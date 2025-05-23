@@ -1,5 +1,6 @@
 // https://github.com/tellytv/go.xtream-codes/blob/master/structs.go
 
+use std::borrow::Cow;
 use crate::api::api_utils;
 use crate::api::api_utils::{get_user_target, get_user_target_by_credentials, is_seek_request, redirect_response, resource_response, force_provider_stream_response, separate_number_and_remainder, serve_file, stream_response, RedirectParams, read_session_token};
 use crate::api::api_utils::{redirect, try_option_bad_request, try_result_bad_request};
@@ -336,18 +337,18 @@ fn get_doc_id_and_field_name(input: &str) -> Option<(u32, &str)> {
     None
 }
 
-fn get_doc_resource_field_value(field: &str, doc: Option<&Value>) -> Option<String> {
+fn get_doc_resource_field_value<'a>(field: &'a str, doc: Option<&'a Value>) -> Option<Cow<'a, str>> {
     if let Some(Value::Object(info_data)) = doc {
         if field.starts_with(crate::model::XC_PROP_BACKDROP_PATH) {
             return get_backdrop_path_value(field, info_data.get(crate::model::XC_PROP_BACKDROP_PATH));
         } else if let Some(Value::String(url)) = info_data.get(field) {
-            return Some(url.to_string());
+            return Some(Cow::Borrowed(url));
         }
     }
     None
 }
 
-fn xtream_get_info_resource_url(config: &Config, pli: &XtreamPlaylistItem, target: &ConfigTarget, resource: &str) -> Result<Option<String>, serde_json::Error> {
+fn xtream_get_info_resource_url<'a>(config: &'a Config, pli: &'a XtreamPlaylistItem, target: &'a ConfigTarget, resource: &'a str) -> Result<Option<Cow<'a, str>>, serde_json::Error> {
     let info_content = match pli.xtream_cluster {
         XtreamCluster::Video => {
             xtream_repository::xtream_load_vod_info(config, target.name.as_str(), pli.get_virtual_id())
@@ -380,7 +381,7 @@ fn xtream_get_info_resource_url(config: &Config, pli: &XtreamPlaylistItem, targe
         };
 
         if let Some(value) = get_doc_resource_field_value(field, info_doc) {
-            return Ok(Some(value));
+            return Ok(Some(Cow::Owned(value.into_owned())));
         }
     }
     Ok(None)
@@ -422,7 +423,7 @@ fn get_season_info_doc(doc: &Vec<Value>, season_id: u32) -> Option<&Value> {
 }
 
 
-fn xtream_get_season_resource_url(config: &Config, pli: &XtreamPlaylistItem, target: &ConfigTarget, resource: &str) -> Result<Option<String>, serde_json::Error> {
+fn xtream_get_season_resource_url<'a>(config: &'a Config, pli: &'a XtreamPlaylistItem, target: &'a ConfigTarget, resource: &'a str) -> Result<Option<Cow<'a, str>>, serde_json::Error> {
     let info_content = match pli.xtream_cluster {
         XtreamCluster::Series => {
             xtream_repository::xtream_load_series_info(config, target.name.as_str(), pli.get_virtual_id())
@@ -441,7 +442,7 @@ fn xtream_get_season_resource_url(config: &Config, pli: &XtreamPlaylistItem, tar
 
                 if let Some(Value::Array(seasons)) = seasons_doc {
                     if let Some(value) = get_doc_resource_field_value(field, get_season_info_doc(seasons, season_id)) {
-                        return Ok(Some(value));
+                        return Ok(Some(Cow::Owned(value.into_owned())));
                     }
                 }
             }
@@ -481,10 +482,10 @@ async fn xtream_player_api_resource(
         Some(url) => {
             if user.proxy.is_redirect(pli.item_type)  || target.is_force_redirect(pli.item_type) {
                 trace_if_enabled!("Redirecting resource request to {}", sanitize_sensitive_info(&url));
-                redirect(url.as_str()).into_response()
+                redirect(&url).into_response()
             } else {
                 trace_if_enabled!("Resource request to {}", sanitize_sensitive_info(&url));
-                resource_response(app_state, url.as_str(), req_headers, None).await.into_response()
+                resource_response(app_state, &url, req_headers, None).await.into_response()
             }
         }
     }

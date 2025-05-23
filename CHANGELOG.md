@@ -1,6 +1,6 @@
 # Changelog
 # 3.1.0 (2025-05-xx)
-
+- !BREAKING_CHANGE! mapper refactored, mapping can be written as script with a custom DSL.  
 - !BREAKING_CHANGE! epg refactored
   - url config is now renamed to sources
   - Added `priority`, priority is `optional`
@@ -66,7 +66,13 @@ The template can now be used for sequence
           - '(?i)\bHD\b'
           - '(?i)\bSD\b'
 ```
+- added `disable_referer_header` to `reverse_proxy` config
+This option, when set to `true`, prevents tuliprox from sending the Referer header in requests made when acting as a reverse proxy. This can be particularly useful when dealing with certain Xtream Codes providers that might restrict or behave differently based on the Referer header. Default is `false`.
 
+```yaml
+reverse_proxy:
+  disable_referer_header: false 
+```
 
 # 3.0.0 (2025-05-12)
 - !BREAKING_CHANGE! user has now the attribute `ui_enabled` to disable/enable web_ui for user.

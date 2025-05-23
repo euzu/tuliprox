@@ -293,7 +293,7 @@ async fn config(
                                                       app_state.config.t_config_file_path.as_str(),
                                                       app_state.config.t_sources_file_path.as_str(),
                                                       app_state.config.t_api_proxy_file_path.as_str(),
-                                                      app_state.config.t_mapping_file_path.as_str(),
+                                                      Some(app_state.config.t_mapping_file_path.to_string()),
                                                       false) {
         Ok(mut cfg) => {
             let _ = cfg.prepare(false);

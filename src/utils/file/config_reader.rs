@@ -13,6 +13,7 @@ use std::fs::File;
 use std::io::{self,  BufReader, Read};
 use std::path::{PathBuf};
 use std::sync::Arc;
+use crate::utils;
 
 enum EitherReader<L, R> {
     Left(L),
@@ -52,7 +53,7 @@ pub fn read_api_proxy_config(cfg: &Config) -> Result<(), TuliproxError> {
     }
 }
 
-pub fn read_config(config_path: &str, config_file: &str, sources_file: &str, api_proxy_file: &str, mappings_file: &str, include_computed: bool) -> Result<Config, TuliproxError> {
+pub fn read_config(config_path: &str, config_file: &str, sources_file: &str, api_proxy_file: &str, mappings_file: Option<String>, include_computed: bool) -> Result<Config, TuliproxError> {
     let files = vec![std::path::PathBuf::from(config_file), std::path::PathBuf::from(sources_file)];
     match MultiFileReader::new(&files) {
         Ok(reader) => {
@@ -62,10 +63,11 @@ pub fn read_config(config_path: &str, config_file: &str, sources_file: &str, api
                     result.t_config_file_path = config_file.to_string();
                     result.t_sources_file_path = sources_file.to_string();
                     result.t_api_proxy_file_path = api_proxy_file.to_string();
-                    result.t_mapping_file_path = mappings_file.to_string();
-                    match result.prepare(include_computed) {
-                        Err(err) => Err(err),
-                        _ => Ok(result),
+                    if let Err(err) = result.prepare(include_computed) { Err(err) } else {
+                        if result.t_mapping_file_path.is_empty() {
+                            result.t_mapping_file_path = resolve_env_var(&mappings_file.unwrap_or_else(|| utils::get_default_mappings_path(config_path)));
+                        }
+                        Ok(result)
                     }
                 }
                 Err(e) => {

@@ -1,16 +1,17 @@
-use std::cmp::PartialEq;
-use std::fmt::{Display, Formatter};
-use std::str::FromStr;
-use crate::model::ProxyUserCredentials;
-use crate::model::{ConfigInput, ConfigTargetOptions};
-use crate::model::TVGuide;
-use crate::model::xtream_const;
 use crate::model::xtream::{xtream_playlistitem_to_document, XtreamMappingOptions};
+use crate::model::xtream_const;
+use crate::model::ProxyUserCredentials;
+use crate::model::TVGuide;
+use crate::model::{ConfigInput, ConfigTargetOptions};
+use crate::utils::request::extract_extension_from_url;
+use crate::utils::{generate_playlist_uuid, get_provider_id};
 use crate::utils::{get_string_from_serde_value, get_u64_from_serde_value};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use crate::utils::{generate_playlist_uuid, get_provider_id};
-use crate::utils::request::extract_extension_from_url;
+use std::borrow::Cow;
+use std::cmp::PartialEq;
+use std::fmt::{Display, Formatter};
+use std::str::FromStr;
 // https://de.wikipedia.org/wiki/M3U
 // https://siptv.eu/howto/playlist.html
 
@@ -140,7 +141,7 @@ impl PlaylistItemType {
 impl Display for PlaylistItemType {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", match self {
-            Self::Live | Self::LiveHls | Self::LiveDash |Self::LiveUnknown => Self::LIVE,
+            Self::Live | Self::LiveHls | Self::LiveDash | Self::LiveUnknown => Self::LIVE,
             Self::Video => Self::VIDEO,
             Self::Series => Self::SERIES,
             Self::SeriesInfo => Self::SERIES_INFO,
@@ -150,7 +151,7 @@ impl Display for PlaylistItemType {
 }
 
 pub trait FieldGetAccessor {
-    fn get_field(&self, field: &str) -> Option<String>;
+    fn get_field(&self, field: &str) -> Option<Cow<str>>;
 }
 pub trait FieldSetAccessor {
     fn set_field(&mut self, field: &str, value: &str) -> bool;
@@ -254,21 +255,23 @@ macro_rules! to_m3u_resource_non_empty_fields {
 macro_rules! generate_field_accessor_impl_for_playlist_item_header {
     ($($prop:ident),*;) => {
         impl FieldGetAccessor for PlaylistItemHeader {
-            fn get_field(&self, field: &str) -> Option<String> {
-                match field {
+            fn get_field(&self, field: &str) -> Option<Cow<str>> {
+                let field = field.to_lowercase();
+                match field.as_str() {
                     $(
-                        stringify!($prop) => Some(self.$prop.clone()),
+                        stringify!($prop) => Some(Cow::Borrowed(&self.$prop)),
                     )*
-                    "caption" =>  Some(if self.title.is_empty() { self.name.clone() } else { self.title.clone() }),
-                    "epg_channel_id" | "epg_id" => self.epg_channel_id.clone(),
+                    "caption" =>  Some(if self.title.is_empty() { Cow::Borrowed(&self.name) } else { Cow::Borrowed(&self.title) }),
+                    "epg_channel_id" | "epg_id" => self.epg_channel_id.as_ref().map(|s| Cow::Borrowed(s.as_str())),
                     _ => None,
                 }
             }
          }
          impl FieldSetAccessor for PlaylistItemHeader {
             fn set_field(&mut self, field: &str, value: &str) -> bool {
+                let field = field.to_lowercase();
                 let val = String::from(value);
-                match field {
+                match field.as_str() {
                     $(
                         stringify!($prop) => {
                             self.$prop = val;
@@ -327,7 +330,7 @@ impl M3uPlaylistItem {
                                self.name, self.group);
 
         if !ignore_logo {
-            if rewrite_urls && self.t_resource_url.is_some(){
+            if rewrite_urls && self.t_resource_url.is_some() {
                 to_m3u_resource_non_empty_fields!(self, self.t_resource_url.as_ref().unwrap(), line, (logo, "tvg-logo"), (logo_small, "tvg-logo-small"););
             } else {
                 to_m3u_non_empty_fields!(self, line, (logo, "tvg-logo"), (logo_small, "tvg-logo-small"););
@@ -372,18 +375,19 @@ impl PlaylistEntry for M3uPlaylistItem {
     fn get_item_type(&self) -> PlaylistItemType {
         self.item_type
     }
-
 }
 
 macro_rules! generate_field_accessor_impl_for_m3u_playlist_item {
     ($($prop:ident),*;) => {
         impl FieldGetAccessor for M3uPlaylistItem {
-            fn get_field(&self, field: &str) -> Option<String> {
-                match field {
+            fn get_field(&self, field: &str) -> Option<Cow<str>> {
+                let field = field.to_lowercase();
+                match field.as_str() {
                     $(
-                        stringify!($prop) => Some(self.$prop.clone()),
+                        stringify!($prop) => Some(Cow::Borrowed(&self.$prop)),
                     )*
-                     "epg_channel_id" | "epg_id" => self.epg_channel_id.clone(),
+                    "caption" =>  Some(if self.title.is_empty() { Cow::Borrowed(&self.name) } else { Cow::Borrowed(&self.title) }),
+                    "epg_channel_id" | "epg_id" => self.epg_channel_id.as_ref().map(|s| Cow::Borrowed(s.as_str())),
                     _ => None,
                 }
             }
@@ -422,7 +426,7 @@ impl XtreamPlaylistItem {
     pub fn get_additional_property(&self, field: &str) -> Option<Value> {
         if let Some(json) = self.additional_properties.as_ref() {
             if let Ok(Value::Object(props)) = serde_json::from_str(json) {
-                return  props.get(field).cloned();
+                return props.get(field).cloned();
             }
         }
         None
@@ -457,22 +461,22 @@ impl PlaylistEntry for XtreamPlaylistItem {
     }
 }
 
-pub fn get_backdrop_path_value(field: &str, value: Option<&Value>) -> Option<String> {
+pub fn get_backdrop_path_value<'a>(field: &'a str, value: Option<&'a Value>) -> Option<Cow<'a, str>> {
     match value {
-        Some(Value::String(url)) => Some(url.clone()),
+        Some(Value::String(url)) => Some(Cow::Borrowed(url)),
         Some(Value::Array(values)) => {
             match values.as_slice() {
-                [Value::String(single)] => Some(single.to_string()),
+                [Value::String(single)] => Some(Cow::Borrowed(single)),
                 multiple if !multiple.is_empty() => {
                     if let Some(index) = field.rfind('_') {
                         if let Ok(bd_index) = field[index + 1..].parse::<usize>() {
                             if let Some(Value::String(selected)) = multiple.get(bd_index) {
-                                return Some(selected.to_string());
+                                return Some(Cow::Borrowed(selected));
                             }
                         }
                     }
                     if let Value::String(url) = &multiple[0] {
-                        Some(url.to_string())
+                        Some(Cow::Borrowed(url))
                     } else {
                         None
                     }
@@ -487,21 +491,23 @@ pub fn get_backdrop_path_value(field: &str, value: Option<&Value>) -> Option<Str
 macro_rules! generate_field_accessor_impl_for_xtream_playlist_item {
     ($($prop:ident),*;) => {
         impl FieldGetAccessor for XtreamPlaylistItem {
-            fn get_field(&self, field: &str) -> Option<String> {
-                match field {
+            fn get_field(&self, field: &str) -> Option<Cow<str>> {
+                let field = field.to_lowercase();
+                match field.as_str() {
                     $(
-                        stringify!($prop) => Some(self.$prop.clone()),
+                        stringify!($prop) => Some(Cow::Borrowed(&self.$prop)),
                     )*
-                     "epg_channel_id" | "epg_id" => self.epg_channel_id.clone(),
+                    "caption" =>  Some(if self.title.is_empty() { Cow::Borrowed(&self.name) } else { Cow::Borrowed(&self.title) }),
+                    "epg_channel_id" | "epg_id" => self.epg_channel_id.as_ref().map(|s| Cow::Borrowed(s.as_str())),
                     _ => {
                        if field.starts_with(xtream_const::XC_PROP_BACKDROP_PATH) || field == xtream_const::XC_PROP_COVER {
                             let props = self.additional_properties.as_ref().and_then(|add_props| serde_json::from_str::<Map<String, Value>>(add_props).ok());
                             return match props {
                                 Some(doc) => {
                                     return if field == xtream_const::XC_PROP_COVER {
-                                       doc.get(field).and_then(|value| value.as_str().map(|s| s.to_string()))
+                                       doc.get(&field).and_then(|value| value.as_str()).map(|s| Cow::<str>::Owned(s.to_owned()))
                                     } else {
-                                       get_backdrop_path_value(field, doc.get(xtream_const::XC_PROP_BACKDROP_PATH))
+                                      get_backdrop_path_value(&field, doc.get(xtream_const::XC_PROP_BACKDROP_PATH)).map(|s| Cow::<str>::Owned(s.to_string()))
                                     }
                                 }
                                 _=> None,
@@ -562,7 +568,7 @@ impl PlaylistItem {
                     let mut result = match header.additional_properties.as_ref() {
                         None => Map::new(),
                         Some(props) => {
-                            if let  Value::Object(map)  = props {
+                            if let Value::Object(map) = props {
                                 map.clone()
                             } else {
                                 Map::new()
@@ -570,7 +576,7 @@ impl PlaylistItem {
                         }
                     };
                     result.insert("container_extension".to_string(), Value::String(ext.to_string()));
-                    additional_properties =  serde_json::to_string(&Value::Object(result)).ok();
+                    additional_properties = serde_json::to_string(&Value::Object(result)).ok();
                 }
             }
         }
@@ -600,7 +606,7 @@ impl PlaylistItem {
             item_type: header.item_type,
             category_id: header.category_id,
             input_name: header.input_name.to_string(),
-            channel_no: header.chno.parse::<u32>().unwrap_or(0)
+            channel_no: header.chno.parse::<u32>().unwrap_or(0),
         }
     }
 }
@@ -635,7 +641,6 @@ impl PlaylistEntry for PlaylistItem {
     fn get_item_type(&self) -> PlaylistItemType {
         self.header.item_type
     }
-
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -656,11 +661,10 @@ impl PlaylistGroup {
     }
 
     #[inline]
-    pub  fn filter_count<F>(&self, filter: F) -> usize
+    pub fn filter_count<F>(&self, filter: F) -> usize
     where
         F: Fn(&PlaylistItem) -> bool,
     {
         self.channels.iter().filter(|&c| filter(c)).count()
     }
-
 }

@@ -94,7 +94,7 @@ fn main() {
     let config_path: String = utils::resolve_directory_path(&resolve_env_var(&args.config_path.unwrap_or_else(utils::get_default_config_path)));
     let config_file: String = resolve_env_var(&args.config_file.unwrap_or_else(|| utils::get_default_config_file_path(&config_path)));
     let api_proxy_file = resolve_env_var(&args.api_proxy.unwrap_or_else(|| utils::get_default_api_proxy_config_path(config_path.as_str())));
-    let mappings_file = resolve_env_var(&args.mapping_file.unwrap_or_else(|| utils::get_default_mappings_path(config_path.as_str())));
+    let mappings_file = args.mapping_file.as_ref();
 
     init_logger(args.log_level.as_ref(), config_file.as_str());
 
@@ -110,7 +110,7 @@ fn main() {
     let sources_file: String = args.source_file.unwrap_or_else(|| utils::get_default_sources_file_path(&config_path));
     let cfg = utils::read_config(config_path.as_str(), config_file.as_str(),
                                              sources_file.as_str(), api_proxy_file.as_str(),
-                                             mappings_file.as_str(), true).unwrap_or_else(|err| exit!("{}", err));
+                                             mappings_file.cloned(), true).unwrap_or_else(|err| exit!("{}", err));
 
     set_sanitize_sensitive_info(cfg.log.as_ref().is_none_or(|l| l.sanitize_sensitive_info));
 
@@ -127,7 +127,7 @@ fn main() {
     info!("Config file: {:?}", &cfg.t_config_file_path);
     info!("Source file: {:?}", &cfg.t_sources_file_path);
     info!("Api Proxy File: {:?}", cfg.t_api_proxy_file_path);
-    match utils::read_mappings(mappings_file.as_str(), true) {
+    match utils::read_mappings(&cfg.t_mapping_file_path, true) {
         Ok(Some(mappings)) => {
             info!("Mapping file: {:?}", cfg.t_mapping_file_path);
             cfg.set_mappings(&mappings);

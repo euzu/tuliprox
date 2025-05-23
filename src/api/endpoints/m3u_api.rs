@@ -172,9 +172,9 @@ async fn m3u_api_resource(
         Some(url) => {
             if user.proxy.is_redirect(m3u_item.item_type)  || target.is_force_redirect(m3u_item.item_type) {
                 debug!("Redirecting stream request to {}", sanitize_sensitive_info(&url));
-                redirect(url.as_str()).into_response()
+                redirect(&url).into_response()
             } else {
-                resource_response(&app_state, url.as_str(), &req_headers, None).await.into_response()
+                resource_response(&app_state, &url, &req_headers, None).await.into_response()
             }
         }
     }

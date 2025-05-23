@@ -9,14 +9,13 @@ use std::sync::Arc;
 use std::thread;
 use tokio::sync::Mutex;
 
-use crate::foundation::filter::{get_field_value, set_field_value, MockValueProcessor, ValueProvider};
+use crate::foundation::filter::{get_field_value, set_field_value, ValueProvider, ValueAccessor};
 use crate::messaging::{send_message, MsgKind};
 use crate::model::{ConfigTarget, InputType, ItemField, ProcessTargets, ProcessingOrder};
-use crate::model::{CounterModifier, Mapping, MappingValueProcessor};
+use crate::model::{CounterModifier, Mapping};
 use crate::model::{FetchedPlaylist, FieldGetAccessor, FieldSetAccessor, PlaylistEntry, PlaylistGroup, PlaylistItem, UUIDType, XtreamCluster};
 use crate::model::{InputStats, PlaylistStats, SourceStats, TargetStats};
 use crate::processing::playlist_watch::process_group_watch;
-use crate::processing::processor::affix::apply_affixes;
 use crate::processing::processor::xtream_series::playlist_resolve_series;
 use crate::processing::processor::xtream_vod::playlist_resolve_vod;
 use crate::repository::playlist_repository::persist_playlist;
@@ -26,7 +25,6 @@ use crate::utils::default_as_default;
 use deunicode::deunicode;
 use log::{debug, error, info, log_enabled, trace, warn, Level};
 use std::time::Instant;
-
 use crate::model::Epg;
 use crate::processing::parser::xmltv::flatten_tvguide;
 use crate::processing::processor::epg::process_playlist_epg;
@@ -121,34 +119,23 @@ fn rename_playlist(playlist: &mut [PlaylistGroup], target: &ConfigTarget) -> Opt
     }
 }
 
-macro_rules! apply_pattern {
-    ($pattern:expr, $provider:expr, $processor:expr) => {{
-            if let Some(ptrn) = $pattern {
-               ptrn.filter($provider, $processor);
-            };
-    }};
-}
-
 fn map_channel(mut channel: PlaylistItem, mapping: &Mapping) -> PlaylistItem {
     if let Some(mapper) = &mapping.mapper {
         if !mapper.is_empty() {
             let header = &channel.header;
             let channel_name = if mapping.match_as_ascii { deunicode(&header.name) } else { header.name.to_string() };
             if mapping.match_as_ascii && log_enabled!(Level::Trace) { trace!("Decoded {} for matching to {}", &header.name, &channel_name); }
-            // let ref_chan = &mut channel;
             let ref_chan = &mut channel;
-            let mut mock_processor = MockValueProcessor {};
             for m in mapper {
-                let provider = ValueProvider { pli: &ref_chan.clone() };
-                let mut processor = MappingValueProcessor { pli: ref_chan, mapper: m };
-                match &m.t_filter {
-                    Some(filter) => {
-                        if filter.filter(&provider, &mut mock_processor) {
-                            apply_pattern!(&m.t_pattern, &provider, &mut processor);
+                if let Some(script) = m.t_script.as_ref() {
+                    let provider = ValueProvider { pli: &ref_chan.clone() };
+                    let mut accessor = ValueAccessor { pli: ref_chan };
+                    if let Some(filter) = &m.t_filter {
+                        if filter.filter(&provider) {
+                            if let Err(err) = script.eval(&mut accessor) {
+                                error!("Error while evaluating script: {err}");
+                            }
                         }
-                    }
-                    _ => {
-                        apply_pattern!(&m.t_pattern, &provider, &mut processor);
                     }
                 }
             }
@@ -196,7 +183,6 @@ fn map_playlist(playlist: &mut [PlaylistGroup], target: &ConfigTarget) -> Option
 
 fn map_playlist_counter(target: &ConfigTarget, playlist: &mut [PlaylistGroup]) {
     if target.t_mapping.load().is_some() {
-        let mut mock_processor = MockValueProcessor {};
         let guard = target.t_mapping.load();
         let mappings = guard.as_ref().unwrap();
         for mapping in mappings.iter() {
@@ -205,7 +191,7 @@ fn map_playlist_counter(target: &ConfigTarget, playlist: &mut [PlaylistGroup]) {
                     for plg in &mut *playlist {
                         for channel in &mut plg.channels {
                             let provider = ValueProvider { pli: channel };
-                            if counter.filter.filter(&provider, &mut mock_processor) {
+                            if counter.filter.filter(&provider) {
                                 let cntval = counter.value.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
                                 let padded_cntval = if counter.padding > 0 {
                                     format!("{:0width$}", cntval, width = counter.padding as usize)
@@ -474,9 +460,6 @@ async fn process_playlist_for_target(client: Arc<reqwest::Client>,
         }
         processed_fetched_playlists.push(processed_fpl);
     }
-
-    step.tick("Processed affixes");
-    apply_affixes(&mut processed_fetched_playlists);
 
     step.tick("Processed epg");
     let (new_epg, new_playlist) = process_epg(&mut processed_fetched_playlists);

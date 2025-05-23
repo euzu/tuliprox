@@ -283,7 +283,7 @@ This option, when set to `true`, prevents tuliprox from sending the Referer head
 
 ```yaml
 reverse_proxy:
-  disable_referer_header: false 
+  disable_referer_header: false
 ```
 
 ### 1.7 `backup_dir`
@@ -309,24 +309,26 @@ log:
   log_level: debug
 ```
 
-### 1.10 `web_ui_enabled`
-default is true, if set to false the web_ui is disabled
-
-### 1.11 `web_auth`
-Web UI Authentication can be enabled if `web_ui_enabled` is `true`.
-
+### 1.10 `web_ui`
+- enabled: default is true, if set to false the web_ui is disabled
+- user_ui_enabled, true or false,  for user bouquet editor
+- path is for web_ui path like `/ui` for reverse proxy integration if necessary.
+- auth for authentication settings
+  - `enabled` can be deactivated if `enabled` is set to `false`. If not set default is `true`.
+  - `issuer`
+  - `secret` is used for jwt token generation.
+  - `userfile` is the file where the ui users are stored. If the filename is not absolute, `tuliprox` will look into the `config_dir`. If `userfile` is not given, the default value is `user.txt`.
 ```yaml
-web_ui_enabled: true
-web_auth:
+web_ui:
   enabled: true
-  secret: very.secret.secret
-  issuer: tuliprox
-  userfile: user.txt
+  user_ui_enabled: true
+  path:
+  auth:
+    enabled: true
+    issuer: tuliprox
+    secret: ef9ab256a8c0abe5de92c2e05ca92baa810472ab702ff1674e9248308ceeec92
+    userfile: user.txt
 ```
-
-- `web_auth` can be deactivated if `enabled` is set to `false`. If not set default is `true`.
-- `secret` is used for jwt token generation.
-- `userfile` is the file where the ui users are stored. if the filename is not absolute `tuliprox` will look into the `config_dir`. if `userfile`is not given the default value is `user.txt`
 
 You can generate a secret for jwt token for example with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`
 
@@ -405,7 +407,6 @@ It is the storage path for user configurations (f.e. bouquets).
 
 It is possible to define `hdhomerun` target for output. To use this outputs we need to define HdHomeRun devices.
 Supports now basic auth like <http://user:password@ip:port/lineup.json>.
-
 
 The simplest config looks like:
 ```yaml
@@ -878,7 +879,7 @@ In the above example each entry starting with `DE` will be prefixed with `1.`.
 
 ### 2.2.2.7 `mapping`
 `mapping: <list of mapping id's>`
-The mappings are defined in a file `mapping.yml`. The filename can be given as `-m` argument.
+The mappings are defined in a file `mapping.yml`. The filename can be given as `-m` argument. (See Mappings section)
 
 ## Example source.yml file
 ```yaml
@@ -968,8 +969,10 @@ messaging:
 ## 2. `mapping.yml`
 Has the root item `mappings` which has the following top level entries:
 - `templates` _optional_
-- `tags` _optional_
 - `mapping` _mandatory_
+
+Instead of using a single `mapping.yml` file, you can use multiple mapping files
+when you set `mapping_path` in `config.yml` to a directory.
 
 ### 2.1 `templates`
 If you have a lot of repeats in you regexps, you can use `templates` to make your regexps cleaner.
@@ -984,14 +987,6 @@ With this definition you can use `delimiter` and `quality` in your regexp's surr
 `^.*TF1!delimiter!Series?!delimiter!Films?(!delimiter!!quality!)\s*$`
 
 This will replace all occurrences of `!delimiter!` and `!quality!` in the regexp string.
-
-### 2.2 `tags`
-Has the following top level entries:
-- `name`: unique name of the tag.
-- `captures`: List of captured variable names like `quality`. The names should be equal to the regexp capture names.
-- `concat`: if you have more than one captures defined this is the join string between them
-- `suffix`: suffix for the tag
-- `prefix`: prefix for the tag
 
 ### 2.3 `mapping`
 Has the following top level entries:
@@ -1008,174 +1003,120 @@ If you have non ascii characters in you playlist and want to
 write regexp without considering chars like `é` and use `e` instead, set this option to `true`.
 [unidecode](https://crates.io/crates/unidecode) is used to convert the text.
 
-
 ### 2.3.3 `mapper`
 Has the following top level entries:
-- `filter` _optional_
-- `pattern`
-- `attributes`
-- `suffix`
-- `prefix`
-- `assignments`
-- `transform`
+- `filter`
+- `script`
 
 #### 2.3.3.1 `filter`
 The filter  is a string with a statement (@see filter statements).
 It is optional and allows you to filter the content.
 
-#### 2.3.3.2 `pattern`
-The pattern is a string with a statement (@see filter statements).
-The pattern can have UnaryExpression `NOT`, BinaryExpression `AND OR`, and Comparison `(Group|Title|Name|Url) ~ "regexp"`.
-Filter fields are `Group`, `Title`, `Name`, `Caption`, `Url`, `Input` and `Type`.
-Example filter:  `NOT Title ~ ".*Shopping.*"`
+#### 2.3.3.2 `script`
+Script has a custom DSL syntax. 
 
-`Caption` is an alias for `Title` or/and `Name`.
+This Domain-Specific Language (DSL) supports simple scripting operations including variable assignment, 
+string operations, pattern matching, conditional mapping, and structured data access. 
+It is whitespace-tolerant and uses familiar programming concepts with a custom syntax.
 
-The pattern for the mapper works different from a filter expression.
-A filter evaluates the complete expression and returns a result.
-The mapper pattern evaluates the expression, but matches directly comparisons and processes them immediately.
-To avoid misunderstandings, keep the pattern simply to comparisons.
+**Basic elements:**
+- Identifiers: `Variable Names` composed of ASCII alphanumeric characters and underscores.
+- FieldNames: `Playlist Field Names` starting with `@` following compose of ASCII alphanumeric characters and underscores.
+- Strings / Text: Enclosed in double quotes. "example string" 
+- Null value `null`
+- Regex Matching:   `@FieldName ~ "Regex"` like in filter statements. You can match a `FieldName` or a existing `variable`.
+- Access a field in a regex match result:  with `result.capture`. For example, if you have multiple captures you can access them by their name, or their index beginning at 1.
+- Builtin String functions: 
+  - concat(a, b, ...)
+  - uppercase(a)
+  - lowercase(a)
+  - capitalize(a)
+  - trim(a)
+  - print(a)
+Example `print(uppercase("hello"))`. output is only visible in `trace` log level you can enable it like `log_level: debug,tuliprox::foundation::mapper=trace` in config
+- Assignment assigns an expression result. variable or field.
+```dsl
+  @Title = uppercase("hello")
+  hello = concat(capitalize("hello"), " ", capitalize("world")) 
+```
+-  Match block evaluates expressions based on multiple matching cases.
+Note: **The order of the cases are important.**
 
-The regular expression syntax is similar to Perl-style regular expressions,
-but lacks a few features like look around and backreferences.
+```dsl
+result = match {
+    (var1, var2) => result1,  <- only executed when both variables set
+     var2 => result2,  <- only executed when var2 variable is set
+     var3 => result3,  <- only executed when var3 variable is set
+     _ => default <-  matches anything.
+   }
+```
+- Map block assigns expression results to a variable or field
+It is possible to define multiple keys with `|` seperated for one case.  
+```dsl
+result = map variable_name {
+    "key1" => result1,
+    "key2" => result2,
+    _ => default
+}
 
-#### 2.3.3.3 `attributes`
-Attributes is a map of key value pairs. Valid keys are:
-- `id`
-- `epg_channel_id` or `epg_id`
-- `chno`
-- `group`
-- `name`
-- `title`
-- `caption` (for `title and `name`)
-- `logo`
-- `logo_small`
-- `parent_code`
-- `audio_track`
-- `time_shift`
-- `rec`
-- `url`
+result = map variable_name {
+    "key1" | "key2" => result1,
+    _ => null
+}
+```
 
-If the regexps matches, the given fields will be set to the new value
-You can use `captures` in attributes.
-For example you want to `rewrite` the `base_url` for channels in a specific group.
+Example `mapping.yml`
 
 ```yaml
-
 mappings:
   templates:
-    - name: sports
-      value: 'Group ~ ".*SPORT.*"'
-    - name: source
-      value: 'Url ~ "https?:\/\/(.*?)\/(?P<query>.*)$"'
+    # Template to match and capture different qualities in the caption (FHD, HD, SD, UHD)
+    - name: QUALITY
+      value: '(?i)\b([FUSL]?HD|SD|4K|1080p|720p|3840p)\b'
+
+    - name: COAST
+      value: '(?i)\b(EAST|WEST)\b'
+
+    - name: USA_TNT_FILTER
+      value: 'Caption ~ "(?i)^(US|USA|United States).*?TNT"'
+
+    - name: US_TNT_PREFIX
+      value: "US: TNT"
+
+    - name: US_TNT_ENTERTAIN_GROUP
+      value: "United States - Entertainment"
+
+    # Template to capture the group name for US TNT channels
+    - name: US_TNT_ENTERTAIN
+      value: 'Group ~ "^United States - Entertainment"'
 
   mapping:
-    - id: sport-mapper
-      counter:
-        - filter: '!sports!'
-          value: 9000
-          padding: 3
-          field: chno
-          modifier: assign
+    # Mapping rules for all channels
+    - id: all_channels
+      match_as_ascii: true
       mapper:
-        - filter: '!sports!'
-          pattern: "!source!"
-          attributes:
-            url: http://my.bubble-gum.tv/<query>
+        - filter: "!USA_TNT_FILTER!"
+          script: |
+            coast = Caption ~ "!COAST!"
+            quality = uppercase(Caption ~ "!QUALITY!")
+            quality = map quality {
+                       "SHD" => "SD",
+                       "LHD" => "HD",
+                       "720p" => "HD",
+                       "1080p" => "FHD",
+                       "4K" => "UHD",
+                       "3840p" => "UHD",
+                        _ => quality,
+            }
+            coast_quality = match {
+                (coast, quality) => concat(capitalize(coast), " ", uppercase(quality)),
+                coast => concat(capitalize(coast), " HD"),
+                quality => concat("East ", uppercase(quality)),
+                _ => "East HD",
+            }
+            @Caption = concat("!US_TNT_PREFIX!", " ", coast_quality)
+            @Group = "!US_TNT_ENTERTAIN_GROUP!"
 ```
-
-In this example all channels the urls of all channels with a group name containing `SPORT` will be changed.
-
-
-#### 2.3.3.4 `suffix`
-Suffix is a map of key value pairs. Valid keys are
-- name
-- group
-- title
-
-The special text `<tag:tag_name>` is used to append the tag if not empty.
-Example:
-```yaml
-  suffix:
-     name: '<tag:quality>'
-     title: '-=[<tag:group>]=-'
-```
-
-In this example there must be 2 tag definitions `quality` and `group`.
-
-If the regexps matches, the given fields will be appended to field value
-
-#### 2.3.3.5 `prefix`
-Suffix is a map of key value pairs. Valid keys are
-- name
-- group
-- title
-
-The special text `<tag:tag_name>` is used to append the tag if not empty
-Example:
-```yaml
-  suffix:
-     name: '<tag:quality>'
-     title: '-=[<tag:group>]=-'
-```
-
-In this example there must be 2 tag definitions `quality` and `group`.
-
-If the regexps matches, the given fields will be prefixed to field value
-
-#### 2.3.3.6 `assignments`
-Attributes is a map of key value pairs. Valid keys and values are:
-- `id`
-- `chno`
-- `group`
-- `name`
-- `title`
-- `caption` (for `title and `name`)
-- `logo`
-- `logo_small`
-- `parent_code`
-- `audio_track`
-- `time_shift`
-- `rec`
-- `source`
-
-Example configuration is:
-```yaml
-assignments:
-   title: name
-```
-This configuration sets `title` property to the value of `name`.
-
-#### 2.3.3.6 `transform`
-
-`transform` is a list of transformations.
-
-Each transformation can have the following attributes:
-- `field` _mandatory_ the field where the transformation will be applied
-- `modifier` _mandatory_, values are: `lowercase`, `uppercase` and `capitalize`
-- `pattern` _optional_  is a regular expression (not filter!) with captures. Only needed when you want to transform parts of the property.
-
-For example: first 3 chars of channel name to lowercase:
-
-```yaml
-      mapper:
-        - pattern: 'Group ~ ".*"'
-          transform:
-          - field: name
-            pattern: "^(...)"
-            modifier: lowercase
-```
-
-channel name to uppercase:
-
-```yaml
-      mapper:
-        - pattern: 'Group ~ ".*"'
-          transform:
-          - field: name
-            modifier: uppercase
-```
-
 ### 2.3.4 counter
 
 Each mapping can have a list of counter.
@@ -1826,3 +1767,147 @@ To handle this, we introduce a **grace period_millis** and **grace_period_timeou
 ```
 The grace period means: if a user reaches the connection limit, we still allow one more connection for a short time.
 After a delay, we check whether old connections have been properly closed. If not, we then enforce the limit and terminate the excess connection(s).
+
+# Mapper example
+
+```yaml
+  group = Group ~ "(EU|SATELLITE|NATIONAL|NEWS|MUSIC|SPORT|RELIGION|FILM|KIDS|DOCU)"
+  quality = Caption ~ "\b([F]?HD[i]?)\b"
+  title_match = Caption ~ "(.*?)\:\s*(.*)"
+  title_prefix = title_match.1
+  title_name = title_match.2
+
+  # suffix '*' for SATELLITE
+  title_name = map title_prefix {
+     "SATELLITE" =>  concat(title_name, "*"),
+     _ => title_name,
+  }
+
+  quality = map group {
+      "NEWS" | "NATIONAL" | "SATELLITE" => quality,
+      _ => null,
+  }
+
+  prefix = map quality {
+   "HD" => "01.",
+   "FHD" => "02.",
+   "HDi" => "03.",
+   _ => map group {
+      "NEWS" => "04.",
+      "DOCU" => "05.",
+      "SPORT" => "06.",
+      "NATIONAL" => "07.",
+      "RELIGION" => "08.",
+      "KIDS" => "09.",
+      "FILM" => "10.",
+      "MUSIC" => "11.",
+      "EU" => "12.",
+      "SATELLITE" => "13.",
+      _ => group
+    },
+  }
+
+  name = match {
+    quality => concat(prefix, " FR [", quality, "]"),
+    group => concat(prefix, " FR [", group, "]"),
+    _ => prefix
+  }
+
+  @Group = name
+  @Caption = title_name
+```
+The transformation logic processes each entry and modifies two key fields:
+- `Group`: The group or category the stream belongs to.
+- `Caption`: The title or name of the stream.
+It extracts data from these fields and applies structured transformations.
+
+This extracts a known group keyword from `Group`
+`group = Group ~ "(EU|SATELLITE|NATIONAL|NEWS|MUSIC|SPORT|RELIGION|FILM|KIDS|DOCU)"`
+
+Quality subset detection -> HD, FHD, HDi
+`quality = @Caption ~ "\b([F]?HD[i]?)\b"`
+
+Title splitting. As you can see there are 2 captures, the first one is the prefix and the second one is the name.
+You get something like 
+- title_prefix = 'FR'
+- title_name = 'TV5Monde'
+from "FR: TV5Monde"
+```
+title_match = @Caption ~ "(.*?)\:\s*(.*)"
+title_prefix = title_match.1
+title_name = title_match.2
+```
+
+We will later merge 3 groups together and want to keep the quality for the group name.
+For example all channels from the groups "NEWS", "NATIONAL" amd "SATELLITE" will go
+into new groups named by the previously extracted quality.
+```dsl
+quality = map group {
+"NEWS" | "NATIONAL" | "SATELLITE" => quality,
+_ => null,
+}
+```
+is equivalent to
+```python
+if group in ["NEWS", "NATIONAL", "SATELLITE"]:
+   keep quality
+else:
+   quality = null
+```
+
+Generate prefix. We have later 3 new groups named by the quality. 
+We want to put them in some order and prefix them with a counter.
+This could be later done with counter sequence too. (And would be better if some groups get empty)
+
+if the current plalyist item has one of the qualities we set the prefix according to quality,
+otherwise we use the group category.
+```dsl
+  prefix = map quality {
+   "HD" => "01.",
+   "FHD" => "02.",
+   "HDi" => "03.",
+   _ => map group {
+      "NEWS" => "04.",
+      "DOCU" => "05.",
+      "SPORT" => "06.",
+      "NATIONAL" => "07.",
+      "RELIGION" => "08.",
+      "KIDS" => "09.",
+      "FILM" => "10.",
+      "MUSIC" => "11.",
+      "EU" => "12.",
+      "SATELLITE" => "13.",
+      _ => group
+    },
+  }
+```
+
+Final name construction
+
+```dsl
+  name = match {
+    quality => concat(prefix, " FR [", quality, "]"),
+    group => concat(prefix, " FR [", group, "]"),
+    _ => prefix
+  }
+```
+
+is equivalent to 
+
+```python
+if quality is set:
+    name = prefix + " FR [" + quality + "]"
+elif group is set:
+    name = prefix + " FR [" + group + "]"
+else:
+    name = prefix
+``` 
+
+Update the playlist item
+- Group is overwritten with the new formatted name.
+- Caption is overwritten with the cleaned-up title name.
+
+```dsl
+  @Group = name
+  @Caption = title_name
+```

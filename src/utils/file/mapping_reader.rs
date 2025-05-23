@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use crate::foundation::filter::PatternTemplate;
-use crate::model::{Mapping, MappingDefinition, MappingTag, Mappings};
+use crate::model::{Mapping, MappingDefinition, Mappings};
 use crate::tuliprox_error::{create_tuliprox_error_result, info_err, TuliproxError, TuliproxErrorKind};
 use crate::utils::traverse_dir;
 use crate::utils::{config_file_reader, open_file};
@@ -22,7 +22,7 @@ fn read_mapping(mapping_file: &Path, resolve_var: bool, prepare_mappings: bool) 
             }
         };
     }
-    warn!("cant read mapping file: {}", mapping_file.to_str().unwrap_or("?"));
+    warn!("Can't read mapping file: {}", mapping_file.to_str().unwrap_or("?"));
     Ok(None)
 }
 
@@ -64,16 +64,11 @@ fn merge_mappings(mappings: Vec<Mapping>) -> Vec<Mapping> {
 }
 fn merge_mapping_definitions(mappings: Vec<Mappings>) -> Result<Option<Mappings>, TuliproxError> {
     let mut merged_templates: Vec<PatternTemplate> = Vec::new();
-    let mut merged_tags: Vec<MappingTag> = Vec::new();
     let mut merged_mapping: Vec<Mapping> = Vec::new();
 
     for mapping in mappings {
         if let Some(mut templates) = mapping.mappings.templates {
             merged_templates.append(&mut templates);
-        }
-
-        if let Some(mut tags) = mapping.mappings.tags {
-            merged_tags.append(&mut tags);
         }
 
          merged_mapping.extend(mapping.mappings.mapping);
@@ -82,7 +77,6 @@ fn merge_mapping_definitions(mappings: Vec<Mappings>) -> Result<Option<Mappings>
     let mut result = Mappings {
         mappings: MappingDefinition {
             templates: if merged_templates.is_empty() { None } else { Some(merged_templates) },
-            tags: if merged_tags.is_empty() { None } else { Some(merged_tags) },
             mapping: merge_mappings(merged_mapping)
         }
     };

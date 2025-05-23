@@ -1,4 +1,4 @@
-use crate::model::{ConfigInput, InputAffix, AFFIX_FIELDS, valid_property};
+use crate::model::{ConfigInput, InputAffix, valid_property, MAPPER_FIELDS};
 use crate::model::{FetchedPlaylist, FieldGetAccessor, FieldSetAccessor, PlaylistItem};
 use crate::utils::{debug_if_enabled};
 
@@ -8,9 +8,9 @@ fn create_affix_processor(affix: &InputAffix, is_prefix: bool) -> AffixProcessor
     Box::new(move |channel: &mut PlaylistItem| {
         let header = &mut channel.header;
         let value = header.get_field(affix.field.as_str()).map_or_else(|| String::from(&affix.value), |field_value| if is_prefix {
-            format!("{}{}", &affix.value, field_value.as_str())
+            format!("{}{field_value}", &affix.value, )
         } else {
-            format!("{}{}", field_value.as_str(), &affix.value)
+            format!("{field_value}{}", , &affix.value)
         });
         debug_if_enabled!("Applying input {}:  {}={}",  if is_prefix {"prefix"} else {"suffix"},  &affix.field, &value);
         header.set_field(&affix.field, value.as_str());
@@ -19,7 +19,7 @@ fn create_affix_processor(affix: &InputAffix, is_prefix: bool) -> AffixProcessor
 
 fn validate_and_create_affix_processor(affix: Option<&InputAffix>, is_prefix: bool) -> Option<AffixProcessor> {
     if let Some(affix_def) = affix {
-        if (valid_property!(&affix_def.field.as_str(), AFFIX_FIELDS) && !affix_def.value.is_empty()) {
+        if (valid_property!(&affix_def.field.as_str(), MAPPER_FIELDS) && !affix_def.value.is_empty()) {
             return Some(create_affix_processor(affix_def, is_prefix));
         }
     }

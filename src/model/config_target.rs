@@ -1,4 +1,4 @@
-use crate::foundation::filter::{get_filter, Filter, MockValueProcessor, PatternTemplate, ValueProvider};
+use crate::foundation::filter::{get_filter, Filter, PatternTemplate, ValueProvider};
 use crate::tuliprox_error::{create_tuliprox_error_result, handle_tuliprox_error_result_list, info_err, TuliproxError, TuliproxErrorKind};
 use crate::model::cluster_flags::ClusterFlags;
 use crate::model::config_rename::ConfigRename;
@@ -301,9 +301,8 @@ impl ConfigTarget {
     }
 
     pub fn filter(&self, provider: &ValueProvider) -> bool {
-        let mut processor = MockValueProcessor {};
         if let Some(filter) = self.t_filter.as_ref() {
-            return filter.filter(provider, &mut processor);
+            return filter.filter(provider);
         }
         true
     }

@@ -60,7 +60,7 @@ docker tag ghcr.io/euzu/${BETA_IMAGE_NAME}:"${VERSION}" ghcr.io/euzu/${BETA_IMAG
 echo "Logging into GitHub Container Registry..."
 docker login ghcr.io -u euzu -p "${GHCR_IO_TOKEN}"
 
-# Push alipne
+# Push alpine
 docker push ghcr.io/euzu/${BETA_IMAGE_NAME}:"${VERSION}"
 docker push ghcr.io/euzu/${BETA_IMAGE_NAME}:latest
 
@@ -70,4 +70,4 @@ rm -rf "${DOCKER_DIR}/web"
 rm -f "${DOCKER_DIR}/tuliprox"
 rm -rf "${DOCKER_DIR}/resources"
 
-echo "Docker images ghcr.io/euzu/${BETA_IMAGE_NAME}${VERSION} have been successfully built, tagged, and pushed."
+echo "Docker images ghcr.io/euzu/${BETA_IMAGE_NAME}  with version ${VERSION} have been successfully built, tagged, and pushed."
