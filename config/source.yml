@@ -25,3 +25,32 @@ sources:
         options: { ignore_logo: false, share_live_streams: true }
         mapping:
           - iptv-org
+      - name: iptv-trakt-example
+        output:
+          - type: xtream
+            skip_live_direct_source: true
+            skip_video_direct_source: false
+            skip_series_direct_source: false
+            resolve_series: false
+            resolve_vod: false
+            trakt_lists:
+              lists:
+                - user: "linaspurinis"
+                  list_slug: "top-watched-movies-of-the-week"
+                  category_name: "📈 Top Weekly Movies"
+                  content_type: "vod"
+                  fuzzy_match_threshold: 80
+                - user: "garycrawfordgc"
+                  list_slug: "latest-tv-shows"
+                  category_name: "📺 Latest TV Shows"
+                  content_type: "series"
+                  fuzzy_match_threshold: 75
+                - user: "trakt"
+                  list_slug: "trending"
+                  category_name: "🔥 Trending"
+                  content_type: "both"
+                  fuzzy_match_threshold: 80
+              update_interval_hours: 6
+              cache_enabled: true
+        filter: "!final_channel_lineup!"
+        options: { ignore_logo: false, share_live_streams: true }

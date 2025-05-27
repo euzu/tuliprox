@@ -18,6 +18,7 @@ use crate::model::{InputStats, PlaylistStats, SourceStats, TargetStats};
 use crate::processing::playlist_watch::process_group_watch;
 use crate::processing::processor::xtream_series::playlist_resolve_series;
 use crate::processing::processor::xtream_vod::playlist_resolve_vod;
+use crate::processing::processor::trakt_categories::process_trakt_categories_for_target;
 use crate::repository::playlist_repository::persist_playlist;
 use crate::tuliprox_error::{get_errors_notify_message, notify_err, TuliproxError, TuliproxErrorKind};
 use crate::utils::debug_if_enabled;
@@ -476,6 +477,22 @@ async fn process_playlist_for_target(client: Arc<reqwest::Client>,
         assign_channel_no_playlist(&mut flat_new_playlist);
         step.tick("Assigned channel counter");
         map_playlist_counter(target, &mut flat_new_playlist);
+        
+        // Process Trakt categories
+        step.tick("Processing Trakt categories");
+        match process_trakt_categories_for_target(Arc::clone(&client), &mut flat_new_playlist, target).await {
+            Ok(trakt_categories) => {
+                if !trakt_categories.is_empty() {
+                    info!("Adding {} Trakt categories to playlist", trakt_categories.len());
+                    flat_new_playlist.extend(trakt_categories);
+                }
+            }
+            Err(trakt_errors) => {
+                warn!("Trakt processing failed with {} errors", trakt_errors.len());
+                errors.extend(trakt_errors);
+            }
+        }
+        
         step.tick("Processed group watches");
         process_watch(&client, target, cfg, &flat_new_playlist);
         step.tick("Persisting playlists");

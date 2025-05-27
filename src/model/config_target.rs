@@ -6,6 +6,7 @@ use crate::model::config_sort::ConfigSort;
 use crate::model::mapping::Mapping;
 use crate::model::processing_order::ProcessingOrder;
 use crate::model::PlaylistItemType;
+use crate::model::trakt::TraktConfig;
 use crate::utils::{default_as_default, default_as_true, default_resolve_delay_secs};
 use enum_iterator::Sequence;
 use std::fmt::Display;
@@ -110,6 +111,8 @@ pub struct XtreamTargetOutput {
     pub resolve_vod: bool,
     #[serde(default = "default_resolve_delay_secs")]
     pub resolve_vod_delay: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trakt_lists: Option<TraktConfig>,
 }
 
 

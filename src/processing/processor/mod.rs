@@ -5,6 +5,7 @@ mod xtream_vod;
 mod xtream_series;
 pub mod epg;
 mod sort;
+pub mod trakt_categories;
 
 #[macro_export]
 macro_rules! handle_error {
