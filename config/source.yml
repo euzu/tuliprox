@@ -50,7 +50,5 @@ sources:
                   category_name: "🔥 Trending"
                   content_type: "both"
                   fuzzy_match_threshold: 80
-              update_interval_hours: 6
-              cache_enabled: true
         filter: "!final_channel_lineup!"
         options: { ignore_logo: false, share_live_streams: true }

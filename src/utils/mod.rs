@@ -13,6 +13,7 @@ mod crypto_utils;
 mod constants;
 mod step_measure;
 pub mod logging;
+pub mod trakt;
 
 #[macro_export]
 macro_rules! debug_if_enabled {

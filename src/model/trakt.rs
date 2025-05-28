@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TraktApiConfig {
@@ -59,14 +58,6 @@ impl Default for TraktContentType {
 pub struct TraktConfig {
     pub api: TraktApiConfig,
     pub lists: Vec<TraktListConfig>,
-    #[serde(default = "default_update_interval")]
-    pub update_interval_hours: u32,
-    #[serde(default)]
-    pub cache_enabled: bool,
-}
-
-fn default_update_interval() -> u32 {
-    6
 }
 
 // API Response structures
@@ -180,16 +171,4 @@ pub enum MatchType {
     TmdbExact,
     FuzzyTitle,
     FuzzyTitleYear,
-}
-
-// Cache structures
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TraktListCache {
-    pub user: String,
-    pub list_slug: String,
-    pub items: Vec<TraktListItem>,
-    pub last_updated: u64,
-    pub etag: Option<String>,
-}
-
-pub type TraktCacheMap = HashMap<String, TraktListCache>; 
+} 
