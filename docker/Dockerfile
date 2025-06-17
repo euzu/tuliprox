@@ -52,8 +52,8 @@ WORKDIR /app
 # Copy package.json files first for better caching
 COPY ./frontend/package.json ./
 
-# Install dependencies
-RUN yarn install --prefer-offline --non-interactive --production=false
+# Install dependencies (including dev deps)
+RUN yarn install --prefer-offline --non-interactive
 
 # Copy the rest of the frontend code
 COPY ./frontend /app
