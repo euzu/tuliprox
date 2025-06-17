@@ -87,6 +87,7 @@ pub struct Constants {
     pub re_whitespace: Regex,
     pub re_hls_uri: Regex,
     pub sanitize: AtomicBool,
+    pub proxy_in_use: AtomicBool,
     pub export_style_config: ExportStyleConfig,
     pub country_codes: HashSet<&'static str>,
     pub allowed_output_formats: Vec<String>,
@@ -112,6 +113,7 @@ pub static CONSTANTS: LazyLock<Constants> = LazyLock::new(||
         re_hls_uri: Regex::new(r#"URI="([^"]+)""#).unwrap(),
 
         sanitize: AtomicBool::new(true),
+        proxy_in_use: AtomicBool::new(false),
         export_style_config: ExportStyleConfig {
             season: Regex::new(r"[Ss]\d{1,2}").unwrap(),
             episode: Regex::new(r"[Ee]\d{1,2}").unwrap(),

@@ -30,6 +30,12 @@ pub const fn bytes_to_megabytes(bytes: u64) -> u64 {
     bytes / 1_048_576
 }
 
+pub fn debug_proxy_request(url: &str) {
+    if CONSTANTS.proxy_in_use.load(Ordering::SeqCst) {
+        debug!("Proxy request to {}", sanitize_sensitive_info(url));
+    }
+}
+
 pub async fn get_input_epg_content_as_file(client: Arc<reqwest::Client>, input: &ConfigInput, working_dir: &str, url_str: &str, persist_filepath: Option<PathBuf>) -> Result<PathBuf, TuliproxError> {
     debug_if_enabled!("getting input epg content working_dir: {}, url: {}", working_dir, sanitize_sensitive_info(url_str));
     if url_str.parse::<url::Url>().is_ok() {
@@ -198,6 +204,7 @@ pub fn get_local_file_content(file_path: &PathBuf) -> Result<String, Error> {
 
 async fn get_remote_content_as_file(client: Arc<reqwest::Client>, input: &ConfigInput, url: &Url, file_path: &Path) -> Result<PathBuf, std::io::Error> {
     let start_time = Instant::now();
+    debug_proxy_request(url.as_str());
     let request = get_client_request(&client, input.method, Some(&input.headers), url, None);
     match request.send().await {
         Ok(response) => {
@@ -231,6 +238,7 @@ async fn get_remote_content_as_file(client: Arc<reqwest::Client>, input: &Config
 
 async fn get_remote_content(client: Arc<reqwest::Client>, input: &ConfigInput, url: &Url) -> Result<(String, String), Error> {
     let start_time = Instant::now();
+    debug_proxy_request(url.as_str());
     let request = get_client_request(&client, input.method, Some(&input.headers), url, None);
     match request.send().await {
         Ok(response) => {
@@ -516,24 +524,37 @@ pub fn create_client(cfg: &Config) -> reqwest::ClientBuilder {
     let mut client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::limited(10));
 
     if let Some(proxy_cfg) = cfg.proxy.as_ref() {
-        let proxy = match reqwest::Proxy::all(&proxy_cfg.url) {
-            Ok(proxy) => {
-                if let (Some(username), Some(password)) = (&proxy_cfg.username, &proxy_cfg.password) {
-                    Some(proxy.basic_auth(username, password))
-                } else {
-                    Some(proxy)
+        let proxy = match Url::parse(&proxy_cfg.url) {
+            Ok(url) => {
+                let proxy = match url.scheme() {
+                    "http" => reqwest::Proxy::http(&proxy_cfg.url),
+                    "https" => reqwest::Proxy::https(&proxy_cfg.url),
+                    _ => reqwest::Proxy::all(&proxy_cfg.url),
+                };
+                match proxy {
+                    Ok(proxy) => {
+                        debug!("Using network proxy {}", sanitize_sensitive_info(&proxy_cfg.url));
+                        if let (Some(username), Some(password)) = (&proxy_cfg.username, &proxy_cfg.password) {
+                            Some(proxy.basic_auth(username, password))
+                        } else {
+                            Some(proxy)
+                        }
+                    }
+                    Err(err) => {
+                        error!("Failed to create proxy {}: {err}", sanitize_sensitive_info(&proxy_cfg.url));
+                        None
+                    }
                 }
             }
             Err(err) => {
-                error!("Failed to create proxy {}, {err}", &proxy_cfg.url);
+                error!("Invalid proxy URL {}: {err}", sanitize_sensitive_info(&proxy_cfg.url));
                 None
             }
         };
-        client = if let Some(prxy) = proxy {
-            client.proxy(prxy)
-        } else {
-            client
-        };
+        if let Some(prxy) = proxy {
+            CONSTANTS.proxy_in_use.store(true, Ordering::SeqCst);
+            client = client.proxy(prxy);
+        }
     }
 
     if let Some(rp_config) = cfg.reverse_proxy.as_ref() {
