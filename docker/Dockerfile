@@ -12,13 +12,18 @@
 # -----------------------------------------------------------------
 FROM rust:bookworm AS rust-build
 
-# Get target architecture
+# Target architecture for the Rust build
 ARG RUST_TARGET
 
-RUN apt-get update && apt-get install -y --no-install-recommends pkg-config musl-tools libssl-dev
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        pkg-config musl-tools libssl-dev gcc-aarch64-linux-gnu \
+    && rm -rf /var/lib/apt/lists/*
 
 # Update Rust toolchain and add necessary target
 RUN rustup update && rustup target add $RUST_TARGET
+
+# Ensure the correct C compiler is used for ARM builds
+ENV CC_aarch64_unknown_linux_musl=aarch64-linux-gnu-gcc
 
 # Set Rust compiler flags for better optimization and reproducibility
 ENV RUSTFLAGS='--remap-path-prefix $HOME=~ -C target-feature=+crt-static'
