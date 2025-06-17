@@ -4,8 +4,10 @@ use regex::Regex;
 use reqwest::Client;
 use std::sync::Arc;
 use crate::utils::request::sanitize_sensitive_info;
+use crate::utils::request::debug_proxy_request;
 
 async fn fetch_ip(client: &Arc<Client>, url: &str, regex: Option<&Regex>) -> Result<String, TuliproxError> {
+    debug_proxy_request(url);
     let response = client.get(url).send().await
         .map_err(|e| TuliproxError::new(TuliproxErrorKind::Info, format!("Failed to request {}: {e}", sanitize_sensitive_info(url))))?;
 
@@ -29,6 +31,7 @@ async fn fetch_ip(client: &Arc<Client>, url: &str, regex: Option<&Regex>) -> Res
 
 /// Fetch both IPs from a shared URL (if both regex patterns are available)
 async fn fetch_combined_ips(client: &Arc<Client>, config: &IpCheckConfig, url: &str) -> (Option<String>, Option<String>) {
+    debug_proxy_request(url);
     let response = client.get(url).send().await.ok();
     let text = match response {
         Some(r) => r.text().await.ok(),
