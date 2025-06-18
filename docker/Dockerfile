@@ -55,7 +55,9 @@ WORKDIR /app
 COPY ./frontend/package.json ./
 
 # Install dependencies (including dev deps)
-<<<<<<< codex/github-action-für-docker-image-erstellen
+FROM alpine:latest AS resource-build
+
+RUN apk add --no-cache ffmpeg
 RUN yarn config set network-timeout 600000 -g \
     && yarn install --prefer-offline --non-interactive
 =======
