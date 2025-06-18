@@ -55,8 +55,12 @@ WORKDIR /app
 COPY ./frontend/package.json ./
 
 # Install dependencies (including dev deps)
+<<<<<<< codex/github-action-für-docker-image-erstellen
 RUN yarn config set network-timeout 600000 -g \
     && yarn install --prefer-offline --non-interactive
+=======
+RUN yarn install --prefer-offline --non-interactive
+>>>>>>> master
 
 # Copy the rest of the frontend code
 COPY ./frontend /app
