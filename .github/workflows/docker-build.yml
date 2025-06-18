@@ -97,7 +97,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Create and push multi-arch manifest
         run: |
-          docker manifest create ghcr.io/${{ github.repository }}:latest \
+          docker buildx imagetools create -t ghcr.io/${{ github.repository }}:latest \
             ghcr.io/${{ github.repository }}:linux-amd64 \
             ghcr.io/${{ github.repository }}:linux-arm64 \
             ghcr.io/${{ github.repository }}:linux-armv7
