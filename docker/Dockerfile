@@ -12,13 +12,20 @@
 # -----------------------------------------------------------------
 FROM rust:bookworm AS rust-build
 
-# Get target architecture
+# Target architecture for the Rust build
 ARG RUST_TARGET
 
-RUN apt-get update && apt-get install -y --no-install-recommends pkg-config musl-tools libssl-dev
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        pkg-config musl-tools libssl-dev \
+        gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf \
+    && rm -rf /var/lib/apt/lists/*
 
 # Update Rust toolchain and add necessary target
 RUN rustup update && rustup target add $RUST_TARGET
+
+# Ensure the correct C compiler is used for ARM builds
+ENV CC_aarch64_unknown_linux_musl=aarch64-linux-gnu-gcc
+ENV CC_armv7_unknown_linux_musleabihf=arm-linux-gnueabihf-gcc
 
 # Set Rust compiler flags for better optimization and reproducibility
 ENV RUSTFLAGS='--remap-path-prefix $HOME=~ -C target-feature=+crt-static'
@@ -47,8 +54,9 @@ WORKDIR /app
 # Copy package.json files first for better caching
 COPY ./frontend/package.json ./
 
-# Install dependencies
-RUN yarn install --prefer-offline --non-interactive --production=false
+# Install dependencies (including dev deps)
+RUN yarn config set network-timeout 600000 -g \
+    && yarn install --prefer-offline --non-interactive
 
 # Copy the rest of the frontend code
 COPY ./frontend /app
