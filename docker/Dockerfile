@@ -25,8 +25,8 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends $deps; \
     rm -rf /var/lib/apt/lists/*
 
-# Update Rust toolchain and add necessary target
-RUN rustup update && rustup target add $RUST_TARGET
+# Install only the required Rust target
+RUN rustup target add $RUST_TARGET
 
 # Ensure the correct C compiler is used for ARM builds
 ENV CC_aarch64_unknown_linux_musl=aarch64-linux-gnu-gcc
@@ -138,8 +138,8 @@ ENV TZ=${TZ}
 # Added 'perl' which is required to build the native OpenSSL library.
 RUN apk add --no-cache bash build-base openssl-dev lldb gdb perl
 
-# Update Rust toolchain and add the necessary target
-RUN rustup update && rustup target add $RUST_TARGET
+# Install only the required Rust target
+RUN rustup target add $RUST_TARGET
 
 # Create the final application layout to mimic production
 WORKDIR /app
