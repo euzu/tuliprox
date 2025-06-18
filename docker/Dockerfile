@@ -15,10 +15,15 @@ FROM rust:bookworm AS rust-build
 # Target architecture for the Rust build
 ARG RUST_TARGET
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        pkg-config musl-tools libssl-dev \
-        gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf \
-    && rm -rf /var/lib/apt/lists/*
+RUN set -eux; \
+    apt-get update; \
+    deps="pkg-config musl-tools libssl-dev"; \
+    case "$RUST_TARGET" in \
+        *aarch64*) deps="$deps gcc-aarch64-linux-gnu" ;; \
+        *armv7*) deps="$deps gcc-arm-linux-gnueabihf" ;; \
+    esac; \
+    apt-get install -y --no-install-recommends $deps; \
+    rm -rf /var/lib/apt/lists/*
 
 # Update Rust toolchain and add necessary target
 RUN rustup update && rustup target add $RUST_TARGET
