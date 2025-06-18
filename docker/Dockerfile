@@ -58,11 +58,9 @@ COPY ./frontend/package.json ./
 FROM alpine:latest AS resource-build
 
 RUN apk add --no-cache ffmpeg
+
 RUN yarn config set network-timeout 600000 -g \
-    && yarn install --prefer-offline --non-interactive
-=======
-RUN yarn install --prefer-offline --non-interactive
->>>>>>> master
+    && yarn install --prefer-offline --non-interactive --production=false
 
 # Copy the rest of the frontend code
 COPY ./frontend /app
