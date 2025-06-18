@@ -20,6 +20,10 @@ jobs:
           - platform: linux/arm64
             rust_target: aarch64-unknown-linux-musl
             tag: linux-arm64
+          - platform: linux/arm/v7
+            rust_target: armv7-unknown-linux-musleabihf
+            tag: linux-armv7
+
     steps:
       - uses: actions/checkout@v3
       - uses: docker/setup-qemu-action@v2
@@ -57,5 +61,5 @@ jobs:
         run: |
           docker manifest create ghcr.io/${{ github.repository }}:latest \
             ghcr.io/${{ github.repository }}:linux-amd64 \
-            ghcr.io/${{ github.repository }}:linux-arm64
-          docker manifest push ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}:linux-arm64 \
+            ghcr.io/${{ github.repository }}:linux-armv7

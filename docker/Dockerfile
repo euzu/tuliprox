@@ -16,7 +16,8 @@ FROM rust:bookworm AS rust-build
 ARG RUST_TARGET
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        pkg-config musl-tools libssl-dev gcc-aarch64-linux-gnu \
+        pkg-config musl-tools libssl-dev \
+        gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf \
     && rm -rf /var/lib/apt/lists/*
 
 # Update Rust toolchain and add necessary target
@@ -24,6 +25,7 @@ RUN rustup update && rustup target add $RUST_TARGET
 
 # Ensure the correct C compiler is used for ARM builds
 ENV CC_aarch64_unknown_linux_musl=aarch64-linux-gnu-gcc
+ENV CC_armv7_unknown_linux_musleabihf=arm-linux-gnueabihf-gcc
 
 # Set Rust compiler flags for better optimization and reproducibility
 ENV RUSTFLAGS='--remap-path-prefix $HOME=~ -C target-feature=+crt-static'
@@ -53,7 +55,12 @@ WORKDIR /app
 COPY ./frontend/package.json ./
 
 # Install dependencies (including dev deps)
+<<<<<<< codex/github-action-für-docker-image-erstellen
+RUN yarn config set network-timeout 600000 -g \
+    && yarn install --prefer-offline --non-interactive
+=======
 RUN yarn install --prefer-offline --non-interactive
+>>>>>>> master
 
 # Copy the rest of the frontend code
 COPY ./frontend /app
