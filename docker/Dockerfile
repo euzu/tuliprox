@@ -55,10 +55,6 @@ WORKDIR /app
 COPY ./frontend/package.json ./
 
 # Install dependencies (including dev deps)
-FROM alpine:latest AS resource-build
-
-RUN apk add --no-cache ffmpeg
-
 RUN yarn config set network-timeout 600000 -g \
     && yarn install --prefer-offline --non-interactive --production=false
 
@@ -71,7 +67,9 @@ RUN yarn build && rm -rf node_modules
 # -----------------------------------------------------------------
 # Stage 3: Build video resources with ffmpeg
 # -----------------------------------------------------------------
-FROM linuxserver/ffmpeg:latest AS resource-build
+FROM alpine:latest AS resource-build
+
+RUN apk add --no-cache ffmpeg
 
 WORKDIR /src
 COPY resources ./resources
