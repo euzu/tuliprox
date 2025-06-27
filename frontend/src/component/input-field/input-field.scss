@@ -39,18 +39,18 @@
     font-size: 1.1rem !important;
   }
 
-  input {
-    color: var(--text-color);
-    border: none !important;
-    flex: 1 1 0;
-    height: 100%;
-    width: 100%;
-    min-width: 0;
-    font-size: 1.1rem !important;
-    outline: none !important;
-    padding: 0 4px 0 12px;
-    box-sizing: border-box;
-  }
+  //input {
+  //  color: var(--text-color);
+  //  border: none !important;
+  //  flex: 1 1 0;
+  //  height: 100%;
+  //  width: 100%;
+  //  min-width: 0;
+  //  font-size: 1.1rem !important;
+  //  outline: none !important;
+  //  padding: 0 4px 0 12px;
+  //  box-sizing: border-box;
+  //}
 
   button {
     @include common.iconButton();

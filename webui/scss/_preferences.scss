@@ -1,0 +1,172 @@
+@use 'common';
+
+@mixin prefsRoot {
+  @include common.container_vert_no_padding(flex-start);
+  align-content: flex-start;
+  overflow: hidden;
+}
+
+@mixin prefsInput {
+    color: var(--text-color);
+    background-color: transparent;
+    padding: 0.2rem 0.5rem;
+    flex: 1 1 auto;
+    border: 1px solid var(--border-color);
+
+    &:focus,
+    &:hover {
+      outline: none;
+    }
+}
+
+@mixin prefsToolbar() {
+  &__toolbar {
+    display: flex;
+    flex-flow: row wrap;
+    flex: 0 0 auto;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 12px;
+    background-color: var(--toolbar-bg-color);
+    padding: 8px 16px;
+
+    label {
+      flex: 1 1 auto;
+      font-size: 2rem;
+      font-weight: bold;
+      color: var(--title-label-color);
+    }
+
+    button {
+      @include common.textButton();
+    }
+  }
+}
+
+@mixin prefsForm() {
+  &__content {
+    display: flex;
+    flex-flow: column;
+
+    &-help {
+      display: flex;
+      flex-flow: column;
+      gap:12px;
+      border-top: 1px solid var(--border-light-color);
+      padding-top: 12px;
+      color: var(--label-color);
+
+      pre {
+        margin: 0;
+      }
+    }
+
+  }
+
+}
+
+
+.preferences {
+  @include common.container_horz_no_padding();
+  overflow: hidden;
+  flex: 1 1 auto;
+
+  &__content {
+    @include common.container_horz_nowrap(flex-start, 0);
+    flex: 1 1 auto;
+    overflow: hidden;
+    gap: 0;
+  }
+
+  &__panels {
+    @include common.container_vert_no_padding(flex-start);
+    overflow: hidden;
+    flex: 1 1 auto;
+
+    .panel {
+      @include common.container_vert();
+      flex: 1 1 auto;
+      overflow: hidden;
+      .card {
+        @include common.container_vert();
+        flex: 1 1 auto;
+        overflow: hidden;
+      }
+    }
+  }
+
+  &__sidebar {
+    display: flex;
+    flex-flow: column;
+    box-sizing: border-box;
+    @media (max-width: common.$media-size-mobile) {
+      flex-flow: row;
+    }
+    //max-width: 48px;
+    //min-width: 48px;
+    //width: 48px;
+    @media (max-width: common.$media-size-mobile) {
+      max-width: 32px;
+      min-width: 32px;
+    }
+    gap: 12px;
+    padding: 8px 4px;
+
+    button {
+      @include common.iconButton();
+      border: 1px solid transparent;
+    }
+
+    button.selected {
+      color: var(--icon-button-hover-color);
+      background-color: var(--icon-button-hover-background-color);
+      border: 1px solid var(--icon-button-hover-border-color);
+    }
+
+    &-menu-action {
+      display: flex;
+      flex-flow: row nowrap;
+      gap: 8px;
+      align-items: center;
+      cursor: pointer;
+      color: var(--menu-button-color);
+      background-color: var(--menu-button-background-color);
+      border: 1px solid transparent;
+      border-radius: var(--border-radius);
+      padding: 8px 16px;
+      user-select: none;
+      white-space: nowrap;
+
+      svg {
+        width: 2rem;
+      }
+
+      &_update { svg { path { fill: var(--menu-icon-color-update); } } }
+      &_user { svg { path { fill: var(--menu-icon-color-user); } } }
+      &_apiserver { svg { path { fill: var(--menu-icon-color-api_server); } } }
+      &_mainconfig { svg { path { fill: var(--menu-icon-color-main_config); } } }
+      &_status { svg { path { fill: var(--menu-icon-color-status); } } }
+
+
+      * {
+        pointer-events: none;
+      }
+
+      @media (max-width: common.$media-size-mobile) {
+        label {
+          display: none;
+        }
+      }
+
+      &:hover {
+        border: 1px solid var(--icon-button-hover-border-color);
+      }
+    }
+
+    &-menu-action.selected {
+      color: var(--menu-button-hover-color);
+      background-color: var(--menu-button-hover-background-color);
+    }
+  }
+
+}

@@ -1,0 +1,11 @@
+{
+  "tabTitle": "tuliprox",
+  "appTitle": "tuliprox",
+  "appLogo": "/assets/tuliprox-logo.svg",
+  "api": {
+    "apiUrl": "/api/v1/",
+    "authUrl": "/auth/"
+  },
+  "wsUrl" : "/ws",
+  "protocolVersion": 1
+}

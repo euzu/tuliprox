@@ -59,7 +59,6 @@ button {
 
 select,
 input {
-  background-color: transparent;
   color: var(--text-color);
   &:focus {
     background-color: var(--background-color) !important;

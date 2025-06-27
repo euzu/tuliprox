@@ -1,8 +1,7 @@
 use std::borrow::BorrowMut;
-use shared::model::{PlaylistItemType, XtreamCluster};
 use crate::model::{Config, ConfigInput};
-use crate::model::{PlaylistGroup, PlaylistItem, PlaylistItemHeader};
-use crate::utils::{extract_id_from_url};
+use shared::model::{PlaylistItemType, XtreamCluster, PlaylistGroup, PlaylistItem, PlaylistItemHeader};
+use shared::utils::{extract_id_from_url};
 
 
 // other implementations like calculating text_distance on all titles took too much time

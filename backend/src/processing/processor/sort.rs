@@ -1,8 +1,8 @@
-use crate::foundation::filter::get_field_value;
-use crate::model::{ConfigSortChannel, ConfigSortGroup, ConfigTarget, SortOrder};
-use crate::model::{PlaylistGroup, PlaylistItem};
+use crate::model::{ConfigSortChannel, ConfigSortGroup, ConfigTarget};
 use deunicode::deunicode;
 use std::cmp::Ordering;
+use shared::foundation::filter::get_field_value;
+use shared::model::{PlaylistGroup, PlaylistItem, SortOrder};
 
 fn playlist_comparator(
     sequence: Option<&Vec<regex::Regex>>,
@@ -98,7 +98,7 @@ fn playlistgroup_comparator(a: &PlaylistGroup, b: &PlaylistGroup, group_sort: &C
     let value_a = if match_as_ascii { deunicode(&a.title) } else { a.title.to_string() };
     let value_b = if match_as_ascii { deunicode(&b.title) } else { b.title.to_string() };
 
-    playlist_comparator(group_sort.t_re_sequence.as_ref(), group_sort.order, &value_a, &value_b)
+    playlist_comparator(group_sort.sequence.as_ref(), group_sort.order, &value_a, &value_b)
 }
 
 fn playlistitem_comparator(
@@ -112,7 +112,7 @@ fn playlistitem_comparator(
     let value_a = if match_as_ascii { deunicode(&raw_value_a) } else { raw_value_a };
     let value_b = if match_as_ascii { deunicode(&raw_value_b) } else { raw_value_b };
 
-    playlist_comparator(channel_sort.t_re_sequence.as_ref(), channel_sort.order, &value_a, &value_b)
+    playlist_comparator(channel_sort.sequence.as_ref(), channel_sort.order, &value_a, &value_b)
 }
 
 pub(in crate::processing::processor) fn sort_playlist(target: &ConfigTarget, new_playlist: &mut [PlaylistGroup]) {
@@ -123,7 +123,7 @@ pub(in crate::processing::processor) fn sort_playlist(target: &ConfigTarget, new
         }
         if let Some(channel_sorts) = &sort.channels {
             for channel_sort in channel_sorts {
-                let regexp = channel_sort.t_re_group_pattern.as_ref().unwrap();
+                let regexp = &channel_sort.group_pattern;
                 for group in new_playlist.iter_mut() {
                     let group_title = if match_as_ascii { deunicode(&group.title) } else { group.title.to_string() };
                     if regexp.is_match(group_title.as_str()) {
@@ -137,10 +137,10 @@ pub(in crate::processing::processor) fn sort_playlist(target: &ConfigTarget, new
 
 #[cfg(test)]
 mod tests {
-    use crate::model::{ConfigSortChannel, ItemField, SortOrder};
-    use crate::model::{PlaylistItem, PlaylistItemHeader};
     use crate::processing::processor::sort::playlistitem_comparator;
     use regex::Regex;
+    use shared::model::{ItemField, PlaylistItem, PlaylistItemHeader, SortOrder};
+    use crate::model::ConfigSortChannel;
 
     #[test]
     fn test_sort() {
@@ -151,15 +151,13 @@ mod tests {
 
         let channel_sort = ConfigSortChannel {
             field: ItemField::Caption,
-            group_pattern: ".*".to_string(),
             order: SortOrder::Asc,
-            sequence: None,
-            t_re_sequence: Some(vec![
+            sequence: Some(vec![
                 Regex::new(r"(?P<c1>.*?)\bUHD\b").unwrap(),
                 Regex::new(r"(?P<c1>.*?)\bFHD\b").unwrap(),
                 Regex::new(r"(?P<c1>.*?)\bHD\b").unwrap(),
             ]),
-            t_re_group_pattern: Some(Regex::new(".*").unwrap()),
+            group_pattern: Regex::new(".*").unwrap(),
         };
 
         channels.sort_by(|chan1, chan2| playlistitem_comparator(chan1, chan2, &channel_sort, true));
@@ -199,10 +197,8 @@ mod tests {
 
         let channel_sort = ConfigSortChannel {
             field: ItemField::Caption,
-            group_pattern: ".*US.*".to_string(),
             order: SortOrder::Asc,
-            sequence: None,
-            t_re_sequence: Some(vec![
+            sequence: Some(vec![
                 Regex::new(r"^US\| EAST.*?\[\bUHD\b\](?P<c1>.*)").unwrap(),
                 Regex::new(r"^US\| EAST.*?\[\bFHD\b\](?P<c1>.*)").unwrap(),
                 Regex::new(r"^US\| EAST.*?\[\bHD\b\](?P<c1>.*)").unwrap(),
@@ -212,7 +208,7 @@ mod tests {
                 Regex::new(r"^US\| WEST.*?\[\bHD\b\](?P<c1>.*)").unwrap(),
                 Regex::new(r"^US\| WEST.*?\[\bSD\b\](?P<c1>.*)").unwrap(),
             ]),
-            t_re_group_pattern: Some(Regex::new(".*").unwrap()),
+            group_pattern: Regex::new(".*").unwrap(),
         };
 
         channels.sort_by(|chan1, chan2| playlistitem_comparator(chan1, chan2, &channel_sort, true));

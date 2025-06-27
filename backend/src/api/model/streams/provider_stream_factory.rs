@@ -6,12 +6,12 @@ use crate::api::model::streams::buffered_stream::BufferedStream;
 use crate::api::model::streams::client_stream::ClientStream;
 use crate::api::model::streams::provider_stream::{create_channel_unavailable_stream, get_header_filter_for_item_type};
 use crate::api::model::streams::timed_client_stream::TimedClientStream;
-use shared::model::PlaylistItemType;
-use crate::model::{Config, DEFAULT_USER_AGENT};
+use shared::model::{PlaylistItemType, DEFAULT_USER_AGENT};
+use crate::model::{AppConfig};
 use crate::tools::atomic_once_flag::AtomicOnceFlag;
-use crate::utils::request::{classify_content_type, get_request_headers, sanitize_sensitive_info, MimeCategory};
+use crate::utils::request::{classify_content_type, get_request_headers, MimeCategory};
 use crate::utils::{debug_if_enabled};
-use shared::utils::{filter_request_header};
+use shared::utils::{filter_request_header, sanitize_sensitive_info};
 use futures::stream::{self};
 use futures::{StreamExt, TryStreamExt};
 use log::{debug, log_enabled, warn};
@@ -236,7 +236,7 @@ fn prepare_client(request_client: &Arc<reqwest::Client>, stream_options: &Provid
     (request_builder, partial)
 }
 
-async fn provider_stream_request(cfg: &Config, request_client: Arc<reqwest::Client>, stream_options: &ProviderStreamFactoryOptions) -> Result<Option<ProviderStreamFactoryResponse>, StatusCode> {
+async fn provider_stream_request(cfg: &AppConfig, request_client: Arc<reqwest::Client>, stream_options: &ProviderStreamFactoryOptions) -> Result<Option<ProviderStreamFactoryResponse>, StatusCode> {
     let (client, _partial_content) = prepare_client(&request_client, stream_options);
     match client.send().await {
         Ok(mut response) => {
@@ -319,7 +319,7 @@ async fn provider_stream_request(cfg: &Config, request_client: Arc<reqwest::Clie
     }
 }
 
-async fn get_provider_stream(cfg: &Config, client: Arc<reqwest::Client>, stream_options: &ProviderStreamFactoryOptions) -> Result<Option<ProviderStreamFactoryResponse>, StatusCode> {
+async fn get_provider_stream(cfg: &AppConfig, client: Arc<reqwest::Client>, stream_options: &ProviderStreamFactoryOptions) -> Result<Option<ProviderStreamFactoryResponse>, StatusCode> {
     let url = stream_options.get_url();
     debug_if_enabled!("stream provider {}", sanitize_sensitive_info(url.as_str()));
     let start = Instant::now();
@@ -367,7 +367,7 @@ async fn get_provider_stream(cfg: &Config, client: Arc<reqwest::Client>, stream_
 }
 
 
-pub async fn create_provider_stream(cfg: Arc<Config>,
+pub async fn create_provider_stream(cfg: Arc<AppConfig>,
                                     client: Arc<reqwest::Client>,
                                     stream_options: ProviderStreamFactoryOptions) -> Option<ProviderStreamFactoryResponse> {
     let client_stream_factory = |stream, reconnect_flag, range_cnt| {

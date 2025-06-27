@@ -82,7 +82,7 @@ fn validate_request(
     token: &str,
     verify_fn: fn(&str, &[u8]) -> bool,
 ) -> Result<(), ()> {
-    if let Some(web_auth_config) =&app_state.config.web_ui.as_ref().and_then(|c| c.auth.as_ref()) {
+    if let Some(web_auth_config) = &app_state.app_config.config.load().web_ui.as_ref().and_then(|c| c.auth.as_ref()) {
         let secret_key = web_auth_config.secret.as_ref();
         if verify_fn(token, secret_key) {
             return Ok(());
@@ -111,7 +111,7 @@ pub async fn validator_user(
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, axum::http::StatusCode> {
     if let Some(username) = get_username_from_auth_header(&token, &app_state) {
-        if let Some(user) = app_state.config.get_user_credentials(&username) {
+        if let Some(user) = app_state.app_config.get_user_credentials(&username) {
             if !user.ui_enabled {
                 return Err(axum::http::StatusCode::FORBIDDEN);
             }

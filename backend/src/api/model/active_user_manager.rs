@@ -1,20 +1,79 @@
 use crate::model::Config;
 use crate::model::{ProxyUserCredentials};
-use crate::utils::request::sanitize_sensitive_info;
-use shared::utils::{current_time_secs, default_grace_period_millis, default_grace_period_timeout_secs};
+use shared::utils::{current_time_secs, default_grace_period_millis, default_grace_period_timeout_secs, sanitize_sensitive_info};
 use jsonwebtoken::get_current_timestamp;
 use log::{debug, info};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use shared::model::UserConnectionPermission;
 
+macro_rules! active_user_manager_shared_impl {
+    () => {
+          #[inline]
+        async fn get_active_connections(user: &Arc<RwLock<HashMap<String, UserConnectionData>>>) -> usize {
+            user.read().await.values().map(|c| c.connections as usize).sum()
+        }
+
+        fn log_active_user(&self) {
+            if self.is_log_user_enabled() {
+                let user = Arc::clone(&self.user);
+                tokio::spawn(async move {
+                    let user_count = user.read().await.len();
+                    let user_connection_count = Self::get_active_connections(&user).await;
+                    info!("Active Users: {user_count}, Active User Connections: {user_connection_count}");
+                });
+            }
+        }
+    };
+}
+
 const USER_CON_TTL: u64 = 10_800;  // 3 hours
 const USER_SESSION_LIMIT: usize = 50;
 
+
+
+fn get_grace_options(config: &Config) -> (u64, u64) {
+    let (grace_period_millis, grace_period_timeout_secs) = config.reverse_proxy.as_ref()
+        .and_then(|r| r.stream.as_ref())
+        .map_or_else(|| (default_grace_period_millis(), default_grace_period_timeout_secs()), |s| (s.grace_period_millis, s.grace_period_timeout_secs));
+    (grace_period_millis, grace_period_timeout_secs)
+}
+
+struct ConnectionGuardUserManager {
+    log_active_user: bool,
+    user: Arc<RwLock<HashMap<String, UserConnectionData>>>,
+}
+
+impl ConnectionGuardUserManager {
+    active_user_manager_shared_impl!();
+    fn is_log_user_enabled(&self)-> bool {
+        self.log_active_user
+    }
+    async fn remove_connection(&self, username: &str) {
+        let mut lock = self.user.write().await;
+        if let Some(connection_data) = lock.get_mut(username) {
+            if connection_data.connections > 0 {
+                connection_data.connections -= 1;
+            }
+
+            if connection_data.connections == 0 {
+                lock.remove(username);
+            } else if connection_data.connections < connection_data.max_connections {
+                // Grace timeout expired, reset grace counters
+                connection_data.granted_grace = false;
+                connection_data.grace_ts = 0;
+            }
+        }
+        drop(lock);
+
+        self.log_active_user();
+    }
+}
+
 pub struct UserConnectionGuard {
-    manager: Arc<ActiveUserManager>,
+    manager: Arc<ConnectionGuardUserManager>,
     username: String,
 }
 impl Drop for UserConnectionGuard {
@@ -69,9 +128,9 @@ impl UserConnectionData {
 }
 
 pub struct ActiveUserManager {
-    grace_period_millis: u64,
-    grace_period_timeout_secs: u64,
-    log_active_user: bool,
+    grace_period_millis: AtomicU64,
+    grace_period_timeout_secs: AtomicU64,
+    log_active_user: AtomicBool,
     user: Arc<RwLock<HashMap<String, UserConnectionData>>>,
     gc_ts: Option<AtomicU64>,
 }
@@ -79,26 +138,29 @@ pub struct ActiveUserManager {
 impl ActiveUserManager {
     pub fn new(config: &Config) -> Self {
         let log_active_user = config.log.as_ref().is_some_and(|l| l.log_active_user);
-        let (grace_period_millis, grace_period_timeout_secs) = config.reverse_proxy.as_ref()
-            .and_then(|r| r.stream.as_ref())
-            .map_or_else(|| (default_grace_period_millis(), default_grace_period_timeout_secs()), |s| (s.grace_period_millis, s.grace_period_timeout_secs));
+        let (grace_period_millis, grace_period_timeout_secs) = get_grace_options(config);
 
         Self {
-            grace_period_millis,
-            grace_period_timeout_secs,
-            log_active_user,
+            grace_period_millis : AtomicU64::new(grace_period_millis),
+            grace_period_timeout_secs: AtomicU64::new(grace_period_timeout_secs),
+            log_active_user: AtomicBool::new(log_active_user),
             user: Arc::new(RwLock::new(HashMap::new())),
             gc_ts: Some(AtomicU64::new(current_time_secs())),
         }
     }
 
-    fn clone_inner(&self) -> Self {
-        Self {
-            grace_period_millis: self.grace_period_millis,
-            grace_period_timeout_secs: self.grace_period_timeout_secs,
-            log_active_user: self.log_active_user,
+    pub fn update_config(&self, config: &Config) {
+        let log_active_user = config.log.as_ref().is_some_and(|l| l.log_active_user);
+        let (grace_period_millis, grace_period_timeout_secs) = get_grace_options(config);
+        self.grace_period_millis.store(grace_period_millis, Ordering::Relaxed);
+        self.grace_period_timeout_secs.store(grace_period_timeout_secs, Ordering::Relaxed);
+        self.log_active_user.store(log_active_user, Ordering::Relaxed);
+    }
+
+    fn clone_inner(&self) -> ConnectionGuardUserManager {
+        ConnectionGuardUserManager {
+            log_active_user: self.log_active_user.load(Ordering::Relaxed),
             user: Arc::clone(&self.user),
-            gc_ts: None,
         }
     }
 
@@ -122,7 +184,7 @@ impl ActiveUserManager {
         let now = get_current_timestamp();
         // Check if user already used grace period
         if connection_data.granted_grace {
-            if current_connections > connection_data.max_connections && now - connection_data.grace_ts <= self.grace_period_timeout_secs {
+            if current_connections > connection_data.max_connections && now - connection_data.grace_ts <= self.grace_period_timeout_secs.load(Ordering::Relaxed) {
                 // Grace timeout still active, deny connection
                 debug!("User access denied, grace exhausted, too many connections: {username}");
                 return UserConnectionPermission::Exhausted;
@@ -132,7 +194,7 @@ impl ActiveUserManager {
             connection_data.grace_ts = 0;
         }
 
-        if self.grace_period_millis > 0 && current_connections == connection_data.max_connections {
+        if self.grace_period_millis.load(Ordering::Relaxed) > 0 && current_connections == connection_data.max_connections {
             // Allow grace period once
             connection_data.granted_grace = true;
             connection_data.grace_ts = now;
@@ -167,11 +229,6 @@ impl ActiveUserManager {
         Self::get_active_connections(&self.user).await
     }
 
-    #[inline]
-    async fn get_active_connections(user: &Arc<RwLock<HashMap<String, UserConnectionData>>>) -> usize {
-        user.read().await.values().map(|c| c.connections as usize).sum()
-    }
-
     pub async fn add_connection(&self, username: &str, max_connections: u32) -> UserConnectionGuard {
         let mut lock = self.user.write().await;
         if let Some(connection_data) = lock.get_mut(username) {
@@ -190,24 +247,9 @@ impl ActiveUserManager {
         }
     }
 
-    async fn remove_connection(&self, username: &str) {
-        let mut lock = self.user.write().await;
-        if let Some(connection_data) = lock.get_mut(username) {
-            if connection_data.connections > 0 {
-                connection_data.connections -= 1;
-            }
-
-            if connection_data.connections == 0 {
-                lock.remove(username);
-            } else if connection_data.connections < connection_data.max_connections {
-                // Grace timeout expired, reset grace counters
-                connection_data.granted_grace = false;
-                connection_data.grace_ts = 0;
-            }
-        }
-        drop(lock);
-
-        self.log_active_user();
+    active_user_manager_shared_impl!();
+    fn is_log_user_enabled(&self)-> bool {
+        self.log_active_user.load(Ordering::Relaxed)
     }
 
     fn find_user_session<'a>(token: &'a str, sessions: &'a [UserSession]) -> Option<&'a UserSession> {
@@ -293,17 +335,6 @@ impl ActiveUserManager {
             }
         }
         None
-    }
-
-    fn log_active_user(&self) {
-        if self.log_active_user {
-            let user = Arc::clone(&self.user);
-            tokio::spawn(async move {
-                let user_count = user.read().await.len();
-                let user_connection_count = Self::get_active_connections(&user).await;
-                info!("Active Users: {user_count}, Active User Connections: {user_connection_count}");
-            });
-        }
     }
 
     async fn gc(&self) {

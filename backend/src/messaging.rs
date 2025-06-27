@@ -43,16 +43,16 @@ fn send_telegram_message(msg: &str, messaging: &MessagingConfig) {
 
 fn send_pushover_message(client: &Arc<reqwest::Client>, msg: &str, messaging: &MessagingConfig) {
     if let Some(pushover) = &messaging.pushover {
-        let url = pushover.url.as_deref().unwrap_or("https://api.pushover.net/1/messages.json").to_string();
         let encoded_message: String = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("token", pushover.token.as_str())
             .append_pair("user", pushover.user.as_str())
             .append_pair("message", msg)
             .finish();
         let the_client = Arc::clone(client);
+        let pushover_url = pushover.url.to_string();
         tokio::spawn(async move {
             match the_client
-                .post(url)
+                .post(pushover_url)
                 .header(header::CONTENT_TYPE, mime::APPLICATION_WWW_FORM_URLENCODED.to_string())
                 .body(encoded_message)
                 .send()

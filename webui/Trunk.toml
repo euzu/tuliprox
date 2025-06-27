@@ -1,0 +1,11 @@
+[build]
+dist = "dist"
+
+[serve]
+port = 9899
+
+[[proxy]]
+backend = "http://localhost:9901/api/v1/"
+
+[[proxy]]
+backend = "http://localhost:9901/auth/"

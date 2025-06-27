@@ -5,11 +5,11 @@ use std::sync::Arc;
 use std::task::{Poll};
 use futures::{Stream};
 use log::trace;
+use shared::utils::sanitize_sensitive_info;
 use crate::api::model::stream::BoxedProviderStream;
 use crate::api::model::stream_error::StreamError;
 use crate::utils::trace_if_enabled;
 use crate::tools::atomic_once_flag::AtomicOnceFlag;
-use crate::utils::request::sanitize_sensitive_info;
 
 /// This stream counts the send bytes for reconnecting to the actual position and
 /// sets the `close_signal`  if the client drops the connection.

@@ -1,0 +1,206 @@
+{
+  "LABEL": {
+    "LIVE": "Live",
+    "VOD": "VOD",
+    "SERIES": "Series",
+    "SAVE": "Save",
+    "SUBMIT": "Submit",
+    "OK": "Ok",
+    "CANCEL": "Cancel",
+    "CLOSE": "Close",
+    "SHOW_SELECTED": "Show selected",
+    "SELECT_ALL": "Select All",
+    "DESELECT_ALL": "Deselect all",
+    "SEARCH": "Search",
+    "CLEAR": "Clear",
+    "REGEXP": "Regexp",
+    "LOGOUT": "Logout",
+    "CONFIGURATION": "Configuration",
+    "HOST": "Host",
+    "PORT": "Port",
+    "WEB_ROOT": "Web-Root",
+    "THREADS": "Threads",
+    "WORKING_DIR": "Working dir",
+    "BACKUP_DIR": "Backup dir",
+    "UPDATE_ON_BOOT": "Update on boot",
+    "WEB_UI": "Web UI",
+    "USER_UI": "User UI",
+    "WEB_UI_PATH": "Path prefix",
+    "SCHEDULES": "Schedules",
+    "SANITIZE_SENSITIVE_INFO": "Sanitize sensitive info",
+    "ACTIVE_USER": "Active User",
+    "RESOURCE_REWRITE_DISABLE": "Resource Rewrite disable",
+    "DISABLE_REFERER_HEADER": "Referer header disable",
+    "RECONNECT": "Reconnect",
+    "THROTTLE": "Throttle",
+    "GRACE_PERIOD": "Grace period ms",
+    "GRACE_PERIOD_TIMEOUT": "Grace period timeout sec",
+    "BUFFER_ENABLED": "Buffer Enabled",
+    "BUFFER_SIZE": "Buffer Size",
+    "ENABLED": "Enabled",
+    "SIZE": "Size",
+    "CACHE_DIR": "Cache dir",
+    "NOTIFY_ON": "Notify on",
+    "BOT_TOKEN": "Bot Token",
+    "CHAT_IDS": "Chat Ids",
+    "URL": "Url",
+    "USER": "User",
+    "USERS": "Users",
+    "TOKEN": "Token",
+    "WEB_SEARCH_URL": "Web Search Url",
+    "EXTENSIONS": "Extensions",
+    "HEADERS": "Headers",
+    "DIRECTORY": "Directory",
+    "ORGANIZE_INTO_DIRECTORIES": "Organize Into Directorie",
+    "EPISODE_PATTERN": "Episode Pattern",
+    "API": "Api",
+    "MAIN": "Main",
+    "REVERSE_PROXY": "ReverseProxy",
+    "MESSAGING": "Messaging",
+    "VIDEO": "Video",
+    "EXAMPLES": "Examples",
+    "UPDATE": "Update",
+    "START": "Start",
+    "CACHE": "Cache",
+    "STREAM": "Stream",
+    "LOG": "Log",
+    "LOG_LEVEL": "Log level",
+    "CONFIG": "Config",
+    "TELEGRAM": "Telegram",
+    "REST": "Rest",
+    "PUSHOVER": "Pushover",
+    "PROXY": "Proxy",
+    "REFRESH": "Refresh",
+    "STATUS": "Status",
+    "MAX_CON": "MaxCon",
+    "EXP_DATE": "ExpDate",
+    "USERNAME": "Username",
+    "PASSWORD": "Password",
+    "SERVER": "Server",
+    "TIMEZONE": "Timezone",
+    "PATH": "Path",
+    "MESSAGE": "Message",
+    "PROTOCOL": "Protocol",
+    "NAME": "Name",
+    "API_PROXY": "Api-Proxy",
+    "INFINITE": "Infinite",
+    "ONE_YEAR": "One year",
+    "SELF_HOSTED": "Self Hosted",
+    "PROVIDER": "Provider",
+    "CUSTOM": "Custom",
+    "XTREAM_CODES": "xtream codes",
+    "XC": "xc",
+    "M3U": "m3u",
+    "PLAYLIST_BROWSER": "Playlist Browser",
+    "RATE_LIMIT": "Rate Limit",
+    "PERIOD_MILLIS": "Period Millis",
+    "BURST_SIZE": "Burst Size",
+    "WEB_AUTH":  "Auth",
+    "ISSUER": "Issuer",
+    "SECRET":  "Secret",
+    "USERFILE": "Userfile",
+    "UI_ENABLED": "UI",
+    "PLAYER_SERVER": "Player Server",
+    "VERSION": "Version",
+    "SERVER_TIME": "Server time",
+    "BUILD_TIME": "Build time",
+    "MEMORY": "Memory",
+    "ACTIVE_USERS": "Active users",
+    "ACTIVE_USER_CONNECTIONS": "Active user conn...",
+    "ACTIVE_PROVIDER_CONNECTIONS": "Active provider conn...",
+    "IP_CHECK": "IP Check",
+    "URL_IPV4": "Url IPv4",
+    "URL_IPV6": "Url IPv6",
+    "PATTERN_IPV4": "Pattern IPv4",
+    "PATTERN_IPV6": "Pattern IPv6",
+    "IPv4": "IPv4",
+    "IPv6": "IPv6",
+    "IP": "IP",
+    "TARGET": "Target",
+    "TARGETS": "Targets",
+    "NOTES": "Notes"
+  },
+  "TITLE": {
+    "USER_BOUQUET_EDITOR": "User group editor"
+  },
+  "MESSAGES": {
+    "NO_CONTENT": "No content",
+    "INVALID_REGEXP": "Invalid regexp",
+    "INVALID_FILETYPE": "Invalid filetype",
+    "TARGET_NOT_EXISTS": "Target does not exist",
+    "DOWNLOAD": {
+      "SUCCESS": "Successfully downloaded",
+      "FAIL": "Failed to download!",
+      "PLAYLIST": {
+        "SUCCESS": "Successfully downloaded playlist",
+        "FAIL": "Failed to download playlist!"
+      },
+      "SERVER_CONFIG": {
+        "FAIL": "Failed to download server config!"
+      }
+    },
+    "SAVE": {
+      "MAIN_CONFIG": {
+        "SUCCESS": "Main config saved!",
+        "FAIL": "Failed to save main config!"
+      },
+      "BOUQUET": {
+        "SUCCESS": "Successfully saved bouquet",
+        "FAIL": "Failed to save bouquet!"
+      },
+      "USER": {
+        "SUCCESS": "Successfully saved user",
+        "FAIL": "Failed to save user!",
+        "USERNAME_REQUIRED": "Username required",
+        "DUPLICATE_USERNAME": "Duplicate username!",
+        "DUPLICATE_TOKEN": "Duplicate token!",
+        "TARGET_NOT_FOUND": "Target not found!",
+        "MAX_CONNECTIONS_INVALID": "MaxConnections invalid"
+      }
+    },
+    "PLAYLIST_UPDATE": {
+      "SUCCESS": "Successfully started playlist update!",
+      "FAIL": "Playlist update failed!"
+    },
+    "SOURCE_SELECTOR": {
+      "MISSING_SELECTION": "No entry selected"
+    }
+  },
+  "INFO": {
+    "RESTART_TO_APPLY_CHANGES": "You need to restart to apply changes.",
+    "SCHEDULE_EXAMPLE": "Schedule example",
+    "THREADS": "Threads: keep it 0 if you have no problems. Increase it if you have multiple providers. Accessing you provider parallel can cause a ban.",
+    "WEB_ROOT": "Web-Root: Contains the web-ui files. They are normally placed in the same directory under ./web"
+  },
+  "HINT": {
+    "CONFIG": {
+      "API_PROXY": {
+        "PATH": "URL path prefix"
+      },
+      "USER": {
+        "TARGET_FORCE_REDIRECT": "Force Redirect is set for target"
+      },
+      "LOG": {
+        "ACTIVE_USER": "Activates active user info log"
+      },
+      "PROXY": {
+        "RESOURCE_REWRITE_DISABLE": "If activated, the URL rewrite of resources in reverse proxy mode is disabled",
+        "DISABLE_REFERER_HEADER": "If activated, the referer header is not sent to the provider",
+        "THROTTLE": "Supported units are KB/s,MB/s,KiB/s,MiB/s,kbps,mbps,Mibps"
+      },
+      "WEB_UI": {
+        "PATH": "Configuration of a path prefix, allowing it to be accessed behind a reverse proxy under a custom subpath. like https://yourdomain.com/tuliprox"
+      }
+    }
+  },
+  "SETUP":{
+    "LABEL": {
+      "NEXT": "Next",
+      "BACK": "Back",
+      "FINISH_SETUP": "Finish Setup"
+    },
+    "MSG": {
+      "WELCOME": "Welcome to tuliprox setup. This wizard will guide you through the initial setup process."
+    }
+  }
+}

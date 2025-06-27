@@ -1,12 +1,13 @@
+use shared::model::InputType;
 use shared::error::{TuliproxError, TuliproxErrorKind};
-use crate::model::{Config, ConfigTarget, InputType};
-use crate::model::{FetchedPlaylist, PlaylistItem};
-use shared::model::{PlaylistItemType, XtreamCluster};
+use crate::model::{AppConfig, ConfigTarget};
+use crate::model::{FetchedPlaylist};
+use shared::model::{PlaylistItem, PlaylistItemType, XtreamCluster};
 use crate::processing::processor::xtream::{create_resolve_info_wal_files, playlist_resolve_download_playlist_item, read_processed_info_ids, should_update_info};
 use crate::repository::xtream_repository::{write_vod_info_to_wal_file, xtream_update_input_info_file, xtream_update_input_vod_record_from_wal_file, InputVodInfoRecord};
 use shared::error::{notify_err};
 use crate::processing::processor::{handle_error, handle_error_and_return, create_resolve_options_function_for_xtream_target};
-use crate::utils::{get_u32_from_serde_value, get_u64_from_serde_value, get_string_from_serde_value};
+use shared::utils::{get_u32_from_serde_value, get_u64_from_serde_value, get_string_from_serde_value};
 use crate::repository::xtream_repository::xtream_get_input_info;
 use serde_json::{from_str, Map, Value};
 use std::collections::HashMap;
@@ -19,7 +20,7 @@ use crate::processing::processor::xtream::normalize_json_content;
 
 create_resolve_options_function_for_xtream_target!(vod);
 
-async fn read_processed_vod_info_ids(cfg: &Config, errors: &mut Vec<TuliproxError>, fpl: &FetchedPlaylist<'_>) -> HashMap<u32, u64> {
+async fn read_processed_vod_info_ids(cfg: &AppConfig, errors: &mut Vec<TuliproxError>, fpl: &FetchedPlaylist<'_>) -> HashMap<u32, u64> {
     read_processed_info_ids(cfg, errors, fpl, PlaylistItemType::Video, |record: &InputVodInfoRecord| record.ts).await
 }
 
@@ -58,17 +59,18 @@ fn should_update_vod_info(pli: &mut PlaylistItem, processed_provider_ids: &HashM
     should_update_info(pli, processed_provider_ids, crate::model::XC_TAG_VOD_INFO_ADDED)
 }
 
-pub async fn playlist_resolve_vod(client: Arc<reqwest::Client>, cfg: &Config, target: &ConfigTarget, errors: &mut Vec<TuliproxError>, fpl: &mut FetchedPlaylist<'_>) {
+pub async fn playlist_resolve_vod(app_config: &AppConfig, client: Arc<reqwest::Client>, target: &ConfigTarget, errors: &mut Vec<TuliproxError>, fpl: &mut FetchedPlaylist<'_>) {
     let (resolve_movies, resolve_delay) = get_resolve_vod_options(target, fpl);
     if !resolve_movies { return; }
 
     // we cant write to the indexed-document directly because of the write lock and time-consuming operation.
     // All readers would be waiting for the lock and the app would be unresponsive.
     // We collect the content into a wal file and write it once we collected everything.
-    let Some((wal_content_file, wal_record_file, wal_content_path, wal_record_path)) = create_resolve_info_wal_files(cfg, fpl.input, XtreamCluster::Video)
+    let config = app_config.config.load();
+    let Some((wal_content_file, wal_record_file, wal_content_path, wal_record_path)) = create_resolve_info_wal_files(&config, fpl.input, XtreamCluster::Video)
     else { return; };
 
-    let mut processed_info_ids = read_processed_vod_info_ids(cfg, errors, fpl).await;
+    let mut processed_info_ids = read_processed_vod_info_ids(app_config, errors, fpl).await;
     let mut content_writer = utils::file_writer(&wal_content_file);
     let mut record_writer = utils::file_writer(&wal_record_file);
     let mut content_updated = false;
@@ -126,9 +128,9 @@ pub async fn playlist_resolve_vod(client: Arc<reqwest::Client>, cfg: &Config, ta
         drop(record_writer);
         drop(wal_content_file);
         drop(wal_record_file);
-        handle_error!(xtream_update_input_info_file(cfg, fpl.input, &wal_content_path, XtreamCluster::Video).await,
+        handle_error!(xtream_update_input_info_file(app_config, fpl.input, &wal_content_path, XtreamCluster::Video).await,
             |err| errors.push(err));
-        handle_error!(xtream_update_input_vod_record_from_wal_file(cfg, fpl.input, &wal_record_path).await,
+        handle_error!(xtream_update_input_vod_record_from_wal_file(app_config, fpl.input, &wal_record_path).await,
             |err| errors.push(err));
     }
     
@@ -140,7 +142,7 @@ pub async fn playlist_resolve_vod(client: Arc<reqwest::Client>, cfg: &Config, ta
 
     for pli in vod_info_iter {
         if let Some(provider_id) = pli.header.get_provider_id() {
-            if let Some(content) = xtream_get_input_info(cfg, fpl.input, provider_id, XtreamCluster::Video) {
+            if let Some(content) = xtream_get_input_info(app_config, fpl.input, provider_id, XtreamCluster::Video) {
                 pli.header.additional_properties = from_str::<Map<String, Value>>(&content).ok().and_then(|info_doc| info_doc.get("info").cloned());
             }
         }

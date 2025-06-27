@@ -1,0 +1,77 @@
+@use 'common';
+
+.app {
+  display: flex;
+  flex-flow: column;
+  justify-content: center;
+  overflow: hidden;
+  flex: 1 1 auto;
+  box-sizing: border-box;
+  max-width: 100%;
+  color: var(--text-color);
+  background-color: inherit;
+
+  &-header {
+    display: flex;
+    flex-flow: row;
+    font-size: 2rem;
+    font-weight: bold;
+    color: var(--app-header-color);
+    align-content: center;
+    padding: 10px;
+    @media (max-width: common.$media-size-mobile) {
+      padding: 10px 0;
+    }
+
+    &__logo {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+
+      svg, img {
+        width: 2em;
+        aspect-ratio: 1 / 1;
+        transform: translate(-10px, 0);
+      }
+    }
+
+    &__caption {
+      display: flex;
+      flex-flow: row nowrap;
+      flex: 1 1 auto;
+      justify-content: center;
+      align-items: center;
+    }
+
+    &__toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      button {
+        height: 60%;
+        @include common.iconButton();
+      }
+      padding-right: 4px;
+    }
+  }
+
+  &-main {
+    display: flex;
+    flex-flow: column;
+    justify-content: center;
+    flex: 1 1 auto;
+    overflow: hidden;
+    box-sizing: border-box;
+    max-width: 100%;
+    background-color: inherit;
+  }
+  &-content {
+      display: flex;
+      flex-flow: column;
+      flex: 1 1 auto;
+      box-sizing: border-box;
+      overflow: hidden;
+      max-width: 100%;
+      background-color: inherit;
+    }
+}

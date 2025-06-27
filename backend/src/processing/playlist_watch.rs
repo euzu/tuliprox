@@ -2,10 +2,9 @@ use std::collections::BTreeSet;
 use std::path::{Path};
 use std::sync::Arc;
 use log::{error, info};
-use shared::model::MsgKind;
+use shared::model::{MsgKind, PlaylistGroup};
 use crate::messaging::{send_message};
 use crate::model::Config;
-use crate::model::PlaylistGroup;
 use crate::utils;
 use crate::utils::{bincode_deserialize, bincode_serialize};
 

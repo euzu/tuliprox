@@ -1,42 +1,38 @@
-use log::warn;
-use shared::error::TuliproxError;
+use shared::model::ReverseProxyConfigDto;
 use crate::model::config::cache::CacheConfig;
-use crate::model::{RateLimitConfig, StreamConfig};
+use crate::model::{macros, RateLimitConfig, StreamConfig};
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone)]
 pub struct ReverseProxyConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stream: Option<StreamConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache: Option<CacheConfig>,
-    #[serde(default)]
     pub resource_rewrite_disabled: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rate_limit: Option<RateLimitConfig>,
-    #[serde(default)]
     pub disable_referer_header: bool,
+    pub stream: Option<StreamConfig>,
+    pub cache: Option<CacheConfig>,
+    pub rate_limit: Option<RateLimitConfig>,
 }
 
+macros::from_impl!(ReverseProxyConfig);
 
-impl ReverseProxyConfig {
-    pub(crate) fn prepare(&mut self, working_dir: &str) -> Result<(), TuliproxError> {
-        if let Some(stream) = self.stream.as_mut() {
-            stream.prepare()?;
+impl From<&ReverseProxyConfigDto> for ReverseProxyConfig {
+    fn from(dto: &ReverseProxyConfigDto) -> Self {
+        Self {
+            resource_rewrite_disabled: dto.resource_rewrite_disabled,
+            disable_referer_header: dto.disable_referer_header,
+            stream: dto.stream.as_ref().map(Into::into),
+            cache: dto.cache.as_ref().map(Into::into),
+            rate_limit: dto.rate_limit.as_ref().map(Into::into),
         }
-        if let Some(cache) = self.cache.as_mut() {
-            if cache.enabled && self.resource_rewrite_disabled {
-                warn!("The cache is disabled because resource rewrite is disabled");
-                cache.enabled = false;
-            }
-            cache.prepare(working_dir)?;
-        }
+    }
+}
 
-        if let Some(rate_limit) = self.rate_limit.as_mut() {
-            if rate_limit.enabled {
-                rate_limit.prepare()?;
-            }
+impl From<&ReverseProxyConfig> for ReverseProxyConfigDto {
+    fn from(instance: &ReverseProxyConfig) -> Self {
+        Self {
+            resource_rewrite_disabled: instance.resource_rewrite_disabled,
+            disable_referer_header: instance.disable_referer_header,
+            stream: instance.stream.as_ref().map(Into::into),
+            cache: instance.cache.as_ref().map(Into::into),
+            rate_limit: instance.rate_limit.as_ref().map(Into::into),
         }
-        Ok(())
     }
 }

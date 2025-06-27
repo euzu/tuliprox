@@ -1,0 +1,73 @@
+@use 'common';
+
+.login-view {
+  display: flex;
+  flex-flow: column;
+  gap: 8px;
+  margin: auto;
+  overflow: hidden;
+  position: relative;
+  z-index: 1;
+  padding: 60px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+  background-color: var(--card-background-color);
+  width: 400px;
+
+  &__header {
+    display: flex;
+    flex-flow: column;
+    align-items: center;
+    background-color: var(--card-background-color);
+    padding: 0 8px;
+    &-title {
+      color: var(--card-color);
+      padding: 8px;
+      font-size: 1.5rem;
+    }
+    &-logo {
+      overflow: hidden;
+      img, svg {
+        height: 4rem;
+        width: 4rem;
+      }
+    }
+
+  }
+
+  &__logo {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    svg {
+      height: 100%;
+      width: 100%;
+      color: color-mix(in srgb, var(--background-color) 80%, black 10%);
+    }
+  }
+
+  &__form {
+    display: flex;
+    flex-flow: column;
+    gap: 20px;
+    padding: 8px;
+
+    &-action {
+      display: flex;
+      flex-flow: column;
+      gap: 20px;
+      padding-top: 20px;
+   }
+
+    button {
+      @include common.textButton();
+    }
+
+    .error-text {
+      color: var(--attention-color);
+      font-size: 1rem;
+    }
+  }
+}

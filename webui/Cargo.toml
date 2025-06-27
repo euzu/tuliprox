@@ -1,0 +1,43 @@
+[package]
+name = "frontend"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+shared = { version = "0.1.0", path = "../shared" }
+yew = "0.21"
+yew-router = "0.18"
+yew-hooks = "0.3"
+yew-i18n = "0.1"
+serde_json = "1"
+serde = {version = "1.0", features = ["derive", "rc"] }
+wasm-bindgen = {version = "0.2", features = ["serde-serialize"]}
+wasm-bindgen-futures = "0.4"
+anyhow = "1"
+thiserror = "2"
+reqwasm = {version = "0.5", features = ["json"]}
+log = "0.4.27"
+wasm-logger = "0.2"
+gloo-storage = "0"
+gloo-timers = { version = "0", features = ["futures"] }
+implicit-clone = "0"
+futures-signals = "0.3"
+futures = "0.3"
+prost = "0"
+
+[dependencies.web-sys]
+version = "0.3"
+features = [
+    "Document",
+    "Element",
+    "Node",
+    "Window",
+    "HtmlCollection",
+    "HtmlInputElement",
+]
+
+[dev-dependencies]
+js-sys = "0.3"
+wasm-bindgen-futures = "0.4"
+wasm-bindgen-test = "0.3"
+gloo-utils = "0.2"

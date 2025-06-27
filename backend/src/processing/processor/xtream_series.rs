@@ -1,7 +1,8 @@
+use shared::model::InputType;
 use shared::error::{TuliproxError, TuliproxErrorKind};
-use crate::model::{Config, ConfigTarget, InputType};
-use crate::model::{FetchedPlaylist, PlaylistGroup, PlaylistItem};
-use shared::model::{PlaylistItemType, XtreamCluster};
+use crate::model::{AppConfig, ConfigTarget};
+use crate::model::{FetchedPlaylist};
+use shared::model::{PlaylistGroup, PlaylistItem, PlaylistItemType, XtreamCluster};
 use crate::processing::processor::playlist::ProcessingPipe;
 use crate::processing::parser::xtream::parse_xtream_series_info;
 use crate::processing::processor::xtream::{create_resolve_episode_wal_files, create_resolve_info_wal_files, playlist_resolve_download_playlist_item, read_processed_info_ids, should_update_info};
@@ -23,7 +24,7 @@ use crate::processing::processor::xtream::normalize_json_content;
 
 create_resolve_options_function_for_xtream_target!(series);
 
-async fn read_processed_series_info_ids(cfg: &Config, errors: &mut Vec<TuliproxError>, fpl: &FetchedPlaylist<'_>) -> HashMap<u32, u64> {
+async fn read_processed_series_info_ids(cfg: &AppConfig, errors: &mut Vec<TuliproxError>, fpl: &FetchedPlaylist<'_>) -> HashMap<u32, u64> {
     read_processed_info_ids(cfg, errors, fpl, PlaylistItemType::SeriesInfo, |ts: &u64| *ts).await
 }
 
@@ -46,13 +47,13 @@ fn should_update_series_info(pli: &mut PlaylistItem, processed_provider_ids: &Ha
     should_update_info(pli, processed_provider_ids, crate::model::XC_TAG_SERIES_INFO_LAST_MODIFIED)
 }
 
-async fn playlist_resolve_series_info(client: Arc<reqwest::Client>, cfg: &Config, errors: &mut Vec<TuliproxError>,
+async fn playlist_resolve_series_info(cfg: &AppConfig, client: Arc<reqwest::Client>, errors: &mut Vec<TuliproxError>,
                                       fpl: &mut FetchedPlaylist<'_>, resolve_delay: u16) -> bool {
     let mut processed_info_ids = read_processed_series_info_ids(cfg, errors, fpl).await;
     // we cant write to the indexed-document directly because of the write lock and time-consuming operation.
     // All readers would be waiting for the lock and the app would be unresponsive.
     // We collect the content into a wal file and write it once we collected everything.
-    let Some((wal_content_file, wal_record_file, wal_content_path, wal_record_path)) = create_resolve_info_wal_files(cfg, fpl.input, XtreamCluster::Series)
+    let Some((wal_content_file, wal_record_file, wal_content_path, wal_record_path)) = create_resolve_info_wal_files(&cfg.config.load(), fpl.input, XtreamCluster::Series)
     else { return !processed_info_ids.is_empty(); };
 
     let mut content_writer = utils::file_writer(&wal_content_file);
@@ -124,26 +125,26 @@ async fn playlist_resolve_series_info(client: Arc<reqwest::Client>, cfg: &Config
     !processed_info_ids.is_empty()
 }
 async fn process_series_info(
-    cfg: &Config,
+    app_config: &AppConfig,
     fpl: &mut FetchedPlaylist<'_>,
     errors: &mut Vec<TuliproxError>,
 ) -> Vec<PlaylistGroup> {
     let mut result: Vec<PlaylistGroup> = vec![];
     let input = fpl.input;
-
-    let Ok(Some((info_path, idx_path))) = get_input_storage_path(&input.name, &cfg.working_dir)
+    let config = app_config.config.load();
+    let Ok(Some((info_path, idx_path))) = get_input_storage_path(&input.name, &config.working_dir)
         .map(|storage_path| xtream_get_info_file_paths(&storage_path, XtreamCluster::Series))
     else {
         errors.push(notify_err!("Failed to open input info file for series".to_string()));
         return result;
     };
 
-    let _file_lock = cfg.file_locks.read_lock(&info_path);
+    let _file_lock = app_config.file_locks.read_lock(&info_path);
 
     // Contains the Series Info with episode listing
     let Ok(mut info_reader) = IndexedDocumentReader::<u32, String>::new(&info_path, &idx_path) else { return result; };
 
-    let Some((wal_file, wal_path)) = create_resolve_episode_wal_files(cfg, input) else {
+    let Some((wal_file, wal_path)) = create_resolve_episode_wal_files(&config, input) else {
         errors.push(notify_err!("Could not create wal file for series episodes record".to_string()));
         return result;
     };
@@ -201,13 +202,15 @@ async fn process_series_info(
             |err| errors.push(notify_err!(format!("Failed to resolve series episodes, could not write to wal file {err}"))));
     drop(wal_writer);
     drop(wal_file);
-    handle_error!(xtream_update_input_series_episodes_record_from_wal_file(cfg, input, &wal_path).await,
+    handle_error!(xtream_update_input_series_episodes_record_from_wal_file(app_config, input, &wal_path).await,
             |err| errors.push(err));
     result
 }
 
 
-pub async fn playlist_resolve_series(client: Arc<reqwest::Client>, cfg: &Config, target: &ConfigTarget,
+pub async fn playlist_resolve_series(cfg: &AppConfig,
+                                     client: Arc<reqwest::Client>,
+                                     target: &ConfigTarget,
                                      errors: &mut Vec<TuliproxError>,
                                      pipe: &ProcessingPipe,
                                      provider_fpl: &mut FetchedPlaylist<'_>,
@@ -216,7 +219,7 @@ pub async fn playlist_resolve_series(client: Arc<reqwest::Client>, cfg: &Config,
     let (resolve_series, resolve_delay) = get_resolve_series_options(target, processed_fpl);
     if !resolve_series { return; }
 
-    if !playlist_resolve_series_info(client, cfg, errors, processed_fpl, resolve_delay).await { return; }
+    if !playlist_resolve_series_info(cfg, client, errors, processed_fpl, resolve_delay).await { return; }
     let series_playlist = process_series_info(cfg, provider_fpl, errors).await;
     if series_playlist.is_empty() { return; }
     // original content saved into original list

@@ -54,14 +54,14 @@
     padding: 8px;
     width: 300px;
 
-    input {
-      height: 2rem;
-      border: none;
-      border-radius: 6px;
-      font-size: 1.4rem;
-      background-color: var(--card-background-color);
-      padding: 4px 8px;
-    }
+    //input {
+    //  height: 2rem;
+    //  border: none;
+    //  border-radius: 6px;
+    //  font-size: 1.4rem;
+    //  background-color: var(--card-background-color);
+    //  padding: 4px 8px;
+    //}
     input[type="password"] {
       caret-color:  var(--card-color);
     }

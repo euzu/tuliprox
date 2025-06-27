@@ -6,9 +6,8 @@ use crate::model::{ProxyUserCredentials};
 use crate::model::ConfigInput;
 use shared::model::{PlaylistItemType, UserConnectionPermission, XtreamCluster};
 use crate::processing::parser::hls::{get_hls_session_token_and_url_from_token, rewrite_hls, RewriteHlsProps};
-use shared::utils::HLS_EXT;
+use shared::utils::{is_hls_url, replace_url_extension, sanitize_sensitive_info, HLS_EXT};
 use crate::utils::request;
-use crate::utils::request::{is_hls_url, replace_url_extension, sanitize_sensitive_info};
 use axum::response::IntoResponse;
 use log::{debug, error};
 use serde::Deserialize;
@@ -45,7 +44,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
         input: &ConfigInput,
         connection_permission: UserConnectionPermission) -> impl IntoResponse + Send {
     let url = replace_url_extension(hls_url, HLS_EXT);
-    let server_info = app_state.config.get_user_server_info(user);
+    let server_info = app_state.app_config.get_user_server_info(user);
 
     let (request_url, session_token) = match user_session {
         Some(session) => {
@@ -70,10 +69,10 @@ pub(in crate::api) async fn handle_hls_stream_request(
         }
     };
 
-    match request::download_text_content(Arc::clone(&app_state.http_client), input, &request_url, None).await {
+    match request::download_text_content(Arc::clone(&app_state.http_client.load()), input, &request_url, None).await {
         Ok((content, response_url)) => {
             let rewrite_hls_props = RewriteHlsProps {
-                secret: &app_state.config.t_encrypt_secret,
+                secret: &app_state.app_config.encrypt_secret,
                 base_url: &server_info.get_base_url(),
                 content: &content,
                 hls_url: response_url,
@@ -86,7 +85,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
         }
         Err(err) => {
             error!("Failed to download m3u8 {}", sanitize_sensitive_info(err.to_string().as_str()));
-            create_custom_video_stream_response(&app_state.config, CustomVideoStreamType::ChannelUnavailable).into_response()
+            create_custom_video_stream_response(&app_state.app_config, CustomVideoStreamType::ChannelUnavailable).into_response()
         }
     }
 }
@@ -98,29 +97,29 @@ async fn hls_api_stream(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
 ) -> impl axum::response::IntoResponse + Send {
     let (user, target) = try_option_bad_request!(
-        app_state.config.get_target_for_user(&params.username, &params.password), false,
-        format!("Could not find any user {}", params.username));
+        app_state.app_config.get_target_for_user(&params.username, &params.password), false,
+        format!("Could not find any user for hls stream {}", params.username));
     if user.permission_denied(&app_state) {
-        return create_custom_video_stream_response(&app_state.config, CustomVideoStreamType::UserAccountExpired).into_response();
+        return create_custom_video_stream_response(&app_state.app_config, CustomVideoStreamType::UserAccountExpired).into_response();
     }
 
     let target_name = &target.name;
     let virtual_id = params.stream_id;
-    let input = try_option_bad_request!(app_state.config.get_input_by_id(params.input_id), true, format!("Cant find input for target {target_name}, context {}, stream_id {virtual_id}", XtreamCluster::Live));
+    let input = try_option_bad_request!(app_state.app_config.get_input_by_id(params.input_id), true, format!("Cant find input for target {target_name}, context {}, stream_id {virtual_id}", XtreamCluster::Live));
 
     let user_session_token = format!("{fingerprint}{virtual_id}");
     let mut user_session = app_state.active_users.get_user_session(&user.username, &user_session_token).await;
 
     if let Some(session)  = &mut user_session {
         if session.permission == UserConnectionPermission::Exhausted {
-            return create_custom_video_stream_response(&app_state.config, CustomVideoStreamType::UserConnectionsExhausted).into_response();
+            return create_custom_video_stream_response(&app_state.app_config, CustomVideoStreamType::UserConnectionsExhausted).into_response();
         }
 
         if app_state.active_provider.is_over_limit(&session.provider).await {
-            return create_custom_video_stream_response(&app_state.config, CustomVideoStreamType::ProviderConnectionsExhausted).into_response();
+            return create_custom_video_stream_response(&app_state.app_config, CustomVideoStreamType::ProviderConnectionsExhausted).into_response();
         }
 
-        let hls_url = match get_hls_session_token_and_url_from_token(&app_state.config.t_encrypt_secret, &params.token) {
+        let hls_url = match get_hls_session_token_and_url_from_token(&app_state.app_config.encrypt_secret, &params.token) {
             Some((Some(session_token), hls_url)) if session.token.eq(&session_token) => hls_url,
             _ => return axum::http::StatusCode::BAD_REQUEST.into_response(),
         };
@@ -129,7 +128,7 @@ async fn hls_api_stream(
         if session.virtual_id == virtual_id {
             if is_seek_request(XtreamCluster::Live, &req_headers).await {
                 // partial request means we are in reverse proxy mode, seek happened
-                return force_provider_stream_response(&app_state, session, PlaylistItemType::LiveHls, &req_headers, input, &user).await.into_response()
+                return force_provider_stream_response(&app_state, session, PlaylistItemType::LiveHls, &req_headers, &input, &user).await.into_response()
             }
         } else {
             return axum::http::StatusCode::BAD_REQUEST.into_response();
@@ -137,14 +136,14 @@ async fn hls_api_stream(
 
         let connection_permission = user.connection_permission(&app_state).await;
         if connection_permission == UserConnectionPermission::Exhausted {
-            return create_custom_video_stream_response(&app_state.config, CustomVideoStreamType::UserConnectionsExhausted).into_response();
+            return create_custom_video_stream_response(&app_state.app_config, CustomVideoStreamType::UserConnectionsExhausted).into_response();
         }
 
         if is_hls_url(&session.stream_url) {
-            return handle_hls_stream_request(&fingerprint, &app_state, &user, Some(session), &session.stream_url, virtual_id, input, connection_permission).await.into_response();
+            return handle_hls_stream_request(&fingerprint, &app_state, &user, Some(session), &session.stream_url, virtual_id, &input, connection_permission).await.into_response();
         }
 
-        force_provider_stream_response(&app_state, session, PlaylistItemType::LiveHls, &req_headers, input, &user).await.into_response()
+        force_provider_stream_response(&app_state, session, PlaylistItemType::LiveHls, &req_headers, &input, &user).await.into_response()
     } else {
         axum::http::StatusCode::BAD_REQUEST.into_response()
     }

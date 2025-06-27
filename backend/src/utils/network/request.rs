@@ -1,10 +1,8 @@
-use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::fs::File;
 use std::io::{BufWriter, Error, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -17,15 +15,43 @@ use url::Url;
 
 use shared::error::create_tuliprox_error_result;
 use shared::error::{str_to_io_error, TuliproxError, TuliproxErrorKind};
-use crate::model::{format_elapsed_time, Config};
-use crate::model::{ConfigInput, InputFetchMethod};
+use shared::model::InputFetchMethod;
+use crate::model::{format_elapsed_time, AppConfig};
+use crate::model::{ConfigInput};
 use crate::repository::storage::{get_input_storage_path};
 use crate::repository::storage_const;
 use crate::utils::compression::compression_utils::{is_deflate, is_gzip};
-use crate::utils::{debug_if_enabled, short_hash};
-use shared::utils::{filter_request_header};
+use crate::utils::{debug_if_enabled};
+use shared::utils::{filter_request_header, sanitize_sensitive_info, short_hash, ENCODING_DEFLATE, ENCODING_GZIP};
 use crate::utils::{get_file_path, persist_file};
-use shared::utils::{CONSTANTS, DASH_EXT, DASH_EXT_FRAGMENT, DASH_EXT_QUERY, ENCODING_DEFLATE, ENCODING_GZIP, HLS_EXT, HLS_EXT_FRAGMENT, HLS_EXT_QUERY};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MimeCategory {
+    Unknown,
+    Video,
+    M3U8,
+    Image,
+    Json,
+    Xml,
+    Text,
+    Unclassified,
+}
+
+pub fn classify_content_type(headers: &[(String, String)]) -> MimeCategory {
+    headers.iter()
+        .find_map(|(k, v)| {
+            (k == axum::http::header::CONTENT_TYPE.as_str()).then_some(v)
+        })
+        .map_or(MimeCategory::Unknown, |v| match v.to_lowercase().as_str() {
+            v if v.starts_with("video/") || v == "application/octet-stream" => MimeCategory::Video,
+            v if v.contains("mpegurl") => MimeCategory::M3U8,
+            v if v.starts_with("image/") => MimeCategory::Image,
+            v if v.starts_with("application/json") || v.ends_with("+json") => MimeCategory::Json,
+            v if v.starts_with("application/xml") || v.ends_with("+xml") || v == "text/xml" => MimeCategory::Xml,
+            v if v.starts_with("text/") => MimeCategory::Text,
+            _ => MimeCategory::Unclassified,
+        })
+}
 
 pub async fn get_input_epg_content_as_file(client: Arc<reqwest::Client>, input: &ConfigInput, working_dir: &str, url_str: &str, persist_filepath: Option<PathBuf>) -> Result<PathBuf, TuliproxError> {
     debug_if_enabled!("getting input epg content working_dir: {}, url: {}", working_dir, sanitize_sensitive_info(url_str));
@@ -365,157 +391,15 @@ pub async fn get_input_json_content(client: Arc<reqwest::Client>, input: &Config
     }
 }
 
-pub fn set_sanitize_sensitive_info(value: bool) {
-    CONSTANTS.sanitize.store(value, Ordering::SeqCst);
-}
-pub fn sanitize_sensitive_info(query: &str) -> Cow<str> {
-    if !CONSTANTS.sanitize.load(Ordering::SeqCst) {
-        return Cow::Borrowed(query);
-    }
 
-    let mut result = query.to_owned();
-
-    for (re, replacement) in &[
-        (&CONSTANTS.re_credentials, "$1***"),
-        (&CONSTANTS.re_ipv4, "$1***"),
-        (&CONSTANTS.re_ipv6, "$1***"),
-        (&CONSTANTS.re_stream_url, "$1***/$2/***"),
-        (&CONSTANTS.re_url, "$1***/$2"),
-    ] {
-        result = re.replace_all(&result, *replacement).into_owned();
-    }
-    Cow::Owned(result)
-}
-
-#[inline]
-fn ensure_extension(ext: &str) -> Option<&str> {
-    if ext.len() > 4 {
-        return None;
-    }
-    Some(ext)
-}
-
-pub fn extract_extension_from_url(url: &str) -> Option<&str> {
-    if let Some(protocol_pos) = url.find("://") {
-        if let Some(last_slash_pos) = url[protocol_pos + 3..].rfind('/') {
-            let path = &url[protocol_pos + 3 + last_slash_pos + 1..];
-            if let Some(last_dot_pos) = path.rfind('.') {
-                return ensure_extension(&path[last_dot_pos..]);
-            }
-        }
-    } else if let Some(last_dot_pos) = url.rfind('.') {
-        if last_dot_pos > url.rfind('/').unwrap_or(0) {
-            return ensure_extension(&url[last_dot_pos..]);
-        }
-    }
-    None
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum MimeCategory {
-    Unknown,
-    Video,
-    M3U8,
-    Image,
-    Json,
-    Xml,
-    Text,
-    Unclassified,
-}
-
-pub fn classify_content_type(headers: &[(String, String)]) -> MimeCategory {
-    headers.iter()
-        .find_map(|(k, v)| {
-            (k == axum::http::header::CONTENT_TYPE.as_str()).then_some(v)
-        })
-        .map_or(MimeCategory::Unknown, |v| match v.to_lowercase().as_str() {
-            v if v.starts_with("video/") || v == "application/octet-stream" => MimeCategory::Video,
-            v if v.contains("mpegurl") => MimeCategory::M3U8,
-            v if v.starts_with("image/") => MimeCategory::Image,
-            v if v.starts_with("application/json") || v.ends_with("+json") => MimeCategory::Json,
-            v if v.starts_with("application/xml") || v.ends_with("+xml") || v == "text/xml" => MimeCategory::Xml,
-            v if v.starts_with("text/") => MimeCategory::Text,
-            _ => MimeCategory::Unclassified,
-        })
-}
-
-pub fn is_hls_url(url: &str) -> bool {
-    let lc_url = url.to_lowercase();
-    lc_url.ends_with(HLS_EXT) || lc_url.contains(HLS_EXT_QUERY) || lc_url.contains(HLS_EXT_FRAGMENT)
-}
-
-pub fn is_dash_url(url: &str) -> bool {
-    let lc_url = url.to_lowercase();
-    lc_url.ends_with(DASH_EXT) || lc_url.contains(DASH_EXT_QUERY) || lc_url.contains(DASH_EXT_FRAGMENT)
-}
-
-pub fn replace_url_extension(url: &str, new_ext: &str) -> String {
-    let ext = new_ext.strip_prefix('.').unwrap_or(new_ext); // Remove leading dot if exists
-
-    // Split URL into the base part (domain and path) and the suffix (query/fragment)
-    let (base_url, suffix) = match url.find(['?', '#'].as_ref()) {
-        Some(pos) => (&url[..pos], &url[pos..]), // Base URL and suffix
-        None => (url, ""), // No query or fragment
-    };
-
-    // Find the last '/' in the base URL, which marks the end of the domain and the beginning of the file path
-    if let Some(last_slash_pos) = base_url.rfind('/') {
-        if last_slash_pos < 9 { // protocol slash, return url as is
-            return url.to_string();
-        }
-        let (path_part, file_name_with_extension) = base_url.split_at(last_slash_pos + 1);
-        // Find the last dot in the file name to replace the extension
-        if let Some(dot_pos) = file_name_with_extension.rfind('.') {
-            return format!(
-                "{}{}.{}{}",
-                path_part,
-                &file_name_with_extension[..dot_pos], // Keep the name part before the dot
-                ext, // Add the new extension
-                suffix // Add the query or fragment if any
-            );
-        }
-    }
-
-    // If no extension is found, add the new extension to the base URL
-    format!("{}{}.{}{}", base_url, "", ext, suffix)
-}
-
-pub fn get_credentials_from_url(url: &Url) -> (Option<String>, Option<String>) {
-    let mut username = None;
-    let mut password = None;
-    for (key, value) in url.query_pairs() {
-        if key.eq("username") {
-            username = Some(value.to_string());
-        } else if key.eq("password") {
-            password = Some(value.to_string());
-        }
-    }
-    (username, password)
-}
-
-pub fn get_credentials_from_url_str(url_with_credentials: &str) -> (Option<String>, Option<String>) {
-    if let Ok(url) = Url::parse(url_with_credentials) {
-        get_credentials_from_url(&url)
-    } else {
-        (None, None)
-    }
-}
-
-pub fn get_base_url_from_str(url: &str) -> Option<String> {
-    if let Ok(url) = Url::parse(url) {
-        Some(url.origin().ascii_serialization())
-    } else {
-        None
-    }
-}
-
-pub fn create_client(cfg: &Config) -> reqwest::ClientBuilder {
+pub fn create_client(cfg: &AppConfig) -> reqwest::ClientBuilder {
     let mut client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::limited(10))
         .pool_idle_timeout(Duration::from_secs(30))
         .pool_max_idle_per_host(10);
 
-    if let Some(proxy_cfg) = cfg.proxy.as_ref() {
+    let config = cfg.config.load();
+    if let Some(proxy_cfg) = config.proxy.as_ref() {
         let proxy = match reqwest::Proxy::all(&proxy_cfg.url) {
             Ok(proxy) => {
                 if let (Some(username), Some(password)) = (&proxy_cfg.username, &proxy_cfg.password) {
@@ -536,7 +420,7 @@ pub fn create_client(cfg: &Config) -> reqwest::ClientBuilder {
         };
     }
 
-    if let Some(rp_config) = cfg.reverse_proxy.as_ref() {
+    if let Some(rp_config) = config.reverse_proxy.as_ref() {
         if rp_config.disable_referer_header {
             client = client.referer(false);
         }
@@ -547,7 +431,7 @@ pub fn create_client(cfg: &Config) -> reqwest::ClientBuilder {
 
 #[cfg(test)]
 mod tests {
-    use crate::utils::request::{get_base_url_from_str, replace_url_extension, sanitize_sensitive_info};
+    use shared::utils::{get_base_url_from_str, replace_url_extension, sanitize_sensitive_info};
 
     #[test]
     fn test_url_mask() {
