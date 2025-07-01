@@ -1,0 +1,24 @@
+.menu-item {
+  display: flex;
+  flex-flow: row nowrap;
+  align-items: center;
+  gap: var(--gap-default);
+  fill: var(--menu-icon-color);
+  color: var(--menu-text-color);
+  padding: 12px;
+  border-radius: var(--border-radius);
+  cursor: pointer;
+
+  height: 1.3rem;
+  svg {
+    width: 1.3rem;
+    pointer-events: none;
+  }
+  label {
+    pointer-events: none;
+  }
+
+  &:hover {
+     background-color: var(--menu-item-hover-background-color)
+  }
+}

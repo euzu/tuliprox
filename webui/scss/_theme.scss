@@ -1,0 +1,186 @@
+:root {
+  --app-header-height: 56px;
+  --gap-default: 0.5rem;
+  --gap-small: 0.3rem;
+  --gap-large: 1rem;
+  --gap-larger: 1.5rem;
+
+  --padding-default: 1.5rem;
+  --padding-large: 2rem;
+
+  --action-item-background-color: #242427;
+
+  --text-color: #ffffff;
+  --modest-text-color: #A1A1AAFF;
+  --background-color: #09090B;
+  --input-background-color: var(--action-item-background-color);
+  --input-border-color: #454548;
+  --input-focus-border-color: #12499a;
+  --input-autofill-background-color: #323a48;
+  --button-background-color: #124a9b;
+  --border-color: #222224;
+  --menu-text-color: #e2e2e5;
+  --menu-icon-color: #707079;
+  --menu-item-hover-background-color: var(--action-item-background-color);
+  --menu-text-active-color: #124a9b;
+  --menu-item-active-background-color: var(--menu-item-hover-background-color);
+  --icon-button-hover-color: #8f8f97;
+  --card-background-color: #18181b;
+  --card-color: var(--modest-text-color);
+
+  --text-button-background-color: var(--action-item-background-color);
+  --text-button-color: #ffffff;
+  --text-button-border-color: #2F2F31;
+  --text-button-hover-color: #303032;
+  --text-button-primary-background-color: #124a9b;
+  --text-button-primary-color: #ffffff;
+  --text-button-primary-hover-background-color: #2f68be;
+  --text-button-primary-hover-color: #ffffff;
+
+  --discord-color: #5764f0;
+  --documenation-color: #2b944b;
+
+  --app-header-background-color: #18181b;
+  --app-header-color: #73d6fe;
+
+  --pulse-color-1: #837f80;
+  --pulse-color-2: #545454;
+
+
+  --media-size-mobile: 600px;
+  --hint-color: #888888;
+  --label-color: #73d6fe;
+
+  --sidebar-toggle-color: #ffffff;
+  --sidebar-toggle-hover-color: #47495d;
+  --playlist-color: #aeb0b2;
+  --hover-border-color: #aaaab0;
+  --spinner-color: #ffffff66;
+  --spinner-highlight-color: #5599f0;
+  --tree-count-color: #7b7b7e;
+  --tree-hover-background-color: #004db4;
+  --tree-hover-color: white;
+  --tree-expander-hover-color: white;
+  --tool-button-background-color: #434343;
+  --tool-button-color: #fff;
+  --tool-button-hover-color: #ffffff;
+  --tool-button-hover-background-color: #0c8a13;
+
+  --toolbar-background-color: #282A36;
+  --toolbar-button-hover-color: #ffffff;
+  --toolbar-button-hover-background-color: #004db4;
+
+  --popup-background-color: #282A36;
+  --popup-shadow-color: #06070a;
+  --popup-border-color: #646464;
+  --popup-color: #fff;
+  --popup-hover-background-color: #5599f0;
+  --popup-hover-color: #fff;
+
+  --attention-color: red;
+  --warn-color: orange;
+  --ok-color: #21e821;
+
+  --card-background-color-darker: #1c2026;
+  --card-border-color: #47495d;
+
+  --title-label-color: #6495b1;
+
+  --border-radius: 8px;
+
+  --icon-button-border-radius: 4px;
+  --icon-button-background-color: var(--button-background-color);
+  --icon-button-color: #ffffff;
+  --icon-button-hover-background-color: #0d6efd;
+
+  --icon-button-hover-border-color: #ced9fb;
+
+  --menu-button-color: #fffff;
+  --menu-button-background-color: #20273344;
+
+  --menu-button-hover-color: #fffff;
+  --menu-button-hover-background-color: #202733;
+
+  --text-button-border-radius: var(--border-radius);
+  --text-button-hover-background-color: #0d6efd;
+
+
+  --scrollbar-track-color: #838383;
+  --scrollbar-handle-color: #505050;
+
+  --tabset-background-color: #44475a47; // #282A36;
+  --tabset-border-color: #535353;
+  --tab-background-color: #44475A;
+  --tab-color: #fff;
+  --tab-hover-background-color: #6272A4;
+  --tab-hover-color: #50FA7B;
+  --tab-avtive-indicator-color: #50FA7B;
+  --tab-active-background-color: #54547a;
+  --tab-active-color: #50FA7B;
+
+  --table-border-color: #44475a;
+
+  --checkbox-background-color: #44475A;
+  --checkbox-hover-background-color: #006fee;
+  --checkbox-checked-background-color: #006fee;
+  --checkbox-border-radius: 4px;
+
+  --option-active-background-color: #50FA7B;
+  --option-active-color: #000;
+
+  --shocase-card-background: #4b4b4b;
+
+  --breadcrumbs-background-color: #202733;
+  --breadcrumb-background-color: #4e545d;
+  --breadcrumb-color: #c4c4c4;
+  --breadcrumb-active-background-color: #4ad96e;
+  --breadcrumb-active-color: #000;
+
+  --menu-icon-color-update: #A3D8FF;
+  --menu-icon-color-user: #0ABAB5;
+  --menu-icon-color-api_server: #FF9D23;
+  --menu-icon-color-main_config: #FF2DF1;
+  --menu-icon-color-status: #F9E400;
+
+  --toolbar-bg-color: #161b25;
+
+}
+
+body[data-theme="bright"] {
+
+  --action-item-background-color: #e0e2e7;
+
+  --text-color: #1a1a1a;
+  --modest-text-color: #6b7280ff;
+  --background-color: #f9fafb;
+  --input-background-color: var(--action-item-background-color);
+  --input-border-color: #cbd5e1;
+  --input-focus-border-color: #2563eb;
+  --input-autofill-background-color: #d1d5db;
+  --button-background-color: #2563eb;
+  --border-color: #d1d5db;
+  --menu-text-color: #374151;
+  --menu-icon-color: #9ca3af;
+  --menu-item-hover-background-color: var(--action-item-background-color);
+  --menu-text-active-color: #2563eb;
+  --menu-item-active-background-color: var(--menu-item-hover-background-color);
+  --icon-button-hover-color: #6b7280;
+  --card-background-color: #ffffff;
+  --card-color: var(--modest-text-color);
+
+  --text-button-background-color: var(--action-item-background-color);
+  --text-button-color: #1a1a1a;
+  --text-button-border-color: #d1d5db;
+  --text-button-hover-background-color: #e5e7eb;
+  --text-button-primary-background-color: #2563eb;
+  --text-button-primary-color: #ffffff;
+  --text-button-primary-hover-background-color: #3b82f6;
+  --text-button-primary-hover-color: #ffffff;
+
+  --discord-color: #5865f2;
+  --documenation-color: #22c55e;
+
+  --app-header-background-color: #e0e7ff;
+  --app-header-color: #2563eb;
+
+}

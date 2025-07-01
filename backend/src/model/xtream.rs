@@ -1,10 +1,8 @@
-use crate::model::{ProxyUserCredentials};
-use crate::model::{Config, ConfigTarget, XtreamTargetOutput};
-use crate::model::{PlaylistItem,XtreamPlaylistItem};
-use crate::utils::{deserialize_as_option_rc_string, deserialize_as_rc_string, deserialize_as_string_array, deserialize_number_from_string};
-use crate::model::xtream_const;
-use crate::utils::{opt_string_or_number_u32, string_default_on_null, string_or_number_f64, string_or_number_u32};
-use shared::utils::{get_non_empty_str};
+use crate::model::{AppConfig, ProxyUserCredentials};
+use crate::model::{ConfigTarget, XtreamTargetOutput};
+use shared::model::{xtream_const, PlaylistItem,XtreamPlaylistItem};
+use shared::utils::{deserialize_as_option_rc_string, deserialize_as_rc_string, deserialize_as_string_array, deserialize_number_from_string,
+                    opt_string_or_number_u32, string_default_on_null, string_or_number_f64, string_or_number_u32, get_non_empty_str};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
@@ -345,7 +343,6 @@ pub struct XtreamSeriesInfo {
     pub episodes: Option<HashMap<String, Vec<XtreamSeriesInfoEpisode>>>,
 }
 
-
 impl XtreamSeriesInfoEpisode {
     pub fn get_additional_properties(&self, series_info: &XtreamSeriesInfo) -> Option<Value> {
         let mut result = Map::new();
@@ -386,13 +383,13 @@ pub struct XtreamMappingOptions {
 }
 
 impl XtreamMappingOptions {
-    pub fn from_target_options(target: &ConfigTarget, target_output: &XtreamTargetOutput, cfg: &Config) -> Self {
+    pub fn from_target_options(target: &ConfigTarget, target_output: &XtreamTargetOutput, cfg: &AppConfig) -> Self {
         Self {
             skip_live_direct_source: target_output.skip_live_direct_source,
             skip_video_direct_source: target_output.skip_video_direct_source,
             skip_series_direct_source: target_output.skip_series_direct_source,
             rewrite_resource_url: cfg.is_reverse_proxy_resource_rewrite_enabled(),
-            force_redirect: target.options.as_ref().and_then(|o| o.force_redirect.clone()),
+            force_redirect: target.options.as_ref().and_then(|o| o.force_redirect),
         }
     }
 }

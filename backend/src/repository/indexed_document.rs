@@ -511,7 +511,7 @@ mod tests {
     use std::path::PathBuf;
 
     use serde::{Deserialize, Serialize};
-    use crate::model::XtreamPlaylistItem;
+    use shared::model::XtreamPlaylistItem;
     // use crate::model::XtreamPlaylistItem;
     use crate::repository::indexed_document::{IndexedDocumentGarbageCollector, IndexedDocumentIterator, IndexedDocumentWriter};
     use crate::utils::resolve_env_var;

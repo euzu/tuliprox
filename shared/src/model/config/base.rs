@@ -1,14 +1,7 @@
-use crate::model::{WebUiConfigDto, MessagingConfigDto, IpCheckConfigDto, HdHomeRunConfigDto, VideoConfigDto, ScheduleConfigDto, LogConfigDto, ReverseProxyConfigDto, ProxyConfigDto};
+use crate::error::{TuliproxError, TuliproxErrorKind};
+use crate::model::{WebUiConfigDto, MessagingConfigDto, IpCheckConfigDto, HdHomeRunConfigDto, VideoConfigDto, ScheduleConfigDto, LogConfigDto, ReverseProxyConfigDto, ProxyConfigDto, ConfigApiDto};
 use crate::utils::{default_connect_timeout_secs};
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct ConfigApiDto {
-    pub host: String,
-    pub port: u16,
-    #[serde(default)]
-    pub web_root: String,
-}
 
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
@@ -57,6 +50,68 @@ pub struct ConfigDto {
 }
 
 impl ConfigDto {
+
+    pub fn prepare(&mut self) -> Result<(), TuliproxError> {
+        if let Some(mins) = self.sleep_timer_mins {
+            if mins == 0 {
+                return Err(TuliproxError::new(TuliproxErrorKind::Info, "`sleep_timer_mins` must be > 0 when specified".to_string()));
+            }
+        }
+
+        self.api.prepare();
+        self.prepare_web()?;
+        self.prepare_hdhomerun()?;
+        self.prepare_video_config()?;
+
+        if let Some(reverse_proxy) = self.reverse_proxy.as_mut() {
+            reverse_proxy.prepare(&self.working_dir)?;
+        }
+        if let Some(proxy) = &mut self.proxy {
+            proxy.prepare()?;
+        }
+        if let Some(ipcheck) = self.ipcheck.as_mut() {
+            ipcheck.prepare()?;
+        }
+
+        Ok(())
+    }
+
+    fn prepare_web(&mut self) -> Result<(), TuliproxError> {
+        if let Some(web_ui_config) = self.web_ui.as_mut() {
+            web_ui_config.prepare()?;
+        }
+        Ok(())
+    }
+
+    fn prepare_hdhomerun(&mut self) -> Result<(), TuliproxError> {
+        if let Some(old_hdhomerun) = &self.hdhomerun {
+            let mut hdhomerun = (*old_hdhomerun).clone();
+            if hdhomerun.enabled {
+                hdhomerun.prepare(self.api.port)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn prepare_video_config(&mut self) -> Result<(), TuliproxError> {
+        match &mut self.video {
+            None => {
+                self.video = Some(VideoConfigDto {
+                    extensions: vec!["mkv".to_string(), "avi".to_string(), "mp4".to_string()],
+                    download: None,
+                    web_search: None,
+                });
+            }
+            Some(video) => {
+                match video.prepare() {
+                    Ok(()) => {}
+                    Err(err) => return Err(err)
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn is_valid(&self) -> bool {
         if self.api.host.is_empty() {
             return false;

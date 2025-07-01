@@ -1,0 +1,106 @@
+$dashboard-mobile-size: 1280px;
+
+.dashboard {
+  display: flex;
+  flex-flow: column;
+  box-sizing: border-box;
+  flex: 1 1 auto;
+  width: 100%;
+  max-width: 1280px;
+
+  &__header {
+    display: flex;
+    flex-flow: row nowrap;
+  }
+
+  &__body {
+    display: flex;
+    flex-flow: column;
+    gap: var(--gap-larger);
+
+    &-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--gap-larger);
+
+      @media (max-width: $dashboard-mobile-size) {
+        grid-template-columns: 1fr;
+      }
+
+      .span-two {
+        grid-column: span 2;
+      }
+    }
+
+    &-stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: var(--gap-larger);
+    }
+  }
+
+  .action-card {
+    display: flex;
+    flex-flow: row nowrap;
+    align-content: flex-start;
+    flex: 1 1 auto;
+    gap: var(--gap-default);
+    fill: var(--card-color);
+
+    &__icon {
+      fill: inherit;
+      width: 3rem;
+      transform: translateY(-0.5rem);
+
+      img {
+        width: 3rem;
+      }
+    }
+
+    &__body {
+      display: flex;
+      flex-flow: column;
+      align-content: flex-start;
+      flex: 1 1 auto;
+      gap: var(--gap-small);
+    }
+
+    &__title {
+      color: var(--text-color);
+      font-weight: bold;
+      font-size: 1.1rem;
+    }
+
+    &__content {
+
+    }
+  }
+
+  .status-card {
+    display: flex;
+    flex-flow: column;
+    gap: var(--gap-default);
+    &__title {
+      color: var(--modest-text-color);
+    }
+    &__body {
+      color: var(--text-color);
+      font-size: 1.1rem;
+    }
+    &__footer {
+      color: var(--modest-text-color);
+    }
+  }
+
+  .discord {
+    fill: var(--discord-color);
+  }
+
+  .documentation {
+    fill: var(--documenation-color);
+
+    svg {
+      transform: scale(1.4);
+    }
+  }
+}

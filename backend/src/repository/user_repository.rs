@@ -1,4 +1,4 @@
-use crate::model::{ProxyUserCredentials, TargetUser};
+use crate::model::{AppConfig, ProxyUserCredentials, TargetUser};
 use crate::model::{Config};
 use shared::model::{ProxyType, ProxyUserStatus, TargetType, XtreamCluster};
 use crate::model::{PlaylistBouquetDto, TargetBouquetDto};
@@ -36,7 +36,7 @@ impl StoredProxyUserCredentialsDeprecated {
             username: stored.username.clone(),
             password: stored.password.clone(),
             token: stored.token.clone(),
-            proxy: stored.proxy.clone(),
+            proxy: stored.proxy,
             server: stored.server.clone(),
             epg_timeshift: stored.epg_timeshift.clone(),
             created_at: stored.created_at,
@@ -77,7 +77,7 @@ impl StoredProxyUserCredentials {
             username: proxy.username.clone(),
             password: proxy.password.clone(),
             token: proxy.token.clone(),
-            proxy: proxy.proxy.clone(),
+            proxy: proxy.proxy,
             server: proxy.server.clone(),
             epg_timeshift: proxy.epg_timeshift.clone(),
             created_at: proxy.created_at,
@@ -94,7 +94,7 @@ impl StoredProxyUserCredentials {
             username: stored.username.clone(),
             password: stored.password.clone(),
             token: stored.token.clone(),
-            proxy: stored.proxy.clone(),
+            proxy: stored.proxy,
             server: stored.server.clone(),
             epg_timeshift: stored.epg_timeshift.clone(),
             created_at: stored.created_at,
@@ -108,8 +108,9 @@ impl StoredProxyUserCredentials {
 }
 
 
-pub fn get_api_user_db_path(cfg: &Config) -> PathBuf {
-    PathBuf::from(&cfg.t_config_path).join(storage_const::API_USER_DB_FILE)
+pub fn get_api_user_db_path(cfg: &AppConfig) -> PathBuf {
+    let paths = cfg.paths.load();
+    PathBuf::from(&paths.config_path).join(storage_const::API_USER_DB_FILE)
 }
 
 
@@ -122,7 +123,7 @@ fn add_target_user_to_user_tree(target_users: &[TargetUser], user_tree: &mut BPl
     }
 }
 
-pub fn merge_api_user(cfg: &Config, target_users: &[TargetUser]) -> Result<u64, Error> {
+pub fn merge_api_user(cfg: &AppConfig, target_users: &[TargetUser]) -> Result<u64, Error> {
     let path = get_api_user_db_path(cfg);
     let lock = cfg.file_locks.read_lock(&path);
     let mut user_tree: BPlusTree<String, StoredProxyUserCredentials> = BPlusTree::load(&path).unwrap_or_else(|_| BPlusTree::new());
@@ -135,8 +136,8 @@ pub fn merge_api_user(cfg: &Config, target_users: &[TargetUser]) -> Result<u64, 
 /// # Panics
 ///
 /// Will panic if `backup_dir` is not given
-pub fn backup_api_user_db_file(cfg: &Config, path: &Path) {
-    if let Some(backup_dir) = cfg.backup_dir.as_ref() {
+pub fn backup_api_user_db_file(cfg: &AppConfig, path: &Path) {
+    if let Some(backup_dir) = cfg.config.load().backup_dir.as_ref() {
         let backup_path = PathBuf::from(backup_dir).join(format!("{}_{}", storage_const::API_USER_DB_FILE, Local::now().format("%Y%m%d_%H%M%S")));
         let _lock = cfg.file_locks.read_lock(path);
         match std::fs::copy(path, &backup_path) {
@@ -146,7 +147,7 @@ pub fn backup_api_user_db_file(cfg: &Config, path: &Path) {
     }
 }
 
-pub fn store_api_user(cfg: &Config, target_users: &[TargetUser]) -> Result<u64, Error> {
+pub fn store_api_user(cfg: &AppConfig, target_users: &[TargetUser]) -> Result<u64, Error> {
     let mut user_tree = BPlusTree::<String, StoredProxyUserCredentials>::new();
     add_target_user_to_user_tree(target_users, &mut user_tree);
     let path = get_api_user_db_path(cfg);
@@ -156,7 +157,7 @@ pub fn store_api_user(cfg: &Config, target_users: &[TargetUser]) -> Result<u64, 
 }
 
 // TODO remove me if we get stable on user_db
-pub fn load_api_user_deprecated(cfg: &Config) -> Result<Vec<TargetUser>, Error> {
+pub fn load_api_user_deprecated(cfg: &AppConfig) -> Result<Vec<TargetUser>, Error> {
     let path = get_api_user_db_path(cfg);
     let lock = cfg.file_locks.read_lock(&path);
     let user_tree = BPlusTree::<String, StoredProxyUserCredentialsDeprecated>::load(&path)?;
@@ -182,7 +183,7 @@ pub fn load_api_user_deprecated(cfg: &Config) -> Result<Vec<TargetUser>, Error> 
 }
 
 
-pub fn load_api_user(cfg: &Config) -> Result<Vec<TargetUser>, Error> {
+pub fn load_api_user(cfg: &AppConfig) -> Result<Vec<TargetUser>, Error> {
     let path = get_api_user_db_path(cfg);
     let lock = cfg.file_locks.read_lock(&path);
     let Ok(user_tree) = BPlusTree::<String, StoredProxyUserCredentials>::load(&path) else { return load_api_user_deprecated(cfg) };
@@ -397,9 +398,11 @@ pub async fn user_get_bouquet_filter(config: &Config, username: &str, category_i
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ProxyType, ProxyUserStatus};
+    use shared::model::{ConfigPaths, ProxyType, ProxyUserStatus};
     use std::env::temp_dir;
-
+    use std::sync::Arc;
+    use arc_swap::{ArcSwap, ArcSwapAny, ArcSwapOption};
+    use crate::utils::FileLockManager;
 
     #[test]
     pub fn save_target_user() {
@@ -466,9 +469,25 @@ mod tests {
                 ],
             };
 
-        let mut cfg = Config::default();
+        let cfg = AppConfig {
+            config: Arc::new(ArcSwapAny::default()),
+            sources: Arc::new(ArcSwapAny::default()),
+            hdhomerun: Arc::new(ArcSwapAny::default()),
+            api_proxy: Arc::new(ArcSwapAny::default()),
+            paths: Arc::new(ArcSwap::from(Arc::new(ConfigPaths {
+                config_path: temp_dir().to_string_lossy().to_string(),
+                config_file_path: "".to_string(),
+                sources_file_path: "".to_string(),
+                mapping_file_path: None,
+                api_proxy_file_path: "".to_string(),
+                custom_stream_response_path: None,
+            }))),
+            file_locks: Arc::new(FileLockManager::default()),
+            custom_stream_response: Arc::new(ArcSwapAny::default()),
+            access_token_secret: Default::default(),
+            encrypt_secret: Default::default(),
+        };
         let target_user = vec![user];
-        cfg.t_config_path = temp_dir().to_string_lossy().to_string();
         let _ = store_api_user(&cfg, &target_user);
 
         let user_list = load_api_user(&cfg);

@@ -1,12 +1,13 @@
 use crate::model::{Epg, TVGuide, XmlTag, XmlTagIcon, EPG_ATTRIB_CHANNEL, EPG_ATTRIB_ID, EPG_TAG_CHANNEL, EPG_TAG_DISPLAY_NAME, EPG_TAG_ICON, EPG_TAG_PROGRAMME, EPG_TAG_TV};
-use crate::model::{EpgNamePrefix, EpgSmartMatchConfig, PersistedEpgSource};
+use crate::model::{EpgSmartMatchConfig, PersistedEpgSource};
 use crate::processing::processor::epg::EpgIdCache;
 use crate::utils::compressed_file_reader::CompressedFileReader;
-use shared::utils::CONSTANTS;
 use deunicode::deunicode;
 use quick_xml::events::{BytesStart, BytesText, Event};
 use quick_xml::Reader;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use shared::model::EpgNamePrefix;
+use shared::utils::CONSTANTS;
 use std::borrow::Cow;
 use std::cmp::min;
 use std::collections::hash_map::Entry;
@@ -52,7 +53,7 @@ fn split_by_first_match<'a>(input: &'a str, delimiters: &[char]) -> (Option<&'a 
 
 fn name_prefix<'a>(name: &'a str, smart_config: &EpgSmartMatchConfig) -> (&'a str, Option<&'a str>) {
     if smart_config.name_prefix != EpgNamePrefix::Ignore {
-        let (prefix, suffix) = split_by_first_match(name, &smart_config.t_name_prefix_separator.clone());
+        let (prefix, suffix) = split_by_first_match(name, &smart_config.name_prefix_separator);
         if prefix.is_some() {
             return (suffix, prefix);
         }
@@ -73,9 +74,9 @@ pub fn normalize_channel_name(name: &str, normalize_config: &EpgSmartMatchConfig
     let normalized = deunicode(name.trim()).to_lowercase();
     let (channel_name, suffix) = name_prefix(&normalized, normalize_config);
     // Remove all non-alphanumeric characters (except dashes and underscores).
-    let cleaned_name = normalize_config.t_normalize_regex.as_ref().unwrap().replace_all(channel_name, "");
+    let cleaned_name = normalize_config.normalize_regex.replace_all(channel_name, "");
     // Remove terms like resolution
-    let cleaned_name = normalize_config.t_strip.iter().fold(cleaned_name.to_string(), |acc, term| {
+    let cleaned_name = normalize_config.strip.iter().fold(cleaned_name.to_string(), |acc, term| {
         acc.replace(term, "")
     });
     match suffix {
@@ -380,7 +381,7 @@ where
             Ok(Event::Empty(e)) => {
                 handle_tag_start(callback, &mut stack, &e);
                 handle_tag_end(callback, &mut stack);
-            },
+            }
             Ok(Event::End(_e)) => handle_tag_end(callback, &mut stack),
             Ok(Event::Text(e)) => handle_text_tag(&mut stack, &e),
             _ => {}
@@ -485,7 +486,7 @@ pub fn flatten_tvguide(tv_guides: &[Epg]) -> Option<Epg> {
 
 #[cfg(test)]
 mod tests {
-    use crate::model::{EpgNamePrefix, EpgSmartMatchConfig};
+    use crate::model::EpgSmartMatchConfig;
     use crate::processing::parser::xmltv::normalize_channel_name;
 
     #[test]
@@ -496,11 +497,11 @@ mod tests {
     /// ```
     /// parse_normalize().unwrap();
     /// ```
-    fn parse_normalize() -> Result<(), TuliproxError> {
-        let epg_normalize = EpgSmartMatchConfig::new()?;
+    fn parse_normalize() {
+        let epg_normalize_dto = EpgSmartMatchConfigDto {..Default::default()};
+        let epg_normalize = EpgSmartMatchConfig::from(epg_normalize_dto);
         let normalized = normalize_channel_name("Love Nature", &epg_normalize);
         assert_eq!(normalized, "lovenature".to_string());
-        Ok(())
     }
 
 
@@ -533,8 +534,9 @@ mod tests {
     /// // This will assert that various channel names are normalized as expected.
     /// ```
     fn normalize() {
-        let mut epg_smart_cfg = EpgSmartMatchConfig { enabled: true, name_prefix: EpgNamePrefix::Suffix(".".to_string()), ..Default::default() };
-       let _ = epg_smart_cfg.prepare();
+        let mut epg_smart_cfg_dto = EpgSmartMatchConfigDto { enabled: true, name_prefix: EpgNamePrefix::Suffix(".".to_string()), ..Default::default() };
+        let _ = epg_smart_cfg_dto.prepare();
+        let epg_smart_cfg = EpgSmartMatchConfig::from(epg_smart_cfg_dto);
         println!("{epg_smart_cfg:?}");
         assert_eq!("supersport6.ru", normalize_channel_name("RU: SUPERSPORT 6 ᴿᴬᵂ", &epg_smart_cfg));
         assert_eq!("odisea.sat", normalize_channel_name("SAT: ODISEA ᴿᴬᵂ", &epg_smart_cfg));
@@ -544,8 +546,8 @@ mod tests {
         assert_eq!("odisea.bg", normalize_channel_name("BG | ODISEA ᵁᴴᴰ ³⁸⁴⁰ᴾ", &epg_smart_cfg));
     }
 
-    use shared::error::TuliproxError;
     use rphonetic::{Encoder, Metaphone};
+    use shared::model::{EpgNamePrefix, EpgSmartMatchConfigDto};
 
     #[test]
     /// Demonstrates phonetic encoding (Metaphone) of normalized channel names with various prefixes and suffixes.
@@ -560,8 +562,9 @@ mod tests {
     /// ```
     fn test_metaphone() {
         let metaphone = Metaphone::default();
-        let mut epg_smart_cfg = EpgSmartMatchConfig { enabled: true, name_prefix: EpgNamePrefix::Suffix(".".to_string()), ..Default::default() };
-        let _ = epg_smart_cfg.prepare();
+        let mut epg_smart_cfg_dto = EpgSmartMatchConfigDto { enabled: true, name_prefix: EpgNamePrefix::Suffix(".".to_string()), ..Default::default() };
+        let _ = epg_smart_cfg_dto.prepare();
+        let epg_smart_cfg = EpgSmartMatchConfig::from(epg_smart_cfg_dto);
         println!("{epg_smart_cfg:?}");
         // assert_eq!("supersport6.ru", metaphone.encode(&normalize_channel_name("RU: SUPERSPORT 6 ᴿᴬᵂ", &epg_normalize_cfg)));
         // assert_eq!("odisea.sat", metaphone.encode(&normalize_channel_name("SAT: ODISEA ᴿᴬᵂ", &epg_normalize_cfg)));

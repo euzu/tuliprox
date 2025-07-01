@@ -1,0 +1,28 @@
+.collapse-panel {
+  display: flex;
+  flex-flow: column;
+  gap: 8px;
+  overflow: hidden;
+
+  &__header {
+    color: var(--modest-text-color);
+    fill: var(--modest-text-color);
+    display: flex;
+    flex-flow: row nowrap;
+    max-height: 1.2rem;
+    cursor: pointer;
+    &:hover {
+      color: var(--menu-button-hover-color);
+    }
+    span {
+      flex: 1 1 auto;
+    }
+    span,
+    svg {
+      pointer-events: none;
+    }
+    svg {
+      width: 1.2rem;
+    }
+  }
+}

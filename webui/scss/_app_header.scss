@@ -1,0 +1,23 @@
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-left: 2rem;
+  height: var(--app-header-height);
+  background-color: var(--app-header-background-color);
+  border-bottom: 1px solid var(--border-color);
+  fill: var(--menu-icon-color);
+  img, svg {
+    width: 2.5rem;
+    height: 2.5rem;
+  }
+  &-toolbar {
+    display: flex;
+    align-items: center;
+    gap: var(--gap-small);
+    .icon-button {
+      width: 2.5rem;
+    }
+  }
+}

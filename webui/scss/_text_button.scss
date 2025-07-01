@@ -1,0 +1,43 @@
+.text-button {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  fill: var(--menu-icon-color);
+  background-color: var(--text-button-background-color);
+  color: var(--text-button-color);
+  border: 1px solid var(--text-button-border-color);
+  border-radius: var(--border-radius);
+  cursor: pointer;
+  box-sizing: border-box;
+  max-height: 3rem;
+  min-height: 2.5rem;
+  gap: var(--gap-default);
+  padding: 0 var(--padding-default);
+  font-weight: bold;
+  font-size: 1rem;
+
+  svg {
+    width: 1.5rem;
+  }
+
+  span,
+  svg {
+    pointer-events: none;
+  }
+
+  &:focus,
+  &:hover {
+    background-color: var(--text-button-hover-color);
+    outline: none;
+  }
+}
+
+.text-button.button-primary {
+   background-color: var(--text-button-primary-background-color);
+   color: var(--text-button-primary-color);
+   &:hover {
+      background-color: var(--text-button-primary-hover-background-color);
+      color: var(--text-button-primary-hover-color);
+      outline: none;
+   }
+}

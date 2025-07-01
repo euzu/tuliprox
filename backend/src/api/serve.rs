@@ -14,6 +14,7 @@ use std::net::SocketAddr;
 use std::pin::pin;
 use std::time::Duration;
 use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 use tower::{Service, ServiceExt};
 
 #[derive(Debug)]
@@ -35,48 +36,41 @@ impl axum::extract::connect_info::Connected<IncomingStream> for SocketAddr {
     }
 }
 
-pub async fn serve(listener: tokio::net::TcpListener, router: axum::Router<()>) -> ! {
+pub async fn serve(listener: tokio::net::TcpListener, router: axum::Router<()>,
+                   cancel_token: Option<CancellationToken>) {
     let (signal_tx, _signal_rx) = watch::channel(());
     let (_close_tx, close_rx) = watch::channel(());
     let mut make_service = router.into_make_service_with_connect_info::<SocketAddr>();
 
-    loop {
-        let Ok((socket, remote_addr)) = listener.accept().await else { continue };
-
-        let Ok(tcp_stream_std) = socket.into_std() else { continue; };
-        tcp_stream_std.set_nonblocking(true).ok(); // this is not necessary
-
-        // Configure keep alive with socket2
-        let sock_ref = SockRef::from(&tcp_stream_std);
-
-        let keep_alive_first_probe = 10;
-        let keep_alive_interval = 5;
-
-        let mut keepalive = TcpKeepalive::new();
-        keepalive = keepalive.with_time(Duration::from_secs(keep_alive_first_probe)) // Time until the first keepalive probe (idle time)
-            .with_interval(Duration::from_secs(keep_alive_interval)); // Interval between keep alives
-        #[cfg(not(target_os = "windows"))]
-        {
-            let keep_alive_retries = 3;
-            keepalive = keepalive.with_retries(keep_alive_retries); // Number of failed probes before the connection is closed
+    match cancel_token {
+        Some(token) => {
+            loop {
+                tokio::select! {
+                    () = token.cancelled() => {
+                        break;
+                    }
+                    accept_result = listener.accept() => {
+                        let Ok((socket, remote_addr)) = accept_result else { continue };
+                        handle_connection(&mut make_service, &signal_tx, &close_rx, socket, remote_addr).await;
+                    }
+                }
+            }
         }
-
-        if let Err(e) = sock_ref.set_tcp_keepalive(&keepalive) {
-            error!("Failed to set keepalive for {remote_addr}: {e}");
+        None => {
+            loop {
+                let Ok((socket, remote_addr)) = listener.accept().await else { continue };
+                handle_connection(&mut make_service, &signal_tx, &close_rx, socket, remote_addr).await;
+            }
         }
-
-        let Ok(socket) = tokio::net::TcpStream::from_std(tcp_stream_std) else { continue; };
-
-        let io = TokioIo::new(socket);
-        handle_connection(&mut make_service, &signal_tx, &close_rx, io, remote_addr).await;
     }
 }
+
 
 async fn handle_connection<M, S>(
     make_service: &mut M,
     signal_tx: &watch::Sender<()>,
     close_rx: &watch::Receiver<()>,
-    io: TokioIo<tokio::net::TcpStream>,
+    socket: tokio::net::TcpStream,
     remote_addr: SocketAddr,
 )
 where
@@ -85,6 +79,31 @@ where
     S: Service<Request, Response=Response, Error=Infallible> + Clone + Send + 'static,
     S::Future: Send,
 {
+    let Ok(tcp_stream_std) = socket.into_std() else { return; };
+    tcp_stream_std.set_nonblocking(true).ok(); // this is not necessary
+
+    // Configure keep alive with socket2
+    let sock_ref = SockRef::from(&tcp_stream_std);
+
+    let keep_alive_first_probe = 10;
+    let keep_alive_interval = 5;
+
+    let mut keepalive = TcpKeepalive::new();
+    keepalive = keepalive.with_time(Duration::from_secs(keep_alive_first_probe)) // Time until the first keepalive probe (idle time)
+        .with_interval(Duration::from_secs(keep_alive_interval)); // Interval between keep alives
+    #[cfg(not(target_os = "windows"))]
+    {
+        let keep_alive_retries = 3;
+        keepalive = keepalive.with_retries(keep_alive_retries); // Number of failed probes before the connection is closed
+    }
+
+    if let Err(e) = sock_ref.set_tcp_keepalive(&keepalive) {
+        error!("Failed to set keepalive for {remote_addr}: {e}");
+    }
+
+    let Ok(socket) = tokio::net::TcpStream::from_std(tcp_stream_std) else { return; };
+
+    let io = TokioIo::new(socket);
     trace!("connection {remote_addr:?} accepted");
 
     make_service

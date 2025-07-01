@@ -1,0 +1,116 @@
+$media-size-mobile: 600px;
+
+@mixin container_common($justify-content: flex-start, $padding: 12px) {
+  display: flex;
+  justify-content: $justify-content;
+  gap: 8px;
+  box-sizing: border-box;
+  @media (max-width: $media-size-mobile) {
+    padding: $padding;
+  }
+  @media (min-width: $media-size-mobile) {
+    padding: 2px;
+  }
+}
+
+@mixin container_vert() {
+  flex-flow: column;
+  @include container_common();
+}
+
+@mixin container_horz() {
+  flex-flow: row;
+  @include container_common();
+}
+
+@mixin container_horz_nowrap($justify-content: flex-start, $padding: 12px) {
+  flex-flow: row nowrap;
+  @media (max-width: $media-size-mobile) {
+    flex-flow: column;
+  }
+  @include container_common($justify-content,  $padding);
+}
+
+@mixin container_horz_no_padding() {
+  flex-flow: row;
+  @include container_common($padding: 0);
+}
+
+@mixin container_vert_no_padding($justify-content: flex-start) {
+  flex-flow: column;
+  @include container_common($justify-content, $padding: 0);
+}
+
+@mixin activeOptionButton {
+    box-sizing: border-box !important;
+    background-color: var(--option-active-background-color) !important;
+    color: var(--option-active-color) !important;
+    font-weight: bold;
+    svg {
+      color: var(--option-active-color) !important;
+    }
+}
+
+@mixin textButton {
+  border: 1px solid var(--text-button-border-color);
+  font-size: 1.2rem;
+  border-radius: var(--text-button-border-radius);
+  padding: 8px 16px;
+  background-color: var(--text-button-background-color);
+  color: var(--text-button-color);
+  &:focus,
+  &:hover {
+    background-color: var(--text-button-hover-background-color);
+    color: var(--text-button-hover-color);
+    border: 1px solid transparent;
+    outline: none;
+  }
+}
+
+@mixin list {
+  ul {
+    list-style-type: none; /* Remove bullets */
+    padding: 0; /* Remove padding */
+    margin: 0; /* Remove margins */
+    li {
+      padding: 8px;
+      border-radius: var(--border-radius);
+    }
+  }
+}
+
+@mixin list-hover {
+  ul {
+    list-style-type: none; /* Remove bullets */
+    padding: 0; /* Remove padding */
+    margin: 0; /* Remove margins */
+    li {
+      padding: 8px;
+      border-radius: var(--border-radius);
+      user-select: none;
+      cursor: pointer;
+
+      &:hover {
+        color: var(--popup-hover-color);
+        background-color: var(--popup-hover-background-color);
+      }
+    }
+  }
+}
+
+
+@keyframes pulse-bg {
+  0% {
+    background-color: var(--pulse-color-1);
+  }
+  50% {
+    background-color: var(--pulse-color-2);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+.pulse {
+  animation: pulse-bg 500ms ease-out;
+}

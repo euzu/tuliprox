@@ -104,7 +104,7 @@ pub fn rewrite_hls(user: &ProxyUserCredentials, props: &RewriteHlsProps) -> Stri
 #[cfg(test)]
 mod test {
     use rand::RngCore;
-    use crate::utils::u32_to_base64;
+    use shared::utils::u32_to_base64;
 
     #[test]
     fn test_token_size() {

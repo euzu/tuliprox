@@ -1,4 +1,10 @@
 use std::collections::HashMap;
+use std::borrow::BorrowMut;
+use crate::create_tuliprox_error_result;
+use crate::error::{TuliproxError, TuliproxErrorKind};
+
+
+pub const DEFAULT_USER_AGENT: &str = "VLC/3.0.16 LibVLC/3.0.16";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -22,4 +28,35 @@ pub struct VideoConfigDto {
     pub download: Option<VideoDownloadConfigDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web_search: Option<String>,
+}
+
+
+impl VideoConfigDto {
+    /// # Panics
+    ///
+    /// Will panic if default `RegEx` gets invalid
+    pub fn prepare(&mut self) -> Result<(), TuliproxError> {
+        if self.extensions.is_empty() {
+            self.extensions = ["mkv", "avi", "mp4", "mpeg", "divx", "mov"]
+                .iter()
+                .map(|&arg| arg.to_string())
+                .collect();
+        }
+        match &mut self.download {
+            None => {}
+            Some(downl) => {
+                if downl.headers.is_empty() {
+                    downl.headers.borrow_mut().insert("Accept".to_string(), "video/*".to_string());
+                    downl.headers.borrow_mut().insert("User-Agent".to_string(), DEFAULT_USER_AGENT.to_string());
+                }
+
+                if let Some(episode_pattern) = &downl.episode_pattern {
+                    if let Err(err) = regex::Regex::new(episode_pattern) {
+                         return create_tuliprox_error_result!(TuliproxErrorKind::Info, "cant parse regex: {episode_pattern} {err}");
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }

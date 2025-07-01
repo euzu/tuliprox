@@ -1,8 +1,8 @@
 use shared::error::{info_err, notify_err};
 use shared::error::{str_to_io_error, TuliproxError, TuliproxErrorKind};
-use crate::model::{Config, ConfigInput};
-use crate::model::{FetchedPlaylist, PlaylistItem};
-use shared::model::{PlaylistEntry, PlaylistItemType, XtreamCluster};
+use crate::model::{AppConfig, Config, ConfigInput};
+use crate::model::{FetchedPlaylist};
+use shared::model::{PlaylistEntry, PlaylistItem, PlaylistItemType, XtreamCluster};
 use crate::model::normalize_release_date;
 use crate::repository::storage::get_input_storage_path;
 use serde::{Deserialize, Serialize};
@@ -87,7 +87,7 @@ pub(in crate::processing) fn should_update_info(pli: &mut PlaylistItem, processe
          || *old_timestamp.unwrap() != last_modified.unwrap(), provider_id, last_modified.unwrap_or(0))
 }
 
-pub(in crate::processing) async fn read_processed_info_ids<V, F>(cfg: &Config, errors: &mut Vec<TuliproxError>, fpl: &FetchedPlaylist<'_>,
+pub(in crate::processing) async fn read_processed_info_ids<V, F>(cfg: &AppConfig, errors: &mut Vec<TuliproxError>, fpl: &FetchedPlaylist<'_>,
                                                                  item_type: PlaylistItemType, extract_ts: F) -> HashMap<u32, u64>
 where
     F: Fn(&V) -> u64,
@@ -96,7 +96,7 @@ where
     let mut processed_info_ids = HashMap::new();
 
     let fpl_name = &fpl.input.name;
-    let file_path = match get_input_storage_path(fpl_name, &cfg.working_dir)
+    let file_path = match get_input_storage_path(fpl_name, &cfg.config.load().working_dir)
         .map(|storage_path| xtream_get_record_file_path(&storage_path, item_type)).and_then(|opt| opt.ok_or_else(|| str_to_io_error("Not supported")))
     {
         Ok(file_path) => file_path,

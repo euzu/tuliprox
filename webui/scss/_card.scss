@@ -1,0 +1,9 @@
+.card {
+  display: flex;
+  flex-flow: column;
+  background-color: var(--card-background-color);
+  color: var(--card-color);
+  padding: var(--padding-default);
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+}

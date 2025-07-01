@@ -770,7 +770,7 @@ mod tests {
     use std::path::PathBuf;
 
     use serde::{Deserialize, Serialize};
-
+    use shared::utils::generate_random_string;
     use crate::repository::bplustree::{BPlusTree, BPlusTreeQuery, BPlusTreeUpdate};
 
     // Example usage with a simple struct
@@ -784,7 +784,7 @@ mod tests {
     #[test]
     fn insert_test() -> io::Result<()> {
         let test_size = 500;
-        let content = crate::utils::generate_random_string(1024);
+        let content = generate_random_string(1024);
         let mut tree = BPlusTree::<u32, Record>::new();
         for i in 0u32..=test_size {
             tree.insert(i, Record {

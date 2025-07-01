@@ -3,7 +3,7 @@ use crate::model::IpCheckConfig;
 use regex::Regex;
 use reqwest::Client;
 use std::sync::Arc;
-use crate::utils::request::sanitize_sensitive_info;
+use shared::utils::sanitize_sensitive_info;
 
 async fn fetch_ip(client: &Arc<Client>, url: &str, regex: Option<&Regex>) -> Result<String, TuliproxError> {
     let response = client.get(url).send().await
@@ -37,13 +37,13 @@ async fn fetch_combined_ips(client: &Arc<Client>, config: &IpCheckConfig, url: &
 
     if let Some(body) = text {
         let ipv4 = config
-            .t_pattern_ipv4
+            .pattern_ipv4
             .as_ref()
             .and_then(|re| re.captures(&body))
             .and_then(|caps| caps.get(1).map(|m| m.as_str().to_string()));
 
         let ipv6 = config
-            .t_pattern_ipv6
+            .pattern_ipv6
             .as_ref()
             .and_then(|re| re.captures(&body))
             .and_then(|caps| caps.get(1).map(|m| m.as_str().to_string()));
@@ -60,8 +60,8 @@ pub async fn get_ips(client: &Arc<Client>, config: &IpCheckConfig) -> Result<(Op
         // Both dedicated URLs provided
         (Some(url_v4), Some(url_v6), _) => {
             let (ipv4, ipv6) = tokio::join!(
-                    fetch_ip(client, url_v4, config.t_pattern_ipv4.as_ref()),
-                    fetch_ip(client, url_v6, config.t_pattern_ipv6.as_ref())
+                    fetch_ip(client, url_v4, config.pattern_ipv4.as_ref()),
+                    fetch_ip(client, url_v6, config.pattern_ipv6.as_ref())
                 );
             Ok((ipv4.ok(), ipv6.ok()))
         }
@@ -74,11 +74,11 @@ pub async fn get_ips(client: &Arc<Client>, config: &IpCheckConfig) -> Result<(Op
 
         // Only one dedicated URL
         (Some(url_v4), None, _) => {
-            let ipv4 = fetch_ip(client, url_v4, config.t_pattern_ipv4.as_ref()).await.ok();
+            let ipv4 = fetch_ip(client, url_v4, config.pattern_ipv4.as_ref()).await.ok();
             Ok((ipv4, None))
         }
         (None, Some(url_v6), _) => {
-            let ipv6 = fetch_ip(client, url_v6, config.t_pattern_ipv6.as_ref()).await.ok();
+            let ipv6 = fetch_ip(client, url_v6, config.pattern_ipv6.as_ref()).await.ok();
             Ok((None, ipv6))
         }
 

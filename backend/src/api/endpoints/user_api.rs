@@ -1,7 +1,7 @@
 use crate::api::api_utils::{get_user_target_by_username, get_username_from_auth_header};
 use crate::api::model::app_state::AppState;
 use crate::auth::validator_user;
-use crate::model::{Config, ConfigTarget};
+use crate::model::{AppConfig, ConfigTarget};
 use shared::model::{TargetType, XtreamCluster};
 use crate::model::PlaylistBouquetDto;
 use crate::model::PlaylistXtreamCategory;
@@ -27,7 +27,7 @@ fn get_categories_from_xtream(categories: Option<Vec<PlaylistXtreamCategory>>) -
 }
 
 
-async fn get_categories_from_m3u_playlist(target: &ConfigTarget, config: &Arc<Config>) -> Vec<String> {
+async fn get_categories_from_m3u_playlist(target: &ConfigTarget, config: &AppConfig) -> Vec<String> {
     let mut groups = Vec::new();
     if let Some((_guard, iter)) = m3u_repository::iter_raw_m3u_playlist(config, target).await {
         let mut unique_groups = HashSet::new();
@@ -50,9 +50,9 @@ async fn playlist_categories(
             if user.permission_denied(&app_state) {
                 return axum::http::StatusCode::FORBIDDEN.into_response();
             }
-            let config = &app_state.config;
             let target_name = &target.name;
             let xtream_stream = if target.has_output(&TargetType::Xtream) {
+                let config = &app_state.app_config.config.load();
                 let live_categories = get_categories_from_xtream(xtream_get_playlist_categories(config, target_name, XtreamCluster::Live).await);
                 let vod_categories = get_categories_from_xtream(xtream_get_playlist_categories(config, target_name, XtreamCluster::Video).await);
                 let series_categories = get_categories_from_xtream(xtream_get_playlist_categories(config, target_name, XtreamCluster::Series).await);
@@ -70,7 +70,7 @@ async fn playlist_categories(
             };
 
             let m3u_stream = if target.has_output(&TargetType::M3u) {
-                let live_categories = get_categories_from_m3u_playlist(target, config).await;
+                let live_categories = get_categories_from_m3u_playlist(&target, &app_state.app_config).await;
                 stream::iter(vec![
                     Ok::<Bytes, String>(Bytes::from(r#"{"live": "#)),
                     Ok::<Bytes, String>(Bytes::from(serde_json::to_string(&live_categories).unwrap_or("[]".to_string()))),
@@ -108,7 +108,8 @@ async fn save_playlist_bouquet(
             if user.permission_denied(&app_state) {
                 return axum::http::StatusCode::FORBIDDEN.into_response();
             }
-            match save_user_bouquet(&app_state.config, &target.name, &username, &bouquet).await {
+            let config = &app_state.app_config.config.load();
+            match save_user_bouquet(config, &target.name, &username, &bouquet).await {
                 Ok(()) => {
                     return axum::http::StatusCode::OK.into_response();
                 }
@@ -130,8 +131,9 @@ async fn playlist_bouquet(
             if user.permission_denied(&app_state) {
                 return axum::http::StatusCode::FORBIDDEN.into_response();
             }
-            let xtream = load_user_bouquet_as_json(&app_state.config, &username, TargetType::Xtream).await;
-            let m3u = load_user_bouquet_as_json(&app_state.config, &username, TargetType::M3u).await;
+            let config = &app_state.app_config.config.load();
+            let xtream = load_user_bouquet_as_json(config, &username, TargetType::Xtream).await;
+            let m3u = load_user_bouquet_as_json(config, &username, TargetType::M3u).await;
             return axum::response::Response::builder()
                 .status(axum::http::StatusCode::OK)
                 .header("Content-Type", mime::APPLICATION_JSON.to_string())

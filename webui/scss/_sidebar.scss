@@ -1,0 +1,19 @@
+@use 'common';
+
+$sidebar-width: 270px;
+
+.app-sidebar {
+  display: flex;
+  flex-flow: column;
+  gap: var(--gap-default);
+  min-width: $sidebar-width;
+  max-width: $sidebar-width;
+  width: $sidebar-width;
+
+  &__content {
+    display: flex;
+    flex-flow: column;
+    padding: 2rem 1.5rem;
+    gap: var(--gap-larger);
+  }
+}

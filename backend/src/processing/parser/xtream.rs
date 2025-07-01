@@ -1,13 +1,12 @@
 use shared::error::{create_tuliprox_error_result, TuliproxError, TuliproxErrorKind};
 use crate::model::ConfigInput;
-use crate::model::{PlaylistGroup, PlaylistItem, PlaylistItemHeader};
+use shared::model::{PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, XtreamCluster};
 use crate::model::{XtreamCategory, XtreamSeriesInfo, XtreamSeriesInfoEpisode, XtreamStream};
-use crate::utils::generate_playlist_uuid;
+use shared::utils::generate_playlist_uuid;
 use crate::utils::xtream::{get_xtream_stream_url_base};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
-use shared::model::{PlaylistItemType, XtreamCluster};
 
 fn map_to_xtream_category(categories: &Value) -> Result<Vec<XtreamCategory>, TuliproxError> {
     match serde_json::from_value::<Vec<XtreamCategory>>(categories.to_owned()) {

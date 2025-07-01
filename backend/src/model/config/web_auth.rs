@@ -1,22 +1,42 @@
-use shared::utils::default_as_true;
 use std::fs::File;
 use std::io::BufRead;
 use std::path::PathBuf;
-use crate::auth::UserCredential;
 use shared::error::{TuliproxError, TuliproxErrorKind, create_tuliprox_error_result};
+use shared::model::{UserCredential, WebAuthConfigDto};
+use crate::model::macros;
 use crate::utils;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone)]
 pub struct WebAuthConfig {
-    #[serde(default = "default_as_true")]
     pub enabled: bool,
     pub issuer: String,
     pub secret: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub userfile: Option<String>,
-    #[serde(skip_serializing, skip_deserializing)]
     pub t_users: Option<Vec<UserCredential>>,
+}
+
+macros::from_impl!(WebAuthConfig);
+impl From<&WebAuthConfigDto> for WebAuthConfig {
+    fn from(dto: &WebAuthConfigDto) -> Self {
+        Self {
+            enabled: dto.enabled,
+            issuer: dto.issuer.to_string(),
+            secret: dto.secret.to_string(),
+            userfile: dto.userfile.clone(),
+            t_users: None,
+        }
+    }
+}
+
+impl From<&WebAuthConfig> for WebAuthConfigDto {
+    fn from(instance: &WebAuthConfig) -> Self {
+        Self {
+            enabled: instance.enabled,
+            issuer: instance.issuer.to_string(),
+            secret: instance.secret.to_string(),
+            userfile: instance.userfile.clone(),
+        }
+    }
 }
 
 impl WebAuthConfig {
