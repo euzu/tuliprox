@@ -1,0 +1,20 @@
+.tp__playlist-mappings {
+
+  li {
+    display: flex;
+    flex-flow: row nowrap;
+    gap: var(--gap-small);
+    align-items: center;
+    background: transparent;
+    white-space: nowrap;
+    padding: var(--padding-micro) var(--padding-mini);
+    border-radius: var(--border-radius);
+
+    &:hover {
+      cursor: pointer;
+      background-color: var(--menu-item-hover-background-color);
+      color: var(--menu-item-hover-color)
+    }
+  }
+
+}

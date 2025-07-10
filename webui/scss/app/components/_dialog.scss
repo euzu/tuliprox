@@ -1,0 +1,23 @@
+dialog {
+  display: flex;
+  flex-flow: column;
+  gap: var(--gap-large);
+  padding: var(--padding-larger);
+  background-color: var(--card-background-color);
+  color: var(--card-color);
+  border: none;
+  border-radius: var(--border-radius);
+  filter: drop-shadow(6px 6px 6px var(--popup-shadow-color));
+  &::backdrop {
+    background: rgba(0, 0, 0, 0.3);
+  }
+}
+
+.tp__dialog {
+  min-width: 400px;
+  &__toolbar {
+    display: flex;
+    flex-flow: row nowrap;
+    justify-content: space-between;
+  }
+}

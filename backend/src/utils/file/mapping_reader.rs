@@ -1,15 +1,15 @@
 use std::collections::HashMap;
-use crate::foundation::filter::PatternTemplate;
-use crate::model::{Mapping, MappingDefinition, Mappings};
+use crate::model::{Mappings};
 use shared::error::{create_tuliprox_error_result, info_err, TuliproxError, TuliproxErrorKind};
 use crate::utils::traverse_dir;
 use crate::utils::{config_file_reader, open_file};
 use log::{warn};
 use std::path::{Path, PathBuf};
+use shared::model::{MappingDefinitionDto, MappingDto, MappingsDto, PatternTemplate};
 
-fn read_mapping(mapping_file: &Path, resolve_var: bool, prepare_mappings: bool) -> Result<Option<Mappings>, TuliproxError> {
+fn read_mapping(mapping_file: &Path, resolve_var: bool, prepare_mappings: bool) -> Result<Option<MappingsDto>, TuliproxError> {
     if let Ok(file) = open_file(mapping_file) {
-        let maybe_mapping: Result<Mappings, _> = serde_yaml::from_reader(config_file_reader(file, resolve_var));
+        let maybe_mapping: Result<MappingsDto, _> = serde_yaml::from_reader(config_file_reader(file, resolve_var));
         return match maybe_mapping {
             Ok(mut mapping) => {
                 if prepare_mappings {
@@ -26,7 +26,7 @@ fn read_mapping(mapping_file: &Path, resolve_var: bool, prepare_mappings: bool) 
     Ok(None)
 }
 
-fn read_mappings_from_file(mappings_file: &Path, resolve_env: bool) -> Result<Option<Mappings>, TuliproxError> {
+fn read_mappings_from_file(mappings_file: &Path, resolve_env: bool) -> Result<Option<MappingsDto>, TuliproxError> {
     match read_mapping(mappings_file, resolve_env, true) {
         Ok(mappings) => {
             match mappings {
@@ -39,11 +39,11 @@ fn read_mappings_from_file(mappings_file: &Path, resolve_env: bool) -> Result<Op
 }
 
 
-fn merge_mappings(mappings: Vec<Mapping>) -> Vec<Mapping> {
-    let mut map: HashMap<String, Mapping> = HashMap::new();
+fn merge_mappings(mappings: Vec<MappingDto>) -> Vec<MappingDto> {
+    let mut map: HashMap<String, MappingDto> = HashMap::new();
 
     for mut m in mappings {
-        let entry = map.entry(m.id.clone()).or_insert_with(|| Mapping {
+        let entry = map.entry(m.id.clone()).or_insert_with(|| MappingDto {
             id: m.id.clone(),
             ..Default::default()
         });
@@ -62,9 +62,9 @@ fn merge_mappings(mappings: Vec<Mapping>) -> Vec<Mapping> {
 
     map.into_values().collect()
 }
-fn merge_mapping_definitions(mappings: Vec<Mappings>) -> Result<Option<Mappings>, TuliproxError> {
+fn merge_mapping_definitions(mappings: Vec<MappingsDto>) -> Result<Option<MappingsDto>, TuliproxError> {
     let mut merged_templates: Vec<PatternTemplate> = Vec::new();
-    let mut merged_mapping: Vec<Mapping> = Vec::new();
+    let mut merged_mapping: Vec<MappingDto> = Vec::new();
 
     for mapping in mappings {
         if let Some(mut templates) = mapping.mappings.templates {
@@ -74,8 +74,8 @@ fn merge_mapping_definitions(mappings: Vec<Mappings>) -> Result<Option<Mappings>
          merged_mapping.extend(mapping.mappings.mapping);
     }
 
-    let mut result = Mappings {
-        mappings: MappingDefinition {
+    let mut result = MappingsDto {
+        mappings: MappingDefinitionDto {
             templates: if merged_templates.is_empty() { None } else { Some(merged_templates) },
             mapping: merge_mappings(merged_mapping)
         }
@@ -84,7 +84,7 @@ fn merge_mapping_definitions(mappings: Vec<Mappings>) -> Result<Option<Mappings>
     Ok(Some(result))
 }
 
-fn read_mappings_from_directory(path: &Path, resolve_env: bool) -> Result<Option<Mappings>, TuliproxError> {
+fn read_mappings_from_directory(path: &Path, resolve_env: bool) -> Result<Option<MappingsDto>, TuliproxError> {
     let mut files = vec![];
     let mut visit = |entry: &std::fs::DirEntry, metadata: &std::fs::Metadata| {
         if metadata.is_file() {
@@ -113,7 +113,7 @@ fn read_mappings_from_directory(path: &Path, resolve_env: bool) -> Result<Option
     merge_mapping_definitions(mappings)
 }
 
-pub fn read_mappings(mappings_file: &str, resolve_env: bool) -> Result<Option<Mappings>, TuliproxError> {
+pub fn read_mappings_file(mappings_file: &str, resolve_env: bool) -> Result<Option<MappingsDto>, TuliproxError> {
     let path = PathBuf::from(mappings_file);
     match std::fs::metadata(&path) {
         Ok(metadata) => {
@@ -128,5 +128,12 @@ pub fn read_mappings(mappings_file: &str, resolve_env: bool) -> Result<Option<Ma
         Err(_err) => {
             Ok(None)
         }
+    }
+}
+
+pub fn read_mappings(mappings_file: &str, resolve_env: bool) -> Result<Option<Mappings>, TuliproxError> {
+    match read_mappings_file(mappings_file, resolve_env)? {
+        Some(dto) => Ok(Some(Mappings::from(&dto))),
+        None => Ok(None),
     }
 }

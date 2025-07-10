@@ -47,11 +47,12 @@ impl ActiveClientStream {
         let grant_user_grace_period = connection_permission == UserConnectionPermission::GracePeriod;
         let username = user.username.as_str();
         let user_connection_guard = Some(active_user.add_connection(username, user.max_connections).await);
-        let cfg = &app_state.config;
+        let cfg = &app_state.app_config;
         let waker = Arc::new(Mutex::new(None));
         let waker_clone = Arc::clone(&waker);
         let grace_stop_flag = Self::stream_grace_period(&stream_details, grant_user_grace_period, user, &active_user, &active_provider, &waker_clone);
-        let custom_video = cfg.t_custom_stream_response.as_ref()
+        let custom_response = cfg.custom_stream_response.load();
+        let custom_video = custom_response.as_ref()
             .map_or((None, None), |c|
                 (
                     c.user_connections_exhausted.clone(),
@@ -59,7 +60,7 @@ impl ActiveClientStream {
                 ));
 
         let stream = stream_details.stream.take().unwrap();
-        let stream = match app_state.config.sleep_timer_mins {
+        let stream = match app_state.app_config.config.load().sleep_timer_mins {
             None => stream,
             Some(mins) => {
                 let secs = u32::try_from((u64::from(mins) * 60).min(u64::from(u32::MAX))).unwrap_or(0);

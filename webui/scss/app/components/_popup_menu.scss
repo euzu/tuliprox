@@ -1,0 +1,17 @@
+.tp__popup-menu {
+  display: flex;
+  flex-flow: column;
+  padding: var(--padding-mini);
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+  background-color: var(--popup-background-color);
+  color: var(--popup-color);
+  box-shadow: var(--popup-shadow);
+  z-index: 9999;
+
+  hr {
+    border: none;
+    height: 2px;
+    background-color: var(--border-color);
+  }
+}

@@ -1,5 +1,9 @@
 $media-size-mobile: 600px;
 
+.hidden {
+  display: none;
+}
+
 @mixin container_common($justify-content: flex-start, $padding: 12px) {
   display: flex;
   justify-content: $justify-content;

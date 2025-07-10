@@ -1,0 +1,95 @@
+.tp__preferences {
+  overflow: hidden;
+  flex: 1 1 auto;
+
+  &__content {
+    flex: 1 1 auto;
+    overflow: hidden;
+    gap: 0;
+  }
+
+  &__panels {
+    overflow: hidden;
+    flex: 1 1 auto;
+
+    .panel {
+      flex: 1 1 auto;
+      overflow: hidden;
+      .card {
+        flex: 1 1 auto;
+        overflow: hidden;
+      }
+    }
+  }
+
+  &__sidebar {
+    display: flex;
+    flex-flow: column;
+    box-sizing: border-box;
+    @media (max-width: var(--media-size-mobile)) {
+      flex-flow: row;
+    }
+    //max-width: 48px;
+    //min-width: 48px;
+    //width: 48px;
+    @media (max-width: var(--media-size-mobile)) {
+      max-width: 32px;
+      min-width: 32px;
+    }
+    gap: var(--gap-default);
+    padding: 8px 4px;
+
+
+    button.selected {
+      color: var(--icon-button-hover-color);
+      background-color: var(--icon-button-hover-background-color);
+      border: 1px solid var(--icon-button-hover-border-color);
+    }
+
+    &-menu-action {
+      display: flex;
+      flex-flow: row nowrap;
+      gap: 8px;
+      align-items: center;
+      cursor: pointer;
+      color: var(--menu-button-color);
+      background-color: var(--menu-button-background-color);
+      border: 1px solid transparent;
+      border-radius: var(--border-radius);
+      padding: 8px 16px;
+      user-select: none;
+      white-space: nowrap;
+
+      svg {
+        width: 2rem;
+      }
+
+      &_update {  fill: var(--menu-icon-color-update); }
+      &_user {  fill: var(--menu-icon-color-user); }
+      &_apiserver {  fill: var(--menu-icon-color-api_server); }
+      &_mainconfig {  fill: var(--menu-icon-color-main_config);}
+      &_status {  fill: var(--menu-icon-color-status); }
+
+
+      * {
+        pointer-events: none;
+      }
+
+      @media (max-width: var(--media-size-mobile)) {
+        label {
+          display: none;
+        }
+      }
+
+      &:hover {
+        border: 1px solid var(--icon-button-hover-border-color);
+      }
+    }
+
+    &-menu-action.selected {
+      color: var(--menu-button-hover-color);
+      background-color: var(--menu-button-hover-background-color);
+    }
+  }
+
+}

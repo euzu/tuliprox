@@ -15,8 +15,7 @@ pub const EPG_TAG_ICON: &str = "icon";
 // https://github.com/XMLTV/xmltv/blob/master/xmltv.dtd
 
 
-#[derive(Debug, Clone, Eq, PartialEq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Eq, PartialEq,Default)]
 pub enum XmlTagIcon {
     #[default]
     Undefined,

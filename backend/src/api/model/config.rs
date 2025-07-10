@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
-use shared::model::ProcessingOrder;
-use crate::model::{ApiProxyConfig, ConfigApi, InputType, LogConfig, MessagingConfig, ReverseProxyConfig, ScheduleConfig, VideoConfig, ConfigSort, WebUiConfig, ProxyConfig, IpCheckConfig, ConfigTargetOptions, TargetOutput, ConfigRename};
+use shared::model::{ApiProxyConfigDto, ConfigApiDto, ConfigRenameDto, ConfigSortDto, ConfigTargetOptions, InputType, IpCheckConfigDto, LogConfigDto, MessagingConfigDto, ProcessingOrder, ProxyConfigDto, ReverseProxyConfigDto, ScheduleConfigDto, TargetOutputDto, VideoConfigDto, WebUiConfigDto};
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct ServerInputConfig {
@@ -20,11 +19,11 @@ pub struct ServerTargetConfig {
     pub enabled: bool,
     pub name: String,
     pub options: Option<ConfigTargetOptions>,
-    pub sort: Option<ConfigSort>,
+    pub sort: Option<ConfigSortDto>,
     pub filter: String,
     #[serde(alias = "type")]
-    pub output: Vec<TargetOutput>,
-    pub rename: Option<Vec<ConfigRename>>,
+    pub output: Vec<TargetOutputDto>,
+    pub rename: Option<Vec<ConfigRenameDto>>,
     pub mapping: Option<Vec<String>>,
     pub processing_order: ProcessingOrder,
     pub watch: Option<Vec<String>>,
@@ -38,21 +37,21 @@ pub struct ServerSourceConfig {
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct ServerConfig {
-    pub api: ConfigApi,
+    pub api: ConfigApiDto,
     pub threads: u8,
     pub working_dir: String,
     pub backup_dir: Option<String>,
     pub user_config_dir: Option<String>,
-    pub schedules: Option<Vec<ScheduleConfig>>,
-    pub reverse_proxy: Option<ReverseProxyConfig>,
+    pub schedules: Option<Vec<ScheduleConfigDto>>,
+    pub reverse_proxy: Option<ReverseProxyConfigDto>,
     pub sources: Vec<ServerSourceConfig>,
-    pub messaging: Option<MessagingConfig>,
-    pub video: Option<VideoConfig>,
-    pub api_proxy: Option<ApiProxyConfig>,
-    pub log: Option<LogConfig>,
+    pub messaging: Option<MessagingConfigDto>,
+    pub video: Option<VideoConfigDto>,
+    pub api_proxy: Option<ApiProxyConfigDto>,
+    pub log: Option<LogConfigDto>,
     pub update_on_boot: bool,
-    pub web_ui: Option<WebUiConfig>,
-    pub proxy: Option<ProxyConfig>,
-    pub ipcheck: Option<IpCheckConfig>,
+    pub web_ui: Option<WebUiConfigDto>,
+    pub proxy: Option<ProxyConfigDto>,
+    pub ipcheck: Option<IpCheckConfigDto>,
 }
 

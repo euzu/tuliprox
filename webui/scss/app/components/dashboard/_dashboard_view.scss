@@ -1,0 +1,53 @@
+$dashboard-mobile-size: 1280px;
+
+.tp__dashboard {
+  display: flex;
+  flex-flow: column;
+  box-sizing: border-box;
+  flex: 1 1 auto;
+  width: 100%;
+  max-width: var(--max-view-width);
+
+  &__header {
+    display: flex;
+    flex-flow: row nowrap;
+  }
+
+  &__body {
+    display: flex;
+    flex-flow: column;
+    gap: var(--gap-larger);
+
+    &-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--gap-larger);
+
+      @media (max-width: $dashboard-mobile-size) {
+        grid-template-columns: 1fr;
+      }
+
+      .span-two {
+        grid-column: span 2;
+      }
+    }
+
+    &-stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: var(--gap-larger);
+    }
+  }
+
+  .tp__discord {
+    fill: var(--discord-color);
+  }
+
+  .tp__documentation {
+    fill: var(--documentation-color);
+
+    svg {
+      transform: scale(1.4);
+    }
+  }
+}

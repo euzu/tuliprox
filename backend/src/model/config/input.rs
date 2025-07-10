@@ -1,143 +1,37 @@
-use shared::error::{create_tuliprox_error_result, handle_tuliprox_error_result_list, info_err, TuliproxError, TuliproxErrorKind};
-use crate::model::{EpgConfig};
-use shared::utils::default_as_true;
-use shared::utils::get_trimmed_string;
-use crate::utils::request::{get_base_url_from_str, get_credentials_from_url, get_credentials_from_url_str, sanitize_sensitive_info};
-use enum_iterator::Sequence;
-use log::{debug};
-use std::collections::{HashMap, HashSet};
-use std::fmt::Display;
-use std::str::FromStr;
+use shared::utils::get_credentials_from_url_str;
+use log::debug;
+use shared::info_err;
+use shared::error::{TuliproxError, TuliproxErrorKind};
+use crate::model::{macros, EpgConfig};
+use shared::utils::{get_base_url_from_str, get_credentials_from_url};
+use std::collections::{HashMap};
+use std::path::PathBuf;
 use url::Url;
+use shared::check_input_credentials;
+use shared::model::{ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, InputFetchMethod, InputType};
 use crate::utils;
 
-macro_rules! check_input_credentials {
-    ($this:ident, $input_type:expr) => {
-     match $input_type {
-            InputType::M3u | InputType::M3uBatch => {
-                if $this.username.is_some() || $this.password.is_some() {
-                    debug!("for input type m3u: username and password are ignored");
-                }
-                if $this.username.is_none() && $this.password.is_none() {
-                    let (username, password) = get_credentials_from_url_str(&$this.url);
-                    $this.username = username;
-                    $this.password = password;
-                }
-            }
-            InputType::Xtream | InputType::XtreamBatch => {
-                if $this.username.is_none() || $this.password.is_none() {
-                    return Err(info_err!("for input type xtream: username and password are mandatory".to_string()));
-                }
-            }
-        }
-    };
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct InputAffix {
-    pub field: String,
-    pub value: String,
-}
-
-#[derive(Debug,Copy,Clone,serde::Serialize,serde::Deserialize,Sequence,PartialEq,Eq,Default)]
-pub enum InputType {
-    #[serde(rename = "m3u")]
-    #[default]
-    M3u,
-    #[serde(rename = "xtream")]
-    Xtream,
-    #[serde(rename = "m3u_batch")]
-    M3uBatch,
-    #[serde(rename = "xtream_batch")]
-    XtreamBatch,
-}
-
-impl InputType {
-    const M3U: &'static str = "m3u";
-    const XTREAM: &'static str = "xtream";
-    const M3U_BATCH: &'static str = "m3u_batch";
-    const XTREAM_BATCH: &'static str = "xtream_batch";
-}
-
-impl Display for InputType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", match self {
-            Self::M3u => Self::M3U,
-            Self::Xtream => Self::XTREAM,
-            Self::M3uBatch => Self::M3U_BATCH,
-            Self::XtreamBatch => Self::XTREAM_BATCH,
-        })
-    }
-}
-
-impl FromStr for InputType {
-    type Err = TuliproxError;
-
-    fn from_str(s: &str) -> Result<Self, TuliproxError> {
-        if s.eq(Self::M3U) {
-            Ok(Self::M3u)
-        } else if s.eq(Self::XTREAM) {
-            Ok(Self::Xtream)
-        } else if s.eq(Self::M3U_BATCH) {
-            Ok(Self::M3uBatch)
-        } else if s.eq(Self::XTREAM_BATCH) {
-            Ok(Self::XtreamBatch)
-        } else {
-            create_tuliprox_error_result!(TuliproxErrorKind::Info, "Unknown InputType: {}", s)
-        }
-    }
-}
-
-#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq, Default)]
-pub enum InputFetchMethod {
-    #[default]
-    GET,
-    POST,
-}
-
-impl InputFetchMethod {
-    const GET_METHOD: &'static str = "GET";
-    const POST_METHOD: &'static str = "POST";
-}
-
-impl Display for InputFetchMethod {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", match self {
-            Self::GET => Self::GET_METHOD,
-            Self::POST => Self::POST_METHOD,
-        })
-    }
-}
-
-impl FromStr for InputFetchMethod {
-    type Err = TuliproxError;
-
-    fn from_str(s: &str) -> Result<Self, TuliproxError> {
-        if s.eq(Self::GET_METHOD) {
-            Ok(Self::GET)
-        } else if s.eq(Self::POST_METHOD) {
-            Ok(Self::POST)
-        } else {
-            create_tuliprox_error_result!(TuliproxErrorKind::Info, "Unknown Fetch Method: {}", s)
-        }
-    }
-}
-
 #[allow(clippy::struct_excessive_bools)]
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone)]
 pub struct ConfigInputOptions {
-    #[serde(default)]
     pub xtream_skip_live: bool,
-    #[serde(default)]
     pub xtream_skip_vod: bool,
-    #[serde(default)]
     pub xtream_skip_series: bool,
-    #[serde(default = "default_as_true")]
     pub xtream_live_stream_use_prefix: bool,
-    #[serde(default)]
     pub xtream_live_stream_without_extension: bool,
+}
+
+macros::from_impl!(ConfigInputOptions);
+impl From<&ConfigInputOptionsDto> for ConfigInputOptions {
+    fn from(dto: &ConfigInputOptionsDto) -> Self {
+        Self {
+            xtream_skip_live: dto.xtream_skip_live,
+            xtream_skip_vod: dto.xtream_skip_vod,
+            xtream_skip_series: dto.xtream_skip_series,
+            xtream_live_stream_use_prefix: dto.xtream_live_stream_use_prefix,
+            xtream_live_stream_without_extension: dto.xtream_live_stream_without_extension,
+        }
+    }
 }
 
 pub struct InputUserInfo {
@@ -173,146 +67,79 @@ impl InputUserInfo {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone)]
 pub struct ConfigInputAlias {
-    #[serde(skip)]
     pub id: u16,
     pub name: String,
     pub url: String,
     pub username: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
-    #[serde(default)]
     pub priority: i16,
-    #[serde(default)]
     pub max_connections: u16,
-    #[serde(skip)]
-    pub t_base_url: String,
 }
 
-
-impl ConfigInputAlias {
-    pub fn prepare(&mut self, index: u16, input_type: &InputType) -> Result<(), TuliproxError> {
-        self.id = index;
-        self.name = self.name.trim().to_string();
-        if self.name.is_empty() {
-            return Err(info_err!("name for input is mandatory".to_string()));
+macros::from_impl!(ConfigInputAlias);
+impl From<&ConfigInputAliasDto> for ConfigInputAlias {
+    fn from(dto: &ConfigInputAliasDto) -> Self {
+        Self {
+            id: dto.id,
+            name: dto.name.to_string(),
+            url: get_base_url_from_str(&dto.url).map_or_else(|| dto.url.to_string(), |base_url| base_url),
+            username: dto.username.clone(),
+            password: dto.password.clone(),
+            priority: dto.priority,
+            max_connections: dto.max_connections,
         }
-        self.url = self.url.trim().to_string();
-        if self.url.is_empty() {
-            return Err(info_err!("url for input is mandatory".to_string()));
-        }
-        if let Some(base_url) = get_base_url_from_str(&self.url) {
-            self.t_base_url = base_url;
-        }
-        self.username = get_trimmed_string(&self.username);
-        self.password = get_trimmed_string(&self.password);
-        check_input_credentials!(self, input_type);
-
-        Ok(())
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Default)]
 pub struct ConfigInput {
-    #[serde(skip)]
     pub id: u16,
     pub name: String,
-    #[serde(default, rename = "type")]
     pub input_type: InputType,
-    #[serde(default)]
     pub headers: HashMap<String, String>,
     pub url: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub epg: Option<EpgConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persist: Option<String>,
-    #[serde(default = "default_as_true")]
     pub enabled: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub options: Option<ConfigInputOptions>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aliases: Option<Vec<ConfigInputAlias>>,
-    #[serde(default)]
     pub priority: i16,
-    #[serde(default)]
     pub max_connections: u16,
-    #[serde(default)]
     pub method: InputFetchMethod,
-    #[serde(skip)]
-    pub t_base_url: String,
 }
 
 impl ConfigInput {
-    #[allow(clippy::cast_possible_truncation)]
-    pub fn prepare(&mut self, index: u16, include_computed: bool) -> Result<u16, TuliproxError> {
-        self.id = index;
-        self.check_url()?;
-        self.prepare_batch()?;
 
-        self.name = self.name.trim().to_string();
-        if self.name.is_empty() {
-            return Err(info_err!("name for input is mandatory".to_string()));
+    pub fn prepare(&mut self) -> Result<Option<PathBuf>, TuliproxError> {
+        let batch_file_path = self.prepare_batch()?;
+        check_input_credentials!(self, self.input_type, false);
+        Ok(batch_file_path)
+    }
+
+    pub fn get_user_info(&self) -> Option<InputUserInfo> {
+        InputUserInfo::new(self.input_type, self.username.as_deref(), self.password.as_deref(), &self.url)
+    }
+
+    pub fn get_matched_config_by_url<'a>(&'a self, url: &str) -> Option<(&'a str, Option<&'a String>, Option<&'a String>)> {
+        if url.starts_with(&self.url) {
+            return Some((&self.url, self.username.as_ref(), self.password.as_ref()));
         }
 
-        self.username = get_trimmed_string(&self.username);
-        self.password = get_trimmed_string(&self.password);
-        check_input_credentials!(self, self.input_type);
-        self.persist = get_trimmed_string(&self.persist);
-        if let Some(base_url) = get_base_url_from_str(&self.url) {
-            self.t_base_url = base_url;
-        }
-
-        if let Some(epg) = self.epg.as_mut() {
-            let create_auto_url = || {
-                let (username, password) = if self.username.is_none() || self.password.is_none() {
-                    get_credentials_from_url_str(&self.url)
-                } else {
-                    (self.username.clone(), self.password.clone())
-                };
-
-                if username.is_none() || password.is_none() {
-                    Err(format!("auto_epg is enabled for input {}, but no credentials could be extracted", self.name))
-                } else if !self.t_base_url.is_empty() {
-                    let provider_epg_url = format!("{}/xmltv.php?username={}&password={}", self.t_base_url, username.unwrap_or_default(), password.unwrap_or_default());
-                     Ok(provider_epg_url)
-                } else {
-                    Err(format!("auto_epg is enabled for input {}, but url could not be parsed {}", self.name, sanitize_sensitive_info(&self.url)))
+        if let Some(aliases) = &self.aliases {
+            for alias in aliases {
+                if url.starts_with(&alias.url) {
+                    return Some((&alias.url, alias.username.as_ref(), alias.password.as_ref()));
                 }
-            };
-
-            epg.prepare(create_auto_url, include_computed)?;
-            epg.t_sources = {
-                let mut seen_urls = HashSet::new();
-                epg.t_sources
-                    .drain(..)
-                    .filter(|src| seen_urls.insert(src.url.clone()))
-                    .collect()
-            };
+            }
         }
-
-        if let Some(aliases) = self.aliases.as_mut() {
-            let input_type = &self.input_type;
-            handle_tuliprox_error_result_list!(TuliproxErrorKind::Info, aliases.iter_mut().enumerate().map(|(idx, i)| i.prepare(index+1+(idx as u16), input_type)));
-        }
-        Ok(index + self.aliases.as_ref().map_or(0, std::vec::Vec::len) as u16)
+        None
     }
 
-    fn check_url(&mut self) -> Result<(), TuliproxError> {
-        self.url = self.url.trim().to_string();
-        if self.url.is_empty() {
-            return Err(info_err!("url for input is mandatory".to_string()));
-        }
-        Ok(())
-    }
-
-    fn prepare_batch(&mut self) -> Result<(), TuliproxError> {
+    fn prepare_batch(&mut self) -> Result<Option<PathBuf>, TuliproxError> {
         if self.input_type == InputType::M3uBatch || self.input_type == InputType::XtreamBatch {
             let input_type = if self.input_type == InputType::M3uBatch {
                 InputType::M3u
@@ -321,7 +148,7 @@ impl ConfigInput {
             };
 
             match utils::csv_read_inputs(self) {
-                Ok(mut batch_aliases) => {
+                Ok((file_path, mut batch_aliases)) => {
                     if !batch_aliases.is_empty() {
                         batch_aliases.reverse();
                         if let Some(mut first) = batch_aliases.pop() {
@@ -343,32 +170,37 @@ impl ConfigInput {
                             }
                         }
                     }
+                    self.input_type = input_type;
+                    return Ok(Some(file_path));
                 }
                 Err(err) => {
                     return Err(TuliproxError::new(TuliproxErrorKind::Info, err.to_string()));
                 }
             }
-            self.input_type = input_type;
         }
-        Ok(())
+        Ok(None)
     }
+}
 
-    pub fn get_user_info(&self) -> Option<InputUserInfo> {
-        InputUserInfo::new(self.input_type, self.username.as_deref(), self.password.as_deref(), &self.url)
-    }
-
-    pub fn get_matched_config_by_url<'a>(&'a self, url: &str) -> Option<(&'a str, Option<&'a String>, Option<&'a String>)> {
-        if url.starts_with(&self.t_base_url) {
-            return Some((&self.t_base_url, self.username.as_ref(), self.password.as_ref()));
+macros::from_impl!(ConfigInput);
+impl From<&ConfigInputDto> for ConfigInput {
+    fn from(dto: &ConfigInputDto) -> Self {
+        Self {
+            id: dto.id,
+            name: dto.name.to_string(),
+            input_type: dto.input_type,
+            headers: dto.headers.clone(),
+            url: dto.url.clone(), //get_base_url_from_str(&dto.url).map_or_else(|| dto.url.to_string(), |base_url| base_url),
+            epg: dto.epg.as_ref().map(std::convert::Into::into),
+            username: dto.username.clone(),
+            password: dto.password.clone(),
+            persist: dto.persist.clone(),
+            enabled: dto.enabled,
+            options: dto.options.as_ref().map(std::convert::Into::into),
+            aliases: dto.aliases.as_ref().map(|list| list.iter().map(std::convert::Into::into).collect()),
+            priority: dto.priority,
+            max_connections: dto.max_connections,
+            method: dto.method,
         }
-
-        if let Some(aliases) = &self.aliases {
-            for alias in aliases {
-                if url.starts_with(&alias.t_base_url) {
-                    return Some((&alias.t_base_url, alias.username.as_ref(), alias.password.as_ref()));
-                }
-            }
-        }
-        None
     }
 }

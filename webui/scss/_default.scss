@@ -1,0 +1,87 @@
+@keyframes tp__pulse-bg {
+  0% {
+    background-color: var(--pulse-color-1);
+  }
+  50% {
+    background-color: var(--pulse-color-2);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+.tp__pulse {
+  animation: tp__pulse-bg 500ms ease-out;
+}
+
+.tp__error-text {
+  color: var(--attention-color);
+  font-size: 1rem;
+}
+
+::-webkit-scrollbar-track {
+  -webkit-box-shadow: inset 0 0 6px rgba(0, 0, 0, 0.3);
+  border-radius: var(--scrollbar-border-radius);
+  background-color: var(--scrollbar-track-color);
+}
+
+::-webkit-scrollbar {
+  width: var(--scrollbar-width);
+  height: var(--scrollbar-width);
+  background-color: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  border-radius: var(--scrollbar-width);
+  //-webkit-box-shadow: inset 0 0 6px rgba(0, 0, 0, .3);
+  background-color: var(--scrollbar-handle-color);
+}
+
+button {
+  cursor: pointer;
+}
+
+.tp__hidden {
+  display: none !important;
+}
+
+select {
+  padding: 2px 4px;
+}
+
+:not(input[type="text"]) {
+  caret-color: transparent;
+}
+input[type="text"] {
+  caret-color: auto;
+}
+
+option {
+  cursor: pointer;
+}
+
+.tp__delete_action {
+   color: var(--attention-color) !important;
+   fill: var(--attention-color) !important;
+}
+
+.tp__update_action {
+  color: var(--active-color) !important;
+  fill: var(--active-color) !important;
+}
+
+.svg-icon {
+  pointer-events: none;
+  width: 1rem;
+}
+
+ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  background: transparent;
+}
+
+li {
+  background: transparent;
+}

@@ -1,0 +1,49 @@
+.tp__target-options__panel {
+  display: flex;
+  flex-flow: column;
+  align-items: flex-start;
+  gap: var(--gap-default);
+  box-sizing: border-box;
+  max-width: var(--max-table-cell-width);
+  height: 100%;
+  overflow: hidden;
+}
+
+.tp__target-options {
+  display: flex;
+  flex-flow: column;
+  gap: var(--gap-default);
+
+  &__has_options {
+    .tp__collapse-panel__header {
+      font-weight: bold;
+      color: var(--active-color);
+      &:hover {
+        color: var(--menu-button-hover-color);
+      }
+    }
+  }
+
+  &__section {
+    display: flex;
+    flex-flow: column;
+    gap: var(--gap-small);
+    justify-content: center;
+    padding: var(--padding-micro) var(--padding-mini);
+
+    .tp__tag_list {
+      flex-flow: row nowrap;
+    }
+  }
+
+  &__label {
+    font-weight: bold;
+    white-space: nowrap;
+    vertical-align: middle;
+    color: var(--modest-text-color);
+
+    &:after {
+      content: ":";
+    }
+  }
+}

@@ -1,0 +1,41 @@
+.tp__collapse-panel {
+  display: flex;
+  flex-flow: column;
+  gap: 8px;
+  overflow: hidden;
+
+  &__header {
+    display: flex;
+    flex-flow: row nowrap;
+    color: var(--modest-text-color);
+    fill: var(--modest-text-color);
+    max-height: 1.2rem;
+    cursor: pointer;
+    box-sizing: border-box;
+    width: 100%;
+
+    &:hover {
+      color: var(--menu-button-hover-color);
+    }
+    &-title {
+      flex: 1 1 auto;
+    }
+    span {
+      pointer-events: none;
+    }
+    svg {
+      width: 1.2rem;
+    }
+  }
+
+  &__body {
+    max-height: 5000px;
+  //  transition: max-height 0.5s ease;
+  //  max-height: 5000px;
+  }
+  &.tp__collapsed {
+    .tp__collapse-panel__body {
+       max-height: 0;
+     }
+  }
+}

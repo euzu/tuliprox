@@ -1,0 +1,36 @@
+.tp__action-card {
+  display: flex;
+  flex-flow: row nowrap;
+  align-content: flex-start;
+  flex: 1 1 auto;
+  gap: var(--gap-default);
+  fill: var(--card-color);
+
+  &__icon {
+    fill: inherit;
+    width: 3rem;
+    transform: translateY(-0.5rem);
+
+    img {
+      width: 3rem;
+    }
+  }
+
+  &__body {
+    display: flex;
+    flex-flow: column;
+    align-content: flex-start;
+    flex: 1 1 auto;
+    gap: var(--gap-small);
+  }
+
+  &__title {
+    color: var(--text-color);
+    font-weight: bold;
+    font-size: 1.1rem;
+  }
+
+  &__content {
+
+  }
+}

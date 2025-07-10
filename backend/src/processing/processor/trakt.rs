@@ -1,10 +1,10 @@
 use std::borrow::Cow;
-use crate::model::{ConfigTarget, PlaylistGroup, PlaylistItem};
-use shared::model::{FieldGetAccessor, FieldSetAccessor, XtreamCluster};
-use crate::model::{TraktConfig, TraktContentType, TraktListConfig, TraktListItem, TraktMatchItem, TraktMatchResult};
+use crate::model::{ConfigTarget, TraktListItem, TraktMatchItem};
+use shared::model::{FieldGetAccessor, FieldSetAccessor, PlaylistGroup, PlaylistItem, TraktContentType, XtreamCluster};
+use crate::model::{TraktConfig, TraktListConfig, TraktMatchResult};
 use shared::error::TuliproxError;
 use crate::utils::{TraktClient, extract_year_from_title, normalize_title_for_matching};
-use crate::utils::{get_u32_from_serde_value};
+use shared::utils::{get_u32_from_serde_value};
 use shared::utils::{CONSTANTS};
 use crate::utils::{trace_if_enabled, with};
 use log::{debug, info, trace, warn};
@@ -22,7 +22,7 @@ fn extract_quality(value: &str) -> Option<&str> {
 
 
 /// Utility functions for content type compatibility
-fn should_include_item(item: &TraktListItem, content_type: &TraktContentType) -> bool {
+fn should_include_item(item: &TraktListItem, content_type: TraktContentType) -> bool {
     match content_type {
         TraktContentType::Vod => item.content_type == TraktContentType::Vod,
         TraktContentType::Series => item.content_type == TraktContentType::Series,
@@ -30,7 +30,7 @@ fn should_include_item(item: &TraktListItem, content_type: &TraktContentType) ->
     }
 }
 
-fn is_compatible_content_type(cluster: XtreamCluster, content_type: &TraktContentType) -> bool {
+fn is_compatible_content_type(cluster: XtreamCluster, content_type: TraktContentType) -> bool {
     match content_type {
         TraktContentType::Vod => cluster == XtreamCluster::Video,
         TraktContentType::Series => cluster == XtreamCluster::Series,
@@ -216,7 +216,7 @@ fn match_trakt_items_with_playlist<'a>(
 ) -> Option<PlaylistGroup> {
     let trakt_match_items: Vec<TraktMatchItem<'a>> = trakt_items
         .iter()
-        .filter(|item| should_include_item(item, &list_config.content_type))
+        .filter(|item| should_include_item(item, list_config.content_type))
         .filter_map(TraktMatchItem::from_trakt_list_item)
         .collect();
 
@@ -225,7 +225,7 @@ fn match_trakt_items_with_playlist<'a>(
     let mut matches = Vec::new();
     for playlist_group in playlist {
         for channel in &playlist_group.channels {
-            if is_compatible_content_type(channel.header.xtream_cluster, &list_config.content_type) {
+            if is_compatible_content_type(channel.header.xtream_cluster, list_config.content_type) {
                 let normalized_title = normalize_title_for_matching(&channel.header.title);
                 let channel_year = extract_year_from_title(&channel.header.title);
                 let channel_tmdb_id = extract_tmdb_id_from_playlist_item(channel);
@@ -314,7 +314,7 @@ mod tests {
     #[test]
     pub fn test_quality() {
         let quality = extract_quality("Hello HD UHD 720p");
-        assert_eq!(true, quality.is_some());
+        assert!(quality.is_some());
         assert_eq!("UHD", quality.unwrap());
     }
 }

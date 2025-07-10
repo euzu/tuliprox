@@ -1,13 +1,12 @@
 use shared::error::{create_tuliprox_error_result, TuliproxError, TuliproxErrorKind};
 use crate::model::ConfigInput;
-use crate::model::{PlaylistGroup, PlaylistItem, PlaylistItemHeader};
+use shared::model::{PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, XtreamCluster};
 use crate::model::{XtreamCategory, XtreamSeriesInfo, XtreamSeriesInfoEpisode, XtreamStream};
-use crate::utils::generate_playlist_uuid;
+use shared::utils::{generate_playlist_uuid, trim_last_slash};
 use crate::utils::xtream::{get_xtream_stream_url_base};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
-use shared::model::{PlaylistItemType, XtreamCluster};
 
 fn map_to_xtream_category(categories: &Value) -> Result<Vec<XtreamCategory>, TuliproxError> {
     match serde_json::from_value::<Vec<XtreamCategory>>(categories.to_owned()) {
@@ -81,6 +80,7 @@ pub fn get_xtream_url(xtream_cluster: XtreamCluster, url: &str,
                       username: &str, password: &str,
                       stream_id: u32, container_extension: Option<&String>,
                       live_stream_use_prefix: bool, live_stream_without_extension: bool) -> String {
+    let url = trim_last_slash(url);
     let stream_base_url = match xtream_cluster {
         XtreamCluster::Live => {
             let ctx_path = if live_stream_use_prefix { "live/" } else { "" };
@@ -92,7 +92,7 @@ pub fn get_xtream_url(xtream_cluster: XtreamCluster, url: &str,
             format!("{url}/movie/{username}/{password}/{stream_id}.{ext}")
         }
         XtreamCluster::Series =>
-            format!("{}&action={}&series_id={stream_id}", get_xtream_stream_url_base(url, username, password), crate::model::XC_ACTION_GET_SERIES_INFO)
+            format!("{}&action={}&series_id={stream_id}", get_xtream_stream_url_base(url.as_ref(), username, password), crate::model::XC_ACTION_GET_SERIES_INFO)
     };
     stream_base_url
 }

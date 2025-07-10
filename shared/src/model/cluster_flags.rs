@@ -5,7 +5,7 @@ use serde::de::{Error, SeqAccess, Visitor};
 use crate::model::{PlaylistItemType, XtreamCluster};
 
 bitflags! {
-    #[derive(Debug, Clone, PartialEq, Eq)]
+    #[derive(Debug, Copy, Clone, PartialEq, Eq)]
    pub struct ClusterFlags: u16 {
         const Live   = 1;      // 0b0000_0001
         const Vod    = 1 << 1; // 0b0000_0010

@@ -1,4 +1,8 @@
+use std::collections::HashSet;
 use enum_iterator::Sequence;
+use log::warn;
+use crate::create_tuliprox_error_result;
+use crate::error::{TuliproxError, TuliproxErrorKind};
 use crate::model::TargetType;
 
 fn default_friendly_name() -> String { String::from("TuliproxTV") }
@@ -57,6 +61,28 @@ pub struct HdHomeRunDeviceConfigDto {
     pub tuner_count: u8,
 }
 
+impl HdHomeRunDeviceConfigDto {
+    pub fn prepare(&mut self, device_num: u8) {
+        self.name = self.name.trim().to_string();
+        if self.name.is_empty() {
+            self.name = format!("device{device_num}");
+            warn!("Device name empty, assigned new name: {}", self.name);
+        }
+
+        if self.tuner_count == 0 {
+            self.tuner_count = 1;
+        }
+
+        if device_num > 0 && self.friendly_name == default_friendly_name() {
+            self.friendly_name = format!("{} {}", self.friendly_name, device_num);
+        }
+        if self.device_udn == default_device_udn() {
+            self.device_udn = format!("{}:{}", self.device_udn, device_num+1);
+        }
+    }
+}
+
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct HdHomeRunConfigDto {
@@ -65,4 +91,35 @@ pub struct HdHomeRunConfigDto {
     #[serde(default)]
     pub auth: bool,
     pub devices: Vec<HdHomeRunDeviceConfigDto>,
+}
+
+impl HdHomeRunConfigDto {
+    pub fn prepare(&mut self, api_port: u16)  -> Result<(), TuliproxError> {
+        let mut names = HashSet::new();
+        let mut ports = HashSet::new();
+        ports.insert(api_port);
+        for (device_num, device) in (0_u8..).zip(self.devices.iter_mut()) {
+            device.prepare(device_num);
+            if names.contains(&device.name) {
+                names.insert(&device.name);
+                return create_tuliprox_error_result!(TuliproxErrorKind::Info, "HdHomeRun duplicate device name {}", device.name);
+            }
+            if device.port > 0 && ports.contains(&device.port) {
+                ports.insert(device.port);
+                return create_tuliprox_error_result!(TuliproxErrorKind::Info, "HdHomeRun duplicate port {}", device.port);
+            }
+        }
+        let mut current_port = api_port + 1;
+        for device in &mut self.devices {
+            if device.port == 0 {
+                while ports.contains(&current_port) {
+                    current_port += 1;
+                }
+                device.port = current_port;
+                current_port += 1;
+            }
+        }
+
+        Ok(())
+    }
 }

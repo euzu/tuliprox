@@ -14,7 +14,7 @@ pub enum UserConnectionPermission {
     GracePeriod,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ProxyType {
     Reverse(Option<ClusterFlags>),
     Redirect,
@@ -201,4 +201,33 @@ pub struct ProxyUserCredentialsDto {
     pub ui_enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+}
+
+
+impl ProxyUserCredentialsDto {
+    pub fn prepare(&mut self) {
+        self.trim();
+    }
+
+    fn trim(&mut self) {
+        self.username = self.username.trim().to_string();
+        self.password = self.password.trim().to_string();
+        match &self.token {
+            None => {}
+            Some(tkn) => {
+                self.token = Some(tkn.trim().to_string());
+            }
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), TuliproxError> {
+        if self.username.is_empty() {
+            return Err(TuliproxError::new(TuliproxErrorKind::Info, "Username required".to_string()));
+        }
+        if self.password.is_empty() {
+            return Err(TuliproxError::new(TuliproxErrorKind::Info, "Password required".to_string()));
+        }
+        Ok(())
+    }
+
 }

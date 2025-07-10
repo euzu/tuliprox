@@ -1,0 +1,19 @@
+.tp__icon-button {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  fill: var(--menu-icon-color);
+  background-color: transparent;
+  border: none;
+  aspect-ratio: 1 / 1;
+  cursor: pointer;
+  box-sizing: border-box;
+  height: min-content;
+  width: min-content;
+
+  &:focus,
+  &:hover {
+    fill: var(--icon-button-hover-color);
+    outline: none;
+  }
+}
