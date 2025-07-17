@@ -35,7 +35,7 @@ fn epg_write_file(target: &ConfigTarget, epg: &Epg, path: &Path) -> Result<(), T
     Ok(())
 }
 
-pub fn epg_write(target: &ConfigTarget, cfg: &Config, target_path: &Path, epg: Option<&Epg>, output: &TargetOutput) -> Result<(), TuliproxError> {
+pub fn epg_write(cfg: &Config, target: &ConfigTarget, target_path: &Path, epg: Option<&Epg>, output: &TargetOutput) -> Result<(), TuliproxError> {
     if let Some(epg_data) = epg {
         match output {
             TargetOutput::Xtream(_) => {

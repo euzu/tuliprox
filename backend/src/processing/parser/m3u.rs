@@ -1,8 +1,7 @@
-use std::borrow::BorrowMut;
-use shared::model::{PlaylistItemType, XtreamCluster};
 use crate::model::{Config, ConfigInput};
-use crate::model::{PlaylistGroup, PlaylistItem, PlaylistItemHeader};
-use crate::utils::{extract_id_from_url};
+use shared::model::{PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, XtreamCluster};
+use shared::utils::extract_id_from_url;
+use std::borrow::BorrowMut;
 
 
 // other implementations like calculating text_distance on all titles took too much time
@@ -111,9 +110,10 @@ macro_rules! process_header_fields {
 fn process_header(input_name: &str, video_suffixes: &[&str], content: &str, url: &str) -> PlaylistItemHeader {
     let mut plih = create_empty_playlistitem_header(input_name, url);
     let mut it = content.chars();
-    let mut stack  = String::with_capacity(64);
+    let mut stack = String::with_capacity(64);
     let line_token = token_till(&mut stack, &mut it, ':', false);
     if line_token.as_deref() == Some("#EXTINF") {
+        let mut provider_id = None::<String>;
         let mut c = skip_digit(&mut it);
         loop {
             if c.is_none() {
@@ -129,17 +129,24 @@ fn process_header(input_name: &str, video_suffixes: &[&str], content: &str, url:
                 let token = token_till(&mut stack, &mut it, '=', true);
                 if let Some(t) = token {
                     let value = token_value(&mut stack, &mut it);
-                    process_header_fields!(plih, t.to_lowercase().as_str(),
-                        (id, "tvg-id"),
-                        (group, "group-title"),
-                        (name, "tvg-name"),
-                        (chno, "tvg-chno"),
-                        (parent_code, "parent-code"),
-                        (audio_track, "audio-track"),
-                        (logo, "tvg-logo"),
-                        (logo_small, "tvg-logo-small"),
-                        (time_shift, "timeshift"),
-                        (rec, "tvg-rec"); value);
+                    let token = t.to_lowercase();
+                    if token.as_str() == "xui-id" {
+                        if !value.is_empty() {
+                            provider_id = Some(value);
+                        }
+                    } else {
+                        process_header_fields!(plih, token.as_str(),
+                            (id, "tvg-id"),
+                            (group, "group-title"),
+                            (name, "tvg-name"),
+                            (chno, "tvg-chno"),
+                            (parent_code, "parent-code"),
+                            (audio_track, "audio-track"),
+                            (logo, "tvg-logo"),
+                            (logo_small, "tvg-logo-small"),
+                            (time_shift, "timeshift"),
+                            (rec, "tvg-rec"); value);
+                    }
                 }
             }
             c = it.next();
@@ -147,11 +154,16 @@ fn process_header(input_name: &str, video_suffixes: &[&str], content: &str, url:
 
         if plih.id.is_empty() {
             plih.epg_channel_id = None;
-            if let Some(chanid) = extract_id_from_url(url) {
+            if let Some(pid) = provider_id {
+                plih.id = pid;
+            } else if let Some(chanid) = extract_id_from_url(url) {
                 plih.id = chanid;
             }
         } else {
             plih.epg_channel_id = Some(plih.id.to_string());
+            if let Some(pid) = provider_id {
+                plih.id = pid;
+            }
         }
     }
 
@@ -261,7 +273,7 @@ mod test {
         let input: &str = "hello";
         let video_suffixes = Vec::new();
         let url = "http://hello.de/hello.ts";
-        let line =  r#"#EXTINF:-1 channel-id="abc-seven" tvg-id="abc-seven" tvg-logo="https://abc.nz/.images/seven.png" tvg-chno="7" group-title="Sydney" , Seven"#;
+        let line = r#"#EXTINF:-1 channel-id="abc-seven" tvg-id="abc-seven" tvg-logo="https://abc.nz/.images/seven.png" tvg-chno="7" group-title="Sydney" , Seven"#;
 
         let pli = process_header(input, &video_suffixes, line, url);
         assert_eq!(pli.title, "Seven");
@@ -276,7 +288,7 @@ mod test {
         let input: &str = "hello";
         let video_suffixes = Vec::new();
         let url = "http://hello.de/hello.ts";
-        let line =  r#"#EXTINF:-1 channel-id="abc-seven" tvg-id="abc-seven" tvg-logo="https://abc.nz/.images/seven.png" tvg-chno="7" group-title="Sydney", Seven"#;
+        let line = r#"#EXTINF:-1 channel-id="abc-seven" tvg-id="abc-seven" tvg-logo="https://abc.nz/.images/seven.png" tvg-chno="7" group-title="Sydney", Seven"#;
 
         let pli = process_header(input, &video_suffixes, line, url);
         assert_eq!(pli.title, "Seven");

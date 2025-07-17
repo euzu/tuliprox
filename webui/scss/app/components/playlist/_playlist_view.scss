@@ -1,0 +1,46 @@
+.tp__playlist-create,
+.tp__playlist-list {
+
+  &__body {
+
+    > :nth-child(even) {
+      border-left: 2px solid  var(--output-xtream-color);
+    }
+
+    > :nth-child(odd) {
+      border-left: 2px solid var(--output-hdhomerun-color);
+    }
+  }
+
+  &__source {
+    display: flex;
+    flex-flow: column;
+    border-top: 1px solid var(--border-color);
+    border-bottom: 1px solid var(--border-color);
+    border-right: 1px solid var(--border-color);
+    box-sizing: border-box;
+    border-top-right-radius: var(--border-radius);
+    border-bottom-right-radius: var(--border-radius);
+    padding: var(--padding-mini);
+    gap: var(--gap-default);
+
+    .svg-icon {
+      width: 1.2rem;
+      min-width: 1.2rem;
+      min-height: 1.2rem;
+    }
+    &-label,
+    &-inputs > .tp__collapse-panel__header > .tp__collapse-panel__header-title {
+        display: flex;
+        flex-flow: row;
+        align-items: center;
+        gap: var(--gap-default);
+        font-size: 1.2rem;
+    }
+    &-label {
+      color: var(--modest-text-color);
+      fill: var(--modest-text-color);
+
+    }
+  }
+}

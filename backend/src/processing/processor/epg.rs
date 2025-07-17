@@ -1,12 +1,12 @@
 use crate::model::{Epg, TVGuide, XmlTag, XmlTagIcon, EPG_ATTRIB_ID};
 use crate::model::{EpgConfig, EpgSmartMatchConfig};
-use crate::model::{FetchedPlaylist, PlaylistItem};
+use crate::model::{FetchedPlaylist};
 use crate::processing::parser::xmltv::normalize_channel_name;
 use log::{debug, trace};
 use rphonetic::{DoubleMetaphone, Encoder};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-use shared::model::XtreamCluster;
+use shared::model::{EpgSmartMatchConfigDto, PlaylistItem, XtreamCluster};
 
 pub struct EpgIdCache<'a> {
     pub channel_epg_id: HashSet<Cow<'a, str>>,
@@ -31,7 +31,10 @@ impl EpgIdCache<'_> {
     /// assert!(cache.is_empty());
     /// ```
     pub fn new(epg_config: Option<&EpgConfig>) -> Self {
-        let normalize_config = epg_config.map_or_else(EpgSmartMatchConfig::default, |epg_config| epg_config.t_smart_match.clone());
+        let normalize_config: EpgSmartMatchConfig = epg_config
+            .and_then(|cfg| cfg.smart_match.clone())
+            .unwrap_or_else(|| EpgSmartMatchConfigDto::default().into());
+
         EpgIdCache {
             channel_epg_id: HashSet::new(), // contains the epg_ids collected from playlist channels
             normalized: HashMap::new(),

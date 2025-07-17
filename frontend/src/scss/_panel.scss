@@ -1,0 +1,6 @@
+@use "./common";
+
+.panel {
+  @include common.container_vert_no_padding();
+  overflow: hidden;
+}

@@ -1,10 +1,11 @@
 use crate::api::model::active_provider_manager::ProviderAllocation;
-use crate::model::{ConfigInput, ConfigInputAlias, InputType, InputUserInfo};
+use crate::model::{ConfigInput, ConfigInputAlias, InputUserInfo};
 use jsonwebtoken::get_current_timestamp;
 use log::debug;
 use std::ops::Deref;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use shared::model::InputType;
 
 #[derive(Debug, Clone, Copy)]
 pub enum ProviderConfigAllocation {
@@ -13,8 +14,8 @@ pub enum ProviderConfigAllocation {
     GracePeriod,
 }
 
-#[derive(Debug, Default)]
-struct ProviderConfigConnection {
+#[derive(Debug, Default, Copy, Clone)]
+pub struct ProviderConfigConnection {
     current_connections: usize,
     granted_grace: bool,
     grace_ts: u64,
@@ -41,7 +42,10 @@ pub struct ProviderConfig {
 }
 
 impl ProviderConfig {
-    pub fn new(cfg: &ConfigInput) -> Self {
+    pub fn new<'a, F>(cfg: &ConfigInput, get_connection: Option<F>) -> Self
+    where
+        F: Fn(&str) -> Option<&'a ProviderConfigConnection>,
+    {
         Self {
             id: cfg.id,
             name: cfg.name.clone(),
@@ -51,11 +55,14 @@ impl ProviderConfig {
             input_type: cfg.input_type,
             max_connections: cfg.max_connections as usize,
             priority: cfg.priority,
-            connection: RwLock::new(ProviderConfigConnection::default()),
+            connection: RwLock::new(get_connection.and_then(|f| f(cfg.name.as_str())).map_or_else(Default::default, Clone::clone)),
         }
     }
 
-    pub fn new_alias(cfg: &ConfigInput, alias: &ConfigInputAlias) -> Self {
+    pub fn new_alias<'a, F>(cfg: &ConfigInput, alias: &ConfigInputAlias, get_connection: Option<F>) -> Self
+    where
+        F: Fn(&str) -> Option<&'a ProviderConfigConnection>,
+    {
         Self {
             id: alias.id,
             name: alias.name.clone(),
@@ -65,7 +72,7 @@ impl ProviderConfig {
             input_type: cfg.input_type,
             max_connections: alias.max_connections as usize,
             priority: alias.priority,
-            connection: RwLock::new(ProviderConfigConnection::default()),
+            connection: RwLock::new(get_connection.and_then(|f| f(alias.name.as_str())).map_or_else(Default::default, Clone::clone)),
         }
     }
 
@@ -235,6 +242,15 @@ impl ProviderConfigWrapper {
             return Some(Arc::clone(&self.inner));
         }
         None
+    }
+
+    pub async fn get_connection_info(&self) -> ProviderConfigConnection {
+        let guard = self.inner.connection.read().await;
+        ProviderConfigConnection {
+            current_connections: guard.current_connections,
+            granted_grace: guard.granted_grace,
+            grace_ts: guard.grace_ts,
+        }
     }
 }
 impl Deref for ProviderConfigWrapper {

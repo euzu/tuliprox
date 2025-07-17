@@ -1,0 +1,40 @@
+.tp__chip.tp__user-status {
+  width: 3.5rem;
+  min-width: 3.5rem;
+}
+
+.tp__chip.tp__user-status__active {
+  color: var(--tag-active-color);
+  background-color: var(--tag-active-background-color);
+  border-color:  var(--tag-active-border-color);
+}
+
+.tp__chip.tp__user-status__expired {
+  color: var(--tag-status-expired-color);
+  background-color: var(--tag-status-expired-background-color);
+  border-color: var(--tag-status-expired-border-color);
+}
+
+.tp__chip.tp__user-status__banned {
+  color: var(--tag-status-banned-color);
+  background-color: var(--tag-status-banned-background-color);
+  border-color: var(--tag-status-banned-border-color);
+}
+
+.tp__chip.tp__user-status__trial {
+  color: var(--tag-status-trial-color);
+  background-color: var(--tag-status-trial-background-color);
+  border-color:  var(--tag-status-trial-border-color);
+}
+
+.tp__chip.tp__user-status__disabled {
+  color: var(--tag-inactive-color);
+  background-color: var(--tag-inactive-background-color);
+  border-color:  var(--tag-inactive-border-color);
+}
+
+.tp__chip.tp__user-status__pending {
+  color: var(--tag-status-pending-color);
+  background-color: var(--tag-status-pending-background-color);
+  border-color: var(--tag-status-pending-border-color);
+}

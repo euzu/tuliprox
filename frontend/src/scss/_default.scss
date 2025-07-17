@@ -25,7 +25,7 @@ button {
   //}
 }
 
-.hidden {
+.tp__hidden {
   display: none !important;
 }
 
@@ -59,7 +59,6 @@ button {
 
 select,
 input {
-  background-color: transparent;
   color: var(--text-color);
   &:focus {
     background-color: var(--background-color) !important;

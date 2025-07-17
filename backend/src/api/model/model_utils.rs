@@ -29,7 +29,7 @@ pub fn get_stream_response_with_headers(custom: Option<(Vec<(String, String)>, S
 
     let default_headers = vec![
         ("content-type", "application/octet-stream"),
-        ("connection", "keep-alive"),
+        //("connection", "keep-alive"),
     ];
 
     for (key, value) in default_headers {

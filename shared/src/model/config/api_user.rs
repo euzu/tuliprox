@@ -14,7 +14,7 @@ pub enum UserConnectionPermission {
     GracePeriod,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ProxyType {
     Reverse(Option<ClusterFlags>),
     Redirect,
@@ -176,7 +176,7 @@ impl FromStr for ProxyUserStatus {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ProxyUserCredentialsDto {
     pub username: String,
@@ -202,3 +202,51 @@ pub struct ProxyUserCredentialsDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
 }
+
+
+impl ProxyUserCredentialsDto {
+    pub fn prepare(&mut self) {
+        self.trim();
+    }
+
+    fn trim(&mut self) {
+        self.username = self.username.trim().to_string();
+        self.password = self.password.trim().to_string();
+        match &self.token {
+            None => {}
+            Some(tkn) => {
+                self.token = Some(tkn.trim().to_string());
+            }
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), TuliproxError> {
+        if self.username.is_empty() {
+            return Err(TuliproxError::new(TuliproxErrorKind::Info, "Username required".to_string()));
+        }
+        if self.password.is_empty() {
+            return Err(TuliproxError::new(TuliproxErrorKind::Info, "Password required".to_string()));
+        }
+        Ok(())
+    }
+
+    pub fn is_active(&self) -> bool {
+        if let Some(status) = &self.status {
+            if matches!(status, ProxyUserStatus::Expired
+            | ProxyUserStatus::Banned
+            | ProxyUserStatus::Disabled
+            | ProxyUserStatus::Pending) {
+                return false;
+            }
+        }
+        if let Some(exp_date) = self.exp_date {
+            let now =  chrono::Local::now();
+            if (exp_date - now.timestamp()) < 0 {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+

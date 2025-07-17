@@ -1,24 +1,28 @@
 use crate::api::api_utils::serve_file;
 use crate::api::model::app_state::AppState;
-use crate::auth::{AuthBearer, UserCredential, verify_password, create_jwt_admin, create_jwt_user, is_admin, verify_token};
+use crate::auth::{AuthBearer, verify_password, create_jwt_admin, create_jwt_user, is_admin, verify_token};
 use axum::response::IntoResponse;
 use log::error;
 use serde_json::json;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc};
 use tower::Service;
+use shared::model::{TokenResponse, UserCredential};
 use shared::utils::CONSTANTS;
 
 fn no_web_auth_token() -> impl axum::response::IntoResponse + Send {
-    axum::Json(HashMap::from([("token", "authorized")])).into_response()
+    axum::Json(TokenResponse {
+        token: "authorized".to_string(),
+        username: "admin".to_string(),
+    }).into_response()
 }
 
 async fn token(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     axum::extract::Json(mut req): axum::extract::Json<UserCredential>,
 ) -> impl axum::response::IntoResponse + Send {
-    match &app_state.config.web_ui.as_ref().and_then(|c| c.auth.as_ref()) {
+    let config = &app_state.app_config.config.load();
+    match config.web_ui.as_ref().and_then(|c| c.auth.as_ref()) {
         None => no_web_auth_token().into_response(),
         Some(web_auth) => {
             if !web_auth.enabled {
@@ -32,15 +36,23 @@ async fn token(
                     if verify_password(hash, password.as_bytes()) {
                         if let Ok(token) = create_jwt_admin(web_auth, username) {
                             req.zeroize();
-                            return axum::Json(HashMap::from([("token", token)])).into_response();
+                            return axum::Json(
+                                TokenResponse {
+                                    token,
+                                    username: req.username.to_string(),
+                                }).into_response();
                         }
                     }
                 }
-                if let Some(credentials) = app_state.config.get_user_credentials(username) {
+                if let Some(credentials) = app_state.app_config.get_user_credentials(username) {
                     if credentials.password == password {
                         if let Ok(token) = create_jwt_user(web_auth, username) {
                             req.zeroize();
-                            return axum::Json(HashMap::from([("token", token)])).into_response();
+                            return axum::Json(
+                                TokenResponse {
+                                    token,
+                                    username: req.username.to_string(),
+                                }).into_response();
                         }
                     }
                 }
@@ -56,7 +68,8 @@ async fn token_refresh(
     AuthBearer(token): AuthBearer,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
 ) -> impl axum::response::IntoResponse + Send {
-    match &app_state.config.web_ui.as_ref().and_then(|c| c.auth.as_ref()) {
+    let config = &app_state.app_config.config.load();
+    match &config.web_ui.as_ref().and_then(|c| c.auth.as_ref()) {
         None => no_web_auth_token().into_response(),
         Some(web_auth) => {
             if !web_auth.enabled {
@@ -72,7 +85,11 @@ async fn token_refresh(
                     create_jwt_user(web_auth, &username)
                 };
                 if let Ok(token) = new_token {
-                    return axum::Json(HashMap::from([("token", token)])).into_response();
+                    return axum::Json(
+                        TokenResponse {
+                            token,
+                            username: username.to_string(),
+                        }).into_response();
                 }
             }
             axum::http::StatusCode::BAD_REQUEST.into_response()
@@ -83,8 +100,9 @@ async fn token_refresh(
 async fn index(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
 ) -> impl axum::response::IntoResponse + Send {
-    let path: PathBuf = [&app_state.config.api.web_root, "index.html"].iter().collect();
-    if let Some(web_ui_path) = &app_state.config.web_ui.as_ref().and_then(|c| c.path.as_ref()) {
+    let config = &app_state.app_config.config.load();
+    let path: PathBuf = [&config.api.web_root, "index.html"].iter().collect();
+    if let Some(web_ui_path) = &config.web_ui.as_ref().and_then(|c| c.path.as_ref()) {
         match tokio::fs::read_to_string(&path).await {
             Ok(content) => {
                 let mut new_content = CONSTANTS.re_base_href.replace_all(&content, |caps: &regex::Captures| {
@@ -112,8 +130,9 @@ async fn index(
 async fn index_config(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
 ) -> impl axum::response::IntoResponse + Send {
-    let path: PathBuf = [&app_state.config.api.web_root, "config.json"].iter().collect();
-    if let Some(web_ui_path) = &app_state.config.web_ui.as_ref().and_then(|c| c.path.as_ref()) {
+    let config = &app_state.app_config.config.load();
+    let path: PathBuf = [&config.api.web_root, "config.json"].iter().collect();
+    if let Some(web_ui_path) = &config.web_ui.as_ref().and_then(|c| c.path.as_ref()) {
         match tokio::fs::read_to_string(&path).await {
             Ok(content) => {
                 if let Ok(mut json_data) = serde_json::from_str::<serde_json::Value>(&content) {

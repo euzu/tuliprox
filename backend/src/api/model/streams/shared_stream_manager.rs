@@ -2,7 +2,6 @@ use crate::api::model::app_state::AppState;
 use crate::api::model::stream_error::StreamError;
 use crate::api::model::streams::provider_stream_factory::STREAM_QUEUE_SIZE;
 use crate::utils::debug_if_enabled;
-use crate::utils::request::sanitize_sensitive_info;
 use bytes::Bytes;
 use futures::stream::{BoxStream, FuturesUnordered};
 use futures::{Stream, StreamExt};
@@ -20,6 +19,7 @@ use std::task::{Context, Poll};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+use shared::utils::sanitize_sensitive_info;
 
 ///
 /// Wraps a `ReceiverStream` as Stream<Item = Result<Bytes, `StreamError`>>

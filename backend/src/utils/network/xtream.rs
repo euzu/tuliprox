@@ -1,13 +1,10 @@
-use crate::model::ProxyUserCredentials;
+use crate::model::{AppConfig, ProxyUserCredentials};
 use crate::model::{Config, ConfigInput, ConfigTarget};
-use crate::model::{PlaylistGroup, XtreamPlaylistItem};
 use crate::processing::parser::xtream;
 use crate::repository::xtream_repository;
 use crate::repository::xtream_repository::{rewrite_xtream_series_info_content, rewrite_xtream_vod_info_content, xtream_get_input_info};
 use shared::error::{str_to_io_error, TuliproxError};
-use crate::utils;
-use crate::utils::{get_string_from_serde_value, request};
-use crate::utils::request::extract_extension_from_url;
+use crate::utils::{request};
 use chrono::{DateTime};
 use log::{info, warn};
 use std::cmp::Ordering;
@@ -15,7 +12,8 @@ use std::io::Error;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use shared::model::{MsgKind, PlaylistEntry, ProxyUserStatus, XtreamCluster};
+use shared::model::{MsgKind, PlaylistEntry, PlaylistGroup, ProxyUserStatus, XtreamCluster, XtreamPlaylistItem};
+use shared::utils::{extract_extension_from_url, get_i64_from_serde_value, get_string_from_serde_value};
 use crate::messaging::{send_message};
 
 #[inline]
@@ -56,7 +54,7 @@ pub async fn get_xtream_stream_info_content(client: Arc<reqwest::Client>, info_u
 
 #[allow(clippy::too_many_arguments)]
 pub async fn get_xtream_stream_info<P>(client: Arc<reqwest::Client>,
-                                       config: &Config,
+                                       app_config: &AppConfig,
                                        user: &ProxyUserCredentials,
                                        input: &ConfigInput,
                                        target: &ConfigTarget,
@@ -69,29 +67,29 @@ where
     let xtream_output = target.get_xtream_output().ok_or_else(|| Error::other("Unexpected error, missing xtream output"))?;
 
     if cluster == XtreamCluster::Series {
-        if let Some(content) = xtream_repository::xtream_load_series_info(config, target.name.as_str(), pli.get_virtual_id()) {
+        if let Some(content) = xtream_repository::xtream_load_series_info(app_config, target.name.as_str(), pli.get_virtual_id()) {
             // Deliver existing target content
-            return rewrite_xtream_series_info_content(config, target, xtream_output, pli, user, &content).await;
+            return rewrite_xtream_series_info_content(app_config, target, xtream_output, pli, user, &content).await;
         }
 
         // Check if the content has been resolved
         if xtream_output.resolve_series {
             if let Some(provider_id) = pli.get_provider_id() {
-                if let Some(content) = xtream_get_input_info(config, input, provider_id, XtreamCluster::Series) {
-                    return xtream_repository::write_and_get_xtream_series_info(config, target, xtream_output, pli, user, &content).await;
+                if let Some(content) = xtream_get_input_info(app_config, input, provider_id, XtreamCluster::Series) {
+                    return xtream_repository::write_and_get_xtream_series_info(app_config, target, xtream_output, pli, user, &content).await;
                 }
             }
         }
     } else if cluster == XtreamCluster::Video {
-        if let Some(content) = xtream_repository::xtream_load_vod_info(config, target.name.as_str(), pli.get_virtual_id()) {
+        if let Some(content) = xtream_repository::xtream_load_vod_info(app_config, target.name.as_str(), pli.get_virtual_id()) {
             // Deliver existing target content
-            return rewrite_xtream_vod_info_content(config, target, xtream_output, pli, user, &content);
+            return rewrite_xtream_vod_info_content(app_config, target, xtream_output, pli, user, &content);
         }
         // Check if the content has been resolved
         if xtream_output.resolve_vod {
             if let Some(provider_id) = pli.get_provider_id() {
-                if let Some(content) = xtream_get_input_info(config, input, provider_id, XtreamCluster::Video) {
-                    return xtream_repository::write_and_get_xtream_vod_info(config, target, xtream_output, pli, user, &content).await;
+                if let Some(content) = xtream_get_input_info(app_config, input, provider_id, XtreamCluster::Video) {
+                    return xtream_repository::write_and_get_xtream_vod_info(app_config, target, xtream_output, pli, user, &content).await;
                 }
             }
         }
@@ -100,8 +98,8 @@ where
     if let Ok(content) = get_xtream_stream_info_content(client, info_url, input).await {
         return match cluster {
             XtreamCluster::Live => Ok(content),
-            XtreamCluster::Video => xtream_repository::write_and_get_xtream_vod_info(config, target, xtream_output, pli, user, &content).await,
-            XtreamCluster::Series => xtream_repository::write_and_get_xtream_series_info(config, target, xtream_output, pli, user, &content).await,
+            XtreamCluster::Video => xtream_repository::write_and_get_xtream_vod_info(app_config, target, xtream_output, pli, user, &content).await,
+            XtreamCluster::Series => xtream_repository::write_and_get_xtream_series_info(app_config, target, xtream_output, pli, user, &content).await,
         };
     }
 
@@ -150,7 +148,7 @@ async fn xtream_login(cfg: &Config, client: &Arc<reqwest::Client>, input: &Confi
         None => {}
         Some(value) => {
             if let Some(status_value) = value.get("status") {
-                if let Some(status) = utils::get_string_from_serde_value(status_value) {
+                if let Some(status) = get_string_from_serde_value(status_value) {
                     if let Ok(cur_status) = ProxyUserStatus::from_str(&status) {
                         if !matches!(cur_status,  ProxyUserStatus::Active | ProxyUserStatus::Trial) {
                             warn!("User status for user {username} is {cur_status:?}");
@@ -160,7 +158,7 @@ async fn xtream_login(cfg: &Config, client: &Arc<reqwest::Client>, input: &Confi
                 }
             }
             if let Some(status_value) = value.get("exp_date") {
-                if let Some(expiration_timestamp) = utils::get_i64_from_serde_value(status_value) {
+                if let Some(expiration_timestamp) = get_i64_from_serde_value(status_value) {
                     if expiration_timestamp > 0 {
                         #[allow(clippy::cast_sign_loss)]
                         let expiration_ts = expiration_timestamp as u64;

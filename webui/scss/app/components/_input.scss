@@ -1,0 +1,54 @@
+.tp__input {
+  display: flex;
+  flex-flow: column;
+  overflow: hidden;
+  box-sizing: border-box;
+  gap: 6px;
+  .tp__input-wrapper {
+    overflow: hidden;
+    box-sizing: border-box;
+    border: 1px solid var(--input-border-color);
+    border-radius: var(--border-radius);
+    background-color: var(--input-background-color);
+    &:focus-within {
+      border-color: var(--input-focus-border-color);
+    }
+  }
+  label {
+    padding-left: 2px;
+    color: var(--text-color);
+  }
+}
+
+input {
+  background-clip: content-box;
+  box-sizing: border-box;
+  width: 100%;
+  font-family: inherit;
+  font-size: 1.1rem;
+  line-height: 1.5rem;
+  border: none;
+  color: var(--text-color);
+  background-color: var(--input-background-color);
+  padding: 6px 12px;
+  flex: 1 1 auto;
+  caret-color: var(--text-color) !important;
+
+  &:focus,
+  &:hover {
+    outline: none;
+    background-color: var(--input-background-color);
+  }
+}
+
+input:-webkit-autofill,
+input:-internal-autofill-selected {
+  //appearance: menulist-button;
+  -webkit-box-shadow: 0 0 0 1000px  var(--input-autofill-background-color) inset;
+  -webkit-text-fill-color: var(--text-color) !important;
+  color: var(--text-color) !important;
+  background-color: var(--input-autofill-background-color) !important;
+  background-image: none !important;
+  caret-color: var(--text-color) !important;
+  border: none !important;
+}

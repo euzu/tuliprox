@@ -1,9 +1,8 @@
 use shared::error::info_err;
 use shared::error::{TuliproxError, TuliproxErrorKind};
-use crate::model::{ProxyUserCredentials};
-use crate::model::{Config, ConfigTarget, ConfigTargetOptions};
-use crate::model::{M3uPlaylistItem};
-use shared::model::{PlaylistItemType, ProxyType, TargetType, XtreamCluster};
+use crate::model::{AppConfig, ProxyUserCredentials};
+use crate::model::{ConfigTarget};
+use shared::model::{ConfigTargetOptions, M3uPlaylistItem, PlaylistItemType, ProxyType, TargetType, XtreamCluster};
 use crate::repository::indexed_document::IndexedDocumentIterator;
 use crate::repository::m3u_repository::m3u_get_file_paths;
 use crate::repository::storage::ensure_target_storage_path;
@@ -30,12 +29,13 @@ pub struct M3uPlaylistIterator {
 
 impl M3uPlaylistIterator {
     pub async fn new(
-        cfg: &Config,
+        cfg: &AppConfig,
         target: &ConfigTarget,
         user: &ProxyUserCredentials,
     ) -> Result<Self, TuliproxError> {
         let m3u_output = target.get_m3u_output().ok_or_else(|| info_err!(format!("Unexpected failure, missing m3u target output for target {}",  target.name)))?;
-        let target_path = ensure_target_storage_path(cfg, target.name.as_str())?;
+        let config = cfg.config.load();
+        let target_path = ensure_target_storage_path(&config, target.name.as_str())?;
         let (m3u_path, idx_path) = m3u_get_file_paths(&target_path);
 
         let file_lock = cfg.file_locks.read_lock(&m3u_path).await;
@@ -44,7 +44,7 @@ impl M3uPlaylistIterator {
             IndexedDocumentIterator::<u32, M3uPlaylistItem>::new(&m3u_path, &idx_path)
                 .map_err(|err| info_err!(format!("Could not deserialize file {m3u_path:?} - {err}")))?;
 
-        let filter = user_get_bouquet_filter(cfg, &user.username, None, TargetType::M3u, XtreamCluster::Live).await;
+        let filter = user_get_bouquet_filter(&config, &user.username, None, TargetType::M3u, XtreamCluster::Live).await;
 
         let server_info = cfg.get_user_server_info(user);
         Ok(Self {
@@ -56,7 +56,7 @@ impl M3uPlaylistIterator {
             include_type_in_url: m3u_output.include_type_in_url,
             mask_redirect_url: m3u_output.mask_redirect_url,
             filter,
-            proxy_type: user.proxy.clone(),
+            proxy_type: user.proxy,
             _file_lock: file_lock, // Save lock inside struct
             rewrite_resource: cfg.is_reverse_proxy_resource_rewrite_enabled(),
             lookup_item: None,
@@ -152,7 +152,7 @@ pub struct M3uPlaylistM3uTextIterator {
 
 impl M3uPlaylistM3uTextIterator {
     pub async fn new(
-        cfg: &Config,
+        cfg: &AppConfig,
         target: &ConfigTarget,
         user: &ProxyUserCredentials,
     ) -> Result<Self, TuliproxError> {

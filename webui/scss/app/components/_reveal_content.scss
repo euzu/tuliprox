@@ -1,0 +1,27 @@
+.tp__reveal-content {
+  display: flex;
+  justify-content: flex-start;
+  align-items: center;
+  gap: var(--gap-default);
+  cursor: pointer;
+  fill: var(--modest-text-color);
+
+  &:hover {
+    fill: var(--text-color);
+  }
+  .svg-icon {
+    width: 1.2rem;
+    height: 1.2rem;
+    min-height: 1.2rem;
+    min-width: 1.2rem;
+  }
+
+  &__preview {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    max-height: 2rem;
+    max-width: var(--max-table-cell-width);
+  }
+
+}

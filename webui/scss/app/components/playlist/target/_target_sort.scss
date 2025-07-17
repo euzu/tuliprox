@@ -1,0 +1,65 @@
+.tp__target-sort {
+  display: flex;
+  justify-content: center;
+  flex-flow: column;
+  gap: var(--gap-small);
+  box-sizing: border-box;
+
+  h2 {
+    margin-top: 0;
+  }
+
+  &__card {
+    background-color: var(--table-card-background-color);
+    max-height: var(--max-dialog-card-height);
+    overflow: auto;
+  }
+
+  &__new-field {
+
+    &:before {
+      content: '-';
+      display: inline-block;
+      margin-left: -0.6rem;
+    }
+
+    &:not(:first-child) {
+       padding-top: var(--padding-default);
+    }
+  }
+
+  &__sequence {
+    max-height: 300px;
+    overflow: auto;
+  }
+  
+  &__section {
+    display: flex;
+    flex-flow: column;
+    gap: var(--gap-small);
+    padding: var(--padding-micro) var(--padding-mini);
+
+    .tp__tag_list {
+      flex-flow: row nowrap;
+    }
+
+    li {
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+  }
+  &__row {
+    flex-flow: row;
+  }
+  &__label {
+    font-weight: bold;
+    white-space: nowrap;
+    vertical-align: middle;
+    color: var(--modest-text-color);
+
+    &:after {
+      content: ":";
+    }
+  }
+}

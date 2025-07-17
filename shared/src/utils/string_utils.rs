@@ -1,4 +1,4 @@
-use rand::Rng;
+use std::borrow::Cow;
 
 pub trait Capitalize {
     fn capitalize(&self) -> String;
@@ -30,16 +30,29 @@ pub fn get_trimmed_string(value: &Option<String>) -> Option<String> {
 
 pub fn generate_random_string(length: usize) -> String {
     let charset = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    let mut rng = rand::rng();
-
+    let range = ..charset.len();
     let random_string: String = (0..length)
         .map(|_| {
-            let idx = rng.random_range(0..charset.len());
+            let idx = fastrand::usize(range);
             charset[idx] as char
         })
         .collect();
 
     random_string
+}
+
+// compare 2 small vecs without HashSet
+pub fn small_vecs_equal_unordered<T: PartialEq>(a: &[T], b: &[T]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+
+    for item in a {
+        if !b.iter().any(|x| x == item) {
+            return false;
+        }
+    }
+    true
 }
 
 pub fn get_non_empty_str<'a>(first: &'a str, second: &'a str, third: &'a str) -> &'a str {
@@ -52,9 +65,39 @@ pub fn get_non_empty_str<'a>(first: &'a str, second: &'a str, third: &'a str) ->
     }
 }
 
+pub fn trim_slash(s: &str) -> Cow<str> {
+    let trimmed = s.trim_matches('/');
+    if trimmed.len() == s.len() {
+        Cow::Borrowed(s) // Keine Änderung → kein Clone
+    } else {
+        Cow::Owned(trimmed.to_string()) // Änderung → neue String
+    }
+}
+
+pub fn trim_last_slash(s: &str) -> Cow<str> {
+    if s.ends_with('/') {
+        if let Some(stripped) = s.strip_suffix('/') {
+          return  Cow::Owned(stripped.to_string())
+        }
+    }
+    Cow::Borrowed(s)
+}
+
+pub trait Substring {
+    fn substring(&self, from: usize, to: usize) -> String;
+}
+
+impl Substring for String {
+    fn substring(&self, from: usize, to: usize) -> String {
+        self.chars().skip(from).take(to - from).collect()
+    }
+}
+
+
 #[cfg(test)]
 mod test {
     use std::collections::HashSet;
+    use crate::utils::Capitalize;
     use super::generate_random_string;
 
     #[test]

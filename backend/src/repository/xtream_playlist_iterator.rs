@@ -1,11 +1,11 @@
 use std::collections::HashSet;
 use log::error;
-use shared::model::{TargetType, XtreamCluster};
+use serde_json::Value;
+use shared::model::{TargetType, XtreamCluster, XtreamPlaylistItem};
 use shared::error::info_err;
 use shared::error::{TuliproxError, TuliproxErrorKind};
-use crate::model::{ProxyUserCredentials};
-use crate::model::{Config, ConfigTarget};
-use crate::model::{XtreamPlaylistItem};
+use crate::model::{xtream_playlistitem_to_document, AppConfig, ProxyUserCredentials};
+use crate::model::{ConfigTarget};
 use crate::model::XtreamMappingOptions;
 use crate::repository::indexed_document::{IndexedDocumentIterator};
 use crate::repository::user_repository::user_get_bouquet_filter;
@@ -25,26 +25,27 @@ pub struct XtreamPlaylistIterator {
 impl XtreamPlaylistIterator {
     pub async fn new(
         cluster: XtreamCluster,
-        config: &Config,
+        app_config: &AppConfig,
         target: &ConfigTarget,
         category_id: Option<u32>,
         user: &ProxyUserCredentials,
     ) -> Result<Self, TuliproxError> {
         let xtream_output = target.get_xtream_output().ok_or_else(|| info_err!(format!("Unexpected: xtream output required for target {}", target.name)))?;
-        if let Some(storage_path) = xtream_get_storage_path(config, target.name.as_str()) {
+        let config = app_config.config.load();
+        if let Some(storage_path) = xtream_get_storage_path(&config, target.name.as_str()) {
             let (xtream_path, idx_path) = xtream_get_file_paths(&storage_path, cluster);
             if !xtream_path.exists() || !idx_path.exists() {
                 return Err(info_err!(format!("No {cluster} entries found for target {}", &target.name)));
             }
-            let file_lock = config.file_locks.read_lock(&xtream_path).await;
+            let file_lock = app_config.file_locks.read_lock(&xtream_path).await;
 
             let reader = IndexedDocumentIterator::<u32, XtreamPlaylistItem>::new(&xtream_path, &idx_path)
                 .map_err(|err| info_err!(format!("Could not deserialize file {xtream_path:?} - {err}")))?;
 
-            let options = XtreamMappingOptions::from_target_options(target, xtream_output, config);
-            let server_info = config.get_user_server_info(user);
+            let options = XtreamMappingOptions::from_target_options(target, xtream_output, app_config);
+            let server_info = app_config.get_user_server_info(user);
 
-            let filter = user_get_bouquet_filter(config, &user.username, category_id, TargetType::Xtream, cluster).await;
+            let filter = user_get_bouquet_filter(&config, &user.username, category_id, TargetType::Xtream, cluster).await;
 
             Ok(Self {
                 reader,
@@ -103,7 +104,7 @@ pub struct XtreamPlaylistJsonIterator {
 impl XtreamPlaylistJsonIterator {
 pub async fn new(
     cluster: XtreamCluster,
-    config: &Config,
+    config: &AppConfig,
     target: &ConfigTarget,
     category_id: Option<u32>,
     user: &ProxyUserCredentials,
@@ -114,10 +115,15 @@ pub async fn new(
     }
 }
 
+pub fn to_doc(pli: &XtreamPlaylistItem, url: &str, options: &XtreamMappingOptions, user: &ProxyUserCredentials) -> Value {
+    xtream_playlistitem_to_document(pli, url, options, user)
+}
+
+
 impl Iterator for XtreamPlaylistJsonIterator {
     type Item = (String, bool);
     fn next(&mut self) -> Option<Self::Item> {
-        self.inner.get_next().map(|(pli, has_next)| (pli.to_doc(&self.inner.base_url, &self.inner.options, &self.inner.user).to_string(), has_next))
+        self.inner.get_next().map(|(pli, has_next)| (to_doc(&pli, &self.inner.base_url, &self.inner.options, &self.inner.user).to_string(), has_next))
     }
 }
 

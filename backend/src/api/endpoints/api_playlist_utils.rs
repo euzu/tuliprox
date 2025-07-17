@@ -1,6 +1,5 @@
-use crate::model::{Config, ConfigInput, ConfigTarget, InputType};
-use crate::model::{M3uPlaylistItem, PlaylistGroup};
-use shared::model::{PlaylistItemType, TargetType, XtreamCluster};
+use crate::model::{AppConfig, Config, ConfigInput, ConfigTarget};
+use shared::model::{InputType, M3uPlaylistItem, PlaylistGroup, PlaylistItemType, TargetType, XtreamCluster};
 use crate::repository::{m3u_repository, xtream_repository};
 use crate::utils::{m3u, xtream};
 use axum::response::IntoResponse;
@@ -125,7 +124,7 @@ fn group_playlist_groups_by_cluster(playlist: Vec<PlaylistGroup>, input_type: In
 
 
 async fn grouped_channels(
-    cfg: &Arc<Config>,
+    cfg: &AppConfig,
     target: &ConfigTarget,
     cluster: XtreamCluster,
 ) -> Option<Vec<PlaylistResponseGroup>> {
@@ -137,7 +136,7 @@ async fn grouped_channels(
         ))
 }
 
-pub(in crate::api::endpoints) async fn get_playlist_for_target(cfg_target: Option<&ConfigTarget>, cfg: &Arc<Config>) -> impl axum::response::IntoResponse + Send {
+pub(in crate::api::endpoints) async fn get_playlist_for_target(cfg_target: Option<&ConfigTarget>, cfg: &AppConfig) -> impl axum::response::IntoResponse + Send {
     if let Some(target) = cfg_target {
         if target.has_output(&TargetType::Xtream) {
             let live_channels = grouped_channels(cfg, target, XtreamCluster::Live).await;

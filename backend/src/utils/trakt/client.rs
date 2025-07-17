@@ -4,6 +4,7 @@ use reqwest::header::{HeaderMap, HeaderValue};
 use std::sync::Arc;
 use log::{debug, info};
 use shared::error::{info_err, TuliproxErrorKind};
+use shared::utils::trim_last_slash;
 use super::errors::{handle_trakt_api_error};
 
 pub struct TraktClient {
@@ -34,7 +35,7 @@ impl TraktClient {
     }
 
     fn build_list_url(&self, user: &str, list_slug: &str) -> String {
-        format!("{}/users/{user}/lists/{list_slug}/items", self.api_config.url)
+        format!("{}/users/{user}/lists/{list_slug}/items", trim_last_slash(&self.api_config.url))
     }
 
     pub async fn get_list_items(&self, list_config: &TraktListConfig) -> Result<Vec<TraktListItem>, TuliproxError> {

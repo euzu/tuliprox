@@ -1,9 +1,26 @@
+use shared::model::ScheduleConfigDto;
+use crate::model::macros;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone)]
 pub struct ScheduleConfig {
-    #[serde(default)]
     pub schedule: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub targets: Option<Vec<String>>,
+}
+
+macros::from_impl!(ScheduleConfig);
+impl From<&ScheduleConfigDto> for ScheduleConfig {
+    fn from(dto: &ScheduleConfigDto) -> Self {
+        Self {
+            schedule: dto.schedule.to_string(),
+            targets: dto.targets.clone(),
+        }
+    }
+}
+impl From<&ScheduleConfig> for ScheduleConfigDto {
+    fn from(dto: &ScheduleConfig) -> Self {
+        Self {
+            schedule: dto.schedule.to_string(),
+            targets: dto.targets.clone(),
+        }
+    }
 }

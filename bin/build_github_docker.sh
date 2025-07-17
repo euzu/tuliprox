@@ -6,6 +6,7 @@ WORKING_DIR=$(pwd)
 BIN_DIR="${WORKING_DIR}/bin"
 RESOURCES_DIR="${WORKING_DIR}/resources"
 DOCKER_DIR="${WORKING_DIR}/docker"
+BACKEND_DIR="${WORKING_DIR}/backend"
 FRONTEND_DIR="${WORKING_DIR}/frontend"
 declare -A ARCHITECTURES=(
     [LINUX]=x86_64-unknown-linux-musl
@@ -30,7 +31,10 @@ if [ ! -d "$FRONTEND_DIR/build" ]; then
     exit 1
 fi
 
-VERSION=$(grep -Po '^version\s*=\s*"\K[0-9\.]+' Cargo.toml)
+cd "$WORKING_DIR"
+
+
+VERSION=$(grep -Po '^version\s*=\s*"\K[0-9\.]+' "${BACKEND_DIR}/Cargo.toml")
 if [ -z "${VERSION}" ]; then
     echo "🧨 Error: Failed to determine the version."
     exit 1
@@ -78,6 +82,8 @@ for PLATFORM in "${!ARCHITECTURES[@]}"; do
       BUILT_IMAGES+=("ghcr.io/euzu/${IMAGE_NAME}:latest")
   done
 done
+
+cd "$WORKING_DIR"
 
 echo "🔑 Logging into GitHub Container Registry..."
 docker login ghcr.io -u euzu -p "${GHCR_IO_TOKEN}"

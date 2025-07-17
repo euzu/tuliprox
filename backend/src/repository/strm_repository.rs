@@ -1,17 +1,14 @@
 use shared::error::{create_tuliprox_error_result, info_err};
 use shared::error::{TuliproxError, TuliproxErrorKind};
-use crate::model::{ApiProxyServerInfo, ProxyUserCredentials};
-use crate::model::{Config, ConfigTarget, StrmTargetOutput};
-use crate::model::{PlaylistGroup, PlaylistItem};
+use crate::model::{ApiProxyServerInfo, AppConfig, ProxyUserCredentials};
+use crate::model::{ConfigTarget, StrmTargetOutput};
 use crate::model::XtreamSeriesEpisode;
 use crate::repository::bplustree::BPlusTree;
 use crate::repository::storage::{ensure_target_storage_path, get_input_storage_path};
 use crate::repository::storage_const;
 use crate::repository::xtream_repository::{xtream_get_record_file_path, InputVodInfoRecord};
-use crate::utils::{hash_bytes};
-use shared::utils::{ExportStyleConfig, CONSTANTS};
+use shared::utils::{extract_extension_from_url, hash_bytes, ExportStyleConfig, CONSTANTS};
 use crate::utils::FileReadGuard;
-use crate::utils::request::extract_extension_from_url;
 use chrono::Datelike;
 use filetime::{set_file_times, FileTime};
 use log::{error, trace};
@@ -22,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs::{create_dir_all, remove_dir, remove_file, File};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
-use shared::model::{ClusterFlags, FieldGetAccessor, PlaylistItemType, StrmExportStyle, UUIDType};
+use shared::model::{ClusterFlags, FieldGetAccessor, PlaylistGroup, PlaylistItem, PlaylistItemType, StrmExportStyle, UUIDType};
 use crate::utils;
 
 /// Sanitizes a string to be safe for use as a file or directory name by
@@ -170,7 +167,7 @@ enum InputTmdbIndexValue {
 
 type InputTmdbIndexMap = HashMap<String, Option<(FileReadGuard, InputTmdbIndexTree)>>;
 async fn get_tmdb_value(
-    cfg: &Config,
+    cfg: &AppConfig,
     provider_id: Option<u32>,
     input_name: &str,
     input_indexes: &mut InputTmdbIndexMap,
@@ -195,7 +192,7 @@ async fn get_tmdb_value(
             }
         }
         std::collections::hash_map::Entry::Vacant(entry) => {
-            if let Ok(Some(tmdb_path)) = get_input_storage_path(input_name, &cfg.working_dir)
+            if let Ok(Some(tmdb_path)) = get_input_storage_path(input_name, &cfg.config.load().working_dir)
                 .map(|storage_path| xtream_get_record_file_path(&storage_path, item_type))
             {
                 {
@@ -669,7 +666,7 @@ fn format_for_jellyfin(
 /// Generates style-compliant directory and file names by dispatching
 /// the call to a dedicated formatting function for the respective style.
 async fn style_based_rename(
-    cfg: &Config,
+    cfg: &AppConfig,
     strm_item_info: &StrmItemInfo,
     input_tmdb_indexes: &mut InputTmdbIndexMap,
     style: &StrmExportStyle,
@@ -701,7 +698,7 @@ async fn style_based_rename(
 }
 
 async fn prepare_strm_files(
-    cfg: &Config,
+    cfg: &AppConfig,
     new_playlist: &mut [PlaylistGroup],
     _root_path: &Path,
     underscore_whitespace: bool,
@@ -786,17 +783,18 @@ async fn prepare_strm_files(
 }
 
 pub async fn write_strm_playlist(
+    app_config: &AppConfig,
     target: &ConfigTarget,
     target_output: &StrmTargetOutput,
-    cfg: &Config,
     new_playlist: &mut [PlaylistGroup],
 ) -> Result<(), TuliproxError> {
     if new_playlist.is_empty() {
         return Ok(());
     }
 
+    let config = app_config.config.load();
     let Some(root_path) = utils::get_file_path(
-        &cfg.working_dir,
+        &config.working_dir,
         Some(std::path::PathBuf::from(&target_output.directory)),
     ) else {
         return Err(info_err!(format!(
@@ -805,11 +803,11 @@ pub async fn write_strm_playlist(
         )));
     };
 
-    let user_and_server_info = get_credentials_and_server_info(cfg, target_output.username.as_ref());
+    let user_and_server_info = get_credentials_and_server_info(app_config, target_output.username.as_ref());
     let strm_index_path =
-        strm_get_file_paths(&ensure_target_storage_path(cfg, target.name.as_str())?);
+        strm_get_file_paths(&ensure_target_storage_path(&config, target.name.as_str())?);
     let existing_strm = {
-        let _file_lock = cfg
+        let _file_lock = app_config
             .file_locks
             .read_lock(&strm_index_path);
         read_strm_file_index(&strm_index_path)
@@ -831,7 +829,7 @@ pub async fn write_strm_playlist(
     // - M3u Series (TODO we dont have this currently, should be guessed through m3u parser)
     // - M3u Vod (no additional infos, need to extract from title)
     let strm_files = prepare_strm_files(
-        cfg,
+        app_config,
         new_playlist,
         &root_path,
         target_output.underscore_whitespace,
@@ -879,7 +877,7 @@ pub async fn write_strm_playlist(
         };
     }
 
-    if let Err(err) = write_strm_index_file(cfg, &processed_strm, &strm_index_path).await {
+    if let Err(err) = write_strm_index_file(app_config, &processed_strm, &strm_index_path).await {
         failed.push(err);
     }
 
@@ -896,7 +894,7 @@ pub async fn write_strm_playlist(
     }
 }
 async fn write_strm_index_file(
-    cfg: &Config,
+    cfg: &AppConfig,
     entries: &HashSet<String>,
     index_file_path: &PathBuf,
 ) -> Result<(), String> {
@@ -981,7 +979,7 @@ async fn has_strm_file_same_hash(file_path: &PathBuf, content_hash: UUIDType) ->
 }
 
 fn get_credentials_and_server_info(
-    cfg: &Config,
+    cfg: &AppConfig,
     username: Option<&String>,
 ) -> Option<(ProxyUserCredentials, ApiProxyServerInfo)> {
     let username = username?;

@@ -1,0 +1,25 @@
+.tp__stats {
+  display: flex;
+  flex-flow: column;
+  flex: 1 1 auto;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: var(--max-view-width);
+
+  &__header {
+    display: flex;
+    flex-flow: row nowrap;
+  }
+
+  &__body {
+    display: flex;
+    flex-flow: column;
+    gap: var(--gap-larger);
+
+    &-group {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: var(--gap-larger);
+    }
+  }
+}

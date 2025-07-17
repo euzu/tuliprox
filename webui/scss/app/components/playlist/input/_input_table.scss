@@ -1,0 +1,17 @@
+.tp__input-table {
+  display: flex;
+  flex-flow: column;
+  box-sizing: border-box;
+  overflow: hidden;
+  .tp__icon-button {
+     width: 2rem;
+  }
+  &__alias {
+    margin-left: var(--margin-default);
+  }
+  .tp__chip.alias {
+    color: var(--tag-alt-active-color);
+    background-color: var(--tag-alt-active-background-color);
+    border-color:  var(--tag-alt-active-border-color);
+  }
+}

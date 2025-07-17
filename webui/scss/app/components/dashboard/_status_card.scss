@@ -1,0 +1,15 @@
+.tp__status-card {
+  display: flex;
+  flex-flow: column;
+  gap: var(--gap-default);
+  &__title {
+    color: var(--modest-text-color);
+  }
+  &__body {
+    color: var(--text-color);
+    font-size: 1.1rem;
+  }
+  &__footer {
+    color: var(--modest-text-color);
+  }
+}

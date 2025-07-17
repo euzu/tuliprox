@@ -7,27 +7,24 @@ use crate::api::endpoints::xmltv_api::xmltv_api_register;
 use crate::api::endpoints::xtream_api::xtream_api_register;
 use crate::api::model::active_provider_manager::ActiveProviderManager;
 use crate::api::model::active_user_manager::ActiveUserManager;
-use crate::api::model::app_state::{AppState, HdHomerunAppState};
+use crate::api::model::app_state::{create_cache, create_http_client, AppState, CancelTokens, HdHomerunAppState};
 use crate::api::model::download::DownloadQueue;
 use crate::api::model::streams::shared_stream_manager::SharedStreamManager;
-use crate::api::scheduler::start_scheduler;
-use crate::model::{Config, ProcessTargets, RateLimitConfig, ScheduleConfig};
+use crate::api::scheduler::{exec_scheduler};
+use crate::model::{AppConfig, Config, ProcessTargets, RateLimitConfig};
 use crate::model::{Healthcheck};
 use crate::processing::processor::playlist;
-use crate::tools::lru_cache::LRUResourceCache;
 use log::{error, info};
-use reqwest::Client;
 use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use axum::Router;
-use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 use tower_governor::key_extractor::SmartIpKeyExtractor;
 use crate::api::api_utils::{get_build_time, get_server_time};
 use crate::api::config_watch::exec_config_watch;
 use crate::api::serve::serve;
-use crate::utils::request::create_client;
 use crate::VERSION;
 
 fn get_web_dir_path(web_ui_enabled: bool, web_root: &str) -> Result<PathBuf, std::io::Error> {
@@ -54,44 +51,29 @@ async fn healthcheck() -> impl axum::response::IntoResponse {
     axum::Json(create_healthcheck())
 }
 
-async fn create_shared_data(cfg: &Arc<Config>) -> AppState {
-    let lru_cache = cfg.reverse_proxy.as_ref().and_then(|r| r.cache.as_ref()).and_then(|c| if c.enabled {
-        Some(Mutex::new(LRUResourceCache::new(c.t_size, &PathBuf::from(c.dir.as_ref().unwrap()))))
-    } else { None });
-    let cache = Arc::new(lru_cache);
-    let cache_scanner = Arc::clone(&cache);
-    tokio::spawn(async move {
-        if let Some(m) = cache_scanner.as_ref() {
-            let mut c = m.lock().await;
-            if let Err(err) = (*c).scan() {
-                error!("Failed to scan cache {err}");
-            }
-        }
-    });
-
-    let active_users = Arc::new(ActiveUserManager::new(cfg));
-    let active_provider = Arc::new(ActiveProviderManager::new(cfg).await);
-
-    let mut builder = create_client(cfg).http1_only(); // because of RAII connection dropping
-    if cfg.connect_timeout_secs > 0 {
-        builder = builder.connect_timeout(Duration::from_secs(u64::from(cfg.connect_timeout_secs)));
-    }
-
-    let client = builder.build().unwrap_or_else(|_| Client::new());
+fn create_shared_data(app_config: &Arc<AppConfig>, forced_targets: &Arc<ProcessTargets>) -> AppState {
+    let config = app_config.config.load();
+    let cache = create_cache(&config);
+    let active_users = Arc::new(ActiveUserManager::new(&config));
+    let active_provider = Arc::new(ActiveProviderManager::new(app_config));
+    let client = create_http_client(app_config);
 
     AppState {
-        config: Arc::clone(cfg),
-        http_client: Arc::new(client),
+        forced_targets: Arc::new(ArcSwap::new(Arc::clone(forced_targets))),
+        app_config: Arc::clone(app_config),
+        http_client: Arc::new(ArcSwap::from_pointee(client)),
         downloads: Arc::new(DownloadQueue::new()),
-        cache,
+        cache: Arc::new(ArcSwapOption::from(cache)),
         shared_stream_manager: Arc::new(SharedStreamManager::new()),
         active_users,
         active_provider,
+        cancel_tokens: Arc::new(ArcSwap::from_pointee(CancelTokens::default())),
     }
 }
 
-fn exec_update_on_boot(client: Arc<reqwest::Client>, cfg: &Arc<Config>, targets: &Arc<ProcessTargets>) {
-    if cfg.update_on_boot {
+fn exec_update_on_boot(client: Arc<reqwest::Client>, cfg: &Arc<AppConfig>, targets: &Arc<ProcessTargets>) {
+    let config = cfg.config.load();
+    if config.update_on_boot {
         let cfg_clone = Arc::clone(cfg);
         let targets_clone = Arc::clone(targets);
         tokio::spawn(
@@ -100,48 +82,6 @@ fn exec_update_on_boot(client: Arc<reqwest::Client>, cfg: &Arc<Config>, targets:
     }
 }
 
-
-fn get_process_targets(cfg: &Arc<Config>, process_targets: &Arc<ProcessTargets>, exec_targets: Option<&Vec<String>>) -> Arc<ProcessTargets> {
-    if let Ok(user_targets) = cfg.sources.validate_targets(exec_targets) {
-        if user_targets.enabled {
-            if !process_targets.enabled {
-                return Arc::new(user_targets);
-            }
-
-            let inputs: Vec<u16> = user_targets.inputs.iter()
-                .filter(|&id| process_targets.inputs.contains(id))
-                .copied()
-                .collect();
-            let targets: Vec<u16> = user_targets.targets.iter()
-                .filter(|&id| process_targets.inputs.contains(id))
-                .copied()
-                .collect();
-            return Arc::new(ProcessTargets {
-                enabled: user_targets.enabled,
-                inputs,
-                targets,
-            });
-        }
-    }
-    Arc::clone(process_targets)
-}
-
-fn exec_scheduler(client: &Arc<reqwest::Client>, cfg: &Arc<Config>, targets: &Arc<ProcessTargets>) {
-    let schedules: Vec<ScheduleConfig> = if let Some(schedules) = &cfg.schedules {
-        schedules.clone()
-    } else {
-        vec![]
-    };
-    for schedule in schedules {
-        let expression = schedule.schedule.to_string();
-        let exec_targets = get_process_targets(cfg, targets, schedule.targets.as_ref());
-        let cfg_clone = Arc::clone(cfg);
-        let http_client = Arc::clone(client);
-        tokio::spawn(async move {
-            start_scheduler(http_client, expression.as_str(), cfg_clone, exec_targets).await;
-        });
-    }
-}
 
 fn is_web_auth_enabled(cfg: &Arc<Config>, web_ui_enabled: bool) -> bool {
     if web_ui_enabled {
@@ -168,9 +108,11 @@ fn create_compression_layer() -> tower_http::compression::CompressionLayer {
         .zstd(true)
 }
 
-fn start_hdhomerun(cfg: &Arc<Config>, app_state: &Arc<AppState>, infos: &mut Vec<String>) {
-    let host = cfg.api.host.to_string();
-    let guard = cfg.t_hdhomerun.load();
+pub(in crate::api) fn start_hdhomerun(app_config: &Arc<AppConfig>, app_state: &Arc<AppState>, infos: &mut Vec<String>,
+                                      cancel_token: &CancellationToken) {
+    let config = app_config.config.load();
+    let host = config.api.host.to_string();
+    let guard = app_config.hdhomerun.load();
     if let Some(hdhomerun) = &*guard {
         if hdhomerun.enabled {
             for device in &hdhomerun.devices {
@@ -181,6 +123,8 @@ fn start_hdhomerun(cfg: &Arc<Config>, app_state: &Arc<AppState>, infos: &mut Vec
                     let device_clone = Arc::new(device.clone());
                     let basic_auth = hdhomerun.auth;
                     infos.push(format!("HdHomeRun Server '{}' running: http://{host}:{port}", device.name));
+                    let c_token = cancel_token.clone();
+                    let active_user_manager = Arc::clone(&app_data.active_users);
                     tokio::spawn(async move {
                         let router = axum::Router::<Arc<HdHomerunAppState>>::new()
                             .layer(create_cors_layer())
@@ -195,7 +139,7 @@ fn start_hdhomerun(cfg: &Arc<Config>, app_state: &Arc<AppState>, infos: &mut Vec
 
                         match tokio::net::TcpListener::bind(format!("{}:{}", app_host.clone(), port)).await {
                             Ok(listener) => {
-                                serve(listener, router).await;
+                                serve(listener, router, Some(c_token), active_user_manager).await;
                                 // if let Err(err) = axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).into_future().await {
                                 //     error!("{err}");
                                 // }
@@ -214,8 +158,9 @@ fn start_hdhomerun(cfg: &Arc<Config>, app_state: &Arc<AppState>, infos: &mut Vec
 //     next.run(request).await
 // }
 
-pub async fn start_server(cfg: Arc<Config>, targets: Arc<ProcessTargets>) -> futures::io::Result<()> {
+pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTargets>) -> futures::io::Result<()> {
     let mut infos = Vec::new();
+    let cfg = app_config.config.load();
     let host = cfg.api.host.to_string();
     let port = cfg.api.port;
     let web_ui_enabled = cfg.web_ui.as_ref().is_some_and(|c| c.enabled);
@@ -226,25 +171,24 @@ pub async fn start_server(cfg: Arc<Config>, targets: Arc<ProcessTargets>) -> fut
     if web_ui_enabled {
         infos.push(format!("Web root: {}", web_dir_path.display()));
     }
-    let app_shared_data = create_shared_data(&cfg).await;
+    let app_shared_data = create_shared_data(&app_config, &targets);
     let app_state = Arc::new(app_shared_data);
     let shared_data = Arc::clone(&app_state);
 
-    exec_scheduler(&Arc::clone(&shared_data.http_client), &cfg, &targets);
-    exec_update_on_boot(Arc::clone(&shared_data.http_client), &cfg, &targets);
+    let (cancel_token_scheduler, cancel_token_hdhomerun, cancel_token_file_watch) = {
+        let cancel_tokens = app_state.cancel_tokens.load();
+        (cancel_tokens.scheduler.clone(), cancel_tokens.hdhomerun.clone(), cancel_tokens.file_watch.clone())
+    };
 
-    if cfg.config_hot_reload {
-        if let Err(err) = exec_config_watch(&app_state).await {
-            error!("Failed to start config watch: {err}");
-        }
-    }
+    exec_scheduler(&Arc::clone(&shared_data.http_client.load()), &app_config, &targets, &cancel_token_scheduler);
+    exec_update_on_boot(Arc::clone(&shared_data.http_client.load()), &app_config, &targets);
+    exec_config_watch(&app_state, &cancel_token_file_watch);
 
     let web_auth_enabled = is_web_auth_enabled(&cfg, web_ui_enabled);
 
-    if cfg.t_api_proxy.load().is_some() {
-        start_hdhomerun(&cfg, &app_state, &mut infos);
+    if app_config.api_proxy.load().is_some() {
+        start_hdhomerun(&app_config, &app_state, &mut infos, &cancel_token_hdhomerun);
     }
-
 
     let web_ui_path = cfg.web_ui.as_ref().and_then(|c| c.path.as_ref()).map(|p| format!("/{p}")).unwrap_or_default();
     infos.push(format!("Server running: http://{}:{}", &cfg.api.host, &cfg.api.port));
@@ -271,7 +215,7 @@ pub async fn start_server(cfg: Arc<Config>, targets: Arc<ProcessTargets>) -> fut
         .merge(xmltv_api_register())
         .merge(hls_api_register());
     // let mut rate_limiting = false;
-    if let Some(rate_limiter) = app_state.config.reverse_proxy.as_ref().and_then(|r| r.rate_limit.clone()) {
+    if let Some(rate_limiter) = cfg.reverse_proxy.as_ref().and_then(|r| r.rate_limit.clone()) {
         // rate_limiting = rate_limiter.enabled;
         api_router = add_rate_limiter(api_router, &rate_limiter);
     }
@@ -290,7 +234,9 @@ pub async fn start_server(cfg: Arc<Config>, targets: Arc<ProcessTargets>) -> fut
 
     let router: axum::Router<()> = router.with_state(shared_data.clone());
     let listener = tokio::net::TcpListener::bind(format!("{host}:{port}")).await?;
-    serve(listener, router).await
+    let active_user_manager = Arc::clone(&shared_data.active_users);
+    serve(listener, router, None, active_user_manager).await;
+    Ok(())
     //axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).into_future().await
 }
 

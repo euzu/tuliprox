@@ -1,143 +1,7 @@
-use enum_iterator::Sequence;
-use std::fmt::Display;
-use std::str::FromStr;
-use std::sync::atomic::AtomicU32;
-use std::sync::Arc;
-use log::{trace};
-use crate::foundation::filter::{apply_templates_to_pattern_single, get_filter, prepare_templates, Filter, PatternTemplate};
-use crate::foundation::mapper::MapperScript;
-use crate::model::valid_property;
-use shared::error::{create_tuliprox_error_result, info_err};
-use shared::error::{TuliproxError, TuliproxErrorKind};
-
-pub const COUNTER_FIELDS: &[&str] = &["name", "title", "caption", "chno"];
-
-pub const MAPPER_FIELDS: &[&str] = &[
-    "name", "title", "caption", "group", "id", "chno", "logo",
-    "logo_small", "parent_code", "audio_track",
-    "time_shift", "rec", "url", "epg_channel_id", "epg_id"
-];
-
-#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq)]
-pub enum CounterModifier {
-    #[serde(rename = "assign")]
-    Assign,
-    #[serde(rename = "suffix")]
-    Suffix,
-    #[serde(rename = "prefix")]
-    Prefix,
-}
-
-impl Default for CounterModifier {
-    fn default() -> Self {
-        Self::Assign
-    }
-}
-
-impl CounterModifier {
-    const ASSIGN: &'static str = "assign";
-    const SUFFIX: &'static str = "suffix";
-    const PREFIX: &'static str = "prefix";
-}
-
-impl Display for CounterModifier {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", match self {
-            Self::Assign => Self::ASSIGN,
-            Self::Suffix => Self::SUFFIX,
-            Self::Prefix => Self::PREFIX,
-        })
-    }
-}
-
-impl FromStr for CounterModifier {
-    type Err = TuliproxError;
-
-    fn from_str(s: &str) -> Result<Self, TuliproxError> {
-        if s.eq("assign") {
-            Ok(Self::Assign)
-        } else if s.eq("suffix") {
-            Ok(Self::Suffix)
-        } else if s.eq("prefix") {
-            Ok(Self::Prefix)
-        } else {
-            create_tuliprox_error_result!(TuliproxErrorKind::Info, "Unknown CounterModifier: {}", s)
-        }
-    }
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-pub struct MappingCounterDefinition {
-    pub filter: String,
-    pub field: String,
-    #[serde(default)]
-    pub concat: String,
-    #[serde(default)]
-    pub modifier: CounterModifier,
-    #[serde(default)]
-    pub value: u32,
-    #[serde(default)]
-    pub padding: u8,
-}
-
-#[derive(Debug, Clone)]
-pub struct MappingCounter {
-    pub filter: Filter,
-    pub field: String,
-    pub concat: String,
-    pub modifier: CounterModifier,
-    pub value: Arc<AtomicU32>,
-    pub padding: u8,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "modifier", rename_all = "snake_case")]
-pub enum MapperOperation {
-    Lowercase { field: String },
-    Uppercase { field: String },
-    Capitalize { field: String },
-    Suffix { field: String, value: String },
-    Prefix { field: String, value: String },
-    Set { field: String, value: String },
-    Copy { field: String, source: String },
-}
-
-impl MapperOperation {
-    pub fn prepare(&mut self, templates: Option<&Vec<PatternTemplate>>) -> Result<(), TuliproxError> {
-        match self {
-            MapperOperation::Lowercase {ref field }
-            | MapperOperation::Uppercase { ref field }
-            | MapperOperation::Capitalize { ref field } => {
-                if !valid_property!(field.as_str(), MAPPER_FIELDS) {
-                    return Err(info_err!(format!("Invalid mapper attribute field {field}")));
-                }
-            }
-
-            MapperOperation::Copy { ref field, ref source } => {
-                if !valid_property!(field.as_str(), MAPPER_FIELDS) {
-                    return Err(info_err!(format!("Invalid mapper attribute field {field}")));
-                }
-                if !valid_property!(source.as_str(), MAPPER_FIELDS) {
-                    return Err(info_err!(format!("Invalid mapper source field {source}")));
-                }
-            }
-
-            MapperOperation::Suffix { ref field, ref mut value }
-            | MapperOperation::Prefix { ref field, ref mut value }
-            | MapperOperation::Set { ref field, ref mut value } => {
-                if !valid_property!(field.as_str(), MAPPER_FIELDS) {
-                    return Err(info_err!(format!("Invalid mapper attribute field {field}")));
-                }
-
-                if templates.is_some() {
-                    *value = apply_templates_to_pattern_single(value, templates)?;
-                }
-            }
-        }
-
-        Ok(())
-    }
-}
+use shared::foundation::filter::Filter;
+use shared::foundation::mapper::MapperScript;
+use shared::model::{MapperDto, MappingCounter, MappingCounterDefinition, MappingDefinitionDto, MappingDto, MappingsDto, PatternTemplate};
+use crate::model::macros;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct Mapper {
@@ -149,26 +13,17 @@ pub struct Mapper {
     pub t_script: Option<MapperScript>,
 }
 
-impl Mapper {
-    /// # Panics
-    ///
-    /// Will panic if default `RegEx` gets invalid
-    pub fn prepare(&mut self, templates: Option<&Vec<PatternTemplate>>) -> Result<(), TuliproxError> {
-        match get_filter(&self.filter, templates) {
-            Ok(filter) => self.t_filter = Some(filter),
-            Err(err) => return Err(err),
+macros::from_impl!(Mapper);
+impl From<&MapperDto>  for Mapper {
+    fn from(dto: &MapperDto) -> Self {
+        Self {
+            filter: dto.filter.to_string(),
+            script: dto.script.to_string(),
+            t_filter: dto.t_filter.clone(),
+            t_script: dto.t_script.clone(),
         }
-        let script = if templates.is_some() {
-            apply_templates_to_pattern_single(&self.script, templates)?
-        } else {
-            self.script.to_string()
-        };
-        trace!("Mapper script: {script}");
-        self.t_script = Some(MapperScript::parse(&script, templates)?);
-        Ok(())
     }
 }
-
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct Mapping {
@@ -183,39 +38,16 @@ pub struct Mapping {
     pub(crate) templates: Option<Vec<PatternTemplate>>
 }
 
-impl Mapping {
-    pub fn prepare(&mut self, templates: Option<&Vec<PatternTemplate>>) -> Result<(), TuliproxError> {
-        self.templates = templates.map(|t| t.iter().map(PatternTemplate::clone).collect::<Vec<_>>());
-        if let Some(mapper_list) = &mut self.mapper {
-            for mapper in mapper_list {
-                mapper.prepare(templates)?;
-            }
+impl From<&MappingDto>  for Mapping {
+    fn from(dto: &MappingDto) -> Self {
+        Self {
+            id: dto.id.to_string(),
+            match_as_ascii: dto.match_as_ascii,
+            mapper: dto.mapper.as_ref().map(|l| l.iter().map(Mapper::from).collect()),
+            counter: dto.counter.clone(),
+            t_counter: dto.t_counter.clone(),
+            templates: dto.templates.clone(),
         }
-
-        if let Some(counter_def_list) = &self.counter {
-            let mut counters = vec![];
-            for def in counter_def_list {
-                if !valid_property!(def.field.as_str(), COUNTER_FIELDS) {
-                    return Err(info_err!(format!("Invalid counter field {}", def.field)));
-                }
-                match get_filter(&def.filter, templates) {
-                    Ok(flt) => {
-                        counters.push(MappingCounter {
-                            filter: flt,
-                            field: def.field.clone(),
-                            concat: def.concat.clone(),
-                            modifier: def.modifier,
-                            value: Arc::new(AtomicU32::new(def.value)),
-                            padding: def.padding,
-                        });
-                    }
-                    Err(e) => return Err(info_err!(e.to_string()))
-                }
-            }
-            self.t_counter = Some(counters);
-        }
-
-        Ok(())
     }
 }
 
@@ -225,21 +57,13 @@ pub struct MappingDefinition {
     pub mapping: Vec<Mapping>,
 }
 
-impl MappingDefinition {
-    pub fn prepare(&mut self) -> Result<(), TuliproxError> {
-        if let Some(templates) = &mut self.templates {
-            match prepare_templates(templates) {
-                Ok(tmplts) => {
-                    self.templates = Some(tmplts);
-                }
-                Err(err) => return Err(err),
-            }
+macros::from_impl!(MappingDefinition);
+impl From<&MappingDefinitionDto> for MappingDefinition {
+    fn from(dto: &MappingDefinitionDto) -> Self {
+        Self {
+            templates: dto.templates.clone(),
+            mapping: dto.mapping.iter().map(Into::into).collect(),
         }
-        for mapping in &mut self.mapping {
-            let template_list = self.templates.as_ref();
-            mapping.prepare(template_list)?;
-        }
-        Ok(())
     }
 }
 
@@ -249,9 +73,6 @@ pub struct Mappings {
 }
 
 impl Mappings {
-    pub fn prepare(&mut self) -> Result<(), TuliproxError> {
-        self.mappings.prepare()
-    }
 
     pub fn get_mapping(&self, mapping_id: &str) -> Option<Mapping> {
         for mapping in &self.mappings.mapping {
@@ -260,5 +81,14 @@ impl Mappings {
             }
         }
         None
+    }
+}
+
+macros::from_impl!(Mappings);
+impl From<&MappingsDto> for Mappings {
+    fn from(dto: &MappingsDto) -> Self {
+        Mappings {
+            mappings: MappingDefinition::from(&dto.mappings),
+        }
     }
 }

@@ -1,0 +1,28 @@
+.tp__app {
+  display: flex;
+  flex-flow: row;
+  overflow: hidden;
+  flex: 1 1 auto;
+  box-sizing: border-box;
+  max-width: 100%;
+  color: var(--text-color);
+  background-color: inherit;
+
+  &-main {
+    display: flex;
+    flex-flow: column;
+    flex: 1 1 auto;
+    align-content: flex-start;
+    justify-content: flex-start;
+    overflow: hidden;
+
+    &__body {
+      display: flex;
+      flex-flow: column;
+      box-sizing: border-box;
+      padding: 0 var(--padding-larger);
+      align-items: center;
+      overflow: hidden;
+    }
+  }
+}

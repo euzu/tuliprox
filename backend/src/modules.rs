@@ -4,8 +4,6 @@ macro_rules! include_modules {
         extern crate core;
         extern crate env_logger;
         extern crate pest;
-        #[macro_use]
-        extern crate pest_derive;
         pub mod api;
         pub mod auth;
         pub mod messaging;
@@ -14,7 +12,6 @@ macro_rules! include_modules {
         pub mod repository;
         pub mod utils;
         pub mod tools;
-        pub mod foundation;
     }
 }
 

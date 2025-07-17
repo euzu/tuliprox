@@ -1,0 +1,53 @@
+.tp__breadcrumbs {
+  display: flex;
+  flex-flow: row;
+  align-items: center;
+  gap: 4px;
+  border-radius: 5px;
+  box-sizing: border-box;
+
+  ol {
+    display: flex;
+    flex-flow: row;
+    list-style-type: none;
+    padding: 0;
+    margin: 0;
+    align-items: center;
+    box-sizing: border-box;
+
+    li {
+      display: flex;
+      flex-flow: row;
+      align-items: center;
+      box-sizing: border-box;
+    }
+
+    .tp__breadcrumbs__icon {
+      display: flex;
+      flex-flow: row;
+      align-items: center;
+      box-sizing: border-box;
+      fill: var(--modest-text-color);
+      svg {
+       width: 1.2rem;
+      }
+    }
+  }
+
+  span {
+    box-sizing: border-box;
+    color: var(--modest-text-color);
+
+  }
+
+  &__active {
+    pointer-events: none;
+  }
+
+  &__selectable {
+    cursor: pointer;
+    &:hover {
+      color: var(--text-color);
+    }
+  }
+}

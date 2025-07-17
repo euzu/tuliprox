@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use shared::error::TuliproxError;
+use shared::model::PlaylistGroup;
 use crate::model::{Config, ConfigInput};
-use crate::model::PlaylistGroup;
 use crate::processing::parser::m3u;
 use crate::utils::prepare_file_path;
 use crate::utils::request;
