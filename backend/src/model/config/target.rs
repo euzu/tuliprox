@@ -1,13 +1,13 @@
-use crate::foundation::filter::{get_filter, Filter, PatternTemplate, ValueProvider};
 use crate::model::mapping::Mapping;
 use crate::model::config::trakt::TraktConfig;
-use shared::error::{create_tuliprox_error_result, handle_tuliprox_error_result_list, info_err, TuliproxError, TuliproxErrorKind};
-use shared::utils::{default_as_default, default_as_true, default_resolve_delay_secs};
 use arc_swap::ArcSwapOption;
-use shared::model::{ClusterFlags, ProcessingOrder, StrmExportStyle, TargetType};
+use shared::model::{ConfigTargetDto, ConfigTargetOptions, HdHomeRunTargetOutputDto, M3uTargetOutputDto, ProcessingOrder, StrmExportStyle, StrmTargetOutputDto, TargetOutputDto, TargetType, TraktConfigDto, XtreamTargetOutputDto};
 use shared::model::PlaylistItemType;
 use std::sync::Arc;
-use crate::model::{ConfigRename, ConfigSort};
+use regex::Regex;
+use shared::foundation::filter::Filter;
+use shared::foundation::filter::ValueProvider;
+use crate::model::{macros, ConfigRename, ConfigSort};
 
 
 #[derive(Clone, Debug)]
@@ -15,6 +15,7 @@ pub struct ProcessTargets {
     pub enabled: bool,
     pub inputs: Vec<u16>,
     pub targets: Vec<u16>,
+    pub target_names: Vec<String>,
 }
 
 impl ProcessTargets {
@@ -27,88 +28,146 @@ impl ProcessTargets {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct ConfigTargetOptions {
-    #[serde(default)]
-    pub ignore_logo: bool,
-    #[serde(default)]
-    pub share_live_streams: bool,
-    #[serde(default)]
-    pub remove_duplicates: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub force_redirect: Option<ClusterFlags>,
-}
-
 #[allow(clippy::struct_excessive_bools)]
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone)]
 pub struct XtreamTargetOutput {
-    #[serde(default = "default_as_true")]
     pub skip_live_direct_source: bool,
-    #[serde(default = "default_as_true")]
     pub skip_video_direct_source: bool,
-    #[serde(default = "default_as_true")]
     pub skip_series_direct_source: bool,
-    #[serde(default)]
     pub resolve_series: bool,
-    #[serde(default = "default_resolve_delay_secs")]
     pub resolve_series_delay: u16,
-    #[serde(default)]
     pub resolve_vod: bool,
-    #[serde(default = "default_resolve_delay_secs")]
     pub resolve_vod_delay: u16,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trakt: Option<TraktConfig>,
 }
 
-impl XtreamTargetOutput {
-    pub fn prepare(&mut self) {
-        if let Some(trakt) = &mut self.trakt {
-            trakt.prepare();
+macros::from_impl!(XtreamTargetOutput);
+impl From<&XtreamTargetOutputDto> for XtreamTargetOutput {
+    fn from(dto: &XtreamTargetOutputDto) -> Self {
+        Self {
+            skip_live_direct_source: dto.skip_live_direct_source,
+            skip_video_direct_source: dto.skip_video_direct_source,
+            skip_series_direct_source: dto.skip_series_direct_source,
+            resolve_series: dto.resolve_series,
+            resolve_series_delay: dto.resolve_series_delay,
+            resolve_vod: dto.resolve_vod,
+            resolve_vod_delay: dto.resolve_vod_delay,
+            trakt: dto.trakt.as_ref().map(Into::into),
         }
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+impl From<&XtreamTargetOutput> for XtreamTargetOutputDto {
+    fn from(instance: &XtreamTargetOutput) -> Self {
+        Self {
+            skip_live_direct_source: instance.skip_live_direct_source,
+            skip_video_direct_source: instance.skip_video_direct_source,
+            skip_series_direct_source: instance.skip_series_direct_source,
+            resolve_series: instance.resolve_series,
+            resolve_series_delay: instance.resolve_series_delay,
+            resolve_vod: instance.resolve_vod,
+            resolve_vod_delay: instance.resolve_vod_delay,
+            trakt: instance.trakt.as_ref().map(TraktConfigDto::from),
+        }
+    }
+}
+
+
+#[derive(Debug, Clone)]
 pub struct M3uTargetOutput {
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub filename: Option<String>,
-    #[serde(default)]
     pub include_type_in_url: bool,
-    #[serde(default)]
     pub mask_redirect_url: bool,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+macros::from_impl!(M3uTargetOutput);
+impl From<&M3uTargetOutputDto> for M3uTargetOutput {
+    fn from(dto: &M3uTargetOutputDto) -> Self {
+        Self {
+            filename: dto.filename.clone(),
+            include_type_in_url: dto.include_type_in_url,
+            mask_redirect_url: dto.mask_redirect_url,
+        }
+    }
+}
+impl From<&M3uTargetOutput> for M3uTargetOutputDto {
+    fn from(instance: &M3uTargetOutput) -> Self {
+        Self {
+            filename: instance.filename.clone(),
+            include_type_in_url: instance.include_type_in_url,
+            mask_redirect_url: instance.mask_redirect_url,
+        }
+    }
+}
+
+
+#[derive(Debug, Clone)]
 pub struct StrmTargetOutput {
     pub directory: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
-    #[serde(default)]
     pub style: StrmExportStyle,
-    #[serde(default)]
     pub flat: bool,
-    #[serde(default)]
     pub underscore_whitespace: bool,
-    #[serde(default)]
     pub cleanup: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strm_props: Option<Vec<String>>,
 }
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+
+macros::from_impl!(StrmTargetOutput);
+impl From<&StrmTargetOutputDto> for StrmTargetOutput {
+    fn from(dto: &StrmTargetOutputDto) -> Self {
+        Self {
+            directory: dto.directory.to_string(),
+            username: dto.username.clone(),
+            style: dto.style,
+            flat: dto.flat,
+            underscore_whitespace: dto.underscore_whitespace,
+            cleanup: dto.cleanup,
+            strm_props: dto.strm_props.clone(),
+        }
+    }
+}
+impl From<&StrmTargetOutput> for StrmTargetOutputDto {
+    fn from(instance: &StrmTargetOutput) -> Self {
+        Self {
+            directory: instance.directory.to_string(),
+            username: instance.username.clone(),
+            style: instance.style,
+            flat: instance.flat,
+            underscore_whitespace: instance.underscore_whitespace,
+            cleanup: instance.cleanup,
+            strm_props: instance.strm_props.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct HdHomeRunTargetOutput {
     pub device: String,
     pub username: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub use_output: Option<TargetType>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields, tag = "type", rename_all = "lowercase")]
+macros::from_impl!(HdHomeRunTargetOutput);
+impl From<&HdHomeRunTargetOutputDto> for HdHomeRunTargetOutput {
+    fn from(dto: &HdHomeRunTargetOutputDto) -> Self {
+        Self {
+            device: dto.device.to_string(),
+            username: dto.username.to_string(),
+            use_output: dto.use_output,
+        }
+    }
+}
+impl From<&HdHomeRunTargetOutput> for HdHomeRunTargetOutputDto {
+    fn from(instance: &HdHomeRunTargetOutput) -> Self {
+        Self {
+            device: instance.device.to_string(),
+            username: instance.username.to_string(),
+            use_output: instance.use_output,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub enum TargetOutput {
     Xtream(XtreamTargetOutput),
     M3u(M3uTargetOutput),
@@ -116,177 +175,49 @@ pub enum TargetOutput {
     HdHomeRun(HdHomeRunTargetOutput),
 }
 
-impl TargetOutput {
-    pub fn prepare(&mut self) {
-        match self {
-            TargetOutput::Xtream(output) => output.prepare(),
-            TargetOutput::M3u(_)
-            | TargetOutput::Strm(_)
-            | TargetOutput::HdHomeRun(_) => {}
+macros::from_impl!(TargetOutput);
+impl From<&TargetOutputDto> for TargetOutput {
+    fn from(dto: &TargetOutputDto) -> Self {
+        match dto {
+            TargetOutputDto::Xtream(o) => TargetOutput::Xtream(XtreamTargetOutput::from(o)),
+            TargetOutputDto::M3u(o)  => TargetOutput::M3u(M3uTargetOutput::from(o)),
+            TargetOutputDto::Strm(o)  => TargetOutput::Strm(StrmTargetOutput::from(o)),
+            TargetOutputDto::HdHomeRun(o) =>  TargetOutput::HdHomeRun(HdHomeRunTargetOutput::from(o)),
         }
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-#[serde(deny_unknown_fields)]
+impl From<&TargetOutput> for TargetOutputDto {
+    fn from(instance: &TargetOutput) -> Self {
+        match instance {
+            TargetOutput::Xtream(o) => TargetOutputDto::Xtream(XtreamTargetOutputDto::from(o)),
+            TargetOutput::M3u(o)  => TargetOutputDto::M3u(M3uTargetOutputDto::from(o)),
+            TargetOutput::Strm(o)  => TargetOutputDto::Strm(StrmTargetOutputDto::from(o)),
+            TargetOutput::HdHomeRun(o) =>  TargetOutputDto::HdHomeRun(HdHomeRunTargetOutputDto::from(o)),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct ConfigTarget {
-    #[serde(skip)]
     pub id: u16,
-    #[serde(default = "default_as_true")]
     pub enabled: bool,
-    #[serde(default = "default_as_default")]
     pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub options: Option<ConfigTargetOptions>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sort: Option<ConfigSort>,
-    pub filter: String,
-    #[serde(default)]
+    pub filter: Filter,
     pub output: Vec<TargetOutput>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub rename: Option<Vec<ConfigRename>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mapping: Option<Vec<String>>,
-    #[serde(default)]
+    pub mapping_ids: Option<Vec<String>>,
+    pub mapping: Arc<ArcSwapOption<Vec<Mapping>>>,
     pub processing_order: ProcessingOrder,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub watch: Option<Vec<String>>,
-    #[serde(skip)]
-    pub t_watch_re: Option<Vec<regex::Regex>>,
-    #[serde(skip)]
-    pub t_filter: Option<Filter>,
-    #[serde(skip)]
-    pub t_mapping: Arc<ArcSwapOption<Vec<Mapping>>>,
+    pub watch: Option<Vec<regex::Regex>>,
 }
 
 impl ConfigTarget {
-    #[allow(clippy::too_many_lines)]
-    pub fn prepare(&mut self, id: u16, templates: Option<&Vec<PatternTemplate>>) -> Result<(), TuliproxError> {
-        self.id = id;
-        if self.output.is_empty() {
-            return Err(info_err!(format!("Missing output format for {}", self.name)));
-        }
-        let mut m3u_cnt = 0;
-        let mut xtream_cnt = 0;
-        let mut strm_cnt = 0;
-        let mut strm_needs_xtream = false;
-        let mut hdhr_cnt = 0;
-        let mut hdhomerun_needs_m3u = false;
-        let mut hdhomerun_needs_xtream = false;
-
-        let mut strm_export_styles = vec![];
-        let mut strm_directories: Vec<&str> = vec![];
-
-        for target_output in &mut self.output {
-            target_output.prepare();
-            match target_output {
-                TargetOutput::Xtream(_) => {
-                    xtream_cnt += 1;
-                    if default_as_default().eq_ignore_ascii_case(&self.name) {
-                        return create_tuliprox_error_result!(TuliproxErrorKind::Info, "unique target name is required for xtream type output: {}", self.name);
-                    }
-                }
-                TargetOutput::M3u(m3u_output) => {
-                    m3u_cnt += 1;
-                    m3u_output.filename = m3u_output.filename.as_ref().map(|s| s.trim().to_string());
-                }
-                TargetOutput::Strm(strm_output) => {
-                    strm_cnt += 1;
-                    strm_output.directory = strm_output.directory.trim().to_string();
-                    if strm_output.directory.trim().is_empty() {
-                        return create_tuliprox_error_result!(TuliproxErrorKind::Info, "directory is required for strm type: {}", self.name);
-                    }
-                    if let Some(username) = &mut strm_output.username {
-                        *username = username.trim().to_string();
-                    }
-                    let has_username = strm_output.username.as_ref().is_some_and(|u| !u.is_empty());
-
-                    if has_username {
-                        strm_needs_xtream = true;
-                    }
-                    if strm_export_styles.contains(&strm_output.style) {
-                        return create_tuliprox_error_result!(TuliproxErrorKind::Info, "strm outputs with same export style are not allowed: {}", self.name);
-                    }
-                    strm_export_styles.push(strm_output.style);
-                    if strm_directories.contains(&strm_output.directory.as_str()) {
-                        return create_tuliprox_error_result!(TuliproxErrorKind::Info, "strm outputs with same export directory are not allowed: {}", self.name);
-                    }
-                    strm_directories.push(strm_output.directory.as_str());
-                }
-                TargetOutput::HdHomeRun(hdhomerun_output) => {
-                    hdhr_cnt += 1;
-                    hdhomerun_output.username = hdhomerun_output.username.trim().to_string();
-                    if hdhomerun_output.username.is_empty() {
-                        return create_tuliprox_error_result!(TuliproxErrorKind::Info, "Username is required for HdHomeRun type: {}", self.name);
-                    }
-
-                    hdhomerun_output.device = hdhomerun_output.device.trim().to_string();
-                    if hdhomerun_output.device.is_empty() {
-                        return create_tuliprox_error_result!(TuliproxErrorKind::Info, "Device is required for HdHomeRun type: {}", self.name);
-                    }
-
-                    if let Some(use_output) = hdhomerun_output.use_output.as_ref() {
-                        match &use_output {
-                            TargetType::M3u => { hdhomerun_needs_m3u = true; }
-                            TargetType::Xtream => { hdhomerun_needs_xtream = true; }
-                            _ => return create_tuliprox_error_result!(TuliproxErrorKind::Info, "HdHomeRun output option `use_output` only accepts `m3u` or `xtream` for target: {}", self.name),
-                        }
-                    }
-                }
-            }
-        }
-
-        if m3u_cnt > 1 || xtream_cnt > 1 || hdhr_cnt > 1 {
-            return create_tuliprox_error_result!(TuliproxErrorKind::Info, "Multiple output formats with same type : {}", self.name);
-        }
-
-        if strm_cnt > 0 && strm_needs_xtream && xtream_cnt == 0 {
-            return create_tuliprox_error_result!(TuliproxErrorKind::Info, "strm output with a username is only permitted when used in combination with xtream output: {}", self.name);
-        }
-
-        if hdhr_cnt > 0 {
-            if xtream_cnt == 0 && m3u_cnt == 0 {
-                return create_tuliprox_error_result!(TuliproxErrorKind::Info, "HdHomeRun output is only permitted when used in combination with xtream or m3u output: {}", self.name);
-            }
-            if hdhomerun_needs_m3u && m3u_cnt == 0 {
-                return create_tuliprox_error_result!(TuliproxErrorKind::Info, "HdHomeRun output has `use_output=m3u` but no `m3u` output defined: {}", self.name);
-            }
-            if hdhomerun_needs_xtream && xtream_cnt == 0 {
-                return create_tuliprox_error_result!(TuliproxErrorKind::Info, "HdHomeRun output has `use_output=xtream` but no `xtream` output defined: {}", self.name);
-            }
-        }
-
-        if let Some(watch) = &self.watch {
-            let regexps: Result<Vec<regex::Regex>, _> = watch.iter().map(|s| regex::Regex::new(s)).collect();
-            match regexps {
-                Ok(watch_re) => self.t_watch_re = Some(watch_re),
-                Err(err) => {
-                    return create_tuliprox_error_result!(TuliproxErrorKind::Info, "Invalid watch regular expression: {}", err);
-                }
-            }
-        }
-
-        match get_filter(&self.filter, templates) {
-            Ok(fltr) => {
-                // debug!("Filter: {}", fltr);
-                self.t_filter = Some(fltr);
-                if let Some(renames) = self.rename.as_mut() {
-                    handle_tuliprox_error_result_list!(TuliproxErrorKind::Info, renames.iter_mut().map(|cr|cr.prepare(templates)));
-                }
-                if let Some(sort) = self.sort.as_mut() {
-                    sort.prepare(templates)?;
-                }
-                Ok(())
-            }
-            Err(err) => Err(err),
-        }
-    }
 
     pub fn filter(&self, provider: &ValueProvider) -> bool {
-        if let Some(filter) = self.t_filter.as_ref() {
-            return filter.filter(provider);
-        }
-        true
+      self.filter.filter(provider)
     }
 
     pub(crate) fn get_xtream_output(&self) -> Option<&XtreamTargetOutput> {
@@ -338,5 +269,26 @@ impl ConfigTarget {
             .as_ref()
             .and_then(|options| options.force_redirect.as_ref())
             .is_some_and(|flags| flags.has_cluster(item_type))
+    }
+}
+
+macros::from_impl!(ConfigTarget);
+impl From<&ConfigTargetDto> for ConfigTarget {
+    fn from(dto: &ConfigTargetDto) -> Self {
+
+        Self {
+            id: dto.id,
+            enabled: dto.enabled,
+            name: dto.name.to_string(),
+            options: dto.options.clone(),
+            sort: dto.sort.as_ref().map(Into::into),
+            filter: dto.t_filter.as_ref().unwrap().clone(),
+            output: dto.output.iter().map(Into::into).collect(),
+            rename: dto.rename.as_ref().map(|l| l.iter().map(Into::into).collect()),
+            mapping_ids: dto.mapping.clone(),
+            mapping: Arc::new(ArcSwapOption::new(None)),
+            processing_order: dto.processing_order,
+            watch: dto.watch.as_ref().map(|list| list.iter().filter_map(|s| Regex::new(s).ok()).collect())
+        }
     }
 }

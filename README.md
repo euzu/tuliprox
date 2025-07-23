@@ -1115,6 +1115,7 @@ It is whitespace-tolerant and uses familiar programming concepts with a custom s
   - print(a, b, c)
   - first(a)
   - template(a)
+  - replace(text, match, replacement)
 Field names are:  `name`, `title"`, `caption"`, `group"`, `id"`, `chno"`, `logo"`, `logo_small"`, `parent_code"`, `time_shift" |  "url"`, `epg_channel_id"`, `epg_id`.
 When you use Regular expressions it could be that your match contains multiple results. The builtin function `first` returns the first match.
 Example `print(uppercase("hello"))`. output is only visible in `trace` log level you can enable it like `log_level: debug,tuliprox::foundation::mapper=trace` in config
@@ -1182,6 +1183,10 @@ Example `if then else` block
   }
 ```
 
+Example of removing prefix
+```
+`@Caption = replace(@Caption, "UK:",  "EN:"`
+```
 
 Example `mapping.yml`
 

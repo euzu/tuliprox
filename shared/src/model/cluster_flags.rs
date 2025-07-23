@@ -5,7 +5,7 @@ use serde::de::{Error, SeqAccess, Visitor};
 use crate::model::{PlaylistItemType, XtreamCluster};
 
 bitflags! {
-    #[derive(Debug, Clone, PartialEq, Eq)]
+    #[derive(Debug, Copy, Clone, PartialEq, Eq)]
    pub struct ClusterFlags: u16 {
         const Live   = 1;      // 0b0000_0001
         const Vod    = 1 << 1; // 0b0000_0010
@@ -67,7 +67,7 @@ impl TryFrom<&str> for ClusterFlags {
     type Error = &'static str;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
-        let input = value.trim().trim_matches(['[', ']'].as_ref());
+        let input = value.trim().trim_matches(|c| ['[', ']', '(', ')'].contains(&c));
         let items = input.split(',').map(str::trim);
         ClusterFlags::from_items(items)
     }

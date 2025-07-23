@@ -6,19 +6,6 @@
   overflow: hidden;
 }
 
-@mixin prefsInput {
-    color: var(--text-color);
-    background-color: transparent;
-    padding: 0.2rem 0.5rem;
-    flex: 1 1 auto;
-    border: 1px solid var(--border-color);
-
-    &:focus,
-    &:hover {
-      outline: none;
-    }
-}
-
 @mixin prefsToolbar() {
   &__toolbar {
     display: flex;

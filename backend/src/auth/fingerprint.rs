@@ -16,7 +16,8 @@ fn validate_header(value: &str) -> Option<String> {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-pub struct Fingerprint(pub String);
+pub struct Fingerprint(pub String, pub String);
+
 
 impl<B> FromRequestParts<B> for Fingerprint
 where
@@ -64,6 +65,6 @@ impl Fingerprint {
             None => format!("{}{ua}", addr.ip()),
         };
 
-        Ok(Fingerprint(key))
+        Ok(Fingerprint(key, addr.to_string()))
     }
 }

@@ -1,10 +1,9 @@
-use crate::utils::{hash_string_as_hex, traverse_dir};
-use shared::utils::human_readable_byte_size;
+use crate::utils::{traverse_dir};
+use shared::utils::{hash_string_as_hex, human_readable_byte_size};
 use log::{debug, error, info, trace};
 use std::collections::{HashMap, VecDeque};
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::path::PathBuf;
 
 /// `LRUResourceCache`
 ///
@@ -18,14 +17,12 @@ use std::sync::RwLock;
 /// - `current_size`: The current total size of all files in the cache, in bytes.
 /// - `cache`: A `HashMap` that maps a unique key to a tuple containing the file path and its size.
 /// - `usage_order`: A `VecDeque` that tracks the access order of keys, with the oldest at the front.
-/// - `lock`: An `RwLock` to ensure thread-safe access to the cache during read and write operations.
 pub struct LRUResourceCache {
     capacity: usize,  // Maximum size in bytes
     cache_dir: PathBuf,
     current_size: usize,  // Current size in bytes
     cache: HashMap<String, (PathBuf, usize)>,
     usage_order: VecDeque<String>,
-    lock: RwLock<()>,
 }
 
 impl LRUResourceCache {
@@ -34,22 +31,25 @@ impl LRUResourceCache {
     ///     - `capacity`: The maximum size of the cache in bytes.
     ///     - `cache_dir`: The directory path where cached files are stored.
     ///
-    pub fn new(capacity: usize, cache_dir: &Path) -> Self {
+    pub fn new(capacity: usize, cache_dir: &str) -> Self {
         Self {
             capacity,
             cache_dir: PathBuf::from(cache_dir),
             current_size: 0,
             cache: HashMap::<String, (PathBuf, usize)>::new(),
             usage_order: VecDeque::new(),
-            lock: RwLock::new(()),
         }
+    }
+
+    pub fn update_config(&mut self, capacity: usize, cache_dir: &str) {
+        self.capacity = capacity;
+        self.cache_dir = PathBuf::from(cache_dir);
     }
 
     /// - Scans the cache directory and populates the internal data structures with existing files and their sizes.
     /// - Updates the `current_size` and `usage_order` fields based on the scanned files.
     ///   The use/access order is not restored!!!
     pub fn scan(&mut self) -> std::io::Result<()> {
-        let _write_lock = self.lock.write();
         let mut visit = |entry: &std::fs::DirEntry, metadata: &std::fs::Metadata| {
             let path = entry.path();
             if let Some(file_name) = path.file_name() {
@@ -92,7 +92,6 @@ impl LRUResourceCache {
     }
 
     fn insert_to_cache(&mut self, key: String, file_size: usize) -> PathBuf {
-        let _write_lock = self.lock.write();
         let mut path = self.cache_dir.clone();
         path.push(&key);
         debug!("Added file to cache: {}", &path.to_string_lossy());
@@ -118,7 +117,6 @@ impl LRUResourceCache {
     pub fn get_content(&mut self, url: &str) -> Option<PathBuf> {
         let key = hash_string_as_hex(url);
         {
-            let _read_lock = self.lock.read();
             if let Some((path, size)) = self.cache.get(&key) {
                 if path.exists() {
                     // Move to the end of the queue
@@ -128,7 +126,6 @@ impl LRUResourceCache {
                 }
                 {
                     // this should not happen, someone deleted the file manually and the cache is not in sync
-                    let _write_lock = self.lock.write();
                     self.current_size -= size;
                     self.cache.remove(&key);
                     self.usage_order.retain(|k| k != &key);
@@ -139,7 +136,6 @@ impl LRUResourceCache {
     }
 
     fn evict_if_needed(&mut self) {
-        let _write_lock = self.lock.write();
         // if the cache size is to small and one element exceeds the size than the cache won't work, we ignore this
         while self.current_size > self.capacity {
             if let Some(oldest_file) = self.usage_order.pop_front() {

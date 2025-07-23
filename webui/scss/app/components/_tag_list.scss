@@ -1,0 +1,12 @@
+.tp__tag_list {
+  display: flex;
+  flex-flow: row wrap;
+  gap: var(--gap-small);
+
+  .tp__add-input {
+    padding: 0.3rem 0.6rem;
+    border: 1px solid #ccc;
+    border-radius: 16px;
+    font-size: 0.9rem;
+  }
+}

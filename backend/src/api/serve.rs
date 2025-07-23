@@ -6,15 +6,18 @@ use hyper::body::Incoming;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder;
 use hyper_util::service::TowerToHyperService;
-use log::{error, info, trace};
+use log::{debug, error, trace};
 use socket2::{SockRef, TcpKeepalive};
 use std::convert::Infallible;
 use std::fmt::Debug;
 use std::net::SocketAddr;
 use std::pin::pin;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 use tower::{Service, ServiceExt};
+use crate::api::model::active_user_manager::ActiveUserManager;
 
 #[derive(Debug)]
 struct IncomingStream
@@ -35,49 +38,43 @@ impl axum::extract::connect_info::Connected<IncomingStream> for SocketAddr {
     }
 }
 
-pub async fn serve(listener: tokio::net::TcpListener, router: axum::Router<()>) -> ! {
+pub async fn serve(listener: tokio::net::TcpListener,
+                   router: axum::Router<()>,
+                   cancel_token: Option<CancellationToken>,
+                   user_manager: Arc<ActiveUserManager>) {
     let (signal_tx, _signal_rx) = watch::channel(());
-    let (_close_tx, close_rx) = watch::channel(());
     let mut make_service = router.into_make_service_with_connect_info::<SocketAddr>();
 
-    loop {
-        let Ok((socket, remote_addr)) = listener.accept().await else { continue };
-
-        let Ok(tcp_stream_std) = socket.into_std() else { continue; };
-        tcp_stream_std.set_nonblocking(true).ok(); // this is not necessary
-
-        // Configure keep alive with socket2
-        let sock_ref = SockRef::from(&tcp_stream_std);
-
-        let keep_alive_first_probe = 10;
-        let keep_alive_interval = 5;
-
-        let mut keepalive = TcpKeepalive::new();
-        keepalive = keepalive.with_time(Duration::from_secs(keep_alive_first_probe)) // Time until the first keepalive probe (idle time)
-            .with_interval(Duration::from_secs(keep_alive_interval)); // Interval between keep alives
-        #[cfg(not(target_os = "windows"))]
-        {
-            let keep_alive_retries = 3;
-            keepalive = keepalive.with_retries(keep_alive_retries); // Number of failed probes before the connection is closed
+    match cancel_token {
+        Some(token) => {
+            loop {
+                tokio::select! {
+                    () = token.cancelled() => {
+                        break;
+                    }
+                    accept_result = listener.accept() => {
+                        let Ok((socket, remote_addr)) = accept_result else { continue };
+                        handle_connection(&mut make_service, &signal_tx, socket, remote_addr, Arc::clone(&user_manager)).await;
+                    }
+                }
+            }
         }
-
-        if let Err(e) = sock_ref.set_tcp_keepalive(&keepalive) {
-            error!("Failed to set keepalive for {remote_addr}: {e}");
+        None => {
+            loop {
+                let Ok((socket, remote_addr)) = listener.accept().await else { continue };
+                handle_connection(&mut make_service, &signal_tx, socket, remote_addr, Arc::clone(&user_manager)).await;
+            }
         }
-
-        let Ok(socket) = tokio::net::TcpStream::from_std(tcp_stream_std) else { continue; };
-
-        let io = TokioIo::new(socket);
-        handle_connection(&mut make_service, &signal_tx, &close_rx, io, remote_addr).await;
     }
 }
+
 
 async fn handle_connection<M, S>(
     make_service: &mut M,
     signal_tx: &watch::Sender<()>,
-    close_rx: &watch::Receiver<()>,
-    io: TokioIo<tokio::net::TcpStream>,
+    socket: tokio::net::TcpStream,
     remote_addr: SocketAddr,
+    user_manager: Arc<ActiveUserManager>,
 )
 where
     M: for<'a> Service<IncomingStream, Error=Infallible, Response=S> + Send + 'static,
@@ -85,6 +82,31 @@ where
     S: Service<Request, Response=Response, Error=Infallible> + Clone + Send + 'static,
     S::Future: Send,
 {
+    let Ok(tcp_stream_std) = socket.into_std() else { return; };
+    tcp_stream_std.set_nonblocking(true).ok(); // this is not necessary
+
+    // Configure keep alive with socket2
+    let sock_ref = SockRef::from(&tcp_stream_std);
+
+    let keep_alive_first_probe = 10;
+    let keep_alive_interval = 5;
+
+    let mut keepalive = TcpKeepalive::new();
+    keepalive = keepalive.with_time(Duration::from_secs(keep_alive_first_probe)) // Time until the first keepalive probe (idle time)
+        .with_interval(Duration::from_secs(keep_alive_interval)); // Interval between keep alives
+    #[cfg(not(target_os = "windows"))]
+    {
+        let keep_alive_retries = 3;
+        keepalive = keepalive.with_retries(keep_alive_retries); // Number of failed probes before the connection is closed
+    }
+
+    if let Err(e) = sock_ref.set_tcp_keepalive(&keepalive) {
+        error!("Failed to set keepalive for {remote_addr}: {e}");
+    }
+
+    let Ok(socket) = tokio::net::TcpStream::from_std(tcp_stream_std) else { return; };
+
+    let io = TokioIo::new(socket);
     trace!("connection {remote_addr:?} accepted");
 
     make_service
@@ -103,7 +125,7 @@ where
 
     let hyper_service = TowerToHyperService::new(tower_service);
     let signal_tx = signal_tx.clone();
-    let close_rx = close_rx.clone();
+    let addr_str = remote_addr.to_string();
 
     tokio::spawn(async move {
         #[allow(unused_mut)]
@@ -111,8 +133,13 @@ where
         let mut conn = pin!(builder.serve_connection_with_upgrades(io, hyper_service));
         let mut signal_closed = pin!(signal_tx.closed().fuse());
 
-        // TODO use this to remove user connections
-        let connection_closed = || info!("Connection closed: {remote_addr}");
+        let user_manager_clone = Arc::clone(&user_manager);
+        let mut addr_close_rx = user_manager_clone.get_close_connection_channel();
+        let connection_closed = move || {
+            debug!("Connection closed: {remote_addr}");
+            let addr = remote_addr.to_string();
+            user_manager_clone.remove_connection(&addr);
+        };
 
         loop {
             tokio::select! {
@@ -128,9 +155,14 @@ where
                     trace!("signal received in task, starting graceful shutdown");
                     conn.as_mut().graceful_shutdown();
                 }
+                Ok(msg) = addr_close_rx.recv() => {
+                    if msg == addr_str {
+                        debug!("Forced client disconnect {msg}");
+                        conn.as_mut().graceful_shutdown();
+                        break;
+                    }
+                }
             }
         }
-
-        drop(close_rx);
     });
 }

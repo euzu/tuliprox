@@ -1,68 +1,62 @@
-use shared::error::{create_tuliprox_error_result, TuliproxError, TuliproxErrorKind};
 use regex::Regex;
-use std::borrow::BorrowMut;
 use std::collections::HashMap;
-use crate::utils::request::DEFAULT_USER_AGENT;
+use shared::model::{VideoConfigDto, VideoDownloadConfigDto};
+use crate::model::macros;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone)]
 pub struct VideoDownloadConfig {
-    #[serde(default)]
     pub headers: HashMap<String, String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub directory: Option<String>,
-    #[serde(default)]
+    pub directory: String,
     pub organize_into_directories: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub episode_pattern: Option<String>,
-    #[serde(default, skip_serializing, skip_deserializing)]
-    pub t_re_episode_pattern: Option<Regex>,
+    pub episode_pattern: Option<Regex>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-#[serde(deny_unknown_fields)]
+macros::from_impl!(VideoDownloadConfig);
+impl From<&VideoDownloadConfigDto> for VideoDownloadConfig {
+    fn from(dto: &VideoDownloadConfigDto) -> Self {
+        Self {
+            headers: dto.headers.clone(),
+            directory: dto.directory.as_ref().map_or_else(|| "downloads".to_string(), ToString::to_string),
+            organize_into_directories: dto.organize_into_directories,
+            episode_pattern: dto.episode_pattern.as_ref().and_then(|s| Regex::new(s).ok()),
+        }
+    }
+}
+
+impl From<&VideoDownloadConfig> for VideoDownloadConfigDto {
+    fn from(instance: &VideoDownloadConfig) -> Self {
+        Self {
+            headers: instance.headers.clone(),
+            directory: Some(instance.directory.clone()),
+            organize_into_directories: instance.organize_into_directories,
+            episode_pattern: instance.episode_pattern.as_ref().map(std::string::ToString::to_string),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct VideoConfig {
-    #[serde(default)]
     pub extensions: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download: Option<VideoDownloadConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web_search: Option<String>,
 }
-
-impl VideoConfig {
-    /// # Panics
-    ///
-    /// Will panic if default `RegEx` gets invalid
-    pub fn prepare(&mut self) -> Result<(), TuliproxError> {
-        if self.extensions.is_empty() {
-            self.extensions = ["mkv", "avi", "mp4", "mpeg", "divx", "mov"]
-                .iter()
-                .map(|&arg| arg.to_string())
-                .collect();
+macros::from_impl!(VideoConfig);
+impl From<&VideoConfigDto> for VideoConfig {
+    fn from(dto: &VideoConfigDto) -> Self {
+        Self {
+            extensions: dto.extensions.clone(),
+            download: dto.download.as_ref().map(Into::into),
+            web_search: dto.web_search.clone(),
         }
-        match &mut self.download {
-            None => {}
-            Some(downl) => {
-                if downl.headers.is_empty() {
-                    downl.headers.borrow_mut().insert("Accept".to_string(), "video/*".to_string());
-                    downl.headers.borrow_mut().insert("User-Agent".to_string(), DEFAULT_USER_AGENT.to_string());
-                }
+    }
+}
 
-                if let Some(episode_pattern) = &downl.episode_pattern {
-                    if !episode_pattern.is_empty() {
-                        match regex::Regex::new(episode_pattern) {
-                            Ok(pattern) => {
-                                downl.t_re_episode_pattern = Some(pattern);
-                            }
-                            Err(err) => {
-                                return create_tuliprox_error_result!(TuliproxErrorKind::Info, "cant parse regex: {episode_pattern} {err}");
-                            }
-                        }
-                    }
-                }
-            }
+impl From<&VideoConfig> for VideoConfigDto {
+    fn from(instance: &VideoConfig) -> Self {
+        Self {
+            extensions: instance.extensions.clone(),
+            download: instance.download.as_ref().map(Into::into),
+            web_search: instance.web_search.clone(),
         }
-        Ok(())
     }
 }

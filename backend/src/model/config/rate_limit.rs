@@ -1,21 +1,30 @@
-use shared::error::{TuliproxError, TuliproxErrorKind};
+use shared::model::RateLimitConfigDto;
+use crate::model::macros;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone)]
 pub struct RateLimitConfig {
     pub enabled: bool,
     pub period_millis: u64,
     pub burst_size: u32,
 }
 
-impl RateLimitConfig {
-    pub(crate) fn prepare(&self) -> Result<(), TuliproxError> {
-        if self.period_millis == 0 {
-            return Err(TuliproxError::new(TuliproxErrorKind::Info, "Rate limiter period can't be 0".to_string()));
+macros::from_impl!(RateLimitConfig);
+impl From<&RateLimitConfigDto> for RateLimitConfig {
+    fn from(dto: &RateLimitConfigDto) -> Self {
+        Self {
+            enabled: dto.enabled,
+            period_millis: dto.period_millis,
+            burst_size: dto.burst_size,
         }
-        if self.burst_size == 0 {
-            return Err(TuliproxError::new(TuliproxErrorKind::Info, "Rate limiter burst can't be 0".to_string()));
+    }
+}
+
+impl From<&RateLimitConfig> for RateLimitConfigDto {
+    fn from(instance: &RateLimitConfig) -> Self {
+        Self {
+            enabled: instance.enabled,
+            period_millis: instance.period_millis,
+            burst_size: instance.burst_size,
         }
-        Ok(())
     }
 }

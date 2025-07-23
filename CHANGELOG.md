@@ -1,4 +1,9 @@
 # Changelog
+- Hot reload for config
+- Fixed shared stream provider connection count
+- Added hanging client connection release
+- Added `replace` built-in function for mapper scripts 
+
 # 3.1.4 (2025-06-17)
 - share live stream refactored
 - fixed active user count

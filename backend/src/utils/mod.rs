@@ -1,19 +1,17 @@
-mod json_utils;
 mod sys_utils;
-mod hash_utils;
 mod compression;
 mod file;
 mod network;
-mod bincode_utils;
 mod crypto_utils;
 mod step_measure;
 mod logging;
 mod trakt;
-mod serde_utils;
+mod json_utils;
+mod bincode_utils;
 
+pub use self::bincode_utils::*;
 pub use self::logging::*;
 pub use self::trakt::*;
-pub use self::serde_utils::*;
 
 
 #[macro_export]
@@ -64,10 +62,8 @@ pub use with;
 
 pub use self::json_utils::*;
 pub use self::sys_utils::*;
-pub use self::hash_utils::*;
 pub use self::compression::*;
 pub use self::file::*;
 pub use self::network::*;
-pub use self::bincode_utils::*;
 pub use self::crypto_utils::*;
 pub use self::step_measure::*;

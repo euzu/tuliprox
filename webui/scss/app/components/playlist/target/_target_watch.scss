@@ -1,0 +1,13 @@
+.tp__target-watch {
+  display: flex;
+  flex-flow: column;
+  color: var(--modest-text-color);
+  li {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    &::before {
+      content: " - ";
+    }
+  }
+}

@@ -7,8 +7,7 @@ use deunicode::deunicode;
 use serde::{Deserialize, Serialize};
 
 use crate::model::{VideoDownloadConfig};
-use crate::utils::hash_string_as_hex;
-use shared::utils::{CONSTANTS, FILENAME_TRIM_PATTERNS};
+use shared::utils::{CONSTANTS, FILENAME_TRIM_PATTERNS, hash_string_as_hex};
 
 /// File-Download information.
 #[derive(Clone)]
@@ -43,7 +42,7 @@ pub struct FileDownload {
 fn get_download_directory(download_cfg: &VideoDownloadConfig, filestem: &str) -> PathBuf {
     if download_cfg.organize_into_directories {
         let mut stem = filestem;
-        if let Some(re) = &download_cfg.t_re_episode_pattern {
+        if let Some(re) = &download_cfg.episode_pattern {
             if let Some(captures) = re.captures(stem) {
                 if let Some(episode) = captures.name("episode") {
                     if !episode.as_str().is_empty() {
@@ -53,10 +52,10 @@ fn get_download_directory(download_cfg: &VideoDownloadConfig, filestem: &str) ->
             }
         }
         let dir_name = CONSTANTS.re_remove_filename_ending.replace(stem, "");
-        let file_dir: PathBuf = [download_cfg.directory.as_ref().unwrap(), dir_name.as_ref()].iter().collect();
+        let file_dir: PathBuf = [download_cfg.directory.as_str(), dir_name.as_ref()].iter().collect();
         file_dir
     } else {
-        PathBuf::from(download_cfg.directory.as_ref().unwrap())
+        PathBuf::from(download_cfg.directory.as_str())
     }
 }
 

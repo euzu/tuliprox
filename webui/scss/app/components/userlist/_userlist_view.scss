@@ -1,0 +1,12 @@
+.tp__userlist-view {
+
+  .tp__userlist-list__user {
+    display: flex;
+    flex-flow: column;
+    flex: 1 1 auto;
+    max-width: 100%;
+    box-sizing: border-box;
+    overflow: hidden;
+  }
+
+}

@@ -1,15 +1,15 @@
+use crate::utils;
+use log::error;
+use ruzstd::decoding::StreamingDecoder;
+use ruzstd::encoding::{compress_to_vec, CompressionLevel};
+use serde::{Deserialize, Serialize};
+use shared::error::{str_to_io_error, to_io_error};
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::marker::PhantomData;
 use std::mem::size_of;
 use std::path::Path;
-use shared::error::{str_to_io_error, to_io_error};
-use log::error;
-use ruzstd::decoding::StreamingDecoder;
-use ruzstd::encoding::{compress_to_vec, CompressionLevel};
-use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
-use crate::utils;
 use crate::utils::{bincode_deserialize, bincode_serialize};
 
 const BLOCK_SIZE: usize = 4096;
@@ -102,9 +102,10 @@ where
     fn find_leaf_entry(node: &Self) -> Option<&K> {
         if node.is_leaf {
             node.keys.first()
-        } else {
-            let child = node.children.first().unwrap();
+        } else if let Some(child) = node.children.first() {
             Self::find_leaf_entry(child)
+        } else {
+            None
         }
     }
 
@@ -185,7 +186,9 @@ where
             let mut node = Self::new(false);
             node.keys = self.keys.split_off(median + 1);
             node.children = self.children.split_off(median + 1);
-            self.children.push(node.children.first().unwrap().clone());
+            if let Some(child) = node.children.first() {
+                self.children.push(child.clone());
+            }
             node
         }
     }
@@ -301,7 +304,7 @@ where
 
         // Deserialize values if leaf node
         let values = if is_leaf {
-            let use_compression = u8::from_le_bytes(buffer[read_pos..=read_pos].try_into().unwrap()) == 1;
+            let use_compression = u8::from_le_bytes(buffer[read_pos..=read_pos].try_into().unwrap_or([0u8])) == 1;
             read_pos += FLAG_SIZE;
             let values_length = u32_from_bytes(&buffer[read_pos..read_pos + LEN_SIZE])? as usize;
             read_pos += LEN_SIZE;
@@ -528,7 +531,11 @@ where
                     };
                 }
                 let child_idx = get_entry_index_upper_bound::<K>(&node.keys, key);
-                offset = *pointers.unwrap().get(child_idx).unwrap();
+                if let Some(child_offset) = pointers.unwrap().get(child_idx) {
+                    offset = *child_offset;
+                } else {
+                    return None;
+                }
             }
             Err(err) => {
                 error!("Failed to read id tree from file {err}");
@@ -769,9 +776,9 @@ mod tests {
     use std::io;
     use std::path::PathBuf;
 
-    use serde::{Deserialize, Serialize};
-
     use crate::repository::bplustree::{BPlusTree, BPlusTreeQuery, BPlusTreeUpdate};
+    use serde::{Deserialize, Serialize};
+    use shared::utils::generate_random_string;
 
     // Example usage with a simple struct
     #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -784,7 +791,7 @@ mod tests {
     #[test]
     fn insert_test() -> io::Result<()> {
         let test_size = 500;
-        let content = crate::utils::generate_random_string(1024);
+        let content = generate_random_string(1024);
         let mut tree = BPlusTree::<u32, Record>::new();
         for i in 0u32..=test_size {
             tree.insert(i, Record {
@@ -878,7 +885,6 @@ mod tests {
                 assert!(format!("{content} {}", k + 1).eq(&v.data), "Wrong entry");
             });
         });
-
     }
 
     #[test]

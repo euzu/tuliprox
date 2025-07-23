@@ -208,7 +208,7 @@ where
                 }
             }
             Err(err) => {
-                return Err(str_to_io_error(&format!("failed to write document: {} - {}", self.main_path.to_str().unwrap(), err)));
+                return Err(str_to_io_error(&format!("failed to write document: {} - {}", self.main_path.display(), err)));
             }
         }
         Ok(())
@@ -320,7 +320,7 @@ where
                 Err(e) => Err(e)
             }
         } else {
-            Err(Error::new(ErrorKind::NotFound, format!("File not found {}", main_path.to_str().unwrap())))
+            Err(Error::new(ErrorKind::NotFound, format!("File not found {}", main_path.display())))
         }
     }
 
@@ -404,7 +404,7 @@ impl IndexedDocumentDirectAccess {
                 return Ok(item);
             }
         }
-        Err(str_to_io_error(&format!("Failed to read item for id {:?} - {}", doc_id, main_path.to_str().unwrap())))
+        Err(str_to_io_error(&format!("Failed to read item for id {:?} - {}", doc_id, main_path.display())))
     }
 }
 
@@ -511,7 +511,7 @@ mod tests {
     use std::path::PathBuf;
 
     use serde::{Deserialize, Serialize};
-    use crate::model::XtreamPlaylistItem;
+    use shared::model::XtreamPlaylistItem;
     // use crate::model::XtreamPlaylistItem;
     use crate::repository::indexed_document::{IndexedDocumentGarbageCollector, IndexedDocumentIterator, IndexedDocumentWriter};
     use crate::utils::resolve_env_var;

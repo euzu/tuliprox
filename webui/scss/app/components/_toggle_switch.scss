@@ -1,0 +1,49 @@
+$toggle-switch-width: 2.8rem;
+$toggle-switch-height: 1.6rem;
+$toggle-switch-toggle-padding: 3px;
+$toggle-switch-toggle-width: calc($toggle-switch-height - $toggle-switch-toggle-padding * 2);
+$toggle-switch-toggle-end-pos: calc($toggle-switch-width - ($toggle-switch-toggle-width + $toggle-switch-toggle-padding * 2));
+
+.tp__toggle-switch {
+  position: relative;
+  display: inline-block;
+  width: $toggle-switch-width;
+  height: $toggle-switch-height;
+  cursor: pointer;
+  &__readonly {
+    cursor: default;
+  }
+
+  input {
+    opacity: 0; width: 0; height: 0
+  }
+  input:checked + span {
+    background-color: var(--toggle-switch-on-background-color);
+  }
+  input:checked + span > span {
+    transform: translateX($toggle-switch-toggle-end-pos);
+  }
+  &__track {
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background-color: var(--toggle-switch-off-background-color);
+    border-radius: $toggle-switch-toggle-width;
+    transition: 0.3s;
+
+  }
+  &__toggle {
+    position: absolute;
+    height: $toggle-switch-toggle-width;
+    width: $toggle-switch-toggle-width;
+    left: $toggle-switch-toggle-padding;
+    bottom: $toggle-switch-toggle-padding;
+    background-color: var(--toggle-switch-toggle-color);
+    border-radius: 50%;
+    transition: 0.3s;
+    transform: translateX(0);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.8);
+  }
+  &__active {
+
+  }
+}

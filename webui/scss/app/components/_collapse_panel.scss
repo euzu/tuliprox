@@ -1,0 +1,47 @@
+.tp__collapse-panel {
+  display: flex;
+  flex-flow: column;
+  overflow: hidden;
+
+  &__header {
+    display: flex;
+    flex-flow: row nowrap;
+    color: var(--modest-text-color);
+    fill: var(--modest-text-color);
+    max-height: 1.2rem;
+    cursor: pointer;
+    box-sizing: border-box;
+    width: 100%;
+
+    &:hover {
+      color: var(--menu-button-hover-color);
+      fill: var(--menu-button-hover-color);
+      background-color: var(--card-background-color);
+    }
+    &-title {
+      flex: 1 1 auto;
+    }
+    span {
+      pointer-events: none;
+    }
+    svg {
+      width: 1.2rem;
+    }
+  }
+
+  &__body {
+    display: flex;
+    flex-flow: column;
+    width: 100%;
+    box-sizing: border-box;
+    height: fit-content;
+  //  transition: max-height 0.5s ease;
+  //  max-height: 5000px;
+  }
+  &.tp__collapsed {
+    .tp__collapse-panel__body {
+       display: none;
+       max-height: 0;
+     }
+  }
+}

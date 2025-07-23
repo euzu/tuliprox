@@ -1,8 +1,7 @@
-use std::borrow::BorrowMut;
-use shared::model::{PlaylistItemType, XtreamCluster};
 use crate::model::{Config, ConfigInput};
-use crate::model::{PlaylistGroup, PlaylistItem, PlaylistItemHeader};
-use crate::utils::{extract_id_from_url};
+use shared::model::{PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, XtreamCluster, DEFAULT_VIDEO_EXTENSIONS};
+use shared::utils::extract_id_from_url;
+use std::borrow::BorrowMut;
 
 
 // other implementations like calculating text_distance on all titles took too much time
@@ -111,35 +110,44 @@ macro_rules! process_header_fields {
 fn process_header(input_name: &str, video_suffixes: &[&str], content: &str, url: &str) -> PlaylistItemHeader {
     let mut plih = create_empty_playlistitem_header(input_name, url);
     let mut it = content.chars();
-    let mut stack  = String::with_capacity(64);
+    let mut stack = String::with_capacity(64);
     let line_token = token_till(&mut stack, &mut it, ':', false);
     if line_token.as_deref() == Some("#EXTINF") {
+        let mut provider_id = None::<String>;
         let mut c = skip_digit(&mut it);
         loop {
-            if c.is_none() {
-                break;
-            }
-            let chr = c.unwrap();
-            if chr.is_whitespace() {
-                // skip
-            } else if chr == ',' {
-                plih.title = get_value(&mut stack, &mut it);
-            } else {
-                stack.push(chr);
-                let token = token_till(&mut stack, &mut it, '=', true);
-                if let Some(t) = token {
-                    let value = token_value(&mut stack, &mut it);
-                    process_header_fields!(plih, t.to_lowercase().as_str(),
-                        (id, "tvg-id"),
-                        (group, "group-title"),
-                        (name, "tvg-name"),
-                        (chno, "tvg-chno"),
-                        (parent_code, "parent-code"),
-                        (audio_track, "audio-track"),
-                        (logo, "tvg-logo"),
-                        (logo_small, "tvg-logo-small"),
-                        (time_shift, "timeshift"),
-                        (rec, "tvg-rec"); value);
+            match c {
+                None=> break,
+                Some(chr) => {
+                    if chr.is_whitespace() {
+                        // skip
+                    } else if chr == ',' {
+                        plih.title = get_value(&mut stack, &mut it);
+                    } else {
+                        stack.push(chr);
+                        let token = token_till(&mut stack, &mut it, '=', true);
+                        if let Some(t) = token {
+                            let value = token_value(&mut stack, &mut it);
+                            let token = t.to_lowercase();
+                            if token.as_str() == "xui-id" {
+                                if !value.is_empty() {
+                                    provider_id = Some(value);
+                                }
+                            } else {
+                                process_header_fields!(plih, token.as_str(),
+                            (id, "tvg-id"),
+                            (group, "group-title"),
+                            (name, "tvg-name"),
+                            (chno, "tvg-chno"),
+                            (parent_code, "parent-code"),
+                            (audio_track, "audio-track"),
+                            (logo, "tvg-logo"),
+                            (logo_small, "tvg-logo-small"),
+                            (time_shift, "timeshift"),
+                            (rec, "tvg-rec"); value);
+                            }
+                        }
+                    }
                 }
             }
             c = it.next();
@@ -147,11 +155,16 @@ fn process_header(input_name: &str, video_suffixes: &[&str], content: &str, url:
 
         if plih.id.is_empty() {
             plih.epg_channel_id = None;
-            if let Some(chanid) = extract_id_from_url(url) {
+            if let Some(pid) = provider_id {
+                plih.id = pid;
+            } else if let Some(chanid) = extract_id_from_url(url) {
                 plih.id = chanid;
             }
         } else {
             plih.epg_channel_id = Some(plih.id.to_string());
+            if let Some(pid) = provider_id {
+                plih.id = pid;
+            }
         }
     }
 
@@ -176,7 +189,6 @@ fn process_header(input_name: &str, video_suffixes: &[&str], content: &str, url:
     plih
 }
 
-
 pub fn consume_m3u<'a, I, F: FnMut(PlaylistItem)>(cfg: &Config, input: &ConfigInput, lines: I, mut visit: F)
 where
     I: Iterator<Item=&'a str>,
@@ -185,7 +197,12 @@ where
     let mut group: Option<String> = None;
     let input_name = input.name.as_str();
 
-    let video_suffixes = cfg.video.as_ref().unwrap().extensions.iter().map(String::as_str).collect::<Vec<&str>>();
+    let video_suffixes = match cfg.video.as_ref() {
+      Some(config) => {
+          config.extensions.iter().map(String::as_str).collect::<Vec<&str>>()
+      },
+      None => DEFAULT_VIDEO_EXTENSIONS.to_vec()
+    };
     for line in lines {
         if line.starts_with("#EXTINF") {
             header = Some(String::from(line));
@@ -236,18 +253,23 @@ where
                 sort_order_idx += 1;
             }
             std::collections::hash_map::Entry::Occupied(o) => {
-                sort_order.get_mut(*o.get()).unwrap().push(item);
+                if let Some(order) = sort_order.get_mut(*o.get()) {
+                    order.push(item);
+                }
             }
         }
     });
     let mut grp_id = 0;
-    let result: Vec<PlaylistGroup> = sort_order.into_iter().map(|channels| {
+    let result: Vec<PlaylistGroup> = sort_order.into_iter().filter_map(|channels| {
         // create a group based on the first playlist item
         let channel = channels.first();
-        let (cluster, group_title) = channel.map(|pli|
-            (pli.header.xtream_cluster, &pli.header.group)).unwrap();
-        grp_id += 1;
-        PlaylistGroup { id: grp_id, xtream_cluster: cluster, title: group_title.to_string(), channels }
+        if let Some((cluster, group_title)) = channel.map(|pli|
+            (pli.header.xtream_cluster, &pli.header.group)) {
+            grp_id += 1;
+            Some(PlaylistGroup { id: grp_id, xtream_cluster: cluster, title: group_title.to_string(), channels })
+        } else {
+            None
+        }
     }).collect();
     result
 }
@@ -261,7 +283,7 @@ mod test {
         let input: &str = "hello";
         let video_suffixes = Vec::new();
         let url = "http://hello.de/hello.ts";
-        let line =  r#"#EXTINF:-1 channel-id="abc-seven" tvg-id="abc-seven" tvg-logo="https://abc.nz/.images/seven.png" tvg-chno="7" group-title="Sydney" , Seven"#;
+        let line = r#"#EXTINF:-1 channel-id="abc-seven" tvg-id="abc-seven" tvg-logo="https://abc.nz/.images/seven.png" tvg-chno="7" group-title="Sydney" , Seven"#;
 
         let pli = process_header(input, &video_suffixes, line, url);
         assert_eq!(pli.title, "Seven");
@@ -276,13 +298,27 @@ mod test {
         let input: &str = "hello";
         let video_suffixes = Vec::new();
         let url = "http://hello.de/hello.ts";
-        let line =  r#"#EXTINF:-1 channel-id="abc-seven" tvg-id="abc-seven" tvg-logo="https://abc.nz/.images/seven.png" tvg-chno="7" group-title="Sydney", Seven"#;
+        let line = r#"#EXTINF:-1 channel-id="abc-seven" tvg-id="abc-seven" tvg-logo="https://abc.nz/.images/seven.png" tvg-chno="7" group-title="Sydney", Seven"#;
 
         let pli = process_header(input, &video_suffixes, line, url);
         assert_eq!(pli.title, "Seven");
         assert_eq!(pli.id, "abc-seven");
         assert_eq!(pli.logo, "https://abc.nz/.images/seven.png");
         assert_eq!(pli.chno, "7");
+        assert_eq!(pli.group, "Sydney");
+    }
+
+    #[test]
+    fn test_process_header_xui_id() {
+        let input: &str = "hello";
+        let video_suffixes = Vec::new();
+        let url = "http://hello.de/hello.ts";
+        let line = r#"#EXTINF:-1 tvg-id="abc-seven" xui-id="provider-123" group-title="Sydney", Seven"#;
+
+        let pli = process_header(input, &video_suffixes, line, url);
+        assert_eq!(pli.title, "Seven");
+        assert_eq!(pli.id, "provider-123"); // Should use xui-id
+        assert_eq!(pli.epg_channel_id, Some("abc-seven".to_string())); // Should preserve original tvg-id
         assert_eq!(pli.group, "Sydney");
     }
 }

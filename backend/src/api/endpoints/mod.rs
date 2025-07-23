@@ -8,3 +8,4 @@ pub(in crate::api) mod hls_api;
 mod user_api;
 pub(in crate::api) mod hdhomerun_api;
 mod api_playlist_utils;
+pub (in crate::api) mod websocket_api;

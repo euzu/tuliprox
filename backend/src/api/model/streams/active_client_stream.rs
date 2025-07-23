@@ -1,22 +1,21 @@
 use crate::api::api_utils::StreamDetails;
 use crate::api::model::active_provider_manager::{ActiveProviderManager, ProviderConnectionGuard};
-use crate::api::model::active_user_manager::ActiveUserManager;
-use crate::api::model::active_user_manager::UserConnectionGuard;
+use crate::api::model::active_user_manager::{ActiveUserManager, UserConnectionGuard};
 use crate::api::model::app_state::AppState;
 use crate::api::model::stream::BoxedProviderStream;
 use crate::api::model::stream_error::StreamError;
+use crate::api::model::streams::timed_client_stream::TimedClientStream;
 use crate::api::model::streams::transport_stream_buffer::TransportStreamBuffer;
-use crate::model::{ProxyUserCredentials};
+use crate::model::ProxyUserCredentials;
 use bytes::Bytes;
 use futures::Stream;
+use futures::StreamExt;
 use log::{error, info};
+use shared::model::UserConnectionPermission;
 use std::pin::Pin;
 use std::sync::atomic::AtomicU8;
 use std::sync::{Arc, Mutex};
 use std::task::{Poll, Waker};
-use crate::api::model::streams::timed_client_stream::TimedClientStream;
-use futures::{StreamExt};
-use shared::model::UserConnectionPermission;
 
 const INNER_STREAM: u8 = 0_u8;
 const GRACE_BLOCK_STREAM: u8 = 1_u8;
@@ -29,16 +28,17 @@ pub(in crate::api) struct ActiveClientStream {
     #[allow(unused)]
     user_connection_guard: Option<UserConnectionGuard>,
     #[allow(dead_code)]
-    provider_connection_guard: Option<ProviderConnectionGuard>,
+    provider_connection_guard: Option<Arc<ProviderConnectionGuard>>,
     custom_video: (Option<TransportStreamBuffer>, Option<TransportStreamBuffer>),
     waker: Arc<Mutex<Option<Waker>>>,
 }
 
 impl ActiveClientStream {
-    pub(crate) async fn new(mut stream_details: StreamDetails,
-                            app_state: &AppState,
-                            user: &ProxyUserCredentials,
-                            connection_permission: UserConnectionPermission) -> Self {
+    pub(crate) fn new(mut stream_details: StreamDetails,
+                      app_state: &AppState,
+                      user: &ProxyUserCredentials,
+                      connection_permission: UserConnectionPermission,
+                      addr: &str) -> Self {
         let active_user = app_state.active_users.clone();
         let active_provider = app_state.active_provider.clone();
         if connection_permission == UserConnectionPermission::Exhausted {
@@ -46,27 +46,37 @@ impl ActiveClientStream {
         }
         let grant_user_grace_period = connection_permission == UserConnectionPermission::GracePeriod;
         let username = user.username.as_str();
-        let user_connection_guard = Some(active_user.add_connection(username, user.max_connections).await);
-        let cfg = &app_state.config;
+        let user_connection_guard = Some(active_user.add_connection(username, user.max_connections, addr));
+        let cfg = &app_state.app_config;
         let waker = Arc::new(Mutex::new(None));
         let waker_clone = Arc::clone(&waker);
-        let grace_stop_flag = Self::stream_grace_period(&stream_details, grant_user_grace_period, user, &active_user, &active_provider, &waker_clone);
-        let custom_video = cfg.t_custom_stream_response.as_ref()
+        let grace_stop_flag = Self::stream_grace_period(&stream_details, grant_user_grace_period, user, addr, &active_user, &active_provider, &waker_clone);
+        let custom_response = cfg.custom_stream_response.load();
+        let custom_video = custom_response.as_ref()
             .map_or((None, None), |c|
                 (
                     c.user_connections_exhausted.clone(),
                     c.provider_connections_exhausted.clone()
                 ));
 
-        let stream = stream_details.stream.take().unwrap();
-        let stream = match app_state.config.sleep_timer_mins {
-            None => stream,
-            Some(mins) => {
-                let secs = u32::try_from((u64::from(mins) * 60).min(u64::from(u32::MAX))).unwrap_or(0);
-                if secs > 0 {
-                    TimedClientStream::new(stream,  secs).boxed()
-                } else {
-                    stream
+        let stream = match stream_details.stream.take() {
+            None => {
+                if let Some(guard) = stream_details.provider_connection_guard.as_ref() {
+                    guard.release();
+                }
+                futures::stream::empty::<Result<Bytes, StreamError>>().boxed()
+            }
+            Some(stream) => {
+                match app_state.app_config.config.load().sleep_timer_mins {
+                    None => stream,
+                    Some(mins) => {
+                        let secs = u32::try_from((u64::from(mins) * 60).min(u64::from(u32::MAX))).unwrap_or(0);
+                        if secs > 0 {
+                            TimedClientStream::new(stream, secs).boxed()
+                        } else {
+                            stream
+                        }
+                    }
                 }
             }
         };
@@ -84,6 +94,7 @@ impl ActiveClientStream {
     fn stream_grace_period(stream_details: &StreamDetails,
                            user_grace_period: bool,
                            user: &ProxyUserCredentials,
+                           addr: &str,
                            active_user: &Arc<ActiveUserManager>,
                            active_provider: &Arc<ActiveProviderManager>,
                            waker: &Arc<Mutex<Option<Waker>>>) -> Option<Arc<AtomicU8>> {
@@ -110,19 +121,24 @@ impl ActiveClientStream {
             let stream_strategy_flag_copy = Arc::clone(&stream_strategy_flag);
             let waker_copy = Arc::clone(waker);
             let grace_period_millis = stream_details.grace_period_millis;
+            let provider_guard = stream_details.provider_connection_guard.clone();
 
+            let address = addr.to_string();
             tokio::spawn(async move {
                 tokio::time::sleep(tokio::time::Duration::from_millis(grace_period_millis)).await;
 
                 let mut updated = false;
 
                 if let Some((username, user_manager, max_connections, reconnect_flag)) = user_grace_check {
-                    let active_connections = user_manager.user_connections(&username).await;
+                    let active_connections = user_manager.user_connections(&username);
                     if active_connections > max_connections {
                         info!("User connections exhausted for active clients: {username}");
                         stream_strategy_flag_copy.store(USER_EXHAUSTED_STREAM, std::sync::atomic::Ordering::SeqCst);
+                        if let Some(guard) = provider_guard.as_ref() {
+                            guard.release();
+                        }
                         if let Some(flag) = reconnect_flag {
-                            info!("Stopped reconnecting, user connections exhausted");
+                            info!("Stopped reconnecting, user connections exhausted: {username}");
                             flag.notify();
                         }
                         updated = true;
@@ -133,9 +149,13 @@ impl ActiveClientStream {
                     if let Some((provider_name, provider_manager, reconnect_flag)) = provider_grace_check {
                         if provider_manager.is_over_limit(&provider_name).await {
                             info!("Provider connections exhausted for active clients: {provider_name}");
+                            provider_manager.release_connection(&address);
                             stream_strategy_flag_copy.store(PROVIDER_EXHAUSTED_STREAM, std::sync::atomic::Ordering::SeqCst);
+                            if let Some(guard) = provider_guard.as_ref() {
+                                guard.release();
+                            }
                             if let Some(flag) = reconnect_flag {
-                                info!("Stopped reconnecting, provider connections exhausted");
+                                info!("Stopped reconnecting, provider connections exhausted {provider_name}");
                                 flag.notify();
                             }
                             updated = true;
@@ -183,13 +203,17 @@ impl Stream for ActiveClientStream {
         }
 
         let buffer_opt = match flag {
-            USER_EXHAUSTED_STREAM => self.custom_video.0.as_mut(),
-            PROVIDER_EXHAUSTED_STREAM => self.custom_video.1.as_mut(),
+            USER_EXHAUSTED_STREAM => {
+                self.custom_video.0.as_mut()
+            },
+            PROVIDER_EXHAUSTED_STREAM => {
+                self.custom_video.1.as_mut()
+            },
             _ => None,
         };
 
         if let Some(buffer) = buffer_opt {
-           return Poll::Ready(Some(Ok(buffer.next_chunk())));
+            return Poll::Ready(Some(Ok(buffer.next_chunk())));
         }
 
         Poll::Ready(None)

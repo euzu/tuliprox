@@ -16,11 +16,11 @@ fi
 cd "$FRONTEND_DIR" || (echo "🧨 Can't find frontend directory" && exit 1)
 
 if [ "$1" = "m" ]; then
-  NEW_VERSION=$(yarn version --no-git-tag-version --major | grep "New version" | grep -Po "(\d+\.)+\d+")
+  NEW_VERSION=$(yarn version --no-git-tag-version --major | grep "New version" | grep -Po "(\d+\.)+\d+" || true)
 elif [ "$1" = "p" ]; then
-  NEW_VERSION=$(yarn version --no-git-tag-version --minor | grep "New version" | grep -Po "(\d+\.)+\d+")
+  NEW_VERSION=$(yarn version --no-git-tag-version --minor | grep "New version" | grep -Po "(\d+\.)+\d+" || true)
 else
-  NEW_VERSION=$(yarn version --no-git-tag-version --patch | grep "New version" | grep -Po "(\d+\.)+\d+")
+  NEW_VERSION=$(yarn version --no-git-tag-version --patch | grep "New version" | grep -Po "(\d+\.)+\d+" || true)
 fi
 
 cd "$WORKING_DIR"

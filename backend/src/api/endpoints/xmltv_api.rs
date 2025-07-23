@@ -12,19 +12,19 @@ use std::sync::Arc;
 use crate::api::api_utils::{get_user_target, serve_file};
 use crate::api::model::app_state::AppState;
 use crate::api::model::request::UserApiRequest;
+use crate::model::Config;
 use crate::model::{ConfigTarget, ProxyUserCredentials, TargetOutput};
-use crate::model::{Config};
 use crate::repository::m3u_repository::m3u_get_epg_file_path;
 use crate::repository::storage::get_target_storage_path;
 use crate::repository::xtream_repository::{xtream_get_epg_file_path, xtream_get_storage_path};
-use crate::utils;
+use crate::{utils};
+use crate::api::api_utils::try_unwrap_body;
 
 pub fn get_empty_epg_response() -> impl axum::response::IntoResponse + Send {
-    axum::response::Response::builder()
+    try_unwrap_body!(axum::response::Response::builder()
         .status(axum::http::StatusCode::OK) // Entspricht `HttpResponse::Ok()`
         .header(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("text/xml"))
-        .body(axum::body::Body::from(r#"<?xml version="1.0" encoding="utf-8" ?><!DOCTYPE tv SYSTEM "xmltv.dtd"><tv generator-info-name="Xtream Codes" generator-info-url=""></tv>"#)) // Setzt den Body der Antwort
-        .unwrap()
+        .body(axum::body::Body::from(r#"<?xml version="1.0" encoding="utf-8" ?><!DOCTYPE tv SYSTEM "xmltv.dtd"><tv generator-info-name="Xtream Codes" generator-info-url=""></tv>"#)))
 }
 
 fn time_correct(date_time: &str, correction: &TimeDelta) -> String {
@@ -159,14 +159,14 @@ fn serve_epg_with_timeshift(epg_file: File, offset_minutes: i32) -> impl axum::r
 
         buf.clear();
     }
-
-    let compressed_data = xml_writer.into_inner().finish().unwrap();
-    axum::response::Response::builder()
-        .header(axum::http::header::CONTENT_TYPE, mime::APPLICATION_OCTET_STREAM.to_string())
-        .header(axum::http::header::CONTENT_ENCODING, "gzip") // Set Content-Encoding header
-        .body(axum::body::Body::from(compressed_data))
-        .unwrap()
-        .into_response()
+    match xml_writer.into_inner().finish() {
+        Ok(compressed_data) =>
+            try_unwrap_body!(axum::response::Response::builder()
+            .header(axum::http::header::CONTENT_TYPE, mime::APPLICATION_OCTET_STREAM.to_string())
+            .header(axum::http::header::CONTENT_ENCODING, "gzip") // Set Content-Encoding header
+            .body(axum::body::Body::from(compressed_data))),
+        Err(err) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
+    }
 }
 
 /// Handles XMLTV EPG API requests, serving the appropriate EPG file with optional time-shifting based on user configuration.
@@ -192,7 +192,8 @@ async fn xmltv_api(
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
 
-    let Some(epg_path) = get_epg_path_for_target(&app_state.config, target) else {
+    let config = &app_state.app_config.config.load();
+    let Some(epg_path) = get_epg_path_for_target(config, &target) else {
         // No epg configured,  No processing or timeshift, epg can't be mapped to the channels.
         // we do not deliver epg
         return get_empty_epg_response().into_response();

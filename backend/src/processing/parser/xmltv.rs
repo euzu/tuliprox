@@ -1,19 +1,20 @@
 use crate::model::{Epg, TVGuide, XmlTag, XmlTagIcon, EPG_ATTRIB_CHANNEL, EPG_ATTRIB_ID, EPG_TAG_CHANNEL, EPG_TAG_DISPLAY_NAME, EPG_TAG_ICON, EPG_TAG_PROGRAMME, EPG_TAG_TV};
-use crate::model::{EpgNamePrefix, EpgSmartMatchConfig, PersistedEpgSource};
+use crate::model::{EpgSmartMatchConfig, PersistedEpgSource};
 use crate::processing::processor::epg::EpgIdCache;
 use crate::utils::compressed_file_reader::CompressedFileReader;
-use shared::utils::CONSTANTS;
+use dashmap::DashMap;
 use deunicode::deunicode;
 use quick_xml::events::{BytesStart, BytesText, Event};
 use quick_xml::Reader;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use shared::model::EpgNamePrefix;
+use shared::utils::CONSTANTS;
 use std::borrow::Cow;
 use std::cmp::min;
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::mem;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 
 /// Splits a string at the first delimiter if the prefix matches a known country code.
 ///
@@ -52,7 +53,7 @@ fn split_by_first_match<'a>(input: &'a str, delimiters: &[char]) -> (Option<&'a 
 
 fn name_prefix<'a>(name: &'a str, smart_config: &EpgSmartMatchConfig) -> (&'a str, Option<&'a str>) {
     if smart_config.name_prefix != EpgNamePrefix::Ignore {
-        let (prefix, suffix) = split_by_first_match(name, &smart_config.t_name_prefix_separator.clone());
+        let (prefix, suffix) = split_by_first_match(name, &smart_config.name_prefix_separator);
         if prefix.is_some() {
             return (suffix, prefix);
         }
@@ -73,9 +74,9 @@ pub fn normalize_channel_name(name: &str, normalize_config: &EpgSmartMatchConfig
     let normalized = deunicode(name.trim()).to_lowercase();
     let (channel_name, suffix) = name_prefix(&normalized, normalize_config);
     // Remove all non-alphanumeric characters (except dashes and underscores).
-    let cleaned_name = normalize_config.t_normalize_regex.as_ref().unwrap().replace_all(channel_name, "");
+    let cleaned_name = normalize_config.normalize_regex.replace_all(channel_name, "");
     // Remove terms like resolution
-    let cleaned_name = normalize_config.t_strip.iter().fold(cleaned_name.to_string(), |acc, term| {
+    let cleaned_name = normalize_config.strip.iter().fold(cleaned_name.to_string(), |acc, term| {
         acc.replace(term, "")
     });
     match suffix {
@@ -142,13 +143,14 @@ impl TVGuide {
         if !matched && fuzzy_matching {
             let (fuzzy_matched, matched_normalized_name) = Self::find_best_fuzzy_match(id_cache, tag);
             if fuzzy_matched {
-                let key = matched_normalized_name.unwrap();
-                let id = epg_id.to_string();
-                id_cache.normalized.entry(key).and_modify(|entry| {
-                    entry.replace(id.clone());
-                    id_cache.channel_epg_id.insert(Cow::Owned(id));
-                    matched = true;
-                });
+                if let Some(key) = matched_normalized_name {
+                    let id = epg_id.to_string();
+                    id_cache.normalized.entry(key).and_modify(|entry| {
+                        entry.replace(id.clone());
+                        id_cache.channel_epg_id.insert(Cow::Owned(id));
+                        matched = true;
+                    });
+                }
             }
         }
         matched
@@ -189,9 +191,10 @@ impl TVGuide {
                         #[allow(clippy::cast_sign_loss)]
                         let mjw = min(100, (match_jw * 100.0).round() as u16);
                         if mjw >= match_threshold {
-                            let mut lock = data.lock().unwrap();
-                            if lock.0 < mjw {
-                                *lock = (mjw, Some(Cow::Borrowed(norm_key)));
+                            if let Ok(mut lock) = data.lock() {
+                                if lock.0 < mjw {
+                                    *lock = (mjw, Some(Cow::Borrowed(norm_key)));
+                                }
                             }
                             if mjw > best_match_threshold {
                                 return true; // (true, matched_normalized_epg_id.map(|s| s.to_string()));
@@ -205,8 +208,9 @@ impl TVGuide {
         // is there an early exit strategy ???
 
         if early_exit_flag.load(Ordering::SeqCst) {
-            let result = data.lock().unwrap().1.take();
-            return (true, result.as_ref().map(std::string::ToString::to_string));
+            if let Ok(mut result) = data.lock() {
+                return (true, result.1.take().as_ref().map(ToString::to_string));
+            }
         }
         (false, None)
     }
@@ -353,13 +357,14 @@ where
     }
 }
 
-
 fn handle_text_tag(stack: &mut [XmlTag], e: &BytesText) {
     if !stack.is_empty() {
         if let Ok(text) = e.unescape() {
             let t = text.trim();
             if !t.is_empty() {
-                stack.last_mut().unwrap().value = Some(t.to_string());
+                if let Some(tag) = stack.last_mut() {
+                    tag.value = Some(t.to_string());
+                }
             }
         }
     }
@@ -380,7 +385,7 @@ where
             Ok(Event::Empty(e)) => {
                 handle_tag_start(callback, &mut stack, &e);
                 handle_tag_end(callback, &mut stack);
-            },
+            }
             Ok(Event::End(_e)) => handle_tag_end(callback, &mut stack),
             Ok(Event::Text(e)) => handle_text_tag(&mut stack, &e),
             _ => {}
@@ -402,14 +407,16 @@ fn collect_tag_attributes(e: &BytesStart, is_channel: bool, is_program: bool) ->
     let attributes = e.attributes().filter_map(Result::ok)
         .filter_map(|a| {
             let key = String::from_utf8_lossy(a.key.as_ref()).to_string();
-            let mut value = String::from(a.unescape_value().unwrap().as_ref());
-            if (is_channel && key == EPG_ATTRIB_ID) || (is_program && key == EPG_ATTRIB_CHANNEL) {
-                value = value.to_lowercase().to_string();
-            }
-            if value.is_empty() {
-                None
+            if let Ok(value) = a.unescape_value().as_ref() {
+                if value.is_empty() {
+                    None
+                } else if (is_channel && key == EPG_ATTRIB_ID) || (is_program && key == EPG_ATTRIB_CHANNEL) {
+                    Some((key, value.to_lowercase().to_string()))
+                } else {
+                    Some((key, value.to_string()))
+                }
             } else {
-                Some((key, value))
+                None
             }
         }).collect::<HashMap<String, String>>();
     attributes
@@ -422,7 +429,7 @@ pub fn flatten_tvguide(tv_guides: &[Epg]) -> Option<Epg> {
         let epg_children = Mutex::new(Vec::new());
         let epg_attributes = tv_guides.first().and_then(|t| t.attributes.clone());
         let count = tv_guides.iter().map(|tvg| tvg.children.len()).sum();
-        let channel_mapping: RwLock<HashMap<String, i16>> = RwLock::new(HashMap::with_capacity(count));
+        let channel_mapping: DashMap<String, i16> = DashMap::with_capacity(count);
 
         let mut sorted_guides = tv_guides.to_vec();
         // sort by priority
@@ -434,24 +441,20 @@ pub fn flatten_tvguide(tv_guides: &[Epg]) -> Option<Epg> {
                 if c.name.as_str() == EPG_TAG_CHANNEL {
                     if let Some(chan_id) = c.get_attribute_value(EPG_ATTRIB_ID) {
                         let should_add = {
-                            let channel_map = channel_mapping.read().unwrap();
                             // if not stored
-                            !channel_map.contains_key(chan_id) ||
+                            !channel_mapping.contains_key(chan_id) ||
                                 // or if priority is higher (less means higher priority)
-                                channel_map.get(chan_id).is_none_or(|&priority| guide.priority < priority)
+                                channel_mapping.get(chan_id).as_deref().is_none_or(|&priority| guide.priority < priority)
                         };
                         if should_add {
-                            let mut channel_map = channel_mapping.write().unwrap();
-                            match channel_map.entry(chan_id.to_string()) {
-                                Entry::Vacant(e) => {
-                                    e.insert(guide.priority);
+                            if let Some(mut existing) = channel_mapping.get_mut(chan_id) {
+                                if guide.priority < *existing {
+                                    *existing = guide.priority;
                                     children.push(c.clone());
                                 }
-                                Entry::Occupied(mut e) if guide.priority < *e.get() => {
-                                    e.insert(guide.priority);
-                                    children.push(c.clone());
-                                }
-                                Entry::Occupied(_) => {}
+                            } else {
+                                channel_mapping.insert(chan_id.clone(), guide.priority);
+                                children.push(c.clone());
                             }
                         }
                     }
@@ -460,9 +463,8 @@ pub fn flatten_tvguide(tv_guides: &[Epg]) -> Option<Epg> {
             guide.children.iter().for_each(|c| {
                 if c.name.as_str() == EPG_TAG_PROGRAMME {
                     if let Some(chan_id) = c.get_attribute_value(EPG_ATTRIB_CHANNEL) {
-                        let channel_map = channel_mapping.read().unwrap();
-                        if let Some(&stored_priority) = channel_map.get(chan_id) {
-                            if stored_priority == guide.priority {
+                        if let Some(stored_priority) = channel_mapping.get(chan_id) {
+                            if *stored_priority == guide.priority {
                                 children.push(c.clone());
                             }
                         }
@@ -470,22 +472,28 @@ pub fn flatten_tvguide(tv_guides: &[Epg]) -> Option<Epg> {
                 }
             });
 
-            epg_children.lock().unwrap().extend(children);
+            if let Ok(mut guard) = epg_children.lock() {
+                guard.extend(children);
+            }
         });
+        let children = if let Ok(mut children) = epg_children.lock() {
+            mem::take(&mut *children)
+        } else {
+            vec![]
+        };
         let epg = Epg {
             logo_override: false,
             priority: 0,
             attributes: epg_attributes,
-            children: mem::take(&mut *epg_children.lock().unwrap()),
+            children,
         };
         Some(epg)
     }
 }
 
-
 #[cfg(test)]
 mod tests {
-    use crate::model::{EpgNamePrefix, EpgSmartMatchConfig};
+    use crate::model::EpgSmartMatchConfig;
     use crate::processing::parser::xmltv::normalize_channel_name;
 
     #[test]
@@ -496,11 +504,11 @@ mod tests {
     /// ```
     /// parse_normalize().unwrap();
     /// ```
-    fn parse_normalize() -> Result<(), TuliproxError> {
-        let epg_normalize = EpgSmartMatchConfig::new()?;
+    fn parse_normalize() {
+        let epg_normalize_dto = EpgSmartMatchConfigDto { ..Default::default() };
+        let epg_normalize = EpgSmartMatchConfig::from(epg_normalize_dto);
         let normalized = normalize_channel_name("Love Nature", &epg_normalize);
         assert_eq!(normalized, "lovenature".to_string());
-        Ok(())
     }
 
 
@@ -533,8 +541,9 @@ mod tests {
     /// // This will assert that various channel names are normalized as expected.
     /// ```
     fn normalize() {
-        let mut epg_smart_cfg = EpgSmartMatchConfig { enabled: true, name_prefix: EpgNamePrefix::Suffix(".".to_string()), ..Default::default() };
-       let _ = epg_smart_cfg.prepare();
+        let mut epg_smart_cfg_dto = EpgSmartMatchConfigDto { enabled: true, name_prefix: EpgNamePrefix::Suffix(".".to_string()), ..Default::default() };
+        let _ = epg_smart_cfg_dto.prepare();
+        let epg_smart_cfg = EpgSmartMatchConfig::from(epg_smart_cfg_dto);
         println!("{epg_smart_cfg:?}");
         assert_eq!("supersport6.ru", normalize_channel_name("RU: SUPERSPORT 6 ᴿᴬᵂ", &epg_smart_cfg));
         assert_eq!("odisea.sat", normalize_channel_name("SAT: ODISEA ᴿᴬᵂ", &epg_smart_cfg));
@@ -544,8 +553,8 @@ mod tests {
         assert_eq!("odisea.bg", normalize_channel_name("BG | ODISEA ᵁᴴᴰ ³⁸⁴⁰ᴾ", &epg_smart_cfg));
     }
 
-    use shared::error::TuliproxError;
     use rphonetic::{Encoder, Metaphone};
+    use shared::model::{EpgNamePrefix, EpgSmartMatchConfigDto};
 
     #[test]
     /// Demonstrates phonetic encoding (Metaphone) of normalized channel names with various prefixes and suffixes.
@@ -560,8 +569,9 @@ mod tests {
     /// ```
     fn test_metaphone() {
         let metaphone = Metaphone::default();
-        let mut epg_smart_cfg = EpgSmartMatchConfig { enabled: true, name_prefix: EpgNamePrefix::Suffix(".".to_string()), ..Default::default() };
-        let _ = epg_smart_cfg.prepare();
+        let mut epg_smart_cfg_dto = EpgSmartMatchConfigDto { enabled: true, name_prefix: EpgNamePrefix::Suffix(".".to_string()), ..Default::default() };
+        let _ = epg_smart_cfg_dto.prepare();
+        let epg_smart_cfg = EpgSmartMatchConfig::from(epg_smart_cfg_dto);
         println!("{epg_smart_cfg:?}");
         // assert_eq!("supersport6.ru", metaphone.encode(&normalize_channel_name("RU: SUPERSPORT 6 ᴿᴬᵂ", &epg_normalize_cfg)));
         // assert_eq!("odisea.sat", metaphone.encode(&normalize_channel_name("SAT: ODISEA ᴿᴬᵂ", &epg_normalize_cfg)));

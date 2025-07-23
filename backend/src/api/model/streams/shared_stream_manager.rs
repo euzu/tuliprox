@@ -2,22 +2,18 @@ use crate::api::model::app_state::AppState;
 use crate::api::model::stream_error::StreamError;
 use crate::api::model::streams::provider_stream_factory::STREAM_QUEUE_SIZE;
 use crate::utils::debug_if_enabled;
-use crate::utils::request::sanitize_sensitive_info;
 use bytes::Bytes;
-use futures::stream::{BoxStream, FuturesUnordered};
+use futures::stream::BoxStream;
 use futures::{Stream, StreamExt};
-use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::mpsc::Sender;
-use tokio::sync::RwLock;
 
+use crate::api::model::active_provider_manager::ProviderConnectionGuard;
 use crate::api::model::stream::BoxedProviderStream;
 use dashmap::DashMap;
-use log::trace;
+use log::{debug, trace};
+use shared::utils::sanitize_sensitive_info;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
-use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -47,7 +43,7 @@ fn convert_stream(stream: BoxStream<Bytes>) -> BoxStream<Result<Bytes, StreamErr
     ReceiverStreamWrapper { stream }.boxed()
 }
 
-type SubscriberId = usize;
+type SubscriberId = String;
 
 /// Represents the state of a shared provider URL.
 ///
@@ -55,26 +51,75 @@ type SubscriberId = usize;
 struct SharedStreamState {
     headers: Vec<(String, String)>,
     buf_size: usize,
-    subscribers: Arc<DashMap<SubscriberId, Sender<Bytes>>>, //Arc<RwLock<Vec<Sender<Bytes>>>>,
-    next_subscriber_id: AtomicUsize,
+    provider_guard: Option<Arc<ProviderConnectionGuard>>,
+    subscribers: Arc<DashMap<SubscriberId, tokio::sync::watch::Sender<bool>>>,
+    broadcaster: tokio::sync::broadcast::Sender<Bytes>,
+    stop_tx: tokio::sync::watch::Sender<bool>,
+    stop_rx: tokio::sync::watch::Receiver<bool>,
+}
+
+impl Drop for SharedStreamState {
+    fn drop(&mut self) {
+        if let Some(guard) = self.provider_guard.as_ref() {
+            guard.force_release();
+        }
+    }
 }
 
 impl SharedStreamState {
-    fn new(headers: Vec<(String, String)>,
-           buf_size: usize) -> Self {
+    fn new(headers: Vec<(String, String)>, buf_size: usize,
+           provider_guard: Option<Arc<ProviderConnectionGuard>>) -> Self {
+        if let Some(guard) = &provider_guard {
+            guard.disable_release();
+        }
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let (broadcaster, _) = tokio::sync::broadcast::channel(buf_size);
         Self {
             headers,
             buf_size,
+            provider_guard,
             subscribers: Arc::new(DashMap::new()), //Arc::new(RwLock::new(Vec::new())),
-            next_subscriber_id: AtomicUsize::new(1),
+            broadcaster,
+            stop_tx,
+            stop_rx,
         }
     }
 
-    fn subscribe(&self) -> BoxedProviderStream {
-        let (tx, rx) = mpsc::channel(self.buf_size);
-        let id = self.next_subscriber_id.fetch_add(1, Ordering::AcqRel);
-        self.subscribers.insert(id, tx);
-        convert_stream(ReceiverStream::new(rx).boxed())
+    fn subscribe(&self, addr: &str, manager: Arc<SharedStreamManager>) -> BoxedProviderStream {
+        let (client_tx, client_rx) = mpsc::channel(self.buf_size);
+        let mut broadcast_rx = self.broadcaster.subscribe();
+        let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
+        self.subscribers.insert(addr.to_string(), cancel_tx);
+
+        let address = addr.to_string();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    result = broadcast_rx.recv() => {
+                        match result {
+                            Ok(data) => {
+                                if let Err(err) = client_tx.send(data).await {
+                                    debug!("Shared stream client send error: {address} {err}");
+                                    break;
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                                trace!("Client lagged behind. Skipped {skipped} messages. {address}");
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    _ = cancel_rx.changed() => {
+                        if *cancel_rx.borrow() {
+                            debug!("Client disconnected from shared stream: {address}");
+                            break;
+                        }
+                    }
+                }
+            }
+            manager.release_connection(&address);
+        });
+        convert_stream(ReceiverStream::new(client_rx).boxed())
     }
 
     fn broadcast<S, E>(
@@ -88,136 +133,136 @@ impl SharedStreamState {
         E: std::fmt::Debug + Send,
     {
         let mut source_stream = Box::pin(bytes_stream);
-        let subscribers = self.subscribers.clone();
         let streaming_url = stream_url.to_string();
+        let sender = self.broadcaster.clone();
+        let mut stop_rx = self.stop_rx.clone();
 
         tokio::spawn(async move {
-            while let Some(item) = source_stream.next().await {
-                let Ok(data) = item else {
-                    trace!("Shared stream received Err, skipping...");
-                    continue;
-                };
-
-                if subscribers.is_empty() {
-                    debug_if_enabled!("No active subscribers. Closing shared provider stream {}", sanitize_sensitive_info(&streaming_url));
-                    shared_streams.unregister(&streaming_url).await;
-                    break;
-                }
-
-                // Fast-path: at least one has capacity
-                if subscribers.iter().any(|sender| sender.value().capacity() > 0) {
-                    // Try sending immediately
-                    subscribers.retain(|_id, sender| match sender.try_send(data.clone()) {
-                        Ok(()) => true,
-                        Err(TrySendError::Closed(_)) => false,
-                        Err(err) => {
-                            trace!("broadcast try_send error: {err:?}");
-                            true
+            loop {
+                tokio::select! {
+                  item = source_stream.next() => {
+                     match item {
+                        Some(Ok(data)) => {
+                            let _ = sender.send(data);
                         }
-                    });
-                    continue;
-                }
-
-                // All are full → wait until one becomes available
-                let mut futures = FuturesUnordered::new();
-                for sender in subscribers.iter() {
-                    let tx = sender.value().clone();
-                    futures.push(async move {
-                        match tx.reserve().await {
-                            Ok(permit) => {
-                                drop(permit);
-                                Ok(())
-                            }
-                            Err(_) => Err(()),
+                        Some(Err(e)) => {
+                            trace!("Shared stream received error: {e:?}");
                         }
-                    });
-                }
-
-                let mut has_fillable_subscriber = false;
-                while let Some(result) = futures.next().await {
-                    if let Ok(()) = result {
-                        has_fillable_subscriber = true;
-                        break;
+                        None => {
+                            debug_if_enabled!("Source stream ended. Closing shared provider stream {}", sanitize_sensitive_info(&streaming_url));
+                            break;
+                        }
                     }
-                }
-
-                if !has_fillable_subscriber {
-                    debug_if_enabled!("All subscribers closed. Shutting down shared provider stream {}",sanitize_sensitive_info(&streaming_url));
-                    shared_streams.unregister(&streaming_url).await;
-                    break;
-                }
-
-                // Re-validate subscribers and send again
-                subscribers.retain(|_id, sender| match sender.try_send(data.clone()) {
-                    Ok(()) => true,
-                    Err(TrySendError::Closed(_)) => false,
-                    Err(err) => {
-                        trace!("broadcast try_send error after reserve: {err:?}");
-                        true
-                    }
-                });
+                  },
+                  _ = stop_rx.changed() => {
+                        if *stop_rx.borrow() {
+                           debug_if_enabled!("No shared stream subscribers left. Closing shared provider stream {}", sanitize_sensitive_info(&streaming_url));
+                            break;
+                        }
+                  }
+               }
             }
-
             debug_if_enabled!("Shared stream exhausted. Closing shared provider stream {}", sanitize_sensitive_info(&streaming_url));
-            shared_streams.unregister(&streaming_url).await;
+            shared_streams.unregister(&streaming_url);
         });
     }
 }
 
-type SharedStreamRegister = RwLock<HashMap<String, SharedStreamState>>;
+type SharedStreamRegister = DashMap<String, SharedStreamState>;
+type SharedStreamAddrRegister = DashMap<String, String>;
+
 
 pub struct SharedStreamManager {
     shared_streams: SharedStreamRegister,
+    shared_streams_by_addr: SharedStreamAddrRegister,
 }
 
 impl SharedStreamManager {
     pub(crate) fn new() -> Self {
         Self {
-            shared_streams: RwLock::new(HashMap::new()),
+            shared_streams: SharedStreamRegister::new(),
+            shared_streams_by_addr: SharedStreamAddrRegister::new(),
         }
     }
 
-    pub async fn get_shared_state_headers(&self, stream_url: &str) -> Option<Vec<(String, String)>> {
-        self.shared_streams.read().await.get(stream_url).map(|s| s.headers.clone())
+    pub fn get_shared_state_headers(&self, stream_url: &str) -> Option<Vec<(String, String)>> {
+        self.shared_streams.get(stream_url).map(|s| s.headers.clone())
     }
 
-    async fn unregister(&self, stream_url: &str) {
-        let _ = self.shared_streams.write().await.remove(stream_url);
+
+    fn unregister(&self, stream_url: &str) {
+        debug_if_enabled!("Unregistering shared stream {}", sanitize_sensitive_info(stream_url));
+        if let Some((_, shared_state)) = self.shared_streams.remove(stream_url) {
+            debug_if_enabled!("No active subscribers. Closing shared provider stream {}", sanitize_sensitive_info(stream_url));
+            let _ = shared_state.stop_tx.send(true);
+            if let Some(guard) = &shared_state.provider_guard {
+                guard.force_release();
+            }
+        }
     }
 
-    async fn subscribe_stream(&self, stream_url: &str) -> Option<BoxedProviderStream> {
-        let stream_data = self.shared_streams.read().await.get(stream_url)?.subscribe();
-        Some(stream_data)
+    pub fn release_connection(&self, addr: &str) {
+        let stream_url = self.shared_streams_by_addr.remove(addr).map(|(_key, value)| value);
+        if let Some(stream_url) = stream_url {
+            debug!("Release shared stream {addr}");
+            if let Some(mut entry) = self.shared_streams.get_mut(&stream_url) {
+                let shared_state = &mut *entry;
+                if let Some((_, tx)) = shared_state.subscribers.remove(addr) {
+                    let _ = tx.send(true);
+                }
+                if shared_state.subscribers.is_empty() {
+                    drop(entry); // Release the lock before unregistering
+                    self.unregister(&stream_url);
+                }
+            }
+        }
     }
 
-    async fn register(&self, stream_url: &str, shared_state: SharedStreamState) {
-        let _ = self.shared_streams.write().await.insert(stream_url.to_string(), shared_state);
+    fn subscribe_stream(&self, stream_url: &str, addr: Option<&str>, manager: Arc<SharedStreamManager>) -> Option<BoxedProviderStream> {
+        match self.shared_streams.get(stream_url) {
+            None => None,
+            Some(stream_state) => {
+                debug_if_enabled!("Responding to existing shared client stream {}", sanitize_sensitive_info(stream_url));
+                if let Some(address) = addr {
+                    self.shared_streams_by_addr.insert(address.to_string(), stream_url.to_string());
+                    Some(stream_state.subscribe(address, manager))
+                } else {
+                    None
+                }
+            }
+        }
     }
 
-    pub(crate) async fn subscribe<S, E>(
+    fn register(&self, stream_url: &str, shared_state: SharedStreamState) {
+        let _ = self.shared_streams.insert(stream_url.to_string(), shared_state);
+    }
+
+    pub(crate) fn subscribe<S, E>(
         app_state: &AppState,
         stream_url: &str,
         bytes_stream: S,
         headers: Vec<(String, String)>,
-        buffer_size: usize, ) -> Option<BoxedProviderStream>
+        buffer_size: usize,
+        provider_guard: Option<Arc<ProviderConnectionGuard>>) -> Option<BoxedProviderStream>
     where
-        S: Stream<Item=Result<Bytes, E>> + Unpin + 'static + std::marker::Send,
-        E: std::fmt::Debug + std::marker::Send,
+        S: Stream<Item=Result<Bytes, E>> + Unpin + 'static + Send,
+        E: std::fmt::Debug + Send,
     {
-        let buf_size = std::cmp::max(buffer_size, STREAM_QUEUE_SIZE);
-        let shared_state = SharedStreamState::new(headers, buf_size);
+        let buf_size = STREAM_QUEUE_SIZE.max(buffer_size);
+        let shared_state = SharedStreamState::new(headers, buf_size, provider_guard);
         shared_state.broadcast(stream_url, bytes_stream, Arc::clone(&app_state.shared_stream_manager));
-        app_state.shared_stream_manager.register(stream_url, shared_state).await;
+        app_state.shared_stream_manager.register(stream_url, shared_state);
         debug_if_enabled!("Created shared provider stream {}", sanitize_sensitive_info(stream_url));
-        Self::subscribe_shared_stream(app_state, stream_url).await
+        Self::subscribe_shared_stream(app_state, stream_url, None)
     }
 
     /// Creates a broadcast notify stream for the given URL if a shared stream exists.
-    pub async fn subscribe_shared_stream(
+    pub fn subscribe_shared_stream(
         app_state: &AppState,
         stream_url: &str,
+        addr: Option<&str>,
     ) -> Option<BoxedProviderStream> {
-        debug_if_enabled!("Responding existing shared client stream {}", sanitize_sensitive_info(stream_url));
-        app_state.shared_stream_manager.subscribe_stream(stream_url).await
+        let manager = Arc::clone(&app_state.shared_stream_manager);
+        app_state.shared_stream_manager.subscribe_stream(stream_url, addr, manager)
     }
 }

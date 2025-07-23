@@ -1,0 +1,17 @@
+.tp__proxy-type {
+   display: flex;
+   flex-flow: row nowrap;
+   gap: var(--gap-small);
+
+   &__reverse {
+      color: var(--tag-active-color);
+      background-color: var(--tag-active-background-color);
+      border-color: var(--tag-active-border-color);
+   }
+
+   &__redirect {
+      color: var(--tag-alt-active-color);
+      background-color: var(--tag-alt-active-background-color);
+      border-color: var(--tag-alt-active-border-color);
+   }
+}

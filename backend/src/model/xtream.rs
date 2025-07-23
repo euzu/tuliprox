@@ -1,10 +1,8 @@
-use crate::model::{ProxyUserCredentials};
-use crate::model::{Config, ConfigTarget, XtreamTargetOutput};
-use crate::model::{PlaylistItem,XtreamPlaylistItem};
-use crate::utils::{deserialize_as_option_rc_string, deserialize_as_rc_string, deserialize_as_string_array, deserialize_number_from_string};
-use crate::model::xtream_const;
-use crate::utils::{opt_string_or_number_u32, string_default_on_null, string_or_number_f64, string_or_number_u32};
-use shared::utils::{get_non_empty_str};
+use crate::model::{AppConfig, ProxyUserCredentials};
+use crate::model::{ConfigTarget, XtreamTargetOutput};
+use shared::model::{xtream_const, PlaylistItem,XtreamPlaylistItem};
+use shared::utils::{deserialize_as_option_rc_string, deserialize_as_rc_string, deserialize_as_string_array, deserialize_number_from_string,
+                    opt_string_or_number_u32, string_default_on_null, string_or_number_f64, string_or_number_u32, get_non_empty_str};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
@@ -114,13 +112,13 @@ macro_rules! add_opt_i64_property_if_exists {
 
 macro_rules! add_opt_f64_property_if_exists {
     ($vec:expr, $prop:expr, $prop_name:expr) => {
-       $prop.as_ref().map(|v| $vec.insert(String::from($prop_name), Value::Number(serde_json::value::Number::from_f64(f64::from(*v)).unwrap())));
+       $prop.as_ref().map(|v| $vec.insert(String::from($prop_name), Value::Number(serde_json::value::Number::from_f64(f64::from(*v)).unwrap_or_else(|| serde_json::Number::from(0)))));
     }
 }
 
 macro_rules! add_f64_property_if_exists {
     ($vec:expr, $prop:expr, $prop_name:expr) => {
-       $vec.insert(String::from($prop_name), Value::Number(serde_json::value::Number::from_f64(f64::from($prop)).unwrap()));
+       $vec.insert(String::from($prop_name), Value::Number(serde_json::value::Number::from_f64(f64::from($prop)).unwrap_or_else(|| serde_json::Number::from(0))));
     }
 }
 
@@ -345,7 +343,6 @@ pub struct XtreamSeriesInfo {
     pub episodes: Option<HashMap<String, Vec<XtreamSeriesInfoEpisode>>>,
 }
 
-
 impl XtreamSeriesInfoEpisode {
     pub fn get_additional_properties(&self, series_info: &XtreamSeriesInfo) -> Option<Value> {
         let mut result = Map::new();
@@ -386,13 +383,13 @@ pub struct XtreamMappingOptions {
 }
 
 impl XtreamMappingOptions {
-    pub fn from_target_options(target: &ConfigTarget, target_output: &XtreamTargetOutput, cfg: &Config) -> Self {
+    pub fn from_target_options(target: &ConfigTarget, target_output: &XtreamTargetOutput, cfg: &AppConfig) -> Self {
         Self {
             skip_live_direct_source: target_output.skip_live_direct_source,
             skip_video_direct_source: target_output.skip_video_direct_source,
             skip_series_direct_source: target_output.skip_series_direct_source,
             rewrite_resource_url: cfg.is_reverse_proxy_resource_rewrite_enabled(),
-            force_redirect: target.options.as_ref().and_then(|o| o.force_redirect.clone()),
+            force_redirect: target.options.as_ref().and_then(|o| o.force_redirect),
         }
     }
 }
@@ -430,7 +427,7 @@ fn append_prepared_series_properties(add_props: Option<&Map<String, Value>>, doc
         match props.get("rating") {
             Some(value) => {
                 document.insert("rating".to_string(), match value {
-                    Value::Number(val) => Value::String(format!("{:.0}", val.as_f64().unwrap())),
+                    Value::Number(val) => Value::String(format!("{:.0}", val.as_f64().unwrap_or(0f64))),
                     Value::String(val) => Value::String(val.to_string()),
                     _ => Value::String("0".to_string()),
                 });

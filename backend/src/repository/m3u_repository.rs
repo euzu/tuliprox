@@ -1,8 +1,8 @@
 use shared::error::{create_tuliprox_error,info_err};
 use shared::error::{str_to_io_error, TuliproxError, TuliproxErrorKind};
-use crate::model::ProxyUserCredentials;
+use crate::model::{AppConfig, ProxyUserCredentials};
 use crate::model::{Config, ConfigTarget, M3uTargetOutput};
-use crate::model::{M3uPlaylistItem, PlaylistGroup, PlaylistItem};
+use shared::model::{M3uPlaylistItem, PlaylistGroup, PlaylistItem};
 use crate::repository::indexed_document::{IndexedDocumentDirectAccess, IndexedDocumentIterator, IndexedDocumentWriter};
 use crate::repository::m3u_playlist_iterator::{M3uPlaylistM3uTextIterator};
 use crate::repository::storage::{get_target_storage_path};
@@ -10,14 +10,13 @@ use log::error;
 use std::fs::File;
 use std::io::{Error, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use shared::model::PlaylistItemType;
 use crate::repository::storage_const;
 use crate::utils;
 
 macro_rules! cant_write_result {
     ($path:expr, $err:expr) => {
-        create_tuliprox_error!(TuliproxErrorKind::Notify, "failed to write m3u playlist: {} - {}", $path.to_str().unwrap() ,$err)
+        create_tuliprox_error!(TuliproxErrorKind::Notify, "failed to write m3u playlist: {} - {}", $path.display() ,$err)
     }
 }
 
@@ -45,14 +44,14 @@ fn persist_m3u_playlist_as_text(cfg: &Config, target: &ConfigTarget, target_outp
                     }
                 }
                 Err(_) => {
-                    error!("Can't write m3u plain playlist {}", &m3u_filename.to_str().unwrap());
+                    error!("Can't write m3u plain playlist {}", &m3u_filename.display());
                 }
             }
         }
     }
 }
 
-pub async fn m3u_write_playlist( cfg: &Config, target: &ConfigTarget, target_output: &M3uTargetOutput, target_path: &Path, new_playlist: &[PlaylistGroup]) -> Result<(), TuliproxError> {
+pub async fn m3u_write_playlist( cfg: &AppConfig, target: &ConfigTarget, target_output: &M3uTargetOutput, target_path: &Path, new_playlist: &[PlaylistGroup]) -> Result<(), TuliproxError> {
     if !new_playlist.is_empty() {
         let (m3u_path, idx_path) = m3u_get_file_paths(target_path);
         let m3u_playlist = new_playlist.iter()
@@ -60,7 +59,7 @@ pub async fn m3u_write_playlist( cfg: &Config, target: &ConfigTarget, target_out
             .filter(|&pli| pli.header.item_type != PlaylistItemType::SeriesInfo)
             .map(PlaylistItem::to_m3u).collect::<Vec<M3uPlaylistItem>>();
 
-        persist_m3u_playlist_as_text(cfg, target, target_output, &m3u_playlist);
+        persist_m3u_playlist_as_text(&cfg.config.load(), target, target_output, &m3u_playlist);
         {
             let _file_lock = cfg.file_locks.write_lock(&m3u_path);
             match IndexedDocumentWriter::new(m3u_path.clone(), idx_path) {
@@ -81,27 +80,27 @@ pub async fn m3u_write_playlist( cfg: &Config, target: &ConfigTarget, target_out
 }
 
 pub async fn m3u_load_rewrite_playlist(
-    cfg: &Config,
+    cfg: &AppConfig,
     target: &ConfigTarget,
     user: &ProxyUserCredentials,
 ) -> Result<M3uPlaylistM3uTextIterator, TuliproxError> {
     M3uPlaylistM3uTextIterator::new(cfg, target, user).await
 }
 
-pub async fn m3u_get_item_for_stream_id(stream_id: u32, cfg: &Config, target: &ConfigTarget) -> Result<M3uPlaylistItem, Error> {
+pub async fn m3u_get_item_for_stream_id(stream_id: u32, cfg: &AppConfig, target: &ConfigTarget) -> Result<M3uPlaylistItem, Error> {
     if stream_id < 1 {
         return Err(str_to_io_error("id should start with 1"));
     }
     {
-        let target_path = get_target_storage_path(cfg, target.name.as_str()).ok_or_else(|| str_to_io_error(&format!("Could not find path for target {}", &target.name)))?;
+        let target_path = get_target_storage_path(&cfg.config.load(), target.name.as_str()).ok_or_else(|| str_to_io_error(&format!("Could not find path for target {}", &target.name)))?;
         let (m3u_path, idx_path) = m3u_get_file_paths(&target_path);
         let _file_lock = cfg.file_locks.read_lock(&m3u_path);
         IndexedDocumentDirectAccess::read_indexed_item::<u32, M3uPlaylistItem>(&m3u_path, &idx_path, &stream_id)
     }
 }
 
-pub async fn iter_raw_m3u_playlist(config: &Arc<Config>, target: &ConfigTarget) -> Option<(utils::FileReadGuard, impl Iterator<Item=(M3uPlaylistItem, bool)>)> {
-    let target_path = get_target_storage_path(config, target.name.as_str())?;
+pub async fn iter_raw_m3u_playlist(config: &AppConfig, target: &ConfigTarget) -> Option<(utils::FileReadGuard, impl Iterator<Item=(M3uPlaylistItem, bool)>)> {
+    let target_path = get_target_storage_path(&config.config.load(), target.name.as_str())?;
     let (m3u_path, idx_path) = m3u_get_file_paths(&target_path);
     if !m3u_path.exists() || !idx_path.exists() {
         return None;

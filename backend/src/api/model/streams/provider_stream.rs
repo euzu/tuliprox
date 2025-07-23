@@ -1,12 +1,13 @@
 use crate::api::api_utils::{HeaderFilter};
 use crate::api::model::streams::custom_video_stream::CustomVideoStream;
-use crate::model::{Config};
+use crate::model::{AppConfig};
 use shared::model::PlaylistItemType;
 use log::{trace};
 use reqwest::StatusCode;
 use axum::response::IntoResponse;
 use crate::api::model::stream::ProviderStreamResponse;
 use crate::api::model::streams::transport_stream_buffer::TransportStreamBuffer;
+use crate::api::api_utils::try_unwrap_body;
 
 #[derive(Debug, Copy, Clone)]
 pub enum CustomVideoStreamType {
@@ -29,27 +30,31 @@ fn create_video_stream(video_buffer: Option<&TransportStreamBuffer>, headers: &[
     }
 }
 
-pub fn create_channel_unavailable_stream(cfg: &Config, headers: &[(String, String)], status: StatusCode) -> ProviderStreamResponse {
-    let video = cfg.t_custom_stream_response.as_ref().and_then(|c| c.channel_unavailable.as_ref());
+pub fn create_channel_unavailable_stream(cfg: &AppConfig, headers: &[(String, String)], status: StatusCode) -> ProviderStreamResponse {
+    let custom_stream_response = cfg.custom_stream_response.load();
+    let video = custom_stream_response.as_ref().and_then(|c| c.channel_unavailable.as_ref());
     create_video_stream(video, headers, &format!("Streaming response channel unavailable for status {status}"))
 }
 
-pub fn create_user_connections_exhausted_stream(cfg: &Config, headers: &[(String, String)]) -> ProviderStreamResponse {
-    let video = cfg.t_custom_stream_response.as_ref().and_then(|c| c.user_connections_exhausted.as_ref());
+pub fn create_user_connections_exhausted_stream(cfg: &AppConfig, headers: &[(String, String)]) -> ProviderStreamResponse {
+    let custom_stream_response = cfg.custom_stream_response.load();
+    let video = custom_stream_response.as_ref().and_then(|c| c.user_connections_exhausted.as_ref());
     create_video_stream(video, headers, "Streaming response user connections exhausted")
 }
 
-pub fn create_provider_connections_exhausted_stream(cfg: &Config, headers: &[(String, String)]) -> ProviderStreamResponse {
-    let video = cfg.t_custom_stream_response.as_ref().and_then(|c| c.provider_connections_exhausted.as_ref());
+pub fn create_provider_connections_exhausted_stream(cfg: &AppConfig, headers: &[(String, String)]) -> ProviderStreamResponse {
+    let custom_stream_response = cfg.custom_stream_response.load();
+    let video = custom_stream_response.as_ref().and_then(|c| c.provider_connections_exhausted.as_ref());
     create_video_stream(video, headers, "Streaming response provider connections exhausted")
 }
 
-pub fn create_user_account_expired_stream(cfg: &Config, headers: &[(String, String)]) -> ProviderStreamResponse {
-    let video = cfg.t_custom_stream_response.as_ref().and_then(|c| c.user_account_expired.as_ref());
+pub fn create_user_account_expired_stream(cfg: &AppConfig, headers: &[(String, String)]) -> ProviderStreamResponse {
+    let custom_stream_response = cfg.custom_stream_response.load();
+    let video = custom_stream_response.as_ref().and_then(|c| c.user_account_expired.as_ref());
     create_video_stream(video, headers, "Streaming response user account expired")
 }
 
-pub fn create_custom_video_stream_response(config: &Config, video_response: CustomVideoStreamType) -> impl axum::response::IntoResponse + Send {
+pub fn create_custom_video_stream_response(config: &AppConfig, video_response: CustomVideoStreamType) -> impl axum::response::IntoResponse + Send {
     if let (Some(stream), Some((headers, status_code, _))) = match video_response {
         CustomVideoStreamType::ChannelUnavailable => create_channel_unavailable_stream(config, &[], StatusCode::BAD_REQUEST),
         CustomVideoStreamType::UserConnectionsExhausted => create_user_connections_exhausted_stream(config, &[]),
@@ -61,7 +66,7 @@ pub fn create_custom_video_stream_response(config: &Config, video_response: Cust
         for (key, value) in headers {
             builder = builder.header(key, value);
         }
-        return builder.body(axum::body::Body::from_stream(stream)).unwrap().into_response();
+        return try_unwrap_body!(builder.body(axum::body::Body::from_stream(stream)));
     }
     axum::http::StatusCode::FORBIDDEN.into_response()
 }

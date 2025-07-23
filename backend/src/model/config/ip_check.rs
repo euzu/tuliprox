@@ -1,81 +1,36 @@
 use regex::Regex;
-use shared::error::{TuliproxError, TuliproxErrorKind};
+use shared::model::IpCheckConfigDto;
+use crate::model::macros;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone)]
 pub struct IpCheckConfig {
-    /// URL that may return both IPv4 and IPv6 in one response
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-
-    /// Dedicated URL to fetch only IPv4
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url_ipv4: Option<String>,
-
-    /// Dedicated URL to fetch only IPv6
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url_ipv6: Option<String>,
-
-    /// Optional regex pattern to extract IPv4
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pattern_ipv4: Option<String>,
-
-    /// Optional regex pattern to extract IPv6
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pattern_ipv6: Option<String>,
-
-    #[serde(skip)]
-    pub t_pattern_ipv4: Option<Regex>,
-    #[serde(skip)]
-    pub t_pattern_ipv6: Option<Regex>,
+    pub pattern_ipv4: Option<Regex>,
+    pub pattern_ipv6: Option<Regex>,
 }
 
-impl IpCheckConfig {
-    pub fn prepare(&mut self) -> Result<(), TuliproxError> {
-        if let Some(url) = &self.url {
-            let url = url.trim();
-            if url.is_empty() {
-                self.url = None;
-            } else {
-                self.url = Some(url.to_owned());
-            }
+macros::from_impl!(IpCheckConfig);
+impl From<&IpCheckConfigDto> for IpCheckConfig {
+    fn from(dto: &IpCheckConfigDto) -> Self {
+        Self {
+            url: dto.url.clone(),
+            url_ipv4: dto.url_ipv4.clone(),
+            url_ipv6: dto.url_ipv6.clone(),
+            pattern_ipv4: dto.pattern_ipv4.as_ref().and_then(|s| Regex::new(s).ok()),
+            pattern_ipv6:  dto.pattern_ipv6.as_ref().and_then(|s| Regex::new(s).ok()),
         }
-        if let Some(url) = &self.url_ipv4 {
-            let url = url.trim();
-            if url.is_empty() {
-                self.url_ipv4 = None;
-            } else {
-                self.url_ipv4 = Some(url.to_owned());
-            }
+    }
+}
+impl From<&IpCheckConfig> for IpCheckConfigDto {
+    fn from(dto: &IpCheckConfig) -> Self {
+        Self {
+            url: dto.url.clone(),
+            url_ipv4: dto.url_ipv4.clone(),
+            url_ipv6: dto.url_ipv6.clone(),
+            pattern_ipv4: dto.pattern_ipv4.as_ref().map(std::string::ToString::to_string),
+            pattern_ipv6:  dto.pattern_ipv6.as_ref().map(std::string::ToString::to_string),
         }
-        if let Some(url) = &self.url_ipv6 {
-            let url = url.trim();
-            if url.is_empty() {
-                self.url_ipv6 = None;
-            } else {
-                self.url_ipv6 = Some(url.to_owned());
-            }
-        }
-
-        if self.url.is_none()  && self.url_ipv4.is_none() && self.url_ipv6.is_none() {
-            return Err(TuliproxError::new(TuliproxErrorKind::Info, "No url provided!".to_owned()));
-        }
-
-        // TODO allow or do not allow ?
-        // if self.url.is_some() && (self.url_ipv4.is_some() || self.url_ipv6.is_some()) {
-        //     return Err(TuliproxError::new(TuliproxErrorKind::Info, "url in combination with ipv4 and/or ipv6 url not allowed!".to_owned()));
-        // }
-
-        if let Some(p4) = &self.pattern_ipv4 {
-            self.t_pattern_ipv4 = Some(
-                Regex::new(p4).map_err(|err| TuliproxError::new(TuliproxErrorKind::Info, format!("Invalid IPv4 regex: {p4} {err}")))?,
-            );
-        }
-        if let Some(p6) = &self.pattern_ipv6 {
-            self.t_pattern_ipv6 = Some(
-                Regex::new(p6).map_err(|err| TuliproxError::new(TuliproxErrorKind::Info, format!("Invalid IPv6 regex: {p6} {err}")))?,
-            );
-        }
-        Ok(())
     }
 }

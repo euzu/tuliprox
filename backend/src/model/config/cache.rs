@@ -1,49 +1,50 @@
-use std::path::PathBuf;
-use log::error;
-use path_clean::PathClean;
-use shared::error::{info_err, TuliproxError, TuliproxErrorKind};
+use shared::model::CacheConfigDto;
 use shared::utils::parse_size_base_2;
+use crate::model::macros;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone)]
 pub struct CacheConfig {
-    #[serde(default)]
     pub enabled: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub size: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dir: Option<String>,
-    #[serde(skip)]
-    pub t_size: usize,
+    pub dir: String,
+    pub size: usize,
+    pub size_str: Option<String>,
 }
 
-impl CacheConfig {
-    pub(crate) fn prepare(&mut self, working_dir: &str) -> Result<(), TuliproxError>{
-        if self.enabled {
-            let work_path = PathBuf::from(working_dir);
-            if self.dir.is_none() {
-                self.dir = Some(work_path.join("cache").to_string_lossy().to_string());
-            } else {
-                let mut cache_dir = self.dir.as_ref().unwrap().to_string();
-                if PathBuf::from(&cache_dir).is_relative() {
-                    cache_dir = work_path.join(&cache_dir).clean().to_string_lossy().to_string();
-                }
-                self.dir = Some(cache_dir.to_string());
-            }
-            match self.size.as_ref() {
-                None => self.t_size = 1024,
-                Some(val) => match parse_size_base_2(val) {
-                    Ok(size) => match usize::try_from(size) {
-                        Ok(s) => self.t_size = s,
-                        Err(err) => {
-                            self.t_size = 0;
-                            error!("Cache size could not be determined. Setting to 0. {err}");
-                        }
-                    },
-                    Err(err) => { return Err(info_err!(format!("Failed to read cache size: {err}"))) }
+macros::from_impl!(CacheConfig);
+impl From<&CacheConfigDto> for CacheConfig {
+    fn from(dto: &CacheConfigDto) -> Self {
+        Self {
+            enabled: dto.enabled,
+            // Dto prepare should have set the right path
+            dir: dto.dir.as_ref().map_or_else(Default::default, std::string::ToString::to_string),
+            size_str: dto.size.clone(),
+            size: get_size(dto)
+        }
+    }
+}
+
+impl From<&CacheConfig> for CacheConfigDto {
+    fn from(instance: &CacheConfig) -> Self {
+        Self {
+            enabled: instance.enabled,
+            // Dto prepare should have set the right path
+            dir: Some(instance.dir.to_string()),
+            size: instance.size_str.clone(),
+        }
+    }
+}
+
+fn get_size(dto: &CacheConfigDto) -> usize {
+    // we assume that the previous dto check discarded all problems
+    match dto.size.as_ref() {
+        None => return 1024,
+        Some(val) => {
+            if let Ok(size) = parse_size_base_2(val) {
+                if let Ok(value) = usize::try_from(size) {
+                    return value;
                 }
             }
         }
-        Ok(())
     }
+    0
 }

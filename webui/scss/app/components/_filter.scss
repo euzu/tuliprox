@@ -1,0 +1,66 @@
+.tp__filter {
+  overflow: hidden;
+  .tp__filter__code {
+    font-family: monospace;
+    background: #1e1e1e;
+    color: #d4d4d4;
+    padding: 1rem;
+    border-radius: 8px;
+    white-space: pre;
+
+    .binary_op-wrapper{
+      white-space: pre;
+    }
+    .comparison {
+      white-space: nowrap;
+      overflow: hidden;
+      background-color: #202429;
+      padding: var(--padding-micro);
+      border-radius: var(--border-radius);
+    }
+
+    .unary_op {
+      font-weight: bold;
+      color: #569cd6;
+      text-transform: uppercase;
+    }
+
+    .binary_op {
+      font-weight: bold;
+      color: #9cdcfe;
+      text-transform: uppercase;
+    }
+
+    .field {
+      font-weight: bold;
+      color: #fdb76c;
+    }
+
+    .regex {
+      color: #bb8953;
+      white-space: nowrap;
+    }
+
+    .enum {
+      color: #78ce89;
+    }
+  }
+
+  .bracket {
+      font-weight: bold;
+      font-size: 1.1rem;
+  }
+
+  //.bracket-1 { color: #c551ac; }
+  //.bracket-2 { color: #70db39; }
+  //.bracket-3 { color: #dbdb02; }
+  .bracket-1 { color: #569CD6; }
+  .bracket-2 { color: #C586C0; }
+  .bracket-3 { color: #B5CEA8; }
+}
+.tp__filter__inline {
+  .tp__filter__code {
+     padding: 0;
+     margin-block: 0;
+  }
+}

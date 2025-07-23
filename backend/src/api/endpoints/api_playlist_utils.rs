@@ -1,14 +1,13 @@
-use crate::model::{Config, ConfigInput, ConfigTarget, InputType};
-use crate::model::{M3uPlaylistItem, PlaylistGroup};
-use shared::model::{PlaylistItemType, TargetType, XtreamCluster};
+use crate::model::{AppConfig, Config, ConfigInput, ConfigTarget};
 use crate::repository::{m3u_repository, xtream_repository};
 use crate::utils::{m3u, xtream};
+use crate::utils;
 use axum::response::IntoResponse;
+use indexmap::IndexMap;
 use serde::Serialize;
 use serde_json::{json, Value};
+use shared::model::{InputType, M3uPlaylistItem, PlaylistGroup, PlaylistItemType, TargetType, XtreamCluster};
 use std::sync::Arc;
-use indexmap::IndexMap;
-use crate::utils;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct PlaylistResponseGroup {
@@ -58,35 +57,36 @@ where
 fn group_playlist_items_by_cluster(params: Option<(utils::FileReadGuard,
                                                    impl Iterator<Item=(M3uPlaylistItem, bool)>)>) ->
                                    (Vec<M3uPlaylistItem>, Vec<M3uPlaylistItem>, Vec<M3uPlaylistItem>) {
-    if params.is_none() {
-        return (vec![], vec![], vec![]);
-    }
-    let mut live = Vec::new();
-    let mut video = Vec::new();
-    let mut series = Vec::new();
-    let (guard, iter) = params.unwrap();
-    for (item, _) in iter {
-        match item.item_type {
-            PlaylistItemType::Live
-            | PlaylistItemType::LiveUnknown
-            | PlaylistItemType::LiveHls
-            | PlaylistItemType::LiveDash => {
-                live.push(item);
+    match params {
+        None => (vec![], vec![], vec![]),
+        Some((guard, iter)) => {
+            let mut live = Vec::new();
+            let mut video = Vec::new();
+            let mut series = Vec::new();
+            for (item, _) in iter {
+                match item.item_type {
+                    PlaylistItemType::Live
+                    | PlaylistItemType::LiveUnknown
+                    | PlaylistItemType::LiveHls
+                    | PlaylistItemType::LiveDash => {
+                        live.push(item);
+                    }
+                    PlaylistItemType::Catchup
+                    | PlaylistItemType::Video => {
+                        video.push(item);
+                    }
+                    PlaylistItemType::Series
+                    | PlaylistItemType::SeriesInfo => {
+                        series.push(item);
+                    }
+                }
             }
-            PlaylistItemType::Catchup
-            | PlaylistItemType::Video => {
-                video.push(item);
-            }
-            PlaylistItemType::Series
-            | PlaylistItemType::SeriesInfo => {
-                series.push(item);
-            }
+
+            drop(guard);
+
+            (live, video, series)
         }
     }
-
-    drop(guard);
-
-    (live, video, series)
 }
 
 fn group_playlist_groups_by_cluster(playlist: Vec<PlaylistGroup>, input_type: InputType) -> (Vec<PlaylistResponseGroup>, Vec<PlaylistResponseGroup>, Vec<PlaylistResponseGroup>) {
@@ -94,7 +94,15 @@ fn group_playlist_groups_by_cluster(playlist: Vec<PlaylistGroup>, input_type: In
     let mut video = Vec::new();
     let mut series = Vec::new();
     for group in playlist {
-        let channels = group.channels.iter().map(|item| if input_type == InputType::M3u { serde_json::to_value(item.to_m3u()).unwrap() } else { serde_json::to_value(item.to_xtream()).unwrap() }).collect();
+        let channels = group.channels.iter()
+            .filter_map(|item| {
+                if input_type == InputType::M3u {
+                    serde_json::to_value(item.to_m3u())
+                } else {
+                    serde_json::to_value(item.to_xtream())
+                }.ok()
+            })
+            .collect::<serde_json::Value>();
         let grp = PlaylistResponseGroup {
             id: group.id,
             title: group.title,
@@ -125,7 +133,7 @@ fn group_playlist_groups_by_cluster(playlist: Vec<PlaylistGroup>, input_type: In
 
 
 async fn grouped_channels(
-    cfg: &Arc<Config>,
+    cfg: &AppConfig,
     target: &ConfigTarget,
     cluster: XtreamCluster,
 ) -> Option<Vec<PlaylistResponseGroup>> {
@@ -137,7 +145,7 @@ async fn grouped_channels(
         ))
 }
 
-pub(in crate::api::endpoints) async fn get_playlist_for_target(cfg_target: Option<&ConfigTarget>, cfg: &Arc<Config>) -> impl axum::response::IntoResponse + Send {
+pub(in crate::api::endpoints) async fn get_playlist_for_target(cfg_target: Option<&ConfigTarget>, cfg: &AppConfig) -> impl axum::response::IntoResponse + Send {
     if let Some(target) = cfg_target {
         if target.has_output(&TargetType::Xtream) {
             let live_channels = grouped_channels(cfg, target, XtreamCluster::Live).await;

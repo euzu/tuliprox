@@ -1,19 +1,19 @@
 use crate::model::MsgKind;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct TelegramMessagingConfigDto {
     pub bot_token: String,
     pub chat_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct RestMessagingConfigDto {
     pub url: String,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct PushoverMessagingConfigDto {
     pub url: Option<String>,
@@ -21,7 +21,7 @@ pub struct PushoverMessagingConfigDto {
     pub user: String,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct MessagingConfigDto {
     #[serde(default)]

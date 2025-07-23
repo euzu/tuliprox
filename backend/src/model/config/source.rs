@@ -1,28 +1,23 @@
+use crate::model::{macros, ConfigInput, ConfigTarget, ProcessTargets};
+use shared::error::{create_tuliprox_error_result, TuliproxError, TuliproxErrorKind};
+use shared::model::{ConfigSourceDto, PatternTemplate, SourcesConfigDto};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-use crate::foundation::filter::{prepare_templates, PatternTemplate};
-use shared::error::{TuliproxError, TuliproxErrorKind, handle_tuliprox_error_result_list, create_tuliprox_error_result};
-use crate::model::{ConfigInput, ConfigTarget, ProcessTargets};
-use shared::utils::default_as_default;
+use std::path::PathBuf;
+use std::sync::Arc;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone)]
 pub struct ConfigSource {
-    pub inputs: Vec<ConfigInput>,
-    pub targets: Vec<ConfigTarget>,
+    pub batch_files: Vec<PathBuf>,
+    pub inputs: Vec<Arc<ConfigInput>>,
+    pub targets: Vec<Arc<ConfigTarget>>,
 }
 
 impl ConfigSource {
-    #[allow(clippy::cast_possible_truncation)]
-    pub fn prepare(&mut self, index: u16, include_computed: bool) -> Result<u16, TuliproxError> {
-        handle_tuliprox_error_result_list!(TuliproxErrorKind::Info, self.inputs.iter_mut().enumerate()
-            .map(|(idx, i)| i.prepare(index+(idx as u16), include_computed)));
-        Ok(index + (self.inputs.len() as u16))
-    }
-
-    pub fn get_inputs_for_target(&self, target_name: &str) -> Option<Vec<&ConfigInput>> {
+    pub fn get_inputs_for_target(&self, target_name: &str) -> Option<Vec<Arc<ConfigInput>>> {
         for target in &self.targets {
             if target.name.eq(target_name) {
-                let inputs = self.inputs.iter().filter(|&i| i.enabled).collect::<Vec<&ConfigInput>>();
+                let inputs = self.inputs.iter().filter(|&i| i.enabled).map(Arc::clone).collect::<Vec<Arc<ConfigInput>>>();
                 if !inputs.is_empty() {
                     return Some(inputs);
                 }
@@ -32,12 +27,45 @@ impl ConfigSource {
     }
 }
 
-#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+macros::try_from_impl!(ConfigSource);
+impl TryFrom<&ConfigSourceDto> for ConfigSource {
+    type Error = TuliproxError;
+    fn try_from(dto: &ConfigSourceDto) -> Result<ConfigSource, TuliproxError> {
+        let mut batch_files = Vec::new();
+        let mut inputs: Vec<ConfigInput> = dto.inputs.iter().map(ConfigInput::from).collect();
+        for input in &mut inputs {
+            if let Some(batch_file_path) = input.prepare()? {
+                batch_files.push(batch_file_path);
+            }
+        }
+        Ok(Self {
+            batch_files,
+            inputs: inputs.into_iter().map(Arc::new).collect(),
+            targets: dto.targets.iter().map(|c| Arc::new(ConfigTarget::from(c))).collect(),
+        })
+    }
+}
+
+#[derive(Default, Debug, Clone)]
 pub struct SourcesConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub templates: Option<Vec<PatternTemplate>>,
     pub sources: Vec<ConfigSource>,
+}
+
+macros::try_from_impl!(SourcesConfig);
+impl TryFrom<&SourcesConfigDto> for SourcesConfig {
+    type Error = TuliproxError;
+    fn try_from(dto: &SourcesConfigDto) -> Result<Self, TuliproxError> {
+        let sources = dto.sources
+            .iter()
+            .map(ConfigSource::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Self {
+            templates: dto.templates.clone(),
+            sources,
+        })
+    }
 }
 
 impl SourcesConfig {
@@ -45,75 +73,17 @@ impl SourcesConfig {
         self.sources.get(idx)
     }
 
-    pub fn prepare(&mut self, include_computed: bool) -> Result<(), TuliproxError> {
-        self.prepare_templates()?;
-        self.prepare_sources(include_computed)?;
-        Ok(())
-    }
-
-    fn prepare_sources(&mut self, include_computed: bool) -> Result<(), TuliproxError> {
-        // prepare sources and set id's
-        let mut source_index: u16 = 1;
-        let mut target_index: u16 = 1;
-        for source in &mut self.sources {
-            source_index = source.prepare(source_index, include_computed)?;
-            for target in &mut source.targets {
-                // prepare target templates
-                let prepare_result = match &self.templates {
-                    Some(templ) => target.prepare(target_index, Some(templ)),
-                    _ => target.prepare(target_index, None)
-                };
-                prepare_result?;
-                target_index += 1;
-            }
-        }
-        Ok(())
-    }
-
-    fn prepare_templates(&mut self) -> Result<(), TuliproxError> {
-        if let Some(templates) = &mut self.templates {
-            match prepare_templates(templates) {
-                Ok(tmplts) => {
-                    self.templates = Some(tmplts);
-                }
-                Err(err) => {
-                    return Err(err);
-                }
-            }
-        }
-        Ok(())
-    }
-
-    pub fn check_unique_target_names(&mut self) -> Result<HashSet<String>, TuliproxError> {
-        let mut seen_names = HashSet::new();
-        let default_target_name = default_as_default();
-        for source in &self.sources {
-            for target in &source.targets {
-                // check the target name is unique
-                let target_name = target.name.trim().to_string();
-                if target_name.is_empty() {
-                    return create_tuliprox_error_result!(TuliproxErrorKind::Info, "target name required");
-                }
-                if !default_target_name.eq_ignore_ascii_case(target_name.as_str()) {
-                    if seen_names.contains(target_name.as_str()) {
-                        return create_tuliprox_error_result!(TuliproxErrorKind::Info, "target names should be unique: {}", target_name);
-                    }
-                    seen_names.insert(target_name);
-                }
-            }
-        }
-        Ok(seen_names)
-    }
-    pub fn get_target_by_id(&self, target_id: u16) -> Option<&ConfigTarget> {
+    pub fn get_target_by_id(&self, target_id: u16) -> Option<Arc<ConfigTarget>> {
         for source in &self.sources {
             for target in &source.targets {
                 if target.id == target_id {
-                    return Some(target);
+                    return Some(Arc::clone(target));
                 }
             }
         }
         None
     }
+
 
     /// Returns the targets that were specified as parameters.
     /// If invalid targets are found, the program will be terminated.
@@ -126,6 +96,7 @@ impl SourcesConfig {
         let mut enabled = true;
         let mut inputs: Vec<u16> = vec![];
         let mut targets: Vec<u16> = vec![];
+        let mut target_names: Vec<String> = vec![];
         if let Some(user_targets) = target_args {
             let mut check_targets: HashMap<String, u16> = user_targets.iter().map(|t| (t.to_lowercase(), 0)).collect();
             for source in &self.sources {
@@ -135,6 +106,7 @@ impl SourcesConfig {
                         let key = user_target.to_lowercase();
                         if target.name.eq_ignore_ascii_case(key.as_str()) {
                             targets.push(target.id);
+                            target_names.push(target.name.to_string());
                             target_added = true;
                             if let Some(value) = check_targets.get(key.as_str()) {
                                 check_targets.insert(key, value + 1);
@@ -161,6 +133,29 @@ impl SourcesConfig {
             enabled,
             inputs,
             targets,
+            target_names,
         })
+    }
+
+    pub fn get_unique_target_names(&self) -> HashSet<Cow<str>> {
+        let mut seen_names = HashSet::new();
+        for source in &self.sources {
+            for target in &source.targets {
+                // check the target name is unique
+                let target_name = Cow::Borrowed(target.name.as_str());
+                seen_names.insert(target_name);
+            }
+        }
+        seen_names
+    }
+
+    pub fn get_input_files(&self) -> HashSet<PathBuf> {
+        let mut file_names = HashSet::new();
+        for source in &self.sources {
+            for file in &source.batch_files {
+                file_names.insert(file.clone());
+            }
+        }
+        file_names
     }
 }

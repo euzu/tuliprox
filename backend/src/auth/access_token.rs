@@ -1,4 +1,4 @@
-use crate::utils::{hex_decode, hex_encode};
+use shared::utils::{hex_decode, hex_encode};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 

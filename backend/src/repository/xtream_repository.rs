@@ -1,23 +1,19 @@
 use shared::error::{create_tuliprox_error, create_tuliprox_error_result, info_err, notify_err, str_to_io_error, to_io_error, TuliproxError, TuliproxErrorKind};
-use crate::model::{ProxyUserCredentials};
+use crate::model::{AppConfig, ProxyUserCredentials};
 use crate::model::{Config, ConfigInput, ConfigTarget, XtreamTargetOutput};
-use crate::model::{PlaylistGroup, PlaylistItem, XtreamPlaylistItem};
 use crate::model::{rewrite_doc_urls, PlaylistXtreamCategory, XtreamMappingOptions, XtreamSeriesEpisode};
 use crate::model::normalize_release_date;
 use crate::repository::bplustree::{BPlusTree, BPlusTreeQuery, BPlusTreeUpdate};
 use crate::repository::indexed_document::{IndexedDocumentDirectAccess, IndexedDocumentGarbageCollector, IndexedDocumentIterator, IndexedDocumentWriter};
 use crate::repository::playlist_repository::get_target_id_mapping;
-use crate::utils::hex_encode;
 use crate::repository::storage::{get_input_storage_path, get_target_id_mapping_file, get_target_storage_path};
 use crate::repository::storage_const;
 use crate::repository::target_id_mapping::VirtualIdRecord;
 use crate::repository::xtream_playlist_iterator::XtreamPlaylistJsonIterator;
-use crate::utils::bincode_deserialize;
-use crate::utils::FileReadGuard;
+use crate::utils::{bincode_deserialize, FileReadGuard};
 use crate::utils::file_reader;
 use crate::utils::open_readonly_file;
-use crate::utils::generate_playlist_uuid;
-use crate::utils::{get_u32_from_serde_value, json_iter_array, json_write_documents_to_file};
+use crate::utils::{json_write_documents_to_file};
 use bytes::Bytes;
 use futures::{stream, Stream, StreamExt};
 use log::error;
@@ -28,15 +24,15 @@ use std::fs;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Error, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use shared::model::{PlaylistEntry, PlaylistItemType, XtreamCluster};
+use shared::model::{PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemType, XtreamCluster, XtreamPlaylistItem};
+use shared::utils::{generate_playlist_uuid, get_u32_from_serde_value, hex_encode, json_iter_array};
 
 macro_rules! cant_write_result {
     ($path:expr, $err:expr) => {
         create_tuliprox_error!(
             TuliproxErrorKind::Notify,
             "failed to write xtream playlist: {} - {}",
-            $path.to_str().unwrap(),
+            $path.display(),
             $err
         )
     };
@@ -68,7 +64,7 @@ fn ensure_xtream_storage_path(cfg: &Config, target_name: &str) -> Result<PathBuf
         if std::fs::create_dir_all(&path).is_err() {
             let msg = format!(
                 "Failed to save xtream data, can't create directory {}",
-                &path.to_str().unwrap()
+                &path.display()
             );
             return Err(notify_err!(msg));
         }
@@ -104,7 +100,7 @@ pub fn xtream_get_record_file_path(storage_path: &Path, item_type: PlaylistItemT
     }
 }
 fn write_playlists_to_file(
-    cfg: &Config,
+    cfg: &AppConfig,
     storage_path: &Path,
     collections: Vec<(XtreamCluster, &[&mut PlaylistItem])>,
 ) -> Result<(), TuliproxError> {
@@ -185,9 +181,12 @@ pub fn xtream_get_file_paths_for_series(storage_path: &Path) -> (PathBuf, PathBu
     xtream_get_file_paths_for_name(storage_path, storage_const::FILE_SERIES)
 }
 
-fn xtream_garbage_collect(config: &Config, target_name: &str) -> std::io::Result<()> {
+fn xtream_garbage_collect(config: &AppConfig, target_name: &str) -> std::io::Result<()> {
     // Garbage collect series
-    let storage_path = try_option_ok!(xtream_get_storage_path(config, target_name));
+    let storage_path = {
+        let cfg = config.config.load();
+        try_option_ok!(xtream_get_storage_path(&cfg, target_name))
+    };
     let (info_path, idx_path) = try_option_ok!(xtream_get_info_file_paths(
         &storage_path,
         XtreamCluster::Series
@@ -200,11 +199,14 @@ fn xtream_garbage_collect(config: &Config, target_name: &str) -> std::io::Result
 }
 
 pub async fn xtream_write_playlist(
+    cfg: &AppConfig,
     target: &ConfigTarget,
-    cfg: &Config,
     playlist: &mut [PlaylistGroup],
 ) -> Result<(), TuliproxError> {
-    let path = ensure_xtream_storage_path(cfg, target.name.as_str())?;
+    let path = {
+        let config = cfg.config.load();
+        ensure_xtream_storage_path(&config, target.name.as_str())?
+    };
     let mut errors = Vec::new();
     let mut cat_live_col = Vec::with_capacity(1_000);
     let mut cat_series_col = Vec::with_capacity(1_000);
@@ -308,7 +310,7 @@ pub fn xtream_get_collection_path(
 }
 
 fn xtream_read_item_for_stream_id(
-    cfg: &Config,
+    cfg: &AppConfig,
     stream_id: u32,
     storage_path: &Path,
     cluster: XtreamCluster,
@@ -321,7 +323,7 @@ fn xtream_read_item_for_stream_id(
 }
 
 fn xtream_read_series_item_for_stream_id(
-    cfg: &Config,
+    cfg: &AppConfig,
     stream_id: u32,
     storage_path: &Path,
 ) -> Result<XtreamPlaylistItem, Error> {
@@ -342,39 +344,40 @@ macro_rules! try_cluster {
 
 pub fn xtream_get_item_for_stream_id(
     virtual_id: u32,
-    config: &Config,
+    app_config: &AppConfig,
     target: &ConfigTarget,
     xtream_cluster: Option<XtreamCluster>,
 ) -> Result<(XtreamPlaylistItem, VirtualIdRecord), Error> {
-    let target_path = get_target_storage_path(config, target.name.as_str()).ok_or_else(|| str_to_io_error(&format!("Could not find path for target {}", &target.name)))?;
-    let storage_path = xtream_get_storage_path(config, target.name.as_str()).ok_or_else(|| str_to_io_error(&format!("Could not find path for target {} xtream output", &target.name)))?;
+    let config = app_config.config.load();
+    let target_path = get_target_storage_path(&config, target.name.as_str()).ok_or_else(|| str_to_io_error(&format!("Could not find path for target {}", &target.name)))?;
+    let storage_path = xtream_get_storage_path(&config, target.name.as_str()).ok_or_else(|| str_to_io_error(&format!("Could not find path for target {} xtream output", &target.name)))?;
     {
         let target_id_mapping_file = get_target_id_mapping_file(&target_path);
-        let _file_lock = config.file_locks.read_lock(&target_id_mapping_file);
+        let _file_lock = app_config.file_locks.read_lock(&target_id_mapping_file);
 
         let mut target_id_mapping = BPlusTreeQuery::<u32, VirtualIdRecord>::try_new(&target_id_mapping_file).map_err(|err| str_to_io_error(&format!("Could not load id mapping for target {} err:{err}", target.name)))?;
         let mapping = target_id_mapping.query(&virtual_id).ok_or_else(|| str_to_io_error(&format!("Could not find mapping for target {} and id {}", target.name, virtual_id)))?;
         let result = match mapping.item_type {
             PlaylistItemType::SeriesInfo => {
-                xtream_read_series_item_for_stream_id(config, virtual_id, &storage_path)
+                xtream_read_series_item_for_stream_id(app_config, virtual_id, &storage_path)
             }
             PlaylistItemType::Series => {
-                if let Ok(mut item) = xtream_read_series_item_for_stream_id(config, mapping.parent_virtual_id, &storage_path) {
+                if let Ok(mut item) = xtream_read_series_item_for_stream_id(app_config, mapping.parent_virtual_id, &storage_path) {
                     item.provider_id = mapping.provider_id;
                     Ok(item)
                 } else {
-                    xtream_read_item_for_stream_id(config, virtual_id, &storage_path, XtreamCluster::Series)
+                    xtream_read_item_for_stream_id(app_config, virtual_id, &storage_path, XtreamCluster::Series)
                 }
             }
             PlaylistItemType::Catchup => {
                 let cluster = try_cluster!(xtream_cluster, mapping.item_type, virtual_id)?;
-                let mut item = xtream_read_item_for_stream_id(config, mapping.parent_virtual_id, &storage_path, cluster)?;
+                let mut item = xtream_read_item_for_stream_id(app_config, mapping.parent_virtual_id, &storage_path, cluster)?;
                 item.provider_id = mapping.provider_id;
                 Ok(item)
             }
             _ => {
                 let cluster = try_cluster!(xtream_cluster, mapping.item_type, virtual_id)?;
-                xtream_read_item_for_stream_id(config, virtual_id, &storage_path, cluster)
+                xtream_read_item_for_stream_id(app_config, virtual_id, &storage_path, cluster)
             }
         };
 
@@ -384,7 +387,7 @@ pub fn xtream_get_item_for_stream_id(
 
 pub async fn xtream_load_rewrite_playlist(
     cluster: XtreamCluster,
-    config: &Config,
+    config: &AppConfig,
     target: &ConfigTarget,
     category_id: Option<u32>,
     user: &ProxyUserCredentials,
@@ -393,27 +396,28 @@ pub async fn xtream_load_rewrite_playlist(
 }
 
 pub fn xtream_write_series_info(
-    config: &Config,
+    app_config: &AppConfig,
     target_name: &str,
     series_info_id: u32,
     content: &str,
 ) -> Result<(), Error> {
-    let target_path = try_option_ok!(get_target_storage_path(config, target_name));
-    let storage_path = try_option_ok!(xtream_get_storage_path(config, target_name));
+    let config = app_config.config.load();
+    let target_path = try_option_ok!(get_target_storage_path(&config, target_name));
+    let storage_path = try_option_ok!(xtream_get_storage_path(&config, target_name));
     let (info_path, idx_path) = try_option_ok!(xtream_get_info_file_paths(
         &storage_path,
         XtreamCluster::Series
     ));
 
     {
-        let _file_lock = config.file_locks.write_lock(&info_path);
+        let _file_lock = app_config.file_locks.write_lock(&info_path);
         let mut writer = IndexedDocumentWriter::new_append(info_path.clone(), idx_path)?;
         writer.write_doc(series_info_id, content).map_err(|_| str_to_io_error(&format!("failed to write xtream series info for target {target_name}")))?;
         writer.store()?;
     }
     {
         let target_id_mapping_file = get_target_id_mapping_file(&target_path);
-        let _file_lock = config.file_locks.write_lock(&target_id_mapping_file);
+        let _file_lock = app_config.file_locks.write_lock(&target_id_mapping_file);
         if let Ok(mut target_id_mapping) = BPlusTreeUpdate::<u32, VirtualIdRecord>::try_new(&target_id_mapping_file) {
             if let Some(record) = target_id_mapping.query(&series_info_id) {
                 let new_record = record.copy_update_timestamp();
@@ -426,15 +430,16 @@ pub fn xtream_write_series_info(
 }
 
 pub async fn xtream_write_vod_info(
-    config: &Config,
+    app_config: &AppConfig,
     target_name: &str,
     virtual_id: u32,
     content: &str,
 ) -> Result<(), Error> {
-    let storage_path = try_option_ok!(xtream_get_storage_path(config, target_name));
+    let config = app_config.config.load();
+    let storage_path = try_option_ok!(xtream_get_storage_path(&config, target_name));
     let (info_path, idx_path) = try_option_ok!(xtream_get_info_file_paths(&storage_path, XtreamCluster::Video));
     {
-        let _file_lock = config.file_locks.write_lock(&info_path).await;
+        let _file_lock = app_config.file_locks.write_lock(&info_path).await;
         let mut writer = IndexedDocumentWriter::new_append(info_path.clone(), idx_path)?;
         writer.write_doc(virtual_id, content).map_err(|_| str_to_io_error(&format!("failed to write xtream vod info for target {target_name}")))?;
         writer.store()?;
@@ -443,18 +448,19 @@ pub async fn xtream_write_vod_info(
 }
 
 fn xtream_get_series_info_mapping(
-    config: &Config,
+    config: &AppConfig,
     target_name: &str,
     series_id: u32,
 ) -> Option<VirtualIdRecord> {
     xtream_get_info_mapping(config, target_name, series_id).filter(|id_record| !id_record.is_expired())
 }
 
-fn xtream_get_info_mapping(config: &Config, target_name: &str, info_id: u32) -> Option<VirtualIdRecord> {
-    let target_path = get_target_storage_path(config, target_name)?;
+fn xtream_get_info_mapping(app_config: &AppConfig, target_name: &str, info_id: u32) -> Option<VirtualIdRecord> {
+    let config = app_config.config.load();
+    let target_path = get_target_storage_path(&config, target_name)?;
 
     let target_id_mapping_file = get_target_id_mapping_file(&target_path);
-    let _file_lock = config.file_locks.read_lock(&target_id_mapping_file);
+    let _file_lock = app_config.file_locks.read_lock(&target_id_mapping_file);
     BPlusTreeQuery::<u32, VirtualIdRecord>::try_new(&target_id_mapping_file).map_err(|err| {
         error!("Could not load id mapping for target {target_name}: {err}");
         str_to_io_error(&format!("ID mapping load error for target {target_name}"))
@@ -463,19 +469,19 @@ fn xtream_get_info_mapping(config: &Config, target_name: &str, info_id: u32) -> 
 
 // Reads the series info entry if exists
 pub fn xtream_load_series_info(
-    config: &Config,
+    app_config: &AppConfig,
     target_name: &str,
     series_id: u32,
 ) -> Option<String> {
-    xtream_get_series_info_mapping(config, target_name, series_id)?;
-
-    let storage_path = xtream_get_storage_path(config, target_name)?;
+    xtream_get_series_info_mapping(app_config, target_name, series_id)?;
+    let config = app_config.config.load();
+    let storage_path = xtream_get_storage_path(&config, target_name)?;
 
     let (info_path, idx_path) = xtream_get_info_file_paths(&storage_path, XtreamCluster::Series)?;
 
     if info_path.exists() && idx_path.exists() {
         {
-            let _file_lock = config.file_locks.read_lock(&info_path);
+            let _file_lock = app_config.file_locks.read_lock(&info_path);
             return match IndexedDocumentDirectAccess::read_indexed_item::<u32, String>(&info_path, &idx_path, &series_id) {
                 Ok(content) => Some(content),
                 Err(err) => {
@@ -488,7 +494,7 @@ pub fn xtream_load_series_info(
     None
 }
 fn xtream_get_vod_info_mapping(
-    config: &Config,
+    config: &AppConfig,
     target_name: &str,
     vod_id: u32,
 ) -> Option<VirtualIdRecord> {
@@ -498,7 +504,7 @@ fn xtream_get_vod_info_mapping(
 
 // Reads the vod info entry if exists
 pub fn xtream_load_vod_info(
-    config: &Config,
+    config: &AppConfig,
     target_name: &str,
     vod_id: u32,
 ) -> Option<String> {
@@ -506,7 +512,7 @@ pub fn xtream_load_vod_info(
     // Check if the entry exists; if not, we don't need to look further.
     xtream_get_vod_info_mapping(config, target_name, vod_id).as_ref()?;
     // Entry exists, read db entry
-    let target_storage_path = xtream_get_storage_path(config, target_name)?;
+    let target_storage_path = xtream_get_storage_path(&config.config.load(), target_name)?;
 
     let (info_path, idx_path) = xtream_get_info_file_paths(&target_storage_path, XtreamCluster::Video)?;
 
@@ -520,7 +526,7 @@ pub fn xtream_load_vod_info(
 }
 
 fn rewrite_xtream_vod_info<P>(
-    config: &Config,
+    config: &AppConfig,
     target: &ConfigTarget,
     xtream_output: &XtreamTargetOutput,
     pli: &P,
@@ -567,7 +573,7 @@ fn rewrite_xtream_vod_info<P>(
 }
 
 pub fn rewrite_xtream_vod_info_content<P>(
-    config: &Config,
+    config: &AppConfig,
     target: &ConfigTarget,
     xtream_output: &XtreamTargetOutput,
     pli: &P,
@@ -581,7 +587,7 @@ pub fn rewrite_xtream_vod_info_content<P>(
 }
 
 pub async fn write_and_get_xtream_vod_info<P>(
-    config: &Config,
+    app_config: &AppConfig,
     target: &ConfigTarget,
     xtream_output: &XtreamTargetOutput,
     pli: &P,
@@ -591,12 +597,12 @@ pub async fn write_and_get_xtream_vod_info<P>(
     P: PlaylistEntry,
 {
     let mut doc = serde_json::from_str::<Map<String, Value>>(content).map_err(|_| str_to_io_error("Failed to parse JSON content"))?;
-    xtream_write_vod_info(config, target.name.as_str(), pli.get_virtual_id(), content).await.ok();
-    rewrite_xtream_vod_info(config, target, xtream_output, pli, user, &mut doc)
+    xtream_write_vod_info(app_config, target.name.as_str(), pli.get_virtual_id(), content).await.ok();
+    rewrite_xtream_vod_info(app_config, target, xtream_output, pli, user, &mut doc)
 }
 
 async fn rewrite_xtream_series_info<P>(
-    config: &Config,
+    app_config: &AppConfig,
     target: &ConfigTarget,
     xtream_output: &XtreamTargetOutput,
     pli: &P,
@@ -605,12 +611,13 @@ async fn rewrite_xtream_series_info<P>(
 ) -> Result<String, Error> where
     P: PlaylistEntry,
 {
-    let target_path = get_target_storage_path(config, target.name.as_str()).ok_or_else(|| str_to_io_error(&format!("Could not find path for target {}", target.name)))?;
+    let config = app_config.config.load();
+    let target_path = get_target_storage_path(&config, target.name.as_str()).ok_or_else(|| str_to_io_error(&format!("Could not find path for target {}", target.name)))?;
 
-    let resource_url = if config.is_reverse_proxy_resource_rewrite_enabled() {
+    let resource_url = if app_config.is_reverse_proxy_resource_rewrite_enabled() {
         let item_type = pli.get_item_type();
         if user.proxy.is_reverse(item_type) && !target.is_force_redirect(item_type) {
-            let server_info = config.get_user_server_info(user);
+            let server_info = app_config.get_user_server_info(user);
             let url = server_info.get_base_url();
             Some(format!("{url}/resource/series/{}/{}/{}", user.username, user.password, pli.get_virtual_id()))
         } else {
@@ -640,8 +647,8 @@ async fn rewrite_xtream_series_info<P>(
 
     let virtual_id = pli.get_virtual_id();
     {
-        let (mut target_id_mapping, file_lock) = get_target_id_mapping(config, &target_path).await;
-        let options = XtreamMappingOptions::from_target_options(target, xtream_output, config);
+        let (mut target_id_mapping, file_lock) = get_target_id_mapping(app_config, &target_path).await;
+        let options = XtreamMappingOptions::from_target_options(target, xtream_output, app_config);
 
         let provider_url = pli.get_provider_url();
         for episode_list in episodes.values_mut().filter_map(Value::as_array_mut) {
@@ -682,7 +689,7 @@ async fn rewrite_xtream_series_info<P>(
 }
 
 pub async fn rewrite_xtream_series_info_content<P>(
-    config: &Config,
+    config: &AppConfig,
     target: &ConfigTarget,
     xtream_output: &XtreamTargetOutput,
     pli_series_info: &P,
@@ -696,7 +703,7 @@ pub async fn rewrite_xtream_series_info_content<P>(
 }
 
 pub async fn write_and_get_xtream_series_info<P>(
-    config: &Config,
+    config: &AppConfig,
     target: &ConfigTarget,
     xtream_output: &XtreamTargetOutput,
     pli_series_info: &P,
@@ -712,12 +719,12 @@ pub async fn write_and_get_xtream_series_info<P>(
 }
 
 pub fn xtream_get_input_info(
-    cfg: &Config,
+    cfg: &AppConfig,
     input: &ConfigInput,
     provider_id: u32,
     cluster: XtreamCluster,
 ) -> Option<String> {
-    if let Ok(Some((info_path, idx_path))) = get_input_storage_path(&input.name, &cfg.working_dir).map(|storage_path| xtream_get_info_file_paths(&storage_path, cluster))
+    if let Ok(Some((info_path, idx_path))) = get_input_storage_path(&input.name, &cfg.config.load().working_dir).map(|storage_path| xtream_get_info_file_paths(&storage_path, cluster))
     {
         let _file_lock = cfg.file_locks.read_lock(&info_path);
         if let Ok(content) = IndexedDocumentDirectAccess::read_indexed_item::<u32, String>(&info_path, &idx_path, &provider_id) {
@@ -728,12 +735,13 @@ pub fn xtream_get_input_info(
 }
 
 pub async fn xtream_update_input_info_file(
-    cfg: &Config,
+    cfg: &AppConfig,
     input: &ConfigInput,
     wal_path: &Path,
     cluster: XtreamCluster,
 ) -> Result<(), TuliproxError> {
-    match get_input_storage_path(&input.name, &cfg.working_dir).map(|storage_path| xtream_get_info_file_paths(&storage_path, cluster)) {
+    let config = cfg.config.load();
+    match get_input_storage_path(&input.name, &config.working_dir).map(|storage_path| xtream_get_info_file_paths(&storage_path, cluster)) {
         Ok(Some((info_path, idx_path))) => {
             {
                 let _file_lock = cfg.file_locks.write_lock(&info_path);
@@ -772,11 +780,12 @@ pub async fn xtream_update_input_info_file(
 }
 
 pub async fn xtream_update_input_vod_record_from_wal_file(
-    cfg: &Config,
+    cfg: &AppConfig,
     input: &ConfigInput,
     wal_path: &Path,
 ) -> Result<(), TuliproxError> {
-    let record_path = get_input_storage_path(&input.name, &cfg.working_dir).map(|storage_path| xtream_get_record_file_path(&storage_path, PlaylistItemType::Video))
+    let config = cfg.config.load();
+    let record_path = get_input_storage_path(&input.name, &config.working_dir).map(|storage_path| xtream_get_record_file_path(&storage_path, PlaylistItemType::Video))
         .map_err(|err| notify_err!(format!("Error accessing storage path: {err}")))
         .and_then(|opt| opt.ok_or_else(|| notify_err!(format!("Error accessing storage path for input: {}", &input.name))))?;
 
@@ -840,11 +849,12 @@ pub async fn xtream_update_input_vod_record_from_wal_file(
 }
 
 pub async fn xtream_update_input_series_record_from_wal_file(
-    cfg: &Config,
+    cfg: &AppConfig,
     input: &ConfigInput,
     wal_path: &Path,
 ) -> Result<(), TuliproxError> {
-    let record_path = get_input_storage_path(&input.name, &cfg.working_dir).map(|storage_path| xtream_get_record_file_path(&storage_path, PlaylistItemType::SeriesInfo))
+    let config = cfg.config.load();
+    let record_path = get_input_storage_path(&input.name, &config.working_dir).map(|storage_path| xtream_get_record_file_path(&storage_path, PlaylistItemType::SeriesInfo))
         .map_err(|err| notify_err!(format!("Error accessing storage path: {err}")))
         .and_then(|opt| opt.ok_or_else(|| notify_err!(format!("Error accessing storage path for input: {}", &input.name))))?;
     {
@@ -874,11 +884,12 @@ pub async fn xtream_update_input_series_record_from_wal_file(
 }
 
 pub async fn xtream_update_input_series_episodes_record_from_wal_file(
-    cfg: &Config,
+    cfg: &AppConfig,
     input: &ConfigInput,
     wal_path: &Path,
 ) -> Result<(), TuliproxError> {
-    let record_path = get_input_storage_path(&input.name, &cfg.working_dir).map(|storage_path| xtream_get_record_file_path(&storage_path, PlaylistItemType::Series))
+    let config = cfg.config.load();
+    let record_path = get_input_storage_path(&input.name, &config.working_dir).map(|storage_path| xtream_get_record_file_path(&storage_path, PlaylistItemType::Series))
         .map_err(|err| notify_err!(format!("Error accessing storage path: {err}")))
         .and_then(|opt| opt.ok_or_else(|| notify_err!(format!("Error accessing storage path for input: {}", &input.name))))?;
     {
@@ -924,13 +935,14 @@ pub async fn xtream_update_input_series_episodes_record_from_wal_file(
     }
 }
 
-pub async fn iter_raw_xtream_playlist(config: &Arc<Config>, target: &ConfigTarget, cluster: XtreamCluster) -> Option<(FileReadGuard, impl Iterator<Item=(XtreamPlaylistItem, bool)>)> {
-    if let Some(storage_path) = xtream_get_storage_path(config, target.name.as_str()) {
+pub async fn iter_raw_xtream_playlist(app_config: &AppConfig, target: &ConfigTarget, cluster: XtreamCluster) -> Option<(FileReadGuard, impl Iterator<Item=(XtreamPlaylistItem, bool)>)> {
+    let config = app_config.config.load();
+    if let Some(storage_path) = xtream_get_storage_path(&config, target.name.as_str()) {
         let (xtream_path, idx_path) = xtream_get_file_paths(&storage_path, cluster);
         if !xtream_path.exists() || !idx_path.exists() {
             return None;
         }
-        let file_lock = config.file_locks.read_lock(&xtream_path).await;
+        let file_lock = app_config.file_locks.read_lock(&xtream_path).await;
         match IndexedDocumentIterator::<u32, XtreamPlaylistItem>::new(&xtream_path, &idx_path)
             .map_err(|err| info_err!(format!("Could not deserialize file {xtream_path:?} - {err}"))) {
             Ok(reader) => Some((file_lock, reader)),
