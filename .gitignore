@@ -12,6 +12,8 @@ dist
 /dataSources/
 /dataSources.local.xml
 
+.DS_Store
+
 *.m3u
 
 .idea
