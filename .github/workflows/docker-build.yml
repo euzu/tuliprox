@@ -14,11 +14,11 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+        
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
         with:
-          platforms: all
+          platforms: linux/amd64,linux/arm64
       
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -34,34 +34,97 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl,wasm32-unknown-unknown
-      
+          
       - name: Cache cargo tools
         id: cache-tools
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
-          path: ~/.cargo/bin
-          key: ${{ runner.os }}-cargo-tools-cross-trunk
-      
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-tools-v1
+          restore-keys: |
+            ${{ runner.os }}-cargo-tools-
+
       - name: Install cross
-        if: steps.cache-tools.outputs.cache-hit != 'true'
-        run: cargo install cross --git https://github.com/cross-rs/cross
-      
+        run: |
+          if ! command -v cross &> /dev/null; then
+            cargo install cross --git https://github.com/cross-rs/cross
+          fi
+
       - name: Install trunk
-        if: steps.cache-tools.outputs.cache-hit != 'true'
-        run: cargo install trunk
-      
-      - name: Cache cargo registry
-        uses: actions/cache@v3
+        run: |
+          if ! command -v trunk &> /dev/null; then
+            cargo install trunk
+          fi
+
+      - name: Install wasm-bindgen-cli
+        run: |
+          if ! command -v wasm-bindgen &> /dev/null; then
+            cargo install wasm-bindgen-cli
+          fi
+
+      - name: Cache cargo registry and dependencies
+        id: cache-cargo-deps
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+            backend/target
+            frontend/target
+            shared/target
+          key: ${{ runner.os }}-cargo-deps-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/Cargo.toml') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-            ${{ runner.os }}-cargo-
+            ${{ runner.os }}-cargo-deps-${{ hashFiles('**/Cargo.lock') }}-
+            ${{ runner.os }}-cargo-deps-
+      
+      - name: Cache Docker buildx
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+      
+      - name: Cache frontend dist
+        id: cache-frontend
+        uses: actions/cache@v4
+        with:
+          path: frontend/dist
+          key: ${{ runner.os }}-frontend-${{ hashFiles('frontend/**/*', 'shared/**/*') }}-${{ hashFiles('frontend/Cargo.toml', 'frontend/Trunk.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-frontend-
+      
+      - name: Cache cross-compilation tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cross
+            ~/.rustup/toolchains/*/lib/rustlib/x86_64-unknown-linux-musl
+            ~/.rustup/toolchains/*/lib/rustlib/aarch64-unknown-linux-musl
+          key: ${{ runner.os }}-cross-${{ hashFiles('**/Cargo.lock') }}-v2
+          restore-keys: |
+            ${{ runner.os }}-cross-
+      
+      - name: Cache built resources
+        id: cache-resources
+        uses: actions/cache@v4
+        with:
+          path: |
+            resources/*.ts
+          key: ${{ runner.os }}-resources-${{ hashFiles('resources/*.jpg') }}-v1
+          restore-keys: |
+            ${{ runner.os }}-resources-
+      
+      - name: Install ffmpeg (only if resources not cached)
+        if: steps.cache-resources.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
       
       - name: Extract branch name
         shell: bash
@@ -77,4 +140,14 @@ jobs:
         run: chmod +x ./bin/build_docker.sh
       
       - name: Build and push Docker images
+        env:
+          FRONTEND_CACHE_HIT: ${{ steps.cache-frontend.outputs.cache-hit }}
+          CARGO_DEPS_CACHE_HIT: ${{ steps.cache-cargo-deps.outputs.cache-hit }}
+          BUILDX_CACHE_FROM: type=local,src=/tmp/.buildx-cache
+          BUILDX_CACHE_TO: type=local,dest=/tmp/.buildx-cache-new,mode=max
         run: ./bin/build_docker.sh ${{ steps.extract_branch.outputs.branch }}
+      
+      - name: Move buildx cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache || true
