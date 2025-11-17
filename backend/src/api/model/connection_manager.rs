@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::net::SocketAddr;
 use crate::api::model::{ActiveProviderManager, ActiveUserManager, CustomVideoStreamType, EventManager, EventMessage, ProviderHandle, SharedStreamManager};
 use std::sync::Arc;
-use log::{debug};
+use log::{debug, warn};
 use shared::model::{ActiveUserConnectionChange, StreamChannel};
 use crate::auth::Fingerprint;
 
@@ -73,7 +73,12 @@ impl ConnectionManager {
         if let Some(stream_info) = self.user_manager.update_connection(username, max_connections, fingerprint, provider, stream_channel, user_agent).await {
             self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream_info)));
         } else {
-            // TODO what do we do here ?
+            warn!(
+                "Failed to register connection for user {username} at {}; disconnecting client",
+                fingerprint.addr
+            );
+            self.release_connection(&fingerprint.addr).await;
+            let _ = self.kick_connection(&fingerprint.addr);
         }
     }
 
