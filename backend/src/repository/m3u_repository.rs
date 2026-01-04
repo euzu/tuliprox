@@ -202,7 +202,7 @@ pub async fn persist_input_m3u_playlist(app_config: &Arc<AppConfig>, m3u_path: &
 }
 
 pub async fn load_input_m3u_playlist(app_config: &Arc<AppConfig>, m3u_path: &Path) -> Result<Vec<PlaylistGroup>, TuliproxError> {
-    let mut groups: IndexMap<String, PlaylistGroup> = IndexMap::new();
+    let mut groups: IndexMap<Arc<str>, PlaylistGroup> = IndexMap::new();
 
     if tokio::fs::try_exists(m3u_path).await.unwrap_or(false) {
         // Load Items
@@ -211,7 +211,7 @@ pub async fn load_input_m3u_playlist(app_config: &Arc<AppConfig>, m3u_path: &Pat
             let mut group_cnt = 0;
             for (_, ref item) in query.iter() {
                 let cat_id = item.group.clone();
-                groups.entry(cat_id.to_string())
+                groups.entry(cat_id)
                     .or_insert_with(|| {
                         group_cnt += 1;
                         PlaylistGroup {

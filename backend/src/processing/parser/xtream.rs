@@ -55,7 +55,10 @@ fn create_xtream_series_episode_url<'a>(url: &'a str, username: &'a str, passwor
     }
 }
 
-pub fn parse_xtream_series_info(parent_uuid: &UUIDType, series_info: &SeriesStreamProperties, group_title: &str, series_name: &str, input: &ConfigInput) -> Option<Vec<PlaylistItem>> {
+//pub fn parse_xtream_series_info(parent_uuid: &UUIDType, series_info: &SeriesStreamProperties, group_title: &str, series_name: &str, input: &ConfigInput) -> Option<Vec<PlaylistItem>> {
+ pub fn parse_xtream_series_info(parent_uuid: &UUIDType, series_info: &SeriesStreamProperties,
+                                 group_title: &str, series_name: &str, input: &ConfigInput,
+                                 interner: &mut StringInterner) -> Option<Vec<PlaylistItem>> {
     let url = input.url.as_str();
     let username = input.username.as_ref().map_or("", |v| v);
     let password = input.password.as_ref().map_or("", |v| v);
@@ -72,14 +75,14 @@ pub fn parse_xtream_series_info(parent_uuid: &UUIDType, series_info: &SeriesStre
                      parent_code: parent_uuid.to_string(),
                      name: series_name.to_string(),
                      logo: episode.movie_image.clone(),
-                     group: shared::utils::intern(group_title),
+                     group: interner.intern(group_title),
                      title: episode.title.clone(),
                      url: episode_url.to_string(),
                      item_type: PlaylistItemType::Series,
                      xtream_cluster: XtreamCluster::Series,
                      additional_properties: Some(StreamProperties::Episode(episode_info)),
                      category_id: 0,
-                     input_name: shared::utils::intern(&input.name),
+                     input_name: interner.intern(&input.name),
                      ..Default::default()
                  }
              }

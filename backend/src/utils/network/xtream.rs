@@ -15,7 +15,7 @@ use shared::error::{string_to_io_error, to_io_error, TuliproxError};
 use shared::model::{MsgKind, PlaylistEntry, PlaylistGroup, ProxyUserStatus, SeriesStreamProperties,
                     StreamProperties, VideoStreamProperties, XtreamCluster,
                     XtreamPlaylistItem, XtreamSeriesInfo, XtreamVideoInfo};
-use shared::utils::{extract_extension_from_url, get_i64_from_serde_value, get_string_from_serde_value, sanitize_sensitive_info};
+use shared::utils::{extract_extension_from_url, get_i64_from_serde_value, get_string_from_serde_value, sanitize_sensitive_info, StringInterner};
 use std::collections::HashMap;
 use std::io::Error;
 use std::str::FromStr;
@@ -135,8 +135,8 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
                                     error!("Failed to persist series info for input {}: {err}", &input.name);
                                 }
                             }
-
-                            if let Some(mut episodes) = parse_xtream_series_info(&pli.get_uuid(), &series_stream_props, &group, &series_name, input) {
+                            let mut interner = StringInterner::new();
+                            if let Some(mut episodes) = parse_xtream_series_info(&pli.get_uuid(), &series_stream_props, &group, &series_name, input, &mut interner) {
                                 let config = &app_state.app_config.config.load();
                                 match get_target_storage_path(config, target.name.as_str()) {
                                     None => {

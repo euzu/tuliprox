@@ -110,14 +110,12 @@ impl EpgIdCache<'_> {
         let smart_match_enabled = self.smart_match_enabled;
         let fuzzy_matching = self.fuzzy_match_enabled;
 
-        let groups = match &fp.source {
-            ProviderPlaylistSource::Memory(groups) => groups,
-            _ => &vec![], 
-        };
-        for channel in groups.iter().flat_map(|g| &g.channels) {
+        // Helper closure to process a single item
+        // We use a closure here to capture `self` and avoid code duplication
+        let mut process_item = |name: &str, epg_channel_id: Option<&str>| {
             let mut missing_epg_id = true;
             // insert epg_id to known channel epg_ids
-            if let Some(id) = channel.header.epg_channel_id.as_deref() {
+            if let Some(id) = epg_channel_id {
                 if !id.is_empty() {
                     missing_epg_id = false;
                     self.channel_epg_id.insert(Cow::Owned(id.to_string()));
@@ -129,8 +127,40 @@ impl EpgIdCache<'_> {
             let needs_normalization = smart_match_enabled && (fuzzy_matching || missing_epg_id);
 
             if needs_normalization {
-                let name = &channel.header.name;
-                self.normalize_and_store(name, channel.header.epg_channel_id.as_deref());
+                self.normalize_and_store(name, epg_channel_id);
+            }
+        };
+
+        match &mut fp.source {
+            ProviderPlaylistSource::Memory(groups) => {
+                for channel in groups.iter().flat_map(|g| &g.channels) {
+                    process_item(&channel.header.name, channel.header.epg_channel_id.as_deref());
+                }
+            }
+            ProviderPlaylistSource::XtreamDisk { live, vod, series, .. } => {
+                // Iterate over live
+                if let Some(query) = live.as_mut() {
+                    for (_, item) in query.iter() {
+                        process_item(&item.name, item.epg_channel_id.as_deref());
+                    }
+                }
+                // Iterate over vod
+                if let Some(query) = vod.as_mut() {
+                    for (_, item) in query.iter() {
+                        process_item(&item.name, item.epg_channel_id.as_deref());
+                    }
+                }
+                // Iterate over series
+                if let Some(query) = series.as_mut() {
+                    for (_, item) in query.iter() {
+                        process_item(&item.name, item.epg_channel_id.as_deref());
+                    }
+                }
+            }
+            ProviderPlaylistSource::M3uDisk { query, .. } => {
+                for (_, item) in query.iter() {
+                    process_item(&item.name, item.epg_channel_id.as_deref());
+                }
             }
         }
     }

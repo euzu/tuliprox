@@ -594,11 +594,7 @@ fn execute_pipe_memory<'a>(target: &ConfigTarget, pipe: &ProcessingPipe, fpl: &F
 
 // Streaming implementation
 fn execute_pipe_stream(target: &ConfigTarget, fpl: &mut FetchedPlaylist<'_>, duplicates: &mut HashSet<UUIDType>) -> Vec<PlaylistGroup> {
-    // 1. Iterate source items
-    // Since BTree iter is blocking/sync usually in this implementation? No, BPlusTreeQuery iter is sync? 
-    // Checking bplustree.rs: query.iter() returns generic iterator.
-    // So we can iterate.
-
+    
     let mut accumulator: IndexMap<String, PlaylistGroup> = IndexMap::new();
     let mut group_id_counter = 0;
 
@@ -623,7 +619,6 @@ fn execute_pipe_stream(target: &ConfigTarget, fpl: &mut FetchedPlaylist<'_>, dup
             }
         }
 
-        // Map
         // Map can return list of items
         let items = if let Some(mappings) = target.mapping.load().as_ref() {
             let mut current_items = vec![pli];
@@ -667,7 +662,7 @@ fn execute_pipe_stream(target: &ConfigTarget, fpl: &mut FetchedPlaylist<'_>, dup
     };
 
     match &mut fpl.source {
-        ProviderPlaylistSource::XtreamDisk { live, vod, series } => {
+        ProviderPlaylistSource::XtreamDisk { live, vod, series, .. } => {
             if let Some(q) = &mut **live {
                 for (_, item) in q.iter() {
                     process_item(PlaylistItem::from(&item), &mut accumulator, &mut group_id_counter, duplicates);
@@ -684,8 +679,8 @@ fn execute_pipe_stream(target: &ConfigTarget, fpl: &mut FetchedPlaylist<'_>, dup
                 }
             }
         }
-        ProviderPlaylistSource::M3uDisk(q) => {
-            for (_, item) in q.iter() { process_item(PlaylistItem::from(&item), &mut accumulator, &mut group_id_counter, duplicates); }
+        ProviderPlaylistSource::M3uDisk { query, .. } => {
+            for (_, item) in query.iter() { process_item(PlaylistItem::from(&item), &mut accumulator, &mut group_id_counter, duplicates); }
         }
         ProviderPlaylistSource::Memory(_) => {}
     }

@@ -34,13 +34,13 @@ impl StringInterner {
 
     /// Interns an owned string.
     pub fn intern_string(&mut self, s: String) -> Arc<str> {
-         if let Some(existing) = self.pool.get(s.as_str()) {
-            Arc::clone(existing)
-        } else {
-            let arc: Arc<str> = s.as_str().into();
-            self.pool.insert(s.into_boxed_str(), Arc::clone(&arc));
-            arc
+        if let Some(existing) = self.pool.get(s.as_str()) {
+            return Arc::clone(existing);
         }
+        // Convert String to Arc<str> directly
+        let arc: Arc<str> = Arc::from(s);
+        self.pool.insert(arc.as_ref().into(), Arc::clone(&arc));
+        arc
     }
 }
 

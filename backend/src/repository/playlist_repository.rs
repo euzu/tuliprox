@@ -374,17 +374,36 @@ pub async fn load_input_playlist(app_config: &Arc<AppConfig>, input: &ConfigInpu
     let storage_path = get_input_storage_path(&input.name, working_dir)
         .map_err(|e| create_tuliprox_error!(TuliproxErrorKind::Info, "Error getting input path: {e}"))?;
 
+    let use_disk_input_playlist = app_config.config.load().use_disk_input_playlist;
+
     match input.input_type {
         InputType::Xtream | InputType::XtreamBatch => {
-            if app_config.config.load().use_disk_input_playlist {
+            if use_disk_input_playlist {
                 let live_path = xtream_get_file_path(&storage_path, XtreamCluster::Live);
                 let vod_path = xtream_get_file_path(&storage_path, XtreamCluster::Video);
                 let series_path = xtream_get_file_path(&storage_path, XtreamCluster::Series);
 
+                let mut guards = Vec::new();
+                let live = if live_path.exists() {
+                    guards.push(app_config.file_locks.read_lock(&live_path).await);
+                    BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&live_path).ok()
+                } else { None };
+
+                let vod = if vod_path.exists() {
+                    guards.push(app_config.file_locks.read_lock(&vod_path).await);
+                    BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&vod_path).ok()
+                } else { None };
+
+                let series = if series_path.exists() {
+                    guards.push(app_config.file_locks.read_lock(&series_path).await);
+                    BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&series_path).ok()
+                } else { None };
+
                 Ok(ProviderPlaylistSource::XtreamDisk {
-                    live: Box::new(BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&live_path).ok()),
-                    vod: Box::new(BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&vod_path).ok()),
-                    series: Box::new(BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&series_path).ok()),
+                    live: Box::new(live),
+                    vod: Box::new(vod),
+                    series: Box::new(series),
+                    guards,
                 })
             } else {
                 let clusters_to_load = if let Some(c) = clusters {
@@ -399,8 +418,15 @@ pub async fn load_input_playlist(app_config: &Arc<AppConfig>, input: &ConfigInpu
         _ => {
             // Load M3U
             let file_path = get_input_playlist_file_path(&storage_path, input.name.as_str());
-            let groups = load_input_m3u_playlist(app_config, &file_path).await?;
-             Ok(ProviderPlaylistSource::Memory(Box::new(groups)))
+            if use_disk_input_playlist && file_path.exists() {
+                let guard = app_config.file_locks.read_lock(&file_path).await;
+                let query = BPlusTreeQuery::<u32, M3uPlaylistItem>::try_new(&file_path)
+                    .map_err(|e| create_tuliprox_error!(TuliproxErrorKind::Info, "Error loading M3U disk playlist: {e}"))?;
+                Ok(ProviderPlaylistSource::M3uDisk { query, guard })
+            } else {
+                let groups = load_input_m3u_playlist(app_config, &file_path).await?;
+                Ok(ProviderPlaylistSource::Memory(Box::new(groups)))
+            }
         }
     }
 }

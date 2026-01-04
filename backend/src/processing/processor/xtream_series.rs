@@ -1,21 +1,24 @@
-use crate::repository::provider_source::ProviderPlaylistSource;
 use crate::model::FetchedPlaylist;
 use crate::model::{AppConfig, ConfigTarget};
 use crate::processing::parser::xtream::parse_xtream_series_info;
 use crate::processing::processor::create_resolve_options_function_for_xtream_target;
 use crate::processing::processor::playlist::ProcessingPipe;
 use crate::processing::processor::xtream::playlist_resolve_download_playlist_item;
+use crate::repository::provider_source::ProviderPlaylistSource;
 use crate::repository::storage::get_input_storage_path;
 use crate::repository::xtream_repository::persists_input_series_info;
 use log::{error, info, log_enabled, Level};
 use shared::error::TuliproxError;
 use shared::model::{InputType, PlaylistEntry, SeriesStreamProperties, StreamProperties, XtreamSeriesInfo};
-use shared::model::{PlaylistGroup, PlaylistItemType, XtreamCluster};
 use std::sync::Arc;
 use std::time::Instant;
+use shared::utils::StringInterner;
+use indexmap::IndexMap;
+use shared::model::{PlaylistGroup, PlaylistItemType, XtreamCluster, PlaylistItem};
 
 create_resolve_options_function_for_xtream_target!(series);
 
+#[allow(clippy::too_many_lines)]
 async fn playlist_resolve_series_info(app_config: &Arc<AppConfig>, client: &reqwest::Client,
                                       errors: &mut Vec<TuliproxError>,
                                       fpl: &mut FetchedPlaylist<'_>,
@@ -32,84 +35,155 @@ async fn playlist_resolve_series_info(app_config: &Arc<AppConfig>, client: &reqw
     };
 
     let series_info_count = if resolve_series {
-        if let ProviderPlaylistSource::Memory(groups) = &fpl.source {
-            let count = groups.iter()
-                .flat_map(|plg| &plg.channels)
-                .filter(|&pli| pli.header.xtream_cluster == XtreamCluster::Series
-                    && pli.header.item_type == PlaylistItemType::SeriesInfo
-                    && !pli.has_details()).count();
-            info!("Found {count} series info to resolve");
-            count
-        } else { 0 }
+        match &mut fpl.source {
+            ProviderPlaylistSource::Memory(groups) => {
+                groups.iter()
+                    .flat_map(|plg| &plg.channels)
+                    .filter(|&pli| pli.header.xtream_cluster == XtreamCluster::Series
+                        && pli.header.item_type == PlaylistItemType::SeriesInfo
+                        && !pli.has_details()).count()
+            }
+            ProviderPlaylistSource::XtreamDisk { series, .. } => {
+                let mut count = 0;
+                if let Some(query) = series.as_mut() {
+                    for (_, item) in query.iter() {
+                        if item.item_type == PlaylistItemType::SeriesInfo && !item.has_details() {
+                            count += 1;
+                        }
+                    }
+                }
+                count
+            }
+            ProviderPlaylistSource::M3uDisk { .. } => 0,
+        }
     } else {
         0
     };
 
+    if series_info_count > 0 {
+        info!("Found {series_info_count} series info to resolve");
+    }
+
     let mut last_log_time = Instant::now();
     let mut processed_series_info_count = 0;
     let mut result: Vec<PlaylistGroup> = vec![];
+    let mut interner = StringInterner::new();
 
-    if let ProviderPlaylistSource::Memory(groups) = &mut fpl.source {
-        for plg in groups.iter_mut() {
-            let mut group_series = vec![];
-            for pli in &mut plg.channels {
-                if pli.header.xtream_cluster != XtreamCluster::Series
-                    || pli.header.item_type != PlaylistItemType::SeriesInfo {
-                    continue;
-                }
+    match &mut fpl.source {
+        ProviderPlaylistSource::Memory(groups) => {
+            for plg in groups.iter_mut() {
+                let mut group_series = vec![];
+                for pli in &mut plg.channels {
+                    if pli.header.xtream_cluster != XtreamCluster::Series
+                        || pli.header.item_type != PlaylistItemType::SeriesInfo {
+                        continue;
+                    }
 
-                let Some(provider_id) = pli.get_provider_id() else { continue; };
-                if provider_id == 0 {
-                    continue;
-                }
+                    let Some(provider_id) = pli.get_provider_id() else { continue; };
+                    if provider_id == 0 {
+                        continue;
+                    }
 
-                let should_download = resolve_series && !pli.has_details();
-                if should_download {
-                    processed_series_info_count += 1;
-                    if let Some(content) = playlist_resolve_download_playlist_item(client, pli, fpl.input, errors, resolve_delay, XtreamCluster::Series).await {
-                        if !content.is_empty() {
-                            match serde_json::from_str::<XtreamSeriesInfo>(&content) {
-                                Ok(info) => {
-                                    let series_stream_props = SeriesStreamProperties::from_info(&info, pli);
-                                    // the input db needs to be updated
-                                    let _ = persists_input_series_info(app_config, &storage_path, pli.header.xtream_cluster, &input.name, provider_id, &series_stream_props).await;
-                                    // Update in-memory playlist items with the newly fetched vod info.
-                                    // This makes the data available for later processing steps like STRM export.
-                                    pli.header.additional_properties = Some(StreamProperties::Series(Box::new(series_stream_props)));
-                                }
-                                Err(err) => {
-                                    error!("Failed to parse series info for provider_id {provider_id}: {err}");
+                    let should_download = resolve_series && !pli.has_details();
+                    if should_download {
+                        processed_series_info_count += 1;
+                        if let Some(content) = playlist_resolve_download_playlist_item(client, pli, fpl.input, errors, resolve_delay, XtreamCluster::Series).await {
+                            if !content.is_empty() {
+                                match serde_json::from_str::<XtreamSeriesInfo>(&content) {
+                                    Ok(info) => {
+                                        let series_stream_props = SeriesStreamProperties::from_info(&info, pli);
+                                        let _ = persists_input_series_info(app_config, &storage_path, pli.header.xtream_cluster, &input.name, provider_id, &series_stream_props).await;
+                                        pli.header.additional_properties = Some(StreamProperties::Series(Box::new(series_stream_props)));
+                                    }
+                                    Err(err) => {
+                                        error!("Failed to parse series info for provider_id {provider_id}: {err}");
+                                    }
                                 }
                             }
                         }
                     }
-                }
 
-                // extract episodes from info
-                if let Some(StreamProperties::Series(properties)) = pli.header.additional_properties.as_ref() {
-                    let (group, series_name) = {
-                        let header = &pli.header;
-                        (header.group.clone(), if header.name.is_empty() { header.title.clone() } else { header.name.clone() })
-                    };
-                    if let Some(episodes) = parse_xtream_series_info(&pli.get_uuid(), properties, &group, &series_name, input) {
-                        group_series.extend(episodes.into_iter());
+                    if let Some(StreamProperties::Series(properties)) = pli.header.additional_properties.as_ref() {
+                        let (group, series_name) = {
+                            let header = &pli.header;
+                            (header.group.clone(), if header.name.is_empty() { header.title.clone() } else { header.name.clone() })
+                        };
+                        if let Some(episodes) = parse_xtream_series_info(&pli.get_uuid(), properties, &group, &series_name, input, &mut interner) {
+                            group_series.extend(episodes.into_iter());
+                        }
+                    }
+
+                    if resolve_series && log_enabled!(Level::Info) && last_log_time.elapsed().as_secs() >= 30 {
+                        info!("resolved {processed_series_info_count}/{series_info_count} series info");
+                        last_log_time = Instant::now();
+                    }
+                }
+                if !group_series.is_empty() {
+                    result.push(PlaylistGroup {
+                        id: plg.id,
+                        title: plg.title.clone(),
+                        channels: group_series,
+                        xtream_cluster: XtreamCluster::Series,
+                    });
+                }
+            }
+        }
+        ProviderPlaylistSource::XtreamDisk { series, .. } => {
+            if let Some(query) = series.as_mut() {
+                // For disk sources, we process groups by grouping items from the flat BTree
+                // Since M3U/Xtream loading already organized them by id, we can't easily replicate
+                // the "per-group" processing of Memory without accumulating.
+                // However, series resolves into episodes which are then filtered.
+                // We'll collect all new episodes into their respective groups.
+                let mut group_episodes: IndexMap<String, Vec<PlaylistItem>> = IndexMap::new();
+
+                for (_, item) in query.iter() {
+                    if item.item_type != PlaylistItemType::SeriesInfo { continue; }
+                    let mut pli = PlaylistItem::from(&item);
+                    let provider_id = item.provider_id;
+                    if provider_id == 0 { continue; }
+
+                    let should_download = resolve_series && !item.has_details();
+                    if should_download {
+                        processed_series_info_count += 1;
+                        if let Some(content) = playlist_resolve_download_playlist_item(client, &pli, fpl.input, errors, resolve_delay, XtreamCluster::Series).await {
+                             if !content.is_empty() {
+                                if let Ok(info) = serde_json::from_str::<XtreamSeriesInfo>(&content) {
+                                    let series_stream_props = SeriesStreamProperties::from_info(&info, &pli);
+                                    let _ = persists_input_series_info(app_config, &storage_path, pli.header.xtream_cluster, &input.name, provider_id, &series_stream_props).await;
+                                    pli.header.additional_properties = Some(StreamProperties::Series(Box::new(series_stream_props)));
+                                }
+                            }
+                        }
+                    }
+
+                    if let Some(StreamProperties::Series(properties)) = pli.header.additional_properties.as_ref() {
+                        let (group, series_name) = {
+                            let header = &pli.header;
+                            (header.group.clone(), if header.name.is_empty() { header.title.clone() } else { header.name.clone() })
+                        };
+                        if let Some(episodes) = parse_xtream_series_info(&pli.get_uuid(), properties, &group, &series_name, input, &mut interner) {
+                           group_episodes.entry(group.to_string()).or_default().extend(episodes);
+                        }
+                    }
+
+                    if resolve_series && log_enabled!(Level::Info) && last_log_time.elapsed().as_secs() >= 30 {
+                        info!("resolved {processed_series_info_count}/{series_info_count} series info");
+                        last_log_time = Instant::now();
                     }
                 }
 
-                if resolve_series && log_enabled!(Level::Info) && last_log_time.elapsed().as_secs() >= 30 {
-                    info!("resolved {processed_series_info_count}/{series_info_count} series info");
-                    last_log_time = Instant::now();
+                for (group_id, (title, channels)) in group_episodes.into_iter().enumerate() {
+                    result.push(PlaylistGroup {
+                        id: u32::try_from(group_id).unwrap_or(0) + 1,
+                        title,
+                        channels,
+                        xtream_cluster: XtreamCluster::Series,
+                    });
                 }
             }
-            if !group_series.is_empty() {
-            result.push(PlaylistGroup {
-                id: plg.id,
-                title: plg.title.clone(),
-                channels: group_series,
-                xtream_cluster: XtreamCluster::Series,
-            });
         }
-    }
+        ProviderPlaylistSource::M3uDisk { .. } => {}
     }
     if resolve_series {
         info!("resolved {processed_series_info_count}/{series_info_count} series info");
