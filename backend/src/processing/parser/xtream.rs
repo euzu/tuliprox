@@ -4,7 +4,10 @@ use crate::model::{XtreamCategory};
 use crate::utils::request::DynReader;
 use crate::utils::xtream::get_xtream_stream_url_base;
 use shared::error::{create_tuliprox_error_result, TuliproxError, TuliproxErrorKind};
-use shared::model::{EpisodeStreamProperties, LiveStreamProperties, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, SeriesStreamDetailEpisodeProperties, SeriesStreamProperties, StreamProperties, UUIDType, VideoStreamProperties, XtreamCluster};
+use shared::model::{EpisodeStreamProperties, LiveStreamProperties, PlaylistGroup, PlaylistItem,
+                    PlaylistItemHeader, PlaylistItemType, SeriesStreamDetailEpisodeProperties,
+                    SeriesStreamProperties, StreamProperties, UUIDType, VideoStreamProperties,
+                    XtreamCluster};
 use shared::utils::{generate_playlist_uuid, trim_last_slash, StringInterner};
 use indexmap::IndexMap;
 use tokio::task::spawn_blocking;

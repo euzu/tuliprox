@@ -396,7 +396,7 @@ async fn process_source(client: &reqwest::Client, app_config: Arc<AppConfig>, so
                 errors.append(&mut tvguide_errors);
                 let group_count = match &playlist_groups {
                     ProviderPlaylistSource::Memory(g) => g.len(),
-                    _ => 0, // Stats for disk?
+                    _ => 0, // Is it worth - Stats for disk?
                 };
                 let channel_count = match &playlist_groups {
                     ProviderPlaylistSource::Memory(g) => g.iter().map(|group| group.channels.len()).sum(),

@@ -38,13 +38,14 @@ pub async fn playlist_resolve_vod(app_config: &Arc<AppConfig>, client: &reqwest:
                 .flat_map(|plg| &plg.channels)
                 .filter(|pli| pli.header.xtream_cluster == XtreamCluster::Video
                     && pli.header.item_type == PlaylistItemType::Video
+                    && pli.get_provider_id().is_some_and(|id| id > 0)
                     && !pli.has_details()).count()
         }
         ProviderPlaylistSource::XtreamDisk { vod, .. } => {
             let mut count = 0;
             if let Some(query) = vod.as_mut() {
                 for (_, item) in query.iter() {
-                    if item.item_type == PlaylistItemType::Video && !item.has_details() {
+                    if item.item_type == PlaylistItemType::Video && item.provider_id > 0 && !item.has_details() {
                         count += 1;
                     }
                 }
@@ -70,8 +71,9 @@ pub async fn playlist_resolve_vod(app_config: &Arc<AppConfig>, client: &reqwest:
                         || pli.has_details() {
                         continue;
                     }
-                    processed_vod_info_count += 1;
-                    download_and_parse_vod_info(app_config, client, input, &storage_path, pli, errors, resolve_delay).await;
+                    if download_and_parse_vod_info(app_config, client, input, &storage_path, pli, errors, resolve_delay).await {
+                         processed_vod_info_count += 1;
+                    }
 
                     if log_enabled!(Level::Info) && last_log_time.elapsed().as_secs() >= 30 {
                         info!("resolved {processed_vod_info_count}/{vod_info_count} vod info");
@@ -87,8 +89,9 @@ pub async fn playlist_resolve_vod(app_config: &Arc<AppConfig>, client: &reqwest:
                         continue;
                     }
                     let mut pli = PlaylistItem::from(&item);
-                    processed_vod_info_count += 1;
-                    download_and_parse_vod_info(app_config, client, input, &storage_path, &mut pli, errors, resolve_delay).await;
+                    if download_and_parse_vod_info(app_config, client, input, &storage_path, &mut pli, errors, resolve_delay).await {
+                        processed_vod_info_count += 1;
+                    }
 
                     if log_enabled!(Level::Info) && last_log_time.elapsed().as_secs() >= 30 {
                         info!("resolved {processed_vod_info_count}/{vod_info_count} vod info");
@@ -112,9 +115,9 @@ async fn download_and_parse_vod_info(
     pli: &mut PlaylistItem,
     errors: &mut Vec<TuliproxError>,
     resolve_delay: u16,
-) {
+) -> bool {
     if let Some(provider_id) = pli.get_provider_id() {
-        if provider_id == 0 { return; }
+        if provider_id == 0 { return false; }
         if let Some(content) = playlist_resolve_download_playlist_item(client, pli, input, errors, resolve_delay, XtreamCluster::Video).await {
             if !content.is_empty() {
                 match serde_json::from_str::<XtreamVideoInfo>(&content) {
@@ -124,6 +127,7 @@ async fn download_and_parse_vod_info(
                             error!("Failed to persist VOD info for provider_id {provider_id}: {err}");
                         }
                         pli.header.additional_properties = Some(StreamProperties::Video(Box::new(video_stream_props)));
+                        return true;
                     }
                     Err(err) => {
                         error!("Failed to parse video info for provider_id {provider_id}: {err}");
@@ -132,4 +136,5 @@ async fn download_and_parse_vod_info(
             }
         }
     }
+    false
 }

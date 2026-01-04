@@ -41,13 +41,14 @@ async fn playlist_resolve_series_info(app_config: &Arc<AppConfig>, client: &reqw
                     .flat_map(|plg| &plg.channels)
                     .filter(|&pli| pli.header.xtream_cluster == XtreamCluster::Series
                         && pli.header.item_type == PlaylistItemType::SeriesInfo
+                        && pli.get_provider_id().is_some_and(|id| id > 0)
                         && !pli.has_details()).count()
             }
             ProviderPlaylistSource::XtreamDisk { series, .. } => {
                 let mut count = 0;
                 if let Some(query) = series.as_mut() {
                     for (_, item) in query.iter() {
-                        if item.item_type == PlaylistItemType::SeriesInfo && !item.has_details() {
+                        if item.item_type == PlaylistItemType::SeriesInfo && item.provider_id > 0 && !item.has_details() {
                             count += 1;
                         }
                     }
@@ -84,9 +85,9 @@ async fn playlist_resolve_series_info(app_config: &Arc<AppConfig>, client: &reqw
                         continue;
                     }
 
-                    if resolve_series && !pli.has_details() {
-                        processed_series_info_count += 1;
-                        download_and_parse_series_info(app_config, client, input, &storage_path, pli, errors, resolve_delay).await;
+                    if resolve_series && !pli.has_details()
+                        && download_and_parse_series_info(app_config, client, input, &storage_path, pli, errors, resolve_delay).await {
+                             processed_series_info_count += 1;
                     }
 
                     if let Some(StreamProperties::Series(properties)) = pli.header.additional_properties.as_ref() {
@@ -121,7 +122,7 @@ async fn playlist_resolve_series_info(app_config: &Arc<AppConfig>, client: &reqw
                 // the "per-group" processing of Memory without accumulating.
                 // However, series resolves into episodes which are then filtered.
                 // We'll collect all new episodes into their respective groups.
-                let mut group_episodes: IndexMap<String, Vec<PlaylistItem>> = IndexMap::new();
+                let mut group_episodes: IndexMap<Arc<str>, Vec<PlaylistItem>> = IndexMap::new();
 
                 for (_, item) in query.iter() {
                     if item.item_type != PlaylistItemType::SeriesInfo { continue; }
@@ -129,9 +130,9 @@ async fn playlist_resolve_series_info(app_config: &Arc<AppConfig>, client: &reqw
                     let provider_id = item.provider_id;
                     if provider_id == 0 { continue; }
 
-                    if resolve_series && !item.has_details() {
-                        processed_series_info_count += 1;
-                        download_and_parse_series_info(app_config, client, input, &storage_path, &mut pli, errors, resolve_delay).await;
+                    if resolve_series && !item.has_details()
+                        && download_and_parse_series_info(app_config, client, input, &storage_path, &mut pli, errors, resolve_delay).await {
+                            processed_series_info_count += 1;
                     }
 
                     if let Some(StreamProperties::Series(properties)) = pli.header.additional_properties.as_ref() {
@@ -140,7 +141,7 @@ async fn playlist_resolve_series_info(app_config: &Arc<AppConfig>, client: &reqw
                             (header.group.clone(), if header.name.is_empty() { header.title.clone() } else { header.name.clone() })
                         };
                         if let Some(episodes) = parse_xtream_series_info(&pli.get_uuid(), properties, &group, &series_name, input, &mut interner) {
-                           group_episodes.entry(group.to_string()).or_default().extend(episodes);
+                           group_episodes.entry(Arc::clone(&group)).or_default().extend(episodes);
                         }
                     }
 
@@ -153,7 +154,7 @@ async fn playlist_resolve_series_info(app_config: &Arc<AppConfig>, client: &reqw
                 for (group_id, (title, channels)) in group_episodes.into_iter().enumerate() {
                     result.push(PlaylistGroup {
                         id: u32::try_from(group_id).unwrap_or(0) + 1,
-                        title,
+                        title: title.to_string(),
                         channels,
                         xtream_cluster: XtreamCluster::Series,
                     });
@@ -206,16 +207,19 @@ async fn download_and_parse_series_info(
     pli: &mut PlaylistItem,
     errors: &mut Vec<TuliproxError>,
     resolve_delay: u16,
-) {
+) -> bool {
     if let Some(provider_id) = pli.get_provider_id() {
-        if provider_id == 0 { return; }
+        if provider_id == 0 { return false; }
         if let Some(content) = playlist_resolve_download_playlist_item(client, pli, input, errors, resolve_delay, XtreamCluster::Series).await {
             if !content.is_empty() {
                 match serde_json::from_str::<XtreamSeriesInfo>(&content) {
                     Ok(info) => {
                         let series_stream_props = SeriesStreamProperties::from_info(&info, pli);
-                        let _ = persists_input_series_info(app_config, storage_path, pli.header.xtream_cluster, &input.name, provider_id, &series_stream_props).await;
+                        if let Err(err) = persists_input_series_info(app_config, storage_path, pli.header.xtream_cluster, &input.name, provider_id, &series_stream_props).await {
+                            error!("Failed to persist series info for provider_id {provider_id}: {err}");
+                        }
                         pli.header.additional_properties = Some(StreamProperties::Series(Box::new(series_stream_props)));
+                        return true;
                     }
                     Err(err) => {
                         error!("Failed to parse series info for provider_id {provider_id}: {err}");
@@ -224,4 +228,5 @@ async fn download_and_parse_series_info(
             }
         }
     }
+    false
 }

@@ -1,3 +1,4 @@
+use log::warn;
 use crate::model::{ConfigInput, TVGuide};
 use crate::repository::provider_source::ProviderPlaylistSource;
 use shared::model::PlaylistGroup;
@@ -26,6 +27,8 @@ impl FetchedPlaylist<'_> {
                     return;
                 }
             }
+        } else {
+            warn!("This case should not happen! Playlist source is not Memory!");
         }
     }
 }
