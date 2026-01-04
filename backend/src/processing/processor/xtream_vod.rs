@@ -11,6 +11,7 @@ use shared::model::{InputType, PlaylistEntry, StreamProperties, VideoStreamPrope
 use shared::model::{PlaylistItemType, XtreamCluster, PlaylistItem};
 use std::sync::Arc;
 use std::time::Instant;
+use shared::info_err;
 
 create_resolve_options_function_for_xtream_target!(vod);
 
@@ -145,6 +146,7 @@ async fn download_and_parse_vod_info(
                     }
                     Err(err) => {
                         error!("Failed to parse video info for provider_id {provider_id}: {err}");
+                        errors.push(info_err!(format!("{err}")));
                     }
                 }
             }

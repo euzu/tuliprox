@@ -27,7 +27,7 @@ impl ProviderPlaylistSource {
 impl std::fmt::Debug for ProviderPlaylistSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Memory(arg0) => f.debug_tuple("Memory").field(arg0).finish(),
+            Self::Memory(_) => f.debug_struct("Memory").finish(),
             Self::XtreamDisk { live, vod, series, .. } => f
                 .debug_struct("XtreamDisk")
                 .field("live", &live.is_some())

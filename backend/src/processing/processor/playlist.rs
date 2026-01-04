@@ -400,7 +400,7 @@ async fn process_source(client: &reqwest::Client, app_config: Arc<AppConfig>, so
                 };
                 let channel_count = match &playlist_groups {
                     ProviderPlaylistSource::Memory(g) => g.iter().map(|group| group.channels.len()).sum(),
-                    _ => 0,
+                    _ => 0, // Is it worth - Stats for disk?
                 };
                 let input_name = &input.name;
                 if matches!(playlist_groups, ProviderPlaylistSource::Memory(ref g) if g.is_empty()) {
