@@ -72,13 +72,12 @@ async fn playlist_resolve_series_info(app_config: &Arc<AppConfig>, client: &reqw
 
     match &mut fpl.source {
         ProviderPlaylistSource::Memory(groups) => {
-            let mut updates = Vec::new();
             for plg in groups.iter_mut() {
                 let mut group_series = vec![];
                 for pli in &mut plg.channels {
                     if let Some(episodes) = process_xtream_series_item(
                         app_config, client, input, &storage_path, pli, errors, &mut interner,
-                        resolve_series, resolve_delay, &mut updates,
+                        resolve_series, resolve_delay, None,
                         &mut processed_series_info_count, series_info_count, &mut last_log_time
                     ).await {
                         group_series.extend(episodes);
@@ -93,10 +92,6 @@ async fn playlist_resolve_series_info(app_config: &Arc<AppConfig>, client: &reqw
                     });
                 }
             }
-            // Batch persist series info updates
-            for (provider_id, props) in updates {
-                let _ = persists_input_series_info(app_config, &storage_path, XtreamCluster::Series, &input.name, provider_id, &props).await;
-            }
         }
         ProviderPlaylistSource::XtreamDisk { series, .. } => {
             if let Some(query) = series.as_mut() {
@@ -107,7 +102,7 @@ async fn playlist_resolve_series_info(app_config: &Arc<AppConfig>, client: &reqw
                     let mut pli = PlaylistItem::from(&item);
                     if let Some(episodes) = process_xtream_series_item(
                         app_config, client, input, &storage_path, &mut pli, errors, &mut interner,
-                        resolve_series, resolve_delay, &mut updates,
+                        resolve_series, resolve_delay, Some(&mut updates),
                         &mut processed_series_info_count, series_info_count, &mut last_log_time
                     ).await {
                        group_episodes.entry(Arc::clone(&pli.header.group)).or_default().extend(episodes);
@@ -149,7 +144,7 @@ async fn process_xtream_series_item(
     interner: &mut StringInterner,
     resolve_series: bool,
     resolve_delay: u16,
-    updates: &mut Vec<(u32, SeriesStreamProperties)>,
+    updates: Option<&mut Vec<(u32, SeriesStreamProperties)>>,
     processed_series_info_count: &mut usize,
     series_info_count: usize,
     last_log_time: &mut Instant,
@@ -159,24 +154,42 @@ async fn process_xtream_series_item(
         return None;
     }
 
+    let mut props_opt = None;
     if resolve_series && !pli.has_details() {
         if let Some(props) = download_and_parse_series_info(app_config, client, input, storage_path, pli, errors, resolve_delay).await {
             *processed_series_info_count += 1;
-            if let Some(provider_id) = pli.get_provider_id() {
-                updates.push((provider_id, props));
+            props_opt = Some(props);
+            
+            if updates.is_none() {
+                 if let Some(provider_id) = pli.get_provider_id() {
+                    let _ = persists_input_series_info(app_config, storage_path, XtreamCluster::Series, &input.name, provider_id, props_opt.as_ref().unwrap()).await;
+                 }
             }
         }
     }
 
-    let parsed_episodes = if let Some(StreamProperties::Series(properties)) = pli.header.additional_properties.as_ref() {
-        let (group, series_name) = {
-            let header = &pli.header;
-            (header.group.clone(), if header.name.is_empty() { header.title.clone() } else { header.name.clone() })
-        };
+    let (group, series_name) = {
+        let header = &pli.header;
+        (header.group.clone(), if header.name.is_empty() { header.title.clone() } else { header.name.clone() })
+    };
+
+    let parsed_episodes = if let Some(ref props) = props_opt {
+        parse_xtream_series_info(&pli.get_uuid(), props, &group, &series_name, input, interner)
+    } else if let Some(StreamProperties::Series(properties)) = pli.header.additional_properties.as_ref() {
         parse_xtream_series_info(&pli.get_uuid(), properties, &group, &series_name, input, interner)
     } else {
         None
     };
+
+    if let Some(props) = props_opt {
+        if let Some(updates) = updates {
+             if let Some(provider_id) = pli.get_provider_id() {
+                updates.push((provider_id, props));
+             }
+        } else {
+            pli.header.additional_properties = Some(StreamProperties::Series(Box::new(props)));
+        }
+    }
 
     if resolve_series && log_enabled!(Level::Info) && last_log_time.elapsed().as_secs() >= 30 {
         info!("resolved {processed_series_info_count}/{series_info_count} series info");
@@ -227,19 +240,15 @@ async fn download_and_parse_series_info(
     errors: &mut Vec<TuliproxError>,
     resolve_delay: u16,
 ) -> Option<SeriesStreamProperties> {
-    if let Some(provider_id) = pli.get_provider_id() {
-        if provider_id == 0 { return None; }
-        if let Some(content) = playlist_resolve_download_playlist_item(client, pli, input, errors, resolve_delay, XtreamCluster::Series).await {
-            if !content.is_empty() {
-                match serde_json::from_str::<XtreamSeriesInfo>(&content) {
-                    Ok(info) => {
-                        let series_stream_props = SeriesStreamProperties::from_info(&info, pli);
-                        pli.header.additional_properties = Some(StreamProperties::Series(Box::new(series_stream_props.clone())));
-                        return Some(series_stream_props);
-                    }
-                    Err(err) => {
-                        error!("Failed to parse series info for provider_id {provider_id}: {err}");
-                    }
+    if let Some(content) = playlist_resolve_download_playlist_item(client, pli, input, errors, resolve_delay, XtreamCluster::Series).await {
+        if !content.is_empty() {
+            match serde_json::from_str::<XtreamSeriesInfo>(&content) {
+                Ok(info) => {
+                    return Some(SeriesStreamProperties::from_info(&info, pli));
+                }
+                Err(err) => {
+                    let provider_id = pli.get_provider_id().unwrap_or(0);
+                    error!("Failed to parse series info for provider_id {provider_id}: {err}");
                 }
             }
         }
