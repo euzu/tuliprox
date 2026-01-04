@@ -400,9 +400,9 @@ pub async fn load_input_playlist(app_config: &Arc<AppConfig>, input: &ConfigInpu
                 } else { None };
 
                 Ok(ProviderPlaylistSource::XtreamDisk {
-                    live: Box::new(live),
-                    vod: Box::new(vod),
-                    series: Box::new(series),
+                    live,
+                    vod,
+                    series,
                     guards,
                 })
             } else {
@@ -412,7 +412,7 @@ pub async fn load_input_playlist(app_config: &Arc<AppConfig>, input: &ConfigInpu
                     &XTREAM_CLUSTER
                 };
                 let groups = load_input_xtream_playlist(app_config, &storage_path, clusters_to_load).await?;
-                Ok(ProviderPlaylistSource::Memory(Box::new(groups)))
+                Ok(ProviderPlaylistSource::Memory(groups))
             }
         }
         _ => {
@@ -425,7 +425,7 @@ pub async fn load_input_playlist(app_config: &Arc<AppConfig>, input: &ConfigInpu
                 Ok(ProviderPlaylistSource::M3uDisk { query, guard })
             } else {
                 let groups = load_input_m3u_playlist(app_config, &file_path).await?;
-                Ok(ProviderPlaylistSource::Memory(Box::new(groups)))
+                Ok(ProviderPlaylistSource::Memory(groups))
             }
         }
     }

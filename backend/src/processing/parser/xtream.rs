@@ -55,7 +55,6 @@ fn create_xtream_series_episode_url<'a>(url: &'a str, username: &'a str, passwor
     }
 }
 
-//pub fn parse_xtream_series_info(parent_uuid: &UUIDType, series_info: &SeriesStreamProperties, group_title: &str, series_name: &str, input: &ConfigInput) -> Option<Vec<PlaylistItem>> {
  pub fn parse_xtream_series_info(parent_uuid: &UUIDType, series_info: &SeriesStreamProperties,
                                  group_title: &str, series_name: &str, input: &ConfigInput,
                                  interner: &mut StringInterner) -> Option<Vec<PlaylistItem>> {

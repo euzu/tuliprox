@@ -1,6 +1,6 @@
 use crate::repository::provider_source::ProviderPlaylistSource;
 use crate::model::FetchedPlaylist;
-use crate::model::{AppConfig, ConfigTarget};
+use crate::model::{AppConfig, ConfigTarget, ConfigInput};
 use crate::processing::processor::create_resolve_options_function_for_xtream_target;
 use crate::processing::processor::xtream::playlist_resolve_download_playlist_item;
 use crate::repository::storage::get_input_storage_path;
@@ -70,26 +70,9 @@ pub async fn playlist_resolve_vod(app_config: &Arc<AppConfig>, client: &reqwest:
                         || pli.has_details() {
                         continue;
                     }
-                    let Some(provider_id) = pli.get_provider_id() else { continue; };
                     processed_vod_info_count += 1;
-                    if provider_id != 0 {
-                        if let Some(content) = playlist_resolve_download_playlist_item(client, pli, fpl.input, errors, resolve_delay, XtreamCluster::Video).await {
-                            if content.is_empty() { continue; }
-                            match serde_json::from_str::<XtreamVideoInfo>(&content) {
-                                Ok(info) => {
-                                    let video_stream_props = VideoStreamProperties::from_info(&info, pli);
-                                    if let Err(err) = persist_input_vod_info(app_config, &storage_path, pli.header.xtream_cluster, &input.name, provider_id, &video_stream_props).await {
-                                        error!("Failed to persist VOD info for provider_id {provider_id}: {err}");
-                                    }
-                                    // This makes the data available for subsequent processing steps like STRM export.
-                                    pli.header.additional_properties = Some(StreamProperties::Video(Box::new(video_stream_props)));
-                                }
-                                Err(err) => {
-                                    error!("Failed to parse video info for provider_id {provider_id}: {err}");
-                                }
-                            }
-                        }
-                    }
+                    download_and_parse_vod_info(app_config, client, input, &storage_path, pli, errors, resolve_delay).await;
+
                     if log_enabled!(Level::Info) && last_log_time.elapsed().as_secs() >= 30 {
                         info!("resolved {processed_vod_info_count}/{vod_info_count} vod info");
                         last_log_time = Instant::now();
@@ -103,19 +86,10 @@ pub async fn playlist_resolve_vod(app_config: &Arc<AppConfig>, client: &reqwest:
                     if item.item_type != PlaylistItemType::Video || item.has_details() {
                         continue;
                     }
-                    let pli = PlaylistItem::from(&item);
-                    let provider_id = item.provider_id;
-                    if provider_id == 0 { continue; }
+                    let mut pli = PlaylistItem::from(&item);
                     processed_vod_info_count += 1;
-                    if let Some(content) = playlist_resolve_download_playlist_item(client, &pli, fpl.input, errors, resolve_delay, XtreamCluster::Video).await {
-                        if content.is_empty() { continue; }
-                        if let Ok(info) = serde_json::from_str::<XtreamVideoInfo>(&content) {
-                            let video_stream_props = VideoStreamProperties::from_info(&info, &pli);
-                            if let Err(err) = persist_input_vod_info(app_config, &storage_path, pli.header.xtream_cluster, &input.name, provider_id, &video_stream_props).await {
-                                error!("Failed to persist VOD info for provider_id {provider_id}: {err}");
-                            }
-                        }
-                    }
+                    download_and_parse_vod_info(app_config, client, input, &storage_path, &mut pli, errors, resolve_delay).await;
+
                     if log_enabled!(Level::Info) && last_log_time.elapsed().as_secs() >= 30 {
                         info!("resolved {processed_vod_info_count}/{vod_info_count} vod info");
                         last_log_time = Instant::now();
@@ -127,5 +101,35 @@ pub async fn playlist_resolve_vod(app_config: &Arc<AppConfig>, client: &reqwest:
     }
     if vod_info_count > 0 {
         info!("resolved {processed_vod_info_count}/{vod_info_count} vod info");
+    }
+}
+
+async fn download_and_parse_vod_info(
+    app_config: &Arc<AppConfig>,
+    client: &reqwest::Client,
+    input: &ConfigInput,
+    storage_path: &std::path::Path,
+    pli: &mut PlaylistItem,
+    errors: &mut Vec<TuliproxError>,
+    resolve_delay: u16,
+) {
+    if let Some(provider_id) = pli.get_provider_id() {
+        if provider_id == 0 { return; }
+        if let Some(content) = playlist_resolve_download_playlist_item(client, pli, input, errors, resolve_delay, XtreamCluster::Video).await {
+            if !content.is_empty() {
+                match serde_json::from_str::<XtreamVideoInfo>(&content) {
+                    Ok(info) => {
+                        let video_stream_props = VideoStreamProperties::from_info(&info, pli);
+                        if let Err(err) = persist_input_vod_info(app_config, storage_path, pli.header.xtream_cluster, &input.name, provider_id, &video_stream_props).await {
+                            error!("Failed to persist VOD info for provider_id {provider_id}: {err}");
+                        }
+                        pli.header.additional_properties = Some(StreamProperties::Video(Box::new(video_stream_props)));
+                    }
+                    Err(err) => {
+                        error!("Failed to parse video info for provider_id {provider_id}: {err}");
+                    }
+                }
+            }
+        }
     }
 }

@@ -3,21 +3,21 @@
 //! Provides a scoped string interner to deduplicate frequently repeated
 //! strings like `input_name` and `group` in playlist items.
 
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// A scoped string interner that deduplicates strings within its lifetime.
 /// Dropping this struct releases all internal references.
 #[derive(Default)]
 pub struct StringInterner {
-    pool: HashMap<Box<str>, Arc<str>>,
+    pool: HashSet<Arc<str>>,
 }
 
 impl StringInterner {
     /// Creates a new empty interner.
     pub fn new() -> Self {
         Self {
-            pool: HashMap::new(),
+            pool: HashSet::new(),
         }
     }
 
@@ -27,7 +27,7 @@ impl StringInterner {
             Arc::clone(existing)
         } else {
             let arc: Arc<str> = s.into();
-            self.pool.insert(s.into(), Arc::clone(&arc));
+            self.pool.insert(Arc::clone(&arc));
             arc
         }
     }
@@ -39,7 +39,7 @@ impl StringInterner {
         }
         // Convert String to Arc<str> directly
         let arc: Arc<str> = Arc::from(s);
-        self.pool.insert(arc.as_ref().into(), Arc::clone(&arc));
+        self.pool.insert(Arc::clone(&arc));
         arc
     }
 }

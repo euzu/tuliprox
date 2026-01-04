@@ -2,12 +2,13 @@ use crate::repository::bplustree::BPlusTreeQuery;
 use crate::utils::FileReadGuard;
 use shared::model::{M3uPlaylistItem, PlaylistGroup, XtreamPlaylistItem};
 
+#[allow(clippy::large_enum_variant)]
 pub enum ProviderPlaylistSource {
-    Memory(Box<Vec<PlaylistGroup>>),
+    Memory(Vec<PlaylistGroup>),
     XtreamDisk {
-        live: Box<Option<BPlusTreeQuery<u32, XtreamPlaylistItem>>>,
-        vod: Box<Option<BPlusTreeQuery<u32, XtreamPlaylistItem>>>,
-        series: Box<Option<BPlusTreeQuery<u32, XtreamPlaylistItem>>>,
+        live: Option<BPlusTreeQuery<u32, XtreamPlaylistItem>>,
+        vod: Option<BPlusTreeQuery<u32, XtreamPlaylistItem>>,
+        series: Option<BPlusTreeQuery<u32, XtreamPlaylistItem>>,
         guards: Vec<FileReadGuard>,
     },
     M3uDisk {

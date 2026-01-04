@@ -15,7 +15,6 @@ use crate::model::Epg;
 
 use crate::model::FetchedPlaylist;
 use crate::model::Mapping;
-use crate::model::TVGuide;
 use crate::model::{ConfigTarget, ProcessTargets};
 use crate::model::{InputStats, PlaylistStats, SourceStats, TargetStats};
 use crate::processing::input_cache;
@@ -39,7 +38,7 @@ use shared::error::{get_errors_notify_message, notify_err, TuliproxError};
 use shared::foundation::filter::{get_field_value, set_field_value, Filter, ValueAccessor, ValueProvider};
 use shared::model::xtream_const::XTREAM_CLUSTER;
 use shared::model::{CounterModifier, FieldGetAccessor, FieldSetAccessor, InputType, ItemField, MsgKind, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistUpdateState, ProcessingOrder, UUIDType, XtreamCluster};
-use shared::utils::{create_alias_uuid, default_as_default};
+use shared::utils::{create_alias_uuid, default_as_default, StringInterner};
 use std::time::Instant;
 
 fn is_valid(pli: &PlaylistItem, filter: &Filter, match_as_ascii: bool) -> bool {
@@ -368,12 +367,12 @@ async fn process_source(client: &reqwest::Client, app_config: Arc<AppConfig>, so
                     let (playlist, error) = if was_cached {
                         match load_input_playlist(&app_config, input, None).await {
                             Ok(pl_source) => (pl_source, None),
-                            Err(e) => (ProviderPlaylistSource::Memory(Box::default()), Some(e)),
+                            Err(e) => (ProviderPlaylistSource::Memory(Vec::default()), Some(e)),
                         }
                     } else {
                         broadcast_step("Playlist download", &format!("Persisting input '{}' playlist", input.name));
                         let (pl, err) = persist_input_playlist(&app_config, input, downloaded_playlist).await;
-                        (ProviderPlaylistSource::Memory(Box::new(pl)), err)
+                        (ProviderPlaylistSource::Memory(pl), err)
                     };
 
                     if let Some(err) = error {
@@ -427,7 +426,7 @@ async fn process_source(client: &reqwest::Client, app_config: Arc<AppConfig>, so
                 debug!("Source at index {source_idx} is empty");
                 errors.push(notify_err!(format!("Source at index {source_idx} is empty: {}", source.inputs.iter().map(std::string::String::as_str).collect::<Vec<&str>>().join(", "))));
             } else {
-                debug_if_enabled!("Source has {} groups", source_playlists.iter().map(|fpl| ensure_memory_source(fpl)).sum::<usize>());
+                debug_if_enabled!("Source has {} groups", source_playlists.iter().map(|fpl| get_memory_source_count(fpl)).sum::<usize>());
                 let event_manager_clone = event_manager.clone();
                 for target in &source.targets {
                     let event_manager_clone = event_manager_clone.clone();
@@ -554,133 +553,119 @@ fn get_processing_pipe(target: &ConfigTarget) -> ProcessingPipe {
     }
 }
 
-fn duplicate_hash(item: &PlaylistItem) -> UUIDType {
-    item.get_uuid()
-}
 
-fn execute_pipe<'a>(target: &ConfigTarget, pipe: &ProcessingPipe, input: &'a ConfigInput,
-                    mut source_groups: Vec<PlaylistGroup>, epg: Option<TVGuide>,
-                    duplicates: &mut HashSet<UUIDType>) -> FetchedPlaylist<'a> {
-    if target.options.as_ref().is_some_and(|opt| opt.remove_duplicates) {
-        for group in &mut source_groups {
-            // `HashSet::insert`  returns true for first insert, otherwise false
-            group.channels.retain(|item| duplicates.insert(duplicate_hash(item)));
+fn execute_pipe_memory<'a>(target: &ConfigTarget, _pipe: &ProcessingPipe, fpl: &FetchedPlaylist<'a>,
+                           duplicates: &mut HashSet<UUIDType>) -> FetchedPlaylist<'a> {
+    let mut accumulator: IndexMap<String, PlaylistGroup> = IndexMap::new();
+    let mut group_id_counter = 0;
+    let mut interner = StringInterner::new();
+
+    if let ProviderPlaylistSource::Memory(groups) = &fpl.source {
+        for group in groups {
+            for channel in &group.channels {
+                process_and_accumulate_item(channel.clone(), target, &mut accumulator, &mut group_id_counter, duplicates, &mut interner);
+            }
         }
     }
 
-    for f in pipe {
-        if let Some(groups) = f(&mut source_groups, target) {
-            source_groups = groups;
-        }
-    }
+    let source_groups = accumulator.into_values().collect();
 
     FetchedPlaylist {
-        input,
-        source: ProviderPlaylistSource::Memory(Box::new(source_groups)),
-        epg,
+        input: fpl.input,
+        source: ProviderPlaylistSource::Memory(source_groups),
+        epg: fpl.epg.clone(),
     }
 }
-fn execute_pipe_memory<'a>(target: &ConfigTarget, pipe: &ProcessingPipe, fpl: &FetchedPlaylist<'a>,
-                           duplicates: &mut HashSet<UUIDType>) -> FetchedPlaylist<'a> {
-    // Compatibility wrapper for Memory source which uses Vec<Group>
-    let groups = if let ProviderPlaylistSource::Memory(groups) = &fpl.source {
-        groups.clone()
+
+fn process_and_accumulate_item(
+    mut pli: PlaylistItem,
+    target: &ConfigTarget,
+    accumulator: &mut IndexMap<String, PlaylistGroup>,
+    group_id_counter: &mut u32,
+    duplicates: &mut HashSet<UUIDType>,
+    _interner: &mut StringInterner, // interner is not used here, but kept for consistency if needed later
+) {
+    // Filter
+    if !is_valid(&pli, &target.filter, false) { return; }
+
+    // Rename
+    exec_rename(&mut pli, target.rename.as_ref());
+    if let Some(renames) = &target.rename {
+        for r in renames {
+            if matches!(r.field, ItemField::Group) {
+                let val = &pli.header.group;
+                let cap = r.pattern.replace_all(val, &r.new_name);
+                if **val != *cap {
+                    pli.header.group = shared::utils::intern(&cap);
+                }
+            }
+        }
+    }
+
+    // Mapping
+    let items = if let Some(mappings) = target.mapping.load().as_ref() {
+        let mut current_items = vec![pli];
+        for mapping in mappings.iter().filter(|&m| m.mapper.as_ref().is_some_and(|v| !v.is_empty())) {
+            let mut next_items = Vec::with_capacity(current_items.len());
+            for item in current_items {
+                next_items.extend(map_channel_and_flatten(item, mapping));
+            }
+            current_items = next_items;
+        }
+        current_items
     } else {
-        Box::new(vec![])
+        vec![pli]
     };
 
-    execute_pipe(target, pipe, fpl.input, *groups, fpl.epg.clone(), duplicates)
+    // De-duplication and Accumulation
+    for item in items {
+        if target.options.as_ref().is_some_and(|opt| opt.remove_duplicates)
+            && !duplicates.insert(item.get_uuid()) { continue; }
+
+        let group_name = item.header.group.to_string();
+        let cluster = item.header.xtream_cluster;
+
+        let entry = accumulator.entry(group_name.clone()).or_insert_with(|| {
+            *group_id_counter += 1;
+            PlaylistGroup {
+                id: *group_id_counter,
+                title: group_name,
+                channels: Vec::new(),
+                xtream_cluster: cluster,
+            }
+        });
+        entry.channels.push(item);
+    }
 }
 
 // Streaming implementation
 fn execute_pipe_stream(target: &ConfigTarget, fpl: &mut FetchedPlaylist<'_>, duplicates: &mut HashSet<UUIDType>) -> Vec<PlaylistGroup> {
-    
     let mut accumulator: IndexMap<String, PlaylistGroup> = IndexMap::new();
     let mut group_id_counter = 0;
-
-    let process_item = |mut pli: PlaylistItem, acc: &mut IndexMap<String, PlaylistGroup>, grp_cnt: &mut u32, dups: &mut HashSet<UUIDType>| {
-        // Filter
-        if !is_valid(&pli, &target.filter, false) { return; }
-
-        // Rename
-        exec_rename(&mut pli, target.rename.as_ref());
-        // Group rename handled if group field changed
-        // But wait, rename_playlist also renames Group Title based on regex on Group Title.
-        // We must execute regex on pli.header.group
-        if let Some(renames) = &target.rename {
-            for r in renames {
-                if matches!(r.field, ItemField::Group) {
-                    let val = &pli.header.group;
-                    let cap = r.pattern.replace_all(val, &r.new_name);
-                    if **val != *cap {
-                        pli.header.group = shared::utils::intern(&cap);
-                    }
-                }
-            }
-        }
-
-        // Map can return list of items
-        let items = if let Some(mappings) = target.mapping.load().as_ref() {
-            let mut current_items = vec![pli];
-            for mapping in mappings.iter().filter(|&m| m.mapper.as_ref().is_some_and(|v| !v.is_empty())) {
-                let mut next_items = Vec::with_capacity(current_items.len());
-                for item in current_items {
-                    next_items.extend(map_channel_and_flatten(item, mapping));
-                }
-                current_items = next_items;
-            }
-            current_items
-        } else {
-            vec![pli]
-        };
-
-        // Accumulate
-        for item in items {
-            if target.options.as_ref().is_some_and(|opt| opt.remove_duplicates)
-                && !dups.insert(item.get_uuid()) { continue; }
-
-            let group_name = item.header.group.to_string();
-            let cluster = item.header.xtream_cluster;
-            // we can use the accumulator to group
-            // Using (group_name, cluster) as key effectively
-            // But IndexMap key is String. Use group_name.
-            // flatten_groups does this (Title, Cluster) -> Index.
-            // Here we just use Title for now, or careful about cluster mixing?
-            // Existing logic separates by group title primarily, then cluster.
-
-            let entry = acc.entry(group_name.clone()).or_insert_with(|| {
-                *grp_cnt += 1;
-                PlaylistGroup {
-                    id: *grp_cnt,
-                    title: group_name,
-                    channels: Vec::new(),
-                    xtream_cluster: cluster,
-                }
-            });
-            entry.channels.push(item);
-        }
-    };
+    let mut interner = StringInterner::new();
 
     match &mut fpl.source {
         ProviderPlaylistSource::XtreamDisk { live, vod, series, .. } => {
-            if let Some(q) = &mut **live {
+            if let Some(q) = live {
                 for (_, item) in q.iter() {
-                    process_item(PlaylistItem::from(&item), &mut accumulator, &mut group_id_counter, duplicates);
+                    process_and_accumulate_item(PlaylistItem::from(&item), target, &mut accumulator, &mut group_id_counter, duplicates, &mut interner);
                 }
             }
-            if let Some(q) = &mut **vod {
+            if let Some(q) = vod {
                 for (_, item) in q.iter() {
-                    process_item(PlaylistItem::from(&item), &mut accumulator, &mut group_id_counter, duplicates);
+                    process_and_accumulate_item(PlaylistItem::from(&item), target, &mut accumulator, &mut group_id_counter, duplicates, &mut interner);
                 }
             }
-            if let Some(q) = &mut **series {
+            if let Some(q) = series {
                 for (_, item) in q.iter() {
-                    process_item(PlaylistItem::from(&item), &mut accumulator, &mut group_id_counter, duplicates);
+                    process_and_accumulate_item(PlaylistItem::from(&item), target, &mut accumulator, &mut group_id_counter, duplicates, &mut interner);
                 }
             }
         }
         ProviderPlaylistSource::M3uDisk { query, .. } => {
-            for (_, item) in query.iter() { process_item(PlaylistItem::from(&item), &mut accumulator, &mut group_id_counter, duplicates); }
+            for (_, item) in query.iter() {
+                process_and_accumulate_item(PlaylistItem::from(&item), target, &mut accumulator, &mut group_id_counter, duplicates, &mut interner);
+                }
         }
         ProviderPlaylistSource::Memory(_) => {}
     }
@@ -688,11 +673,12 @@ fn execute_pipe_stream(target: &ConfigTarget, fpl: &mut FetchedPlaylist<'_>, dup
     accumulator.into_values().collect()
 }
 
-// Helper to convert source if needed or just use passed
-fn ensure_memory_source(fpl: &FetchedPlaylist) -> usize {
-    match &fpl.source {
-        ProviderPlaylistSource::Memory(groups) => groups.len(),
-        _ => 0,
+// Helper to convert a source if needed or just use passed
+fn get_memory_source_count(fpl: &FetchedPlaylist) -> usize {
+    if let ProviderPlaylistSource::Memory(groups) = &fpl.source {
+        groups.len()
+    } else {
+        0
     }
 }
 
@@ -756,7 +742,7 @@ async fn process_playlist_for_target(app_config: &Arc<AppConfig>,
             let groups = execute_pipe_stream(target, provider_fpl, &mut duplicates);
             processed_fpl = FetchedPlaylist {
                 input: provider_fpl.input,
-                source: ProviderPlaylistSource::Memory(Box::new(groups)),
+                source: ProviderPlaylistSource::Memory(groups),
                 epg: provider_fpl.epg.clone(),
             };
         }
@@ -883,6 +869,8 @@ async fn process_epg(processed_fetched_playlists: &mut Vec<FetchedPlaylist<'_>>)
         process_playlist_epg(fp, &mut new_epg).await;
         if let ProviderPlaylistSource::Memory(groups) = &mut fp.source {
             new_playlist.append(groups);
+        } else {
+            warn!("Unexpected disk source in EPG pipeline for input: {}", fp.input.name);
         }
     }
     (new_epg, new_playlist)

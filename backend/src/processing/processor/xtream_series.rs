@@ -1,5 +1,5 @@
 use crate::model::FetchedPlaylist;
-use crate::model::{AppConfig, ConfigTarget};
+use crate::model::{AppConfig, ConfigTarget, ConfigInput};
 use crate::processing::parser::xtream::parse_xtream_series_info;
 use crate::processing::processor::create_resolve_options_function_for_xtream_target;
 use crate::processing::processor::playlist::ProcessingPipe;
@@ -84,23 +84,9 @@ async fn playlist_resolve_series_info(app_config: &Arc<AppConfig>, client: &reqw
                         continue;
                     }
 
-                    let should_download = resolve_series && !pli.has_details();
-                    if should_download {
+                    if resolve_series && !pli.has_details() {
                         processed_series_info_count += 1;
-                        if let Some(content) = playlist_resolve_download_playlist_item(client, pli, fpl.input, errors, resolve_delay, XtreamCluster::Series).await {
-                            if !content.is_empty() {
-                                match serde_json::from_str::<XtreamSeriesInfo>(&content) {
-                                    Ok(info) => {
-                                        let series_stream_props = SeriesStreamProperties::from_info(&info, pli);
-                                        let _ = persists_input_series_info(app_config, &storage_path, pli.header.xtream_cluster, &input.name, provider_id, &series_stream_props).await;
-                                        pli.header.additional_properties = Some(StreamProperties::Series(Box::new(series_stream_props)));
-                                    }
-                                    Err(err) => {
-                                        error!("Failed to parse series info for provider_id {provider_id}: {err}");
-                                    }
-                                }
-                            }
-                        }
+                        download_and_parse_series_info(app_config, client, input, &storage_path, pli, errors, resolve_delay).await;
                     }
 
                     if let Some(StreamProperties::Series(properties)) = pli.header.additional_properties.as_ref() {
@@ -143,18 +129,9 @@ async fn playlist_resolve_series_info(app_config: &Arc<AppConfig>, client: &reqw
                     let provider_id = item.provider_id;
                     if provider_id == 0 { continue; }
 
-                    let should_download = resolve_series && !item.has_details();
-                    if should_download {
+                    if resolve_series && !item.has_details() {
                         processed_series_info_count += 1;
-                        if let Some(content) = playlist_resolve_download_playlist_item(client, &pli, fpl.input, errors, resolve_delay, XtreamCluster::Series).await {
-                             if !content.is_empty() {
-                                if let Ok(info) = serde_json::from_str::<XtreamSeriesInfo>(&content) {
-                                    let series_stream_props = SeriesStreamProperties::from_info(&info, &pli);
-                                    let _ = persists_input_series_info(app_config, &storage_path, pli.header.xtream_cluster, &input.name, provider_id, &series_stream_props).await;
-                                    pli.header.additional_properties = Some(StreamProperties::Series(Box::new(series_stream_props)));
-                                }
-                            }
-                        }
+                        download_and_parse_series_info(app_config, client, input, &storage_path, &mut pli, errors, resolve_delay).await;
                     }
 
                     if let Some(StreamProperties::Series(properties)) = pli.header.additional_properties.as_ref() {
@@ -218,5 +195,33 @@ pub async fn playlist_resolve_series(cfg: &Arc<AppConfig>,
     // assign new items to the new playlist
     for plg in &new_playlist {
         processed_fpl.update_playlist(plg);
+    }
+}
+
+async fn download_and_parse_series_info(
+    app_config: &Arc<AppConfig>,
+    client: &reqwest::Client,
+    input: &ConfigInput,
+    storage_path: &std::path::Path,
+    pli: &mut PlaylistItem,
+    errors: &mut Vec<TuliproxError>,
+    resolve_delay: u16,
+) {
+    if let Some(provider_id) = pli.get_provider_id() {
+        if provider_id == 0 { return; }
+        if let Some(content) = playlist_resolve_download_playlist_item(client, pli, input, errors, resolve_delay, XtreamCluster::Series).await {
+            if !content.is_empty() {
+                match serde_json::from_str::<XtreamSeriesInfo>(&content) {
+                    Ok(info) => {
+                        let series_stream_props = SeriesStreamProperties::from_info(&info, pli);
+                        let _ = persists_input_series_info(app_config, storage_path, pli.header.xtream_cluster, &input.name, provider_id, &series_stream_props).await;
+                        pli.header.additional_properties = Some(StreamProperties::Series(Box::new(series_stream_props)));
+                    }
+                    Err(err) => {
+                        error!("Failed to parse series info for provider_id {provider_id}: {err}");
+                    }
+                }
+            }
+        }
     }
 }

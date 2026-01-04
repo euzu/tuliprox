@@ -13,7 +13,7 @@ impl FetchedPlaylist<'_> {
     pub fn clone_schema(&self) -> Self {
         Self {
             input: self.input,
-            source: ProviderPlaylistSource::Memory(Box::default()),
+            source: ProviderPlaylistSource::Memory(Vec::default()),
             epg: self.epg.clone(),
         }
     }
