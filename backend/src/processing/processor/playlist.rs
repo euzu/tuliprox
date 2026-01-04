@@ -556,7 +556,7 @@ fn get_processing_pipe(target: &ConfigTarget) -> ProcessingPipe {
 
 fn execute_pipe_memory<'a>(target: &ConfigTarget, _pipe: &ProcessingPipe, fpl: &FetchedPlaylist<'a>,
                            duplicates: &mut HashSet<UUIDType>) -> FetchedPlaylist<'a> {
-    let mut accumulator: IndexMap<String, PlaylistGroup> = IndexMap::new();
+    let mut accumulator: IndexMap<Arc<str>, PlaylistGroup> = IndexMap::new();
     let mut group_id_counter = 0;
     let mut interner = StringInterner::new();
 
@@ -580,7 +580,7 @@ fn execute_pipe_memory<'a>(target: &ConfigTarget, _pipe: &ProcessingPipe, fpl: &
 fn process_and_accumulate_item(
     mut pli: PlaylistItem,
     target: &ConfigTarget,
-    accumulator: &mut IndexMap<String, PlaylistGroup>,
+    accumulator: &mut IndexMap<Arc<str>, PlaylistGroup>,
     group_id_counter: &mut u32,
     duplicates: &mut HashSet<UUIDType>,
     _interner: &mut StringInterner, // interner is not used here, but kept for consistency if needed later
@@ -622,14 +622,14 @@ fn process_and_accumulate_item(
         if target.options.as_ref().is_some_and(|opt| opt.remove_duplicates)
             && !duplicates.insert(item.get_uuid()) { continue; }
 
-        let group_name = item.header.group.to_string();
+        let group_name: Arc<str> = Arc::clone(&item.header.group);
         let cluster = item.header.xtream_cluster;
 
         let entry = accumulator.entry(group_name.clone()).or_insert_with(|| {
             *group_id_counter += 1;
             PlaylistGroup {
                 id: *group_id_counter,
-                title: group_name,
+                title: group_name.to_string(),
                 channels: Vec::new(),
                 xtream_cluster: cluster,
             }
@@ -640,7 +640,7 @@ fn process_and_accumulate_item(
 
 // Streaming implementation
 fn execute_pipe_stream(target: &ConfigTarget, fpl: &mut FetchedPlaylist<'_>, duplicates: &mut HashSet<UUIDType>) -> Vec<PlaylistGroup> {
-    let mut accumulator: IndexMap<String, PlaylistGroup> = IndexMap::new();
+    let mut accumulator: IndexMap<Arc<str>, PlaylistGroup> = IndexMap::new();
     let mut group_id_counter = 0;
     let mut interner = StringInterner::new();
 
@@ -665,7 +665,7 @@ fn execute_pipe_stream(target: &ConfigTarget, fpl: &mut FetchedPlaylist<'_>, dup
         ProviderPlaylistSource::M3uDisk { query, .. } => {
             for (_, item) in query.iter() {
                 process_and_accumulate_item(PlaylistItem::from(&item), target, &mut accumulator, &mut group_id_counter, duplicates, &mut interner);
-                }
+            }
         }
         ProviderPlaylistSource::Memory(_) => {}
     }

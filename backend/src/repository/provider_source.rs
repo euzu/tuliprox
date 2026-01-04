@@ -17,6 +17,12 @@ pub enum ProviderPlaylistSource {
     },
 }
 
+impl ProviderPlaylistSource {
+    pub fn is_memory(&self) -> bool {
+        matches!(self, Self::Memory(_))
+    }
+}
+
 // Debug manual impl because BPlusTreeQuery might not be Debug
 impl std::fmt::Debug for ProviderPlaylistSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

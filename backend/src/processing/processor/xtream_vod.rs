@@ -64,6 +64,7 @@ pub async fn playlist_resolve_vod(app_config: &Arc<AppConfig>, client: &reqwest:
 
     match &mut fpl.source {
         ProviderPlaylistSource::Memory(groups) => {
+            let mut updates = Vec::new();
             for plg in groups.iter_mut() {
                 for pli in &mut plg.channels {
                     if pli.header.xtream_cluster != XtreamCluster::Video
@@ -71,8 +72,11 @@ pub async fn playlist_resolve_vod(app_config: &Arc<AppConfig>, client: &reqwest:
                         || pli.has_details() {
                         continue;
                     }
-                    if download_and_parse_vod_info(app_config, client, input, &storage_path, pli, errors, resolve_delay).await {
+                    if let Some(props) = download_and_parse_vod_info(app_config, client, input, &storage_path, pli, errors, resolve_delay).await {
                          processed_vod_info_count += 1;
+                         if let Some(provider_id) = pli.get_provider_id() {
+                            updates.push((provider_id, props));
+                         }
                     }
 
                     if log_enabled!(Level::Info) && last_log_time.elapsed().as_secs() >= 30 {
@@ -81,22 +85,35 @@ pub async fn playlist_resolve_vod(app_config: &Arc<AppConfig>, client: &reqwest:
                     }
                 }
             }
+            // Batch persist VOD info updates
+            for (provider_id, props) in updates {
+                let _ = persist_input_vod_info(app_config, &storage_path, XtreamCluster::Video, &input.name, provider_id, &props).await;
+            }
         }
         ProviderPlaylistSource::XtreamDisk { vod, .. } => {
             if let Some(query) = vod.as_mut() {
+                let mut updates = Vec::new();
                 for (_, item) in query.iter() {
                     if item.item_type != PlaylistItemType::Video || item.has_details() {
                         continue;
                     }
+                    let provider_id = item.provider_id;
+                    if provider_id == 0 { continue; }
+
                     let mut pli = PlaylistItem::from(&item);
-                    if download_and_parse_vod_info(app_config, client, input, &storage_path, &mut pli, errors, resolve_delay).await {
+                    if let Some(props) = download_and_parse_vod_info(app_config, client, input, &storage_path, &mut pli, errors, resolve_delay).await {
                         processed_vod_info_count += 1;
+                        updates.push((provider_id, props));
                     }
 
                     if log_enabled!(Level::Info) && last_log_time.elapsed().as_secs() >= 30 {
                         info!("resolved {processed_vod_info_count}/{vod_info_count} vod info");
                         last_log_time = Instant::now();
                     }
+                }
+                // Batch persist VOD info updates
+                for (provider_id, props) in updates {
+                    let _ = persist_input_vod_info(app_config, &storage_path, XtreamCluster::Video, &input.name, provider_id, &props).await;
                 }
             }
         }
@@ -108,26 +125,23 @@ pub async fn playlist_resolve_vod(app_config: &Arc<AppConfig>, client: &reqwest:
 }
 
 async fn download_and_parse_vod_info(
-    app_config: &Arc<AppConfig>,
+    _app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
     input: &ConfigInput,
-    storage_path: &std::path::Path,
+    _storage_path: &std::path::Path,
     pli: &mut PlaylistItem,
     errors: &mut Vec<TuliproxError>,
     resolve_delay: u16,
-) -> bool {
+) -> Option<VideoStreamProperties> {
     if let Some(provider_id) = pli.get_provider_id() {
-        if provider_id == 0 { return false; }
+        if provider_id == 0 { return None; }
         if let Some(content) = playlist_resolve_download_playlist_item(client, pli, input, errors, resolve_delay, XtreamCluster::Video).await {
             if !content.is_empty() {
                 match serde_json::from_str::<XtreamVideoInfo>(&content) {
                     Ok(info) => {
                         let video_stream_props = VideoStreamProperties::from_info(&info, pli);
-                        if let Err(err) = persist_input_vod_info(app_config, storage_path, pli.header.xtream_cluster, &input.name, provider_id, &video_stream_props).await {
-                            error!("Failed to persist VOD info for provider_id {provider_id}: {err}");
-                        }
-                        pli.header.additional_properties = Some(StreamProperties::Video(Box::new(video_stream_props)));
-                        return true;
+                        pli.header.additional_properties = Some(StreamProperties::Video(Box::new(video_stream_props.clone())));
+                        return Some(video_stream_props);
                     }
                     Err(err) => {
                         error!("Failed to parse video info for provider_id {provider_id}: {err}");
@@ -136,5 +150,5 @@ async fn download_and_parse_vod_info(
             }
         }
     }
-    false
+    None
 }
