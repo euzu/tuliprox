@@ -37,8 +37,10 @@ use log::{debug, error, info, log_enabled, trace, warn, Level};
 use shared::error::{get_errors_notify_message, notify_err, TuliproxError};
 use shared::foundation::filter::{get_field_value, set_field_value, Filter, ValueAccessor, ValueProvider};
 use shared::model::xtream_const::XTREAM_CLUSTER;
-use shared::model::{CounterModifier, FieldGetAccessor, FieldSetAccessor, InputType, ItemField, MsgKind, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistUpdateState, ProcessingOrder, UUIDType, XtreamCluster};
-use shared::utils::{create_alias_uuid, default_as_default, StringInterner};
+use shared::model::{CounterModifier, FieldGetAccessor, FieldSetAccessor, InputType, ItemField, MsgKind,
+                    PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistUpdateState,
+                    ProcessingOrder, UUIDType, XtreamCluster};
+use shared::utils::{create_alias_uuid, default_as_default};
 use std::time::Instant;
 
 fn is_valid(pli: &PlaylistItem, filter: &Filter, match_as_ascii: bool) -> bool {
@@ -560,12 +562,11 @@ fn execute_pipe_memory<'a>(target: &ConfigTarget, _pipe: &ProcessingPipe, fpl: &
                            duplicates: &mut HashSet<UUIDType>) -> FetchedPlaylist<'a> {
     let mut accumulator: IndexMap<Arc<str>, PlaylistGroup> = IndexMap::new();
     let mut group_id_counter = 0;
-    let mut interner = StringInterner::new();
 
     if let ProviderPlaylistSource::Memory(groups) = &fpl.source {
         for group in groups {
             for channel in &group.channels {
-                process_and_accumulate_item(channel.clone(), target, &mut accumulator, &mut group_id_counter, duplicates, &mut interner);
+                process_and_accumulate_item(channel.clone(), target, &mut accumulator, &mut group_id_counter, duplicates);
             }
         }
     }
@@ -585,7 +586,6 @@ fn process_and_accumulate_item(
     accumulator: &mut IndexMap<Arc<str>, PlaylistGroup>,
     group_id_counter: &mut u32,
     duplicates: &mut HashSet<UUIDType>,
-    _interner: &mut StringInterner, // interner is not used here, but kept for consistency if needed later
 ) {
     // Filter
     if !is_valid(&pli, &target.filter, false) { return; }
@@ -644,29 +644,28 @@ fn process_and_accumulate_item(
 fn execute_pipe_stream(target: &ConfigTarget, fpl: &mut FetchedPlaylist<'_>, duplicates: &mut HashSet<UUIDType>) -> Vec<PlaylistGroup> {
     let mut accumulator: IndexMap<Arc<str>, PlaylistGroup> = IndexMap::new();
     let mut group_id_counter = 0;
-    let mut interner = StringInterner::new();
 
     match &mut fpl.source {
         ProviderPlaylistSource::XtreamDisk { live, vod, series, .. } => {
             if let Some(q) = live {
                 for (_, item) in q.iter() {
-                    process_and_accumulate_item(PlaylistItem::from(&item), target, &mut accumulator, &mut group_id_counter, duplicates, &mut interner);
+                    process_and_accumulate_item(PlaylistItem::from(&item), target, &mut accumulator, &mut group_id_counter, duplicates);
                 }
             }
             if let Some(q) = vod {
                 for (_, item) in q.iter() {
-                    process_and_accumulate_item(PlaylistItem::from(&item), target, &mut accumulator, &mut group_id_counter, duplicates, &mut interner);
+                    process_and_accumulate_item(PlaylistItem::from(&item), target, &mut accumulator, &mut group_id_counter, duplicates);
                 }
             }
             if let Some(q) = series {
                 for (_, item) in q.iter() {
-                    process_and_accumulate_item(PlaylistItem::from(&item), target, &mut accumulator, &mut group_id_counter, duplicates, &mut interner);
+                    process_and_accumulate_item(PlaylistItem::from(&item), target, &mut accumulator, &mut group_id_counter, duplicates);
                 }
             }
         }
         ProviderPlaylistSource::M3uDisk { query, .. } => {
             for (_, item) in query.iter() {
-                process_and_accumulate_item(PlaylistItem::from(&item), target, &mut accumulator, &mut group_id_counter, duplicates, &mut interner);
+                process_and_accumulate_item(PlaylistItem::from(&item), target, &mut accumulator, &mut group_id_counter, duplicates);
             }
         }
         ProviderPlaylistSource::Memory(_) => {}

@@ -1,5 +1,5 @@
 use crate::model::FetchedPlaylist;
-use crate::model::{AppConfig, ConfigTarget, ConfigInput};
+use crate::model::{AppConfig, ConfigInput, ConfigTarget};
 use crate::processing::parser::xtream::parse_xtream_series_info;
 use crate::processing::processor::create_resolve_options_function_for_xtream_target;
 use crate::processing::processor::playlist::ProcessingPipe;
@@ -7,14 +7,14 @@ use crate::processing::processor::xtream::playlist_resolve_download_playlist_ite
 use crate::repository::provider_source::ProviderPlaylistSource;
 use crate::repository::storage::get_input_storage_path;
 use crate::repository::xtream_repository::persists_input_series_info;
+use indexmap::IndexMap;
 use log::{error, info, log_enabled, Level};
 use shared::error::TuliproxError;
 use shared::model::{InputType, PlaylistEntry, SeriesStreamProperties, StreamProperties, XtreamSeriesInfo};
+use shared::model::{PlaylistGroup, PlaylistItem, PlaylistItemType, XtreamCluster};
+use shared::utils::StringInterner;
 use std::sync::Arc;
 use std::time::Instant;
-use shared::utils::StringInterner;
-use indexmap::IndexMap;
-use shared::model::{PlaylistGroup, PlaylistItemType, XtreamCluster, PlaylistItem};
 
 create_resolve_options_function_for_xtream_target!(series);
 
@@ -78,7 +78,7 @@ async fn playlist_resolve_series_info(app_config: &Arc<AppConfig>, client: &reqw
                     if let Some(episodes) = process_xtream_series_item(
                         app_config, client, input, &storage_path, pli, errors, &mut interner,
                         resolve_series, resolve_delay, None,
-                        &mut processed_series_info_count, series_info_count, &mut last_log_time
+                        &mut processed_series_info_count, series_info_count, &mut last_log_time,
                     ).await {
                         group_series.extend(episodes);
                     }
@@ -103,15 +103,18 @@ async fn playlist_resolve_series_info(app_config: &Arc<AppConfig>, client: &reqw
                     if let Some(episodes) = process_xtream_series_item(
                         app_config, client, input, &storage_path, &mut pli, errors, &mut interner,
                         resolve_series, resolve_delay, Some(&mut updates),
-                        &mut processed_series_info_count, series_info_count, &mut last_log_time
+                        &mut processed_series_info_count, series_info_count, &mut last_log_time,
                     ).await {
-                       group_episodes.entry(Arc::clone(&pli.header.group)).or_default().extend(episodes);
+                        group_episodes.entry(Arc::clone(&pli.header.group)).or_default().extend(episodes);
                     }
                 }
 
                 // Batch persist series info updates
                 for (provider_id, props) in updates {
-                    let _ = persists_input_series_info(app_config, &storage_path, XtreamCluster::Series, &input.name, provider_id, &props).await;
+                    if let Err(e) = persists_input_series_info(app_config, &storage_path, XtreamCluster::Series, &input.name, provider_id, &props).await {
+                        error!("Failed to persist series info for provider_id {provider_id}: {e}");
+                        errors.push(shared::info_err!(format!("Failed to persist series info: {e}")));
+                    }
                 }
 
                 for (group_id, (title, channels)) in group_episodes.into_iter().enumerate() {
@@ -159,11 +162,14 @@ async fn process_xtream_series_item(
         if let Some(props) = download_and_parse_series_info(app_config, client, input, storage_path, pli, errors, resolve_delay).await {
             *processed_series_info_count += 1;
             props_opt = Some(props);
-            
+
             if updates.is_none() {
-                 if let Some(provider_id) = pli.get_provider_id() {
-                    let _ = persists_input_series_info(app_config, storage_path, XtreamCluster::Series, &input.name, provider_id, props_opt.as_ref().unwrap()).await;
-                 }
+                if let Some(provider_id) = pli.get_provider_id() {
+                    if let Err(e) = persists_input_series_info(app_config, storage_path, XtreamCluster::Series, &input.name, provider_id, props_opt.as_ref().unwrap()).await {
+                        error!("Failed to persist series info for provider_id {provider_id}: {e}");
+                        errors.push(shared::info_err!(format!("Failed to persist series info: {e}")));
+                    }
+                }
             }
         }
     }
@@ -183,9 +189,9 @@ async fn process_xtream_series_item(
 
     if let Some(props) = props_opt {
         if let Some(updates) = updates {
-             if let Some(provider_id) = pli.get_provider_id() {
+            if let Some(provider_id) = pli.get_provider_id() {
                 updates.push((provider_id, props));
-             }
+            }
         } else {
             pli.header.additional_properties = Some(StreamProperties::Series(Box::new(props)));
         }
