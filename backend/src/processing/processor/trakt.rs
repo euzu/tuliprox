@@ -4,6 +4,7 @@ use crate::utils::{extract_year_from_title, normalize_title_for_matching, TraktC
 use crate::utils::{trace_if_enabled, with};
 use log::{debug, info, trace, warn};
 use shared::error::TuliproxError;
+use shared::utils::StringInterner;
 use shared::model::{FieldGetAccessor, FieldSetAccessor, PlaylistGroup, PlaylistItem, TraktContentType, XtreamCluster};
 use shared::utils::CONSTANTS;
 use std::borrow::Cow;
@@ -145,6 +146,7 @@ fn create_category_from_matches<'a>(
     });
 
     let group_title = &list_config.category_name;
+    let mut interner = StringInterner::new();
 
     for match_result in sorted_matches {
         let mut modified_item = match_result.playlist_item.clone();
@@ -164,7 +166,7 @@ fn create_category_from_matches<'a>(
                     header.set_field("caption", &caption);
                 }
             }
-            header.group = String::from(group_title);
+            header.group = interner.intern(group_title);
             header.gen_uuid();
         });
         matched_items.push(modified_item);

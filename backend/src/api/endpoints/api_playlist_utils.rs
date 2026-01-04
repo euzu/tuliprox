@@ -111,7 +111,7 @@ async fn grouped_channels(
         .map(|(_guard, iter)| group_playlist_items::<CommonPlaylistItem>(
             cluster,
             iter.filter(|(item, _)| item.item_type != PlaylistItemType::LocalSeries).map(|(v, _)| v.to_common()),
-            |item| item.group.clone(),
+            |item| item.group.to_string(),
         ))
 }
 
@@ -133,9 +133,9 @@ pub(in crate::api::endpoints) async fn get_playlist_for_target(cfg_target: Optio
             let all_channels = m3u_repository::iter_raw_m3u_playlist(cfg, target).await;
             let (live_channels, vod_channels, series_channels) = group_playlist_items_by_cluster(all_channels);
             let response = PlaylistCategoriesResponse {
-                live: Some(group_playlist_items::<M3uPlaylistItem>(XtreamCluster::Live, live_channels.into_iter(), |item| item.group.clone())),
-                vod: Some(group_playlist_items::<M3uPlaylistItem>(XtreamCluster::Video, vod_channels.into_iter(), |item| item.group.clone())),
-                series: Some(group_playlist_items::<M3uPlaylistItem>(XtreamCluster::Series, series_channels.into_iter(), |item| item.group.clone())),
+                live: Some(group_playlist_items::<M3uPlaylistItem>(XtreamCluster::Live, live_channels.into_iter(), |item| item.group.to_string())),
+                vod: Some(group_playlist_items::<M3uPlaylistItem>(XtreamCluster::Video, vod_channels.into_iter(), |item| item.group.to_string())),
+                series: Some(group_playlist_items::<M3uPlaylistItem>(XtreamCluster::Series, series_channels.into_iter(), |item| item.group.to_string())),
             };
 
             return json_or_bin_response(accept, &response).into_response();

@@ -5,7 +5,7 @@ use crate::utils::request::DynReader;
 use crate::utils::xtream::get_xtream_stream_url_base;
 use shared::error::{create_tuliprox_error_result, TuliproxError, TuliproxErrorKind};
 use shared::model::{EpisodeStreamProperties, LiveStreamProperties, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, SeriesStreamDetailEpisodeProperties, SeriesStreamProperties, StreamProperties, UUIDType, VideoStreamProperties, XtreamCluster};
-use shared::utils::{generate_playlist_uuid, trim_last_slash};
+use shared::utils::{generate_playlist_uuid, trim_last_slash, StringInterner};
 use indexmap::IndexMap;
 use tokio::task::spawn_blocking;
 
@@ -72,14 +72,14 @@ pub fn parse_xtream_series_info(parent_uuid: &UUIDType, series_info: &SeriesStre
                      parent_code: parent_uuid.to_string(),
                      name: series_name.to_string(),
                      logo: episode.movie_image.clone(),
-                     group: group_title.to_string(),
+                     group: shared::utils::intern(group_title),
                      title: episode.title.clone(),
                      url: episode_url.to_string(),
                      item_type: PlaylistItemType::Series,
                      xtream_cluster: XtreamCluster::Series,
                      additional_properties: Some(StreamProperties::Episode(episode_info)),
                      category_id: 0,
-                     input_name: input.name.clone(),
+                     input_name: shared::utils::intern(&input.name),
                      ..Default::default()
                  }
              }
@@ -129,6 +129,7 @@ pub async fn parse_xtream(input: &ConfigInput,
                           streams: DynReader) -> Result<Option<Vec<PlaylistGroup>>, TuliproxError> {
     match map_to_xtream_category(categories).await {
         Ok(xtream_categories) => {
+            let mut interner = StringInterner::new();
             let input_name = input.name.clone();
             let url = input.url.as_str();
             let username = input.username.as_ref().map_or("", |v| v);
@@ -158,7 +159,7 @@ pub async fn parse_xtream(input: &ConfigInput,
                                 uuid: generate_playlist_uuid(&input_name, &stream.get_stream_id().to_string(), item_type, &stream_url),
                                 name: stream.get_name().to_string(),
                                 logo: stream.get_stream_icon().to_string(),
-                                group: category_name.clone(),
+                                group: interner.intern(category_name),
                                 title: stream.get_name().to_string(),
                                 url: stream_url.to_string(),
                                 epg_channel_id: stream.get_epg_channel_id(),
@@ -166,7 +167,7 @@ pub async fn parse_xtream(input: &ConfigInput,
                                 xtream_cluster,
                                 additional_properties: Some(stream),
                                 category_id: 0,
-                                input_name: input_name.clone(),
+                                input_name: interner.intern(&input_name),
                                 ..Default::default()
                             },
                         };

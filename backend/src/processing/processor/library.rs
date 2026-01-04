@@ -2,7 +2,7 @@ use crate::library::{MediaMetadata, MetadataAsyncIter, MetadataCacheEntry};
 use crate::model::{AppConfig, ConfigInput};
 use shared::error::TuliproxError;
 use shared::model::{EpisodeStreamProperties, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, SeriesStreamDetailEpisodeProperties, SeriesStreamDetailProperties, SeriesStreamProperties, StreamProperties, UUIDType, VideoStreamDetailProperties, VideoStreamProperties, XtreamCluster};
-use shared::utils::{generate_playlist_uuid};
+use shared::utils::{generate_playlist_uuid, StringInterner};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -25,14 +25,15 @@ pub async fn download_library_playlist(_client: &reqwest::Client, app_config: &A
         channels: vec![],
         xtream_cluster: XtreamCluster::Series,
     };
+    let mut interner = StringInterner::new();
     while let Some(entry) = metadata_iter.next().await {
         match entry.metadata {
             MediaMetadata::Movie(_) => {
-                let pli = to_playlist_item(&entry, &input.name, &library_config.playlist.movie_category);
+                let pli = to_playlist_item(&mut interner, &entry, &input.name, &library_config.playlist.movie_category);
                 group_movies.channels.extend(pli);
             }
             MediaMetadata::Series(_) => {
-                let pli = to_playlist_item(&entry, &input.name, &library_config.playlist.series_category);
+                let pli = to_playlist_item(&mut interner, &entry, &input.name, &library_config.playlist.series_category);
                 group_series.channels.extend(pli);
             }
         }
@@ -49,7 +50,8 @@ pub async fn download_library_playlist(_client: &reqwest::Client, app_config: &A
     (groups, vec![])
 }
 
-fn to_playlist_item(entry: &MetadataCacheEntry, input_name: &str, group_name: &str) -> Vec<PlaylistItem> {
+
+fn to_playlist_item(interner: &mut StringInterner, entry: &MetadataCacheEntry, input_name: &str, group_name: &str) -> Vec<PlaylistItem> {
     let metadata = &entry.metadata;
 
     match metadata {
@@ -59,14 +61,14 @@ fn to_playlist_item(entry: &MetadataCacheEntry, input_name: &str, group_name: &s
                 header: PlaylistItemHeader {
                     uuid: UUIDType::from_valid_uuid(&entry.uuid),
                     name: metadata.title().to_string(),
-                    group: group_name.to_string(),
+                    group: interner.intern(group_name),
                     title: metadata.title().to_string(),
                     logo: metadata.poster().map_or_else(String::new, ToString::to_string),
                     url: format!("file://{}", entry.file_path),
                     xtream_cluster: XtreamCluster::Video,
                     additional_properties,
                     item_type: PlaylistItemType::LocalVideo,
-                    input_name: input_name.to_string(),
+                    input_name: interner.intern(input_name),
                     ..PlaylistItemHeader::default()
                 }
             }]
@@ -92,13 +94,13 @@ fn to_playlist_item(entry: &MetadataCacheEntry, input_name: &str, group_name: &s
                                         uuid: generate_playlist_uuid(input_name, &episode.id.to_string(), PlaylistItemType::LocalSeries, &episode.direct_source),
                                         logo: logo.clone(),
                                         name: episode.title.clone(),
-                                        group: group_name.to_string(),
+                                        group: interner.intern(group_name),
                                         title: episode.title.clone(),
                                         url: episode.direct_source.clone(),
                                         xtream_cluster: XtreamCluster::Series,
                                         item_type: PlaylistItemType::LocalSeries,
                                         category_id: 0,
-                                        input_name: input_name.to_string(),
+                                        input_name: interner.intern(input_name),
                                         additional_properties: Some(StreamProperties::Episode(EpisodeStreamProperties {
                                             episode_id: episode.id,
                                             episode: episode.episode_num,
@@ -124,13 +126,13 @@ fn to_playlist_item(entry: &MetadataCacheEntry, input_name: &str, group_name: &s
                         uuid: UUIDType::from_valid_uuid(&entry.uuid),
                         id: entry.uuid.clone(),
                         name: metadata.title().to_string(),
-                        group: group_name.to_string(),
+                        group: interner.intern(group_name),
                         title: metadata.title().to_string(),
                         logo: metadata.poster().map_or_else(String::new, ToString::to_string),
                         url: format!("file://{}", entry.file_path),
                         xtream_cluster: XtreamCluster::Series,
                         item_type: PlaylistItemType::LocalSeriesInfo,
-                        input_name: input_name.to_string(),
+                        input_name: interner.intern(input_name),
                         additional_properties: Some(additional_properties),
                         ..PlaylistItemHeader::default()
                     }

@@ -160,12 +160,12 @@ impl StrmItemInfo {
 
 fn extract_item_info(pli: &mut PlaylistItem) -> StrmItemInfo {
     let header = &mut pli.header;
-    let group = header.group.clone();
+    let group = header.group.to_string();
     let title = header.title.clone();
     let item_type = header.item_type;
     let provider_id = header.get_provider_id();
     let virtual_id = header.virtual_id;
-    let input_name = header.input_name.clone();
+    let input_name = header.input_name.to_string();
     let url = header.url.clone();
     let (series_name, release_date, added, tmdb_id, season, episode) = match header.item_type {
         PlaylistItemType::Series

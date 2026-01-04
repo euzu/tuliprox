@@ -32,9 +32,9 @@ async fn get_categories_from_m3u_playlist(target: &ConfigTarget, config: &AppCon
     if let Some((_guard, iter)) = m3u_repository::iter_raw_m3u_playlist(config, target).await {
         let mut unique_groups = HashSet::new();
         for (item, _has_next) in iter {
-            if !unique_groups.contains(item.group.as_str()) {
-                unique_groups.insert(item.group.clone());
-                groups.push(item.group.clone());
+            if !unique_groups.contains(&*item.group) {
+                unique_groups.insert(item.group.to_string());
+                groups.push(item.group.to_string());
             }
         }
     }

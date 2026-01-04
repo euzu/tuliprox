@@ -1250,7 +1250,7 @@ impl Expression {
                                 let item_type = accessor.pli.header.item_type;
                                 if item_type != PlaylistItemType::Series &&  item_type != PlaylistItemType::LocalSeries {
                                     let mut pli = accessor.pli.clone();
-                                    pli.header.group.clone_from(group);
+                                    pli.header.group = crate::utils::intern(group);
                                     pli.header.uuid = crate::utils::create_alias_uuid(&accessor.pli.header.uuid, group);
                                     accessor.virtual_items.push((group.clone(), pli));
                                 }
@@ -1564,7 +1564,7 @@ mod tests {
         let mut accessor = ValueAccessor { pli: &mut video, virtual_items: vec![], match_as_ascii: false };
         mapper.eval(&mut accessor, None);
         assert_eq!(accessor.virtual_items.len(), 1);
-        assert_eq!(accessor.virtual_items[0].1.header.group, "My Favs");
+        assert_eq!(&*accessor.virtual_items[0].1.header.group, "My Favs");
 
         // Test with SeriesInfo (should work)
         let mut series_info = PlaylistItem {

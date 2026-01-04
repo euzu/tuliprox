@@ -1,6 +1,6 @@
 use crate::model::info_doc_utils::InfoDocUtils;
 use crate::model::{xtream_const, ClusterFlags, CommonPlaylistItem, ConfigTargetOptions, EpisodeStreamProperties, LiveStreamProperties, SeriesStreamProperties, StreamProperties, VideoStreamProperties};
-use crate::utils::{extract_extension_from_url, generate_playlist_uuid, get_provider_id, parse_uuid_hex};
+use crate::utils::{arc_str_serde, extract_extension_from_url, generate_playlist_uuid, get_provider_id, intern, parse_uuid_hex};
 use enum_iterator::Sequence;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -8,6 +8,7 @@ use std::borrow::Cow;
 use std::fmt::Write;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
+use std::sync::Arc;
 use hex::FromHex;
 // https://de.wikipedia.org/wiki/M3U
 // https://siptv.eu/howto/playlist.html
@@ -290,7 +291,7 @@ pub trait PlaylistEntry: Send + Sync {
     fn get_additional_properties_mut(&mut self) -> Option<&mut StreamProperties>;
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlaylistItemHeader {
     #[serde(skip)]
     pub uuid: UUIDType, // calculated
@@ -300,7 +301,8 @@ pub struct PlaylistItemHeader {
     pub chno: u32,
     pub logo: String,
     pub logo_small: String,
-    pub group: String,
+    #[serde(with = "arc_str_serde")]
+    pub group: Arc<str>,
     pub title: String,
     pub parent_code: String,
     pub audio_track: String,
@@ -314,7 +316,35 @@ pub struct PlaylistItemHeader {
     pub item_type: PlaylistItemType,
     #[serde(default)]
     pub category_id: u32,
-    pub input_name: String,
+    #[serde(with = "arc_str_serde")]
+    pub input_name: Arc<str>,
+}
+
+impl Default for PlaylistItemHeader {
+    fn default() -> Self {
+        Self {
+            uuid: UUIDType::default(),
+            id: String::new(),
+            virtual_id: 0,
+            name: String::new(),
+            chno: 0,
+            logo: String::new(),
+            logo_small: String::new(),
+            group: intern(""),
+            title: String::new(),
+            parent_code: String::new(),
+            audio_track: String::new(),
+            time_shift: String::new(),
+            rec: String::new(),
+            url: String::new(),
+            epg_channel_id: None,
+            xtream_cluster: XtreamCluster::default(),
+            additional_properties: None,
+            item_type: PlaylistItemType::default(),
+            category_id: 0,
+            input_name: intern(""),
+        }
+    }
 }
 
 impl PlaylistItemHeader {
@@ -369,8 +399,9 @@ macro_rules! generate_field_accessor_impl_for_playlist_item_header {
                     $(
                         stringify!($prop) => Some(Cow::Borrowed(&self.$prop)),
                     )*
+                    "group" => Some(Cow::Borrowed(&*self.group)),
                     "chno" => Some(Cow::Owned(self.chno.to_string())),
-                    "input" =>  Some(Cow::Borrowed(self.input_name.as_str())),
+                    "input" =>  Some(Cow::Borrowed(&*self.input_name)),
                     "type" => Some(Cow::Owned(self.item_type.to_string())),
                     "caption" =>  Some(if self.title.is_empty() { Cow::Borrowed(&self.name) } else { Cow::Borrowed(&self.title) }),
                     "epg_channel_id" | "epg_id" => self.epg_channel_id.as_ref().map(|s| Cow::Borrowed(s.as_str())),
@@ -389,6 +420,10 @@ macro_rules! generate_field_accessor_impl_for_playlist_item_header {
                             true
                         }
                     )*
+                    "group" => {
+                        self.group = crate::utils::intern(value);
+                        true
+                    }
                     "chno" => {
                         if let Ok(val) = value.parse::<u32>() {
                             self.chno = val;
@@ -413,7 +448,7 @@ macro_rules! generate_field_accessor_impl_for_playlist_item_header {
     }
 }
 
-generate_field_accessor_impl_for_playlist_item_header!(id, /*virtual_id,*/ name, logo, logo_small, group, title, parent_code, audio_track, time_shift, rec, url;);
+generate_field_accessor_impl_for_playlist_item_header!(id, /*virtual_id,*/ name, logo, logo_small, title, parent_code, audio_track, time_shift, rec, url;);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct M3uPlaylistItem {
@@ -423,7 +458,8 @@ pub struct M3uPlaylistItem {
     pub chno: u32,
     pub logo: String,
     pub logo_small: String,
-    pub group: String,
+    #[serde(with = "arc_str_serde")]
+    pub group: Arc<str>,
     pub title: String,
     pub parent_code: String,
     pub audio_track: String,
@@ -431,7 +467,8 @@ pub struct M3uPlaylistItem {
     pub rec: String,
     pub url: String,
     pub epg_channel_id: Option<String>,
-    pub input_name: String,
+    #[serde(with = "arc_str_serde")]
+    pub input_name: Arc<str>,
     pub item_type: PlaylistItemType,
     #[serde(skip)]
     pub t_stream_url: String,
@@ -525,7 +562,7 @@ impl PlaylistEntry for M3uPlaylistItem {
 
     #[inline]
     fn get_group(&self) -> Cow<'_, str> {
-        Cow::Borrowed(self.group.as_str())
+        Cow::Borrowed(&*self.group)
     }
 
     #[inline]
@@ -618,7 +655,8 @@ pub struct XtreamPlaylistItem {
     pub name: String,
     pub logo: String,
     pub logo_small: String,
-    pub group: String,
+    #[serde(with = "arc_str_serde")]
+    pub group: Arc<str>,
     pub title: String,
     pub parent_code: String,
     pub rec: String,
@@ -628,7 +666,8 @@ pub struct XtreamPlaylistItem {
     pub additional_properties: Option<StreamProperties>,
     pub item_type: PlaylistItemType,
     pub category_id: u32,
-    pub input_name: String,
+    #[serde(with = "arc_str_serde")]
+    pub input_name: Arc<str>,
     pub channel_no: u32,
 }
 
@@ -1003,7 +1042,7 @@ impl PlaylistEntry for XtreamPlaylistItem {
     }
     #[inline]
     fn get_group(&self) -> Cow<'_, str> {
-        Cow::Borrowed(self.group.as_str())
+        Cow::Borrowed(&*self.group)
     }
     #[inline]
     fn get_name(&self) -> Cow<'_, str> {
@@ -1234,7 +1273,7 @@ impl From<&PlaylistItem> for XtreamPlaylistItem {
             name: if header.item_type == PlaylistItemType::Series { &header.title } else { &header.name }.to_string(),
             logo: header.logo.to_string(),
             logo_small: header.logo_small.to_string(),
-            group: header.group.to_string(),
+            group: Arc::clone(&header.group),
             title: header.title.to_string(),
             parent_code: header.parent_code.to_string(),
             rec: header.rec.to_string(),
@@ -1244,7 +1283,7 @@ impl From<&PlaylistItem> for XtreamPlaylistItem {
             additional_properties,
             item_type: header.item_type,
             category_id: header.category_id,
-            input_name: header.input_name.to_string(),
+            input_name: Arc::clone(&header.input_name),
             channel_no: header.chno,
         }
     }
@@ -1260,7 +1299,7 @@ impl From<&PlaylistItem> for M3uPlaylistItem {
             chno: header.chno,
             logo: header.logo.to_string(),
             logo_small: header.logo_small.to_string(),
-            group: header.group.to_string(),
+            group: Arc::clone(&header.group),
             title: header.title.to_string(),
             parent_code: header.parent_code.to_string(),
             audio_track: header.audio_track.to_string(),
@@ -1268,7 +1307,7 @@ impl From<&PlaylistItem> for M3uPlaylistItem {
             rec: header.rec.to_string(),
             url: header.url.to_string(),
             epg_channel_id: header.epg_channel_id.clone(),
-            input_name: header.input_name.to_string(),
+            input_name: Arc::clone(&header.input_name),
             item_type: header.item_type,
             t_stream_url: header.url.to_string(),
             t_resource_url: None,
@@ -1288,7 +1327,7 @@ impl From<&PlaylistItem> for CommonPlaylistItem {
             name: if header.item_type == PlaylistItemType::Series { &header.title } else { &header.name }.clone(),
             logo: header.logo.clone(),
             logo_small: header.logo_small.clone(),
-            group: header.group.clone(),
+            group: Arc::clone(&header.group),
             title: header.title.clone(),
             parent_code: header.parent_code.clone(),
             audio_track: header.audio_track.clone(),
@@ -1300,7 +1339,7 @@ impl From<&PlaylistItem> for CommonPlaylistItem {
             additional_properties,
             item_type: header.item_type,
             category_id: Some(header.category_id),
-            input_name: header.input_name.clone(),
+            input_name: Arc::clone(&header.input_name),
             chno: header.chno,
         }
     }
@@ -1403,7 +1442,7 @@ impl PlaylistEntry for PlaylistItem {
 
     #[inline]
     fn get_group(&self) -> Cow<'_, str> {
-        Cow::Borrowed(self.header.group.as_str())
+        Cow::Borrowed(&*self.header.group)
     }
 
     #[inline]

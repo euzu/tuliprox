@@ -188,7 +188,7 @@ fn map_playlist(playlist: &mut [PlaylistGroup], target: &ConfigTarget) -> Option
                     grp_id += 1;
                     new_groups.push(PlaylistGroup {
                         id: grp_id,
-                        title: title.clone(),
+                        title: title.to_string(),
                         channels: vec![channel.clone()],
                         xtream_cluster: *cluster,
                     });
@@ -691,7 +691,7 @@ pub fn process_favourites(playlist: &mut Vec<PlaylistGroup>, favourites_cfg: Opt
                 for fav in favourites {
                     if is_valid(pli, &fav.filter, fav.match_as_ascii) {
                         let mut channel = pli.clone();
-                        channel.header.group.clone_from(&fav.group);
+                        channel.header.group = shared::utils::intern(&fav.group);
                         // Update UUID to be an alias of the original
                         channel.header.uuid = create_alias_uuid(&pli.header.uuid, &fav.group);
                         fav_groups

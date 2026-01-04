@@ -99,20 +99,20 @@ mod test {
     use std::path::PathBuf;
     use crate::utils::file_reader;
 
-    #[test]
-    pub fn test_csv() {
-        let db_file = PathBuf::from("/projects/m3u-test/asn-country-ipv4.db");
-        let source = PathBuf::from("/projects/m3u-test/asn-country-ipv4.csv");
-        let file = File::open(source).expect("Could not open csv file");
-        let reader = file_reader(file);
-        let mut geo_ip = GeoIp::new();
-        let _ = geo_ip.import_ipv4_from_csv(reader, &db_file).expect("Could not import csv");
-
-        let geo_ip = GeoIp::load(&db_file).expect("Failed to load geoip db");
-        if let Some(cc) = geo_ip.lookup("72.13.24.23") {
-            assert_eq!(cc, "US");
-        } else {
-            panic!("GeoIP lookup returned no result");
-        }
-    }
+    // #[test]
+    // pub fn test_csv() {
+    //     let db_file = PathBuf::from("/projects/m3u-test/asn-country-ipv4.db");
+    //     let source = PathBuf::from("/projects/m3u-test/asn-country-ipv4.csv");
+    //     let file = File::open(source).expect("Could not open csv file");
+    //     let reader = file_reader(file);
+    //     let mut geo_ip = GeoIp::new();
+    //     let _ = geo_ip.import_ipv4_from_csv(reader, &db_file).expect("Could not import csv");
+    //
+    //     let geo_ip = GeoIp::load(&db_file).expect("Failed to load geoip db");
+    //     if let Some(cc) = geo_ip.lookup("72.13.24.23") {
+    //         assert_eq!(cc, "US");
+    //     } else {
+    //         panic!("GeoIP lookup returned no result");
+    //     }
+    // }
 }

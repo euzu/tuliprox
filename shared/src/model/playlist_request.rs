@@ -1,7 +1,9 @@
 use crate::model::{PlaylistItemType, SearchRequest, StreamProperties, XtreamCluster};
+use crate::utils::arc_str_serde;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::rc::Rc;
+use std::sync::Arc;
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct PlaylistRequestXtream {
@@ -31,14 +33,16 @@ pub struct CommonPlaylistItem {
     pub chno: u32,
     pub logo: String,
     pub logo_small: String,
-    pub group: String,
+    #[serde(with = "arc_str_serde")]
+    pub group: Arc<str>,
     pub title: String,
     pub parent_code: String,
     pub audio_track: String,
     pub time_shift: String,
     pub rec: String,
     pub url: String,
-    pub input_name: String,
+    #[serde(with = "arc_str_serde")]
+    pub input_name: Arc<str>,
     pub item_type: PlaylistItemType,
     #[serde(default)]
     pub epg_channel_id: Option<String>,

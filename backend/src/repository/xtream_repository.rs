@@ -340,7 +340,7 @@ async fn create_categories(playlist: &mut [PlaylistGroup], path: &Path) -> Vec<(
 
         for channel in &mut plg.channels {
             let cluster = channel.header.xtream_cluster;
-            let group = channel.header.group.as_str();
+            let group = &*channel.header.group;
 
             // Fast path
             if last_cluster == Some(cluster) && last_group == group {
@@ -753,7 +753,7 @@ pub async fn persist_input_xtream_playlist(app_config: &Arc<AppConfig>, storage_
                 .entry(item.header.category_id)
                 .or_insert_with(|| PlaylistGroup {
                     id: item.header.category_id,
-                    title: item.header.group.clone(),
+                    title: item.header.group.to_string(),
                     channels: Vec::new(),
                     xtream_cluster: item.header.xtream_cluster,
                 })

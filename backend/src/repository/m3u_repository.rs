@@ -211,12 +211,12 @@ pub async fn load_input_m3u_playlist(app_config: &Arc<AppConfig>, m3u_path: &Pat
             let mut group_cnt = 0;
             for (_, ref item) in query.iter() {
                 let cat_id = item.group.clone();
-                groups.entry(cat_id)
+                groups.entry(cat_id.to_string())
                     .or_insert_with(|| {
                         group_cnt += 1;
                         PlaylistGroup {
                             id: group_cnt,
-                            title: item.group.clone(),
+                            title: item.group.to_string(),
                             channels: Vec::new(),
                             xtream_cluster: XtreamCluster::try_from(item.item_type).unwrap_or(XtreamCluster::Live),
                         }
