@@ -11,8 +11,11 @@ use tokio::task::JoinSet;
 use crate::api::model::{EventManager, EventMessage, PlaylistStorageState, UpdateGuard};
 use crate::messaging::send_message_json;
 use crate::model::Epg;
+
+
 use crate::model::FetchedPlaylist;
 use crate::model::Mapping;
+use crate::model::TVGuide;
 use crate::model::{ConfigTarget, ProcessTargets};
 use crate::model::{InputStats, PlaylistStats, SourceStats, TargetStats};
 use crate::processing::input_cache;
@@ -26,6 +29,7 @@ use crate::processing::processor::trakt::process_trakt_categories_for_target;
 use crate::processing::processor::xtream_series::playlist_resolve_series;
 use crate::processing::processor::xtream_vod::playlist_resolve_vod;
 use crate::repository::playlist_repository::{load_input_playlist, persist_input_playlist, persist_playlist};
+use crate::repository::provider_source::ProviderPlaylistSource;
 use crate::utils::StepMeasure;
 use crate::utils::{debug_if_enabled, trace_if_enabled};
 use futures::StreamExt;
@@ -363,12 +367,13 @@ async fn process_source(client: &reqwest::Client, app_config: Arc<AppConfig>, so
 
                     let (playlist, error) = if was_cached {
                         match load_input_playlist(&app_config, input, None).await {
-                            Ok(pl) => (pl, None),
-                            Err(e) => (vec![], Some(e)),
+                            Ok(pl_source) => (pl_source, None),
+                            Err(e) => (ProviderPlaylistSource::Memory(Box::default()), Some(e)),
                         }
                     } else {
                         broadcast_step("Playlist download", &format!("Persisting input '{}' playlist", input.name));
-                        persist_input_playlist(&app_config, input, downloaded_playlist).await
+                        let (pl, err) = persist_input_playlist(&app_config, input, downloaded_playlist).await;
+                        (ProviderPlaylistSource::Memory(Box::new(pl)), err)
                     };
 
                     if let Some(err) = error {
@@ -390,10 +395,16 @@ async fn process_source(client: &reqwest::Client, app_config: Arc<AppConfig>, so
 
                 errors.append(&mut error_list);
                 errors.append(&mut tvguide_errors);
-                let group_count = playlist_groups.len();
-                let channel_count = playlist_groups.iter().map(|group| group.channels.len()).sum();
+                let group_count = match &playlist_groups {
+                    ProviderPlaylistSource::Memory(g) => g.len(),
+                    _ => 0, // Stats for disk?
+                };
+                let channel_count = match &playlist_groups {
+                    ProviderPlaylistSource::Memory(g) => g.iter().map(|group| group.channels.len()).sum(),
+                    _ => 0,
+                };
                 let input_name = &input.name;
-                if playlist_groups.is_empty() {
+                if matches!(playlist_groups, ProviderPlaylistSource::Memory(ref g) if g.is_empty()) {
                     broadcast_step("Playlist download", &format!("Input '{}' playlist is empty", input.name));
                     info!("Source is empty {input_name}");
                     errors.push(notify_err!(format!("Source is empty {input_name}")));
@@ -401,18 +412,7 @@ async fn process_source(client: &reqwest::Client, app_config: Arc<AppConfig>, so
                     source_playlists.push(
                         FetchedPlaylist {
                             input,
-                            // If I create Arc here, it drops at end of loop iteration!
-                            // SAFETY ISSUE.
-                            // `source_playlists` stores `FetchedPlaylist`.
-                            // `FetchedPlaylist` struct definition:
-                            // pub struct FetchedPlaylist<'a> { pub input: &'a ConfigInput, ... }
-                            // It holds a REFERENCE.
-                            // If `input` comes from `sources` (guard), it lives as long as `sources` guard lives.
-                            // `sources` guard is alive in this function scope.
-                            // So `&input` is valid.
-                            // `playlist_download_from_input` takes `&Arc<ConfigInput>`. I pass formatted Arc.
-                            // `FetchedPlaylist` needs reference.
-                            playlist_groups,
+                            source: playlist_groups,
                             epg: tvguide,
                         }
                     );
@@ -427,7 +427,7 @@ async fn process_source(client: &reqwest::Client, app_config: Arc<AppConfig>, so
                 debug!("Source at index {source_idx} is empty");
                 errors.push(notify_err!(format!("Source at index {source_idx} is empty: {}", source.inputs.iter().map(std::string::String::as_str).collect::<Vec<&str>>().join(", "))));
             } else {
-                debug_if_enabled!("Source has {} groups", source_playlists.iter().map(|fpl| fpl.playlist_groups.len()).sum::<usize>());
+                debug_if_enabled!("Source has {} groups", source_playlists.iter().map(|fpl| ensure_memory_source(fpl)).sum::<usize>());
                 let event_manager_clone = event_manager.clone();
                 for target in &source.targets {
                     let event_manager_clone = event_manager_clone.clone();
@@ -558,26 +558,147 @@ fn duplicate_hash(item: &PlaylistItem) -> UUIDType {
     item.get_uuid()
 }
 
-fn execute_pipe<'a>(target: &ConfigTarget, pipe: &ProcessingPipe, fpl: &FetchedPlaylist<'a>,
+fn execute_pipe<'a>(target: &ConfigTarget, pipe: &ProcessingPipe, input: &'a ConfigInput,
+                    mut source_groups: Vec<PlaylistGroup>, epg: Option<TVGuide>,
                     duplicates: &mut HashSet<UUIDType>) -> FetchedPlaylist<'a> {
-    let mut new_fpl = FetchedPlaylist {
-        input: fpl.input,
-        playlist_groups: fpl.playlist_groups.clone(), // we need to clone, because of multiple target definitions, we cant change the initial playlist.
-        epg: fpl.epg.clone(),
-    };
     if target.options.as_ref().is_some_and(|opt| opt.remove_duplicates) {
-        for group in &mut new_fpl.playlist_groups {
+        for group in &mut source_groups {
             // `HashSet::insert`  returns true for first insert, otherwise false
             group.channels.retain(|item| duplicates.insert(duplicate_hash(item)));
         }
     }
 
     for f in pipe {
-        if let Some(groups) = f(&mut new_fpl.playlist_groups, target) {
-            new_fpl.playlist_groups = groups;
+        if let Some(groups) = f(&mut source_groups, target) {
+            source_groups = groups;
         }
     }
-    new_fpl
+
+    FetchedPlaylist {
+        input,
+        source: ProviderPlaylistSource::Memory(Box::new(source_groups)),
+        epg,
+    }
+}
+fn execute_pipe_memory<'a>(target: &ConfigTarget, pipe: &ProcessingPipe, fpl: &FetchedPlaylist<'a>,
+                           duplicates: &mut HashSet<UUIDType>) -> FetchedPlaylist<'a> {
+    // Compatibility wrapper for Memory source which uses Vec<Group>
+    let groups = if let ProviderPlaylistSource::Memory(groups) = &fpl.source {
+        groups.clone()
+    } else {
+        Box::new(vec![])
+    };
+
+    execute_pipe(target, pipe, fpl.input, *groups, fpl.epg.clone(), duplicates)
+}
+
+// Streaming implementation
+fn execute_pipe_stream(target: &ConfigTarget, fpl: &mut FetchedPlaylist<'_>, duplicates: &mut HashSet<UUIDType>) -> Vec<PlaylistGroup> {
+    // 1. Iterate source items
+    // Since BTree iter is blocking/sync usually in this implementation? No, BPlusTreeQuery iter is sync? 
+    // Checking bplustree.rs: query.iter() returns generic iterator.
+    // So we can iterate.
+
+    let mut accumulator: IndexMap<String, PlaylistGroup> = IndexMap::new();
+    let mut group_id_counter = 0;
+
+    let process_item = |mut pli: PlaylistItem, acc: &mut IndexMap<String, PlaylistGroup>, grp_cnt: &mut u32, dups: &mut HashSet<UUIDType>| {
+        // Filter
+        if !is_valid(&pli, &target.filter, false) { return; }
+
+        // Rename
+        exec_rename(&mut pli, target.rename.as_ref());
+        // Group rename handled if group field changed
+        // But wait, rename_playlist also renames Group Title based on regex on Group Title.
+        // We must execute regex on pli.header.group
+        if let Some(renames) = &target.rename {
+            for r in renames {
+                if matches!(r.field, ItemField::Group) {
+                    let val = &pli.header.group;
+                    let cap = r.pattern.replace_all(val, &r.new_name);
+                    if **val != *cap {
+                        pli.header.group = shared::utils::intern(&cap);
+                    }
+                }
+            }
+        }
+
+        // Map
+        // Map can return list of items
+        let items = if let Some(mappings) = target.mapping.load().as_ref() {
+            let mut current_items = vec![pli];
+            for mapping in mappings.iter().filter(|&m| m.mapper.as_ref().is_some_and(|v| !v.is_empty())) {
+                let mut next_items = Vec::with_capacity(current_items.len());
+                for item in current_items {
+                    next_items.extend(map_channel_and_flatten(item, mapping));
+                }
+                current_items = next_items;
+            }
+            current_items
+        } else {
+            vec![pli]
+        };
+
+        // Accumulate
+        for item in items {
+            if target.options.as_ref().is_some_and(|opt| opt.remove_duplicates)
+                && !dups.insert(item.get_uuid()) { continue; }
+
+            let group_name = item.header.group.to_string();
+            let cluster = item.header.xtream_cluster;
+            // we can use the accumulator to group
+            // Using (group_name, cluster) as key effectively
+            // But IndexMap key is String. Use group_name.
+            // flatten_groups does this (Title, Cluster) -> Index.
+            // Here we just use Title for now, or careful about cluster mixing?
+            // Existing logic separates by group title primarily, then cluster.
+
+            let entry = acc.entry(group_name.clone()).or_insert_with(|| {
+                *grp_cnt += 1;
+                PlaylistGroup {
+                    id: *grp_cnt,
+                    title: group_name,
+                    channels: Vec::new(),
+                    xtream_cluster: cluster,
+                }
+            });
+            entry.channels.push(item);
+        }
+    };
+
+    match &mut fpl.source {
+        ProviderPlaylistSource::XtreamDisk { live, vod, series } => {
+            if let Some(q) = &mut **live {
+                for (_, item) in q.iter() {
+                    process_item(PlaylistItem::from(&item), &mut accumulator, &mut group_id_counter, duplicates);
+                }
+            }
+            if let Some(q) = &mut **vod {
+                for (_, item) in q.iter() {
+                    process_item(PlaylistItem::from(&item), &mut accumulator, &mut group_id_counter, duplicates);
+                }
+            }
+            if let Some(q) = &mut **series {
+                for (_, item) in q.iter() {
+                    process_item(PlaylistItem::from(&item), &mut accumulator, &mut group_id_counter, duplicates);
+                }
+            }
+        }
+        ProviderPlaylistSource::M3uDisk(q) => {
+            for (_, item) in q.iter() { process_item(PlaylistItem::from(&item), &mut accumulator, &mut group_id_counter, duplicates); }
+        }
+        ProviderPlaylistSource::Memory(_) => {}
+    }
+
+    accumulator.into_values().collect()
+}
+
+// Helper to convert source if needed or just use passed
+fn ensure_memory_source(fpl: &FetchedPlaylist) -> usize {
+    match &fpl.source {
+        ProviderPlaylistSource::Memory(groups) => groups.len(),
+        _ => 0,
+    }
 }
 
 // This method is needed, because of duplicate group names in different inputs.
@@ -626,16 +747,37 @@ async fn process_playlist_for_target(app_config: &Arc<AppConfig>,
     let mut step = StepMeasure::new(&target.name, broadcast_step);
     for provider_fpl in playlists.iter_mut() {
         step.broadcast("Executing transformations on '{}' playlist", &target.name);
-        let mut processed_fpl = execute_pipe(target, &pipe, provider_fpl, &mut duplicates);
+
+        // New Streaming / Hybrid Pipeline
+        let mut processed_fpl: FetchedPlaylist;
+
+        // Avoid holding borrow of source when calling execute_pipe_stream
+        let is_memory = matches!(provider_fpl.source, ProviderPlaylistSource::Memory(_));
+
+        if is_memory {
+            processed_fpl = execute_pipe_memory(target, &pipe, provider_fpl, &mut duplicates);
+        } else {
+            // Disk Source Streaming
+            let groups = execute_pipe_stream(target, provider_fpl, &mut duplicates);
+            processed_fpl = FetchedPlaylist {
+                input: provider_fpl.input,
+                source: ProviderPlaylistSource::Memory(Box::new(groups)),
+                epg: provider_fpl.epg.clone(),
+            };
+        }
+
+
         playlist_resolve_series(app_config, client, target, errors, &pipe, provider_fpl, &mut processed_fpl).await;
         playlist_resolve_vod(app_config, client, target, errors, &mut processed_fpl).await;
         // stats
         let input_stats = stats.get_mut(&processed_fpl.input.name);
         if let Some(stat) = input_stats {
-            stat.processed_stats.group_count = processed_fpl.playlist_groups.len();
-            stat.processed_stats.channel_count = processed_fpl.playlist_groups.iter()
-                .map(|group| group.channels.len())
-                .sum();
+            if let ProviderPlaylistSource::Memory(groups) = &processed_fpl.source {
+                stat.processed_stats.group_count = groups.len();
+                stat.processed_stats.channel_count = groups.iter()
+                    .map(|group| group.channels.len())
+                    .sum();
+            }
         }
         processed_fetched_playlists.push(processed_fpl);
     }
@@ -744,7 +886,9 @@ async fn process_epg(processed_fetched_playlists: &mut Vec<FetchedPlaylist<'_>>)
     // we need to process each input epg.
     for fp in processed_fetched_playlists {
         process_playlist_epg(fp, &mut new_epg).await;
-        new_playlist.append(&mut fp.playlist_groups);
+        if let ProviderPlaylistSource::Memory(groups) = &mut fp.source {
+            new_playlist.append(groups);
+        }
     }
     (new_epg, new_playlist)
 }

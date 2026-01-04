@@ -12,6 +12,7 @@ use crate::repository::target_id_mapping::{TargetIdMapping, VirtualIdRecord};
 use crate::repository::xtream_repository::{load_input_xtream_playlist, persist_input_xtream_playlist, xtream_get_file_path, xtream_get_storage_path, xtream_write_playlist};
 use crate::utils;
 use log::info;
+use crate::repository::provider_source::ProviderPlaylistSource;
 use shared::create_tuliprox_error;
 use shared::error::TuliproxError;
 use shared::error::{info_err, TuliproxErrorKind};
@@ -368,25 +369,38 @@ pub async fn persist_input_playlist(app_config: &Arc<AppConfig>, input: &ConfigI
     }
 }
 
-pub async fn load_input_playlist(app_config: &Arc<AppConfig>, input: &ConfigInput, clusters: Option<&[XtreamCluster]>) -> Result<Vec<PlaylistGroup>, TuliproxError> {
+pub async fn load_input_playlist(app_config: &Arc<AppConfig>, input: &ConfigInput, clusters: Option<&[XtreamCluster]>) -> Result<ProviderPlaylistSource, TuliproxError> {
     let working_dir = &app_config.config.load().working_dir;
     let storage_path = get_input_storage_path(&input.name, working_dir)
         .map_err(|e| create_tuliprox_error!(TuliproxErrorKind::Info, "Error getting input path: {e}"))?;
 
     match input.input_type {
         InputType::Xtream | InputType::XtreamBatch => {
-            let clusters_to_load = if let Some(c) = clusters {
-                c
-            } else {
-                &XTREAM_CLUSTER
-            };
+            if app_config.config.load().use_disk_input_playlist {
+                let live_path = xtream_get_file_path(&storage_path, XtreamCluster::Live);
+                let vod_path = xtream_get_file_path(&storage_path, XtreamCluster::Video);
+                let series_path = xtream_get_file_path(&storage_path, XtreamCluster::Series);
 
-            load_input_xtream_playlist(app_config, &storage_path, clusters_to_load).await
+                Ok(ProviderPlaylistSource::XtreamDisk {
+                    live: Box::new(BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&live_path).ok()),
+                    vod: Box::new(BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&vod_path).ok()),
+                    series: Box::new(BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&series_path).ok()),
+                })
+            } else {
+                let clusters_to_load = if let Some(c) = clusters {
+                    c
+                } else {
+                    &XTREAM_CLUSTER
+                };
+                let groups = load_input_xtream_playlist(app_config, &storage_path, clusters_to_load).await?;
+                Ok(ProviderPlaylistSource::Memory(Box::new(groups)))
+            }
         }
         _ => {
             // Load M3U
             let file_path = get_input_playlist_file_path(&storage_path, input.name.as_str());
-            load_input_m3u_playlist(app_config, &file_path).await
+            let groups = load_input_m3u_playlist(app_config, &file_path).await?;
+             Ok(ProviderPlaylistSource::Memory(Box::new(groups)))
         }
     }
 }

@@ -223,6 +223,7 @@
     "SLEEP_TIMER_MINS": "Sleep Timer (mins)",
     "CONNECT_TIMEOUT_SECS": "Connect Timeout (secs)",
     "CONFIG_HOT_RELOAD": "Config Hot Reload",
+    "USE_DISK_INPUT_PLAYLIST": "Use Disk Input Playlist",
     "ACCEPT_INSECURE_SSL_CERTIFICATES": "Accept Insecure SSL Certificates",
     "CUSTOM_STREAM_RESPONSE_PATH": "Custom Stream Response dir",
     "REVERSE_PROXY": "Reverse Proxy",

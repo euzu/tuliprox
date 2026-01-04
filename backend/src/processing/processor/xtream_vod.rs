@@ -1,3 +1,4 @@
+use crate::repository::provider_source::ProviderPlaylistSource;
 use crate::model::FetchedPlaylist;
 use crate::model::{AppConfig, ConfigTarget};
 use crate::processing::processor::create_resolve_options_function_for_xtream_target;
@@ -30,18 +31,21 @@ pub async fn playlist_resolve_vod(app_config: &Arc<AppConfig>, client: &reqwest:
     };
 
     // LocalVideo entries are not resolved!
-    let vod_info_count = fpl.playlist_groups.iter()
-        .flat_map(|plg| &plg.channels)
-        .filter(|pli| pli.header.xtream_cluster == XtreamCluster::Video
-            && pli.header.item_type == PlaylistItemType::Video
-            && !pli.has_details()).count();
+    let vod_info_count = if let ProviderPlaylistSource::Memory(groups) = &fpl.source {
+        groups.iter()
+            .flat_map(|plg| &plg.channels)
+            .filter(|pli| pli.header.xtream_cluster == XtreamCluster::Video
+                && pli.header.item_type == PlaylistItemType::Video
+                && !pli.has_details()).count()
+    } else { 0 };
 
 
     info!("Found {vod_info_count} vod info to resolve");
     let mut last_log_time = Instant::now();
     let mut processed_vod_info_count = 0;
 
-    for plg in &mut fpl.playlist_groups {
+    if let ProviderPlaylistSource::Memory(groups) = &mut fpl.source {
+        for plg in groups.iter_mut() {
         for pli in &mut plg.channels {
             if pli.header.xtream_cluster != XtreamCluster::Video
                 || pli.header.item_type != PlaylistItemType::Video
@@ -73,6 +77,7 @@ pub async fn playlist_resolve_vod(app_config: &Arc<AppConfig>, client: &reqwest:
                 last_log_time = Instant::now();
             }
         }
+    }
     }
     info!("resolved {processed_vod_info_count}/{vod_info_count} vod info");
 }

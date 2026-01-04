@@ -11,4 +11,4 @@ pub mod xtream_playlist_iterator;
 pub mod user_repository;
 pub mod storage_const;
 mod playlist_scratch;
-
+pub mod provider_source;

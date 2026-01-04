@@ -1,6 +1,7 @@
 use crate::model::{Epg, TVGuide, XmlTag, XmlTagIcon, EPG_ATTRIB_ID};
 use crate::model::{EpgConfig, EpgSmartMatchConfig};
-use crate::model::{FetchedPlaylist};
+use crate::model::FetchedPlaylist;
+use crate::repository::provider_source::ProviderPlaylistSource;
 use crate::processing::parser::xmltv::normalize_channel_name;
 use log::{debug, trace};
 use rphonetic::{DoubleMetaphone, Encoder};
@@ -109,7 +110,11 @@ impl EpgIdCache<'_> {
         let smart_match_enabled = self.smart_match_enabled;
         let fuzzy_matching = self.fuzzy_match_enabled;
 
-        for channel in fp.playlist_groups.iter().flat_map(|g| &g.channels) {
+        let groups = match &fp.source {
+            ProviderPlaylistSource::Memory(groups) => groups,
+            _ => &vec![], 
+        };
+        for channel in groups.iter().flat_map(|g| &g.channels) {
             let mut missing_epg_id = true;
             // insert epg_id to known channel epg_ids
             if let Some(id) = channel.header.epg_channel_id.as_deref() {
@@ -212,10 +217,12 @@ async fn assign_channel_epg(new_epg: &mut Vec<Epg>, fp: &mut FetchedPlaylist<'_>
                 };
 
                 let filter_live = |c: &&mut PlaylistItem| c.header.xtream_cluster == XtreamCluster::Live;
-                fp.playlist_groups.iter_mut()
-                    .flat_map(|g| &mut g.channels)
-                    .filter(filter_live)
-                    .for_each(assign_values);
+                if let ProviderPlaylistSource::Memory(groups) = &mut fp.source {
+                    groups.iter_mut()
+                        .flat_map(|g| &mut g.channels)
+                        .filter(filter_live)
+                        .for_each(assign_values);
+                }
                 processed_epgs.push(epg_source);
             }
         }
