@@ -1,8 +1,8 @@
 use crate::model::{Epg, TVGuide, XmlTag, XmlTagIcon, EPG_ATTRIB_ID};
 use crate::model::{EpgConfig, EpgSmartMatchConfig};
-use crate::model::{FetchedPlaylist};
+use crate::model::FetchedPlaylist;
 use crate::processing::parser::xmltv::normalize_channel_name;
-use log::{debug, trace};
+use log::{debug, trace, warn};
 use rphonetic::{DoubleMetaphone, Encoder};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -109,10 +109,12 @@ impl EpgIdCache<'_> {
         let smart_match_enabled = self.smart_match_enabled;
         let fuzzy_matching = self.fuzzy_match_enabled;
 
-        for channel in fp.playlist_groups.iter().flat_map(|g| &g.channels) {
+        // Helper closure to process a single item
+        // We use a closure here to capture `self` and avoid code duplication
+        let mut process_item = |name: &str, epg_channel_id: Option<&str>| {
             let mut missing_epg_id = true;
             // insert epg_id to known channel epg_ids
-            if let Some(id) = channel.header.epg_channel_id.as_deref() {
+            if let Some(id) = epg_channel_id {
                 if !id.is_empty() {
                     missing_epg_id = false;
                     self.channel_epg_id.insert(Cow::Owned(id.to_string()));
@@ -124,10 +126,18 @@ impl EpgIdCache<'_> {
             let needs_normalization = smart_match_enabled && (fuzzy_matching || missing_epg_id);
 
             if needs_normalization {
-                let name = &channel.header.name;
-                self.normalize_and_store(name, channel.header.epg_channel_id.as_deref());
+                self.normalize_and_store(name, epg_channel_id);
             }
+        };
+
+        if fp.source.is_memory() {
+            for channel in fp.source.items_mut() {
+                process_item(&channel.header.name, channel.header.epg_channel_id.as_deref());
+            }
+        } else {
+            warn!("Disk based playlist processing with modification is not supported!");
         }
+
     }
 
     pub fn match_with_normalized(&mut self, epg_id: &str, normalized_epg_ids: &[String]) -> bool {
@@ -212,10 +222,12 @@ async fn assign_channel_epg(new_epg: &mut Vec<Epg>, fp: &mut FetchedPlaylist<'_>
                 };
 
                 let filter_live = |c: &&mut PlaylistItem| c.header.xtream_cluster == XtreamCluster::Live;
-                fp.playlist_groups.iter_mut()
-                    .flat_map(|g| &mut g.channels)
-                    .filter(filter_live)
-                    .for_each(assign_values);
+
+                if fp.source.is_memory() {
+                    fp.source.items_mut().filter(filter_live).for_each(assign_values);
+                } else {
+                    warn!("Disk based playlist modification is not supported!");
+                }
                 processed_epgs.push(epg_source);
             }
         }

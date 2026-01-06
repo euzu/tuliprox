@@ -1,10 +1,12 @@
+use std::sync::Arc;
 use crate::error::{info_err, TuliproxError};
 use crate::utils::{is_true, default_as_true, default_metadata_path,
                    default_movie_category, default_series_category, default_storage_formats,
                    default_supported_library_extensions, is_default_supported_library_extensions,
                    default_tmdb_api_key, default_tmdb_cache_duration_days,
                    default_tmdb_language, default_tmdb_rate_limit_ms, is_default_tmdb_cache_duration_days,
-                   is_default_tmdb_language, is_default_tmdb_rate_limit_ms, is_tmdb_default_api_key};
+                   is_default_tmdb_language, is_default_tmdb_rate_limit_ms, is_tmdb_default_api_key,
+                   arc_str_serde};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -99,10 +101,10 @@ pub enum LibraryMetadataFormat {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct LibraryPlaylistConfigDto {
-    #[serde(default = "default_movie_category")]
-    pub movie_category: String,
-    #[serde(default = "default_series_category")]
-    pub series_category: String,
+    #[serde(with = "arc_str_serde", default = "default_movie_category")]
+    pub movie_category: Arc<str>,
+    #[serde(with = "arc_str_serde", default = "default_series_category")]
+    pub series_category: Arc<str>,
 }
 
 impl LibraryConfigDto {

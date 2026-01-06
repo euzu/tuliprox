@@ -62,6 +62,10 @@ fn start_config_watch(app_state: &Arc<AppState>, cancel_token: &CancellationToke
 
         let _keep_watcher_alive = watcher;
 
+        let mut debounce_timer = Box::pin(tokio::time::sleep(tokio::time::Duration::from_millis(0)));
+        let mut timer_active = false;
+        let mut pending_configs: HashMap<ConfigFile, PathBuf> = HashMap::new();
+
         loop {
             tokio::select! {
             biased;
@@ -75,24 +79,46 @@ fn start_config_watch(app_state: &Arc<AppState>, cancel_token: &CancellationToke
                 match res {
                     Ok(event) => {
                         if let EventKind::Access(AccessKind::Close(AccessMode::Write)) = event.kind {
-                        for path in event.paths {
-                            if let Some((config_file, _is_dir)) = files.get(&path) {
-                                if let Err(err) = config_file.reload(&path, &watcher_app_state).await {
-                                   handle_error(err, &path);
-                                }
-                            } else if recursive_mode == RecursiveMode::Recursive && path.extension().is_some_and(|ext| ext == "yml") {
-                                for (key, (config_file, is_dir)) in &files {
-                                    if *is_dir && path.starts_with(key) {
-                                        if let Err(err) = config_file.reload(&path, &watcher_app_state).await {
-                                            handle_error(err, &path);
+                            let mut trigger = false;
+                            for path in event.paths {
+                                let mut resolved = None;
+                                if let Some((config_file, _is_dir)) = files.get(&path) {
+                                    resolved = Some(*config_file);
+                                } else if recursive_mode == RecursiveMode::Recursive && path.extension().is_some_and(|ext| ext == "yml") {
+                                    for (key, (config_file, is_dir)) in &files {
+                                        if *is_dir && path.starts_with(key) {
+                                            resolved = Some(*config_file);
+                                            break;
                                         }
                                     }
                                 }
+
+                                if let Some(config_file) = resolved {
+                                    // Consolidate updates
+                                    let effective = if config_file == ConfigFile::SourceFile { ConfigFile::Sources } else { config_file };
+                                    pending_configs.insert(effective, path);
+                                    trigger = true;
+                                }
+                            }
+
+                            if trigger {
+                                debounce_timer = Box::pin(tokio::time::sleep(tokio::time::Duration::from_millis(500)));
+                                timer_active = true;
                             }
                         }
                     }
-                    }
                     Err(e) => error!("watch error: {e:?}"),
+                }
+            }
+
+            () = &mut debounce_timer, if timer_active => {
+                timer_active = false;
+                if !pending_configs.is_empty() {
+                    for (config_file, path) in pending_configs.drain() {
+                        if let Err(err) = config_file.reload(&path, &watcher_app_state).await {
+                           handle_error(err, &path);
+                        }
+                    }
                 }
             }
 

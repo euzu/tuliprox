@@ -319,15 +319,7 @@ where
 {
     let path = PathBuf::from(file_path);
     let filename = path.file_name().map_or(default_name.to_string(), |f| f.to_string_lossy().to_string());
-    let backup_path = PathBuf::from(backup_dir).join(format!("{filename}_{}", Local::now().format("%Y%m%d_%H%M%S")));
-
-
-    match fs::copy(&path, &backup_path).await {
-        Ok(_) => {}
-        Err(err) => { error!("Could not backup file {}:{}", &backup_path.to_str().unwrap_or("?"), err) }
-    }
-    info!("Saving file to {}", &path.to_str().unwrap_or("?"));
-
+    
     let mut serialized = String::new();
     let options = serde_saphyr::SerializerOptions {
         prefer_block_scalars: false,
@@ -335,6 +327,23 @@ where
     };
     serde_saphyr::to_fmt_writer_with_options(&mut serialized, &config, options)
         .map_err(|err| create_tuliprox_error!(TuliproxErrorKind::Info, "Could not serialize config: {}", err))?;
+
+    if path.exists() {
+        if let Ok(existing) = fs::read_to_string(&path).await {
+            if existing == serialized {
+                // info!("File {} unchanged, skipping write", path.display());
+                return Ok(());
+            }
+        }
+    }
+
+    let backup_path = PathBuf::from(backup_dir).join(format!("{filename}_{}", Local::now().format("%Y%m%d_%H%M%S")));
+
+    match fs::copy(&path, &backup_path).await {
+        Ok(_) => {}
+        Err(err) => { error!("Could not backup file {}:{}", &backup_path.to_str().unwrap_or("?"), err) }
+    }
+    info!("Saving file to {}", &path.to_str().unwrap_or("?"));
 
     fs::write(&path, serialized)
         .await

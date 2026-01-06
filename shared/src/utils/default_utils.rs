@@ -1,4 +1,6 @@
+use std::sync::Arc;
 use crate::model::{ConfigTargetOptions, LibraryMetadataFormat};
+use crate::utils::intern;
 
 pub const fn is_zero_u16(v: &u16) -> bool { *v == 0 }
 pub const fn is_true(v: &bool) -> bool { *v }
@@ -82,11 +84,11 @@ pub fn is_default_tmdb_cache_duration_days(v: &u32) -> bool { *v == DEFAULT_TMDB
 pub fn default_storage_formats() -> Vec<LibraryMetadataFormat> {
     vec![]
 }
-pub fn default_movie_category() -> String {
-    "Local Movies".to_string()
+pub fn default_movie_category() -> Arc<str> {
+    intern("Local Movies")
 }
-pub fn default_series_category() -> String {
-    "Local TV Shows".to_string()
+pub fn default_series_category() -> Arc<str> {
+    intern("Local TV Shows")
 }
 
 pub const DEFAULT_SUPPORTED_LIBRARY_EXTENSIONS: &[&str] = &[

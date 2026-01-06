@@ -116,14 +116,14 @@ impl M3uPlaylistIterator {
         let entry = if let Some(set) = &self.filter {
             if let Some((current_item, _)) = self.lookup_item.take() {
                 // Avoid cloning strings while filtering
-                let next_valid = self.reader.find(|(_, pli)| set.contains(pli.group.as_str()));
+                let next_valid = self.reader.find(|(_, pli)| set.contains(&*pli.group));
                 self.lookup_item = next_valid.map(|(_k, v)| (v, true)); // has_next handled by iterator usually, but here we just need the item
                 let has_next = self.lookup_item.is_some();
                 Some((current_item, has_next))
             } else {
-                let current_item = self.reader.find(|(_, item)| set.contains(item.group.as_str()));
+                let current_item = self.reader.find(|(_, item)| set.contains(&*item.group));
                 if let Some((_, item)) = current_item {
-                    self.lookup_item = self.reader.find(|(_, item)| set.contains(item.group.as_str())).map(|(_, item)| (item, true));
+                    self.lookup_item = self.reader.find(|(_, item)| set.contains(&*item.group)).map(|(_, item)| (item, true));
                     let has_next = self.lookup_item.is_some();
                     Some((item, has_next))
                 } else {

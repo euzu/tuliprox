@@ -37,6 +37,23 @@ pub fn get_input_storage_path(input_name: &str, working_dir: &str) -> std::io::R
     std::fs::create_dir_all(&path).map(|()| path)
 }
 
+pub fn ensure_input_storage_path(cfg: &Config, input_name: &str) -> Result<PathBuf, TuliproxError> {
+    if let Ok(path) = get_input_storage_path(input_name, &cfg.working_dir) {
+        if std::fs::create_dir_all(&path).is_err() {
+            let msg = format!(
+                "Failed to save xtream data, can't create directory {}",
+                &path.display()
+            );
+            return Err(notify_err!(msg));
+        }
+        Ok(path)
+    } else {
+        let msg = format!("Failed to save xtream data, can't create directory for input {input_name}");
+        Err(notify_err!(msg))
+    }
+}
+
+
 pub fn get_geoip_path(working_dir: &str) -> PathBuf {
     Path::new(working_dir).join("geoip.db")
 }

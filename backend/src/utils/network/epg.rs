@@ -16,6 +16,24 @@ fn get_input_raw_epg_file_path(url: &str, input: &ConfigInput, working_dir: &str
 async fn download_epg_file(url: &str, client: &reqwest::Client, input: &ConfigInput, working_dir: &str) -> Result<PathBuf, TuliproxError> {
     debug!("Getting epg file path for url: {}", sanitize_sensitive_info(url));
     let persist_file_path = get_input_raw_epg_file_path(url, input, working_dir);
+
+    if input.cache_duration_seconds > 0 {
+        if let Some(path) = &persist_file_path {
+            if path.exists() {
+                if let Ok(metadata) = tokio::fs::metadata(path).await {
+                    if let Ok(modified) = metadata.modified() {
+                        if let Ok(elapsed) = std::time::SystemTime::now().duration_since(modified) {
+                            if elapsed.as_secs() < input.cache_duration_seconds {
+                                debug!("Using cached epg file: {}", path.display());
+                                return Ok(path.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     request::get_input_epg_content_as_file(client, input, working_dir, url, persist_file_path).await
 }
 

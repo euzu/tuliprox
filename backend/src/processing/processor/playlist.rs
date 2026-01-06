@@ -4,13 +4,15 @@ use crate::utils::xtream;
 use crate::utils::{epg, StepMeasureCallback};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::sync::{Arc, Weak};
+use tokio::sync::{Mutex, OwnedRwLockWriteGuard, RwLock};
 use tokio::task::JoinSet;
 
 use crate::api::model::{EventManager, EventMessage, PlaylistStorageState, UpdateGuard};
 use crate::messaging::send_message_json;
 use crate::model::Epg;
+
+
 use crate::model::FetchedPlaylist;
 use crate::model::Mapping;
 use crate::model::{ConfigTarget, ProcessTargets};
@@ -26,16 +28,20 @@ use crate::processing::processor::trakt::process_trakt_categories_for_target;
 use crate::processing::processor::xtream_series::playlist_resolve_series;
 use crate::processing::processor::xtream_vod::playlist_resolve_vod;
 use crate::repository::playlist_repository::{load_input_playlist, persist_input_playlist, persist_playlist};
+use crate::repository::xtream_repository::CategoryKey;
+use crate::repository::{MemoryPlaylistSource, PlaylistSource};
 use crate::utils::StepMeasure;
 use crate::utils::{debug_if_enabled, trace_if_enabled};
 use futures::StreamExt;
 use indexmap::IndexMap;
-use log::{debug, error, info, log_enabled, trace, warn, Level};
+use log::{debug, error, info, log_enabled, warn, Level};
 use shared::error::{get_errors_notify_message, notify_err, TuliproxError};
 use shared::foundation::filter::{get_field_value, set_field_value, Filter, ValueAccessor, ValueProvider};
 use shared::model::xtream_const::XTREAM_CLUSTER;
-use shared::model::{CounterModifier, FieldGetAccessor, FieldSetAccessor, InputType, ItemField, MsgKind, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistUpdateState, ProcessingOrder, UUIDType, XtreamCluster};
-use shared::utils::{create_alias_uuid, default_as_default};
+use shared::model::{CounterModifier, FieldGetAccessor, FieldSetAccessor, InputType, ItemField, MsgKind,
+                    PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistUpdateState,
+                    ProcessingOrder, UUIDType};
+use shared::utils::{create_alias_uuid, default_as_default, StringInterner};
 use std::time::Instant;
 
 fn is_valid(pli: &PlaylistItem, filter: &Filter, match_as_ascii: bool) -> bool {
@@ -43,14 +49,35 @@ fn is_valid(pli: &PlaylistItem, filter: &Filter, match_as_ascii: bool) -> bool {
     filter.filter(&provider)
 }
 
-#[allow(clippy::unnecessary_wraps)]
+pub fn apply_filter_to_source(source: &mut dyn PlaylistSource, filter: &Filter) -> Option<Vec<PlaylistGroup>> {
+    let mut groups: IndexMap<Arc<str>, PlaylistGroup> = IndexMap::new();
+    for pli in source.into_items() {
+        if is_valid(&pli, filter, false) {
+            let group_title = pli.header.group.clone();
+            let cluster = pli.header.xtream_cluster;
+            let cat_id = pli.header.category_id;
+            groups.entry(group_title.clone())
+                .or_insert_with(|| PlaylistGroup {
+                    id: cat_id,
+                    title: group_title,
+                    channels: vec![],
+                    xtream_cluster: cluster,
+                })
+                .channels.push(pli);
+        }
+    }
+    if groups.is_empty() { None } else { Some(groups.into_values().collect()) }
+}
+
+fn filter_playlist(source: &mut dyn PlaylistSource, target: &ConfigTarget, _interner: &mut StringInterner) -> Option<Vec<PlaylistGroup>> {
+    apply_filter_to_source(source, &target.filter)
+}
+
 pub fn apply_filter_to_playlist(playlist: &mut [PlaylistGroup], filter: &Filter) -> Option<Vec<PlaylistGroup>> {
-    debug!("Filtering {} groups", playlist.len());
     let mut new_playlist = Vec::with_capacity(128);
     for pg in playlist.iter_mut() {
         let channels = pg.channels.iter()
             .filter(|&pli| is_valid(pli, filter, false)).cloned().collect::<Vec<PlaylistItem>>();
-        trace!("Filtered group {} has now {}/{} items", pg.title, channels.len(), pg.channels.len());
         if !channels.is_empty() {
             new_playlist.push(PlaylistGroup {
                 id: pg.id,
@@ -60,11 +87,7 @@ pub fn apply_filter_to_playlist(playlist: &mut [PlaylistGroup], filter: &Filter)
             });
         }
     }
-    Some(new_playlist)
-}
-
-fn filter_playlist(playlist: &mut [PlaylistGroup], target: &ConfigTarget) -> Option<Vec<PlaylistGroup>> {
-    apply_filter_to_playlist(playlist, &target.filter)
+    if new_playlist.is_empty() { None } else { Some(new_playlist) }
 }
 
 fn assign_channel_no_playlist(new_playlist: &mut [PlaylistGroup]) {
@@ -103,27 +126,35 @@ fn exec_rename(pli: &mut PlaylistItem, rename: Option<&Vec<ConfigRename>>) {
     }
 }
 
-fn rename_playlist(playlist: &mut [PlaylistGroup], target: &ConfigTarget) -> Option<Vec<PlaylistGroup>> {
+fn rename_playlist(source: &mut dyn PlaylistSource, target: &ConfigTarget, interner: &mut StringInterner) -> Option<Vec<PlaylistGroup>> {
     match &target.rename {
-        Some(renames) => {
-            if !renames.is_empty() {
-                let mut new_playlist: Vec<PlaylistGroup> = Vec::with_capacity(playlist.len());
-                for g in playlist {
-                    let mut grp = g.clone();
-                    for r in renames {
-                        if matches!(r.field, ItemField::Group) {
-                            let cap = r.pattern.replace_all(&grp.title, &r.new_name);
-                            trace_if_enabled!("Renamed group {} to {cap} for {}", &grp.title, target.name);
-                            grp.title = cap.into_owned();
+        Some(renames) if !renames.is_empty() => {
+            let mut groups: IndexMap<Arc<str>, PlaylistGroup> = IndexMap::new();
+            for mut pli in source.into_items() {
+                // Handle group rename first if it's in the renames
+                for r in renames {
+                    if matches!(r.field, ItemField::Group) {
+                        let value = &*pli.header.group;
+                        let cap = r.pattern.replace_all(value, &r.new_name);
+                        if *value != cap {
+                            pli.header.group = interner.intern(&cap);
                         }
                     }
-
-                    grp.channels.iter_mut().for_each(|pli| exec_rename(pli, target.rename.as_ref()));
-                    new_playlist.push(grp);
                 }
-                return Some(new_playlist);
+                exec_rename(&mut pli, Some(renames));
+                let group_title = pli.header.group.clone();
+                let cluster = pli.header.xtream_cluster;
+                let cat_id = pli.header.category_id;
+                groups.entry(group_title.clone())
+                    .or_insert_with(|| PlaylistGroup {
+                        id: cat_id,
+                        title: group_title,
+                        channels: vec![],
+                        xtream_cluster: cluster,
+                    })
+                    .channels.push(pli);
             }
-            None
+            Some(groups.into_values().collect())
         }
         _ => None
     }
@@ -164,41 +195,34 @@ fn map_channel_and_flatten(channel: PlaylistItem, mapping: &Mapping) -> Vec<Play
     result
 }
 
-fn map_playlist(playlist: &mut [PlaylistGroup], target: &ConfigTarget) -> Option<Vec<PlaylistGroup>> {
-    if let Some(mappings) = target.mapping.load().as_ref() {
-        let new_playlist: Vec<PlaylistGroup> = playlist.iter().map(|playlist_group| {
-            let mut grp = playlist_group.clone();
-            mappings.iter().filter(|&mapping| mapping.mapper.as_ref().is_some_and(|v| !v.is_empty()))
-                .for_each(|mapping|
-                    grp.channels = grp.channels.drain(..).flat_map(|chan| map_channel_and_flatten(chan, mapping)).collect());
-            grp
-        }).collect();
-
-        // if the group names are changed, restructure channels to the right groups
-        // we use
-        let mut new_groups: Vec<PlaylistGroup> = Vec::with_capacity(128);
-        let mut grp_id: u32 = 0;
-        for playlist_group in new_playlist {
-            for channel in &playlist_group.channels {
-                let cluster = &channel.header.xtream_cluster;
-                let title = &channel.header.group;
-                if let Some(grp) = new_groups.iter_mut().find(|x| *x.title == **title) {
-                    grp.channels.push(channel.clone());
-                } else {
-                    grp_id += 1;
-                    new_groups.push(PlaylistGroup {
-                        id: grp_id,
-                        title: title.clone(),
-                        channels: vec![channel.clone()],
-                        xtream_cluster: *cluster,
-                    });
+fn map_playlist(source: &mut dyn PlaylistSource, target: &ConfigTarget, _interner: &mut StringInterner) -> Option<Vec<PlaylistGroup>> {
+    let mapping_binding = target.mapping.load();
+    let mappings = mapping_binding.as_ref()?;
+    let valid_mappings = mappings.iter().filter(|m| m.mapper.as_ref().is_some_and(|v| !v.is_empty()));
+    let iter: Box<dyn Iterator<Item=PlaylistItem>> = Box::new(source.into_items());
+    let mapped_iter = valid_mappings.fold(iter, |iter, mapping| {
+        Box::new(iter.flat_map(move |chan| map_channel_and_flatten(chan, mapping)))
+            as Box<dyn Iterator<Item=PlaylistItem>>
+    });
+    let mut next_groups: IndexMap<Arc<str>, PlaylistGroup> = IndexMap::new();
+    let mut grp_id: u32 = 0;
+    for channel in mapped_iter {
+        let group_title = channel.header.group.clone();
+        let cluster = channel.header.xtream_cluster;
+        next_groups.entry(group_title.clone())
+            .or_insert_with(|| {
+                grp_id += 1;
+                PlaylistGroup {
+                    id: grp_id,
+                    title: group_title,
+                    channels: Vec::new(),
+                    xtream_cluster: cluster,
                 }
-            }
-        }
-        Some(new_groups)
-    } else {
-        None
+            })
+            .channels.push(channel);
     }
+
+    Some(next_groups.into_values().collect())
 }
 
 fn map_playlist_counter(target: &ConfigTarget, playlist: &mut [PlaylistGroup]) {
@@ -247,7 +271,7 @@ fn is_target_enabled(target: &ConfigTarget, user_targets: &ProcessTargets) -> bo
     (!user_targets.enabled && target.enabled) || (user_targets.enabled && user_targets.has_target(target.id))
 }
 
-async fn playlist_download_from_input(client: &reqwest::Client, app_config: &Arc<AppConfig>, input: &ConfigInput) -> (Vec<PlaylistGroup>, Vec<TuliproxError>, bool) {
+async fn playlist_download_from_input(client: &reqwest::Client, app_config: &Arc<AppConfig>, input: &ConfigInput) -> (Vec<PlaylistGroup>, Vec<TuliproxError>, bool, bool) {
     let config = &*app_config.config.load();
     let working_dir = &config.working_dir;
 
@@ -286,14 +310,20 @@ async fn playlist_download_from_input(client: &reqwest::Client, app_config: &Arc
     };
 
     if fully_cached {
-        return (vec![], vec![], true);
+        return (vec![], vec![], true, false);
     }
 
-    let (playlist, errors) = match input.input_type {
-        InputType::M3u => m3u::download_m3u_playlist(client, config, input).await,
+    let (playlist, errors, persisted) = match input.input_type {
+        InputType::M3u => {
+            let (p, e) = m3u::download_m3u_playlist(client, config, input).await;
+            (p, e, false)
+        }
         InputType::Xtream => xtream::download_xtream_playlist(config, client, input, clusters_to_download.as_deref()).await,
-        InputType::M3uBatch | InputType::XtreamBatch => (vec![], vec![]),
-        InputType::Library => library::download_library_playlist(client, app_config, input).await,
+        InputType::M3uBatch | InputType::XtreamBatch => (vec![], vec![], false),
+        InputType::Library => {
+            let (p, e) = library::download_library_playlist(client, app_config, input).await;
+            (p, e, false)
+        }
     };
 
     // Update Status
@@ -330,20 +360,19 @@ async fn playlist_download_from_input(client: &reqwest::Client, app_config: &Arc
         }
     }
 
-    (playlist, errors, false)
+    (playlist, errors, false, persisted)
 }
 
-async fn process_source(client: &reqwest::Client, app_config: Arc<AppConfig>, source_idx: usize,
-                        user_targets: Arc<ProcessTargets>, event_manager: Option<Arc<EventManager>>,
-                        playlist_state: Option<&Arc<PlaylistStorageState>>,
-) -> (Vec<InputStats>, Vec<TargetStats>, Vec<TuliproxError>) {
-    let sources = app_config.sources.load();
+#[allow(clippy::too_many_lines)]
+async fn process_source(source_idx: usize, ctx: &PlaylistProcessingContext) -> (Vec<InputStats>, Vec<TargetStats>, Vec<TuliproxError>) {
+    let sources = ctx.config.sources.load();
     let mut errors = vec![];
     let mut input_stats = HashMap::<String, InputStats>::new();
     let mut target_stats = Vec::<TargetStats>::new();
     if let Some(source) = sources.get_source_at(source_idx) {
+        let mut interner = StringInterner::default();
         let mut source_playlists = Vec::with_capacity(128);
-        let broadcast_step = create_broadcast_callback(event_manager.as_ref());
+        let broadcast_step = create_broadcast_callback(ctx.event_manager.as_ref());
         // Download the sources
         let mut source_downloaded = false;
         for input_name in &source.inputs {
@@ -351,24 +380,48 @@ async fn process_source(client: &reqwest::Client, app_config: Arc<AppConfig>, so
                 error!("Input {input_name} referenced by source {source_idx} does not exist");
                 continue;
             };
-            if is_input_enabled(input, &user_targets) {
+            if is_input_enabled(input, &ctx.user_targets) {
                 source_downloaded = true;
 
                 let start_time = Instant::now();
                 // Download the playlist for input
-                let (playlist_groups, mut error_list) = {
+                let (mut playlist_groups, mut error_list) = {
                     broadcast_step("Playlist download", &format!("Downloading input '{}'", input.name));
-                    // Caching Logic
-                    let (downloaded_playlist, mut download_err, was_cached) = playlist_download_from_input(client, &app_config, input).await;
 
-                    let (playlist, error) = if was_cached {
-                        match load_input_playlist(&app_config, input, None).await {
-                            Ok(pl) => (pl, None),
-                            Err(e) => (vec![], Some(e)),
+                    // Coordination Logic
+                    let need_download = !ctx.is_input_downloaded(&input.name).await;
+
+                    let (downloaded_playlist, mut download_err, was_cached, persisted) = if need_download {
+                        // Acquire named lock to prevent thundering herd on same input
+                        let _input_lock = ctx.get_input_lock(&input.name);
+                        // Check again after lock
+                        let already_processed = ctx.is_input_downloaded(&input.name).await;
+
+                        if already_processed {
+                            // Use empty results, will load from disk below
+                            (vec![], vec![], true, false)
+                        } else {
+                            let res = playlist_download_from_input(&ctx.client, &ctx.config, input).await;
+                            // Mark as processed if NO critical errors? 
+                            // playlist_download_from_input returns errors but also potentially a partial playlist.
+                            // If it attempted download, we consider it processed for this session.
+                            let mut processed = ctx.processed_inputs.lock().await;
+                            processed.insert(input.name.clone());
+                            res
+                        }
+                    } else {
+                        (vec![], vec![], true, false)
+                    };
+
+                    let (playlist, error) = if was_cached || persisted {
+                        match load_input_playlist(&ctx.config, input, None).await {
+                            Ok(pl_source) => (pl_source, None),
+                            Err(e) => (MemoryPlaylistSource::default().boxed(), Some(e)),
                         }
                     } else {
                         broadcast_step("Playlist download", &format!("Persisting input '{}' playlist", input.name));
-                        persist_input_playlist(&app_config, input, downloaded_playlist).await
+                        let (pl, err) = persist_input_playlist(&ctx.config, input, downloaded_playlist).await;
+                        (MemoryPlaylistSource::new(pl).boxed(), err)
                     };
 
                     if let Some(err) = error {
@@ -382,16 +435,16 @@ async fn process_source(client: &reqwest::Client, app_config: Arc<AppConfig>, so
                 // Download epg for input
                 let (tvguide, mut tvguide_errors) = if error_list.is_empty() {
                     broadcast_step("Playlist download", &format!("Downloading epg for input '{}'", input.name));
-                    let working_dir = &app_config.config.load().working_dir;
-                    epg::get_xmltv(client, input, working_dir).await
+                    let working_dir = &ctx.config.config.load().working_dir;
+                    epg::get_xmltv(&ctx.client, input, working_dir).await
                 } else {
                     (None, vec![])
                 };
 
                 errors.append(&mut error_list);
                 errors.append(&mut tvguide_errors);
-                let group_count = playlist_groups.len();
-                let channel_count = playlist_groups.iter().map(|group| group.channels.len()).sum();
+                let group_count = playlist_groups.get_group_count();
+                let channel_count = playlist_groups.get_channel_count();
                 let input_name = &input.name;
                 if playlist_groups.is_empty() {
                     broadcast_step("Playlist download", &format!("Input '{}' playlist is empty", input.name));
@@ -401,18 +454,7 @@ async fn process_source(client: &reqwest::Client, app_config: Arc<AppConfig>, so
                     source_playlists.push(
                         FetchedPlaylist {
                             input,
-                            // If I create Arc here, it drops at end of loop iteration!
-                            // SAFETY ISSUE.
-                            // `source_playlists` stores `FetchedPlaylist`.
-                            // `FetchedPlaylist` struct definition:
-                            // pub struct FetchedPlaylist<'a> { pub input: &'a ConfigInput, ... }
-                            // It holds a REFERENCE.
-                            // If `input` comes from `sources` (guard), it lives as long as `sources` guard lives.
-                            // `sources` guard is alive in this function scope.
-                            // So `&input` is valid.
-                            // `playlist_download_from_input` takes `&Arc<ConfigInput>`. I pass formatted Arc.
-                            // `FetchedPlaylist` needs reference.
-                            playlist_groups,
+                            source: playlist_groups,
                             epg: tvguide,
                         }
                     );
@@ -427,12 +469,12 @@ async fn process_source(client: &reqwest::Client, app_config: Arc<AppConfig>, so
                 debug!("Source at index {source_idx} is empty");
                 errors.push(notify_err!(format!("Source at index {source_idx} is empty: {}", source.inputs.iter().map(std::string::String::as_str).collect::<Vec<&str>>().join(", "))));
             } else {
-                debug_if_enabled!("Source has {} groups", source_playlists.iter().map(|fpl| fpl.playlist_groups.len()).sum::<usize>());
-                let event_manager_clone = event_manager.clone();
+                debug_if_enabled!("Source has {} groups", source_playlists.iter_mut().map(FetchedPlaylist::get_channel_count).sum::<usize>());
                 for target in &source.targets {
-                    let event_manager_clone = event_manager_clone.clone();
-                    if is_target_enabled(target, &user_targets) {
-                        match process_playlist_for_target(&app_config, client, &mut source_playlists, target, &mut input_stats, &mut errors, event_manager_clone, playlist_state).await {
+                    if is_target_enabled(target, &ctx.user_targets) {
+                        match process_playlist_for_target(ctx, &mut source_playlists, target,
+                                                          &mut input_stats, &mut errors,
+                                                          &mut interner).await {
                             Ok(()) => {
                                 target_stats.push(TargetStats::success(&target.name));
                             }
@@ -477,42 +519,74 @@ fn create_input_stat(group_count: usize, channel_count: usize, error_count: usiz
     }
 }
 
-async fn process_sources(client: &reqwest::Client, config: &Arc<AppConfig>, user_targets: Arc<ProcessTargets>,
-                         event_manager: Option<Arc<EventManager>>, playlist_state: Option<&Arc<PlaylistStorageState>>,
-) -> (Vec<SourceStats>, Vec<TuliproxError>) {
+
+#[derive(Clone)]
+pub struct PlaylistProcessingContext {
+    pub client: reqwest::Client,
+    pub config: Arc<AppConfig>,
+    pub user_targets: Arc<ProcessTargets>,
+    pub event_manager: Option<Arc<EventManager>>,
+    pub playlist_state: Option<Arc<PlaylistStorageState>>,
+
+    // Coordination
+    pub processed_inputs: Arc<Mutex<HashSet<String>>>,
+    pub input_locks: Arc<Mutex<HashMap<String, Weak<RwLock<()>>>>>,
+}
+
+impl PlaylistProcessingContext {
+    pub async fn is_input_downloaded(&self, input_name: &str) -> bool {
+        let processed = self.processed_inputs.lock().await;
+        processed.contains(input_name)
+    }
+
+    pub async fn get_input_lock(&self, input_name: &str) -> OwnedRwLockWriteGuard<()> {
+        let mut locks = self.input_locks.lock().await;
+
+        if let Some(weak) = locks.get(input_name) {
+            if let Some(strong) = weak.upgrade() {
+                return strong.write_owned().await;
+            }
+        }
+
+        let lock = Arc::new(RwLock::new(()));
+        locks.insert(input_name.to_string(), Arc::downgrade(&lock));
+        lock.write_owned().await
+    }
+}
+
+async fn process_sources(processing_ctx: &PlaylistProcessingContext) -> (Vec<SourceStats>, Vec<TuliproxError>) {
     let mut async_tasks = JoinSet::new();
-    let sources = config.sources.load();
-    let process_parallel = config.config.load().process_parallel && sources.sources.len() > 1;
+    let sources = processing_ctx.config.sources.load();
+    let process_parallel = processing_ctx.config.config.load().process_parallel && sources.sources.len() > 1;
     if process_parallel && log_enabled!(Level::Debug) {
         debug!("Parallel processing enabled");
     }
+
     let errors = Arc::new(Mutex::<Vec<TuliproxError>>::new(vec![]));
     let stats = Arc::new(Mutex::<Vec<SourceStats>>::new(vec![]));
+
     for (index, source) in sources.sources.iter().enumerate() {
-        if !source.should_process_for_user_targets(&user_targets) {
+        if !source.should_process_for_user_targets(&processing_ctx.user_targets) {
             continue;
         }
 
         // We're using the file lock this way on purpose
         let source_lock_path = PathBuf::from(format!("source_{index}"));
-        let Ok(update_lock) = config.file_locks.try_write_lock(&source_lock_path).await else {
+        let Ok(update_lock) = processing_ctx.config.file_locks.try_write_lock(&source_lock_path).await else {
             warn!("The update operation for the source at index {index} was skipped because an update is already in progress.");
             continue;
         };
 
         let shared_errors = errors.clone();
         let shared_stats = stats.clone();
-        let cfg = config.clone();
-        let usr_trgts = user_targets.clone();
-        let event_manager = event_manager.clone();
+        let ctx = processing_ctx.clone();
+
         if process_parallel {
-            let http_client = client.clone();
-            let playlist_state = playlist_state.cloned();
             async_tasks.spawn(async move {
                 // Hold the per-source lock for the full duration of this update.
                 let current_update_lock = update_lock;
                 let (input_stats, target_stats, mut res_errors) =
-                    process_source(&http_client, cfg, index, usr_trgts, event_manager, playlist_state.as_ref()).await;
+                    process_source(index, &ctx).await;
                 shared_errors.lock().await.append(&mut res_errors);
                 if let Some(process_stats) = SourceStats::try_new(input_stats, target_stats) {
                     shared_stats.lock().await.push(process_stats);
@@ -521,7 +595,7 @@ async fn process_sources(client: &reqwest::Client, config: &Arc<AppConfig>, user
             });
         } else {
             let (input_stats, target_stats, mut res_errors) =
-                process_source(client, cfg, index, usr_trgts, event_manager, playlist_state).await;
+                process_source(index, &ctx).await;
             shared_errors.lock().await.append(&mut res_errors);
             if let Some(process_stats) = SourceStats::try_new(input_stats, target_stats) {
                 shared_stats.lock().await.push(process_stats);
@@ -541,7 +615,7 @@ async fn process_sources(client: &reqwest::Client, config: &Arc<AppConfig>, user
     }
 }
 
-pub type ProcessingPipe = Vec<fn(playlist: &mut [PlaylistGroup], target: &ConfigTarget) -> Option<Vec<PlaylistGroup>>>;
+pub type ProcessingPipe = Vec<fn(source: &mut dyn PlaylistSource, target: &ConfigTarget, interner: &mut StringInterner) -> Option<Vec<PlaylistGroup>>>;
 
 fn get_processing_pipe(target: &ConfigTarget) -> ProcessingPipe {
     match &target.processing_order {
@@ -554,28 +628,26 @@ fn get_processing_pipe(target: &ConfigTarget) -> ProcessingPipe {
     }
 }
 
-fn duplicate_hash(item: &PlaylistItem) -> UUIDType {
-    item.get_uuid()
-}
-
 fn execute_pipe<'a>(target: &ConfigTarget, pipe: &ProcessingPipe, fpl: &FetchedPlaylist<'a>,
-                    duplicates: &mut HashSet<UUIDType>) -> FetchedPlaylist<'a> {
+                          duplicates: &mut HashSet<UUIDType>,
+                          interner: &mut StringInterner) -> FetchedPlaylist<'a> {
     let mut new_fpl = FetchedPlaylist {
         input: fpl.input,
-        playlist_groups: fpl.playlist_groups.clone(), // we need to clone, because of multiple target definitions, we cant change the initial playlist.
+        source: fpl.clone_source(),
         epg: fpl.epg.clone(),
     };
     if target.options.as_ref().is_some_and(|opt| opt.remove_duplicates) {
-        for group in &mut new_fpl.playlist_groups {
-            // `HashSet::insert`  returns true for first insert, otherwise false
-            group.channels.retain(|item| duplicates.insert(duplicate_hash(item)));
-        }
+        new_fpl.deduplicate(duplicates);
     }
 
     for f in pipe {
-        if let Some(groups) = f(&mut new_fpl.playlist_groups, target) {
-            new_fpl.playlist_groups = groups;
+        if let Some(groups) = f(new_fpl.source.as_mut(), target, interner) {
+            new_fpl.source = MemoryPlaylistSource::new(groups).boxed();
         }
+    }
+    // Ensure source is memory-based for downstream mutable processing (VOD/series resolution)
+    if !new_fpl.source.is_memory() {
+        new_fpl.source = MemoryPlaylistSource::new(new_fpl.source.get_groups()).boxed();
     }
     new_fpl
 }
@@ -585,9 +657,9 @@ fn execute_pipe<'a>(target: &ConfigTarget, pipe: &ProcessingPipe, fpl: &FetchedP
 fn flatten_groups(playlistgroups: Vec<PlaylistGroup>) -> Vec<PlaylistGroup> {
     let mut sort_order: Vec<PlaylistGroup> = vec![];
     let mut idx: usize = 0;
-    let mut group_map: HashMap<(String, XtreamCluster), usize> = HashMap::new();
+    let mut group_map: HashMap<CategoryKey, usize> = HashMap::new();
     for group in playlistgroups {
-        let key = (group.title.clone(), group.xtream_cluster);
+        let key = (group.xtream_cluster, group.title.clone());
         match group_map.entry(key) {
             std::collections::hash_map::Entry::Vacant(v) => {
                 v.insert(idx);
@@ -605,14 +677,12 @@ fn flatten_groups(playlistgroups: Vec<PlaylistGroup>) -> Vec<PlaylistGroup> {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn process_playlist_for_target(app_config: &Arc<AppConfig>,
-                                     client: &reqwest::Client,
+async fn process_playlist_for_target(ctx: &PlaylistProcessingContext,
                                      playlists: &mut [FetchedPlaylist<'_>],
                                      target: &ConfigTarget,
                                      stats: &mut HashMap<String, InputStats>,
                                      errors: &mut Vec<TuliproxError>,
-                                     event_manager: Option<Arc<EventManager>>,
-                                     playlist_state: Option<&Arc<PlaylistStorageState>>,
+                                     interner: &mut StringInterner,
 ) -> Result<(), Vec<TuliproxError>> {
     debug_if_enabled!("Processing order is {}", &target.processing_order);
 
@@ -620,22 +690,22 @@ async fn process_playlist_for_target(app_config: &Arc<AppConfig>,
     let mut processed_fetched_playlists: Vec<FetchedPlaylist> = vec![];
 
     debug!("Executing processing pipes");
-    let broadcast_step = create_broadcast_callback(event_manager.as_ref());
+    let broadcast_step = create_broadcast_callback(ctx.event_manager.as_ref());
 
     let pipe = get_processing_pipe(target);
     let mut step = StepMeasure::new(&target.name, broadcast_step);
     for provider_fpl in playlists.iter_mut() {
         step.broadcast("Executing transformations on '{}' playlist", &target.name);
-        let mut processed_fpl = execute_pipe(target, &pipe, provider_fpl, &mut duplicates);
-        playlist_resolve_series(app_config, client, target, errors, &pipe, provider_fpl, &mut processed_fpl).await;
-        playlist_resolve_vod(app_config, client, target, errors, &mut processed_fpl).await;
+        let mut processed_fpl = execute_pipe(target, &pipe, provider_fpl, &mut duplicates, interner);
+        playlist_resolve_series(&ctx.config, &ctx.client, target, errors, &pipe, provider_fpl, &mut processed_fpl, interner).await;
+        playlist_resolve_vod(&ctx.config, &ctx.client, target, errors, provider_fpl, &mut processed_fpl).await;
         // stats
-        let input_stats = stats.get_mut(&processed_fpl.input.name);
-        if let Some(stat) = input_stats {
-            stat.processed_stats.group_count = processed_fpl.playlist_groups.len();
-            stat.processed_stats.channel_count = processed_fpl.playlist_groups.iter()
-                .map(|group| group.channels.len())
-                .sum();
+        let input_entry_name = processed_fpl.input.name.clone();
+        let group_count = processed_fpl.get_group_count();
+        let channel_count = processed_fpl.get_channel_count();
+        if let Some(stat) = stats.get_mut(&input_entry_name) {
+            stat.processed_stats.group_count = group_count;
+            stat.processed_stats.channel_count = channel_count;
         }
         processed_fetched_playlists.push(processed_fpl);
     }
@@ -654,7 +724,7 @@ async fn process_playlist_for_target(app_config: &Arc<AppConfig>,
         Ok(())
     } else {
         // Process Trakt categories
-        if trakt_playlist(client, target, errors, &mut new_playlist).await {
+        if trakt_playlist(&ctx.client, target, errors, &mut new_playlist).await {
             step.tick("trakt categories");
         }
 
@@ -669,11 +739,11 @@ async fn process_playlist_for_target(app_config: &Arc<AppConfig>,
         map_playlist_counter(target, &mut flat_new_playlist);
         step.tick("assigning channel counter");
 
-        let config = app_config.config.load();
-        if process_watch(&config, client, target, &flat_new_playlist).await {
+        let config = ctx.config.config.load();
+        if process_watch(&config, &ctx.client, target, &flat_new_playlist).await {
             step.tick("group watches");
         }
-        let result = persist_playlist(app_config, &mut flat_new_playlist, flatten_tvguide(&new_epg).as_ref(), target, playlist_state).await;
+        let result = persist_playlist(&ctx.config, &mut flat_new_playlist, flatten_tvguide(&new_epg).as_ref(), target, ctx.playlist_state.as_ref(), interner).await;
         step.stop("Persisting playlists");
         result
     }
@@ -681,7 +751,7 @@ async fn process_playlist_for_target(app_config: &Arc<AppConfig>,
 
 pub fn process_favourites(playlist: &mut Vec<PlaylistGroup>, favourites_cfg: Option<&[ConfigFavourites]>) {
     if let Some(favourites) = favourites_cfg {
-        let mut fav_groups: IndexMap<String, Vec<PlaylistItem>> = IndexMap::new();
+        let mut fav_groups: IndexMap<Arc<str>, Vec<PlaylistItem>> = IndexMap::new();
         for pg in playlist.iter() {
             for pli in &pg.channels {
                 // series episodes cant be included in favourites
@@ -737,14 +807,14 @@ async fn trakt_playlist(client: &reqwest::Client, target: &ConfigTarget, errors:
 }
 
 async fn process_epg(processed_fetched_playlists: &mut Vec<FetchedPlaylist<'_>>) -> (Vec<Epg>, Vec<PlaylistGroup>) {
-    let mut new_playlist = vec![];
+    let mut new_playlist: Vec<PlaylistGroup> = vec![];
     let mut new_epg = vec![];
 
     // each fetched playlist can have its own epgl url.
     // we need to process each input epg.
     for fp in processed_fetched_playlists {
         process_playlist_epg(fp, &mut new_epg).await;
-        new_playlist.append(&mut fp.playlist_groups);
+        new_playlist.extend(fp.source.get_groups());
     }
     (new_epg, new_playlist)
 }
@@ -786,9 +856,19 @@ pub async fn exec_processing(client: &reqwest::Client, app_config: Arc<AppConfig
         None
     };
 
-    let event_manager_clone = event_manager.clone();
+    // Initialize Context
+    let ctx = PlaylistProcessingContext {
+        client: client.clone(),
+        config: app_config.clone(),
+        user_targets: targets.clone(),
+        event_manager: event_manager.clone(),
+        playlist_state: playlist_state.clone(),
+        processed_inputs: Arc::new(Mutex::new(HashSet::new())),
+        input_locks: Arc::new(Mutex::new(HashMap::new())),
+    };
+
     let start_time = Instant::now();
-    let (stats, errors) = process_sources(client, &app_config, targets.clone(), event_manager_clone, playlist_state.as_ref()).await;
+    let (stats, errors) = process_sources(&ctx).await;
     // log errors
     for err in &errors {
         error!("{}", err.message);
@@ -814,19 +894,24 @@ pub async fn exec_processing(client: &reqwest::Client, app_config: Arc<AppConfig
         }
     }
 
+    let elapsed = start_time.elapsed().as_secs();
+    let update_finished_message = format!("🌷 Update process finished! Took {elapsed} secs.");
+
     // send errors
     if let Some(message) = get_errors_notify_message!(errors, 255) {
-        if let Some(events) = event_manager {
+        if let Some(events) = &event_manager {
             events.send_event(EventMessage::PlaylistUpdate(PlaylistUpdateState::Failure));
         }
         if let Ok(error_msg) = serde_json::to_string(&serde_json::Value::Object(serde_json::map::Map::from_iter([("errors".to_string(), serde_json::Value::String(message))]))) {
             send_message_json(client, MsgKind::Error, messaging, error_msg.as_str()).await;
         }
-    } else if let Some(events) = event_manager {
+    } else if let Some(events) = &event_manager {
         events.send_event(EventMessage::PlaylistUpdate(PlaylistUpdateState::Success));
     }
-    let elapsed = start_time.elapsed().as_secs();
-    info!("🌷 Update process finished! Took {elapsed} secs.");
+    if let Some(events) = &event_manager {
+        events.send_event(EventMessage::PlaylistUpdate(PlaylistUpdateState::Success));
+    }
+    info!("{update_finished_message}");
 }
 
 // #[cfg(test)]

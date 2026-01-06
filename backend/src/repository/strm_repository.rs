@@ -5,7 +5,8 @@ use crate::model::{ApiProxyServerInfo, AppConfig, ProxyUserCredentials};
 use crate::model::{ConfigTarget, StrmTargetOutput};
 use crate::repository::storage::{ensure_target_storage_path};
 use crate::repository::storage_const;
-use crate::utils::{async_file_reader, async_file_writer, normalize_string_path, truncate_filename, IO_BUFFER_SIZE};
+use crate::utils::{async_file_reader, async_file_writer, normalize_string_path, truncate_filename,
+                   IO_BUFFER_SIZE};
 use chrono::Datelike;
 use filetime::{set_file_times, FileTime};
 use log::{error, trace};
@@ -14,7 +15,7 @@ use serde::Serialize;
 use shared::error::{create_tuliprox_error_result, info_err};
 use shared::error::{TuliproxError, TuliproxErrorKind};
 use shared::model::{ClusterFlags, PlaylistGroup, PlaylistItem, PlaylistItemType, StreamProperties, StrmExportStyle, UUIDType};
-use shared::utils::{extract_extension_from_url, hash_bytes, hash_string_as_hex, truncate_string, ExportStyleConfig, CONSTANTS};
+use shared::utils::{ arc_str_serde, extract_extension_from_url, hash_bytes, hash_string_as_hex, truncate_string, ExportStyleConfig, CONSTANTS};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -130,13 +131,15 @@ pub fn strm_get_file_paths(file_prefix: &str, target_path: &Path) -> PathBuf {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StrmItemInfo {
-    group: String,
+    #[serde(with = "arc_str_serde")]
+    group: Arc<str>,
     title: String,
     item_type: PlaylistItemType,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     provider_id: Option<u32>,
     virtual_id: u32,
-    input_name: String,
+    #[serde(with = "arc_str_serde")]
+    input_name: Arc<str>,
     url: String,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     series_name: Option<String>,

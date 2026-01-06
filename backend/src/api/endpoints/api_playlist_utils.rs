@@ -14,12 +14,12 @@ use crate::api::api_utils::{json_or_bin_response};
 fn group_playlist_items<T>(
     cluster: XtreamCluster,
     iter: impl Iterator<Item=T>,
-    get_group: fn(&T) -> String,
+    get_group: fn(&T) -> Arc<str>,
 ) -> Vec<PlaylistResponseGroup>
 where
     T: Serialize + Into<CommonPlaylistItem>,
 {
-    let mut groups: IndexMap<String, Vec<T>> = IndexMap::new();
+    let mut groups: IndexMap<Arc<str>, Vec<T>> = IndexMap::new();
 
     for item in iter {
         let group_key = get_group(&item);
@@ -115,7 +115,7 @@ async fn grouped_channels(
         ))
 }
 
-pub(in crate::api::endpoints) async fn get_playlist_for_target(cfg_target: Option<&ConfigTarget>, cfg: &AppConfig, accept: Option<&str>) -> impl axum::response::IntoResponse + Send {
+pub(in crate::api::endpoints) async fn get_playlist_for_target(cfg_target: Option<&ConfigTarget>, cfg: &AppConfig, accept: Option<&str>) -> impl IntoResponse + Send {
     if let Some(target) = cfg_target {
         if target.has_output(TargetType::Xtream) {
             let live_channels = grouped_channels(cfg, target, XtreamCluster::Live).await;
@@ -150,7 +150,10 @@ pub(in crate::api::endpoints) async fn get_playlist(client: &reqwest::Client, cf
             let (result, errors) =
                 match input.input_type {
                     InputType::M3u | InputType::M3uBatch => m3u::download_m3u_playlist(client, cfg, input).await,
-                    InputType::Xtream | InputType::XtreamBatch => xtream::download_xtream_playlist(cfg, client, input, None).await,
+                    InputType::Xtream | InputType::XtreamBatch => {
+                        let (pl, err, _) = xtream::download_xtream_playlist(cfg, client, input, None).await;
+                        (pl, err)
+                    }
                     InputType::Library => {
                         return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({ "error": "Library inputs are not supported on this endpoint"}))).into_response();
                     }

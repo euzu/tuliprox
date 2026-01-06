@@ -2,7 +2,7 @@
 name = "tuliprox"
 version = "3.2.37"
 edition = "2021"
-rust-version = "1.87.0"
+rust-version = "1.89.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

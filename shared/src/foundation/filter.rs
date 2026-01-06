@@ -31,11 +31,11 @@ pub fn get_field_value(pli: &PlaylistItem, field: ItemField) -> String {
 pub fn set_field_value(pli: &mut PlaylistItem, field: ItemField, value: String) -> bool {
     let header = &mut pli.header;
     match field {
-        ItemField::Group => header.group = value,
+        ItemField::Group => header.group = crate::utils::intern(&value),
         ItemField::Name => header.name = value,
         ItemField::Title => header.title = value,
         ItemField::Url => header.url = value,
-        ItemField::Input => header.input_name = value,
+        ItemField::Input => header.input_name = crate::utils::intern(&value),
         ItemField::Caption => {
             header.title.clone_from(&value);
             header.name = value;
@@ -746,7 +746,7 @@ mod tests {
         PlaylistItem {
             header: PlaylistItemHeader {
                 name: name.to_string(),
-                group: group.to_string(),
+                group: crate::utils::intern(group),
                 ..Default::default()
             },
         }

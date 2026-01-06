@@ -2,6 +2,7 @@ use crate::model::macros;
 use shared::error::TuliproxError;
 use shared::model::{LibraryConfigDto, LibraryContentType, LibraryMetadataFormat};
 use std::path::PathBuf;
+use std::sync::Arc;
 use shared::info_err;
 use shared::utils::default_metadata_path;
 
@@ -40,8 +41,8 @@ pub struct LibraryTmdbConfig {
 
 #[derive(Debug, Clone)]
 pub struct LibraryPlaylistConfig {
-    pub movie_category: String,
-    pub series_category: String,
+    pub movie_category: Arc<str>,
+    pub series_category: Arc<str>,
 }
 
 

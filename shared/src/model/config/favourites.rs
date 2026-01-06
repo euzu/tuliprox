@@ -1,11 +1,14 @@
+use std::sync::Arc;
 use crate::error::{TuliproxError};
 use crate::foundation::filter::{get_filter, Filter};
 use crate::model::{PatternTemplate};
+use crate::utils::arc_str_serde;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigFavouritesDto {
-    pub group: String,
+    #[serde(with = "arc_str_serde")]
+    pub group: Arc<str>,
     #[serde(default)]
     pub filter: String,
     #[serde(default)]

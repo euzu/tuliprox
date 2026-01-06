@@ -126,7 +126,7 @@ async fn m3u_api_stream(
     let input = try_option_bad_request!(
       app_state
       .app_config
-      .get_input_by_name(pli.input_name.as_str()),
+      .get_input_by_name(&pli.input_name),
       true,
       format!("Cant find input {} for target {target_name}, stream_id {virtual_id}", pli.input_name)
     );

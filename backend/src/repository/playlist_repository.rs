@@ -12,12 +12,13 @@ use crate::repository::target_id_mapping::{TargetIdMapping, VirtualIdRecord};
 use crate::repository::xtream_repository::{load_input_xtream_playlist, persist_input_xtream_playlist, xtream_get_file_path, xtream_get_storage_path, xtream_write_playlist};
 use crate::utils;
 use log::info;
+use crate::repository::{EmptyPlaylistSource, M3uDiskPlaylistSource, MemoryPlaylistSource, PlaylistSource, XtreamDiskPlaylistSource};
 use shared::create_tuliprox_error;
 use shared::error::TuliproxError;
 use shared::error::{info_err, TuliproxErrorKind};
 use shared::model::xtream_const::XTREAM_CLUSTER;
 use shared::model::{InputType, M3uPlaylistItem, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, StreamProperties, XtreamCluster, XtreamPlaylistItem};
-use shared::utils::{is_dash_url, is_hls_url};
+use shared::utils::{is_dash_url, is_hls_url, StringInterner};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -33,7 +34,8 @@ pub struct ProviderEpisodeKey {
 }
 
 pub async fn persist_playlist(app_config: &Arc<AppConfig>, playlist: &mut [PlaylistGroup], epg: Option<&Epg>,
-                              target: &ConfigTarget, playlist_state: Option<&Arc<PlaylistStorageState>>) -> Result<(), Vec<TuliproxError>> {
+                              target: &ConfigTarget, playlist_state: Option<&Arc<PlaylistStorageState>>,
+                              interner: &mut StringInterner) -> Result<(), Vec<TuliproxError>> {
     let mut errors = vec![];
     let config = &app_config.config.load();
     let target_path = match ensure_target_storage_path(config, &target.name) {
@@ -80,7 +82,7 @@ pub async fn persist_playlist(app_config: &Arc<AppConfig>, playlist: &mut [Playl
     rewrite_series_info_episode_virtual_id(playlist, &local_library_series, &provider_series);
 
     for output in &target.output {
-        let mut filtered = match output {
+        let mut filtered: Option<Vec<PlaylistGroup>> = match output {
             TargetOutput::Xtream(out) => out.filter.as_ref().and_then(|flt| apply_filter_to_playlist(playlist, flt)),
             TargetOutput::M3u(out) => out.filter.as_ref().and_then(|flt| apply_filter_to_playlist(playlist, flt)),
             TargetOutput::Strm(out) => out.filter.as_ref().and_then(|flt| apply_filter_to_playlist(playlist, flt)),
@@ -94,7 +96,7 @@ pub async fn persist_playlist(app_config: &Arc<AppConfig>, playlist: &mut [Playl
         };
 
         let result = match output {
-            TargetOutput::Xtream(_xtream_output) => xtream_write_playlist(app_config, target, pl).await,
+            TargetOutput::Xtream(_xtream_output) => xtream_write_playlist(app_config, target, pl, interner).await,
             TargetOutput::M3u(m3u_output) => m3u_write_playlist(app_config, target, m3u_output, &target_path, pl).await,
             TargetOutput::Strm(strm_output) => write_strm_playlist(app_config, target, strm_output, pl).await,
             TargetOutput::HdHomeRun(_hdhomerun_output) => Ok(()),
@@ -368,26 +370,38 @@ pub async fn persist_input_playlist(app_config: &Arc<AppConfig>, input: &ConfigI
     }
 }
 
-pub async fn load_input_playlist(app_config: &Arc<AppConfig>, input: &ConfigInput, clusters: Option<&[XtreamCluster]>) -> Result<Vec<PlaylistGroup>, TuliproxError> {
+pub async fn load_input_playlist(app_config: &Arc<AppConfig>, input: &ConfigInput, clusters: Option<&[XtreamCluster]>) -> Result<Box<dyn PlaylistSource>, TuliproxError> {
     let working_dir = &app_config.config.load().working_dir;
     let storage_path = get_input_storage_path(&input.name, working_dir)
         .map_err(|e| create_tuliprox_error!(TuliproxErrorKind::Info, "Error getting input path: {e}"))?;
 
+    let use_disk_input_playlist = app_config.config.load().use_disk_input_playlist;
+
     match input.input_type {
         InputType::Xtream | InputType::XtreamBatch => {
-            let clusters_to_load = if let Some(c) = clusters {
-                c
+            if use_disk_input_playlist {
+                Ok(Box::new(XtreamDiskPlaylistSource::new(app_config, &storage_path).await))
             } else {
-                &XTREAM_CLUSTER
-            };
-
-            load_input_xtream_playlist(app_config, &storage_path, clusters_to_load).await
+                let clusters_to_load = if let Some(c) = clusters {
+                    c
+                } else {
+                    &XTREAM_CLUSTER
+                };
+                let groups = load_input_xtream_playlist(app_config, &storage_path, clusters_to_load).await?;
+                Ok(Box::new(MemoryPlaylistSource::new(groups)))
+            }
         }
-        _ => {
+        InputType::M3u | InputType::M3uBatch => {
             // Load M3U
             let file_path = get_input_playlist_file_path(&storage_path, input.name.as_str());
-            load_input_m3u_playlist(app_config, &file_path).await
+            if use_disk_input_playlist && file_path.exists() {
+                Ok(Box::new(M3uDiskPlaylistSource::new(app_config, &file_path).await))
+            } else {
+                let groups = load_input_m3u_playlist(app_config, &file_path).await?;
+                Ok(Box::new(MemoryPlaylistSource::new(groups)))
+            }
         }
+        InputType::Library => Ok(Box::new(EmptyPlaylistSource::default()))
     }
 }
 

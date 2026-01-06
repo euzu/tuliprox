@@ -2,7 +2,7 @@
 name = "frontend"
 version = "3.2.37"
 edition = "2021"
-rust-version = "1.87.0"
+rust-version = "1.89.0"
 
 [dependencies]
 shared = { version = "3.2.37", path = "../shared" }

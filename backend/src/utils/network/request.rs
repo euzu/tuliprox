@@ -497,7 +497,7 @@ pub async fn download_text_content(
 
     if log_enabled!(log::Level::Debug) {
         if let Ok((_content, response_url)) = result.as_ref() {
-            debug!("Request took: {} {}", format_elapsed_time(start_time.elapsed().as_secs()), sanitize_sensitive_info(response_url.as_str()));
+           debug!("Request took: {} {}", format_elapsed_time(start_time.elapsed().as_secs()), sanitize_sensitive_info(response_url.as_str()));
         }
     }
 
@@ -562,7 +562,7 @@ pub async fn get_input_json_content(client: &reqwest::Client, disabled_headers: 
 }
 
 async fn download_json_content_as_stream(client: &reqwest::Client, disabled_headers: Option<&ReverseProxyDisabledHeaderConfig>, input: &InputSource, persist_filepath: Option<PathBuf>) -> Result<DynReader, Error> {
-    debug_if_enabled!("Downloading json content from {}", sanitize_sensitive_info(&input.url));
+    debug_if_enabled!("Downloading json content as stream from {}", sanitize_sensitive_info(&input.url));
     match download_text_content_as_stream(client, disabled_headers, input, None, persist_filepath).await {
         Ok((reader, _response_url)) => Ok(reader),
         Err(err) => Err(err)
