@@ -4,6 +4,7 @@ use shared::model::{PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistIte
 use shared::utils::{default_supported_video_extensions, extract_id_from_url, StringInterner};
 use std::borrow::BorrowMut;
 use tokio::io::AsyncBufReadExt;
+use indexmap::IndexMap;
 
 // other implementations like calculating text_distance on all titles took too much time
 // we keep it now as simple as possible and less memory intensive.
@@ -248,30 +249,18 @@ pub async fn consume_m3u<F: FnMut(PlaylistItem)>(cfg: &Config, input: &ConfigInp
 pub async fn parse_m3u(cfg: &Config, input: &ConfigInput, lines: DynReader) -> Vec<PlaylistGroup>
 {
     let ord_counter = std::sync::atomic::AtomicU32::new(1);
-    let mut sort_order: Vec<Vec<PlaylistItem>> = vec![];
-    let mut sort_order_idx: usize = 0;
-    let mut group_map: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    consume_m3u(cfg, input, lines, |item| {
-        // keep the original sort order for groups and group the playlist items
+    let mut group_map: IndexMap<String, Vec<PlaylistItem>> = IndexMap::new();
+    consume_m3u(cfg, input, lines, |mut item| {
+        item.header.source_ordinal = ord_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let key = {
             let header = &item.header;
             format!("{}{}", &header.xtream_cluster, &header.group)
         };
-        match group_map.entry(key) {
-            std::collections::hash_map::Entry::Vacant(v) => {
-                v.insert(sort_order_idx);
-                sort_order.push(vec![item]);
-                sort_order_idx += 1;
-            }
-            std::collections::hash_map::Entry::Occupied(o) => {
-                if let Some(order) = sort_order.get_mut(*o.get()) {
-                    order.push(item);
-                }
-            }
-        }
+        group_map.entry(key).or_default().push(item);
     }).await;
+
     let mut grp_id = 0;
-    let result: Vec<PlaylistGroup> = sort_order.into_iter().filter_map(|channels| {
+    group_map.into_values().filter_map(|channels| {
         // create a group based on the first playlist item
         let channel = channels.first();
         if let Some((cluster, group_title)) = channel.map(|pli|
@@ -281,8 +270,7 @@ pub async fn parse_m3u(cfg: &Config, input: &ConfigInput, lines: DynReader) -> V
         } else {
             None
         }
-    }).collect();
-    result
+    }).collect()
 }
 
 #[cfg(test)]

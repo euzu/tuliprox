@@ -26,6 +26,7 @@ use crate::utils::request::DynReader;
 use fs2::FileExt;
 use std::fs::File;
 use std::sync::Arc;
+use shared::{notify_err, notify_err_res};
 
 const THREE_DAYS_IN_SECS: i64 = 3 * 24 * 60 * 60;
 
@@ -509,14 +510,14 @@ async fn process_xtream_cluster_to_disk(
     };
     let xtream_path = xtream_get_file_path(&storage_path, cluster);
 
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<XtreamPlaylistItem>();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<XtreamPlaylistItem>(BATCH_SIZE * 2);
     let input_clone = input.clone();
     let parse_task = tokio::spawn(async move {
         // trace!("Spawned parse_task for cluster {}", cluster);
         xtream::parse_xtream_streaming(&input_clone, cluster, categories, streams, move |item| {
             // trace!("Parsed item {}: {}", item.virtual_id, item.name);
-            if tx.send(item).is_err() {
-                return Err(TuliproxError::new(shared::error::TuliproxErrorKind::Notify, "Channel closed".to_string()));
+            if tx.blocking_send(item).is_err() {
+                return notify_err_res!("Channel closed");
             }
             Ok(())
         }).await
@@ -531,13 +532,13 @@ async fn process_xtream_cluster_to_disk(
             .store(&tmp_xtream_path)
             .map_err(|e| {
                 error!("Failed to initialize ghost BPlusTree at {}: {e}", tmp_xtream_path.display());
-                TuliproxError::new(shared::error::TuliproxErrorKind::Notify, format!("Init tree error {e}"))
+                notify_err!("Init tree error {e}")
             })?;
 
         let mut tree = BPlusTreeUpdate::try_new(&tmp_xtream_path)
             .map_err(|e| {
                 error!("Failed to open ghost tree at {}: {e}", tmp_xtream_path.display());
-                TuliproxError::new(shared::error::TuliproxErrorKind::Notify, format!("Failed to open tree {e}"))
+                notify_err!("Failed to open tree {e}")
             })?;
 
         let mut buffer = Vec::with_capacity(BATCH_SIZE);
@@ -550,7 +551,7 @@ async fn process_xtream_cluster_to_disk(
                 let batch: Vec<(&u32, &XtreamPlaylistItem)> = buffer.iter().map(|i| (&i.provider_id, i)).collect();
                 tree.upsert_batch(&batch).map_err(|e| {
                     error!("Batch upsert failed for cluster {cluster}: {e}");
-                    TuliproxError::new(shared::error::TuliproxErrorKind::Notify, format!("Upsert failed {e}"))
+                    notify_err!("Upsert failed {e}")
                 })?;
                 buffer.clear();
             }
@@ -562,7 +563,7 @@ async fn process_xtream_cluster_to_disk(
             let batch: Vec<(&u32, &XtreamPlaylistItem)> = buffer.iter().map(|i| (&i.provider_id, i)).collect();
             tree.upsert_batch(&batch).map_err(|e| {
                 error!("Final batch upsert failed for cluster {cluster}: {e}");
-                TuliproxError::new(shared::error::TuliproxErrorKind::Notify, format!("Upsert failed {e}"))
+                notify_err!("Upsert failed {e}")
             })?;
         }
         Ok::<(), TuliproxError>(())
@@ -571,8 +572,8 @@ async fn process_xtream_cluster_to_disk(
     let (parse_res, consumer_res) = futures::join!(parse_task, consumer_task);
     // trace!("Joined tasks for cluster {}", cluster);
 
-    let categories = parse_res.map_err(|e| TuliproxError::new(shared::error::TuliproxErrorKind::Notify, format!("Parse task join err {e}")))??;
-    consumer_res.map_err(|e| TuliproxError::new(shared::error::TuliproxErrorKind::Notify, format!("Consumer task join err {e}")))??;
+    let categories = parse_res.map_err(|e| notify_err!("Parse task join err {e}"))??;
+    consumer_res.map_err(|e| notify_err!("Consumer task join err {e}"))??;
 
     // 1. Save categories to a temporary file
     let col_path = match cluster {
@@ -599,12 +600,12 @@ async fn process_xtream_cluster_to_disk(
     // trace!("Performing atomic swap for cluster {}", cluster);
     if let Err(e) = crate::utils::rename_or_copy(&tmp_xtream_path, &xtream_path, false) {
         error!("Failed to swap xtream database for {cluster}: {e}");
-        return Err(TuliproxError::new(shared::error::TuliproxErrorKind::Notify, format!("Failed to swap database: {e}")));
+        return notify_err_res!("Failed to swap database: {e}");
     }
 
     if let Err(e) = crate::utils::rename_or_copy(&tmp_col_path, &col_path, false) {
         error!("Failed to swap xtream categories for {cluster}: {e}");
-        return Err(TuliproxError::new(shared::error::TuliproxErrorKind::Notify, format!("Failed to swap categories: {e}")));
+        return notify_err_res!("Failed to swap categories: {e}");
     }
 
     // Cleanup - temporary files are usually replaced/moved by swap, but defensive removal of leftovers
@@ -635,12 +636,12 @@ async fn save_xtream_categories_to_file(col_path: &Path, categories: &[XtreamCat
             }
             serde_json::to_writer(&file, &cat_entries).map_err(|e| {
                 error!("Failed to write categories to file {}: {e}", col_path_buf.display());
-                TuliproxError::new(shared::error::TuliproxErrorKind::Notify, format!("Write failed: {e}"))
+                notify_err!("Write failed: {e}")
             })?;
             let _ = file.unlock();
         } else {
-            return Err(TuliproxError::new(shared::error::TuliproxErrorKind::Notify, format!("Failed to create category file {}", col_path_buf.display())));
+            return notify_err_res!("Failed to create category file {}", col_path_buf.display());
         }
         Ok(())
-    }).await.map_err(|e| TuliproxError::new(shared::error::TuliproxErrorKind::Notify, format!("Spawn error {e}")))?
+    }).await.map_err(|e| notify_err!("Spawn error {e}"))?
 }
