@@ -57,7 +57,7 @@ impl EpgConfigDto {
                                         logo_override: epg_source.logo_override,
                                     });
                                 }
-                                Err(err) => return Err(info_err!(err))
+                                Err(err) => return Err(info_err!("{}", err))
                             }
                         } else {
                             self.t_sources.push(epg_source.clone());

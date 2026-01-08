@@ -5,7 +5,7 @@ use crate::utils::{is_false, is_true, default_as_true, get_credentials_from_url_
                    sanitize_sensitive_info, trim_last_slash, deserialize_timestamp, is_zero_u16,
                    serialize_option_vec_flow_map_items};
 use super::PanelApiConfigDto;
-use crate::{check_input_credentials, check_input_connections, create_tuliprox_error_result, info_err};
+use crate::{check_input_credentials, check_input_connections, info_err_res, info_err};
 
 use enum_iterator::Sequence;
 use std::collections::{HashMap, HashSet};
@@ -101,7 +101,7 @@ impl FromStr for InputType {
         } else if s.eq(Self::LIBRARY) {
             Ok(Self::Library)
         } else {
-            create_tuliprox_error_result!(TuliproxErrorKind::Info, "Unknown InputType: {}", s)
+            info_err_res!("Unknown InputType: {}", s)
         }
     }
 }
@@ -146,7 +146,7 @@ impl FromStr for InputFetchMethod {
         } else if s.eq(Self::POST_METHOD) {
             Ok(Self::POST)
         } else {
-            create_tuliprox_error_result!(TuliproxErrorKind::Info, "Unknown Fetch Method: {}", s)
+            info_err_res!("Unknown Fetch Method: {}", s)
         }
     }
 }
@@ -262,11 +262,11 @@ impl ConfigInputAliasDto {
         self.id = index + 1;
         self.name = self.name.trim().to_string();
         if self.name.is_empty() {
-            return Err(info_err!("name for input is mandatory".to_string()));
+            return Err(info_err!("{}", "name for input is mandatory"));
         }
         self.url = self.url.trim().to_string();
         if self.url.is_empty() {
-            return Err(info_err!("url for input is mandatory".to_string()));
+            return Err(info_err!("{}", "url for input is mandatory"));
         }
         check_input_credentials!(self, input_type, true, true);
         check_input_connections!(self, input_type, true);
@@ -353,7 +353,7 @@ impl ConfigInputDto {
 
         self.name = self.name.trim().to_owned();
         if self.name.is_empty() {
-            return Err(info_err!("name for input is mandatory".to_owned()));
+            return Err(info_err!("{}", "name for input is mandatory"));
         }
 
         if let Some(duration_str) = &self.cache_duration {
@@ -369,12 +369,12 @@ impl ConfigInputDto {
                                 "m" => val * 60,
                                 "h" => val * 3600,
                                 "d" => val * 86400,
-                                _ => return Err(info_err!(format!("Invalid cache_duration unit in '{}': {}", self.name, unit))),
+                                _ => return Err(info_err!("Invalid cache_duration unit in '{}': {}", self.name, unit)),
                             },
-                            Err(_) => return Err(info_err!(format!("Invalid cache_duration format in '{}': {}", self.name, duration_str))),
+                            Err(_) => return Err(info_err!("Invalid cache_duration format in '{}': {}", self.name, duration_str)),
                         }
                     } else {
-                        return Err(info_err!(format!("Invalid cache_duration format in '{}'", self.name)));
+                        return Err(info_err!("Invalid cache_duration format in '{}'", self.name));
                     }
                 }
             };
@@ -387,7 +387,7 @@ impl ConfigInputDto {
         if let Some(staged_input) = self.staged.as_mut() {
             check_input_credentials!(staged_input, staged_input.input_type, true, true);
             if !matches!(staged_input.input_type, InputType::M3u | InputType::Xtream) {
-               return Err(info_err!("Staged input can only be of type m3u or xtream".to_owned()));
+               return info_err_res!("{}", "Staged input can only be of type m3u or xtream");
             }
         }
 

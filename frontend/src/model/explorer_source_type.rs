@@ -1,6 +1,6 @@
 use std::fmt;
 use std::str::FromStr;
-use shared::error::{info_err, TuliproxError};
+use shared::error::{info_err_res, TuliproxError};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ExplorerSourceType {
@@ -17,7 +17,7 @@ impl FromStr for ExplorerSourceType {
             "hosted" => Ok(ExplorerSourceType::Hosted),
             "provider" => Ok(ExplorerSourceType::Provider),
             "custom" => Ok(ExplorerSourceType::Custom),
-            _ => Err(info_err!(format!("Unknown explorer source type: {s}"))),
+            _ => info_err_res!("Unknown explorer source type: {s}"),
         }
     }
 }

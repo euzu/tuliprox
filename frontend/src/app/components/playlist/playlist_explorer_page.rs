@@ -1,7 +1,6 @@
 use std::fmt::Display;
 use std::str::FromStr;
-use shared::error::{TuliproxError};
-use shared::info_err;
+use shared::error::{TuliproxError, info_err_res};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PlaylistExplorerPage {
@@ -14,7 +13,7 @@ impl FromStr for PlaylistExplorerPage {
     fn from_str(s: &str) -> Result<Self, TuliproxError> {
         match s.to_lowercase().as_str() {
             "source-selector" => Ok(PlaylistExplorerPage::SourceSelector),
-            _ => Err(info_err!(format!("Unknown page type: {s}"))),
+            _ => info_err_res!("Unknown page type: {s}"),
         }
     }
 }

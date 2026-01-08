@@ -9,8 +9,7 @@ use crate::utils;
 use crate::utils::{async_file_writer, IO_BUFFER_SIZE};
 use indexmap::IndexMap;
 use log::error;
-use shared::error::{create_tuliprox_error, info_err, string_to_io_error};
-use shared::error::{str_to_io_error, TuliproxError, TuliproxErrorKind};
+use shared::error::{notify_err, info_err, string_to_io_error, str_to_io_error, TuliproxError};
 use shared::model::{M3uPlaylistItem, PlaylistGroup};
 use shared::model::{PlaylistItem, PlaylistItemType, XtreamCluster};
 use std::io::Error;
@@ -22,7 +21,7 @@ use tokio::task;
 
 macro_rules! cant_write_result {
     ($path:expr, $err:expr) => {
-        create_tuliprox_error!(TuliproxErrorKind::Notify, "failed to write m3u playlist: {} - {}", $path.display() ,$err)
+        notify_err!("failed to write m3u playlist: {} - {}", $path.display() ,$err)
     }
 }
 
@@ -38,7 +37,7 @@ pub fn m3u_get_epg_file_path(target_path: &Path) -> PathBuf {
 macro_rules! await_playlist_write {
     ($expr:expr, $fmt:literal $(, $args:expr)* ) => {{
         $expr.await.map_err(|err| {
-            create_tuliprox_error!(TuliproxErrorKind::Notify, $fmt $(, $args)*, err)
+            notify_err!($fmt $(, $args)*, err)
         })?
     }};
 }
@@ -116,7 +115,7 @@ pub async fn m3u_write_playlist(
         Ok(())
     })
         .await
-        .map_err(|err| create_tuliprox_error!(TuliproxErrorKind::Notify, "failed to write m3u playlist: {} - {err}", m3u_path.display()))??;
+        .map_err(|err| notify_err!("failed to write m3u playlist: {} - {err}", m3u_path.display()))??;
 
     Ok(())
 }
@@ -165,7 +164,7 @@ pub async fn iter_raw_m3u_playlist(config: &AppConfig, target: &ConfigTarget) ->
     }
     let file_lock = config.file_locks.read_lock(&m3u_path).await;
     match BPlusTreeQuery::<u32, M3uPlaylistItem>::try_new(&m3u_path)
-        .map_err(|err| info_err!(format!("Could not open BPlusTreeQuery {m3u_path:?} - {err}"))) {
+        .map_err(|err| info_err!("Could not open BPlusTreeQuery {m3u_path:?} - {err}")) {
         Ok(mut query) => {
             let items: Vec<M3uPlaylistItem> = query.iter().map(|(_, v)| v).collect();
             let len = items.len();
@@ -196,13 +195,13 @@ pub async fn persist_input_m3u_playlist(app_config: &Arc<AppConfig>, m3u_path: &
         Ok(())
     })
     .await
-    .map_err(|err| create_tuliprox_error!(TuliproxErrorKind::Notify, "failed to write m3u playlist: {} - {err}", m3u_path.display()))??;
+    .map_err(|err| notify_err!("failed to write m3u playlist: {} - {err}", m3u_path.display()))??;
 
     Ok(())
 }
 
 pub async fn load_input_m3u_playlist(app_config: &Arc<AppConfig>, m3u_path: &Path) -> Result<Vec<PlaylistGroup>, TuliproxError> {
-    let mut groups: IndexMap<String, PlaylistGroup> = IndexMap::new();
+    let mut groups: IndexMap<Arc<str>, PlaylistGroup> = IndexMap::new();
 
     if tokio::fs::try_exists(m3u_path).await.unwrap_or(false) {
         // Load Items

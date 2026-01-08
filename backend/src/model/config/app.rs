@@ -5,7 +5,7 @@ use arc_swap::access::Access;
 use arc_swap::{ArcSwap, ArcSwapOption};
 use log::{error, warn};
 use rand::Rng;
-use shared::create_tuliprox_error_result;
+use shared::info_err_res;
 use shared::error::{TuliproxError, TuliproxErrorKind};
 use shared::model::ConfigPaths;
 use std::borrow::Cow;
@@ -81,10 +81,10 @@ impl AppConfig {
         if let Some(username) = output_username {
             if let Some((_, config_target)) = self.get_target_for_username(username) {
                 if config_target.name != target_name {
-                    return create_tuliprox_error_result!(TuliproxErrorKind::Info, "User:{username} does not belong to target: {}", target_name);
+                    return info_err_res!("User:{username} does not belong to target: {}", target_name);
                 }
             } else {
-                return create_tuliprox_error_result!(TuliproxErrorKind::Info, "User: {username} does not exist");
+                return info_err_res!("User: {username} does not exist");
             }
             Ok(())
         } else {
@@ -249,20 +249,20 @@ impl AppConfig {
         for input in &sources.inputs {
             let input_name = input.name.trim();
             if input_name.is_empty() {
-                return create_tuliprox_error_result!(TuliproxErrorKind::Info, "input name required");
+                return info_err_res!("input name required");
             }
             if seen_names.contains(input_name) {
-                return create_tuliprox_error_result!(TuliproxErrorKind::Info, "input names should be unique: {}", input_name);
+                return info_err_res!("input names should be unique: {}", input_name);
             }
             seen_names.insert(input_name.to_string());
             if let Some(aliases) = &input.aliases {
                 for alias in aliases {
                     let input_name = alias.name.trim().to_string();
                     if input_name.is_empty() {
-                        return create_tuliprox_error_result!(TuliproxErrorKind::Info, "input name required");
+                        return info_err_res!("input name required");
                     }
                     if seen_names.contains(&input_name) {
-                        return create_tuliprox_error_result!(TuliproxErrorKind::Info, "input and alias names should be unique: {}", input_name);
+                        return info_err_res!("input and alias names should be unique: {}", input_name);
                     }
                     seen_names.insert(input_name.clone());
                 }
@@ -280,7 +280,7 @@ impl AppConfig {
                 if let Some(targets) = &schedule.targets {
                     for target_name in targets {
                         if !target_names.contains(target_name.as_str()) {
-                            return create_tuliprox_error_result!(TuliproxErrorKind::Info, "Unknown target name in scheduler: {}", target_name);
+                            return info_err_res!("Unknown target name in scheduler: {}", target_name);
                         }
                     }
                 }

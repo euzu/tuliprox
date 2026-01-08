@@ -6,7 +6,7 @@ use crate::app::context::ConfigContext;
 use crate::{config_field_bool, config_field_child, edit_field_bool, generate_form_reducer};
 use crate::app::components::config::config_view_context::ConfigViewContext;
 use crate::app::components::config::config_page::{ConfigForm, LABEL_LOG_CONFIG};
-use crate::app::components::{Chip, RadioButtonGroup};
+use crate::app::components::{Card, Chip, RadioButtonGroup};
 
 const LABEL_LOG_LEVEL: &str =  "LABEL.LOG_LEVEL";
 const LABEL_LOG_ACTIVE_USER: &str =  "LABEL.LOG_ACTIVE_USER";
@@ -67,8 +67,11 @@ pub fn LogConfigView() -> Html {
         let log_state = form_state.clone();
         html! {
           <>
+            <Card class="tp__config-view__card">
             { config_field_bool!(log_state.form, translate.t(LABEL_LOG_ACTIVE_USER),  log_active_user) }
             { config_field_bool!(log_state.form, translate.t(LABEL_LOG_SANITIZE_SENSITIVE_INFO),  sanitize_sensitive_info) }
+           </Card>
+            <Card class="tp__config-view__card">
             <div class="tp__log-config-view__header tp__config-view-page__header">
                 { config_field_child!(translate.t(LABEL_LOG_LEVEL), {
                     match log_state.form.log_level.as_ref() {
@@ -77,6 +80,7 @@ pub fn LogConfigView() -> Html {
                     }
                 })}
             </div>
+           </Card>
           </>
         }
     };
@@ -86,8 +90,11 @@ pub fn LogConfigView() -> Html {
         let log_level_selection = Rc::new(forms.form.log_level.as_ref().map_or_else(Vec::new, |l| vec![l.to_uppercase()]));
         html! {
             <>
+            <Card class="tp__config-view__card">
             { edit_field_bool!(form_state, translate.t(LABEL_LOG_ACTIVE_USER), log_active_user, LogConfigFormAction::LogActiveUser) }
             { edit_field_bool!(form_state, translate.t(LABEL_LOG_SANITIZE_SENSITIVE_INFO),  sanitize_sensitive_info, LogConfigFormAction::SanitizeSensitiveInfo) }
+            </Card>
+            <Card class="tp__config-view__card">
             { config_field_child!(translate.t(LABEL_LOG_LEVEL), {
                html! { <RadioButtonGroup
                     multi_select={false} none_allowed={true}
@@ -99,6 +106,7 @@ pub fn LogConfigView() -> Html {
                     selected={log_level_selection}
                 />
             }})}
+            </Card>
             </>
         }
     };

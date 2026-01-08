@@ -7,7 +7,7 @@ use arc_swap::ArcSwapOption;
 use jsonwebtoken::get_current_timestamp;
 use log::{debug, info};
 use shared::model::{ActiveUserConnectionChange, StreamChannel, StreamInfo, UserConnectionPermission, VirtualId};
-use shared::utils::{current_time_secs, default_grace_period_millis, default_grace_period_timeout_secs, sanitize_sensitive_info, strip_port};
+use shared::utils::{current_time_secs, default_grace_period_millis, default_grace_period_timeout_secs, intern, sanitize_sensitive_info, strip_port};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -251,7 +251,7 @@ impl ActiveUserManager {
                 if &stream.addr == addr {
                     stream.provider = String::from("tuliprox");
                     stream.channel.title = video_type.to_string();
-                    stream.channel.group = String::new();
+                    stream.channel.group = intern("");
                     return Some(stream.clone());
                 }
             }

@@ -1,7 +1,16 @@
+use crate::api::model::persist_pipe_stream::tee_dyn_reader;
+use crate::model::ConfigInput;
+use crate::model::{format_elapsed_time, AppConfig, InputSource, ReverseProxyDisabledHeaderConfig};
+use crate::utils::compression::compression_utils::{is_deflate, is_gzip};
+use crate::utils::{async_file_reader, async_file_writer, debug_if_enabled, IO_BUFFER_SIZE};
+use crate::utils::{get_file_path, persist_file};
 use futures::{StreamExt, TryStreamExt};
 use log::{debug, error, log_enabled, trace, Level};
 use reqwest::header::CONTENT_ENCODING;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use shared::error::{notify_err_res, string_to_io_error, TuliproxError};
+use shared::model::{InputFetchMethod, DEFAULT_USER_AGENT};
+use shared::utils::{filter_request_header, human_readable_byte_size, sanitize_sensitive_info, ENCODING_DEFLATE, ENCODING_GZIP};
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};
@@ -12,19 +21,6 @@ use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio_util::io::StreamReader;
 use url::Url;
-
-use crate::api::model::persist_pipe_stream::tee_dyn_reader;
-use crate::model::ConfigInput;
-use crate::model::{format_elapsed_time, AppConfig, InputSource, ReverseProxyDisabledHeaderConfig};
-use crate::repository::storage::get_input_storage_path;
-use crate::repository::storage_const;
-use crate::utils::compression::compression_utils::{is_deflate, is_gzip};
-use crate::utils::{async_file_reader, async_file_writer, debug_if_enabled, IO_BUFFER_SIZE};
-use crate::utils::{get_file_path, persist_file};
-use shared::error::{create_tuliprox_error_result, string_to_io_error};
-use shared::error::{TuliproxError, TuliproxErrorKind};
-use shared::model::{InputFetchMethod, DEFAULT_USER_AGENT};
-use shared::utils::{filter_request_header, human_readable_byte_size, sanitize_sensitive_info, short_hash, ENCODING_DEFLATE, ENCODING_GZIP};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MimeCategory {
@@ -66,32 +62,28 @@ pub fn content_type_from_ext(ext: &str) -> &'static str {
     }
 }
 
-pub async fn get_input_epg_content_as_file(client: &reqwest::Client, input: &ConfigInput, working_dir: &str, url_str: &str, persist_filepath: Option<PathBuf>) -> Result<PathBuf, TuliproxError> {
+pub async fn get_input_epg_content_as_file(client: &reqwest::Client, input: &ConfigInput, working_dir: &str, url_str: &str, persist_filepath: &Path) -> Result<PathBuf, TuliproxError> {
     debug_if_enabled!("getting input epg content working_dir: {}, url: {}", working_dir, sanitize_sensitive_info(url_str));
     if url_str.parse::<url::Url>().is_ok() {
-        match download_epg_content_as_file(client, input, url_str, working_dir, persist_filepath).await {
+        match download_epg_content_as_file(client, input, url_str, persist_filepath).await {
             Ok(content) => Ok(content),
             Err(e) => {
                 error!("cant download input {} epg url: {}  => {}", input.name, sanitize_sensitive_info(url_str), sanitize_sensitive_info(e.to_string().as_str()));
-                create_tuliprox_error_result!(TuliproxErrorKind::Notify, "Failed to download")
+                notify_err_res!("Failed to download")
             }
         }
     } else {
         let result = match get_file_path(working_dir, Some(PathBuf::from(url_str))) {
             Some(filepath) => {
                 if filepath.exists() {
-                    if let Some(persist_file_value) = persist_filepath {
-                        let to_file = &persist_file_value;
-                        if let Err(e) = tokio::fs::copy(&filepath, to_file).await {
-                            error!("cant persist to: {}  => {}", to_file.to_str().unwrap_or("?"), e);
-                            return create_tuliprox_error_result!(TuliproxErrorKind::Notify, "Failed to persist: {}  => {}", to_file.to_str().unwrap_or("?"), e);
-                        }
+                    if let Err(e) = tokio::fs::copy(&filepath, persist_filepath).await {
+                        error!("cant persist to: {}  => {}", persist_filepath.display(), e);
+                        return notify_err_res!("Failed to persist: {}  => {}", persist_filepath.display(), e);
                     }
-
                     if filepath.exists() {
                         Some(filepath)
                     } else {
-                        return create_tuliprox_error_result!(TuliproxErrorKind::Notify, "Failed: file does not exists {filepath:?}");
+                        return notify_err_res!("Failed: file does not exists {filepath:?}");
                     }
                 } else {
                     None
@@ -103,7 +95,7 @@ pub async fn get_input_epg_content_as_file(client: &reqwest::Client, input: &Con
         result.map_or_else(|| {
             let msg = format!("cant read input url: {}", sanitize_sensitive_info(url_str));
             error!("{msg}");
-            create_tuliprox_error_result!(TuliproxErrorKind::Notify, "{msg}")
+            notify_err_res!("{msg}")
         }, Ok)
     }
 }
@@ -112,11 +104,11 @@ pub async fn get_input_text_content(client: &reqwest::Client, input: &InputSourc
     debug_if_enabled!("getting input text content working_dir: {}, url: {}", working_dir, sanitize_sensitive_info(&input.url));
 
     if input.url.parse::<url::Url>().is_ok() {
-        match download_text_content(client, None, input, None, persist_filepath).await {
+        match download_text_content(client, None, input, None, persist_filepath, false).await {
             Ok((content, _response_url)) => Ok(content),
             Err(e) => {
                 error!("Failed to download input '{}': {}", &input.name, sanitize_sensitive_info(e.to_string().as_str()));
-                create_tuliprox_error_result!(TuliproxErrorKind::Notify, "Failed to download")
+                notify_err_res!("Failed to download")
             }
         }
     } else {
@@ -127,14 +119,14 @@ pub async fn get_input_text_content(client: &reqwest::Client, input: &InputSourc
                         let to_file = &persist_file_value;
                         if let Err(e) = tokio::fs::copy(&filepath, to_file).await {
                             error!("cant persist to: {}  => {}", to_file.to_str().unwrap_or("?"), e);
-                            return create_tuliprox_error_result!(TuliproxErrorKind::Notify, "Failed to persist: {}  => {}", to_file.to_str().unwrap_or("?"), e);
+                            return notify_err_res!("Failed to persist: {}  => {}", to_file.to_str().unwrap_or("?"), e);
                         }
                     }
 
                     match get_local_file_content(&filepath).await {
                         Ok(content) => Some(content),
                         Err(err) => {
-                            return create_tuliprox_error_result!(TuliproxErrorKind::Notify, "Failed : {}", err);
+                            return notify_err_res!("Failed : {}", err);
                         }
                     }
                 } else {
@@ -146,7 +138,7 @@ pub async fn get_input_text_content(client: &reqwest::Client, input: &InputSourc
         result.map_or_else(|| {
             let msg = format!("cant read input url: {}", sanitize_sensitive_info(&input.url));
             error!("{msg}");
-            create_tuliprox_error_result!(TuliproxErrorKind::Notify, "{msg}")
+            notify_err_res!("{msg}")
         }, Ok)
     }
 }
@@ -160,7 +152,7 @@ pub async fn get_input_text_content_as_stream(client: &reqwest::Client, input: &
             Ok((content, _response_url)) => Ok(content),
             Err(e) => {
                 error!("Failed to download input '{}': {}", &input.name, sanitize_sensitive_info(e.to_string().as_str()));
-                create_tuliprox_error_result!(TuliproxErrorKind::Notify, "Failed to download")
+                notify_err_res!("Failed to download")
             }
         }
     } else {
@@ -179,7 +171,7 @@ pub async fn get_input_text_content_as_stream(client: &reqwest::Client, input: &
                             }
                         }
                         Err(err) => {
-                            return create_tuliprox_error_result!(TuliproxErrorKind::Notify, "Failed : {}", err);
+                            return notify_err_res!("Failed : {}", err);
                         }
                     }
                 } else {
@@ -191,7 +183,7 @@ pub async fn get_input_text_content_as_stream(client: &reqwest::Client, input: &
         result.map_or_else(|| {
             let msg = format!("cant read input url: {}", sanitize_sensitive_info(&input.url));
             error!("{msg}");
-            create_tuliprox_error_result!(TuliproxErrorKind::Notify, "{msg}")
+            notify_err_res!("{msg}")
         }, Ok)
     }
 }
@@ -437,7 +429,7 @@ async fn get_remote_content(client: &reqwest::Client, input: &InputSource, heade
     Ok((content, response_url))
 }
 
-async fn download_epg_content_as_file(client: &reqwest::Client, input: &ConfigInput, url_str: &str, working_dir: &str, persist_filepath: Option<PathBuf>) -> Result<PathBuf, Error> {
+async fn download_epg_content_as_file(client: &reqwest::Client, input: &ConfigInput, url_str: &str, persist_filepath: &Path) -> Result<PathBuf, Error> {
     if let Ok(url) = url_str.parse::<url::Url>() {
         if url.scheme() == "file" {
             url.to_file_path().map_or_else(|()| Err(Error::new(ErrorKind::Unsupported, format!("Unknown file {}", sanitize_sensitive_info(url_str)))), |file_path| if file_path.exists() {
@@ -446,19 +438,10 @@ async fn download_epg_content_as_file(client: &reqwest::Client, input: &ConfigIn
                 Err(Error::new(ErrorKind::NotFound, format!("Unknown file {}", file_path.display())))
             })
         } else {
-            let file_path = persist_filepath.map_or_else(|| match get_input_storage_path(&input.name, working_dir) {
-                Ok(download_path) => {
-                    Ok(download_path.join(format!("{}_{}", short_hash(url_str), storage_const::FILE_EPG)))
-                }
-                Err(err) => Err(err)
-            }, Ok);
-            match file_path {
-                Ok(persist_path) => get_remote_content_as_file(client, input, &url, &persist_path).await,
-                Err(err) => Err(err)
-            }
+            get_remote_content_as_file(client, input, &url, persist_filepath).await
         }
     } else {
-        Err(std::io::Error::new(ErrorKind::Unsupported, format!("Malformed URL {}", sanitize_sensitive_info(url_str))))
+        Err(Error::new(ErrorKind::Unsupported, format!("Malformed URL {}", sanitize_sensitive_info(url_str))))
     }
 }
 
@@ -468,16 +451,14 @@ pub async fn download_text_content(
     input: &InputSource,
     headers: Option<&HeaderMap>,
     persist_filepath: Option<PathBuf>,
+    trace_log: bool,
 ) -> Result<(String, String), Error> {
     let start_time = Instant::now();
     let result = if let Ok(url) = input.url.parse::<url::Url>() {
         let result = if url.scheme() == "file" {
             match url.to_file_path() {
                 Ok(file_path) => get_local_file_content(&file_path).await.map(|c| (c, url.to_string())),
-                Err(()) => Err(string_to_io_error(format!(
-                    "Unknown file {}",
-                    sanitize_sensitive_info(&input.url)
-                ))),
+                Err(()) => Err(string_to_io_error(format!("Unknown file {}", sanitize_sensitive_info(&input.url)))),
             }
         } else {
             get_remote_content(client, input, headers, &url, disabled_headers).await
@@ -495,9 +476,10 @@ pub async fn download_text_content(
         Err(string_to_io_error(format!("Malformed URL {}", sanitize_sensitive_info(&input.url))))
     };
 
-    if log_enabled!(log::Level::Debug) {
+    let level = if trace_log { log::Level::Trace } else { log::Level::Debug };
+    if log_enabled!(level) {
         if let Ok((_content, response_url)) = result.as_ref() {
-            debug!("Request took: {} {}", format_elapsed_time(start_time.elapsed().as_secs()), sanitize_sensitive_info(response_url.as_str()));
+            log::log!(level, "Request took: {} {}", format_elapsed_time(start_time.elapsed().as_secs()), sanitize_sensitive_info(response_url.as_str()));
         }
     }
 
@@ -541,9 +523,9 @@ pub async fn download_text_content_as_stream(
     }
 }
 
-async fn download_json_content(client: &reqwest::Client, disabled_headers: Option<&ReverseProxyDisabledHeaderConfig>, input: &InputSource, persist_filepath: Option<PathBuf>) -> Result<serde_json::Value, Error> {
+async fn download_json_content(client: &reqwest::Client, disabled_headers: Option<&ReverseProxyDisabledHeaderConfig>, input: &InputSource, persist_filepath: Option<PathBuf>, trace_log: bool) -> Result<serde_json::Value, Error> {
     debug_if_enabled!("Downloading json content from {}", sanitize_sensitive_info(&input.url));
-    match download_text_content(client, disabled_headers, input, None, persist_filepath).await {
+    match download_text_content(client, disabled_headers, input, None, persist_filepath, trace_log).await {
         Ok((content, _response_url)) => {
             match serde_json::from_str::<serde_json::Value>(&content) {
                 Ok(value) => Ok(value),
@@ -554,15 +536,15 @@ async fn download_json_content(client: &reqwest::Client, disabled_headers: Optio
     }
 }
 
-pub async fn get_input_json_content(client: &reqwest::Client, disabled_headers: Option<&ReverseProxyDisabledHeaderConfig>, input: &InputSource, persist_filepath: Option<PathBuf>) -> Result<serde_json::Value, TuliproxError> {
-    match download_json_content(client, disabled_headers, input, persist_filepath).await {
+pub async fn get_input_json_content(client: &reqwest::Client, disabled_headers: Option<&ReverseProxyDisabledHeaderConfig>, input: &InputSource, persist_filepath: Option<PathBuf>, trace_log: bool) -> Result<serde_json::Value, TuliproxError> {
+    match download_json_content(client, disabled_headers, input, persist_filepath, trace_log).await {
         Ok(content) => Ok(content),
-        Err(e) => create_tuliprox_error_result!(TuliproxErrorKind::Notify, "cant download input {},  url: {}  => {}", input.name, sanitize_sensitive_info(&input.url), sanitize_sensitive_info(e.to_string().as_str()))
+        Err(e) => notify_err_res!("cant download input {}, => {}", input.name, sanitize_sensitive_info(e.to_string().as_str()))
     }
 }
 
 async fn download_json_content_as_stream(client: &reqwest::Client, disabled_headers: Option<&ReverseProxyDisabledHeaderConfig>, input: &InputSource, persist_filepath: Option<PathBuf>) -> Result<DynReader, Error> {
-    debug_if_enabled!("Downloading json content from {}", sanitize_sensitive_info(&input.url));
+    debug_if_enabled!("Downloading json content as stream from {}", sanitize_sensitive_info(&input.url));
     match download_text_content_as_stream(client, disabled_headers, input, None, persist_filepath).await {
         Ok((reader, _response_url)) => Ok(reader),
         Err(err) => Err(err)
@@ -572,7 +554,7 @@ async fn download_json_content_as_stream(client: &reqwest::Client, disabled_head
 pub async fn get_input_json_content_as_stream(client: &reqwest::Client, disabled_headers: Option<&ReverseProxyDisabledHeaderConfig>, input: &InputSource, persist_filepath: Option<PathBuf>) -> Result<DynReader, TuliproxError> {
     match download_json_content_as_stream(client, disabled_headers, input, persist_filepath).await {
         Ok(stream) => Ok(stream),
-        Err(e) => create_tuliprox_error_result!(TuliproxErrorKind::Notify, "cant download input {},  url: {}  => {}", input.name, sanitize_sensitive_info(&input.url), sanitize_sensitive_info(e.to_string().as_str()))
+        Err(e) => notify_err_res!("cant download input {} => {}", input.name, sanitize_sensitive_info(e.to_string().as_str()))
     }
 }
 

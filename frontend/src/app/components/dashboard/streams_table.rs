@@ -7,7 +7,7 @@ use crate::services::DialogService;
 use crate::utils::t_safe;
 use gloo_timers::callback::Interval;
 use gloo_utils::window;
-use shared::error::{create_tuliprox_error_result, TuliproxError, TuliproxErrorKind};
+use shared::error::{info_err_res, TuliproxError};
 use shared::model::{PlaylistItemType, ProtocolMessage, SortOrder, StreamChannel, StreamInfo, UserCommand};
 use shared::utils::{current_time_secs, default_kick_secs, strip_port};
 use std::fmt::Display;
@@ -189,7 +189,7 @@ pub fn StreamsTable(props: &StreamsTableProps) -> Html {
                         </>},
                     "CLUSTER" => html! { render_cluster(&dto.channel) },
                     "CHANNEL" => html! {dto.channel.title.as_str()},
-                    "GROUP" => html! {dto.channel.group.as_str()},
+                    "GROUP" => html! {&*dto.channel.group},
                     "CLIENT_IP" => html! { strip_port(&dto.client_ip)},
                     "COUNTRY" => html! { dto.country.as_ref().map_or_else(String::new, |c| t_safe(&translate, &format!("COUNTRY.{c}")).unwrap_or_else(||c.to_string())) },
                     "PROVIDER" => html! {dto.provider.as_str()},
@@ -349,7 +349,7 @@ impl FromStr for StreamsTableAction {
         } else if s.eq(COPY_LINK_PROVIDER_URL) {
             Ok(Self::CopyLinkProviderUrl)
         } else {
-            create_tuliprox_error_result!(TuliproxErrorKind::Info, "Unknown Stream Action: {}", s)
+            info_err_res!("Unknown Stream Action: {}", s)
         }
     }
 }

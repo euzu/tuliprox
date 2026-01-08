@@ -1,5 +1,4 @@
-use crate::error::{TuliproxError, TuliproxErrorKind};
-use crate::info_err;
+use crate::error::{TuliproxError, TuliproxErrorKind, info_err_res};
 use crate::utils::{default_grace_period_millis, default_grace_period_timeout_secs,
                    is_default_grace_period_millis, is_default_grace_period_timeout_secs,
                    default_shared_burst_buffer_mb, is_default_shared_burst_buffer_mb,
@@ -91,17 +90,12 @@ impl StreamConfigDto {
                 let triple_ms = self.grace_period_millis.saturating_mul(3);
                 self.grace_period_timeout_secs = std::cmp::max(1, triple_ms.div_ceil(1000));
             } else if self.grace_period_millis / 1000 > self.grace_period_timeout_secs {
-                return Err(info_err!(format!("Grace time period timeout {} sec should be more than grace time period {} ms", self.grace_period_timeout_secs, self.grace_period_millis)));
+                return info_err_res!("Grace time period timeout {} sec should be more than grace time period {} ms", self.grace_period_timeout_secs, self.grace_period_millis);
             }
         }
 
         if self.shared_burst_buffer_mb < MIN_SHARED_BURST_BUFFER_MB {
-            return Err(TuliproxError::new(
-                TuliproxErrorKind::Info,
-                format!(
-                    "`shared_burst_buffer_mb` must be at least {MIN_SHARED_BURST_BUFFER_MB} MB"
-                ),
-            ));
+            return info_err_res!("`shared_burst_buffer_mb` must be at least {MIN_SHARED_BURST_BUFFER_MB} MB");
         }
 
         Ok(())

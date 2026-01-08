@@ -4,21 +4,27 @@ use crate::model::{is_input_expired, xtream_mapping_option_from_target_options, 
 use crate::model::{InputSource, ProxyUserCredentials};
 use crate::processing::parser::xtream;
 use crate::processing::parser::xtream::parse_xtream_series_info;
+use crate::repository::bplustree::BPlusTreeUpdate;
 use crate::repository::playlist_repository::{get_target_id_mapping, rewrite_provider_series_info_episode_virtual_id, ProviderEpisodeKey};
-use crate::repository::storage::{get_input_storage_path, get_target_storage_path};
+use crate::repository::storage::{ensure_input_storage_path, get_input_storage_path, get_target_storage_path};
 use crate::repository::target_id_mapping::VirtualIdRecord;
+use crate::repository::xtream_repository::{get_live_cat_collection_path, get_series_cat_collection_path, get_vod_cat_collection_path, xtream_get_file_path, CategoryEntry};
 use crate::repository::xtream_repository::{persist_input_vod_info, persists_input_series_info, write_playlist_batch_item_upsert, write_playlist_item_update};
 use crate::utils::request;
 use chrono::{DateTime, Utc};
 use log::{error, info, warn};
 use shared::error::{string_to_io_error, to_io_error, TuliproxError};
-use shared::model::{MsgKind, PlaylistEntry, PlaylistGroup, ProxyUserStatus, SeriesStreamProperties,
-                    StreamProperties, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem,
-                    XtreamSeriesInfo, XtreamVideoInfo, XtreamVideoInfoDoc};
-use shared::utils::{extract_extension_from_url, get_i64_from_serde_value, get_string_from_serde_value, sanitize_sensitive_info};
+use shared::model::{MsgKind, PlaylistEntry, PlaylistGroup, ProxyUserStatus, SeriesStreamProperties, StreamProperties, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem, XtreamSeriesInfo, XtreamVideoInfo, XtreamVideoInfoDoc};
+use shared::utils::{extract_extension_from_url, get_i64_from_serde_value, get_string_from_serde_value, sanitize_sensitive_info, StringInterner};
 use std::collections::HashMap;
 use std::io::Error;
+use std::path::Path;
 use std::str::FromStr;
+
+use crate::model::XtreamCategory;
+use crate::utils::request::DynReader;
+use fs2::FileExt;
+use std::fs::File;
 use std::sync::Arc;
 
 const THREE_DAYS_IN_SECS: i64 = 3 * 24 * 60 * 60;
@@ -52,8 +58,8 @@ pub fn get_xtream_player_api_info_url(input: &ConfigInput, cluster: XtreamCluste
 }
 
 
-pub async fn get_xtream_stream_info_content(client: &reqwest::Client, input: &InputSource) -> Result<String, Error> {
-    match request::download_text_content(client, None, input, None, None).await {
+pub async fn get_xtream_stream_info_content(client: &reqwest::Client, input: &InputSource, trace_log: bool) -> Result<String, Error> {
+    match request::download_text_content(client, None, input, None, None, trace_log).await {
         Ok((content, _response_url)) => Ok(content),
         Err(err) => Err(err)
     }
@@ -79,10 +85,10 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
     }
 
     let input_source = InputSource::from(input).with_url(info_url.to_owned());
-    if let Ok(content) = get_xtream_stream_info_content(client, &input_source).await {
+    if let Ok(content) = get_xtream_stream_info_content(client, &input_source, false).await {
         if content.is_empty() {
             return Err(string_to_io_error(format!("Provider returned no response for stream with id: {}/{}/{}",
-                                                target.name.replace(' ', "_").as_str(), &cluster, pli.get_virtual_id())));
+                                                  target.name.replace(' ', "_").as_str(), &cluster, pli.get_virtual_id())));
         }
         if let Some(provider_id) = pli.get_provider_id() {
             match cluster {
@@ -135,8 +141,8 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
                                     error!("Failed to persist series info for input {}: {err}", &input.name);
                                 }
                             }
-
-                            if let Some(mut episodes) = parse_xtream_series_info(&pli.get_uuid(), &series_stream_props, &group, &series_name, input) {
+                            let mut interner = StringInterner::new();
+                            if let Some(mut episodes) = parse_xtream_series_info(&pli.get_uuid(), &series_stream_props, &group, &series_name, input, &mut interner) {
                                 let config = &app_state.app_config.config.load();
                                 match get_target_storage_path(config, target.name.as_str()) {
                                     None => {
@@ -218,7 +224,7 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
     }
 
     Err(string_to_io_error(format!("Cant find stream with id: {}/{}/{}",
-                                 target.name.replace(' ', "_").as_str(), &cluster, pli.get_virtual_id())))
+                                   target.name.replace(' ', "_").as_str(), &cluster, pli.get_virtual_id())))
 }
 
 fn xtream_resolve_stream_info(app_state: &Arc<AppState>, user: &ProxyUserCredentials,
@@ -258,12 +264,12 @@ const ACTIONS: [(XtreamCluster, &str, &str); 3] = [
     (XtreamCluster::Series, crate::model::XC_ACTION_GET_SERIES_CATEGORIES, crate::model::XC_ACTION_GET_SERIES)];
 
 async fn xtream_login(cfg: &Config, client: &reqwest::Client, input: &InputSource, username: &str) -> Result<Option<XtreamLoginInfo>, TuliproxError> {
-    let content = if let Ok(content) = request::get_input_json_content(client, None, input, None).await {
+    let content = if let Ok(content) = request::get_input_json_content(client, None, input, None, false).await {
         content
     } else {
         let input_source_account_info =
             input.with_url(format!("{}&action={}", &input.url, crate::model::XC_ACTION_GET_ACCOUNT_INFO));
-        match request::get_input_json_content(client, None, &input_source_account_info, None).await {
+        match request::get_input_json_content(client, None, &input_source_account_info, None, false).await {
             Ok(content) => content,
             Err(err) => {
                 warn!("Failed to login xtream account {username} {err}");
@@ -330,7 +336,7 @@ pub async fn notify_account_expire(exp_date: Option<i64>, cfg: &Config, client: 
 }
 
 pub async fn download_xtream_playlist(cfg: &Arc<Config>, client: &reqwest::Client, input: &ConfigInput, clusters: Option<&[XtreamCluster]>)
-                                      -> (Vec<PlaylistGroup>, Vec<TuliproxError>) {
+                                      -> (Vec<PlaylistGroup>, Vec<TuliproxError>, bool) {
     let input_source: InputSource = {
         match input.staged.as_ref() {
             None => input.into(),
@@ -348,7 +354,7 @@ pub async fn download_xtream_playlist(cfg: &Arc<Config>, client: &reqwest::Clien
 
     if let Err(err) = xtream_login(cfg, client, &input_source_login, username).await {
         error!("Could not log in with xtream user {username} for provider {}. {err}", input.name);
-        return (Vec::with_capacity(0), vec![err]);
+        return (Vec::with_capacity(0), vec![err], false);
     }
 
     let mut playlist_groups: Vec<PlaylistGroup> = Vec::with_capacity(128);
@@ -372,19 +378,30 @@ pub async fn download_xtream_playlist(cfg: &Arc<Config>, client: &reqwest::Clien
                 request::get_input_json_content_as_stream(client, None, &input_source_stream, stream_file_path)
             ) {
                 (Ok(category_content), Ok(stream_content)) => {
-                    match xtream::parse_xtream(input,
-                                               *xtream_cluster,
-                                               category_content,
-                                               stream_content).await {
-                        Ok(sub_playlist_parsed) => {
-                            if let Some(mut xtream_sub_playlist) = sub_playlist_parsed {
-                                playlist_groups.append(&mut xtream_sub_playlist);
-                            } else {
-                                error!("Could not parse playlist {xtream_cluster} for input {}: {}",
-                                    input_source.name, sanitize_sensitive_info(&input_source.url));
-                            }
+                    if cfg.disk_based_processing {
+                        // trace!("Using disk input playlist optimization for cluster {}", xtream_cluster);
+                        if let Err(err) = process_xtream_cluster_to_disk(cfg, input, *xtream_cluster, category_content, stream_content).await {
+                            error!("process_xtream_cluster_to_disk failed: {err}");
+                            errors.push(err);
+                        } else {
+                            // trace!("process_xtream_cluster_to_disk succeeded for cluster {}", xtream_cluster);
                         }
-                        Err(err) => errors.push(err)
+                    } else {
+                        // trace!("Using in-memory playlist parsing for cluster {}", xtream_cluster);
+                        match xtream::parse_xtream(input,
+                                                   *xtream_cluster,
+                                                   category_content,
+                                                   stream_content).await {
+                            Ok(sub_playlist_parsed) => {
+                                if let Some(mut xtream_sub_playlist) = sub_playlist_parsed {
+                                    playlist_groups.append(&mut xtream_sub_playlist);
+                                } else {
+                                    error!("Could not parse playlist {xtream_cluster} for input {}: {}",
+                                        input_source.name, sanitize_sensitive_info(&input_source.url));
+                                }
+                            }
+                            Err(err) => errors.push(err)
+                        }
                     }
                 }
                 (Err(err1), Err(err2)) => {
@@ -398,7 +415,8 @@ pub async fn download_xtream_playlist(cfg: &Arc<Config>, client: &reqwest::Clien
     for (grp_id, plg) in (1_u32..).zip(playlist_groups.iter_mut()) {
         plg.id = grp_id;
     }
-    (playlist_groups, errors)
+
+    (playlist_groups, errors, cfg.disk_based_processing)
 }
 
 async fn check_alias_user_state(cfg: &Arc<Config>, client: &reqwest::Client, input: &ConfigInput) {
@@ -474,5 +492,155 @@ pub fn create_vod_info_from_item(target: &ConfigTarget, user: &ProxyUserCredenti
     doc.movie_data.custom_sid = None;
 
     serde_json::to_string(&doc).unwrap_or(String::new())
+}
 
+const BATCH_SIZE: usize = 1000;
+
+async fn process_xtream_cluster_to_disk(
+    cfg: &Arc<Config>,
+    input: &ConfigInput,
+    cluster: XtreamCluster,
+    categories: DynReader,
+    streams: DynReader,
+) -> Result<(), TuliproxError> {
+    // trace!("Starting process_xtream_cluster_to_disk for cluster {}", cluster);
+    let storage_path = {
+        ensure_input_storage_path(cfg, &input.name)?
+    };
+    let xtream_path = xtream_get_file_path(&storage_path, cluster);
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<XtreamPlaylistItem>();
+
+    let input_clone = input.clone();
+    // We need to maintain the original order from the provider.
+    // Since parse_xtream_streaming processes items in order, we can use a simple counter.
+    let ord_counter = std::sync::atomic::AtomicU32::new(1);
+
+    let parse_task = tokio::spawn(async move {
+        // trace!("Spawned parse_task for cluster {}", cluster);
+        xtream::parse_xtream_streaming(&input_clone, cluster, categories, streams, move |mut item| {
+            // trace!("Parsed item {}: {}", item.virtual_id, item.name);
+            item.source_ordinal = ord_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if tx.send(item).is_err() {
+                return Err(TuliproxError::new(shared::error::TuliproxErrorKind::Notify, "Channel closed".to_string()));
+            }
+            Ok(())
+        }).await
+    });
+
+    let xtream_path_for_consumer = xtream_path.clone();
+    let consumer_task = tokio::task::spawn_blocking(move || {
+        // trace!("Spawned consumer_task for cluster {}", cluster);
+        let tmp_xtream_path = xtream_path_for_consumer.with_extension("tmp");
+        // trace!("Creating fresh ghost database at {:?}", tmp_xtream_path);
+        crate::repository::bplustree::BPlusTree::<u32, XtreamPlaylistItem>::new()
+            .store(&tmp_xtream_path)
+            .map_err(|e| {
+                error!("Failed to initialize ghost BPlusTree at {}: {e}", tmp_xtream_path.display());
+                TuliproxError::new(shared::error::TuliproxErrorKind::Notify, format!("Init tree error {e}"))
+            })?;
+
+        let mut tree = BPlusTreeUpdate::try_new(&tmp_xtream_path)
+            .map_err(|e| {
+                error!("Failed to open ghost tree at {}: {e}", tmp_xtream_path.display());
+                TuliproxError::new(shared::error::TuliproxErrorKind::Notify, format!("Failed to open tree {e}"))
+            })?;
+
+        let mut buffer = Vec::with_capacity(BATCH_SIZE);
+        // let mut total_items = 0;
+
+        while let Some(item) = rx.blocking_recv() {
+            buffer.push(item);
+            // total_items += 1;
+            if buffer.len() >= BATCH_SIZE {
+                let batch: Vec<(&u32, &XtreamPlaylistItem)> = buffer.iter().map(|i| (&i.provider_id, i)).collect();
+                tree.upsert_batch(&batch).map_err(|e| {
+                    error!("Batch upsert failed for cluster {cluster}: {e}");
+                    TuliproxError::new(shared::error::TuliproxErrorKind::Notify, format!("Upsert failed {e}"))
+                })?;
+                buffer.clear();
+            }
+        }
+
+        // trace!("Finished receiving items for {}, total: {}", cluster, total_items);
+        if !buffer.is_empty() {
+            // trace!("Writing final batch of {} items to disk for cluster {}", buffer.len(), cluster);
+            let batch: Vec<(&u32, &XtreamPlaylistItem)> = buffer.iter().map(|i| (&i.provider_id, i)).collect();
+            tree.upsert_batch(&batch).map_err(|e| {
+                error!("Final batch upsert failed for cluster {cluster}: {e}");
+                TuliproxError::new(shared::error::TuliproxErrorKind::Notify, format!("Upsert failed {e}"))
+            })?;
+        }
+        Ok::<(), TuliproxError>(())
+    });
+
+    let (parse_res, consumer_res) = futures::join!(parse_task, consumer_task);
+    // trace!("Joined tasks for cluster {}", cluster);
+
+    let categories = parse_res.map_err(|e| TuliproxError::new(shared::error::TuliproxErrorKind::Notify, format!("Parse task join err {e}")))??;
+    consumer_res.map_err(|e| TuliproxError::new(shared::error::TuliproxErrorKind::Notify, format!("Consumer task join err {e}")))??;
+
+    // 1. Save categories to a temporary file
+    let col_path = match cluster {
+        XtreamCluster::Live => get_live_cat_collection_path(&storage_path),
+        XtreamCluster::Video => get_vod_cat_collection_path(&storage_path),
+        XtreamCluster::Series => get_series_cat_collection_path(&storage_path),
+    };
+    let tmp_col_path = col_path.with_extension("tmp");
+    save_xtream_categories_to_file(&tmp_col_path, &categories).await?;
+
+    // 2. Success! Swap temporary files to permanent ones
+    let tmp_xtream_path = xtream_path.with_extension("tmp");
+
+    if let Ok(mut tree_update) = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::try_new(&tmp_xtream_path) {
+        // Compact the TEMPORARY file before moving it.
+        // We Do NOT compact to &xtream_path directly, as that would overwrite the target with the OLD data
+        if let Err(e) = tree_update.compact(&tmp_xtream_path) {
+            error!("Failed to compact temporary database for {cluster}: {e}");
+            // We continue anyway, as uncompacted data is better than no data.
+        }
+    }
+
+    // trace!("Performing atomic swap for cluster {}", cluster);
+    if let Err(e) = crate::utils::rename_or_copy(&tmp_xtream_path, &xtream_path, false) {
+        error!("Failed to swap xtream database for {cluster}: {e}");
+        return Err(TuliproxError::new(shared::error::TuliproxErrorKind::Notify, format!("Failed to swap database: {e}")));
+    }
+
+    if let Err(e) = crate::utils::rename_or_copy(&tmp_col_path, &col_path, false) {
+        error!("Failed to swap xtream categories for {cluster}: {e}");
+        return Err(TuliproxError::new(shared::error::TuliproxErrorKind::Notify, format!("Failed to swap categories: {e}")));
+    }
+
+    // Cleanup - temporary files are replaced/removed by swap, but defensive removal of leftovers
+    let _ = std::fs::remove_file(tmp_xtream_path);
+    let _ = std::fs::remove_file(tmp_col_path);
+
+    // trace!("Cluster {} updated successfully", cluster);
+    Ok(())
+}
+
+async fn save_xtream_categories_to_file(col_path: &Path, categories: &[XtreamCategory]) -> Result<(), TuliproxError> {
+    let col_path_buf = col_path.to_path_buf();
+    let cat_entries: Vec<CategoryEntry> = categories.iter().map(|c| CategoryEntry {
+        category_id: c.category_id,
+        category_name: shared::utils::intern(&c.category_name),
+        parent_id: 0,
+    }).collect();
+
+    tokio::task::spawn_blocking(move || {
+        if let Ok(file) = File::create(&col_path_buf) {
+            if let Err(e) = file.lock_exclusive() {
+                warn!("Could not acquire exclusive lock for {}: {e}, proceeding without lock", col_path_buf.display());
+            }
+            serde_json::to_writer(&file, &cat_entries).map_err(|e| {
+                error!("Failed to write categories to file {}: {e}", col_path_buf.display());
+                TuliproxError::new(shared::error::TuliproxErrorKind::Notify, format!("Write failed: {e}"))
+            })?;
+            let _ = file.unlock();
+        } else {
+            return Err(TuliproxError::new(shared::error::TuliproxErrorKind::Notify, format!("Failed to create category file {}", col_path_buf.display())));
+        }
+        Ok(())
+    }).await.map_err(|e| TuliproxError::new(shared::error::TuliproxErrorKind::Notify, format!("Spawn error {e}")))?
 }

@@ -7,19 +7,19 @@ use shared::utils::CONSTANTS;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct XtreamUserInfoResponse {
-    pub password: String,
     pub username: String,
-    pub active_cons: String,
-    pub allowed_output_formats: Vec<String>,
+    pub password: String,
+    pub message: String,
     pub auth: u16, // 0 | 1
-    #[serde(serialize_with ="serialize_number_as_string")]
-    pub created_at: i64, //1623429679,
+    pub status: String, // "Active"
     #[serde(serialize_with ="serialize_number_as_string")]
     pub exp_date: i64, //1628755200,
     pub is_trial: String, // 0 | 1
+    pub active_cons: String,
+    #[serde(serialize_with ="serialize_number_as_string")]
+    pub created_at: i64, //1623429679,
     pub max_connections: String,
-    pub message: String,
-    pub status: String, // "Active"
+    pub allowed_output_formats: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -32,6 +32,7 @@ pub struct XtreamServerInfoResponse {
     pub timezone: String,
     pub timestamp_now: i64,
     pub time_now: String, //"2021-06-28 17:07:37"
+    pub process: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -72,17 +73,17 @@ impl XtreamAuthorizationResponse {
 
         Self {
             user_info: XtreamUserInfoResponse {
-                active_cons: format!("{active_connections}"),
-                allowed_output_formats: CONSTANTS.allowed_output_formats.clone(),
+                username: user.username.clone(),
+                password: user.password.clone(),
+                message: server_info.message.clone(),
                 auth: 1,
-                created_at,
+                status: user_status.to_string(),
                 exp_date,
                 is_trial,
+                active_cons: active_connections.to_string(),
+                created_at,
                 max_connections,
-                message: server_info.message.clone(),
-                password: user.password.clone(),
-                username: user.username.clone(),
-                status: user_status.to_string(),
+                allowed_output_formats: CONSTANTS.allowed_output_formats.clone(),
             },
             server_info: XtreamServerInfoResponse {
                 url: server_info.host.clone(),
@@ -93,6 +94,7 @@ impl XtreamAuthorizationResponse {
                 timezone: server_info.timezone.clone(),
                 timestamp_now: now.timestamp(),
                 time_now: now.format("%Y-%m-%d %H:%M:%S").to_string(),
+                process: true
             },
         }
     }

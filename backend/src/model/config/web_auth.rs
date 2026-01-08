@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::BufRead;
 use std::path::PathBuf;
-use shared::error::{TuliproxError, TuliproxErrorKind, create_tuliprox_error_result};
+use shared::error::{TuliproxError, info_err_res};
 use shared::model::{UserCredential, WebAuthConfigDto};
 use crate::model::macros;
 use crate::utils;
@@ -51,7 +51,7 @@ impl WebAuthConfig {
         if !utils::path_exists(&userfile_path) {
             userfile_path = PathBuf::from(config_path).join(&userfile_name);
             if !utils::path_exists(&userfile_path) {
-                return create_tuliprox_error_result!(TuliproxErrorKind::Info, "Could not find userfile {}", &userfile_name);
+                return info_err_res!("Could not find userfile {}", &userfile_name);
             }
         }
 
@@ -72,7 +72,7 @@ impl WebAuthConfig {
 
             self.t_users = Some(users);
         } else {
-            return create_tuliprox_error_result!(TuliproxErrorKind::Info, "Could not read userfile {:?}", &userfile_path);
+            return info_err_res!("Could not read userfile {:?}", &userfile_path);
         }
         Ok(())
     }

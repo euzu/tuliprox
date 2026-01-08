@@ -1,8 +1,8 @@
 [package]
 name = "shared"
-version = "3.2.37"
+version = "3.2.38"
 edition = "2021"
-rust-version = "1.87.0"
+rust-version = "1.89.0"
 
 [dependencies]
 bitflags = "2"
@@ -11,7 +11,7 @@ regex = "1"
 enum-iterator = "2"
 log = "0"
 path-clean = "1"
-url = "2.5.7"
+url = "2.5.8"
 indexmap = "2"
 pest = "2"
 pest_derive = "2"
@@ -26,7 +26,7 @@ ciborium = "0.2.2"
 hex = "0.4.3"
 lz4_flex = "0.12.0"
 deunicode = "1.6.2"
-serde-saphyr = "0.0.12"
+serde-saphyr = "0.0.13"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3.83"

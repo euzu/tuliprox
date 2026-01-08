@@ -1,21 +1,21 @@
-use shared::error::TuliproxError;
-use shared::info_err;
-use shared::model::{ConfigApiDto, HdHomeRunConfigDto, IpCheckConfigDto, LogConfigDto, MainConfigDto, MessagingConfigDto, ProxyConfigDto, ReverseProxyConfigDto, SchedulesConfigDto, SourcesConfigDto, VideoConfigDto, WebUiConfigDto};
+use shared::error::{TuliproxError, info_err_res};
+use shared::model::{ConfigApiDto, HdHomeRunConfigDto, IpCheckConfigDto, LibraryConfigDto, LogConfigDto, MainConfigDto, MessagingConfigDto, ProxyConfigDto, ReverseProxyConfigDto, SchedulesConfigDto, SourcesConfigDto, VideoConfigDto, WebUiConfigDto};
 use std::fmt;
 use std::str::FromStr;
 
-pub const LABEL_MAIN_CONFIG: &str = "LABEL.MAIN";
-pub const LABEL_API_CONFIG: &str = "LABEL.API";
-pub const LABEL_LOG_CONFIG: &str = "LABEL.LOG";
-pub const LABEL_SCHEDULES_CONFIG: &str = "LABEL.SCHEDULES";
-pub const LABEL_MESSAGING_CONFIG: &str = "LABEL.MESSAGING";
-pub const LABEL_WEB_UI_CONFIG: &str = "LABEL.WEB_UI";
-pub const LABEL_REVERSE_PROXY_CONFIG: &str = "LABEL.REVERSE_PROXY";
+pub const LABEL_MAIN_CONFIG: &str = "LABEL.MAIN_CONFIG";
+pub const LABEL_API_CONFIG: &str = "LABEL.API_CONFIG";
+pub const LABEL_LOG_CONFIG: &str = "LABEL.LOG_CONFIG";
+pub const LABEL_SCHEDULES_CONFIG: &str = "LABEL.SCHEDULES_CONFIG";
+pub const LABEL_MESSAGING_CONFIG: &str = "LABEL.MESSAGING_CONFIG";
+pub const LABEL_WEB_UI_CONFIG: &str = "LABEL.WEB_UI_CONFIG";
+pub const LABEL_REVERSE_PROXY_CONFIG: &str = "LABEL.REVERSE_PROXY_CONFIG";
 pub const LABEL_HDHOMERUN_CONFIG: &str = "LABEL.HDHOMERUN_CONFIG";
-pub const LABEL_PROXY_CONFIG: &str = "LABEL.PROXY";
-pub const LABEL_IP_CHECK_CONFIG: &str = "LABEL.IP_CHECK";
-pub const LABEL_VIDEO_CONFIG: &str = "LABEL.VIDEO";
-pub const LABEL_PANEL_CONFIG: &str = "LABEL.PANEL";
+pub const LABEL_PROXY_CONFIG: &str = "LABEL.PROXY_CONFIG";
+pub const LABEL_IP_CHECK_CONFIG: &str = "LABEL.IP_CHECK_CONFIG";
+pub const LABEL_VIDEO_CONFIG: &str = "LABEL.VIDEO_CONFIG";
+pub const LABEL_PANEL_CONFIG: &str = "LABEL.PANEL_CONFIG";
+pub const LABEL_LIBRARY_CONFIG: &str = "LABEL.LIBRARY_CONFIG";
 
 const MAIN_PAGE: &str = "main";
 const API_PAGE: &str = "api";
@@ -29,6 +29,7 @@ const PROXY_PAGE: &str = "proxy";
 const IPCHECK_PAGE: &str = "ipcheck";
 const VIDEO_PAGE: &str = "video";
 const PANEL_PAGE: &str = "panel";
+const LIBRARY_PAGE: &str = "library";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub enum ConfigPage {
@@ -44,6 +45,7 @@ pub enum ConfigPage {
     Proxy,
     IpCheck,
     Panel,
+    Library,
 }
 
 impl FromStr for ConfigPage {
@@ -63,7 +65,8 @@ impl FromStr for ConfigPage {
             PROXY_PAGE => Ok(ConfigPage::Proxy),
             IPCHECK_PAGE => Ok(ConfigPage::IpCheck),
             PANEL_PAGE => Ok(ConfigPage::Panel),
-            _ => Err(info_err!(format!("Unknown config page: {s}"))),
+            LIBRARY_PAGE => Ok(ConfigPage::Library),
+            _ => info_err_res!("Unknown config page: {s}"),
         }
     }
 }
@@ -83,6 +86,7 @@ impl fmt::Display for ConfigPage {
             ConfigPage::Proxy => PROXY_PAGE,
             ConfigPage::IpCheck => IPCHECK_PAGE,
             ConfigPage::Panel => PANEL_PAGE,
+            ConfigPage::Library => LIBRARY_PAGE,
         };
         write!(f, "{s}")
     }
@@ -102,6 +106,7 @@ pub enum ConfigForm {
     Proxy(bool, ProxyConfigDto),
     IpCheck(bool, IpCheckConfigDto),
     Panel(bool, SourcesConfigDto),
+    Library(bool, LibraryConfigDto),
 }
 
 impl ConfigForm {
@@ -117,6 +122,7 @@ impl ConfigForm {
               | ConfigForm::HdHomerun(true, _)
               | ConfigForm::Proxy(true, _)
               | ConfigForm::IpCheck(true, _)
-              | ConfigForm::Panel(true, _))
+              | ConfigForm::Panel(true, _)
+              | ConfigForm::Library(true, _))
     }
 }

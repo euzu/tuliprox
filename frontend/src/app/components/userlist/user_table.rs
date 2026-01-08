@@ -5,7 +5,7 @@ use crate::app::components::{convert_bool_to_chip_style, AppIcon, CellValue, Chi
 use crate::app::context::TargetUser;
 use crate::model::DialogResult;
 use crate::services::DialogService;
-use shared::error::{create_tuliprox_error_result, TuliproxError, TuliproxErrorKind};
+use shared::error::{info_err_res, TuliproxError};
 use shared::model::{SortOrder};
 use shared::utils::{unix_ts_to_str, Substring};
 use std::fmt::Display;
@@ -87,7 +87,7 @@ impl FromStr for TableAction {
         } else if s.eq("copy_credentials") {
             Ok(Self::CopyCredentials)
         } else {
-            create_tuliprox_error_result!(TuliproxErrorKind::Info, "Unknown TableAction: {}", s)
+            info_err_res!("Unknown TableAction: {}", s)
         }
     }
 }

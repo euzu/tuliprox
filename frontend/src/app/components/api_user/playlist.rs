@@ -2,8 +2,7 @@ use crate::app::components::api_user::target_playlist::{BouquetSelection, UserTa
 use crate::app::components::{Panel, RadioButtonGroup, TextButton};
 use crate::hooks::use_service_context;
 use crate::model::{BusyStatus, EventMessage};
-use shared::error::TuliproxError;
-use shared::info_err;
+use shared::error::{TuliproxError, info_err_res};
 use shared::model::{PlaylistBouquetDto, PlaylistCategoriesDto, PlaylistClusterBouquetDto};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -26,7 +25,7 @@ impl FromStr for ApiUserPlaylistPage {
         match s.to_lowercase().as_str() {
             "xtream" => Ok(ApiUserPlaylistPage::Xtream),
             "m3u" => Ok(ApiUserPlaylistPage::M3u),
-            _ => Err(info_err!(format!("Unknown api user playlist type: {s}"))),
+            _ => info_err_res!("Unknown api user playlist type: {s}"),
         }
     }
 }

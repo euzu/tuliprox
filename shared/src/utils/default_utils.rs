@@ -83,10 +83,10 @@ pub fn default_storage_formats() -> Vec<LibraryMetadataFormat> {
     vec![]
 }
 pub fn default_movie_category() -> String {
-    "Local Movies".to_string()
+    String::from("Local Movies")
 }
 pub fn default_series_category() -> String {
-    "Local TV Shows".to_string()
+    String::from("Local TV Shows")
 }
 
 pub const DEFAULT_SUPPORTED_LIBRARY_EXTENSIONS: &[&str] = &[

@@ -10,6 +10,7 @@ use shared::model::{ConfigPaths, ConfigType};
 use std::path::Path;
 use std::sync::Arc;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ConfigFile {
     Config,
     ApiProxy,

@@ -1,15 +1,15 @@
 [package]
 name = "frontend"
-version = "3.2.37"
+version = "3.2.38"
 edition = "2021"
-rust-version = "1.87.0"
+rust-version = "1.89.0"
 
 [dependencies]
-shared = { version = "3.2.37", path = "../shared" }
+shared = { version = "3.2.38", path = "../shared" }
 chrono = "0"
 yew = "0.21"
 yew-router = "0.18"
-yew-hooks = "0.3"
+yew-hooks = "0.3.4"
 yew-i18n = "0.1"
 serde_json = {version = "1" }
 serde = {version = "1.0", features = ["derive", "rc"] }

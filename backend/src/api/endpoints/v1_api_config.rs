@@ -148,7 +148,7 @@ async fn config_batch_content(
         if let Some(batch_url) = config_input.t_batch_url.as_ref() {
             let input_source = InputSource::from(&*config_input).with_url(batch_url.to_owned());
             let disabled_headers = app_state.get_disabled_headers();
-            return match download_text_content(&app_state.http_client.load(), disabled_headers.as_ref(), &input_source, None, None).await {
+            return match download_text_content(&app_state.http_client.load(), disabled_headers.as_ref(), &input_source, None, None, false).await {
                 Ok((content, _path)) => {
                     // Return CSV with explicit content-type
                     try_unwrap_body!(axum::response::Response::builder()

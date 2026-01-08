@@ -17,11 +17,10 @@ use indexmap::IndexMap;
 use log::error;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use shared::error::{create_tuliprox_error, create_tuliprox_error_result, info_err, notify_err, string_to_io_error, TuliproxError, TuliproxErrorKind};
+use shared::error::{info_err_res, info_err, notify_err, string_to_io_error, TuliproxError};
 use shared::model::xtream_const::XTREAM_CLUSTER;
 use shared::model::{PlaylistGroup, PlaylistItem, PlaylistItemType, SeriesStreamProperties, StreamProperties, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem};
-use shared::utils::get_u32_from_serde_value;
-use std::borrow::Cow;
+use shared::utils::{arc_str_serde, get_u32_from_serde_value, intern, StringInterner};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Error, ErrorKind};
@@ -30,8 +29,7 @@ use std::sync::Arc;
 
 macro_rules! cant_write_result {
     ($path:expr, $err:expr) => {
-        create_tuliprox_error!(
-            TuliproxErrorKind::Notify,
+        notify_err!(
             "failed to write xtream playlist: {} - {}",
             $path.display(),
             $err
@@ -40,39 +38,38 @@ macro_rules! cant_write_result {
 }
 
 #[inline]
-fn get_collection_path(path: &Path, collection: &str) -> PathBuf {
+pub fn get_collection_path(path: &Path, collection: &str) -> PathBuf {
     path.join(format!("{collection}.json"))
 }
 
 #[inline]
-fn get_live_cat_collection_path(path: &Path) -> PathBuf {
+pub fn get_live_cat_collection_path(path: &Path) -> PathBuf {
     get_collection_path(path, storage_const::COL_CAT_LIVE)
 }
 
 #[inline]
-fn get_vod_cat_collection_path(path: &Path) -> PathBuf {
+pub fn get_vod_cat_collection_path(path: &Path) -> PathBuf {
     get_collection_path(path, storage_const::COL_CAT_VOD)
 }
 
 #[inline]
-fn get_series_cat_collection_path(path: &Path) -> PathBuf {
+pub fn get_series_cat_collection_path(path: &Path) -> PathBuf {
     get_collection_path(path, storage_const::COL_CAT_SERIES)
 }
 
-
-fn ensure_xtream_storage_path(cfg: &Config, target_name: &str) -> Result<PathBuf, TuliproxError> {
+pub fn ensure_xtream_storage_path(cfg: &Config, target_name: &str) -> Result<PathBuf, TuliproxError> {
     if let Some(path) = xtream_get_storage_path(cfg, target_name) {
         if std::fs::create_dir_all(&path).is_err() {
             let msg = format!(
                 "Failed to save xtream data, can't create directory {}",
                 &path.display()
             );
-            return Err(notify_err!(msg));
+            return Err(notify_err!("{}", msg));
         }
         Ok(path)
     } else {
         let msg = format!("Failed to save xtream data, can't create directory for target {target_name}");
-        Err(notify_err!(msg))
+        Err(notify_err!("{}", msg))
     }
 }
 
@@ -167,9 +164,9 @@ fn get_map_item_as_str(map: &serde_json::Map<String, Value>, key: &str) -> Optio
     None
 }
 
-type CategoryKey = (XtreamCluster, Cow<'static, str>);
+pub type CategoryKey = (XtreamCluster, Arc<str>);
 
-async fn load_old_category_ids(path: &Path) -> (u32, HashMap<CategoryKey, u32>) {
+async fn load_old_category_ids(path: &Path, _interner: &mut StringInterner) -> (u32, HashMap<CategoryKey, u32>) {
     let old_path = path.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let mut result: HashMap<CategoryKey, u32> = HashMap::new();
@@ -190,7 +187,7 @@ async fn load_old_category_ids(path: &Path) -> (u32, HashMap<CategoryKey, u32>) 
                                     if let Some(category_id) = entry.get(crate::model::XC_TAG_CATEGORY_ID).and_then(get_u32_from_serde_value) {
                                         if let Value::Object(item) = entry {
                                             if let Some(category_name) = get_map_item_as_str(&item, crate::model::XC_TAG_CATEGORY_NAME) {
-                                                result.insert((cluster, Cow::Owned(category_name)), category_id);
+                                                result.insert((cluster, /*interner.*/intern(&category_name)), category_id);
                                                 max_id = max_id.max(category_id);
                                             }
                                         }
@@ -226,16 +223,18 @@ pub fn xtream_get_file_path(storage_path: &Path, cluster: XtreamCluster) -> Path
 }
 
 #[derive(Serialize, Deserialize)]
-struct CategoryEntry {
-    category_id: u32,
-    category_name: String,
-    parent_id: u32,
+pub struct CategoryEntry {
+    pub category_id: u32,
+    #[serde(with = "arc_str_serde")]
+    pub category_name: Arc<str>,
+    pub parent_id: u32,
 }
 
 pub async fn xtream_write_playlist(
     app_cfg: &Arc<AppConfig>,
     target: &ConfigTarget,
     playlist: &mut [PlaylistGroup],
+    interner: &mut StringInterner,
 ) -> Result<(), TuliproxError> {
     let path = {
         let config = app_cfg.config.load();
@@ -249,7 +248,7 @@ pub async fn xtream_write_playlist(
     let mut series_col = Vec::with_capacity(50_000);
     let mut vod_col = Vec::with_capacity(50_000);
 
-    let categories = create_categories(playlist, &path).await;
+    let categories = create_categories(playlist, &path, interner).await;
     {
         for (xtream_cluster, category) in categories {
             match xtream_cluster {
@@ -306,25 +305,21 @@ pub async fn xtream_write_playlist(
     }
 
     if !errors.is_empty() {
-        return create_tuliprox_error_result!(
-            TuliproxErrorKind::Notify,
-            "{}",
-            errors.join("\n")
-        );
+        return info_err_res!("{}", errors.join("\n"));
     }
 
     Ok(())
 }
 
-async fn create_categories(playlist: &mut [PlaylistGroup], path: &Path) -> Vec<(XtreamCluster, CategoryEntry)> {
+async fn create_categories(playlist: &mut [PlaylistGroup], path: &Path, interner: &mut StringInterner) -> Vec<(XtreamCluster, CategoryEntry)> {
     // preserve category_ids
-    let (max_cat_id, existing_cat_ids) = load_old_category_ids(path).await;
+    let (max_cat_id, existing_cat_ids) = load_old_category_ids(path, interner).await;
     let mut cat_id_counter = max_cat_id;
 
-    let mut new_categories: IndexMap<(XtreamCluster, Cow<'_, str>), CategoryEntry> = IndexMap::new();
+    let mut new_categories: IndexMap<CategoryKey, CategoryEntry> = IndexMap::new();
 
     let mut last_cluster: Option<XtreamCluster> = None;
-    let mut last_group = String::new();
+    let mut last_group = intern("");
     let mut last_category_id: u32 = 0;
 
     for plg in playlist.iter_mut() {
@@ -334,15 +329,15 @@ async fn create_categories(playlist: &mut [PlaylistGroup], path: &Path) -> Vec<(
 
         for channel in &mut plg.channels {
             let cluster = channel.header.xtream_cluster;
-            let group = channel.header.group.as_str();
+            let group = &channel.header.group;
 
             // Fast path
-            if last_cluster == Some(cluster) && last_group == group {
+            if last_cluster == Some(cluster) && &last_group == group {
                 channel.header.category_id = last_category_id;
                 continue;
             }
 
-            let key = (cluster, Cow::Borrowed(group));
+            let key = (cluster, Arc::clone(group));
 
             let entry = new_categories.entry(key.clone()).or_insert_with(|| {
                 let cat_id = existing_cat_ids.get(&key).copied().unwrap_or_else(|| {
@@ -352,14 +347,13 @@ async fn create_categories(playlist: &mut [PlaylistGroup], path: &Path) -> Vec<(
 
                 CategoryEntry {
                     category_id: cat_id,
-                    category_name: group.to_string(),
+                    category_name: group.clone(),
                     parent_id: 0,
                 }
             });
 
             last_cluster = Some(cluster);
-            last_group.clear();
-            last_group.push_str(group);
+            last_group = Arc::clone(group);
             last_category_id = entry.category_id;
 
             channel.header.category_id = last_category_id;
@@ -584,7 +578,7 @@ pub async fn iter_raw_xtream_playlist(app_config: &AppConfig, target: &ConfigTar
         }
         let file_lock = app_config.file_locks.read_lock(&xtream_path).await;
         match BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path)
-            .map_err(|err| info_err!(format!("Could not open BPlusTreeQuery {xtream_path:?} - {err}"))) {
+            .map_err(|err| info_err!("Could not open BPlusTreeQuery {xtream_path:?} - {err}")) {
             Ok(mut query) => {
                 let items: Vec<XtreamPlaylistItem> = query.iter().map(|(_, v)| v).collect();
                 let len = items.len();
@@ -757,7 +751,7 @@ pub async fn persist_input_xtream_playlist(app_config: &Arc<AppConfig>, storage_
     let err = if errors.is_empty() {
         None
     } else {
-        Some(create_tuliprox_error!(TuliproxErrorKind::Notify, "{}", errors.join("\n")))
+        Some(notify_err!("{}", errors.join("\n")))
     };
 
     (result, err)
@@ -802,6 +796,41 @@ async fn persist_input_info(app_config: &Arc<AppConfig>, storage_path: &Path, cl
     Ok(())
 }
 
+pub async fn persist_input_info_batch(app_config: &Arc<AppConfig>, storage_path: &Path, cluster: XtreamCluster,
+                                      input_name: &str, updates: Vec<(u32, StreamProperties)>) -> Result<(), Error> {
+    if updates.is_empty() { return Ok(()); }
+    let xtream_path = xtream_get_file_path(storage_path, cluster);
+    if xtream_path.exists() {
+        let _file_lock = app_config.file_locks.write_lock(&xtream_path).await;
+        let mut tree: BPlusTreeUpdate<u32, XtreamPlaylistItem> = BPlusTreeUpdate::try_new(&xtream_path)
+            .map_err(|err| Error::other(format!("failed to open BPlusTree for input {input_name}: {err}")))?;
+
+        let mut updated_plis = Vec::with_capacity(updates.len());
+        for (provider_id, props) in updates {
+            match tree.query(&provider_id) {
+                Ok(Some(mut pli)) => {
+                    pli.additional_properties = Some(props);
+                    updated_plis.push((provider_id, pli));
+                }
+                Ok(None) => {
+                    error!("Could not find input entry for provider_id: {provider_id} and input: {input_name}");
+                }
+                Err(err) => {
+                    error!("Failed to query BPlusTree for provider_id: {provider_id} and input: {input_name}: {err}");
+                }
+            }
+        }
+
+        if !updated_plis.is_empty() {
+            let refs: Vec<(&u32, &XtreamPlaylistItem)> = updated_plis.iter()
+                .map(|(id, pli)| (id, pli))
+                .collect();
+            tree.update_batch(&refs).map_err(|err| Error::other(format!("failed to write batch {cluster} info for input {input_name}: {err}")))?;
+        }
+    }
+    Ok(())
+}
+
 
 pub async fn persist_input_vod_info(app_config: &Arc<AppConfig>, storage_path: &Path,
                                     cluster: XtreamCluster, input_name: &str, provider_id: u32,
@@ -809,10 +838,28 @@ pub async fn persist_input_vod_info(app_config: &Arc<AppConfig>, storage_path: &
     persist_input_info(app_config, storage_path, cluster, input_name, provider_id, StreamProperties::Video(Box::new(props.clone()))).await
 }
 
+pub async fn persist_input_vod_info_batch(app_config: &Arc<AppConfig>, storage_path: &Path,
+                                          cluster: XtreamCluster, input_name: &str,
+                                          updates: Vec<(u32, VideoStreamProperties)>) -> Result<(), Error> {
+    let batch = updates.into_iter()
+        .map(|(id, props)| (id, StreamProperties::Video(Box::new(props))))
+        .collect();
+    persist_input_info_batch(app_config, storage_path, cluster, input_name, batch).await
+}
+
 pub async fn persists_input_series_info(app_config: &Arc<AppConfig>, storage_path: &Path,
                                         cluster: XtreamCluster, input_name: &str, provider_id: u32,
                                         props: &SeriesStreamProperties) -> Result<(), Error> {
     persist_input_info(app_config, storage_path, cluster, input_name, provider_id, StreamProperties::Series(Box::new(props.clone()))).await
+}
+
+pub async fn persist_input_series_info_batch(app_config: &Arc<AppConfig>, storage_path: &Path,
+                                             cluster: XtreamCluster, input_name: &str,
+                                             updates: Vec<(u32, SeriesStreamProperties)>) -> Result<(), Error> {
+    let batch = updates.into_iter()
+        .map(|(id, props)| (id, StreamProperties::Series(Box::new(props))))
+        .collect();
+    persist_input_info_batch(app_config, storage_path, cluster, input_name, batch).await
 }
 
 pub async fn load_input_xtream_playlist(app_config: &Arc<AppConfig>, storage_path: &Path, clusters: &[XtreamCluster]) -> Result<Vec<PlaylistGroup>, TuliproxError> {
@@ -851,7 +898,7 @@ pub async fn load_input_xtream_playlist(app_config: &Arc<AppConfig>, storage_pat
                     groups.entry(cat_id)
                         .or_insert_with(|| PlaylistGroup {
                             id: cat_id,
-                            title: String::from("Unknown"),
+                            title: intern("Unknown"),
                             channels: Vec::new(),
                             xtream_cluster: cluster,
                         })

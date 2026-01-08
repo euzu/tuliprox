@@ -1,7 +1,7 @@
 use crate::utils::is_blank_optional_string;
 use std::fmt::Display;
 use log::warn;
-use crate::error::{create_tuliprox_error_result, TuliproxError, TuliproxErrorKind};
+use crate::error::{info_err_res, TuliproxError};
 use crate::utils::{is_false, default_match_threshold, default_best_match_threshold,
                    is_default_match_threshold, is_default_best_match_threshold};
 
@@ -98,7 +98,7 @@ impl EpgSmartMatchConfigDto {
         if let Some(regstr) = self.normalize_regex.as_ref() {
             let re = regex::Regex::new(regstr.as_str());
             if re.is_err() {
-                return create_tuliprox_error_result!(TuliproxErrorKind::Info, "cant parse regex: {}", regstr);
+                return info_err_res!("cant parse regex: {}", regstr);
             }
         };
 

@@ -32,6 +32,7 @@ pub fn update_config(config: &mut ConfigDto, forms: Vec<ConfigForm>) {
             ConfigForm::HdHomerun(_, mut hdhr_cfg) => set_config_field!(config, hdhr_cfg, hdhomerun),
             ConfigForm::Proxy(_, mut proxy_cfg) => set_config_field!(config, proxy_cfg, proxy),
             ConfigForm::IpCheck(_, mut ipcheck_cfg) => set_config_field!(config, ipcheck_cfg, ipcheck),
+            ConfigForm::Library(_, mut library_cfg) => set_config_field!(config, library_cfg, library),
             ConfigForm::Panel(_, _) => {}
         }
     }

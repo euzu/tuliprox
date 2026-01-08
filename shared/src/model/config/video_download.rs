@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::borrow::BorrowMut;
-use crate::create_tuliprox_error_result;
-use crate::error::{TuliproxError, TuliproxErrorKind};
+use crate::info_err_res;
+use crate::error::{TuliproxError};
 use crate::model::DEFAULT_USER_AGENT;
 use crate::utils::{is_false, is_blank_optional_string, is_blank_optional_str, default_supported_video_extensions, is_default_supported_video_extensions};
 
@@ -68,7 +68,7 @@ impl VideoConfigDto {
 
                 if let Some(episode_pattern) = &downl.episode_pattern {
                     if let Err(err) = regex::Regex::new(episode_pattern) {
-                         return create_tuliprox_error_result!(TuliproxErrorKind::Info, "cant parse regex: {episode_pattern} {err}");
+                         return info_err_res!("cant parse regex: {episode_pattern} {err}");
                     }
                 }
             }

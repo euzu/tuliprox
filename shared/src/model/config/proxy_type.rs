@@ -2,8 +2,7 @@ use std::fmt::Display;
 use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use crate::create_tuliprox_error_result;
-use crate::error::{TuliproxError, TuliproxErrorKind};
+use crate::error::{TuliproxError, info_err_res};
 use crate::model::{ClusterFlags, PlaylistItemType};
 
 #[derive(Debug, Default, Copy, Clone)]
@@ -124,7 +123,7 @@ impl FromStr for ProxyType {
             }
         }
 
-        create_tuliprox_error_result!(TuliproxErrorKind::Info, "Unknown ProxyType: {}", s)
+        info_err_res!("Unknown ProxyType: {}", s)
     }
 }
 

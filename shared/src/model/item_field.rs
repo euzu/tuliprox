@@ -2,8 +2,8 @@ use std::fmt::Display;
 use std::str::FromStr;
 use enum_iterator::Sequence;
 use serde::{Deserialize, Deserializer};
-use crate::create_tuliprox_error_result;
-use crate::error::{TuliproxError, TuliproxErrorKind};
+use crate::info_err_res;
+use crate::error::{TuliproxError};
 
 #[derive(Debug, Copy, Clone, serde::Serialize, Sequence, Eq, PartialEq)]
 pub enum ItemField {
@@ -78,7 +78,7 @@ impl FromStr for ItemField {
         } else if s.eq_ignore_ascii_case(Self::TYPE) {
             Ok(Self::Type)
         } else {
-            create_tuliprox_error_result!(TuliproxErrorKind::Info, "Unknown InputType: {}", s)
+            info_err_res!("Unknown InputType: {}", s)
         }
     }
 }

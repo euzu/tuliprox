@@ -2,7 +2,7 @@ use std::fmt::Display;
 use crate::error::{TuliproxError, TuliproxErrorKind};
 use crate::foundation::filter::{apply_templates_to_pattern, apply_templates_to_pattern_single};
 use crate::model::{ItemField, PatternTemplate, TemplateValue};
-use crate::{create_tuliprox_error, handle_tuliprox_error_result_list};
+use crate::{info_err, handle_tuliprox_error_result_list};
 use regex::Regex;
 
 fn compile_regex_vec(patterns: Option<&Vec<String>>) -> Result<Option<Vec<Regex>>, TuliproxError> {
@@ -10,7 +10,7 @@ fn compile_regex_vec(patterns: Option<&Vec<String>>) -> Result<Option<Vec<Regex>
         .map(|seq| {
             seq.iter()
                 .map(|s| Regex::new(s).map_err(|err| {
-                    create_tuliprox_error!(TuliproxErrorKind::Info, "cant parse regex: {s} {err}")
+                    info_err!("cant parse regex: {s} {err}")
                 }))
                 .collect::<Result<Vec<_>, _>>()
         })
@@ -106,7 +106,7 @@ impl ConfigSortChannelDto {
         self.group_pattern = apply_templates_to_pattern_single(&self.group_pattern, templates)?;
         // Compile group_pattern
         Regex::new(&self.group_pattern).map_err(|err| {
-            create_tuliprox_error!(TuliproxErrorKind::Info, "cant parse regex: {} {err}", &self.group_pattern)
+            info_err!("cant parse regex: {} {err}", &self.group_pattern)
         })?;
 
         // Transform sequence with templates if provided, otherwise use raw sequence

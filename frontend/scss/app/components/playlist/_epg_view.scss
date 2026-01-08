@@ -151,10 +151,12 @@ $epg-border-size: 4px;
   &__now-line {
     position: absolute;
     top: 0;
+    left: 0;
     bottom: 0;
     height: 100%;
     width: 2px;
-    background-color: red;
+    background: var(--epg-past-background);
+    border-right: 1px solid var(--epg-now-line-color);
     z-index: 11; /* above programs */
     pointer-events: none;
   }

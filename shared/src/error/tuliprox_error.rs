@@ -26,37 +26,45 @@ pub use get_errors_notify_message;
 
 #[macro_export]
 macro_rules! notify_err {
-    ($text:expr) => {
-        $crate::error::TuliproxError::new($crate::error::TuliproxErrorKind::Notify, $text)
+    ($($arg:tt)*) => {
+        $crate::error::TuliproxError::new($crate::error::TuliproxErrorKind::Notify, format!($($arg)*))
     };
 }
 
 pub use notify_err;
 
 #[macro_export]
-macro_rules! info_err {
-    ($text:expr) => {
-        $crate::error::TuliproxError::new($crate::error::TuliproxErrorKind::Info, $text)
+macro_rules! notify_err_res {
+    ($($arg:tt)*) => {
+        Err($crate::error::TuliproxError::new($crate::error::TuliproxErrorKind::Notify, format!($($arg)*)))
     };
 }
+
+pub use notify_err_res;
+
+
+#[macro_export]
+macro_rules! info_err {
+    // This matches any arguments (format string + variables) and forwards them
+    // to format!, then wraps them in your Error constructor.
+    ($($arg:tt)*) => {
+        $crate::error::TuliproxError::new($crate::error::TuliproxErrorKind::Info, format!($($arg)*))
+    };
+}
+
 pub use info_err;
 
-
 #[macro_export]
-macro_rules! create_tuliprox_error {
-     ($kind: expr, $($arg:tt)*) => {
-        $crate::error::TuliproxError::new($kind, format!($($arg)*))
-    }
+macro_rules! info_err_res {
+    // This matches any arguments (format string + variables) and forwards them
+    // to format!, then wraps them in your Error constructor.
+    ($($arg:tt)*) => {
+        Err($crate::error::TuliproxError::new($crate::error::TuliproxErrorKind::Info, format!($($arg)*)))
+    };
 }
-pub use create_tuliprox_error;
 
-#[macro_export]
-macro_rules! create_tuliprox_error_result {
-     ($kind: expr, $($arg:tt)*) => {
-        Err($crate::error::TuliproxError::new($kind, format!($($arg)*)))
-    }
-}
-pub use create_tuliprox_error_result;
+pub use info_err_res;
+
 
 #[macro_export]
 macro_rules! handle_tuliprox_error_result_list {

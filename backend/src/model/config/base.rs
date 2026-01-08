@@ -58,6 +58,7 @@ pub struct Config {
     pub sleep_timer_mins: Option<u32>,
     pub update_on_boot: bool,
     pub config_hot_reload: bool,
+    pub disk_based_processing: bool,
     pub accept_insecure_ssl_certificates: bool,
     pub web_ui: Option<WebUiConfig>,
     pub messaging: Option<MessagingConfig>,
@@ -134,6 +135,7 @@ impl From<&ConfigDto> for Config {
     fn from(dto: &ConfigDto) -> Self {
         Config {
             process_parallel: dto.process_parallel,
+            disk_based_processing: dto.disk_based_processing,
             api: ConfigApi::from(&dto.api),
             working_dir: dto.working_dir.clone(),
             backup_dir: dto.backup_dir.clone(),

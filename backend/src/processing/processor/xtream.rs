@@ -9,10 +9,10 @@ pub(in crate::processing) async fn playlist_resolve_download_playlist_item(clien
     let provider_id = pli.get_provider_id()?;
     if let Some(info_url) = xtream::get_xtream_player_api_info_url(input, cluster, provider_id) {
         let input_source = InputSource::from(input).with_url(info_url);
-        result = match xtream::get_xtream_stream_info_content(client, &input_source).await {
+        result = match xtream::get_xtream_stream_info_content(client, &input_source, true).await {
             Ok(content) => Some(content),
             Err(err) => {
-                errors.push(info_err!(format!("{err}")));
+                errors.push(info_err!("{err}"));
                 None
             }
         };

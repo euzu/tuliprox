@@ -23,6 +23,7 @@
 - **Panel API Integration**: Optional integration to renew expired accounts or provision new aliases when connections are exhausted.
 - **Playlist Caching**: Added `cache_duration` to inputs, allowing configurable provider playlist cache times during subsequent updates (e.g., `60s`, `5m` `12h`, `1d`).
 - **Database Viewer**: New CLI flags `--dbx` and `--dbm` to inspect internal database content.
+- **Added `disk_based_processing`** (boolean, default `false`) to `config.yml`. When enabled, input playlists are processed from disk instead of memory.
 
 ## ⚙️ Engine & Storage Optimizations
 - **Slotted Page Architecture**: Improved space utilization and support for variable-length keys.
@@ -30,6 +31,8 @@
 - **Atomic I/O Layer**: Refactored for atomic writes and file locking, ensuring data integrity.
 - **B+Tree Compaction**: Reclaim space after deletions or mass updates.
 - **Batch Upsert**: Significantly higher throughput during mass inserts/updates.
+- **Disk-Based Provider Processing**: New `disk_based_processing` config option massively reduces RAM usage by streaming playlist data from disk (BPlusTree) during updates.
+- **String Interning**: Implemented `Arc<str>` string interning for playlist items to further reduce memory footprint.
 
 ## 🔍 Mapping & Filtering Enhancements
 - **Accent-Independent Matching**: Integrated `match_as_ascii` flag for robust text matching (e.g., "Cinema" matches "Cinéma").

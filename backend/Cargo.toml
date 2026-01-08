@@ -1,8 +1,8 @@
 [package]
 name = "tuliprox"
-version = "3.2.37"
+version = "3.2.38"
 edition = "2021"
-rust-version = "1.87.0"
+rust-version = "1.89.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -11,13 +11,13 @@ lol_html = "2.7"
 handlebars = "6"
 shared = { version = "3", path = "../shared" }
 serde = { version = "1.0", features = ["derive", "rc"] }
-serde-saphyr = "0.0.12"
+serde-saphyr = "0.0.13"
 serde_json = { version = "1", features = ["raw_value"] }
 quick-xml = { version = "0.38", features = ["async-tokio"] }
 regex = "1.12"
 clap = { version = "4", features = ["derive"] }
 reqwest = { version = "0", features = ["blocking", "json", "stream", "rustls-tls", "socks"] }
-url = "2.5.7"
+url = "2.5.8"
 chrono = "0.4"
 cron = "0.15"
 axum = { version = "0.8" , features = ["macros", "default", "ws"]}
@@ -44,7 +44,7 @@ flate2 = "1.1"
 blake3 = "1.8"
 bytes = "1.11"
 tokio-stream = { version = "0.1", features = ["sync"] }
-tokio = { version = "1.48", features = ["rt-multi-thread", "parking_lot", "fs"] }
+tokio = { version = "1.49", features = ["rt-multi-thread", "parking_lot", "fs"] }
 #tokio = { version = "1.46", features = ["rt-multi-thread", "parking_lot", "fs", "tracing"] }
 #console-subscriber = "0"
 #tracing = "0.1"
@@ -58,7 +58,7 @@ rayon = "1.11"
 base64 = "0.22"
 paste = "1.0"
 indexmap = "2"
-lz4_flex = "0.11"
+lz4_flex = "0.12"
 fs2 = "0.4"
 notify = "8.2"
 arc-swap = "1.8"

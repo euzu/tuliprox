@@ -39,22 +39,22 @@ impl ApiProxyServerInfoDto {
     pub fn prepare(&mut self) -> Result<(), TuliproxError> {
         self.name = self.name.trim().to_string();
         if self.name.is_empty() {
-            return Err(info_err!("Server info name is empty ".to_string()));
+            return Err(info_err!("{}", "Server info name is empty "));
         }
         self.protocol = self.protocol.trim().to_string();
         if self.protocol.is_empty() {
-            return Err(info_err!("protocol cant be empty for api server config".to_string()));
+            return Err(info_err!("{}", "protocol cant be empty for api server config"));
         }
         self.host = self.host.trim().to_string();
         if self.host.is_empty() {
-            return Err(info_err!("host cant be empty for api server config".to_string()));
+            return Err(info_err!("{}", "host cant be empty for api server config"));
         }
         if let Some(port) = self.port.as_ref() {
             let port = port.trim().to_string();
             if port.is_empty() {
                 self.port = None;
             } else if port.parse::<u16>().is_err() {
-                return Err(info_err!("invalid port for api server config".to_string()));
+                return Err(info_err!("{}", "invalid port for api server config"));
             } else {
                 self.port = Some(port);
             }
@@ -151,7 +151,7 @@ impl ApiProxyConfigDto {
         if errors.is_empty() {
             Ok(())
         } else {
-            Err(info_err!(errors.join("\n")))
+            Err(info_err!("{}", errors.join("\n")))
         }
     }
 }

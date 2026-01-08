@@ -282,6 +282,7 @@ impl LibraryScanner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shared::utils::intern;
     use crate::model::{LibraryMetadataConfig, LibraryMetadataReadConfig, LibraryPlaylistConfig, LibraryTmdbConfig};
 
     fn create_test_config() -> LibraryConfig {
@@ -311,8 +312,8 @@ mod tests {
                 formats: vec![],
             },
             playlist: LibraryPlaylistConfig {
-                movie_category: "Local Movies".to_string(),
-                series_category: "Local Series".to_string(),
+                movie_category: intern("Local Movies"),
+                series_category: intern("Local Series"),
             },
         }
     }

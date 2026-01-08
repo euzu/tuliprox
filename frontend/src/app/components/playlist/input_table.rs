@@ -6,7 +6,7 @@ use std::str::FromStr;
 use yew::platform::spawn_local;
 use yew::prelude::*;
 use yew_i18n::use_translation;
-use shared::error::{create_tuliprox_error_result, TuliproxError, TuliproxErrorKind};
+use shared::error::{info_err_res, TuliproxError};
 use shared::model::{ConfigInputAliasDto, ConfigInputDto, SortOrder};
 use crate::app::components::menu_item::MenuItem;
 use crate::html_if;
@@ -297,7 +297,7 @@ impl FromStr for TableAction {
         } else if s.eq("delete") {
             Ok(Self::Delete)
         } else {
-            create_tuliprox_error_result!(TuliproxErrorKind::Info, "Unknown InputType: {}", s)
+            info_err_res!("Unknown InputType: {}", s)
         }
     }
 }

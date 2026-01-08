@@ -1,5 +1,5 @@
 use crate::model::{macros, ConfigInput, ConfigTarget, ProcessTargets};
-use shared::error::{create_tuliprox_error_result, TuliproxError, TuliproxErrorKind};
+use shared::error::{info_err_res, TuliproxError};
 use shared::model::{ConfigSourceDto, PatternTemplate, SourcesConfigDto};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -67,7 +67,7 @@ impl TryFrom<&SourcesConfigDto> for SourcesConfig {
             // Validate that all input references exist
             for input_name in &source_dto.inputs {
                 if !input_names.contains(input_name) {
-                    return create_tuliprox_error_result!(TuliproxErrorKind::Info, "Source references unknown input: {input_name}");
+                    return info_err_res!("Source references unknown input: {input_name}");
                 }
             }
             sources.push(ConfigSource::from_dto(source_dto)?);
@@ -140,7 +140,7 @@ impl SourcesConfig {
 
             let missing_targets: Vec<String> = check_targets.iter().filter(|&(_, v)| *v == 0).map(|(k, _)| k.clone()).collect();
             if !missing_targets.is_empty() {
-                return create_tuliprox_error_result!(TuliproxErrorKind::Info, "No target found for {}", missing_targets.join(", "));
+                return info_err_res!("No target found for {}", missing_targets.join(", "));
             }
             // let processing_targets: Vec<String> = check_targets.iter().filter(|&(_, v)| *v != 0).map(|(k, _)| k.to_string()).collect();
             // info!("Processing targets {}", processing_targets.join(", "));

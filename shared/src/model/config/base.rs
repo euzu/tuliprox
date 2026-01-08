@@ -39,6 +39,8 @@ pub struct ConfigDto {
     #[serde(default, skip_serializing_if = "is_false")]
     pub config_hot_reload: bool,
     #[serde(default, skip_serializing_if = "is_false")]
+    pub disk_based_processing: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
     pub accept_insecure_ssl_certificates: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web_ui: Option<WebUiConfigDto>,
@@ -73,6 +75,8 @@ pub struct MainConfigDto {
     pub custom_stream_response_path: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub user_access_control: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub disk_based_processing: bool,
     #[serde(default = "default_connect_timeout_secs", skip_serializing_if = "is_default_connect_timeout_secs")]
     pub connect_timeout_secs: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -89,6 +93,7 @@ impl Default for MainConfigDto {
     fn default() -> Self {
         MainConfigDto {
             process_parallel: false,
+            disk_based_processing: false,
             working_dir: String::new(),
             backup_dir: None,
             user_config_dir: None,
@@ -108,6 +113,7 @@ impl From<&ConfigDto> for MainConfigDto {
     fn from(config: &ConfigDto) -> Self {
         Self {
             process_parallel: config.process_parallel,
+            disk_based_processing: config.disk_based_processing,
             working_dir: config.working_dir.clone(),
             backup_dir: config.backup_dir.clone(),
             user_config_dir: config.user_config_dir.clone(),
@@ -242,6 +248,7 @@ impl ConfigDto {
 
     pub fn update_from_main_config(&mut self, main_config: &MainConfigDto) {
         self.process_parallel = main_config.process_parallel;
+        self.disk_based_processing = main_config.disk_based_processing;
         self.working_dir = main_config.working_dir.clone();
         self.backup_dir = main_config.backup_dir.clone();
         self.user_config_dir = main_config.user_config_dir.clone();

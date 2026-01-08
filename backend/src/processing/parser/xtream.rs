@@ -3,11 +3,17 @@ use crate::model::ConfigInput;
 use crate::model::{XtreamCategory};
 use crate::utils::request::DynReader;
 use crate::utils::xtream::get_xtream_stream_url_base;
-use shared::error::{create_tuliprox_error_result, TuliproxError, TuliproxErrorKind};
-use shared::model::{EpisodeStreamProperties, LiveStreamProperties, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, SeriesStreamDetailEpisodeProperties, SeriesStreamProperties, StreamProperties, UUIDType, VideoStreamProperties, XtreamCluster};
-use shared::utils::{generate_playlist_uuid, trim_last_slash};
+use shared::error::{notify_err_res, notify_err, TuliproxError};
+use shared::model::{EpisodeStreamProperties, LiveStreamProperties, PlaylistGroup, PlaylistItem,
+                    PlaylistItemHeader, PlaylistItemType, SeriesStreamDetailEpisodeProperties,
+                    SeriesStreamProperties, StreamProperties, UUIDType, VideoStreamProperties,
+                    XtreamCluster, XtreamPlaylistItem};
+use shared::utils::{generate_playlist_uuid, trim_last_slash, StringInterner};
 use indexmap::IndexMap;
 use tokio::task::spawn_blocking;
+use serde::Deserializer;
+
+
 
 async fn map_to_xtream_category(categories: DynReader) -> Result<Vec<XtreamCategory>, TuliproxError> {
     spawn_blocking(move || {
@@ -15,10 +21,10 @@ async fn map_to_xtream_category(categories: DynReader) -> Result<Vec<XtreamCateg
         match serde_json::from_reader::<_, Vec<XtreamCategory>>(reader) {
             Ok(xtream_categories) => Ok(xtream_categories),
             Err(err) => {
-                create_tuliprox_error_result!(TuliproxErrorKind::Notify, "Failed to process categories {}", &err)
+                notify_err_res!("Failed to process categories {}", &err)
             }
         }
-    }).await.map_err(|e| TuliproxError::new(TuliproxErrorKind::Notify, format!("Mapping xtream categories failed: {e}")))?
+    }).await.map_err(|e| notify_err!("Mapping xtream categories failed: {e}"))?
 }
 
 async fn map_to_xtream_streams(xtream_cluster: XtreamCluster, streams: DynReader) -> Result<Vec<StreamProperties>, TuliproxError> {
@@ -39,10 +45,10 @@ async fn map_to_xtream_streams(xtream_cluster: XtreamCluster, streams: DynReader
                 Ok(stream_list)
             }
             Err(err) => {
-                create_tuliprox_error_result!(TuliproxErrorKind::Notify, "Failed to map to xtream streams {xtream_cluster}: {err}", )
+                notify_err_res!("Failed to map to xtream streams {xtream_cluster}: {err}")
             }
         }
-    }).await.map_err(|e| TuliproxError::new(TuliproxErrorKind::Notify, format!("Mapping xtream streams failed: {e}")))?
+    }).await.map_err(|e| notify_err!("Mapping xtream streams failed: {e}"))?
 }
 
 fn create_xtream_series_episode_url<'a>(url: &'a str, username: &'a str, password: &'a str, episode: &'a SeriesStreamDetailEpisodeProperties) -> Cow<'a, str> {
@@ -55,7 +61,9 @@ fn create_xtream_series_episode_url<'a>(url: &'a str, username: &'a str, passwor
     }
 }
 
-pub fn parse_xtream_series_info(parent_uuid: &UUIDType, series_info: &SeriesStreamProperties, group_title: &str, series_name: &str, input: &ConfigInput) -> Option<Vec<PlaylistItem>> {
+ pub fn parse_xtream_series_info(parent_uuid: &UUIDType, series_info: &SeriesStreamProperties,
+                                 group_title: &str, series_name: &str, input: &ConfigInput,
+                                 interner: &mut StringInterner) -> Option<Vec<PlaylistItem>> {
     let url = input.url.as_str();
     let username = input.username.as_ref().map_or("", |v| v);
     let password = input.password.as_ref().map_or("", |v| v);
@@ -72,14 +80,14 @@ pub fn parse_xtream_series_info(parent_uuid: &UUIDType, series_info: &SeriesStre
                      parent_code: parent_uuid.to_string(),
                      name: series_name.to_string(),
                      logo: episode.movie_image.clone(),
-                     group: group_title.to_string(),
+                     group: interner.intern(group_title),
                      title: episode.title.clone(),
                      url: episode_url.to_string(),
                      item_type: PlaylistItemType::Series,
                      xtream_cluster: XtreamCluster::Series,
                      additional_properties: Some(StreamProperties::Episode(episode_info)),
                      category_id: 0,
-                     input_name: input.name.clone(),
+                     input_name: interner.intern(&input.name),
                      ..Default::default()
                  }
              }
@@ -129,6 +137,7 @@ pub async fn parse_xtream(input: &ConfigInput,
                           streams: DynReader) -> Result<Option<Vec<PlaylistGroup>>, TuliproxError> {
     match map_to_xtream_category(categories).await {
         Ok(xtream_categories) => {
+            let mut interner = StringInterner::new();
             let input_name = input.name.clone();
             let url = input.url.as_str();
             let username = input.username.as_ref().map_or("", |v| v);
@@ -147,18 +156,20 @@ pub async fn parse_xtream(input: &ConfigInput,
                     let (live_stream_use_prefix, live_stream_without_extension) = input.options.as_ref()
                         .map_or((true, false), |o| (o.xtream_live_stream_use_prefix, o.xtream_live_stream_without_extension));
 
+                    // Re-implement the loop to add ordinal
+                    let mut ord_counter: u32 = 1;
                     for stream in xtream_streams {
                         let group = group_map.get_mut(&stream.get_category_id()).unwrap_or(&mut unknown_grp);
                         let category_name = &group.category_name;
                         let stream_url = create_xtream_url(xtream_cluster, url, username, password, &stream, live_stream_use_prefix, live_stream_without_extension);
                         let item_type = PlaylistItemType::from(xtream_cluster);
-                        let item = PlaylistItem {
+                        let mut item = PlaylistItem {
                             header: PlaylistItemHeader {
                                 id: stream.get_stream_id().to_string(),
                                 uuid: generate_playlist_uuid(&input_name, &stream.get_stream_id().to_string(), item_type, &stream_url),
                                 name: stream.get_name().to_string(),
                                 logo: stream.get_stream_icon().to_string(),
-                                group: category_name.clone(),
+                                group: interner.intern(category_name),
                                 title: stream.get_name().to_string(),
                                 url: stream_url.to_string(),
                                 epg_channel_id: stream.get_epg_channel_id(),
@@ -166,10 +177,12 @@ pub async fn parse_xtream(input: &ConfigInput,
                                 xtream_cluster,
                                 additional_properties: Some(stream),
                                 category_id: 0,
-                                input_name: input_name.clone(),
+                                input_name: interner.intern(&input_name),
                                 ..Default::default()
                             },
                         };
+                        item.header.source_ordinal = ord_counter;
+                        ord_counter += 1;
                         group.add(item);
                     }
 
@@ -184,7 +197,7 @@ pub async fn parse_xtream(input: &ConfigInput,
                             PlaylistGroup {
                                 id: category.category_id,
                                 xtream_cluster,
-                                title: category.category_name.clone(),
+                                title: interner.intern(&category.category_name),
                                 channels: category.channels.clone(),
                             }
                         }).collect()))
@@ -193,6 +206,159 @@ pub async fn parse_xtream(input: &ConfigInput,
             }
         }
         Err(err) => Err(err)
+    }
+}
+
+pub async fn parse_xtream_streaming<F>(
+    input: &ConfigInput,
+    xtream_cluster: XtreamCluster,
+    categories: DynReader,
+    streams: DynReader,
+    mut on_item: F,
+) -> Result<Vec<XtreamCategory>, TuliproxError> 
+where 
+    F: FnMut(XtreamPlaylistItem) -> Result<(), TuliproxError> + Send + 'static 
+{
+    // 1. Parse Categories
+    let xtream_categories = map_to_xtream_category(categories).await?;
+    
+    // 2. Prepare for Stream Parsing
+    let mut interner = StringInterner::new();
+    let input_name = input.name.clone();
+    let url = input.url.as_str().to_string(); 
+    let username = input.username.as_ref().map_or("", |v| v).to_string();
+    let password = input.password.as_ref().map_or("", |v| v).to_string();
+    let options = input.options.clone();
+
+    // Map categories for lookup
+    let group_map: IndexMap<u32, String> = xtream_categories.iter().map(|c| (c.category_id, c.category_name.clone())).collect();
+    let unknown_group_name = "Unknown".to_string();
+
+    spawn_blocking(move || {
+        let reader = tokio_util::io::SyncIoBridge::new(streams);
+        let mut deserializer = serde_json::Deserializer::from_reader(reader);
+        
+        let (live_stream_use_prefix, live_stream_without_extension) = options.as_ref()
+             .map_or((true, false), |o| (o.xtream_live_stream_use_prefix, o.xtream_live_stream_without_extension));
+
+        match xtream_cluster {
+             XtreamCluster::Live => {
+                  let mut on_stream = |stream: LiveStreamProperties| {
+                       let stream_prop = StreamProperties::Live(stream);
+                       process_stream_item(&input_name, &url, &username, &password, 
+                           xtream_cluster, &mut interner, &group_map, &unknown_group_name,
+                           stream_prop, &mut on_item, live_stream_use_prefix, live_stream_without_extension)
+                  };
+                  let visitor = XtreamItemVisitor { on_item: &mut on_stream, _marker: std::marker::PhantomData };
+                  deserializer.deserialize_any(visitor).map_err(|e| notify_err!("JSON parse error: {e}"))?;
+             }
+             XtreamCluster::Video => {
+                  let mut on_stream = |stream: VideoStreamProperties| {
+                       let stream_prop = StreamProperties::Video(Box::new(stream));
+                       process_stream_item(&input_name, &url, &username, &password, 
+                           xtream_cluster, &mut interner, &group_map, &unknown_group_name,
+                           stream_prop, &mut on_item, live_stream_use_prefix, live_stream_without_extension)
+                  };
+                  let visitor = XtreamItemVisitor { on_item: &mut on_stream, _marker: std::marker::PhantomData };
+                  deserializer.deserialize_any(visitor).map_err(|e| notify_err!("JSON parse error: {e}"))?;
+             }
+             XtreamCluster::Series => {
+                  let mut on_stream = |stream: SeriesStreamProperties| {
+                       let stream_prop = StreamProperties::Series(Box::new(stream));
+                       process_stream_item(&input_name, &url, &username, &password, 
+                           xtream_cluster, &mut interner, &group_map, &unknown_group_name,
+                           stream_prop, &mut on_item, live_stream_use_prefix, live_stream_without_extension)
+                  };
+                  let visitor = XtreamItemVisitor { on_item: &mut on_stream, _marker: std::marker::PhantomData };
+                  deserializer.deserialize_any(visitor).map_err(|e| notify_err!("JSON parse error: {e}"))?;
+             }
+        }
+        Ok(())
+    }).await.map_err(|e| notify_err!("Streaming parse failed: {e}"))??;
+
+    Ok(xtream_categories) 
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_stream_item<F>(
+    input_name: &str, url: &str, username: &str, password: &str,
+    cluster: XtreamCluster, interner: &mut StringInterner,
+    group_map: &IndexMap<u32, String>, unknown_group_name: &str,
+    mut stream: StreamProperties,
+    callback: &mut F,
+    live_stream_use_prefix: bool, live_stream_without_extension: bool
+) -> Result<(), TuliproxError>
+where F: FnMut(XtreamPlaylistItem) -> Result<(), TuliproxError> 
+{
+     stream.prepare(); 
+     let category_name = group_map.get(&stream.get_category_id()).map_or(unknown_group_name, String::as_str);
+     let stream_url = create_xtream_url(cluster, url, username, password, &stream, live_stream_use_prefix, live_stream_without_extension);
+     
+     let item_type = PlaylistItemType::from(cluster);
+     let item = PlaylistItem {
+         header: PlaylistItemHeader {
+             id: stream.get_stream_id().to_string(),
+             uuid: generate_playlist_uuid(input_name, &stream.get_stream_id().to_string(), item_type, &stream_url),
+             name: stream.get_name().to_string(),
+             logo: stream.get_stream_icon().to_string(),
+             group: interner.intern(category_name),
+             title: stream.get_name().to_string(),
+             url: stream_url.to_string(),
+             epg_channel_id: stream.get_epg_channel_id(),
+             item_type,
+             xtream_cluster: cluster,
+             additional_properties: Some(stream),
+             category_id: 0,
+             input_name: interner.intern(input_name),
+             ..Default::default()
+         },
+     };
+
+    // if let Some(StreamProperties::Series(props)) = item.header.additional_properties.as_mut() {
+    //      // We need to set category_id for Series properties just like parse_xtream might expect or use?
+    //      // Actually parse_xtream doesn't modify internal category_ids, but mapping to XtreamCategory struct relies on it.
+    //      // Here we are creating PlaylistItem.
+    //      let _ = props;
+    // }
+     
+     callback(XtreamPlaylistItem::from(&item))
+}
+
+struct XtreamItemVisitor<'a, T, F> {
+    on_item: &'a mut F,
+    _marker: std::marker::PhantomData<T>,
+}
+
+impl<'de, T, F> serde::de::Visitor<'de> for XtreamItemVisitor<'_, T, F>
+where
+    T: serde::Deserialize<'de>,
+    F: FnMut(T) -> Result<(), TuliproxError>,
+{
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("a JSON array or an error object")
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::SeqAccess<'de>,
+    {
+        while let Some(item) = seq.next_element::<T>()? {
+            (self.on_item)(item).map_err(serde::de::Error::custom)?;
+        }
+        Ok(())
+    }
+
+    fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::MapAccess<'de>,
+    {
+        let val: serde_json::Value = serde::de::Deserialize::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+        if let Some(msg) = val.get("message").and_then(|m| m.as_str()) {
+            return Err(serde::de::Error::custom(format!("Xtream API error: {msg}")));
+        }
+        Err(serde::de::Error::custom(format!("Expected array, got object: {val}")))
     }
 }
 
@@ -236,5 +402,21 @@ mod tests {
             };
         }
         Ok(())
+    }
+
+    #[test]
+    fn test_xtream_item_visitor_array() {
+        use serde_json::Deserializer;
+        use shared::model::LiveStreamProperties;
+        let data = r#"[{"name":"stream1", "stream_id": 1, "category_id": 1, "added": "0"}]"#;
+        let mut deserializer = Deserializer::from_str(data);
+        let mut count = 0;
+        let mut on_item = |_: LiveStreamProperties| {
+            count += 1;
+            Ok(())
+        };
+        let visitor = super::XtreamItemVisitor { on_item: &mut on_item, _marker: std::marker::PhantomData };
+        serde::Deserializer::deserialize_any(&mut deserializer, visitor).unwrap();
+        assert_eq!(count, 1);
     }
 }

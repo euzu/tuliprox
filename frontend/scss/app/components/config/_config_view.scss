@@ -131,7 +131,7 @@
   &__body {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(size.$config-grid-cell-width, 1fr));
-    max-width: calc(size.$config-max-grid-cells * size.$config-grid-cell-width + 2 * 1rem);
+  //max-width: calc(size.$config-max-grid-cells * size.$config-grid-cell-width + 2 * 1rem);
     gap: var(--gap-large);
     box-sizing: border-box;
     width: 100%;
@@ -268,3 +268,28 @@
   }
 }
 
+.tp__library-config-view {
+  &__header {
+    display: flex;
+    flex-flow: column;
+    gap: var(--gap-default);
+    box-sizing: border-box;
+  }
+
+  &__list {
+    display: flex;
+    flex-flow: row;
+    gap: var(--gap-default);
+    &-item {
+      font-size: 1.1rem;
+      color: var(--text-color);
+    }
+  }
+
+  &__editor-row {
+    display: flex;
+    flex-flow: row wrap;
+    gap: var(--gap-default);
+    box-sizing: border-box;
+  }
+}

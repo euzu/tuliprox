@@ -9,10 +9,10 @@ use pest::iterators::Pair;
 use pest::Parser;
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use crate::error::{create_tuliprox_error_result, TuliproxError, TuliproxErrorKind};
+use crate::error::{info_err_res, TuliproxError};
 use crate::info_err;
 pub use crate::model::{ItemField, PatternTemplate, PlaylistItem, PlaylistItemType, FieldGetAccessor, FieldSetAccessor, TemplateValue};
-use crate::utils::{DirectedGraph, CONSTANTS};
+use crate::utils::{DirectedGraph, StringInterner, CONSTANTS};
 
 pub fn get_field_value(pli: &PlaylistItem, field: ItemField) -> String {
     let header = &pli.header;
@@ -28,14 +28,14 @@ pub fn get_field_value(pli: &PlaylistItem, field: ItemField) -> String {
     value.to_string()
 }
 
-pub fn set_field_value(pli: &mut PlaylistItem, field: ItemField, value: String) -> bool {
+pub fn set_field_value(pli: &mut PlaylistItem, field: ItemField, value: String, interner: &mut StringInterner) -> bool {
     let header = &mut pli.header;
     match field {
-        ItemField::Group => header.group = value,
+        ItemField::Group => header.group = interner.intern(&value),
         ItemField::Name => header.name = value,
         ItemField::Title => header.title = value,
         ItemField::Url => header.url = value,
-        ItemField::Input => header.input_name = value,
+        ItemField::Input => header.input_name = interner.intern(&value),
         ItemField::Caption => {
             header.title.clone_from(&value);
             header.name = value;
@@ -279,7 +279,7 @@ fn get_parser_item_field(expr: &Pair<Rule>) -> Result<ItemField, TuliproxError> 
             }
         }
     }
-    create_tuliprox_error_result!(TuliproxErrorKind::Info, "unknown field: {}", expr.as_str())
+    info_err_res!("unknown field: {}", expr.as_str())
 }
 
 fn get_parser_regexp(
@@ -293,7 +293,7 @@ fn get_parser_regexp(
         let regstr = apply_templates_to_pattern_single(&parsed_text, templates)?;
         let re = regex::Regex::new(regstr.as_str());
         if re.is_err() {
-            return create_tuliprox_error_result!(TuliproxErrorKind::Info, "cant parse regex: {}", regstr);
+            return info_err_res!("cant parse regex: {}", regstr);
         }
         let regexp = re.unwrap();
         if log_enabled!(Level::Trace) {
@@ -304,7 +304,7 @@ fn get_parser_regexp(
             re: regexp,
         });
     }
-    create_tuliprox_error_result!(TuliproxErrorKind::Info, "unknown field: {}", expr.as_str())
+    info_err_res!("unknown field: {}", expr.as_str())
 }
 
 fn get_parser_field_comparison(
@@ -344,7 +344,7 @@ fn get_parser_type_comparison(expr: Pair<Rule>) -> Result<Filter, TuliproxError>
     let expr_inner = expr.into_inner();
     let text_item_type = expr_inner.as_str();
     let item_type = get_filter_item_type(text_item_type);
-    item_type.map_or_else(|| create_tuliprox_error_result!(TuliproxErrorKind::Info, "cant parse item type: {text_item_type}"),
+    item_type.map_or_else(|| info_err_res!("cant parse item type: {text_item_type}"),
                           |itype| Ok(Filter::TypeComparison(ItemField::Type, itype)))
 }
 
@@ -436,11 +436,7 @@ fn get_parser_binary_op(expr: &Pair<Rule>) -> Result<BinaryOperator, TuliproxErr
     match expr.as_rule() {
         Rule::and => Ok(BinaryOperator::And),
         Rule::or => Ok(BinaryOperator::Or),
-        _ => create_tuliprox_error_result!(
-            TuliproxErrorKind::Info,
-            "Unknown binary operator {}",
-            expr.as_str()
-        ),
+        _ => info_err_res!("Unknown binary operator {}",expr.as_str()),
     }
 }
 
@@ -503,21 +499,12 @@ pub fn get_filter(
 
             if !errors.is_empty() {
                 errors.push(format!("Unable to parse filter: {}", &filter_text));
-                return Err(info_err!(errors.join("\n")));
+                return Err(info_err!("{}", errors.join("\n")));
             }
 
-            result.map_or_else(
-                || {
-                    create_tuliprox_error_result!(
-                        TuliproxErrorKind::Info,
-                        "Unable to parse filter: {}",
-                        &filter_text
-                    )
-                },
-                Ok,
-            )
+            result.map_or_else(|| info_err_res!("Unable to parse filter: {}", &filter_text), Ok)
         }
-        Err(err) => create_tuliprox_error_result!(TuliproxErrorKind::Info, "{}", err),
+        Err(err) => info_err_res!("{}", err),
     }
 }
 
@@ -551,10 +538,7 @@ fn build_dependency_graph(
         );
     }
     if !cycles.is_empty() {
-        return create_tuliprox_error_result!(
-            TuliproxErrorKind::Info,
-            "Cyclic dependencies in templates detected!"
-        );
+        return info_err_res!("{}", "Cyclic dependencies in templates detected!");
     }
     Ok(graph)
 }
@@ -577,7 +561,7 @@ pub fn prepare_templates(templates: &mut Vec<PatternTemplate>) -> Result<Vec<Pat
                 if let Some(depends_on) = dependencies.get(&template_name) {
                     let mut templ_value = template_values.get(&template_name).unwrap().clone();
                     for dep_templ_name in depends_on {
-                        let dep_value = template_values.get(dep_templ_name).ok_or_else(|| info_err!(format!("Failed to load template {dep_templ_name}")))?;
+                        let dep_value = template_values.get(dep_templ_name).ok_or_else(|| info_err!("Failed to load template {dep_templ_name}"))?;
                         let dep_templ = template_map.get_mut(dep_templ_name).unwrap();
                         templ_value = match dep_value {
                             TemplateValue::Single(dep_val) => {
@@ -713,13 +697,13 @@ pub fn apply_templates_to_pattern(
             TemplateValue::Multi(multi_vals) => {
                 match multi_vals.len().cmp(&1) {
                     Ordering::Less => {
-                        return create_tuliprox_error_result!(TuliproxErrorKind::Info, "Empty multi value templates are not supported for pattern! {pattern}");
+                        return info_err_res!("Empty multi value templates are not supported for pattern! {pattern}");
                     }
                     Ordering::Equal => {
                         new_pattern = TemplateValue::Single(multi_vals.first().unwrap().to_owned());
                     }
                     Ordering::Greater => {
-                        return create_tuliprox_error_result!(TuliproxErrorKind::Info, "Multi value templates are not supported for pattern! {pattern}");
+                        return info_err_res!("Multi value templates are not supported for pattern! {pattern}");
                     }
                 }
             }
@@ -732,7 +716,7 @@ pub fn apply_templates_to_pattern(
 pub fn apply_templates_to_pattern_single(pattern: &str, templates: Option<&Vec<PatternTemplate>>) -> Result<String, TuliproxError> {
     match apply_templates_to_pattern(pattern, templates, false)? {
         TemplateValue::Single(value) => Ok(value),
-        TemplateValue::Multi(_) => create_tuliprox_error_result!(TuliproxErrorKind::Info, "Multi value templates are not supported for pattern!"),
+        TemplateValue::Multi(_) => info_err_res!("Multi value templates are not supported for pattern!"),
     }
 }
 
@@ -746,7 +730,7 @@ mod tests {
         PlaylistItem {
             header: PlaylistItemHeader {
                 name: name.to_string(),
-                group: group.to_string(),
+                group: crate::utils::intern(group),
                 ..Default::default()
             },
         }

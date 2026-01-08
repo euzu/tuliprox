@@ -4,6 +4,7 @@ use crate::utils::{extract_year_from_title, normalize_title_for_matching, TraktC
 use crate::utils::{trace_if_enabled, with};
 use log::{debug, info, trace, warn};
 use shared::error::TuliproxError;
+use shared::utils::StringInterner;
 use shared::model::{FieldGetAccessor, FieldSetAccessor, PlaylistGroup, PlaylistItem, TraktContentType, XtreamCluster};
 use shared::utils::CONSTANTS;
 use std::borrow::Cow;
@@ -128,6 +129,7 @@ fn find_best_match_for_item<'a>(
 fn create_category_from_matches<'a>(
     matches: Vec<TraktMatchResult<'a>>,
     list_config: &'a TraktListConfig,
+    interner: &mut StringInterner,
 ) -> Option<PlaylistGroup> {
     if matches.is_empty() { return None; }
 
@@ -164,7 +166,7 @@ fn create_category_from_matches<'a>(
                     header.set_field("caption", &caption);
                 }
             }
-            header.group = String::from(group_title);
+            header.group = interner.intern(group_title);
             header.gen_uuid();
         });
         matched_items.push(modified_item);
@@ -184,7 +186,7 @@ fn create_category_from_matches<'a>(
 
     Some(PlaylistGroup {
         id: 0,
-        title: String::from(group_title),
+        title: interner.intern(group_title),
         channels: matched_items,
         xtream_cluster: cluster,
     })
@@ -194,6 +196,7 @@ fn match_trakt_items_with_playlist<'a>(
     trakt_items: &'a [TraktListItem],
     playlist: &'a [PlaylistGroup],
     list_config: &'a TraktListConfig,
+    interner: &mut StringInterner,
 ) -> Option<PlaylistGroup> {
     let trakt_match_items: Vec<TraktMatchItem<'a>> = trakt_items
         .iter()
@@ -217,7 +220,7 @@ fn match_trakt_items_with_playlist<'a>(
         }
     }
 
-    create_category_from_matches(matches, list_config)
+    create_category_from_matches(matches, list_config, interner)
 }
 
 pub struct TraktCategoriesProcessor {
@@ -244,6 +247,8 @@ impl TraktCategoriesProcessor {
         info!("Processing {} Trakt lists for target {}", trakt_config.lists.len(), target.name);
         let mut new_categories = Vec::new();
         let mut total_matches = 0;
+        let mut interner = StringInterner::new();
+
         for list_config in &trakt_config.lists {
             let cache_key = format!("{}:{}", list_config.user, list_config.list_slug);
 
@@ -251,7 +256,7 @@ impl TraktCategoriesProcessor {
                 Ok(trakt_items) => {
                     debug!("Processing Trakt list {cache_key} with {} items", trakt_items.len());
 
-                    if let Some(category) = match_trakt_items_with_playlist(&trakt_items, playlist, list_config) {
+                    if let Some(category) = match_trakt_items_with_playlist(&trakt_items, playlist, list_config, &mut interner) {
                         if !category.channels.is_empty() {
                             total_matches += category.channels.len();
                             let category_len = category.channels.len();

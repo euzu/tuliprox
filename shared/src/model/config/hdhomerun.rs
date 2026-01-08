@@ -1,5 +1,5 @@
-use crate::create_tuliprox_error_result;
-use crate::error::{TuliproxError, TuliproxErrorKind};
+use crate::info_err_res;
+use crate::error::{TuliproxError};
 use crate::utils::{is_false, is_true, default_as_true, default_device_type, default_device_udn,
                    default_firmware_name, default_firmware_version, default_friendly_name,
                    default_manufacturer, default_model_name, generate_hdhr_device_id,
@@ -141,13 +141,13 @@ impl HdHomeRunConfigDto {
         for (device_num, device) in (0_u8..).zip(self.devices.iter_mut()) {
             device.prepare(device_num, include_computed)?;
             if !names.insert(device.name.clone()) {
-                return create_tuliprox_error_result!(TuliproxErrorKind::Info, "HdHomeRun duplicate device name {}", device.name);
+                return info_err_res!("HdHomeRun duplicate device name {}", device.name);
             }
             if device.port > 0 && !ports.insert(device.port) {
-                return create_tuliprox_error_result!(TuliproxErrorKind::Info, "HdHomeRun duplicate port {}", device.port);
+                return info_err_res!("HdHomeRun duplicate port {}", device.port);
             }
             if !device_ids.insert(device.device_id.clone()) {
-                return create_tuliprox_error_result!(TuliproxErrorKind::Info, "HdHomeRun duplicate device_id {}", device.device_id);
+                return info_err_res!("HdHomeRun duplicate device_id {}", device.device_id);
             }
         }
         let mut current_port = api_port.saturating_add(1);
@@ -156,7 +156,7 @@ impl HdHomeRunConfigDto {
                 while ports.contains(&current_port) || current_port == 0 {
                     current_port = current_port.wrapping_add(1);
                     if current_port == api_port { // full cycle guard
-                        return create_tuliprox_error_result!(TuliproxErrorKind::Info, "No free port available for HdHomeRun devices");
+                        return info_err_res!("{}", "No free port available for HdHomeRun devices");
                     }
                 }
 

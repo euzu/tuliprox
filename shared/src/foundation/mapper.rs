@@ -1,6 +1,6 @@
 #![allow(clippy::empty_docs)]
 
-use crate::error::{create_tuliprox_error_result, info_err, TuliproxError, TuliproxErrorKind};
+use crate::error::{info_err_res, info_err, TuliproxError};
 use crate::foundation::filter::ValueAccessor;
 use crate::foundation::mapper::EvalResult::{AnyValue, Failure, Named, Number, Undefined, Value};
 use crate::model::{PatternTemplate, PlaylistItemType, TemplateValue};
@@ -142,7 +142,7 @@ impl FromStr for BuiltInFunction {
             "pad" => Ok(Self::Pad),
             "format" => Ok(Self::Format),
             "add_favourite" => Ok(Self::AddFavourite),
-            _ => create_tuliprox_error_result!(TuliproxErrorKind::Info, "Unknown function {s}"),
+            _ => info_err_res!("Unknown function {s}"),
         }
     }
 }
@@ -290,7 +290,7 @@ impl MapperScript {
     }
 
     pub fn parse(input: &str, templates: Option<&Vec<PatternTemplate>>) -> Result<Self, TuliproxError> {
-        let mut parsed = MapperParser::parse(Rule::main, input).map_err(|e| info_err!(e.to_string()))?;
+        let mut parsed = MapperParser::parse(Rule::main, input).map_err(|e| info_err!("{}", e))?;
         let program_pair = parsed.next().unwrap();
         let mut statements = Vec::new();
         let mut expressions = Vec::new();
@@ -329,7 +329,7 @@ impl MapperScript {
         let target = match name.as_rule() {
             Rule::identifier => AssignmentTarget::Identifier(name.as_str().to_string()),
             Rule::field => AssignmentTarget::Field(name.as_str().to_string()),
-            _ => return create_tuliprox_error_result!(TuliproxErrorKind::Info, "Assignment target isn't supported {}", name.as_str()),
+            _ => return info_err_res!("Assignment target isn't supported {}", name.as_str()),
         };
         let next = inner.next().unwrap();
         if let Some(expr) = MapperScript::parse_expression(next, expressions)? {
@@ -346,7 +346,7 @@ impl MapperScript {
         match inner.as_rule() {
             Rule::identifier => Ok(MatchCaseKey::Identifier(inner.as_str().to_string())),
             Rule::any_match => Ok(MatchCaseKey::AnyMatch),
-            _ => create_tuliprox_error_result!(TuliproxErrorKind::Info, "Unexpected match_key: {:?}", inner.as_rule()),
+            _ => info_err_res!("Unexpected match_key: {:?}", inner.as_rule()),
         }
     }
 
@@ -371,11 +371,11 @@ impl MapperScript {
                 }
                 // we don't allow inside multi match keys AnyMatch
                 if matches.len() > 1 && matches.iter().filter(|&m| matches!(m, &MatchCaseKey::AnyMatch)).count() > 0 {
-                    return Err(info_err!("Unexpected match case key: _".to_string()));
+                    return Err(info_err!("{}", "Unexpected match case key: _"));
                 }
                 matches
             }
-            _ => return create_tuliprox_error_result!(TuliproxErrorKind::Info, "Unexpected match arm input: {:?}", first.as_rule()),
+            _ => return info_err_res!("Unexpected match arm input: {:?}", first.as_rule()),
         };
 
         if let Some(expr) = MapperScript::parse_expression(inner.next().unwrap(), expressions)? {
@@ -403,7 +403,7 @@ impl MapperScript {
                             let content = &raw[1..raw.len() - 1];
                             matches.push(MapCaseKey::Text(content.to_string()));
                         }
-                        _ => return create_tuliprox_error_result!(TuliproxErrorKind::Info, "Unexpected map key: {:?}", arm.as_rule()),
+                        _ => return info_err_res!("Unexpected map key: {:?}", arm.as_rule()),
                     }
                 }
                 Ok(matches)
@@ -430,7 +430,7 @@ impl MapperScript {
                 Ok(vec![MapCaseKey::RangeEq(num)])
             }
             Rule::any_match => Ok(vec![MapCaseKey::AnyMatch]),
-            _ => create_tuliprox_error_result!(TuliproxErrorKind::Info, "Unexpected map key: {:?}", inner.as_rule()),
+            _ => info_err_res!("Unexpected map key: {:?}", inner.as_rule()),
         }
     }
 
@@ -443,7 +443,7 @@ impl MapperScript {
             Rule::map_case_key => {
                 MapperScript::parse_map_case_key(first)?
             }
-            _ => return create_tuliprox_error_result!(TuliproxErrorKind::Info, "Unexpected match arm input: {:?}", first.as_rule()),
+            _ => return info_err_res!("Unexpected match arm input: {:?}", first.as_rule()),
         };
 
         if let Some(expr) = MapperScript::parse_expression(inner.next().unwrap(), expressions)? {
@@ -492,7 +492,7 @@ impl MapperScript {
                 if let Number(val) = to_number(raw) {
                     Ok(Some(Expression::NumberLiteral(val)))
                 } else {
-                    create_tuliprox_error_result!(TuliproxErrorKind::Info, "Invalid number {raw}")
+                    info_err_res!("Invalid number {raw}")
                 }
             }
 
@@ -502,13 +502,13 @@ impl MapperScript {
                 let field = match first.as_rule() {
                     Rule::identifier => RegexSource::Identifier(first.as_str().to_string()),
                     Rule::field => RegexSource::Field(first.as_str().to_string()),
-                    _ => return create_tuliprox_error_result!(TuliproxErrorKind::Info, "Invalid regex source {}", first.as_str().to_string()),
+                    _ => return info_err_res!("Invalid regex source {}", first.as_str().to_string()),
                 };
                 let pattern_raw = inner.next().unwrap().as_str();
                 let pattern = &pattern_raw[1..pattern_raw.len() - 1]; // Strip quotes
                 match Regex::new(pattern) {
                     Ok(re) => Ok(Some(Expression::RegexExpr { field, pattern: pattern.to_string(), re_pattern: re })),
-                    Err(_) => create_tuliprox_error_result!(TuliproxErrorKind::Info, "Invalid regex {}", pattern),
+                    Err(_) => info_err_res!("Invalid regex {}", pattern),
                 }
             }
 
@@ -565,7 +565,7 @@ impl MapperScript {
                 }
                 Ok(Some(Expression::Block(block_expressions)))
             }
-            _ => create_tuliprox_error_result!(TuliproxErrorKind::Info, "Unknown expression rule: {:?}", pair.as_rule()),
+            _ => info_err_res!("Unknown expression rule: {:?}", pair.as_rule()),
         }
     }
 
@@ -587,13 +587,13 @@ impl MapperScript {
                                 MapKey::Identifier(text.trim().to_string())
                             }
                         }
-                        _ => return create_tuliprox_error_result!(TuliproxErrorKind::Info, "Unexpected map case key: {:?}", map_key.as_rule()),
+                        _ => return info_err_res!("Unexpected map case key: {:?}", map_key.as_rule()),
                     }
                 } else {
-                    return create_tuliprox_error_result!(TuliproxErrorKind::Info, "Missing map case key");
+                    return info_err_res!("Missing map case key");
                 }
             }
-            _ => return create_tuliprox_error_result!(TuliproxErrorKind::Info, "Unexpected map case key: {:?}", first.as_rule()),
+            _ => return info_err_res!("Unexpected map case key: {:?}", first.as_rule()),
         };
         let mut cases = vec![];
         for case in pairs {
@@ -664,12 +664,12 @@ impl<'a> MapperContext<'a> {
     }
 
     fn validate_expr(&mut self, expr_id: ExprId, identifiers: &mut HashSet<String>) -> Result<(), TuliproxError> {
-        let Some(expr) = self.expressions.get(expr_id.0) else { return create_tuliprox_error_result!(TuliproxErrorKind::Info, "No matching expression found at index {}", expr_id.0) };
+        let Some(expr) = self.expressions.get(expr_id.0) else { return info_err_res!("No matching expression found at index {}", expr_id.0) };
         match expr {
             Expression::Identifier(ident)
             | Expression::VarAccess(ident, _) => {
                 if !identifiers.contains(ident.as_str()) {
-                    return create_tuliprox_error_result!(TuliproxErrorKind::Info, "Identifier unknown {}, {:?}", ident, expr);
+                    return info_err_res!("Identifier unknown {}, {:?}", ident, expr);
                 }
             }
             Expression::NullValue
@@ -680,7 +680,7 @@ impl<'a> MapperContext<'a> {
                 match field {
                     RegexSource::Identifier(ident) => {
                         if !identifiers.contains(ident.as_str()) {
-                            return create_tuliprox_error_result!(TuliproxErrorKind::Info, "Regex identifier unknown {}, {:?}", ident, expr);
+                            return info_err_res!("Regex identifier unknown {}, {:?}", ident, expr);
                         }
                     }
                     RegexSource::Field(_) => {}
@@ -697,7 +697,7 @@ impl<'a> MapperContext<'a> {
             }
             Expression::FunctionCall { name, args } => {
                 if args.is_empty() {
-                    return create_tuliprox_error_result!(TuliproxErrorKind::Info, "Function needs at least one argument {:?}", name);
+                    return info_err_res!("Function needs at least one argument {:?}", name);
                 }
                 match name {
                     BuiltInFunction::ToNumber
@@ -705,17 +705,17 @@ impl<'a> MapperContext<'a> {
                     | BuiltInFunction::First
                     | BuiltInFunction::AddFavourite => {
                         if args.len() > 1 {
-                            return create_tuliprox_error_result!(TuliproxErrorKind::Info, "Function accepts only one argument {:?}, {} given", name, args.len());
+                            return info_err_res!("Function accepts only one argument {:?}, {} given", name, args.len());
                         }
                     }
                     BuiltInFunction::Replace => {
                         if args.len() != 3 {
-                            return create_tuliprox_error_result!(TuliproxErrorKind::Info, "Function accepts three arguments {:?}, {} given", name, args.len());
+                            return info_err_res!("Function accepts three arguments {:?}, {} given", name, args.len());
                         }
                     }
                     BuiltInFunction::Pad => {
                         if !(args.len() == 3 || args.len() == 4) {
-                            return create_tuliprox_error_result!(TuliproxErrorKind::Info, "Function accepts three or four arguments {:?}, {} given", name, args.len());
+                            return info_err_res!("Function accepts three or four arguments {:?}, {} given", name, args.len());
                         }
                     }
                     _ => {}
@@ -748,7 +748,7 @@ impl<'a> MapperContext<'a> {
                 match identifier {
                     MatchCaseKey::Identifier(ident) => {
                         if !identifiers.contains(ident.as_str()) {
-                            return create_tuliprox_error_result!(TuliproxErrorKind::Info, "Match case identifier unknown {}", ident);
+                            return info_err_res!("Match case identifier unknown {}", ident);
                         }
                         identifier_key.push_str(ident.as_str());
                         identifier_key.push_str(", ");
@@ -756,14 +756,14 @@ impl<'a> MapperContext<'a> {
                     MatchCaseKey::AnyMatch => {
                         any_match_count += 1;
                         if any_match_count > 1 {
-                            return create_tuliprox_error_result!(TuliproxErrorKind::Info, "Match case can only have one '_'");
+                            return info_err_res!("Match case can only have one '_'");
                         }
                         identifier_key.push_str("_, ");
                     }
                 }
             }
             if case_keys.contains(&identifier_key) {
-                return create_tuliprox_error_result!(TuliproxErrorKind::Info, "Duplicate case {}", identifier_key);
+                return info_err_res!("Duplicate case {}", identifier_key);
             }
             case_keys.insert(identifier_key);
             self.validate_expr(match_case.expression, identifiers)?;
@@ -776,7 +776,7 @@ impl<'a> MapperContext<'a> {
             MapKey::Identifier(ident)
             | MapKey::VarAccess(ident, _) => {
                 if !identifiers.contains(ident.as_str()) {
-                    return create_tuliprox_error_result!(TuliproxErrorKind::Info, "Map key identifier unknown {}", ident);
+                    return info_err_res!("Map key identifier unknown {}", ident);
                 }
             }
             MapKey::FieldAccess(_) => {}
@@ -788,7 +788,7 @@ impl<'a> MapperContext<'a> {
                 match key {
                     MapCaseKey::Text(value) => {
                         if case_keys.contains(value.as_str()) {
-                            return create_tuliprox_error_result!(TuliproxErrorKind::Info, "Duplicate case {}", value);
+                            return info_err_res!("Duplicate case {}", value);
                         }
                         case_keys.insert(value.as_str());
                     }
@@ -797,13 +797,13 @@ impl<'a> MapperContext<'a> {
                     | MapCaseKey::RangeFrom(_) => {}
                     MapCaseKey::RangeFull(from, to) => {
                         if *from > *to {
-                            return create_tuliprox_error_result!(TuliproxErrorKind::Info, "Invalid range {from}..{to}");
+                            return info_err_res!("Invalid range {from}..{to}");
                         }
                     }
                     MapCaseKey::AnyMatch => {
                         any_match_count += 1;
                         if any_match_count > 1 {
-                            return create_tuliprox_error_result!(TuliproxErrorKind::Info, "Map case can only have one '_'");
+                            return info_err_res!("Map case can only have one '_'");
                         }
                     }
                 }
@@ -1250,7 +1250,7 @@ impl Expression {
                                 let item_type = accessor.pli.header.item_type;
                                 if item_type != PlaylistItemType::Series &&  item_type != PlaylistItemType::LocalSeries {
                                     let mut pli = accessor.pli.clone();
-                                    pli.header.group.clone_from(group);
+                                    pli.header.group = crate::utils::intern(group);
                                     pli.header.uuid = crate::utils::create_alias_uuid(&accessor.pli.header.uuid, group);
                                     accessor.virtual_items.push((group.clone(), pli));
                                 }
@@ -1564,7 +1564,7 @@ mod tests {
         let mut accessor = ValueAccessor { pli: &mut video, virtual_items: vec![], match_as_ascii: false };
         mapper.eval(&mut accessor, None);
         assert_eq!(accessor.virtual_items.len(), 1);
-        assert_eq!(accessor.virtual_items[0].1.header.group, "My Favs");
+        assert_eq!(&*accessor.virtual_items[0].1.header.group, "My Favs");
 
         // Test with SeriesInfo (should work)
         let mut series_info = PlaylistItem {

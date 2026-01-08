@@ -38,11 +38,11 @@ impl CacheConfigDto {
                 match parse_size_base_2(val) {
                     Ok(size) => {
                         if let Err(err) = usize::try_from(size) {
-                            return Err(info_err!(format!("Cache size could not be determined: {err}")));
+                            return Err(info_err!("Cache size could not be determined: {err}"));
                         }
                     }
                     Err(err) => {
-                        return Err(info_err!(format!("Failed to read cache size: {err}")))
+                        return Err(info_err!("Failed to read cache size: {err}"))
                     }
                 }
             }

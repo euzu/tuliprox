@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use crate::model::macros;
 use regex::Regex;
 use shared::foundation::filter::{CompiledRegex, Filter};
@@ -5,7 +6,7 @@ use shared::model::{ConfigFavouritesDto, ItemField};
 
 #[derive(Debug, Clone)]
 pub struct ConfigFavourites {
-    pub group: String,
+    pub group: Arc<str>,
     pub filter: Filter,
     pub match_as_ascii: bool,
 }

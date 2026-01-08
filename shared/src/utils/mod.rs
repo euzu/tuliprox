@@ -11,6 +11,7 @@ mod serde_utils;
 mod hdhomerun_utils;
 mod net_utils;
 mod number_utils;
+mod string_interner;
 
 use std::fmt::Display;
 pub use self::default_utils::*;
@@ -26,6 +27,7 @@ pub use self::serde_utils::*;
 pub use self::hdhomerun_utils::*;
 pub use self::net_utils::*;
 pub use self::number_utils::*;
+pub use self::string_interner::*;
 
 #[macro_export]
 macro_rules! write_if_some {

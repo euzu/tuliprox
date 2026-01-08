@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use crate::model::{Mappings};
-use shared::error::{create_tuliprox_error_result, info_err, TuliproxError, TuliproxErrorKind};
+use shared::error::{info_err_res, info_err, TuliproxError, TuliproxErrorKind};
 use crate::utils::traverse_dir;
 use crate::utils::{config_file_reader, open_file};
 use log::{warn};
@@ -18,7 +18,7 @@ fn read_mapping(mapping_file: &Path, resolve_var: bool, prepare_mappings: bool) 
                 Ok(Some(mapping))
             }
             Err(err) => {
-                Err(info_err!(err.to_string()))
+                Err(info_err!("{}", err.to_string()))
             }
         };
     }
@@ -104,7 +104,7 @@ fn read_mappings_from_directory(path: &Path, resolve_env: bool) -> Result<Option
                 mappings.push(mapping);
             },
             Ok(None) => {}
-            Err(err) => return create_tuliprox_error_result!(TuliproxErrorKind::Info, "Failed to read mapping file {file_path:?}: {err:?}"),
+            Err(err) => return info_err_res!("Failed to read mapping file {file_path:?}: {err:?}"),
         }
     }
 

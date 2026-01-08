@@ -1,5 +1,6 @@
 use crate::utils::is_blank_optional_string;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use crate::model::{M3uPlaylistItem, PlaylistEntry, PlaylistItemType, XtreamCluster, XtreamPlaylistItem};
 use crate::utils::{current_time_secs, longest};
@@ -11,7 +12,7 @@ pub struct StreamChannel {
     pub provider_id: u32,
     pub item_type: PlaylistItemType,
     pub cluster: XtreamCluster,
-    pub group: String,
+    pub group: Arc<str>,
     pub title: String,
     pub url: String,
     pub shared: bool,

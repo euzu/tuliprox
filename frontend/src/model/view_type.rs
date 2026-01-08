@@ -1,6 +1,6 @@
 use std::fmt;
 use std::str::FromStr;
-use shared::error::{info_err, TuliproxError};
+use shared::error::{info_err_res, TuliproxError};
 
 const DASHBOARD: &str = "dashboard";
 const STATS: &str = "stats";
@@ -43,7 +43,7 @@ impl FromStr for ViewType {
             PLAYLIST_EDITOR => Ok(ViewType::PlaylistEditor),
             PLAYLIST_EXPLORER => Ok(ViewType::PlaylistExplorer),
             PLAYLIST_EPG => Ok(ViewType::PlaylistEpg),
-            _ => Err(info_err!(format!("Unknown view type: {s}"))),
+            _ => info_err_res!("Unknown view type: {s}"),
         }
     }
 }

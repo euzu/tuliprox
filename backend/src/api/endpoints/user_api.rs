@@ -1,20 +1,20 @@
+use crate::api::api_utils::try_unwrap_body;
 use crate::api::api_utils::{get_user_target_by_username, get_username_from_auth_header};
 use crate::api::model::AppState;
 use crate::auth::validator_user;
-use crate::model::{AppConfig, ConfigTarget};
-use shared::model::{PlaylistBouquetDto, TargetType, XtreamCluster};
+use crate::auth::AuthBearer;
 use crate::model::PlaylistXtreamCategory;
+use crate::model::{AppConfig, ConfigTarget};
+use crate::repository::m3u_repository;
 use crate::repository::user_repository::{load_user_bouquet_as_json, save_user_bouquet};
 use crate::repository::xtream_repository::xtream_get_playlist_categories;
-use crate::repository::m3u_repository;
+use axum::response::IntoResponse;
 use bytes::Bytes;
 use futures::{stream, StreamExt};
 use log::error;
+use shared::model::{PlaylistBouquetDto, TargetType, XtreamCluster};
 use std::collections::HashSet;
 use std::sync::Arc;
-use axum::response::IntoResponse;
-use crate::auth::AuthBearer;
-use crate::api::api_utils::try_unwrap_body;
 
 fn get_categories_from_xtream(categories: Option<Vec<PlaylistXtreamCategory>>) -> Vec<String> {
     let mut groups: Vec<String> = Vec::new();
@@ -27,12 +27,12 @@ fn get_categories_from_xtream(categories: Option<Vec<PlaylistXtreamCategory>>) -
 }
 
 
-async fn get_categories_from_m3u_playlist(target: &ConfigTarget, config: &AppConfig) -> Vec<String> {
+async fn get_categories_from_m3u_playlist(target: &ConfigTarget, config: &AppConfig) -> Vec<Arc<str>> {
     let mut groups = Vec::new();
     if let Some((_guard, iter)) = m3u_repository::iter_raw_m3u_playlist(config, target).await {
         let mut unique_groups = HashSet::new();
         for (item, _has_next) in iter {
-            if !unique_groups.contains(item.group.as_str()) {
+            if !unique_groups.contains(&item.group) {
                 unique_groups.insert(item.group.clone());
                 groups.push(item.group.clone());
             }
@@ -153,7 +153,7 @@ pub fn user_api_register(app_state: Arc<AppState>) -> axum::Router<Arc<AppState>
                 .route("/playlist/categories", axum::routing::get(playlist_categories))
                 .route("/playlist/bouquet", axum::routing::get(playlist_bouquet))
                 .route("/playlist/bouquet", axum::routing::post(save_playlist_bouquet))
-                .route_layer(axum::middleware::from_fn_with_state(app_state, validator_user))
+                .route_layer(axum::middleware::from_fn_with_state(app_state, validator_user)),
         )
 
 

@@ -5,13 +5,12 @@ use reqwest::header::HeaderMap;
 use shared::utils::{filter_response_header};
 
 pub fn get_response_headers(headers: &HeaderMap) -> Vec<(String, String)> {
-    let mut response_headers: Vec<(String, String)> = headers.iter()
+    let response_headers: Vec<(String, String)> = headers.iter()
         .filter(|(key, _)| filter_response_header(key.as_str()))
         .filter_map(|(key, value)| {
             value.to_str().ok().map(|v| (key.to_string(), v.to_string()))
         })
         .collect();
-    response_headers.push((axum::http::header::CONNECTION.as_str().to_string(), "close".to_string()));
     response_headers
 }
 
@@ -32,7 +31,6 @@ pub fn get_stream_response_with_headers(custom: Option<(Vec<(String, String)>, S
 
     let default_headers = vec![
         ("content-type", "application/octet-stream"),
-        ("connection", "close"),
     ];
 
     for (key, value) in default_headers {

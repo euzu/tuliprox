@@ -1,8 +1,8 @@
 use std::fmt::Display;
 use std::str::FromStr;
 use enum_iterator::Sequence;
-use crate::create_tuliprox_error_result;
-use crate::error::{TuliproxError, TuliproxErrorKind};
+use crate::info_err_res;
+use crate::error::{TuliproxError};
 
 #[derive(Debug, Default, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq, Ord, PartialOrd)]
 pub enum ProxyUserStatus {
@@ -48,7 +48,7 @@ impl FromStr for ProxyUserStatus {
             Self::TRIAL => Ok(Self::Trial),
             Self::DISABLED => Ok(Self::Disabled),
             Self::PENDING => Ok(Self::Pending),
-            _ => create_tuliprox_error_result!(TuliproxErrorKind::Info, "Unknown ProxyUserStatus: {}", s)
+            _ => info_err_res!("Unknown ProxyUserStatus: {}", s)
         }
     }
 }

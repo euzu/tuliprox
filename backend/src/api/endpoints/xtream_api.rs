@@ -1,4 +1,5 @@
 // https://github.com/tellytv/go.xtream-codes/blob/master/structs.go
+// Xtream api -> https://9tzx6f0ozj.apidog.io/
 use crate::api::api_utils;
 use crate::api::api_utils::{create_session_fingerprint, local_stream_response, try_unwrap_body};
 use crate::api::api_utils::{
@@ -32,9 +33,7 @@ use futures::Stream;
 use log::{debug, error, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use shared::error::create_tuliprox_error_result;
-use shared::error::info_err;
-use shared::error::{TuliproxError, TuliproxErrorKind};
+use shared::error::{info_err_res, info_err, TuliproxError};
 use shared::model::{create_stream_channel_with_type, PlaylistEntry, PlaylistItemType, ProxyType,
                     TargetType, UserConnectionPermission, XtreamCluster};
 use shared::utils::{ deserialize_as_string, extract_extension_from_url, generate_playlist_uuid,
@@ -92,11 +91,7 @@ impl FromStr for ApiStreamContext {
             Self::MOVIE => Ok(Self::Movie),
             Self::SERIES => Ok(Self::Series),
             Self::TIMESHIFT => Ok(Self::Timeshift),
-            _ => create_tuliprox_error_result!(
-                TuliproxErrorKind::Info,
-                "Unknown ApiStreamContext: {}",
-                s
-            ),
+            _ => info_err_res!("Unknown ApiStreamContext: {}", s),
         }
     }
 }
@@ -255,7 +250,7 @@ async fn xtream_player_api_stream(
     }
 
     let input = try_option_bad_request!(
-      app_state.app_config.get_input_by_name(pli.input_name.as_str()),
+      app_state.app_config.get_input_by_name(&pli.input_name),
       true,
       format!( "Cant find input {} for target {target_name}, context {}, stream_id {virtual_id}", pli.input_name, stream_req.context)
     );
@@ -447,7 +442,7 @@ async fn xtream_player_api_stream_with_token(
         let input = try_option_bad_request!(
             app_state
                 .app_config
-                .get_input_by_name(pli.input_name.as_str()),
+                .get_input_by_name(&pli.input_name),
             true,
             format!(
                 "Cant find input {} for target {target_name}, context {}, stream_id {}",
@@ -829,7 +824,7 @@ async fn xtream_get_stream_info_response(
         Some(cluster),
     ).await {
         if pli.item_type.is_local() {
-            let Ok(xtream_output) = target.get_xtream_output().ok_or_else(|| info_err!(format!("Unexpected: xtream output required for target {}", target.name))) else {
+            let Ok(xtream_output) = target.get_xtream_output().ok_or_else(|| info_err!("Unexpected: xtream output required for target {}", target.name)) else {
                 return try_unwrap_body!(empty_json_response());
             };
 
@@ -840,7 +835,7 @@ async fn xtream_get_stream_info_response(
 
         if pli.provider_id > 0 {
             let input_name = &pli.input_name;
-            if let Some(input) = app_state.app_config.get_input_by_name(input_name.as_str()) {
+            if let Some(input) = app_state.app_config.get_input_by_name(input_name) {
                 if let Some(info_url) = xtream::get_xtream_player_api_info_url(&input, cluster, pli.provider_id) {
                     // Redirect is only possible for live streams, vod and series info needs to be modified
                     if user.proxy == ProxyType::Redirect && cluster == XtreamCluster::Live {
@@ -925,7 +920,7 @@ async fn xtream_get_short_epg(
 
             if pli.provider_id > 0 {
                 let input_name = &pli.input_name;
-                if let Some(input) = app_state.app_config.get_input_by_name(input_name.as_str()) {
+                if let Some(input) = app_state.app_config.get_input_by_name(input_name) {
                     if let Some(action_url) = xtream::get_xtream_player_api_action_url(
                         &input,
                         crate::model::XC_ACTION_GET_SHORT_EPG,
@@ -952,6 +947,7 @@ async fn xtream_get_short_epg(
                             &input_source,
                             None,
                             None,
+                            false
                         )
                             .await
                         {
@@ -1039,7 +1035,7 @@ async fn xtream_get_catchup_response(
     ).await);
     let input = try_option_bad_request!(app_state
         .app_config
-        .get_input_by_name(pli.input_name.as_str()));
+        .get_input_by_name(&pli.input_name));
     let info_url = try_option_bad_request!(xtream::get_xtream_player_api_action_url(
         &input,
         crate::model::XC_ACTION_GET_CATCHUP_TABLE
@@ -1053,7 +1049,8 @@ async fn xtream_get_catchup_response(
     let content = try_result_bad_request!(
         xtream::get_xtream_stream_info_content(
             &app_state.http_client.load(),
-            &input_source
+            &input_source,
+            false
         )
         .await
     );
@@ -1288,10 +1285,7 @@ async fn xtream_player_api(
                 )
                 .await
             ),
-            _ => Some(Err(info_err!(format!(
-                "Cant find content: {action} for target: {}",
-                &target.name
-            )))),
+            _ => Some(info_err_res!("Cant find content: {action} for target: {}", &target.name)),
         };
 
         match result {

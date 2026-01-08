@@ -1,7 +1,7 @@
 use std::fmt;
 use std::str::FromStr;
-use crate::create_tuliprox_error_result;
-use crate::error::{TuliproxError, TuliproxErrorKind};
+use crate::info_err_res;
+use crate::error::{TuliproxError};
 
 #[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub enum MsgKind {
@@ -39,7 +39,7 @@ impl FromStr for MsgKind {
         } else if s.eq_ignore_ascii_case("watch") {
             Ok(Self::Watch)
         } else {
-            create_tuliprox_error_result!(TuliproxErrorKind::Info, "Unknown MsgKind: {}", s)
+            info_err_res!("Unknown MsgKind: {}", s)
         }
     }
 }

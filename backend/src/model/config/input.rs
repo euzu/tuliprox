@@ -156,7 +156,7 @@ impl ConfigInput {
         if let Some(staged_input) = &mut self.staged {
             check_input_credentials!(staged_input, staged_input.input_type, false, true);
             if !matches!(staged_input.input_type, InputType::M3u | InputType::Xtream) {
-                return Err(info_err!("Staged input can only be from type m3u or xtream".to_owned()));
+                return Err(info_err!("{}", "Staged input can only be from type m3u or xtream"));
             }
         }
 

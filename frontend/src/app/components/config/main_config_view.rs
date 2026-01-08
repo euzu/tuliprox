@@ -11,6 +11,7 @@ const LABEL_UPDATE_ON_BOOT: &str = "LABEL.UPDATE_ON_BOOT";
 const LABEL_CONFIG_HOT_RELOAD: &str = "LABEL.CONFIG_HOT_RELOAD";
 const LABEL_USER_ACCESS_CONTROL: &str = "LABEL.USER_ACCESS_CONTROL";
 const LABEL_PROCESS_PARALLEL: &str = "LABEL.PROCESS_PARALLEL";
+const LABEL_DISK_BASED_PROCESSING: &str = "LABEL.DISK_BASED_PROCESSING";
 const LABEL_WORKING_DIR: &str = "LABEL.WORKING_DIR";
 const LABEL_MAPPING_PATH: &str = "LABEL.MAPPING_PATH";
 const LABEL_BACKUP_DIR: &str = "LABEL.BACKUP_DIR";
@@ -29,6 +30,7 @@ generate_form_reducer!(
         UserAccessControl => user_access_control: bool,
         AcceptInsecureSslCertificates => accept_insecure_ssl_certificates: bool,
         ProcessParallel => process_parallel: bool,
+        DiskBasedProcessing => disk_based_processing: bool,
         WorkingDir => working_dir: String,
         MappingPath => mapping_path: Option<String>,
         BackupDir => backup_dir: Option<String>,
@@ -79,6 +81,7 @@ pub fn MainConfigView() -> Html {
                 { config_field_bool!(form_state.form, translate.t(LABEL_USER_ACCESS_CONTROL), user_access_control) }
                 { config_field_bool!(form_state.form, translate.t(LABEL_ACCEPT_INSECURE_SSL_CERTIFICATES), accept_insecure_ssl_certificates) }
                 { config_field_bool!(form_state.form, translate.t(LABEL_PROCESS_PARALLEL), process_parallel) }
+                { config_field_bool!(form_state.form, translate.t(LABEL_DISK_BASED_PROCESSING), disk_based_processing) }
                 { config_field!(form_state.form, translate.t(LABEL_WORKING_DIR), working_dir) }
                 { config_field_optional!(form_state.form, translate.t(LABEL_MAPPING_PATH), mapping_path) }
                 { config_field_optional!(form_state.form, translate.t(LABEL_BACKUP_DIR), backup_dir) }
@@ -97,6 +100,7 @@ pub fn MainConfigView() -> Html {
             { edit_field_bool!(form_state, translate.t(LABEL_USER_ACCESS_CONTROL), user_access_control, MainConfigFormAction::UserAccessControl) }
             { edit_field_bool!(form_state, translate.t(LABEL_ACCEPT_INSECURE_SSL_CERTIFICATES), accept_insecure_ssl_certificates, MainConfigFormAction::AcceptInsecureSslCertificates) }
             { edit_field_bool!(form_state, translate.t(LABEL_PROCESS_PARALLEL), process_parallel, MainConfigFormAction::ProcessParallel) }
+            { edit_field_bool!(form_state, translate.t(LABEL_DISK_BASED_PROCESSING), disk_based_processing, MainConfigFormAction::DiskBasedProcessing) }
             { edit_field_text!(form_state, translate.t(LABEL_WORKING_DIR), working_dir, MainConfigFormAction::WorkingDir) }
             { edit_field_text_option!(form_state, translate.t(LABEL_MAPPING_PATH), mapping_path, MainConfigFormAction::MappingPath) }
             { edit_field_text_option!(form_state, translate.t(LABEL_BACKUP_DIR), backup_dir, MainConfigFormAction::BackupDir) }

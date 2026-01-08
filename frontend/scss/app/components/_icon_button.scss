@@ -21,6 +21,13 @@
   .svg-icon {
     pointer-events: none;
   }
+
+  &__remove {
+    fill: var(--menu-button-warn-color);
+    &:hover {
+      fill: var(--menu-button-warn-hover-color);
+    }
+  }
 }
 
 .tp__icon-button.tp__button-primary {

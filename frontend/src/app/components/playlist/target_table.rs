@@ -4,7 +4,7 @@ use crate::app::components::{convert_bool_to_chip_style, AppIcon, Chip, FilterVi
 use crate::hooks::use_service_context;
 use crate::model::DialogResult;
 use crate::services::DialogService;
-use shared::error::{create_tuliprox_error_result, TuliproxError, TuliproxErrorKind};
+use shared::error::{info_err_res, TuliproxError};
 use shared::model::{ConfigTargetDto, SortOrder};
 use std::fmt::Display;
 use std::rc::Rc;
@@ -232,7 +232,7 @@ impl FromStr for TargetTableAction {
             "edit" => Ok(Self::Edit),
             "refresh" => Ok(Self::Refresh),
             "delete" => Ok(Self::Delete),
-            _ => create_tuliprox_error_result!(TuliproxErrorKind::Info, "Unknown Target Action: {}", s),
+            _ => info_err_res!("Unknown Target Action: {}", s),
         }
     }
 }

@@ -1,9 +1,9 @@
 use crate::model::macros;
-use shared::error::TuliproxError;
+use shared::error::{TuliproxError, info_err_res};
 use shared::model::{LibraryConfigDto, LibraryContentType, LibraryMetadataFormat};
 use std::path::PathBuf;
-use shared::info_err;
-use shared::utils::default_metadata_path;
+use std::sync::Arc;
+use shared::utils::{default_metadata_path, intern};
 
 #[derive(Debug, Clone, Default)]
 pub struct LibraryScanDirectory {
@@ -40,8 +40,8 @@ pub struct LibraryTmdbConfig {
 
 #[derive(Debug, Clone)]
 pub struct LibraryPlaylistConfig {
-    pub movie_category: String,
-    pub series_category: String,
+    pub movie_category: Arc<str>,
+    pub series_category: Arc<str>,
 }
 
 
@@ -67,7 +67,7 @@ impl LibraryConfig {
                             dir.path = path.to_string();
                         }
                     }
-                    Err(err) => return Err(info_err!(format!("Failed to canonicalize directory path: {err}"))),
+                    Err(err) => return info_err_res!("Failed to canonicalize directory path: {err}"),
                 }
             }
         }
@@ -121,8 +121,8 @@ impl From<&LibraryConfigDto> for LibraryConfig {
                 formats: dto.metadata.formats.clone(),
             },
             playlist: LibraryPlaylistConfig {
-                movie_category: dto.playlist.movie_category.clone(),
-                series_category: dto.playlist.series_category.clone(),
+                movie_category: intern(&dto.playlist.movie_category),
+                series_category: intern(&dto.playlist.series_category),
             },
         }
     }

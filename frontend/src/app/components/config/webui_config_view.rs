@@ -124,11 +124,14 @@ pub fn WebUiConfigView() -> Html {
     let render_view_mode = || {
         html! {
         <>
+            <Card class="tp__config-view__card">
             { config_field_bool!(webui_state.form, translate.t(LABEL_ENABLED), enabled) }
             { config_field_bool!(webui_state.form, translate.t(LABEL_USER_UI_ENABLED), user_ui_enabled) }
             { config_field_optional!(webui_state.form, translate.t(LABEL_PATH), path) }
             { config_field_optional!(webui_state.form, translate.t(LABEL_PLAYER_SERVER), player_server) }
             { config_field!(webui_state.form, translate.t(LABEL_KICK_DURATION), kick_secs) }
+            </Card>
+
             <Card class="tp__config-view__card">
                 <h1>{translate.t(LABEL_CONTENT_SECURITY_POLICY)}</h1>
                 { config_field_bool!(csp_state.form, translate.t(LABEL_ENABLED), enabled) }
@@ -162,12 +165,14 @@ pub fn WebUiConfigView() -> Html {
     let render_edit_mode = || {
         html! {
             <>
+            <Card class="tp__config-view__card">
                 { edit_field_bool!(webui_state, translate.t(LABEL_ENABLED), enabled, WebUiConfigFormAction::Enabled) }
                 { edit_field_bool!(webui_state, translate.t(LABEL_USER_UI_ENABLED), user_ui_enabled, WebUiConfigFormAction::UserUiEnabled) }
                 { edit_field_text_option!(webui_state, translate.t(LABEL_PATH), path, WebUiConfigFormAction::Path) }
                 { edit_field_text_option!(webui_state, translate.t(LABEL_PLAYER_SERVER), player_server, WebUiConfigFormAction::PlayerServer) }
                 { edit_field_number_u64!(webui_state, translate.t(LABEL_KICK_DURATION), kick_secs, WebUiConfigFormAction::KickSecs) }
-                <Card class="tp__config-view__card">
+            </Card>
+            <Card class="tp__config-view__card">
                     <h1>{translate.t(LABEL_CONTENT_SECURITY_POLICY)}</h1>
                     { edit_field_bool!(csp_state, translate.t(LABEL_ENABLED), enabled, CspConfigFormAction::Enabled) }
                     { edit_field_list_option!(csp_state, translate.t(LABEL_CONTENT_SECURITY_POLICY_CUSTOM_ATTRIBUTES), custom_attributes, CspConfigFormAction::CustomAttributes, translate.t("LABEL.ADD_ATTRIBUTE")) }

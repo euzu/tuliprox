@@ -5,8 +5,7 @@ use crate::repository::user_repository::user_get_bouquet_filter;
 use crate::repository::xtream_repository::{xtream_get_file_path, xtream_get_storage_path};
 use crate::utils::FileReadGuard;
 use log::error;
-use shared::error::info_err;
-use shared::error::TuliproxError;
+use shared::error::{TuliproxError, info_err, info_err_res};
 use shared::model::{PlaylistItemType, TargetType, XtreamCluster, XtreamMappingOptions, XtreamPlaylistItem};
 use std::collections::HashSet;
 
@@ -31,17 +30,17 @@ impl XtreamPlaylistIterator {
 
         // TODO use playlist memory cache and keep sorted
 
-        let xtream_output = target.get_xtream_output().ok_or_else(|| info_err!(format!("Unexpected: xtream output required for target {}", target.name)))?;
+        let xtream_output = target.get_xtream_output().ok_or_else(|| info_err!("Unexpected: xtream output required for target {}", target.name))?;
         let config = app_config.config.load();
         if let Some(storage_path) = xtream_get_storage_path(&config, target.name.as_str()) {
             let xtream_path = xtream_get_file_path(&storage_path, cluster);
             if !xtream_path.exists() {
-                return Err(info_err!(format!("No {cluster} entries found for target {}", &target.name)));
+                return info_err_res!("No {cluster} entries found for target {}", &target.name);
             }
             let file_lock = app_config.file_locks.read_lock(&xtream_path).await;
 
             let query = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path)
-                .map_err(|err| info_err!(format!("Could not open BPlusTreeQuery {xtream_path:?} - {err}")))?;
+                .map_err(|err| info_err!("Could not open BPlusTreeQuery {xtream_path:?} - {err}"))?;
             let reader = query.disk_iter();
 
             let server_info = app_config.get_user_server_info(user);
@@ -67,7 +66,7 @@ impl XtreamPlaylistIterator {
                 lookup_item: None,
             })
         } else {
-            Err(info_err!(format!("Failed to find xtream storage for target {}", &target.name)))
+            info_err_res!("Failed to find xtream storage for target {}", &target.name)
         }
     }
 

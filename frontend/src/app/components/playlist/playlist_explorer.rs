@@ -7,8 +7,7 @@ use crate::app::context::PlaylistExplorerContext;
 use yew::prelude::*;
 use yew_hooks::use_clipboard;
 use yew_i18n::use_translation;
-use shared::create_tuliprox_error_result;
-use shared::error::{TuliproxError, TuliproxErrorKind};
+use shared::error::{TuliproxError, info_err_res};
 use shared::model::{CommonPlaylistItem, PlaylistRequest, SearchRequest, UiPlaylistGroup, XtreamCluster};
 use crate::app::components::{AppIcon, IconButton, NoContent, Panel, Search};
 use crate::app::components::menu_item::MenuItem;
@@ -51,7 +50,7 @@ impl FromStr for ExplorerAction {
         } else if s.eq(COPY_LINK_PROVIDER_URL) {
             Ok(Self::CopyLinkProviderUrl)
         } else {
-            create_tuliprox_error_result!(TuliproxErrorKind::Info, "Unknown InputType: {}", s)
+            info_err_res!("Unknown InputType: {}", s)
         }
     }
 }

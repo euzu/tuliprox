@@ -19,14 +19,14 @@ const XML_PREAMBLE: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 //
 // // XML Header via events (DO NOT USE, kept for documentation):
 // writer.write_event_async(quick_xml::events::Event::Decl(quick_xml::events::BytesDecl::new("1.0", Some("utf-8"), None)))
-//     .await.map_err(|e| notify_err!(format!("failed to write XML header: {}", e)))?;
+//     .await.map_err(|e| notify_err!("failed to write XML header: {}", e))?;
 //
 // // DOCTYPE via events (DO NOT USE):
 // writer.write_event_async(quick_xml::events::Event::DocType(quick_xml::events::BytesText::new(r#"tv SYSTEM "xmltv.dtd""#)))
-//     .await.map_err(|e| notify_err!(format!("failed to write doctype: {}", e)))?;
+//     .await.map_err(|e| notify_err!("failed to write doctype: {}", e))?;
 pub async fn epg_write_file(target: &ConfigTarget, epg: &Epg, path: &Path, playlist: Option<&[PlaylistGroup]>) -> Result<(), TuliproxError> {
     let file = tokio::fs::File::create(path).await
-        .map_err(|e| notify_err!(format!("failed to create epg file {}: {}", path.display(), e)))?;
+        .map_err(|e| notify_err!("failed to create epg file {}: {}", path.display(), e))?;
 
     // Use a larger buffer for sequential writes to reduce syscalls
     let mut buf_writer = async_file_writer(file);
@@ -35,7 +35,7 @@ pub async fn epg_write_file(target: &ConfigTarget, epg: &Epg, path: &Path, playl
     buf_writer
         .write_all(XML_PREAMBLE.as_bytes())
         .await
-        .map_err(|e| notify_err!(format!("failed to write XML preamble {}: {}", path.display(), e)))?;
+        .map_err(|e| notify_err!("failed to write XML preamble {}: {}", path.display(), e))?;
 
     // Build a temporary rename map with zero allocations (uses references)
     let mut rename_map: HashMap<&str, &str> = HashMap::new();
@@ -56,16 +56,16 @@ pub async fn epg_write_file(target: &ConfigTarget, epg: &Epg, path: &Path, playl
     epg
         .write_to_async(&mut writer, if rename_map.is_empty() { None } else { Some(&rename_map) })
         .await
-        .map_err(|e| notify_err!(format!("failed to write epg {}: {}", path.display(), e)))?;
+        .map_err(|e| notify_err!("failed to write epg {}: {}", path.display(), e))?;
 
     // Ensure buffers are flushed to the OS and capture any I/O error
     let mut buf_writer = writer.into_inner();
     buf_writer
         .flush()
         .await
-        .map_err(|e| notify_err!(format!("failed to flush epg {}: {}", path.display(), e)))?;
+        .map_err(|e| notify_err!("failed to flush epg {}: {}", path.display(), e))?;
 
-    buf_writer.shutdown().await.map_err(|e| notify_err!(format!("failed to write epg {}: {}", path.display(), e)))?;
+    buf_writer.shutdown().await.map_err(|e| notify_err!("failed to write epg {}: {}", path.display(), e))?;
 
     debug_if_enabled!("Epg for target {} written to {}", target.name, path.display());
     Ok(())
@@ -81,7 +81,7 @@ pub async fn epg_write(cfg: &Config, target: &ConfigTarget, target_path: &Path, 
                         debug_if_enabled!("writing xtream epg to {}", epg_path.display());
                         epg_write_file(target, epg_data, &epg_path, playlist).await?;
                     }
-                    None => return Err(notify_err!(format!("failed to serialize epg for target: {}, storage path not found", target.name))),
+                    None => return Err(notify_err!("failed to serialize epg for target: {}, storage path not found", target.name)),
                 }
             }
             TargetOutput::M3u(_) => {

@@ -1,6 +1,6 @@
-use crate::app::components::config::config_page::{ConfigForm, ConfigPage, LABEL_API_CONFIG, LABEL_HDHOMERUN_CONFIG, LABEL_IP_CHECK_CONFIG, LABEL_LOG_CONFIG, LABEL_MAIN_CONFIG, LABEL_MESSAGING_CONFIG, LABEL_PANEL_CONFIG, LABEL_PROXY_CONFIG, LABEL_REVERSE_PROXY_CONFIG, LABEL_SCHEDULES_CONFIG, LABEL_VIDEO_CONFIG, LABEL_WEB_UI_CONFIG};
+use crate::app::components::config::config_page::{ConfigForm, ConfigPage, LABEL_API_CONFIG, LABEL_HDHOMERUN_CONFIG, LABEL_IP_CHECK_CONFIG, LABEL_LIBRARY_CONFIG, LABEL_LOG_CONFIG, LABEL_MAIN_CONFIG, LABEL_MESSAGING_CONFIG, LABEL_PANEL_CONFIG, LABEL_PROXY_CONFIG, LABEL_REVERSE_PROXY_CONFIG, LABEL_SCHEDULES_CONFIG, LABEL_VIDEO_CONFIG, LABEL_WEB_UI_CONFIG};
 use crate::app::components::config::config_view_context::ConfigViewContext;
-use crate::app::components::config::{ApiConfigView, HdHomerunConfigView, IpCheckConfigView, LogConfigView, MainConfigView, MessagingConfigView, PanelConfigView, ProxyConfigView, ReverseProxyConfigView, SchedulesConfigView, VideoConfigView, WebUiConfigView};
+use crate::app::components::config::{ApiConfigView, HdHomerunConfigView, IpCheckConfigView, LibraryConfigView, LogConfigView, MainConfigView, MessagingConfigView, PanelConfigView, ProxyConfigView, ReverseProxyConfigView, SchedulesConfigView, VideoConfigView, WebUiConfigView};
 use crate::app::components::{Card, TabItem, TabSet, TextButton};
 use crate::html_if;
 use std::str::FromStr;
@@ -49,6 +49,7 @@ fn config_form_to_config_page(form: &ConfigForm) -> ConfigPage {
         ConfigForm::Proxy(_, _) => ConfigPage::Proxy,
         ConfigForm::IpCheck(_, _) => ConfigPage::IpCheck,
         ConfigForm::Panel(_, _) => ConfigPage::Panel,
+        ConfigForm::Library(_, _) => ConfigPage::Library,
     }
 }
 
@@ -66,6 +67,7 @@ struct ConfigFormState {
     pub proxy: Option<ConfigForm>,
     pub ipcheck: Option<ConfigForm>,
     pub panel: Option<ConfigForm>,
+    pub library: Option<ConfigForm>,
 }
 
 #[function_component]
@@ -96,7 +98,7 @@ pub fn ConfigView() -> Html {
             let forms: &ConfigFormState = forms;
             let modified_pages = collect_modified!(forms, [
                 main, api, log, schedules, video, messaging, web_ui,
-                reverse_proxy, hd_homerun, proxy, ipcheck, panel
+                reverse_proxy, hd_homerun, proxy, ipcheck, panel, library
             ]).iter()
                 .map(config_form_to_config_page)
                 .collect::<Vec<ConfigPage>>();
@@ -114,6 +116,7 @@ pub fn ConfigView() -> Html {
                 (ConfigPage::IpCheck, LABEL_IP_CHECK_CONFIG, html! { <IpCheckConfigView/> }, "IpCheckConfig"),
                 (ConfigPage::Panel, LABEL_PANEL_CONFIG, html! { <PanelConfigView/> }, "Settings"),
                 (ConfigPage::Video, LABEL_VIDEO_CONFIG, html! { <VideoConfigView/> }, "VideoConfig"),
+                (ConfigPage::Library, LABEL_LIBRARY_CONFIG, html! { <LibraryConfigView/> }, "VideoLibrary"),
             ];
 
             let editing = *editing;
@@ -149,7 +152,7 @@ pub fn ConfigView() -> Html {
             let forms = &*get_form_state;
             let modified_forms: Vec<ConfigForm> = collect_modified!(forms, [
                 main, api, log, schedules, video, messaging, web_ui,
-                reverse_proxy, hd_homerun, proxy, ipcheck, panel
+                reverse_proxy, hd_homerun, proxy, ipcheck, panel, library
             ]);
 
             if modified_forms.is_empty() {
@@ -249,6 +252,7 @@ pub fn ConfigView() -> Html {
                 ConfigForm::Proxy(_, _) => new_state.proxy = Some(form_data),
                 ConfigForm::IpCheck(_, _) => new_state.ipcheck = Some(form_data),
                 ConfigForm::Panel(_, _) => new_state.panel = Some(form_data),
+                ConfigForm::Library(_, _) => new_state.library = Some(form_data),
             };
             set_form_state.set(new_state);
         })

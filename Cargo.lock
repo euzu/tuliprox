@@ -1156,7 +1156,7 @@ dependencies = [
 
 [[package]]
 name = "frontend"
-version = "3.2.37"
+version = "3.2.38"
 dependencies = [
  "anyhow",
  "base64",
@@ -1168,9 +1168,9 @@ dependencies = [
  "futures-signals",
  "gloo-render 0.2.0",
  "gloo-storage 0.3.0",
- "gloo-timers 0.2.6",
+ "gloo-timers 0.3.0",
  "gloo-utils 0.2.0",
- "implicit-clone",
+ "implicit-clone 0.6.0",
  "js-sys",
  "log",
  "prost",
@@ -1691,8 +1691,6 @@ version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b995a66bb87bebce9a0f4a95aed01daca4872c050bfcb21653361c03bc35e5c"
 dependencies = [
- "futures-channel",
- "futures-core",
  "js-sys",
  "wasm-bindgen",
 ]
@@ -2253,6 +2251,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "implicit-clone"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1689b939ee35e3a075b0834b5672efd43aec8a6e81a1c6002b76a5ca2f211ae0"
+dependencies = [
+ "implicit-clone-derive",
+]
+
+[[package]]
 name = "implicit-clone-derive"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2504,15 +2511,6 @@ name = "lru-slab"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
-
-[[package]]
-name = "lz4_flex"
-version = "0.11.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08ab2867e3eeeca90e844d1940eab391c9dc5228783db2ed999acbc0a9ed375a"
-dependencies = [
- "twox-hash",
-]
 
 [[package]]
 name = "lz4_flex"
@@ -3863,9 +3861,9 @@ dependencies = [
 
 [[package]]
 name = "serde-saphyr"
-version = "0.0.12"
+version = "0.0.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef7e021087b4b525edcbb93045ca3f1dafeff7800b3c7960a90a75f197e257da"
+checksum = "be7f28bb35aab6f9cdc5f464f9bbda0b1e3908766e819557111cc13e58ce7915"
 dependencies = [
  "ahash",
  "annotate-snippets",
@@ -3992,7 +3990,7 @@ dependencies = [
 
 [[package]]
 name = "shared"
-version = "3.2.37"
+version = "3.2.38"
 dependencies = [
  "base64",
  "bitflags 2.10.0",
@@ -4008,7 +4006,7 @@ dependencies = [
  "indexmap",
  "js-sys",
  "log",
- "lz4_flex 0.12.0",
+ "lz4_flex",
  "path-clean",
  "pest",
  "pest_derive",
@@ -4566,7 +4564,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tuliprox"
-version = "3.2.37"
+version = "3.2.38"
 dependencies = [
  "arc-swap",
  "async-compression",
@@ -4597,7 +4595,7 @@ dependencies = [
  "libc",
  "log",
  "lol_html",
- "lz4_flex 0.11.5",
+ "lz4_flex",
  "mime",
  "mime_guess",
  "notify",
@@ -4697,9 +4695,9 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "url"
-version = "2.5.7"
+version = "2.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08bc136a29a3d1758e07a9cca267be308aeebf5cfd5a10f3f67ab2097683ef5b"
+checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
 dependencies = [
  "form_urlencoded",
  "idna",
@@ -5351,7 +5349,7 @@ dependencies = [
  "console_error_panic_hook",
  "futures",
  "gloo 0.10.0",
- "implicit-clone",
+ "implicit-clone 0.4.9",
  "indexmap",
  "js-sys",
  "prokio",

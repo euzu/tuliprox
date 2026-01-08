@@ -37,7 +37,7 @@ impl M3uPlaylistIterator {
 
         // TODO use playlist memory cache, but be aware of sorting !
 
-        let m3u_output = target.get_m3u_output().ok_or_else(|| info_err!(format!("Unexpected failure, missing m3u target output for target {}",  target.name)))?;
+        let m3u_output = target.get_m3u_output().ok_or_else(|| info_err!("Unexpected failure, missing m3u target output for target {}",  target.name))?;
         let config = cfg.config.load();
         let target_path = ensure_target_storage_path(&config, target.name.as_str())?;
         let m3u_path = m3u_get_file_path(&target_path);
@@ -45,7 +45,7 @@ impl M3uPlaylistIterator {
         let file_lock = cfg.file_locks.read_lock(&m3u_path).await;
 
         let query = BPlusTreeQuery::<u32, M3uPlaylistItem>::try_new(&m3u_path)
-                .map_err(|err| info_err!(format!("Could not open BPlusTreeQuery {m3u_path:?} - {err}")))?;
+                .map_err(|err| info_err!("Could not open BPlusTreeQuery {m3u_path:?} - {err}"))?;
         let reader = query.disk_iter();
 
         let filter = user_get_bouquet_filter(&config, &user.username, None, TargetType::M3u, XtreamCluster::Live).await;
@@ -116,14 +116,14 @@ impl M3uPlaylistIterator {
         let entry = if let Some(set) = &self.filter {
             if let Some((current_item, _)) = self.lookup_item.take() {
                 // Avoid cloning strings while filtering
-                let next_valid = self.reader.find(|(_, pli)| set.contains(pli.group.as_str()));
+                let next_valid = self.reader.find(|(_, pli)| set.contains(&*pli.group));
                 self.lookup_item = next_valid.map(|(_k, v)| (v, true)); // has_next handled by iterator usually, but here we just need the item
                 let has_next = self.lookup_item.is_some();
                 Some((current_item, has_next))
             } else {
-                let current_item = self.reader.find(|(_, item)| set.contains(item.group.as_str()));
+                let current_item = self.reader.find(|(_, item)| set.contains(&*item.group));
                 if let Some((_, item)) = current_item {
-                    self.lookup_item = self.reader.find(|(_, item)| set.contains(item.group.as_str())).map(|(_, item)| (item, true));
+                    self.lookup_item = self.reader.find(|(_, item)| set.contains(&*item.group)).map(|(_, item)| (item, true));
                     let has_next = self.lookup_item.is_some();
                     Some((item, has_next))
                 } else {

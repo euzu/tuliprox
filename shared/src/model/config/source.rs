@@ -1,6 +1,6 @@
 use std::collections::HashSet;
-use crate::create_tuliprox_error_result;
-use crate::error::{TuliproxError, TuliproxErrorKind};
+use crate::info_err_res;
+use crate::error::{TuliproxError};
 use crate::foundation::filter::prepare_templates;
 use crate::model::{ConfigInputDto, HdHomeRunDeviceOverview, PatternTemplate};
 use crate::model::config::target::ConfigTargetDto;
@@ -19,7 +19,7 @@ impl ConfigSourceDto {
     pub fn prepare(&mut self, index: u16, _include_computed: bool) -> Result<u16, TuliproxError> {
         let current_index = index;
         if self.inputs.is_empty() {
-            return create_tuliprox_error_result!(TuliproxErrorKind::Info, "At least one input should be defined at source: {index}");
+            return info_err_res!("At least one input should be defined at source: {index}");
         }
         // Trim all input names
         for input in &mut self.inputs {
@@ -62,7 +62,7 @@ impl SourcesConfigDto {
             // Validate referenced inputs
             for name in &source.inputs {
                 if !self.inputs.iter().any(|i| &i.name == name) {
-                     return create_tuliprox_error_result!(TuliproxErrorKind::Info, "Source references unknown input: '{name}'");
+                     return info_err_res!("Source references unknown input: '{name}'");
                 }
             }
 
@@ -102,7 +102,7 @@ impl SourcesConfigDto {
                 let target_name = target.name.as_str();
                 if !default_target_name.eq_ignore_ascii_case(target_name) {
                     if seen_names.contains(target_name) {
-                        return create_tuliprox_error_result!(TuliproxErrorKind::Info, "target names should be unique: {target_name}");
+                        return info_err_res!("target names should be unique: {target_name}");
                     }
                     seen_names.insert(target_name);
                 }

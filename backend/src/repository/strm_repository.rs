@@ -5,16 +5,16 @@ use crate::model::{ApiProxyServerInfo, AppConfig, ProxyUserCredentials};
 use crate::model::{ConfigTarget, StrmTargetOutput};
 use crate::repository::storage::{ensure_target_storage_path};
 use crate::repository::storage_const;
-use crate::utils::{async_file_reader, async_file_writer, normalize_string_path, truncate_filename, IO_BUFFER_SIZE};
+use crate::utils::{async_file_reader, async_file_writer, normalize_string_path, truncate_filename,
+                   IO_BUFFER_SIZE};
 use chrono::Datelike;
 use filetime::{set_file_times, FileTime};
 use log::{error, trace};
 use regex::Regex;
 use serde::Serialize;
-use shared::error::{create_tuliprox_error_result, info_err};
-use shared::error::{TuliproxError, TuliproxErrorKind};
+use shared::error::{TuliproxError, info_err_res, info_err};
 use shared::model::{ClusterFlags, PlaylistGroup, PlaylistItem, PlaylistItemType, StreamProperties, StrmExportStyle, UUIDType};
-use shared::utils::{extract_extension_from_url, hash_bytes, hash_string_as_hex, truncate_string, ExportStyleConfig, CONSTANTS};
+use shared::utils::{ arc_str_serde, extract_extension_from_url, hash_bytes, hash_string_as_hex, truncate_string, ExportStyleConfig, CONSTANTS};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -130,13 +130,15 @@ pub fn strm_get_file_paths(file_prefix: &str, target_path: &Path) -> PathBuf {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StrmItemInfo {
-    group: String,
+    #[serde(with = "arc_str_serde")]
+    group: Arc<str>,
     title: String,
     item_type: PlaylistItemType,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     provider_id: Option<u32>,
     virtual_id: u32,
-    input_name: String,
+    #[serde(with = "arc_str_serde")]
+    input_name: Arc<str>,
     url: String,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     series_name: Option<String>,
@@ -219,10 +221,7 @@ async fn prepare_strm_output_directory(path: &Path) -> Result<(), TuliproxError>
     // Ensure the directory exists
     if let Err(e) = tokio::fs::create_dir_all(path).await {
         error!("Failed to create directory {}: {e}", path.display());
-        return create_tuliprox_error_result!(
-            TuliproxErrorKind::Notify,
-            "Error creating STRM directory: {e}"
-        );
+        return info_err_res!("Error creating STRM directory: {e}");
     }
     Ok(())
 }
@@ -713,10 +712,7 @@ pub async fn write_strm_playlist(
         &config.working_dir,
         Some(std::path::PathBuf::from(&target_output.directory)),
     ) else {
-        return Err(info_err!(format!(
-            "Failed to get file path for {}",
-            target_output.directory
-        )));
+        return info_err_res!("Failed to get file path for {}",target_output.directory);
     };
 
     let user_and_server_info = get_credentials_and_server_info(app_config, target_output.username.as_deref());
@@ -801,7 +797,7 @@ pub async fn write_strm_playlist(
     if failed.is_empty() {
         Ok(())
     } else {
-        Err(info_err!(failed.join(", ")))
+        Err(info_err!("{}", failed.join(", ")))
     }
 }
 async fn write_strm_index_file(

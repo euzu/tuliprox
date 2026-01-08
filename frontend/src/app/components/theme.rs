@@ -1,5 +1,4 @@
-use shared::error::TuliproxError;
-use shared::info_err;
+use shared::error::{TuliproxError, info_err_res};
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 use web_sys::window;
@@ -36,7 +35,7 @@ impl FromStr for Theme {
         match s.to_lowercase().as_str() {
             THEME_DARK => Ok(Theme::Dark),
             THEME_BRIGHT => Ok(Theme::Bright),
-            _ => Err(info_err!(format!("Unknown theme: {s}"))),
+            _ => info_err_res!("Unknown theme: {s}"),
         }
     }
 }

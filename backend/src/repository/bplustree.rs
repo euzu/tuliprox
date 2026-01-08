@@ -1,17 +1,17 @@
-use std::ffi::OsString;
 use crate::utils;
 use crate::utils::{binary_deserialize, binary_serialize};
+use fs2::FileExt;
 use indexmap::IndexMap;
 use log::error;
 use serde::{Deserialize, Serialize};
 use shared::error::{string_to_io_error, to_io_error};
+use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::marker::PhantomData;
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
-use fs2::FileExt;
 
 // Constants (Restored)
 const PAGE_SIZE: u16 = 4096;
@@ -231,7 +231,6 @@ impl From<io::Error> for BPlusTreeError {
 }
 
 
-
 impl BPlusTreeError {
     pub fn to_io(self) -> io::Error {
         match self {
@@ -255,7 +254,6 @@ impl From<PageError> for BPlusTreeError {
 
 
 impl<'a> SlottedPage<'a> {
-
     pub fn new(data: &'a mut [u8], page_type: PageType) -> Result<Self, PageError> {
         if data.len() < PAGE_HEADER_SIZE_USIZE {
             return Err(PageError::NoSpace);
@@ -366,7 +364,7 @@ impl<'a> SlottedPage<'a> {
         let slot_pos = PAGE_HEADER_SIZE_USIZE + (index * SLOT_SIZE);
         // Safe slice access
         if slot_pos + 2 > self.data.len() { return None; }
-        let offset = u16::from_le_bytes(self.data[slot_pos..slot_pos+2].try_into().ok()?);
+        let offset = u16::from_le_bytes(self.data[slot_pos..slot_pos + 2].try_into().ok()?);
 
         // Bounds check for length header
         if (offset as usize) + 4 > self.data.len() { return None; }
@@ -379,7 +377,7 @@ impl<'a> SlottedPage<'a> {
     pub fn get_cell_offset(&self, index: usize) -> Option<u16> {
         let slot_pos = PAGE_HEADER_SIZE_USIZE + (index * SLOT_SIZE);
         if slot_pos + 2 > self.data.len() { return None; }
-        Some(u16::from_le_bytes(self.data[slot_pos..slot_pos+2].try_into().ok()?))
+        Some(u16::from_le_bytes(self.data[slot_pos..slot_pos + 2].try_into().ok()?))
     }
 
     pub fn compact(&mut self) -> Result<(), PageError> {
@@ -433,7 +431,7 @@ impl<'a> SlottedPage<'a> {
             return Err(PageError::InvalidIndex); // Cannot split empty page
         }
         if count == 1 {
-            // Cannot split single item fundamentally. 
+            // Cannot split single item fundamentally.
             // Return Ok(None) explicitly to indicate no-op.
             return Ok(None);
         }
@@ -524,7 +522,7 @@ struct ValueInfo {
     mode: ValueStorageMode,
     length: u32,
     #[serde(skip)]
-    compressed_cache: Option<(u8, Vec<u8>)> // (flag, payload)
+    compressed_cache: Option<(u8, Vec<u8>)>, // (flag, payload)
 }
 
 
@@ -661,6 +659,14 @@ where
                 // fallback: if child_idx is out of bounds, try last child (defensive)
                 self.children.last().and_then(|c| c.find_le(key))
             }
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        if self.is_leaf {
+            self.keys.len()
+        } else {
+            self.children.iter().map(BPlusTreeNode::len).sum()
         }
     }
 
@@ -1388,6 +1394,14 @@ where
         }
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.root.keys.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.root.len()
+    }
+
     pub fn insert(&mut self, key: K, value: V) {
         self.dirty = true;
         if self.root.keys.is_empty() {
@@ -1456,6 +1470,97 @@ where
                 Ok(result)
             }
             Err(err) => Err(err),
+        }
+    }
+
+    /// Bulk build a tree from pre-calculated `ValueInfos` (streaming compact helper).
+    /// Writes nodes to `file` starting at `start_offset`.
+    /// Returns the offset of the root node used to update the file header.
+    fn bulk_build_from_infos<W: Write + Seek>(
+        &mut self,
+        file: &mut W,
+        items: &[(K, ValueInfo)],
+        start_offset: u64,
+    ) -> io::Result<u64> {
+        if items.is_empty() {
+            // Write empty root
+            let root = BPlusTreeNode::<K, V>::new(true);
+            let mut buffer = Vec::with_capacity(PAGE_SIZE_USIZE);
+            let _offset = root.serialize_to_block(file, &mut buffer, start_offset)?;
+            // For a single empty root, the root offset is the start offset.
+            // serialize_to_block returns the *end* offset (start of next block).
+            // But header needs the *start* of the root node.
+            // Wait - serialize_to_block logic:
+            // "Returns the offset of the NEXT block"
+            // So the root IS at start_offset.
+            return Ok(start_offset);
+        }
+
+        // 1. Sort items (Query iterator is usually sorted, but let's be safe or rely on caller)
+        // Since BPlusTreeQuery works on offsets, order might be physical not logical if we iterate blocks?
+        // BPlusTreeQuery::iter() uses range_scan which traverses logical order. So it IS sorted!
+
+        let mut current_offset = start_offset;
+        let mut write_buffer = Vec::with_capacity(PAGE_SIZE_USIZE);
+
+        // 2. Build Leaves
+        // Chunk items into leaf nodes
+        let mut next_level_pointers: Vec<(K, u64)> = Vec::new();
+
+        for chunk in items.chunks(self.leaf_order) {
+            let mut node = BPlusTreeNode::<K, V>::new(true);
+            for (k, v) in chunk {
+                node.keys.push(k.clone());
+                node.value_info.push(v.clone());
+            }
+
+            let node_offset = current_offset;
+            current_offset = node.serialize_to_block(file, &mut write_buffer, node_offset)?;
+
+            if !node.keys.is_empty() {
+                next_level_pointers.push((node.keys[0].clone(), node_offset));
+            }
+        }
+
+        // 3. Build Internal Levels recursively
+        while next_level_pointers.len() > 1 {
+            let mut parent_level_pointers: Vec<(K, u64)> = Vec::new();
+            let children = next_level_pointers; // Move
+
+            // Chunk size: `inner_order + 1` (pointers).
+            for chunk in children.chunks(self.inner_order + 1) {
+                let mut node = BPlusTreeNode::<K, V>::new(false);
+                let mut pointers = Vec::new();
+
+                // First pointer
+                if let Some((_, off)) = chunk.first() {
+                    pointers.push(*off);
+                }
+
+                // Subsequent pointers and separators
+                for (k, off) in &chunk[1..] {
+                    node.keys.push(k.clone());
+                    pointers.push(*off);
+                }
+
+                let node_offset = current_offset;
+
+                // Use serialize_internal_with_offsets
+                current_offset = node.serialize_internal_with_offsets(file, &mut write_buffer, node_offset, &pointers)?;
+
+                // Track for upper level
+                if let Some((k, _)) = chunk.first() {
+                    parent_level_pointers.push((k.clone(), node_offset));
+                }
+            }
+            next_level_pointers = parent_level_pointers;
+        }
+
+        // 4. Return Root Offset
+        if let Some((_, root_off)) = next_level_pointers.first() {
+            Ok(*root_off)
+        } else {
+            Ok(start_offset)
         }
     }
 
@@ -1643,6 +1748,50 @@ where
     }
 }
 
+fn count_items<K, V, R: Read + Seek>(
+    file: &mut R,
+    buffer: &mut Vec<u8>,
+    cache: &mut IndexMap<u64, Vec<u8>>,
+    start_offset: u64,
+) -> Result<usize, BPlusTreeError>
+where
+    K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
+    V: Serialize + for<'de> Deserialize<'de> + Clone,
+{
+    let mut count = 0;
+    let mut stack = vec![start_offset];
+    while let Some(offset) = stack.pop() {
+        let (node, pointers) = if let Some(cached_block) = cache.get_mut(&offset) {
+            let data = cached_block.clone();
+            let temp_buffer = data;
+            let res = BPlusTreeNode::<K, V>::deserialize_from_block_slice(&temp_buffer, file, false)
+                .map_err(BPlusTreeError::from)?;
+            if let Some(removed) = cache.shift_remove(&offset) {
+                cache.insert(offset, removed);
+            }
+            res
+        } else {
+            match BPlusTreeNode::<K, V>::deserialize_from_block(file, buffer, offset, false) {
+                Ok((node, pointers)) => {
+                    if cache.len() >= CACHE_CAPACITY {
+                        cache.shift_remove_index(0);
+                    }
+                    cache.insert(offset, buffer.to_owned());
+                    (node, pointers)
+                }
+                Err(err) => return Err(BPlusTreeError::from(err)),
+            }
+        };
+
+        if node.is_leaf {
+            count += node.keys.len();
+        } else if let Some(ptrs) = pointers {
+            stack.extend(ptrs);
+        }
+    }
+    Ok(count)
+}
+
 
 /// `BPlusTreeQuery` performs on-disk queries without loading the entire tree into memory.
 /// For frequent queries, consider using `BPlusTree::load()` instead, which loads the full tree into memory
@@ -1693,6 +1842,18 @@ where
 
     pub fn query(&mut self, key: &K) -> Result<Option<V>, BPlusTreeError> {
         query_tree(&mut self.file, &mut self.buffer, &mut self.cache, key, self.root_offset)
+    }
+
+    pub fn is_empty(&mut self) -> Result<bool, BPlusTreeError> {
+        self.file.seek(SeekFrom::Start(self.root_offset))?;
+        let header_required = FLAG_SIZE + LEN_SIZE;
+        self.file.read_exact(&mut self.buffer[0..header_required])?;
+        let keys_len = u32_from_bytes(&self.buffer[FLAG_SIZE..=LEN_SIZE])? as usize;
+        Ok(keys_len == 0)
+    }
+
+    pub fn len(&mut self) -> Result<usize, BPlusTreeError> {
+        count_items::<K, V, _>(&mut self.file, &mut self.buffer, &mut self.cache, self.root_offset)
     }
 
     pub fn query_le(&mut self, key: &K) -> Result<Option<V>, BPlusTreeError> {
@@ -2002,95 +2163,89 @@ where
         query_tree(&mut reader, &mut self.read_buffer, &mut self.cache, key, self.root_offset)
     }
 
+    pub fn is_empty(&mut self) -> Result<bool, BPlusTreeError> {
+        self.file.seek(SeekFrom::Start(self.root_offset))?;
+        let header_required = FLAG_SIZE + LEN_SIZE;
+        self.file.read_exact(&mut self.read_buffer[0..header_required])?;
+        let keys_len = u32_from_bytes(&self.read_buffer[FLAG_SIZE..=LEN_SIZE])? as usize;
+        Ok(keys_len == 0)
+    }
+
+    pub fn len(&mut self) -> Result<usize, BPlusTreeError> {
+        let mut reader = utils::file_reader(&mut self.file);
+        count_items::<K, V, _>(&mut reader, &mut self.read_buffer, &mut self.cache, self.root_offset)
+    }
+
     pub fn query_le(&mut self, key: &K) -> Result<Option<V>, BPlusTreeError> {
         let mut reader = utils::file_reader(&mut self.file);
         query_tree_le(&mut reader, &mut self.read_buffer, &mut self.cache, key, self.root_offset)
     }
 
 
-    fn update_recursive(
-        &mut self,
-        offset: u64,
-        key: &K,
-        value: &V,
-    ) -> Result<u64, BPlusTreeError> {
-        let mut reader = utils::file_reader(&mut self.file);
-        let (mut node, pointers) = BPlusTreeNode::<K, V>::deserialize_from_block(&mut reader, &mut self.read_buffer, offset, false)?;
-
-        if node.is_leaf {
-            match node.keys.binary_search(key) {
-                Ok(idx) => {
-                    // COW: Write new value with adaptive LZ4 compression
-                    let raw_bytes = binary_serialize(value)?;
-
-
-
-                    let (flag, payload) = compress_if_beneficial(&raw_bytes);
-
-                    self.file.seek(SeekFrom::End(0))?;
-                    let val_offset = self.file.stream_position()?;
-
-                    // Write: [flag:1][payload]
-                    self.file.write_all(&[flag])?;
-                    // NOTE: For LZ4, payload already includes original length (prepended)
-                    self.file.write_all(&payload)?;
-
-                    // stored_len includes flag + payload
-                    let stored_len = 1 + payload.len();
-
-                    // Update leaf metadata
-                    node.value_info[idx] = ValueInfo {
-                        mode: ValueStorageMode::Single(val_offset),
-                        length: u32::try_from(stored_len).map_err(to_io_error)?,
-                        compressed_cache: None,
-                    };
-
-                    // Write new leaf node at end of file
-                    self.file.seek(SeekFrom::End(0))?;
-                    let new_leaf_offset = self.file.stream_position()?;
-                    node.serialize_to_block(&mut self.file, &mut self.write_buffer, new_leaf_offset)?;
-                    Ok(new_leaf_offset)
-                }
-                Err(_) => Err(BPlusTreeError::KeyNotFound),
-            }
-        } else {
-            let child_idx = get_entry_index_upper_bound::<K>(&node.keys, key);
-            if let Some(mut pters) = pointers {
-                if let Some(&child_offset) = pters.get(child_idx) {
-                    // Recurse to get a new child offset
-                    let new_child_offset = self.update_recursive(child_offset, key, value)?;
-
-                    // Update current node's pointers
-                    pters[child_idx] = new_child_offset;
-
-                    // COW: Write new internal node at end of file
-                    self.file.seek(SeekFrom::End(0))?;
-                    let new_node_offset = self.file.stream_position()?;
-
-                    // Use the robust helper to serialize the internal node with updated child pointers
-                    node.serialize_internal_with_offsets(&mut self.file, &mut self.write_buffer, new_node_offset, &pters)?;
-                    Ok(new_node_offset)
-                } else {
-                    Err(BPlusTreeError::InvalidStructure("Child pointer not found in internal node".into()))
-                }
-            } else {
-                Err(BPlusTreeError::InvalidStructure("Internal node missing pointers invariant violation".into()))
-            }
-        }
-    }
-
-
     pub fn update(&mut self, key: &K, value: V) -> Result<u64, BPlusTreeError> {
-        let new_root_offset = self.update_recursive(self.root_offset, key, &value)?;
+        let refs = [(key, &value)];
+        let new_root_offset = self.update_batch_recursive(self.root_offset, &refs)?;
 
         // Atomic Header Swap
-        self.file.seek(SeekFrom::Start(ROOT_OFFSET_POS))?;
-        self.file.write_all(&new_root_offset.to_le_bytes())?;
-        self.file.flush()?;
-        self.file.sync_all()?;
+        self.file.seek(SeekFrom::Start(ROOT_OFFSET_POS)).map_err(BPlusTreeError::Io)?;
+        self.file.write_all(&new_root_offset.to_le_bytes()).map_err(BPlusTreeError::Io)?;
+        self.file.flush().map_err(BPlusTreeError::Io)?;
+        self.file.sync_all().map_err(BPlusTreeError::Io)?;
 
         self.root_offset = new_root_offset;
         Ok(new_root_offset)
+    }
+
+    /// Update multiple items in batch. This is more efficient than calling `update()` multiple times
+    /// as it performs all updates and then commits the final root offset once.
+    /// returns The final root offset after all updates, or an error if any update fails
+    fn update_batch_recursive(
+        &mut self,
+        offset: u64,
+        items: &[(&K, &V)],
+    ) -> Result<u64, BPlusTreeError> {
+        let mut reader = utils::file_reader(&mut self.file);
+        let (mut node, pointers_opt) = BPlusTreeNode::<K, V>::deserialize_from_block(&mut reader, &mut self.read_buffer, offset, false)?;
+
+        if node.is_leaf {
+            for (key, value) in items {
+                match node.keys.binary_search(key) {
+                    Ok(idx) => {
+                        let (val_off, val_len) = self.insert_value_to_disk(value).map_err(BPlusTreeError::Io)?;
+                        node.value_info[idx] = ValueInfo {
+                            mode: ValueStorageMode::Single(val_off),
+                            length: val_len,
+                            compressed_cache: None,
+                        };
+                    }
+                    Err(_) => return Err(BPlusTreeError::KeyNotFound),
+                }
+            }
+            let new_offset = self.write_node(&node).map_err(BPlusTreeError::Io)?;
+            Ok(new_offset)
+        } else {
+            let mut pointers = pointers_opt.ok_or_else(|| BPlusTreeError::InvalidStructure("Internal node missing pointers".into()))?;
+
+            let mut current_idx = 0;
+            while current_idx < items.len() {
+                let first_key_in_group = items[current_idx].0;
+                let child_idx = get_entry_index_upper_bound::<K>(&node.keys, first_key_in_group);
+
+                let mut group_end = current_idx + 1;
+                while group_end < items.len() && get_entry_index_upper_bound::<K>(&node.keys, items[group_end].0) == child_idx {
+                    group_end += 1;
+                }
+
+                let sub_items = &items[current_idx..group_end];
+                let new_child_offset = self.update_batch_recursive(pointers[child_idx], sub_items)?;
+                pointers[child_idx] = new_child_offset;
+
+                current_idx = group_end;
+            }
+
+            let new_offset = self.write_internal_node(&node, &pointers).map_err(BPlusTreeError::Io)?;
+            Ok(new_offset)
+        }
     }
 
     /// Update multiple items in batch. This is more efficient than calling `update()` multiple times
@@ -2101,21 +2256,19 @@ where
             return Ok(self.root_offset);
         }
 
-        let mut current_root = self.root_offset;
+        let mut sorted_items = items.to_vec();
+        sorted_items.sort_by(|a, b| a.0.cmp(b.0));
 
-        // Perform all updates sequentially
-        for (key, value) in items {
-            current_root = self.update_recursive(current_root, key, value)?;
-        }
+        let new_root_offset = self.update_batch_recursive(self.root_offset, &sorted_items)?;
 
         // Atomic Header Swap - only once at the end
-        self.file.seek(SeekFrom::Start(ROOT_OFFSET_POS))?;
-        self.file.write_all(&current_root.to_le_bytes())?;
-        self.file.flush()?;
-        self.file.sync_all()?;
+        self.file.seek(SeekFrom::Start(ROOT_OFFSET_POS)).map_err(BPlusTreeError::Io)?;
+        self.file.write_all(&new_root_offset.to_le_bytes()).map_err(BPlusTreeError::Io)?;
+        self.file.flush().map_err(BPlusTreeError::Io)?;
+        self.file.sync_all().map_err(BPlusTreeError::Io)?;
 
-        self.root_offset = current_root;
-        Ok(current_root)
+        self.root_offset = new_root_offset;
+        Ok(new_root_offset)
     }
 
 
@@ -2156,104 +2309,139 @@ where
         Ok(offset)
     }
 
-    fn upsert_recursive(&mut self, offset: u64, key: K, value: V) -> io::Result<(u64, Option<(K, u64)>)> {
+
+    fn upsert_batch_recursive(
+        &mut self,
+        offset: u64,
+        items: &[(&K, &V)],
+    ) -> io::Result<(u64, Vec<(K, u64)>)> {
+        let mut reader = utils::file_reader(&mut self.file);
         let (mut node, pointers_opt) = BPlusTreeNode::<K, V>::deserialize_from_block(
-            &mut self.file,
+            &mut reader,
             &mut self.read_buffer,
             offset,
             false, // shallow
         )?;
 
         if node.is_leaf {
-            match node.keys.binary_search(&key) {
-                Ok(idx) => {
-                    let (val_off, val_len) = self.insert_value_to_disk(&value)?;
-                    let new_info = ValueInfo { mode: ValueStorageMode::Single(val_off), length: val_len, compressed_cache: None };
-                    node.value_info[idx] = new_info;
+            for (key, value) in items {
+                let (val_off, val_len) = self.insert_value_to_disk(value)?;
+                let new_info = ValueInfo { mode: ValueStorageMode::Single(val_off), length: val_len, compressed_cache: None };
 
-                    let new_offset = self.write_node(&node)?;
-                    Ok((new_offset, None))
-                }
-                Err(idx) => {
-                    let (val_off, val_len) = self.insert_value_to_disk(&value)?;
-                    let new_info = ValueInfo { mode: ValueStorageMode::Single(val_off), length: val_len, compressed_cache: None };
-                    node.keys.insert(idx, key);
-                    node.value_info.insert(idx, new_info);
-
-                    if node.keys.len() > self.leaf_order {
-                        let median = self.leaf_order >> 1;
-                        let mut right_node = BPlusTreeNode::new(true);
-                        right_node.keys = node.keys.split_off(median);
-                        right_node.value_info = node.value_info.split_off(median);
-
-                        let promoted_key = right_node.keys.first().ok_or_else(|| io::Error::other("Split resulted in empty right node keys"))?.clone();
-
-                        let left_offset = self.write_node(&node)?;
-                        let right_offset = self.write_node(&right_node)?;
-
-                        Ok((left_offset, Some((promoted_key, right_offset))))
-                    } else {
-                        let new_offset = self.write_node(&node)?;
-                        Ok((new_offset, None))
+                match node.keys.binary_search(key) {
+                    Ok(idx) => {
+                        node.value_info[idx] = new_info;
+                    }
+                    Err(idx) => {
+                        node.keys.insert(idx, (*key).clone());
+                        node.value_info.insert(idx, new_info);
                     }
                 }
             }
-        } else {
-            let mut pointers = pointers_opt.unwrap();
-            let idx = get_entry_index_upper_bound(&node.keys, &key);
-            let child_offset = *pointers.get(idx).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Pointer index out of bounds"))?;
 
-            let (new_child_offset, split_res) = self.upsert_recursive(child_offset, key, value)?;
-            pointers[idx] = new_child_offset;
+            let mut leaf_promotions = Vec::new();
+            while node.keys.len() > self.leaf_order {
+                let median_idx = node.keys.len() / 2;
+                let mut right_node = BPlusTreeNode::new(true);
+                right_node.keys = node.keys.split_off(median_idx);
+                right_node.value_info = node.value_info.split_off(median_idx);
 
-            if let Some((median_key, right_child_offset)) = split_res {
-                node.keys.insert(idx, median_key);
-                pointers.insert(idx + 1, right_child_offset);
-
-                if node.keys.len() > self.inner_order {
-                    let median = self.inner_order >> 1;
-                    let mut right_node = BPlusTreeNode::new(false);
-                    let right_pointers = pointers.split_off(median + 1);
-                    right_node.keys = node.keys.split_off(median + 1);
-
-                    let promoted_key = node.keys.pop().unwrap();
-
-                    let left_offset = self.write_internal_node(&node, &pointers)?;
-                    let right_offset = self.write_internal_node(&right_node, &right_pointers)?;
-
-                    Ok((left_offset, Some((promoted_key, right_offset))))
-                } else {
-                    let new_offset = self.write_internal_node(&node, &pointers)?;
-                    Ok((new_offset, None))
-                }
-            } else {
-                let new_offset = self.write_internal_node(&node, &pointers)?;
-                Ok((new_offset, None))
+                let promoted_key = right_node.keys[0].clone();
+                let right_offset = self.write_node(&right_node)?;
+                leaf_promotions.push((promoted_key, right_offset));
             }
+
+            let new_leaf_offset = self.write_node(&node)?;
+            Ok((new_leaf_offset, leaf_promotions))
+        } else {
+            let mut pointers = pointers_opt.ok_or_else(|| io::Error::other("Internal node missing pointers"))?;
+            let mut current_idx = 0;
+
+            while current_idx < items.len() {
+                let first_key_in_group = items[current_idx].0;
+                let child_idx = get_entry_index_upper_bound::<K>(&node.keys, first_key_in_group);
+
+                let mut group_end = current_idx + 1;
+                while group_end < items.len() && get_entry_index_upper_bound::<K>(&node.keys, items[group_end].0) == child_idx {
+                    group_end += 1;
+                }
+
+                let sub_items = &items[current_idx..group_end];
+                let (new_child_offset, child_promotions) = self.upsert_batch_recursive(pointers[child_idx], sub_items)?;
+                pointers[child_idx] = new_child_offset;
+
+                for (median_key, right_child_offset) in child_promotions {
+                    let insert_idx = get_entry_index_upper_bound::<K>(&node.keys, &median_key);
+                    node.keys.insert(insert_idx, median_key);
+                    pointers.insert(insert_idx + 1, right_child_offset);
+                }
+
+                current_idx = group_end;
+            }
+
+            let mut node_promotions = Vec::new();
+            while node.keys.len() > self.inner_order {
+                let median_idx = node.keys.len() / 2;
+                let mut right_node = BPlusTreeNode::new(false);
+
+                let promoted_key = node.keys.remove(median_idx);
+                right_node.keys = node.keys.split_off(median_idx);
+                let right_pointers = pointers.split_off(median_idx + 1);
+
+                let right_offset = self.write_internal_node(&right_node, &right_pointers)?;
+                node_promotions.push((promoted_key, right_offset));
+            }
+
+            let new_offset = self.write_internal_node(&node, &pointers)?;
+            Ok((new_offset, node_promotions))
         }
     }
 
+    fn build_higher_levels(&mut self, base_offset: u64, mut promotions: Vec<(K, u64)>) -> io::Result<u64> {
+        if promotions.is_empty() {
+            return Ok(base_offset);
+        }
+        promotions.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut node = BPlusTreeNode::<K, V>::new(false);
+        let mut pointers = vec![base_offset];
+        for (key, ptr) in promotions {
+            node.keys.push(key);
+            pointers.push(ptr);
+        }
+
+        if node.keys.len() <= self.inner_order {
+            return self.write_internal_node(&node, &pointers);
+        }
+
+        let mut next_level_promotions = Vec::new();
+        while node.keys.len() > self.inner_order {
+            let median_idx = node.keys.len() / 2;
+            let mut right_node = BPlusTreeNode::new(false);
+            let promoted_key = node.keys.remove(median_idx);
+            right_node.keys = node.keys.split_off(median_idx);
+            let right_pointers = pointers.split_off(median_idx + 1);
+            let right_offset = self.write_internal_node(&right_node, &right_pointers)?;
+            next_level_promotions.push((promoted_key, right_offset));
+        }
+        let left_offset = self.write_internal_node(&node, &pointers)?;
+        self.build_higher_levels(left_offset, next_level_promotions)
+    }
+
     /// Insert or update multiple items in batch (upsert).
-    /// Uses disk-based recursive insertion (COW) to avoid loading full tree.
+    /// Uses disk-based recursive traversal for efficiency, processing each node only once.
     pub fn upsert_batch(&mut self, items: &[(&K, &V)]) -> io::Result<u64> {
         if items.is_empty() {
             return Ok(self.root_offset);
         }
 
-        let mut current_root = self.root_offset;
+        let mut sorted_items = items.to_vec();
+        sorted_items.sort_by(|a, b| a.0.cmp(b.0));
 
-        for (key, value) in items {
-            let (new_root, split) = self.upsert_recursive(current_root, (*key).clone(), (*value).clone())?;
-            current_root = new_root;
+        let (mut current_root, promotions) = self.upsert_batch_recursive(self.root_offset, &sorted_items)?;
 
-            if let Some((median_key, right_child)) = split {
-                let mut new_root_node = BPlusTreeNode::<K, V>::new(false);
-                new_root_node.keys.push(median_key);
-                let pointers = vec![current_root, right_child];
-
-                current_root = self.write_internal_node(&new_root_node, &pointers)?;
-            }
-        }
+        // Handle promotions (splits) using balanced approach
+        current_root = self.build_higher_levels(current_root, promotions)?;
 
         self.file.seek(SeekFrom::Start(ROOT_OFFSET_POS))?;
         self.file.write_all(&current_root.to_le_bytes())?;
@@ -2266,13 +2454,65 @@ where
 
     /// Garbage Collection: Compacts the file by rewriting only live blocks sequentially.
     pub fn compact(&mut self, filepath: &Path) -> io::Result<()> {
-        // 1. Reload the current tree fully from the live root
-        let mut tree = BPlusTree::<K, V>::load(filepath)?;
-        // 2. Setting dirty=true forces store_internal() to rewrite the file sequentially.
-        // We use store_internal because we already hold the lock in self._lock.
-        tree.dirty = true;
-        let new_root_offset = tree.store_internal(filepath)?;
-        self.root_offset = new_root_offset;
+        let mut value_infos: Vec<(K, ValueInfo)> = Vec::new();
+        let mut temp_file = NamedTempFile::new_in(filepath.parent().unwrap_or(Path::new(".")))?;
+
+        // 1. Write Header placeholder
+        temp_file.seek(SeekFrom::Start(0))?;
+        temp_file.write_all(MAGIC)?;
+        temp_file.write_all(&STORAGE_VERSION.to_le_bytes())?;
+        temp_file.seek(SeekFrom::Start(HEADER_SIZE))?; // Skip to start of content
+
+        let mut current_offset = HEADER_SIZE;
+
+        // 2. Iterate source and write values immediately (Streaming)
+        {
+            let mut query = BPlusTreeQuery::<K, V>::try_new(filepath).map_err(to_io_error)?;
+            let mut write_buffer = std::io::BufWriter::new(&mut temp_file);
+
+            for (k, v) in query.iter() {
+                let value_bytes = binary_serialize(&v)?;
+                let len = value_bytes.len();
+
+                let offset = current_offset;
+
+                // Write value header (flag + payload)
+                write_buffer.write_all(&[COMPRESSION_FLAG_NONE])?;
+                write_buffer.write_all(&value_bytes)?;
+
+                current_offset += 1 + len as u64;
+
+                let stored_len = u32::try_from(len + 1).map_err(to_io_error)?;
+                value_infos.push((k, ValueInfo {
+                    mode: ValueStorageMode::Single(offset),
+                    length: stored_len,
+                    compressed_cache: None,
+                }));
+            }
+            write_buffer.flush()?;
+        }
+
+        // 3. Build Tree Structure
+        current_offset = temp_file.seek(SeekFrom::End(0))?;
+
+        let mut tree = BPlusTree::<K, V>::new();
+        let root_offset = tree.bulk_build_from_infos(&mut temp_file, &value_infos, current_offset)?;
+
+        // 4. Update Header
+        temp_file.seek(SeekFrom::Start(ROOT_OFFSET_POS))?;
+        temp_file.write_all(&root_offset.to_le_bytes())?;
+
+        temp_file.flush()?;
+        temp_file.as_file().sync_all()?;
+
+        // 5. Atomic Replace
+        temp_file.persist(filepath).map_err(to_io_error)?;
+
+        // 6. Refresh state
+        self.root_offset = root_offset;
+        self.file = utils::open_read_write_file(filepath)?;
+        self.cache.clear();
+
         Ok(())
     }
 }
@@ -2481,6 +2721,81 @@ mod tests {
             });
         });
     }
+
+    #[test]
+    fn test_upsert_batch() -> io::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let filepath = tempdir.path().join("upsert_batch_test.bin");
+
+        // 1. Create initial tree
+        let mut tree = BPlusTree::<u32, Record>::new();
+        tree.insert(1, Record { id: 1, data: "original 1".to_string() });
+        tree.insert(2, Record { id: 2, data: "original 2".to_string() });
+        tree.store(&filepath)?;
+
+        // 2. Open for update and upsert batch
+        let mut update = BPlusTreeUpdate::<u32, Record>::try_new(&filepath)?;
+        let r1_new = Record { id: 1, data: "updated 1".to_string() };
+        let r3_new = Record { id: 3, data: "new 3".to_string() };
+
+        update.upsert_batch(&[
+            (&1, &r1_new),
+            (&3, &r3_new),
+        ])?;
+
+        // 3. Verify with query
+        let mut query = BPlusTreeQuery::<u32, Record>::try_new(&filepath)?;
+        assert_eq!(query.query(&1).unwrap(), Some(r1_new));
+        assert_eq!(query.query(&2).unwrap(), Some(Record { id: 2, data: "original 2".to_string() }));
+        assert_eq!(query.query(&3).unwrap(), Some(r3_new));
+
+        Ok(())
+    }
+
+    #[test]
+    fn len_test() -> io::Result<()> {
+        let test_size = 100;
+        let mut tree = BPlusTree::<u32, Record>::new();
+
+        // Initial state
+        assert_eq!(tree.len(), 0);
+        assert!(tree.is_empty());
+
+        for i in 1..=test_size {
+            tree.insert(i, Record {
+                id: i,
+                data: format!("data {i}"),
+            });
+            assert_eq!(tree.len(), i as usize);
+            assert!(!tree.is_empty());
+        }
+
+        let tempdir = tempfile::tempdir()?;
+        let filepath = tempdir.path().join("len_test.bin");
+        tree.store(&filepath)?;
+
+        // Test BPlusTreeQuery len
+        let mut query: BPlusTreeQuery<u32, Record> = BPlusTreeQuery::try_new(&filepath)?;
+        assert_eq!(query.len().expect("Query len failed"), test_size as usize);
+        assert!(!query.is_empty().expect("Query is_empty failed"));
+
+        // Test BPlusTreeUpdate len and modifications
+        let mut update: BPlusTreeUpdate<u32, Record> = BPlusTreeUpdate::try_new(&filepath)?;
+        assert_eq!(update.len().expect("Update len failed"), test_size as usize);
+
+        // Update existing key - length should stay same
+        update.update(&1, Record { id: 1, data: "updated".to_string() }).map_err(|e| e.to_io())?;
+        assert_eq!(update.len().expect("Update len failed after update"), test_size as usize);
+
+        // Insert new key - length should increase
+        update.upsert_batch(&[
+            (&(test_size + 1), &Record { id: test_size + 1, data: "new".to_string() })
+        ])?;
+        assert_eq!(update.len().expect("Update len failed after insert"), (test_size + 1) as usize);
+
+        Ok(())
+    }
+
 
     #[test]
     fn iterator_test() -> io::Result<()> {
@@ -2922,6 +3237,43 @@ mod tests {
         Ok(())
     }
 
+
+    #[test]
+    fn compact_reopen_test() -> io::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let filepath = tempdir.path().join("tree_compact_reopen.bin");
+        let mut tree = BPlusTree::<u32, Record>::new();
+
+        // Initial write
+        tree.insert(1, Record { id: 1, data: "Initial".to_string() });
+        tree.store(&filepath)?;
+        drop(tree);
+
+        let mut tree_update = BPlusTreeUpdate::<u32, Record>::try_new(&filepath)?;
+
+        // 1. Write something
+        let r2 = Record { id: 2, data: "BeforeCompact".to_string() };
+        tree_update.upsert_batch(&[(&2, &r2)])?;
+
+        // 2. Compact (this replaces the file)
+        tree_update.compact(&filepath)?;
+
+        // 3. Write something else
+        let r3 = Record { id: 3, data: "AfterCompact".to_string() };
+        tree_update.upsert_batch(&[(&3, &r3)])?;
+
+        drop(tree_update);
+
+        // Verify all data is present in the NEW file
+        let mut tree_check = BPlusTreeQuery::<u32, Record>::try_new(&filepath)?;
+
+        assert!(tree_check.query(&1).map_err(|e| e.to_io())?.is_some(), "Should have key 1");
+        assert!(tree_check.query(&2).map_err(|e| e.to_io())?.is_some(), "Should have key 2");
+        assert!(tree_check.query(&3).map_err(|e| e.to_io())?.is_some(), "Should have key 3 - if missing, file handle wasn't updated");
+
+        Ok(())
+    }
+
     #[test]
     fn upsert_batch_mixed_test() -> io::Result<()> {
         let tempdir = tempfile::tempdir()?;
@@ -3091,7 +3443,7 @@ mod tests {
 
         let file_size = std::fs::metadata(&filepath)?.len();
 
-        // Expected size without packing: 
+        // Expected size without packing:
         // 1000 items * 4096 bytes/block = 4,096,000 bytes (~4MB)
         // Plus internal nodes
         let unpacked_size_estimate = count as u64 * super::PAGE_SIZE_USIZE as u64;
@@ -3099,9 +3451,9 @@ mod tests {
         println!("File size with packing: {} bytes", file_size);
         println!("Estimated unpacked size: {} bytes", unpacked_size_estimate);
 
-        // We expect significant savings. 
+        // We expect significant savings.
         // 1000 items * ~60 bytes / 4096 bytes/block ~= 15 blocks
-        // Plus tree structure overhead. 
+        // Plus tree structure overhead.
         // Let's be conservative and say it should be less than 10% of unpacked size.
         assert!(file_size < unpacked_size_estimate / 10, "Packing should reduce size by at least 90%");
 
@@ -3193,7 +3545,7 @@ mod tests {
 
         let mut tree_update = BPlusTreeUpdate::<u32, u32>::try_new(&filepath)?;
 
-        // Insert 5000 items. 
+        // Insert 5000 items.
         // 5000 items ensures at least Root -> Internal -> Leaf split (Height 2 or 3).
 
         let count = 5000;
@@ -3268,10 +3620,14 @@ mod tests {
         for i in 0..count {
             updates.push((i, val.clone()));
         }
-        let refs: Vec<(&u32, &String)> = updates.iter().map(|(k, v)| (k, v)).collect();
-        tree_update.upsert_batch(&refs)?;
+        // Use individual upsert calls to create fragmentation (one path write per update)
+        for (k, v) in updates {
+            let refs = [(&k, &v)];
+            tree_update.upsert_batch(&refs)?;
+        }
 
         let size_before = std::fs::metadata(&filepath)?.len();
+        // Each individual update writes a full path, increasing file size significantly.
         assert!(size_before > count as u64 * 4000);
 
         // Now Compact
@@ -3475,9 +3831,10 @@ mod page_tests {
         match res {
             Ok(None) => {
                 assert_eq!(page.header.cell_count, 1); // Original page untouched
-            },
+            }
             Ok(Some(_)) => panic!("Split of single item should result in None"),
             Err(e) => panic!("Split of single item should result in no-op, not error: {:?}", e),
         }
     }
 }
+

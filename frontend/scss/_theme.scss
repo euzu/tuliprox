@@ -34,6 +34,9 @@
   --epg-header-height: 2rem;
   --epg-channels-width: 300px;
 
+  --epg-past-background: rgba(0, 0, 0, 0.4);
+  --epg-now-line-color: red;
+
 }
 
 @media (max-width: size.$mobile-breakpoint) {

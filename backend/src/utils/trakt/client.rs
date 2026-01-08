@@ -47,7 +47,7 @@ impl TraktClient {
             .headers(self.headers.clone())
             .send()
             .await
-            .map_err(|err| info_err!(format!("Failed to fetch Trakt list {url}: {err}")))?;
+            .map_err(|err| info_err!("Failed to fetch Trakt list {url}: {err}"))?;
 
         if !response.status().is_success() {
             handle_trakt_api_error(response.status(), &list_config.user, &list_config.list_slug)?;
@@ -56,10 +56,10 @@ impl TraktClient {
         let response_text = response
             .text()
             .await
-            .map_err(|error: reqwest::Error| info_err!(format!("Failed to read Trakt response: {error}")))?;
+            .map_err(|error: reqwest::Error| info_err!("Failed to read Trakt response: {error}"))?;
 
         let mut items: Vec<TraktListItem> = serde_json::from_str(&response_text)
-            .map_err(|error: serde_json::Error| info_err!(format!("Failed to parse Trakt response: {error}")))?;
+            .map_err(|error: serde_json::Error| info_err!("Failed to parse Trakt response: {error}"))?;
         items.iter_mut().for_each(TraktListItem::prepare);
         info!("Successfully fetched {} items from Trakt list {}:{}", items.len(), list_config.user, list_config.list_slug);
 
