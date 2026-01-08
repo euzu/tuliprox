@@ -94,6 +94,7 @@ impl XtreamAuthorizationResponse {
                 timezone: server_info.timezone.clone(),
                 timestamp_now: now.timestamp(),
                 time_now: now.format("%Y-%m-%d %H:%M:%S").to_string(),
+                // We don't know what this field is good for, but it is in the response from XtreamCodes, so we will include it.
                 process: true
             },
         }

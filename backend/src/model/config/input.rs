@@ -5,7 +5,7 @@ use log::warn;
 use shared::error::TuliproxError;
 use shared::model::{ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, InputFetchMethod, InputType, StagedInputDto};
 use shared::utils::{get_credentials_from_url};
-use shared::{check_input_connections, info_err, write_if_some};
+use shared::{check_input_connections, info_err_res, write_if_some};
 use shared::check_input_credentials;
 use std::collections::HashMap;
 use std::fmt;
@@ -156,7 +156,7 @@ impl ConfigInput {
         if let Some(staged_input) = &mut self.staged {
             check_input_credentials!(staged_input, staged_input.input_type, false, true);
             if !matches!(staged_input.input_type, InputType::M3u | InputType::Xtream) {
-                return Err(info_err!("{}", "Staged input can only be from type m3u or xtream"));
+                return info_err_res!("Staged input can only be from type m3u or xtream");
             }
         }
 

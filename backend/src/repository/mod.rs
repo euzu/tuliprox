@@ -12,7 +12,7 @@ pub mod user_repository;
 pub mod storage_const;
 mod playlist_scratch;
 mod playlist_source;
-mod library_repistory;
+mod library_repository;
 
 pub use playlist_source::*;
 

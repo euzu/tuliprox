@@ -297,7 +297,7 @@ impl FromStr for TableAction {
         } else if s.eq("delete") {
             Ok(Self::Delete)
         } else {
-            info_err_res!("Unknown InputType: {}", s)
+            info_err_res!("Unknown TableAction: {}", s)
         }
     }
 }

@@ -26,6 +26,7 @@ use std::fs::File;
 use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use shared::notify_err_res;
 
 macro_rules! cant_write_result {
     ($path:expr, $err:expr) => {
@@ -64,12 +65,12 @@ pub fn ensure_xtream_storage_path(cfg: &Config, target_name: &str) -> Result<Pat
                 "Failed to save xtream data, can't create directory {}",
                 &path.display()
             );
-            return Err(notify_err!("{}", msg));
+            return notify_err_res!("{msg}");
         }
         Ok(path)
     } else {
         let msg = format!("Failed to save xtream data, can't create directory for target {target_name}");
-        Err(notify_err!("{}", msg))
+        notify_err_res!("{msg}")
     }
 }
 
@@ -166,6 +167,8 @@ fn get_map_item_as_str(map: &serde_json::Map<String, Value>, key: &str) -> Optio
 
 pub type CategoryKey = (XtreamCluster, Arc<str>);
 
+// Because interner is not thread safe we cant use it currently for interning.
+// We leave the argument for later optimizations.
 async fn load_old_category_ids(path: &Path, _interner: &mut StringInterner) -> (u32, HashMap<CategoryKey, u32>) {
     let old_path = path.to_path_buf();
     tokio::task::spawn_blocking(move || {

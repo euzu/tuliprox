@@ -20,7 +20,7 @@ use shared::utils::{is_dash_url, is_hls_url, StringInterner};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use crate::repository::library_repistory::{load_input_local_library_playlist, persist_input_library_playlist};
+use crate::repository::library_repository::{load_input_local_library_playlist, persist_input_library_playlist};
 
 struct LocalEpisodeKey {
     path: String,
@@ -115,7 +115,7 @@ pub async fn persist_playlist(app_config: &Arc<AppConfig>, playlist: &mut [Playl
     }
 
     if let Err(err) = target_id_mapping.persist() {
-        errors.push(info_err!("{}", err.to_string()));
+        errors.push(info_err!("{err}"));
     }
     drop(file_lock);
 

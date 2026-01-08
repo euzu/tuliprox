@@ -474,7 +474,7 @@ async fn download_input(ctx: &PlaylistProcessingContext, input: &Arc<ConfigInput
 
     let (downloaded_playlist, download_err, was_cached, persisted) = if need_download {
         // Acquire named lock to prevent thundering herd on same input
-        let _input_lock = ctx.get_input_lock(&input.name);
+        let _input_lock = ctx.get_input_lock(&input.name).await;
         // Check again after lock
         let already_processed = ctx.is_input_downloaded(&input.name).await;
 
@@ -560,6 +560,8 @@ impl PlaylistProcessingContext {
 
     pub async fn get_input_lock(&self, input_name: &str) -> OwnedRwLockWriteGuard<()> {
         let mut locks = self.input_locks.lock().await;
+        // Clean up stale weak references
+        locks.retain(|_, weak| weak.strong_count() > 0);
 
         if let Some(weak) = locks.get(input_name) {
             if let Some(strong) = weak.upgrade() {

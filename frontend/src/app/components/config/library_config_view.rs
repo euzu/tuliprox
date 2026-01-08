@@ -331,10 +331,8 @@ pub fn LibraryConfigView() -> Html {
         html! {
             <>
             <div class="tp__library-config-view__header">
-               { config_field_bool!(form_state.form, translate.t(LABEL_ENABLED), enabled) }
-                <Card class="tp__config-view__card">
+                { config_field_bool!(form_state.form, translate.t(LABEL_ENABLED), enabled) }
                 { render_scan_directories_view(&form_state.form.scan_directories) }
-                </Card>
             </div>
             <div class="tp__library-config-view__body tp__config-view-page__body">
                 { render_extensions(&form_state.form.supported_extensions) }

@@ -1,4 +1,4 @@
-use crate::{info_err};
+use crate::{info_err_res};
 use crate::error::{TuliproxError};
 use crate::model::EpgSmartMatchConfigDto;
 use crate::utils::{is_false};
@@ -57,7 +57,7 @@ impl EpgConfigDto {
                                         logo_override: epg_source.logo_override,
                                     });
                                 }
-                                Err(err) => return Err(info_err!("{}", err))
+                                Err(err) => return info_err_res!("{err}")
                             }
                         } else {
                             self.t_sources.push(epg_source.clone());

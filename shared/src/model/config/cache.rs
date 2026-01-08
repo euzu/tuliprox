@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use crate::error::{TuliproxError};
-use crate::info_err;
+use crate::{info_err_res};
 use crate::utils::{is_blank_optional_str, is_blank_optional_string, parse_size_base_2};
 use path_clean::PathClean;
 
@@ -38,11 +38,11 @@ impl CacheConfigDto {
                 match parse_size_base_2(val) {
                     Ok(size) => {
                         if let Err(err) = usize::try_from(size) {
-                            return Err(info_err!("Cache size could not be determined: {err}"));
+                            return info_err_res!("Cache size could not be determined: {err}");
                         }
                     }
                     Err(err) => {
-                        return Err(info_err!("Failed to read cache size: {err}"))
+                        return info_err_res!("Failed to read cache size: {err}")
                     }
                 }
             }

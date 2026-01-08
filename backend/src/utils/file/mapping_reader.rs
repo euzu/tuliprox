@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use crate::model::{Mappings};
-use shared::error::{info_err_res, info_err, TuliproxError, TuliproxErrorKind};
+use shared::error::{info_err_res, TuliproxError};
 use crate::utils::traverse_dir;
 use crate::utils::{config_file_reader, open_file};
 use log::{warn};
 use std::path::{Path, PathBuf};
+use shared::info_err;
 use shared::model::{MappingDefinitionDto, MappingDto, MappingsDto, PatternTemplate};
 
 fn read_mapping(mapping_file: &Path, resolve_var: bool, prepare_mappings: bool) -> Result<Option<MappingsDto>, TuliproxError> {
@@ -18,7 +19,7 @@ fn read_mapping(mapping_file: &Path, resolve_var: bool, prepare_mappings: bool) 
                 Ok(Some(mapping))
             }
             Err(err) => {
-                Err(info_err!("{}", err.to_string()))
+                info_err_res!("{err}")
             }
         };
     }
@@ -91,9 +92,9 @@ fn read_mappings_from_directory(path: &Path, resolve_env: bool) -> Result<Option
             }
         }
     };
-    traverse_dir(path, &mut visit).map_err(|err| TuliproxError::new(TuliproxErrorKind::Info, format!("Failed to read mappings {err}")))?;
+    traverse_dir(path, &mut visit).map_err(|err| info_err!("Failed to read mappings {err}"))?;
 
-    files.sort_by(|a,b| a.file_name().cmp(&b.file_name()));
+    files.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
 
     let mut mappings = vec![];
     let mut loaded_mapping_files = vec![];

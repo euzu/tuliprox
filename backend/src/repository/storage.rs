@@ -4,6 +4,7 @@ use crate::utils;
 use shared::error::notify_err;
 use shared::error::TuliproxError;
 use std::path::{Path, PathBuf};
+use shared::notify_err_res;
 
 pub(in crate::repository) fn get_target_id_mapping_file(target_path: &Path) -> PathBuf {
     // Join directly with &str to avoid an intermediate PathBuf allocation
@@ -14,12 +15,12 @@ pub fn ensure_target_storage_path(cfg: &Config, target_name: &str) -> Result<Pat
     if let Some(path) = get_target_storage_path(cfg, target_name) {
         if std::fs::create_dir_all(&path).is_err() {
             let msg = format!("Failed to save target data, can't create directory {}", path.display());
-            return Err(notify_err!("{}", msg));
+            return notify_err_res!("{msg}");
         }
         Ok(path)
     } else {
         let msg = format!("Failed to save target data, can't create directory for target {target_name}");
-        Err(notify_err!("{}", msg))
+        notify_err_res!("{msg}")
     }
 }
 
@@ -39,8 +40,8 @@ pub fn get_input_storage_path(input_name: &str, working_dir: &str) -> std::io::R
 
 pub fn ensure_input_storage_path(cfg: &Config, input_name: &str) -> Result<PathBuf, TuliproxError> {
     get_input_storage_path(input_name, &cfg.working_dir)
-        .map_err(|_| {
-            notify_err!("Failed to save input data, can't create directory for input {input_name}")
+        .map_err(|err| {
+            notify_err!("Failed to save input data, can't create directory for input {input_name}: {err}")
         })
 }
 

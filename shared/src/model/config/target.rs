@@ -1,7 +1,7 @@
 use crate::utils::is_blank_optional_string;
 use log::warn;
 use crate::error::{TuliproxError, TuliproxErrorKind};
-use crate::{info_err_res, handle_tuliprox_error_result_list, info_err};
+use crate::{info_err_res, handle_tuliprox_error_result_list};
 use crate::foundation::filter::{get_filter, Filter};
 use crate::model::{ClusterFlags, ConfigFavouritesDto, ConfigRenameDto, ConfigSortDto, HdHomeRunDeviceOverview,
                    PatternTemplate, ProcessingOrder, StrmExportStyle, TargetType, TraktConfigDto};
@@ -256,7 +256,7 @@ impl ConfigTargetDto {
     pub fn prepare(&mut self, id: u16, templates: Option<&Vec<PatternTemplate>>, hdhr_config: Option<&HdHomeRunDeviceOverview>) -> Result<(), TuliproxError> {
         self.id = id;
         if self.output.is_empty() {
-            return Err(info_err!("Missing output format for {}", self.name));
+            return info_err_res!("Missing output format for {}", self.name);
         }
         self.name = self.name.trim().to_string();
         if self.name.is_empty() {

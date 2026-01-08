@@ -5,7 +5,7 @@ use crate::utils::{debug_if_enabled, persist_source_config, read_sources_file_fr
 use crate::utils::get_csv_file_path;
 use log::{debug, error, warn};
 use serde_json::Value;
-use shared::error::{info_err_res, info_err, TuliproxError, TuliproxErrorKind};
+use shared::error::{info_err_res, info_err, TuliproxError};
 use shared::model::{ConfigInputAliasDto, InputType};
 use shared::utils::{get_credentials_from_url, parse_timestamp, sanitize_sensitive_info, trim_last_slash};
 use std::path::{Path, PathBuf};
@@ -156,14 +156,14 @@ async fn panel_get_json(app_state: &AppState, url: Url) -> Result<Value, Tulipro
         .timeout(std::time::Duration::from_secs(30))
         .send()
         .await
-        .map_err(|e| TuliproxError::new(TuliproxErrorKind::Info, format!("panel_api request failed: {e}")))?;
+        .map_err(|e|info_err!("panel_api request failed: {e}"))?;
     let status = resp.status();
     let body = resp
         .text()
         .await
-        .map_err(|e| TuliproxError::new(TuliproxErrorKind::Info, format!("panel_api read response failed: {e}")))?;
+        .map_err(|e| info_err!("panel_api read response failed: {e}"))?;
     let json: Value = serde_json::from_str(&body)
-        .map_err(|e| TuliproxError::new(TuliproxErrorKind::Info, format!("panel_api invalid json (http {status}): {e}")))?;
+        .map_err(|e| info_err!("panel_api invalid json (http {status}): {e}"))?;
     let json_for_log = sanitize_panel_api_json_for_log(&json);
     if let Ok(json_str) = serde_json::to_string(&json_for_log) {
         debug_if_enabled!("panel_api response (http {}): {}", status, sanitize_sensitive_info(&json_str));
@@ -302,7 +302,7 @@ async fn patch_source_yml_add_alias(
 ) -> Result<(), TuliproxError> {
     let mut sources = match read_sources_file_from_path(source_file_path, false, false, None) {
         Ok(sources) => sources,
-        Err(e) => return Err(TuliproxError::new(TuliproxErrorKind::Info, format!("panel_api: failed to read source file: {e}"))),
+        Err(e) => return info_err_res!("panel_api: failed to read source file: {e}"),
     };
 
     let Some(input) = sources.inputs.iter_mut().find(|i| i.name == input_name) else {
@@ -335,7 +335,7 @@ async fn patch_source_yml_update_exp_date(
 ) -> Result<(), TuliproxError> {
     let mut sources = match read_sources_file_from_path(source_file_path, false, false, None) {
         Ok(sources) => sources,
-        Err(e) => return Err(TuliproxError::new(TuliproxErrorKind::Info, format!("panel_api: failed to read source file: {e}"))),
+        Err(e) => return info_err_res!("panel_api: failed to read source file: {e}"),
     };
 
     let Some(input) = sources.inputs.iter_mut().find(|i| i.name == input_name) else {
@@ -399,7 +399,7 @@ async fn patch_batch_csv_append(
     lines.push(record.join(";"));
     tokio::fs::write(csv_path, lines.join("\n") + "\n")
         .await
-        .map_err(|e| TuliproxError::new(TuliproxErrorKind::Info, format!("panel_api: failed to write csv: {e}")))?;
+        .map_err(|e| info_err!("panel_api: failed to write csv: {e}"))?;
     Ok(())
 }
 
@@ -412,7 +412,7 @@ async fn patch_batch_csv_update_exp_date(
 ) -> Result<(), TuliproxError> {
     let raw = tokio::fs::read_to_string(csv_path)
         .await
-        .map_err(|e| TuliproxError::new(TuliproxErrorKind::Info, format!("panel_api: failed to read csv: {e}")))?;
+        .map_err(|e| info_err!("panel_api: failed to read csv: {e}"))?;
     let mut lines: Vec<String> = raw.lines().map(ToString::to_string).collect();
     let header_line_idx = lines.iter().position(|l| l.trim_start().starts_with('#'));
     let Some(header_idx) = header_line_idx else {
@@ -461,7 +461,7 @@ async fn patch_batch_csv_update_exp_date(
             lines[i] = fields.join(";");
             tokio::fs::write(csv_path, lines.join("\n") + "\n")
                 .await
-                .map_err(|e| TuliproxError::new(TuliproxErrorKind::Info, format!("panel_api: failed to write csv: {e}")))?;
+                .map_err(|e| info_err!("panel_api: failed to write csv: {e}"))?;
             return Ok(());
         }
     }

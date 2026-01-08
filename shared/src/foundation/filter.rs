@@ -499,12 +499,12 @@ pub fn get_filter(
 
             if !errors.is_empty() {
                 errors.push(format!("Unable to parse filter: {}", &filter_text));
-                return Err(info_err!("{}", errors.join("\n")));
+                return info_err_res!("{}", errors.join("\n"));
             }
 
             result.map_or_else(|| info_err_res!("Unable to parse filter: {}", &filter_text), Ok)
         }
-        Err(err) => info_err_res!("{}", err),
+        Err(err) => info_err_res!("{err}"),
     }
 }
 
@@ -538,7 +538,7 @@ fn build_dependency_graph(
         );
     }
     if !cycles.is_empty() {
-        return info_err_res!("{}", "Cyclic dependencies in templates detected!");
+        return info_err_res!("Cyclic dependencies in templates detected!");
     }
     Ok(graph)
 }
@@ -744,7 +744,7 @@ mod tests {
                 assert_eq!(format!("{filter}"), flt1);
             }
             Err(e) => {
-                panic!("{}", e)
+                panic!("{e}")
             }
         }
     }
@@ -757,7 +757,7 @@ mod tests {
                 assert_eq!(format!("{filter}"), flt2);
             }
             Err(e) => {
-                panic!("{}", e)
+                panic!("{e}")
             }
         }
     }
@@ -770,7 +770,7 @@ mod tests {
                 assert_eq!(format!("{filter}"), flt);
             }
             Err(e) => {
-                panic!("{}", e)
+                panic!("{e}")
             }
         }
     }
@@ -820,7 +820,7 @@ mod tests {
                 );
             }
             Err(e) => {
-                panic!("{}", e)
+                panic!("{e}")
             }
         }
     }
@@ -852,7 +852,7 @@ mod tests {
                 assert_eq!(filtered.len(), 1);
             }
             Err(e) => {
-                panic!("{}", e)
+                panic!("{e}")
             }
         }
     }
@@ -885,7 +885,7 @@ mod tests {
                 assert_eq!(format!("{filter}"), result.trim());
             }
             Err(e) => {
-                panic!("{}", e)
+                panic!("{e}")
             }
         }
     }
@@ -921,7 +921,7 @@ mod tests {
                 );
             }
             Err(e) => {
-                panic!("{}", e)
+                panic!("{e}")
             }
         }
     }
@@ -947,7 +947,7 @@ mod tests {
                 };
                 assert!(filter.filter(&provider_success));
             }
-            Err(e) => panic!("{}", e),
+            Err(e) => panic!("{e}"),
         }
     }
 }

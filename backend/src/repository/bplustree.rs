@@ -1845,11 +1845,13 @@ where
     }
 
     pub fn is_empty(&mut self) -> Result<bool, BPlusTreeError> {
-        self.file.seek(SeekFrom::Start(self.root_offset))?;
-        let header_required = FLAG_SIZE + LEN_SIZE;
-        self.file.read_exact(&mut self.buffer[0..header_required])?;
-        let keys_len = u32_from_bytes(&self.buffer[FLAG_SIZE..=LEN_SIZE])? as usize;
-        Ok(keys_len == 0)
+        let (node, _) = BPlusTreeNode::<K, V>::deserialize_from_block(
+            &mut self.file,
+            &mut self.buffer,
+            self.root_offset,
+            false,
+        )?;
+        Ok(node.is_leaf && node.keys.is_empty())
     }
 
     pub fn len(&mut self) -> Result<usize, BPlusTreeError> {
@@ -2164,11 +2166,14 @@ where
     }
 
     pub fn is_empty(&mut self) -> Result<bool, BPlusTreeError> {
-        self.file.seek(SeekFrom::Start(self.root_offset))?;
-        let header_required = FLAG_SIZE + LEN_SIZE;
-        self.file.read_exact(&mut self.read_buffer[0..header_required])?;
-        let keys_len = u32_from_bytes(&self.read_buffer[FLAG_SIZE..=LEN_SIZE])? as usize;
-        Ok(keys_len == 0)
+        let mut reader = utils::file_reader(&mut self.file);
+        let (node, _) = BPlusTreeNode::<K, V>::deserialize_from_block(
+            &mut reader,
+            &mut self.read_buffer,
+            self.root_offset,
+            false,
+        )?;
+        Ok(node.is_leaf && node.keys.is_empty())
     }
 
     pub fn len(&mut self) -> Result<usize, BPlusTreeError> {

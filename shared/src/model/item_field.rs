@@ -78,7 +78,7 @@ impl FromStr for ItemField {
         } else if s.eq_ignore_ascii_case(Self::TYPE) {
             Ok(Self::Type)
         } else {
-            info_err_res!("Unknown InputType: {}", s)
+            info_err_res!("Unknown ItemField: {}", s)
         }
     }
 }

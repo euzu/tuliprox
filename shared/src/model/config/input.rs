@@ -5,7 +5,7 @@ use crate::utils::{is_false, is_true, default_as_true, get_credentials_from_url_
                    sanitize_sensitive_info, trim_last_slash, deserialize_timestamp, is_zero_u16,
                    serialize_option_vec_flow_map_items};
 use super::PanelApiConfigDto;
-use crate::{check_input_credentials, check_input_connections, info_err_res, info_err};
+use crate::{check_input_credentials, check_input_connections, info_err_res};
 
 use enum_iterator::Sequence;
 use std::collections::{HashMap, HashSet};
@@ -262,11 +262,11 @@ impl ConfigInputAliasDto {
         self.id = index + 1;
         self.name = self.name.trim().to_string();
         if self.name.is_empty() {
-            return Err(info_err!("{}", "name for input is mandatory"));
+            return info_err_res!("name for input is mandatory");
         }
         self.url = self.url.trim().to_string();
         if self.url.is_empty() {
-            return Err(info_err!("{}", "url for input is mandatory"));
+            return info_err_res!("url for input is mandatory");
         }
         check_input_credentials!(self, input_type, true, true);
         check_input_connections!(self, input_type, true);
@@ -353,7 +353,7 @@ impl ConfigInputDto {
 
         self.name = self.name.trim().to_owned();
         if self.name.is_empty() {
-            return Err(info_err!("{}", "name for input is mandatory"));
+            return info_err_res!("name for input is mandatory");
         }
 
         if let Some(duration_str) = &self.cache_duration {
@@ -369,12 +369,12 @@ impl ConfigInputDto {
                                 "m" => val * 60,
                                 "h" => val * 3600,
                                 "d" => val * 86400,
-                                _ => return Err(info_err!("Invalid cache_duration unit in '{}': {}", self.name, unit)),
+                                _ => return info_err_res!("Invalid cache_duration unit in '{}': {}", self.name, unit),
                             },
-                            Err(_) => return Err(info_err!("Invalid cache_duration format in '{}': {}", self.name, duration_str)),
+                            Err(_) => return info_err_res!("Invalid cache_duration format in '{}': {}", self.name, duration_str),
                         }
                     } else {
-                        return Err(info_err!("Invalid cache_duration format in '{}'", self.name));
+                        return info_err_res!("Invalid cache_duration format in '{}'", self.name);
                     }
                 }
             };
@@ -387,7 +387,7 @@ impl ConfigInputDto {
         if let Some(staged_input) = self.staged.as_mut() {
             check_input_credentials!(staged_input, staged_input.input_type, true, true);
             if !matches!(staged_input.input_type, InputType::M3u | InputType::Xtream) {
-               return info_err_res!("{}", "Staged input can only be of type m3u or xtream");
+               return info_err_res!("Staged input can only be of type m3u or xtream");
             }
         }
 

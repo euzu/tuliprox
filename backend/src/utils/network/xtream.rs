@@ -593,8 +593,9 @@ async fn process_xtream_cluster_to_disk(
     let tmp_xtream_path = xtream_path.with_extension("tmp");
 
     if let Ok(mut tree_update) = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::try_new(&tmp_xtream_path) {
-        // Compact the TEMPORARY file before moving it.
-        // We Do NOT compact to &xtream_path directly, as that would overwrite the target with the OLD data
+        // Compact the TEMPORARY file (tmp_xtream_path) in place.
+        // We ensure the .tmp file is compacted before we rename it to the final destination,
+        // so that the final database file is fresh and optimized.
         if let Err(e) = tree_update.compact(&tmp_xtream_path) {
             error!("Failed to compact temporary database for {cluster}: {e}");
             // We continue anyway, as uncompacted data is better than no data.
@@ -612,9 +613,14 @@ async fn process_xtream_cluster_to_disk(
         return Err(TuliproxError::new(shared::error::TuliproxErrorKind::Notify, format!("Failed to swap categories: {e}")));
     }
 
-    // Cleanup - temporary files are replaced/removed by swap, but defensive removal of leftovers
-    let _ = std::fs::remove_file(tmp_xtream_path);
-    let _ = std::fs::remove_file(tmp_col_path);
+    // Cleanup - temporary files are usually replaced/moved by swap, but defensive removal of leftovers
+    // We strictly check for existence first to avoid errors if rename_or_copy acted as a move.
+    if tokio::fs::try_exists(&tmp_xtream_path).await.unwrap_or(false) {
+        let _ = tokio::fs::remove_file(tmp_xtream_path).await;
+    }
+    if tokio::fs::try_exists(&tmp_col_path).await.unwrap_or(false) {
+        let _ = tokio::fs::remove_file(tmp_col_path).await;
+    }
 
     // trace!("Cluster {} updated successfully", cluster);
     Ok(())

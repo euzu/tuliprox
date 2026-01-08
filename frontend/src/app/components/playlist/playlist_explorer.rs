@@ -50,7 +50,7 @@ impl FromStr for ExplorerAction {
         } else if s.eq(COPY_LINK_PROVIDER_URL) {
             Ok(Self::CopyLinkProviderUrl)
         } else {
-            info_err_res!("Unknown InputType: {}", s)
+            info_err_res!("Unknown ExplorerAction: {}", s)
         }
     }
 }

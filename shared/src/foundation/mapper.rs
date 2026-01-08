@@ -290,7 +290,7 @@ impl MapperScript {
     }
 
     pub fn parse(input: &str, templates: Option<&Vec<PatternTemplate>>) -> Result<Self, TuliproxError> {
-        let mut parsed = MapperParser::parse(Rule::main, input).map_err(|e| info_err!("{}", e))?;
+        let mut parsed = MapperParser::parse(Rule::main, input).map_err(|e| info_err!("{e}"))?;
         let program_pair = parsed.next().unwrap();
         let mut statements = Vec::new();
         let mut expressions = Vec::new();
@@ -371,7 +371,7 @@ impl MapperScript {
                 }
                 // we don't allow inside multi match keys AnyMatch
                 if matches.len() > 1 && matches.iter().filter(|&m| matches!(m, &MatchCaseKey::AnyMatch)).count() > 0 {
-                    return Err(info_err!("{}", "Unexpected match case key: _"));
+                    return info_err_res!("Unexpected match case key: _");
                 }
                 matches
             }

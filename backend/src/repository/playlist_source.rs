@@ -311,7 +311,8 @@ macro_rules! impl_single_file_disk_source {
                 if let Some(query) = self.playlist.as_mut() { for (_, item) in query.iter() { groups.insert(item.group.clone()); } }
                 groups.len()
             }
-            fn is_empty(&mut self) -> bool { self.playlist.as_mut().and_then(|t| t.is_empty().ok()).is_some_and(|t| t) }
+
+            fn is_empty(&mut self) -> bool { self.playlist.as_mut().map_or(true, |t| t.is_empty().unwrap_or(true)) }
 
             fn into_items(&mut self) -> Box<dyn Iterator<Item=PlaylistItem> + Send + '_> {
                 if let Some(q) = self.playlist.as_mut() {

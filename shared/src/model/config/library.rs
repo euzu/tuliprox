@@ -1,6 +1,7 @@
-use crate::error::{info_err, TuliproxError};
+use crate::error::{TuliproxError};
 use crate::utils::{default_as_true, default_metadata_path, default_movie_category, default_series_category, default_storage_formats, default_supported_library_extensions, default_tmdb_api_key, default_tmdb_cache_duration_days, default_tmdb_language, default_tmdb_rate_limit_ms, is_default_supported_library_extensions, is_default_tmdb_cache_duration_days, is_default_tmdb_language, is_default_tmdb_rate_limit_ms, is_tmdb_default_api_key, is_true, TMDB_API_KEY};
 use serde::{Deserialize, Serialize};
+use crate::info_err_res;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(deny_unknown_fields)]
@@ -184,19 +185,19 @@ impl LibraryConfigDto {
     pub fn prepare(&mut self) -> Result<(), TuliproxError> {
         // Validate enabled state
         if self.enabled && self.scan_directories.is_empty() {
-            return Err(info_err!("{}", "Library enabled but no scan_directories configured"));
+            return info_err_res!("Library enabled but no scan_directories configured");
         }
 
         // Validate scan directories
         for dir in &self.scan_directories {
             if dir.path.is_empty() {
-                return Err(info_err!("{}", "Library scan directory path cannot be empty"));
+                return info_err_res!("Library scan directory path cannot be empty");
             }
         }
 
         // Validate metadata storage location
         if self.metadata.path.is_empty() {
-            return Err(info_err!("{}", "Library Metadata storage location cannot be empty"));
+            return info_err_res!("Library Metadata storage location cannot be empty");
         }
 
         Ok(())

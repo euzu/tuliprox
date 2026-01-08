@@ -105,7 +105,7 @@ impl PanelApiQueryParameters {
         Self::require_api_key_param(params, "query_parameter.client_new")?;
         Self::validate_type_is_m3u(params)?;
         if params.iter().any(|p| p.key.trim().eq_ignore_ascii_case("user")) {
-            return info_err_res!("{}", "panel_api: client_new must not contain query param 'user'");
+            return info_err_res!("panel_api: client_new must not contain query param 'user'");
         }
         Ok(())
     }
@@ -172,7 +172,7 @@ impl PanelApiConfig {
             || self.query_parameter.client_new.is_empty()
             || self.query_parameter.client_renew.is_empty()
         {
-            return info_err_res!("{}", "panel_api: query_parameter.client_info/client_new/client_renew must be configured");
+            return info_err_res!("panel_api: query_parameter.client_info/client_new/client_renew must be configured");
         }
         self.query_parameter.prepare()
     }

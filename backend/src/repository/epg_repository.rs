@@ -81,7 +81,7 @@ pub async fn epg_write(cfg: &Config, target: &ConfigTarget, target_path: &Path, 
                         debug_if_enabled!("writing xtream epg to {}", epg_path.display());
                         epg_write_file(target, epg_data, &epg_path, playlist).await?;
                     }
-                    None => return Err(notify_err!("failed to serialize epg for target: {}, storage path not found", target.name)),
+                    None => return Err(notify_err!("failed to write epg for target: {}, storage path not found", target.name)),
                 }
             }
             TargetOutput::M3u(_) => {

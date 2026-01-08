@@ -156,7 +156,7 @@ impl HdHomeRunConfigDto {
                 while ports.contains(&current_port) || current_port == 0 {
                     current_port = current_port.wrapping_add(1);
                     if current_port == api_port { // full cycle guard
-                        return info_err_res!("{}", "No free port available for HdHomeRun devices");
+                        return info_err_res!("No free port available for HdHomeRun devices");
                     }
                 }
 

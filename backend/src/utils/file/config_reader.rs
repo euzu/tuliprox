@@ -175,7 +175,7 @@ pub async fn get_batch_aliases(input_type: InputType, url: &str) -> Result<Optio
                 Ok(Some((file_path, batch_aliases)))
             }
             Err(err) => {
-                info_err_res!("{}", err.to_string())
+                info_err_res!("{err}")
             }
         };
     }
