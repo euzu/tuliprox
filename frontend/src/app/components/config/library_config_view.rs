@@ -266,10 +266,15 @@ pub fn LibraryConfigView() -> Html {
             <ul>
             { for directories.iter().map(|dir| html! {
                 <li class="tp__library-config-view__list"><span class="tp__library-config-view__list-item">{&dir.path}</span>
-                    <span>{format!("({}, {}, Type: {:?})",
+                    <span>{format!("({}, {}, {}: {})",
                         if dir.enabled { translate.t("LABEL.ENABLED") } else {translate.t("LABEL.DISABLED")},
                         if dir.recursive { translate.t("LABEL.RECURSIVE") } else {translate.t("LABEL.NON_RECURSIVE")},
-                        dir.content_type)}</span>
+                        translate.t(LABEL_CONTENT_TYPE),
+                        match dir.content_type {
+                            LibraryContentType::Auto => translate.t(LABEL_AUTO),
+                            LibraryContentType::Movie => translate.t(LABEL_MOVIE),
+                            LibraryContentType::Series => translate.t(LABEL_SERIES),
+                        })}</span>
                 </li>
             }) }
             </ul>

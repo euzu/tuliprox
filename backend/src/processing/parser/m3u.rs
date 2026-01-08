@@ -247,6 +247,7 @@ pub async fn consume_m3u<F: FnMut(PlaylistItem)>(cfg: &Config, input: &ConfigInp
 
 pub async fn parse_m3u(cfg: &Config, input: &ConfigInput, lines: DynReader) -> Vec<PlaylistGroup>
 {
+    let ord_counter = std::sync::atomic::AtomicU32::new(1);
     let mut sort_order: Vec<Vec<PlaylistItem>> = vec![];
     let mut sort_order_idx: usize = 0;
     let mut group_map: std::collections::HashMap<String, usize> = std::collections::HashMap::new();

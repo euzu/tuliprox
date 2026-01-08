@@ -510,17 +510,11 @@ async fn process_xtream_cluster_to_disk(
     let xtream_path = xtream_get_file_path(&storage_path, cluster);
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<XtreamPlaylistItem>();
-
     let input_clone = input.clone();
-    // We need to maintain the original order from the provider.
-    // Since parse_xtream_streaming processes items in order, we can use a simple counter.
-    let ord_counter = std::sync::atomic::AtomicU32::new(1);
-
     let parse_task = tokio::spawn(async move {
         // trace!("Spawned parse_task for cluster {}", cluster);
-        xtream::parse_xtream_streaming(&input_clone, cluster, categories, streams, move |mut item| {
+        xtream::parse_xtream_streaming(&input_clone, cluster, categories, streams, move |item| {
             // trace!("Parsed item {}: {}", item.virtual_id, item.name);
-            item.source_ordinal = ord_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if tx.send(item).is_err() {
                 return Err(TuliproxError::new(shared::error::TuliproxErrorKind::Notify, "Channel closed".to_string()));
             }

@@ -241,33 +241,38 @@ where
         let (live_stream_use_prefix, live_stream_without_extension) = options.as_ref()
              .map_or((true, false), |o| (o.xtream_live_stream_use_prefix, o.xtream_live_stream_without_extension));
 
+        let mut source_ordinal = 0u32;
+
         match xtream_cluster {
              XtreamCluster::Live => {
                   let mut on_stream = |stream: LiveStreamProperties| {
+                       source_ordinal += 1;
                        let stream_prop = StreamProperties::Live(stream);
                        process_stream_item(&input_name, &url, &username, &password, 
                            xtream_cluster, &mut interner, &group_map, &unknown_group_name,
-                           stream_prop, &mut on_item, live_stream_use_prefix, live_stream_without_extension)
+                           stream_prop, &mut on_item, live_stream_use_prefix, live_stream_without_extension, source_ordinal)
                   };
                   let visitor = XtreamItemVisitor { on_item: &mut on_stream, _marker: std::marker::PhantomData };
                   deserializer.deserialize_any(visitor).map_err(|e| notify_err!("JSON parse error: {e}"))?;
              }
              XtreamCluster::Video => {
                   let mut on_stream = |stream: VideoStreamProperties| {
+                       source_ordinal += 1;
                        let stream_prop = StreamProperties::Video(Box::new(stream));
                        process_stream_item(&input_name, &url, &username, &password, 
                            xtream_cluster, &mut interner, &group_map, &unknown_group_name,
-                           stream_prop, &mut on_item, live_stream_use_prefix, live_stream_without_extension)
+                           stream_prop, &mut on_item, live_stream_use_prefix, live_stream_without_extension, source_ordinal)
                   };
                   let visitor = XtreamItemVisitor { on_item: &mut on_stream, _marker: std::marker::PhantomData };
                   deserializer.deserialize_any(visitor).map_err(|e| notify_err!("JSON parse error: {e}"))?;
              }
              XtreamCluster::Series => {
                   let mut on_stream = |stream: SeriesStreamProperties| {
+                       source_ordinal += 1;
                        let stream_prop = StreamProperties::Series(Box::new(stream));
                        process_stream_item(&input_name, &url, &username, &password, 
                            xtream_cluster, &mut interner, &group_map, &unknown_group_name,
-                           stream_prop, &mut on_item, live_stream_use_prefix, live_stream_without_extension)
+                           stream_prop, &mut on_item, live_stream_use_prefix, live_stream_without_extension, source_ordinal)
                   };
                   let visitor = XtreamItemVisitor { on_item: &mut on_stream, _marker: std::marker::PhantomData };
                   deserializer.deserialize_any(visitor).map_err(|e| notify_err!("JSON parse error: {e}"))?;
@@ -286,12 +291,14 @@ fn process_stream_item<F>(
     group_map: &IndexMap<u32, String>, unknown_group_name: &str,
     mut stream: StreamProperties,
     callback: &mut F,
-    live_stream_use_prefix: bool, live_stream_without_extension: bool
+    live_stream_use_prefix: bool, live_stream_without_extension: bool,
+    source_ordinal: u32,
 ) -> Result<(), TuliproxError>
 where F: FnMut(XtreamPlaylistItem) -> Result<(), TuliproxError> 
 {
      stream.prepare(); 
-     let category_name = group_map.get(&stream.get_category_id()).map_or(unknown_group_name, String::as_str);
+     let category_id = stream.get_category_id();
+     let category_name = group_map.get(&category_id).map_or(unknown_group_name, String::as_str);
      let stream_url = create_xtream_url(cluster, url, username, password, &stream, live_stream_use_prefix, live_stream_without_extension);
      
      let item_type = PlaylistItemType::from(cluster);
@@ -308,7 +315,8 @@ where F: FnMut(XtreamPlaylistItem) -> Result<(), TuliproxError>
              item_type,
              xtream_cluster: cluster,
              additional_properties: Some(stream),
-             category_id: 0,
+             category_id,
+             source_ordinal,
              input_name: interner.intern(input_name),
              ..Default::default()
          },
@@ -320,7 +328,7 @@ where F: FnMut(XtreamPlaylistItem) -> Result<(), TuliproxError>
     //      // Here we are creating PlaylistItem.
     //      let _ = props;
     // }
-     
+
      callback(XtreamPlaylistItem::from(&item))
 }
 
