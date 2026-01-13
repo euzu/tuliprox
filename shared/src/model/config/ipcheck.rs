@@ -1,6 +1,5 @@
 use crate::error::{TuliproxError, TuliproxErrorKind};
 use crate::utils::{is_blank_optional_str, is_blank_optional_string};
-use regex::Regex;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -68,7 +67,7 @@ impl IpCheckConfigDto {
         // }
 
         if let Some(p4) = &self.pattern_ipv4 {
-            Regex::new(p4).map_err(|err| {
+            crate::model::REGEX_CACHE.get_or_compile(p4).map_err(|err| {
                 TuliproxError::new(
                     TuliproxErrorKind::Info,
                     format!("Invalid IPv4 regex: {p4} {err}"),
@@ -76,7 +75,7 @@ impl IpCheckConfigDto {
             })?;
         }
         if let Some(p6) = &self.pattern_ipv6 {
-            Regex::new(p6).map_err(|err| {
+            crate::model::REGEX_CACHE.get_or_compile(p6).map_err(|err| {
                 TuliproxError::new(
                     TuliproxErrorKind::Info,
                     format!("Invalid IPv6 regex: {p6} {err}"),

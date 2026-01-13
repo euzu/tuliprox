@@ -1,5 +1,4 @@
 use std::rc::Rc;
-use regex::Regex;
 use yew::UseStateHandle;
 use shared::model::{AppConfigDto, ConfigTargetDto, PlaylistRequest, ProxyUserCredentialsDto, SearchRequest, StatusCheck, SystemInfo, UiPlaylistCategories};
 use crate::app::components::{InputRow, PlaylistEditorPage, PlaylistExplorerPage, UserlistPage};
@@ -22,7 +21,6 @@ pub struct PlaylistExplorerContext {
     pub playlist: UseStateHandle<Option<Rc<UiPlaylistCategories>>>,
     pub playlist_request: UseStateHandle<Option<PlaylistRequest>>,
 }
-
 
 #[derive(Clone, PartialEq)]
 pub struct TargetUser {
@@ -79,7 +77,7 @@ impl UserlistContext {
                 self.filtered_users.set(Some(Rc::new(filtered)));
             }
             SearchRequest::Regexp(text, search_fields) => {
-                if let Ok(regex) = Regex::new(text) {
+                if let Ok(regex) = shared::model::REGEX_CACHE.get_or_compile(text) {
                     let filter_username = search_fields.as_ref().is_none_or(|f| f.iter().any(|s| s == "username"));
                     let filter_server = search_fields.as_ref().is_none_or(|f| f.iter().any(|s| s == "server"));
                     let filter_playlist = search_fields.as_ref().is_none_or(|f| f.iter().any(|s| s == "playlist"));

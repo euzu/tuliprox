@@ -40,7 +40,7 @@ use shared::foundation::filter::{get_field_value, set_field_value, Filter, Value
 use shared::model::xtream_const::XTREAM_CLUSTER;
 use shared::model::{CounterModifier, FieldGetAccessor, FieldSetAccessor, InputType, ItemField, MsgKind,
                     PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistUpdateState,
-                    ProcessingOrder, UUIDType};
+                    ProcessingOrder, UUIDType, XtreamCluster};
 use shared::utils::{create_alias_uuid, default_as_default, StringInterner};
 use std::time::Instant;
 
@@ -50,13 +50,14 @@ fn is_valid(pli: &PlaylistItem, filter: &Filter, match_as_ascii: bool) -> bool {
 }
 
 pub fn apply_filter_to_source(source: &mut dyn PlaylistSource, filter: &Filter) -> Option<Vec<PlaylistGroup>> {
-    let mut groups: IndexMap<Arc<str>, PlaylistGroup> = IndexMap::new();
+    let mut groups: IndexMap<CategoryKey, PlaylistGroup> = IndexMap::new();
     for pli in source.into_items() {
         if is_valid(&pli, filter, false) {
             let group_title = pli.header.group.clone();
             let cluster = pli.header.xtream_cluster;
             let cat_id = pli.header.category_id;
-            groups.entry(group_title.clone())
+            let key = (cluster, group_title.clone());
+            groups.entry(key)
                 .or_insert_with(|| PlaylistGroup {
                     id: cat_id,
                     title: group_title,
@@ -130,7 +131,7 @@ fn exec_rename(pli: &mut PlaylistItem, rename: Option<&Vec<ConfigRename>>, inter
 fn rename_playlist(source: &mut dyn PlaylistSource, target: &ConfigTarget, interner: &mut StringInterner) -> Option<Vec<PlaylistGroup>> {
     match &target.rename {
         Some(renames) if !renames.is_empty() => {
-            let mut groups: IndexMap<Arc<str>, PlaylistGroup> = IndexMap::new();
+            let mut groups: IndexMap<(XtreamCluster, Arc<str>), PlaylistGroup> = IndexMap::new();
             for mut pli in source.into_items() {
                 // Handle group rename first if it's in the renames
                 for r in renames {
@@ -146,7 +147,7 @@ fn rename_playlist(source: &mut dyn PlaylistSource, target: &ConfigTarget, inter
                 let group_title = pli.header.group.clone();
                 let cluster = pli.header.xtream_cluster;
                 let cat_id = pli.header.category_id;
-                groups.entry(group_title.clone())
+                groups.entry((cluster, group_title.clone()))
                     .or_insert_with(|| PlaylistGroup {
                         id: cat_id,
                         title: group_title,
@@ -205,12 +206,12 @@ fn map_playlist(source: &mut dyn PlaylistSource, target: &ConfigTarget, _interne
         Box::new(iter.flat_map(move |chan| map_channel_and_flatten(chan, mapping)))
             as Box<dyn Iterator<Item=PlaylistItem>>
     });
-    let mut next_groups: IndexMap<Arc<str>, PlaylistGroup> = IndexMap::new();
+    let mut next_groups: IndexMap<(XtreamCluster, Arc<str>), PlaylistGroup> = IndexMap::new();
     let mut grp_id: u32 = 0;
     for channel in mapped_iter {
         let group_title = channel.header.group.clone();
         let cluster = channel.header.xtream_cluster;
-        next_groups.entry(group_title.clone())
+        next_groups.entry((cluster, group_title.clone()))
             .or_insert_with(|| {
                 grp_id += 1;
                 PlaylistGroup {
@@ -774,7 +775,7 @@ async fn process_playlist_for_target(ctx: &PlaylistProcessingContext,
 
 pub fn process_favourites(playlist: &mut Vec<PlaylistGroup>, favourites_cfg: Option<&[ConfigFavourites]>) {
     if let Some(favourites) = favourites_cfg {
-        let mut fav_groups: IndexMap<Arc<str>, Vec<PlaylistItem>> = IndexMap::new();
+        let mut fav_groups: IndexMap<CategoryKey, Vec<PlaylistItem>> = IndexMap::new();
         for pg in playlist.iter() {
             for pli in &pg.channels {
                 // series episodes can't be included in favourites
@@ -782,13 +783,13 @@ pub fn process_favourites(playlist: &mut Vec<PlaylistGroup>, favourites_cfg: Opt
                     continue;
                 }
                 for fav in favourites {
-                    if is_valid(pli, &fav.filter, fav.match_as_ascii) {
+                    if pli.header.xtream_cluster == fav.cluster && is_valid(pli, &fav.filter, fav.match_as_ascii) {
                         let mut channel = pli.clone();
                         channel.header.group.clone_from(&fav.group);
                         // Update UUID to be an alias of the original
                         channel.header.uuid = create_alias_uuid(&pli.header.uuid, &fav.group);
                         fav_groups
-                            .entry(fav.group.clone())
+                            .entry((fav.cluster, fav.group.clone()))
                             .or_default()
                             .push(channel);
                     }
@@ -796,9 +797,9 @@ pub fn process_favourites(playlist: &mut Vec<PlaylistGroup>, favourites_cfg: Opt
             }
         }
 
-        for (group_name, channels) in fav_groups {
+        for (fav_group, channels) in fav_groups {
             if !channels.is_empty() {
-                let xtream_cluster = channels[0].header.xtream_cluster;
+                let (xtream_cluster, group_name) = fav_group;
                 playlist.push(PlaylistGroup {
                     id: 0,
                     title: group_name,

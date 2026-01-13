@@ -2,7 +2,7 @@ use regex::Regex;
 use std::collections::HashSet;
 use std::string::ToString;
 use std::sync::atomic::AtomicBool;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 
 pub const USER_FILE: &str = "user.txt";
@@ -83,7 +83,7 @@ pub struct Constants {
     pub re_base_href_wasm: Regex,
     pub re_env_var: Regex,
     pub re_memory_usage: Regex,
-    pub re_epg_normalize: Regex,
+    pub re_epg_normalize: Arc<Regex>,
     pub re_template_var: Regex,
     pub re_template_tag: Regex,
     pub re_template_attribute: Regex,
@@ -119,7 +119,7 @@ pub static CONSTANTS: LazyLock<Constants> = LazyLock::new(||
         re_base_href_wasm: Regex::new("'(/frontend\\-)").unwrap(),
         re_env_var: Regex::new(r"\$\{env:(?P<var>[a-zA-Z_][a-zA-Z0-9_]*)}").unwrap(),
         re_memory_usage: Regex::new(r"VmRSS:\s+(\d+) kB").unwrap(),
-        re_epg_normalize: Regex::new(r"[^a-zA-Z0-9\-]").unwrap(),
+        re_epg_normalize: Arc::new(Regex::new(r"[^a-zA-Z0-9\-]").unwrap()),
         re_template_var: Regex::new("!(.*?)!").unwrap(),
         re_template_tag: Regex::new("<tag:(.*?)>").unwrap(),
         re_template_attribute: Regex::new("<(.*?)>").unwrap(),

@@ -13,6 +13,7 @@ pub mod storage_const;
 mod playlist_scratch;
 mod playlist_source;
 mod library_repository;
+pub mod sorted_index;
 
 pub use playlist_source::*;
 

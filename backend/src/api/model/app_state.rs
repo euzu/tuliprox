@@ -10,7 +10,7 @@ use arc_swap::{ArcSwap, ArcSwapOption};
 use log::{error, info};
 use reqwest::Client;
 use shared::error::TuliproxError;
-use shared::model::UserConnectionPermission;
+use shared::model::{UserConnectionPermission};
 use shared::utils::small_vecs_equal_unordered;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicI8;
@@ -293,6 +293,7 @@ impl AppState {
             self.geoip.store(new_geoip);
         }
 
+        shared::model::REGEX_CACHE.sweep();
         Ok(changes)
     }
 
@@ -326,6 +327,7 @@ impl AppState {
         self.app_config.set_sources(sources)?;
         self.active_provider.update_config(&self.app_config).await;
 
+        shared::model::REGEX_CACHE.sweep();
         Ok(changes)
     }
 

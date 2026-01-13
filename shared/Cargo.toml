@@ -26,7 +26,8 @@ ciborium = "0.2.2"
 hex = "0.4.3"
 lz4_flex = "0.12.0"
 deunicode = "1.6.2"
-serde-saphyr = "0.0.13"
+serde-saphyr = "0.0.14"
+dashmap = "6.1.0"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3.83"

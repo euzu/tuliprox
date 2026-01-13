@@ -1,7 +1,9 @@
 use std::cmp::Ordering;
 use crate::app::components::menu_item::MenuItem;
 use crate::app::components::popup_menu::PopupMenu;
-use crate::app::components::{convert_bool_to_chip_style, AppIcon, CellValue, Chip, HideContent, MaxConnections, ProxyTypeView, RevealContent, Table, TableDefinition, UserStatus, UserlistContext, UserlistPage};
+use crate::app::components::{convert_bool_to_chip_style, AppIcon, CellValue, Chip, HideContent,
+                             MaxConnections, ProxyTypeView, RevealContent, Table, TableDefinition,
+                             UserStatus, UserlistContext, UserlistPage};
 use crate::app::context::TargetUser;
 use crate::model::DialogResult;
 use crate::services::DialogService;
@@ -11,11 +13,12 @@ use shared::utils::{unix_ts_to_str, Substring};
 use std::fmt::Display;
 use std::rc::Rc;
 use std::str::FromStr;
+use std::collections::HashSet;
 use yew::platform::spawn_local;
 use yew::prelude::*;
 use yew_hooks::use_clipboard;
 use yew_i18n::use_translation;
-use crate::app::TargetUserList;
+use crate::app::{ConfigContext, TargetUserList};
 use crate::hooks::use_service_context;
 
 const HEADERS: [&str; 15] = [
@@ -102,12 +105,21 @@ pub fn UserTable(props: &UserTableProps) -> Html {
     let translate = use_translation();
     let clipboard = use_clipboard();
     let service_ctx = use_service_context();
+    let config_ctx = use_context::<ConfigContext>().expect("Config context not found");
     let dialog = use_context::<DialogService>().expect("Dialog service not found");
     let userlist_context = use_context::<UserlistContext>().expect("Userlist context not found");
     let popup_anchor_ref = use_state(|| None::<web_sys::Element>);
     let popup_is_open = use_state(|| false);
     let selected_dto = use_state(|| None::<Rc<TargetUser>>);
     let user_list = use_state(|| props.users.clone());
+    let target_names = use_memo(config_ctx.clone(), |cfg|
+        cfg.config.as_ref().map(|c| c.sources.sources.iter().flat_map(|s| s.targets.iter())
+            .map(|t| t.name.clone())
+            .collect::<HashSet<String>>()
+            )
+            .unwrap_or_default()
+    );
+
 
     {
         let user_list = user_list.clone();
@@ -156,6 +168,7 @@ pub fn UserTable(props: &UserTableProps) -> Html {
     let render_data_cell = {
         let translator = translate.clone();
         let popup_onclick = handle_popup_onclick.clone();
+        let target_names = target_names.clone();
         Callback::<(usize, usize, Rc<TargetUser>), Html>::from(
             move |(row, col, dto): (usize, usize, Rc<TargetUser>)| {
                 let user_active = dto.credentials.is_active();
@@ -174,7 +187,7 @@ pub fn UserTable(props: &UserTableProps) -> Html {
                                   label={if user_active {translator.t("LABEL.ENABLED")} else { translator.t("LABEL.DISABLED")} }
                                    /> },
                     2 => html! { <UserStatus status={ dto.credentials.status } /> },
-                    3 => html! { dto.target.as_str() },
+                    3 => html! { <span class={if target_names.contains(dto.target.as_str()) {""} else {"tp__user-table__invalid-target"} }>{dto.target.as_str()}</span> },
                     4 => html! { dto.credentials.username.as_str() },
                     5 => html! { <HideContent content={dto.credentials.password.to_string()}></HideContent> },
                     6 => html! { dto.credentials.token.as_ref().map_or_else(|| html!{}, |token| html! { <HideContent content={token.to_string()}></HideContent>}) },
@@ -317,7 +330,7 @@ pub fn UserTable(props: &UserTableProps) -> Html {
     };
 
     html! {
-        <div class="tp__target-table">
+        <div class="tp__user-table">
           {
             html! {
               <>

@@ -227,7 +227,7 @@ impl ConfigDto {
             if let Some(download) = &video.download {
                 if let Some(episode_pattern) = &download.episode_pattern {
                     if !episode_pattern.is_empty() {
-                        let re = regex::Regex::new(episode_pattern);
+                        let re = crate::model::REGEX_CACHE.get_or_compile(episode_pattern);
                         if re.is_err() {
                             return false;
                         }

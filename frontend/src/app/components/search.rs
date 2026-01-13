@@ -45,7 +45,7 @@ pub fn Search(props: &SearchProps) -> Html {
                 RegexState::Inactive => {
                     if let Some(input) = input.cast::<HtmlInputElement>() {
                         let text = input.value();
-                        if regex::Regex::new(&text).is_ok() {
+                        if shared::model::REGEX_CACHE.get_or_compile(&text).is_ok() {
                             regex_active.set(RegexState::Active);
                         } else {
                             regex_active.set(RegexState::Invalid);
@@ -83,7 +83,7 @@ pub fn Search(props: &SearchProps) -> Html {
                         let text = input.value();
                         if text.len() >= min_length {
                             if !matches!(*regex, RegexState::Inactive) {
-                                if regex::Regex::new(&text).is_ok() {
+                                if shared::model::REGEX_CACHE.get_or_compile(&text).is_ok() {
                                     regex.set(RegexState::Active);
                                     cb_search.emit(SearchRequest::Regexp(text, (*search_fields).clone()));
                                 } else {

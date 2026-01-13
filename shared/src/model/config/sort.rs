@@ -6,12 +6,13 @@ use regex::Regex;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
+use std::sync::Arc;
 
-fn compile_regex_vec(patterns: Option<&Vec<String>>) -> Result<Option<Vec<Regex>>, TuliproxError> {
+fn compile_regex_vec(patterns: Option<&Vec<String>>) -> Result<Option<Vec<Arc<Regex>>>, TuliproxError> {
     patterns.as_ref()
         .map(|seq| {
             seq.iter()
-                .map(|s| Regex::new(s).map_err(|err| {
+                .map(|s| crate::model::REGEX_CACHE.get_or_compile(s).map_err(|err| {
                     info_err!("can't parse regex: {s} {err}")
                 }))
                 .collect::<Result<Vec<_>, _>>()
@@ -107,7 +108,7 @@ pub struct ConfigSortRuleDto {
     pub sequence: Option<Vec<String>>,
     pub filter: String,
     #[serde(skip)]
-    pub t_sequence: Option<Vec<Regex>>,
+    pub t_sequence: Option<Vec<Arc<Regex>>>,
     #[serde(skip)]
     pub t_filter: Option<Filter>,
 }

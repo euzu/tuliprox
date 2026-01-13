@@ -1,0 +1,24 @@
+.tp__user-table {
+  display: flex;
+  flex-flow: column;
+  box-sizing: border-box;
+  overflow: hidden;
+
+  .tp__icon-button {
+    width: 2rem;
+  }
+
+  .tp__filter {
+    max-width: var(--max-table-cell-width);
+    overflow: hidden !important;
+
+    .tp__filter__code {
+      overflow: hidden !important;
+    }
+  }
+
+  &__invalid-target {
+    font-weight: bold;
+    background-color: var(--attention-color);
+  }
+}

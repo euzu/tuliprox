@@ -1168,7 +1168,7 @@ dependencies = [
  "futures-signals",
  "gloo-render 0.2.0",
  "gloo-storage 0.3.0",
- "gloo-timers 0.2.6",
+ "gloo-timers 0.3.0",
  "gloo-utils 0.2.0",
  "implicit-clone",
  "js-sys",
@@ -1691,8 +1691,6 @@ version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b995a66bb87bebce9a0f4a95aed01daca4872c050bfcb21653361c03bc35e5c"
 dependencies = [
- "futures-channel",
- "futures-core",
  "js-sys",
  "wasm-bindgen",
 ]
@@ -3284,9 +3282,9 @@ dependencies = [
 
 [[package]]
 name = "quick-xml"
-version = "0.38.4"
+version = "0.39.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b66c2058c55a409d601666cffe35f04333cf1013010882cec174a7467cd4e21c"
+checksum = "f2e3bf4aa9d243beeb01a7b3bc30b77cfe2c44e24ec02d751a7104a53c2c49a1"
 dependencies = [
  "memchr",
  "tokio",
@@ -3854,9 +3852,9 @@ dependencies = [
 
 [[package]]
 name = "serde-saphyr"
-version = "0.0.13"
+version = "0.0.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be7f28bb35aab6f9cdc5f464f9bbda0b1e3908766e819557111cc13e58ce7915"
+checksum = "45400dbf0a2c4c2af106c08eb1028b3e45bea3cd45517d3a0e8170b86597122f"
 dependencies = [
  "ahash",
  "annotate-snippets",
@@ -3864,11 +3862,11 @@ dependencies = [
  "encoding_rs_io",
  "nohash-hasher",
  "num-traits",
- "ryu",
  "saphyr-parser",
  "serde",
  "serde_json",
  "smallvec 2.0.0-alpha.12",
+ "zmij",
 ]
 
 [[package]]
@@ -3991,6 +3989,7 @@ dependencies = [
  "bytes",
  "chrono",
  "ciborium",
+ "dashmap",
  "deunicode",
  "enum-iterator",
  "fastrand",

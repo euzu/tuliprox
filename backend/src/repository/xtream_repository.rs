@@ -4,7 +4,7 @@ use crate::model::{AppConfig, ProxyUserCredentials};
 use crate::model::{Config, ConfigTarget};
 use crate::repository::bplustree::{BPlusTree, BPlusTreeQuery, BPlusTreeUpdate};
 use crate::repository::playlist_scratch::PlaylistScratch;
-use crate::repository::storage::{get_target_id_mapping_file, get_target_storage_path};
+use crate::repository::storage::{get_file_path_for_db_index, get_target_id_mapping_file, get_target_storage_path};
 use crate::repository::storage_const;
 use crate::repository::target_id_mapping::VirtualIdRecord;
 use crate::repository::xtream_playlist_iterator::XtreamPlaylistJsonIterator;
@@ -83,6 +83,7 @@ enum StorageKey {
 async fn write_playlists_to_file(
     app_config: &Arc<AppConfig>,
     storage_path: &Path,
+    with_index: bool,
     storage_key: StorageKey,
     collections: Vec<(XtreamCluster, Vec<XtreamPlaylistItem>)>,
 ) -> Result<(), TuliproxError> {
@@ -100,7 +101,11 @@ async fn write_playlists_to_file(
                     StorageKey::ProviderId => item.provider_id,
                 }, item);
             }
-            tree.store(&xtream_path).map_err(|err| cant_write_result!(&xtream_path, err))?;
+            if with_index {
+                tree.store_with_index(&xtream_path, |pli| pli.source_ordinal).map_err(|err| cant_write_result!(&xtream_path, err))?;
+            } else {
+                tree.store(&xtream_path).map_err(|err| cant_write_result!(&xtream_path, err))?;
+            }
         }
     }
     Ok(())
@@ -297,6 +302,7 @@ pub async fn xtream_write_playlist(
     if let Err(err) = write_playlists_to_file(
         app_cfg,
         &path,
+        true,
         StorageKey::VirtualId,
         vec![
             (XtreamCluster::Live, live_col.iter().map(|item| XtreamPlaylistItem::from(&**item)).collect::<Vec<XtreamPlaylistItem>>()),
@@ -582,11 +588,27 @@ pub async fn iter_raw_xtream_playlist(app_config: &AppConfig, target: &ConfigTar
         let file_lock = app_config.file_locks.read_lock(&xtream_path).await;
         match BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path)
             .map_err(|err| info_err!("Could not open BPlusTreeQuery {xtream_path:?} - {err}")) {
-            Ok(mut query) => {
-                let items: Vec<XtreamPlaylistItem> = query.iter().map(|(_, v)| v).collect();
-                let len = items.len();
-                Some((file_lock, items.into_iter().enumerate().map(move |(i, v)| (v, i < len - 1))))
-            }
+        Ok(mut query) => {
+            let index_path = get_file_path_for_db_index(&xtream_path);
+            let items: Vec<XtreamPlaylistItem> = if index_path.exists() {
+                match query.disk_iter_sorted::<u32>() {
+                    Ok(iter) => iter.filter_map(Result::ok).map(|(_, v)| v).collect(),
+                    Err(err) => {
+                        error!("Sorted index error {}: {err}", xtream_path.display());
+                        // Re-open query for fallback
+                        match BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) {
+                            Ok(mut query) => query.iter().map(|(_, v)| v).collect(),
+                            Err(_) => Vec::new(),
+                        }
+                    }
+                }
+            } else {
+                query.iter().map(|(_, v)| v).collect()
+            };
+
+            let len = items.len();
+            Some((file_lock, items.into_iter().enumerate().map(move |(i, v)| (v, i < len - 1))))
+        }
             Err(_) => None
         }
     } else {
@@ -732,6 +754,7 @@ pub async fn persist_input_xtream_playlist(app_config: &Arc<AppConfig>, storage_
         if let Err(err) = write_playlists_to_file(
             app_config,
             storage_path,
+            false,
             StorageKey::ProviderId,
             vec![(cluster, col.iter().map(Into::into).collect::<Vec<XtreamPlaylistItem>>())],
         ).await {
@@ -869,7 +892,7 @@ pub async fn persist_input_series_info_batch(app_config: &Arc<AppConfig>, storag
 }
 
 pub async fn load_input_xtream_playlist(app_config: &Arc<AppConfig>, storage_path: &Path, clusters: &[XtreamCluster]) -> Result<Vec<PlaylistGroup>, TuliproxError> {
-    let mut groups: IndexMap<u32, PlaylistGroup> = IndexMap::new();
+    let mut groups: IndexMap<(XtreamCluster, u32), PlaylistGroup> = IndexMap::new();
 
     for &cluster in clusters {
         let xtream_path = xtream_get_file_path(storage_path, cluster);
@@ -885,7 +908,7 @@ pub async fn load_input_xtream_playlist(app_config: &Arc<AppConfig>, storage_pat
                 if let Ok(content) = tokio::fs::read_to_string(&cat_path).await {
                     if let Ok(cats) = serde_json::from_str::<Vec<CategoryEntry>>(&content) {
                         for cat in cats {
-                            groups.insert(cat.category_id, PlaylistGroup {
+                            groups.insert((cluster, cat.category_id), PlaylistGroup {
                                 id: cat.category_id,
                                 title: cat.category_name,
                                 channels: Vec::new(),
@@ -901,7 +924,7 @@ pub async fn load_input_xtream_playlist(app_config: &Arc<AppConfig>, storage_pat
             if let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) {
                 for (_, ref item) in query.iter() {
                     let cat_id = item.category_id;
-                    groups.entry(cat_id)
+                    groups.entry((cluster, cat_id))
                         .or_insert_with(|| PlaylistGroup {
                             id: cat_id,
                             title: intern("Unknown"),

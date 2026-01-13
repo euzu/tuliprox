@@ -4,7 +4,6 @@ use arc_swap::ArcSwapOption;
 use shared::model::{ConfigTargetDto, ConfigTargetOptions, HdHomeRunTargetOutputDto, M3uTargetOutputDto, ProcessingOrder, StrmExportStyle, StrmTargetOutputDto, TargetOutputDto, TargetType, TraktConfigDto, XtreamTargetOutputDto};
 use shared::model::PlaylistItemType;
 use std::sync::Arc;
-use regex::Regex;
 use shared::foundation::filter::Filter;
 use shared::foundation::filter::ValueProvider;
 use crate::model::{macros, ConfigRename, ConfigSort};
@@ -228,7 +227,7 @@ pub struct ConfigTarget {
     pub mapping: Arc<ArcSwapOption<Vec<Mapping>>>,
     pub favourites: Option<Vec<ConfigFavourites>>,
     pub processing_order: ProcessingOrder,
-    pub watch: Option<Vec<regex::Regex>>,
+    pub watch: Option<Vec<Arc<regex::Regex>>>,
     pub use_memory_cache: bool,
 }
 
@@ -310,7 +309,7 @@ impl From<&ConfigTargetDto> for ConfigTarget {
             mapping: Arc::new(ArcSwapOption::new(None)),
             favourites: dto.favourites.as_ref().map(|f| f.iter().map(Into::into).collect()),
             processing_order: dto.processing_order,
-            watch: dto.watch.as_ref().map(|list| list.iter().filter_map(|s| Regex::new(s).ok()).collect()),
+            watch: dto.watch.as_ref().map(|list| list.iter().filter_map(|s| shared::model::REGEX_CACHE.get_or_compile(s).ok()).collect()),
             use_memory_cache: dto.use_memory_cache,
         }
     }

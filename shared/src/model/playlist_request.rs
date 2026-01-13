@@ -211,7 +211,7 @@ impl UiPlaylistCategories {
                 build_result(live, video, series)
             }
             SearchRequest::Regexp(text, _search_fields) => {
-                if let Ok(regex) = Regex::new(text) {
+                if let Ok(regex) = crate::model::REGEX_CACHE.get_or_compile(text) {
                     let live = filter_channels_re(self.live.as_ref(), &regex);
                     let video = filter_channels_re(self.vod.as_ref(), &regex);
                     let series = filter_channels_re(self.series.as_ref(), &regex);

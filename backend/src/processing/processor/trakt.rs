@@ -7,6 +7,7 @@ use shared::error::TuliproxError;
 use shared::utils::StringInterner;
 use shared::model::{FieldGetAccessor, FieldSetAccessor, PlaylistGroup, PlaylistItem, TraktContentType, XtreamCluster};
 use shared::utils::CONSTANTS;
+use indexmap::IndexMap;
 use std::borrow::Cow;
 use strsim::normalized_levenshtein;
 
@@ -130,10 +131,10 @@ fn create_category_from_matches<'a>(
     matches: Vec<TraktMatchResult<'a>>,
     list_config: &'a TraktListConfig,
     interner: &mut StringInterner,
-) -> Option<PlaylistGroup> {
-    if matches.is_empty() { return None; }
+) -> Vec<PlaylistGroup> {
+    if matches.is_empty() { return vec![]; }
 
-    let mut matched_items = Vec::new();
+    let mut matched_items_by_cluster: IndexMap<XtreamCluster, Vec<PlaylistItem>> = IndexMap::new();
 
     let mut sorted_matches = matches;
     sorted_matches.sort_by(|a, b| {
@@ -150,11 +151,7 @@ fn create_category_from_matches<'a>(
 
     for match_result in sorted_matches {
         let mut modified_item = match_result.playlist_item.clone();
-        // Use the (possibly numbered) title from the match result (which now contains the original playlist title)
         with!(mut modified_item.header => header {
-            // Synchronize name with title so both fields show the same value
-            // header.title.clone_from(&match_result.trakt_item.title.to_string());
-            // header.name.clone_from(&match_result.trakt_item.title.to_string());
             let title = header.get_field("caption").unwrap_or_else(|| Cow::Borrowed(&header.title));
             if extract_quality(&title).is_none() {
                 if let Some(quality) = extract_quality(&header.group) {
@@ -168,28 +165,18 @@ fn create_category_from_matches<'a>(
             }
             header.group = interner.intern(group_title);
             header.gen_uuid();
+            matched_items_by_cluster.entry(header.xtream_cluster).or_default().push(modified_item);
         });
-        matched_items.push(modified_item);
     }
 
-    if matched_items.is_empty() { return None; }
-
-
-    let cluster = match list_config.content_type {
-        TraktContentType::Vod => XtreamCluster::Video,
-        TraktContentType::Series => XtreamCluster::Series,
-        TraktContentType::Both => {
-            matched_items.first()
-                .map_or(XtreamCluster::Video, |item| item.header.xtream_cluster)
+    matched_items_by_cluster.into_iter().map(|(cluster, channels)| {
+        PlaylistGroup {
+            id: 0,
+            title: interner.intern(group_title),
+            channels,
+            xtream_cluster: cluster,
         }
-    };
-
-    Some(PlaylistGroup {
-        id: 0,
-        title: interner.intern(group_title),
-        channels: matched_items,
-        xtream_cluster: cluster,
-    })
+    }).collect()
 }
 
 fn match_trakt_items_with_playlist<'a>(
@@ -197,7 +184,7 @@ fn match_trakt_items_with_playlist<'a>(
     playlist: &'a [PlaylistGroup],
     list_config: &'a TraktListConfig,
     interner: &mut StringInterner,
-) -> Option<PlaylistGroup> {
+) -> Vec<PlaylistGroup> {
     let trakt_match_items: Vec<TraktMatchItem<'a>> = trakt_items
         .iter()
         .filter(|item| should_include_item(item, list_config.content_type))
@@ -256,7 +243,8 @@ impl TraktCategoriesProcessor {
                 Ok(trakt_items) => {
                     debug!("Processing Trakt list {cache_key} with {} items", trakt_items.len());
 
-                    if let Some(category) = match_trakt_items_with_playlist(&trakt_items, playlist, list_config, &mut interner) {
+                    let categories = match_trakt_items_with_playlist(&trakt_items, playlist, list_config, &mut interner);
+                    for category in categories {
                         if !category.channels.is_empty() {
                             total_matches += category.channels.len();
                             let category_len = category.channels.len();

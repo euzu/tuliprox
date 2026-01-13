@@ -12,6 +12,7 @@ use std::marker::PhantomData;
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
+use crate::repository::storage::get_file_path_for_db_index;
 
 // Constants (Restored)
 const PAGE_SIZE: u16 = 4096;
@@ -41,7 +42,7 @@ const PACK_VALUE_HEADER_SIZE: usize = 4;
 const COMPRESSION_MIN_SIZE: usize = 64;
 const COMPRESSION_THRESHOLD_PERCENT: usize = 85;
 const COMPRESSION_FLAG_NONE: u8 = 0x00;
-const COMPRESSION_FLAG_LZ4: u8 = 0x01;
+pub const COMPRESSION_FLAG_LZ4: u8 = 0x01;
 
 // Page Configuration
 const PAGE_HEADER_SIZE: u16 = 16;
@@ -1444,6 +1445,63 @@ where
         }
     }
 
+    /// Store the tree and build a sorted index file.
+    ///
+    /// # Arguments
+    /// * `filepath` - Path to store the `BPlusTree`
+    /// * `sort_key_extractor` - Closure that extracts the sort key from a value
+    ///
+    /// # Example
+    /// ```ignore
+    /// tree.store_with_index(&db_path, |v| v.name.clone())?;
+    /// ```
+    pub fn store_with_index<SortKey, F>(
+        &mut self,
+        filepath: &Path,
+        sort_key_extractor: F,
+    ) -> io::Result<u64>
+    where
+        SortKey: Ord + Serialize,
+        F: Fn(&V) -> SortKey,
+    {
+        // Store the tree first
+        let result = self.store(filepath)?;
+
+        Self::store_index(filepath, sort_key_extractor)?;
+
+        Ok(result)
+    }
+
+    pub fn store_index<SortKey, F>(filepath: &Path, sort_key_extractor: F) -> io::Result<()>
+    where
+        SortKey: Ord + Serialize,
+        F: Fn(&V) -> SortKey
+    {
+        let index_path = get_file_path_for_db_index(filepath);
+
+        // Re-open the stored tree to get value locations
+        let mut query = BPlusTreeQuery::<K, V>::try_new(filepath)?;
+        let entries_with_locations = query.collect_with_locations()?;
+
+        // Collect (sort_key, primary_key, location) and sort
+        let mut sorted_entries: Vec<(SortKey, K, super::sorted_index::ValueLocation)> =
+            entries_with_locations
+                .into_iter()
+                .map(|(k, v, loc)| (sort_key_extractor(&v), k, loc))
+                .collect();
+
+        // Sort by sort key
+        sorted_entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+        // Write index file
+        let mut writer = super::sorted_index::SortedIndexWriter::new(&index_path)?;
+        for (sort_key, primary_key, location) in &sorted_entries {
+            writer.push(sort_key, primary_key, *location)?;
+        }
+        writer.finish()?;
+        Ok(())
+    }
+
     /// Internal store without locking, used for compaction or initial save.
     fn store_internal(&mut self, filepath: &Path) -> io::Result<u64> {
         let tempfile = NamedTempFile::new()?;
@@ -1798,6 +1856,7 @@ where
 /// at the cost of higher memory usage.
 pub struct BPlusTreeQuery<K, V> {
     file: BufReader<File>,
+    filepath: PathBuf,
     buffer: Vec<u8>,
     cache: IndexMap<u64, Vec<u8>>,
     root_offset: u64,
@@ -1827,6 +1886,7 @@ where
 
         Ok(Self {
             file: utils::file_reader(file),
+            filepath: PathBuf::new(), // Unknown when created from file directly
             buffer: vec![0u8; PAGE_SIZE_USIZE],
             cache: IndexMap::with_capacity(CACHE_CAPACITY),
             root_offset,
@@ -1837,7 +1897,14 @@ where
 
     pub fn try_new(filepath: &Path) -> io::Result<Self> {
         let file = File::open(filepath)?;
-        Self::try_from_file(file)
+        let mut query = Self::try_from_file(file)?;
+        query.filepath = filepath.to_path_buf();
+        Ok(query)
+    }
+
+    /// Returns the filepath this query was opened from.
+    pub fn filepath(&self) -> &Path {
+        &self.filepath
     }
 
     pub fn query(&mut self, key: &K) -> Result<Option<V>, BPlusTreeError> {
@@ -1867,6 +1934,29 @@ where
     pub fn iter(&mut self) -> BPlusTreeDiskIterator<'_, K, V> {
         BPlusTreeDiskIterator::new(self)
     }
+    
+    /// Owned iterator that traverses the tree in order defined by a secondary sorted index.
+    /// 
+    /// The index path is automatically derived from the tree filepath by changing
+    /// the extension to `.idx`. For example, if the tree is at `/data/items.bin`,
+    /// the index is expected at `/data/items.idx`.
+    ///
+    /// This iterator reads values directly from stored offsets in O(1) time,
+    /// avoiding O(log n) tree traversal per item.
+    pub fn disk_iter_sorted<SortKey>(self) -> io::Result<super::sorted_index::BPlusTreeSortedIteratorOwned<K, V, SortKey>>
+    where
+        SortKey: for<'de> Deserialize<'de>,
+    {
+        super::sorted_index::BPlusTreeSortedIteratorOwned::new(self.filepath.clone(), self.file)
+    }
+
+    /// Owned iterator with explicit index path.
+    pub fn disk_iter_sorted_with_path<SortKey>(self, index_path: &Path) -> io::Result<super::sorted_index::BPlusTreeSortedIteratorOwned<K, V, SortKey>>
+    where
+        SortKey: for<'de> Deserialize<'de>,
+    {
+        super::sorted_index::BPlusTreeSortedIteratorOwned::with_index_path(self.filepath.clone(), self.file, index_path)
+    }
 
     /// Traverses the tree and calls the provided closure for each leaf's keys and values.
     pub fn traverse<F>(&mut self, mut f: F) -> io::Result<()>
@@ -1882,11 +1972,58 @@ where
         Ok(())
     }
 
+    /// Collects all entries with their value locations.
+    /// Used for building sorted indexes that need direct value access.
+    pub fn collect_with_locations(&mut self) -> io::Result<Vec<(K, V, super::sorted_index::ValueLocation)>> {
+        let mut result = Vec::new();
+        let mut stack = vec![self.root_offset];
+        
+        while let Some(offset) = stack.pop() {
+            let (node, pointers) = BPlusTreeNode::<K, V>::deserialize_from_block(
+                &mut self.file,
+                &mut self.buffer,
+                offset,
+                false,
+            )?;
+            
+            if node.is_leaf {
+                for (key, info) in node.keys.into_iter().zip(node.value_info.iter()) {
+                    let value = BPlusTreeNode::<K, V>::load_value_from_info(&mut self.file, info)?;
+                    let location = match info.mode {
+                        ValueStorageMode::Single(offset) => {
+                            super::sorted_index::ValueLocation::Single {
+                                offset,
+                                length: info.length,
+                            }
+                        }
+                        ValueStorageMode::Packed(block_offset, index) => {
+                            super::sorted_index::ValueLocation::Packed {
+                                block_offset,
+                                index,
+                                length: info.length,
+                            }
+                        }
+                    };
+                    result.push((key, value, location));
+                }
+            } else if let Some(ptrs) = pointers {
+                // Process children in reverse order so we pop them in correct order
+                for ptr in ptrs.into_iter().rev() {
+                    stack.push(ptr);
+                }
+            }
+        }
+        
+        Ok(result)
+    }
+
     /// Provides an owned disk-backed iterator.
     pub fn disk_iter(self) -> BPlusTreeDiskIteratorOwned<K, V> {
         BPlusTreeDiskIteratorOwned::new(self)
     }
+
 }
+
 
 pub struct BPlusTreeDiskIteratorOwned<K, V> {
     query: BPlusTreeQuery<K, V>,
@@ -1969,6 +2106,27 @@ where
                 }
                 _ => return None,
             }
+        }
+    }
+}
+
+/// Generic reader that can be either a sorted index iterator or a regular disk iterator.
+/// Used for fallback logic (Sorted -> Unsorted).
+pub enum PlaylistIteratorReader<V> {
+    Sorted(super::sorted_index::BPlusTreeSortedIteratorOwned<u32, V, u32>),
+    Unsorted(BPlusTreeDiskIteratorOwned<u32, V>),
+}
+
+impl<V> Iterator for PlaylistIteratorReader<V>
+where
+    V: Serialize + for<'de> Deserialize<'de> + Clone,
+{
+    type Item = io::Result<(u32, V)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            PlaylistIteratorReader::Sorted(iter) => iter.next(),
+            PlaylistIteratorReader::Unsorted(iter) => iter.next().map(Ok),
         }
     }
 }
