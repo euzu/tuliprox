@@ -398,3 +398,28 @@ where
 {
     serializer.serialize_str(&value.to_string())
 }
+
+
+/// Serde support for `Arc<str>` fields.
+/// Note: This does NOT deduplicate on load to avoid global state leaks.
+pub mod xtream_cluster_serde {
+    use std::str::FromStr;
+    use serde::{Deserialize, Deserializer, Serializer};
+    use serde::de::Error;
+    use crate::model::XtreamCluster;
+
+    pub fn serialize<S>(value: &XtreamCluster, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(value.as_str())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<XtreamCluster, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        XtreamCluster::from_str(&raw).map_err(D::Error::custom)
+    }
+}

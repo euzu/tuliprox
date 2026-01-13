@@ -1443,6 +1443,7 @@ sources:
 ### 2.2.2.8 `favourites`
 Allows you to explicitly add items to a favorite group based on a filter. This is processed after mapping and resolution.
 
+- `cluster`: can be Series, Movie or Live.
 - `group`: The name of the group to add the favorite items to.
 - `filter`: A filter statement to select the original items.
 - `match_as_ascii`: _optional_ (default `false`). If `true`, the filter matching will be case-insensitive and normalized (e.g., "Cinema" matches "Cinéma").
@@ -1450,7 +1451,8 @@ Allows you to explicitly add items to a favorite group based on a filter. This i
 Example:
 ```yaml
 favourites:
-  - group: "My Favourites"
+  - cluster: series
+    group: "My Favourites"
     filter: 'Name ~ "Cinema"'
     match_as_ascii: true
 ```
