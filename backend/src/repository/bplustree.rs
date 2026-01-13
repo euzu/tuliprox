@@ -1466,8 +1466,9 @@ where
     {
         // Store the tree first
         let result = self.store(filepath)?;
-
-        Self::store_index(filepath, sort_key_extractor)?;
+        if result > 0 {
+            Self::store_index(filepath, sort_key_extractor)?;
+        }
 
         Ok(result)
     }

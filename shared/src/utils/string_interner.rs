@@ -57,8 +57,8 @@ pub fn intern_string(s: String) -> Arc<str> {
     s.into()
 }
 
-/// Serde support for `XtreamCluster` fields.
-/// Serializes as string (e.g., "live", "video", "series") and deserializes via `FromStr`.
+/// Serde support for `Arc<str>` fields.
+/// Note: This does NOT deduplicate on load to avoid global state leaks.
 pub mod arc_str_serde {
     use serde::{Deserialize, Deserializer, Serializer};
     use std::sync::Arc;

@@ -400,8 +400,8 @@ where
 }
 
 
-/// Serde support for `Arc<str>` fields.
-/// Note: This does NOT deduplicate on load to avoid global state leaks.
+/// Serde support for `XtreamCluster` fields.
+/// Serializes as string (e.g., "live", "video", "series") and deserializes via `FromStr`.
 pub mod xtream_cluster_serde {
     use std::str::FromStr;
     use serde::{Deserialize, Deserializer, Serializer};
