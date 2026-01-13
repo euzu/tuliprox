@@ -130,7 +130,7 @@ fn sort_groups(
         let a_chan = a_grp.channels.first();
         let b_chan = b_grp.channels.first();
 
-        for rule in group_rules.iter() {
+        for rule in &group_rules {
             let (provider_a, provider_b) = match (a_chan, b_chan) {
                 (Some(a), Some(b)) => (
                     ValueProvider { pli: a, match_as_ascii },
