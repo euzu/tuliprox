@@ -188,7 +188,7 @@ impl PlaylistSource for XtreamDiskPlaylistSource {
 
     fn take_groups(&mut self) -> Vec<PlaylistGroup> {
         // Build groups on-the-fly using disk iterator (streams one leaf at a time)
-        let mut groups_map: IndexMap<u32, PlaylistGroup> = IndexMap::new();
+        let mut groups_map: IndexMap<(XtreamCluster, u32), PlaylistGroup> = IndexMap::new();
         let mut iters: Vec<(XtreamCluster, Box<dyn Iterator<Item=XtreamPlaylistItem> + Send>)> = vec![];
         if let Some((q, _)) = self.live.as_mut() {
             iters.push((XtreamCluster::Live, Box::new(q.iter().map(|(_, item)| item))));
@@ -202,7 +202,7 @@ impl PlaylistSource for XtreamDiskPlaylistSource {
 
         for (cluster, iter) in iters {
             for item in iter {
-                groups_map.entry(item.category_id)
+                groups_map.entry((cluster, item.category_id))
                     .or_insert_with(|| PlaylistGroup {
                         id: item.category_id,
                         title: item.group.clone(),
@@ -351,14 +351,16 @@ macro_rules! impl_single_file_disk_source {
             fn take_groups(&mut self) -> Vec<PlaylistGroup> {
                 // Build groups on-the-fly using disk iterator (streams one leaf at a time)
                 if let Some(q) = self.playlist.as_mut() {
-                    let mut groups_map: IndexMap<Arc<str>, PlaylistGroup> = IndexMap::new();
+                    let mut groups_map: IndexMap<(XtreamCluster, Arc<str>), PlaylistGroup> = IndexMap::new();
                     for (_, item) in q.iter() {
-                        groups_map.entry(item.group.clone())
+                        let cluster = XtreamCluster::try_from(item.item_type).unwrap_or(XtreamCluster::Live);
+                        let key = (cluster, item.group.clone());
+                        groups_map.entry(key)
                             .or_insert_with(|| PlaylistGroup {
                                 id: 0,
                                 title: item.group.clone(),
                                 channels: vec![],
-                                xtream_cluster: XtreamCluster::try_from(item.item_type).unwrap_or(XtreamCluster::Live),
+                                xtream_cluster: cluster,
                             })
                             .channels.push(PlaylistItem::from(&item));
                     }

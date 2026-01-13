@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use shared::model::{ConfigRenameDto, ItemField};
 use crate::model::macros;
 
@@ -5,7 +6,7 @@ use crate::model::macros;
 pub struct ConfigRename {
     pub field: ItemField,
     pub new_name: String,
-    pub pattern: regex::Regex,
+    pub pattern: Arc<regex::Regex>,
 }
 
 macros::from_impl!(ConfigRename);
@@ -14,7 +15,7 @@ impl From<&ConfigRenameDto> for ConfigRename {
         Self {
             field: dto.field,
             new_name: dto.new_name.clone(),
-            pattern: regex::Regex::new(&dto.pattern).unwrap()
+            pattern: shared::model::REGEX_CACHE.get_or_compile(&dto.pattern).unwrap_or_else(|_| panic!("Invalid regex pattern {}", dto.pattern)),
         }
     }
 }

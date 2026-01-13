@@ -4,7 +4,7 @@ use crate::model::{AppConfig, ConfigInput, ConfigTarget, TargetOutput};
 use crate::processing::processor::playlist::{apply_filter_to_playlist, PlaylistProcessingContext};
 use crate::repository::bplustree::{BPlusTree, BPlusTreeQuery};
 use crate::repository::epg_repository::epg_write;
-use crate::repository::m3u_repository::{load_input_m3u_playlist, m3u_get_file_path, m3u_write_playlist, persist_input_m3u_playlist};
+use crate::repository::m3u_repository::{load_input_m3u_playlist, m3u_get_file_path_for_db, m3u_write_playlist, persist_input_m3u_playlist};
 use crate::repository::storage::{ensure_target_storage_path, get_input_storage_path, get_target_id_mapping_file, get_target_storage_path};
 use crate::repository::storage_const::FILE_SUFFIX_DB;
 use crate::repository::strm_repository::write_strm_playlist;
@@ -47,10 +47,13 @@ pub async fn persist_playlist(app_config: &Arc<AppConfig>, playlist: &mut [Playl
     let mut local_library_series = HashMap::<String, Vec<LocalEpisodeKey>>::new();
     let mut provider_series = HashMap::<String, Vec<ProviderEpisodeKey>>::new();
 
+    let mut source_ordinal: u32 = 0;
     // Virtual IDs assignment
     for group in playlist.iter_mut() {
         for channel in &mut group.channels {
             let header = &mut channel.header;
+            source_ordinal += 1;
+            header.source_ordinal = source_ordinal;
             let provider_id = header.get_provider_id().unwrap_or_default();
             if provider_id == 0 {
                 header.item_type = match (is_hls_url(&header.url), header.item_type) {
@@ -286,7 +289,7 @@ async fn load_m3u_target_storage(app_config: &AppConfig, target: &ConfigTarget) 
     let target_path = get_target_storage_path(&config, target.name.as_str()).ok_or_else(||
         info_err!("Could not find path for target {}", &target.name))?;
 
-    let m3u_path = m3u_get_file_path(&target_path);
+    let m3u_path = m3u_get_file_path_for_db(&target_path);
     let _file_lock = app_config.file_locks.read_lock(&m3u_path).await;
     let mut tree = BPlusTree::<u32, M3uPlaylistItem>::new();
     if let Ok(mut query) = BPlusTreeQuery::<u32, M3uPlaylistItem>::try_new(&m3u_path) {

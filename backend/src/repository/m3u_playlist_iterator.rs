@@ -3,18 +3,20 @@ use shared::error::{TuliproxError};
 use crate::model::{AppConfig, ProxyUserCredentials};
 use crate::model::{ConfigTarget};
 use shared::model::{ConfigTargetOptions, M3uPlaylistItem, PlaylistItemType, ProxyType, TargetType, XtreamCluster};
-use crate::repository::bplustree::{BPlusTreeDiskIteratorOwned, BPlusTreeQuery};
-use crate::repository::m3u_repository::m3u_get_file_path;
-use crate::repository::storage::ensure_target_storage_path;
+use crate::repository::bplustree::{BPlusTreeQuery, PlaylistIteratorReader};
+use crate::repository::m3u_repository::m3u_get_file_path_for_db;
+use crate::repository::storage::{ensure_target_storage_path, get_file_path_for_db_index};
 use crate::repository::storage_const;
 use crate::repository::user_repository::user_get_bouquet_filter;
 use crate::utils::FileReadGuard;
 use std::collections::HashSet;
+use std::iter::Peekable;
+use log::error;
 // concat_string! macro from shared utils is used for efficient String building
 
 #[allow(clippy::struct_excessive_bools)]
 pub struct M3uPlaylistIterator {
-    reader: BPlusTreeDiskIteratorOwned<u32, M3uPlaylistItem>,
+    reader: Peekable<PlaylistIteratorReader<M3uPlaylistItem>>,
     base_url: String,
     username: String,
     password: String,
@@ -40,13 +42,28 @@ impl M3uPlaylistIterator {
         let m3u_output = target.get_m3u_output().ok_or_else(|| info_err!("Unexpected failure, missing m3u target output for target {}",  target.name))?;
         let config = cfg.config.load();
         let target_path = ensure_target_storage_path(&config, target.name.as_str())?;
-        let m3u_path = m3u_get_file_path(&target_path);
+        let m3u_path = m3u_get_file_path_for_db(&target_path);
 
         let file_lock = cfg.file_locks.read_lock(&m3u_path).await;
 
-        let query = BPlusTreeQuery::<u32, M3uPlaylistItem>::try_new(&m3u_path)
-                .map_err(|err| info_err!("Could not open BPlusTreeQuery {m3u_path:?} - {err}"))?;
-        let reader = query.disk_iter();
+        let index_path = get_file_path_for_db_index(&m3u_path);
+        let reader = if index_path.exists() {
+             let query = BPlusTreeQuery::<u32, M3uPlaylistItem>::try_new(&m3u_path)
+                 .map_err(|err| info_err!("Could not open BPlusTreeQuery {m3u_path:?} - {err}"))?;
+             match query.disk_iter_sorted() {
+                 Ok(reader) => PlaylistIteratorReader::Sorted(reader),
+                 Err(err) => {
+                     error!("Sorted index error for m3u, fallback: {err}");
+                     let query = BPlusTreeQuery::<u32, M3uPlaylistItem>::try_new(&m3u_path)
+                         .map_err(|err| info_err!("Could not open BPlusTreeQuery {m3u_path:?} - {err}"))?;
+                     PlaylistIteratorReader::Unsorted(query.disk_iter())
+                 }
+             }
+        } else {
+             let query = BPlusTreeQuery::<u32, M3uPlaylistItem>::try_new(&m3u_path)
+                 .map_err(|err| info_err!("Could not open BPlusTreeQuery {m3u_path:?} - {err}"))?;
+             PlaylistIteratorReader::Unsorted(query.disk_iter())
+        }.peekable();
 
         let filter = user_get_bouquet_filter(&config, &user.username, None, TargetType::M3u, XtreamCluster::Live).await;
 
@@ -112,18 +129,35 @@ impl M3uPlaylistIterator {
         self.get_rewritten_url(m3u_pli, false, storage_const::M3U_RESOURCE_PATH)
     }
 
+    fn find_next_matching(reader: &mut Peekable<PlaylistIteratorReader<M3uPlaylistItem>>, set: &HashSet<String>) -> Option<M3uPlaylistItem> {
+        loop {
+            match reader.next() {
+                Some(Ok((_, item))) => {
+                    if set.contains(&*item.group) {
+                        return Some(item);
+                    }
+                }
+                Some(Err(e)) => {
+                    error!("Iterator error: {e}");
+                    return None;
+                }
+                None => return None,
+            }
+        }
+    }
+
     fn get_next(&mut self) -> Option<(M3uPlaylistItem, bool)> {
         let entry = if let Some(set) = &self.filter {
             if let Some((current_item, _)) = self.lookup_item.take() {
                 // Avoid cloning strings while filtering
-                let next_valid = self.reader.find(|(_, pli)| set.contains(&*pli.group));
-                self.lookup_item = next_valid.map(|(_k, v)| (v, true)); // has_next handled by iterator usually, but here we just need the item
+                let next_valid = Self::find_next_matching(&mut self.reader, set);
+                self.lookup_item = next_valid.map(|v| (v, true)); // has_next handled by iterator usually, but here we just need the item
                 let has_next = self.lookup_item.is_some();
                 Some((current_item, has_next))
             } else {
-                let current_item = self.reader.find(|(_, item)| set.contains(&*item.group));
-                if let Some((_, item)) = current_item {
-                    self.lookup_item = self.reader.find(|(_, item)| set.contains(&*item.group)).map(|(_, item)| (item, true));
+                let current_item = Self::find_next_matching(&mut self.reader, set);
+                if let Some(item) = current_item {
+                    self.lookup_item = Self::find_next_matching(&mut self.reader, set).map(|item| (item, true));
                     let has_next = self.lookup_item.is_some();
                     Some((item, has_next))
                 } else {
@@ -131,7 +165,14 @@ impl M3uPlaylistIterator {
                 }
             }
         } else {
-            self.reader.next().map(|(_, v)| (v, !self.reader.is_empty()))
+            match self.reader.next() {
+                Some(Ok((_, v))) => Some((v, self.reader.peek().is_some())),
+                Some(Err(e)) => {
+                    error!("Iterator error: {e}");
+                    None
+                }
+                None => None,
+            }
         };
 
         // TODO hls and unknown reverse proxy

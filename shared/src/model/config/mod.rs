@@ -36,6 +36,7 @@ mod proxy_user_status;
 mod favourites;
 mod geoip;
 mod library;
+
 pub use proxy_type::*;
 pub use proxy_user_status::*;
 pub use base::*;

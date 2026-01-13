@@ -21,7 +21,6 @@
 @forward "components/list_view";
 @forward "components/reveal_content";
 @forward "components/hide_content";
-@forward "components/userlist/userlist_view";
 @forward "components/playlist/playlist_editor_view";
 @forward "components/playlist/playlist_explorer_view";
 @forward "components/playlist/playlist_explorer";
@@ -53,10 +52,12 @@
 @forward "components/filter";
 @forward "components/mapper_script";
 @forward "components/mapper_counter";
+@forward "components/userlist/userlist_view";
 @forward "components/userlist/user_state";
 @forward "components/userlist/proxy_type";
 @forward "components/userlist/max_connections";
-@forward "components/userlist/proxy-user-credentials-form";
+@forward "components/userlist/proxy_user_credentials_form";
+@forward "components/userlist/user_table";
 @forward "components/radio_button_group";
 @forward "components/no_content";
 @forward "components/search";

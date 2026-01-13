@@ -1232,7 +1232,6 @@ pub struct PlaylistGroup {
     #[serde(with = "arc_str_serde")]
     pub title: Arc<str>,
     pub channels: Vec<PlaylistItem>,
-    #[serde(skip)]
     pub xtream_cluster: XtreamCluster,
 }
 

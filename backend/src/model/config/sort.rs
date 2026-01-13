@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use regex::Regex;
 use shared::model::{ConfigSortRuleDto, ConfigSortDto, ItemField, SortOrder, SortTarget};
 use shared::foundation::filter::Filter;
@@ -10,7 +11,7 @@ pub struct ConfigSortRule {
     pub target: SortTarget,
     pub order: SortOrder,
     pub field: ItemField,
-    pub sequence: Option<Vec<Regex>>,
+    pub sequence: Option<Vec<Arc<Regex>>>,
     pub filter: Filter,
 }
 
@@ -33,7 +34,7 @@ impl From<&ConfigSortRule> for ConfigSortRuleDto {
             target: instance.target,
             order: instance.order,
             field: instance.field,
-            sequence: instance.sequence.as_ref().map(|l: &Vec<Regex>| l.iter().map(ToString::to_string).collect()),
+            sequence: instance.sequence.as_ref().map(|l: &Vec<Arc<Regex>>| l.iter().map(ToString::to_string).collect()),
             filter: instance.filter.to_string(),
             t_sequence: None,
             t_filter: Some(instance.filter.clone()),

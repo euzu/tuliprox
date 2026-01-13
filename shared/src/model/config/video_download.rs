@@ -67,7 +67,7 @@ impl VideoConfigDto {
                 }
 
                 if let Some(episode_pattern) = &downl.episode_pattern {
-                    if let Err(err) = regex::Regex::new(episode_pattern) {
+                    if let Err(err) = crate::model::REGEX_CACHE.get_or_compile(episode_pattern) {
                          return info_err_res!("can't parse regex: {episode_pattern} {err}");
                     }
                 }

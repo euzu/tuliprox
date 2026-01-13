@@ -9,6 +9,7 @@ use pest::iterators::Pair;
 use pest::Parser;
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::sync::Arc;
 use crate::error::{info_err_res, TuliproxError};
 use crate::info_err;
 pub use crate::model::{ItemField, PatternTemplate, PlaylistItem, PlaylistItemType, FieldGetAccessor, FieldSetAccessor, TemplateValue};
@@ -86,7 +87,7 @@ impl ValueAccessor<'_> {
 #[derive(Debug, Clone)]
 pub struct CompiledRegex {
     pub restr: String,
-    pub re: regex::Regex,
+    pub re: Arc<regex::Regex>,
 }
 
 impl PartialEq for CompiledRegex {
@@ -157,7 +158,7 @@ pub enum Filter {
 
 impl Default for Filter {
     fn default() -> Self {
-        Self::Group(Box::new(Filter::FieldComparison(ItemField::Group, CompiledRegex { restr: ".*".to_string(), re: regex::Regex::new(".*").unwrap() })))
+        Self::Group(Box::new(Filter::FieldComparison(ItemField::Group, CompiledRegex { restr: ".*".to_string(), re: crate::model::REGEX_CACHE.get_or_compile(".*").unwrap() })))
     }
 }
 
@@ -296,7 +297,7 @@ fn get_parser_regexp(
         parsed_text.pop();
         parsed_text.remove(0);
         let regstr = apply_templates_to_pattern_single(&parsed_text, templates)?;
-        let re = regex::Regex::new(regstr.as_str());
+        let re = crate::model::REGEX_CACHE.get_or_compile(regstr.as_str());
         if re.is_err() {
             return info_err_res!("can't parse regex: {}", regstr);
         }

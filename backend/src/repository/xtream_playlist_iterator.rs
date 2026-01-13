@@ -1,6 +1,7 @@
 use crate::model::ConfigTarget;
 use crate::model::{xtream_mapping_option_from_target_options, AppConfig, ProxyUserCredentials};
-use crate::repository::bplustree::{BPlusTreeDiskIteratorOwned, BPlusTreeQuery};
+use crate::repository::bplustree::{BPlusTreeQuery, PlaylistIteratorReader};
+
 use crate::repository::user_repository::user_get_bouquet_filter;
 use crate::repository::xtream_repository::{xtream_get_file_path, xtream_get_storage_path};
 use crate::utils::FileReadGuard;
@@ -8,9 +9,10 @@ use log::error;
 use shared::error::{TuliproxError, info_err, info_err_res};
 use shared::model::{PlaylistItemType, TargetType, XtreamCluster, XtreamMappingOptions, XtreamPlaylistItem};
 use std::collections::HashSet;
+use crate::repository::storage::get_file_path_for_db_index;
 
 pub struct XtreamPlaylistIterator {
-    reader: BPlusTreeDiskIteratorOwned<u32, XtreamPlaylistItem>,
+    reader: PlaylistIteratorReader<XtreamPlaylistItem>,
     options: XtreamMappingOptions,
     cluster: XtreamCluster,
     // Use parsed numeric filter to avoid per-item String allocations (no to_string per check)
@@ -39,9 +41,25 @@ impl XtreamPlaylistIterator {
             }
             let file_lock = app_config.file_locks.read_lock(&xtream_path).await;
 
-            let query = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path)
-                .map_err(|err| info_err!("Could not open BPlusTreeQuery {xtream_path:?} - {err}"))?;
-            let reader = query.disk_iter();
+            let index_path = get_file_path_for_db_index(&xtream_path);
+            let reader = if index_path.exists() {
+                 let query = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path)
+                    .map_err(|err| info_err!("Could not open BPlusTreeQuery {xtream_path:?} - {err}"))?;
+                 match query.disk_iter_sorted() {
+                     Ok(reader) => PlaylistIteratorReader::Sorted(reader),
+                     Err(err) => {
+                         error!("Sorted index error, falling back to unsorted: {err}");
+                         // Query was consumed, re-open for fallback
+                         let query = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path)
+                             .map_err(|err| info_err!("Could not open BPlusTreeQuery {xtream_path:?} - {err}"))?;
+                         PlaylistIteratorReader::Unsorted(query.disk_iter())
+                     }
+                 }
+            } else {
+                 let query = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path)
+                     .map_err(|err| info_err!("Could not open BPlusTreeQuery {xtream_path:?} - {err}"))?;
+                 PlaylistIteratorReader::Unsorted(query.disk_iter())
+            };
 
             let server_info = app_config.get_user_server_info(user);
             let options = xtream_mapping_option_from_target_options(target, xtream_output, app_config, user, Some(server_info.get_base_url().as_str()));
@@ -87,31 +105,37 @@ impl XtreamPlaylistIterator {
         true
     }
 
-    fn get_next(&mut self) -> Option<(XtreamPlaylistItem, bool)> {
+    /// Helper to find the next matching item from the iterator, handling `io::Result`.
+    fn find_next_matching(&mut self) -> Option<(XtreamPlaylistItem, bool)> {
         let filter_ids = self.filter_ids.as_ref();
         let cluster = self.cluster;
 
-        let predicate = |(_, item): &(u32, XtreamPlaylistItem)| {
-            Self::matches_filters(cluster, filter_ids, item)
-        };
+        loop {
+            match self.reader.next() {
+                Some(Ok((_, item))) => {
+                    if Self::matches_filters(cluster, filter_ids, &item) {
+                        return Some((item, false));
+                    }
+                    // Continue to next item if filter doesn't match
+                }
+                Some(Err(err)) => {
+                    error!("Error reading sorted index: {err}");
+                    return None;
+                }
+                None => return None,
+            }
+        }
+    }
 
+    fn get_next(&mut self) -> Option<(XtreamPlaylistItem, bool)> {
         if self.lookup_item.is_none() {
-            self.lookup_item = if self.cluster == XtreamCluster::Series || self.filter_ids.is_some() {
-                self.reader.find(predicate).map(|(_, item)| (item, false))
-            } else {
-                self.reader.next().map(|(_, item)| (item, false))
-            };
+            self.lookup_item = self.find_next_matching();
         }
 
         let (current_item, _) = self.lookup_item.take()?;
 
         // prefetch next
-        self.lookup_item = if self.cluster == XtreamCluster::Series || self.filter_ids.is_some() {
-            self.reader.find(predicate).map(|(_, item)| (item, false))
-        } else {
-            self.reader.next().map(|(_, item)| (item, false))
-        };
-
+        self.lookup_item = self.find_next_matching();
         let has_next = self.lookup_item.is_some();
 
         Some((current_item, has_next))

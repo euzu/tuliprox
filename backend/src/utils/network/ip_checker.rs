@@ -1,9 +1,10 @@
+use std::sync::Arc;
 use shared::error::{TuliproxError, TuliproxErrorKind};
 use crate::model::IpCheckConfig;
 use regex::Regex;
 use shared::utils::sanitize_sensitive_info;
 
-async fn fetch_ip(client: &reqwest::Client, url: &str, regex: Option<&Regex>) -> Result<String, TuliproxError> {
+async fn fetch_ip(client: &reqwest::Client, url: &str, regex: Option<&Arc<Regex>>) -> Result<String, TuliproxError> {
     let response = client.get(url).send().await
         .map_err(|e| TuliproxError::new(TuliproxErrorKind::Info, format!("Failed to request {}: {e}", sanitize_sensitive_info(url))))?;
 

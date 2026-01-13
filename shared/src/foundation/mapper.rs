@@ -17,6 +17,7 @@ use std::fmt::Display;
 use std::fmt::Write;
 use std::ops::Deref;
 use std::str::FromStr;
+use std::sync::Arc;
 
 #[derive(Parser)]
 #[grammar_inline = r##"
@@ -181,7 +182,7 @@ pub enum Expression {
     NumberLiteral(f64),
     FieldAccess(String),
     VarAccess(String, String),
-    RegexExpr { field: RegexSource, pattern: String, re_pattern: Regex },
+    RegexExpr { field: RegexSource, pattern: String, re_pattern: Arc<Regex> },
     FunctionCall { name: BuiltInFunction, args: Vec<ExprId> },
     Assignment { target: AssignmentTarget, expr: ExprId },
     MatchBlock(Vec<MatchCase>),
@@ -506,7 +507,7 @@ impl MapperScript {
                 };
                 let pattern_raw = inner.next().unwrap().as_str();
                 let pattern = &pattern_raw[1..pattern_raw.len() - 1]; // Strip quotes
-                match Regex::new(pattern) {
+                match crate::model::REGEX_CACHE.get_or_compile(pattern) {
                     Ok(re) => Ok(Some(Expression::RegexExpr { field, pattern: pattern.to_string(), re_pattern: re })),
                     Err(_) => info_err_res!("Invalid regex {}", pattern),
                 }

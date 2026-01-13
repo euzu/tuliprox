@@ -45,7 +45,10 @@ pub fn ensure_input_storage_path(cfg: &Config, input_name: &str) -> Result<PathB
         })
 }
 
-
 pub fn get_geoip_path(working_dir: &str) -> PathBuf {
     Path::new(working_dir).join("geoip.db")
+}
+
+pub fn get_file_path_for_db_index(db_path: &Path) -> PathBuf {
+    db_path.with_extension(storage_const::FILE_SUFFIX_INDEX)
 }

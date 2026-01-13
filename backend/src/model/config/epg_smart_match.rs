@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use shared::utils::CONSTANTS;
 use regex::Regex;
 use shared::model::{EpgNamePrefix, EpgSmartMatchConfigDto};
@@ -6,14 +7,13 @@ use crate::model::macros;
 #[derive(Debug, Clone)]
 pub struct EpgSmartMatchConfig {
     pub enabled: bool,
-    pub normalize_regex: Regex,
+    pub normalize_regex: Arc<Regex>,
     pub strip: Vec<String>,
     pub name_prefix: EpgNamePrefix,
     pub name_prefix_separator: Vec<char>,
     pub fuzzy_matching: bool,
     pub match_threshold: u16,
     pub best_match_threshold: u16,
-
 }
 
 macros::from_impl!(EpgSmartMatchConfig);
@@ -22,7 +22,7 @@ impl From<&EpgSmartMatchConfigDto> for EpgSmartMatchConfig {
         Self {
             enabled: dto.enabled,
             normalize_regex: match &dto.normalize_regex {
-              Some(regex_str) =>  regex::Regex::new(regex_str).unwrap_or_else(|_| CONSTANTS.re_epg_normalize.clone()),
+              Some(regex_str) =>  shared::model::REGEX_CACHE.get_or_compile(regex_str).unwrap_or_else(|_| CONSTANTS.re_epg_normalize.clone()),
               None => CONSTANTS.re_epg_normalize.clone(),
             },
             strip: match &dto.strip {
