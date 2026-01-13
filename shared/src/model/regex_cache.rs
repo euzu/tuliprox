@@ -27,15 +27,19 @@ impl RegexCache {
         &self,
         pattern: &str,
     ) -> Result<Arc<Regex>, TuliproxError> {
+        // Try to get existing entry first
         if let Some(cached) = self.cache.get(pattern) {
             return Ok(cached.clone());
         }
+        // Compile outside the lock
         let regex = Regex::new(pattern).map_err(|e| {
             info_err!("can't parse regex: {pattern} {e}")
         })?;
         let arc_regex = Arc::new(regex);
-        self.cache.insert(pattern.to_owned(), arc_regex.clone());
-        Ok(arc_regex)
+        // Use entry API to avoid overwriting if another thread inserted
+        Ok(self.cache.entry(pattern.to_owned())
+            .or_insert(arc_regex)
+            .clone())
     }
 
 

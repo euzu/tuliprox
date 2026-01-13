@@ -16,7 +16,7 @@ use crate::repository::storage::get_file_path_for_db_index;
 
 // Constants (Restored)
 const PAGE_SIZE: u16 = 4096;
-const PAGE_SIZE_USIZE: usize = PAGE_SIZE as usize;
+pub const PAGE_SIZE_USIZE: usize = PAGE_SIZE as usize;
 const LEN_SIZE: usize = 4;
 const FLAG_SIZE: usize = 1;
 const MAGIC: &[u8; 4] = b"BTRE";

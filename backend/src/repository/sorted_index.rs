@@ -32,7 +32,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
-use crate::repository::bplustree::COMPRESSION_FLAG_LZ4;
+use crate::repository::bplustree::{COMPRESSION_FLAG_LZ4, PAGE_SIZE_USIZE};
 use indexmap::IndexMap;
 use crate::repository::storage::get_file_path_for_db_index;
 
@@ -423,14 +423,12 @@ where
 
     /// Read a value from a packed block at the given index.
     fn read_value_packed(&mut self, block_offset: u64, value_index: u16) -> io::Result<V> {
-        // Page size used by BPlusTree
-        const PAGE_SIZE: usize = 4096;
 
         // Try cache first
         if !self.block_cache.contains_key(&block_offset) {
             // Miss - read from disk
             self.tree_file.seek(SeekFrom::Start(block_offset))?;
-            let mut buf = vec![0u8; PAGE_SIZE];
+            let mut buf = vec![0u8; PAGE_SIZE_USIZE];
             self.tree_file.read_exact(&mut buf)?;
 
             // Update cache
@@ -450,7 +448,7 @@ where
 
         // Skip to target value
         for i in 0..=value_index {
-            if pos + 4 > PAGE_SIZE {
+            if pos + 4 > PAGE_SIZE_USIZE {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("Packed block corrupted: position {pos} exceeds block size"),
@@ -464,7 +462,7 @@ where
 
             if i == value_index {
                 // Found target value
-                if pos + len > PAGE_SIZE {
+                if pos + len > PAGE_SIZE_USIZE {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!("Packed value corrupted: length {len} at position {pos} exceeds block size"),
