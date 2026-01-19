@@ -584,6 +584,7 @@ pub async fn notify_account_expire(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn download_xtream_playlist(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
