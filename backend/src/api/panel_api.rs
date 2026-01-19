@@ -3133,6 +3133,9 @@ async fn sync_panel_api_for_input_on_boot(
         .count();
 
     let desired_aliases_u16 = desired_aliases;
+    let alias_total = accounts.iter().filter(|a| a.name != input.name).count();
+    let alias_total_u16 = u16::try_from(alias_total).unwrap_or(u16::MAX);
+    let missing_aliases_u16 = desired_aliases_u16.saturating_sub(alias_total_u16);
 
     let (refresh_plan, planned_refresh_aliases) = if provisioning_enabled {
         let mut refresh_candidates: Vec<usize> = accounts
@@ -3186,6 +3189,17 @@ async fn sync_panel_api_for_input_on_boot(
         0
     };
     if log_pool {
+        if missing_aliases_u16 > 0 {
+            debug_if_enabled!(
+                "panel_api boot/update provisioning aliases missing for input {} (offset={}s): desired={}, existing={}, missing={}, client_new_enabled={}",
+                sanitize_sensitive_info(&input.name),
+                offset_secs,
+                desired_aliases_u16,
+                alias_total,
+                missing_aliases_u16,
+                new_enabled
+            );
+        }
         debug_if_enabled!(
             "panel_api boot/update provisioning aliases for input {} (offset={}s): desired={}, valid_beyond_offset={}, expiring(offset)={}, refresh_planned(offset)={}",
             sanitize_sensitive_info(&input.name),
