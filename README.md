@@ -752,11 +752,14 @@ library:
 
 **Integration with source.yml**:
 ```yaml
+inputs:
+- name: local-movies
+  type: library  # New input type
+  enabled: true
+
 sources:
-  - inputs:
-      - name: local-movies
-        type: library  # New input type
-        enabled: true
+- inputs:
+  - local-movies
 ```
 
 ## 2. `source.yml`
