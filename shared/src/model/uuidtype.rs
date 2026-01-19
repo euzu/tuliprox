@@ -6,14 +6,11 @@ use crate::utils::parse_uuid_hex;
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct UUIDType(pub [u8; 32]);
 
+#[allow(clippy::len_without_is_empty)]
 impl UUIDType {
 
     pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        32usize
     }
 
     /// Converts the first 16 bytes of this `UUIDType` into a valid UUID v4 string.
@@ -53,14 +50,14 @@ impl UUIDType {
     pub fn from_valid_uuid(uuid: &str) -> Self {
        let bytes = if let Some(parsed_uuid) = parse_uuid_hex(uuid) {
            let mut bytes = [0u8; 32];
-           // die 16 UUID Bytes
+           // The 16 UUID Bytes
            bytes[..16].copy_from_slice(&parsed_uuid);
-           // die restlichen 16 Bytes = Hash der UUID (optional)
+           // The remaining 16 Bytes = Hash der UUID (optional)
            let hash = blake3::hash(&parsed_uuid);
            bytes[16..].copy_from_slice(&hash.as_bytes()[..16]);
            bytes
        } else {
-           // fallback
+           // Fallback: hash the entire input string
            *blake3::hash(uuid.as_bytes()).as_bytes()
        };
 

@@ -220,7 +220,6 @@ where
     let xtream_categories = map_to_xtream_category(categories).await?;
     
     // 2. Prepare for Stream Parsing
-    // 2. Prepare for Stream Parsing
     let input_name = input.name.clone();
     let url = input.url.as_str().to_string(); 
     let username = input.username.as_ref().map_or("", |v| v).to_string();
@@ -310,14 +309,14 @@ where F: FnMut(XtreamPlaylistItem) -> Result<(), TuliproxError>
                   logo: stream.get_stream_icon(),
                   group: category_name.clone(),
                   title: stream.get_name(),
-                  url: stream_url.to_string().into(),
+                  url: stream_url,
                   epg_channel_id: stream.get_epg_channel_id(),
                   item_type,
                   xtream_cluster: cluster,
                   additional_properties: Some(stream),
                   category_id,
                   source_ordinal,
-                  input_name: input_name.intern(),
+                  input_name: Arc::clone(input_name),
                  ..Default::default()
              },
          };

@@ -1213,14 +1213,24 @@ where
         }
 
         let keys_len = u32_from_bytes(&mmap[start + FLAG_SIZE..start + FLAG_SIZE + LEN_SIZE])? as usize;
-        let _ = start + FLAG_SIZE + LEN_SIZE + keys_len;
+        //let _ = start + FLAG_SIZE + LEN_SIZE + keys_len;
+        let keys_start = start + FLAG_SIZE + LEN_SIZE;
+        let len_pos = keys_start + keys_len;
+        if len_pos + LEN_SIZE > mmap.len() {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Mmap access out of bounds"));
+        }
+        let payload_len = u32_from_bytes(&mmap[len_pos..len_pos + LEN_SIZE])? as usize;
+        let total = len_pos + LEN_SIZE + payload_len;
+        if total > mmap.len() {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Mmap access out of bounds"));
+        }
 
         // We need to know the total size of the node to slice the mmap
         // For simplicity, we can just slice a PAGE_SIZE or slightly more if we know it overflows.
         // Actually, our serialize_to_block uses PAGE_SIZE blocks.
 
-        let slice = &mmap[start..];
-
+        //let slice = &mmap[start..];
+        let slice = &mmap[start..total];
         Self::deserialize_from_block_slice(slice, file, nested)
     }
 
