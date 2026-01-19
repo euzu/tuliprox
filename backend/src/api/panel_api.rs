@@ -332,24 +332,51 @@ fn validate_client_adult_content_params(
     Ok(())
 }
 
-fn panel_api_request_enabled(
-    params: &[PanelApiQueryParamDto],
-    action: &str,
-    context: Option<&str>,
-) -> bool {
-    if params.is_empty() {
-        let suffix = context.map_or_else(String::new, |ctx| {
-            format!(" for {}", sanitize_sensitive_info(ctx))
-        });
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Copy)]
+struct PanelApiOptionalFlags {
+    account_info: bool,
+    client_new: bool,
+    client_renew: bool,
+    adult_content: bool,
+}
+
+fn resolve_panel_api_optional_flags(
+    cfg: &PanelApiConfigDto,
+    input_name: &str,
+) -> PanelApiOptionalFlags {
+    let flags = PanelApiOptionalFlags {
+        account_info: !cfg.query_parameter.account_info.is_empty(),
+        client_new: !cfg.query_parameter.client_new.is_empty(),
+        client_renew: !cfg.query_parameter.client_renew.is_empty(),
+        adult_content: !cfg.query_parameter.client_adult_content.is_empty(),
+    };
+    let name = sanitize_sensitive_info(input_name);
+    if !flags.client_renew {
         debug_if_enabled!(
-            "panel_api request for {} disabled due to missing arguments{}",
-            action,
-            suffix
+            "panel_api request for client_renew disabled due to missing arguments for {}",
+            name
         );
-        false
-    } else {
-        true
     }
+    if !flags.client_new {
+        debug_if_enabled!(
+            "panel_api request for client_new disabled due to missing arguments for {}",
+            name
+        );
+    }
+    if !flags.adult_content {
+        debug_if_enabled!(
+            "panel_api request for client_adult_content disabled due to missing arguments for {}",
+            name
+        );
+    }
+    if !flags.account_info {
+        debug_if_enabled!(
+            "panel_api request for account_info disabled due to missing arguments for {}",
+            name
+        );
+    }
+    flags
 }
 
 fn parse_panel_api_provisioning_offset_secs(offset: &str) -> Result<u64, TuliproxError> {
@@ -1767,19 +1794,12 @@ async fn try_renew_expired_account(
     is_batch: bool,
     sources_path: &Path,
     treat_missing_exp_date_as_expired: bool,
+    optional: PanelApiOptionalFlags,
 ) -> Option<PanelApiProvisionOutcome> {
-    if !panel_api_request_enabled(
-        &panel_cfg.query_parameter.client_renew,
-        "client_renew",
-        Some(&input.name),
-    ) {
+    if !optional.client_renew {
         return None;
     }
-    let adult_enabled = panel_api_request_enabled(
-        &panel_cfg.query_parameter.client_adult_content,
-        "client_adult_content",
-        Some(&input.name),
-    );
+    let adult_enabled = optional.adult_content;
     let mut candidates = collect_accounts(input);
     for acct in &mut candidates {
         if treat_missing_exp_date_as_expired && acct.exp_date.is_none() {
@@ -1913,19 +1933,12 @@ async fn try_create_new_account(
     panel_cfg: &PanelApiConfigDto,
     is_batch: bool,
     sources_path: &Path,
+    optional: PanelApiOptionalFlags,
 ) -> Option<PanelApiProvisionOutcome> {
-    if !panel_api_request_enabled(
-        &panel_cfg.query_parameter.client_new,
-        "client_new",
-        Some(&input.name),
-    ) {
+    if !optional.client_new {
         return None;
     }
-    let adult_enabled = panel_api_request_enabled(
-        &panel_cfg.query_parameter.client_adult_content,
-        "client_adult_content",
-        Some(&input.name),
-    );
+    let adult_enabled = optional.adult_content;
     match panel_client_new(app_state, panel_cfg).await {
         Ok((username, password, base_url_from_resp)) => {
             let base_url = base_url_from_resp.unwrap_or_else(|| input.url.clone());
@@ -2074,6 +2087,7 @@ pub async fn try_provision_account_on_exhausted(
         return None;
     }
 
+    let optional = resolve_panel_api_optional_flags(panel_cfg, &input.name);
     debug_if_enabled!(
         "panel_api: exhausted -> provisioning for input {} (aliases={})",
         sanitize_sensitive_info(&input.name),
@@ -2094,6 +2108,7 @@ pub async fn try_provision_account_on_exhausted(
         is_batch,
         sources_path.as_path(),
         true,
+        optional,
     )
     .await
     {
@@ -2109,6 +2124,7 @@ pub async fn try_provision_account_on_exhausted(
         panel_cfg,
         is_batch,
         sources_path.as_path(),
+        optional,
     )
     .await;
     debug_if_enabled!(
@@ -2134,26 +2150,15 @@ async fn ensure_alias_pool_min(
     sources_yml_patches: &mut Vec<SourcesYmlPatch>,
     time_ctx: Option<&PanelApiTimeContext>,
     effective_now: u64,
+    optional: PanelApiOptionalFlags,
 ) -> bool {
     if min_pool == 0 {
         return false;
     }
 
-    let renew_enabled = panel_api_request_enabled(
-        &panel_cfg.query_parameter.client_renew,
-        "client_renew",
-        Some(&input.name),
-    );
-    let new_enabled = panel_api_request_enabled(
-        &panel_cfg.query_parameter.client_new,
-        "client_new",
-        Some(&input.name),
-    );
-    let adult_enabled = panel_api_request_enabled(
-        &panel_cfg.query_parameter.client_adult_content,
-        "client_adult_content",
-        Some(&input.name),
-    );
+    let renew_enabled = optional.client_renew;
+    let new_enabled = optional.client_new;
+    let adult_enabled = optional.adult_content;
     if !renew_enabled && !new_enabled {
         return false;
     }
@@ -2391,6 +2396,7 @@ async fn sync_panel_api_for_input_on_boot(
         );
         return false;
     }
+    let optional = resolve_panel_api_optional_flags(panel_cfg, &input.name);
 
     let input_name = input.name.as_str();
     let _input_lock = app_state
@@ -2553,11 +2559,7 @@ async fn sync_panel_api_for_input_on_boot(
         );
     }
 
-    if panel_api_request_enabled(
-        &panel_cfg.query_parameter.account_info,
-        "account_info",
-        Some(&input.name),
-    ) {
+    if optional.account_info {
         let creds = accounts
             .first()
             .map(|acct| (acct.username.as_str(), acct.password.as_str()));
@@ -2650,21 +2652,10 @@ async fn sync_panel_api_for_input_on_boot(
         .unwrap_or(0);
 
     let min_pool = resolve_alias_pool_min(app_state.as_ref(), &input.name, panel_cfg);
-    let renew_enabled = panel_api_request_enabled(
-        &panel_cfg.query_parameter.client_renew,
-        "client_renew",
-        Some(&input.name),
-    );
-    let new_enabled = panel_api_request_enabled(
-        &panel_cfg.query_parameter.client_new,
-        "client_new",
-        Some(&input.name),
-    );
-    let adult_enabled = panel_api_request_enabled(
-        &panel_cfg.query_parameter.client_adult_content,
-        "client_adult_content",
-        Some(&input.name),
-    );
+    let renew_enabled = optional.client_renew;
+    let new_enabled = optional.client_new;
+    let adult_enabled = optional.adult_content;
+    let provisioning_enabled = renew_enabled || new_enabled;
     // Refresh/provision credentials on boot/update.
     // Root is handled first (may affect desired_aliases and avoids over-provisioning).
     let mut provisioned_root = 0_u16;
@@ -2701,10 +2692,11 @@ async fn sync_panel_api_for_input_on_boot(
         );
 
         if should_refresh_root {
-            let old_username = accounts[root_idx].username.clone();
-            let old_password = accounts[root_idx].password.clone();
+            if provisioning_enabled {
+                let old_username = accounts[root_idx].username.clone();
+                let old_password = accounts[root_idx].password.clone();
 
-            debug_if_enabled!(
+                debug_if_enabled!(
                 "panel_api boot/update refreshing root account {} for input {} (exp_date={}, offset={}s)",
                 sanitize_sensitive_info(&old_username),
                 sanitize_sensitive_info(&input.name),
@@ -2712,376 +2704,386 @@ async fn sync_panel_api_for_input_on_boot(
                 offset_secs
             );
 
-            let (active_username, active_password, creds_changed) = if renew_enabled {
-                match panel_client_renew(
-                    app_state.as_ref(),
-                    panel_cfg,
-                    old_username.as_str(),
-                    old_password.as_str(),
-                )
-                .await
-                {
-                    Ok(()) => {
-                        provisioned_root = 1;
-                        (old_username.clone(), old_password.clone(), false)
-                    }
-                    Err(err) => {
-                        debug_if_enabled!(
-                            "panel_api client_renew failed for root {}: {}",
-                            sanitize_sensitive_info(&input.name),
-                            sanitize_sensitive_info(err.to_string().as_str())
-                        );
-                        if new_enabled {
-                            match panel_client_new(app_state.as_ref(), panel_cfg).await {
-                                Ok((new_username, new_password, _base_url_from_resp)) => {
-                                    provisioned_root = 1;
-                                    // Variant B: if the old root is still valid but within offset window,
-                                    // keep it as a new alias entry so we don't lose usable credentials.
-                                    let park_old_root_as_alias =
-                                        root_expiring && !root_expired && root_exp_date.is_some();
+                let (active_username, active_password, creds_changed) = if renew_enabled {
+                    match panel_client_renew(
+                        app_state.as_ref(),
+                        panel_cfg,
+                        old_username.as_str(),
+                        old_password.as_str(),
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            provisioned_root = 1;
+                            (old_username.clone(), old_password.clone(), false)
+                        }
+                        Err(err) => {
+                            debug_if_enabled!(
+                                "panel_api client_renew failed for root {}: {}",
+                                sanitize_sensitive_info(&input.name),
+                                sanitize_sensitive_info(err.to_string().as_str())
+                            );
+                            if new_enabled {
+                                match panel_client_new(app_state.as_ref(), panel_cfg).await {
+                                    Ok((new_username, new_password, _base_url_from_resp)) => {
+                                        provisioned_root = 1;
+                                        // Variant B: if the old root is still valid but within offset window,
+                                        // keep it as a new alias entry so we don't lose usable credentials.
+                                        let park_old_root_as_alias = root_expiring
+                                            && !root_expired
+                                            && root_exp_date.is_some();
 
-                                    if park_old_root_as_alias {
-                                        let base_url = get_base_url_from_str(input.url.as_str())
-                                            .unwrap_or_else(|| input.url.clone());
-                                        let alias_name = derive_unique_alias_name_set(
-                                            &existing_names,
-                                            &input.name,
-                                            old_username.as_str(),
+                                        if park_old_root_as_alias {
+                                            let base_url =
+                                                get_base_url_from_str(input.url.as_str())
+                                                    .unwrap_or_else(|| input.url.clone());
+                                            let alias_name = derive_unique_alias_name_set(
+                                                &existing_names,
+                                                &input.name,
+                                                old_username.as_str(),
+                                            );
+                                            existing_names.insert(alias_name.clone());
+
+                                            if let Some(csv_path) = csv_path.as_ref() {
+                                                let batch_type =
+                                                    if input.input_type == InputType::Xtream {
+                                                        InputType::XtreamBatch
+                                                    } else if input.input_type == InputType::M3u {
+                                                        InputType::M3uBatch
+                                                    } else {
+                                                        input.input_type
+                                                    };
+                                                let _csv_lock = app_state
+                                                    .app_config
+                                                    .file_locks
+                                                    .write_lock(csv_path)
+                                                    .await;
+                                                if let Err(err) = csv_patch_batch_append(
+                                                    csv_path,
+                                                    batch_type,
+                                                    &alias_name,
+                                                    &base_url,
+                                                    &old_username,
+                                                    &old_password,
+                                                    root_exp_date,
+                                                )
+                                                .await
+                                                {
+                                                    debug_if_enabled!(
+                                                    "panel_api boot/update failed to park old root as csv alias {}: {}",
+                                                    sanitize_sensitive_info(&alias_name),
+                                                    err
+                                                );
+                                                } else {
+                                                    any_change = true;
+                                                }
+                                            } else {
+                                                sources_yml_patches.push(
+                                                    SourcesYmlPatch::AddAlias {
+                                                        input_name: input.name.clone(),
+                                                        alias_name: alias_name.clone(),
+                                                        base_url,
+                                                        username: old_username.clone(),
+                                                        password: old_password.clone(),
+                                                        exp_date: root_exp_date,
+                                                    },
+                                                );
+                                                pending_sources_yml = true;
+                                            }
+
+                                            accounts.push(AccountCredentials {
+                                                name: alias_name,
+                                                username: old_username.clone(),
+                                                password: old_password.clone(),
+                                                exp_date: root_exp_date,
+                                            });
+
+                                            debug_if_enabled!(
+                                            "panel_api boot/update parked old root credentials for input {} as new alias (exp_date={:?})",
+                                            sanitize_sensitive_info(&input.name),
+                                            root_exp_date
                                         );
-                                        existing_names.insert(alias_name.clone());
+                                        }
 
                                         if let Some(csv_path) = csv_path.as_ref() {
-                                            let batch_type =
-                                                if input.input_type == InputType::Xtream {
-                                                    InputType::XtreamBatch
-                                                } else if input.input_type == InputType::M3u {
-                                                    InputType::M3uBatch
-                                                } else {
-                                                    input.input_type
-                                                };
                                             let _csv_lock = app_state
                                                 .app_config
                                                 .file_locks
                                                 .write_lock(csv_path)
                                                 .await;
-                                            if let Err(err) = csv_patch_batch_append(
+                                            if let Err(err) = csv_patch_batch_update_credentials(
+                                                input.input_type,
                                                 csv_path,
-                                                batch_type,
-                                                &alias_name,
-                                                &base_url,
+                                                &input.name,
                                                 &old_username,
                                                 &old_password,
-                                                root_exp_date,
+                                                &new_username,
+                                                &new_password,
+                                                None,
                                             )
                                             .await
                                             {
                                                 debug_if_enabled!(
-                                                    "panel_api boot/update failed to park old root as csv alias {}: {}",
-                                                    sanitize_sensitive_info(&alias_name),
-                                                    err
-                                                );
-                                            } else {
-                                                any_change = true;
-                                            }
-                                        } else {
-                                            sources_yml_patches.push(SourcesYmlPatch::AddAlias {
-                                                input_name: input.name.clone(),
-                                                alias_name: alias_name.clone(),
-                                                base_url,
-                                                username: old_username.clone(),
-                                                password: old_password.clone(),
-                                                exp_date: root_exp_date,
-                                            });
-                                            pending_sources_yml = true;
-                                        }
-
-                                        accounts.push(AccountCredentials {
-                                            name: alias_name,
-                                            username: old_username.clone(),
-                                            password: old_password.clone(),
-                                            exp_date: root_exp_date,
-                                        });
-
-                                        debug_if_enabled!(
-                                            "panel_api boot/update parked old root credentials for input {} as new alias (exp_date={:?})",
-                                            sanitize_sensitive_info(&input.name),
-                                            root_exp_date
-                                        );
-                                    }
-
-                                    if let Some(csv_path) = csv_path.as_ref() {
-                                        let _csv_lock = app_state
-                                            .app_config
-                                            .file_locks
-                                            .write_lock(csv_path)
-                                            .await;
-                                        if let Err(err) = csv_patch_batch_update_credentials(
-                                            input.input_type,
-                                            csv_path,
-                                            &input.name,
-                                            &old_username,
-                                            &old_password,
-                                            &new_username,
-                                            &new_password,
-                                            None,
-                                        )
-                                        .await
-                                        {
-                                            debug_if_enabled!(
                                                 "panel_api boot/update failed to persist new root credentials to csv for {}: {}",
                                                 sanitize_sensitive_info(&input.name),
                                                 err
                                             );
+                                            } else {
+                                                any_change = true;
+                                            }
                                         } else {
-                                            any_change = true;
+                                            sources_yml_patches.push(
+                                                SourcesYmlPatch::UpdateRootCredentials {
+                                                    input_name: input.name.clone(),
+                                                    username: new_username.clone(),
+                                                    password: new_password.clone(),
+                                                    exp_date: None,
+                                                },
+                                            );
+                                            pending_sources_yml = true;
                                         }
-                                    } else {
-                                        sources_yml_patches.push(
-                                            SourcesYmlPatch::UpdateRootCredentials {
-                                                input_name: input.name.clone(),
-                                                username: new_username.clone(),
-                                                password: new_password.clone(),
-                                                exp_date: None,
-                                            },
-                                        );
-                                        pending_sources_yml = true;
-                                    }
 
-                                    accounts[root_idx].username.clone_from(&new_username);
-                                    accounts[root_idx].password.clone_from(&new_password);
-                                    (new_username, new_password, true)
+                                        accounts[root_idx].username.clone_from(&new_username);
+                                        accounts[root_idx].password.clone_from(&new_password);
+                                        (new_username, new_password, true)
+                                    }
+                                    Err(err) => {
+                                        debug_if_enabled!(
+                                            "panel_api client_new failed for root {}: {}",
+                                            sanitize_sensitive_info(&input.name),
+                                            sanitize_sensitive_info(err.to_string().as_str())
+                                        );
+                                        (old_username.clone(), old_password.clone(), false)
+                                    }
                                 }
-                                Err(err) => {
-                                    debug_if_enabled!(
-                                        "panel_api client_new failed for root {}: {}",
-                                        sanitize_sensitive_info(&input.name),
-                                        sanitize_sensitive_info(err.to_string().as_str())
-                                    );
-                                    (old_username.clone(), old_password.clone(), false)
-                                }
+                            } else {
+                                (old_username.clone(), old_password.clone(), false)
                             }
-                        } else {
-                            (old_username.clone(), old_password.clone(), false)
                         }
                     }
-                }
-            } else if new_enabled {
-                match panel_client_new(app_state.as_ref(), panel_cfg).await {
-                    Ok((new_username, new_password, _base_url_from_resp)) => {
-                        provisioned_root = 1;
-                        let park_old_root_as_alias =
-                            root_expiring && !root_expired && root_exp_date.is_some();
+                } else if new_enabled {
+                    match panel_client_new(app_state.as_ref(), panel_cfg).await {
+                        Ok((new_username, new_password, _base_url_from_resp)) => {
+                            provisioned_root = 1;
+                            let park_old_root_as_alias =
+                                root_expiring && !root_expired && root_exp_date.is_some();
 
-                        if park_old_root_as_alias {
-                            let base_url = get_base_url_from_str(input.url.as_str())
-                                .unwrap_or_else(|| input.url.clone());
-                            let alias_name = derive_unique_alias_name_set(
-                                &existing_names,
-                                &input.name,
-                                old_username.as_str(),
-                            );
-                            existing_names.insert(alias_name.clone());
+                            if park_old_root_as_alias {
+                                let base_url = get_base_url_from_str(input.url.as_str())
+                                    .unwrap_or_else(|| input.url.clone());
+                                let alias_name = derive_unique_alias_name_set(
+                                    &existing_names,
+                                    &input.name,
+                                    old_username.as_str(),
+                                );
+                                existing_names.insert(alias_name.clone());
 
-                            if let Some(csv_path) = csv_path.as_ref() {
-                                let batch_type = if input.input_type == InputType::Xtream {
-                                    InputType::XtreamBatch
-                                } else if input.input_type == InputType::M3u {
-                                    InputType::M3uBatch
-                                } else {
-                                    input.input_type
-                                };
-                                let _csv_lock =
-                                    app_state.app_config.file_locks.write_lock(csv_path).await;
-                                if let Err(err) = csv_patch_batch_append(
-                                    csv_path,
-                                    batch_type,
-                                    &alias_name,
-                                    &base_url,
-                                    &old_username,
-                                    &old_password,
-                                    root_exp_date,
-                                )
-                                .await
-                                {
-                                    debug_if_enabled!(
+                                if let Some(csv_path) = csv_path.as_ref() {
+                                    let batch_type = if input.input_type == InputType::Xtream {
+                                        InputType::XtreamBatch
+                                    } else if input.input_type == InputType::M3u {
+                                        InputType::M3uBatch
+                                    } else {
+                                        input.input_type
+                                    };
+                                    let _csv_lock =
+                                        app_state.app_config.file_locks.write_lock(csv_path).await;
+                                    if let Err(err) = csv_patch_batch_append(
+                                        csv_path,
+                                        batch_type,
+                                        &alias_name,
+                                        &base_url,
+                                        &old_username,
+                                        &old_password,
+                                        root_exp_date,
+                                    )
+                                    .await
+                                    {
+                                        debug_if_enabled!(
                                         "panel_api boot/update failed to park old root as csv alias {}: {}",
                                         sanitize_sensitive_info(&alias_name),
                                         err
                                     );
+                                    } else {
+                                        any_change = true;
+                                    }
                                 } else {
-                                    any_change = true;
+                                    sources_yml_patches.push(SourcesYmlPatch::AddAlias {
+                                        input_name: input.name.clone(),
+                                        alias_name: alias_name.clone(),
+                                        base_url,
+                                        username: old_username.clone(),
+                                        password: old_password.clone(),
+                                        exp_date: root_exp_date,
+                                    });
+                                    pending_sources_yml = true;
                                 }
-                            } else {
-                                sources_yml_patches.push(SourcesYmlPatch::AddAlias {
-                                    input_name: input.name.clone(),
-                                    alias_name: alias_name.clone(),
-                                    base_url,
+
+                                accounts.push(AccountCredentials {
+                                    name: alias_name,
                                     username: old_username.clone(),
                                     password: old_password.clone(),
                                     exp_date: root_exp_date,
                                 });
-                                pending_sources_yml = true;
-                            }
 
-                            accounts.push(AccountCredentials {
-                                name: alias_name,
-                                username: old_username.clone(),
-                                password: old_password.clone(),
-                                exp_date: root_exp_date,
-                            });
-
-                            debug_if_enabled!(
+                                debug_if_enabled!(
                                 "panel_api boot/update parked old root credentials for input {} as new alias (exp_date={:?})",
                                 sanitize_sensitive_info(&input.name),
                                 root_exp_date
                             );
-                        }
+                            }
 
-                        if let Some(csv_path) = csv_path.as_ref() {
-                            let _csv_lock =
-                                app_state.app_config.file_locks.write_lock(csv_path).await;
-                            if let Err(err) = csv_patch_batch_update_credentials(
-                                input.input_type,
-                                csv_path,
-                                &input.name,
-                                &old_username,
-                                &old_password,
-                                &new_username,
-                                &new_password,
-                                None,
-                            )
-                            .await
-                            {
-                                debug_if_enabled!(
+                            if let Some(csv_path) = csv_path.as_ref() {
+                                let _csv_lock =
+                                    app_state.app_config.file_locks.write_lock(csv_path).await;
+                                if let Err(err) = csv_patch_batch_update_credentials(
+                                    input.input_type,
+                                    csv_path,
+                                    &input.name,
+                                    &old_username,
+                                    &old_password,
+                                    &new_username,
+                                    &new_password,
+                                    None,
+                                )
+                                .await
+                                {
+                                    debug_if_enabled!(
                                     "panel_api boot/update failed to persist new root credentials to csv for {}: {}",
                                     sanitize_sensitive_info(&input.name),
                                     err
                                 );
+                                } else {
+                                    any_change = true;
+                                }
                             } else {
-                                any_change = true;
+                                sources_yml_patches.push(SourcesYmlPatch::UpdateRootCredentials {
+                                    input_name: input.name.clone(),
+                                    username: new_username.clone(),
+                                    password: new_password.clone(),
+                                    exp_date: None,
+                                });
+                                pending_sources_yml = true;
                             }
-                        } else {
-                            sources_yml_patches.push(SourcesYmlPatch::UpdateRootCredentials {
-                                input_name: input.name.clone(),
-                                username: new_username.clone(),
-                                password: new_password.clone(),
-                                exp_date: None,
-                            });
-                            pending_sources_yml = true;
-                        }
 
-                        accounts[root_idx].username.clone_from(&new_username);
-                        accounts[root_idx].password.clone_from(&new_password);
-                        (new_username, new_password, true)
+                            accounts[root_idx].username.clone_from(&new_username);
+                            accounts[root_idx].password.clone_from(&new_password);
+                            (new_username, new_password, true)
+                        }
+                        Err(err) => {
+                            debug_if_enabled!(
+                                "panel_api client_new failed for root {}: {}",
+                                sanitize_sensitive_info(&input.name),
+                                sanitize_sensitive_info(err.to_string().as_str())
+                            );
+                            (old_username.clone(), old_password.clone(), false)
+                        }
                     }
-                    Err(err) => {
+                } else {
+                    (old_username.clone(), old_password.clone(), false)
+                };
+
+                if adult_enabled {
+                    if let Err(err) = panel_client_adult_content(
+                        app_state.as_ref(),
+                        panel_cfg,
+                        Some((active_username.as_str(), active_password.as_str())),
+                    )
+                    .await
+                    {
                         debug_if_enabled!(
-                            "panel_api client_new failed for root {}: {}",
+                            "panel_api client_adult_content failed for root {}: {}",
                             sanitize_sensitive_info(&input.name),
                             sanitize_sensitive_info(err.to_string().as_str())
                         );
-                        (old_username.clone(), old_password.clone(), false)
                     }
                 }
-            } else {
-                (old_username.clone(), old_password.clone(), false)
-            };
 
-            if adult_enabled {
-                if let Err(err) = panel_client_adult_content(
+                let refreshed_exp = panel_client_info(
                     app_state.as_ref(),
                     panel_cfg,
-                    Some((active_username.as_str(), active_password.as_str())),
+                    active_username.as_str(),
+                    active_password.as_str(),
+                    time_ctx.as_ref(),
                 )
                 .await
-                {
+                .ok()
+                .flatten();
+
+                let ready = wait_for_panel_api_account_ready(
+                    app_state,
+                    input.as_ref(),
+                    panel_cfg,
+                    input.name.as_str(),
+                    active_username.as_str(),
+                    active_password.as_str(),
+                )
+                .await;
+                if !ready {
                     debug_if_enabled!(
-                        "panel_api client_adult_content failed for root {}: {}",
-                        sanitize_sensitive_info(&input.name),
-                        sanitize_sensitive_info(err.to_string().as_str())
-                    );
-                }
-            }
-
-            let refreshed_exp = panel_client_info(
-                app_state.as_ref(),
-                panel_cfg,
-                active_username.as_str(),
-                active_password.as_str(),
-                time_ctx.as_ref(),
-            )
-            .await
-            .ok()
-            .flatten();
-
-            let ready = wait_for_panel_api_account_ready(
-                app_state,
-                input.as_ref(),
-                panel_cfg,
-                input.name.as_str(),
-                active_username.as_str(),
-                active_password.as_str(),
-            )
-            .await;
-            if !ready {
-                debug_if_enabled!(
                     "panel_api boot/update probe timeout for root {}; skipping exp_date refresh",
                     sanitize_sensitive_info(&input.name)
                 );
-            } else if let Some(new_exp) = refreshed_exp {
-                if let Some(csv_path) = csv_path.as_ref() {
-                    let _csv_lock = app_state.app_config.file_locks.write_lock(csv_path).await;
-                    let result = if creds_changed {
-                        csv_patch_batch_update_credentials(
-                            input.input_type,
-                            csv_path,
-                            &input.name,
-                            old_username.as_str(),
-                            old_password.as_str(),
-                            active_username.as_str(),
-                            active_password.as_str(),
-                            Some(new_exp),
-                        )
-                        .await
-                    } else {
-                        csv_patch_batch_update_exp_date(
-                            input.input_type,
-                            csv_path,
-                            &input.name,
-                            old_username.as_str(),
-                            old_password.as_str(),
-                            new_exp,
-                        )
-                        .await
-                    };
-                    if let Err(err) = result {
-                        debug_if_enabled!(
+                } else if let Some(new_exp) = refreshed_exp {
+                    if let Some(csv_path) = csv_path.as_ref() {
+                        let _csv_lock = app_state.app_config.file_locks.write_lock(csv_path).await;
+                        let result = if creds_changed {
+                            csv_patch_batch_update_credentials(
+                                input.input_type,
+                                csv_path,
+                                &input.name,
+                                old_username.as_str(),
+                                old_password.as_str(),
+                                active_username.as_str(),
+                                active_password.as_str(),
+                                Some(new_exp),
+                            )
+                            .await
+                        } else {
+                            csv_patch_batch_update_exp_date(
+                                input.input_type,
+                                csv_path,
+                                &input.name,
+                                old_username.as_str(),
+                                old_password.as_str(),
+                                new_exp,
+                            )
+                            .await
+                        };
+                        if let Err(err) = result {
+                            debug_if_enabled!(
                             "panel_api boot/update failed to persist root exp_date to csv for {}: {}",
                             sanitize_sensitive_info(&input.name),
                             err
                         );
+                        } else {
+                            accounts[root_idx].exp_date = Some(new_exp);
+                            any_change = true;
+                        }
                     } else {
+                        if creds_changed {
+                            sources_yml_patches.push(SourcesYmlPatch::UpdateRootCredentials {
+                                input_name: input.name.clone(),
+                                username: active_username.clone(),
+                                password: active_password.clone(),
+                                exp_date: Some(new_exp),
+                            });
+                        } else {
+                            sources_yml_patches.push(SourcesYmlPatch::UpdateExpDate {
+                                input_name: input.name.clone(),
+                                account_name: input.name.clone(),
+                                exp_date: new_exp,
+                            });
+                        }
+                        pending_sources_yml = true;
                         accounts[root_idx].exp_date = Some(new_exp);
-                        any_change = true;
                     }
-                } else {
-                    if creds_changed {
-                        sources_yml_patches.push(SourcesYmlPatch::UpdateRootCredentials {
-                            input_name: input.name.clone(),
-                            username: active_username.clone(),
-                            password: active_password.clone(),
-                            exp_date: Some(new_exp),
-                        });
-                    } else {
-                        sources_yml_patches.push(SourcesYmlPatch::UpdateExpDate {
-                            input_name: input.name.clone(),
-                            account_name: input.name.clone(),
-                            exp_date: new_exp,
-                        });
-                    }
-                    pending_sources_yml = true;
-                    accounts[root_idx].exp_date = Some(new_exp);
                 }
+            } else {
+                debug_if_enabled!(
+                    "panel_api boot/update skipped root refresh for input {}: client_new/client_renew disabled",
+                    sanitize_sensitive_info(&input.name)
+                );
             }
         }
     } else {
@@ -3130,45 +3132,50 @@ async fn sync_panel_api_for_input_on_boot(
 
     let desired_aliases_u16 = desired_aliases;
 
-    let mut refresh_candidates: Vec<usize> = accounts
-        .iter()
-        .enumerate()
-        .filter(|(_, a)| {
-            if a.name == input.name {
-                return false;
-            }
-            if is_input_expired_at(a.exp_date, now) {
-                return false;
-            }
-            match a.exp_date {
-                None => true,
-                Some(ts) => u64::try_from(ts)
-                    .map(|exp_ts| exp_ts <= offset_deadline)
-                    .unwrap_or(true),
-            }
-        })
-        .map(|(idx, _)| idx)
-        .collect();
+    let (refresh_plan, planned_refresh_aliases) = if provisioning_enabled {
+        let mut refresh_candidates: Vec<usize> = accounts
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| {
+                if a.name == input.name {
+                    return false;
+                }
+                if is_input_expired_at(a.exp_date, now) {
+                    return false;
+                }
+                match a.exp_date {
+                    None => true,
+                    Some(ts) => u64::try_from(ts)
+                        .map(|exp_ts| exp_ts <= offset_deadline)
+                        .unwrap_or(true),
+                }
+            })
+            .map(|(idx, _)| idx)
+            .collect();
 
-    refresh_candidates.sort_by_key(|idx| {
-        let acct = &accounts[*idx];
-        match acct.exp_date {
-            None => (0_u8, i64::MIN),
-            Some(ts) => (1_u8, ts),
-        }
-    });
+        refresh_candidates.sort_by_key(|idx| {
+            let acct = &accounts[*idx];
+            match acct.exp_date {
+                None => (0_u8, i64::MIN),
+                Some(ts) => (1_u8, ts),
+            }
+        });
 
-    let valid_aliases_beyond_offset_u16 =
-        u16::try_from(valid_aliases_beyond_offset).unwrap_or(u16::MAX);
-    let needed_refresh_aliases_u16 =
-        desired_aliases_u16.saturating_sub(valid_aliases_beyond_offset_u16);
-    let planned_refresh_aliases = refresh_candidates
-        .len()
-        .min(usize::from(needed_refresh_aliases_u16));
-    let refresh_plan: Vec<usize> = refresh_candidates
-        .into_iter()
-        .take(planned_refresh_aliases)
-        .collect();
+        let valid_aliases_beyond_offset_u16 =
+            u16::try_from(valid_aliases_beyond_offset).unwrap_or(u16::MAX);
+        let needed_refresh_aliases_u16 =
+            desired_aliases_u16.saturating_sub(valid_aliases_beyond_offset_u16);
+        let planned_refresh_aliases = refresh_candidates
+            .len()
+            .min(usize::from(needed_refresh_aliases_u16));
+        let refresh_plan: Vec<usize> = refresh_candidates
+            .into_iter()
+            .take(planned_refresh_aliases)
+            .collect();
+        (refresh_plan, planned_refresh_aliases)
+    } else {
+        (Vec::new(), 0)
+    };
 
     let log_pool = alias_pool_has_min(panel_cfg);
     let enabled_users = if log_pool {
@@ -3580,6 +3587,7 @@ async fn sync_panel_api_for_input_on_boot(
             &mut sources_yml_patches,
             time_ctx.as_ref(),
             effective_now,
+            optional,
         )
         .await
         {
