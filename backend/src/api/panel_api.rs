@@ -3,7 +3,7 @@ use crate::api::model::{
     create_panel_api_provisioning_stream_with_stop, create_provider_connections_exhausted_stream,
     AppState, StreamDetails,
 };
-use crate::model::{is_input_expired, ConfigInput, ProxyUserCredentials};
+use crate::model::{is_input_expired, ConfigInput, ConfigInputAlias, ProxyUserCredentials};
 use crate::repository::{
     csv_patch_batch_append, csv_patch_batch_remove_expired, csv_patch_batch_sort_by_exp_date,
     csv_patch_batch_update_credentials, csv_patch_batch_update_exp_date, get_csv_file_path,
@@ -1115,19 +1115,25 @@ fn compare_alias_exp_date(a: &ConfigInputAliasDto, b: &ConfigInputAliasDto) -> O
     a_ts.cmp(&b_ts).then_with(|| a.name.cmp(&b.name))
 }
 
+fn compare_alias_exp_date_config(a: &ConfigInputAlias, b: &ConfigInputAlias) -> Ordering {
+    let a_ts = a.exp_date.unwrap_or(i64::MAX);
+    let b_ts = b.exp_date.unwrap_or(i64::MAX);
+    a_ts.cmp(&b_ts).then_with(|| a.name.cmp(&b.name))
+}
+
 fn compare_account_exp_date(a: &AccountCredentials, b: &AccountCredentials) -> Ordering {
     let a_ts = a.exp_date.unwrap_or(i64::MAX);
     let b_ts = b.exp_date.unwrap_or(i64::MAX);
     a_ts.cmp(&b_ts).then_with(|| a.name.cmp(&b.name))
 }
 
-fn aliases_need_sort(aliases: &[ConfigInputAliasDto]) -> bool {
+fn aliases_need_sort_config(aliases: &[ConfigInputAlias]) -> bool {
     if aliases.len() < 2 {
         return false;
     }
     aliases
         .windows(2)
-        .any(|pair| compare_alias_exp_date(&pair[0], &pair[1]) == Ordering::Greater)
+        .any(|pair| compare_alias_exp_date_config(&pair[0], &pair[1]) == Ordering::Greater)
 }
 
 fn sort_aliases_by_exp_date(aliases: &mut Vec<ConfigInputAliasDto>) -> bool {
@@ -1900,6 +1906,7 @@ async fn try_renew_expired_account(
     None
 }
 
+#[allow(clippy::too_many_lines)]
 async fn try_create_new_account(
     app_state: &Arc<AppState>,
     input: &ConfigInput,
@@ -2434,7 +2441,7 @@ async fn sync_panel_api_for_input_on_boot(
         } else if input
             .aliases
             .as_ref()
-            .is_some_and(|aliases| aliases_need_sort(aliases))
+            .is_some_and(|aliases| aliases_need_sort_config(aliases))
         {
             sources_yml_patches.push(SourcesYmlPatch::SortAliases {
                 input_name: input.name.clone(),
@@ -3330,9 +3337,8 @@ async fn sync_panel_api_for_input_on_boot(
                                 continue;
                             }
                         }
-                    } else {
-                        continue;
                     }
+                    continue;
                 }
             }
         } else if new_enabled {
