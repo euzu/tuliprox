@@ -5,8 +5,8 @@ use crate::api::model::{
 };
 use crate::model::{is_input_expired, ConfigInput, ProxyUserCredentials};
 use crate::repository::{
-    csv_patch_batch_append, csv_patch_batch_remove_expired, csv_patch_batch_update_credentials,
-    csv_patch_batch_update_exp_date, get_csv_file_path,
+    csv_patch_batch_append, csv_patch_batch_remove_expired, csv_patch_batch_sort_by_exp_date,
+    csv_patch_batch_update_credentials, csv_patch_batch_update_exp_date, get_csv_file_path,
 };
 use crate::tools::atomic_once_flag::AtomicOnceFlag;
 use crate::utils::{debug_if_enabled, persist_source_config, read_sources_file_from_path};
@@ -29,6 +29,7 @@ use shared::utils::{
     get_i64_from_serde_value, get_string_from_serde_value, parse_timestamp,
     sanitize_sensitive_info,
 };
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -1108,6 +1109,56 @@ fn collect_accounts(input: &ConfigInput) -> Vec<AccountCredentials> {
     out
 }
 
+fn compare_alias_exp_date(a: &ConfigInputAliasDto, b: &ConfigInputAliasDto) -> Ordering {
+    let a_ts = a.exp_date.unwrap_or(i64::MAX);
+    let b_ts = b.exp_date.unwrap_or(i64::MAX);
+    a_ts.cmp(&b_ts).then_with(|| a.name.cmp(&b.name))
+}
+
+fn compare_account_exp_date(a: &AccountCredentials, b: &AccountCredentials) -> Ordering {
+    let a_ts = a.exp_date.unwrap_or(i64::MAX);
+    let b_ts = b.exp_date.unwrap_or(i64::MAX);
+    a_ts.cmp(&b_ts).then_with(|| a.name.cmp(&b.name))
+}
+
+fn aliases_need_sort(aliases: &[ConfigInputAliasDto]) -> bool {
+    if aliases.len() < 2 {
+        return false;
+    }
+    aliases
+        .windows(2)
+        .any(|pair| compare_alias_exp_date(&pair[0], &pair[1]) == Ordering::Greater)
+}
+
+fn sort_aliases_by_exp_date(aliases: &mut Vec<ConfigInputAliasDto>) -> bool {
+    if aliases.len() < 2 {
+        return false;
+    }
+    let mut sorted = aliases.clone();
+    sorted.sort_by(compare_alias_exp_date);
+    if &sorted == aliases {
+        false
+    } else {
+        *aliases = sorted;
+        true
+    }
+}
+
+fn sort_account_aliases_keep_root_first(accounts: &mut Vec<AccountCredentials>, root_name: &str) {
+    let root = accounts.iter().find(|acct| acct.name == root_name).cloned();
+    let mut aliases: Vec<AccountCredentials> = accounts
+        .iter()
+        .filter(|acct| acct.name != root_name)
+        .cloned()
+        .collect();
+    aliases.sort_by(compare_account_exp_date);
+    accounts.clear();
+    if let Some(root) = root {
+        accounts.push(root);
+    }
+    accounts.extend(aliases);
+}
+
 fn is_account_valid(exp_date: Option<i64>) -> bool {
     exp_date.is_some() && !is_input_expired(exp_date)
 }
@@ -1296,6 +1347,9 @@ enum SourcesYmlPatch {
         input_name: String,
         credits: String,
     },
+    SortAliases {
+        input_name: String,
+    },
     UpdateExpDate {
         input_name: String,
         account_name: String,
@@ -1408,6 +1462,22 @@ fn apply_sources_yml_patches(
                 };
                 if panel_api.credits.as_deref().map(str::trim) != Some(credits.trim()) {
                     panel_api.credits = Some(credits.trim().to_string());
+                    changed = true;
+                }
+            }
+            SourcesYmlPatch::SortAliases { input_name } => {
+                let idx = *inputs_by_name.get(input_name.as_str()).ok_or_else(|| {
+                    info_err!("panel_api: could not find input '{input_name}' in source.yml")
+                })?;
+                let Some(aliases) = doc.inputs[idx].aliases.as_mut() else {
+                    continue;
+                };
+                if sort_aliases_by_exp_date(aliases) {
+                    alias_indices[idx] = aliases
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, alias)| (alias.name.clone(), idx))
+                        .collect();
                     changed = true;
                 }
             }
@@ -2337,6 +2407,9 @@ async fn sync_panel_api_for_input_on_boot(
     let mut pending_sources_yml = false;
 
     let mut accounts = collect_accounts(input.as_ref());
+    if panel_cfg.alias_pool.is_some() {
+        sort_account_aliases_keep_root_first(&mut accounts, input.name.as_str());
+    }
     let mut existing_names: HashSet<String> = accounts.iter().map(|a| a.name.clone()).collect();
     let mut newly_created_accounts: Vec<AccountCredentials> = Vec::new();
     let mut time_ctx: Option<PanelApiTimeContext> = None;
@@ -2345,6 +2418,30 @@ async fn sync_panel_api_for_input_on_boot(
     let cache_path = panel_api_time_cache_path(app_state.as_ref());
     let mut time_cache = load_panel_api_time_cache(app_state.as_ref(), &cache_path).await;
     let cached_entry = time_cache.inputs.get(&input.name).cloned();
+
+    if panel_cfg.alias_pool.is_some() {
+        if let Some(csv_path) = csv_path.as_ref() {
+            let _csv_lock = app_state.app_config.file_locks.write_lock(csv_path).await;
+            match csv_patch_batch_sort_by_exp_date(input.input_type, csv_path).await {
+                Ok(true) => any_change = true,
+                Ok(false) => {}
+                Err(err) => debug_if_enabled!(
+                    "panel_api boot/update failed to sort csv alias pool for {}: {}",
+                    sanitize_sensitive_info(&input.name),
+                    err
+                ),
+            }
+        } else if input
+            .aliases
+            .as_ref()
+            .is_some_and(|aliases| aliases_need_sort(aliases))
+        {
+            sources_yml_patches.push(SourcesYmlPatch::SortAliases {
+                input_name: input.name.clone(),
+            });
+            pending_sources_yml = true;
+        }
+    }
 
     if let Some((root_username, root_password)) = extract_account_creds_from_input(input.as_ref()) {
         let user_info = fetch_root_user_api_info(app_state.as_ref(), input.as_ref()).await;
