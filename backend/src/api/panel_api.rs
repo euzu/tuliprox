@@ -3189,25 +3189,15 @@ async fn sync_panel_api_for_input_on_boot(
         0
     };
     if log_pool {
-        if missing_aliases_u16 > 0 {
-            debug_if_enabled!(
-                "panel_api boot/update provisioning aliases missing for input {} (offset={}s): desired={}, existing={}, missing={}, client_new_enabled={}",
-                sanitize_sensitive_info(&input.name),
-                offset_secs,
-                desired_aliases_u16,
-                alias_total,
-                missing_aliases_u16,
-                new_enabled
-            );
-        }
         debug_if_enabled!(
-            "panel_api boot/update provisioning aliases for input {} (offset={}s): desired={}, valid_beyond_offset={}, expiring(offset)={}, refresh_planned(offset)={}",
+            "panel_api boot/update provisioning aliases for input {} (offset={}s): desired={}, valid_beyond_offset={}, expiring(offset)={}, refresh_planned(offset)={}, missing={}",
             sanitize_sensitive_info(&input.name),
             offset_secs,
             desired_aliases_u16,
             valid_aliases_beyond_offset,
             expiring_aliases,
-            planned_refresh_aliases
+            planned_refresh_aliases,
+            missing_aliases_u16
         );
     }
 
