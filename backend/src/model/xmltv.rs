@@ -10,7 +10,7 @@ use std::sync::Arc;
 use futures::TryFutureExt;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use url::Url;
-use shared::utils::sanitize_sensitive_info;
+use shared::utils::{sanitize_sensitive_info, Internable};
 use crate::api::model::AppState;
 use crate::model::{InputSource};
 use crate::utils::async_file_reader;
@@ -227,7 +227,7 @@ pub async fn parse_xmltv_for_web_ui_from_url(app_state: &Arc<AppState>, url: &st
     if let Ok(request_url) = Url::parse(url) {
         let client = app_state.http_client.load();
         let input_source: InputSource = InputSource {
-            name: String::from("xmltv"),
+            name: "xmltv".intern(),
             url: request_url.to_string(),
             username: None,
             password: None,

@@ -6,11 +6,12 @@ use futures::future::BoxFuture;
 use indexmap::IndexMap;
 use log::{error, warn};
 use serde::{Deserialize, Serialize};
-use shared::model::{M3uPlaylistItem, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemType, UUIDType, XtreamCluster, XtreamPlaylistItem};
+use shared::model::{M3uPlaylistItem, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemType, XtreamCluster, XtreamPlaylistItem};
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use shared::model::UUIDType;
 
 pub trait PlaylistSource: Send + Sync {
     fn is_memory(&self) -> bool;

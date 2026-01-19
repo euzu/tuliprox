@@ -44,7 +44,7 @@ pub async fn epg_write_file(target: &ConfigTarget, epg: &Epg, path: &Path, playl
             for channel in &group.channels {
                 if let Some(epg_id) = &channel.header.epg_channel_id {
                     if !epg_id.is_empty() {
-                        rename_map.insert(epg_id.as_str(), channel.header.name.as_str());
+                        rename_map.insert(epg_id, &channel.header.name);
                     }
                 }
             }

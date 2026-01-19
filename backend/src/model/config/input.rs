@@ -1,19 +1,17 @@
-use crate::model::{macros, EpgConfig};
-use crate::repository::get_csv_file_path;
+use crate::model::{macros, EpgConfig, PanelApiConfig};
 use chrono::Utc;
 use log::warn;
-use shared::check_input_credentials;
 use shared::error::TuliproxError;
-use shared::model::{
-    ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, InputFetchMethod, InputType,
-    PanelApiAliasPoolSizeDto, PanelApiAliasPoolSizeValue, PanelApiConfigDto, StagedInputDto,
-};
-use shared::utils::get_credentials_from_url;
+use shared::model::{ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, InputFetchMethod, InputType, StagedInputDto};
+use shared::utils::{get_credentials_from_url, Internable};
 use shared::{check_input_connections, info_err_res, write_if_some};
+use shared::check_input_credentials;
 use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::Arc;
 use url::Url;
+use crate::repository::get_csv_file_path;
 
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
@@ -45,12 +43,7 @@ pub struct InputUserInfo {
 }
 
 impl InputUserInfo {
-    pub fn new(
-        input_type: InputType,
-        username: Option<&str>,
-        password: Option<&str>,
-        input_url: &str,
-    ) -> Option<Self> {
+    pub fn new(input_type: InputType, username: Option<&str>, password: Option<&str>, input_url: &str) -> Option<Self> {
         if input_type == InputType::Xtream {
             if let (Some(username), Some(password)) = (username, password) {
                 return Some(Self {
@@ -78,7 +71,7 @@ impl InputUserInfo {
 
 #[derive(Debug, Clone, Default)]
 pub struct StagedInput {
-    pub name: String,
+    pub name: Arc<str>,
     pub url: String,
     pub username: Option<String>,
     pub password: Option<String>,
@@ -105,7 +98,7 @@ impl From<&StagedInputDto> for StagedInput {
 #[derive(Debug, Clone)]
 pub struct ConfigInputAlias {
     pub id: u16,
-    pub name: String,
+    pub name: Arc<str>,
     pub url: String,
     pub username: Option<String>,
     pub password: Option<String>,
@@ -133,7 +126,7 @@ impl From<&ConfigInputAliasDto> for ConfigInputAlias {
 #[derive(Debug, Clone, Default)]
 pub struct ConfigInput {
     pub id: u16,
-    pub name: String,
+    pub name: Arc<str>,
     pub input_type: InputType,
     pub headers: HashMap<String, String>,
     pub url: String,
@@ -150,14 +143,14 @@ pub struct ConfigInput {
     pub staged: Option<StagedInput>,
     pub exp_date: Option<i64>,
     pub t_batch_url: Option<String>,
-    pub panel_api: Option<PanelApiConfigDto>,
+    pub panel_api: Option<PanelApiConfig>,
     pub cache_duration_seconds: u64,
 }
 
 impl ConfigInput {
     pub fn prepare(&mut self) -> Result<Option<PathBuf>, TuliproxError> {
         let batch_file_path = self.prepare_batch();
-        self.name = self.name.trim().to_string();
+        self.name = self.name.trim().intern();
         check_input_credentials!(self, self.input_type, false, false);
         check_input_connections!(self, self.input_type, false);
         if let Some(staged_input) = &mut self.staged {
@@ -168,81 +161,22 @@ impl ConfigInput {
         }
 
         if is_input_expired(self.exp_date) {
-            warn!(
-                "Account {} expired for provider: {}",
-                self.username.as_ref().map_or("?", |s| s.as_str()),
-                self.name
-            );
+            warn!("Account {} expired for provider: {}", self.username.as_ref().map_or("?", |s| s.as_str()), self.name);
             self.enabled = false;
         }
 
-        let () = self.prepare_panel_api()?;
+        if let Some(panel_api) = &mut self.panel_api {
+            panel_api.prepare()?;
+        }
 
         Ok(batch_file_path)
     }
 
-    fn prepare_panel_api(&mut self) -> Result<(), TuliproxError> {
-        if let Some(panel) = self.panel_api.as_mut() {
-            if panel.enabled {
-                if let Some(alias_pool) = panel.alias_pool.as_mut() {
-                    let size = alias_pool
-                        .size
-                        .get_or_insert_with(PanelApiAliasPoolSizeDto::default);
-                    if size.min.is_none() {
-                        size.min = Some(PanelApiAliasPoolSizeValue::Number(1));
-                    }
-                    if size.max.is_none() {
-                        size.max = Some(PanelApiAliasPoolSizeValue::Number(1));
-                    }
-                    let min = size
-                        .min
-                        .as_ref()
-                        .and_then(PanelApiAliasPoolSizeValue::as_number);
-                    let max = size
-                        .max
-                        .as_ref()
-                        .and_then(PanelApiAliasPoolSizeValue::as_number);
-                    if let (Some(min), Some(max)) = (min, max) {
-                        if min > max {
-                            return info_err_res!("panel_api.alias_pool.size.min must be <= panel_api.alias_pool.size.max");
-                        }
-                    }
-
-                    let max_auto = size
-                        .max
-                        .as_ref()
-                        .is_some_and(PanelApiAliasPoolSizeValue::is_auto);
-                    if max_auto && size.min.is_none() {
-                        warn!(
-                            "panel_api.alias_pool.size.max is set to auto without min for input {}",
-                            self.name
-                        );
-                    }
-                }
-
-                if panel.provisioning.probe_interval_sec == 0 {
-                    return info_err_res!(
-                        "panel_api.provisioning.probe_interval_sec must be greater than 0"
-                    );
-                }
-            }
-        }
-        Ok(())
-    }
-
     pub fn get_user_info(&self) -> Option<InputUserInfo> {
-        InputUserInfo::new(
-            self.input_type,
-            self.username.as_deref(),
-            self.password.as_deref(),
-            &self.url,
-        )
+        InputUserInfo::new(self.input_type, self.username.as_deref(), self.password.as_deref(), &self.url)
     }
 
-    pub fn get_matched_config_by_url<'a>(
-        &'a self,
-        url: &str,
-    ) -> Option<(&'a str, Option<&'a String>, Option<&'a String>)> {
+    pub fn get_matched_config_by_url<'a>(&'a self, url: &str) -> Option<(&'a str, Option<&'a String>, Option<&'a String>)> {
         if url.starts_with(&self.url) {
             return Some((&self.url, self.username.as_ref(), self.password.as_ref()));
         }
@@ -258,10 +192,7 @@ impl ConfigInput {
     }
 
     fn prepare_batch(&mut self) -> Option<PathBuf> {
-        if matches!(
-            self.input_type,
-            InputType::M3uBatch | InputType::XtreamBatch
-        ) {
+        if matches!(self.input_type, InputType::M3uBatch | InputType::XtreamBatch) {
             let input_type = if self.input_type == InputType::M3uBatch {
                 InputType::M3u
             } else {
@@ -274,11 +205,7 @@ impl ConfigInput {
             if let Some(aliases) = self.aliases.as_mut() {
                 for alias in aliases.iter() {
                     if is_input_expired(alias.exp_date) {
-                        warn!(
-                            "Alias-Account {} expired for provider: {}",
-                            alias.username.as_ref().map_or("?", |s| s.as_str()),
-                            alias.name
-                        );
+                        warn!("Alias-Account {} expired for provider: {}", alias.username.as_ref().map_or("?", |s| s.as_str()), alias.name);
                     }
                 }
 
@@ -344,17 +271,14 @@ impl From<&ConfigInputDto> for ConfigInput {
             persist: dto.persist.clone(),
             enabled: dto.enabled,
             options: dto.options.as_ref().map(ConfigInputOptions::from),
-            aliases: dto
-                .aliases
-                .as_ref()
-                .map(|list| list.iter().map(ConfigInputAlias::from).collect()),
+            aliases: dto.aliases.as_ref().map(|list| list.iter().map(ConfigInputAlias::from).collect()),
             priority: dto.priority,
             max_connections: dto.max_connections,
             method: dto.method,
             exp_date: dto.exp_date,
             staged: dto.staged.as_ref().map(StagedInput::from),
             t_batch_url: None,
-            panel_api: dto.panel_api.clone(),
+            panel_api: dto.panel_api.as_ref().map(PanelApiConfig::from),
             cache_duration_seconds: dto.cache_duration_seconds,
         }
     }

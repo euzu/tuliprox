@@ -23,12 +23,16 @@ pub fn TextButton(props: &TextButtonProps) -> Html {
         let name = props.name.clone();
         Callback::from(move |e: MouseEvent| {
             e.prevent_default();
+            e.stop_propagation();
             click.emit(name.clone());
         })
     };
 
     html! {
-        <button autofocus={props.autofocus} class={if props.class.is_empty() {"tp__text-button".to_string()} else {format!("tp__text-button tp__button-{}", props.class)}} onclick={handle_click}>
+        <button
+            autofocus={props.autofocus}
+            onclick={handle_click}
+            class={if props.class.is_empty() {"tp__text-button".to_string()} else {format!("tp__text-button tp__button-{}", props.class)}}>
          if !props.icon.is_empty() {
             <AppIcon name={props.icon.clone()}></AppIcon>
          }

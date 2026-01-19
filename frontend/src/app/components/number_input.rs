@@ -87,6 +87,7 @@ pub fn NumberInput(props: &NumberInputProps) -> Html {
 
             if !allowed {
                 e.prevent_default();
+                e.stop_propagation();
             }
         })
     };

@@ -1,10 +1,11 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use shared::model::InputFetchMethod;
 use crate::model::{ConfigInput, StagedInput};
 
 #[derive(Clone, Debug)]
 pub struct InputSource {
-    pub name: String,
+    pub name: Arc<str>,
     pub url: String,
     pub username: Option<String>,
     pub password: Option<String>,

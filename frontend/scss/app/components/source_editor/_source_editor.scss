@@ -101,7 +101,7 @@
    }
 
    &__selection-rect {
-      position:absolute;
+      position: absolute;
       display: none;
       border: 1px dashed var(--selection-area-border-color);
       background: var(--selection-area-background-color);
@@ -109,7 +109,11 @@
       pointer-events: none;
    }
 
+   .tp__form-page__toolbar {
+      padding: var(--padding-default) 0 var(--padding-default) var(--padding-small);
+   }
 }
+
 
 .graph-paper-advanced {
    background-image:
@@ -131,15 +135,4 @@
 
 .clickable {
    cursor: pointer;
-}
-
-.tp__form-page__toolbar {
-   margin-top: var(--padding-default);
-   padding-top: var(--padding-default);
-   display: flex;
-   flex-flow: row;
-   gap: var(--gap-large);
-   box-sizing: border-box;
-   width: 100%;
-   border-top: 1px solid var(--card-border-color);
 }

@@ -321,7 +321,8 @@ where
 /// tree file using stored offsets - no tree traversal needed (O(1) per item).
 pub struct BPlusTreeSortedIteratorOwned<K, V, SortKey> {
     index_reader: SortedIndexReader<SortKey, K>,
-    tree_file: BufReader<File>,
+    tree_file: Option<BufReader<File>>,
+    mmap: Option<memmap2::Mmap>,
     filepath: PathBuf,
     block_cache: IndexMap<u64, Vec<u8>>,
     _marker: PhantomData<V>,
@@ -339,12 +340,30 @@ where
     ///
     /// The index path is automatically derived from the tree filepath
     /// by changing the extension to `.idx`.
-    pub fn new(filepath: PathBuf, tree_file: BufReader<File>) -> io::Result<Self> {
+    pub fn new(filepath: PathBuf, tree_file: Option<BufReader<File>>) -> io::Result<Self> {
         let index_path = get_file_path_for_db_index(&filepath);
         let index_reader = SortedIndexReader::open(&index_path)?;
         Ok(Self {
             index_reader,
             tree_file,
+            mmap: None,
+            filepath,
+            block_cache: IndexMap::with_capacity(CACHE_CAPACITY),
+            _marker: PhantomData,
+        })
+    }
+
+    pub fn new_hybrid(
+        filepath: PathBuf,
+        tree_file: Option<BufReader<File>>,
+        mmap: Option<memmap2::Mmap>,
+    ) -> io::Result<Self> {
+        let index_path = get_file_path_for_db_index(&filepath);
+        let index_reader = SortedIndexReader::open(&index_path)?;
+        Ok(Self {
+            index_reader,
+            tree_file,
+            mmap,
             filepath,
             block_cache: IndexMap::with_capacity(CACHE_CAPACITY),
             _marker: PhantomData,
@@ -354,13 +373,31 @@ where
     /// Create from an explicit index path.
     pub fn with_index_path(
         filepath: PathBuf,
-        tree_file: BufReader<File>,
+        tree_file: Option<BufReader<File>>,
         index_path: &Path,
     ) -> io::Result<Self> {
         let index_reader = SortedIndexReader::open(index_path)?;
         Ok(Self {
             index_reader,
             tree_file,
+            mmap: None,
+            filepath,
+            block_cache: IndexMap::with_capacity(CACHE_CAPACITY),
+            _marker: PhantomData,
+        })
+    }
+
+    pub fn with_index_path_hybrid(
+        filepath: PathBuf,
+        tree_file: Option<BufReader<File>>,
+        mmap: Option<memmap2::Mmap>,
+        index_path: &Path,
+    ) -> io::Result<Self> {
+        let index_reader = SortedIndexReader::open(index_path)?;
+        Ok(Self {
+            index_reader,
+            tree_file,
+            mmap,
             filepath,
             block_cache: IndexMap::with_capacity(CACHE_CAPACITY),
             _marker: PhantomData,
@@ -391,50 +428,117 @@ where
 
     /// Read a single value directly from the tree file at the given offset.
     fn read_value_single(&mut self, offset: u64, length: u32) -> io::Result<V> {
-        self.tree_file.seek(SeekFrom::Start(offset))?;
+        if let Some(mmap) = &self.mmap {
+            let mut cursor = io::Cursor::new(mmap.as_ref());
+            cursor.set_position(offset);
+            
+            let mut flag = [0u8; 1];
+            cursor.read_exact(&mut flag)?;
 
-        // Read compression flag
-        let mut flag = [0u8; 1];
-        self.tree_file.read_exact(&mut flag)?;
+            let data = if flag[0] == COMPRESSION_FLAG_LZ4 {
+                let compressed_len = length as usize - 1;
+                let mut compressed = vec![0u8; compressed_len];
+                cursor.read_exact(&mut compressed)?;
+                lz4_flex::decompress_size_prepended(&compressed).map_err(|e| {
+                    io::Error::new(io::ErrorKind::InvalidData, format!("LZ4 decompression failed: {e}"))
+                })?
+            } else {
+                let payload_len = length as usize - 1;
+                let mut data = vec![0u8; payload_len];
+                cursor.read_exact(&mut data)?;
+                data
+            };
+            crate::utils::binary_deserialize(&data)
+        } else if let Some(tree_file) = &mut self.tree_file {
+            tree_file.seek(SeekFrom::Start(offset))?;
 
-        let data = if flag[0] == COMPRESSION_FLAG_LZ4 {
-            // Compressed: [flag:1][lz4_payload_with_prepended_size]
-            let compressed_len = length as usize - 1;
-            let mut compressed = vec![0u8; compressed_len];
-            self.tree_file.read_exact(&mut compressed)?;
+            // Read compression flag
+            let mut flag = [0u8; 1];
+            tree_file.read_exact(&mut flag)?;
 
-            lz4_flex::decompress_size_prepended(&compressed).map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("LZ4 decompression failed: {e}"),
-                )
-            })?
+            let data = if flag[0] == COMPRESSION_FLAG_LZ4 {
+                // Compressed: [flag:1][lz4_payload_with_prepended_size]
+                let compressed_len = length as usize - 1;
+                let mut compressed = vec![0u8; compressed_len];
+                tree_file.read_exact(&mut compressed)?;
+
+                lz4_flex::decompress_size_prepended(&compressed).map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("LZ4 decompression failed: {e}"),
+                    )
+                })?
+            } else {
+                // Uncompressed: [flag:1][payload]
+                let payload_len = length as usize - 1;
+                let mut data = vec![0u8; payload_len];
+                tree_file.read_exact(&mut data)?;
+                data
+            };
+
+            crate::utils::binary_deserialize(&data)
         } else {
-            // Uncompressed: [flag:1][payload]
-            let payload_len = length as usize - 1;
-            let mut data = vec![0u8; payload_len];
-            self.tree_file.read_exact(&mut data)?;
-            data
-        };
-
-        crate::utils::binary_deserialize(&data)
+            Err(io::Error::other("No data source available"))
+        }
     }
 
     /// Read a value from a packed block at the given index.
     fn read_value_packed(&mut self, block_offset: u64, value_index: u16) -> io::Result<V> {
+        if let Some(mmap) = &self.mmap {
+            let start = usize::try_from(block_offset).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            let end = (start + PAGE_SIZE_USIZE).min(mmap.len());
+            let block_buffer = &mmap[start..end];
+            
+            // Read count (first 4 bytes)
+            let count = u32::from_le_bytes(block_buffer[0..4].try_into().map_err(|e| {
+                io::Error::new(io::ErrorKind::InvalidData, format!("Invalid count: {e}"))
+            })?);
+
+            if u32::from(value_index) >= count {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Value index {value_index} out of bounds (count: {count})"),
+                ));
+            }
+
+            let mut pos = 4;
+            // Skip to target value
+            for i in 0..=value_index {
+                if pos + 4 > block_buffer.len() {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, "Packed block corrupted"));
+                }
+                let len = u32::from_le_bytes(block_buffer[pos..pos + 4].try_into().map_err(|e| {
+                    io::Error::new(io::ErrorKind::InvalidData, format!("Invalid length: {e}"))
+                })?) as usize;
+                pos += 4;
+
+                if i == value_index {
+                    if pos + len > block_buffer.len() {
+                         return Err(io::Error::new(io::ErrorKind::InvalidData, "Packed block corrupted"));
+                    }
+                    let value_data = &block_buffer[pos..pos + len];
+                    return crate::utils::binary_deserialize(value_data);
+                }
+                pos += len;
+            }
+            return Err(io::Error::other("Value not found"));
+        }
 
         // Try cache first
         if !self.block_cache.contains_key(&block_offset) {
             // Miss - read from disk
-            self.tree_file.seek(SeekFrom::Start(block_offset))?;
-            let mut buf = vec![0u8; PAGE_SIZE_USIZE];
-            self.tree_file.read_exact(&mut buf)?;
+            if let Some(tree_file) = &mut self.tree_file {
+                tree_file.seek(SeekFrom::Start(block_offset))?;
+                let mut buf = vec![0u8; PAGE_SIZE_USIZE];
+                tree_file.read_exact(&mut buf)?;
 
-            // Update cache
-            if self.block_cache.len() >= CACHE_CAPACITY {
-                self.block_cache.shift_remove_index(0); // FIFO eviction
+                // Update cache
+                if self.block_cache.len() >= CACHE_CAPACITY {
+                    self.block_cache.shift_remove_index(0); // FIFO eviction
+                }
+                self.block_cache.insert(block_offset, buf);
+                return Err(io::Error::other("No data source available"));
             }
-            self.block_cache.insert(block_offset, buf);
         }
 
         let block_buffer = self.block_cache.get(&block_offset).unwrap();

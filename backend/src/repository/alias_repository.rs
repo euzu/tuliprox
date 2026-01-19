@@ -7,12 +7,11 @@ use log::{error, warn};
 use shared::error::{string_to_io_error, to_io_error, TuliproxError};
 use shared::info_err;
 use shared::model::{ConfigInputAliasDto, InputType};
-use shared::utils::{
-    get_credentials_from_url, get_credentials_from_url_str, parse_timestamp, trim_last_slash,
-};
+use shared::utils::{get_credentials_from_url, get_credentials_from_url_str, parse_timestamp, trim_last_slash, Internable};
 use std::io;
 use std::io::{BufRead, Cursor, Error};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use url::Url;
 
 const CSV_SEPARATOR: char = ';';
@@ -73,9 +72,9 @@ fn csv_assign_mandatory_fields(alias: &mut ConfigInputAliasDto, input_type: Inpu
                     let username = alias.username.as_deref().unwrap_or_default();
                     let domain: Vec<&str> = url.domain().unwrap_or_default().split('.').collect();
                     if domain.len() > 1 {
-                        alias.name = format!("{}_{username}", domain[domain.len() - 2]);
+                        alias.name = format!("{}_{username}", domain[domain.len() - 2]).intern();
                     } else {
-                        alias.name = username.to_string();
+                        alias.name = username.intern();
                     }
                 }
             }
@@ -105,7 +104,7 @@ fn csv_assign_config_input_column(
                 config_input.priority = priority;
             }
             FIELD_NAME => {
-                config_input.name = value.to_string();
+                config_input.name = value.intern();
             }
             FIELD_USERNAME => {
                 config_input.username = Some(value.to_string());
@@ -168,7 +167,7 @@ pub fn csv_read_inputs_from_reader(
 
         let mut config_input = ConfigInputAliasDto {
             id: 0,
-            name: String::new(),
+            name: "".intern(),
             url: String::new(),
             username: None,
             password: None,
@@ -308,7 +307,7 @@ pub async fn csv_patch_batch_append(
 
     let alias = ConfigInputAliasDto {
         id: 0,
-        name: alias_name.to_string(),
+        name: alias_name.intern(),
         url,
         username: Some(username.to_string()),
         password: Some(password.to_string()),
@@ -327,7 +326,7 @@ pub async fn csv_patch_batch_append(
 pub async fn csv_patch_batch_update_exp_date(
     input_type: InputType,
     csv_path: &Path,
-    account_name: &str,
+    account_name: &Arc<str>,
     username: &str,
     password: &str,
     exp_date: i64,
@@ -337,7 +336,7 @@ pub async fn csv_patch_batch_update_exp_date(
         .map_err(|err| info_err!("{err}"))
         .await?;
     for alias in &mut aliases {
-        if alias.name == account_name
+        if &alias.name == account_name
             || (alias.username == Some(username.to_string())
                 && alias.password == Some(password.to_string()))
         {
@@ -367,7 +366,7 @@ pub async fn csv_patch_batch_update_exp_date(
 pub async fn csv_patch_batch_update_credentials(
     input_type: InputType,
     csv_path: &Path,
-    account_name: &str,
+    account_name: &Arc<str>,
     old_username: &str,
     old_password: &str,
     new_username: &str,
@@ -380,7 +379,7 @@ pub async fn csv_patch_batch_update_credentials(
         .await?;
 
     for alias in &mut aliases {
-        let mut is_match = alias.name == account_name;
+        let mut is_match = &alias.name == account_name;
         if !is_match {
             is_match = alias.username.as_deref() == Some(old_username)
                 && alias.password.as_deref() == Some(old_password);

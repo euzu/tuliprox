@@ -4,7 +4,7 @@ use crate::error::{info_err_res, info_err, TuliproxError};
 use crate::foundation::filter::ValueAccessor;
 use crate::foundation::mapper::EvalResult::{AnyValue, Failure, Named, Number, Undefined, Value};
 use crate::model::{PatternTemplate, PlaylistItemType, TemplateValue};
-use crate::utils::Capitalize;
+use crate::utils::{Capitalize, Internable};
 use log::{debug, trace};
 use pest::iterators::{Pair, Pairs};
 use pest::Parser;
@@ -1014,7 +1014,7 @@ impl Expression {
                 let source = match field {
                     RegexSource::Identifier(ident) => {
                         match ctx.get_var(ident) {
-                            Value(text) => Some(Cow::Borrowed(text.as_str())),
+                            Value(text) => Some(text.as_str().into()),
                             _ => None,
                         }
                     }
@@ -1251,7 +1251,7 @@ impl Expression {
                                 let item_type = accessor.pli.header.item_type;
                                 if item_type != PlaylistItemType::Series &&  item_type != PlaylistItemType::LocalSeries {
                                     let mut pli = accessor.pli.clone();
-                                    pli.header.group = crate::utils::intern(group);
+                                    pli.header.group = group.intern();
                                     pli.header.uuid = crate::utils::create_alias_uuid(&accessor.pli.header.uuid, group);
                                     accessor.virtual_items.push((group.clone(), pli));
                                 }
@@ -1435,7 +1435,7 @@ mod tests {
         let mut channels: Vec<PlaylistItem> = vec![
             ("D", "HD"), ("A", "FHD"), ("Z", ""), ("K", "HD"), ("B", "HD"), ("A", "HD"),
             ("K", "SHD"), ("C", "LHD"), ("L", "FHD"), ("R", "UHD"), ("T", "SD"), ("A", "FHD"),
-        ].into_iter().map(|(name, quality)| PlaylistItem { header: PlaylistItemHeader { title: format!("Chanel {name} [{quality}]"), ..Default::default() } }).collect::<Vec<PlaylistItem>>();
+        ].into_iter().map(|(name, quality)| PlaylistItem { header: PlaylistItemHeader { title: format!("Chanel {name} [{quality}]").into(), ..Default::default() } }).collect::<Vec<PlaylistItem>>();
 
         for pli in &mut channels {
             let mut accessor = ValueAccessor {
@@ -1532,7 +1532,7 @@ mod tests {
         let mapper = MapperScript::parse(dsl, None).expect("Parsing failed");
         let mut channels: Vec<PlaylistItem> = vec![
             ("D", "HD"),
-        ].into_iter().map(|(name, quality)| PlaylistItem { header: PlaylistItemHeader { title: format!("Chanel {name} [{quality}]"), ..Default::default() } }).collect::<Vec<PlaylistItem>>();
+        ].into_iter().map(|(name, quality)| PlaylistItem { header: PlaylistItemHeader { title: format!("Chanel {name} [{quality}]").into(), ..Default::default() } }).collect::<Vec<PlaylistItem>>();
 
         for pli in &mut channels {
             let mut accessor = ValueAccessor {
@@ -1557,7 +1557,7 @@ mod tests {
         // Test with Video (should work)
         let mut video = PlaylistItem {
             header: PlaylistItemHeader {
-                name: "Movie 1".to_string(),
+                name: "Movie 1".to_string().into(),
                 item_type: PlaylistItemType::Video,
                 ..Default::default()
             }
@@ -1570,7 +1570,7 @@ mod tests {
         // Test with SeriesInfo (should work)
         let mut series_info = PlaylistItem {
             header: PlaylistItemHeader {
-                name: "Series 1".to_string(),
+                name: "Series 1".to_string().into(),
                 item_type: PlaylistItemType::SeriesInfo,
                 ..Default::default()
             }
@@ -1582,7 +1582,7 @@ mod tests {
         // Test with Series episode (should NOT work)
         let mut episode = PlaylistItem {
             header: PlaylistItemHeader {
-                name: "Episode 1".to_string(),
+                name: "Episode 1".to_string().into(),
                 item_type: PlaylistItemType::Series,
                 ..Default::default()
             }

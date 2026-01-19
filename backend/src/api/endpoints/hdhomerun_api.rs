@@ -1,9 +1,11 @@
-use crate::api::api_utils::try_unwrap_body;
+use crate::api::api_utils::{try_unwrap_body, internal_server_error};
 use crate::api::model::HdHomerunAppState;
 use crate::auth::AuthBasic;
 use crate::model::{AppConfig, ConfigTarget, ProxyUserCredentials};
+use crate::utils::arc_str_serde;
 use crate::processing::parser::xtream::get_xtream_url;
-use crate::repository::{iter_raw_m3u_playlist, M3uPlaylistIterator, XtreamPlaylistIterator};
+use crate::repository::{iter_raw_m3u_target_playlist, M3uPlaylistIterator};
+use crate::repository::XtreamPlaylistIterator;
 use axum::response::IntoResponse;
 use bytes::Bytes;
 use futures::{stream, Stream, StreamExt};
@@ -18,12 +20,12 @@ use std::sync::Arc;
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Lineup {
-    #[serde(rename = "GuideNumber")]
-    guide_number: String,
-    #[serde(rename = "GuideName")]
-    guide_name: String,
-    #[serde(rename = "URL")]
-    url: String,
+    #[serde(with = "arc_str_serde", rename = "GuideNumber")]
+    guide_number: Arc<str>,
+    #[serde(with = "arc_str_serde", rename = "GuideName")]
+    guide_name: Arc<str>,
+    #[serde(with = "arc_str_serde", rename = "URL")]
+    url: Arc<str>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -122,13 +124,13 @@ where
                         container_extension.as_deref(),
                         live_stream_use_prefix,
                         live_stream_without_extension,
-                    ),
+                    ).into(),
                 };
 
                 let lineup = Lineup {
-                    guide_number: item.epg_channel_id.unwrap_or(item.name).clone(),
+                    guide_number: item.epg_channel_id.unwrap_or(item.name.clone()),
                     guide_name: item.title.clone(),
-                    url: stream_url,
+                    url: stream_url.clone(),
                 };
                 match serde_json::to_string(&lineup) {
                     Ok(mut content) => {
@@ -154,14 +156,13 @@ where
         Some(chans) => {
             let mapped = chans.map(move |(item, has_next)| {
                 let lineup = Lineup {
-                    guide_number: item.epg_channel_id.unwrap_or(item.name).clone(),
+                    guide_number: item.epg_channel_id.clone().unwrap_or(item.name.clone()),
                     guide_name: item.title.clone(),
-                    url: (if item.t_stream_url.is_empty() {
-                        &item.url
+                    url: if item.t_stream_url.is_empty() {
+                        item.url.clone()
                     } else {
-                        &item.t_stream_url
-                    })
-                        .clone(),
+                        item.t_stream_url.clone()
+                    }
                 };
                 match serde_json::to_string(&lineup) {
                     Ok(mut content) => {
@@ -228,7 +229,7 @@ async fn device_xml(
             .header(axum::http::header::CONTENT_TYPE, "application/xml")
             .body(axum::body::Body::from(device.as_xml())))
     } else {
-        axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        internal_server_error!()
     }
 }
 
@@ -238,7 +239,7 @@ async fn device_json(
     if let Some(device) = create_device(&app_state) {
         axum::Json(device).into_response()
     } else {
-        axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        internal_server_error!()
     }
 }
 
@@ -248,7 +249,7 @@ async fn discover_json(
     if let Some(device) = create_device(&app_state) {
         axum::Json(device).into_response()
     } else {
-        axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        internal_server_error!()
     }
 }
 
@@ -275,8 +276,7 @@ async fn lineup_status(
             cfg.get_target_for_username(&app_state.device.t_username)
         {
             if target.has_output(TargetType::M3u) {
-                if let Some((_guard, iter)) =
-                    iter_raw_m3u_playlist(&cfg, &target).await
+                if let Some((_guard, iter)) = iter_raw_m3u_target_playlist(&cfg, &target, None).await
                 {
                     iter.count()
                 } else {
@@ -284,10 +284,8 @@ async fn lineup_status(
                 }
             } else if target.has_output(TargetType::Xtream) {
                 let credentials = Arc::new(user);
-                let live =
-                    XtreamPlaylistIterator::new(XtreamCluster::Live, &cfg, &target, None, &credentials).await.map_or(0, Iterator::count);
-                let vod =
-                    XtreamPlaylistIterator::new(XtreamCluster::Video, &cfg, &target, None, &credentials).await.map_or(0, Iterator::count);
+                let live = XtreamPlaylistIterator::new(XtreamCluster::Live, &cfg, &target, None, &credentials).await.map_or(0, std::iter::Iterator::count);
+                let vod = XtreamPlaylistIterator::new(XtreamCluster::Video, &cfg, &target, None, &credentials).await.map_or(0, std::iter::Iterator::count);
                 live + vod
             } else {
                 0

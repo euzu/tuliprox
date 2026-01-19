@@ -1034,6 +1034,10 @@ pub fn parse_range(range: &str) -> Option<(u64, Option<u64>)> {
     Some((start, end))
 }
 
+pub fn is_file_url(url: &str) -> bool {
+    url.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("file://"))
+}
+
 #[cfg(test)]
 mod tests {
     use shared::utils::{get_base_url_from_str, replace_url_extension, sanitize_sensitive_info};

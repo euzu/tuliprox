@@ -78,6 +78,7 @@ pub fn FilterInput(props: &FilterInputProps) -> Html {
         let dialog_actions = dialog_actions.clone();
         Callback::from(move |e: MouseEvent| {
             e.prevent_default();
+            e.stop_propagation();
             let original_filter = (*filter_state).clone();
             let original_templates = (*templates_state).clone();
             let current_filter = (*filter_state).clone();

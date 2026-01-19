@@ -12,7 +12,7 @@ use crate::api::endpoints::xtream_api::xtream_api_register;
 use crate::api::hdhomerun_proprietary::spawn_proprietary_tasks;
 use crate::api::hdhomerun_ssdp::spawn_ssdp_discover_task;
 use crate::api::model::{create_cache, create_http_client, ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager, DownloadQueue, EventManager, HdHomerunAppState, PlaylistStorageState, SharedStreamManager, UpdateGuard};
-use crate::api::scheduler::exec_scheduler;
+use crate::api::scheduler::{exec_interner_prune, exec_scheduler};
 use crate::api::serve::serve;
 use crate::model::{AppConfig, Config, Healthcheck, ProcessTargets, RateLimitConfig};
 use crate::processing::processor::playlist;
@@ -296,6 +296,8 @@ pub async fn start_server(
 
     exec_file_lock_prune(&app_state);
 
+    exec_interner_prune(&app_state);
+
     exec_config_watch(&app_state, &cancel_token_file_watch);
 
     let web_auth_enabled = is_web_auth_enabled(&cfg, web_ui_enabled);
@@ -310,10 +312,7 @@ pub async fn start_server(
         .and_then(|c| c.path.as_ref())
         .cloned()
         .unwrap_or_default();
-    infos.push(format!(
-        "Server running: http://{}:{}",
-        &cfg.api.host, &cfg.api.port
-    ));
+    infos.push(format!("Server running: http://{}:{}", &cfg.api.host, &cfg.api.port));
     for info in &infos {
         info!("{info}");
     }

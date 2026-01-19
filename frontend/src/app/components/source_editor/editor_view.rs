@@ -511,7 +511,10 @@ pub fn SourceEditor() -> Html {
         })
     };
 
-    let handle_drag_over = Callback::from(|e: DragEvent| e.prevent_default());
+    let handle_drag_over = Callback::from(|e: DragEvent| {
+        e.prevent_default();
+        e.stop_propagation();
+    });
     let handle_drag_end = {
         let cursor_grabbing = cursor_grabbing.clone();
         Callback::from(move |e: DragEvent| {

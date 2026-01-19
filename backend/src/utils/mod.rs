@@ -18,6 +18,7 @@ pub use self::trakt::*;
 pub use self::telegram::*;
 pub use self::geoip::*;
 pub use self::db_viewer::*;
+pub use shared::utils::*;
 
 #[macro_export]
 macro_rules! debug_if_enabled {

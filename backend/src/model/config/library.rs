@@ -3,7 +3,7 @@ use shared::error::{TuliproxError, info_err_res};
 use shared::model::{LibraryConfigDto, LibraryContentType, LibraryMetadataFormat};
 use std::path::PathBuf;
 use std::sync::Arc;
-use shared::utils::{default_metadata_path, intern};
+use shared::utils::{default_metadata_path, Internable};
 
 #[derive(Debug, Clone, Default)]
 pub struct LibraryScanDirectory {
@@ -121,8 +121,8 @@ impl From<&LibraryConfigDto> for LibraryConfig {
                 formats: dto.metadata.formats.clone(),
             },
             playlist: LibraryPlaylistConfig {
-                movie_category: intern(&dto.playlist.movie_category),
-                series_category: intern(&dto.playlist.series_category),
+                movie_category: dto.playlist.movie_category.as_str().intern(),
+                series_category: dto.playlist.series_category.as_str().intern(),
             },
         }
     }

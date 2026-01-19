@@ -12,7 +12,7 @@ use crate::api::model::ProviderAllocation;
 use crate::utils::debug_if_enabled;
 
 
-pub type ProviderConnectionChangeCallback = Arc<dyn Fn(&str, usize) + Send + Sync>;
+pub type ProviderConnectionChangeCallback = Arc<dyn Fn(&Arc<str>, usize) + Send + Sync>;
 
 #[derive(Debug, Clone, Copy)]
 pub enum ProviderConfigAllocation {
@@ -37,7 +37,7 @@ pub struct ProviderConfigConnection {
 /// `current_connections`: A `RwLock` to safely track the number of active connections.
 pub struct ProviderConfig {
     pub id: u16,
-    pub name: String,
+    pub name: Arc<str>,
     pub url: String,
     pub username: Option<String>,
     pub password: Option<String>,

@@ -1,7 +1,8 @@
 use base64::Engine;
 use base64::engine::general_purpose;
 use url::Url;
-use crate::model::{PlaylistItemType, UUIDType};
+use crate::model::PlaylistItemType;
+use crate::model::UUIDType;
 
 #[inline]
 pub fn hash_bytes(bytes: &[u8]) -> UUIDType {

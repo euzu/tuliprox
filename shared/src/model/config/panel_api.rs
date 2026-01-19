@@ -18,35 +18,15 @@ pub struct PanelApiQueryParamDto {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct PanelApiQueryParametersDto {
-    #[serde(
-        default,
-        skip_serializing_if = "Vec::is_empty",
-        serialize_with = "serialize_vec_flow_map_items"
-    )]
+    #[serde(default, skip_serializing_if = "Vec::is_empty", serialize_with = "serialize_vec_flow_map_items")]
     pub account_info: Vec<PanelApiQueryParamDto>,
-    #[serde(
-        default,
-        skip_serializing_if = "Vec::is_empty",
-        serialize_with = "serialize_vec_flow_map_items"
-    )]
+    #[serde(default, skip_serializing_if = "Vec::is_empty", serialize_with = "serialize_vec_flow_map_items")]
     pub client_info: Vec<PanelApiQueryParamDto>,
-    #[serde(
-        default,
-        skip_serializing_if = "Vec::is_empty",
-        serialize_with = "serialize_vec_flow_map_items"
-    )]
+    #[serde(default, skip_serializing_if = "Vec::is_empty", serialize_with = "serialize_vec_flow_map_items")]
     pub client_new: Vec<PanelApiQueryParamDto>,
-    #[serde(
-        default,
-        skip_serializing_if = "Vec::is_empty",
-        serialize_with = "serialize_vec_flow_map_items"
-    )]
+    #[serde(default, skip_serializing_if = "Vec::is_empty", serialize_with = "serialize_vec_flow_map_items")]
     pub client_renew: Vec<PanelApiQueryParamDto>,
-    #[serde(
-        default,
-        skip_serializing_if = "Vec::is_empty",
-        serialize_with = "serialize_vec_flow_map_items"
-    )]
+    #[serde(default, skip_serializing_if = "Vec::is_empty", serialize_with = "serialize_vec_flow_map_items" )]
     pub client_adult_content: Vec<PanelApiQueryParamDto>,
 }
 

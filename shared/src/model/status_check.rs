@@ -1,5 +1,6 @@
 use crate::utils::is_blank_optional_string;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use crate::model::StreamInfo;
 
@@ -16,7 +17,7 @@ pub struct StatusCheck {
     pub active_user_connections: usize,
     pub active_user_streams: Vec<StreamInfo>,
     #[serde(default)]
-    pub active_provider_connections: Option<BTreeMap<String, usize>>,
+    pub active_provider_connections: Option<BTreeMap<Arc<str>, usize>>,
 }
 
 impl Default for StatusCheck {

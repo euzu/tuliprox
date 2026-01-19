@@ -1,6 +1,6 @@
 [package]
 name = "tuliprox"
-version = "3.2.42"
+version = "3.2.43"
 edition = "2021"
 rust-version = "1.89.0"
 
@@ -59,6 +59,7 @@ base64 = "0.22"
 paste = "1.0"
 indexmap = "2"
 lz4_flex = "0.12"
+memmap2 = "0.9"
 fs2 = "0.4"
 notify = "8.2"
 arc-swap = "1.8"

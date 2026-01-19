@@ -142,6 +142,7 @@ async fn m3u_api_stream(
             &target,
             &user,
             connection_permission,
+            true,
         ).await.into_response();
     }
 
@@ -150,7 +151,7 @@ async fn m3u_api_stream(
     debug_if_enabled!(
         "ID chain for m3u endpoint: request_stream_id={} -> action_stream_id={action_stream_id} -> req_virtual_id={req_virtual_id} -> virtual_id={virtual_id}",
         stream_req.stream_id);
-    let session_key = create_session_fingerprint(&fingerprint.key, &user.username, virtual_id);
+    let session_key = create_session_fingerprint(fingerprint, &user.username, virtual_id);
     let user_session = app_state
         .active_users
         .get_and_update_user_session(&user.username, &session_key).await;
@@ -189,9 +190,9 @@ async fn m3u_api_stream(
             .await
             .into_response();
         }
-        session.stream_url.as_str()
+        session.stream_url.clone()
     } else {
-        pli.url.as_str()
+        pli.url.clone()
     };
 
     let connection_permission = user.connection_permission(app_state).await;
@@ -252,7 +253,7 @@ async fn m3u_api_stream(
         app_state,
         &session_key,
         pli.to_stream_channel(target.id),
-        session_url,
+        &session_url,
         req_headers,
         &input,
         &target,

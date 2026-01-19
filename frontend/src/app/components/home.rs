@@ -6,6 +6,7 @@ use shared::model::{AppConfigDto, ConfigInputDto, LibraryScanSummaryStatus, Play
 use std::collections::HashMap;
 use std::future;
 use std::rc::Rc;
+use std::sync::Arc;
 use yew::prelude::*;
 use yew::suspense::use_future;
 use yew_i18n::use_translation;
@@ -105,7 +106,7 @@ pub fn Home() -> Html {
         if let Some(cfg) = config_ctx.as_ref() {
             let mut sources = vec![];
             // Create a map for a faster lookup of global inputs by name
-            let inputs_map: HashMap<String, &ConfigInputDto> = cfg.sources.inputs.iter().map(|i| (i.name.clone(), i)).collect();
+            let inputs_map: HashMap<Arc<str>, &ConfigInputDto> = cfg.sources.inputs.iter().map(|i| (i.name.clone(), i)).collect();
 
             for source in &cfg.sources.sources {
                 let mut inputs = vec![];

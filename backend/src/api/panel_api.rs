@@ -41,7 +41,7 @@ use url::Url;
 
 #[derive(Debug, Clone)]
 struct AccountCredentials {
-    name: String,
+    name: Arc<str>,
     username: String,
     password: String,
     exp_date: Option<i64>,
@@ -997,7 +997,7 @@ fn is_proxy_user_enabled(user: &ProxyUserCredentials) -> bool {
     !is_input_expired(user.exp_date)
 }
 
-fn find_input_target_names(app_state: &AppState, input_name: &str) -> Vec<String> {
+fn find_input_target_names(app_state: &AppState, input_name: &Arc<str>) -> Vec<String> {
     let sources = app_state.app_config.sources.load();
     for source in &sources.sources {
         if source.inputs.iter().any(|name| name == input_name) {
@@ -1007,7 +1007,7 @@ fn find_input_target_names(app_state: &AppState, input_name: &str) -> Vec<String
     vec![]
 }
 
-fn count_enabled_proxy_users(app_state: &AppState, input_name: &str) -> usize {
+fn count_enabled_proxy_users(app_state: &AppState, input_name: &Arc<str>) -> usize {
     let api_proxy_guard = app_state.app_config.api_proxy.load();
     let Some(api_proxy) = api_proxy_guard.as_ref() else {
         return 0;
@@ -1034,7 +1034,7 @@ fn count_enabled_proxy_users(app_state: &AppState, input_name: &str) -> usize {
         .sum()
 }
 
-fn resolve_alias_pool_auto_value(app_state: &AppState, input_name: &str) -> u16 {
+fn resolve_alias_pool_auto_value(app_state: &AppState, input_name: &Arc<str>) -> u16 {
     let enabled_users = count_enabled_proxy_users(app_state, input_name);
     u16::try_from(enabled_users).unwrap_or(u16::MAX)
 }
@@ -1069,7 +1069,7 @@ pub(crate) fn target_has_alias_pool_min(app_state: &AppState, target_name: &str)
 
 fn resolve_alias_pool_limits(
     app_state: &AppState,
-    input_name: &str,
+    input_name: &Arc<str>,
     cfg: &PanelApiConfigDto,
 ) -> Result<(Option<u16>, Option<u16>), TuliproxError> {
     let (min_val, max_val) = alias_pool_limit_values(cfg);
@@ -1096,7 +1096,7 @@ fn resolve_alias_pool_limits(
 #[allow(dead_code)]
 fn resolve_alias_pool_min(
     app_state: &AppState,
-    input_name: &str,
+    input_name: &Arc<str>,
     cfg: &PanelApiConfigDto,
 ) -> Option<u16> {
     let (min_val, _) = alias_pool_limit_values(cfg);
@@ -1205,7 +1205,7 @@ fn count_valid_accounts(accounts: &[AccountCredentials]) -> usize {
         .count()
 }
 
-fn root_counts_towards_pool(accounts: &[AccountCredentials], input_name: &str) -> bool {
+fn root_counts_towards_pool(accounts: &[AccountCredentials], input_name: &Arc<str>) -> bool {
     accounts
         .iter()
         .find(|acct| acct.name == input_name)
@@ -1221,7 +1221,7 @@ fn count_valid_accounts_at(accounts: &[AccountCredentials], now: u64) -> usize {
 
 fn count_valid_alias_accounts_at(
     accounts: &[AccountCredentials],
-    input_name: &str,
+    input_name: &Arc<str>,
     now: u64,
 ) -> usize {
     accounts
@@ -1236,7 +1236,7 @@ fn count_valid_alias_accounts_at(
 
 fn root_counts_towards_pool_at(
     accounts: &[AccountCredentials],
-    input_name: &str,
+    input_name: &Arc<str>,
     now: u64,
 ) -> bool {
     accounts
@@ -1306,7 +1306,7 @@ pub(crate) fn can_provision_on_exhausted(app_state: &AppState, input: &ConfigInp
 #[allow(dead_code)]
 pub(crate) fn find_input_by_name(
     app_state: &AppState,
-    input_name: &str,
+    input_name: &Arc<str>,
 ) -> Option<Arc<ConfigInput>> {
     let sources = app_state.app_config.sources.load();
     sources.get_input_by_name(input_name).map(Arc::clone)
@@ -1336,8 +1336,8 @@ pub(crate) fn find_input_by_provider_name(
 async fn patch_source_yml_add_alias(
     app_state: &Arc<AppState>,
     source_file_path: &Path,
-    input_name: &str,
-    alias_name: &str,
+    input_name: &Arc<str>,
+    alias_name: &Arc<str>,
     base_url: &str,
     username: &str,
     password: &str,
@@ -1360,7 +1360,7 @@ async fn patch_source_yml_add_alias(
 
     let mut alias = ConfigInputAliasDto {
         id: 0,
-        name: alias_name.to_string(),
+        name: Arc::clone(alias_name),
         url: base_url.to_string(),
         username: Some(username.to_string()),
         password: Some(password.to_string()),
@@ -1369,8 +1369,7 @@ async fn patch_source_yml_add_alias(
         exp_date,
     };
 
-    alias.prepare(next_index, &input.input_type)?;
-    aliases.push(alias);
+   input.upsert_alias(alias)?;
 
     persist_source_config(app_state, Some(source_file_path), sources).await?;
     Ok(())
@@ -1690,7 +1689,7 @@ async fn persist_sources_yml_with_patches(
 async fn patch_source_yml_update_exp_date(
     app_state: &Arc<AppState>,
     source_file_path: &Path,
-    input_name: &str,
+    input_name: &Arc<str>,
     account_name: &str,
     exp_date: i64,
 ) -> Result<(), TuliproxError> {
@@ -1727,7 +1726,7 @@ async fn patch_source_yml_update_exp_date(
 
 const MAX_ALIAS_NAME_ATTEMPTS: usize = 1000;
 
-fn derive_unique_alias_name(existing: &[String], input_name: &str, username: &str) -> String {
+fn derive_unique_alias_name(existing: &[String], input_name: &Arc<str>, username: &str) -> String {
     let base = format!("{input_name}-{username}");
     if !existing.contains(&base) {
         return base;
@@ -1746,7 +1745,7 @@ fn derive_unique_alias_name(existing: &[String], input_name: &str, username: &st
 
 fn derive_unique_alias_name_set(
     existing: &HashSet<String>,
-    input_name: &str,
+    input_name: &Arc<str>,
     username: &str,
 ) -> String {
     let base = format!("{input_name}-{username}");
@@ -3860,7 +3859,7 @@ async fn probe_panel_api_test_url(
 async fn apply_provisioning_cooldown(
     panel_cfg: &PanelApiConfigDto,
     account_name: &str,
-    input_name: &str,
+    input_name: &Arc<str>,
 ) {
     let cooldown_secs = panel_cfg.provisioning.cooldown_sec;
     if cooldown_secs == 0 {
@@ -4127,7 +4126,7 @@ pub(crate) async fn run_panel_api_provisioning_probe(
 pub fn create_panel_api_provisioning_stream_details(
     app_state: &Arc<AppState>,
     input: &ConfigInput,
-    provider_name: Option<String>,
+    provider_name: Option<Arc<str>>,
     grace_period_millis: u64,
     addr: SocketAddr,
     virtual_id: VirtualId,
