@@ -393,8 +393,9 @@ macro_rules! generate_field_accessor_impl_for_playlist_item_header {
                     self.group = value.intern();
                     true
                 } else if bytes.eq_ignore_ascii_case(b"caption") {
-                    self.title = value.intern();
-                    self.name = value.intern();
+                    let interned = value.intern();
+                    self.title = Arc::clone(&interned);
+                    self.name = interned;
                     true
                 } else if bytes.eq_ignore_ascii_case(b"epg_channel_id") || bytes.eq_ignore_ascii_case(b"epg_id") {
                     self.epg_channel_id = Some(value.intern());
@@ -681,7 +682,7 @@ impl XtreamPlaylistItem {
     pub fn to_common(&self) -> CommonPlaylistItem {
         CommonPlaylistItem {
             virtual_id: self.virtual_id,
-            provider_id: Arc::clone(&self.provider_id.to_string().into()),
+            provider_id: self.provider_id.intern(),
             name: self.name.clone(),
             chno: self.channel_no,
             logo: self.logo.clone(),

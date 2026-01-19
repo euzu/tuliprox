@@ -26,11 +26,7 @@ use shared::model::{
     PanelApiProvisioningMethod, PanelApiQueryParamDto, ProxyUserStatus, SourcesConfigDto,
     VirtualId,
 };
-use shared::utils::{
-    get_base_url_from_str, get_credentials_from_url, get_credentials_from_url_str,
-    get_i64_from_serde_value, get_string_from_serde_value, parse_timestamp,
-    sanitize_sensitive_info,
-};
+use shared::utils::{get_base_url_from_str, get_credentials_from_url, get_credentials_from_url_str, get_i64_from_serde_value, get_string_from_serde_value, parse_timestamp, sanitize_sensitive_info, Internable};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -1179,11 +1175,11 @@ fn sort_aliases_by_exp_date(aliases: &mut Vec<ConfigInputAliasDto>) -> bool {
     }
 }
 
-fn sort_account_aliases_keep_root_first(accounts: &mut Vec<AccountCredentials>, root_name: &str) {
-    let root = accounts.iter().find(|acct| acct.name == root_name).cloned();
+fn sort_account_aliases_keep_root_first(accounts: &mut Vec<AccountCredentials>, root_name: &Arc<str>) {
+    let root = accounts.iter().find(|acct| &acct.name == root_name).cloned();
     let mut aliases: Vec<AccountCredentials> = accounts
         .iter()
-        .filter(|acct| acct.name != root_name)
+        .filter(|acct| &acct.name != root_name)
         .cloned()
         .collect();
     aliases.sort_by(compare_account_exp_date);
@@ -1208,7 +1204,7 @@ fn count_valid_accounts(accounts: &[AccountCredentials]) -> usize {
 fn root_counts_towards_pool(accounts: &[AccountCredentials], input_name: &Arc<str>) -> bool {
     accounts
         .iter()
-        .find(|acct| acct.name == input_name)
+        .find(|acct| &acct.name == input_name)
         .is_some_and(|acct| is_account_valid(acct.exp_date))
 }
 
@@ -1227,7 +1223,7 @@ fn count_valid_alias_accounts_at(
     accounts
         .iter()
         .filter(|acct| {
-            acct.name != input_name
+            &acct.name != input_name
                 && acct.exp_date.is_some()
                 && !is_input_expired_at(acct.exp_date, now)
         })
@@ -1241,7 +1237,7 @@ fn root_counts_towards_pool_at(
 ) -> bool {
     accounts
         .iter()
-        .find(|acct| acct.name == input_name)
+        .find(|acct| &acct.name == input_name)
         .is_some_and(|acct| acct.exp_date.is_some() && !is_input_expired_at(acct.exp_date, now))
 }
 
@@ -1314,17 +1310,17 @@ pub(crate) fn find_input_by_name(
 
 pub(crate) fn find_input_by_provider_name(
     app_state: &AppState,
-    provider_name: &str,
+    provider_name: &Arc<str>,
 ) -> Option<Arc<ConfigInput>> {
     let sources = app_state.app_config.sources.load();
     for input in &sources.inputs {
-        if input.name == provider_name {
+        if &input.name == provider_name {
             return Some(Arc::clone(input));
         }
         if input
             .aliases
             .as_ref()
-            .is_some_and(|aliases| aliases.iter().any(|alias| alias.name == provider_name))
+            .is_some_and(|aliases| aliases.iter().any(|alias| &alias.name == provider_name))
         {
             return Some(Arc::clone(input));
         }
@@ -1348,7 +1344,7 @@ async fn patch_source_yml_add_alias(
         Err(e) => return info_err_res!("panel_api: failed to read source file: {e}"),
     };
 
-    let Some(input) = sources.inputs.iter_mut().find(|i| i.name == input_name) else {
+    let Some(input) = sources.inputs.iter_mut().find(|i| i.name == *input_name) else {
         return info_err_res!("panel_api: could not find input '{input_name}' in source.yml");
     };
 
@@ -1378,40 +1374,40 @@ async fn patch_source_yml_add_alias(
 #[derive(Debug, Clone)]
 enum SourcesYmlPatch {
     UpdatePanelApiCredits {
-        input_name: String,
+        input_name: Arc<str>,
         credits: String,
     },
     SortAliases {
-        input_name: String,
+        input_name: Arc<str>,
     },
     UpdateExpDate {
-        input_name: String,
-        account_name: String,
+        input_name: Arc<str>,
+        account_name: Arc<str>,
         exp_date: i64,
     },
     UpdateRootCredentials {
-        input_name: String,
+        input_name: Arc<str>,
         username: String,
         password: String,
         exp_date: Option<i64>,
     },
     UpdateAliasCredentials {
-        input_name: String,
-        alias_name: String,
+        input_name: Arc<str>,
+        alias_name: Arc<str>,
         username: String,
         password: String,
         exp_date: Option<i64>,
     },
     AddAlias {
-        input_name: String,
-        alias_name: String,
+        input_name: Arc<str>,
+        alias_name: Arc<str>,
         base_url: String,
         username: String,
         password: String,
         exp_date: Option<i64>,
     },
     RemoveExpiredAliases {
-        input_name: String,
+        input_name: Arc<str>,
     },
 }
 
@@ -1462,8 +1458,8 @@ fn apply_sources_yml_patches(
     }
 
     let mut changed = false;
-    let mut inputs_by_name: HashMap<String, usize> = HashMap::with_capacity(doc.inputs.len());
-    let mut alias_indices: Vec<HashMap<String, usize>> = Vec::with_capacity(doc.inputs.len());
+    let mut inputs_by_name: HashMap<Arc<str>, usize> = HashMap::with_capacity(doc.inputs.len());
+    let mut alias_indices: Vec<HashMap<Arc<str>, usize>> = Vec::with_capacity(doc.inputs.len());
     for (idx, input) in doc.inputs.iter().enumerate() {
         inputs_by_name.insert(input.name.clone(), idx);
         let map = input
@@ -1474,7 +1470,7 @@ fn apply_sources_yml_patches(
                     .iter()
                     .enumerate()
                     .map(|(idx, alias)| (alias.name.clone(), idx))
-                    .collect::<HashMap<String, usize>>()
+                    .collect::<HashMap<Arc<str>, usize>>()
             })
             .unwrap_or_default();
         alias_indices.push(map);
@@ -1690,7 +1686,7 @@ async fn patch_source_yml_update_exp_date(
     app_state: &Arc<AppState>,
     source_file_path: &Path,
     input_name: &Arc<str>,
-    account_name: &str,
+    account_name: &Arc<str>,
     exp_date: i64,
 ) -> Result<(), TuliproxError> {
     let mut sources = match read_sources_file_from_path(source_file_path, false, false, None) {
@@ -1698,7 +1694,7 @@ async fn patch_source_yml_update_exp_date(
         Err(e) => return info_err_res!("panel_api: failed to read source file: {e}"),
     };
 
-    let Some(input) = sources.inputs.iter_mut().find(|i| i.name == input_name) else {
+    let Some(input) = sources.inputs.iter_mut().find(|i| i.name == *input_name) else {
         return info_err_res!("panel_api: could not find input '{input_name}' in source.yml");
     };
 
@@ -1707,7 +1703,7 @@ async fn patch_source_yml_update_exp_date(
         input.enabled = true;
         input.max_connections = 1;
     } else if let Some(aliases) = input.aliases.as_mut() {
-        let Some(alias) = aliases.iter_mut().find(|a| a.name == account_name) else {
+        let Some(alias) = aliases.iter_mut().find(|a| &a.name == account_name) else {
             return info_err_res!(
                 "panel_api: could not find alias '{account_name}' under input '{input_name}' in source.yml"
             );
@@ -1726,20 +1722,18 @@ async fn patch_source_yml_update_exp_date(
 
 const MAX_ALIAS_NAME_ATTEMPTS: usize = 1000;
 
-fn derive_unique_alias_name(existing: &[String], input_name: &Arc<str>, username: &str) -> String {
-    let base = format!("{input_name}-{username}");
+fn derive_unique_alias_name(existing: &[Arc<str>], input_name: &Arc<str>, username: &str) -> Arc<str> {
+    let base: Arc<str> = concat_string!(input_name, "-", username).intern();
     if !existing.contains(&base) {
         return base;
     }
     for i in 2..MAX_ALIAS_NAME_ATTEMPTS {
-        let cand = format!("{base}-{i}");
+        let cand = concat_string!(&*base, "-", &i.to_string()).intern();
         if !existing.contains(&cand) {
             return cand;
         }
     }
-    warn!(
-        "derive_unique_alias_name: exhausted {MAX_ALIAS_NAME_ATTEMPTS} attempts for base '{base}'; returning potentially duplicate name"
-    );
+    warn!("derive_unique_alias_name: exhausted {MAX_ALIAS_NAME_ATTEMPTS} attempts for base '{base}'; returning potentially duplicate name");
     base
 }
 
@@ -1946,7 +1940,7 @@ async fn try_create_new_account(
             let base_url =
                 get_base_url_from_str(base_url.as_str()).unwrap_or_else(|| base_url.clone());
 
-            let mut existing_names: Vec<String> = vec![input.name.clone()];
+            let mut existing_names: Vec<Arc<str>> = vec![input.name.clone()];
             if let Some(aliases) = input.aliases.as_ref() {
                 existing_names.extend(aliases.iter().map(|a| a.name.clone()));
             }

@@ -238,9 +238,13 @@ impl TargetIdMapping {
 
     pub fn persist(&mut self) -> Result<(), Error> {
         // Persist virtual_id_counter via B+Tree header metadata
-        if let Err(e) = self.disk_by_virtual_id.set_metadata(&BPlusTreeMetadata::TargetIdMapping(self.virtual_id_counter)) {
-            error!("Failed to write virtual_id_counter to tree header at {}: {e}", self.path.display());
-        }
+        self.disk_by_virtual_id
+            .set_metadata(&BPlusTreeMetadata::TargetIdMapping(self.virtual_id_counter))
+            .map_err(|e| {
+                error!("Failed to write virtual_id_counter to tree header at {}: {e}", self.path.display());
+                e
+        })?;
+
 
         // Flush pending virtual_id upserts
         if !self.pending_virtual_id_upserts.is_empty() {

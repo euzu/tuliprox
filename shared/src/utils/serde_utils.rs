@@ -77,7 +77,7 @@ where
     D: serde::Deserializer<'de>,
 {
     Value::deserialize(deserializer).map(|v| match v {
-        Value::String(value) => Some(vec![value.into()]),
+        Value::String(value) => Some(vec![value.intern()]),
         Value::Array(value) => Some(value_to_string_array(&value)),
         _ => None,
     })

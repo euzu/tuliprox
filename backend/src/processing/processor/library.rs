@@ -51,7 +51,7 @@ pub async fn download_library_playlist(_client: &reqwest::Client, app_config: &A
 }
 
 
-fn to_playlist_item(entry: &MetadataCacheEntry, input_name: &str, group_name: &str, channels: &mut Vec<PlaylistItem>) {
+fn to_playlist_item(entry: &MetadataCacheEntry, input_name: &Arc<str>, group_name: &str, channels: &mut Vec<PlaylistItem>) {
     let metadata = &entry.metadata;
 
     match metadata {
@@ -68,7 +68,7 @@ fn to_playlist_item(entry: &MetadataCacheEntry, input_name: &str, group_name: &s
                     xtream_cluster: XtreamCluster::Video,
                     additional_properties,
                     item_type: PlaylistItemType::LocalVideo,
-                    input_name: input_name.intern(),
+                    input_name: Arc::clone(input_name),
                     ..PlaylistItemHeader::default()
                 }
             });
@@ -99,7 +99,7 @@ fn to_playlist_item(entry: &MetadataCacheEntry, input_name: &str, group_name: &s
                                         xtream_cluster: XtreamCluster::Series,
                                         item_type: PlaylistItemType::LocalSeries,
                                         category_id: 0,
-                                        input_name: input_name.intern(),
+                                        input_name: Arc::clone(input_name),
                                         additional_properties: Some(StreamProperties::Episode(EpisodeStreamProperties {
                                             episode_id: episode.id,
                                             episode: episode.episode_num,
@@ -131,7 +131,7 @@ fn to_playlist_item(entry: &MetadataCacheEntry, input_name: &str, group_name: &s
                         url: format!("file://{}", entry.file_path).into(),
                         xtream_cluster: XtreamCluster::Series,
                         item_type: PlaylistItemType::LocalSeriesInfo,
-                        input_name: input_name.intern(),
+                        input_name: Arc::clone(input_name),
                         additional_properties: Some(additional_properties),
                         ..PlaylistItemHeader::default()
                     }

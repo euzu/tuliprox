@@ -93,7 +93,7 @@ fn skip_digit(it: &mut std::str::Chars) -> Option<char> {
 
 fn create_empty_playlistitem_header(input_name: &Arc<str>, url: String) -> PlaylistItemHeader {
     PlaylistItemHeader {
-        url: url.into(),
+        url: url.intern(),
         category_id: 0,
         input_name: Arc::clone(input_name),
         ..Default::default()
@@ -134,7 +134,7 @@ fn process_header(input_name: &Arc<str>, video_suffixes: &[String], content: &st
                     if chr.is_whitespace() {
                         // skip
                     } else if chr == ',' {
-                        plih.title = get_value(&mut stack, &mut it).into();
+                        plih.title = get_value(&mut stack, &mut it).intern();
                     } else {
                         stack.push(chr);
                         let token = token_till(&mut stack, &mut it, '=', true);
@@ -150,13 +150,13 @@ fn process_header(input_name: &Arc<str>, video_suffixes: &[String], content: &st
                             } else if token == "group-title" {
                                 plih.group = value.intern();
                             } else if token == "tvg-id" {
-                                plih.id = value.into();
+                                plih.id = value.intern();
                             } else if token == "tvg-name" {
-                                plih.name = value.into();
+                                plih.name = value.intern();
                             } else if token == "tvg-logo" {
-                                plih.logo = value.into();
+                                plih.logo = value.intern();
                             } else if token == "tvg-logo-small" {
-                                plih.logo_small = value.into();
+                                plih.logo_small = value.intern();
                             } else {
                                 process_header_fields!(plih, token.as_str(),
                                 (parent_code, "parent-code"),
@@ -174,14 +174,14 @@ fn process_header(input_name: &Arc<str>, video_suffixes: &[String], content: &st
         if plih.id.is_empty() {
             plih.epg_channel_id = None;
             if let Some(pid) = provider_id {
-                plih.id = pid.into();
+                plih.id = pid.intern();
             } else if let Some(chanid) = url_id {
-                plih.id = chanid.into();
+                plih.id = chanid.intern();
             }
         } else {
             plih.epg_channel_id = Some(plih.id.intern());
             if let Some(pid) = provider_id {
-                plih.id = pid.into();
+                plih.id = pid.intern();
             }
         }
     }
@@ -288,9 +288,9 @@ mod test {
         let line = r#"#EXTINF:-1 channel-id="abc-seven" tvg-id="abc-seven" tvg-logo="https://abc.nz/.images/seven.png" tvg-chno="7" group-title="Sydney" , Seven"#;
 
         let pli = process_header(&input, &video_suffixes, line, url.to_string());
-        assert_eq!(pli.title, "Seven".into());
-        assert_eq!(pli.id, "abc-seven".into());
-        assert_eq!(pli.logo, "https://abc.nz/.images/seven.png".into());
+        assert_eq!(pli.title, "Seven".intern());
+        assert_eq!(pli.id, "abc-seven".intern());
+        assert_eq!(pli.logo, "https://abc.nz/.images/seven.png".intern());
         assert_eq!(pli.chno, 7);
         assert_eq!(&*pli.group, "Sydney");
     }
@@ -303,9 +303,9 @@ mod test {
         let line = r#"#EXTINF:-1 channel-id="abc-seven" tvg-id="abc-seven" tvg-logo="https://abc.nz/.images/seven.png" tvg-chno="7" group-title="Sydney", Seven"#;
 
         let pli = process_header(&input, &video_suffixes, line, url.to_string());
-        assert_eq!(pli.title, "Seven".into());
-        assert_eq!(pli.id, "abc-seven".into());
-        assert_eq!(pli.logo, "https://abc.nz/.images/seven.png".into());
+        assert_eq!(pli.title, "Seven".intern());
+        assert_eq!(pli.id, "abc-seven".intern());
+        assert_eq!(pli.logo, "https://abc.nz/.images/seven.png".intern());
         assert_eq!(pli.chno, 7);
         assert_eq!(&*pli.group, "Sydney");
     }
@@ -318,9 +318,9 @@ mod test {
         let line = r#"#EXTINF:-1 tvg-id="abc-seven" xui-id="provider-123" group-title="Sydney", Seven"#;
 
         let pli = process_header(&input, &video_suffixes, line, url.to_string());
-        assert_eq!(pli.title, "Seven".into());
-        assert_eq!(pli.id, "provider-123".into()); // Should use xui-id
-        assert_eq!(pli.epg_channel_id, Some("abc-seven".into())); // Should preserve original tvg-id
+        assert_eq!(pli.title, "Seven".intern());
+        assert_eq!(pli.id, "provider-123".intern()); // Should use xui-id
+        assert_eq!(pli.epg_channel_id, Some("abc-seven".intern())); // Should preserve original tvg-id
         assert_eq!(&*pli.group, "Sydney");
     }
 }
