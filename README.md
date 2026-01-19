@@ -1026,71 +1026,85 @@ The `exp_date` field is a date as:
 
 #### `panel_api`
 
-If provider connections are exhausted, tuliprox can optionally call a provider panel API to:
+Tuliprox can optionally call a provider panel API to:
+- fetch your current credit balance
+- sync `exp_date` with your provider
 - renew expired accounts first (based on `exp_date`)
-- otherwise create a new alias account and persist it
+- create a new account and persist it
 
 **Important!** Panel api accounts are not considering unlimited provider access!
 
 Optional alias pool controls:
 - `alias_pool.size.min`: `number` or `auto`.
-  - `number`: keep at least this many valid (not expired) accounts on boot/update. Must be greater `0` and <= `max` (when `max` is a number). Default `1`.
-  - `auto`: uses the number of enabled tuliprox users (Active/Trial and not expired) for targets in the same source. If below, tuliprox tries to renew expired accounts first and then creates new accounts until the minimum is met during boot/update. User add/update triggers only when `max` is also `auto`.
+  - `number`: keep at least this many valid (not expired) accounts beyond the defined offset on boot/update. Must be greater `0` and <= `max` (when `max` is a number). Default `1`.
+  - `auto`: uses the number of enabled tuliprox users (Active/Trial and not expired) for targets in the same source. If below, tuliprox tries to renew expired accounts first and then creates new accounts until the amount of enabled users is met during boot/update + offset. User add/update triggers only when `max` is also `auto`.
 - `alias_pool.size.max`: `number` or `auto`. 
   - `number`: upper bound for valid accounts when provisioning is triggered by provider exhaustion. When the maximum is reached, provisioning (renew/create) is skipped. Must be greater than `0` and >= `min`. Default `1`.
   - `auto`: no upper bound; if `min` is also `auto`, alias-pool min checks are triggered when tuliprox users are added/updated.
 - `alias_pool.remove_expired`: `boolean`
   - `true`: remove expired accounts from `source.yml` or batch CSVs during boot/update. This cleanup runs last in the panel_api routines and only removes aliases/rows (the root input is not removed).
 
-Provisioning (stream probes):
-- `panel_api.provisioning.timeout_sec`: maximum wait time (seconds) to probe a newly created/renewed account before forcing a client reconnect (default `65`).
-- `panel_api.provisioning.method`: HTTP method used for probes (`HEAD`, `GET`, `POST`). Default `HEAD`.
-- `panel_api.provisioning.probe_interval_sec`: probe interval in seconds (default `10`).
-- `panel_api.provisioning.cooldown_sec`: extra wait time (seconds) after a successful probe before continuing boot/update provisioning (default `0`).
-- `panel_api.provisioning.offset`: optional pre-expiry window for boot/update renewal of input accounts with `exp_date`; if `now + offset > exp_date`, tuliprox tries `client_renew`, and falls back to `client_new` if renew fails. Supports suffixes `s` (seconds), `m` (minutes), `h` (hours), `d` (days), e.g. `30m`, `12h`, `2d` (default `None`).
-- Each probe also calls `<scheme>://<host>/player_api.php?username=<username>&password=<password>` and logs status/response for debugging.
+Provisioning settings:
+- `panel_api.provisioning.timeout_sec`: `number`
+  - Maximum wait time (seconds) to probe a newly created/renewed account before forcing a client reconnect or continuing boot/update process.
+  - Default `65`
+- `panel_api.provisioning.method`: `HEAD` | `GET` | `POST`
+  - HTTP method used for probes. 
+  - Default `HEAD`
+- `panel_api.provisioning.probe_interval_sec`: `number`
+  - Probe interval in seconds.
+  - Default `10`
+- `panel_api.provisioning.cooldown_sec`: `number`
+  - Extra wait time (seconds) after a successful probe before continuing boot/update provisioning. If you continue to see a 5XX message during the boot/update process despite a successful probe, gradually increase the cooldown time to give the provider enough time to provision the new root account.
+  - Default `0`
+- `panel_api.provisioning.offset`: e.g.: `15m` | `5h` | `1d`
+  - Optional pre-expiry window for boot/update renewal of input accounts with `exp_date`; if `now + offset > exp_date`, tuliprox tries `client_renew`, and falls back to `client_new` if renew fails. Supports suffixes `s` (seconds), `m` (minutes), `h` (hours), `d` (days), e.g. `30m`, `12h`, `2d` 
+  - Default `None`
 
-The API is configured generically via predefined query parameters; only `type: m3u` is supported for `client_new`, `client_renew` and `client_adult_content`.
-Recommended section order in config/UI: `account_info`, `client_info`, `client_new`, `client_renew`, `client_adult_content`.
-`client_info` is mandatory; saving the config fails if it has no query parameters.
-`account_info`, `client_new`, `client_renew`, and `client_adult_content` are optional; if a section has no parameters, the request is skipped and a debug log notes it was disabled due to missing arguments.
 
+The API is configured generically via predefined query parameters.
+Optional fields can be deactivated by leaving them blank.
 Use the literal value `auto` to fill sensitive values at runtime:
-- in `account_info`:
+- in `account_info`: (_optional_)
   - `api_key: auto` is replaced by `panel_api.api_key`
-- in `client_renew`:
+- in `client_info`: (_mandatory_)
   - `api_key: auto` is replaced by `panel_api.api_key`
-  - `username: auto`: are replaced by the account being renewed
+  - `username: auto`: are replaced by the account being queried
+  - `password: auto` are replaced by the account being queried
+- in `client_renew`: (_optional_)
+  - `api_key: auto` is replaced by `panel_api.api_key`
+  - `username: auto` are replaced by the account being renewed
   - `password: auto` are replaced by the account being renewed
-- in `client_info`:
+  - `type: m3u` is the only supported type
+- in `client_new`: (_optional_)
   - `api_key: auto` is replaced by `panel_api.api_key`
-  - `username: auto`: are replaced by the account being queried
-  - `password: auto` are replaced by the account being queried
-- in `client_adult_content`:
+  - `username: auto` are replaced by the account being renewed
+  - `password: auto` are replaced by the account being renewed
+  - `type: m3u` is the only supported type
+- in `client_adult_content`: (_optional_)
   - `api_key: auto` is replaced by `panel_api.api_key`
-  - `username: auto`: are replaced by the account being queried
+  - `username: auto` are replaced by the account being queried
   - `password: auto` are replaced by the account being queried
 
-`account_info` is executed on boot/update to fetch account credits via the `credits` field. If credentials are required, (username/password=auto), Tuliprox uses the first available ones: the root input if present, otherwise the first alias in config order. If no credentials are required, none are used or if not auto the configured one is used.”
+`account_info`
+ 
+Is executed on boot/update to fetch account credits via the `credits` field. If credentials are required, (username/password=auto), Tuliprox uses the first available ones: the root input if present, otherwise the first alias in config order. If no credentials are required, none are used or if not auto the configured one is used.”
 
-`client_info` is used to fetch the exact `exp_date` (via the `expire` field) and is also executed on boot/update to sync `exp_date` for existing inputs/aliases.
+`client_info` 
 
-`client_adult_content` is executed when configured:
-- on boot/update for every root input account and alias
-- after `client_new` / `client_renew` for the affected account
-The request is skipped when `query_parameter.client_adult_content` is empty.
+Is used to fetch the exact `exp_date` (via the `expire` field) and is also executed on boot/update to sync `exp_date` for existing inputs/aliases.
 
-For `client_new`, the Panel API call would look like this in the example shown:
+`client_adult_content` 
 
-```text
-https://panel.example.tld/api.php?action=new&type=m3u&sub=1&api_key=1234567890
-```
+Optionally executed after `client_new` or `client_renew` to unlock adult content.
+
 
 Response evaluation logic
 Tuliprox evaluates Panel API responses as JSON with the following logic, depending on the operation:
 
 `Common rule (all operations)`
-  - The response must contain `status: true`. If status is missing or not true, the operation is treated as failed.
+  - Require `status: true`. 
+  - If status is missing or not true, the operation is treated as failed.
 
 `account_info (credits)`
 
@@ -1100,10 +1114,10 @@ Tuliprox evaluates Panel API responses as JSON with the following logic, dependi
 `client_info (sync expiration)`
 
   -	Require `status: true`.
-  -	Extract the expiration timestamp/date from the JSON field:
+  -	Extract the expiration timestamp/date from the JSON field and normalize it to UTC:
     -	`expire` → used to populate/update exp_date for the corresponding input/alias.
 
-`client_new (create alias)`
+`client_new (create new account)`
 	
   -	Require `status: true`.
   -	Attempt to extract credentials directly from the JSON response:
@@ -1132,11 +1146,17 @@ Tuliprox evaluates Panel API responses as JSON with the following logic, dependi
     panel_api:
       url: 'https://panel.example.tld/api.php'
       api_key: '1234567890'
+      provisioning:
+        timeout_sec: 65
+        method: GET
+        probe_interval_sec: 10
+        cooldown_sec: 120
+        offset: 12h
       alias_pool:
         size:
           min: auto
           max: auto
-        remove_expired: false
+        remove_expired: true
       query_parameter:
         account_info:
           - { key: action, value: account_info }
@@ -1163,6 +1183,12 @@ Tuliprox evaluates Panel API responses as JSON with the following logic, dependi
           - { key: username, value: auto }
           - { key: password, value: auto }
           - { key: api_key, value: auto }
+      credits: "0.0"
+```
+For `client_new`, the Panel API call would look like this in the example shown:
+
+```text
+https://panel.example.tld/api.php?action=new&type=m3u&sub=1&api_key=1234567890
 ```
 
 ### 2.3. `sources`
