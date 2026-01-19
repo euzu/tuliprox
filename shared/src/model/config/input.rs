@@ -414,6 +414,9 @@ impl ConfigInputDto {
 
         self.persist = get_trimmed_string(self.persist.as_deref());
         if let Some(panel_api) = self.panel_api.as_mut() {
+            if panel_api.enabled && panel_api.query_parameter.client_info.is_empty() {
+                return info_err_res!("panel_api: query_parameter.client_info must be configured");
+            }
             if let Some(alias_pool) = panel_api.alias_pool.as_mut() {
                 let default_size = PanelApiAliasPoolSizeDto::default();
                 match alias_pool.size.as_mut() {

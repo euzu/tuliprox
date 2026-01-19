@@ -1052,6 +1052,8 @@ Provisioning (stream probes):
 
 The API is configured generically via predefined query parameters; only `type: m3u` is supported for `client_new`, `client_renew` and `client_adult_content`.
 Recommended section order in config/UI: `account_info`, `client_info`, `client_new`, `client_renew`, `client_adult_content`.
+`client_info` is mandatory; saving the config fails if it has no query parameters.
+`account_info`, `client_new`, `client_renew`, and `client_adult_content` are optional; if a section has no parameters, the request is skipped and a debug log notes it was disabled due to missing arguments.
 
 Use the literal value `auto` to fill sensitive values at runtime:
 - in `account_info`:
