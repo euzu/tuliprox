@@ -9,7 +9,9 @@ use crate::repository::{
     csv_patch_batch_update_credentials, csv_patch_batch_update_exp_date, get_csv_file_path,
 };
 use crate::tools::atomic_once_flag::AtomicOnceFlag;
-use crate::utils::{debug_if_enabled, persist_source_config, read_sources_file_from_path};
+use crate::utils::{
+    debug_if_enabled, format_http_status, persist_source_config, read_sources_file_from_path,
+};
 use axum::http::{Method, StatusCode};
 use chrono::{NaiveDateTime, TimeZone};
 use chrono_tz::Tz;
@@ -595,7 +597,7 @@ async fn panel_get_json(app_state: &AppState, url: Url) -> Result<Value, Tulipro
     if let Ok(json_str) = serde_json::to_string(&json_for_log) {
         debug_if_enabled!(
             "panel_api response (http {}): {}",
-            status,
+            format_http_status(status),
             sanitize_sensitive_info(&json_str)
         );
     }
@@ -630,7 +632,7 @@ async fn user_api_get_json(app_state: &AppState, url: Url) -> Result<Value, Tuli
     if let Ok(json_str) = serde_json::to_string(&json_for_log) {
         debug_if_enabled!(
             "panel_api user_api response (http {}): {}",
-            status,
+            format_http_status(status),
             sanitize_sensitive_info(&json_str)
         );
     }
@@ -3798,7 +3800,7 @@ async fn probe_panel_api_targets(
                     Ok(status) => {
                         debug_if_enabled!(
                             "panel_api probe status: '{}' action={} url: {}",
-                            status,
+                            format_http_status(status),
                             action,
                             sanitize_sensitive_info(url.as_str())
                         );
@@ -4048,7 +4050,7 @@ pub(crate) async fn run_panel_api_provisioning_probe(
             Ok(status) => {
                 debug_if_enabled!(
                     "panel_api provisioning probe status: '{}' url: {}",
-                    status,
+                    format_http_status(status),
                     sanitize_sensitive_info(test_url.as_str())
                 );
                 if status.is_success() {
