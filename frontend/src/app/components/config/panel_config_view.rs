@@ -1195,12 +1195,12 @@ pub fn PanelConfigView() -> Html {
                                                 label={Some(translate.t(LABEL_PANEL_ALIAS_POOL_MIN))}
                                                 value={alias_pool_min_val.clone()}
                                                 on_change={Some(on_alias_pool_min)}
-                                                placeholder={Some("auto".to_string())}/>
+                                                placeholder={Some("auto|<number>".to_string())}/>
                                                 <Input name="panel_alias_pool_max"
                                                     label={Some(translate.t(LABEL_PANEL_ALIAS_POOL_MAX))}
                                                     value={alias_pool_max_val.clone()}
                                                     on_change={Some(on_alias_pool_max)}
-                                                    placeholder={Some("auto".to_string())}/>
+                                                    placeholder={Some("auto|<number>".to_string())}/>
                                                 <div class="tp__input">
                                                     <label>{ translate.t(LABEL_PANEL_ALIAS_POOL_REMOVE_EXPIRED) }</label>
                                                     <div class="tp__panel-api-config-view__toggle">
