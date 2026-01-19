@@ -303,15 +303,19 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
 
     let handle_close_add_alias_item = {
         let show_alias_form = show_alias_form_state.clone();
+        let edit_alias = edit_alias.clone();
         Callback::from(move |()| {
             show_alias_form.set(false);
+            edit_alias.set(None);
         })
     };
 
     let handle_show_add_alias_item = {
         let show_alias_form = show_alias_form_state.clone();
+        let edit_alias = edit_alias.clone();
         Callback::from(move |_| {
             show_alias_form.set(true);
+            edit_alias.set(None);
         })
     };
 

@@ -47,7 +47,6 @@ pub fn BlockView(props: &BlockProps) -> Html {
         let on_block_mouse_down = props.on_mouse_down.clone();
         Callback::from(move |e: MouseEvent| {
             e.prevent_default();
-            e.stop_propagation();
             if let Some(target) = e.target_dyn_into::<web_sys::Element>() {
                 let tag = target.tag_name().to_lowercase();
                 if &tag == "span" {
@@ -88,7 +87,7 @@ pub fn BlockView(props: &BlockProps) -> Html {
         if dto_title.is_empty() {
             (translate.t(&format!("SOURCE_EDITOR.BRICK_{}", block_type)), false, is_batch)
         } else {
-            (dto_title.to_string(), show_type, is_batch)
+            (dto_title, show_type, is_batch)
         }
     };
 

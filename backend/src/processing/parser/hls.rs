@@ -19,7 +19,7 @@ fn create_hls_session_token_and_url(secret: &[u8], session_token: &str, stream_u
 pub fn get_hls_session_token_and_url_from_token(secret: &[u8], token: &str) -> Option<(Option<String>, String)> {
     if let Ok(decrypted) = deobfuscate_text(secret, token) {
         let parts: Vec<&str> = decrypted.split(TOKEN_SEPARATOR).collect();
-        if !parts.is_empty() && parts.len() == 2 {
+        if parts.len() == 2 {
             let session_token: String = parts[0].to_string();
             let stream_url: String = parts[1].to_string();
             return Some((Some(session_token), stream_url));

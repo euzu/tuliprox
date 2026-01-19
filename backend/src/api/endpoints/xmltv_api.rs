@@ -256,14 +256,14 @@ async fn serve_epg_with_rewrites(
                                                 .filter_map(Result::ok)
                                                 .find(|a| a.key.as_ref() == b"id")
                                                 .and_then(|a| a.unescape_value().ok())
-                                                .is_some_and(|v| !(**flt).eq(v.as_ref()))
+                                                .is_some_and(|v| flt.as_ref() != v.as_ref())
                                         }
                                         b"programme" => {
                                             e.attributes()
                                                 .filter_map(Result::ok)
                                                 .find(|a| a.key.as_ref() == b"channel")
                                                 .and_then(|a| a.unescape_value().ok())
-                                                .is_some_and(|v| !(**flt).eq(v.as_ref()))
+                                                .is_some_and(|v| flt.as_ref() != v.as_ref())
                                         }
                                         _ => false,
                                     };

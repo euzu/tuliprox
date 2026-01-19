@@ -21,7 +21,9 @@ $form-width: 480px;
 
 .tp__source-editor-form {
 
-   padding-bottom: var(--padding-default);
+  padding: 0 var(--padding-micro);
+  background-color: var(--card-background-color);
+
 
   &__body {
     background-color: var(--card-background-color);
@@ -70,7 +72,7 @@ $form-width: 480px;
   &__sidebar {
     .tp__icon-button.active {
       background-color: var(--menu-item-hover-background-color);
-      color: var(--menu-item-hover-color)
+      color: var(--menu-item-hover-color);
     }
 
     .tp__icon-button {

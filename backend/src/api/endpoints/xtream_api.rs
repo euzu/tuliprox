@@ -1283,7 +1283,7 @@ async fn xtream_player_api(
                 )
                 .await
             ),
-            _ => Some(info_err_res!("Unkown api call: {action} for target: {}", &target.name)),
+            _ => Some(info_err_res!("Unknown api call: {action} for target: {}", &target.name)),
         };
 
         match result {

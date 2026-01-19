@@ -1,10 +1,10 @@
+use crate::repository::storage::get_file_path_for_db_index;
 use crate::utils;
 use crate::utils::{binary_deserialize, binary_serialize};
 use fs2::FileExt as _;
-use std::os::unix::fs::FileExt;
 use indexmap::IndexMap;
-use memmap2::Mmap;
 use log::error;
+use memmap2::Mmap;
 use serde::{Deserialize, Serialize};
 use shared::error::{string_to_io_error, to_io_error};
 use std::ffi::OsString;
@@ -12,9 +12,9 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::marker::PhantomData;
 use std::mem::size_of;
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
-use crate::repository::storage::get_file_path_for_db_index;
 
 // Constants (Restored)
 const PAGE_SIZE: u16 = 4096;
@@ -1209,18 +1209,18 @@ where
         let start = usize::try_from(offset).map_err(to_io_error)?;
         // Basic safety check for mmap bounds
         if start + FLAG_SIZE + LEN_SIZE > mmap.len() {
-             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Mmap access out of bounds"));
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Mmap access out of bounds"));
         }
-        
+
         let keys_len = u32_from_bytes(&mmap[start + FLAG_SIZE..start + FLAG_SIZE + LEN_SIZE])? as usize;
         let _ = start + FLAG_SIZE + LEN_SIZE + keys_len;
-        
+
         // We need to know the total size of the node to slice the mmap
         // For simplicity, we can just slice a PAGE_SIZE or slightly more if we know it overflows.
         // Actually, our serialize_to_block uses PAGE_SIZE blocks.
-        
+
         let slice = &mmap[start..];
-        
+
         Self::deserialize_from_block_slice(slice, file, nested)
     }
 
@@ -1393,13 +1393,13 @@ impl BPlusTreeMetadata {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Self {
-         match bytes.len() {
-             4 => {
-                 let arr: [u8; 4] = bytes.try_into().unwrap_or([0; 4]);
-                 Self::TargetIdMapping(u32::from_le_bytes(arr))
-             },
-             _ => Self::Empty, // Unknown metadata treated as Empty for now
-         }
+        match bytes.len() {
+            4 => {
+                let arr: [u8; 4] = bytes.try_into().unwrap_or([0; 4]);
+                Self::TargetIdMapping(u32::from_le_bytes(arr))
+            }
+            _ => Self::Empty, // Unknown metadata treated as Empty for now
+        }
     }
 }
 
@@ -1546,7 +1546,7 @@ where
     pub fn store_index<SortKey, F>(filepath: &Path, sort_key_extractor: F) -> io::Result<()>
     where
         SortKey: Ord + Serialize,
-        F: Fn(&V) -> SortKey
+        F: Fn(&V) -> SortKey,
     {
         let index_path = get_file_path_for_db_index(filepath);
 
@@ -1585,20 +1585,20 @@ where
         header[4..8].copy_from_slice(&STORAGE_VERSION.to_le_bytes());
         // Placeholder for root offset, will be updated after serialization
         header[8..16].copy_from_slice(&HEADER_SIZE.to_le_bytes());
-        
+
         let meta_bytes = self.metadata.to_bytes();
-        
+
         if !meta_bytes.is_empty() {
             let len = u32::try_from(meta_bytes.len()).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
             header[16..20].copy_from_slice(&len.to_le_bytes());
-            header[20..20+meta_bytes.len()].copy_from_slice(&meta_bytes);
+            header[20..20 + meta_bytes.len()].copy_from_slice(&meta_bytes);
         }
 
         file.write_all(&header)?;
-        
+
         // We need to ensure we pad to PAGE_SIZE before continuing
         file.seek(SeekFrom::Start(HEADER_SIZE))?;
-        
+
         // Use breadth-first serialization for better disk locality
         match self.root.serialize_breadth_first(&mut file, &mut buffer, HEADER_SIZE) {
             Ok(result) => {
@@ -1625,7 +1625,7 @@ where
         write_buffer: &mut [u8],
     ) -> io::Result<u64> {
         if next_level_pointers.is_empty() {
-             return Ok(current_offset);
+            return Ok(current_offset);
         }
 
         while next_level_pointers.len() > 1 {
@@ -2106,7 +2106,7 @@ where
         } else if let Some(file) = &mut self.file {
             BPlusTreeNode::<K, V>::deserialize_from_block(file, &mut self.buffer, self.root_offset, false)?
         } else {
-             return Err(BPlusTreeError::InvalidStructure("No data source available".into()));
+            return Err(BPlusTreeError::InvalidStructure("No data source available".into()));
         };
         Ok(node.is_leaf && node.keys.is_empty())
     }
@@ -2116,9 +2116,9 @@ where
     pub fn iter(&mut self) -> BPlusTreeDiskIterator<'_, K, V> {
         BPlusTreeDiskIterator::new(self)
     }
-    
+
     /// Owned iterator that traverses the tree in order defined by a secondary sorted index.
-    /// 
+    ///
     /// The index path is automatically derived from the tree filepath by changing
     /// the extension to `.idx`. For example, if the tree is at `/data/items.bin`,
     /// the index is expected at `/data/items.idx`.
@@ -2159,7 +2159,7 @@ where
     pub fn collect_with_locations(&mut self) -> io::Result<Vec<(K, V, super::sorted_index::ValueLocation)>> {
         let mut result = Vec::new();
         let mut stack = vec![self.root_offset];
-        
+
         while let Some(offset) = stack.pop() {
             let (node, pointers) = if let Some(mmap) = &self.mmap {
                 let mut cursor = io::Cursor::new(mmap.as_ref());
@@ -2167,9 +2167,9 @@ where
             } else if let Some(file) = &mut self.file {
                 BPlusTreeNode::<K, V>::deserialize_from_block(file, &mut self.buffer, offset, false)?
             } else {
-                 return Err(io::Error::other("No data source available"));
+                return Err(io::Error::other("No data source available"));
             };
-            
+
             if node.is_leaf {
                 if let Some(mmap) = &self.mmap {
                     let mut cursor = io::Cursor::new(mmap.as_ref());
@@ -2204,7 +2204,6 @@ where
     pub fn disk_iter(self) -> BPlusTreeDiskIteratorOwned<K, V> {
         BPlusTreeDiskIteratorOwned::new(self)
     }
-
 }
 
 
@@ -2524,10 +2523,10 @@ where
 
     /// Helper to access metadata
     pub fn get_metadata(&mut self) -> io::Result<BPlusTreeMetadata> {
-        self.file.get_mut().seek(SeekFrom::Start(METADATA_OFFSET_POS))?;
+        self.file.seek(SeekFrom::Start(METADATA_OFFSET_POS))?;
         let mut len_buf = [0u8; 4];
         if self.file.read_exact(&mut len_buf).is_err() {
-             return Ok(BPlusTreeMetadata::Empty);
+            return Ok(BPlusTreeMetadata::Empty);
         }
         let len = u32::from_le_bytes(len_buf);
         if len == 0 || len as usize > METADATA_MAX_SIZE {
@@ -2535,7 +2534,7 @@ where
         }
         let mut buf = vec![0u8; len as usize];
         self.file.read_exact(&mut buf)?;
-        
+
         Ok(BPlusTreeMetadata::from_bytes(&buf))
     }
 
@@ -2543,13 +2542,19 @@ where
     pub fn set_metadata(&mut self, data: &BPlusTreeMetadata) -> io::Result<()> {
         let bytes = data.to_bytes();
         if bytes.len() > METADATA_MAX_SIZE {
-           return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("Metadata too large: {} > {}", bytes.len(), METADATA_MAX_SIZE)));
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("Metadata too large: {} > {}", bytes.len(), METADATA_MAX_SIZE)));
         }
-        
-        self.file.get_mut().seek(SeekFrom::Start(METADATA_OFFSET_POS))?;
-        self.file.get_mut().write_all(&u32::try_from(bytes.len()).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?.to_le_bytes())?;
-        self.file.get_mut().write_all(&bytes)?;
-        self.file.get_mut().flush()?; // Ensure it hits disk
+
+        self.file.seek(SeekFrom::Start(METADATA_OFFSET_POS))?;
+        {
+            let file = self.file.get_mut();
+            file.write_all(&u32::try_from(bytes.len()).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?.to_le_bytes())?;
+            file.write_all(&bytes)?;
+            file.flush()?; // Ensure it hits disk
+        }
+        // Resync/clear reader buffer after direct writes.
+        self.file.stream_position()?;
+
         Ok(())
     }
 
@@ -2853,20 +2858,20 @@ where
         // 1. Read existing metadata from source (manually to avoid full load)
         let mut metadata = Vec::new();
         {
-             if let Ok(mut src) = File::open(filepath) {
-                 if src.seek(SeekFrom::Start(METADATA_OFFSET_POS)).is_ok() {
-                      let mut lbuf = [0u8; 4];
-                      if src.read_exact(&mut lbuf).is_ok() {
-                          let l = u32::from_le_bytes(lbuf);
-                          if l > 0 && l as usize <= METADATA_MAX_SIZE {
-                              let mut b = vec![0u8; l as usize];
-                              if src.read_exact(&mut b).is_ok() {
-                                  metadata = b;
-                              }
-                          }
-                      }
-                 }
-             }
+            if let Ok(mut src) = File::open(filepath) {
+                if src.seek(SeekFrom::Start(METADATA_OFFSET_POS)).is_ok() {
+                    let mut lbuf = [0u8; 4];
+                    if src.read_exact(&mut lbuf).is_ok() {
+                        let l = u32::from_le_bytes(lbuf);
+                        if l > 0 && l as usize <= METADATA_MAX_SIZE {
+                            let mut b = vec![0u8; l as usize];
+                            if src.read_exact(&mut b).is_ok() {
+                                metadata = b;
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // 2. Write Header placeholder
@@ -2878,10 +2883,10 @@ where
         // Root offset placeholder (will be filled later)
         // Root offset placeholder (will be filled later)
         if !metadata.is_empty() {
-             let len = u32::try_from(metadata.len()).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-             // Ensure we check max size? 
-             header[16..20].copy_from_slice(&len.to_le_bytes());
-             header[20..20+metadata.len()].copy_from_slice(&metadata);
+            let len = u32::try_from(metadata.len()).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            // Ensure we check max size?
+            header[16..20].copy_from_slice(&len.to_le_bytes());
+            header[20..20 + metadata.len()].copy_from_slice(&metadata);
         }
         temp_file.write_all(&header)?;
 

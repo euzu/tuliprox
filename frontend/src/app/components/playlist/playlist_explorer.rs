@@ -502,7 +502,7 @@ pub fn PlaylistExplorer() -> Html {
                             let channel_select = ChannelSelection {
                                 virtual_id: e.id,
                                 cluster: XtreamCluster::Series,
-                                url: String::new(),
+                                url: String::new(), // TODO provider url
                             };
                             let popup_onclick = popup_onclick.clone();
                             let logo = if e.movie_image.is_empty() { series_info.logo.to_string() } else { e.movie_image.to_string() };

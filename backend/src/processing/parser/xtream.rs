@@ -1,19 +1,18 @@
 use std::sync::Arc;
 use crate::model::ConfigInput;
-use crate::model::{XtreamCategory};
+use crate::model::XtreamCategory;
 use crate::utils::request::DynReader;
 use crate::utils::xtream::get_xtream_stream_url_base;
-use shared::error::{notify_err_res, notify_err, TuliproxError};
+use shared::error::{notify_err, notify_err_res, TuliproxError};
 use shared::model::{EpisodeStreamProperties, LiveStreamProperties, PlaylistGroup, PlaylistItem,
                     PlaylistItemHeader, PlaylistItemType, SeriesStreamDetailEpisodeProperties,
-                    SeriesStreamProperties, StreamProperties, UUIDType, VideoStreamProperties,
+                    SeriesStreamProperties, StreamProperties, VideoStreamProperties,
                     XtreamCluster, XtreamPlaylistItem};
 use shared::utils::{generate_playlist_uuid, trim_last_slash, Internable};
 use indexmap::IndexMap;
 use tokio::task::spawn_blocking;
 use serde::Deserializer;
-
-
+use shared::model::UUIDType;
 
 async fn map_to_xtream_category(categories: DynReader) -> Result<Vec<XtreamCategory>, TuliproxError> {
     spawn_blocking(move || {
@@ -169,13 +168,13 @@ pub async fn parse_xtream(input: &ConfigInput,
                                  logo: Arc::clone(&stream.get_stream_icon()),
                                  group: Arc::clone(category_name),
                                  title: Arc::clone(&stream.get_name()),
-                                 url: stream_url.intern(),
+                                 url: stream_url.clone(),
                                  epg_channel_id: stream.get_epg_channel_id(),
                                  item_type,
                                  xtream_cluster,
                                  additional_properties: Some(stream),
                                  category_id: 0,
-                                 input_name: input_name.intern(),
+                                 input_name: input_name.clone(),
                                  ..Default::default()
                             },
                         };
@@ -195,7 +194,7 @@ pub async fn parse_xtream(input: &ConfigInput,
                             PlaylistGroup {
                                 id: category.category_id,
                                 xtream_cluster,
-                                title: category.category_name.intern(),
+                                title: Arc::clone(&category.category_name),
                                 channels: category.channels.clone(),
                             }
                         }).collect()))

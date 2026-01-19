@@ -2,11 +2,12 @@ use std::collections::HashMap;
 use crate::library::{MediaMetadata, MetadataAsyncIter, MetadataCacheEntry};
 use crate::model::{AppConfig, ConfigInput};
 use shared::error::TuliproxError;
-use shared::model::{EpisodeStreamProperties, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, SeriesStreamDetailEpisodeProperties, SeriesStreamDetailProperties, SeriesStreamDetailSeasonProperties, SeriesStreamProperties, StreamProperties, UUIDType, VideoStreamDetailProperties, VideoStreamProperties, XtreamCluster};
+use shared::model::{EpisodeStreamProperties, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, SeriesStreamDetailEpisodeProperties, SeriesStreamDetailProperties, SeriesStreamDetailSeasonProperties, SeriesStreamProperties, StreamProperties, VideoStreamDetailProperties, VideoStreamProperties, XtreamCluster};
 use shared::utils::{generate_playlist_uuid, Internable};
 use std::path::Path;
 use std::sync::Arc;
 use shared::concat_string;
+use shared::model::UUIDType;
 
 pub async fn download_library_playlist(_client: &reqwest::Client, app_config: &Arc<AppConfig>, input: &ConfigInput) -> (Vec<PlaylistGroup>, Vec<TuliproxError>) {
     let config = &*app_config.config.load();

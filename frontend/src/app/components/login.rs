@@ -22,7 +22,7 @@ pub fn Login() -> Html {
     let services_ctx = services.clone();
     let app_logo = use_memo(services_ctx,|service| {
         match service.config.ui_config.app_logo.as_ref() {
-            Some(logo) => html! { <img src={logo.to_string()} alt="logo" loading="lazy"/> },
+            Some(logo) => html! { <img src={logo.to_string()} alt="logo"/> },
             None => html! { <AppIcon name="Logo"  width={"48"} height={"48"}/> },
         }
     });

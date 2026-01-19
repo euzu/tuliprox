@@ -6,6 +6,7 @@ use crate::utils::{arc_str_default_on_null, arc_str_none_default_on_null, arc_st
                    deserialize_number_from_string_or_zero, serialize_json_as_opt_string, serialize_option_string_as_null_if_empty, Internable};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use log::{error};
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct LiveStreamProperties {
@@ -750,7 +751,10 @@ impl SeriesStreamProperties {
     pub fn from_info_doc(info: &XtreamSeriesInfoDoc, series_id: u32) -> SeriesStreamProperties {
         SeriesStreamProperties {
             name: info.info.name.clone(),
-            category_id: info.info.category_id.parse::<u32>().unwrap_or(0),
+            category_id: info.info.category_id.parse::<u32>().unwrap_or_else(|_| {
+                error!("Failed to parse category_id {}", &info.info.category_id);
+                0
+            }),
             series_id,
             backdrop_path: Some(info.info.backdrop_path.clone()),
             cast: info.info.cast.clone(),
@@ -760,8 +764,14 @@ impl SeriesStreamProperties {
             genre: Some(info.info.genre.clone()),
             last_modified: Some(info.info.last_modified.clone()),
             plot: Some(info.info.plot.clone()),
-            rating: info.info.rating.parse::<f64>().unwrap_or(0.0),
-            rating_5based: info.info.rating_5based.parse::<f64>().unwrap_or(0.0),
+            rating: info.info.rating.parse::<f64>().unwrap_or_else(|_| {
+                error!("Failed to parse rating {}", &info.info.rating);
+                0.0
+            }),
+            rating_5based: info.info.rating_5based.parse::<f64>().unwrap_or_else(|_| {
+                error!("Failed to parse rating_5based {}", &info.info.rating_5based);
+                0.0
+            }),
             release_date: Some(info.info.release_date.clone()),
             youtube_trailer: info.info.youtube_trailer.clone(),
             tmdb: info.info.tmdb.parse::<u32>().ok(),
@@ -772,7 +782,10 @@ impl SeriesStreamProperties {
                         SeriesStreamDetailSeasonProperties {
                             name: s.name.clone(),
                             season_number: s.season_number,
-                            episode_count: s.episode_count.parse::<u32>().unwrap_or(0),
+                            episode_count: s.episode_count.parse::<u32>().unwrap_or_else(|_| {
+                                error!("Failed to parse episode_count {}", &s.episode_count);
+                                0
+                            }),
                             overview: s.overview.clone(),
                             air_date: s.air_date.clone(),
                             cover: s.cover.clone(),
@@ -786,7 +799,10 @@ impl SeriesStreamProperties {
                 episodes: {
                     let mut episodes: Vec<SeriesStreamDetailEpisodeProperties> = info.episodes.iter().flat_map(|(_, list)| list.iter()).map(|e|
                         SeriesStreamDetailEpisodeProperties {
-                            id: e.id.parse::<u32>().unwrap_or(0),
+                            id: e.id.parse::<u32>().unwrap_or_else(|_| {
+                                error!("Failed to parse episode id {}", &e.id);
+                                0
+                            }),
                             episode_num: e.episode_num,
                             season: e.season,
                             title: e.title.clone(),

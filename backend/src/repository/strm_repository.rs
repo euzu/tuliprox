@@ -2,7 +2,7 @@
 use crate::model::MediaQuality;
 use crate::model::{ApiProxyServerInfo, AppConfig, ProxyUserCredentials};
 use crate::model::{ConfigTarget, StrmTargetOutput};
-use crate::repository::storage::{ensure_target_storage_path};
+use crate::repository::storage::ensure_target_storage_path;
 use crate::repository::storage_const;
 use crate::utils::{async_file_reader, async_file_writer, normalize_string_path, truncate_filename,
                    IO_BUFFER_SIZE};
@@ -11,15 +11,16 @@ use filetime::{set_file_times, FileTime};
 use log::{error, trace};
 use regex::Regex;
 use serde::Serialize;
-use shared::error::{TuliproxError, info_err_res};
-use shared::model::{ClusterFlags, PlaylistGroup, PlaylistItem, PlaylistItemType, StreamProperties, StrmExportStyle, UUIDType};
-use shared::utils::{ is_blank_optional_arc_str, arc_str_option_serde, arc_str_serde, extract_extension_from_url,
-                     hash_bytes, hash_string_as_hex, truncate_string, ExportStyleConfig, CONSTANTS};
+use shared::error::{info_err_res, TuliproxError};
+use shared::model::{ClusterFlags, PlaylistGroup, PlaylistItem, PlaylistItemType, StreamProperties, StrmExportStyle};
+use shared::utils::{arc_str_option_serde, arc_str_serde, extract_extension_from_url, hash_bytes,
+                    hash_string_as_hex, is_blank_optional_arc_str, truncate_string, ExportStyleConfig, CONSTANTS};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs::{create_dir_all, remove_dir, remove_file, File};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+use shared::model::UUIDType;
 
 /// Sanitizes a string to be safe for use as a file or directory name by
 /// following a strict "allow-list" approach and discarding invalid characters.
@@ -204,14 +205,14 @@ fn extract_item_info(pli: &mut PlaylistItem) -> StrmItemInfo {
     };
     StrmItemInfo {
         group,
-        title: title.clone(),
+        title,
         item_type,
         provider_id,
         virtual_id,
         input_name,
-        url: url.clone(),
-        series_name: series_name.clone(),
-        release_date: release_date.clone(),
+        url,
+        series_name,
+        release_date,
         season,
         episode,
         added: added.as_ref().map_or_else(|| Some(0), |a| a.parse::<u64>().ok()),

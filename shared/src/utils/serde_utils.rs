@@ -7,6 +7,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use std::io;
 use std::sync::Arc;
+use crate::utils::Internable;
 
 fn value_to_string_array(value: &[Value]) -> Vec<Arc<str>> {
     value.iter().filter_map(value_to_arc_str).collect()
@@ -14,9 +15,9 @@ fn value_to_string_array(value: &[Value]) -> Vec<Arc<str>> {
 
 fn value_to_arc_str(v: &Value) -> Option<Arc<str>> {
     match v {
-        Value::Bool(value) => Some(value.to_string().into()),
-        Value::Number(value) => Some(value.to_string().into()),
-        Value::String(value) => Some(value.to_string().into()),
+        Value::Bool(value) => Some(value.to_string().intern()),
+        Value::Number(value) => Some(value.to_string().intern()),
+        Value::String(value) => Some(value.intern()),
         _ => None,
     }
 }

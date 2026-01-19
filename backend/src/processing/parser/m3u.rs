@@ -91,11 +91,11 @@ fn skip_digit(it: &mut std::str::Chars) -> Option<char> {
     }
 }
 
-fn create_empty_playlistitem_header(input_name: &str, url: String) -> PlaylistItemHeader {
+fn create_empty_playlistitem_header(input_name: &Arc<str>, url: String) -> PlaylistItemHeader {
     PlaylistItemHeader {
         url: url.into(),
         category_id: 0,
-        input_name: input_name.intern(),
+        input_name: Arc::clone(input_name),
         ..Default::default()
     }
 }
@@ -239,8 +239,8 @@ pub async fn consume_m3u<F: FnMut(PlaylistItem)>(cfg: &Config, input: &ConfigInp
                     if let Some(group_value) = group {
                         header.group = group_value.intern();
                     } else {
-                        let current_title = header.title.clone();
-                        header.group = get_title_group(&current_title);
+                        let group = get_title_group(&header.title);
+                        header.group = group;
                     }
                 }
                 visit(item);

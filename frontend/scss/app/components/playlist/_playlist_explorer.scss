@@ -3,6 +3,7 @@ $movie-card-width: 16rem;
 $live-card-width: 17.5rem;
 $episode-card-height: 10rem;
 $episode-card-width: 18rem;
+$series-backdrop-height: 300px;
 
 .tp__playlist-explorer {
   display: flex;
@@ -316,7 +317,7 @@ $episode-card-width: 18rem;
         display: flex;
         flex-flow: column;
         gap: var(--gap-default);
-        min-height: 300px;
+        min-height: $series-backdrop-height;
         background-size: cover;
         background-position: right top;
 
@@ -338,7 +339,7 @@ $episode-card-width: 18rem;
     &__title {
       font-weight: bold;
       font-size: 2.5rem;
-      color: white;
+      color: var(--series-info-title-color, white);
     }
 
     &__infos {
@@ -348,7 +349,7 @@ $episode-card-width: 18rem;
     }
 
     &__season {
-      color: white;
+      color: var(--series-info-title-color, white);
       display: flex;
       flex-flow: column;
       gap: var(--gap-default);

@@ -135,7 +135,7 @@ pub mod arc_str_serde {
         D: Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        Ok(intern_str(&s))
+        Ok(s.intern())
     }
 }
 
@@ -164,7 +164,7 @@ pub mod arc_str_vec_serde {
         D: Deserializer<'de>,
     {
         let vec = Vec::<String>::deserialize(deserializer)?;
-        Ok(vec.into_iter().map(|s| intern_str(&s)).collect())
+        Ok(vec.into_iter().map(|s| s.intern()).collect())
     }
 }
 
@@ -182,7 +182,7 @@ pub mod arc_str_serde_none {
         D: Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        Ok(Arc::from(s))
+        Ok(s.intern())
     }
 }
 
@@ -203,7 +203,7 @@ pub mod arc_str_option_serde {
         D: Deserializer<'de>,
     {
         let opt = Option::<String>::deserialize(deserializer)?;
-        Ok(opt.map(|s| intern_str(&s)))
+        Ok(opt.map(|s| s.intern()))
     }
 
     pub fn serialize_null_if_empty<S>(value: &Option<Arc<str>>, serializer: S) -> Result<S::Ok, S::Error>
@@ -235,7 +235,7 @@ pub mod arc_str_option_serde_none {
         D: Deserializer<'de>,
     {
         let opt = Option::<String>::deserialize(deserializer)?;
-        Ok(opt.map(Arc::from))
+        Ok(opt.map(|s| s.intern()))
     }
 }
 
@@ -244,7 +244,7 @@ where
     D: Deserializer<'de>,
 {
     let opt = Option::<String>::deserialize(deserializer)?;
-    Ok(intern_str(&opt.unwrap_or_default()))
+    Ok(opt.unwrap_or_default().intern())
 }
 
 pub fn arc_str_none_default_on_null<'de, D>(deserializer: D) -> Result<Arc<str>, D::Error>
@@ -252,7 +252,7 @@ where
     D: Deserializer<'de>,
 {
     let opt = Option::<String>::deserialize(deserializer)?;
-    Ok(Arc::from(opt.unwrap_or_default()))
+    Ok(opt.unwrap_or_default().intern())
 }
 
 pub fn deserialize_as_option_arc_str<'de, D>(deserializer: D) -> Result<Option<Arc<str>>, D::Error>
@@ -261,8 +261,8 @@ where
 {
     let value: serde_json::Value = Deserialize::deserialize(deserializer)?;
     match value {
-        serde_json::Value::String(s) => Ok(Some(intern_str(&s))),
-        serde_json::Value::Number(s) => Ok(Some(intern_str(&s.to_string()))),
+        serde_json::Value::String(s) => Ok(Some(s.intern())),
+        serde_json::Value::Number(s) => Ok(Some(s.to_string().intern())),
         _ => Ok(None),
     }
 }
@@ -273,8 +273,8 @@ where
 {
     let value: serde_json::Value = Deserialize::deserialize(deserializer)?;
     match value {
-        serde_json::Value::String(s) => Ok(Some(Arc::from(s))),
-        serde_json::Value::Number(s) => Ok(Some(Arc::from(s.to_string()))),
+        serde_json::Value::String(s) => Ok(Some(s.intern())),
+        serde_json::Value::Number(s) => Ok(Some(s.to_string().intern())),
         _ => Ok(None),
     }
 }

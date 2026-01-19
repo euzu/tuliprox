@@ -106,6 +106,8 @@ fn get_process_targets(cfg: &Arc<AppConfig>, process_targets: &Arc<ProcessTarget
     Arc::clone(process_targets)
 }
 
+// TODO Consider making the GC interval configurable.
+// The 180-second interval is hardcoded. For deployments with different memory/performance characteristics, a configurable interval might be useful.
 pub fn exec_interner_prune(app_state: &Arc<AppState>) {
     let app_state = Arc::clone(app_state);
     tokio::spawn({
@@ -113,6 +115,7 @@ pub fn exec_interner_prune(app_state: &Arc<AppState>) {
             loop {
                 tokio::time::sleep(Duration::from_secs(180)).await;
                 if let Some(permit) = app_state.update_guard.try_playlist() {
+                    // Gate check: ensure updates aren't in progress; permit dropped to allow concurrent updates during GC
                     drop(permit);
                     interner_gc();
                 }

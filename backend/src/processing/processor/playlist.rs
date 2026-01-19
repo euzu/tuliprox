@@ -40,10 +40,11 @@ use shared::foundation::filter::{get_field_value, set_field_value, Filter, Value
 use shared::model::xtream_const::XTREAM_CLUSTER;
 use shared::model::{CounterModifier, FieldGetAccessor, FieldSetAccessor, InputType, ItemField, MsgKind,
                     PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistUpdateState,
-                    ProcessingOrder, UUIDType, XtreamCluster};
+                    ProcessingOrder, XtreamCluster};
 use shared::utils::{create_alias_uuid, default_as_default, interner_gc, Internable};
 use std::time::Instant;
 use shared::concat_string;
+use shared::model::UUIDType;
 
 fn is_valid(pli: &PlaylistItem, filter: &Filter, match_as_ascii: bool) -> bool {
     let provider = ValueProvider { pli, match_as_ascii };

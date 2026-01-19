@@ -61,7 +61,7 @@ impl PlaylistService {
             response.map(|resp| to_ui_playlist_groups(resp, XtreamCluster::Series))
         });
 
-        if live.is_some() && vod.is_some() && series.is_some() {
+        if live.is_some() || vod.is_some() || series.is_some() {
             return Some(Rc::new(UiPlaylistCategories {
                 live,
                 vod,

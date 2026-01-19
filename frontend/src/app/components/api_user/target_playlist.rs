@@ -245,7 +245,7 @@ pub fn UserTargetPlaylist(props: &UserTargetPlaylistProps) -> Html {
                                 on_select={Callback::from(move |selections: Rc<Vec<String>>| {
                                     if let Some(first) = selections.first() {
                                        let mut cluster_state = (*filter_state).clone();
-                                       cluster_state.insert(cluster, FilterState::from_str(first.as_str()).unwrap());
+                                       cluster_state.insert(cluster, FilterState::from_str(first.as_str()).unwrap_or(FilterState::All));
                                        filter_state.set(cluster_state);
                                     }
                                 })}

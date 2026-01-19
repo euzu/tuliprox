@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use crate::model::{ConfigInput, TVGuide};
-use shared::model::{PlaylistGroup, PlaylistItem, UUIDType};
+use shared::model::{PlaylistGroup, PlaylistItem};
+use shared::model::UUIDType;
 use crate::repository::PlaylistSource;
 
 pub struct FetchedPlaylist<'a> {

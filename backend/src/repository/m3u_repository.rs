@@ -163,9 +163,6 @@ pub async fn m3u_get_item_for_stream_id(stream_id: u32, app_state: &AppState, ta
 pub async fn iter_raw_m3u_target_playlist(config: &AppConfig, target: &ConfigTarget, cluster: Option<XtreamCluster>) -> Option<(FileReadGuard, Box<dyn Iterator<Item=M3uPlaylistItem> + Send>)> {
     let target_path = get_target_storage_path(&config.config.load(), target.name.as_str())?;
     let m3u_path = m3u_get_file_path_for_db(&target_path);
-    if let Ok(false) = tokio::fs::try_exists(&m3u_path).await {
-        return None;
-    }
 
     iter_raw_m3u_playlist::<u32, u32>(config, &m3u_path, cluster).await
 }
@@ -174,9 +171,6 @@ pub async fn iter_raw_m3u_input_playlist(app_config: &AppConfig, input: &ConfigI
     let working_dir = &app_config.config.load().working_dir;
     let storage_path = get_input_storage_path(&input.name, working_dir).ok()?;
     let m3u_path = get_input_m3u_playlist_file_path(&storage_path, &input.name);
-    if let Ok(false) = tokio::fs::try_exists(&m3u_path).await {
-        return None;
-    }
 
     iter_raw_m3u_playlist::<u32, Arc<str>>(app_config, &m3u_path, cluster).await
 }
