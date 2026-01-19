@@ -1168,9 +1168,10 @@ dependencies = [
  "futures-signals",
  "gloo-render 0.2.0",
  "gloo-storage 0.3.0",
- "gloo-timers 0.2.6",
+ "gloo-timers 0.3.0",
  "gloo-utils 0.2.0",
  "implicit-clone",
+ "indexmap",
  "js-sys",
  "log",
  "prost",
@@ -1691,8 +1692,6 @@ version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b995a66bb87bebce9a0f4a95aed01daca4872c050bfcb21653361c03bc35e5c"
 dependencies = [
- "futures-channel",
- "futures-core",
  "js-sys",
  "wasm-bindgen",
 ]
@@ -2273,6 +2272,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "inner"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9368e93322f271c5ca078ed2ddcfad3511f1a40f564e522ade34e6e5c8e6680"
+
+[[package]]
 name = "inotify"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2525,6 +2530,15 @@ name = "memchr"
 version = "2.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f52b00d39961fc5b2736ea853c9cc86238e165017a493d1d5c8eac6bdc4cc273"
+
+[[package]]
+name = "memmap2"
+version = "0.9.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "744133e4a0e0a658e1374cf3bf8e415c4052a15a111acd372764c55b4177d490"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "mime"
@@ -4585,11 +4599,13 @@ dependencies = [
  "hyper",
  "hyper-util",
  "indexmap",
+ "inner",
  "jsonwebtoken",
  "libc",
  "log",
  "lol_html",
  "lz4_flex",
+ "memmap2",
  "mime",
  "mime_guess",
  "notify",

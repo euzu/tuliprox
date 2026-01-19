@@ -6,16 +6,17 @@ use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use std::io;
+use std::sync::Arc;
 
-fn value_to_string_array(value: &[Value]) -> Vec<String> {
-    value.iter().filter_map(value_to_string).collect()
+fn value_to_string_array(value: &[Value]) -> Vec<Arc<str>> {
+    value.iter().filter_map(value_to_arc_str).collect()
 }
 
-fn value_to_string(v: &Value) -> Option<String> {
+fn value_to_arc_str(v: &Value) -> Option<Arc<str>> {
     match v {
-        Value::Bool(value) => Some(value.to_string()),
-        Value::Number(value) => Some(value.to_string()),
-        Value::String(value) => Some(value.to_string()),
+        Value::Bool(value) => Some(value.to_string().into()),
+        Value::Number(value) => Some(value.to_string().into()),
+        Value::String(value) => Some(value.to_string().into()),
         _ => None,
     }
 }
@@ -41,17 +42,18 @@ where
     }
 }
 
-pub fn serialize_option_string_as_null_if_empty<S>(
-    value: &Option<String>,
+pub fn serialize_option_string_as_null_if_empty<T, S>(
+    value: &Option<T>,
     serializer: S,
 ) -> Result<S::Ok, S::Error>
 where
+    T: AsRef<str>,
     S: serde::Serializer,
 {
     match value {
         None => serializer.serialize_none(),
-        Some(s) if s.is_empty() => serializer.serialize_none(),
-        Some(s) => serializer.serialize_str(s),
+        Some(s) if s.as_ref().is_empty() => serializer.serialize_none(),
+        Some(s) => serializer.serialize_str(s.as_ref()),
     }
 }
 
@@ -69,12 +71,12 @@ where
     }
 }
 
-pub fn deserialize_as_string_array<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+pub fn deserialize_as_string_array<'de, D>(deserializer: D) -> Result<Option<Vec<Arc<str>>>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     Value::deserialize(deserializer).map(|v| match v {
-        Value::String(value) => Some(vec![value]),
+        Value::String(value) => Some(vec![value.into()]),
         Value::Array(value) => Some(value_to_string_array(&value)),
         _ => None,
     })
@@ -293,7 +295,7 @@ pub fn parse_timestamp(value: &str) -> Result<Option<i64>, ParseError> {
 /// - The string is compressed using LZ4 and encoded in Base64.
 /// - Works for any JSON content: strings, arrays, and objects.
 /// - Empty arrays or objects are serialized as `null`.
-pub fn serialize_json_as_opt_string<S>(value: &Option<String>,
+pub fn serialize_json_as_opt_string<S>(value: &Option<Arc<str>>,
                                        serializer: S,
 ) -> Result<S::Ok, S::Error>
 where
@@ -319,7 +321,7 @@ where
 /// - Handles arrays and objects by converting them to JSON strings if not empty.
 pub fn deserialize_json_as_opt_string<'de, D>(
     deserializer: D,
-) -> Result<Option<String>, D::Error>
+) -> Result<Option<Arc<str>>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -335,7 +337,7 @@ where
             } else {
                 let compressed = match base64::engine::general_purpose::STANDARD_NO_PAD.decode(&s) {
                     Ok(bytes) => bytes,
-                    Err(_) => return Ok(Some(s)),
+                    Err(_) => return Ok(Some(s.into())),
                 };
 
                 let decompressed = match lz4_flex::decompress_size_prepended(&compressed) {
@@ -344,7 +346,7 @@ where
                 };
 
                 match String::from_utf8(decompressed) {
-                    Ok(text) => Ok(Some(text)),
+                    Ok(text) => Ok(Some(text.into())),
                     Err(_) => Ok(None),
                 }
             }
@@ -352,7 +354,7 @@ where
         Some(Value::Null)
         | Some(Value::Number(_))
         | Some(Value::Bool(_)) => Ok(None),
-        Some(v) => Ok(Some(serde_json::to_string(&v).map_err(D::Error::custom)?)),
+        Some(v) => Ok(Some(serde_json::to_string(&v).map_err(D::Error::custom)?.into())),
     }
 }
 

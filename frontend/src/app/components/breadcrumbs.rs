@@ -18,6 +18,7 @@ pub fn Breadcrumbs(props: &BreadcrumbsProps) -> Html {
         let click = props.onclick.clone();
         Callback::from(move |e: MouseEvent| {
             e.prevent_default();
+            e.stop_propagation();
             if let Some(target) = e.target() {
                 if let Ok(element) = target.dyn_into::<web_sys::Element>() {
                     if let Some(data_name) = element.get_attribute("data-name") {

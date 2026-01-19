@@ -1,6 +1,6 @@
 use crate::api::api_utils::{create_session_fingerprint, try_unwrap_body};
 use crate::api::api_utils::{
-    force_provider_stream_response, get_stream_alternative_url, is_seek_request,
+    force_provider_stream_response, get_stream_alternative_url, is_seek_request, local_stream_response,
 };
 use crate::api::api_utils::{get_headers_from_request, try_option_bad_request, HeaderFilter};
 use crate::api::model::AppState;
@@ -21,8 +21,9 @@ use axum::response::IntoResponse;
 use log::{debug, error};
 use serde::Deserialize;
 use shared::model::{PlaylistItemType, StreamChannel, TargetType, UserConnectionPermission, XtreamCluster};
-use shared::utils::{intern, is_hls_url, replace_url_extension, sanitize_sensitive_info, CUSTOM_VIDEO_PREFIX, HLS_EXT};
+use shared::utils::{is_hls_url, replace_url_extension, sanitize_sensitive_info, Internable, CUSTOM_VIDEO_PREFIX, HLS_EXT};
 use std::sync::Arc;
+use crate::utils::request::is_file_url;
 
 const PLAYLIST_TEMPLATE: &str = r"#EXTM3U
 #EXT-X-VERSION:3
@@ -102,7 +103,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
                         provider_cfg.name,
                         sanitize_sensitive_info(&stream_url)
                     );
-                    let user_session_token = create_session_fingerprint(&fingerprint.key, &user.username, virtual_id);
+                    let user_session_token = create_session_fingerprint(fingerprint, &user.username, virtual_id);
                     let session_token = app_state.active_users.create_user_session(
                         user,
                         &user_session_token,
@@ -187,8 +188,9 @@ async fn resolve_stream_channel(
     app_state: &Arc<AppState>,
     target: &Arc<ConfigTarget>,
     virtual_id: u32,
-    hls_url: &str,
+    hls_url: &Arc<str>,
 ) -> StreamChannel {
+    let unknown = "Unknown".intern();
     let mut channel = match get_stream_channel(app_state, target, virtual_id).await {
         Some(channel) => channel,
         None => StreamChannel {
@@ -197,9 +199,9 @@ async fn resolve_stream_channel(
             provider_id: 0,
             item_type: PlaylistItemType::LiveHls,
             cluster: XtreamCluster::Live,
-            group: intern("Unknown"),
-            title: "Unknown".to_string(),
-            url: hls_url.to_string(),
+            group: unknown.clone(),
+            title: unknown,
+            url: hls_url.clone(),
             shared: false,
         },
     };
@@ -240,7 +242,7 @@ async fn hls_api_stream(
     );
 
     debug_if_enabled!("ID chain for hls endpoint: request_stream_id={} -> virtual_id={virtual_id}", params.stream_id);
-    let user_session_token = create_session_fingerprint(&fingerprint.key, &user.username, virtual_id);
+    let user_session_token = create_session_fingerprint(&fingerprint, &user.username, virtual_id);
     let mut user_session = app_state
         .active_users
         .get_and_update_user_session(&user.username, &user_session_token).await;
@@ -272,8 +274,8 @@ async fn hls_api_stream(
             Some((Some(session_token), hls_url)) if session.token.eq(&session_token) => hls_url,
             _ => return axum::http::StatusCode::BAD_REQUEST.into_response(),
         };
-
-        session.stream_url.clone_from(&hls_url);
+        let hls_url = hls_url.intern();
+        session.stream_url = hls_url.clone();
         if session.virtual_id == virtual_id {
             let stream_channel = resolve_stream_channel(&app_state, &target, virtual_id, &hls_url).await;
             if is_seek_request(stream_channel.cluster, &req_headers).await {
@@ -314,8 +316,26 @@ async fn hls_api_stream(
                 &req_headers,
                 connection_permission,
             )
-                .await
-                .into_response();
+            .await
+            .into_response();
+        }
+
+        if is_file_url(&session.stream_url) {
+            let stream_channel =
+                resolve_stream_channel(&app_state, &target, virtual_id, &hls_url).await;
+            return local_stream_response(
+                &fingerprint,
+                &app_state,
+                stream_channel,
+                &req_headers,
+                &input,
+                &target,
+                &user,
+                connection_permission,
+                false,
+            )
+            .await
+            .into_response();
         }
 
         let stream_channel = resolve_stream_channel(&app_state, &target, virtual_id, &hls_url).await;

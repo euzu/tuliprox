@@ -1,16 +1,18 @@
-use crate::utils::is_blank_optional_string;
-use crate::error::{TuliproxError, TuliproxErrorKind};
-use crate::model::{EpgConfigDto};
-use crate::utils::{is_false, is_true, default_as_true, get_credentials_from_url_str, get_trimmed_string,
-                   sanitize_sensitive_info, trim_last_slash, deserialize_timestamp, is_zero_u16,
-                   serialize_option_vec_flow_map_items};
 use super::PanelApiConfigDto;
-use crate::{check_input_credentials, check_input_connections, info_err_res};
+use crate::error::{TuliproxError, TuliproxErrorKind};
+use crate::model::EpgConfigDto;
+use crate::utils::{arc_str_serde, default_as_true, deserialize_timestamp, get_credentials_from_url_str, get_trimmed_string,
+                   is_false, is_true, is_zero_u16, sanitize_sensitive_info,
+                   serialize_option_vec_flow_map_items, trim_last_slash};
+use crate::utils::{is_blank_optional_string, Internable};
+use crate::{check_input_connections, check_input_credentials, info_err_res};
 
 use enum_iterator::Sequence;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::str::FromStr;
+use std::sync::Arc;
+use log::warn;
 
 #[macro_export]
 macro_rules! apply_batch_aliases {
@@ -20,7 +22,7 @@ macro_rules! apply_batch_aliases {
             None
         } else {
             if let Some(aliases) = $source.aliases.as_mut() {
-                let mut names = aliases.iter().map(|a| a.name.clone()).collect::<std::collections::HashSet<String>>();
+                let mut names = aliases.iter().map(|a| a.name.clone()).collect::<std::collections::HashSet<Arc<str>>>();
                 names.insert($source.name.clone());
 
                 for alias in $batch_aliases.into_iter() {
@@ -195,14 +197,14 @@ impl ConfigInputOptionsDto {
         self.xtream_skip_series = false;
         self.xtream_live_stream_use_prefix = default_as_true();
         self.xtream_live_stream_without_extension = false;
-
     }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct StagedInputDto {
-    pub name: String,
+    #[serde(with = "arc_str_serde")]
+    pub name: Arc<str>,
     pub url: String,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub username: Option<String>,
@@ -233,7 +235,6 @@ impl StagedInputDto {
         self.method = InputFetchMethod::default();
         self.input_type = InputType::default();
         self.headers.clear();
-
     }
 }
 
@@ -242,7 +243,8 @@ impl StagedInputDto {
 pub struct ConfigInputAliasDto {
     #[serde(default, skip_serializing_if = "is_zero_u16")]
     pub id: u16,
-    pub name: String,
+    #[serde(with = "arc_str_serde")]
+    pub name: Arc<str>,
     pub url: String,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub username: Option<String>,
@@ -252,7 +254,11 @@ pub struct ConfigInputAliasDto {
     pub priority: i16,
     #[serde(default)]
     pub max_connections: u16,
-    #[serde(default, deserialize_with = "deserialize_timestamp", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_timestamp",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub exp_date: Option<i64>,
 
 }
@@ -260,7 +266,7 @@ pub struct ConfigInputAliasDto {
 impl ConfigInputAliasDto {
     pub fn prepare(&mut self, index: u16, input_type: &InputType) -> Result<u16, TuliproxError> {
         self.id = index + 1;
-        self.name = self.name.trim().to_string();
+        self.name = self.name.trim().intern();
         if self.name.is_empty() {
             return info_err_res!("name for input is mandatory");
         }
@@ -280,8 +286,8 @@ impl ConfigInputAliasDto {
 pub struct ConfigInputDto {
     #[serde(default, skip_serializing_if = "is_zero_u16")]
     pub id: u16,
-    #[serde(default)]
-    pub name: String,
+    #[serde(with = "arc_str_serde")]
+    pub name: Arc<str>,
     #[serde(default, rename = "type")]
     pub input_type: InputType,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -304,7 +310,11 @@ pub struct ConfigInputDto {
     pub cache_duration: Option<String>,
     #[serde(skip)]
     pub cache_duration_seconds: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "serialize_option_vec_flow_map_items")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_option_vec_flow_map_items"
+    )]
     pub aliases: Option<Vec<ConfigInputAliasDto>>,
     #[serde(default)]
     pub priority: i16,
@@ -314,7 +324,11 @@ pub struct ConfigInputDto {
     pub method: InputFetchMethod,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub staged: Option<StagedInputDto>,
-    #[serde(default, deserialize_with = "deserialize_timestamp", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_timestamp",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub exp_date: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub panel_api: Option<PanelApiConfigDto>,
@@ -324,7 +338,7 @@ impl Default for ConfigInputDto {
     fn default() -> Self {
         ConfigInputDto {
             id: 0,
-            name: String::new(),
+            name: "".intern(),
             input_type: InputType::default(),
             headers: HashMap::new(),
             url: String::new(),
@@ -350,36 +364,15 @@ impl Default for ConfigInputDto {
 impl ConfigInputDto {
     #[allow(clippy::cast_possible_truncation)]
     pub fn prepare(&mut self, index: u16, _include_computed: bool) -> Result<u16, TuliproxError> {
-
-        self.name = self.name.trim().to_owned();
+        self.name = self.name.trim().intern();
         if self.name.is_empty() {
             return info_err_res!("name for input is mandatory");
         }
 
         if let Some(duration_str) = &self.cache_duration {
-            self.cache_duration_seconds = match duration_str.parse::<u64>() {
-                Ok(secs) => secs,
-                Err(_) => {
-                    let len = duration_str.len();
-                    if len > 1 {
-                        let (num_str, unit) = duration_str.split_at(len - 1);
-                        match num_str.parse::<u64>() {
-                            Ok(val) => match unit {
-                                "s" => val,
-                                "m" => val * 60,
-                                "h" => val * 3600,
-                                "d" => val * 86400,
-                                _ => return info_err_res!("Invalid cache_duration unit in '{}': {}", self.name, unit),
-                            },
-                            Err(_) => return info_err_res!("Invalid cache_duration format in '{}': {}", self.name, duration_str),
-                        }
-                    } else {
-                        return info_err_res!("Invalid cache_duration format in '{}'", self.name);
-                    }
-                }
-            };
+            self.cache_duration_seconds = self.parse_duration(duration_str)?;
         } else {
-             self.cache_duration_seconds = 0;
+            self.cache_duration_seconds = 0;
         }
 
         check_input_credentials!(self, self.input_type, true, false);
@@ -387,7 +380,7 @@ impl ConfigInputDto {
         if let Some(staged_input) = self.staged.as_mut() {
             check_input_credentials!(staged_input, staged_input.input_type, true, true);
             if !matches!(staged_input.input_type, InputType::M3u | InputType::Xtream) {
-               return info_err_res!("Staged input can only be of type m3u or xtream");
+                return info_err_res!("Staged input can only be of type m3u or xtream");
             }
         }
 
@@ -404,8 +397,39 @@ impl ConfigInputDto {
         Ok(current_index)
     }
 
+    fn parse_duration(&self, duration_str: &str) -> Result<u64, TuliproxError> {
+        Ok(match duration_str.parse::<u64>() {
+            Ok(secs) => secs,
+            Err(_) => {
+                let len = duration_str.len();
+                if len > 1 {
+                    let (num_str, unit) = duration_str.split_at(len - 1);
+                    match num_str.parse::<u64>() {
+                        Ok(val) => match unit {
+                            "s" => val,
+                            "m" => val * 60,
+                            "h" => val * 3600,
+                            "d" => val * 86400,
+                            _ => return info_err_res!("Invalid cache_duration unit in '{}': {}", self.name, unit),
+                        },
+                        Err(_) => return info_err_res!("Invalid cache_duration format in '{}': {}", self.name, duration_str),
+                    }
+                } else {
+                    return info_err_res!("Invalid cache_duration format in '{}'", self.name);
+                }
+            }
+        })
+    }
+
     pub fn prepare_epg(&mut self, include_computed: bool) -> Result<(), TuliproxError> {
         if let Some(epg) = self.epg.as_mut() {
+
+            if self.input_type == InputType::Library {
+                warn!("EPG is not supported for library inputs {}, skipping", self.name);
+                self.epg = None;
+                return Ok(());
+            }
+
             let create_auto_url = || {
                 let get_creds = || {
                     if self.username.is_some() && self.password.is_some() {
@@ -415,7 +439,7 @@ impl ConfigInputDto {
                     let (u, p, r) = self.aliases
                         .as_ref()
                         .and_then(|aliases| aliases.first())
-                        .map(|alias|  (alias.username.clone(), alias.password.clone(), Some(alias.url.clone())))
+                        .map(|alias| (alias.username.clone(), alias.password.clone(), Some(alias.url.clone())))
                         .unwrap_or((None, None, None));
 
                     if u.is_some() && p.is_some() && r.is_some() {
@@ -432,14 +456,14 @@ impl ConfigInputDto {
                         .and_then(|aliases| aliases.first())
                         .map(|alias| {
                             let (u, p) = get_credentials_from_url_str(alias.url.as_str());
-                            (u,p, Some(alias.url.clone()))
+                            (u, p, Some(alias.url.clone()))
                         })
                         .unwrap_or((None, None, None))
                 };
 
                 let (username, password, base_url) = get_creds();
 
-                if username.is_none() || password.is_none() || base_url.is_none(){
+                if username.is_none() || password.is_none() || base_url.is_none() {
                     Err(format!("auto_epg is enabled for input {}, but no credentials could be extracted", self.name))
                 } else if base_url.is_some() {
                     let provider_epg_url = format!("{}/xmltv.php?username={}&password={}",
@@ -481,8 +505,8 @@ impl ConfigInputDto {
         Ok(())
     }
 
-    pub fn update_account_expiration_date(&mut self, input_name: &str, username: &str, exp_date: i64) -> Result<(), TuliproxError> {
-        if self.name == input_name {
+    pub fn update_account_expiration_date(&mut self, input_name: &Arc<str>, username: &str, exp_date: i64) -> Result<(), TuliproxError> {
+        if &self.name == input_name {
             if let Some(input_username) = &self.username {
                 if input_username == username {
                     self.exp_date = Some(exp_date);

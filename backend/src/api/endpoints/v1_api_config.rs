@@ -7,7 +7,7 @@ use shared::model::{ApiProxyConfigDto, ApiProxyServerInfoDto, ConfigDto, Sources
 use std::sync::Arc;
 use log::{error};
 use shared::error::TuliproxError;
-use crate::api::api_utils::try_unwrap_body;
+use crate::api::api_utils::{try_unwrap_body, internal_server_error};
 use crate::{utils};
 use crate::utils::{prepare_sources_batch, prepare_users};
 use crate::utils::request::download_text_content;
@@ -124,17 +124,17 @@ async fn config(
         Ok(mut app_config) => {
             if let Err(err) = prepare_sources_batch(&mut app_config.sources, false).await {
                 error!("Failed to prepare sources batch: {err}");
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                internal_server_error!()
             } else if let Err(err) = prepare_users(&mut app_config, &app_state.app_config).await {
                 error!("Failed to prepare users: {err}");
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                internal_server_error!()
             } else {
                 axum::response::Json(app_config).into_response()
             }
         }
         Err(err) => {
             error!("Failed to read config files: {err}");
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            internal_server_error!()
         }
     }
 }
@@ -158,7 +158,7 @@ async fn config_batch_content(
                 }
                 Err(err) => {
                     error!("Failed to read batch file: {err}");
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                    internal_server_error!()
                 }
             };
         }

@@ -270,6 +270,7 @@ pub fn UserTable(props: &UserTableProps) -> Html {
         let dialog = dialog.clone();
         Callback::from(move |(name, e): (String, MouseEvent)| {
             e.prevent_default();
+            e.stop_propagation();
             if let Ok(action) = TableAction::from_str(&name) {
                 match action {
                     TableAction::Edit => {

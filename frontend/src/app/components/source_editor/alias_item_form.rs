@@ -1,8 +1,10 @@
+use std::sync::Arc;
 use crate::app::components::{Card, TextButton};
 use crate::{edit_field_date, edit_field_number_i16, edit_field_number_u16, edit_field_text, edit_field_text_option, generate_form_reducer};
 use shared::model::ConfigInputAliasDto;
 use yew::{function_component, html, use_reducer, Callback, Html, Properties, UseReducerHandle};
 use yew_i18n::use_translation;
+use shared::utils::Internable;
 
 const LABEL_ALIAS_NAME: &str = "LABEL.ALIAS_NAME";
 const LABEL_URL: &str = "LABEL.URL";
@@ -16,7 +18,7 @@ generate_form_reducer!(
     state: AliasFormState { form: ConfigInputAliasDto },
     action_name: AliasFormAction,
     fields {
-        Name => name: String,
+        Name => name: Arc<str>,
         Url => url: String,
         Username => username: Option<String>,
         Password => password: Option<String>,
@@ -42,7 +44,7 @@ pub fn AliasItemForm(props: &AliasItemFormProps) -> Html {
         AliasFormState {
             form: props.initial.clone().unwrap_or_else(|| ConfigInputAliasDto {
                 id: 0,
-                name: String::new(),
+                name: "".intern(),
                 url: String::new(),
                 username: None,
                 password: None,

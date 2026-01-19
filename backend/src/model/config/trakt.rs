@@ -69,6 +69,7 @@ impl From<&TraktListConfig> for TraktListConfigDto {
 
 #[derive(Debug, Clone)]
 pub struct TraktConfig {
+    pub enabled: bool,
     pub api: TraktApiConfig,
     pub lists: Vec<TraktListConfig>,
 }
@@ -77,6 +78,7 @@ macros::from_impl!(TraktConfig);
 impl From<&TraktConfigDto>  for TraktConfig {
     fn from(dto: &TraktConfigDto) -> Self {
         Self {
+            enabled: dto.enabled,
             api: TraktApiConfig::from(&dto.api),
             lists: dto.lists.iter().map(Into::into).collect(),
         }
@@ -85,6 +87,7 @@ impl From<&TraktConfigDto>  for TraktConfig {
 impl From<&TraktConfig>  for TraktConfigDto {
     fn from(dto: &TraktConfig) -> Self {
         Self {
+            enabled: dto.enabled,
             api: TraktApiConfigDto::from(&dto.api),
             lists: dto.lists.iter().map(TraktListConfigDto::from).collect(),
         }

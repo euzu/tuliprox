@@ -1,8 +1,9 @@
-use crate::utils::{arc_str_serde, extract_extension_from_url, generate_playlist_uuid, get_provider_id, intern, parse_uuid_hex};
-use crate::model::{xtream_const, ClusterFlags, CommonPlaylistItem, ConfigTargetOptions, EpisodeStreamProperties, SeriesStreamProperties, StreamProperties, VideoStreamProperties, XtreamInfoDocument};
+use crate::utils::{Internable, arc_str_serde, arc_str_serde_none, arc_str_option_serde, extract_extension_from_url,
+                   generate_playlist_uuid, get_provider_id, parse_uuid_hex};
+use crate::model::{xtream_const, ClusterFlags, CommonPlaylistItem, ConfigTargetOptions, EpisodeStreamProperties,
+                   SeriesStreamProperties, StreamProperties, VideoStreamProperties, XtreamInfoDocument};
 use enum_iterator::Sequence;
 use serde::{Deserialize, Serialize};
-use std::borrow::Cow;
 use std::fmt::Write;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
@@ -13,7 +14,7 @@ use hex::FromHex;
 
 pub type VirtualId = u32;
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct UUIDType(pub [u8; 32]);
 
 impl UUIDType {
@@ -97,6 +98,48 @@ impl FromStr for UUIDType {
 impl std::fmt::Display for UUIDType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", hex::encode(self.0))
+    }
+}
+
+impl Serialize for UUIDType {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_bytes(&self.0)
+    }
+}
+
+
+struct UUIDTypeVisitor;
+
+impl<'de> serde::de::Visitor<'de> for UUIDTypeVisitor {
+    type Value = UUIDType;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("a 32-byte array")
+    }
+
+    fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        if v.len() == 32 {
+            let mut bytes = [0u8; 32];
+            bytes.copy_from_slice(v);
+            Ok(UUIDType(bytes))
+        } else {
+            Err(E::invalid_length(v.len(), &self))
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for UUIDType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_bytes(UUIDTypeVisitor)
     }
 }
 
@@ -223,13 +266,22 @@ impl PlaylistItemType {
         self as u8
     }
 
-    pub fn as_str(&self) -> Cow<'static, str> {
+    pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Live | Self::LiveHls | Self::LiveDash | Self::LiveUnknown => Cow::Borrowed(Self::LIVE),
-            Self::Video | Self::LocalVideo => Cow::Borrowed(Self::VIDEO),
-            Self::Series | Self::LocalSeries => Cow::Borrowed(Self::SERIES),
-            Self::SeriesInfo | Self::LocalSeriesInfo => Cow::Borrowed(Self::SERIES_INFO),
-            Self::Catchup => Cow::Borrowed(Self::CATCHUP),
+            Self::Live | Self::LiveHls | Self::LiveDash | Self::LiveUnknown => Self::LIVE,
+            Self::Video | Self::LocalVideo => Self::VIDEO,
+            Self::Series | Self::LocalSeries => Self::SERIES,
+            Self::SeriesInfo | Self::LocalSeriesInfo => Self::SERIES_INFO,
+            Self::Catchup => Self::CATCHUP,
+        }
+    }
+
+    pub fn is_cluster(&self, cluster: XtreamCluster) -> bool {
+        match self {
+            Self::Live | Self::LiveHls | Self::LiveDash | Self::LiveUnknown => cluster == XtreamCluster::Live,
+            Self::Catchup | Self::Video | Self::LocalVideo => cluster == XtreamCluster::Video,
+            Self::Series | Self::LocalSeries
+            | Self::SeriesInfo | Self::LocalSeriesInfo => cluster == XtreamCluster::Series,
         }
     }
 }
@@ -237,6 +289,12 @@ impl PlaylistItemType {
 impl Display for PlaylistItemType {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.as_str())
+    }
+}
+
+impl Internable for PlaylistItemType {
+    fn intern(self) -> Arc<str> {
+        self.as_str().intern()
     }
 }
 
@@ -277,7 +335,7 @@ impl PlaylistItemTypeSet {
 
 
 pub trait FieldGetAccessor {
-    fn get_field(&self, field: &str) -> Option<Cow<'_, str>>;
+    fn get_field(&self, field: &str) -> Option<Arc<str>>;
 }
 pub trait FieldSetAccessor {
     fn set_field(&mut self, field: &str, value: &str) -> bool;
@@ -287,11 +345,11 @@ pub trait PlaylistEntry: Send + Sync {
     fn get_virtual_id(&self) -> VirtualId;
     fn get_provider_id(&self) -> Option<u32>;
     fn get_category_id(&self) -> Option<u32>;
-    fn get_provider_url(&self) ->  Cow<'_, str>;
+    fn get_provider_url(&self) -> Arc<str>;
     fn get_uuid(&self) -> UUIDType;
     fn get_item_type(&self) -> PlaylistItemType;
-    fn get_group(&self) -> Cow<'_, str>;
-    fn get_name(&self) -> Cow<'_, str>;
+    fn get_group(&self) -> Arc<str>;
+    fn get_name(&self) -> Arc<str>;
     fn get_resolved_info_document(&self, options: &XtreamMappingOptions) -> Option<XtreamInfoDocument>;
     fn get_additional_properties(&self) -> Option<&StreamProperties>;
     fn get_additional_properties_mut(&mut self) -> Option<&mut StreamProperties>;
@@ -301,21 +359,32 @@ pub trait PlaylistEntry: Send + Sync {
 pub struct PlaylistItemHeader {
     #[serde(skip)]
     pub uuid: UUIDType, // calculated
-    pub id: String, // provider id
+    #[serde(with = "arc_str_serde_none")]
+    pub id: Arc<str>, // provider id
     pub virtual_id: VirtualId, // virtual id
-    pub name: String,
+    #[serde(with = "arc_str_serde_none")]
+    pub name: Arc<str>,
     pub chno: u32,
-    pub logo: String,
-    pub logo_small: String,
+    #[serde(with = "arc_str_serde_none")]
+    pub logo: Arc<str>,
+    #[serde(with = "arc_str_serde_none")]
+    pub logo_small: Arc<str>,
     #[serde(with = "arc_str_serde")]
     pub group: Arc<str>,
-    pub title: String,
-    pub parent_code: String,
-    pub audio_track: String,
-    pub time_shift: String,
-    pub rec: String,
-    pub url: String,
-    pub epg_channel_id: Option<String>,
+    #[serde(with = "arc_str_serde_none")]
+    pub title: Arc<str>,
+    #[serde(with = "arc_str_serde")]
+    pub parent_code: Arc<str>,
+    #[serde(with = "arc_str_serde")]
+    pub audio_track: Arc<str>,
+    #[serde(with = "arc_str_serde")]
+    pub time_shift: Arc<str>,
+    #[serde(with = "arc_str_serde")]
+    pub rec: Arc<str>,
+    #[serde(with = "arc_str_serde_none")]
+    pub url: Arc<str>,
+    #[serde(default, with = "arc_str_option_serde")]
+    pub epg_channel_id: Option<Arc<str>>,
     pub xtream_cluster: XtreamCluster,
     pub additional_properties: Option<StreamProperties>,
     #[serde(default)]
@@ -332,25 +401,25 @@ impl Default for PlaylistItemHeader {
     fn default() -> Self {
         Self {
             uuid: UUIDType::default(),
-            id: String::new(),
+            id: "".intern(),
             virtual_id: 0,
-            name: String::new(),
+            name: "".intern(),
             chno: 0,
-            logo: String::new(),
-            logo_small: String::new(),
-            group: intern(""),
-            title: String::new(),
-            parent_code: String::new(),
-            audio_track: String::new(),
-            time_shift: String::new(),
-            rec: String::new(),
-            url: String::new(),
+            logo: "".intern(),
+            logo_small: "".intern(),
+            group: "".intern(),
+            title: "".intern(),
+            parent_code: "".intern(),
+            audio_track: "".intern(),
+            time_shift: "".intern(),
+            rec: "".intern(),
+            url: "".intern(),
             epg_channel_id: None,
             xtream_cluster: XtreamCluster::default(),
             additional_properties: None,
             item_type: PlaylistItemType::default(),
             category_id: 0,
-            input_name: intern(""),
+            input_name: "".intern(),
             source_ordinal: 0,
         }
     }
@@ -368,13 +437,13 @@ impl PlaylistItemHeader {
         match get_provider_id(&self.id, &self.url) {
             None => None,
             Some(newid) => {
-                self.id = newid.to_string();
+                self.id = newid.to_string().intern();
                 Some(newid)
             }
         }
     }
 
-    pub fn get_container_extension(&self) -> Option<Cow<'_, str>> {
+    pub fn get_container_extension(&self) -> Option<Arc<str>> {
         self.additional_properties.as_ref().and_then(|a| a.get_container_extension())
     }
 }
@@ -402,34 +471,34 @@ macro_rules! to_m3u_resource_non_empty_fields {
 macro_rules! generate_field_accessor_impl_for_playlist_item_header {
     ($($prop:ident),*;) => {
         impl crate::model::FieldGetAccessor for crate::model::PlaylistItemHeader {
-            fn get_field(&self, field: &str) -> Option<Cow<'_, str>> {
+            fn get_field(&self, field: &str) -> Option<Arc<str>> {
                 let bytes = field.as_bytes();
 
                 $(
                     {
                         let target = stringify!($prop).as_bytes();
                         if bytes.eq_ignore_ascii_case(target) {
-                            return Some(Cow::Borrowed(&self.$prop));
+                            return Some(Arc::clone(&self.$prop));
                         }
                     }
                 )*
 
                 if bytes.eq_ignore_ascii_case(b"group") {
-                        Some(Cow::Borrowed(&*self.group))
+                        Some(Arc::clone(&self.group))
                 } else if bytes.eq_ignore_ascii_case(b"caption") {
                     Some(if self.title.is_empty() {
-                        Cow::Borrowed(&self.name)
+                        Arc::clone(&self.name)
                     } else {
-                        Cow::Borrowed(&self.title)
+                        Arc::clone(&self.title)
                     })
                 } else if bytes.eq_ignore_ascii_case(b"input") {
-                    Some(Cow::Borrowed(&*self.input_name))
+                    Some(Arc::clone(&self.input_name))
                 } else if bytes.eq_ignore_ascii_case(b"type") {
-                    Some(Cow::Owned(self.item_type.to_string()))
+                    Some(self.item_type.as_str().intern())
                 } else if bytes.eq_ignore_ascii_case(b"epg_channel_id") || bytes.eq_ignore_ascii_case(b"epg_id") {
-                    self.epg_channel_id.as_ref().map(|s| Cow::Borrowed(s.as_str()))
+                    self.epg_channel_id.as_ref().map(Arc::clone)
                 } else if bytes.eq_ignore_ascii_case(b"chno") {
-                    Some(Cow::Owned(self.chno.to_string()))
+                    Some(self.chno.to_string().intern())
                 } else {
                     None
                 }
@@ -443,21 +512,21 @@ macro_rules! generate_field_accessor_impl_for_playlist_item_header {
                     {
                         let target = stringify!($prop).as_bytes();
                         if bytes.eq_ignore_ascii_case(target) {
-                            self.$prop = String::from(value);
+                            self.$prop = value.intern();
                             return true;
                         }
                     }
                 )*
 
                 if bytes.eq_ignore_ascii_case(b"group") {
-                    self.group = crate::utils::intern(value);
+                    self.group = value.intern();
                     true
                 } else if bytes.eq_ignore_ascii_case(b"caption") {
-                    self.title = String::from(value);
-                    self.name = String::from(value);
+                    self.title = value.intern();
+                    self.name = value.intern();
                     true
                 } else if bytes.eq_ignore_ascii_case(b"epg_channel_id") || bytes.eq_ignore_ascii_case(b"epg_id") {
-                    self.epg_channel_id = Some(String::from(value));
+                    self.epg_channel_id = Some(value.intern());
                     true
                 } else if bytes.eq_ignore_ascii_case(b"chno") {
                     if let Ok(parsed) = value.parse::<u32>() {
@@ -479,25 +548,36 @@ generate_field_accessor_impl_for_playlist_item_header!(id, /*virtual_id,*/ title
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct M3uPlaylistItem {
     pub virtual_id: VirtualId,
-    pub provider_id: String,
-    pub name: String,
+    #[serde(with = "arc_str_serde_none")]
+    pub provider_id: Arc<str>,
+    #[serde(with = "arc_str_serde_none")]
+    pub name: Arc<str>,
     pub chno: u32,
-    pub logo: String,
-    pub logo_small: String,
+    #[serde(with = "arc_str_serde_none")]
+    pub logo: Arc<str>,
+    #[serde(with = "arc_str_serde_none")]
+    pub logo_small: Arc<str>,
     #[serde(with = "arc_str_serde")]
     pub group: Arc<str>,
-    pub title: String,
-    pub parent_code: String,
-    pub audio_track: String,
-    pub time_shift: String,
-    pub rec: String,
-    pub url: String,
-    pub epg_channel_id: Option<String>,
+    #[serde(with = "arc_str_serde_none")]
+    pub title: Arc<str>,
+    #[serde(with = "arc_str_serde")]
+    pub parent_code: Arc<str>,
+    #[serde(with = "arc_str_serde")]
+    pub audio_track: Arc<str>,
+    #[serde(with = "arc_str_serde")]
+    pub time_shift: Arc<str>,
+    #[serde(with = "arc_str_serde")]
+    pub rec: Arc<str>,
+    #[serde(with = "arc_str_serde_none")]
+    pub url: Arc<str>,
+    #[serde(default, with = "arc_str_option_serde")]
+    pub epg_channel_id: Option<Arc<str>>,
     #[serde(with = "arc_str_serde")]
     pub input_name: Arc<str>,
     pub item_type: PlaylistItemType,
-    #[serde(skip)]
-    pub t_stream_url: String,
+    #[serde(with = "arc_str_serde")]
+    pub t_stream_url: Arc<str>,
     #[serde(skip)]
     pub t_resource_url: Option<String>,
     #[serde(default)]
@@ -539,7 +619,7 @@ impl M3uPlaylistItem {
     pub fn to_common(&self) -> CommonPlaylistItem {
         CommonPlaylistItem {
             virtual_id: self.virtual_id,
-            provider_id: self.provider_id.to_string(),
+            provider_id: Arc::clone(&self.provider_id),
             name: self.name.clone(),
             chno: self.chno,
             logo: self.logo.clone(),
@@ -547,8 +627,8 @@ impl M3uPlaylistItem {
             group: self.group.clone(),
             title: self.title.clone(),
             parent_code: self.parent_code.clone(),
-            audio_track: self.audio_track.to_string(),
-            time_shift: self.time_shift.to_string(),
+            audio_track: Arc::clone(&self.audio_track),
+            time_shift: Arc::clone(&self.time_shift),
             rec: self.rec.clone(),
             url: self.url.clone(),
             input_name: self.input_name.clone(),
@@ -575,8 +655,8 @@ impl PlaylistEntry for M3uPlaylistItem {
         None
     }
     #[inline]
-    fn get_provider_url(&self) ->  Cow<'_, str> {
-        Cow::Borrowed(self.url.as_str())
+    fn get_provider_url(&self) ->  Arc<str> {
+        Arc::clone(&self.url)
     }
 
     fn get_uuid(&self) -> UUIDType {
@@ -589,16 +669,16 @@ impl PlaylistEntry for M3uPlaylistItem {
     }
 
     #[inline]
-    fn get_group(&self) -> Cow<'_, str> {
-        Cow::Borrowed(&*self.group)
+    fn get_group(&self) -> Arc<str> {
+        Arc::clone(&self.group)
     }
 
     #[inline]
-    fn get_name(&self) -> Cow<'_, str> {
+    fn get_name(&self) -> Arc<str> {
         if self.title.is_empty() {
-            Cow::Borrowed(self.name.as_str())
+            Arc::clone(&self.name)
         } else {
-            Cow::Borrowed(self.title.as_str())
+            Arc::clone(&self.title)
         }
     }
 
@@ -620,7 +700,7 @@ impl PlaylistEntry for M3uPlaylistItem {
 macro_rules! generate_field_accessor_impl_for_m3u_playlist_item {
     ($($prop:ident),*;) => {
         impl crate::model::FieldGetAccessor for M3uPlaylistItem {
-            fn get_field(&self, field: &str) -> Option<Cow<'_, str>> {
+            fn get_field(&self, field: &str) -> Option<Arc<str>> {
                 let bytes = field.as_bytes();
                 $(
                     {
@@ -628,22 +708,22 @@ macro_rules! generate_field_accessor_impl_for_m3u_playlist_item {
                         if bytes.len() == target.len() &&
                            bytes.iter().zip(target).all(|(a, b)| a.to_ascii_lowercase() == *b)
                         {
-                            return Some(Cow::Borrowed(&self.$prop));
+                            return Some(Arc::clone(&self.$prop));
                         }
                     }
                 )*
                 if bytes.eq_ignore_ascii_case(b"group") {
-                    Some(Cow::Borrowed(&*self.group))
+                    Some(Arc::clone(&self.group))
                 } else if bytes.eq_ignore_ascii_case(b"caption") {
                     Some(if self.title.is_empty() {
-                        Cow::Borrowed(&self.name)
+                        Arc::clone(&self.name)
                     } else {
-                        Cow::Borrowed(&self.title)
+                        Arc::clone(&self.title)
                     })
                 } else if bytes.eq_ignore_ascii_case(b"epg_channel_id") || bytes.eq_ignore_ascii_case(b"epg_id") {
-                    self.epg_channel_id.as_ref().map(|s| Cow::Borrowed(s.as_str()))
+                    self.epg_channel_id.as_ref().map(Arc::clone)
                 } else if bytes.eq_ignore_ascii_case(b"chno") {
-                    Some(Cow::Owned(self.chno.to_string()))
+                    Some(self.chno.to_string().intern())
                 } else  {
                     None
                 }
@@ -696,16 +776,24 @@ impl XtreamMappingOptions {
 pub struct XtreamPlaylistItem {
     pub virtual_id: VirtualId,
     pub provider_id: u32,
-    pub name: String,
-    pub logo: String,
-    pub logo_small: String,
+    #[serde(with = "arc_str_serde_none")]
+    pub name: Arc<str>,
+    #[serde(with = "arc_str_serde_none")]
+    pub logo: Arc<str>,
+    #[serde(with = "arc_str_serde_none")]
+    pub logo_small: Arc<str>,
     #[serde(with = "arc_str_serde")]
     pub group: Arc<str>,
-    pub title: String,
-    pub parent_code: String,
-    pub rec: String,
-    pub url: String,
-    pub epg_channel_id: Option<String>,
+    #[serde(with = "arc_str_serde_none")]
+    pub title: Arc<str>,
+    #[serde(with = "arc_str_serde")]
+    pub parent_code: Arc<str>,
+    #[serde(with = "arc_str_serde")]
+    pub rec: Arc<str>,
+    #[serde(with = "arc_str_serde_none")]
+    pub url: Arc<str>,
+    #[serde(default, with = "arc_str_option_serde")]
+    pub epg_channel_id: Option<Arc<str>>,
     pub xtream_cluster: XtreamCluster,
     pub additional_properties: Option<StreamProperties>,
     pub item_type: PlaylistItemType,
@@ -722,7 +810,7 @@ impl XtreamPlaylistItem {
     pub fn to_common(&self) -> CommonPlaylistItem {
         CommonPlaylistItem {
             virtual_id: self.virtual_id,
-            provider_id: self.provider_id.to_string(),
+            provider_id: Arc::clone(&self.provider_id.to_string().into()),
             name: self.name.clone(),
             chno: self.channel_no,
             logo: self.logo.clone(),
@@ -730,8 +818,8 @@ impl XtreamPlaylistItem {
             group: self.group.clone(),
             title: self.title.clone(),
             parent_code: self.parent_code.clone(),
-            audio_track: String::new(),
-            time_shift: String::new(),
+            audio_track: "".intern(),
+            time_shift: "".intern(),
             rec: self.rec.clone(),
             url: self.url.clone(),
             input_name: self.input_name.clone(),
@@ -743,15 +831,15 @@ impl XtreamPlaylistItem {
         }
     }
 
-    pub fn get_container_extension(&self) -> Option<Cow<'_, str>> {
+    pub fn get_container_extension(&self) -> Option<Arc<str>> {
         match self.additional_properties {
             None => None,
             Some(ref props) => {
                 match props {
-                    StreamProperties::Live(_) => Some(Cow::Borrowed("ts")),
-                    StreamProperties::Video(video) => Some(Cow::Borrowed(video.container_extension.as_str())),
+                    StreamProperties::Live(_) => Some("ts".intern()),
+                    StreamProperties::Video(video) => Some(Arc::clone(&video.container_extension)),
                     StreamProperties::Series(_) => None,
-                    StreamProperties::Episode(episode) => Some(Cow::Borrowed(episode.container_extension.as_str())),
+                    StreamProperties::Episode(episode) => Some(Arc::clone(&episode.container_extension)),
                 }
             }
         }
@@ -762,12 +850,12 @@ impl XtreamPlaylistItem {
         self.additional_properties.as_ref().is_some_and(|p| p.has_details())
     }
 
-    pub fn resolve_resource_url<'a>(&'a self, field: &str) -> Option<Cow<'a, str>> {
+    pub fn resolve_resource_url(&self, field: &str) -> Option<Arc<str>> {
         let bytes = field.as_bytes();
         if bytes.eq_ignore_ascii_case(b"logo") && !self.logo.is_empty() {
-            return Some(Cow::Borrowed(self.logo.as_str()));
+            return Some(Arc::clone(&self.logo));
         } else if bytes.eq_ignore_ascii_case(b"logo_small") && !self.logo_small.is_empty() {
-            return Some(Cow::Borrowed(self.logo_small.as_str()));
+            return Some(Arc::clone(&self.logo_small));
         }
         self.additional_properties.as_ref().and_then(|a| a.resolve_resource_url(field))
     }
@@ -788,8 +876,8 @@ impl PlaylistEntry for XtreamPlaylistItem {
         Some(self.category_id)
     }
     #[inline]
-    fn get_provider_url(&self) ->  Cow<'_, str> {
-        Cow::Borrowed(self.url.as_str())
+    fn get_provider_url(&self) ->  Arc<str> {
+        Arc::clone(&self.url)
     }
 
     #[inline]
@@ -801,15 +889,15 @@ impl PlaylistEntry for XtreamPlaylistItem {
         self.item_type
     }
     #[inline]
-    fn get_group(&self) -> Cow<'_, str> {
-        Cow::Borrowed(&*self.group)
+    fn get_group(&self) -> Arc<str> {
+        Arc::clone(&self.group)
     }
     #[inline]
-    fn get_name(&self) -> Cow<'_, str> {
+    fn get_name(&self) -> Arc<str> {
         if self.title.is_empty() {
-            Cow::Borrowed(self.name.as_str())
+            Arc::clone(&self.name)
         } else {
-            Cow::Borrowed(self.title.as_str())
+            Arc::clone(&self.title)
         }
     }
 
@@ -836,7 +924,7 @@ impl PlaylistEntry for XtreamPlaylistItem {
 macro_rules! generate_field_accessor_impl_for_xtream_playlist_item {
     ($($prop:ident),*;) => {
         impl crate::model::FieldGetAccessor for crate::model::XtreamPlaylistItem {
-            fn get_field(&self, field: &str) -> Option<Cow<'_, str>> {
+            fn get_field(&self, field: &str) -> Option<Arc<str>> {
                 let bytes = field.as_bytes();
 
                 $(
@@ -845,7 +933,7 @@ macro_rules! generate_field_accessor_impl_for_xtream_playlist_item {
                         if bytes.len() == target.len() &&
                            bytes.iter().zip(target).all(|(a, b)| a.to_ascii_lowercase() == *b)
                         {
-                            return Some(Cow::Borrowed(&self.$prop));
+                            return Some(Arc::clone(&self.$prop));
                         }
                     }
                 )*
@@ -853,14 +941,14 @@ macro_rules! generate_field_accessor_impl_for_xtream_playlist_item {
                 // Caption
                 if bytes.eq_ignore_ascii_case(b"caption") {
                     Some(if self.title.is_empty() {
-                        Cow::Borrowed(self.name.as_str())
+                        Arc::clone(&self.name)
                     } else {
-                        Cow::Borrowed(self.title.as_str())
+                        Arc::clone(&self.title)
                     })
                 }
                 // epg_channel_id / epg_id
                 else if bytes.eq_ignore_ascii_case(b"epg_channel_id") || bytes.eq_ignore_ascii_case(b"epg_id") {
-                    self.epg_channel_id.as_ref().map(|s| Cow::<str>::Borrowed(s.as_str()))
+                    self.epg_channel_id.as_ref().map(Arc::clone)
                 }
                 // Additional Properties
                 else if field.starts_with(xtream_const::XC_PROP_BACKDROP_PATH)
@@ -875,32 +963,32 @@ macro_rules! generate_field_accessor_impl_for_xtream_playlist_item {
                                         details.cover_big.as_ref()
                                             .or(details.movie_image.as_ref())
                                             .or_else(|| details.backdrop_path.as_ref().and_then(|p| p.first()))
-                                            .map(|s| Cow::<str>::Borrowed(s.as_str()))
+                                            .map(Arc::clone)
                                     })
                                 } else {
                                     video.details.as_ref().and_then(|details| {
                                         details.backdrop_path.as_ref().and_then(|p| p.first())
                                         .or(details.movie_image.as_ref())
                                         .or(details.cover_big.as_ref())
-                                        .map(|s| Cow::<str>::Borrowed(s.as_str()))
+                                        .map(Arc::clone)
                                     })
                                 }
                             }
                             StreamProperties::Series(series) => {
                                 if bytes.eq_ignore_ascii_case(xtream_const::XC_PROP_COVER.as_bytes()) {
                                     if series.cover.is_empty() {
-                                        series.backdrop_path.as_ref().and_then(|p| p.first()).map(|s| Cow::<str>::Borrowed(s.as_str()))
+                                        series.backdrop_path.as_ref().and_then(|p| p.first()).map(Arc::clone)
                                     } else {
-                                        Some(Cow::<str>::Borrowed(series.cover.as_str()))
+                                        Some(Arc::clone(&series.cover))
                                     }
                                 } else {
                                     match series.backdrop_path.as_ref() {
-                                        None => if series.cover.is_empty() { None } else { Some(Cow::Borrowed(&series.cover)) },
-                                        Some(p) => p.first().map(|s| Cow::<str>::Borrowed(s.as_str())),
+                                        None => if series.cover.is_empty() { None } else { Some(Arc::clone(&series.cover)) },
+                                        Some(p) => p.first().map(Arc::clone),
                                     }
                                 }
                             }
-                            StreamProperties::Episode(episode) => Some(Cow::<str>::Borrowed(episode.movie_image.as_str())),
+                            StreamProperties::Episode(episode) => Some(Arc::clone(&episode.movie_image)),
                         },
                         None => None,
                     }
@@ -942,14 +1030,14 @@ impl PlaylistItem {
                             name: header.name.clone(),
                             category_id: header.category_id,
                             stream_id: header.virtual_id,
-                            stream_icon: "".to_string(),
-                            direct_source: "".to_string(),
+                            stream_icon: "".intern(),
+                            direct_source: "".intern(),
                             custom_sid: None,
-                            added: String::new(),
-                            container_extension,
+                            added: "".intern(),
+                            container_extension: container_extension.intern(),
                             rating: None,
                             rating_5based: None,
-                            stream_type: Some("movie".to_string()),
+                            stream_type: Some("movie".intern()),
                             trailer: None,
                             tmdb: None,
                             is_adult: 0,
@@ -967,8 +1055,8 @@ impl PlaylistItem {
                                 added: None,
                                 release_date: None,
                                 tmdb: None,
-                                movie_image: String::new(),
-                                container_extension,
+                                movie_image: "".intern(),
+                                container_extension: container_extension.intern(),
                                 audio: None,
                                 video: None,
                             }))
@@ -979,9 +1067,9 @@ impl PlaylistItem {
                                 tmdb: None,
                                 series_id: 0,
                                 backdrop_path: None,
-                                cast: String::new(),
-                                cover: String::new(),
-                                director: String::new(),
+                                cast: "".intern(),
+                                cover: "".intern(),
+                                director: "".intern(),
                                 episode_run_time: None,
                                 genre: None,
                                 last_modified: None,
@@ -989,7 +1077,7 @@ impl PlaylistItem {
                                 rating: 0.0,
                                 rating_5based: 0.0,
                                 release_date: None,
-                                youtube_trailer: String::new(),
+                                youtube_trailer: "".intern(),
                                 details: None,
                             })))
                         } else {
@@ -1019,14 +1107,14 @@ impl From<&PlaylistItem> for XtreamPlaylistItem {
         XtreamPlaylistItem {
             virtual_id: header.virtual_id,
             provider_id,
-            name: if header.item_type == PlaylistItemType::Series { &header.title } else { &header.name }.to_string(),
-            logo: header.logo.to_string(),
-            logo_small: header.logo_small.to_string(),
+            name: if header.item_type == PlaylistItemType::Series { Arc::clone(&header.title) } else { Arc::clone(&header.name) },
+            logo: Arc::clone(&header.logo),
+            logo_small: Arc::clone(&header.logo_small),
             group: Arc::clone(&header.group),
-            title: header.title.to_string(),
-            parent_code: header.parent_code.to_string(),
-            rec: header.rec.to_string(),
-            url: header.url.to_string(),
+            title: Arc::clone(&header.title),
+            parent_code: Arc::clone(&header.parent_code),
+            rec: Arc::clone(&header.rec),
+            url: Arc::clone(&header.url),
             epg_channel_id: header.epg_channel_id.clone(),
             xtream_cluster: header.xtream_cluster,
             additional_properties,
@@ -1044,22 +1132,22 @@ impl From<&PlaylistItem> for M3uPlaylistItem {
         let header = &item.header;
         M3uPlaylistItem {
             virtual_id: header.virtual_id,
-            provider_id: header.id.to_string(),
-            name: if header.item_type == PlaylistItemType::Series { &header.title } else { &header.name }.to_string(),
+            provider_id: Arc::clone(&header.id),
+            name: if header.item_type == PlaylistItemType::Series { Arc::clone(&header.title) } else { Arc::clone(&header.name) },
             chno: header.chno,
-            logo: header.logo.to_string(),
-            logo_small: header.logo_small.to_string(),
+            logo: Arc::clone(&header.logo),
+            logo_small: Arc::clone(&header.logo_small),
             group: Arc::clone(&header.group),
-            title: header.title.to_string(),
-            parent_code: header.parent_code.to_string(),
-            audio_track: header.audio_track.to_string(),
-            time_shift: header.time_shift.to_string(),
-            rec: header.rec.to_string(),
-            url: header.url.to_string(),
+            title: Arc::clone(&header.title),
+            parent_code: Arc::clone(&header.parent_code),
+            audio_track: Arc::clone(&header.audio_track),
+            time_shift: Arc::clone(&header.time_shift),
+            rec: Arc::clone(&header.rec),
+            url: Arc::clone(&header.url),
             epg_channel_id: header.epg_channel_id.clone(),
             input_name: Arc::clone(&header.input_name),
             item_type: header.item_type,
-            t_stream_url: header.url.to_string(),
+            t_stream_url: Arc::clone(&header.url),
             t_resource_url: None,
             source_ordinal: header.source_ordinal,
         }
@@ -1074,8 +1162,8 @@ impl From<&PlaylistItem> for CommonPlaylistItem {
 
         CommonPlaylistItem {
             virtual_id: header.virtual_id,
-            provider_id: header.id.clone(),
-            name: if header.item_type == PlaylistItemType::Series { &header.title } else { &header.name }.clone(),
+            provider_id: Arc::clone(&header.id),
+            name: if header.item_type == PlaylistItemType::Series { Arc::clone(&header.title) } else { Arc::clone(&header.name) },
             logo: header.logo.clone(),
             logo_small: header.logo_small.clone(),
             group: Arc::clone(&header.group),
@@ -1101,7 +1189,7 @@ impl From<&XtreamPlaylistItem> for PlaylistItem {
         let header = PlaylistItemHeader {
             uuid: item.get_uuid(),
             virtual_id: item.virtual_id,
-            id: item.provider_id.to_string(), // u32 → String
+            id: item.provider_id.to_string().intern(),
             name: item.name.clone(),
             title: item.title.clone(),
             logo: item.logo.clone(),
@@ -1116,8 +1204,8 @@ impl From<&XtreamPlaylistItem> for PlaylistItem {
             category_id: item.category_id,
             input_name: item.input_name.clone(),
             chno: item.channel_no,
-            audio_track: String::new(),
-            time_shift: String::new(),
+            audio_track: "".intern(),
+            time_shift: "".intern(),
             additional_properties: item.additional_properties.clone(),
             source_ordinal: item.source_ordinal,
         };
@@ -1178,8 +1266,8 @@ impl PlaylistEntry for PlaylistItem {
     }
 
     #[inline]
-    fn get_provider_url(&self) ->  Cow<'_, str> {
-        Cow::Borrowed(self.header.url.as_str())
+    fn get_provider_url(&self) ->  Arc<str> {
+        Arc::clone(&self.header.url)
     }
 
     #[inline]
@@ -1194,16 +1282,16 @@ impl PlaylistEntry for PlaylistItem {
     }
 
     #[inline]
-    fn get_group(&self) -> Cow<'_, str> {
-        Cow::Borrowed(&*self.header.group)
+    fn get_group(&self) -> Arc<str> {
+        Arc::clone(&self.header.group)
     }
 
     #[inline]
-    fn get_name(&self) -> Cow<'_, str> {
+    fn get_name(&self) -> Arc<str> {
         if self.header.title.is_empty() {
-            Cow::Borrowed(self.header.name.as_str())
+            Arc::clone(&self.header.name)
         } else {
-            Cow::Borrowed(self.header.title.as_str())
+            Arc::clone(&self.header.title)
         }
     }
 

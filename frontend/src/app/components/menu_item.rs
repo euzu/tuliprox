@@ -23,6 +23,7 @@ pub fn MenuItem(props: &MenuItemProps) -> Html {
         let name = props.name.clone();
         Callback::from(move |e: MouseEvent| {
             e.prevent_default();
+            e.stop_propagation();
             click.emit((name.clone(), e));
         })
     };

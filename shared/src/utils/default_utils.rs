@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use crate::model::{ConfigTargetOptions, LibraryMetadataFormat, ProcessingOrder};
 
 pub const fn is_zero_u16(v: &u16) -> bool { *v == 0 }
@@ -6,6 +7,10 @@ pub const fn is_false(v: &bool) -> bool { !*v }
 pub const fn default_as_true() -> bool { true }
 
 pub fn is_blank_optional_string(s: &Option<String>) -> bool {
+    s.as_ref().is_none_or(|s| s.chars().all(|c| c.is_whitespace()))
+}
+
+pub fn is_blank_optional_arc_str(s: &Option<Arc<str>>) -> bool {
     s.as_ref().is_none_or(|s| s.chars().all(|c| c.is_whitespace()))
 }
 

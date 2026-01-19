@@ -1,9 +1,10 @@
+use std::sync::Arc;
 use crate::model::{AppConfig, ProxyUserCredentials};
 use crate::model::{ConfigTarget, XtreamTargetOutput};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use shared::model::{PlaylistItem, PlaylistItemType, PlaylistItemTypeSet, ProxyUserStatus, XtreamMappingOptions};
-use shared::utils::{deserialize_as_string, deserialize_number_from_string_or_zero};
+use shared::utils::{arc_str_serde, deserialize_number_from_string_or_zero};
 use enum_iterator::all;
 
 #[derive(Debug, Default)]
@@ -16,8 +17,8 @@ pub struct XtreamLoginInfo {
 pub struct XtreamCategory {
     #[serde(deserialize_with = "deserialize_number_from_string_or_zero", serialize_with = "shared::utils::serialize_number_as_string")]
     pub category_id: u32,
-    #[serde(deserialize_with = "deserialize_as_string")]
-    pub category_name: String,
+    #[serde(with = "arc_str_serde")]
+    pub category_name: Arc<str>,
     //pub parent_id: i32,
     #[serde(default)]
     pub channels: Vec<PlaylistItem>,
@@ -79,7 +80,7 @@ pub fn normalize_release_date(document: &mut serde_json::Map<String, Value>) {
 #[derive(Deserialize, Serialize, Clone)]
 pub struct PlaylistXtreamCategory {
     #[serde(alias = "category_id")]
-    pub id: String,
+    pub id: u32,
     #[serde(alias = "category_name")]
     pub name: String,
 }

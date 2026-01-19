@@ -180,7 +180,7 @@ pub fn StreamsTable(props: &StreamsTableProps) -> Html {
                             </button>
                         }
                     }
-                    "USERNAME" => html! {dto.username.as_str()},
+                    "USERNAME" => html! {&dto.username},
                     "STREAM_ID" => html! { <>
                             { dto.channel.virtual_id.to_string() }
                             {" ("}
@@ -188,13 +188,13 @@ pub fn StreamsTable(props: &StreamsTableProps) -> Html {
                             {")"}
                         </>},
                     "CLUSTER" => html! { render_cluster(&dto.channel) },
-                    "CHANNEL" => html! {dto.channel.title.as_str()},
+                    "CHANNEL" => html! {&dto.channel.title},
                     "GROUP" => html! {&*dto.channel.group},
                     "CLIENT_IP" => html! { strip_port(&dto.client_ip)},
                     "COUNTRY" => html! { dto.country.as_ref().map_or_else(String::new, |c| t_safe(&translate, &format!("COUNTRY.{c}")).unwrap_or_else(||c.to_string())) },
-                    "PROVIDER" => html! {dto.provider.as_str()},
+                    "PROVIDER" => html! {&dto.provider},
                     "SHARED" => html! { <ToggleSwitch value={dto.channel.shared} readonly={true} /> },
-                    "USER_AGENT" => html! { <RevealContent preview={Some(html! { dto.user_agent.as_str() })}>{dto.user_agent.as_str()}</RevealContent> },
+                    "USER_AGENT" => html! { <RevealContent preview={Some(html! { &dto.user_agent })}>{&dto.user_agent}</RevealContent> },
                     "DURATION" => html! { <span class="tp__stream-table__duration" data-ts={dto.ts.to_string()}>{format_duration(current_time_secs() - dto.ts)}</span> },
                     _ => html! {""},
                 }
@@ -268,7 +268,7 @@ pub fn StreamsTable(props: &StreamsTableProps) -> Html {
                     }
                     StreamsTableAction::CopyLinkProviderUrl => {
                         if let Some(dto) = &*selected_dto {
-                            copy_to_clipboard.emit(dto.channel.url.clone());
+                            copy_to_clipboard.emit(dto.channel.url.to_string());
                         }
                     }
                     StreamsTableAction::CopyLinkTuliproxWebPlayerUrl => {

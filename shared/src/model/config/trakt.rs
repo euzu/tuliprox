@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 use crate::model::DEFAULT_USER_AGENT;
-use crate::utils::{TRAKT_API_KEY, TRAKT_API_URL, TRAKT_API_VERSION, default_trakt_fuzzy_threshold};
+use crate::utils::{TRAKT_API_KEY, TRAKT_API_URL, TRAKT_API_VERSION,
+                   default_trakt_fuzzy_threshold, is_true, default_as_true};
 
 #[derive(Debug, Default, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -87,14 +88,15 @@ impl Default for TraktListConfigDto {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct TraktConfigDto {
+    #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
+    pub enabled: bool,
     #[serde(default)]
     pub api: TraktApiConfigDto,
     pub lists: Vec<TraktListConfigDto>,
 }
-
 
 impl TraktConfigDto {
     pub fn prepare(&mut self) {

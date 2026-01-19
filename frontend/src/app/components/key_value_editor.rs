@@ -96,6 +96,7 @@ pub fn KeyValueEditor(props: &KeyValueEditorProps) -> Html {
         Callback::from(move |e: KeyboardEvent| {
             if e.key() == "Enter" {
                 e.prevent_default();
+                e.stop_propagation();
                 let key = (*new_key).trim().to_string();
                 let value = (*new_value).trim().to_string();
                 if !key.is_empty() && !value.is_empty() && !entry_state.iter().any(|kv| kv.key == key) {

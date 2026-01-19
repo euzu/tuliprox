@@ -10,6 +10,8 @@ pub struct IconButtonProps {
     #[prop_or_default]
     pub class: String,
     #[prop_or_default]
+    pub hint: String,
+    #[prop_or_default]
     pub button_ref: Option<NodeRef>,
 }
 
@@ -21,12 +23,13 @@ pub fn IconButton(props: &IconButtonProps) -> Html {
         let name = props.name.clone();
         Callback::from(move |e: MouseEvent| {
             e.prevent_default();
+            e.stop_propagation();
             click.emit((name.clone(), e));
         })
     };
 
     html! {
-        <button ref={props.button_ref.clone().unwrap_or_default()} class={classes!("tp__icon-button", if props.icon == "Delete" {"tp__icon-button__remove"} else {""}, props.class.clone())} onclick={handle_click}>
+            <button title={props.hint.clone()} ref={props.button_ref.clone().unwrap_or_default()} class={classes!("tp__icon-button", if props.icon == "Delete" {"tp__icon-button__remove"} else {""}, props.class.clone())} onclick={handle_click}>
             <AppIcon name={props.icon.clone()}></AppIcon>
         </button>
     }

@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct ConfigSource {
-    pub inputs: Vec<String>,
+    pub inputs: Vec<Arc<str>>,
     pub targets: Vec<Arc<ConfigTarget>>,
 }
 
@@ -98,7 +98,7 @@ impl SourcesConfig {
         None
     }
 
-    pub fn get_source_inputs_by_target_by_name(&self, target_name: &str) -> Option<Vec<String>> {
+    pub fn get_source_inputs_by_target_by_name(&self, target_name: &str) -> Option<Vec<Arc<str>>> {
         for source in &self.sources {
             for target in &source.targets {
                 if target.name == target_name {
@@ -176,7 +176,7 @@ impl SourcesConfig {
         file_names
     }
 
-    pub fn get_input_by_name(&self, name: &str) -> Option<&Arc<ConfigInput>> {
-        self.inputs.iter().find(|i| i.name == name)
+    pub fn get_input_by_name(&self, name: &Arc<str>) -> Option<&Arc<ConfigInput>> {
+        self.inputs.iter().find(|i| &i.name == name)
     }
 }

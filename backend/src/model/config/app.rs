@@ -201,20 +201,20 @@ impl AppConfig {
         self.api_proxy.load().as_ref().as_ref().and_then(|api_proxy| api_proxy.get_user_credentials(username))
     }
 
-    pub fn get_input_by_name(&self, input_name: &str) -> Option<Arc<ConfigInput>> {
+    pub fn get_input_by_name(&self, input_name: &Arc<str>) -> Option<Arc<ConfigInput>> {
         let sources = <Arc<ArcSwap<SourcesConfig>> as Access<SourcesConfig>>::load(&self.sources);
         for input in &sources.inputs {
-            if input.name == input_name {
+            if &input.name == input_name {
                 return Some(Arc::clone(input));
             }
         }
         None
     }
 
-    pub fn get_input_options_by_name(&self, input_name: &str) -> Option<ConfigInputOptions> {
+    pub fn get_input_options_by_name(&self, input_name: &Arc<str>) -> Option<ConfigInputOptions> {
         let sources = <Arc<ArcSwap<SourcesConfig>> as Access<SourcesConfig>>::load(&self.sources);
         for input in &sources.inputs {
-            if input.name == input_name {
+            if &input.name == input_name {
                 return input.options.clone();
             }
         }

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use crate::api::config_file::ConfigFile;
 use crate::api::model::AppState;
 use crate::model::{is_input_expired, ConfigInput, PanelApiConfig, PanelApiQueryParam};
@@ -7,14 +8,14 @@ use log::{debug, error, warn};
 use serde_json::Value;
 use shared::error::{info_err_res, info_err, TuliproxError};
 use shared::model::{ConfigInputAliasDto, InputType};
-use shared::utils::{get_credentials_from_url, parse_timestamp, sanitize_sensitive_info, trim_last_slash};
+use shared::utils::{get_credentials_from_url, parse_timestamp, sanitize_sensitive_info, trim_last_slash, Internable};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use url::Url;
 
 #[derive(Debug, Clone)]
 struct AccountCredentials {
-    name: String,
+    name: Arc<str>,
     username: String,
     password: String,
     exp_date: Option<i64>,
@@ -293,8 +294,8 @@ fn collect_expired_accounts(input: &ConfigInput) -> Vec<AccountCredentials> {
 async fn patch_source_yml_add_alias(
     app_state: &Arc<AppState>,
     source_file_path: &Path,
-    input_name: &str,
-    alias_name: &str,
+    input_name: &Arc<str>,
+    alias_name: &Arc<str>,
     base_url: &str,
     username: &str,
     password: &str,
@@ -305,13 +306,13 @@ async fn patch_source_yml_add_alias(
         Err(e) => return info_err_res!("panel_api: failed to read source file: {e}"),
     };
 
-    let Some(input) = sources.inputs.iter_mut().find(|i| i.name == input_name) else {
+    let Some(input) = sources.inputs.iter_mut().find(|i| &i.name == input_name) else {
         return info_err_res!("panel_api: could not find input '{input_name}' in source.yml");
     };
 
     let alias = ConfigInputAliasDto {
         id: 0,
-        name: alias_name.to_string(),
+        name: Arc::clone(alias_name),
         url: base_url.to_string(),
         username: Some(username.to_string()),
         password: Some(password.to_string()),
@@ -329,7 +330,7 @@ async fn patch_source_yml_add_alias(
 async fn patch_source_yml_update_exp_date(
     app_state: &Arc<AppState>,
     source_file_path: &Path,
-    input_name: &str,
+    input_name: &Arc<str>,
     account_name: &str,
     exp_date: i64,
 ) -> Result<(), TuliproxError> {
@@ -338,7 +339,7 @@ async fn patch_source_yml_update_exp_date(
         Err(e) => return info_err_res!("panel_api: failed to read source file: {e}"),
     };
 
-    let Some(input) = sources.inputs.iter_mut().find(|i| i.name == input_name) else {
+    let Some(input) = sources.inputs.iter_mut().find(|i| &i.name == input_name) else {
         return info_err_res!("panel_api: could not find input '{input_name}' in source.yml");
     };
 
@@ -471,14 +472,14 @@ async fn patch_batch_csv_update_exp_date(
 
 const MAX_ALIAS_NAME_ATTEMPTS: usize = 1000;
 
-fn derive_unique_alias_name(existing: &[String], input_name: &str, username: &str) -> String {
+fn derive_unique_alias_name(existing: &HashSet<&str>, input_name: &Arc<str>, username: &str) -> String {
     let base = format!("{input_name}-{username}");
-    if !existing.contains(&base) {
+    if !existing.contains(base.as_str()) {
         return base;
     }
     for i in 2..MAX_ALIAS_NAME_ATTEMPTS {
         let cand = format!("{base}-{i}");
-        if !existing.contains(&cand) {
+        if !existing.contains(cand.as_str()) {
             return cand;
         }
     }
@@ -548,11 +549,12 @@ async fn try_create_new_account(
             let base_url = base_url_from_resp.unwrap_or_else(|| input.url.clone());
             let base_url = extract_base_url(base_url.as_str()).unwrap_or_else(|| base_url.clone());
 
-            let mut existing_names: Vec<String> = vec![input.name.clone()];
+            let mut existing_names: HashSet<&str> = HashSet::new();
+            existing_names.insert(&*input.name);
             if let Some(aliases) = input.aliases.as_ref() {
-                existing_names.extend(aliases.iter().map(|a| a.name.clone()));
+                existing_names.extend(aliases.iter().map(|a| &*a.name));
             }
-            let alias_name = derive_unique_alias_name(&existing_names, &input.name, &username);
+            let alias_name = derive_unique_alias_name(&existing_names, &input.name, &username).intern();
 
             let exp_date = panel_client_info(app_state, panel_cfg, &username, &password)
                 .await

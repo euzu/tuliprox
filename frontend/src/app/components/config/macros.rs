@@ -185,9 +185,9 @@ macro_rules! edit_field_text {
                     hidden={$hidden}
                     name={stringify!($field)}
                     autocomplete={true}
-                    value={instance.form.$field.clone()}
+                    value={instance.form.$field.to_string()}
                     on_change={Callback::from(move |value: String| {
-                        instance.dispatch($action(value));
+                        instance.dispatch($action(value.into()));
                     })}
                 />
             </div>
@@ -498,7 +498,7 @@ macro_rules! generate_form_reducer {
                     $(
                         $action_name::$set_name(v) => {
                             let mut new_data = self.$data_field.clone();
-                            new_data.$field_name = v;
+                            new_data.$field_name = v.into();
                             if !modified { modified = true; }
                             new_data
                         },

@@ -12,7 +12,7 @@ use crate::utils::FileReadGuard;
 use std::collections::HashSet;
 use std::iter::Peekable;
 use log::error;
-// concat_string! macro from shared utils is used for efficient String building
+use shared::utils::Internable;
 
 #[allow(clippy::struct_excessive_bools)]
 pub struct M3uPlaylistIterator {
@@ -195,7 +195,7 @@ impl M3uPlaylistIterator {
                 } else {
                     None
                 };
-                m3u_pli.t_stream_url = stream_url;
+                m3u_pli.t_stream_url = stream_url.intern();
                 m3u_pli.t_resource_url = resource_url;
             } else {
                 // Keep original URL (clone required because target field is distinct)

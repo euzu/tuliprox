@@ -16,8 +16,8 @@ pub type ProviderStreamResponse = (Option<BoxedProviderStream>, ProviderStreamIn
 
 pub type ProviderStreamFactoryResponse = (BoxedProviderStream, ProviderStreamInfo);
 
-type StreamUrl = String;
-type ProviderName = String;
+type StreamUrl = Arc<str>;
+type ProviderName = Arc<str>;
 
 pub enum ProviderStreamState {
     Custom(ProviderStreamResponse),
@@ -28,7 +28,7 @@ pub enum ProviderStreamState {
 pub struct StreamDetails {
     pub stream: Option<BoxedProviderStream>,
     pub(crate) stream_info: ProviderStreamInfo,
-    pub provider_name: Option<String>,
+    pub provider_name: Option<Arc<str>>,
     pub grace_period_millis: u64,
     pub reconnect_flag: Option<Arc<AtomicOnceFlag>>,
     pub provider_handle: Option<ProviderHandle>,

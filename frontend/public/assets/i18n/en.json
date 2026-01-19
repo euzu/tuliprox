@@ -58,7 +58,6 @@
     "BUFFER_SIZE": "Buffer Size",
     "SHARED_BURST_BUFFER_BYTES": "Shared burst buffer (MB)",
     "ENABLED": "Enabled",
-    "DISABLED": "Disabled",
     "SIZE": "Size",
     "CACHE_DIR": "Cache dir",
     "NOTIFY_ON": "Notify on",
@@ -75,6 +74,8 @@
     "DIRECTORY": "Directory",
     "ORGANIZE_INTO_DIRECTORIES": "Organize Into Directories",
     "EPISODE_PATTERN": "Episode Pattern",
+    "API": "Api",
+    "MAIN": "Main",
     "MAIN_CONFIG": "Main",
     "API_CONFIG": "API",
     "LOG_CONFIG":  "Log",
@@ -195,6 +196,7 @@
     "EDIT": "Edit",
     "DELETE": "Delete",
     "ACTIVE": "Active",
+    "DISABLED": "Disabled",
     "IGNORE_LOGO": "Ignore logo",
     "SHARE_LIVE_STREAMS": "Share live",
     "REMOVE_DUPLICATES": "Remove duplicates",
@@ -387,7 +389,10 @@
     "BODY_TEMPLATE": "Body Template",
     "WEBHOOK_URL": "Webhook URL",
     "AUTO": "Auto",
-    "API_USER_AGENT": "User Agent"
+    "API_USER_AGENT": "User Agent",
+    "ADVANCED": "Advanced",
+    "TRAKT": "Trakt",
+    "SEASON": "Season"
   },
   "TITLE": {
     "USER_BOUQUET_EDITOR": "Playlist Category Selection"

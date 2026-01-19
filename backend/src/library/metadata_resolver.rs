@@ -128,7 +128,7 @@ mod tests {
     use crate::model::{LibraryMetadataConfig, LibraryMetadataReadConfig, LibraryPlaylistConfig, LibraryTmdbConfig};
     use std::path::PathBuf;
     use std::time::Duration;
-    use shared::utils::intern;
+    use shared::utils::Internable;
     use crate::library::{MediaClassification, MediaClassifier};
 
     fn create_test_config(tmdb_enabled: bool) -> LibraryConfig {
@@ -158,8 +158,8 @@ mod tests {
                 formats: vec![],
             },
             playlist: LibraryPlaylistConfig {
-                movie_category: intern("Movies"),
-                series_category: intern("Series"),
+                movie_category: "Movies".intern(),
+                series_category: "Series".intern(),
             },
         }
     }

@@ -4,7 +4,7 @@ use crate::utils::{add_prefix_to_filename, prepare_file_path, request};
 use crate::utils::{cleanup_unlisted_files_with_suffix};
 use log::debug;
 use shared::error::{TuliproxError, info_err};
-use shared::utils::{sanitize_sensitive_info, short_hash};
+use shared::utils::{sanitize_sensitive_info, short_hash, Internable};
 use std::path::PathBuf;
 use crate::processing::processor::playlist::PlaylistProcessingContext;
 use crate::repository::storage::get_input_storage_path;
@@ -45,7 +45,7 @@ async fn download_epg_file(url: &str, ctx: &PlaylistProcessingContext, input: &C
         // Cache miss: file doesn't exist
     }
 
-    let lock_key = persist_file_path.display().to_string();
+    let lock_key = persist_file_path.display().to_string().intern();
     let _input_lock = ctx.get_input_lock(&lock_key).await;
 
     if ctx.is_input_downloaded(&lock_key).await {

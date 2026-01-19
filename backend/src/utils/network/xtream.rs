@@ -13,9 +13,9 @@ use crate::repository::xtream_repository::{persist_input_vod_info, persists_inpu
 use crate::utils::request;
 use chrono::{DateTime, Utc};
 use log::{error, info, warn};
-use shared::error::{string_to_io_error, to_io_error, TuliproxError};
+use shared::error::{TuliproxError};
 use shared::model::{MsgKind, PlaylistEntry, PlaylistGroup, ProxyUserStatus, SeriesStreamProperties, StreamProperties, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem, XtreamSeriesInfo, XtreamVideoInfo, XtreamVideoInfoDoc};
-use shared::utils::{extract_extension_from_url, get_i64_from_serde_value, get_string_from_serde_value, sanitize_sensitive_info, StringInterner};
+use shared::utils::{extract_extension_from_url, get_i64_from_serde_value, get_string_from_serde_value, sanitize_sensitive_info, Internable};
 use std::collections::HashMap;
 use std::io::Error;
 use std::path::Path;
@@ -26,7 +26,8 @@ use crate::utils::request::DynReader;
 use fs2::FileExt;
 use std::fs::File;
 use std::sync::Arc;
-use shared::{notify_err, notify_err_res};
+
+use shared::{info_err, notify_err, notify_err_res};
 
 const THREE_DAYS_IN_SECS: i64 = 3 * 24 * 60 * 60;
 
@@ -74,22 +75,22 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
                                     target: &ConfigTarget,
                                     pli: &XtreamPlaylistItem,
                                     info_url: &str,
-                                    cluster: XtreamCluster) -> Result<String, Error> {
-    let xtream_output = target.get_xtream_output().ok_or_else(|| Error::other("Unexpected error, missing xtream output"))?;
+                                    cluster: XtreamCluster) -> Result<String, TuliproxError> {
+    let xtream_output = target.get_xtream_output().ok_or_else(|| info_err!("Unexpected error, missing xtream output"))?;
 
     let app_config = &app_state.app_config;
     let server_info = app_config.get_user_server_info(user);
     let options = xtream_mapping_option_from_target_options(target, xtream_output, app_config, user, Some(server_info.get_base_url().as_str()));
 
     if let Some(content) = pli.get_resolved_info_document(&options) {
-        return serde_json::to_string(&content).map_err(to_io_error);
+        return serde_json::to_string(&content).map_err(|err| info_err!("{err}"));
     }
 
     let input_source = InputSource::from(input).with_url(info_url.to_owned());
     if let Ok(content) = get_xtream_stream_info_content(client, &input_source, false).await {
         if content.is_empty() {
-            return Err(string_to_io_error(format!("Provider returned no response for stream with id: {}/{}/{}",
-                                                  target.name.replace(' ', "_").as_str(), &cluster, pli.get_virtual_id())));
+            return Err(info_err!("Provider returned no response for stream with id: {}/{}/{}",
+                                                  target.name.replace(' ', "_").as_str(), &cluster, pli.get_virtual_id()));
         }
         if let Some(provider_id) = pli.get_provider_id() {
             match cluster {
@@ -136,14 +137,14 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
                         Ok(info) => {
                             // parse series info
                             let series_stream_props = SeriesStreamProperties::from_info(&info, pli);
+                            
                             if let Ok(storage_path) = get_input_storage_path(&input.name, working_dir) {
                                 // update input db
                                 if let Err(err) = persists_input_series_info(app_config, &storage_path, cluster, &input.name, provider_id, &series_stream_props).await {
                                     error!("Failed to persist series info for input {}: {err}", &input.name);
                                 }
                             }
-                            let mut interner = StringInterner::new();
-                            if let Some(mut episodes) = parse_xtream_series_info(&pli.get_uuid(), &series_stream_props, &group, &series_name, input, &mut interner) {
+                            if let Some(mut episodes) = parse_xtream_series_info(&pli.get_uuid(), &series_stream_props, &group, &series_name, input) {
                                 let config = &app_state.app_config.config.load();
                                 match get_target_storage_path(config, target.name.as_str()) {
                                     None => {
@@ -151,16 +152,17 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
                                     }
                                     Some(target_path) => {
                                         let mut in_memory_updates = Vec::new();
-                                        let mut provider_series: HashMap<String, Vec<ProviderEpisodeKey>> = HashMap::new();
+                                        let mut provider_series: HashMap<Arc<str>, Vec<ProviderEpisodeKey>> = HashMap::new();
                                         {
-                                            let (mut target_id_mapping, _file_lock) = get_target_id_mapping(&app_state.app_config, &target_path).await;
+                                            let (mut target_id_mapping, _file_lock) = get_target_id_mapping(&app_state.app_config, &target_path, target.use_memory_cache).await?;
+                                            
                                             if let Some(parent_id) = pli.get_provider_id() {
                                                 let category_id = pli.get_category_id().unwrap_or(0);
                                                 for episode in &mut episodes {
                                                     episode.header.virtual_id = target_id_mapping.get_and_update_virtual_id(&episode.header.uuid, provider_id, episode.header.item_type, parent_id);
                                                     episode.header.category_id = category_id;
                                                     let episode_provider_id = episode.header.get_provider_id().unwrap_or(0);
-                                                    provider_series.entry(pli.get_uuid().to_string())
+                                                    provider_series.entry(pli.get_uuid().intern())
                                                         .or_default()
                                                         .push(ProviderEpisodeKey {
                                                             provider_id: episode_provider_id,
@@ -224,18 +226,18 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
         }
     }
 
-    Err(string_to_io_error(format!("Can't find stream with id: {}/{}/{}",
-                                   target.name.replace(' ', "_").as_str(), &cluster, pli.get_virtual_id())))
+    Err(info_err!("Can't find stream with id: {}/{}/{}",
+                                   target.name.replace(' ', "_").as_str(), &cluster, pli.get_virtual_id()))
 }
 
 fn xtream_resolve_stream_info(app_state: &Arc<AppState>, user: &ProxyUserCredentials,
                               target: &ConfigTarget, xtream_output: &XtreamTargetOutput,
-                              pli: &XtreamPlaylistItem) -> Option<Result<String, Error>> {
+                              pli: &XtreamPlaylistItem) -> Option<Result<String, TuliproxError>> {
     let app_config = &app_state.app_config;
     let server_info = app_config.get_user_server_info(user);
     let options = xtream_mapping_option_from_target_options(target, xtream_output, app_config, user, Some(server_info.get_base_url().as_str()));
     if let Some(content) = pli.get_resolved_info_document(&options) {
-        return Some(serde_json::to_string(&content).map_err(to_io_error));
+        return Some(serde_json::to_string(&content).map_err(|err| info_err!("Failed to serialize stream info: {err}")));
     }
     None
 }
@@ -487,10 +489,10 @@ pub fn create_vod_info_from_item(target: &ConfigTarget, user: &ProxyUserCredenti
     doc.info.name.clone_from(name);
     doc.movie_data.stream_id = stream_id;
     doc.movie_data.name.clone_from(name);
-    doc.movie_data.added = added.to_string();
-    doc.movie_data.category_id = category_id.to_string();
+    doc.movie_data.added = added.intern();
+    doc.movie_data.category_id = category_id.intern();
     doc.movie_data.category_ids.push(category_id);
-    doc.movie_data.container_extension = extension;
+    doc.movie_data.container_extension = extension.intern();
     doc.movie_data.custom_sid = None;
 
     serde_json::to_string(&doc).unwrap_or(String::new())
@@ -631,7 +633,7 @@ async fn save_xtream_categories_to_file(col_path: &Path, categories: &[XtreamCat
     let col_path_buf = col_path.to_path_buf();
     let cat_entries: Vec<CategoryEntry> = categories.iter().map(|c| CategoryEntry {
         category_id: c.category_id,
-        category_name: shared::utils::intern(&c.category_name),
+        category_name: c.category_name.clone(),
         parent_id: 0,
     }).collect();
 

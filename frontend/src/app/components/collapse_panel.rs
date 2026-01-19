@@ -12,6 +12,8 @@ pub struct CollapsePanelProps {
     pub children: Children,
     #[prop_or_default]
     pub class: String,
+    #[prop_or_default]
+    pub on_state_change: Callback<bool>,
 }
 
 #[function_component]
@@ -21,7 +23,12 @@ pub fn CollapsePanel(props: &CollapsePanelProps) -> Html {
 
     let toggle = {
         let expanded = expanded.clone();
-        Callback::from(move |_| expanded.set(!*expanded))
+        let on_state_change = props.on_state_change.clone();
+        Callback::from(move |_| {
+            let new_state = !*expanded;
+            expanded.set(new_state);
+            on_state_change.emit(new_state);
+        })
     };
 
     html! {
