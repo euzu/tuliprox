@@ -2153,19 +2153,20 @@ async fn ensure_alias_pool_min(
     time_ctx: Option<&PanelApiTimeContext>,
     effective_now: u64,
     optional: PanelApiOptionalFlags,
-) -> bool {
+) -> (bool, u16) {
     if min_pool == 0 {
-        return false;
+        return (false, 0);
     }
 
     let renew_enabled = optional.client_renew;
     let new_enabled = optional.client_new;
     let adult_enabled = optional.adult_content;
     if !renew_enabled && !new_enabled {
-        return false;
+        return (false, 0);
     }
 
     let mut changed = false;
+    let mut provisioned = 0_u16;
     let max_pool = resolve_alias_pool_limits(app_state.as_ref(), &input.name, panel_cfg)
         .ok()
         .and_then(|(_, max)| max);
@@ -2207,6 +2208,7 @@ async fn ensure_alias_pool_min(
                 .await
                 {
                     Ok(()) => {
+                        provisioned = provisioned.saturating_add(1);
                         if adult_enabled {
                             if let Err(err) = panel_client_adult_content(
                                 app_state.as_ref(),
@@ -2327,6 +2329,7 @@ async fn ensure_alias_pool_min(
                     password: password.clone(),
                     exp_date,
                 });
+                provisioned = provisioned.saturating_add(1);
 
                 if let Some(csv_path) = csv_path {
                     let batch_type = if input.input_type == InputType::Xtream {
@@ -2374,7 +2377,7 @@ async fn ensure_alias_pool_min(
         }
     }
 
-    changed
+    (changed, provisioned)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -3113,6 +3116,10 @@ async fn sync_panel_api_for_input_on_boot(
             a.name != input.name && is_expiring_with_offset_at(a.exp_date, offset_secs, now)
         })
         .count();
+    let expired_aliases = accounts
+        .iter()
+        .filter(|a| a.name != input.name && is_input_expired_at(a.exp_date, now))
+        .count();
 
     let valid_aliases_beyond_offset = accounts
         .iter()
@@ -3190,12 +3197,13 @@ async fn sync_panel_api_for_input_on_boot(
     };
     if log_pool {
         debug_if_enabled!(
-            "panel_api boot/update provisioning aliases for input {} (offset={}s): desired={}, valid_beyond_offset={}, expiring(offset)={}, refresh_planned(offset)={}, missing={}",
+            "panel_api boot/update provisioning aliases for input {} (offset={}s): desired={}, valid_beyond_offset={}, expiring(offset)={}, expired={}, refresh_planned(offset)={}, missing={}",
             sanitize_sensitive_info(&input.name),
             offset_secs,
             desired_aliases_u16,
             valid_aliases_beyond_offset,
             expiring_aliases,
+            expired_aliases,
             planned_refresh_aliases,
             missing_aliases_u16
         );
@@ -3548,19 +3556,6 @@ async fn sync_panel_api_for_input_on_boot(
         accounts.extend(newly_created_accounts);
     }
 
-    if log_pool {
-        let valid_total = count_valid_accounts_at(&accounts, now);
-        debug_if_enabled!(
-            "panel_api boot/update provisioning total for input {} (offset={}s): enabled_users={}, valid_accounts={}, provisioned_root={}, provisioned_aliases={}",
-            sanitize_sensitive_info(&input.name),
-            offset_secs,
-            enabled_users,
-            valid_total,
-            provisioned_root,
-            provisioned_aliases
-        );
-    }
-
     if adult_enabled {
         for acct in &accounts {
             if let Err(err) = panel_client_adult_content(
@@ -3583,7 +3578,7 @@ async fn sync_panel_api_for_input_on_boot(
     if let Some(min_pool) = min_pool {
         let root_valid = root_counts_towards_pool(&accounts, input.name.as_str());
         let alias_min = min_pool.saturating_sub(u16::from(root_valid));
-        if ensure_alias_pool_min(
+        let (pool_changed, pool_provisioned) = ensure_alias_pool_min(
             app_state,
             input.as_ref(),
             panel_cfg,
@@ -3595,14 +3590,28 @@ async fn sync_panel_api_for_input_on_boot(
             effective_now,
             optional,
         )
-        .await
-        {
+        .await;
+        if pool_changed {
             if csv_path.is_some() {
                 any_change = true;
             } else {
                 pending_sources_yml = true;
             }
         }
+        provisioned_aliases = provisioned_aliases.saturating_add(pool_provisioned);
+    }
+
+    if log_pool {
+        let valid_total = count_valid_accounts_at(&accounts, now);
+        debug_if_enabled!(
+            "panel_api boot/update provisioning total for input {} (offset={}s): enabled_users={}, valid_accounts={}, provisioned_root={}, provisioned_aliases={}",
+            sanitize_sensitive_info(&input.name),
+            offset_secs,
+            enabled_users,
+            valid_total,
+            provisioned_root,
+            provisioned_aliases
+        );
     }
 
     if alias_pool_remove_expired(panel_cfg) {
