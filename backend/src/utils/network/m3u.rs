@@ -1,12 +1,16 @@
-use std::sync::Arc;
-use shared::error::TuliproxError;
-use shared::model::PlaylistGroup;
 use crate::model::{Config, ConfigInput, InputSource};
 use crate::processing::parser::m3u;
 use crate::utils::prepare_file_path;
 use crate::utils::request;
+use shared::error::TuliproxError;
+use shared::model::PlaylistGroup;
+use std::sync::Arc;
 
-pub async fn download_m3u_playlist(client: &reqwest::Client, cfg: &Arc<Config>, input: &ConfigInput) -> (Vec<PlaylistGroup>, Vec<TuliproxError>) {
+pub async fn download_m3u_playlist(
+    client: &reqwest::Client,
+    cfg: &Arc<Config>,
+    input: &ConfigInput,
+) -> (Vec<PlaylistGroup>, Vec<TuliproxError>) {
     let working_dir = &cfg.working_dir;
     let input_source: InputSource = {
         match input.staged.as_ref() {
@@ -22,11 +26,9 @@ pub async fn download_m3u_playlist(client: &reqwest::Client, cfg: &Arc<Config>, 
         persist_file_path,
         cfg.default_user_agent.as_deref(),
     )
-        .await
+    .await
     {
-        Ok(reader) => {
-            (m3u::parse_m3u(cfg, input, reader).await, vec![])
-        }
-        Err(err) => (vec![], vec![err])
+        Ok(reader) => (m3u::parse_m3u(cfg, input, reader).await, vec![]),
+        Err(err) => (vec![], vec![err]),
     }
 }
