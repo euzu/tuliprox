@@ -145,7 +145,8 @@ pub fn InputTable(props: &InputTableProps) -> Html {
                                       <StagedInputView input={ dto.staged.clone() } />
                                    </RevealContent> }),
                             15 => dto.exp_date.as_ref().and_then(|ts| unix_ts_to_str(*ts))
-                                    .map(|s| html! { { s } }).unwrap_or_else(|| html! { <AppIcon name="Unlimited" /> }),
+                                    .map(|s| html! { <span class="tp__table__nowrap">{ s }</span> })
+                                    .unwrap_or_else(|| html! { <AppIcon name="Unlimited" /> }),
                             _ => html! {""},
                         }
                     },
@@ -172,7 +173,8 @@ pub fn InputTable(props: &InputTableProps) -> Html {
                             9 => html! { alias.priority.to_string() },
                             10 => html! { alias.max_connections.to_string() },
                             15 => alias.exp_date.as_ref().and_then(|ts| unix_ts_to_str(*ts))
-                                .map(|s| html! { { s } }).unwrap_or_else(|| html! { <AppIcon name="Unlimited" /> }),
+                                .map(|s| html! { <span class="tp__table__nowrap">{ s }</span> })
+                                .unwrap_or_else(|| html! { <AppIcon name="Unlimited" /> }),
                             _ => html! { },
                         }
                     }
