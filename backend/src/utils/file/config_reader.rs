@@ -542,6 +542,19 @@ pub async fn persist_source_config(
 
     let mut source_config = doc.clone();
     for input in &mut source_config.inputs {
+        if input
+            .panel_api
+            .as_ref()
+            .is_some_and(|panel| panel.alias_pool.is_some())
+        {
+            if let Some(aliases) = input.aliases.as_mut() {
+                aliases.sort_by(|a, b| {
+                    let a_ts = a.exp_date.unwrap_or(i64::MAX);
+                    let b_ts = b.exp_date.unwrap_or(i64::MAX);
+                    a_ts.cmp(&b_ts).then_with(|| a.name.cmp(&b.name))
+                });
+            }
+        }
         if matches!(
             input.input_type,
             InputType::XtreamBatch | InputType::M3uBatch
