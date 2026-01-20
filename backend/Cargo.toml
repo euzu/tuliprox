@@ -1,6 +1,6 @@
 [package]
 name = "tuliprox"
-version = "3.2.44"
+version = "3.2.45"
 edition = "2021"
 rust-version = "1.89.0"
 
@@ -13,7 +13,7 @@ shared = { version = "3", path = "../shared" }
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde-saphyr = "0.0.14"
 serde_json = { version = "1", features = ["raw_value"] }
-quick-xml = { version = "0.39", features = ["async-tokio"] }
+quick-xml = { version = "0.39", features = ["async-tokio", "serialize"] }
 regex = "1.12"
 clap = { version = "4", features = ["derive"] }
 reqwest = { version = "0", features = ["blocking", "json", "stream", "rustls-tls", "socks"] }
