@@ -72,6 +72,10 @@
 
     .tp__collapse-panel__header {
       font-size: 1.6rem;
+      padding: 0;
+       span {
+         pointer-events: auto;
+       }
     }
 
     > :nth-child(1) {
@@ -133,4 +137,28 @@
     }
   }
 
+  &__section-header {
+    display: flex;
+    flex-flow: row nowrap;
+    justify-content: space-between;
+    gap: var(--gap-default);
+    box-sizing: border-box;
+    overflow: hidden;
+    width: 100%;
+
+    &__toolbar {
+      display: flex;
+      flex-flow: row nowrap;
+      gap: var(--gap-default);
+      box-sizing: border-box;
+      .tp__icon-button:hover,
+      .tp__icon-button:focus-visible {
+        background-color: var(--action-item-background-color);
+      }
+      svg, img {
+        height: 2rem;
+        width: 2rem;
+      }
+    }
+  }
 }

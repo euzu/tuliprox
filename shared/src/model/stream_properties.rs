@@ -1,32 +1,37 @@
 use crate::model::info_doc_utils::InfoDocUtils;
-use crate::model::{PlaylistEntry, XtreamSeriesInfo, XtreamVideoInfo};
-use crate::utils::{deserialize_as_option_string, deserialize_as_string,
-                   deserialize_as_string_array, deserialize_json_as_opt_string, serialize_json_as_opt_string,
-                   deserialize_number_from_string, deserialize_number_from_string_or_zero, string_default_on_null,
-                   serialize_option_string_as_null_if_empty};
+use crate::model::{PlaylistEntry, XtreamSeriesInfo, XtreamSeriesInfoDoc, XtreamVideoInfo};
+use crate::utils::{arc_str_default_on_null, arc_str_none_default_on_null, arc_str_option_serde_none,
+                   deserialize_as_option_arc_str, deserialize_as_option_arc_str_none,
+                   deserialize_as_string_array, deserialize_json_as_opt_string, deserialize_number_from_string,
+                   deserialize_number_from_string_or_zero, serialize_json_as_opt_string, serialize_option_string_as_null_if_empty, Internable};
 use serde::{Deserialize, Serialize};
-use std::borrow::Cow;
+use std::sync::Arc;
+use log::{warn};
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct LiveStreamProperties {
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub name: String,
+    #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
+    pub name: Arc<str>,
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
     pub category_id: u32,
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
     pub stream_id: u32,
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub stream_icon: String,
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub direct_source: String,
-    #[serde(default, deserialize_with = "deserialize_as_option_string", serialize_with = "serialize_option_string_as_null_if_empty")]
-    pub custom_sid: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_as_option_string")]
-    pub added: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_as_option_string")]
-    pub stream_type: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_as_option_string")]
-    pub epg_channel_id: Option<String>,
+    #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
+    pub stream_icon: Arc<str>,
+    #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
+    pub direct_source: Arc<str>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_as_option_arc_str_none",
+        serialize_with = "serialize_option_string_as_null_if_empty"
+    )]
+    pub custom_sid: Option<Arc<str>>,
+    #[serde(default, deserialize_with = "deserialize_as_option_arc_str_none")]
+    pub added: Option<Arc<str>>,
+    #[serde(default, deserialize_with = "deserialize_as_option_arc_str")]
+    pub stream_type: Option<Arc<str>>,
+    #[serde(default, deserialize_with = "deserialize_as_option_arc_str")]
+    pub epg_channel_id: Option<Arc<str>>,
     #[serde(default, deserialize_with = "deserialize_number_from_string")]
     pub tv_archive: Option<i32>,
     #[serde(default, deserialize_with = "deserialize_number_from_string")]
@@ -37,65 +42,96 @@ pub struct LiveStreamProperties {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct VideoStreamDetailProperties {
-    pub kinopoisk_url: Option<String>,
-    pub o_name: Option<String>,
-    pub cover_big: Option<String>,
-    pub movie_image: Option<String>,
-    pub release_date: Option<String>,
+    #[serde(default, with = "arc_str_option_serde_none")]
+    pub kinopoisk_url: Option<Arc<str>>,
+    #[serde(default, with = "arc_str_option_serde_none")]
+    pub o_name: Option<Arc<str>>,
+    #[serde(default, with = "arc_str_option_serde_none")]
+    pub cover_big: Option<Arc<str>>,
+    #[serde(default, with = "arc_str_option_serde_none")]
+    pub movie_image: Option<Arc<str>>,
+    #[serde(default, with = "arc_str_option_serde_none")]
+    pub release_date: Option<Arc<str>>,
     #[serde(default, deserialize_with = "deserialize_number_from_string")]
     pub episode_run_time: Option<u32>,
-    pub youtube_trailer: Option<String>,
-    pub director: Option<String>,
-    pub actors: Option<String>,
-    pub cast: Option<String>,
-    pub description: Option<String>,
-    pub plot: Option<String>,
-    pub age: Option<String>,
-    pub mpaa_rating: Option<String>,
+    #[serde(default, with = "arc_str_option_serde_none")]
+    pub youtube_trailer: Option<Arc<str>>,
+    #[serde(default, with = "arc_str_option_serde_none")]
+    pub director: Option<Arc<str>>,
+    #[serde(default, with = "arc_str_option_serde_none")]
+    pub actors: Option<Arc<str>>,
+    #[serde(default, with = "arc_str_option_serde_none")]
+    pub cast: Option<Arc<str>>,
+    #[serde(default, with = "arc_str_option_serde_none")]
+    pub description: Option<Arc<str>>,
+    #[serde(default, with = "arc_str_option_serde_none")]
+    pub plot: Option<Arc<str>>,
+    #[serde(default, with = "arc_str_option_serde_none")]
+    pub age: Option<Arc<str>>,
+    #[serde(default, with = "arc_str_option_serde_none")]
+    pub mpaa_rating: Option<Arc<str>>,
     #[serde(default)]
     pub rating_count_kinopoisk: u32,
-    pub country: Option<String>,
-    pub genre: Option<String>,
+    #[serde(default, with = "arc_str_option_serde_none")]
+    pub country: Option<Arc<str>>,
+    #[serde(default, with = "arc_str_option_serde_none")]
+    pub genre: Option<Arc<str>>,
     #[serde(default, deserialize_with = "deserialize_as_string_array")]
-    pub backdrop_path: Option<Vec<String>>,
-    pub duration_secs: Option<String>,
-    pub duration: Option<String>,
-    #[serde(default, serialize_with = "serialize_json_as_opt_string", deserialize_with = "deserialize_json_as_opt_string")]
-    pub video: Option<String>,
-    #[serde(default, serialize_with = "serialize_json_as_opt_string", deserialize_with = "deserialize_json_as_opt_string")]
-    pub audio: Option<String>,
+    pub backdrop_path: Option<Vec<Arc<str>>>,
+    #[serde(default, with = "arc_str_option_serde_none")]
+    pub duration_secs: Option<Arc<str>>,
+    #[serde(default, with = "arc_str_option_serde_none")]
+    pub duration: Option<Arc<str>>,
+    #[serde(
+        default,
+        serialize_with = "serialize_json_as_opt_string",
+        deserialize_with = "deserialize_json_as_opt_string"
+    )]
+    pub video: Option<Arc<str>>,
+    #[serde(
+        default,
+        serialize_with = "serialize_json_as_opt_string",
+        deserialize_with = "deserialize_json_as_opt_string"
+    )]
+    pub audio: Option<Arc<str>>,
     #[serde(default)]
     pub bitrate: u32,
-    pub runtime: Option<String>,
-    pub status: Option<String>,
+    #[serde(default, with = "arc_str_option_serde_none")]
+    pub runtime: Option<Arc<str>>,
+    #[serde(default, with = "arc_str_option_serde_none")]
+    pub status: Option<Arc<str>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct VideoStreamProperties {
-    #[serde(default, deserialize_with = "deserialize_as_string")]
-    pub name: String,
+    #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
+    pub name: Arc<str>,
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
     pub category_id: u32,
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
     pub stream_id: u32,
-    #[serde(default, deserialize_with = "deserialize_as_string")]
-    pub stream_icon: String,
-    #[serde(default, deserialize_with = "deserialize_as_string")]
-    pub direct_source: String,
-    #[serde(default, deserialize_with = "deserialize_as_option_string", serialize_with = "serialize_option_string_as_null_if_empty")]
-    pub custom_sid: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_as_string")]
-    pub added: String,
-    #[serde(default, deserialize_with = "deserialize_as_string")]
-    pub container_extension: String,
+    #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
+    pub stream_icon: Arc<str>,
+    #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
+    pub direct_source: Arc<str>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_as_option_arc_str_none",
+        serialize_with = "serialize_option_string_as_null_if_empty"
+    )]
+    pub custom_sid: Option<Arc<str>>,
+    #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
+    pub added: Arc<str>,
+    #[serde(default, deserialize_with = "arc_str_default_on_null")]
+    pub container_extension: Arc<str>,
     #[serde(default, deserialize_with = "deserialize_number_from_string")]
     pub rating: Option<f64>,
     #[serde(default, deserialize_with = "deserialize_number_from_string")]
     pub rating_5based: Option<f64>,
-    #[serde(default)]
-    pub stream_type: Option<String>,
-    #[serde(default)]
-    pub trailer: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_as_option_arc_str")]
+    pub stream_type: Option<Arc<str>>,
+    #[serde(default, deserialize_with = "deserialize_as_option_arc_str_none")]
+    pub trailer: Option<Arc<str>>,
     #[serde(default, deserialize_with = "deserialize_number_from_string")]
     pub tmdb: Option<u32>,
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
@@ -106,24 +142,24 @@ pub struct VideoStreamProperties {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct SeriesStreamDetailSeasonProperties {
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub name: String,
+    #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
+    pub name: Arc<str>,
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
     pub season_number: u32,
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
     pub episode_count: u32,
-    #[serde(default, deserialize_with = "deserialize_as_option_string")]
-    pub overview: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_as_option_string")]
-    pub air_date: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_as_option_string")]
-    pub cover: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_as_option_string")]
-    pub cover_tmdb: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_as_option_string")]
-    pub cover_big: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_as_option_string")]
-    pub duration: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_as_option_arc_str_none")]
+    pub overview: Option<Arc<str>>,
+    #[serde(default, deserialize_with = "deserialize_as_option_arc_str_none")]
+    pub air_date: Option<Arc<str>>,
+    #[serde(default, deserialize_with = "deserialize_as_option_arc_str_none")]
+    pub cover: Option<Arc<str>>,
+    #[serde(default, deserialize_with = "deserialize_as_option_arc_str_none")]
+    pub cover_tmdb: Option<Arc<str>>,
+    #[serde(default, deserialize_with = "deserialize_as_option_arc_str_none")]
+    pub cover_big: Option<Arc<str>>,
+    #[serde(default, deserialize_with = "deserialize_as_option_arc_str_none")]
+    pub duration: Option<Arc<str>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -134,38 +170,50 @@ pub struct SeriesStreamDetailEpisodeProperties {
     pub episode_num: u32,
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
     pub season: u32,
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub title: String,
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub container_extension: String,
-    #[serde(default, deserialize_with = "deserialize_as_option_string", serialize_with = "serialize_option_string_as_null_if_empty")]
-    pub custom_sid: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_as_string")]
-    pub added: String,
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub direct_source: String,
+    #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
+    pub title: Arc<str>,
+    #[serde(default, deserialize_with = "arc_str_default_on_null")]
+    pub container_extension: Arc<str>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_as_option_arc_str_none",
+        serialize_with = "serialize_option_string_as_null_if_empty"
+    )]
+    pub custom_sid: Option<Arc<str>>,
+    #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
+    pub added: Arc<str>,
+    #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
+    pub direct_source: Arc<str>,
     #[serde(default, deserialize_with = "deserialize_number_from_string")]
     pub tmdb: Option<u32>,
-    #[serde(default, deserialize_with = "deserialize_as_string")]
-    pub release_date: String,
-    #[serde(default, deserialize_with = "deserialize_as_option_string")]
-    pub plot: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_as_option_string")]
-    pub crew: Option<String>,
+    #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
+    pub release_date: Arc<str>,
+    #[serde(default, deserialize_with = "deserialize_as_option_arc_str_none")]
+    pub plot: Option<Arc<str>>,
+    #[serde(default, deserialize_with = "deserialize_as_option_arc_str_none")]
+    pub crew: Option<Arc<str>>,
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
     pub duration_secs: u32,
-    #[serde(default, deserialize_with = "deserialize_as_string")]
-    pub duration: String,
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub movie_image: String,
+    #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
+    pub duration: Arc<str>,
+    #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
+    pub movie_image: Arc<str>,
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
     pub bitrate: u32,
     #[serde(default, deserialize_with = "deserialize_number_from_string")]
     pub rating: Option<f64>,
-    #[serde(default, serialize_with = "serialize_json_as_opt_string", deserialize_with = "deserialize_json_as_opt_string")]
-    pub video: Option<String>,
-    #[serde(default, serialize_with = "serialize_json_as_opt_string", deserialize_with = "deserialize_json_as_opt_string")]
-    pub audio: Option<String>,
+    #[serde(
+        default,
+        serialize_with = "serialize_json_as_opt_string",
+        deserialize_with = "deserialize_json_as_opt_string"
+    )]
+    pub video: Option<Arc<str>>,
+    #[serde(
+        default,
+        serialize_with = "serialize_json_as_opt_string",
+        deserialize_with = "deserialize_json_as_opt_string"
+    )]
+    pub audio: Option<Arc<str>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -180,35 +228,36 @@ pub struct SeriesStreamDetailProperties {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct SeriesStreamProperties {
-    #[serde(default, deserialize_with = "deserialize_as_string")]
-    pub name: String,
+    #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
+    pub name: Arc<str>,
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
     pub category_id: u32,
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
     pub series_id: u32,
     #[serde(default, deserialize_with = "deserialize_as_string_array")]
-    pub backdrop_path: Option<Vec<String>>,
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub cast: String,
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub cover: String,
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub director: String,
-    #[serde(default, deserialize_with = "deserialize_as_option_string")]
-    pub episode_run_time: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_as_option_string")]
-    pub genre: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_as_option_string")]
-    pub last_modified: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_as_option_string")]
-    pub plot: Option<String>,
+    pub backdrop_path: Option<Vec<Arc<str>>>,
+    #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
+    pub cast: Arc<str>,
+    #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
+    pub cover: Arc<str>,
+    #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
+    pub director: Arc<str>,
+    #[serde(default, deserialize_with = "deserialize_as_option_arc_str_none")]
+    pub episode_run_time: Option<Arc<str>>,
+    #[serde(default, deserialize_with = "deserialize_as_option_arc_str_none")]
+    pub genre: Option<Arc<str>>,
+    #[serde(default, deserialize_with = "deserialize_as_option_arc_str_none")]
+    pub last_modified: Option<Arc<str>>,
+    #[serde(default, deserialize_with = "deserialize_as_option_arc_str_none")]
+    pub plot: Option<Arc<str>>,
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
     pub rating: f64,
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
     pub rating_5based: f64,
-    pub release_date: Option<String>,
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub youtube_trailer: String,
+    #[serde(default, with = "arc_str_option_serde_none")]
+    pub release_date: Option<Arc<str>>,
+    #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
+    pub youtube_trailer: Arc<str>,
     #[serde(default, deserialize_with = "deserialize_number_from_string")]
     pub tmdb: Option<u32>,
     #[serde(default)]
@@ -223,20 +272,28 @@ pub struct EpisodeStreamProperties {
     pub episode: u32,
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
     pub season: u32,
-    #[serde(default, deserialize_with = "deserialize_as_option_string")]
-    pub added: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_as_option_string")]
-    pub release_date: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_as_option_arc_str_none")]
+    pub added: Option<Arc<str>>,
+    #[serde(default, deserialize_with = "deserialize_as_option_arc_str_none")]
+    pub release_date: Option<Arc<str>>,
     #[serde(default, deserialize_with = "deserialize_number_from_string")]
     pub tmdb: Option<u32>,
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub movie_image: String,
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub container_extension: String,
-    #[serde(default, serialize_with = "serialize_json_as_opt_string", deserialize_with = "deserialize_json_as_opt_string")]
-    pub video: Option<String>,
-    #[serde(default, serialize_with = "serialize_json_as_opt_string", deserialize_with = "deserialize_json_as_opt_string")]
-    pub audio: Option<String>,
+    #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
+    pub movie_image: Arc<str>,
+    #[serde(default, deserialize_with = "arc_str_default_on_null")]
+    pub container_extension: Arc<str>,
+    #[serde(
+        default,
+        serialize_with = "serialize_json_as_opt_string",
+        deserialize_with = "deserialize_json_as_opt_string"
+    )]
+    pub video: Option<Arc<str>>,
+    #[serde(
+        default,
+        serialize_with = "serialize_json_as_opt_string",
+        deserialize_with = "deserialize_json_as_opt_string"
+    )]
+    pub audio: Option<Arc<str>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -262,8 +319,8 @@ impl StreamProperties {
             StreamProperties::Live(live) => {
                 live.epg_channel_id = live.epg_channel_id.as_ref()
                     .filter(|epg_id| !epg_id.trim().is_empty())
-                    .map(|epg_id| epg_id.to_lowercase())
-                    .or(None);
+                    .map(|epg_id| epg_id.to_lowercase().intern())
+                    .or(live.epg_channel_id.clone());
             }
             StreamProperties::Video(_) => {}
             StreamProperties::Series(_) => {}
@@ -289,25 +346,25 @@ impl StreamProperties {
         }
     }
 
-    pub fn get_stream_icon(&self) -> Cow<'_, str> {
+    pub fn get_stream_icon(&self) -> Arc<str> {
         match self {
-            StreamProperties::Live(live) => Cow::Borrowed(&live.stream_icon),
-            StreamProperties::Video(video) => Cow::Borrowed(&video.stream_icon),
-            StreamProperties::Series(series) => Cow::Borrowed(&series.cover),
-            StreamProperties::Episode(episode) => Cow::Borrowed(&episode.movie_image),
+            StreamProperties::Live(live) => Arc::clone(&live.stream_icon),
+            StreamProperties::Video(video) => Arc::clone(&video.stream_icon),
+            StreamProperties::Series(series) => Arc::clone(&series.cover),
+            StreamProperties::Episode(episode) => Arc::clone(&episode.movie_image),
         }
     }
 
-    pub fn get_name(&self) -> Cow<'_, str> {
+    pub fn get_name(&self) -> Arc<str> {
         match self {
-            StreamProperties::Live(live) => Cow::Borrowed(&live.name),
-            StreamProperties::Video(video) => Cow::Borrowed(&video.name),
-            StreamProperties::Series(series) => Cow::Borrowed(&series.name),
-            StreamProperties::Episode(_episode) => Cow::Borrowed(""),
+            StreamProperties::Live(live) => Arc::clone(&live.name),
+            StreamProperties::Video(video) => Arc::clone(&video.name),
+            StreamProperties::Series(series) => Arc::clone(&series.name),
+            StreamProperties::Episode(_episode) => "".intern(),
         }
     }
 
-    pub fn get_epg_channel_id(&self) -> Option<String> {
+    pub fn get_epg_channel_id(&self) -> Option<Arc<str>> {
         match self {
             StreamProperties::Live(live) => live.epg_channel_id.clone(),
             StreamProperties::Video(_) => None,
@@ -325,44 +382,44 @@ impl StreamProperties {
         }
     }
 
-    pub fn get_release_date(&self) -> Option<Cow<'_, str>> {
+    pub fn get_release_date(&self) -> Option<Arc<str>> {
         match self {
             StreamProperties::Live(_) => None,
-            StreamProperties::Video(video) => video.details.as_ref().and_then(|d| d.release_date.as_deref().map(Cow::Borrowed)),
-            StreamProperties::Series(series) => series.release_date.as_deref().map(Cow::Borrowed),
-            StreamProperties::Episode(episode) => episode.release_date.as_deref().map(Cow::Borrowed),
+            StreamProperties::Video(video) => video.details.as_ref().and_then(|d| d.release_date.as_ref().map(Arc::clone)),
+            StreamProperties::Series(series) => series.release_date.as_ref().map(Arc::clone),
+            StreamProperties::Episode(episode) => episode.release_date.as_ref().map(Arc::clone),
         }
     }
 
-    pub fn get_added(&self) -> Option<Cow<'_, str>> {
+    pub fn get_added(&self) -> Option<Arc<str>> {
         match self {
             StreamProperties::Live(_) => None,
-            StreamProperties::Video(video) => non_empty_string(video.added.as_str()),
+            StreamProperties::Video(video) => non_empty_arc(&video.added),
             StreamProperties::Series(series) => series.details.as_ref()
                 .and_then(|d| d.episodes.as_ref())
-                .and_then(|e| e.first().and_then(|e| non_empty_string(e.added.as_str()))),
-            StreamProperties::Episode(episode) => episode.added.as_deref().map(Cow::Borrowed),
+                .and_then(|e| e.first().and_then(|e| non_empty_arc(&e.added))),
+            StreamProperties::Episode(episode) => episode.added.as_ref().map(Arc::clone),
         }
     }
 
-    pub fn get_container_extension(&self) -> Option<Cow<'_, str>> {
+    pub fn get_container_extension(&self) -> Option<Arc<str>> {
         match self {
             StreamProperties::Live(_) => None,
-            StreamProperties::Video(video) => non_empty_string(&video.container_extension),
+            StreamProperties::Video(video) => non_empty_arc(&video.container_extension),
             StreamProperties::Series(series) => series.details.as_ref()
                 .and_then(|d| d.episodes.as_ref())
-                .and_then(|e| e.first().and_then(|e| non_empty_string(&e.container_extension))),
-            StreamProperties::Episode(episode) => non_empty_string(&episode.container_extension),
+                .and_then(|e| e.first().and_then(|e| non_empty_arc(&e.container_extension))),
+            StreamProperties::Episode(episode) => non_empty_arc(&episode.container_extension),
         }
     }
 
-    pub fn get_direct_source(&self) -> Option<Cow<'_, str>> {
+    pub fn get_direct_source(&self) -> Option<Arc<str>> {
         match self {
             StreamProperties::Live(_) => None,
-            StreamProperties::Video(video) => non_empty_string(&video.direct_source),
+            StreamProperties::Video(video) => non_empty_arc(&video.direct_source),
             StreamProperties::Series(series) => series.details.as_ref()
                 .and_then(|d| d.episodes.as_ref())
-                .and_then(|e| e.first().and_then(|e| non_empty_string(&e.direct_source))),
+                .and_then(|e| e.first().and_then(|e| non_empty_arc(&e.direct_source))),
             StreamProperties::Episode(_episode) => None,
         }
     }
@@ -394,12 +451,12 @@ impl StreamProperties {
         }
     }
 
-    pub fn resolve_resource_url<'a>(&'a self, field: &str) -> Option<Cow<'a, str>> {
+    pub fn resolve_resource_url(&self, field: &str) -> Option<Arc<str>> {
         if field.starts_with("backdrop_path") {
             if let StreamProperties::Series(series) = self {
                 if let Some(backdrop) = series.backdrop_path.as_ref() {
                     if let Some(url) = backdrop.first() {
-                        return Some(Cow::Borrowed(url));
+                        return Some(Arc::clone(url));
                     }
                 }
             }
@@ -409,7 +466,7 @@ impl StreamProperties {
                 if let Some(details) = video.details.as_ref() {
                     if let Some(backdrop) = details.backdrop_path.as_ref() {
                         if let Some(url) = backdrop.first() {
-                            return Some(Cow::Borrowed(url));
+                            return Some(Arc::clone(url));
                         }
                     }
                 }
@@ -419,29 +476,29 @@ impl StreamProperties {
 
         if field == "cover" {
             if let StreamProperties::Series(series) = self {
-                return Some(Cow::Borrowed(series.cover.as_str()));
+                return Some(Arc::clone(&series.cover));
             }
             return None;
         }
         if field == "logo" || field == "logo_small" {
             return match self {
                 StreamProperties::Live(live) => {
-                    Some(Cow::Borrowed(live.stream_icon.as_str()))
+                    Some(Arc::clone(&live.stream_icon))
                 }
                 StreamProperties::Video(video) => {
-                    Some(Cow::Borrowed(video.stream_icon.as_str()))
+                    Some(Arc::clone(&video.stream_icon))
                 }
                 StreamProperties::Series(series) => {
-                    Some(Cow::Borrowed(series.cover.as_str()))
+                    Some(Arc::clone(&series.cover))
                 }
                 StreamProperties::Episode(episode) => {
-                    Some(Cow::Borrowed(episode.movie_image.as_str()))
+                    Some(Arc::clone(&episode.movie_image))
                 }
             };
         }
         if field == "movie_image" {
             if let StreamProperties::Episode(episode) = self {
-                return Some(Cow::Borrowed(episode.movie_image.as_str()));
+                return Some(Arc::clone(&episode.movie_image));
             }
             return None;
         }
@@ -449,7 +506,7 @@ impl StreamProperties {
             if let StreamProperties::Video(video) = self {
                 if let Some(details) = video.details.as_ref() {
                     if let Some(cover_big) = details.cover_big.as_ref() {
-                        return Some(Cow::Borrowed(cover_big.as_str()));
+                        return Some(Arc::clone(cover_big));
                     }
                 }
             }
@@ -459,7 +516,7 @@ impl StreamProperties {
             if let StreamProperties::Video(video) = self {
                 if let Some(details) = video.details.as_ref() {
                     if let Some(movie_image) = details.movie_image.as_ref() {
-                        return Some(Cow::Borrowed(movie_image.as_str()));
+                        return Some(Arc::clone(movie_image));
                     }
                 }
             }
@@ -474,16 +531,16 @@ impl StreamProperties {
                             for season in seasons {
                                 if season.season_number == season_num {
                                     if field == "cover" {
-                                        return season.cover.as_ref().map(|c| Cow::Borrowed(c.as_str()));
+                                        return season.cover.as_ref().map(Arc::clone);
                                     }
                                     if field == "cover_tmdb" {
-                                        return season.cover_tmdb.as_ref().map(|c| Cow::Borrowed(c.as_str()));
+                                        return season.cover_tmdb.as_ref().map(Arc::clone);
                                     }
                                     if field == "cover_big" {
-                                        return season.cover_big.as_ref().map(|c| Cow::Borrowed(c.as_str()));
+                                        return season.cover_big.as_ref().map(Arc::clone);
                                     }
                                     if field == "overview" {
-                                        return season.overview.as_ref().map(|c| Cow::Borrowed(c.as_str()));
+                                        return season.overview.as_ref().map(Arc::clone);
                                     }
                                 }
                             }
@@ -500,7 +557,7 @@ impl StreamProperties {
                         if let Some(episodes) = details.episodes.as_ref() {
                             for episode in episodes {
                                 if episode.season == season && episode_num == episode.episode_num && field == "movie_image" {
-                                    return Some(Cow::Borrowed(episode.movie_image.as_str()));
+                                    return Some(Arc::clone(&episode.movie_image));
                                 }
                             }
                         }
@@ -560,7 +617,7 @@ impl VideoStreamProperties {
             name: info.info.name.clone(),
             category_id: info.movie_data.category_id,
             stream_id: info.movie_data.stream_id,
-            stream_icon: info.info.movie_image.as_ref().map_or_else(String::new, Clone::clone),
+            stream_icon: info.info.movie_image.as_ref().map_or_else(|| "".intern(), Clone::clone),
             direct_source: info.movie_data.direct_source.clone(),
             custom_sid: info.movie_data.custom_sid.clone(),
             added: info.movie_data.added.clone(),
@@ -612,7 +669,7 @@ impl VideoStreamProperties {
             }
             props.is_adult = video.is_adult;
         } else {
-            props.stream_type = Some("movie".to_string());
+            props.stream_type = Some("movie".intern());
         }
 
         props
@@ -690,6 +747,88 @@ impl SeriesStreamProperties {
             }),
         }
     }
+
+    pub fn from_info_doc(info: &XtreamSeriesInfoDoc, series_id: u32) -> SeriesStreamProperties {
+        let tmdb = info.info.tmdb.parse::<u32>().ok();
+        SeriesStreamProperties {
+            name: info.info.name.clone(),
+            category_id: info.info.category_id.parse::<u32>().unwrap_or_else(|_| {
+                warn!("Failed to parse category_id {}", &info.info.category_id);
+                0
+            }),
+            series_id,
+            backdrop_path: Some(info.info.backdrop_path.clone()),
+            cast: info.info.cast.clone(),
+            cover: info.info.cover.clone(),
+            director: info.info.director.clone(),
+            episode_run_time: Some(info.info.episode_run_time.clone()),
+            genre: Some(info.info.genre.clone()),
+            last_modified: Some(info.info.last_modified.clone()),
+            plot: Some(info.info.plot.clone()),
+            rating: info.info.rating.parse::<f64>().unwrap_or_else(|_| {
+                warn!("Failed to parse rating {}", &info.info.rating);
+                0.0
+            }),
+            rating_5based: info.info.rating_5based.parse::<f64>().unwrap_or_else(|_| {
+                warn!("Failed to parse rating_5based {}", &info.info.rating_5based);
+                0.0
+            }),
+            release_date: Some(info.info.release_date.clone()),
+            youtube_trailer: info.info.youtube_trailer.clone(),
+            tmdb,
+            details: Some(SeriesStreamDetailProperties {
+                year: InfoDocUtils::extract_year_from_release_date(&info.info.release_date),
+                seasons: {
+                    let mut seasons: Vec<SeriesStreamDetailSeasonProperties> = info.seasons.iter().map(|s|
+                        SeriesStreamDetailSeasonProperties {
+                            name: s.name.clone(),
+                            season_number: s.season_number,
+                            episode_count: s.episode_count.parse::<u32>().unwrap_or_else(|_| {
+                                warn!("Failed to parse episode_count {}", &s.episode_count);
+                                0
+                            }),
+                            overview: s.overview.clone(),
+                            air_date: s.air_date.clone(),
+                            cover: s.cover.clone(),
+                            cover_tmdb: s.cover_tmdb.clone(),
+                            cover_big: s.cover_big.clone(),
+                            duration: s.duration.clone(),
+                        }).collect();
+                    seasons.sort_by_key(|season| season.season_number);
+                    Some(seasons)
+                },
+                episodes: {
+                    let mut episodes: Vec<SeriesStreamDetailEpisodeProperties> = info.episodes.iter().flat_map(|(_, list)| list.iter()).map(|e|
+                        SeriesStreamDetailEpisodeProperties {
+                            id: e.id.parse::<u32>().unwrap_or_else(|_| {
+                                warn!("Failed to parse episode id {}", &e.id);
+                                0
+                            }),
+                            episode_num: e.episode_num,
+                            season: e.season,
+                            title: e.title.clone(),
+                            container_extension: e.container_extension.clone(),
+                            custom_sid: e.custom_sid.clone(),
+                            added: e.added.clone(),
+                            direct_source: e.direct_source.clone(),
+                            tmdb,
+                            release_date: e.info.air_date.clone(),
+                            plot: None,
+                            crew: e.info.crew.clone(),
+                            duration_secs: e.info.duration_secs,
+                            duration: e.info.duration.clone(),
+                            movie_image: e.info.movie_image.clone(),
+                            bitrate: e.info.bitrate,
+                            rating: Some(e.info.rating),
+                            video: None,
+                            audio: None,
+                        }).collect();
+                    episodes.sort_by_key(|episode| (episode.season, episode.episode_num));
+                    Some(episodes)
+                },
+            }),
+        }
+    }
 }
 
 impl EpisodeStreamProperties {
@@ -709,6 +848,6 @@ impl EpisodeStreamProperties {
     }
 }
 
-fn non_empty_string(s: &str) -> Option<Cow<'_, str>> {
-    if s.is_empty() { None } else { Some(Cow::Borrowed(s)) }
+fn non_empty_arc(s: &Arc<str>) -> Option<Arc<str>> {
+    if s.is_empty() { None } else { Some(Arc::clone(s)) }
 }

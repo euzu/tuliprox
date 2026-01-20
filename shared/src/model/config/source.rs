@@ -1,16 +1,17 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 use crate::info_err_res;
 use crate::error::{TuliproxError};
 use crate::foundation::filter::prepare_templates;
 use crate::model::{ConfigInputDto, HdHomeRunDeviceOverview, PatternTemplate};
 use crate::model::config::target::ConfigTargetDto;
-use crate::utils::default_as_default;
+use crate::utils::{arc_str_vec_serde, default_as_default, Internable};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigSourceDto {
-    #[serde(default)]
-    pub inputs: Vec<String>,
+    #[serde(with = "arc_str_vec_serde")]
+    pub inputs: Vec<Arc<str>>,
     pub targets: Vec<ConfigTargetDto>,
 }
 
@@ -23,7 +24,7 @@ impl ConfigSourceDto {
         }
         // Trim all input names
         for input in &mut self.inputs {
-            *input = input.trim().to_owned();
+            *input = input.trim().intern();
         }
         Ok(current_index)
     }
@@ -111,7 +112,7 @@ impl SourcesConfigDto {
         Ok(())
     }
 
-    pub fn get_input(&self, name: &str) -> Option<&ConfigInputDto> {
-        self.inputs.iter().find(|i| i.name == name)
+    pub fn get_input(&self, name: &Arc<str>) -> Option<&ConfigInputDto> {
+        self.inputs.iter().find(|i| &i.name == name)
     }
 }

@@ -139,7 +139,7 @@ pub struct SchedulesConfigDto {
 
 impl SchedulesConfigDto {
     pub fn is_empty(&self) -> bool {
-        self.schedules.is_none() || self.schedules.as_ref().unwrap().is_empty()
+        self.schedules.as_deref().is_none_or(|s| s.is_empty())
     }
 }
 

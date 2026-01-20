@@ -10,6 +10,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio_util::sync::CancellationToken;
+use shared::utils::Internable;
 
 const HDHR_PROPRIETARY_PORT: u16 = 65001;
 
@@ -370,7 +371,7 @@ async fn process_getset_request(request: &[u8], app_state: &Arc<AppState>) -> Ve
                     let vchannel = if let Some(stream_info) = active_streams.get(tuner_index) {
                         stream_info.channel.title.clone()
                     } else {
-                        "none".to_string()
+                        "none".intern()
                     };
                     write_tlv_str(
                         &mut response_payload,

@@ -1,12 +1,15 @@
 use std::cell::RefCell;
-use crate::app::components::{AppIcon, Card, CollapsePanel};
+use crate::app::components::{AppIcon, Card, CollapsePanel, IconButton, RadioButtonGroup};
 use shared::model::{PlaylistClusterBouquetDto, PlaylistClusterCategoriesDto, XtreamCluster};
 use std::collections::HashMap;
+use std::fmt::{Display, Formatter};
 use std::rc::Rc;
 use std::str::FromStr;
 use wasm_bindgen::JsCast;
 use yew::prelude::*;
 use yew_i18n::use_translation;
+use shared::error::TuliproxError;
+use shared::info_err_res;
 use crate::html_if;
 
 fn normalize(s: &str) -> String {
@@ -39,6 +42,44 @@ macro_rules! create_selection {
     };
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FilterState {
+    All,
+    Selected,
+    Deselected,
+}
+
+impl FilterState {
+    const ALL: &'static str = "All";
+    const SELECTED: &'static str = "Selected";
+    const DESELECTED: &'static str = "Deselected";
+}
+
+impl Display for FilterState {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}",
+               match self {
+                   Self::All => Self::ALL,
+                   Self::Selected => Self::SELECTED,
+                   Self::Deselected => Self::DESELECTED,
+               }
+        )
+    }
+}
+
+impl FromStr for FilterState {
+    type Err = TuliproxError;
+
+    fn from_str(s: &str) -> Result<Self, TuliproxError> {
+        match s {
+            Self::ALL => Ok(Self::All),
+            Self::SELECTED => Ok(Self::Selected),
+            Self::DESELECTED => Ok(Self::Deselected),
+            _ => info_err_res!("Unknown FilterState: {s}"),
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Default)]
 pub struct BouquetSelection {
     pub live: HashMap<String, bool>,
@@ -58,6 +99,8 @@ pub fn UserTargetPlaylist(props: &UserTargetPlaylistProps) -> Html {
     let translate = use_translation();
     let bouquet_selection = use_mut_ref(BouquetSelection::default);
     let playlist_categories = use_state(PlaylistClusterCategoriesDto::default);
+    let filter_state = use_state(HashMap::<XtreamCluster, FilterState>::new);
+    let collapse_state = use_state(HashMap::<XtreamCluster, bool>::new);
     let force_update = use_state(|| 0);
 
     {
@@ -107,6 +150,7 @@ pub fn UserTargetPlaylist(props: &UserTargetPlaylistProps) -> Html {
         let force_update = force_update.clone();
         Callback::from(move |e: MouseEvent| {
             e.prevent_default();
+            e.stop_propagation();
             if let Some(target) = e.target() {
                 if let Ok(element) = target.dyn_into::<web_sys::Element>() {
                     if let Some(cluster) = element.get_attribute("data-cluster") {
@@ -137,17 +181,112 @@ pub fn UserTargetPlaylist(props: &UserTargetPlaylistProps) -> Html {
         })
     };
 
+    let handle_selection_change = {
+        let bouquet_selection = bouquet_selection.clone();
+        let on_change = props.on_change.clone();
+        let force_update = force_update.clone();
+
+        Callback::from(move |(cluster, cats, select): (XtreamCluster, Vec<String>, bool)| {
+            {
+                let mut selections = bouquet_selection.borrow_mut();
+                let map = match cluster {
+                    XtreamCluster::Live => &mut selections.live,
+                    XtreamCluster::Video => &mut selections.vod,
+                    XtreamCluster::Series => &mut selections.series,
+                };
+                for cat in cats {
+                    map.insert(cat, select);
+                }
+            }
+            on_change.emit(bouquet_selection.clone());
+            force_update.set(*force_update + 1);
+        })
+    };
+
     let render_category_cluster = |cluster: XtreamCluster, cats: Option<&Vec<String>>, selections: &HashMap<String, bool>| {
         if let Some(c) = cats {
+            let cats_clone = c.clone();
+            let cluster_clone = cluster;
+            let handler = handle_selection_change.clone();
+            let current_filter = *filter_state.get(&cluster).unwrap_or(&FilterState::All);
+
+            let select_all = {
+                let cats = cats_clone.clone();
+                let handler = handler.clone();
+                Callback::from(move |(_, event): (String, MouseEvent)| {
+                    event.stop_propagation();
+                    handler.emit((cluster_clone, cats.clone(), true));
+                })
+            };
+
+            let deselect_all = {
+                let cats = cats_clone.clone();
+                let handler = handler.clone();
+                Callback::from(move |(_, event): (String, MouseEvent)| {
+                    event.stop_propagation();
+                    handler.emit((cluster_clone, cats.clone(), false));
+                })
+            };
+
+            let filter_state_handle = filter_state.clone();
+            let filter_state_selections = Rc::new(vec![filter_state.get(&cluster).cloned().unwrap_or(FilterState::All).to_string()]);
+            let title_content = if *collapse_state.get(&cluster).unwrap_or(&true) {
+                html! {
+                <div class="tp__api-user-target-playlist__section-header">
+                    <div class="tp__api-user-target-playlist__section-header__title">
+                        {translate.t( match cluster {
+                                XtreamCluster::Live =>  "LABEL.LIVE",
+                                XtreamCluster::Video =>  "LABEL.MOVIE",
+                                XtreamCluster::Series =>  "LABEL.SERIES"
+                            })}
+                    </div>
+                    <div class="tp__api-user-target-playlist__section-header__toolbar">
+                        <RadioButtonGroup
+                                multi_select={false} none_allowed={false}
+                                on_select={Callback::from(move |selections: Rc<Vec<String>>| {
+                                    if let Some(first) = selections.first() {
+                                       let mut cluster_state = (*filter_state_handle).clone();
+                                       cluster_state.insert(cluster, FilterState::from_str(first.as_str()).unwrap_or(FilterState::All));
+                                       filter_state_handle.set(cluster_state);
+                                    }
+                                })}
+                                options={Rc::new([FilterState::All, FilterState::Selected, FilterState::Deselected].iter().map(|s| s.to_string()).collect::<Vec<String>>())}
+                                selected={filter_state_selections}
+                        />
+                        <IconButton hint={translate.t("LABEL.SELECT_ALL")} name="SelectAll" icon="SelectAll" onclick={select_all} />
+                        <IconButton hint={translate.t("LABEL.DESELECT_ALL")} name="DeselectAll" icon="DeselectAll" onclick={deselect_all} />
+                    </div>
+                </div>
+                }
+            } else {
+                html! {
+                    <div class="tp__api-user-target-playlist__section-header__title">
+                        {translate.t( match cluster {
+                                XtreamCluster::Live =>  "LABEL.LIVE",
+                                XtreamCluster::Video =>  "LABEL.MOVIE",
+                                XtreamCluster::Series =>  "LABEL.SERIES"
+                            })}
+                    </div>
+                }
+            };
+
+            let collapse_state = collapse_state.clone();
             html_if!(!c.is_empty(), {
                <Card>
-                  <CollapsePanel title={translate.t( match cluster {
-                        XtreamCluster::Live =>  "LABEL.LIVE",
-                        XtreamCluster::Video =>  "LABEL.MOVIE",
-                        XtreamCluster::Series =>  "LABEL.SERIES"
+                  <CollapsePanel title_content={title_content} on_state_change={Callback::from(move |expanded| {
+                       let mut collapse_map = (*collapse_state).clone();
+                       collapse_map.insert(cluster, expanded);
+                       collapse_state.set(collapse_map);
                   })}>
                     <div class="tp__api-user-target-playlist__categories">
-                        { for c.iter().map(|cat| {
+                        { for c.iter().filter(|cat| {
+                            let selected = *selections.get(*cat).unwrap_or(&false);
+                            match current_filter {
+                                FilterState::All => true,
+                                FilterState::Selected => selected,
+                                FilterState::Deselected => !selected,
+                            }
+                        }).map(|cat| {
                             let selected = *selections.get(cat).unwrap_or(&false);
                             html! {
                             <div key={cat.clone()} data-cluster={cluster.to_string()} data-category={cat.clone()} class={classes!("tp__api-user-target-playlist__categories-category", if selected {"selected"} else {""})}

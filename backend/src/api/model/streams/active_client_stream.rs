@@ -125,8 +125,7 @@ impl ActiveClientStream {
         let connection_manager = Arc::clone(&app_state.connection_manager);
 
         let provider_grace_check = if stream_details.has_grace_period() && stream_details.provider_name.is_some() {
-            let provider_name = stream_details.provider_name.as_ref().map_or_else(String::new, ToString::to_string);
-            Some(provider_name)
+            stream_details.provider_name.clone()
         } else {
             None
         };

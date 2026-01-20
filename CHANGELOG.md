@@ -6,6 +6,10 @@
 - **Global Input Definitions**: To align input definitions with the SourceEditor, inputs are now defined globally in the `inputs` section of the config file. Each source can reference one or more inputs by their name in the `inputs` attribute.
 - **Data Format Migration**: Due to heavy refactoring, the old data format is invalid. You need to clean your `data` folder and update the playlists.
 - **B+Tree Storage Format**: Storage format has changed to a more efficient Slotted Page architecture.
+  - **Index optimization**: Added index to B+Tree to accelerate queries without tree traversal.
+  - **TargetIdMapping Optimization**: Refactored to use disk-based B+Tree operations, eliminating startup latency.
+  - **B+Tree Header Metadata**: Implemented efficient `BPlusTreeMetadata` Enum to persist `VirtualId` counter directly in the database header.
+  - **Fast Initialization**: `TargetIdMapping` now conditionally loads the tree, achieving near-instant startup for established databases.
 - **Configuration Renames**: 
   - `threads` attribute in `config.yml` renamed to `process_parallel` (boolean).
   - Added mandatory `rewrite_secret` to `reverse_proxy` config for stable resource URLs.

@@ -4,11 +4,12 @@ use crate::processing::processor::playlist::exec_processing;
 use crate::utils::exit;
 use chrono::{DateTime, FixedOffset, Local};
 use cron::Schedule;
-use log::error;
+use log::{error};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use tokio_util::sync::CancellationToken;
+use shared::utils::interner_gc;
 
 pub fn datetime_to_instant(datetime: DateTime<FixedOffset>) -> Instant {
     // Convert DateTime<FixedOffset> to SystemTime
@@ -103,6 +104,24 @@ fn get_process_targets(cfg: &Arc<AppConfig>, process_targets: &Arc<ProcessTarget
         }
     }
     Arc::clone(process_targets)
+}
+
+// TODO Consider making the GC interval configurable.
+// The 180-second interval is hardcoded. For deployments with different memory/performance characteristics, a configurable interval might be useful.
+pub fn exec_interner_prune(app_state: &Arc<AppState>) {
+    let app_state = Arc::clone(app_state);
+    tokio::spawn({
+        async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(180)).await;
+                if let Some(permit) = app_state.update_guard.try_playlist() {
+                    // Gate check: ensure updates aren't in progress; permit dropped to allow concurrent updates during GC
+                    drop(permit);
+                    interner_gc();
+                }
+            }
+        }
+    });
 }
 
 #[cfg(test)]

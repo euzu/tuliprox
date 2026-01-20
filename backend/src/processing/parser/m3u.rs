@@ -1,25 +1,26 @@
 use crate::model::{Config, ConfigInput};
 use crate::utils::request::DynReader;
 use shared::model::{PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, XtreamCluster};
-use shared::utils::{default_supported_video_extensions, extract_id_from_url, StringInterner};
+use shared::utils::{default_supported_video_extensions, extract_id_from_url, Internable};
 use std::borrow::BorrowMut;
+use std::sync::Arc;
 use tokio::io::AsyncBufReadExt;
 use indexmap::IndexMap;
 use shared::concat_string;
 
 // other implementations like calculating text_distance on all titles took too much time
 // we keep it now as simple as possible and less memory intensive.
-fn get_title_group(text: &str) -> String {
+fn get_title_group(text: &Arc<str>) -> Arc<str> {
     let alphabetic_only: String = text.chars().map(|c| if c.is_alphanumeric() { c } else { ' ' }).collect();
     let parts = alphabetic_only.split_whitespace();
     let mut combination = String::new();
     for p in parts {
         combination = concat_string!(&combination, " " , p);
         if combination.len() > 2 {
-            return combination;
+            return combination.intern();
         }
     }
-    text.to_string()
+    text.clone()
 }
 
 #[inline]
@@ -90,11 +91,11 @@ fn skip_digit(it: &mut std::str::Chars) -> Option<char> {
     }
 }
 
-fn create_empty_playlistitem_header(interner: &mut StringInterner, input_name: &str, url: String) -> PlaylistItemHeader {
+fn create_empty_playlistitem_header(input_name: &Arc<str>, url: String) -> PlaylistItemHeader {
     PlaylistItemHeader {
-        url,
+        url: Arc::from(url),
         category_id: 0,
-        input_name: interner.intern(input_name),
+        input_name: Arc::clone(input_name),
         ..Default::default()
     }
 }
@@ -110,7 +111,7 @@ macro_rules! process_header_fields {
     };
 }
 
-fn process_header(interner: &mut StringInterner, input_name: &str, video_suffixes: &[String], content: &str, url: String) -> PlaylistItemHeader {
+fn process_header(input_name: &Arc<str>, video_suffixes: &[String], content: &str, url: String) -> PlaylistItemHeader {
     let url_id = extract_id_from_url(&url);
     let url_types = if video_suffixes.iter().any(|suffix| url.ends_with(suffix)) {
         // TODO find Series based on group or configured names
@@ -119,7 +120,7 @@ fn process_header(interner: &mut StringInterner, input_name: &str, video_suffixe
         None
     };
 
-    let mut plih = create_empty_playlistitem_header(interner, input_name, url);
+    let mut plih = create_empty_playlistitem_header(input_name, url);
     let mut it = content.chars();
     let mut stack = String::with_capacity(64);
     let line_token = token_till(&mut stack, &mut it, ':', false);
@@ -133,7 +134,7 @@ fn process_header(interner: &mut StringInterner, input_name: &str, video_suffixe
                     if chr.is_whitespace() {
                         // skip
                     } else if chr == ',' {
-                        plih.title = get_value(&mut stack, &mut it);
+                        plih.title = get_value(&mut stack, &mut it).intern();
                     } else {
                         stack.push(chr);
                         let token = token_till(&mut stack, &mut it, '=', true);
@@ -146,19 +147,22 @@ fn process_header(interner: &mut StringInterner, input_name: &str, video_suffixe
                                 }
                             } else if token == "tvg-chno" {
                                 plih.chno = value.parse::<u32>().unwrap_or(0);
+                            } else if token == "group-title" {
+                                plih.group = value.intern();
+                            } else if token == "tvg-id" {
+                                plih.id = value.intern();
+                            } else if token == "tvg-name" {
+                                plih.name = value.intern();
+                            } else if token == "tvg-logo" {
+                                plih.logo = value.intern();
+                            } else if token == "tvg-logo-small" {
+                                plih.logo_small = value.intern();
                             } else {
                                 process_header_fields!(plih, token.as_str(),
-                                (id, "tvg-id"),
-                                (name, "tvg-name"),
                                 (parent_code, "parent-code"),
                                 (audio_track, "audio-track"),
-                                (logo, "tvg-logo"),
-                                (logo_small, "tvg-logo-small"),
                                 (time_shift, "timeshift"),
-                                (rec, "tvg-rec"); value.clone());
-                                if token == "group-title" {
-                                    plih.group = interner.intern(&value);
-                                }
+                                (rec, "tvg-rec"); value.intern());
                             }
                         }
                     }
@@ -170,14 +174,14 @@ fn process_header(interner: &mut StringInterner, input_name: &str, video_suffixe
         if plih.id.is_empty() {
             plih.epg_channel_id = None;
             if let Some(pid) = provider_id {
-                plih.id = pid;
+                plih.id = pid.intern();
             } else if let Some(chanid) = url_id {
-                plih.id = chanid;
+                plih.id = chanid.intern();
             }
         } else {
-            plih.epg_channel_id = Some(plih.id.clone());
+            plih.epg_channel_id = Some(Arc::clone(&plih.id));
             if let Some(pid) = provider_id {
-                plih.id = pid;
+                plih.id = pid.intern();
             }
         }
     }
@@ -204,8 +208,7 @@ fn process_header(interner: &mut StringInterner, input_name: &str, video_suffixe
 pub async fn consume_m3u<F: FnMut(PlaylistItem)>(cfg: &Config, input: &ConfigInput, lines: DynReader, mut visit: F) {
     let mut header: Option<String> = None;
     let mut group: Option<String> = None;
-    let mut interner = StringInterner::new();
-    let input_name = input.name.as_str();
+    let input_name = &input.name;
 
     let video_suffixes = match cfg.video.as_ref() {
         Some(config) => {
@@ -228,19 +231,19 @@ pub async fn consume_m3u<F: FnMut(PlaylistItem)>(cfg: &Config, input: &ConfigInp
             continue;
         }
         if let Some(header_value) = header {
-            let mut item = PlaylistItem { header: process_header(&mut interner, input_name, &video_suffixes, &header_value, line) };
+            let mut item = PlaylistItem { header: process_header(input_name, &video_suffixes, &header_value, line) };
             let header = &mut item.header;
             header.source_ordinal = ord_counter;
             ord_counter += 1;
-            if header.group.is_empty() {
-                if let Some(group_value) = group {
-                    header.group = interner.intern(&group_value);
-                } else {
-                    let current_title = header.title.clone();
-                    header.group = interner.intern(&get_title_group(current_title.as_str()));
+                if header.group.is_empty() {
+                    if let Some(group_value) = group {
+                        header.group = group_value.intern();
+                    } else {
+                        let group = get_title_group(&header.title);
+                        header.group = group;
+                    }
                 }
-            }
-            visit(item);
+                visit(item);
         }
         header = None;
         group = None;
@@ -274,53 +277,50 @@ pub async fn parse_m3u(cfg: &Config, input: &ConfigInput, lines: DynReader) -> V
 
 #[cfg(test)]
 mod test {
+    use shared::utils::Internable;
     use crate::processing::parser::m3u::process_header;
-    use shared::utils::StringInterner;
 
     #[test]
     fn test_process_header_1() {
-        let mut interner = StringInterner::new();
-        let input: &str = "hello";
+        let input = "hello".intern();
         let video_suffixes = Vec::new();
         let url = "http://hello.de/hello.ts";
         let line = r#"#EXTINF:-1 channel-id="abc-seven" tvg-id="abc-seven" tvg-logo="https://abc.nz/.images/seven.png" tvg-chno="7" group-title="Sydney" , Seven"#;
 
-        let pli = process_header(&mut interner, input, &video_suffixes, line, url.to_string());
-        assert_eq!(pli.title, "Seven");
-        assert_eq!(pli.id, "abc-seven");
-        assert_eq!(pli.logo, "https://abc.nz/.images/seven.png");
+        let pli = process_header(&input, &video_suffixes, line, url.to_string());
+        assert_eq!(pli.title, "Seven".intern());
+        assert_eq!(pli.id, "abc-seven".intern());
+        assert_eq!(pli.logo, "https://abc.nz/.images/seven.png".intern());
         assert_eq!(pli.chno, 7);
         assert_eq!(&*pli.group, "Sydney");
     }
 
     #[test]
     fn test_process_header_2() {
-        let mut interner = StringInterner::new();
-        let input: &str = "hello";
+        let input = "hello".intern();
         let video_suffixes = Vec::new();
         let url = "http://hello.de/hello.ts";
         let line = r#"#EXTINF:-1 channel-id="abc-seven" tvg-id="abc-seven" tvg-logo="https://abc.nz/.images/seven.png" tvg-chno="7" group-title="Sydney", Seven"#;
 
-        let pli = process_header(&mut interner, input, &video_suffixes, line, url.to_string());
-        assert_eq!(pli.title, "Seven");
-        assert_eq!(pli.id, "abc-seven");
-        assert_eq!(pli.logo, "https://abc.nz/.images/seven.png");
+        let pli = process_header(&input, &video_suffixes, line, url.to_string());
+        assert_eq!(pli.title, "Seven".intern());
+        assert_eq!(pli.id, "abc-seven".intern());
+        assert_eq!(pli.logo, "https://abc.nz/.images/seven.png".intern());
         assert_eq!(pli.chno, 7);
         assert_eq!(&*pli.group, "Sydney");
     }
 
     #[test]
     fn test_process_header_xui_id() {
-        let mut interner = StringInterner::new();
-        let input: &str = "hello";
+        let input = "hello".intern();
         let video_suffixes = Vec::new();
         let url = "http://hello.de/hello.ts";
         let line = r#"#EXTINF:-1 tvg-id="abc-seven" xui-id="provider-123" group-title="Sydney", Seven"#;
 
-        let pli = process_header(&mut interner, input, &video_suffixes, line, url.to_string());
-        assert_eq!(pli.title, "Seven");
-        assert_eq!(pli.id, "provider-123"); // Should use xui-id
-        assert_eq!(pli.epg_channel_id, Some("abc-seven".to_string())); // Should preserve original tvg-id
+        let pli = process_header(&input, &video_suffixes, line, url.to_string());
+        assert_eq!(pli.title, "Seven".intern());
+        assert_eq!(pli.id, "provider-123".intern()); // Should use xui-id
+        assert_eq!(pli.epg_channel_id, Some("abc-seven".intern())); // Should preserve original tvg-id
         assert_eq!(&*pli.group, "Sydney");
     }
 }

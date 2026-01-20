@@ -1,5 +1,4 @@
-use crate::utils::deserialize_as_option_string;
-use crate::utils::serialize_option_string_as_null_if_empty;
+use crate::utils::{arc_str_serde, arc_str_option_serde, arc_str_vec_serde, Internable};
 use crate::model::info_doc_utils::InfoDocUtils;
 use crate::model::{
     LiveStreamProperties, SeriesStreamProperties, StreamProperties, VideoStreamProperties,
@@ -8,79 +7,110 @@ use crate::model::{
     XtreamVideoInfoDoc, XtreamVideoMovieData,
 };
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-fn default_as_live() -> String {
-    "live".to_string()
-}
+fn default_as_live() -> Arc<str> { "live".intern() }
 
-fn default_as_movie() -> String {
-    "movie".to_string()
+fn default_as_movie() -> Arc<str> {
+    "movie".intern()
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct XtreamLiveDoc {
     pub num: u32,
-    pub name: String,
-    pub stream_type: String,
+    #[serde(with = "arc_str_serde")]
+    pub name: Arc<str>,
+    #[serde(with = "arc_str_serde")]
+    pub stream_type: Arc<str>,
     pub stream_id: u32,
-    pub stream_icon: String,
-    pub epg_channel_id: String,
-    pub added: String,
+    #[serde(with = "arc_str_serde")]
+    pub stream_icon: Arc<str>,
+    #[serde(with = "arc_str_serde")]
+    pub epg_channel_id: Arc<str>,
+    #[serde(with = "arc_str_serde")]
+    pub added: Arc<str>,
     pub is_adult: i32,
-    pub category_id: String,
+    #[serde(with = "arc_str_serde")]
+    pub category_id: Arc<str>,
     pub category_ids: Vec<u32>,
-    #[serde(default, deserialize_with = "deserialize_as_option_string", serialize_with = "serialize_option_string_as_null_if_empty")]
-    pub custom_sid: Option<String>,
+    #[serde(default, with = "arc_str_option_serde")]
+    pub custom_sid: Option<Arc<str>>,
     pub tv_archive: i32,
-    pub direct_source: String,
+    #[serde(with = "arc_str_serde")]
+    pub direct_source: Arc<str>,
     pub tv_archive_duration: i32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct XtreamVideoDoc {
     pub num: u32,
-    pub name: String,
-    pub stream_type: String,
+    #[serde(with = "arc_str_serde")]
+    pub name: Arc<str>,
+    #[serde(with = "arc_str_serde")]
+    pub stream_type: Arc<str>,
     pub stream_id: u32,
-    pub stream_icon: String,
-    pub rating: String,
+    #[serde(with = "arc_str_serde")]
+    pub stream_icon: Arc<str>,
+    #[serde(with = "arc_str_serde")]
+    pub rating: Arc<str>,
     pub rating_5based: f64,
-    pub tmdb: String,
-    pub trailer: String,
-    pub added: String,
+    #[serde(with = "arc_str_serde")]
+    pub tmdb: Arc<str>,
+    #[serde(with = "arc_str_serde")]
+    pub trailer: Arc<str>,
+    #[serde(with = "arc_str_serde")]
+    pub added: Arc<str>,
     pub is_adult: i32,
-    pub category_id: String,
+    #[serde(with = "arc_str_serde")]
+    pub category_id: Arc<str>,
     pub category_ids: Vec<u32>,
-    pub container_extension: String,
-    #[serde(default, deserialize_with = "deserialize_as_option_string", serialize_with = "serialize_option_string_as_null_if_empty")]
-    pub custom_sid: Option<String>,
-    pub direct_source: String,
+    #[serde(with = "arc_str_serde")]
+    pub container_extension: Arc<str>,
+    #[serde(default, with = "arc_str_option_serde")]
+    pub custom_sid: Option<Arc<str>>,
+    #[serde(with = "arc_str_serde")]
+    pub direct_source: Arc<str>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct XtreamSeriesDoc {
     pub num: u32,
-    pub name: String,
+    #[serde(with = "arc_str_serde")]
+    pub name: Arc<str>,
     pub series_id: u32,
-    pub cover: String,
-    pub plot: String,
-    pub cast: String,
-    pub director: String,
-    pub genre: String,
-    #[serde(rename = "releaseDate")]
-    pub release_date_alternate: String,
-    pub release_date: String,
-    pub last_modified: String,
-    pub rating: String,
-    pub rating_5based: String,
-    pub backdrop_path: Vec<String>,
-    pub youtube_trailer: String,
-    pub tmdb: String,
-    pub episode_runtime: String,
-    pub category_id: String,
+    #[serde(with = "arc_str_serde")]
+    pub cover: Arc<str>,
+    #[serde(with = "arc_str_serde")]
+    pub plot: Arc<str>,
+    #[serde(with = "arc_str_serde")]
+    pub cast: Arc<str>,
+    #[serde(with = "arc_str_serde")]
+    pub director: Arc<str>,
+    #[serde(with = "arc_str_serde")]
+    pub genre: Arc<str>,
+    #[serde(rename = "releaseDate", with = "arc_str_serde")]
+    pub release_date_alternate: Arc<str>,
+    #[serde(with = "arc_str_serde")]
+    pub release_date: Arc<str>,
+    #[serde(with = "arc_str_serde")]
+    pub last_modified: Arc<str>,
+    #[serde(with = "arc_str_serde")]
+    pub rating: Arc<str>,
+    #[serde(with = "arc_str_serde")]
+    pub rating_5based: Arc<str>,
+    #[serde(with = "arc_str_vec_serde")]
+    pub backdrop_path: Vec<Arc<str>>,
+    #[serde(with = "arc_str_serde")]
+    pub youtube_trailer: Arc<str>,
+    #[serde(with = "arc_str_serde")]
+    pub tmdb: Arc<str>,
+    #[serde(with = "arc_str_serde")]
+    pub episode_runtime: Arc<str>,
+    #[serde(with = "arc_str_serde")]
+    pub category_id: Arc<str>,
     pub category_ids: Vec<u32>,
 }
 
@@ -102,44 +132,44 @@ impl XtreamPlaylistItem {
             XtreamCluster::Video => {
                 XtreamInfoDocument::Video(XtreamVideoInfoDoc {
                     info: XtreamVideoInfoData {
-                        kinopoisk_url: String::new(),
-                        tmdb_id: String::new(),
-                        name: self.title.clone(),
-                        o_name: self.name.clone(),
-                        cover_big: stream_icon.clone(),
-                        movie_image: stream_icon.clone(),
-                        release_date: String::new(),
+                        kinopoisk_url: "".intern(),
+                        tmdb_id: "".intern(),
+                        name: Arc::clone(&self.title),
+                        o_name: Arc::clone(&self.name),
+                        cover_big: Arc::clone(&stream_icon),
+                        movie_image: Arc::clone(&stream_icon),
+                        release_date: "".intern(),
                         episode_run_time: 0,
-                        youtube_trailer: String::new(),
-                        director: String::new(),
-                        actors: String::new(),
-                        cast: String::new(),
-                        description: String::new(),
-                        plot: String::new(),
-                        age: String::new(),
-                        mpaa_rating: String::new(),
+                        youtube_trailer: "".intern(),
+                        director: "".intern(),
+                        actors: "".intern(),
+                        cast: "".intern(),
+                        description: "".intern(),
+                        plot: "".intern(),
+                        age: "".intern(),
+                        mpaa_rating: "".intern(),
                         rating_count_kinopoisk: 0,
-                        country: String::new(),
-                        genre: String::new(),
-                        backdrop_path: vec![stream_icon.clone()],
-                        duration_secs: String::new(),
-                        duration: String::new(),
+                        country: "".intern(),
+                        genre: "".intern(),
+                        backdrop_path: vec![Arc::clone(&stream_icon)],
+                        duration_secs: "".intern(),
+                        duration: "".intern(),
                         video: Value::Array(Vec::new()),
                         audio: Value::Array(Vec::new()),
                         bitrate: 0,
-                        rating: String::new(),
-                        runtime: String::new(),
-                        status: "Released".to_string(),
+                        rating: "".intern(),
+                        runtime: "".intern(),
+                        status: "Released".intern(),
                     },
                     movie_data: XtreamVideoMovieData {
                         stream_id: self.virtual_id,
-                        name: self.name.clone(),
-                        added: String::new(),
-                        category_id: self.category_id.to_string(),
+                        name: Arc::clone(&self.name),
+                        added: "".intern(),
+                        category_id: self.category_id.intern(),
                         category_ids: vec![self.category_id],
-                        container_extension: String::new(),
+                        container_extension: "".intern(),
                         custom_sid: None,
-                        direct_source: String::new(),
+                        direct_source: "".intern(),
                     },
                 })
             }
@@ -147,22 +177,22 @@ impl XtreamPlaylistItem {
                 XtreamInfoDocument::Series(XtreamSeriesInfoDoc {
                     seasons: Vec::new(),
                     info: XtreamSeriesInfoData {
-                        name: self.title.clone(),
-                        cover: stream_icon.clone(),
-                        plot: String::new(),
-                        cast: String::new(),
-                        director: String::new(),
-                        genre: String::new(),
-                        release_date_alternate: String::new(),
-                        release_date: String::new(),
-                        last_modified: String::new(),
-                        rating: String::new(),
-                        rating_5based: String::new(),
-                        backdrop_path: if stream_icon.is_empty() {vec![] } else { vec![stream_icon] },
-                        tmdb: String::new(),
-                        youtube_trailer: String::new(),
-                        episode_run_time: String::new(),
-                        category_id: self.category_id.to_string(),
+                        name: Arc::clone(&self.title),
+                        cover: Arc::clone(&stream_icon),
+                        plot: "".intern(),
+                        cast: "".intern(),
+                        director: "".intern(),
+                        genre: "".intern(),
+                        release_date_alternate: "".intern(),
+                        release_date: "".intern(),
+                        last_modified: "".intern(),
+                        rating: "".intern(),
+                        rating_5based: "".intern(),
+                        backdrop_path: if stream_icon.is_empty() {vec![] } else { vec![Arc::clone(&stream_icon)] },
+                        tmdb: "".intern(),
+                        youtube_trailer: "".intern(),
+                        episode_run_time: "".intern(),
+                        category_id: self.category_id.intern(),
                         category_ids: vec![self.category_id],
                     },
                     episodes: HashMap::new(),
@@ -192,28 +222,28 @@ impl XtreamPlaylistItem {
             num: self.channel_no,
             name: self.title.clone(),
             series_id: self.virtual_id,
-            cover: InfoDocUtils::make_resource_url(resource_url.as_deref(), &series.cover, "cover"),
-            plot: series.plot.clone().unwrap_or_default(),
+            cover: InfoDocUtils::make_resource_url(resource_url.as_deref(), &series.cover, "cover").intern(),
+            plot: series.plot.clone().unwrap_or_else(|| "".intern()),
             cast: series.cast.clone(),
             director: series.director.clone(),
-            genre: series.genre.clone().unwrap_or_default(),
-            release_date: series.release_date.clone().unwrap_or_default(),
-            release_date_alternate: series.release_date.clone().unwrap_or_default(),
-            last_modified: series.last_modified.clone().unwrap_or_default(),
-            rating: InfoDocUtils::limited(series.rating),
-            rating_5based: InfoDocUtils::limited(series.rating_5based),
+            genre: series.genre.clone().unwrap_or_else(|| "".intern()),
+            release_date: series.release_date.clone().unwrap_or_else(|| "".intern()),
+            release_date_alternate: series.release_date.clone().unwrap_or_else(|| "".intern()),
+            last_modified: series.last_modified.clone().unwrap_or_else(|| "".intern()),
+            rating: InfoDocUtils::limited(series.rating).intern(),
+            rating_5based: InfoDocUtils::limited(series.rating_5based).intern(),
             backdrop_path: series.backdrop_path.as_ref().map_or_else(
                 || {
                     let res_url = InfoDocUtils::make_resource_url(resource_url.as_deref(), &series.cover, "cover");
-                    if res_url.is_empty() { vec![] } else { vec![res_url] }
+                    if res_url.is_empty() { vec![] } else { vec![res_url.intern()] }
                 },
                 |b| b.iter().enumerate().map(|(idx, p)|
-                    InfoDocUtils::make_bdpath_resource_url(resource_url.as_deref(), p, idx, "")
+                    InfoDocUtils::make_bdpath_resource_url(resource_url.as_deref(), p, idx, "").intern()
                 ).collect()),
             youtube_trailer: series.youtube_trailer.clone(),
-            tmdb: series.tmdb.map(|v| v.to_string()).unwrap_or_default(),
-            episode_runtime: series.episode_run_time.clone().unwrap_or_default(),
-            category_id: self.category_id.to_string(),
+            tmdb: series.tmdb.map(|v| v.intern()).unwrap_or_else(|| "".intern()),
+            episode_runtime: series.episode_run_time.clone().unwrap_or_else(|| "".intern()),
+            category_id: self.category_id.intern(),
             category_ids: vec![self.category_id],
         })
     }
@@ -227,17 +257,17 @@ impl XtreamPlaylistItem {
             stream_type: video.stream_type.clone().unwrap_or_else(default_as_movie),
             stream_id: self.virtual_id,
             stream_icon,
-            rating: video.rating.map(InfoDocUtils::limited).unwrap_or_default(),
+            rating: video.rating.map(|v| InfoDocUtils::limited(v).intern()).unwrap_or_else(|| "".intern()),
             rating_5based: video.rating_5based.unwrap_or_default(),
-            tmdb: video.tmdb.map(|v| v.to_string()).unwrap_or_default(),
-            trailer: video.trailer.clone().unwrap_or_default(),
+            tmdb: video.tmdb.map(|v| v.intern()).unwrap_or_else(|| "".intern()),
+            trailer: video.trailer.clone().unwrap_or_else(|| "".intern()),
             added: video.added.clone(),
             is_adult: video.is_adult,
-            category_id: self.category_id.to_string(),
+            category_id: self.category_id.intern(),
             category_ids: vec![self.category_id],
             container_extension: video.container_extension.clone(),
             custom_sid: video.custom_sid.clone(),
-            direct_source: if options.skip_video_direct_source { String::new() } else { video.direct_source.clone() },
+            direct_source: if options.skip_video_direct_source { "".intern() } else { video.direct_source.clone() },
         })
     }
 
@@ -250,19 +280,21 @@ impl XtreamPlaylistItem {
             stream_type: live.stream_type.clone().unwrap_or_else(default_as_live),
             stream_id: self.virtual_id,
             stream_icon,
-            epg_channel_id: self.epg_channel_id.clone().unwrap_or_default(),
-            added: live.added.clone().unwrap_or_default(),
+            epg_channel_id: self.epg_channel_id.clone().unwrap_or_else(|| "".intern()),
+            added: live.added.clone().unwrap_or_else(|| "".intern()),
             is_adult: live.is_adult,
-            category_id: self.category_id.to_string(),
+            category_id: self.category_id.intern(),
             category_ids: vec![self.category_id],
             custom_sid: live.custom_sid.clone(),
             tv_archive: live.tv_archive.unwrap_or_default(),
-            direct_source: if options.skip_live_direct_source { String::new() } else { live.direct_source.clone() },
+            direct_source: if options.skip_live_direct_source { "".intern() } else { live.direct_source.clone() },
             tv_archive_duration: live.tv_archive_duration.unwrap_or_default(),
         })
     }
 
     fn to_document_no_props(&self, resource_url: Option<String>) -> XtreamDocument {
+        let empty_str = "".intern();
+        let zero_str = "0".intern();
         let stream_icon = self.get_stream_icon(resource_url);
         match self.xtream_cluster {
             XtreamCluster::Live => {
@@ -272,14 +304,14 @@ impl XtreamPlaylistItem {
                     stream_type: default_as_live(),
                     stream_id: self.virtual_id,
                     stream_icon,
-                    epg_channel_id: self.epg_channel_id.clone().unwrap_or_default(),
-                    added: String::new(),
+                    epg_channel_id: self.epg_channel_id.clone().unwrap_or_else(|| Arc::clone(&empty_str)),
+                    added: Arc::clone(&empty_str),
                     is_adult: 0,
-                    category_id: self.category_id.to_string(),
+                    category_id: self.category_id.intern(),
                     category_ids: vec![self.category_id],
                     custom_sid: None,
                     tv_archive: 0,
-                    direct_source: String::new(),
+                    direct_source: Arc::clone(&empty_str),
                     tv_archive_duration: 0,
                 })
             }
@@ -290,17 +322,17 @@ impl XtreamPlaylistItem {
                     stream_type: default_as_movie(),
                     stream_id: self.virtual_id,
                     stream_icon,
-                    rating: "0".to_string(),
+                    rating: Arc::clone(&zero_str),
                     rating_5based: 0.0,
-                    tmdb: String::new(),
-                    trailer: String::new(),
-                    added: String::new(),
+                    tmdb: Arc::clone(&empty_str),
+                    trailer: Arc::clone(&empty_str),
+                    added: Arc::clone(&empty_str),
                     is_adult: 0,
-                    category_id: self.category_id.to_string(),
+                    category_id: self.category_id.intern(),
                     category_ids: vec![self.category_id],
-                    container_extension: String::new(),
+                    container_extension: Arc::clone(&empty_str),
                     custom_sid: None,
-                    direct_source: String::new(),
+                    direct_source: Arc::clone(&empty_str),
                 })
             }
             XtreamCluster::Series => {
@@ -309,33 +341,33 @@ impl XtreamPlaylistItem {
                     name: self.title.clone(),
                     series_id: self.virtual_id,
                     cover: stream_icon.clone(),
-                    plot: String::new(),
-                    cast: String::new(),
-                    director: String::new(),
-                    genre: String::new(),
-                    release_date: String::new(),
-                    release_date_alternate: String::new(),
-                    last_modified: String::new(),
-                    rating: "0".to_string(),
-                    rating_5based: "0".to_string(),
-                    backdrop_path: if stream_icon.is_empty() { vec![] } else { vec![stream_icon] },
-                    youtube_trailer: String::new(),
-                    tmdb: String::new(),
-                    episode_runtime: "0".to_string(),
-                    category_id: self.category_id.to_string(),
+                    plot: Arc::clone(&empty_str),
+                    cast: Arc::clone(&empty_str),
+                    director: Arc::clone(&empty_str),
+                    genre: Arc::clone(&empty_str),
+                    release_date: Arc::clone(&empty_str),
+                    release_date_alternate: Arc::clone(&empty_str),
+                    last_modified: Arc::clone(&empty_str),
+                    rating: Arc::clone(&zero_str),
+                    rating_5based: Arc::clone(&zero_str),
+                    backdrop_path: if stream_icon.is_empty() { vec![] } else { vec![Arc::clone(&stream_icon)] },
+                    youtube_trailer: Arc::clone(&empty_str),
+                    tmdb: empty_str,
+                    episode_runtime: zero_str,
+                    category_id: self.category_id.intern(),
                     category_ids: vec![self.category_id],
                 })
             }
         }
     }
 
-    fn get_stream_icon(&self, resource_url: Option<String>) -> String {
+    fn get_stream_icon(&self, resource_url: Option<String>) -> Arc<str> {
         if !self.logo.is_empty() {
-            InfoDocUtils::make_resource_url(resource_url.as_deref(), &self.logo, "logo")
+            InfoDocUtils::make_resource_url(resource_url.as_deref(), &self.logo, "logo").intern()
         } else if !self.logo_small.is_empty() {
-            InfoDocUtils::make_resource_url(resource_url.as_deref(), &self.logo_small, "logo_small")
+            InfoDocUtils::make_resource_url(resource_url.as_deref(), &self.logo_small, "logo_small").intern()
         } else {
-            String::new()
+            "".intern()
         }
     }
 }

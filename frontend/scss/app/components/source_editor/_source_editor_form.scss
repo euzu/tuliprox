@@ -1,4 +1,4 @@
-$form-width: 380px;
+$form-width: 480px;
 
 .tp__source-editor-form-wrapper {
   position: absolute;
@@ -21,12 +21,17 @@ $form-width: 380px;
 
 .tp__source-editor-form {
 
+  padding: 0 var(--padding-micro);
+  background-color: var(--card-background-color);
+
   &__body {
     background-color: var(--card-background-color);
     border: 1px solid var(--card-border-color);
 
     display: flex;
     flex-flow: column;
+    width: 100%;
+    overflow: hidden;
 
     &__pages {
       display: flex;
@@ -39,15 +44,40 @@ $form-width: 380px;
     }
   }
 
+  &__content {
+    display: flex;
+    flex-flow: row;
+    gap: var(--gap-default);
+    box-sizing: border-box;
+    overflow: hidden;
+  }
+
   .tp__form-list__item {
     display: flex;
     flex-flow: row nowrap;
     gap: var(--gap-small);
     align-items: center;
+
+    &-toolbar {
+      display: flex;
+      flex-flow: row nowrap;
+    }
+  }
+
+  .tp__form-list__toolbar {
+    margin-top: var(--margin-default);
+  }
+
+  &__sidebar {
+    .tp__icon-button.active {
+      background-color: var(--menu-item-hover-background-color);
+      color: var(--menu-item-hover-color);
+    }
+
     .tp__icon-button {
-      fill: var(--menu-button-warn-color);
-      &:hover {
-        fill: var(--menu-button-warn-hover-color);
+      .svg-icon {
+        width: 2rem;
+        height: 2rem;
       }
     }
   }

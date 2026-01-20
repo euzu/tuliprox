@@ -16,14 +16,14 @@ use crate::repository::{LocalLibraryDiskPlaylistSource, M3uDiskPlaylistSource, M
 use shared::error::{info_err, TuliproxError};
 use shared::model::xtream_const::XTREAM_CLUSTER;
 use shared::model::{InputType, M3uPlaylistItem, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, StreamProperties, XtreamCluster, XtreamPlaylistItem};
-use shared::utils::{is_dash_url, is_hls_url, StringInterner};
+use shared::utils::{is_dash_url, is_hls_url, Internable};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use crate::repository::library_repository::{load_input_local_library_playlist, persist_input_library_playlist};
 
 struct LocalEpisodeKey {
-    path: String,
+    path: Arc<str>,
     virtual_id: u32,
 }
 
@@ -33,8 +33,7 @@ pub struct ProviderEpisodeKey {
 }
 
 pub async fn persist_playlist(app_config: &Arc<AppConfig>, playlist: &mut [PlaylistGroup], epg: Option<&Epg>,
-                              target: &ConfigTarget, playlist_state: Option<&Arc<PlaylistStorageState>>,
-                              interner: &mut StringInterner) -> Result<(), Vec<TuliproxError>> {
+                              target: &ConfigTarget, playlist_state: Option<&Arc<PlaylistStorageState>>) -> Result<(), Vec<TuliproxError>> {
     let mut errors = vec![];
     let config = &app_config.config.load();
     let target_path = match ensure_target_storage_path(config, &target.name) {
@@ -42,10 +41,13 @@ pub async fn persist_playlist(app_config: &Arc<AppConfig>, playlist: &mut [Playl
         Err(err) => return Err(vec![err]),
     };
 
-    let (mut target_id_mapping, file_lock) = get_target_id_mapping(app_config, &target_path).await;
+    let (mut target_id_mapping, file_lock) = match get_target_id_mapping(app_config, &target_path, target.use_memory_cache).await {
+        Ok(result) => result,
+        Err(err) => return Err(vec![err]),
+    };
 
-    let mut local_library_series = HashMap::<String, Vec<LocalEpisodeKey>>::new();
-    let mut provider_series = HashMap::<String, Vec<ProviderEpisodeKey>>::new();
+    let mut local_library_series = HashMap::<Arc<str>, Vec<LocalEpisodeKey>>::new();
+    let mut provider_series = HashMap::<Arc<str>, Vec<ProviderEpisodeKey>>::new();
 
     let mut source_ordinal: u32 = 0;
     // Virtual IDs assignment
@@ -98,7 +100,7 @@ pub async fn persist_playlist(app_config: &Arc<AppConfig>, playlist: &mut [Playl
         };
 
         let result = match output {
-            TargetOutput::Xtream(_xtream_output) => xtream_write_playlist(app_config, target, pl, interner).await,
+            TargetOutput::Xtream(_xtream_output) => xtream_write_playlist(app_config, target, pl).await,
             TargetOutput::M3u(m3u_output) => m3u_write_playlist(app_config, target, m3u_output, &target_path, pl).await,
             TargetOutput::Strm(strm_output) => write_strm_playlist(app_config, target, strm_output, pl).await,
             TargetOutput::HdHomeRun(_hdhomerun_output) => Ok(()),
@@ -120,6 +122,9 @@ pub async fn persist_playlist(app_config: &Arc<AppConfig>, playlist: &mut [Playl
     if let Err(err) = target_id_mapping.persist() {
         errors.push(info_err!("{err}"));
     }
+    // We must drop target_id_mapping here to release the exclusive B+Tree lock
+    // otherwise the subsequent load_xtream_target_storage will deadlock waiting for a shared lock.
+    drop(target_id_mapping);
     drop(file_lock);
 
     if target.use_memory_cache {
@@ -145,7 +150,7 @@ pub async fn persist_playlist(app_config: &Arc<AppConfig>, playlist: &mut [Playl
     if errors.is_empty() { Ok(()) } else { Err(errors) }
 }
 
-fn assign_local_series_info_episode_key(local_library_series: &mut HashMap<String, Vec<LocalEpisodeKey>>, header: &mut PlaylistItemHeader, item_type: PlaylistItemType) {
+fn assign_local_series_info_episode_key(local_library_series: &mut HashMap<Arc<str>, Vec<LocalEpisodeKey>>, header: &mut PlaylistItemHeader, item_type: PlaylistItemType) {
     // we need to rewrite local series info with the new virtual ids
     if item_type == PlaylistItemType::LocalSeries {
         local_library_series
@@ -158,7 +163,7 @@ fn assign_local_series_info_episode_key(local_library_series: &mut HashMap<Strin
     }
 }
 
-fn assign_provider_series_info_episode_key(provider_series: &mut HashMap<String, Vec<ProviderEpisodeKey>>, header: &mut PlaylistItemHeader, item_type: PlaylistItemType) {
+fn assign_provider_series_info_episode_key(provider_series: &mut HashMap<Arc<str>, Vec<ProviderEpisodeKey>>, header: &mut PlaylistItemHeader, item_type: PlaylistItemType) {
     // we need to rewrite local series info with the new virtual ids
     if item_type == PlaylistItemType::Series {
         provider_series
@@ -172,11 +177,11 @@ fn assign_provider_series_info_episode_key(provider_series: &mut HashMap<String,
 }
 
 #[allow(clippy::implicit_hasher)]
-fn rewrite_local_series_info_episode_virtual_id(pli: &mut PlaylistItem, local_library_series: &HashMap<String, Vec<LocalEpisodeKey>>) {
+fn rewrite_local_series_info_episode_virtual_id(pli: &mut PlaylistItem, local_library_series: &HashMap<Arc<str>, Vec<LocalEpisodeKey>>) {
     let header = &mut pli.header;
     // the local_library_series key is the id of the SeriesInfo. The episodes have their parent SeriesInfo id as parent_code.
     // When we populate  local_library_series, we use the episodes.parent_code. Here we need to use the SeriesInfo.id to get the assigned episodes.
-    if let Some(episode_keys) = local_library_series.get(&header.id) {
+    if let Some(episode_keys) = local_library_series.get(&*header.id) {
         if let Some(StreamProperties::Series(series)) = header.additional_properties.as_mut() {
             if let Some(episodes) =
                 series.details.as_mut().and_then(|d| d.episodes.as_mut())
@@ -195,11 +200,11 @@ fn rewrite_local_series_info_episode_virtual_id(pli: &mut PlaylistItem, local_li
 }
 
 #[allow(clippy::implicit_hasher)]
-pub fn rewrite_provider_series_info_episode_virtual_id<P>(pli: &mut P, provider_series: &HashMap<String, Vec<ProviderEpisodeKey>>)
+pub fn rewrite_provider_series_info_episode_virtual_id<P>(pli: &mut P, provider_series: &HashMap<Arc<str>, Vec<ProviderEpisodeKey>>)
 where
     P: PlaylistEntry,
 {
-    if let Some(episode_keys) = provider_series.get(&pli.get_uuid().to_string()) {
+    if let Some(episode_keys) = provider_series.get(&pli.get_uuid().intern()) {
         if let Some(StreamProperties::Series(series)) = pli.get_additional_properties_mut() {
             if let Some(episodes) =
                 series.details.as_mut().and_then(|d| d.episodes.as_mut())
@@ -218,8 +223,8 @@ where
 }
 
 fn rewrite_series_info_episode_virtual_id(playlist: &mut [PlaylistGroup],
-                                          local_library_series: &HashMap<String, Vec<LocalEpisodeKey>>,
-                                          provider_series: &HashMap<String, Vec<ProviderEpisodeKey>>) {
+                                          local_library_series: &HashMap<Arc<str>, Vec<LocalEpisodeKey>>,
+                                          provider_series: &HashMap<Arc<str>, Vec<ProviderEpisodeKey>>) {
     if local_library_series.is_empty() && provider_series.is_empty() {
         return;
     }
@@ -231,16 +236,17 @@ fn rewrite_series_info_episode_virtual_id(playlist: &mut [PlaylistGroup],
             } else if item_type == PlaylistItemType::LocalSeriesInfo {
                 rewrite_local_series_info_episode_virtual_id(channel, local_library_series);
             } else if item_type == PlaylistItemType::LocalSeries {
-                channel.header.parent_code = String::new();
+                channel.header.parent_code = "".intern();
             }
         }
     }
 }
 
-pub async fn get_target_id_mapping(cfg: &AppConfig, target_path: &Path) -> (TargetIdMapping, utils::FileWriteGuard) {
+pub async fn get_target_id_mapping(cfg: &AppConfig, target_path: &Path, use_memory_cache: bool) -> Result<(TargetIdMapping, utils::FileWriteGuard), TuliproxError> {
     let target_id_mapping_file = get_target_id_mapping_file(target_path);
     let file_lock = cfg.file_locks.write_lock(&target_id_mapping_file).await;
-    (TargetIdMapping::new(&target_id_mapping_file), file_lock)
+    let mapping = TargetIdMapping::new(&target_id_mapping_file, use_memory_cache)?;
+    Ok((mapping, file_lock))
 }
 
 
@@ -355,7 +361,7 @@ pub async fn persist_input_playlist(app_config: &Arc<AppConfig>, input: &ConfigI
                     return (playlist, Some(info_err!("Error creating input storage directory for input '{}' failed: {err}", input.name)));
                 }
             };
-            let file_path = get_input_m3u_playlist_file_path(&storage_path, input.name.as_str());
+            let file_path = get_input_m3u_playlist_file_path(&storage_path, &input.name);
             if let Err(err) = persist_input_m3u_playlist(app_config, &file_path, &playlist).await {
                 return (playlist, Some(err));
             }
@@ -370,7 +376,7 @@ pub async fn persist_input_playlist(app_config: &Arc<AppConfig>, input: &ConfigI
                     return (playlist, Some(info_err!("Error creating input storage directory for input '{}' failed: {err}", input.name)));
                 }
             };
-            let file_path = get_input_local_library_playlist_file_path(&storage_path, input.name.as_str());
+            let file_path = get_input_local_library_playlist_file_path(&storage_path, &input.name);
             if let Err(err) = persist_input_library_playlist(app_config, &file_path, &playlist).await {
                 return (playlist, Some(err));
             }
@@ -403,7 +409,7 @@ pub async fn load_input_playlist(ctx: &PlaylistProcessingContext, input: &Config
         }
         InputType::M3u | InputType::M3uBatch => {
             // Load M3U
-            let file_path = get_input_m3u_playlist_file_path(&storage_path, input.name.as_str());
+            let file_path = get_input_m3u_playlist_file_path(&storage_path, &input.name);
             if disk_based_processing && file_path.exists() {
                 Ok(Box::new(M3uDiskPlaylistSource::new(app_config, &file_path).await))
             } else {
@@ -412,7 +418,7 @@ pub async fn load_input_playlist(ctx: &PlaylistProcessingContext, input: &Config
             }
         }
         InputType::Library => {
-            let file_path = get_input_local_library_playlist_file_path(&storage_path, input.name.as_str());
+            let file_path = get_input_local_library_playlist_file_path(&storage_path, &input.name);
             if disk_based_processing && file_path.exists() {
                 Ok(Box::new(LocalLibraryDiskPlaylistSource::new(app_config, &file_path).await))
             } else {
@@ -423,14 +429,14 @@ pub async fn load_input_playlist(ctx: &PlaylistProcessingContext, input: &Config
     }
 }
 
-fn get_input_m3u_playlist_file_path(storage_path: &Path, input_name: &str) -> PathBuf {
+pub fn get_input_m3u_playlist_file_path(storage_path: &Path, input_name: &Arc<str>) -> PathBuf {
     let sanitized_input_name: String = input_name.chars()
         .map(|c| if c.is_alphanumeric() { c } else { '_' })
         .collect();
     storage_path.join(format!("m3u_{sanitized_input_name}.{FILE_SUFFIX_DB}"))
 }
 
-fn get_input_local_library_playlist_file_path(storage_path: &Path, input_name: &str) -> PathBuf {
+fn get_input_local_library_playlist_file_path(storage_path: &Path, input_name: &Arc<str>) -> PathBuf {
     let sanitized_input_name: String = input_name.chars()
         .map(|c| if c.is_alphanumeric() { c } else { '_' })
         .collect();

@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::sync::Arc;
 use deunicode::deunicode_with_tofu_cow;
 
 pub trait Capitalize {
@@ -132,7 +133,7 @@ pub fn deunicode_string(s: &str) -> Cow<'_, str> {
     deunicode_with_tofu_cow(s,  "[?]")
 }
 
-pub fn longest<'a>(a: &'a str, b: &'a str) -> &'a str {
+pub fn longest<'a>(a: &'a Arc<str>, b: &'a Arc<str>) -> &'a Arc<str> {
    if a.len() >= b.len() { a } else { b }
 }
 

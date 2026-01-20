@@ -231,6 +231,7 @@ mod tests {
     use shared::foundation::filter::Filter;
     use shared::model::{ItemField, PlaylistItem, PlaylistItemHeader, SortOrder, SortTarget};
     use std::cmp::Ordering;
+    use std::sync::Arc;
 
     #[test]
     fn test_sort() {
@@ -252,7 +253,7 @@ mod tests {
         .enumerate()
         .map(|(i, (name, quality))| PlaylistItem {
             header: PlaylistItemHeader {
-                title: format!("Chanel {name} [{quality}]"),
+                title: format!("Chanel {name} [{quality}]").into(),
                 source_ordinal: i as u32,
                 ..Default::default()
             },
@@ -298,7 +299,7 @@ mod tests {
             "Chanel K [HD]",
             "Chanel Z [HD]",
             "Chanel T [SD]",
-        ];
+        ].into_iter().map(Into::into).collect::<Vec<Arc<str>>>();
 
         let sorted = channels
             .into_iter()
@@ -340,7 +341,7 @@ mod tests {
         .enumerate()
         .map(|(i, name)| PlaylistItem {
             header: PlaylistItemHeader {
-                title: name.to_string(),
+                title: name.to_string().into(),
                 source_ordinal: i as u32,
                 ..Default::default()
             },
@@ -404,7 +405,7 @@ mod tests {
             "US| East d",
             "US| West e",
             "US| West f",
-        ];
+        ].into_iter().map(Into::into).collect::<Vec<Arc<str>>>();
 
         let sorted = channels
             .into_iter()

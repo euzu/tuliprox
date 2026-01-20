@@ -169,9 +169,9 @@ async fn assign_channel_epg(new_epg: &mut Vec<Epg>, fp: &mut FetchedPlaylist<'_>
             let mut icon_assigned = HashSet::new();
             for epg_source in epg_sources {
                 // icon tags
-                let icon_tags: HashMap<&String, &Arc<XmlTag>> = epg_source.children.iter()
+                let icon_tags: HashMap<&str, &Arc<XmlTag>> = epg_source.children.iter()
                     .filter(|tag| tag.icon != XmlTagIcon::Undefined)
-                    .filter_map(|tag| tag.get_attribute_value(EPG_ATTRIB_ID).map(|id| (id, tag)))
+                    .filter_map(|tag| tag.get_attribute_value(EPG_ATTRIB_ID).map(|id| (id.as_str(), tag)))
                     .collect();
 
                 let assign_values = |chan: &mut PlaylistItem| {
@@ -180,7 +180,7 @@ async fn assign_channel_epg(new_epg: &mut Vec<Epg>, fp: &mut FetchedPlaylist<'_>
                         // if the channel has no epg_id or the epg_id is not present in xmltv/tvguide then we need to match one from existing tvguide
                         let not_found_in_epg = match &chan.header.epg_channel_id {
                             None => true,
-                            Some(epg_id) => !id_cache.processed.contains(epg_id),
+                            Some(epg_id) => !id_cache.processed.contains(&**epg_id),
                         };
                         if not_found_in_epg {
                             let try_match = |key: &str| {
@@ -195,22 +195,22 @@ async fn assign_channel_epg(new_epg: &mut Vec<Epg>, fp: &mut FetchedPlaylist<'_>
                             if let Some(new_id) = try_match(&chan.header.name)
                                 .or_else(|| chan.header.epg_channel_id.as_deref().and_then(try_match))
                             {
-                                chan.header.epg_channel_id = Some(new_id);
+                                chan.header.epg_channel_id = Some(new_id.into());
                             }
                         }
                     }
                     if let Some(epg_channel_id) = chan.header.epg_channel_id.as_ref() {
                         if !icon_assigned.contains(epg_channel_id) &&
                             (epg_source.logo_override || chan.header.logo.is_empty() || chan.header.logo_small.is_empty()) {
-                            if let Some(icon_tag) = icon_tags.get(epg_channel_id) {
+                            if let Some(icon_tag) = icon_tags.get(&**epg_channel_id) {
                                 if let XmlTagIcon::Src(icon) = &icon_tag.icon {
                                     icon_assigned.insert(epg_channel_id.clone());
                                     if epg_source.logo_override || chan.header.logo.is_empty() {
                                         trace!("Matched channel {} to epg icon {icon}", chan.header.name);
-                                        chan.header.logo = icon.clone();
+                                        chan.header.logo = icon.clone().into();
                                     }
                                     if epg_source.logo_override || chan.header.logo_small.is_empty() {
-                                        chan.header.logo_small = icon.clone();
+                                        chan.header.logo_small = icon.clone().into();
                                     }
                                 }
                             }

@@ -7,7 +7,7 @@ use dashmap::DashMap;
 use quick_xml::events::{BytesStart, BytesText, Event};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use shared::model::EpgNamePrefix;
-use shared::utils::{deunicode_string, CONSTANTS};
+use shared::utils::{deunicode_string, Internable, CONSTANTS};
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::cmp::min;
@@ -488,7 +488,7 @@ pub fn flatten_tvguide(tv_guides: &[Epg]) -> Option<Epg> {
         let epg_children: Mutex<Vec<Arc<XmlTag>>> = Mutex::new(Vec::new());
         let epg_attributes: Option<HashMap<Arc<str>, String>> = tv_guides.first().and_then(|t| t.attributes.clone());
         let count = tv_guides.iter().map(|tvg| tvg.children.len()).sum();
-        let channel_mapping: DashMap<String, i16> = DashMap::with_capacity(count);
+        let channel_mapping: DashMap<Arc<str>, i16> = DashMap::with_capacity(count);
 
         let mut sorted_guides = tv_guides.to_vec();
         // sort by priority
@@ -499,14 +499,15 @@ pub fn flatten_tvguide(tv_guides: &[Epg]) -> Option<Epg> {
             guide.children.iter().for_each(|c| {
                 if c.name.as_ref() == EPG_TAG_CHANNEL {
                     if let Some(chan_id) = c.get_attribute_value(EPG_ATTRIB_ID) {
+                        let chan_id = chan_id.intern();
                         let should_add = {
                             // if not stored
-                            !channel_mapping.contains_key(chan_id) ||
+                            !channel_mapping.contains_key(&chan_id) ||
                                 // or if priority is higher (less means higher priority)
-                                channel_mapping.get(chan_id).as_deref().is_none_or(|&priority| guide.priority < priority)
+                                channel_mapping.get(&chan_id).as_deref().is_none_or(|&priority| guide.priority < priority)
                         };
                         if should_add {
-                            if let Some(mut existing) = channel_mapping.get_mut(chan_id) {
+                            if let Some(mut existing) = channel_mapping.get_mut(&chan_id) {
                                 if guide.priority < *existing {
                                     *existing = guide.priority;
                                     children.push(c.clone());
@@ -522,7 +523,8 @@ pub fn flatten_tvguide(tv_guides: &[Epg]) -> Option<Epg> {
             guide.children.iter().for_each(|c| {
                 if c.name.as_ref() == EPG_TAG_PROGRAMME {
                     if let Some(chan_id) = c.get_attribute_value(EPG_ATTRIB_CHANNEL) {
-                        if let Some(stored_priority) = channel_mapping.get(chan_id) {
+                        let chan_id = chan_id.intern();
+                        if let Some(stored_priority) = channel_mapping.get(&chan_id) {
                             if *stored_priority == guide.priority {
                                 children.push(c.clone());
                             }

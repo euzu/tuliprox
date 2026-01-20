@@ -79,6 +79,23 @@ impl FileLockManager {
         FileWriteGuard::new(guard)
     }
 
+    /// Tries to acquire a write lock using a raw string key instead of a normalized `Path`.
+    ///
+    /// Unlike the standard path-based locks, this method does **not** perform any
+    /// path normalization or conversion. The string is used directly as the lock key,
+    /// which can be useful for non-file-based identifiers or dynamic keys.
+    ///
+    /// Returns immediately with an error if the lock is currently held, rather than
+    /// waiting for it to become available.
+    pub async fn try_write_lock_str(&self, text: &str) -> io::Result<FileWriteGuard> {
+        let lock_key = LockKey::Str(text.to_string());
+        let file_lock = self.get_or_create_lock(lock_key).await;
+        match Arc::clone(&file_lock).try_write_owned() {
+            Ok(lock_guard) => Ok(FileWriteGuard::new(lock_guard)),
+            Err(_) => Err(str_to_io_error("Failed to acquire write lock"))
+        }
+    }
+
 
     fn get_lock_key_for_path(path: &Path) -> LockKey {
         let normalized_path = normalize_path(path);

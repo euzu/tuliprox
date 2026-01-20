@@ -4,11 +4,10 @@ use crate::utils::{extract_year_from_title, normalize_title_for_matching, TraktC
 use crate::utils::{trace_if_enabled, with};
 use log::{debug, info, trace, warn};
 use shared::error::TuliproxError;
-use shared::utils::StringInterner;
 use shared::model::{FieldGetAccessor, FieldSetAccessor, PlaylistGroup, PlaylistItem, TraktContentType, XtreamCluster};
-use shared::utils::CONSTANTS;
+use shared::utils::{Internable, CONSTANTS};
 use indexmap::IndexMap;
-use std::borrow::Cow;
+use std::sync::Arc;
 use strsim::normalized_levenshtein;
 
 fn extract_quality(value: &str) -> Option<&str> {
@@ -130,7 +129,6 @@ fn find_best_match_for_item<'a>(
 fn create_category_from_matches<'a>(
     matches: Vec<TraktMatchResult<'a>>,
     list_config: &'a TraktListConfig,
-    interner: &mut StringInterner,
 ) -> Vec<PlaylistGroup> {
     if matches.is_empty() { return vec![]; }
 
@@ -147,12 +145,12 @@ fn create_category_from_matches<'a>(
         ))
     });
 
-    let group_title = &list_config.category_name;
+    let group_title = list_config.category_name.as_str().intern();
 
     for match_result in sorted_matches {
         let mut modified_item = match_result.playlist_item.clone();
         with!(mut modified_item.header => header {
-            let title = header.get_field("caption").unwrap_or_else(|| Cow::Borrowed(&header.title));
+            let title = header.get_field("caption").unwrap_or_else(|| Arc::clone(&header.title));
             if extract_quality(&title).is_none() {
                 if let Some(quality) = extract_quality(&header.group) {
                     let mut caption = String::with_capacity(title.len() + 6);
@@ -163,7 +161,7 @@ fn create_category_from_matches<'a>(
                     header.set_field("caption", &caption);
                 }
             }
-            header.group = interner.intern(group_title);
+            header.group = group_title.clone();
             header.gen_uuid();
             matched_items_by_cluster.entry(header.xtream_cluster).or_default().push(modified_item);
         });
@@ -172,7 +170,7 @@ fn create_category_from_matches<'a>(
     matched_items_by_cluster.into_iter().map(|(cluster, channels)| {
         PlaylistGroup {
             id: 0,
-            title: interner.intern(group_title),
+            title: group_title.clone(),
             channels,
             xtream_cluster: cluster,
         }
@@ -183,7 +181,6 @@ fn match_trakt_items_with_playlist<'a>(
     trakt_items: &'a [TraktListItem],
     playlist: &'a [PlaylistGroup],
     list_config: &'a TraktListConfig,
-    interner: &mut StringInterner,
 ) -> Vec<PlaylistGroup> {
     let trakt_match_items: Vec<TraktMatchItem<'a>> = trakt_items
         .iter()
@@ -207,7 +204,7 @@ fn match_trakt_items_with_playlist<'a>(
         }
     }
 
-    create_category_from_matches(matches, list_config, interner)
+    create_category_from_matches(matches, list_config)
 }
 
 pub struct TraktCategoriesProcessor {
@@ -234,7 +231,6 @@ impl TraktCategoriesProcessor {
         info!("Processing {} Trakt lists for target {}", trakt_config.lists.len(), target.name);
         let mut new_categories = Vec::new();
         let mut total_matches = 0;
-        let mut interner = StringInterner::new();
 
         for list_config in &trakt_config.lists {
             let cache_key = format!("{}:{}", list_config.user, list_config.list_slug);
@@ -243,7 +239,7 @@ impl TraktCategoriesProcessor {
                 Ok(trakt_items) => {
                     debug!("Processing Trakt list {cache_key} with {} items", trakt_items.len());
 
-                    let categories = match_trakt_items_with_playlist(&trakt_items, playlist, list_config, &mut interner);
+                    let categories = match_trakt_items_with_playlist(&trakt_items, playlist, list_config);
                     for category in categories {
                         if !category.channels.is_empty() {
                             total_matches += category.channels.len();
@@ -275,6 +271,9 @@ pub async fn process_trakt_categories_for_target(
         debug!("No Trakt configuration found for target {}", target.name);
         return Ok(None);
     };
+    if !trakt_config.enabled {
+        return Ok(None);
+    }
 
     let processor = TraktCategoriesProcessor::new(http_client, trakt_config);
     processor.process_trakt_categories(playlist, target, trakt_config).await

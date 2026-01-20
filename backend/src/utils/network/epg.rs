@@ -6,6 +6,7 @@ use log::debug;
 use shared::error::{TuliproxError, info_err};
 use shared::utils::{sanitize_sensitive_info, short_hash};
 use std::path::PathBuf;
+use shared::concat_string;
 use crate::processing::processor::playlist::PlaylistProcessingContext;
 use crate::repository::storage::get_input_storage_path;
 use crate::repository::storage_const;
@@ -17,7 +18,7 @@ pub fn get_input_raw_epg_file_path(url: &str, input: &ConfigInput, working_dir: 
     if let Some(persist_path) = input.persist.as_deref() {
         if !persist_path.is_empty() {
             if let Some(path) = prepare_file_path(input.persist.as_deref(), working_dir, "")
-                .map(|path| add_prefix_to_filename(&path, format!("{file_prefix}_epg_").as_str(), Some("xml"))) {
+                .map(|path| add_prefix_to_filename(&path, concat_string!(&file_prefix, "_epg_").as_str(), Some("xml"))) {
                 return Ok(path);
             }
         }
@@ -45,7 +46,7 @@ async fn download_epg_file(url: &str, ctx: &PlaylistProcessingContext, input: &C
         // Cache miss: file doesn't exist
     }
 
-    let lock_key = persist_file_path.display().to_string();
+    let lock_key: std::sync::Arc<str> = persist_file_path.display().to_string().into();
     let _input_lock = ctx.get_input_lock(&lock_key).await;
 
     if ctx.is_input_downloaded(&lock_key).await {

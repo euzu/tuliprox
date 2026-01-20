@@ -1,6 +1,39 @@
 $movie-card-height: 24rem;
 $movie-card-width: 16rem;
 $live-card-width: 17.5rem;
+$episode-card-height: 10rem;
+$episode-card-width: 18rem;
+$series-backdrop-height: 300px;
+
+@mixin card-base($height, $width) {
+  position: relative;
+  padding: 0;
+  max-height: $height;
+  min-height: $height;
+  max-width: $width;
+  min-width: $width;
+
+
+  .tp__playlist-explorer__channel {
+    &-logo {
+      box-sizing: border-box;
+      height: 100%;
+      object-fit: cover;
+      object-position: center;
+    }
+
+    &-title {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      height: 3rem;
+      background-color: var(--card-background-color);
+      display: flex;
+      align-items: center;
+    }
+  }
+}
 
 .tp__playlist-explorer {
   display: flex;
@@ -29,7 +62,7 @@ $live-card-width: 17.5rem;
       width: 100%;
       justify-content: space-between;
 
-      &-actions  {
+      &-actions {
         display: flex;
         flex-flow: row;
         gap: var(--gap-default);
@@ -71,7 +104,7 @@ $live-card-width: 17.5rem;
     box-sizing: border-box;
     overflow: hidden;
 
-    &-sidebar{
+    &-sidebar {
       .tp__icon-button.active {
         color: var(--tag-active-color);
         fill: currentColor;
@@ -101,10 +134,19 @@ $live-card-width: 17.5rem;
         box-sizing: border-box;
         width: 100%;
       }
+
       &-video,
       &-series {
         display: grid;
         grid-template-columns: repeat(auto-fill, minmax($movie-card-width, 1fr));
+        gap: var(--gap-default);
+        box-sizing: border-box;
+        width: 100%;
+      }
+
+      &-episodes {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax($episode-card-width, 1fr));
         gap: var(--gap-default);
         box-sizing: border-box;
         width: 100%;
@@ -203,40 +245,16 @@ $live-card-width: 17.5rem;
 
         &-logo {
           box-sizing: border-box;
-          max-height: 3rem;
-          min-height: 3rem;
-          aspect-ratio: 1 / 1;
+          height: 3rem;
+          object-fit: cover;
+          object-position: center;
         }
       }
     }
 
     &-video,
     &-series {
-      position: relative;
-      max-height: $movie-card-height;
-      min-height: $movie-card-height;
-      max-width: $movie-card-width;
-      min-width: $movie-card-width;
-      padding:0;
-      .tp__playlist-explorer__channel {
-        &-logo {
-          box-sizing: border-box;
-          width: 100%;
-          height: 100%;
-          aspect-ratio: 1 / 1;
-        }
-        &-title {
-          position: absolute;
-          bottom: 0;
-          left: 0;
-          right: 0;
-          height: 3rem;
-          background-color: var(--card-background-color);
-          padding-left: 2rem;
-          display: flex;
-          align-items: center;
-        }
-      }
+      @include card-base($movie-card-height, $movie-card-width);
       .tp__icon-button {
         position: absolute;
         z-index: 1;
@@ -246,6 +264,78 @@ $live-card-width: 17.5rem;
       }
     }
 
+    &-episode {
+      @include card-base($episode-card-height, $episode-card-width);
+    }
   }
 
+  &__series-info {
+    display: flex;
+    flex-flow: column;
+    gap: var(--gap-default);
+    box-sizing: border-box;
+    overflow: hidden;
+
+    &__nowrap {
+      white-space: nowrap;
+    }
+
+    &__body {
+      display: flex;
+      flex-flow: column;
+      gap: var(--gap-default);
+      box-sizing: border-box;
+      overflow: auto;
+
+      .tp__playlist-explorer__group-list {
+        overflow: unset;
+      }
+
+      &-top {
+        display: flex;
+        flex-flow: column;
+        gap: var(--gap-default);
+        min-height: $series-backdrop-height;
+        background-size: cover;
+        background-position: right top;
+
+        font-size: 1.2rem;
+        box-sizing: border-box;
+
+        &-content {
+          display: flex;
+          flex-flow: column;
+          gap: var(--gap-default);
+          max-width: 60%;
+          background-size: cover;
+          background-position: center;
+          font-size: 1.2rem;
+        }
+      }
+    }
+
+    &__title {
+      font-weight: bold;
+      font-size: 2.5rem;
+      color: var(--series-info-title-color, white);
+    }
+
+    &__infos {
+      display: flex;
+      flex-flow: row;
+      gap: var(--gap-larger);
+    }
+
+    &__season {
+      color: var(--series-info-title-color, white);
+      display: flex;
+      flex-flow: column;
+      gap: var(--gap-default);
+
+      &-title {
+        font-weight: bold;
+        font-size: 2rem;
+      }
+    }
+  }
 }

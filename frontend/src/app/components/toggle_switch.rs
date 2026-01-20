@@ -29,6 +29,7 @@ pub fn ToggleSwitch(props: &ToggleSwitchProps) -> Html {
         Callback::from(move |e: MouseEvent|  {
             if readonly {
                 e.prevent_default();
+                e.stop_propagation();
                 return;
             }
             let new_value = !*toggled;

@@ -1,12 +1,15 @@
 use crate::app::components::config::HasFormData;
 use crate::app::components::select::Select;
-use crate::app::components::{BlockId, BlockInstance, Card, DropDownOption, DropDownSelection, EditMode, FilterInput, Panel, SourceEditorContext, TextButton};
+use crate::app::components::{BlockId, BlockInstance, Card, DropDownOption, DropDownSelection, EditMode, FilterInput, IconButton, Panel, SourceEditorContext, TextButton};
 use crate::{config_field_child, edit_field_bool, edit_field_list_option, edit_field_text, edit_field_text_option, generate_form_reducer};
 use shared::model::{StrmExportStyle, StrmTargetOutputDto, TargetOutputDto};
 use std::fmt::Display;
 use std::rc::Rc;
-use yew::{classes, function_component, html, use_context, use_effect_with, use_memo, use_reducer, use_state, Callback, Html, Properties, UseReducerHandle};
+use std::str::FromStr;
+use yew::{function_component, html, use_context, use_effect_with, use_memo, use_reducer, use_state, Callback, Html, Properties, UseReducerHandle};
 use yew_i18n::use_translation;
+use shared::error::TuliproxError;
+use shared::info_err_res;
 
 const LABEL_DIRECTORY: &str = "LABEL.DIRECTORY";
 const LABEL_USERNAME: &str = "LABEL.USERNAME";
@@ -18,6 +21,8 @@ const LABEL_STRM_PROPS: &str = "LABEL.STRM_PROPS";
 const LABEL_FILTER: &str = "LABEL.FILTER";
 const LABEL_ADD_QUALITY_TO_FILENAME: &str = "LABEL.ADD_QUALITY_TO_FILENAME";
 const LABEL_ADD_PROPERTY: &str = "LABEL.ADD_PROPERTY";
+const LABEL_MAIN: &str = "LABEL.MAIN_CONFIG";
+const LABEL_OPTIONS: &str = "LABEL.OPTIONS";
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum StrmFormPage {
@@ -25,11 +30,30 @@ enum StrmFormPage {
     Options,
 }
 
+
+impl StrmFormPage {
+    const MAIN: &str = "Main";
+    const OPTIONS: &str = "Options";
+}
+
+impl FromStr for StrmFormPage {
+    type Err = TuliproxError;
+
+    fn from_str(s: &str) -> Result<Self, TuliproxError> {
+        match s {
+            Self::MAIN => Ok(StrmFormPage::Main),
+            Self::OPTIONS => Ok(StrmFormPage::Options),
+            _ => info_err_res!("Unknown strm output form page: {s}"),
+        }
+    }
+}
+
+
 impl Display for StrmFormPage {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{}", match *self {
-            StrmFormPage::Main => "Main",
-            StrmFormPage::Options => "Options",
+            StrmFormPage::Main => Self::MAIN,
+            StrmFormPage::Options => Self::OPTIONS,
         })
     }
 }
@@ -67,11 +91,15 @@ pub fn StrmTargetOutputView(props: &StrmTargetOutputViewProps) -> Html {
             modified: false,
         });
 
-    let view_visible = use_state(|| StrmFormPage::Main.to_string());
+    let view_visible = use_state(|| StrmFormPage::Main);
 
-    let on_tab_click = {
-        let view_visible = view_visible.clone();
-        Callback::from(move |page: StrmFormPage| view_visible.set(page.to_string()))
+    let handle_menu_click = {
+        let active_menu = view_visible.clone();
+        Callback::from(move |(name, _): (String, _)| {
+            if let Ok(view_type) = StrmFormPage::from_str(&name) {
+                active_menu.set(view_type);
+            }
+        })
     };
 
     let export_styles = use_memo(output_form_state.form.style, |style| {
@@ -160,32 +188,8 @@ pub fn StrmTargetOutputView(props: &StrmTargetOutputViewProps) -> Html {
 
     let render_edit_mode = || {
         html! {
-            <div class="tp__input-form__body">
-                <div class="tp__tab-header">
-                {
-                    for [
-                        StrmFormPage::Main,
-                        StrmFormPage::Options,
-                    ].iter().map(|page| {
-                        let page_str = page.to_string();
-                        let active = *view_visible == page_str;
-                        let on_tab_click = {
-                            let on_tab_click = on_tab_click.clone();
-                            let page = *page;
-                            Callback::from(move |_| on_tab_click.emit(page))
-                        };
-                        html! {
-                            <button
-                                class={classes!("tp__tab-button", if active { "active" } else { "" })}
-                                onclick={on_tab_click}
-                            >
-                                { page_str.clone() }
-                            </button>
-                        }
-                    })
-                }
-                </div>
-                <div class="tp__input-form__body__pages">
+            <div class="tp__source-editor-form__body">
+                <div class="tp__source-editor-form__body__pages">
                     <Panel value={StrmFormPage::Main.to_string()} active={view_visible.to_string()}>
                         {render_main()}
                     </Panel>
@@ -194,6 +198,15 @@ pub fn StrmTargetOutputView(props: &StrmTargetOutputViewProps) -> Html {
                     </Panel>
                 </div>
             </div>
+        }
+    };
+
+    let render_sidebar = || {
+        html! {
+            <div class="tp__source-editor-form__sidebar">
+            <IconButton class={format!("tp__app-sidebar-menu--{}{}", StrmFormPage::Main, if *view_visible == StrmFormPage::Main { " active" } else {""})}  icon="Settings" hint={translate.t(LABEL_MAIN)} name={StrmFormPage::Main.to_string()} onclick={&handle_menu_click}></IconButton>
+            <IconButton class={format!("tp__app-sidebar-menu--{}{}", StrmFormPage::Options, if *view_visible == StrmFormPage::Options { " active" } else {""})}  icon="Options" hint={translate.t(LABEL_OPTIONS)} name={StrmFormPage::Options.to_string()} onclick={&handle_menu_click}></IconButton>
+          </div>
         }
     };
 
@@ -227,7 +240,10 @@ pub fn StrmTargetOutputView(props: &StrmTargetOutputViewProps) -> Html {
                     title={ translate.t("LABEL.OK")}
                     onclick={handle_apply}></TextButton>
             </div>
-            { render_edit_mode() }
+            <div class="tp__source-editor-form__content">
+                { render_sidebar() }
+                { render_edit_mode() }
+            </div>
         </div>
     }
 }

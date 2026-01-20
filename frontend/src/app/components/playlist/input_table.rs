@@ -114,7 +114,7 @@ pub fn InputTable(props: &InputTableProps) -> Html {
                             1 => html! { <Chip class={ convert_bool_to_chip_style(dto.enabled) }
                                  label={if dto.enabled {translator.t("LABEL.ACTIVE")} else { translator.t("LABEL.DISABLED")} }
                                   /> },
-                            2 => html! { dto.name.as_str() },
+                            2 => html! { dto.name.as_ref() },
                             3 => html! { <InputTypeView input_type={dto.input_type}/> },
                             4 => html! { if matches!(dto.input_type, InputType::XtreamBatch | InputType::M3uBatch) {
                                 <RevealContent preview={html!{dto.url.as_str()}}><BatchInputContentView input={ dto.clone() } /></RevealContent>
@@ -165,7 +165,7 @@ pub fn InputTable(props: &InputTableProps) -> Html {
                                 <Chip class={ format!("{} tp__input-table__alias", convert_bool_to_chip_style(dto.enabled).map_or_else(String::new, |s| if s == "active" { "alias".to_string() } else {s} )) }
                                  label={translator.t("LABEL.ALIAS")}  />
                             },
-                            2 => html! { alias.name.as_str() },
+                            2 => html! { alias.name.as_ref() },
                             4 => html! { alias.url.as_str() },
                             5 => alias.username.as_ref().map_or_else(|| html!{}, |u| html!{u}),
                             6 => alias.password.as_ref().map_or_else(|| html!{}, |pwd| html! { <HideContent content={pwd.to_string()}></HideContent>}),
@@ -210,7 +210,7 @@ pub fn InputTable(props: &InputTableProps) -> Html {
                             if result == DialogResult::Ok {
                                 if let (Some(on_delete), Some(selected)) = (on_delete, &*selected_dto) {
                                     if let InputRow::Input(dto) = &**selected {
-                                        on_delete.emit(dto.name.clone());
+                                        on_delete.emit(dto.name.to_string());
                                     }
                                 }
                             }

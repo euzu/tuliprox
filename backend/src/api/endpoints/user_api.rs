@@ -29,9 +29,9 @@ fn get_categories_from_xtream(categories: Option<Vec<PlaylistXtreamCategory>>) -
 
 async fn get_categories_from_m3u_playlist(target: &ConfigTarget, config: &AppConfig) -> Vec<Arc<str>> {
     let mut groups = Vec::new();
-    if let Some((_guard, iter)) = m3u_repository::iter_raw_m3u_playlist(config, target).await {
+    if let Some((_guard, iter)) = m3u_repository::iter_raw_m3u_target_playlist(config, target, None).await {
         let mut unique_groups = HashSet::new();
-        for (item, _has_next) in iter {
+        for item in iter {
             if !unique_groups.contains(&item.group) {
                 unique_groups.insert(item.group.clone());
                 groups.push(item.group.clone());

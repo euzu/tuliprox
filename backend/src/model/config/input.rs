@@ -4,12 +4,13 @@ use chrono::Utc;
 use log::warn;
 use shared::error::TuliproxError;
 use shared::model::{ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, InputFetchMethod, InputType, StagedInputDto};
-use shared::utils::{get_credentials_from_url};
+use shared::utils::{get_credentials_from_url, Internable};
 use shared::{check_input_connections, info_err_res, write_if_some};
 use shared::check_input_credentials;
 use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::Arc;
 use url::Url;
 use crate::model::config::panel_api::PanelApiConfig;
 
@@ -71,7 +72,7 @@ impl InputUserInfo {
 
 #[derive(Debug, Clone, Default)]
 pub struct StagedInput {
-    pub name: String,
+    pub name: Arc<str>,
     pub url: String,
     pub username: Option<String>,
     pub password: Option<String>,
@@ -98,7 +99,7 @@ impl From<&StagedInputDto> for StagedInput {
 #[derive(Debug, Clone)]
 pub struct ConfigInputAlias {
     pub id: u16,
-    pub name: String,
+    pub name: Arc<str>,
     pub url: String,
     pub username: Option<String>,
     pub password: Option<String>,
@@ -126,7 +127,7 @@ impl From<&ConfigInputAliasDto> for ConfigInputAlias {
 #[derive(Debug, Clone, Default)]
 pub struct ConfigInput {
     pub id: u16,
-    pub name: String,
+    pub name: Arc<str>,
     pub input_type: InputType,
     pub headers: HashMap<String, String>,
     pub url: String,
@@ -150,7 +151,7 @@ pub struct ConfigInput {
 impl ConfigInput {
     pub fn prepare(&mut self) -> Result<Option<PathBuf>, TuliproxError> {
         let batch_file_path = self.prepare_batch();
-        self.name = self.name.trim().to_string();
+        self.name = self.name.trim().intern();
         check_input_credentials!(self, self.input_type, false, false);
         check_input_connections!(self, self.input_type, false);
         if let Some(staged_input) = &mut self.staged {
