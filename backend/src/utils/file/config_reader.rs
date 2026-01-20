@@ -423,29 +423,19 @@ where
         }
     }
 
-    let backup_path = PathBuf::from(backup_dir).join(format!(
-        "{filename}_{}",
-        Local::now().format("%Y%m%d_%H%M%S")
-    ));
+    if path.exists() {
+        let backup_path = PathBuf::from(backup_dir).join(format!("{filename}_{}", Local::now().format("%Y%m%d_%H%M%S")));
 
-    match fs::copy(&path, &backup_path).await {
-        Ok(_) => {}
-        Err(err) => {
-            error!(
-                "Could not backup file {}:{}",
-                &backup_path.to_str().unwrap_or("?"),
-                err
-            );
+        match fs::copy(&path, &backup_path).await {
+            Ok(_) => {}
+            Err(err) => {
+                error!("Could not backup file {}:{err}", &backup_path.to_str().unwrap_or("?"));
+            }
         }
+        info!("Saving file to {}", &path.to_str().unwrap_or("?"));
     }
-    info!("Saving file to {}", &path.to_str().unwrap_or("?"));
 
-    let parent_dir = path.parent().ok_or_else(|| {
-        info_err!(
-            "Could not write file {}: missing parent directory",
-            &path.to_str().unwrap_or("?")
-        )
-    })?;
+    let parent_dir = path.parent().ok_or_else(|| { info_err!("Could not write file {}: missing parent directory", &path.to_str().unwrap_or("?"))})?;
 
     let dest_file_name = path
         .file_name()
@@ -453,19 +443,9 @@ where
         .unwrap_or(default_name);
 
     let mut tmp_path = parent_dir.to_path_buf();
-    tmp_path.push(format!(
-        ".{dest_file_name}.tmp-{}-{}",
-        std::process::id(),
-        Local::now().timestamp_nanos_opt().unwrap_or_default()
-    ));
+    tmp_path.push(format!(".{dest_file_name}.tmp-{}-{}", std::process::id(), Local::now().timestamp_nanos_opt().unwrap_or_default()));
 
-    fs::write(&tmp_path, serialized).await.map_err(|err| {
-        info_err!(
-            "Could not write temp file {}: {}",
-            &tmp_path.to_str().unwrap_or("?"),
-            err
-        )
-    })?;
+    fs::write(&tmp_path, serialized).await.map_err(|err| { info_err!("Could not write temp file {}: {err}", &tmp_path.to_str().unwrap_or("?"))})?;
 
     match fs::rename(&tmp_path, &path).await {
         Ok(()) => Ok(()),
@@ -483,10 +463,9 @@ where
             // Best-effort cleanup; if the temp file can't be removed, ignore it.
             let _ = fs::remove_file(&tmp_path).await;
             Err(info_err!(
-                "Could not replace file {} with {}: {}",
+                "Could not replace file {} with {}: {err}",
                 &path.to_str().unwrap_or("?"),
-                &tmp_path.to_str().unwrap_or("?"),
-                err
+                &tmp_path.to_str().unwrap_or("?")
             ))
         }
     }
