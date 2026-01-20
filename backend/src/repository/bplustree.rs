@@ -1210,20 +1210,27 @@ where
         nested: bool,
     ) -> io::Result<(Self, Option<Vec<u64>>)> {
         let start = usize::try_from(offset).map_err(to_io_error)?;
+        let header_end = start.checked_add(FLAG_SIZE + LEN_SIZE)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "Mmap offset overflow"))?;
         // Basic safety check for mmap bounds
-        if start + FLAG_SIZE + LEN_SIZE > mmap.len() {
+        if header_end > mmap.len() {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Mmap access out of bounds"));
         }
 
         let keys_len = u32_from_bytes(&mmap[start + FLAG_SIZE..start + FLAG_SIZE + LEN_SIZE])? as usize;
-        //let _ = start + FLAG_SIZE + LEN_SIZE + keys_len;
-        let keys_start = start + FLAG_SIZE + LEN_SIZE;
-        let len_pos = keys_start + keys_len;
+        let keys_start = header_end;
+        let len_pos = keys_start
+            .checked_add(keys_len)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "Mmap offset overflow"))?;
+
         if len_pos + LEN_SIZE > mmap.len() {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Mmap access out of bounds"));
         }
         let payload_len = u32_from_bytes(&mmap[len_pos..len_pos + LEN_SIZE])? as usize;
-        let total = len_pos + LEN_SIZE + payload_len;
+        let total = len_pos
+            .checked_add(LEN_SIZE + payload_len)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "Mmap offset overflow"))?;
+
         if total > mmap.len() {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Mmap access out of bounds"));
         }
@@ -2042,7 +2049,7 @@ where
         let metadata = file.metadata()?;
         let file_len = metadata.len();
 
-        if file_len < 16 {
+        if file_len < HEADER_SIZE {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "File too small"));
         }
 

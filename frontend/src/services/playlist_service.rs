@@ -96,7 +96,8 @@ impl PlaylistService {
 fn to_ui_playlist_groups(list: Vec<CommonPlaylistItem>, xtream_cluster: XtreamCluster) -> Vec<Rc<UiPlaylistGroup>> {
     let mut groups = IndexMap::new();
     list.into_iter().for_each(|item| {
-        let group = groups.entry(item.group.clone()).or_insert_with(|| UiPlaylistGroup {
+        let group_id = item.group.clone();
+        let group = groups.entry(group_id).or_insert_with(|| UiPlaylistGroup {
             id: item.category_id.unwrap_or(0),
             title: item.group.clone(),
             channels: vec![],
