@@ -189,7 +189,7 @@ impl PanelApiProvisioningDto {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct PanelApiConfigDto {
     #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
@@ -209,4 +209,18 @@ pub struct PanelApiConfigDto {
     pub credits: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alias_pool: Option<PanelApiAliasPoolDto>,
+}
+
+impl Default for PanelApiConfigDto {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            url: String::new(),
+            api_key: None,
+            provisioning: PanelApiProvisioningDto::default(),
+            query_parameter: PanelApiQueryParametersDto::default(),
+            credits: None,
+            alias_pool: None,
+        }
+    }
 }

@@ -12,6 +12,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::marker::PhantomData;
 use std::mem::size_of;
+#[cfg(unix)]
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
@@ -53,6 +54,8 @@ pub const COMPRESSION_FLAG_LZ4: u8 = 0x01;
 const PAGE_HEADER_SIZE: u16 = 16;
 const PAGE_HEADER_SIZE_USIZE: usize = PAGE_HEADER_SIZE as usize;
 const SLOT_SIZE: usize = 2; // u16
+
+const MAGIC_METADATA_TARGET_ID_MAPPING: u8 = 0x01;
 
 /*
     Page Header Layout
@@ -1207,20 +1210,27 @@ where
         nested: bool,
     ) -> io::Result<(Self, Option<Vec<u64>>)> {
         let start = usize::try_from(offset).map_err(to_io_error)?;
+        let header_end = start.checked_add(FLAG_SIZE + LEN_SIZE)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "Mmap offset overflow"))?;
         // Basic safety check for mmap bounds
-        if start + FLAG_SIZE + LEN_SIZE > mmap.len() {
+        if header_end > mmap.len() {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Mmap access out of bounds"));
         }
 
         let keys_len = u32_from_bytes(&mmap[start + FLAG_SIZE..start + FLAG_SIZE + LEN_SIZE])? as usize;
-        //let _ = start + FLAG_SIZE + LEN_SIZE + keys_len;
-        let keys_start = start + FLAG_SIZE + LEN_SIZE;
-        let len_pos = keys_start + keys_len;
+        let keys_start = header_end;
+        let len_pos = keys_start
+            .checked_add(keys_len)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "Mmap offset overflow"))?;
+
         if len_pos + LEN_SIZE > mmap.len() {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Mmap access out of bounds"));
         }
         let payload_len = u32_from_bytes(&mmap[len_pos..len_pos + LEN_SIZE])? as usize;
-        let total = len_pos + LEN_SIZE + payload_len;
+        let total = len_pos
+            .checked_add(LEN_SIZE + payload_len)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "Mmap offset overflow"))?;
+
         if total > mmap.len() {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Mmap access out of bounds"));
         }
@@ -1398,14 +1408,18 @@ impl BPlusTreeMetadata {
     pub fn to_bytes(&self) -> Vec<u8> {
         match self {
             Self::Empty => Vec::new(),
-            Self::TargetIdMapping(val) => val.to_le_bytes().to_vec(),
+            Self::TargetIdMapping(val) => {
+                let mut bytes = vec![MAGIC_METADATA_TARGET_ID_MAPPING]; // Type tag
+                bytes.extend_from_slice(&val.to_le_bytes());
+                bytes
+            }
         }
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Self {
         match bytes.len() {
-            4 => {
-                let arr: [u8; 4] = bytes.try_into().unwrap_or([0; 4]);
+            5 if bytes[0] == MAGIC_METADATA_TARGET_ID_MAPPING => {
+                let arr: [u8; 4] = bytes[1..5].try_into().unwrap_or([0; 4]);
                 Self::TargetIdMapping(u32::from_le_bytes(arr))
             }
             _ => Self::Empty, // Unknown metadata treated as Empty for now
@@ -1417,8 +1431,8 @@ impl BPlusTreeMetadata {
 pub struct BPlusTree<K, V> {
     root: BPlusTreeNode<K, V>,
     inner_order: usize,
-    pub leaf_order: usize,
-    pub metadata: BPlusTreeMetadata,
+    leaf_order: usize,
+    metadata: BPlusTreeMetadata,
     dirty: bool,
 }
 
@@ -1597,7 +1611,9 @@ where
         header[8..16].copy_from_slice(&HEADER_SIZE.to_le_bytes());
 
         let meta_bytes = self.metadata.to_bytes();
-
+        if meta_bytes.len() > METADATA_MAX_SIZE || 20 + meta_bytes.len() > PAGE_SIZE_USIZE {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Metadata too large for header page"));
+        }
         if !meta_bytes.is_empty() {
             let len = u32::try_from(meta_bytes.len()).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
             header[16..20].copy_from_slice(&len.to_le_bytes());
@@ -2033,7 +2049,7 @@ where
         let metadata = file.metadata()?;
         let file_len = metadata.len();
 
-        if file_len < 16 {
+        if file_len < HEADER_SIZE {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "File too small"));
         }
 
@@ -2042,7 +2058,14 @@ where
 
         // Verify Header
         let mut header = [0u8; 16];
+        #[cfg(unix)]
         file.read_exact_at(&mut header, 0)?;
+        #[cfg(not(unix))]
+        {
+            let mut f = &file;
+            f.seek(SeekFrom::Start(0))?;
+            f.read_exact(&mut header)?;
+        }
 
         if &header[0..4] != MAGIC {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid magic number"));
@@ -2563,7 +2586,7 @@ where
             file.flush()?; // Ensure it hits disk
         }
         // Resync/clear reader buffer after direct writes.
-        self.file.stream_position()?;
+        self.file.seek_relative(0)?; // same as self.file.seek(SeekFrom::Current(0))?;
 
         Ok(())
     }
@@ -2877,7 +2900,11 @@ where
                             let mut b = vec![0u8; l as usize];
                             if src.read_exact(&mut b).is_ok() {
                                 metadata = b;
+                            } else {
+                                error!("Failed to read metadata bytes during compaction");
                             }
+                        } else if l > u32::try_from(METADATA_MAX_SIZE).unwrap_or(4000) {
+                            error!("Metadata too large during compaction: {l}");
                         }
                     }
                 }

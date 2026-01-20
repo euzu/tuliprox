@@ -26,15 +26,15 @@
 //! > **Important**: The index is tightly coupled to the B+Tree file structure.
 //! > It must be rebuilt after any operation that changes value offsets (e.g., `compact()`).
 
+use crate::repository::bplustree::{COMPRESSION_FLAG_LZ4, PAGE_SIZE_USIZE};
+use crate::repository::storage::get_file_path_for_db_index;
 use crate::utils::{binary_deserialize, binary_serialize};
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
-use crate::repository::{COMPRESSION_FLAG_LZ4, PAGE_SIZE_USIZE};
-use indexmap::IndexMap;
-use crate::repository::get_file_path_for_db_index;
 
 const MAGIC: &[u8; 4] = b"SIDX";
 const VERSION: u32 = 3; // Bumped for new format with flexible value location
@@ -42,7 +42,6 @@ const HEADER_SIZE: usize = 16; // 4 (magic) + 4 (version) + 8 (count)
 
 const MODE_SINGLE: u8 = 0;
 const MODE_PACKED: u8 = 1;
-
 
 
 /// Represents how a value can be located and read from the tree file.
@@ -431,7 +430,7 @@ where
         if let Some(mmap) = &self.mmap {
             let mut cursor = io::Cursor::new(mmap.as_ref());
             cursor.set_position(offset);
-            
+
             let mut flag = [0u8; 1];
             cursor.read_exact(&mut flag)?;
 
@@ -486,9 +485,14 @@ where
     fn read_value_packed(&mut self, block_offset: u64, value_index: u16) -> io::Result<V> {
         if let Some(mmap) = &self.mmap {
             let start = usize::try_from(block_offset).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            if start >= mmap.len() {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "Packed block offset out of range"));
+            }
             let end = (start + PAGE_SIZE_USIZE).min(mmap.len());
             let block_buffer = &mmap[start..end];
-            
+            if block_buffer.len() < 4 {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "Packed block truncated"));
+            }
             // Read count (first 4 bytes)
             let count = u32::from_le_bytes(block_buffer[0..4].try_into().map_err(|e| {
                 io::Error::new(io::ErrorKind::InvalidData, format!("Invalid count: {e}"))
@@ -514,7 +518,7 @@ where
 
                 if i == value_index {
                     if pos + len > block_buffer.len() {
-                         return Err(io::Error::new(io::ErrorKind::InvalidData, "Packed block corrupted"));
+                        return Err(io::Error::new(io::ErrorKind::InvalidData, "Packed block corrupted"));
                     }
                     let value_data = &block_buffer[pos..pos + len];
                     return crate::utils::binary_deserialize(value_data);
@@ -537,6 +541,7 @@ where
                     self.block_cache.shift_remove_index(0); // FIFO eviction
                 }
                 self.block_cache.insert(block_offset, buf);
+            } else {
                 return Err(io::Error::other("No data source available"));
             }
         }
@@ -630,19 +635,19 @@ mod tests {
         // Write entries with value locations
         let mut writer = SortedIndexWriter::<String, u32>::new(&path).unwrap();
         writer.push(
-            &"apple".to_string(), 
-            &1u32, 
-            ValueLocation::Single { offset: 100, length: 50 }
+            &"apple".to_string(),
+            &1u32,
+            ValueLocation::Single { offset: 100, length: 50 },
         ).unwrap();
         writer.push(
-            &"banana".to_string(), 
-            &2u32, 
-            ValueLocation::Packed { block_offset: 200, index: 3, length: 75 }
+            &"banana".to_string(),
+            &2u32,
+            ValueLocation::Packed { block_offset: 200, index: 3, length: 75 },
         ).unwrap();
         writer.push(
-            &"cherry".to_string(), 
-            &3u32, 
-            ValueLocation::Single { offset: 300, length: 100 }
+            &"cherry".to_string(),
+            &3u32,
+            ValueLocation::Single { offset: 300, length: 100 },
         ).unwrap();
         let count = writer.finish().unwrap();
         assert_eq!(count, 3);
@@ -698,7 +703,7 @@ mod tests {
         // Note: collect() consumes the reader, so we check is_empty() and remaining first
         let remaining = reader.remaining;
         assert_eq!(remaining, 0);
-        
+
         let entries: Vec<_> = reader.collect();
         assert!(entries.is_empty());
     }

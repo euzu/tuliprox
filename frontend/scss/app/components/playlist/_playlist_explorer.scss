@@ -5,6 +5,36 @@ $episode-card-height: 10rem;
 $episode-card-width: 18rem;
 $series-backdrop-height: 300px;
 
+@mixin card-base($height, $width) {
+  position: relative;
+  padding: 0;
+  max-height: $height;
+  min-height: $height;
+  max-width: $width;
+  min-width: $width;
+
+
+  .tp__playlist-explorer__channel {
+    &-logo {
+      box-sizing: border-box;
+      height: 100%;
+      object-fit: cover;
+      object-position: center;
+    }
+
+    &-title {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      height: 3rem;
+      background-color: var(--card-background-color);
+      display: flex;
+      align-items: center;
+    }
+  }
+}
+
 .tp__playlist-explorer {
   display: flex;
   flex-flow: column;
@@ -224,34 +254,7 @@ $series-backdrop-height: 300px;
 
     &-video,
     &-series {
-      position: relative;
-      max-height: $movie-card-height;
-      min-height: $movie-card-height;
-      max-width: $movie-card-width;
-      min-width: $movie-card-width;
-      padding: 0;
-
-      .tp__playlist-explorer__channel {
-        &-logo {
-          box-sizing: border-box;
-          height: 100%;
-          object-fit: cover;
-          object-position: center;
-        }
-
-        &-title {
-          position: absolute;
-          bottom: 0;
-          left: 0;
-          right: 0;
-          height: 3rem;
-          background-color: var(--card-background-color);
-          padding-left: 2rem;
-          display: flex;
-          align-items: center;
-        }
-      }
-
+      @include card-base($movie-card-height, $movie-card-width);
       .tp__icon-button {
         position: absolute;
         z-index: 1;
@@ -262,32 +265,7 @@ $series-backdrop-height: 300px;
     }
 
     &-episode {
-      position: relative;
-      max-height: $episode-card-height;
-      min-height: $episode-card-height;
-      max-width: $episode-card-width;
-      min-width: $episode-card-width;
-      padding: 0;
-
-      .tp__playlist-explorer__channel {
-        &-logo {
-          box-sizing: border-box;
-          height: 100%;
-          object-fit: cover;
-          object-position: center;
-        }
-
-        &-title {
-          position: absolute;
-          bottom: 0;
-          left: 0;
-          right: 0;
-          height: 3rem;
-          background-color: var(--card-background-color);
-          display: flex;
-          align-items: center;
-        }
-      }
+      @include card-base($episode-card-height, $episode-card-width);
     }
   }
 

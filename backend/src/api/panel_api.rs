@@ -3,7 +3,7 @@ use crate::api::model::{
     create_panel_api_provisioning_stream_with_stop, create_provider_connections_exhausted_stream,
     AppState, StreamDetails,
 };
-use crate::model::{is_input_expired, ConfigInput, ConfigInputAlias, ProxyUserCredentials};
+use crate::model::{is_input_expired, ConfigInput, ConfigInputAlias, PanelApiConfig, ProxyUserCredentials};
 use crate::repository::{
     csv_patch_batch_append, csv_patch_batch_remove_expired, csv_patch_batch_sort_by_exp_date,
     csv_patch_batch_update_credentials, csv_patch_batch_update_exp_date, get_csv_file_path,
@@ -950,7 +950,7 @@ fn extract_account_creds_from_input(input: &ConfigInput) -> Option<(String, Stri
 }
 
 fn alias_pool_limit_values(
-    cfg: &PanelApiConfigDto,
+    cfg: &PanelApiConfig,
 ) -> (
     Option<&PanelApiAliasPoolSizeValue>,
     Option<&PanelApiAliasPoolSizeValue>,
@@ -968,7 +968,7 @@ fn alias_pool_both_auto(cfg: &PanelApiConfigDto) -> bool {
         && max.is_some_and(PanelApiAliasPoolSizeValue::is_auto)
 }
 
-fn alias_pool_has_min(cfg: &PanelApiConfigDto) -> bool {
+fn alias_pool_has_min(cfg: &PanelApiConfig) -> bool {
     let (min, _) = alias_pool_limit_values(cfg);
     min.is_some()
 }
@@ -1612,7 +1612,7 @@ fn apply_sources_yml_patches(
                 password,
                 exp_date,
             } => {
-                let idx = *inputs_by_name.get(input_name.as_str()).ok_or_else(|| {
+                let idx = *inputs_by_name.get(input_name).ok_or_else(|| {
                     info_err!("panel_api: could not find input '{input_name}' in source.yml")
                 })?;
                 let input_type = doc.inputs[idx].input_type;
@@ -1624,7 +1624,7 @@ fn apply_sources_yml_patches(
 
                 let mut alias = ConfigInputAliasDto {
                     id: 0,
-                    name: alias_name.to_string(),
+                    name: Arc::clone(alias_name),
                     url: base_url.to_string(),
                     username: Some(username.to_string()),
                     password: Some(password.to_string()),
@@ -1635,11 +1635,11 @@ fn apply_sources_yml_patches(
                 alias.prepare(next_index, &input_type)?;
                 aliases.push(alias);
 
-                alias_indices[idx].insert(alias_name.to_string(), aliases.len().saturating_sub(1));
+                alias_indices[idx].insert(Arc::clone(alias_name), aliases.len().saturating_sub(1));
                 changed = true;
             }
             SourcesYmlPatch::RemoveExpiredAliases { input_name } => {
-                let idx = *inputs_by_name.get(input_name.as_str()).ok_or_else(|| {
+                let idx = *inputs_by_name.get(input_name).ok_or_else(|| {
                     info_err!("panel_api: could not find input '{input_name}' in source.yml")
                 })?;
                 let Some(aliases) = doc.inputs[idx].aliases.as_mut() else {
@@ -1743,12 +1743,12 @@ fn derive_unique_alias_name_set(
     username: &str,
 ) -> String {
     let base = format!("{input_name}-{username}");
-    if !existing.contains(&base) {
+    if !existing.contains(base.as_str()) {
         return base;
     }
     for i in 2..MAX_ALIAS_NAME_ATTEMPTS {
         let cand = format!("{base}-{i}");
-        if !existing.contains(&cand) {
+        if !existing.contains(cand.as_str()) {
             return cand;
         }
     }

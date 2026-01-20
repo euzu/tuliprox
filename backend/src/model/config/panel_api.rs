@@ -1,6 +1,6 @@
 use crate::model::macros;
 use shared::error::{TuliproxError, info_err_res};
-use shared::model::{PanelApiConfigDto, PanelApiQueryParamDto, PanelApiQueryParametersDto};
+use shared::model::{PanelApiAliasPoolDto, PanelApiAliasPoolSizeDto, PanelApiAliasPoolSizeValue, PanelApiConfigDto, PanelApiProvisioningDto, PanelApiQueryParamDto, PanelApiQueryParametersDto};
 
 #[derive(Debug, Clone)]
 pub struct PanelApiQueryParam {
@@ -40,9 +40,11 @@ macros::from_impl!(PanelApiQueryParameters);
 impl From<&PanelApiQueryParametersDto> for PanelApiQueryParameters {
     fn from(dto: &PanelApiQueryParametersDto) -> Self {
         Self {
+            account_info: dto.account_info.iter().map(PanelApiQueryParam::from).collect(),
             client_info: dto.client_info.iter().map(PanelApiQueryParam::from).collect(),
             client_new: dto.client_new.iter().map(PanelApiQueryParam::from).collect(),
             client_renew: dto.client_renew.iter().map(PanelApiQueryParam::from).collect(),
+            client_adult_content: dto.client_adult_content.iter().map(PanelApiQueryParam::from).collect(),
         }
     }
 }
@@ -130,11 +132,44 @@ impl PanelApiQueryParameters {
 }
 
 #[derive(Debug, Clone)]
+pub struct PanelApiAliasPoolSize {
+    pub min: Option<PanelApiAliasPoolSizeValue>,
+    pub max: Option<PanelApiAliasPoolSizeValue>,
+}
+
+macros::from_impl!(PanelApiAliasPoolSize);
+impl From<&PanelApiAliasPoolSizeDto> for PanelApiAliasPoolSize {
+    fn from(dto: &PanelApiAliasPoolSizeDto) -> Self {
+        Self {
+            min: dto.min.clone(),
+            max: dto.max.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PanelApiAliasPool {
+    pub size: Option<PanelApiAliasPoolSize>,
+    pub remove_expired: bool,
+}
+
+macros::from_impl!(PanelApiAliasPool);
+impl From<&PanelApiAliasPoolDto> for PanelApiAliasPool {
+    fn from(dto: &PanelApiAliasPoolDto) -> Self {
+        Self {
+            size: dto.size.as_ref().map(PanelApiAliasPoolSize::from),
+            remove_expired: dto.remove_expired,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct PanelApiConfig {
     pub enabled: bool,
     pub url: String,
     pub api_key: Option<String>,
     pub query_parameter: PanelApiQueryParameters,
+    pub alias_pool: Option<PanelApiAliasPool>,
 }
 
 macros::from_impl!(PanelApiConfig);
@@ -145,6 +180,7 @@ impl From<&PanelApiConfigDto> for PanelApiConfig {
             url: dto.url.clone(),
             api_key: dto.api_key.clone(),
             query_parameter: PanelApiQueryParameters::from(&dto.query_parameter),
+            alias_pool: dto.alias_pool.as_ref().map(PanelApiAliasPool::from),
         }
     }
 }
@@ -155,8 +191,11 @@ impl From<&PanelApiConfig> for PanelApiConfigDto {
             enabled: instance.enabled,
             url: instance.url.clone(),
             api_key: instance.api_key.clone(),
+            provisioning: PanelApiProvisioningDto::default(),
             query_parameter: PanelApiQueryParametersDto::from(&instance.query_parameter),
 
+            credits: None,
+            alias_pool: None,
         }
     }
 }

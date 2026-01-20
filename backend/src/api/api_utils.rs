@@ -1627,7 +1627,10 @@ where
                 Some(item) => {
                     match bin_serialize(&item) {
                         Ok(buf) => Some((Ok::<Bytes, Infallible>(Bytes::from(buf)), iter)),
-                        Err(_) => Some((Ok::<Bytes, Infallible>(Bytes::new()), iter)), // skip errors, continue
+                        Err(err) => {
+                            warn!("CBOR serialization error in stream: {err}");
+                            Some((Ok::<Bytes, Infallible>(Bytes::new()), iter)) // skip errors, continue
+                        }
                     }
                 }
                 None => None,

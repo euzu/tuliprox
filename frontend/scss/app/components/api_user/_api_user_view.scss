@@ -151,7 +151,8 @@
       flex-flow: row nowrap;
       gap: var(--gap-default);
       box-sizing: border-box;
-      .tp__icon-button:hover {
+      .tp__icon-button:hover,
+      .tp__icon-button:focus-visible {
         background-color: var(--action-item-background-color);
       }
       svg, img {

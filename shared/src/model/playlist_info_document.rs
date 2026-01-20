@@ -1,4 +1,4 @@
-use crate::utils::{arc_str_serde, arc_str_option_serde, Internable};
+use crate::utils::{arc_str_serde, arc_str_option_serde, arc_str_vec_serde, Internable};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -80,6 +80,7 @@ pub struct XtreamVideoInfoData {
     pub country: Arc<str>,
     #[serde(with = "arc_str_serde")]
     pub genre: Arc<str>,
+    #[serde(with = "arc_str_vec_serde")]
     pub backdrop_path: Vec<Arc<str>>,
     #[serde(with = "arc_str_serde")]
     pub duration_secs: Arc<str>,
@@ -171,6 +172,7 @@ pub struct XtreamSeriesInfoData {
     pub rating: Arc<str>,
     #[serde(with = "arc_str_serde")]
     pub rating_5based: Arc<str>,
+    #[serde(with = "arc_str_vec_serde")]
     pub backdrop_path: Vec<Arc<str>>,
     #[serde(with = "arc_str_serde")]
     pub tmdb: Arc<str>,
@@ -284,61 +286,62 @@ impl StreamProperties {
                               item_type: PlaylistItemType, virtual_id: VirtualId, category_id: u32) -> XtreamVideoInfoDoc {
         let resource_url = options.get_resource_url(XtreamCluster::Video, item_type, virtual_id);
         let stream_icon = InfoDocUtils::make_resource_url(resource_url.as_deref(), &self.get_stream_icon(), "logo").intern();
+        let empty_str = "".intern();
 
         let info = if let Some(details) = video.details.as_ref() {
             XtreamVideoInfoData {
-                kinopoisk_url: details.kinopoisk_url.as_ref().map(Arc::clone).unwrap_or_else(|| "".intern()),
+                kinopoisk_url: details.kinopoisk_url.as_ref().map(Arc::clone).unwrap_or_else(|| Arc::clone(&empty_str)),
                 tmdb_id: video.tmdb.unwrap_or_default().to_string().intern(),
                 name: Arc::clone(&video.name),
-                o_name: details.o_name.as_ref().map(Arc::clone).unwrap_or_else(|| "".intern()),
+                o_name: details.o_name.as_ref().map(Arc::clone).unwrap_or_else(|| Arc::clone(&empty_str)),
                 cover_big: InfoDocUtils::make_resource_url(resource_url.as_deref(), details.cover_big.as_ref().map(Arc::as_ref).unwrap_or(""), "nfo_cover_big").intern(),
                 movie_image: InfoDocUtils::make_resource_url(resource_url.as_deref(), details.cover_big.as_ref().map(Arc::as_ref).unwrap_or(""), "nfo_movie_image").intern(),
-                release_date: details.release_date.as_ref().map(Arc::clone).unwrap_or_else(|| "".intern()),
+                release_date: details.release_date.as_ref().map(Arc::clone).unwrap_or_else(|| Arc::clone(&empty_str)),
                 episode_run_time: details.episode_run_time.unwrap_or_default(),
-                youtube_trailer: details.youtube_trailer.as_ref().map(Arc::clone).unwrap_or_else(|| "".intern()),
-                director: details.director.as_ref().map(Arc::clone).unwrap_or_else(|| "".intern()),
-                actors: details.actors.as_ref().map(Arc::clone).unwrap_or_else(|| "".intern()),
-                cast: details.cast.as_ref().map(Arc::clone).unwrap_or_else(|| "".intern()),
-                description: details.description.as_ref().map(Arc::clone).unwrap_or_else(|| "".intern()),
-                plot: details.plot.as_ref().map(Arc::clone).unwrap_or_else(|| "".intern()),
-                age: details.age.as_ref().map(Arc::clone).unwrap_or_else(|| "".intern()),
-                mpaa_rating: details.mpaa_rating.as_ref().map(Arc::clone).unwrap_or_else(|| "".intern()),
+                youtube_trailer: details.youtube_trailer.as_ref().map(Arc::clone).unwrap_or_else(|| Arc::clone(&empty_str)),
+                director: details.director.as_ref().map(Arc::clone).unwrap_or_else(|| Arc::clone(&empty_str)),
+                actors: details.actors.as_ref().map(Arc::clone).unwrap_or_else(|| Arc::clone(&empty_str)),
+                cast: details.cast.as_ref().map(Arc::clone).unwrap_or_else(|| Arc::clone(&empty_str)),
+                description: details.description.as_ref().map(Arc::clone).unwrap_or_else(|| Arc::clone(&empty_str)),
+                plot: details.plot.as_ref().map(Arc::clone).unwrap_or_else(|| Arc::clone(&empty_str)),
+                age: details.age.as_ref().map(Arc::clone).unwrap_or_else(|| Arc::clone(&empty_str)),
+                mpaa_rating: details.mpaa_rating.as_ref().map(Arc::clone).unwrap_or_else(|| Arc::clone(&empty_str)),
                 rating_count_kinopoisk: details.rating_count_kinopoisk,
-                country: details.country.as_ref().map(Arc::clone).unwrap_or_else(|| "".intern()),
-                genre: details.genre.as_ref().map(Arc::clone).unwrap_or_else(|| "".intern()),
+                country: details.country.as_ref().map(Arc::clone).unwrap_or_else(|| Arc::clone(&empty_str)),
+                genre: details.genre.as_ref().map(Arc::clone).unwrap_or_else(|| Arc::clone(&empty_str)),
                 backdrop_path: details.backdrop_path.as_deref().map_or_else(Vec::new, |b| b.iter().enumerate().map(|(idx, p)|
                     InfoDocUtils::make_bdpath_resource_url(resource_url.as_deref(), p, idx, "nfo_").intern()
                 ).collect()),
-                duration_secs: details.duration_secs.as_ref().map(Arc::clone).unwrap_or_else(|| "".intern()),
-                duration: details.duration.as_ref().map(Arc::clone).unwrap_or_else(|| "".intern()),
+                duration_secs: details.duration_secs.as_ref().map(Arc::clone).unwrap_or_else(|| Arc::clone(&empty_str)),
+                duration: details.duration.as_ref().map(Arc::clone).unwrap_or_else(|| Arc::clone(&empty_str)),
                 video: InfoDocUtils::build_value(details.video.as_ref().map(Arc::as_ref)),
                 audio: InfoDocUtils::build_value(details.audio.as_ref().map(Arc::as_ref)),
                 bitrate: details.bitrate,
                 rating: InfoDocUtils::limited(video.rating.unwrap_or_default()).intern(),
-                runtime: details.runtime.as_ref().map(Arc::clone).unwrap_or_else(|| "".intern()),
-                status: details.status.as_ref().map(Arc::clone).unwrap_or_else(|| "".intern()),
+                runtime: details.runtime.as_ref().map(Arc::clone).unwrap_or_else(|| Arc::clone(&empty_str)),
+                status: details.status.as_ref().map(Arc::clone).unwrap_or_else(|| Arc::clone(&empty_str)),
             }
         } else {
             XtreamVideoInfoData {
-                kinopoisk_url: "".intern(),
+                kinopoisk_url: Arc::clone(&empty_str),
                 tmdb_id: video.tmdb.unwrap_or_default().to_string().intern(),
                 name: Arc::clone(&video.name),
                 o_name: Arc::clone(&video.name),
-                cover_big: stream_icon.intern(),
-                movie_image: stream_icon.intern(),
-                release_date: "".intern(),
+                cover_big: stream_icon.clone(),
+                movie_image: stream_icon.clone(),
+                release_date: Arc::clone(&empty_str),
                 episode_run_time: 0,
-                youtube_trailer: "".intern(),
-                director: "".intern(),
-                actors: "".intern(),
-                cast: "".intern(),
-                description: "".intern(),
-                plot: "".intern(),
-                age: "".intern(),
-                mpaa_rating: "".intern(),
+                youtube_trailer: Arc::clone(&empty_str),
+                director: Arc::clone(&empty_str),
+                actors: Arc::clone(&empty_str),
+                cast: Arc::clone(&empty_str),
+                description: Arc::clone(&empty_str),
+                plot: Arc::clone(&empty_str),
+                age: Arc::clone(&empty_str),
+                mpaa_rating: Arc::clone(&empty_str),
                 rating_count_kinopoisk: 0,
-                country: "".intern(),
-                genre: "".intern(),
+                country: Arc::clone(&empty_str),
+                genre: Arc::clone(&empty_str),
                 backdrop_path: vec![Arc::clone(&stream_icon)],
                 duration_secs: "0".intern(),
                 duration: "0".intern(),
@@ -361,7 +364,7 @@ impl StreamProperties {
                 category_ids: vec![category_id],
                 container_extension: Arc::clone(&video.container_extension),
                 custom_sid: video.custom_sid.as_ref().map(Arc::clone),
-                direct_source: if options.skip_video_direct_source { "".intern() } else { Arc::clone(&video.direct_source) },
+                direct_source: if options.skip_video_direct_source { Arc::clone(&empty_str) } else { Arc::clone(&video.direct_source) },
             }
         }
     }
@@ -392,6 +395,7 @@ impl StreamProperties {
     fn series_episodes_to_info_document(&self, options: &XtreamMappingOptions,
                                         resource_url: Option<&str>,
                                         episodes: &[SeriesStreamDetailEpisodeProperties]) -> HashMap<String, Vec<XtreamSeriesEpisodeInfoDoc>> {
+        let empty_str = "".intern();
         let mut map: HashMap<u32, Vec<XtreamSeriesEpisodeInfoDoc>> = HashMap::new();
         for ep in episodes {
             let doc = XtreamSeriesEpisodeInfoDoc {
@@ -414,7 +418,7 @@ impl StreamProperties {
                 custom_sid: ep.custom_sid.as_ref().map(Arc::clone),
                 added: Arc::clone(&ep.added),
                 season: ep.season,
-                direct_source: if options.skip_series_direct_source { "".intern() } else { Arc::clone(&ep.direct_source) },
+                direct_source: if options.skip_series_direct_source { Arc::clone(&empty_str) } else { Arc::clone(&ep.direct_source) },
             };
             map.entry(ep.season).or_default().push(doc);
         }

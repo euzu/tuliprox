@@ -52,8 +52,8 @@ impl FromStr for StrmFormPage {
 impl Display for StrmFormPage {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{}", match *self {
-            StrmFormPage::Main => "Main",
-            StrmFormPage::Options => "Options",
+            StrmFormPage::Main => Self::MAIN,
+            StrmFormPage::Options => Self::OPTIONS,
         })
     }
 }

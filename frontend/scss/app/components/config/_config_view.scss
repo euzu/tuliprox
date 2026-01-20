@@ -1,5 +1,14 @@
 @use "../../../size" as size;
 
+%toolbar-base {
+  display: flex;
+  flex-flow: row;
+  gap: var(--gap-large);
+  box-sizing: border-box;
+  width: 100%;
+  border-top: 1px solid var(--card-border-color);
+}
+
 .tp__config-view {
   display: flex;
   flex-flow: column;
@@ -43,13 +52,7 @@
   }
 
   &__toolbar {
-    padding-top: var(--padding-default);
-    display: flex;
-    flex-flow: row;
-    gap: var(--gap-large);
-    box-sizing: border-box;
-    width: 100%;
-    border-top: 1px solid var(--card-border-color);
+    @extend %toolbar-base;
   }
 
   &__tags {
@@ -137,6 +140,79 @@
   }
 }
 
+.tp__schedules-config-view {
+  &__body {
+    display: flex;
+    flex-flow: column;
+    gap: var(--gap-default);
+    box-sizing: border-box;
+  }
+
+  &__schedule {
+    display: flex;
+    flex-flow: column;
+    gap: var(--gap-default);
+    box-sizing: border-box;
+    padding: var(--padding-default);
+
+    .tp__config-view__table {
+      th {
+        text-align: left;
+      }
+
+      th, td {
+        width: 1%;
+        white-space: nowrap;
+      }
+
+      th:last-child,
+      td:last-child {
+        width: auto;
+      }
+
+      td {
+        vertical-align: middle;
+      }
+
+      .tp__config-view__tags {
+        padding-left: var(--padding-default);
+      }
+    }
+
+  }
+
+  &__footer {
+    margin-top: var(--margin-default);
+    padding-top: var(--margin-default);
+    border-top: 1px solid var(--card-border-color);
+
+    svg {
+      width: 320px;
+      height: 90px;
+    }
+
+    fill: var(--label-color);
+  }
+
+  &__editor {
+    display: flex;
+    flex-flow: row wrap;
+    align-items: flex-end;
+    gap: var(--gap-default);
+    box-sizing: border-box;
+
+    .tp__icon-button {
+      svg {
+        width: 2.3rem;
+      }
+    }
+  }
+
+  &__delete-btn {
+    fill: var(--menu-button-warn-hover-color);
+  }
+}
+
 .tp__tab__modified {
   &__active {
     button {
@@ -164,6 +240,13 @@
   }
 }
 
+.tp__messaging-config-view__notify-on {
+  display: flex;
+  flex-flow: row wrap;
+  gap: var(--gap-default);
+  box-sizing: border-box;
+}
+
 .tp__config-view-page {
   &__info {
     display: flex;
@@ -175,4 +258,44 @@
       white-space: wrap;
     }
   }
+}
+
+.tp__log-config-view__header {
+  .tp__form-field {
+    display: flex;
+    flex-flow: row wrap;
+    gap: var(--gap-default);
+    box-sizing: border-box;
+    align-items: center;
+  }
+}
+
+.tp__library-config-view {
+  &__header {
+    display: flex;
+    flex-flow: column;
+    gap: var(--gap-default);
+    box-sizing: border-box;
+  }
+
+  &__list {
+    display: flex;
+    flex-flow: row;
+    gap: var(--gap-default);
+    &-item {
+      font-size: 1.1rem;
+      color: var(--text-color);
+    }
+  }
+
+  &__editor-row {
+    display: flex;
+    flex-flow: row wrap;
+    gap: var(--gap-default);
+    box-sizing: border-box;
+  }
+}
+
+.tp__form-page__toolbar {
+  @extend %toolbar-base;
 }

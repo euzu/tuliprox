@@ -187,15 +187,16 @@ pub fn UserTargetPlaylist(props: &UserTargetPlaylistProps) -> Html {
         let force_update = force_update.clone();
 
         Callback::from(move |(cluster, cats, select): (XtreamCluster, Vec<String>, bool)| {
-            let mut selections = bouquet_selection.borrow_mut();
-            let map = match cluster {
-                XtreamCluster::Live => &mut selections.live,
-                XtreamCluster::Video => &mut selections.vod,
-                XtreamCluster::Series => &mut selections.series,
-            };
-
-            for cat in cats {
-                map.insert(cat, select);
+            {
+                let mut selections = bouquet_selection.borrow_mut();
+                let map = match cluster {
+                    XtreamCluster::Live => &mut selections.live,
+                    XtreamCluster::Video => &mut selections.vod,
+                    XtreamCluster::Series => &mut selections.series,
+                };
+                for cat in cats {
+                    map.insert(cat, select);
+                }
             }
             on_change.emit(bouquet_selection.clone());
             force_update.set(*force_update + 1);
@@ -227,7 +228,7 @@ pub fn UserTargetPlaylist(props: &UserTargetPlaylistProps) -> Html {
                 })
             };
 
-            let filter_state = filter_state.clone();
+            let filter_state_handle = filter_state.clone();
             let filter_state_selections = Rc::new(vec![filter_state.get(&cluster).cloned().unwrap_or(FilterState::All).to_string()]);
             let title_content = if *collapse_state.get(&cluster).unwrap_or(&true) {
                 html! {
@@ -244,9 +245,9 @@ pub fn UserTargetPlaylist(props: &UserTargetPlaylistProps) -> Html {
                                 multi_select={false} none_allowed={false}
                                 on_select={Callback::from(move |selections: Rc<Vec<String>>| {
                                     if let Some(first) = selections.first() {
-                                       let mut cluster_state = (*filter_state).clone();
+                                       let mut cluster_state = (*filter_state_handle).clone();
                                        cluster_state.insert(cluster, FilterState::from_str(first.as_str()).unwrap_or(FilterState::All));
-                                       filter_state.set(cluster_state);
+                                       filter_state_handle.set(cluster_state);
                                     }
                                 })}
                                 options={Rc::new([FilterState::All, FilterState::Selected, FilterState::Deselected].iter().map(|s| s.to_string()).collect::<Vec<String>>())}

@@ -6,7 +6,7 @@ use crate::utils::{arc_str_default_on_null, arc_str_none_default_on_null, arc_st
                    deserialize_number_from_string_or_zero, serialize_json_as_opt_string, serialize_option_string_as_null_if_empty, Internable};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use log::{error};
+use log::{warn};
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct LiveStreamProperties {
@@ -749,10 +749,11 @@ impl SeriesStreamProperties {
     }
 
     pub fn from_info_doc(info: &XtreamSeriesInfoDoc, series_id: u32) -> SeriesStreamProperties {
+        let tmdb = info.info.tmdb.parse::<u32>().ok();
         SeriesStreamProperties {
             name: info.info.name.clone(),
             category_id: info.info.category_id.parse::<u32>().unwrap_or_else(|_| {
-                error!("Failed to parse category_id {}", &info.info.category_id);
+                warn!("Failed to parse category_id {}", &info.info.category_id);
                 0
             }),
             series_id,
@@ -765,16 +766,16 @@ impl SeriesStreamProperties {
             last_modified: Some(info.info.last_modified.clone()),
             plot: Some(info.info.plot.clone()),
             rating: info.info.rating.parse::<f64>().unwrap_or_else(|_| {
-                error!("Failed to parse rating {}", &info.info.rating);
+                warn!("Failed to parse rating {}", &info.info.rating);
                 0.0
             }),
             rating_5based: info.info.rating_5based.parse::<f64>().unwrap_or_else(|_| {
-                error!("Failed to parse rating_5based {}", &info.info.rating_5based);
+                warn!("Failed to parse rating_5based {}", &info.info.rating_5based);
                 0.0
             }),
             release_date: Some(info.info.release_date.clone()),
             youtube_trailer: info.info.youtube_trailer.clone(),
-            tmdb: info.info.tmdb.parse::<u32>().ok(),
+            tmdb,
             details: Some(SeriesStreamDetailProperties {
                 year: InfoDocUtils::extract_year_from_release_date(&info.info.release_date),
                 seasons: {
@@ -783,7 +784,7 @@ impl SeriesStreamProperties {
                             name: s.name.clone(),
                             season_number: s.season_number,
                             episode_count: s.episode_count.parse::<u32>().unwrap_or_else(|_| {
-                                error!("Failed to parse episode_count {}", &s.episode_count);
+                                warn!("Failed to parse episode_count {}", &s.episode_count);
                                 0
                             }),
                             overview: s.overview.clone(),
@@ -800,7 +801,7 @@ impl SeriesStreamProperties {
                     let mut episodes: Vec<SeriesStreamDetailEpisodeProperties> = info.episodes.iter().flat_map(|(_, list)| list.iter()).map(|e|
                         SeriesStreamDetailEpisodeProperties {
                             id: e.id.parse::<u32>().unwrap_or_else(|_| {
-                                error!("Failed to parse episode id {}", &e.id);
+                                warn!("Failed to parse episode id {}", &e.id);
                                 0
                             }),
                             episode_num: e.episode_num,
@@ -810,7 +811,7 @@ impl SeriesStreamProperties {
                             custom_sid: e.custom_sid.clone(),
                             added: e.added.clone(),
                             direct_source: e.direct_source.clone(),
-                            tmdb: info.info.tmdb.parse::<u32>().ok(),
+                            tmdb,
                             release_date: e.info.air_date.clone(),
                             plot: None,
                             crew: e.info.crew.clone(),

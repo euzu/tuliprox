@@ -451,7 +451,7 @@ async fn xtream_player_api_stream_with_token(
         let (action_stream_id, stream_ext) = separate_number_and_remainder(stream_req.stream_id);
         let req_virtual_id: u32 = try_result_bad_request!(action_stream_id.trim().parse());
         let pli = try_result_bad_request!(
-            xtream_get_item_for_stream_id(
+            xtream_repository::xtream_get_item_for_stream_id(
                 req_virtual_id,
                 app_state,
                 &target,
@@ -900,7 +900,7 @@ async fn xtream_get_short_epg(
             Err(_) => return get_empty_epg_response().into_response(),
         };
 
-        if let Ok(pli) = xtream_get_item_for_stream_id(
+        if let Ok(pli) = xtream_repository::xtream_get_item_for_stream_id(
             virtual_id,
             app_state,
             target,

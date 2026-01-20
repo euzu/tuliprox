@@ -39,17 +39,16 @@ pub enum MimeCategory {
 }
 
 pub fn classify_content_type(headers: &[(String, String)]) -> MimeCategory {
-    headers
-        .iter()
-        .find_map(|(k, v)| (k == axum::http::header::CONTENT_TYPE.as_str()).then_some(v))
+    headers.iter()
+        .find_map(|(k, v)| {
+            (k == axum::http::header::CONTENT_TYPE.as_str()).then_some(v)
+        })
         .map_or(MimeCategory::Unknown, |v| match v.to_lowercase().as_str() {
             v if v.starts_with("video/") || v == "application/octet-stream" => MimeCategory::Video,
             v if v.contains("mpegurl") => MimeCategory::M3U8,
             v if v.starts_with("image/") => MimeCategory::Image,
             v if v.starts_with("application/json") || v.ends_with("+json") => MimeCategory::Json,
-            v if v.starts_with("application/xml") || v.ends_with("+xml") || v == "text/xml" => {
-                MimeCategory::Xml
-            }
+            v if v.starts_with("application/xml") || v.ends_with("+xml") || v == "text/xml" => MimeCategory::Xml,
             v if v.starts_with("text/") => MimeCategory::Text,
             _ => MimeCategory::Unclassified,
         })
@@ -100,12 +99,7 @@ pub async fn get_input_epg_content_as_file(
         {
             Ok(content) => Ok(content),
             Err(e) => {
-                error!(
-                    "can't download input {} epg url: {}  => {}",
-                    input.name,
-                    sanitize_sensitive_info(url_str),
-                    sanitize_sensitive_info(e.to_string().as_str())
-                );
+                error!("can't download input {} epg url: {}  => {}", input.name, sanitize_sensitive_info(url_str), sanitize_sensitive_info(e.to_string().as_str()));
                 notify_err_res!("Failed to download")
             }
         }
@@ -115,11 +109,7 @@ pub async fn get_input_epg_content_as_file(
                 if filepath.exists() {
                     if let Err(e) = tokio::fs::copy(&filepath, persist_filepath).await {
                         error!("can't persist to: {}  => {}", persist_filepath.display(), e);
-                        return notify_err_res!(
-                            "Failed to persist: {}  => {}",
-                            persist_filepath.display(),
-                            e
-                        );
+                        return notify_err_res!("Failed to persist: {}  => {}", persist_filepath.display(), e);
                     }
                     if filepath.exists() {
                         Some(filepath)
@@ -133,14 +123,11 @@ pub async fn get_input_epg_content_as_file(
             None => None,
         };
 
-        result.map_or_else(
-            || {
-                let msg = format!("can't read input url: {}", sanitize_sensitive_info(url_str));
-                error!("{msg}");
-                notify_err_res!("{msg}")
-            },
-            Ok,
-        )
+        result.map_or_else(|| {
+            let msg = format!("can't read input url: {}", sanitize_sensitive_info(url_str));
+            error!("{msg}");
+            notify_err_res!("{msg}")
+        }, Ok)
     }
 }
 
@@ -171,11 +158,7 @@ pub async fn get_input_text_content(
         {
             Ok((content, _response_url)) => Ok(content),
             Err(e) => {
-                error!(
-                    "Failed to download input '{}': {}",
-                    &input.name,
-                    sanitize_sensitive_info(e.to_string().as_str())
-                );
+                error!("Failed to download input '{}': {}", &input.name, sanitize_sensitive_info(e.to_string().as_str()));
                 notify_err_res!("Failed to download")
             }
         }
@@ -186,16 +169,8 @@ pub async fn get_input_text_content(
                     if let Some(persist_file_value) = persist_filepath {
                         let to_file = &persist_file_value;
                         if let Err(e) = tokio::fs::copy(&filepath, to_file).await {
-                            error!(
-                                "can't persist to: {}  => {}",
-                                to_file.to_str().unwrap_or("?"),
-                                e
-                            );
-                            return notify_err_res!(
-                                "Failed to persist: {}  => {}",
-                                to_file.to_str().unwrap_or("?"),
-                                e
-                            );
+                            error!("can't persist to: {}  => {}", to_file.to_str().unwrap_or("?"), e);
+                            return notify_err_res!("Failed to persist: {}  => {}", to_file.to_str().unwrap_or("?"), e);
                         }
                     }
 
@@ -211,17 +186,11 @@ pub async fn get_input_text_content(
             }
             None => None,
         };
-        result.map_or_else(
-            || {
-                let msg = format!(
-                    "can't read input url: {}",
-                    sanitize_sensitive_info(&input.url)
-                );
-                error!("{msg}");
-                notify_err_res!("{msg}")
-            },
-            Ok,
-        )
+        result.map_or_else(|| {
+            let msg = format!("can't read input url: {}", sanitize_sensitive_info(&input.url));
+            error!("{msg}");
+            notify_err_res!("{msg}")
+        }, Ok)
     }
 }
 
@@ -292,17 +261,11 @@ pub async fn get_input_text_content_as_stream(
             }
             None => None,
         };
-        result.map_or_else(
-            || {
-                let msg = format!(
-                    "can't read input url: {}",
-                    sanitize_sensitive_info(&input.url)
-                );
-                error!("{msg}");
-                notify_err_res!("{msg}")
-            },
-            Ok,
-        )
+        result.map_or_else(|| {
+            let msg = format!("can't read input url: {}", sanitize_sensitive_info(&input.url));
+            error!("{msg}");
+            notify_err_res!("{msg}")
+        }, Ok)
     }
 }
 
@@ -1035,7 +998,9 @@ pub fn parse_range(range: &str) -> Option<(u64, Option<u64>)> {
 }
 
 pub fn is_file_url(url: &str) -> bool {
-    url.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("file://"))
+    Url::parse(url)
+        .map(|u| u.scheme().eq_ignore_ascii_case("file"))
+        .unwrap_or(false)
 }
 
 #[cfg(test)]

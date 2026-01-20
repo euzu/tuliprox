@@ -145,8 +145,7 @@ pub fn InputTable(props: &InputTableProps) -> Html {
                                       <StagedInputView input={ dto.staged.clone() } />
                                    </RevealContent> }),
                             15 => dto.exp_date.as_ref().and_then(|ts| unix_ts_to_str(*ts))
-                                    .map(|s| html! { <span class="tp__table__nowrap">{ s }</span> })
-                                    .unwrap_or_else(|| html! { <AppIcon name="Unlimited" /> }),
+                                    .map(|s| html! { { s } }).unwrap_or_else(|| html! { <AppIcon name="Unlimited" /> }),
                             _ => html! {""},
                         }
                     },
@@ -166,15 +165,14 @@ pub fn InputTable(props: &InputTableProps) -> Html {
                                 <Chip class={ format!("{} tp__input-table__alias", convert_bool_to_chip_style(dto.enabled).map_or_else(String::new, |s| if s == "active" { "alias".to_string() } else {s} )) }
                                  label={translator.t("LABEL.ALIAS")}  />
                             },
-                            2 => html! { alias.name.to_string() },
+                            2 => html! { alias.name.as_ref() },
                             4 => html! { alias.url.as_str() },
                             5 => alias.username.as_ref().map_or_else(|| html!{}, |u| html!{u}),
                             6 => alias.password.as_ref().map_or_else(|| html!{}, |pwd| html! { <HideContent content={pwd.to_string()}></HideContent>}),
                             9 => html! { alias.priority.to_string() },
-                            10 => html! { alias.max_connections },
+                            10 => html! { alias.max_connections.to_string() },
                             15 => alias.exp_date.as_ref().and_then(|ts| unix_ts_to_str(*ts))
-                                .map(|s| html! { <span class="tp__table__nowrap">{ s }</span> })
-                                .unwrap_or_else(|| html! { <AppIcon name="Unlimited" /> }),
+                                .map(|s| html! { { s } }).unwrap_or_else(|| html! { <AppIcon name="Unlimited" /> }),
                             _ => html! { },
                         }
                     }

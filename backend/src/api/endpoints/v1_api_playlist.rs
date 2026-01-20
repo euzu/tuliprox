@@ -7,7 +7,7 @@ use crate::model::{parse_xmltv_for_web_ui_from_file, parse_xmltv_for_web_ui_from
 use crate::processing::processor::playlist;
 use axum::response::IntoResponse;
 use axum::{Router};
-use log::error;
+use log::{error, info};
 use serde_json::json;
 use shared::model::{InputType, PlaylistEpgRequest, PlaylistRequest, ProxyType, TargetType, WebplayerUrlRequest, XtreamCluster};
 use shared::utils::{sanitize_sensitive_info, Internable};
@@ -166,11 +166,13 @@ async fn playlist_series_info(
             if let Some(input) = app_state.app_config.get_input_by_id(input_id) {
                 if matches!(input.input_type, InputType::Xtream | InputType::XtreamBatch) {
                     // TODO: Implement series info retrieval for input-based requests
+                    info!("TODO: Implement series info retrieval for input-based requests");
                 }
             }
         }
         PlaylistRequest::CustomXtream(_xtream) => {
             // TODO: Implement series info retrieval for custom Xtream requests
+            info!("TODO: Implement series info retrieval for custom Xtream requests");
         },
         PlaylistRequest::CustomM3u(_) => {}
     }

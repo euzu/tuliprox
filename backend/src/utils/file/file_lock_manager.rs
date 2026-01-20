@@ -79,11 +79,14 @@ impl FileLockManager {
         FileWriteGuard::new(guard)
     }
 
-    /// Acquires a write lock using a raw string key instead of a normalized `Path`.
+    /// Tries to acquire a write lock using a raw string key instead of a normalized `Path`.
     ///
     /// Unlike the standard path-based locks, this method does **not** perform any
     /// path normalization or conversion. The string is used directly as the lock key,
     /// which can be useful for non-file-based identifiers or dynamic keys.
+    ///
+    /// Returns immediately with an error if the lock is currently held, rather than
+    /// waiting for it to become available.
     pub async fn try_write_lock_str(&self, text: &str) -> io::Result<FileWriteGuard> {
         let lock_key = LockKey::Str(text.to_string());
         let file_lock = self.get_or_create_lock(lock_key).await;
