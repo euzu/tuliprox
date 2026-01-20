@@ -1,15 +1,14 @@
-use std::str::FromStr;
-use serde::{Deserialize, Serialize};
-use hex::FromHex;
 use crate::utils::parse_uuid_hex;
+use hex::FromHex;
+use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct UUIDType(pub [u8; 32]);
 
 #[allow(clippy::len_without_is_empty)]
 impl UUIDType {
-
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         32usize
     }
 
@@ -49,20 +48,20 @@ impl UUIDType {
     /// - This ensures the resulting `UUIDType` is 32 bytes, but this operation is **not reversible**
     ///   to the original 32-byte `UUIDType` if the input was previously generated with `to_valid_uuid`.
     pub fn from_valid_uuid(uuid: &str) -> Self {
-       let bytes = if let Some(parsed_uuid) = parse_uuid_hex(uuid) {
-           let mut bytes = [0u8; 32];
-           // The 16 UUID Bytes
-           bytes[..16].copy_from_slice(&parsed_uuid);
-           // The remaining 16 Bytes = Hash der UUID (optional)
-           let hash = blake3::hash(&parsed_uuid);
-           bytes[16..].copy_from_slice(&hash.as_bytes()[..16]);
-           bytes
-       } else {
-           // Fallback: hash the entire input string
-           *blake3::hash(uuid.as_bytes()).as_bytes()
-       };
+        let bytes = if let Some(parsed_uuid) = parse_uuid_hex(uuid) {
+            let mut bytes = [0u8; 32];
+            // The 16 UUID Bytes
+            bytes[..16].copy_from_slice(&parsed_uuid);
+            // The remaining 16 bytes = hash of the UUID
+            let hash = blake3::hash(&parsed_uuid);
+            bytes[16..].copy_from_slice(&hash.as_bytes()[..16]);
+            bytes
+        } else {
+            // Fallback: hash the entire input string
+            *blake3::hash(uuid.as_bytes()).as_bytes()
+        };
 
-       UUIDType(bytes)
+        UUIDType(bytes)
     }
 }
 
@@ -116,6 +115,19 @@ impl<'de> serde::de::Visitor<'de> for UUIDTypeVisitor {
         } else {
             Err(E::invalid_length(v.len(), &self))
         }
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::SeqAccess<'de>,
+    {
+        let mut bytes = [0u8; 32];
+        for (i, byte) in bytes.iter_mut().enumerate() {
+            *byte = seq
+                .next_element()?
+                .ok_or_else(|| serde::de::Error::invalid_length(i, &self))?;
+        }
+        Ok(UUIDType(bytes))
     }
 }
 

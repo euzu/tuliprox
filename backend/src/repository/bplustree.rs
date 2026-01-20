@@ -55,6 +55,8 @@ const PAGE_HEADER_SIZE: u16 = 16;
 const PAGE_HEADER_SIZE_USIZE: usize = PAGE_HEADER_SIZE as usize;
 const SLOT_SIZE: usize = 2; // u16
 
+const MAGIC_METADATA_TARGET_ID_MAPPING: u8 = 0x01;
+
 /*
     Page Header Layout
 
@@ -1399,14 +1401,18 @@ impl BPlusTreeMetadata {
     pub fn to_bytes(&self) -> Vec<u8> {
         match self {
             Self::Empty => Vec::new(),
-            Self::TargetIdMapping(val) => val.to_le_bytes().to_vec(),
+            Self::TargetIdMapping(val) => {
+                let mut bytes = vec![MAGIC_METADATA_TARGET_ID_MAPPING]; // Type tag
+                bytes.extend_from_slice(&val.to_le_bytes());
+                bytes
+            }
         }
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Self {
         match bytes.len() {
-            4 => {
-                let arr: [u8; 4] = bytes.try_into().unwrap_or([0; 4]);
+            5 if bytes[0] == MAGIC_METADATA_TARGET_ID_MAPPING => {
+                let arr: [u8; 4] = bytes[1..5].try_into().unwrap_or([0; 4]);
                 Self::TargetIdMapping(u32::from_le_bytes(arr))
             }
             _ => Self::Empty, // Unknown metadata treated as Empty for now
@@ -1418,8 +1424,8 @@ impl BPlusTreeMetadata {
 pub struct BPlusTree<K, V> {
     root: BPlusTreeNode<K, V>,
     inner_order: usize,
-    pub leaf_order: usize,
-    pub metadata: BPlusTreeMetadata,
+    leaf_order: usize,
+    metadata: BPlusTreeMetadata,
     dirty: bool,
 }
 
@@ -2573,7 +2579,7 @@ where
             file.flush()?; // Ensure it hits disk
         }
         // Resync/clear reader buffer after direct writes.
-        self.file.stream_position()?;
+        self.file.seek_relative(0)?; // same as self.file.seek(SeekFrom::Current(0))?;
 
         Ok(())
     }

@@ -49,9 +49,9 @@ impl PlaylistService {
             request_post::<&PlaylistRequest, Vec<CommonPlaylistItem>>(&self.playlist_api_series_path, playlist_request, None, Some(ACCEPT_PREFER_BIN.to_string())),
         );
 
-        let live = live_res.map_or_else(|err| { error!("{err}"); None }, |r| r.map(|resp| to_ui_playlist_groups(resp, XtreamCluster::Live)));
-        let vod = vod_res.map_or_else(|err| { error!("{err}"); None }, |r| r.map(|resp| to_ui_playlist_groups(resp, XtreamCluster::Video)));
-        let series = series_res.map_or_else(|err| { error!("{err}"); None }, |r| r.map(|resp| to_ui_playlist_groups(resp, XtreamCluster::Series)));
+        let live = live_res.map_or_else(|err| { error!("Failed to fetch live playlist: {err}"); None }, |r| r.map(|resp| to_ui_playlist_groups(resp, XtreamCluster::Live)));
+        let vod = vod_res.map_or_else(|err| { error!("Failed to fetch vod playlist: {err}"); None }, |r| r.map(|resp| to_ui_playlist_groups(resp, XtreamCluster::Video)));
+        let series = series_res.map_or_else(|err| { error!("Failed to fetch series playlist: {err}"); None }, |r| r.map(|resp| to_ui_playlist_groups(resp, XtreamCluster::Series)));
 
         if live.is_some() || vod.is_some() || series.is_some() {
             return Some(Rc::new(UiPlaylistCategories {
@@ -96,8 +96,7 @@ impl PlaylistService {
 fn to_ui_playlist_groups(list: Vec<CommonPlaylistItem>, xtream_cluster: XtreamCluster) -> Vec<Rc<UiPlaylistGroup>> {
     let mut groups = IndexMap::new();
     list.into_iter().for_each(|item| {
-        let group_id = item.group.clone();
-        let group = groups.entry(group_id).or_insert_with(|| UiPlaylistGroup {
+        let group = groups.entry(item.group.clone()).or_insert_with(|| UiPlaylistGroup {
             id: item.category_id.unwrap_or(0),
             title: item.group.clone(),
             channels: vec![],

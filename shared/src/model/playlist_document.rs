@@ -1,4 +1,4 @@
-use crate::utils::{arc_str_serde, arc_str_option_serde, Internable};
+use crate::utils::{arc_str_serde, arc_str_option_serde, arc_str_vec_serde, Internable};
 use crate::model::info_doc_utils::InfoDocUtils;
 use crate::model::{
     LiveStreamProperties, SeriesStreamProperties, StreamProperties, VideoStreamProperties,
@@ -101,6 +101,7 @@ pub struct XtreamSeriesDoc {
     pub rating: Arc<str>,
     #[serde(with = "arc_str_serde")]
     pub rating_5based: Arc<str>,
+    #[serde(with = "arc_str_vec_serde")]
     pub backdrop_path: Vec<Arc<str>>,
     #[serde(with = "arc_str_serde")]
     pub youtube_trailer: Arc<str>,
@@ -164,7 +165,7 @@ impl XtreamPlaylistItem {
                         stream_id: self.virtual_id,
                         name: Arc::clone(&self.name),
                         added: "".intern(),
-                        category_id: self.category_id.to_string().intern(),
+                        category_id: self.category_id.intern(),
                         category_ids: vec![self.category_id],
                         container_extension: "".intern(),
                         custom_sid: None,
@@ -191,7 +192,7 @@ impl XtreamPlaylistItem {
                         tmdb: "".intern(),
                         youtube_trailer: "".intern(),
                         episode_run_time: "".intern(),
-                        category_id: self.category_id.to_string().intern(),
+                        category_id: self.category_id.intern(),
                         category_ids: vec![self.category_id],
                     },
                     episodes: HashMap::new(),
@@ -240,9 +241,9 @@ impl XtreamPlaylistItem {
                     InfoDocUtils::make_bdpath_resource_url(resource_url.as_deref(), p, idx, "").intern()
                 ).collect()),
             youtube_trailer: series.youtube_trailer.clone(),
-            tmdb: series.tmdb.map(|v| v.to_string().intern()).unwrap_or_else(|| "".intern()),
+            tmdb: series.tmdb.map(|v| v.intern()).unwrap_or_else(|| "".intern()),
             episode_runtime: series.episode_run_time.clone().unwrap_or_else(|| "".intern()),
-            category_id: self.category_id.to_string().intern(),
+            category_id: self.category_id.intern(),
             category_ids: vec![self.category_id],
         })
     }
@@ -258,11 +259,11 @@ impl XtreamPlaylistItem {
             stream_icon,
             rating: video.rating.map(|v| InfoDocUtils::limited(v).intern()).unwrap_or_else(|| "".intern()),
             rating_5based: video.rating_5based.unwrap_or_default(),
-            tmdb: video.tmdb.map(|v| v.to_string().intern()).unwrap_or_else(|| "".intern()),
+            tmdb: video.tmdb.map(|v| v.intern()).unwrap_or_else(|| "".intern()),
             trailer: video.trailer.clone().unwrap_or_else(|| "".intern()),
             added: video.added.clone(),
             is_adult: video.is_adult,
-            category_id: self.category_id.to_string().intern(),
+            category_id: self.category_id.intern(),
             category_ids: vec![self.category_id],
             container_extension: video.container_extension.clone(),
             custom_sid: video.custom_sid.clone(),
@@ -282,7 +283,7 @@ impl XtreamPlaylistItem {
             epg_channel_id: self.epg_channel_id.clone().unwrap_or_else(|| "".intern()),
             added: live.added.clone().unwrap_or_else(|| "".intern()),
             is_adult: live.is_adult,
-            category_id: self.category_id.to_string().intern(),
+            category_id: self.category_id.intern(),
             category_ids: vec![self.category_id],
             custom_sid: live.custom_sid.clone(),
             tv_archive: live.tv_archive.unwrap_or_default(),
@@ -306,7 +307,7 @@ impl XtreamPlaylistItem {
                     epg_channel_id: self.epg_channel_id.clone().unwrap_or_else(|| Arc::clone(&empty_str)),
                     added: Arc::clone(&empty_str),
                     is_adult: 0,
-                    category_id: self.category_id.to_string().intern(),
+                    category_id: self.category_id.intern(),
                     category_ids: vec![self.category_id],
                     custom_sid: None,
                     tv_archive: 0,
@@ -327,7 +328,7 @@ impl XtreamPlaylistItem {
                     trailer: Arc::clone(&empty_str),
                     added: Arc::clone(&empty_str),
                     is_adult: 0,
-                    category_id: self.category_id.to_string().intern(),
+                    category_id: self.category_id.intern(),
                     category_ids: vec![self.category_id],
                     container_extension: Arc::clone(&empty_str),
                     custom_sid: None,

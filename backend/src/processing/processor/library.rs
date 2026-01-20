@@ -232,7 +232,7 @@ pub fn metadata_cache_entry_to_xtream_series_info(
         MediaMetadata::Series(m) => m,
     };
 
-    let actor_names = series.actors.as_ref().map(|a| a.iter().map(|a| a.name.clone()).collect::<Vec<_>>().join(", ")).unwrap_or_default();
+    let actor_names: Arc<str> = series.actors.as_ref().map(|a| a.iter().map(|a| a.name.clone()).collect::<Vec<_>>().join(", ")).unwrap_or_default().into();
     let release_date = series.year.map(|y| format!("{y}-01-01"));
     let youtube_trailer = series.videos.as_ref().and_then(|v| v.iter().find(|video| video.site.eq_ignore_ascii_case("youtube")).map(|video| video.key.clone())).unwrap_or_default();
 
@@ -288,7 +288,7 @@ pub fn metadata_cache_entry_to_xtream_series_info(
                 tmdb: tmdb_id,
                 release_date: episode_release_date.clone().into(),
                 plot: episode.plot.clone().map(Into::into),
-                crew: Some(actor_names.clone().into()),
+                crew: Some(Arc::clone(&actor_names)),
                 duration_secs: episode.runtime.map_or(0, |r| r * 60),
                 duration: episode.runtime
                     .map(|r| format!("{:02}:{:02}:00", r / 60, r % 60))
@@ -320,7 +320,7 @@ pub fn metadata_cache_entry_to_xtream_series_info(
                     .filter(|s| !s.is_empty())
                     .map(|p| vec![p.clone().into()])
             }),
-        cast: actor_names.into(),
+        cast: Arc::clone(&actor_names),
         cover: series.poster.clone().unwrap_or_default().into(),
         director: series.directors.as_ref().map(|d| d.join(", ")).unwrap_or_default().into(),
         episode_run_time: None,

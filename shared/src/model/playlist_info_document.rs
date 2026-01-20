@@ -1,4 +1,4 @@
-use crate::utils::{arc_str_serde, arc_str_option_serde, Internable};
+use crate::utils::{arc_str_serde, arc_str_option_serde, arc_str_vec_serde, Internable};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -80,6 +80,7 @@ pub struct XtreamVideoInfoData {
     pub country: Arc<str>,
     #[serde(with = "arc_str_serde")]
     pub genre: Arc<str>,
+    #[serde(with = "arc_str_vec_serde")]
     pub backdrop_path: Vec<Arc<str>>,
     #[serde(with = "arc_str_serde")]
     pub duration_secs: Arc<str>,
@@ -171,6 +172,7 @@ pub struct XtreamSeriesInfoData {
     pub rating: Arc<str>,
     #[serde(with = "arc_str_serde")]
     pub rating_5based: Arc<str>,
+    #[serde(with = "arc_str_vec_serde")]
     pub backdrop_path: Vec<Arc<str>>,
     #[serde(with = "arc_str_serde")]
     pub tmdb: Arc<str>,

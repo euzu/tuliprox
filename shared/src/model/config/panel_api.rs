@@ -34,7 +34,7 @@ impl Default for PanelApiConfigDto {
     fn default() -> Self {
         Self {
             enabled: true,
-            url: "".to_string(),
+            url: String::new(),
             api_key: None,
             query_parameter: PanelApiQueryParametersDto::default(),
         }

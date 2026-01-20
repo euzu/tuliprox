@@ -136,13 +136,13 @@ impl TargetIdMapping {
         let mem_by_uuid = if needs_traversal {
             // Load primary tree only if traversal is needed
             let tree: BPlusTree<u32, VirtualIdRecord> = BPlusTree::load(path)
-                    .map_err(|e| {
-                        error!("Failed to load primary tree at {}, starting fresh: {e}", path.display());
+                .map_err(|e| {
+                    error!("Failed to load primary tree at {}, starting fresh: {e}", path.display());
                     e
                 })
-            .unwrap_or_else(|_| BPlusTree::new());
+                .unwrap_or_else(|_| BPlusTree::new());
 
-            // Traverse primary tree to get UUID mappings and max ID
+            // Traverse the primary tree to get UUID mappings and max ID
             let mut uuid_map = BTreeMap::new();
             tree.traverse(|keys, values| {
                 if let Some(max_key) = keys.iter().max() {
@@ -219,11 +219,16 @@ impl TargetIdMapping {
             Some(virtual_id) => {
                 // Existing entry: check if update needed
                 // For update checks, we use the primary tree
-                let needs_update = if let Ok(Some(record)) = self.disk_by_virtual_id.query(&virtual_id) {
-                    record.provider_id == provider_id &&
-                        (record.item_type != item_type || record.parent_virtual_id != parent_virtual_id)
-                } else {
-                    false
+                let needs_update = match self.disk_by_virtual_id.query(&virtual_id) {
+                    Ok(Some(record)) => {
+                        record.provider_id == provider_id &&
+                            (record.item_type != item_type || record.parent_virtual_id != parent_virtual_id)
+                    }
+                    Ok(None) => false,
+                    Err(e) => {
+                        error!("Failed to query record for virtual_id {virtual_id}: {e}");
+                        false
+                    }
                 };
 
                 if needs_update {
@@ -238,15 +243,6 @@ impl TargetIdMapping {
 
     pub fn persist(&mut self) -> Result<(), Error> {
         if self.has_pending_changes() {
-            // Persist virtual_id_counter via B+Tree header metadata
-            self.disk_by_virtual_id
-                .set_metadata(&BPlusTreeMetadata::TargetIdMapping(self.virtual_id_counter))
-                .map_err(|e| {
-                    error!("Failed to write virtual_id_counter to tree header at {}: {e}", self.path.display());
-                    e
-                })?;
-
-
             // Flush pending virtual_id upserts
             if !self.pending_virtual_id_upserts.is_empty() {
                 let batch: Vec<(&u32, &VirtualIdRecord)> = self.pending_virtual_id_upserts
@@ -266,6 +262,14 @@ impl TargetIdMapping {
                 self.disk_by_uuid.upsert_batch(&batch)?;
                 self.pending_uuid_upserts.clear();
             }
+
+            // Persist virtual_id_counter via B+Tree header metadata
+            self.disk_by_virtual_id
+                .set_metadata(&BPlusTreeMetadata::TargetIdMapping(self.virtual_id_counter))
+                .map_err(|e| {
+                    error!("Failed to write virtual_id_counter to tree header at {}: {e}", self.path.display());
+                    e
+                })?;
         }
         Ok(())
     }

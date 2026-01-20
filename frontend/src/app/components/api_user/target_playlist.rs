@@ -187,15 +187,16 @@ pub fn UserTargetPlaylist(props: &UserTargetPlaylistProps) -> Html {
         let force_update = force_update.clone();
 
         Callback::from(move |(cluster, cats, select): (XtreamCluster, Vec<String>, bool)| {
-            let mut selections = bouquet_selection.borrow_mut();
-            let map = match cluster {
-                XtreamCluster::Live => &mut selections.live,
-                XtreamCluster::Video => &mut selections.vod,
-                XtreamCluster::Series => &mut selections.series,
-            };
-
-            for cat in cats {
-                map.insert(cat, select);
+            {
+                let mut selections = bouquet_selection.borrow_mut();
+                let map = match cluster {
+                    XtreamCluster::Live => &mut selections.live,
+                    XtreamCluster::Video => &mut selections.vod,
+                    XtreamCluster::Series => &mut selections.series,
+                };
+                for cat in cats {
+                    map.insert(cat, select);
+                }
             }
             on_change.emit(bouquet_selection.clone());
             force_update.set(*force_update + 1);
