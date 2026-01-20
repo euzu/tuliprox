@@ -7,7 +7,7 @@ use log::{error, warn};
 use shared::error::{string_to_io_error, to_io_error, TuliproxError};
 use shared::info_err;
 use shared::model::{ConfigInputAliasDto, InputType};
-use shared::utils::{get_credentials_from_url, get_credentials_from_url_str, parse_timestamp, trim_last_slash, Internable};
+use shared::utils::{get_credentials_from_url, get_credentials_from_url_str, parse_timestamp, sanitize_sensitive_info, trim_last_slash, Internable};
 use std::io;
 use std::io::{BufRead, Cursor, Error};
 use std::path::{Path, PathBuf};
@@ -101,7 +101,9 @@ fn csv_assign_mandatory_fields(alias: &mut ConfigInputAliasDto, input_type: Inpu
                     }
                 }
             }
-            Err(_err) => {}
+            Err(err) => {
+                warn!("Could not parse URL '{}' for alias: {err}", sanitize_sensitive_info(&alias.url));
+            }
         }
     }
 }
@@ -272,6 +274,8 @@ async fn csv_write_input_to_path(
     content.push(CSV_SEPARATOR);
     content.push_str(FIELD_MAX_CON);
     content.push(CSV_SEPARATOR);
+    content.push_str(FIELD_PRIO);
+    content.push(CSV_SEPARATOR);
     content.push_str(FIELD_EXP_DATE);
     content.push('\n');
 
@@ -285,6 +289,8 @@ async fn csv_write_input_to_path(
         content.push_str(&alias.url);
         content.push(CSV_SEPARATOR);
         content.push_str(&alias.max_connections.to_string());
+        content.push(CSV_SEPARATOR);
+        content.push_str(&alias.priority.to_string());
         content.push(CSV_SEPARATOR);
         if let Some(exp) = alias.exp_date {
             content.push_str(

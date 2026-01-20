@@ -29,6 +29,23 @@ fn normalize_ts(ts: i64) -> Option<i64> {
 }
 
 /// Note: On wasm32, the `format` parameter is ignored; output is always `YYYY-MM-DD HH:MM:SS`.
+// #[cfg(target_arch = "wasm32")]
+// pub fn unix_ts_to_str_with_format(ts: i64, _format: &str) -> Option<String> {
+//     let normalized_ts = normalize_ts(ts)?;
+//     let date = js_sys::Date::new_0();
+//     date.set_time(normalized_ts as f64 * 1000.0);
+//     Some(format!(
+//         "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+//         date.get_full_year(),
+//         date.get_month() + 1,
+//         date.get_date(),
+//         date.get_hours(),
+//         date.get_minutes(),
+//         date.get_seconds()
+//     ))
+// }
+
+// Note: On wasm32, the `format` parameter is ignored; output is always `YYYY-MM-DD HH:MM:SS`.
 #[cfg(target_arch = "wasm32")]
 pub fn unix_ts_to_str_with_format(ts: i64, _format: &str) -> Option<String> {
     let normalized_ts = normalize_ts(ts)?;
@@ -36,12 +53,12 @@ pub fn unix_ts_to_str_with_format(ts: i64, _format: &str) -> Option<String> {
     date.set_time(normalized_ts as f64 * 1000.0);
     Some(format!(
         "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-        date.get_full_year(),
-        date.get_month() + 1,
-        date.get_date(),
-        date.get_hours(),
-        date.get_minutes(),
-        date.get_seconds()
+        date.get_utc_full_year(),
+        date.get_utc_month() + 1,
+        date.get_utc_date(),
+        date.get_utc_hours(),
+        date.get_utc_minutes(),
+        date.get_utc_seconds()
     ))
 }
 
