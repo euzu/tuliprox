@@ -143,7 +143,11 @@ impl Stream for ActiveClientStream {
         };
 
         if let Some(buffer) = buffer_opt {
-            Poll::Ready(Some(Ok(buffer.next_chunk())))
+            buffer.register_waker(cx.waker());
+            match buffer.next_chunk() {
+                Some(chunk) => Poll::Ready(Some(Ok(chunk))),
+                None => Poll::Pending,
+            }
         } else {
             Pin::new(&mut self.state.inner).poll_next(cx)
         }
@@ -154,9 +158,11 @@ impl Drop for ActiveClientStream {
     fn drop(&mut self) {
         let mgr = Arc::clone(&self.state.connection_manager);
         let hndl = self.state.provider_handle.take();
-        tokio::spawn(async move {
-            mgr.release_provider_handle(hndl).await;
-        });
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                mgr.release_provider_handle(hndl).await;
+            });
+        }
     }
 }
 
@@ -187,7 +193,11 @@ impl Stream for ProvisionableActiveClientStream {
         };
 
         if let Some(buffer) = buffer_opt {
-            Poll::Ready(Some(Ok(buffer.next_chunk())))
+            buffer.register_waker(cx.waker());
+            match buffer.next_chunk() {
+                Some(chunk) => Poll::Ready(Some(Ok(chunk))),
+                None => Poll::Pending,
+            }
         } else {
             Pin::new(&mut self.state.inner).poll_next(cx)
         }

@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use bytes::{Bytes, BytesMut};
 use std::sync::Arc;
+use futures::task::AtomicWaker;
+use std::task::Waker;
 
 const MAX_PCR: u64 = 1 << 42;        // 42 bit PCR cycle
 const MAX_PTS_DTS: u64 = 1 << 33;    // 33 bit PTS/DTS cycle
@@ -240,6 +242,7 @@ pub struct TransportStreamBuffer {
     stream_duration_90khz: u64, // Duration in 90kHz units
     initial_continuity_counters: Arc<Vec<(u16,u8)>>,
     continuity_counters: Vec<(u16,u8)>,
+    waker: Arc<AtomicWaker>,
 }
 
 impl Clone for TransportStreamBuffer {
@@ -254,6 +257,7 @@ impl Clone for TransportStreamBuffer {
             stream_duration_90khz: self.stream_duration_90khz,
             initial_continuity_counters: Arc::clone(&self.initial_continuity_counters),
             continuity_counters: self.initial_continuity_counters.as_ref().clone(),
+            waker: Arc::clone(&self.waker),
         }
     }
 }
@@ -286,11 +290,19 @@ impl TransportStreamBuffer {
             stream_duration_90khz,
             continuity_counters: continuity_counters.clone(),
             initial_continuity_counters:  Arc::new(continuity_counters),
+            waker: Arc::new(AtomicWaker::new()),
         }
     }
 
+    pub fn register_waker(&self, waker: &Waker) {
+        self.waker.register(waker);
+    }
+
     /// Returns next chunks with adjusted PTS/DTS and PCR
-    pub fn next_chunk(&mut self) -> Bytes {
+    pub fn next_chunk(&mut self) -> Option<Bytes> {
+        if self.length == 0 {
+            return None;
+        }
         let mut bytes = BytesMut::with_capacity(CHUNK_SIZE);
         // we send this amount of packets in one chunk
         let mut packets_remaining = PACKET_COUNT;
@@ -368,6 +380,6 @@ impl TransportStreamBuffer {
             packets_remaining -= 1;
         }
 
-        bytes.freeze()
+        Some(bytes.freeze())
     }
 }

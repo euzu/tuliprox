@@ -258,6 +258,8 @@ impl PanelApiConfigDto {
                 let size = alias_pool
                     .size
                     .get_or_insert_with(PanelApiAliasPoolSizeDto::default);
+               // Capture original state before applying defaults
+                let min_was_none = size.min.is_none();
                 if size.min.is_none() {
                     size.min = Some(PanelApiAliasPoolSizeValue::Number(1));
                 }
@@ -282,7 +284,7 @@ impl PanelApiConfigDto {
                     .max
                     .as_ref()
                     .is_some_and(PanelApiAliasPoolSizeValue::is_auto);
-                if max_auto && size.min.is_none() {
+                if max_auto && min_was_none {
                     warn!("panel_api.alias_pool.size.max is set to auto without min for input {input_name}");
                 }
             }

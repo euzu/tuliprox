@@ -199,9 +199,10 @@ pub fn time_correct(original: &str, shift: &Duration) -> String {
     let Ok(naive_dt) = NaiveDateTime::parse_from_str(datetime_part, "%Y%m%d%H%M%S") else { return original.to_string() };
 
     let tz_offset_minutes = if tz_part.len() == 5 {
-        let sign = if &tz_part[0..1] == "-" { -1 } else { 1 };
-        let hours: i32 = tz_part[1..3].parse().unwrap_or(0);
-        let mins: i32 = tz_part[3..5].parse().unwrap_or(0);
+        let bytes = tz_part.as_bytes();
+        let sign = if bytes.first() == Some(&b'-') { -1 } else { 1 };
+        let hours: i32 = tz_part.get(1..3).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let mins: i32 = tz_part.get(3..5).and_then(|s| s.parse().ok()).unwrap_or(0);
         sign * (hours * 60 + mins)
     } else {
         0
@@ -226,6 +227,8 @@ pub fn format_offset(offset_minutes: i32) -> String {
     let mins = abs % 60;
     format!("{sign}{hours:02}{mins:02}")
 }
+
+#[inline]
 fn get_attr_value_unescaped(attr: &quick_xml::events::attributes::Attribute, decoder: quick_xml::Decoder) -> Option<String> {
     attr.decode_and_unescape_value(decoder).ok().map(|v| v.to_string())
 }

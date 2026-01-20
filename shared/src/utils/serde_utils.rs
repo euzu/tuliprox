@@ -437,10 +437,11 @@ pub mod xtream_cluster_serde {
     }
 }
 
-pub fn serialize_as_base64<S>(value: &String, serializer: S) -> Result<S::Ok, S::Error>
+pub fn serialize_as_base64_padded<S>(value: &String, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
+    // the xtream api uses padding!
     let encoded = general_purpose::STANDARD.encode(value.as_bytes());
     serializer.serialize_str(&encoded)
 }

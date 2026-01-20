@@ -583,11 +583,8 @@ pub async fn get_remote_content_as_stream(
     let response_url = response.url().to_string();
     let headers = response.headers();
     let header_value = headers.get(CONTENT_ENCODING);
-    let mut encoding = header_value.and_then(|encoding_header| {
-        encoding_header
-            .to_str()
-            .map_or(None, |value| Some(value.to_string()))
-    });
+    let mut encoding = header_value.and_then(|h| h.to_str().ok()).map(ToString::to_string);
+
     let stream_reader = StreamReader::new(response.bytes_stream().map_err(std::io::Error::other));
     let mut buf_reader = async_file_reader(stream_reader);
     let peek = buf_reader.fill_buf().await?;

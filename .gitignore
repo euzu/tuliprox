@@ -21,6 +21,7 @@ AGENTS.md
 
 *.m3u
 
+.idea/
 *.idea
 *.iml
 

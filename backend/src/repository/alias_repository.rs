@@ -39,6 +39,24 @@ pub fn is_csv_file(url: &str) -> bool {
     url.to_lowercase().ends_with(CSV_EXTENSION)
 }
 
+
+fn build_m3u_url(
+    base: &Url,
+    username: Option<&str>,
+    password: Option<&str>,
+) -> Result<Url, url::ParseError> {
+    let base_origin = base.origin().ascii_serialization();
+    let mut url = base_origin.parse::<Url>()?.join("get.php")?;
+    {
+        let mut qp = url.query_pairs_mut();
+        qp.append_pair("username", username.unwrap_or(""));
+        qp.append_pair("password", password.unwrap_or(""));
+        qp.append_pair("type", "m3u_plus");
+    }
+
+    Ok(url)
+}
+
 fn csv_assign_mandatory_fields(alias: &mut ConfigInputAliasDto, input_type: InputType) {
     if !alias.url.is_empty() {
         match Url::parse(alias.url.as_str()) {
@@ -52,12 +70,17 @@ fn csv_assign_mandatory_fields(alias: &mut ConfigInputAliasDto, input_type: Inpu
                         && alias.username.is_some()
                         && alias.password.is_some()
                     {
-                        alias.url = format!(
-                            "{}/get.php?username={}&password={}&type=m3u_plus",
-                            trim_last_slash(&url.origin().ascii_serialization()),
-                            alias.username.as_deref().unwrap_or(""),
-                            alias.password.as_deref().unwrap_or("")
-                        );
+                        match build_m3u_url(
+                            &url,
+                            alias.username.as_deref(),
+                            alias.password.as_deref()) {
+                            Ok(alias_url) => {
+                                alias.url = alias_url.to_string();
+                            },
+                            Err(err) => {
+                                error!("Could not build m3u url for alias {}: {err}", alias.name);
+                            }
+                        }
                     }
                 } else {
                     if input_type == InputType::XtreamBatch {
@@ -213,6 +236,10 @@ pub async fn csv_read_inputs(
 }
 
 pub fn get_csv_file_path(file_uri: &str) -> Result<PathBuf, Error> {
+    let raw_path = Path::new(file_uri);
+    if raw_path.is_absolute() {
+        return Ok(raw_path.to_path_buf());
+    }
     if let Ok(url) = file_uri.parse::<Url>() {
         if url.scheme() == "file" {
             match url.to_file_path() {

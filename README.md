@@ -1106,7 +1106,8 @@ Response evaluation logic
 Tuliprox evaluates Panel API responses as JSON with the following logic, depending on the operation:
 
 `Common rule (all operations)`
-  - Require `status: true`. 
+
+  - Require `status: true`.
   - If status is missing or not true, the operation is treated as failed.
 
 `account_info (credits)`

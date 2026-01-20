@@ -21,7 +21,11 @@ impl CustomVideoStream {
 impl Stream for CustomVideoStream {
     type Item = Result<Bytes, StreamError>;
 
-    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>,) -> Poll<Option<Self::Item>> {
-        Poll::Ready(Some(Ok(self.buffer.next_chunk())))
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.buffer.register_waker(cx.waker());
+        match self.buffer.next_chunk() {
+            Some(chunk) => Poll::Ready(Some(Ok(chunk))),
+            None => Poll::Pending,
+        }
     }
 }

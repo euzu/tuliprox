@@ -155,6 +155,18 @@ impl From<&PanelApiProvisioningDto> for PanelApiProvisioning {
     }
 }
 
+impl From<&PanelApiProvisioning> for PanelApiProvisioningDto {
+    fn from(instance: &PanelApiProvisioning) -> Self {
+        Self {
+            timeout_sec: instance.timeout_sec,
+            method: instance.method,
+            probe_interval_sec: instance.probe_interval_sec,
+            cooldown_sec: instance.cooldown_sec,
+            offset: instance.offset.as_ref().map(ToString::to_string),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PanelApiAliasPoolSize {
     pub min: Option<PanelApiAliasPoolSizeValue>,
@@ -217,13 +229,7 @@ impl From<&PanelApiConfig> for PanelApiConfigDto {
             enabled: instance.enabled,
             url: instance.url.to_string(),
             api_key: instance.api_key.as_ref().map(Arc::clone),
-            provisioning: PanelApiProvisioningDto {
-                timeout_sec: instance.provisioning.timeout_sec,
-                method: instance.provisioning.method,
-                probe_interval_sec: instance.provisioning.probe_interval_sec,
-                cooldown_sec: instance.provisioning.cooldown_sec,
-                offset: instance.provisioning.offset.as_ref().map(std::string::ToString::to_string),
-            },
+            provisioning: PanelApiProvisioningDto::from(&instance.provisioning),
             query_parameter: PanelApiQueryParametersDto::from(&instance.query_parameter),
             credits: None,
             alias_pool: instance.alias_pool.as_ref().map(|p| PanelApiAliasPoolDto {

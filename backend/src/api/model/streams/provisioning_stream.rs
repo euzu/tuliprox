@@ -21,10 +21,15 @@ impl ProvisioningStream {
 impl Stream for ProvisioningStream {
     type Item = Result<Bytes, StreamError>;
 
-    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if !self.stop_signal.is_active() {
             return Poll::Ready(None);
         }
-        Poll::Ready(Some(Ok(self.buffer.next_chunk())))
+
+        self.buffer.register_waker(cx.waker());
+        match self.buffer.next_chunk() {
+            Some(chunk) => Poll::Ready(Some(Ok(chunk))),
+            None => Poll::Pending,
+        }
     }
 }
