@@ -23,14 +23,16 @@ $series-backdrop-height: 300px;
     }
 
     &-title {
+      display: flex;
+      flex-flow: row;
+      align-items: center;
       position: absolute;
       bottom: 0;
       left: 0;
       right: 0;
       height: 3rem;
       background-color: var(--card-background-color);
-      display: flex;
-      align-items: center;
+      padding-left: 2rem;
     }
   }
 }

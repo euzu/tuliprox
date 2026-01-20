@@ -524,11 +524,11 @@ pub fn PlaylistExplorer() -> Html {
                                         />}
                                     }
                                 }
+                                <button class="tp__icon-button"
+                                    onclick={Callback::from(move |event: MouseEvent| popup_onclick.emit((channel_select.clone(), event)))}>
+                                    <AppIcon name="Popup"></AppIcon>
+                                </button>
                                 <span class="tp__playlist-explorer__channel-title">
-                                    <button class="tp__icon-button"
-                                        onclick={Callback::from(move |event: MouseEvent| popup_onclick.emit((channel_select.clone(), event)))}>
-                                        <AppIcon name="Popup"></AppIcon>
-                                    </button>
                                     {e.title.clone()}
                                 </span>
                             </span>
