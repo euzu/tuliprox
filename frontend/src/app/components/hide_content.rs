@@ -17,6 +17,7 @@ pub fn HideContent(props: &HideContentProps) -> Html {
         let hidden = hidden.clone();
         Callback::from(move |e: MouseEvent| {
             e.prevent_default();
+            e.stop_propagation();
             hidden.set(!*hidden);
         })
     };

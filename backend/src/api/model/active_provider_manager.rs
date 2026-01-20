@@ -85,7 +85,7 @@ impl ActiveProviderManager {
     }
 
     pub async fn reconcile_connections(&self) {
-        let mut counts = HashMap::<String, usize>::new();
+        let mut counts = HashMap::<Arc<str>, usize>::new();
         {
             let connections = self.connections.read().await;
 
@@ -111,7 +111,7 @@ impl ActiveProviderManager {
 
     async fn acquire_connection_inner(
         &self,
-        provider_or_input_name: &str,
+        provider_or_input_name: &Arc<str>,
         addr: &SocketAddr,
         force: bool,
         allow_grace_override: Option<bool>,
@@ -152,35 +152,35 @@ impl ActiveProviderManager {
         None
     }
 
-    pub async fn force_exact_acquire_connection(&self, provider_name: &str, addr: &SocketAddr) -> Option<ProviderHandle> {
+    pub async fn force_exact_acquire_connection(&self, provider_name: &Arc<str>, addr: &SocketAddr) -> Option<ProviderHandle> {
         self.acquire_connection_inner(provider_name, addr, true, None).await
     }
 
     // Returns the next available provider connection
-    pub async fn acquire_connection(&self, input_name: &str, addr: &SocketAddr) -> Option<ProviderHandle> {
+    pub async fn acquire_connection(&self, input_name: &Arc<str>, addr: &SocketAddr) -> Option<ProviderHandle> {
         self.acquire_connection_inner(input_name, addr, false, None).await
     }
 
     /// Acquire a provider connection while optionally disabling provider grace allocations.
     pub async fn acquire_connection_with_grace_override(
         &self,
-        input_name: &str,
+        input_name: &Arc<str>,
         addr: &SocketAddr,
         allow_grace: bool,
     ) -> Option<ProviderHandle> {
         self.acquire_connection_inner(input_name, addr, false, Some(allow_grace)).await
     }
 
-    // This method is used for redirects to cycle through provider
-    pub async fn get_next_provider(&self, provider_name: &str) -> Option<Arc<ProviderConfig>> {
+    // This method is used for redirects to cycle through the provider
+    pub async fn get_next_provider(&self, provider_name: &Arc<str>) -> Option<Arc<ProviderConfig>> {
         self.providers.get_next_provider(provider_name).await
     }
 
-    pub async fn active_connections(&self) -> Option<HashMap<String, usize>> {
+    pub async fn active_connections(&self) -> Option<HashMap<Arc<str>, usize>> {
         self.providers.active_connections().await
     }
 
-    pub async fn is_over_limit(&self, provider_name: &str) -> bool {
+    pub async fn is_over_limit(&self, provider_name: &Arc<str>) -> bool {
         self.providers.is_over_limit(provider_name).await
     }
 

@@ -1,7 +1,7 @@
 #![allow(clippy::empty_docs)]
 
 use pest_derive::Parser;
-use std::borrow::Cow;
+
 use enum_iterator::all;
 use indexmap::IndexSet;
 use log::{error, log_enabled, trace, Level};
@@ -13,32 +13,32 @@ use std::sync::Arc;
 use crate::error::{info_err_res, TuliproxError};
 use crate::info_err;
 pub use crate::model::{ItemField, PatternTemplate, PlaylistItem, PlaylistItemType, FieldGetAccessor, FieldSetAccessor, TemplateValue};
-use crate::utils::{deunicode_string, DirectedGraph, StringInterner, CONSTANTS};
+use crate::utils::{deunicode_string, DirectedGraph, Internable, CONSTANTS};
 
-pub fn get_field_value(pli: &PlaylistItem, field: ItemField) -> Cow<'_, str> {
+pub fn get_field_value(pli: &PlaylistItem, field: ItemField) -> Arc<str> {
     let header = &pli.header;
     match field {
-        ItemField::Group => Cow::Borrowed(&*header.group),
-        ItemField::Name => Cow::Borrowed(&*header.name),
-        ItemField::Title => Cow::Borrowed(&*header.title),
-        ItemField::Url => Cow::Borrowed(&*header.url),
-        ItemField::Input => Cow::Borrowed(&*header.input_name),
-        ItemField::Type => header.item_type.as_str(),
-        ItemField::Caption => if header.title.is_empty() { Cow::Borrowed(&*header.name) } else { Cow::Borrowed(&*header.title) },
+        ItemField::Group => Arc::clone(&header.group),
+        ItemField::Name => Arc::clone(&header.name),
+        ItemField::Title => Arc::clone(&header.title),
+        ItemField::Url => Arc::clone(&header.url),
+        ItemField::Input => Arc::clone(&header.input_name),
+        ItemField::Type => header.item_type.intern(),
+        ItemField::Caption => if header.title.is_empty() { Arc::clone(&header.name) } else { Arc::clone(&header.title) },
     }
 }
 
-pub fn set_field_value(pli: &mut PlaylistItem, field: ItemField, value: String, interner: &mut StringInterner) -> bool {
+pub fn set_field_value(pli: &mut PlaylistItem, field: ItemField, value: String) -> bool {
     let header = &mut pli.header;
     match field {
-        ItemField::Group => header.group = interner.intern(&value),
-        ItemField::Name => header.name = value,
-        ItemField::Title => header.title = value,
-        ItemField::Url => header.url = value,
-        ItemField::Input => header.input_name = interner.intern(&value),
+        ItemField::Group => header.group = value.intern(),
+        ItemField::Name => header.name = value.intern(),
+        ItemField::Title => header.title = value.intern(),
+        ItemField::Url => header.url = value.intern(),
+        ItemField::Input => header.input_name = value.intern(),
         ItemField::Caption => {
-            header.title.clone_from(&value);
-            header.name = value;
+            header.title = value.intern();
+            header.name = header.title.clone();
         }
         ItemField::Type => {},
     }
@@ -51,10 +51,10 @@ pub struct ValueProvider<'a> {
 }
 
 impl ValueProvider<'_> {
-    pub fn get(&self, field: &str) -> Option<Cow<'_, str>> {
+    pub fn get(&self, field: &str) -> Option<Arc<str>> {
         let val = self.pli.header.get_field(field)?;
         if self.match_as_ascii {
-            return Some(Cow::Owned(deunicode_string(&val).into_owned()))
+            return Some(deunicode_string(&val).into_owned().into())
         }
         Some(val)
     }
@@ -67,10 +67,10 @@ pub struct ValueAccessor<'a> {
 }
 
 impl ValueAccessor<'_> {
-    pub fn get(&self, field: &str) -> Option<Cow<'_, str>> {
+    pub fn get(&self, field: &str) -> Option<Arc<str>> {
         let val = self.pli.header.get_field(field)?;
         if self.match_as_ascii {
-            return Some(Cow::Owned(deunicode_string(&val).into_owned()))
+            return Some(deunicode_string(&val).into_owned().into())
         }
         Some(val)
     }
@@ -162,7 +162,7 @@ impl Default for Filter {
     }
 }
 
-fn get_caption<'a>(provider: &'a ValueProvider<'a>, rewc: &'a CompiledRegex) -> (bool, Cow<'a, str>) {
+fn get_caption<'a>(provider: &'a ValueProvider<'a>, rewc: &'a CompiledRegex) -> (bool, Arc<str>) {
     if let Some(value) = provider.get("title") {
         if rewc.re.is_match(&value) {
             return (true, value);
@@ -174,7 +174,7 @@ fn get_caption<'a>(provider: &'a ValueProvider<'a>, rewc: &'a CompiledRegex) -> 
             return (true, value);
         }
     }
-    (false, Cow::Borrowed(""))
+    (false, "".intern())
 }
 
 impl Filter {
@@ -186,7 +186,7 @@ impl Filter {
                } else if let Some(value) = provider.get(field.as_str()) {
                     (rewc.re.is_match(&value), value)
                 } else {
-                    (false, Cow::Borrowed(""))
+                    (false, "".intern())
                 };
                 if log_enabled!(Level::Trace) {
                     if is_match {
@@ -730,13 +730,13 @@ pub fn apply_templates_to_pattern_single(pattern: &str, templates: Option<&Vec<P
 mod tests {
     use crate::foundation::filter::{get_filter, ValueProvider};
     use crate::model::{PlaylistItem, PlaylistItemHeader};
-    use crate::utils::CONSTANTS;
+    use crate::utils::{Internable, CONSTANTS};
 
     fn create_mock_pli(name: &str, group: &str) -> PlaylistItem {
         PlaylistItem {
             header: PlaylistItemHeader {
-                name: name.to_string(),
-                group: crate::utils::intern(group),
+                name: name.into(),
+                group: group.intern(),
                 ..Default::default()
             },
         }

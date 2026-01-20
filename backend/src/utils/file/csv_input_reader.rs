@@ -6,8 +6,9 @@ use std::io;
 use std::io::{BufRead, Cursor, Error};
 use std::path::PathBuf;
 use url::Url;
+use shared::concat_string;
 use shared::model::{ConfigInputAliasDto, InputType};
-use shared::utils::{get_credentials_from_url, parse_timestamp, trim_last_slash};
+use shared::utils::{get_credentials_from_url, parse_timestamp, trim_last_slash, Internable};
 use crate::utils::request::get_local_file_content;
 
 const CSV_SEPARATOR: char = ';';
@@ -55,9 +56,9 @@ fn csv_assign_mandatory_fields(alias: &mut ConfigInputAliasDto, input_type: Inpu
                     let username = alias.username.as_deref().unwrap_or_default();
                     let domain: Vec<&str> = url.domain().unwrap_or_default().split('.').collect();
                     if domain.len() > 1 {
-                        alias.name = format!("{}_{username}", domain[domain.len() - 2]);
+                        alias.name = concat_string!(domain[domain.len() - 2], "_", username).intern();
                     } else {
-                        alias.name = username.to_string();
+                        alias.name = username.intern();
                     }
                 }
             }
@@ -83,7 +84,7 @@ fn csv_assign_config_input_column(config_input: &mut ConfigInputAliasDto, header
                 config_input.priority = priority;
             }
             FIELD_NAME => {
-                config_input.name = value.to_string();
+                config_input.name = value.intern();
             }
             FIELD_USERNAME => {
                 config_input.username = Some(value.to_string());
@@ -142,7 +143,7 @@ pub fn csv_read_inputs_from_reader(batch_input_type: InputType, reader: impl Buf
 
         let mut config_input = ConfigInputAliasDto {
             id: 0,
-            name: String::new(),
+            name: "".intern(),
             url: String::new(),
             username: None,
             password: None,

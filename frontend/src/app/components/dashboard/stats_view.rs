@@ -25,7 +25,7 @@ pub fn StatsView() -> Html {
                             html! {
                                     <Card>
                                         <StatusCard
-                                            title={provider.clone()}
+                                            title={provider.to_string()}
                                             data={connections.to_string()}
                                             footer={translate.t("LABEL.ACTIVE_PROVIDER_CONNECTIONS")}
                                         />

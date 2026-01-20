@@ -1,11 +1,11 @@
 [package]
 name = "frontend"
-version = "3.2.42"
+version = "3.2.43"
 edition = "2021"
 rust-version = "1.89.0"
 
 [dependencies]
-shared = { version = "3.2.42", path = "../shared" }
+shared = { version = "3.2.43", path = "../shared" }
 chrono = "0"
 yew = "0.21"
 yew-router = "0.18"
@@ -33,6 +33,7 @@ regex = "1.12.2"
 base64 = "0.22.1"
 cron = "0.15"
 fastrand = "2.3.0"
+indexmap = "2.12.1"
 
 [dependencies.web-sys]
 version = "0.3"

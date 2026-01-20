@@ -157,7 +157,7 @@ impl SharedStreamState {
         }
     }
 
-    async fn subscribe(&self, addr: &SocketAddr, manager: Arc<SharedStreamManager>) -> (BoxedProviderStream, Option<String>) {
+    async fn subscribe(&self, addr: &SocketAddr, manager: Arc<SharedStreamManager>) -> (BoxedProviderStream, Option<Arc<str>>) {
         let (client_tx, client_rx) = mpsc::channel(self.buf_size);
         let mut broadcast_rx = self.broadcaster.subscribe();
         let cancel_token = CancellationToken::new();
@@ -428,7 +428,7 @@ impl SharedStreamManager {
         stream_url: &str,
         addr: &SocketAddr,
         manager: Arc<SharedStreamManager>,
-    ) -> Option<(BoxedProviderStream, Option<String>)> {
+    ) -> Option<(BoxedProviderStream, Option<Arc<str>>)> {
         let shared_state_opt = {
             let mut shared_streams = self.shared_streams.write().await;
             if let Some(shared_state) = shared_streams.by_key.get(stream_url).cloned() {
@@ -464,7 +464,7 @@ impl SharedStreamManager {
         addr: &SocketAddr,
         headers: Vec<(String, String)>,
         buffer_size: usize,
-        provider_handle: Option<ProviderHandle>) -> Option<(BoxedProviderStream, Option<String>)>
+        provider_handle: Option<ProviderHandle>) -> Option<(BoxedProviderStream, Option<Arc<str>>)>
     where
         S: Stream<Item=Result<Bytes, E>> + Unpin + 'static + Send,
         E: std::fmt::Debug + Send,
@@ -487,7 +487,7 @@ impl SharedStreamManager {
         app_state: &AppState,
         stream_url: &str,
         addr: &SocketAddr,
-    ) -> Option<(BoxedProviderStream, Option<String>)> {
+    ) -> Option<(BoxedProviderStream, Option<Arc<str>>)> {
         let manager = Arc::clone(&app_state.shared_stream_manager);
         if let Some(result) = app_state.shared_stream_manager.subscribe_stream(stream_url, addr, manager).await {
             app_state.active_provider.add_shared_connection(addr, stream_url).await;

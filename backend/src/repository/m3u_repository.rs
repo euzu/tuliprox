@@ -1,22 +1,24 @@
 use crate::api::model::AppState;
-use crate::model::{AppConfig, ProxyUserCredentials};
+use crate::model::{AppConfig, ConfigInput, ProxyUserCredentials};
 use crate::model::{Config, ConfigTarget, M3uTargetOutput};
 use crate::repository::bplustree::{BPlusTree, BPlusTreeQuery};
 use crate::repository::m3u_playlist_iterator::M3uPlaylistM3uTextIterator;
-use crate::repository::storage::{get_file_path_for_db_index, get_target_storage_path};
+use crate::repository::playlist_repository::get_input_m3u_playlist_file_path;
+use crate::repository::storage::{get_input_storage_path, get_target_storage_path};
 use crate::repository::storage_const;
 use crate::repository::xtream_repository::CategoryKey;
 use crate::utils;
-use crate::utils::{async_file_writer, IO_BUFFER_SIZE};
+use crate::utils::{async_file_writer, FileReadGuard, IO_BUFFER_SIZE};
 use indexmap::IndexMap;
 use log::error;
 use shared::concat_string;
-use shared::error::{info_err, notify_err, str_to_io_error, string_to_io_error, TuliproxError};
+use shared::error::{notify_err, str_to_io_error, string_to_io_error, TuliproxError};
 use shared::model::{M3uPlaylistItem, PlaylistGroup};
 use shared::model::{PlaylistItem, PlaylistItemType, XtreamCluster};
 use std::io::Error;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::task;
@@ -158,41 +160,49 @@ pub async fn m3u_get_item_for_stream_id(stream_id: u32, app_state: &AppState, ta
     }
 }
 
-pub async fn iter_raw_m3u_playlist(config: &AppConfig, target: &ConfigTarget) -> Option<(utils::FileReadGuard, impl Iterator<Item=(M3uPlaylistItem, bool)>)> {
+pub async fn iter_raw_m3u_target_playlist(config: &AppConfig, target: &ConfigTarget, cluster: Option<XtreamCluster>) -> Option<(FileReadGuard, Box<dyn Iterator<Item=M3uPlaylistItem> + Send>)> {
     let target_path = get_target_storage_path(&config.config.load(), target.name.as_str())?;
     let m3u_path = m3u_get_file_path_for_db(&target_path);
-    if let Ok(false) = tokio::fs::try_exists(&m3u_path).await {
+
+    iter_raw_m3u_playlist::<u32, u32>(config, &m3u_path, cluster).await
+}
+
+pub async fn iter_raw_m3u_input_playlist(app_config: &AppConfig, input: &ConfigInput, cluster: Option<XtreamCluster>) -> Option<(FileReadGuard, Box<dyn Iterator<Item=M3uPlaylistItem> + Send>)> {
+    let working_dir = &app_config.config.load().working_dir;
+    let storage_path = get_input_storage_path(&input.name, working_dir).ok()?;
+    let m3u_path = get_input_m3u_playlist_file_path(&storage_path, &input.name);
+
+    iter_raw_m3u_playlist::<u32, Arc<str>>(app_config, &m3u_path, cluster).await
+}
+
+async fn iter_raw_m3u_playlist<SortKey, ItemKey>(app_config: &AppConfig, m3u_path: &Path, cluster: Option<XtreamCluster>) -> Option<(FileReadGuard, Box<dyn Iterator<Item=M3uPlaylistItem> + Send>)>
+where
+    ItemKey: Ord + Serialize + for<'de> Deserialize<'de> + Clone + Send + 'static,
+    SortKey: for<'de> Deserialize<'de> + Send + 'static,
+{
+    let file_lock = app_config.file_locks.read_lock(m3u_path).await;
+    if !tokio::fs::try_exists(m3u_path).await.unwrap_or(false) {
         return None;
     }
-    let file_lock = config.file_locks.read_lock(&m3u_path).await;
-    match BPlusTreeQuery::<u32, M3uPlaylistItem>::try_new(&m3u_path)
-        .map_err(|err| info_err!("Could not open BPlusTreeQuery {m3u_path:?} - {err}")) {
-        Ok(mut query) => {
-            let index_path = get_file_path_for_db_index(&m3u_path);
-            let items: Vec<M3uPlaylistItem> = if index_path.exists() {
-                match query.disk_iter_sorted::<u32>() {
-                    Ok(iter) => iter.filter_map(Result::ok).map(|(_, v)| v).collect(),
-                    Err(err) => {
-                        error!("Sorted index error {}: {err}", m3u_path.display());
-                        // Re-open query for fallback
-                        match BPlusTreeQuery::<u32, M3uPlaylistItem>::try_new(&m3u_path) {
-                            Ok(mut query) => query.iter().map(|(_, v)| v).collect(),
-                            Err(fallback_err) => {
-                                error!("Fallback query also failed {}: {fallback_err}", m3u_path.display());
-                                Vec::new()
-                            }
-                        }
+
+    let iter: Box<dyn Iterator<Item = M3uPlaylistItem> + Send> = {
+        match BPlusTreeQuery::<ItemKey, M3uPlaylistItem>::try_new(m3u_path) {
+            Ok(tree) => match tree.disk_iter_sorted::<SortKey>() {
+                Ok(sorted_iter) => Box::new(sorted_iter.filter_map(Result::ok).map(|(_, v)| v).filter(move |v| cluster.is_none_or(|c| v.item_type.is_cluster(c)))),
+                Err(_) => {
+                    match BPlusTreeQuery::<ItemKey, M3uPlaylistItem>::try_new(m3u_path) {
+                        Ok(tree) => Box::new(tree.disk_iter().map(|(_, v)| v).filter(move |v| cluster.is_none_or(|c| v.item_type.is_cluster(c)))),
+                        Err(_) => return None,
                     }
                 }
-            } else {
-                query.iter().map(|(_, v)| v).collect()
-            };
-
-            let len = items.len();
-            Some((file_lock, items.into_iter().enumerate().map(move |(i, v)| (v, i + 1 < len))))
+            }
+            Err(_) => {
+                return None
+            }
         }
-        Err(_) => None
-    }
+    };
+
+    Some((file_lock, iter))
 }
 
 pub async fn persist_input_m3u_playlist(app_config: &Arc<AppConfig>, m3u_path: &Path, playlist: &[PlaylistGroup]) -> Result<(), TuliproxError> {
@@ -226,7 +236,7 @@ pub async fn load_input_m3u_playlist(app_config: &Arc<AppConfig>, m3u_path: &Pat
     if tokio::fs::try_exists(m3u_path).await.unwrap_or(false) {
         // Load Items
         let _file_lock = app_config.file_locks.read_lock(m3u_path).await;
-        if let Ok(mut query) = BPlusTreeQuery::<String, M3uPlaylistItem>::try_new(m3u_path) {
+        if let Ok(mut query) = BPlusTreeQuery::<Arc<str>, M3uPlaylistItem>::try_new(m3u_path) {
             let mut group_cnt = 0;
             for (_, ref item) in query.iter() {
                 let cluster = XtreamCluster::try_from(item.item_type).unwrap_or(XtreamCluster::Live);

@@ -126,7 +126,7 @@ pub static CONSTANTS: LazyLock<Constants> = LazyLock::new(||
         re_filename: Regex::new(r"[^A-Za-z0-9_.-]").unwrap(),
         re_remove_filename_ending: Regex::new(r"[_.\s-]$").unwrap(),
         re_whitespace: Regex::new(r"\s+").unwrap(),
-        re_hls_uri: Regex::new(r#"URI="([^"]+)""#).unwrap(),
+        re_hls_uri: Regex::new(r#"URI=["']([^"']+)["']"#).unwrap(),
 
         sanitize: AtomicBool::new(true),
         export_style_config: ExportStyleConfig {

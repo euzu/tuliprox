@@ -70,6 +70,7 @@ pub fn TagList(props: &TagListProps) -> Html {
         Callback::from(move |e: KeyboardEvent| {
             if e.key() == "Enter" {
                 e.prevent_default();
+                e.stop_propagation();
                 let val = (*new_tag).trim().to_string();
                 if !val.is_empty() && !tag_state.iter().any(|t| t.label == val) {
                     let mut updated = (*tag_state).clone();

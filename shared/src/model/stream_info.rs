@@ -15,8 +15,10 @@ pub struct StreamChannel {
     pub cluster: XtreamCluster,
     #[serde(with = "arc_str_serde")]
     pub group: Arc<str>,
-    pub title: String,
-    pub url: String,
+    #[serde(with = "arc_str_serde")]
+    pub title: Arc<str>,
+    #[serde(with = "arc_str_serde")]
+    pub url: Arc<str>,
     pub shared: bool,
 }
 
@@ -34,9 +36,9 @@ impl XtreamPlaylistItem {
             provider_id: self.provider_id,
             item_type: self.item_type,
             cluster: self.xtream_cluster,
-            group: self.group.clone(),
-            title: longest(self.title.as_str(), self.name.as_str()).to_string(),
-            url: self.url.clone(),
+            group: Arc::clone(&self.group),
+            title: Arc::clone(longest(&self.title, &self.name)),
+            url: Arc::clone(&self.url),
             shared: false,
         }
     }
@@ -50,9 +52,9 @@ impl M3uPlaylistItem {
             provider_id: self.get_provider_id().unwrap_or_default(),
             item_type: self.item_type,
             cluster: XtreamCluster::try_from(self.item_type).unwrap_or(XtreamCluster::Live),
-            group: self.group.clone(),
-            title: longest(self.title.as_str(), self.name.as_str()).to_string(),
-            url: self.url.clone(),
+            group: Arc::clone(&self.group),
+            title: Arc::clone(longest(&self.title, &self.name)),
+            url: Arc::clone(&self.url),
             shared: false,
         }
     }

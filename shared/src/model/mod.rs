@@ -29,6 +29,7 @@ mod xtream;
 mod info_doc_utils;
 mod playlist_info_document;
 mod regex_cache;
+mod uuidtype;
 
 pub use self::cluster_flags::*;
 pub use self::playlist::*;
@@ -58,3 +59,4 @@ pub use self::stream_properties::*;
 pub use self::xtream::*;
 pub use self::playlist_info_document::*;
 pub use self::regex_cache::*;
+pub use self::uuidtype::*;

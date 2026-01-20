@@ -61,6 +61,7 @@ pub fn Login() -> Html {
         Callback::from(move |e: KeyboardEvent| {
             if e.key() == "Enter" {
                 e.prevent_default();
+                e.stop_propagation();
                 authenticator.run();
             }
         })

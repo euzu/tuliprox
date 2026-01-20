@@ -1,5 +1,5 @@
-use crate::api::api_utils::{get_user_target, serve_file};
-use crate::api::api_utils::{get_user_target_by_credentials, resource_response, try_unwrap_body};
+use crate::api::api_utils::{get_user_target, serve_file, get_user_target_by_credentials,
+                            resource_response, try_unwrap_body, internal_server_error};
 use crate::api::model::AppState;
 use crate::api::model::UserApiRequest;
 use crate::model::{get_attr_value, Config, EPG_TAG_ICON, EPG_TAG_PROGRAMME};
@@ -7,7 +7,7 @@ use crate::model::{ConfigTarget, ProxyUserCredentials, TargetOutput};
 use crate::repository::storage::get_target_storage_path;
 use crate::repository::storage_const;
 use crate::repository::xtream_repository::{xtream_get_epg_file_path, xtream_get_storage_path};
-use crate::utils;
+use crate::{utils};
 use crate::utils::{async_file_reader, deobscure_text, obscure_text};
 use axum::response::IntoResponse;
 use chrono::{DateTime, Duration, FixedOffset, NaiveDateTime, Offset, TimeZone, Utc};
@@ -150,7 +150,7 @@ pub async fn serve_epg(
     epg_path: &Path,
     user: &ProxyUserCredentials,
     target: &Arc<ConfigTarget>,
-    filter: Option<String>,
+    filter: Option<Arc<str>>,
 ) -> axum::response::Response {
     if let Ok(exists) = tokio::fs::try_exists(epg_path).await {
         if exists {
@@ -188,7 +188,7 @@ async fn serve_epg_with_rewrites(
     rewrite_urls: bool,
     secret: &[u8; 16],
     base_url: &str,
-    filter: Option<String>,
+    filter: Option<Arc<str>>,
 ) -> axum::response::Response {
     match tokio::fs::try_exists(epg_path).await {
         Ok(exists) => {
@@ -256,14 +256,14 @@ async fn serve_epg_with_rewrites(
                                                 .filter_map(Result::ok)
                                                 .find(|a| a.key.as_ref() == b"id")
                                                 .and_then(|a| a.unescape_value().ok())
-                                                .is_some_and(|v| !flt.eq(v.as_ref()))
+                                                .is_some_and(|v| flt.as_ref() != v.as_ref())
                                         }
                                         b"programme" => {
                                             e.attributes()
                                                 .filter_map(Result::ok)
                                                 .find(|a| a.key.as_ref() == b"channel")
                                                 .and_then(|a| a.unescape_value().ok())
-                                                .is_some_and(|v| !flt.eq(v.as_ref()))
+                                                .is_some_and(|v| flt.as_ref() != v.as_ref())
                                         }
                                         _ => false,
                                     };
@@ -409,7 +409,7 @@ async fn serve_epg_with_rewrites(
                     .header(axum::http::header::CONTENT_ENCODING, "gzip") // Set Content-Encoding header
                     .body(axum::body::Body::from_stream(body_stream)))
         }
-        Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Err(_) => internal_server_error!(),
     }
 }
 
@@ -446,7 +446,6 @@ async fn xmltv_api(
     serve_epg(&app_state, &epg_path, &user, &target, None).await
 }
 
-#[axum::debug_handler]
 async fn epg_api_resource(
     req_headers: axum::http::HeaderMap,
     axum::extract::Query(api_req): axum::extract::Query<UserApiRequest>,

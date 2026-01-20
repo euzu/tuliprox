@@ -1,9 +1,8 @@
 // Import the new MediaQuality struct
-use shared::utils::is_blank_optional_string;
 use crate::model::MediaQuality;
 use crate::model::{ApiProxyServerInfo, AppConfig, ProxyUserCredentials};
 use crate::model::{ConfigTarget, StrmTargetOutput};
-use crate::repository::storage::{ensure_target_storage_path};
+use crate::repository::storage::ensure_target_storage_path;
 use crate::repository::storage_const;
 use crate::utils::{async_file_reader, async_file_writer, normalize_string_path, truncate_filename,
                    IO_BUFFER_SIZE};
@@ -12,14 +11,16 @@ use filetime::{set_file_times, FileTime};
 use log::{error, trace};
 use regex::Regex;
 use serde::Serialize;
-use shared::error::{TuliproxError, info_err_res};
-use shared::model::{ClusterFlags, PlaylistGroup, PlaylistItem, PlaylistItemType, StreamProperties, StrmExportStyle, UUIDType};
-use shared::utils::{ arc_str_serde, extract_extension_from_url, hash_bytes, hash_string_as_hex, truncate_string, ExportStyleConfig, CONSTANTS};
+use shared::error::{info_err_res, TuliproxError};
+use shared::model::{ClusterFlags, PlaylistGroup, PlaylistItem, PlaylistItemType, StreamProperties, StrmExportStyle};
+use shared::utils::{arc_str_option_serde, arc_str_serde, extract_extension_from_url, hash_bytes,
+                    hash_string_as_hex, is_blank_optional_arc_str, truncate_string, ExportStyleConfig, CONSTANTS};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs::{create_dir_all, remove_dir, remove_file, File};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+use shared::model::UUIDType;
 
 /// Sanitizes a string to be safe for use as a file or directory name by
 /// following a strict "allow-list" approach and discarding invalid characters.
@@ -84,7 +85,7 @@ fn extract_match(name: &str, pattern: &Regex) -> (String, Option<String>) {
 fn style_rename_year<'a>(
     name: &'a str,
     style: &ExportStyleConfig,
-    release_date: Option<&'a String>,
+    release_date: Option<&Arc<str>>,
 ) -> (std::borrow::Cow<'a, str>, Option<u32>) {
     let mut years = Vec::new();
 
@@ -132,18 +133,20 @@ pub fn strm_get_file_paths(file_prefix: &str, target_path: &Path) -> PathBuf {
 struct StrmItemInfo {
     #[serde(with = "arc_str_serde")]
     group: Arc<str>,
-    title: String,
+    #[serde(with = "arc_str_serde")]
+    title: Arc<str>,
     item_type: PlaylistItemType,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     provider_id: Option<u32>,
     virtual_id: u32,
     #[serde(with = "arc_str_serde")]
     input_name: Arc<str>,
-    url: String,
-    #[serde(default, skip_serializing_if = "is_blank_optional_string")]
-    series_name: Option<String>,
-    #[serde(default, skip_serializing_if = "is_blank_optional_string")]
-    release_date: Option<String>,
+    #[serde(with = "arc_str_serde")]
+    url: Arc<str>,
+    #[serde(with = "arc_str_option_serde", skip_serializing_if = "is_blank_optional_arc_str")]
+    series_name: Option<Arc<str>>,
+    #[serde(with = "arc_str_option_serde", skip_serializing_if = "is_blank_optional_arc_str")]
+    release_date: Option<Arc<str>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     season: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -209,7 +212,7 @@ fn extract_item_info(pli: &mut PlaylistItem) -> StrmItemInfo {
         input_name,
         url,
         series_name,
-        release_date: release_date.as_deref().map(ToString::to_string),
+        release_date,
         season,
         episode,
         added: added.as_ref().map_or_else(|| Some(0), |a| a.parse::<u64>().ok()),
@@ -753,7 +756,7 @@ pub async fn write_strm_playlist(
         // create content
         let url = get_strm_url(target_force_redirect, user_and_server_info.as_ref(), &strm_file.strm_info);
         let mut content = target_output.strm_props.as_ref().map_or_else(Vec::new, std::clone::Clone::clone);
-        content.push(url);
+        content.push(url.to_string());
         let content_text = content.join("\r\n");
         let content_as_bytes = content_text.as_bytes();
         let content_hash = hash_bytes(content_as_bytes);
@@ -922,7 +925,7 @@ fn get_strm_url(
     target_force_redirect: Option<&ClusterFlags>,
     user_and_server_info: Option<&(ProxyUserCredentials, ApiProxyServerInfo)>,
     str_item_info: &StrmItemInfo,
-) -> String {
+) -> Arc<str> {
     let Some((user, server_info)) = user_and_server_info else { return str_item_info.url.clone(); };
 
     let redirect = user.proxy.is_redirect(str_item_info.item_type) || target_force_redirect.is_some_and(|f| f.has_cluster(str_item_info.item_type));
@@ -940,7 +943,7 @@ fn get_strm_url(
         | PlaylistItemType::LocalVideo => Some("movie"),
         _ => None,
     } {
-        let url = str_item_info.url.as_str();
+        let url = &str_item_info.url;
         let ext = extract_extension_from_url(url)
             .map_or_else(String::new, std::string::ToString::to_string);
         format!(
@@ -949,7 +952,7 @@ fn get_strm_url(
             user.username,
             user.password,
             str_item_info.virtual_id
-        )
+        ).into()
     } else {
         str_item_info.url.clone()
     }

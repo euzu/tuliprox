@@ -1,12 +1,15 @@
 use crate::app::components::config::HasFormData;
 use crate::app::components::select::Select;
-use crate::app::components::{BlockId, BlockInstance, Card, ClusterFlagsInput, ClusterFlagsInputMode, DropDownOption, DropDownSelection, EditMode, FilterInput, Panel, SourceEditorContext, TextButton};
+use crate::app::components::{BlockId, BlockInstance, Card, ClusterFlagsInput, ClusterFlagsInputMode, DropDownOption, DropDownSelection, EditMode, FilterInput, IconButton, Panel, SourceEditorContext, TextButton};
 use crate::{config_field_child, edit_field_bool, edit_field_list_option, edit_field_text, generate_form_reducer};
 use shared::model::{ClusterFlags, ConfigTargetDto, ConfigTargetOptions, ProcessingOrder};
 use std::fmt::Display;
 use std::rc::Rc;
-use yew::{classes, function_component, html, use_context, use_effect_with, use_memo, use_reducer, use_state, Callback, Html, Properties, UseReducerHandle};
+use std::str::FromStr;
+use yew::{function_component, html, use_context, use_effect_with, use_memo, use_reducer, use_state, Callback, Html, Properties, UseReducerHandle};
 use yew_i18n::use_translation;
+use shared::error::TuliproxError;
+use shared::info_err_res;
 
 const LABEL_ENABLED: &str = "LABEL.ENABLED";
 const LABEL_NAME: &str = "LABEL.NAME";
@@ -21,11 +24,30 @@ const LABEL_IGNORE_LOGO: &str = "LABEL.IGNORE_LOGO";
 const LABEL_SHARE_LIVE_STREAMS: &str = "LABEL.SHARE_LIVE_STREAMS";
 const LABEL_REMOVE_DUPLICATES: &str = "LABEL.REMOVE_DUPLICATES";
 const LABEL_FORCE_REDIRECT: &str = "LABEL.FORCE_REDIRECT";
+const LABEL_MAIN: &str = "LABEL.MAIN_CONFIG";
+const LABEL_OPTIONS: &str = "LABEL.OPTIONS";
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum TargetFormPage {
     Main,
     Options,
+}
+
+impl TargetFormPage {
+    const MAIN: &str = "Main";
+    const OPTIONS: &str = "Options";
+}
+
+impl FromStr for TargetFormPage {
+    type Err = TuliproxError;
+
+    fn from_str(s: &str) -> Result<Self, TuliproxError> {
+        match s {
+            Self::MAIN => Ok(TargetFormPage::Main),
+            Self::OPTIONS => Ok(TargetFormPage::Options),
+            _ => info_err_res!("Unknown target form page: {s}"),
+        }
+    }
 }
 
 impl Display for TargetFormPage {
@@ -89,12 +111,18 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
             modified: false,
         });
 
-    let view_visible = use_state(|| TargetFormPage::Main.to_string());
+    let view_visible = use_state(|| TargetFormPage::Main);
 
-    let on_tab_click = {
-        let view_visible = view_visible.clone();
-        Callback::from(move |page: TargetFormPage| view_visible.set(page.to_string()))
+
+    let handle_menu_click = {
+        let active_menu = view_visible.clone();
+        Callback::from(move |(name, _): (String, _)| {
+            if let Ok(view_type) = TargetFormPage::from_str(&name) {
+                active_menu.set(view_type);
+            }
+        })
     };
+
 
     let processing_orders = use_memo(target_form_state.clone(), |target_state: &UseReducerHandle<ConfigTargetFormState>| {
         let default_po = target_state.form.processing_order;
@@ -208,32 +236,8 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
 
     let render_edit_mode = || {
         html! {
-            <div class="tp__input-form__body">
-                <div class="tp__tab-header">
-                {
-                    for [
-                        TargetFormPage::Main,
-                        TargetFormPage::Options,
-                    ].iter().map(|page| {
-                        let page_str = page.to_string();
-                        let active = *view_visible == page_str;
-                        let on_tab_click = {
-                            let on_tab_click = on_tab_click.clone();
-                            let page = *page;
-                            Callback::from(move |_| on_tab_click.emit(page))
-                        };
-                        html! {
-                            <button
-                                class={classes!("tp__tab-button", if active { "active" } else { "" })}
-                                onclick={on_tab_click}
-                            >
-                                { page_str.clone() }
-                            </button>
-                        }
-                    })
-                }
-            </div>
-            <div class="tp__input-form__body__pages">
+            <div class="tp__source-editor-form__body">
+            <div class="tp__source-editor-form__body__pages">
                 <Panel value={TargetFormPage::Main.to_string()} active={view_visible.to_string()}>
                 {render_target()}
                 </Panel>
@@ -242,6 +246,15 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
                 </Panel>
             </div>
             </div>
+        }
+    };
+
+    let render_sidebar = || {
+        html! {
+            <div class="tp__source-editor-form__sidebar">
+            <IconButton class={format!("tp__app-sidebar-menu--{}{}", TargetFormPage::Main, if *view_visible == TargetFormPage::Main { " active" } else {""})}  icon="Settings" hint={translate.t(LABEL_MAIN)} name={TargetFormPage::Main.to_string()} onclick={&handle_menu_click}></IconButton>
+            <IconButton class={format!("tp__app-sidebar-menu--{}{}", TargetFormPage::Options, if *view_visible == TargetFormPage::Options { " active" } else {""})}  icon="Options" hint={translate.t(LABEL_OPTIONS)} name={TargetFormPage::Options.to_string()} onclick={&handle_menu_click}></IconButton>
+          </div>
         }
     };
 
@@ -281,7 +294,10 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
                 title={ translate.t("LABEL.OK")}
                 onclick={handle_apply_target}></TextButton>
           </div>
-            { render_edit_mode() }
+            <div class="tp__source-editor-form__content">
+                { render_sidebar() }
+                { render_edit_mode() }
+            </div>
         </div>
         }
 }

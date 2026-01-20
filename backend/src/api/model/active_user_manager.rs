@@ -7,7 +7,8 @@ use arc_swap::ArcSwapOption;
 use jsonwebtoken::get_current_timestamp;
 use log::{debug, info};
 use shared::model::{ActiveUserConnectionChange, StreamChannel, StreamInfo, UserConnectionPermission, VirtualId};
-use shared::utils::{current_time_secs, default_grace_period_millis, default_grace_period_timeout_secs, intern, sanitize_sensitive_info, strip_port};
+use shared::utils::{current_time_secs, default_grace_period_millis, default_grace_period_timeout_secs,
+                    sanitize_sensitive_info, strip_port, Internable};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -31,8 +32,8 @@ fn get_grace_options(config: &Config) -> (u64, u64) {
 pub struct UserSession {
     pub token: String,
     pub virtual_id: u32,
-    pub provider: String,
-    pub stream_url: String,
+    pub provider: Arc<str>,
+    pub stream_url: Arc<str>,
     pub addr: SocketAddr,
     pub ts: u64,
     pub permission: UserConnectionPermission,
@@ -250,8 +251,8 @@ impl ActiveUserManager {
             for stream in &mut connection_data.streams {
                 if &stream.addr == addr {
                     stream.provider = String::from("tuliprox");
-                    stream.channel.title = video_type.to_string();
-                    stream.channel.group = intern("");
+                    stream.channel.title = video_type.to_string().into();
+                    stream.channel.group = "".intern();
                     return Some(stream.clone());
                 }
             }
@@ -351,8 +352,8 @@ impl ActiveUserManager {
         UserSession {
             token: session_token.to_string(),
             virtual_id,
-            provider: provider.to_string(),
-            stream_url: stream_url.to_string(),
+            provider: provider.intern(),
+            stream_url: stream_url.intern(),
             addr: *addr,
             ts: current_time_secs(),
             permission: connection_permission,
@@ -379,11 +380,11 @@ impl ActiveUserManager {
         for session in &mut connection_data.sessions {
             if session.token == session_token {
                 session.ts = current_time_secs();
-                if session.stream_url != stream_url {
-                    session.stream_url = stream_url.to_string();
+                if &*session.stream_url != stream_url {
+                    session.stream_url = stream_url.intern();
                 }
-                if session.provider != provider {
-                    session.provider = provider.to_string();
+                if &*session.provider != provider {
+                    session.provider = provider.intern();
                 }
                 session.permission = connection_permission;
                 debug_if_enabled!("Using session for user {} with url: {}", user.username, sanitize_sensitive_info(stream_url));

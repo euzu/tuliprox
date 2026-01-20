@@ -1,75 +1,86 @@
-use crate::utils::{deserialize_as_option_string, deserialize_as_string_array,
+use crate::utils::{deserialize_as_string_array,
                    deserialize_number_from_string, deserialize_number_from_string_or_zero,
-                   deserialize_as_string, string_default_on_null, serialize_option_string_as_null_if_empty,
-                   deserialize_json_as_opt_string, serialize_json_as_opt_string};
+                   deserialize_json_as_opt_string, serialize_json_as_opt_string, arc_str_option_serde, arc_str_serde};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct XtreamVideoInfoMovieData {
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub name: String,
+    #[serde(default, with = "arc_str_serde")]
+    pub name: Arc<str>,
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
     pub category_id: u32,
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
     pub stream_id: u32,
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub direct_source: String,
-    #[serde(default, deserialize_with = "deserialize_as_option_string", serialize_with = "serialize_option_string_as_null_if_empty")]
-    pub custom_sid: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_as_string")]
-    pub added: String,
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub container_extension: String,
+    #[serde(default, with = "arc_str_serde")]
+    pub direct_source: Arc<str>,
+    #[serde(default, serialize_with = "arc_str_option_serde::serialize_null_if_empty", deserialize_with = "arc_str_option_serde::deserialize")]
+    pub custom_sid: Option<Arc<str>>,
+    #[serde(default, with = "arc_str_serde")]
+    pub added: Arc<str>,
+    #[serde(default, with = "arc_str_serde")]
+    pub container_extension: Arc<str>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct XtreamVideoInfoInfo {
-    #[serde(default)]
-    pub kinopoisk_url: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_as_string")]
-    pub tmdb_id: String, // is in get_vod_streams
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub name: String, // is in get_vod_streams
-    pub o_name: Option<String>,
-    pub cover_big: Option<String>,
-    pub movie_image: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_as_option_string")]
-    pub releasedate: Option<String>,
+    #[serde(default, with = "arc_str_option_serde")]
+    pub kinopoisk_url: Option<Arc<str>>,
+    #[serde(default, with = "arc_str_serde")]
+    pub tmdb_id: Arc<str>, // is in get_vod_streams
+    #[serde(default, with = "arc_str_serde")]
+    pub name: Arc<str>, // is in get_vod_streams
+    #[serde(default, with = "arc_str_option_serde")]
+    pub o_name: Option<Arc<str>>,
+    #[serde(default, with = "arc_str_option_serde")]
+    pub cover_big: Option<Arc<str>>,
+    #[serde(default, with = "arc_str_option_serde")]
+    pub movie_image: Option<Arc<str>>,
+    #[serde(default, with = "arc_str_option_serde")]
+    pub releasedate: Option<Arc<str>>,
     #[serde(default, deserialize_with = "deserialize_number_from_string")]
     pub episode_run_time: Option<u32>,
-    pub youtube_trailer: Option<String>,
-    pub director: Option<String>,
-    pub actors: Option<String>,
-    pub cast: Option<String>,
-    pub description: Option<String>,
-    pub plot: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_as_option_string")]
-    pub age: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_as_option_string")]
-    pub mpaa_rating: Option<String>,
+    #[serde(default, with = "arc_str_option_serde")]
+    pub youtube_trailer: Option<Arc<str>>,
+    #[serde(default, with = "arc_str_option_serde")]
+    pub director: Option<Arc<str>>,
+    #[serde(default, with = "arc_str_option_serde")]
+    pub actors: Option<Arc<str>>,
+    #[serde(default, with = "arc_str_option_serde")]
+    pub cast: Option<Arc<str>>,
+    #[serde(default, with = "arc_str_option_serde")]
+    pub description: Option<Arc<str>>,
+    #[serde(default, with = "arc_str_option_serde")]
+    pub plot: Option<Arc<str>>,
+    #[serde(default, with = "arc_str_option_serde")]
+    pub age: Option<Arc<str>>,
+    #[serde(default, with = "arc_str_option_serde")]
+    pub mpaa_rating: Option<Arc<str>>,
     #[serde(default)]
     pub rating_count_kinopoisk: u32,
-    pub country: Option<String>,
-    pub genre: Option<String>,
+    #[serde(default, with = "arc_str_option_serde")]
+    pub country: Option<Arc<str>>,
+    #[serde(default, with = "arc_str_option_serde")]
+    pub genre: Option<Arc<str>>,
     #[serde(default, deserialize_with = "deserialize_as_string_array")]
-    pub backdrop_path: Option<Vec<String>>,
-    #[serde(default, deserialize_with = "deserialize_as_option_string")]
-    pub duration_secs: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_as_option_string")]
-    pub duration: Option<String>,
+    pub backdrop_path: Option<Vec<Arc<str>>>,
+    #[serde(default, with = "arc_str_option_serde")]
+    pub duration_secs: Option<Arc<str>>,
+    #[serde(default, with = "arc_str_option_serde")]
+    pub duration: Option<Arc<str>>,
     #[serde(default, serialize_with = "serialize_json_as_opt_string", deserialize_with = "deserialize_json_as_opt_string")]
-    pub video: Option<String>,
+    pub video: Option<Arc<str>>,
     #[serde(default, serialize_with = "serialize_json_as_opt_string", deserialize_with = "deserialize_json_as_opt_string")]
-    pub audio: Option<String>,
+    pub audio: Option<Arc<str>>,
     #[serde(default)]
     pub bitrate: u32,
-    #[serde(default, deserialize_with = "deserialize_as_option_string")]
-    pub runtime: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_as_option_string")]
-    pub status: Option<String>,
+    #[serde(default, with = "arc_str_option_serde")]
+    pub runtime: Option<Arc<str>>,
+    #[serde(default, with = "arc_str_option_serde")]
+    pub status: Option<Arc<str>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -81,61 +92,61 @@ pub struct XtreamVideoInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct XtreamSeriesInfoSeason {
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub air_date: String,
+    #[serde(default, with = "arc_str_serde")]
+    pub air_date: Arc<str>,
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
     pub episode_count: u32,
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
     pub id: u32,
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub name: String,
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub overview: String,
+    #[serde(default, with = "arc_str_serde")]
+    pub name: Arc<str>,
+    #[serde(default, with = "arc_str_serde")]
+    pub overview: Arc<str>,
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
     pub season_number: u32,
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
     pub vote_average: f64,
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub cover: String,
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub cover_big: String,
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub cover_tmdb: String,
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub duration: String,
+    #[serde(default, with = "arc_str_serde")]
+    pub cover: Arc<str>,
+    #[serde(default, with = "arc_str_serde")]
+    pub cover_big: Arc<str>,
+    #[serde(default, with = "arc_str_serde")]
+    pub cover_tmdb: Arc<str>,
+    #[serde(default, with = "arc_str_serde")]
+    pub duration: Arc<str>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[allow(non_snake_case)]
 pub struct XtreamSeriesInfoInfo {
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub(crate) name: String,
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub cover: String,
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub plot: String,
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub cast: String,
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub director: String,
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub genre: String,
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub release_date: String,
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub last_modified: String,
+    #[serde(default, with = "arc_str_serde")]
+    pub(crate) name: Arc<str>,
+    #[serde(default, with = "arc_str_serde")]
+    pub cover: Arc<str>,
+    #[serde(default, with = "arc_str_serde")]
+    pub plot: Arc<str>,
+    #[serde(default, with = "arc_str_serde")]
+    pub cast: Arc<str>,
+    #[serde(default, with = "arc_str_serde")]
+    pub director: Arc<str>,
+    #[serde(default, with = "arc_str_serde")]
+    pub genre: Arc<str>,
+    #[serde(default, with = "arc_str_serde")]
+    pub release_date: Arc<str>,
+    #[serde(default, with = "arc_str_serde")]
+    pub last_modified: Arc<str>,
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
     pub rating: f64,
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
     pub rating_5based: f64,
     #[serde(default, deserialize_with = "deserialize_as_string_array")]
-    pub backdrop_path: Option<Vec<String>>,
+    pub backdrop_path: Option<Vec<Arc<str>>>,
     #[serde(default, deserialize_with = "deserialize_number_from_string")]
     pub tmdb: Option<u32>,
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub youtube_trailer: String,
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub episode_run_time: String,
+    #[serde(default, with = "arc_str_serde")]
+    pub youtube_trailer: Arc<str>,
+    #[serde(default, with = "arc_str_serde")]
+    pub episode_run_time: Arc<str>,
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
     pub category_id: u32,
 }
@@ -143,24 +154,24 @@ pub struct XtreamSeriesInfoInfo {
 #[allow(non_snake_case)]
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct XtreamSeriesInfoEpisodeInfo {
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub air_date: String,
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub crew: String,
+    #[serde(default, with = "arc_str_serde")]
+    pub air_date: Arc<str>,
+    #[serde(default, with = "arc_str_serde")]
+    pub crew: Arc<str>,
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
     pub rating: f64,
     #[serde(default, deserialize_with = "deserialize_number_from_string")]
     pub id: Option<u32>,
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
     pub duration_secs: u32,
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub duration: String,
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub movie_image: String,
-    #[serde(default, deserialize_with = "deserialize_json_as_opt_string")]
-    pub video: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_json_as_opt_string")]
-    pub audio: Option<String>,
+    #[serde(default, with = "arc_str_serde")]
+    pub duration: Arc<str>,
+    #[serde(default, with = "arc_str_serde")]
+    pub movie_image: Arc<str>,
+    #[serde(default, serialize_with = "serialize_json_as_opt_string", deserialize_with = "deserialize_json_as_opt_string")]
+    pub video: Option<Arc<str>>,
+    #[serde(default, serialize_with = "serialize_json_as_opt_string", deserialize_with = "deserialize_json_as_opt_string")]
+    pub audio: Option<Arc<str>>,
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
     pub bitrate: u32,
 }
@@ -172,20 +183,20 @@ pub struct XtreamSeriesInfoEpisode {
     pub id: u32,
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
     pub episode_num: u32,
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub title: String,
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub container_extension: String,
+    #[serde(default, with = "arc_str_serde")]
+    pub title: Arc<str>,
+    #[serde(default, with = "arc_str_serde")]
+    pub container_extension: Arc<str>,
     #[serde(default)]
     pub info: Option<XtreamSeriesInfoEpisodeInfo>,
-    #[serde(default, deserialize_with = "deserialize_as_option_string", serialize_with = "serialize_option_string_as_null_if_empty")]
-    pub custom_sid: Option<String>,
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub added: String,
+    #[serde(default, serialize_with = "arc_str_option_serde::serialize_null_if_empty", deserialize_with = "arc_str_option_serde::deserialize")]
+    pub custom_sid: Option<Arc<str>>,
+    #[serde(default, with = "arc_str_serde")]
+    pub added: Arc<str>,
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
     pub season: u32,
-    #[serde(default, deserialize_with = "string_default_on_null")]
-    pub direct_source: String,
+    #[serde(default, with = "arc_str_serde")]
+    pub direct_source: Arc<str>,
 }
 
 impl XtreamSeriesInfoEpisode {

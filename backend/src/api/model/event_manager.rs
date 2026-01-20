@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use log::{trace};
 use shared::model::{ActiveUserConnectionChange, ConfigType, LibraryScanSummary, PlaylistUpdateState, SystemInfo};
 
@@ -6,7 +7,7 @@ use shared::model::{ActiveUserConnectionChange, ConfigType, LibraryScanSummary, 
 pub enum EventMessage {
     ServerError(String),
     ActiveUser(ActiveUserConnectionChange), // user_count, connection count
-    ActiveProvider(String, usize), // provider name, connections
+    ActiveProvider(Arc<str>, usize), // provider name, connections
     ConfigChange(ConfigType),
     PlaylistUpdate(PlaylistUpdateState),
     PlaylistUpdateProgress(String, String),
@@ -41,8 +42,8 @@ impl EventManager {
         }
     }
 
-    pub fn send_provider_event(&self, provider: &str, connection_count: usize) {
-        if !self.send_event(EventMessage::ActiveProvider(String::from(provider), connection_count)) {
+    pub fn send_provider_event(&self, provider: &Arc<str>, connection_count: usize) {
+        if !self.send_event(EventMessage::ActiveProvider(Arc::clone(provider), connection_count)) {
             trace!("Failed to send connection change: {provider}: {connection_count}");
         }
     }

@@ -1,4 +1,5 @@
 use std::rc::Rc;
+use std::sync::Arc;
 use shared::model::{ActiveUserConnectionChange, ConfigType, LibraryScanSummary, PlaylistUpdateState, StatusCheck, SystemInfo};
 use crate::model::BusyStatus;
 
@@ -9,7 +10,7 @@ pub enum EventMessage {
     ServerError(String),
     ServerStatus(Rc<StatusCheck>),
     ActiveUser(ActiveUserConnectionChange),
-    ActiveProvider(String, usize), // single provider
+    ActiveProvider(Arc<str>, usize), // single provider
     ActiveProviderCount(usize), // all provider
     ConfigChange(ConfigType),
     Busy(BusyStatus),

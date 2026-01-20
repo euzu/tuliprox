@@ -1,4 +1,4 @@
-use crate::api::api_utils::{json_or_bin_response, try_unwrap_body};
+use crate::api::api_utils::{json_or_bin_response, try_unwrap_body, internal_server_error};
 use crate::api::endpoints::download_api;
 use crate::api::endpoints::user_api::user_api_register;
 use crate::api::endpoints::v1_api_playlist::v1_api_playlist_register;
@@ -9,7 +9,7 @@ use crate::utils::ip_checker::get_ips;
 use crate::{VERSION};
 use axum::response::IntoResponse;
 use shared::model::{default_geoip_url, InputFetchMethod, IpCheckDto, StatusCheck};
-use shared::utils::{concat_path_leading_slash};
+use shared::utils::{concat_path_leading_slash, Internable};
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Cursor};
 use std::sync::Arc;
@@ -83,7 +83,7 @@ async fn geoip_update(axum::extract::State(app_state): axum::extract::State<Arc<
 
             let url = if geoip.url.trim().is_empty() { default_geoip_url() } else { geoip.url.clone() };
             let input_source =  InputSource {
-                name: String::from("GeoIP"),
+                name: "GeoIP".intern(),
                 url,
                 username: None,
                 password: None,
@@ -112,11 +112,9 @@ async fn geoip_update(axum::extract::State(app_state): axum::extract::State<Arc<
                            },
                            (None, Some(err)) => {
                                error!("Failed to process geoip db: {err}");
-                               axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                               internal_server_error!()
                            },
-                           _ => {
-                               axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
-                           }
+                           _ => internal_server_error!()
                        }
                    }
                    Err(err) => {

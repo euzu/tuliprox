@@ -7,9 +7,12 @@ use shared::model::{ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, 
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::rc::Rc;
+use std::str::FromStr;
 use web_sys::MouseEvent;
-use yew::{classes, function_component, html, use_context, use_effect_with, use_memo, use_reducer, use_state, Callback, Html, Properties, UseReducerHandle};
+use yew::{function_component, html, use_context, use_effect_with, use_memo, use_reducer, use_state, Callback, Html, Properties, UseReducerHandle};
 use yew_i18n::use_translation;
+use shared::error::TuliproxError;
+use shared::info_err_res;
 
 const LABEL_NAME: &str = "LABEL.NAME";
 const LABEL_INPUT_TYPE: &str = "LABEL.INPUT_TYPE";
@@ -35,6 +38,12 @@ const LABEL_XTREAM_LIVE_STREAM_USE_PREFIX: &str = "LABEL.LIVE_STREAM_USE_PREFIX"
 const LABEL_XTREAM_LIVE_STREAM_WITHOUT_EXTENSION: &str = "LABEL.LIVE_STREAM_WITHOUT_EXTENSION";
 const LABEL_CACHE_DURATION: &str = "LABEL.CACHE_DURATION";
 
+const LABEL_MAIN: &str = "LABEL.MAIN_CONFIG";
+const LABEL_OPTIONS: &str = "LABEL.OPTIONS";
+const LABEL_STAGED: &str = "LABEL.STAGED";
+const LABEL_ADVANCED: &str = "LABEL.ADVANCED";
+const LABEL_ALIAS: &str = "LABEL.ALIAS";
+
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum InputFormPage {
@@ -42,15 +51,40 @@ enum InputFormPage {
     Options,
     Staged,
     Advanced,
+    Alias
+}
+
+impl InputFormPage {
+    const MAIN: &str = "Main";
+    const OPTIONS: &str = "Options";
+    const STAGED: &str = "Staged";
+    const ADVANCED: &str = "Advanced";
+    const ALIAS: &str = "Alias";
+}
+
+impl FromStr for InputFormPage {
+    type Err = TuliproxError;
+
+    fn from_str(s: &str) -> Result<Self, TuliproxError> {
+        match s {
+            Self::MAIN => Ok(InputFormPage::Main),
+            Self::OPTIONS => Ok(InputFormPage::Options),
+            Self::STAGED => Ok(InputFormPage::Staged),
+            Self::ADVANCED => Ok(InputFormPage::Advanced),
+            Self::ALIAS => Ok(InputFormPage::Alias),
+            _ => info_err_res!("Unknown input form page: {s}"),
+        }
+    }
 }
 
 impl Display for InputFormPage {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{}", match *self {
-            InputFormPage::Main => "Main",
-            InputFormPage::Options => "Options",
-            InputFormPage::Staged => "Staged",
-            InputFormPage::Advanced => "Advanced",
+            InputFormPage::Main => Self::MAIN,
+            InputFormPage::Options => Self::OPTIONS,
+            InputFormPage::Staged => Self::STAGED,
+            InputFormPage::Advanced => Self::ADVANCED,
+            InputFormPage::Alias => Self::ALIAS,
         })
     }
 }
@@ -119,11 +153,20 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             .map(ToString::to_string)
             .collect::<Vec<String>>()
     });
-    let view_visible = use_state(|| InputFormPage::Main.to_string());
+    let view_visible = use_state(|| InputFormPage::Main);
 
-    let on_tab_click = {
-        let view_visible = view_visible.clone();
-        Callback::from(move |page: InputFormPage| view_visible.set(page.to_string()))
+    // let on_tab_click = {
+    //     let view_visible = view_visible.clone();
+    //     Callback::from(move |page: InputFormPage| view_visible.set(page))
+    // };
+
+    let handle_menu_click = {
+        let active_menu = view_visible.clone();
+        Callback::from(move |(name, _): (String, _)| {
+            if let Ok(view_type) = InputFormPage::from_str(&name) {
+                active_menu.set(view_type);
+            }
+        })
     };
 
     let input_form_state: UseReducerHandle<ConfigInputFormState> =
@@ -150,6 +193,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     // State for showing item forms
     let show_epg_form_state = use_state(|| false);
     let show_alias_form_state = use_state(|| false);
+    let edit_alias = use_state(|| None::<ConfigInputAliasDto>);
 
     let staged_input_types = use_memo(staged_input_state.form.input_type, |input_type| {
         let default_it = input_type;
@@ -237,9 +281,21 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     let handle_add_alias_item = {
         let aliases = aliases_state.clone();
         let show_alias_form = show_alias_form_state.clone();
+        let edit_alias = edit_alias.clone();
         Callback::from(move |alias: ConfigInputAliasDto| {
             let mut items = (*aliases).clone();
-            items.push(alias);
+            if let Some(e) = edit_alias.as_ref() {
+                if let Some(pos) = items.iter().position(|x| x.name == e.name) {
+                    if let Some(slot) = items.get_mut(pos) {
+                        *slot = alias;
+                    }
+                } else {
+                    items.push(alias);
+                }
+                edit_alias.set(None);
+            } else {
+                items.push(alias);
+            }
             aliases.set(items);
             show_alias_form.set(false);
         })
@@ -247,15 +303,19 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
 
     let handle_close_add_alias_item = {
         let show_alias_form = show_alias_form_state.clone();
+        let edit_alias = edit_alias.clone();
         Callback::from(move |()| {
             show_alias_form.set(false);
+            edit_alias.set(None);
         })
     };
 
     let handle_show_add_alias_item = {
         let show_alias_form = show_alias_form_state.clone();
+        let edit_alias = edit_alias.clone();
         Callback::from(move |_| {
             show_alias_form.set(true);
+            edit_alias.set(None);
         })
     };
 
@@ -264,6 +324,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         let alias_list = aliases_state.clone();
         Callback::from(move |(idx, e): (String, MouseEvent)| {
             e.prevent_default();
+            e.stop_propagation();
             if let Ok(index) = idx.parse::<usize>() {
                 let mut items = (*alias_list).clone();
                 if index < items.len() {
@@ -274,10 +335,30 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         })
     };
 
+    let handle_edit_alias_list_item = {
+        let alias_list = aliases_state.clone();
+        let show_alias_form = show_alias_form_state.clone();
+        let edit_alias = edit_alias.clone();
+
+        Callback::from(move |(idx, e): (String, MouseEvent)| {
+            e.prevent_default();
+            e.stop_propagation();
+            if let Ok(index) = idx.parse::<usize>() {
+                let items = (*alias_list).clone();
+                if index < items.len() {
+                    let item = items.get(index).cloned();
+                    edit_alias.set(item);
+                    show_alias_form.set(true);
+                }
+            }
+        })
+    };
+
     let handle_remove_epg_source = {
         let epg_list = epg_sources_state.clone();
         Callback::from(move |(idx, e): (String, MouseEvent)| {
             e.prevent_default();
+            e.stop_propagation();
             if let Ok(index) = idx.parse::<usize>() {
                 let mut items = (*epg_list).clone();
                 if index < items.len() {
@@ -361,27 +442,19 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     let render_input = || {
         let input_method_selection = Rc::new(vec![input_form_state.form.method.to_string()]);
         let input_form_state_disp = input_form_state.clone();
-        let aliases = aliases_state.clone();
-        let show_alias_form = show_alias_form_state.clone();
 
         html! {
              <Card class="tp__config-view__card">
-              if *show_alias_form {
-                    <AliasItemForm
-                        on_submit={handle_add_alias_item}
-                        on_cancel={handle_close_add_alias_item}
-                    />
-              } else {
-                <div class="tp__config-view__cols-2">
+               <div class="tp__config-view__cols-2">
                { edit_field_text!(input_form_state, translate.t(LABEL_NAME),  name, ConfigInputFormAction::Name) }
                { edit_field_bool!(input_form_state, translate.t(LABEL_ENABLED), enabled, ConfigInputFormAction::Enabled) }
-                </div>
+               </div>
                { edit_field_text!(input_form_state, translate.t(LABEL_URL),  url, ConfigInputFormAction::Url) }
-                <div class="tp__config-view__cols-2">
+               <div class="tp__config-view__cols-2">
                { edit_field_text_option!(input_form_state, translate.t(LABEL_USERNAME), username, ConfigInputFormAction::Username) }
                { edit_field_text_option!(input_form_state, translate.t(LABEL_PASSWORD), password, ConfigInputFormAction::Password, true) }
-                 { edit_field_number_u16!(input_form_state, translate.t(LABEL_MAX_CONNECTIONS), max_connections, ConfigInputFormAction::MaxConnections) }
-                 { edit_field_number_i16!(input_form_state, translate.t(LABEL_PRIORITY), priority, ConfigInputFormAction::Priority) }
+               { edit_field_number_u16!(input_form_state, translate.t(LABEL_MAX_CONNECTIONS), max_connections, ConfigInputFormAction::MaxConnections) }
+               { edit_field_number_i16!(input_form_state, translate.t(LABEL_PRIORITY), priority, ConfigInputFormAction::Priority) }
                { edit_field_date!(input_form_state, translate.t(LABEL_EXP_DATE), exp_date, ConfigInputFormAction::ExpDate) }
                { edit_field_text_option!(input_form_state, translate.t(LABEL_CACHE_DURATION), cache_duration, ConfigInputFormAction::CacheDuration) }
                { config_field_child!(translate.t(LABEL_FETCH_METHOD), {
@@ -397,9 +470,26 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                         selected={input_method_selection}
                     />
                }})}
-                </div>
+               </div>
                { edit_field_text_option!(input_form_state, translate.t(LABEL_PERSIST), persist, ConfigInputFormAction::Persist) }
-             // Aliases Section
+            </Card>
+        }
+    };
+
+    let render_alias = || {
+        let aliases = aliases_state.clone();
+        let show_alias_form = show_alias_form_state.clone();
+        let edit_alias = edit_alias.clone();
+
+        html! {
+             <Card class="tp__config-view__card">
+              if *show_alias_form {
+                    <AliasItemForm
+                        initial={(*edit_alias).clone()}
+                        on_submit={handle_add_alias_item}
+                        on_cancel={handle_close_add_alias_item}
+                    />
+              } else {
                   { config_field_child!(translate.t(LABEL_ALIASES), {
                       let aliases_list = aliases.clone();
                       html! {
@@ -409,10 +499,16 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                                 for (*aliases_list).iter().enumerate().map(|(idx, alias)| {
                                     html! {
                                         <div class="tp__form-list__item" key={format!("alias-{idx}")}>
+                                            <div class="tp__form-list__item-toolbar">
                                                 <IconButton
                                                 name={idx.to_string()}
                                                 icon="Delete"
                                                 onclick={handle_remove_alias_list_item.clone()}/>
+                                                <IconButton
+                                                name={idx.to_string()}
+                                                icon="Edit"
+                                                onclick={handle_edit_alias_list_item.clone()}/>
+                                            </div>
                                             <div class="tp__form-list__item-content">
                                                 <span><strong>{&alias.name}</strong>{" - "}{&alias.url}</span>
                                             </div>
@@ -421,17 +517,19 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                                 })
                             }
                             </div>
-                            <TextButton
-                                class="primary"
-                                name="add_alias"
-                                icon="Add"
-                                title={translate.t(LABEL_ADD_ALIAS)}
-                                onclick={handle_show_add_alias_item}
-                            />
-                        </div>
+                            <div class="tp__form-list__toolbar">
+                                <TextButton
+                                    class="primary"
+                                    name="add_alias"
+                                    icon="Add"
+                                    title={translate.t(LABEL_ADD_ALIAS)}
+                                    onclick={handle_show_add_alias_item}
+                                />
+                            </div>
+                          </div>
                       }
                   })}
-                }
+              }
             </Card>
         }
     };
@@ -513,7 +611,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         let headers_state = headers_state.clone();
         let epg_sources_state = epg_sources_state.clone();
         let aliases_state = aliases_state.clone();
-        
+
         Callback::from(move |_| {
             let mut input = input_form_state.data().clone();
 
@@ -580,36 +678,38 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
 
     let render_edit_mode = || {
         html! {
-            <div class="tp__input-form__body">
-                <div class="tp__tab-header">
-                {
-                    for [
-                        InputFormPage::Main,
-                        InputFormPage::Options,
-                        InputFormPage::Staged,
-                        InputFormPage::Advanced
-                    ].iter().map(|page| {
-                        let page_str = page.to_string();
-                        let active = *view_visible == page_str;
-                        let on_tab_click = {
-                            let on_tab_click = on_tab_click.clone();
-                            let page = *page;
-                            Callback::from(move |_| on_tab_click.emit(page))
-                        };
-                        html! {
-                            <button
-                                class={classes!("tp__tab-button", if active { "active" } else { "" })}
-                                onclick={on_tab_click}
-                            >
-                                { page_str.clone() }
-                            </button>
-                        }
-                    })
-                }
-            </div>
-            <div class="tp__input-form__body__pages">
+            <div class="tp__source-editor-form__body">
+                // <div class="tp__tab-header">
+                // {
+                //     for [
+                //         InputFormPage::Main,
+                //         InputFormPage::Options,
+                //         InputFormPage::Staged,
+                //         InputFormPage::Advanced
+                //     ].iter().map(|page| {
+                //         let active = &*view_visible == page;
+                //         let on_tab_click = {
+                //             let on_tab_click = on_tab_click.clone();
+                //             let page = *page;
+                //             Callback::from(move |_| on_tab_click.emit(page))
+                //         };
+                //         html! {
+                //             <button
+                //                 class={classes!("tp__tab-button", if active { "active" } else { "" })}
+                //                 onclick={on_tab_click}
+                //             >
+                //                 { page.to_string() }
+                //             </button>
+                //         }
+                //     })
+                // }
+                // </div>
+            <div class="tp__source-editor-form__body__pages">
                 <Panel value={InputFormPage::Main.to_string()} active={view_visible.to_string()}>
                 {render_input()}
+                </Panel>
+                <Panel value={InputFormPage::Alias.to_string()} active={view_visible.to_string()}>
+                {render_alias()}
                 </Panel>
                 <Panel value={InputFormPage::Options.to_string()} active={view_visible.to_string()}>
                 {render_options()}
@@ -625,6 +725,18 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         }
     };
 
+    let render_sidebar = || {
+        html! {
+            <div class="tp__source-editor-form__sidebar">
+            <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Main, if *view_visible == InputFormPage::Main { " active" } else {""})}  icon="Settings" hint={translate.t(LABEL_MAIN)} name={InputFormPage::Main.to_string()} onclick={&handle_menu_click}></IconButton>
+            <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Alias, if *view_visible == InputFormPage::Alias { " active" } else {""})}  icon="Alias" hint={translate.t(LABEL_ALIAS)} name={InputFormPage::Alias.to_string()} onclick={&handle_menu_click}></IconButton>
+            <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Options, if *view_visible == InputFormPage::Options { " active" } else {""})}  icon="Options" hint={translate.t(LABEL_OPTIONS)} name={InputFormPage::Options.to_string()} onclick={&handle_menu_click}></IconButton>
+            <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Staged, if *view_visible == InputFormPage::Staged { " active" } else {""})}  icon="Staged" hint={translate.t(LABEL_STAGED)} name={InputFormPage::Staged.to_string()} onclick={&handle_menu_click}></IconButton>
+            <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Advanced, if *view_visible == InputFormPage::Advanced { " active" } else {""})}  icon="Advanced" hint={translate.t(LABEL_ADVANCED)} name={InputFormPage::Advanced.to_string()} onclick={&handle_menu_click}></IconButton>
+          </div>
+        }
+    };
+
     html! {
         <div class="tp__source-editor-form tp__config-view-page">
           <div class="tp__source-editor-form__toolbar tp__form-page__toolbar">
@@ -637,7 +749,10 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 title={ translate.t("LABEL.OK")}
                 onclick={handle_apply_input}></TextButton>
           </div>
+        <div class="tp__source-editor-form__content">
+            { render_sidebar() }
             { render_edit_mode() }
+        </div>
         </div>
     }
 }

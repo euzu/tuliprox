@@ -71,6 +71,7 @@ pub fn DropDownIconButton(props: &DropDownIconButtonProps) -> Html {
         let set_is_open = popup_is_open.clone();
         Callback::from(move |(_name, event): (String, MouseEvent)| {
             event.prevent_default();
+            event.stop_propagation();
             if let Some(button) = button_ref.cast::<web_sys::Element>() {
                 set_anchor_ref.set(Some(button));
                 set_is_open.set(true);
@@ -86,6 +87,7 @@ pub fn DropDownIconButton(props: &DropDownIconButtonProps) -> Html {
         let set_is_open = popup_is_open.clone();
         Callback::from(move |(id, e): (String, MouseEvent)| {
             e.prevent_default();
+            e.stop_propagation();
             if selections.current().contains(&id) {
                 selections.remove(&id);
             } else {

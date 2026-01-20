@@ -138,7 +138,7 @@ pub fn EpgSourceSelector(props: &EpgSourceSelectorProps) -> Html {
                                 };
                                 if let Some((name, id)) = result {
                                     html! {
-                                    <TextButton name={name.clone()} title={name.clone()} icon={"CloudDownload"}
+                                    <TextButton name={name.to_string()} title={name.to_string()} icon={"CloudDownload"}
                                     onclick={move |_| handle_click.emit(PlaylistEpgRequest::Input(id))}/>
                                     }
                                 } else {
