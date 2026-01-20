@@ -14,6 +14,7 @@ use shared::model::{
 use std::rc::Rc;
 use yew::prelude::*;
 use yew_i18n::use_translation;
+use shared::utils::Internable;
 
 const LABEL_ENABLED: &str = "LABEL.ENABLED";
 const LABEL_URL: &str = "LABEL.URL";
@@ -379,8 +380,8 @@ fn ensure_required_params(params: &mut Vec<PanelApiQueryParamDto>, section: Pane
     let ensure = |params: &mut Vec<PanelApiQueryParamDto>, key: &str, value: &str| {
         if !has_param(params, key) {
             params.push(PanelApiQueryParamDto {
-                key: key.to_string(),
-                value: value.to_string(),
+                key: key.intern(),
+                value: value.intern(),
             });
         }
     };
@@ -484,7 +485,7 @@ impl Reducible for PanelConfigFormState {
                     panel.api_key = if api_key.trim().is_empty() {
                         None
                     } else {
-                        Some(api_key)
+                        Some(api_key.intern())
                     };
                 });
                 Self {
@@ -657,10 +658,7 @@ impl Reducible for PanelConfigFormState {
                     let panel = input
                         .panel_api
                         .get_or_insert_with(PanelApiConfigDto::default);
-                    params_mut(panel, section).push(PanelApiQueryParamDto {
-                        key: String::new(),
-                        value: String::new(),
-                    });
+                    params_mut(panel, section).push(PanelApiQueryParamDto::default());
                 });
                 Self {
                     form,
@@ -701,7 +699,7 @@ impl Reducible for PanelConfigFormState {
                     if let Some(panel) = input.panel_api.as_mut() {
                         let params = params_mut(panel, section);
                         if let Some(p) = params.get_mut(param_idx) {
-                            p.key = key;
+                            p.key = key.intern();
                         }
                     }
                 });
@@ -723,7 +721,7 @@ impl Reducible for PanelConfigFormState {
                     if let Some(panel) = input.panel_api.as_mut() {
                         let params = params_mut(panel, section);
                         if let Some(p) = params.get_mut(param_idx) {
-                            p.value = value;
+                            p.value = value.intern();
                         }
                     }
                 });
@@ -836,8 +834,8 @@ fn render_param_editor(
                                     if edit_mode {
                                         html!{
                                             <>
-                                                <Input name="key" label={Option::<String>::None} value={p.key.clone()} placeholder={Some("key".to_string())} on_change={Some(on_key)} />
-                                                <Input name="value" label={Option::<String>::None} value={p.value.clone()} placeholder={Some("value".to_string())} on_change={Some(on_val)} />
+                                                <Input name="key" label={Option::<String>::None} value={p.key.to_string()} placeholder={Some("key".to_string())} on_change={Some(on_key)} />
+                                                <Input name="value" label={Option::<String>::None} value={p.value.to_string()} placeholder={Some("value".to_string())} on_change={Some(on_val)} />
                                                 <IconButton name="rm" icon="Delete" class="tp__panel-api-config-view__param-remove" onclick={on_remove}/>
                                             </>
                                         }
@@ -1147,7 +1145,7 @@ pub fn PanelConfigView() -> Html {
                         html! {
                             <>
                                 <Input name="panel_url" label={Some(translate.t(LABEL_URL))} value={url_val} on_change={Some(on_url)} placeholder={Some("https://panel.example.tld/api.php".to_string())}/>
-                                <Input name="panel_api_key" label={Some(translate.t(LABEL_API_KEY))} value={api_key_val} hidden={true} on_change={Some(on_api_key)} placeholder={Some("...".to_string())}/>
+                                <Input name="panel_api_key" label={Some(translate.t(LABEL_API_KEY))} value={api_key_val.to_string()} hidden={true} on_change={Some(on_api_key)} placeholder={Some("...".to_string())}/>
                                 <div class="tp__panel-api-config-view__section">
                                     <div class="tp__panel-api-config-view__section-header">
                                         <h2>{ translate.t(LABEL_PANEL_PROVISIONING) }</h2>

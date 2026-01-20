@@ -1,32 +1,58 @@
+use crate::error::TuliproxError;
+use crate::info_err_res;
 use crate::utils::{
     default_as_true, default_panel_api_alias_pool_max, default_panel_api_alias_pool_min,
     default_panel_api_provision_cooldown_secs, default_panel_api_provision_probe_interval_secs,
     default_panel_api_provision_timeout_secs, deserialize_as_option_string, is_true,
-    serialize_vec_flow_map_items,
+    serialize_vec_flow_map_items, arc_str_serde, arc_str_option_serde, is_blank_optional_arc_str
 };
+use log::warn;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::str::FromStr;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct PanelApiQueryParamDto {
-    pub key: String,
-    pub value: String,
+    #[serde(with = "arc_str_serde")]
+    pub key: Arc<str>,
+    #[serde(with = "arc_str_serde")]
+    pub value: Arc<str>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct PanelApiQueryParametersDto {
-    #[serde(default, skip_serializing_if = "Vec::is_empty", serialize_with = "serialize_vec_flow_map_items")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        serialize_with = "serialize_vec_flow_map_items"
+    )]
     pub account_info: Vec<PanelApiQueryParamDto>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty", serialize_with = "serialize_vec_flow_map_items")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        serialize_with = "serialize_vec_flow_map_items"
+    )]
     pub client_info: Vec<PanelApiQueryParamDto>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty", serialize_with = "serialize_vec_flow_map_items")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        serialize_with = "serialize_vec_flow_map_items"
+    )]
     pub client_new: Vec<PanelApiQueryParamDto>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty", serialize_with = "serialize_vec_flow_map_items")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        serialize_with = "serialize_vec_flow_map_items"
+    )]
     pub client_renew: Vec<PanelApiQueryParamDto>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty", serialize_with = "serialize_vec_flow_map_items" )]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        serialize_with = "serialize_vec_flow_map_items"
+    )]
     pub client_adult_content: Vec<PanelApiQueryParamDto>,
 }
 
@@ -195,8 +221,8 @@ pub struct PanelApiConfigDto {
     #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
     pub enabled: bool,
     pub url: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_key: Option<String>,
+    #[serde(with = "arc_str_option_serde", skip_serializing_if = "is_blank_optional_arc_str")]
+    pub api_key: Option<Arc<str>>,
     #[serde(default, skip_serializing_if = "PanelApiProvisioningDto::is_default")]
     pub provisioning: PanelApiProvisioningDto,
     #[serde(default)]
@@ -222,5 +248,49 @@ impl Default for PanelApiConfigDto {
             credits: None,
             alias_pool: None,
         }
+    }
+}
+
+impl PanelApiConfigDto {
+    pub fn prepare(&mut self, input_name: &Arc<str>) -> Result<(), TuliproxError> {
+        if self.enabled {
+            if let Some(alias_pool) = self.alias_pool.as_mut() {
+                let size = alias_pool
+                    .size
+                    .get_or_insert_with(PanelApiAliasPoolSizeDto::default);
+                if size.min.is_none() {
+                    size.min = Some(PanelApiAliasPoolSizeValue::Number(1));
+                }
+                if size.max.is_none() {
+                    size.max = Some(PanelApiAliasPoolSizeValue::Number(1));
+                }
+                let min = size
+                    .min
+                    .as_ref()
+                    .and_then(PanelApiAliasPoolSizeValue::as_number);
+                let max = size
+                    .max
+                    .as_ref()
+                    .and_then(PanelApiAliasPoolSizeValue::as_number);
+                if let (Some(min), Some(max)) = (min, max) {
+                    if min > max {
+                        return info_err_res!("panel_api.alias_pool.size.min must be <= panel_api.alias_pool.size.max");
+                    }
+                }
+
+                let max_auto = size
+                    .max
+                    .as_ref()
+                    .is_some_and(PanelApiAliasPoolSizeValue::is_auto);
+                if max_auto && size.min.is_none() {
+                    warn!("panel_api.alias_pool.size.max is set to auto without min for input {input_name}");
+                }
+            }
+
+            if self.provisioning.probe_interval_sec == 0 {
+                return info_err_res!("panel_api.provisioning.probe_interval_sec must be greater than 0");
+            }
+        }
+        Ok(())
     }
 }

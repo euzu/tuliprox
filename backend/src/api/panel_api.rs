@@ -3,7 +3,10 @@ use crate::api::model::{
     create_panel_api_provisioning_stream_with_stop, create_provider_connections_exhausted_stream,
     AppState, StreamDetails,
 };
-use crate::model::{is_input_expired, ConfigInput, ConfigInputAlias, PanelApiConfig, ProxyUserCredentials};
+use crate::model::{
+    is_input_expired, ConfigInput, ConfigInputAlias, PanelApiConfig, PanelApiQueryParam,
+    ProxyUserCredentials,
+};
 use crate::repository::{
     csv_patch_batch_append, csv_patch_batch_remove_expired, csv_patch_batch_sort_by_exp_date,
     csv_patch_batch_update_credentials, csv_patch_batch_update_exp_date, get_csv_file_path,
@@ -22,9 +25,8 @@ use serde_json::Value;
 use shared::concat_string;
 use shared::error::{info_err, info_err_res, TuliproxError};
 use shared::model::{
-    ConfigInputAliasDto, InputType, PanelApiAliasPoolSizeValue, PanelApiConfigDto,
-    PanelApiProvisioningMethod, PanelApiQueryParamDto, ProxyUserStatus, SourcesConfigDto,
-    VirtualId,
+    ConfigInputAliasDto, InputType, PanelApiAliasPoolSizeValue,
+    PanelApiProvisioningMethod, ProxyUserStatus, SourcesConfigDto, VirtualId,
 };
 use shared::utils::{get_base_url_from_str, get_credentials_from_url, get_credentials_from_url_str, get_i64_from_serde_value, get_string_from_serde_value, parse_timestamp, sanitize_sensitive_info, Internable};
 use std::cmp::Ordering;
@@ -218,22 +220,22 @@ fn extract_username_password_from_json(
     }
 }
 
-fn validate_type_is_m3u(params: &[PanelApiQueryParamDto]) -> Result<(), TuliproxError> {
+fn validate_type_is_m3u(params: &[PanelApiQueryParam]) -> Result<(), TuliproxError> {
     let typ = params
         .iter()
         .find(|p| p.key.trim().eq_ignore_ascii_case("type"))
         .map(|p| p.value.trim().to_string());
-    match typ {
-        Some(v) if v.eq_ignore_ascii_case("m3u") => Ok(()),
-        Some(v) => info_err_res!("panel_api: unsupported type={v}, only m3u is supported"),
-        None => info_err_res!("panel_api: missing required query param 'type=m3u'"),
+    let typ_str = typ.as_deref().unwrap_or_default();
+    if typ_str.trim().eq_ignore_ascii_case("m3u") {
+        Ok(())
+    } else if typ_str.is_empty() {
+        info_err_res!("panel_api: missing required query param 'type=m3u'")
+    } else {
+        info_err_res!("panel_api: unsupported type={typ_str}, only m3u is supported")
     }
 }
 
-fn require_api_key_param(
-    params: &[PanelApiQueryParamDto],
-    section: &str,
-) -> Result<(), TuliproxError> {
+fn require_api_key_param(params: &[PanelApiQueryParam], section: &str) -> Result<(), TuliproxError> {
     let api_key = params
         .iter()
         .find(|p| p.key.trim().eq_ignore_ascii_case("api_key"));
@@ -251,7 +253,7 @@ fn require_api_key_param(
 }
 
 fn require_username_password_params_auto(
-    params: &[PanelApiQueryParamDto],
+    params: &[PanelApiQueryParam],
     section: &str,
 ) -> Result<(), TuliproxError> {
     let username = params
@@ -275,7 +277,7 @@ fn require_username_password_params_auto(
     Ok(())
 }
 
-fn validate_client_new_params(params: &[PanelApiQueryParamDto]) -> Result<(), TuliproxError> {
+fn validate_client_new_params(params: &[PanelApiQueryParam]) -> Result<(), TuliproxError> {
     require_api_key_param(params, "query_parameter.client_new")?;
     validate_type_is_m3u(params)?;
     if params
@@ -287,20 +289,20 @@ fn validate_client_new_params(params: &[PanelApiQueryParamDto]) -> Result<(), Tu
     Ok(())
 }
 
-fn validate_client_renew_params(params: &[PanelApiQueryParamDto]) -> Result<(), TuliproxError> {
+fn validate_client_renew_params(params: &[PanelApiQueryParam]) -> Result<(), TuliproxError> {
     require_api_key_param(params, "query_parameter.client_renew")?;
     validate_type_is_m3u(params)?;
     require_username_password_params_auto(params, "query_parameter.client_renew")?;
     Ok(())
 }
 
-fn validate_client_info_params(params: &[PanelApiQueryParamDto]) -> Result<(), TuliproxError> {
+fn validate_client_info_params(params: &[PanelApiQueryParam]) -> Result<(), TuliproxError> {
     require_api_key_param(params, "query_parameter.client_info")?;
     require_username_password_params_auto(params, "query_parameter.client_info")?;
     Ok(())
 }
 
-fn validate_account_info_params(params: &[PanelApiQueryParamDto]) -> Result<(), TuliproxError> {
+fn validate_account_info_params(params: &[PanelApiQueryParam]) -> Result<(), TuliproxError> {
     require_api_key_param(params, "query_parameter.account_info")?;
     let has_user = params
         .iter()
@@ -315,7 +317,7 @@ fn validate_account_info_params(params: &[PanelApiQueryParamDto]) -> Result<(), 
 }
 
 fn validate_client_adult_content_params(
-    params: &[PanelApiQueryParamDto],
+    params: &[PanelApiQueryParam],
 ) -> Result<(), TuliproxError> {
     require_api_key_param(params, "query_parameter.client_adult_content")?;
     let has_user = params
@@ -340,7 +342,7 @@ struct PanelApiOptionalFlags {
 }
 
 fn resolve_panel_api_optional_flags(
-    cfg: &PanelApiConfigDto,
+    cfg: &PanelApiConfig,
     input_name: &str,
 ) -> PanelApiOptionalFlags {
     let flags = PanelApiOptionalFlags {
@@ -411,7 +413,7 @@ fn parse_panel_api_provisioning_offset_secs(offset: &str) -> Result<u64, Tulipro
         .ok_or_else(|| info_err!("panel_api.provisioning.offset is too large: '{raw}'"))
 }
 
-fn validate_panel_api_config(cfg: &PanelApiConfigDto) -> Result<(), TuliproxError> {
+fn validate_panel_api_config(cfg: &PanelApiConfig) -> Result<(), TuliproxError> {
     if !cfg.enabled {
         return Ok(());
     }
@@ -467,7 +469,7 @@ fn validate_panel_api_config(cfg: &PanelApiConfigDto) -> Result<(), TuliproxErro
 }
 
 fn resolve_query_params(
-    params: &[PanelApiQueryParamDto],
+    params: &[PanelApiQueryParam],
     api_key: Option<&str>,
     creds: Option<(&str, &str)>,
 ) -> Result<Vec<(String, String)>, TuliproxError> {
@@ -637,7 +639,7 @@ async fn user_api_get_json(app_state: &AppState, url: Url) -> Result<Value, Tuli
 
 async fn panel_client_new(
     app_state: &AppState,
-    cfg: &PanelApiConfigDto,
+    cfg: &PanelApiConfig,
 ) -> Result<(String, String, Option<String>), TuliproxError> {
     validate_client_new_params(&cfg.query_parameter.client_new)?;
     let params = resolve_query_params(
@@ -645,7 +647,7 @@ async fn panel_client_new(
         cfg.api_key.as_deref(),
         None,
     )?;
-    let url = build_panel_url(cfg.url.as_str(), &params)?;
+    let url = build_panel_url(cfg.url.as_ref(), &params)?;
     let json = panel_get_json(app_state, url).await?;
     let Some(obj) = first_json_object(&json) else {
         return info_err_res!("panel_api: client_new response is not a JSON object/array");
@@ -668,7 +670,7 @@ async fn panel_client_new(
 
 async fn panel_client_renew(
     app_state: &AppState,
-    cfg: &PanelApiConfigDto,
+    cfg: &PanelApiConfig,
     username: &str,
     password: &str,
 ) -> Result<(), TuliproxError> {
@@ -678,7 +680,7 @@ async fn panel_client_renew(
         cfg.api_key.as_deref(),
         Some((username, password)),
     )?;
-    let url = build_panel_url(cfg.url.as_str(), &params)?;
+    let url = build_panel_url(cfg.url.as_ref(), &params)?;
     let json = panel_get_json(app_state, url).await?;
     let Some(obj) = first_json_object(&json) else {
         return info_err_res!("panel_api: client_renew response is not a JSON object/array");
@@ -692,7 +694,7 @@ async fn panel_client_renew(
 
 async fn panel_client_info_raw(
     app_state: &AppState,
-    cfg: &PanelApiConfigDto,
+    cfg: &PanelApiConfig,
     username: &str,
     password: &str,
 ) -> Result<Option<String>, TuliproxError> {
@@ -702,7 +704,7 @@ async fn panel_client_info_raw(
         cfg.api_key.as_deref(),
         Some((username, password)),
     )?;
-    let url = build_panel_url(cfg.url.as_str(), &params)?;
+    let url = build_panel_url(cfg.url.as_ref(), &params)?;
     let json = panel_get_json(app_state, url).await?;
     let Some(obj) = first_json_object(&json) else {
         return info_err_res!("panel_api: client_info response is not a JSON object/array");
@@ -726,7 +728,7 @@ async fn panel_client_info_raw(
 
 async fn panel_client_info(
     app_state: &AppState,
-    cfg: &PanelApiConfigDto,
+    cfg: &PanelApiConfig,
     username: &str,
     password: &str,
     time_ctx: Option<&PanelApiTimeContext>,
@@ -747,8 +749,8 @@ async fn fetch_root_user_api_info(
     url.set_path("/player_api.php");
     {
         let mut pairs = url.query_pairs_mut();
-        pairs.append_pair("username", username.as_str());
-        pairs.append_pair("password", password.as_str());
+        pairs.append_pair("username", username.as_ref());
+        pairs.append_pair("password", password.as_ref());
         pairs.append_pair("action", "account_info");
     }
 
@@ -877,7 +879,7 @@ fn parse_cached_tz(tz: Option<String>) -> Option<Tz> {
 
 async fn panel_account_info(
     app_state: &AppState,
-    cfg: &PanelApiConfigDto,
+    cfg: &PanelApiConfig,
     creds: Option<(&str, &str)>,
 ) -> Result<Option<String>, TuliproxError> {
     if cfg.query_parameter.account_info.is_empty() {
@@ -889,7 +891,7 @@ async fn panel_account_info(
         cfg.api_key.as_deref(),
         creds,
     )?;
-    let url = build_panel_url(cfg.url.as_str(), &params)?;
+    let url = build_panel_url(cfg.url.as_ref(), &params)?;
     let json = panel_get_json(app_state, url).await?;
     let Some(obj) = first_json_object(&json) else {
         return info_err_res!("panel_api: account_info response is not a JSON object/array");
@@ -906,7 +908,7 @@ async fn panel_account_info(
 
 async fn panel_client_adult_content(
     app_state: &AppState,
-    cfg: &PanelApiConfigDto,
+    cfg: &PanelApiConfig,
     creds: Option<(&str, &str)>,
 ) -> Result<(), TuliproxError> {
     if cfg.query_parameter.client_adult_content.is_empty() {
@@ -918,7 +920,7 @@ async fn panel_client_adult_content(
         cfg.api_key.as_deref(),
         creds,
     )?;
-    let url = build_panel_url(cfg.url.as_str(), &params)?;
+    let url = build_panel_url(cfg.url.as_ref(), &params)?;
     let json = panel_get_json(app_state, url).await?;
     let Some(obj) = first_json_object(&json) else {
         return info_err_res!(
@@ -962,7 +964,7 @@ fn alias_pool_limit_values(
 }
 
 #[allow(dead_code)]
-fn alias_pool_both_auto(cfg: &PanelApiConfigDto) -> bool {
+fn alias_pool_both_auto(cfg: &PanelApiConfig) -> bool {
     let (min, max) = alias_pool_limit_values(cfg);
     min.is_some_and(PanelApiAliasPoolSizeValue::is_auto)
         && max.is_some_and(PanelApiAliasPoolSizeValue::is_auto)
@@ -1066,7 +1068,7 @@ pub(crate) fn target_has_alias_pool_min(app_state: &AppState, target_name: &str)
 fn resolve_alias_pool_limits(
     app_state: &AppState,
     input_name: &Arc<str>,
-    cfg: &PanelApiConfigDto,
+    cfg: &PanelApiConfig,
 ) -> Result<(Option<u16>, Option<u16>), TuliproxError> {
     let (min_val, max_val) = alias_pool_limit_values(cfg);
     if min_val.is_none() && max_val.is_none() {
@@ -1093,7 +1095,7 @@ fn resolve_alias_pool_limits(
 fn resolve_alias_pool_min(
     app_state: &AppState,
     input_name: &Arc<str>,
-    cfg: &PanelApiConfigDto,
+    cfg: &PanelApiConfig,
 ) -> Option<u16> {
     let (min_val, _) = alias_pool_limit_values(cfg);
     let min_val = min_val?;
@@ -1103,7 +1105,7 @@ fn resolve_alias_pool_min(
     resolve_alias_pool_limit_value(Some(min_val), auto_value)
 }
 
-fn alias_pool_remove_expired(cfg: &PanelApiConfigDto) -> bool {
+fn alias_pool_remove_expired(cfg: &PanelApiConfig) -> bool {
     cfg.alias_pool.as_ref().is_some_and(|p| p.remove_expired)
 }
 
@@ -1175,11 +1177,11 @@ fn sort_aliases_by_exp_date(aliases: &mut Vec<ConfigInputAliasDto>) -> bool {
     }
 }
 
-fn sort_account_aliases_keep_root_first(accounts: &mut Vec<AccountCredentials>, root_name: &Arc<str>) {
-    let root = accounts.iter().find(|acct| &acct.name == root_name).cloned();
+fn sort_account_aliases_keep_root_first(accounts: &mut Vec<AccountCredentials>, root_name: &str) {
+    let root = accounts.iter().find(|acct| acct.name.as_ref() == root_name).cloned();
     let mut aliases: Vec<AccountCredentials> = accounts
         .iter()
-        .filter(|acct| &acct.name != root_name)
+        .filter(|acct| acct.name.as_ref() != root_name)
         .cloned()
         .collect();
     aliases.sort_by(compare_account_exp_date);
@@ -1310,17 +1312,17 @@ pub(crate) fn find_input_by_name(
 
 pub(crate) fn find_input_by_provider_name(
     app_state: &AppState,
-    provider_name: &Arc<str>,
+    provider_name: &str,
 ) -> Option<Arc<ConfigInput>> {
     let sources = app_state.app_config.sources.load();
     for input in &sources.inputs {
-        if &input.name == provider_name {
+        if &*input.name == provider_name {
             return Some(Arc::clone(input));
         }
         if input
             .aliases
             .as_ref()
-            .is_some_and(|aliases| aliases.iter().any(|alias| &alias.name == provider_name))
+            .is_some_and(|aliases| aliases.iter().any(|alias| &*alias.name == provider_name))
         {
             return Some(Arc::clone(input));
         }
@@ -1354,7 +1356,7 @@ async fn patch_source_yml_add_alias(
         return info_err_res!("panel_api: cannot add alias for '{input_name}': alias id overflow");
     }
 
-    let mut alias = ConfigInputAliasDto {
+    let alias = ConfigInputAliasDto {
         id: 0,
         name: Arc::clone(alias_name),
         url: base_url.to_string(),
@@ -1482,7 +1484,7 @@ fn apply_sources_yml_patches(
                 input_name,
                 credits,
             } => {
-                let idx = *inputs_by_name.get(input_name.as_str()).ok_or_else(|| {
+                let idx = *inputs_by_name.get(input_name.as_ref()).ok_or_else(|| {
                     info_err!("panel_api: could not find input '{input_name}' in source.yml")
                 })?;
                 let Some(panel_api) = doc.inputs[idx].panel_api.as_mut() else {
@@ -1496,7 +1498,7 @@ fn apply_sources_yml_patches(
                 }
             }
             SourcesYmlPatch::SortAliases { input_name } => {
-                let idx = *inputs_by_name.get(input_name.as_str()).ok_or_else(|| {
+                let idx = *inputs_by_name.get(input_name.as_ref()).ok_or_else(|| {
                     info_err!("panel_api: could not find input '{input_name}' in source.yml")
                 })?;
                 let Some(aliases) = doc.inputs[idx].aliases.as_mut() else {
@@ -1516,7 +1518,7 @@ fn apply_sources_yml_patches(
                 account_name,
                 exp_date,
             } => {
-                let idx = *inputs_by_name.get(input_name.as_str()).ok_or_else(|| {
+                let idx = *inputs_by_name.get(input_name.as_ref()).ok_or_else(|| {
                     info_err!("panel_api: could not find input '{input_name}' in source.yml")
                 })?;
                 if account_name == input_name {
@@ -1549,7 +1551,7 @@ fn apply_sources_yml_patches(
                 password,
                 exp_date,
             } => {
-                let idx = *inputs_by_name.get(input_name.as_str()).ok_or_else(|| {
+                let idx = *inputs_by_name.get(input_name.as_ref()).ok_or_else(|| {
                     info_err!("panel_api: could not find input '{input_name}' in source.yml")
                 })?;
                 let input = &mut doc.inputs[idx];
@@ -1558,8 +1560,8 @@ fn apply_sources_yml_patches(
                     || input.password.as_deref() != Some(password.as_str())
                     || exp_date_changed
                 {
-                    input.username = Some(username.to_string());
-                    input.password = Some(password.to_string());
+                    input.username = Some(username.clone());
+                    input.password = Some(password.clone());
                     input.enabled = true;
                     input.max_connections = 1;
                     if let Some(exp_date) = *exp_date {
@@ -1576,7 +1578,7 @@ fn apply_sources_yml_patches(
                 password,
                 exp_date,
             } => {
-                let idx = *inputs_by_name.get(input_name.as_str()).ok_or_else(|| {
+                let idx = *inputs_by_name.get(input_name.as_ref()).ok_or_else(|| {
                     info_err!("panel_api: could not find input '{input_name}' in source.yml")
                 })?;
                 let Some(alias_idx) = alias_indices[idx].get(alias_name).copied() else {
@@ -1594,8 +1596,8 @@ fn apply_sources_yml_patches(
                     || alias.password.as_deref() != Some(password.as_str())
                     || exp_date_changed
                 {
-                    alias.username = Some(username.to_string());
-                    alias.password = Some(password.to_string());
+                    alias.username = Some(username.clone());
+                    alias.password = Some(password.clone());
                     alias.max_connections = 1;
                     if let Some(exp_date) = *exp_date {
                         alias.exp_date = Some(exp_date);
@@ -1625,9 +1627,9 @@ fn apply_sources_yml_patches(
                 let mut alias = ConfigInputAliasDto {
                     id: 0,
                     name: Arc::clone(alias_name),
-                    url: base_url.to_string(),
-                    username: Some(username.to_string()),
-                    password: Some(password.to_string()),
+                    url: base_url.clone(),
+                    username: Some(username.clone()),
+                    password: Some(password.clone()),
                     priority: 0,
                     max_connections: 1,
                     exp_date: *exp_date,
@@ -1738,7 +1740,7 @@ fn derive_unique_alias_name(existing: &[Arc<str>], input_name: &Arc<str>, userna
 }
 
 fn derive_unique_alias_name_set(
-    existing: &HashSet<String>,
+    existing: &HashSet<Arc<str>>,
     input_name: &Arc<str>,
     username: &str,
 ) -> String {
@@ -1785,7 +1787,7 @@ impl PanelApiProvisionOutcome {
 async fn try_renew_expired_account(
     app_state: &Arc<AppState>,
     input: &ConfigInput,
-    panel_cfg: &PanelApiConfigDto,
+    panel_cfg: &PanelApiConfig,
     is_batch: bool,
     sources_path: &Path,
     treat_missing_exp_date_as_expired: bool,
@@ -1925,7 +1927,7 @@ async fn try_renew_expired_account(
 async fn try_create_new_account(
     app_state: &Arc<AppState>,
     input: &ConfigInput,
-    panel_cfg: &PanelApiConfigDto,
+    panel_cfg: &PanelApiConfig,
     is_batch: bool,
     sources_path: &Path,
     optional: PanelApiOptionalFlags,
@@ -2138,7 +2140,7 @@ pub async fn try_provision_account_on_exhausted(
 async fn ensure_alias_pool_min(
     app_state: &Arc<AppState>,
     input: &ConfigInput,
-    panel_cfg: &PanelApiConfigDto,
+    panel_cfg: &PanelApiConfig,
     accounts: &mut Vec<AccountCredentials>,
     min_pool: u16,
     csv_path: Option<&Path>,
@@ -2163,11 +2165,11 @@ async fn ensure_alias_pool_min(
     let max_pool = resolve_alias_pool_limits(app_state.as_ref(), &input.name, panel_cfg)
         .ok()
         .and_then(|(_, max)| max);
-    let mut existing_names: HashSet<String> = accounts.iter().map(|a| a.name.clone()).collect();
+    let mut existing_names: HashSet<Arc<str>> = accounts.iter().map(|a| a.name.clone()).collect();
     let max_attempts = usize::from(min_pool).saturating_add(10);
     for _ in 0..max_attempts {
         let current_valid =
-            count_valid_alias_accounts_at(accounts, input.name.as_str(), effective_now);
+            count_valid_alias_accounts_at(accounts, &input.name, effective_now);
         if current_valid >= usize::from(min_pool) {
             break;
         }
@@ -2240,7 +2242,7 @@ async fn ensure_alias_pool_min(
                                 if let Err(err) = csv_patch_batch_update_exp_date(
                                     input.input_type,
                                     csv_path,
-                                    acct.name.as_str(),
+                                    &acct.name,
                                     acct.username.as_str(),
                                     acct.password.as_str(),
                                     new_exp,
@@ -2287,7 +2289,7 @@ async fn ensure_alias_pool_min(
 
                 let alias_name =
                     derive_unique_alias_name_set(&existing_names, &input.name, &username);
-                existing_names.insert(alias_name.clone());
+                existing_names.insert(alias_name.clone().into());
 
                 if adult_enabled {
                     if let Err(err) = panel_client_adult_content(
@@ -2317,7 +2319,7 @@ async fn ensure_alias_pool_min(
                 .flatten();
 
                 accounts.push(AccountCredentials {
-                    name: alias_name.clone(),
+                    name: alias_name.clone().into(),
                     username: username.clone(),
                     password: password.clone(),
                     exp_date,
@@ -2351,7 +2353,7 @@ async fn ensure_alias_pool_min(
                 } else {
                     sources_yml_patches.push(SourcesYmlPatch::AddAlias {
                         input_name: input.name.clone(),
-                        alias_name,
+                        alias_name: alias_name.into(),
                         base_url,
                         username,
                         password,
@@ -2396,7 +2398,7 @@ async fn sync_panel_api_for_input_on_boot(
     }
     let optional = resolve_panel_api_optional_flags(panel_cfg, &input.name);
 
-    let input_name = input.name.as_str();
+    let input_name = &input.name;
     let _input_lock = app_state
         .app_config
         .file_locks
@@ -2419,16 +2421,16 @@ async fn sync_panel_api_for_input_on_boot(
 
     let mut accounts = collect_accounts(input.as_ref());
     if panel_cfg.alias_pool.is_some() {
-        sort_account_aliases_keep_root_first(&mut accounts, input.name.as_str());
+        sort_account_aliases_keep_root_first(&mut accounts, &input.name);
     }
-    let mut existing_names: HashSet<String> = accounts.iter().map(|a| a.name.clone()).collect();
+    let mut existing_names: HashSet<Arc<str>> = accounts.iter().map(|a| a.name.clone()).collect();
     let mut newly_created_accounts: Vec<AccountCredentials> = Vec::new();
     let mut time_ctx: Option<PanelApiTimeContext> = None;
     let mut effective_now = get_current_timestamp();
 
     let cache_path = panel_api_time_cache_path(app_state.as_ref());
     let mut time_cache = load_panel_api_time_cache(app_state.as_ref(), &cache_path).await;
-    let cached_entry = time_cache.inputs.get(&input.name).cloned();
+    let cached_entry = time_cache.inputs.get(input.name.as_ref()).cloned();
 
     if panel_cfg.alias_pool.is_some() {
         if let Some(csv_path) = csv_path.as_ref() {
@@ -2507,7 +2509,7 @@ async fn sync_panel_api_for_input_on_boot(
         effective_now = apply_clock_skew(get_current_timestamp(), skew_secs.unwrap_or_default());
 
         time_cache.inputs.insert(
-            input.name.clone(),
+            input.name.to_string(),
             PanelApiTimeCacheEntry {
                 expire_mode,
                 server_tz: server_tz.map(|tz| tz.name().to_string()),
@@ -2565,7 +2567,7 @@ async fn sync_panel_api_for_input_on_boot(
             Ok(Some(credits)) => {
                 let normalized = credits.trim().to_string();
                 if !normalized.is_empty()
-                    && panel_cfg.credits.as_deref().map(str::trim) != Some(normalized.as_str())
+                    /* && panel_cfg.credits.as_deref().map(str::trim) != Some(normalized.as_str()) */
                 {
                     sources_yml_patches.push(SourcesYmlPatch::UpdatePanelApiCredits {
                         input_name: input.name.clone(),
@@ -2740,7 +2742,7 @@ async fn sync_panel_api_for_input_on_boot(
                                                 &input.name,
                                                 old_username.as_str(),
                                             );
-                                            existing_names.insert(alias_name.clone());
+                                            existing_names.insert(alias_name.clone().into());
 
                                             if let Some(csv_path) = csv_path.as_ref() {
                                                 let batch_type =
@@ -2779,7 +2781,7 @@ async fn sync_panel_api_for_input_on_boot(
                                                 sources_yml_patches.push(
                                                     SourcesYmlPatch::AddAlias {
                                                         input_name: input.name.clone(),
-                                                        alias_name: alias_name.clone(),
+                                                        alias_name: alias_name.clone().into(),
                                                         base_url,
                                                         username: old_username.clone(),
                                                         password: old_password.clone(),
@@ -2790,7 +2792,7 @@ async fn sync_panel_api_for_input_on_boot(
                                             }
 
                                             accounts.push(AccountCredentials {
-                                                name: alias_name,
+                                                name: alias_name.into(),
                                                 username: old_username.clone(),
                                                 password: old_password.clone(),
                                                 exp_date: root_exp_date,
@@ -2874,7 +2876,7 @@ async fn sync_panel_api_for_input_on_boot(
                                     &input.name,
                                     old_username.as_str(),
                                 );
-                                existing_names.insert(alias_name.clone());
+                                existing_names.insert(alias_name.clone().into());
 
                                 if let Some(csv_path) = csv_path.as_ref() {
                                     let batch_type = if input.input_type == InputType::Xtream {
@@ -2908,7 +2910,7 @@ async fn sync_panel_api_for_input_on_boot(
                                 } else {
                                     sources_yml_patches.push(SourcesYmlPatch::AddAlias {
                                         input_name: input.name.clone(),
-                                        alias_name: alias_name.clone(),
+                                        alias_name: alias_name.clone().into(),
                                         base_url,
                                         username: old_username.clone(),
                                         password: old_password.clone(),
@@ -2918,7 +2920,7 @@ async fn sync_panel_api_for_input_on_boot(
                                 }
 
                                 accounts.push(AccountCredentials {
-                                    name: alias_name,
+                                    name: alias_name.into(),
                                     username: old_username.clone(),
                                     password: old_password.clone(),
                                     exp_date: root_exp_date,
@@ -3012,7 +3014,7 @@ async fn sync_panel_api_for_input_on_boot(
                     app_state,
                     input.as_ref(),
                     panel_cfg,
-                    input.name.as_str(),
+                    &input.name,
                     active_username.as_str(),
                     active_password.as_str(),
                 )
@@ -3094,7 +3096,7 @@ async fn sync_panel_api_for_input_on_boot(
     // Plan and execute alias refresh after the root operation (avoids over-provisioning).
     let now = effective_now;
     let offset_deadline = now.saturating_add(offset_secs);
-    let root_valid = root_counts_towards_pool_at(&accounts, input.name.as_str(), now);
+    let root_valid = root_counts_towards_pool_at(&accounts, &input.name, now);
     let desired_aliases = min_pool.filter(|m| *m > 0).map_or_else(
         || {
             u16::try_from(accounts.iter().filter(|a| a.name != input.name).count())
@@ -3263,7 +3265,7 @@ async fn sync_panel_api_for_input_on_boot(
                                     &input.name,
                                     &new_username,
                                 );
-                                existing_names.insert(alias_name.clone());
+                                existing_names.insert(alias_name.clone().into());
 
                                 if adult_enabled {
                                     if let Err(err) = panel_client_adult_content(
@@ -3324,7 +3326,7 @@ async fn sync_panel_api_for_input_on_boot(
                                 } else {
                                     sources_yml_patches.push(SourcesYmlPatch::AddAlias {
                                         input_name: input.name.clone(),
-                                        alias_name: alias_name.clone(),
+                                        alias_name: alias_name.clone().into(),
                                         base_url,
                                         username: new_username.clone(),
                                         password: new_password.clone(),
@@ -3334,7 +3336,7 @@ async fn sync_panel_api_for_input_on_boot(
                                 }
 
                                 newly_created_accounts.push(AccountCredentials {
-                                    name: alias_name,
+                                    name: alias_name.into(),
                                     username: new_username,
                                     password: new_password,
                                     exp_date,
@@ -3364,7 +3366,7 @@ async fn sync_panel_api_for_input_on_boot(
 
                     let alias_name =
                         derive_unique_alias_name_set(&existing_names, &input.name, &new_username);
-                    existing_names.insert(alias_name.clone());
+                    existing_names.insert(alias_name.clone().into());
 
                     if adult_enabled {
                         if let Err(err) = panel_client_adult_content(
@@ -3424,7 +3426,7 @@ async fn sync_panel_api_for_input_on_boot(
                     } else {
                         sources_yml_patches.push(SourcesYmlPatch::AddAlias {
                             input_name: input.name.clone(),
-                            alias_name: alias_name.clone(),
+                            alias_name: alias_name.clone().into(),
                             base_url,
                             username: new_username.clone(),
                             password: new_password.clone(),
@@ -3434,7 +3436,7 @@ async fn sync_panel_api_for_input_on_boot(
                     }
 
                     newly_created_accounts.push(AccountCredentials {
-                        name: alias_name,
+                        name: alias_name.into(),
                         username: new_username,
                         password: new_password,
                         exp_date,
@@ -3569,7 +3571,7 @@ async fn sync_panel_api_for_input_on_boot(
 
     let min_pool = min_pool.filter(|m| *m > 0);
     if let Some(min_pool) = min_pool {
-        let root_valid = root_counts_towards_pool(&accounts, input.name.as_str());
+        let root_valid = root_counts_towards_pool(&accounts, &input.name);
         let alias_min = min_pool.saturating_sub(u16::from(root_valid));
         let (pool_changed, pool_provisioned) = ensure_alias_pool_min(
             app_state,
@@ -3851,7 +3853,7 @@ async fn probe_panel_api_test_url(
 }
 
 async fn apply_provisioning_cooldown(
-    panel_cfg: &PanelApiConfigDto,
+    panel_cfg: &PanelApiConfig,
     account_name: &str,
     input_name: &Arc<str>,
 ) {
@@ -3871,7 +3873,7 @@ async fn apply_provisioning_cooldown(
 async fn wait_for_panel_api_account_ready(
     app_state: &Arc<AppState>,
     input: &ConfigInput,
-    panel_cfg: &PanelApiConfigDto,
+    panel_cfg: &PanelApiConfig,
     account_name: &str,
     username: &str,
     password: &str,

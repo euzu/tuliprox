@@ -8,11 +8,11 @@ use crate::utils::{is_blank_optional_string, Internable};
 use crate::{check_input_connections, check_input_credentials, info_err_res};
 
 use enum_iterator::Sequence;
+use log::warn;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::str::FromStr;
 use std::sync::Arc;
-use log::warn;
 
 #[macro_export]
 macro_rules! apply_batch_aliases {
@@ -394,6 +394,11 @@ impl ConfigInputDto {
                 current_index = alias.prepare(current_index, input_type)?;
             }
         }
+
+        if let Some(panel_api) = self.panel_api.as_mut() {
+            panel_api.prepare(&self.name)?;
+        }
+
         Ok(current_index)
     }
 
@@ -423,7 +428,6 @@ impl ConfigInputDto {
 
     pub fn prepare_epg(&mut self, include_computed: bool) -> Result<(), TuliproxError> {
         if let Some(epg) = self.epg.as_mut() {
-
             if self.input_type == InputType::Library {
                 warn!("EPG is not supported for library inputs {}, skipping", self.name);
                 self.epg = None;

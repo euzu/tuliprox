@@ -1,11 +1,13 @@
 use crate::model::macros;
 use shared::error::{TuliproxError, info_err_res};
 use shared::model::{PanelApiAliasPoolDto, PanelApiAliasPoolSizeDto, PanelApiAliasPoolSizeValue, PanelApiConfigDto, PanelApiProvisioningDto, PanelApiQueryParamDto, PanelApiQueryParametersDto};
+use std::sync::Arc;
+use shared::utils::Internable;
 
 #[derive(Debug, Clone)]
 pub struct PanelApiQueryParam {
-    pub key: String,
-    pub value: String,
+    pub key: Arc<str>,
+    pub value: Arc<str>,
 }
 
 macros::from_impl!(PanelApiQueryParam);
@@ -131,6 +133,28 @@ impl PanelApiQueryParameters {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct PanelApiProvisioning {
+    pub timeout_sec: u64,
+    pub method: shared::model::PanelApiProvisioningMethod,
+    pub probe_interval_sec: u64,
+    pub cooldown_sec: u64,
+    pub offset: Option<Arc<str>>,
+}
+
+macros::from_impl!(PanelApiProvisioning);
+impl From<&PanelApiProvisioningDto> for PanelApiProvisioning {
+    fn from(dto: &PanelApiProvisioningDto) -> Self {
+        Self {
+            timeout_sec: dto.timeout_sec,
+            method: dto.method,
+            probe_interval_sec: dto.probe_interval_sec,
+            cooldown_sec: dto.cooldown_sec,
+            offset: dto.offset.as_ref().map(Internable::intern),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PanelApiAliasPoolSize {
     pub min: Option<PanelApiAliasPoolSizeValue>,
@@ -166,8 +190,9 @@ impl From<&PanelApiAliasPoolDto> for PanelApiAliasPool {
 #[derive(Debug, Clone)]
 pub struct PanelApiConfig {
     pub enabled: bool,
-    pub url: String,
-    pub api_key: Option<String>,
+    pub url: Arc<str>,
+    pub api_key: Option<Arc<str>>,
+    pub provisioning: PanelApiProvisioning,
     pub query_parameter: PanelApiQueryParameters,
     pub alias_pool: Option<PanelApiAliasPool>,
 }
@@ -177,8 +202,9 @@ impl From<&PanelApiConfigDto> for PanelApiConfig {
     fn from(dto: &PanelApiConfigDto) -> Self {
         Self {
             enabled: dto.enabled,
-            url: dto.url.clone(),
-            api_key: dto.api_key.clone(),
+            url: dto.url.clone().intern(),
+            api_key: dto.api_key.as_ref().map(Internable::intern),
+            provisioning: PanelApiProvisioning::from(&dto.provisioning),
             query_parameter: PanelApiQueryParameters::from(&dto.query_parameter),
             alias_pool: dto.alias_pool.as_ref().map(PanelApiAliasPool::from),
         }
@@ -189,67 +215,29 @@ impl From<&PanelApiConfig> for PanelApiConfigDto {
     fn from(instance: &PanelApiConfig) -> Self {
         Self {
             enabled: instance.enabled,
-            url: instance.url.clone(),
-            api_key: instance.api_key.clone(),
-            provisioning: PanelApiProvisioningDto::default(),
+            url: instance.url.to_string(),
+            api_key: instance.api_key.as_ref().map(Arc::clone),
+            provisioning: PanelApiProvisioningDto {
+                timeout_sec: instance.provisioning.timeout_sec,
+                method: instance.provisioning.method,
+                probe_interval_sec: instance.provisioning.probe_interval_sec,
+                cooldown_sec: instance.provisioning.cooldown_sec,
+                offset: instance.provisioning.offset.as_ref().map(std::string::ToString::to_string),
+            },
             query_parameter: PanelApiQueryParametersDto::from(&instance.query_parameter),
-
             credits: None,
-            alias_pool: None,
+            alias_pool: instance.alias_pool.as_ref().map(|p| PanelApiAliasPoolDto {
+                size: p.size.as_ref().map(|s| PanelApiAliasPoolSizeDto {
+                    min: s.min.clone(),
+                    max: s.max.clone(),
+                }),
+                remove_expired: p.remove_expired,
+            }),
         }
     }
 }
 
 impl PanelApiConfig {
-
-    // fn prepare_panel_api(&mut self) -> Result<(), TuliproxError> {
-    //     if let Some(panel) = self.panel_api.as_mut() {
-    //         if panel.enabled {
-    //             if let Some(alias_pool) = panel.alias_pool.as_mut() {
-    //                 let size = alias_pool
-    //                     .size
-    //                     .get_or_insert_with(PanelApiAliasPoolSizeDto::default);
-    //                 if size.min.is_none() {
-    //                     size.min = Some(PanelApiAliasPoolSizeValue::Number(1));
-    //                 }
-    //                 if size.max.is_none() {
-    //                     size.max = Some(PanelApiAliasPoolSizeValue::Number(1));
-    //                 }
-    //                 let min = size
-    //                     .min
-    //                     .as_ref()
-    //                     .and_then(PanelApiAliasPoolSizeValue::as_number);
-    //                 let max = size
-    //                     .max
-    //                     .as_ref()
-    //                     .and_then(PanelApiAliasPoolSizeValue::as_number);
-    //                 if let (Some(min), Some(max)) = (min, max) {
-    //                     if min > max {
-    //                         return info_err_res!("panel_api.alias_pool.size.min must be <= panel_api.alias_pool.size.max");
-    //                     }
-    //                 }
-    //
-    //                 let max_auto = size
-    //                     .max
-    //                     .as_ref()
-    //                     .is_some_and(PanelApiAliasPoolSizeValue::is_auto);
-    //                 if max_auto && size.min.is_none() {
-    //                     warn!(
-    //                         "panel_api.alias_pool.size.max is set to auto without min for input {}",
-    //                         self.name
-    //                     );
-    //                 }
-    //             }
-    //
-    //             if panel.provisioning.probe_interval_sec == 0 {
-    //                 return info_err_res!(
-    //                     "panel_api.provisioning.probe_interval_sec must be greater than 0"
-    //                 );
-    //             }
-    //         }
-    //     }
-    //     Ok(())
-    // }
 
     pub fn prepare(&mut self) -> Result<(), TuliproxError> {
         if !self.enabled {

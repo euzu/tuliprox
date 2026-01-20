@@ -1,7 +1,7 @@
 use crate::api::endpoints::xtream_api::{get_xtream_player_api_stream_url, ApiStreamContext};
 use crate::api::model::{create_channel_unavailable_stream, create_custom_video_stream_response,
                         create_provider_connections_exhausted_stream, create_provider_stream,
-                        get_stream_response_with_headers, ActiveClientStream, AppState,
+                        get_stream_response_with_headers, create_active_client_stream, AppState,
                         CustomVideoStreamType, ProviderStreamFactoryOptions,
                         SharedStreamManager, StreamError, ThrottledStream, UserApiRequest};
 use crate::api::model::{tee_stream, UserSession};
@@ -785,7 +785,7 @@ pub async fn force_provider_stream_response(
             .await;
         stream_channel.shared = share_stream;
         let stream =
-            ActiveClientStream::new(stream_details, app_state, user, connection_permission, fingerprint, stream_channel, Some(&user_session.token), req_headers)
+            create_active_client_stream(stream_details, app_state, user, connection_permission, fingerprint, stream_channel, Some(&user_session.token), req_headers)
                 .await;
 
         let (status_code, header_map) =
@@ -795,7 +795,7 @@ pub async fn force_provider_stream_response(
             response = response.header(key, value);
         }
 
-        let body_stream = prepare_body_stream::<ActiveClientStream>(app_state, item_type, stream);
+        let body_stream = prepare_body_stream(app_state, item_type, stream);
         debug_if_enabled!(
             "Streaming provider forced stream request from {}",
             sanitize_sensitive_info(&user_session.stream_url)
@@ -911,7 +911,7 @@ pub async fn stream_response(
 
         stream_channel.shared = is_stream_shared;
         let stream =
-            ActiveClientStream::new(stream_details, app_state, user, connection_permission, fingerprint, stream_channel, Some(session_token), req_headers)
+            create_active_client_stream(stream_details, app_state, user, connection_permission, fingerprint, stream_channel, Some(session_token), req_headers)
                 .await;
         let stream_resp = if is_stream_shared {
             debug_if_enabled!("Streaming shared stream request from {}",sanitize_sensitive_info(stream_url));
@@ -1009,7 +1009,7 @@ pub async fn stream_response(
                 }
             }
 
-            let body_stream = prepare_body_stream::<ActiveClientStream>(app_state, item_type, stream);
+            let body_stream = prepare_body_stream(app_state, item_type, stream);
             try_unwrap_body!(response.body(body_stream))
         };
 
@@ -1061,7 +1061,7 @@ async fn try_shared_stream_response_if_any(
             stream_details.provider_name = provider;
             stream_channel.shared = true;
             let stream =
-                ActiveClientStream::new(stream_details, app_state, user, connect_permission, fingerprint, stream_channel, Some(session_token), req_headers)
+                create_active_client_stream(stream_details, app_state, user, connect_permission, fingerprint, stream_channel, Some(session_token), req_headers)
                     .await
                     .boxed();
             let mut response = axum::response::Response::builder().status(status_code);
