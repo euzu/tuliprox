@@ -12,6 +12,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::marker::PhantomData;
 use std::mem::size_of;
+#[cfg(unix)]
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
@@ -2042,7 +2043,14 @@ where
 
         // Verify Header
         let mut header = [0u8; 16];
+        #[cfg(unix)]
         file.read_exact_at(&mut header, 0)?;
+        #[cfg(not(unix))]
+        {
+            let mut f = &file;
+            f.seek(SeekFrom::Start(0))?;
+            f.read_exact(&mut header)?;
+        }
 
         if &header[0..4] != MAGIC {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid magic number"));
@@ -2877,7 +2885,11 @@ where
                             let mut b = vec![0u8; l as usize];
                             if src.read_exact(&mut b).is_ok() {
                                 metadata = b;
+                            } else {
+                                error!("Failed to read metadata bytes during compaction");
                             }
+                        } else if l > u32::try_from(METADATA_MAX_SIZE).unwrap_or(4000) {
+                            error!("Metadata too large during compaction: {l}");
                         }
                     }
                 }

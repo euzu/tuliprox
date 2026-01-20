@@ -128,7 +128,7 @@ fn to_playlist_item(entry: &MetadataCacheEntry, input_name: &Arc<str>, group_nam
                         group: group_name.intern(),
                         title: metadata.title().intern(),
                         logo: metadata.poster().unwrap_or("").intern(),
-                        url: format!("file://{}", entry.file_path).into(),
+                        url: concat_string!("file://", &entry.file_path).into(),
                         xtream_cluster: XtreamCluster::Series,
                         item_type: PlaylistItemType::LocalSeriesInfo,
                         input_name: Arc::clone(input_name),

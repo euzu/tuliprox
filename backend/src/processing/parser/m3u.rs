@@ -179,7 +179,7 @@ fn process_header(input_name: &Arc<str>, video_suffixes: &[String], content: &st
                 plih.id = chanid.intern();
             }
         } else {
-            plih.epg_channel_id = Some(plih.id.intern());
+            plih.epg_channel_id = Some(Arc::clone(&plih.id));
             if let Some(pid) = provider_id {
                 plih.id = pid.intern();
             }

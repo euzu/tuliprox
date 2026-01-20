@@ -76,11 +76,11 @@ fn create_xtream_series_episode_url(url: &str, username: &str, password: &str, e
                      uuid: generate_playlist_uuid(&input.name, &episode.id.to_string(), PlaylistItemType::Series, &episode_url),
                      // we use parent_code to track the parent series
                      parent_code: parent_uuid.intern(),
-                     name: series_name.clone(),
-                     logo: episode.movie_image.clone(),
+                     name: Arc::clone(series_name),
+                     logo: Arc::clone(&episode.movie_image),
                      group: group_title.intern(),
-                     title: episode.title.clone(),
-                     url: episode_url.to_string().into(),
+                     title: Arc::clone(&episode.title),
+                     url: Arc::clone(&episode_url),
                      item_type: PlaylistItemType::Series,
                      xtream_cluster: XtreamCluster::Series,
                      additional_properties: Some(StreamProperties::Episode(episode_info)),
@@ -303,7 +303,7 @@ where F: FnMut(XtreamPlaylistItem) -> Result<(), TuliproxError>
      let item_type = PlaylistItemType::from(cluster);
          let item = PlaylistItem {
              header: PlaylistItemHeader {
-                  id: stream.get_stream_id().to_string().into(),
+                  id: stream.get_stream_id().intern(),
                   uuid: generate_playlist_uuid(input_name, &stream.get_stream_id().to_string(), item_type, &stream_url),
                   name: stream.get_name(),
                   logo: stream.get_stream_icon(),

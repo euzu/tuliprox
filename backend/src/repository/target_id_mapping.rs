@@ -1,7 +1,4 @@
-use std::cmp::max;
-use std::collections::BTreeMap;
-use std::io::Error;
-use std::path::{Path, PathBuf};
+use crate::repository::bplustree::{BPlusTree, BPlusTreeMetadata, BPlusTreeUpdate};
 use chrono::Local;
 use log::error;
 use serde::{Deserialize, Serialize};
@@ -9,7 +6,10 @@ use shared::error::TuliproxError;
 use shared::info_err;
 use shared::model::PlaylistItemType;
 use shared::model::UUIDType;
-use crate::repository::bplustree::{BPlusTree, BPlusTreeMetadata, BPlusTreeUpdate};
+use std::cmp::max;
+use std::collections::BTreeMap;
+use std::io::Error;
+use std::path::{Path, PathBuf};
 
 // TODO make configurable
 const EXPIRATION_DURATION: i64 = 86400;
@@ -40,7 +40,6 @@ impl VirtualIdRecord {
 }
 
 
-
 /// Helper to get UUID index path from primary path
 fn get_uuid_index_path(path: &Path) -> PathBuf {
     path.with_extension("uuid.db")
@@ -57,7 +56,6 @@ where
     }
     Ok(())
 }
-
 
 
 /// Dual-mode `TargetIdMapping` supporting both memory-cached and disk-only operations.
@@ -81,22 +79,20 @@ pub struct TargetIdMapping {
 
 impl TargetIdMapping {
     /// Create a new `TargetIdMapping` with dual-mode support.
-    /// 
+    ///
     /// - `use_memory_cache=true`: Full memory mode with O(1) lookups
     /// - `use_memory_cache=false`: Disk-only mode with O(log n) lookups
     pub fn new(path: &Path, use_memory_cache: bool) -> Result<Self, TuliproxError> {
         let uuid_index_path = get_uuid_index_path(path);
-        
+
         let uuid_index_existed = uuid_index_path.exists();
-        
+
         // Ensure both tree files exist
-        if let Err(e) = ensure_tree_file::<u32, VirtualIdRecord>(path) {
-            error!("Failed to create primary tree at {}: {e}", path.display());
-        }
-        if let Err(e) = ensure_tree_file::<UUIDType, u32>(&uuid_index_path) {
-            error!("Failed to create UUID index at {}: {e}", uuid_index_path.display());
-        }
-        
+        ensure_tree_file::<u32, VirtualIdRecord>(path)
+            .map_err(|e| info_err!("Failed to create primary tree at {}: {e}", path.display()))?;
+        ensure_tree_file::<UUIDType, u32>(&uuid_index_path)
+            .map_err(|e| info_err!("Failed to create UUID index at {}: {e}", uuid_index_path.display()))?;
+
         // Open disk-based update handles
         let mut disk_by_virtual_id = match BPlusTreeUpdate::<u32, VirtualIdRecord>::try_new(path) {
             Ok(tree) => tree,
@@ -107,7 +103,7 @@ impl TargetIdMapping {
                 BPlusTreeUpdate::try_new(path).map_err(|_| info_err!("Failed to create primary tree after retry"))?
             }
         };
-        
+
         let mut disk_by_uuid = match BPlusTreeUpdate::<UUIDType, u32>::try_new(&uuid_index_path) {
             Ok(tree) => tree,
             Err(e) => {
@@ -117,7 +113,7 @@ impl TargetIdMapping {
                 BPlusTreeUpdate::try_new(&uuid_index_path).map_err(|_| info_err!("Failed to create UUID index after retry"))?
             }
         };
-        
+
         let mut virtual_id_counter: u32 = 0;
         let mut meta_found = false;
 
@@ -129,7 +125,7 @@ impl TargetIdMapping {
 
         let mut uuid_index_entries: Vec<(UUIDType, u32)> = Vec::new();
         let needs_uuid_rebuild = !uuid_index_existed;
-        
+
         // Determines if we MUST traverse the tree
         // We traverse if:
         // 1. We need to populate memory cache (use_memory_cache)
@@ -140,7 +136,11 @@ impl TargetIdMapping {
         let mem_by_uuid = if needs_traversal {
             // Load primary tree only if traversal is needed
             let tree: BPlusTree<u32, VirtualIdRecord> = BPlusTree::load(path)
-                .unwrap_or_else(|_| BPlusTree::new());
+                    .map_err(|e| {
+                        error!("Failed to load primary tree at {}, starting fresh: {e}", path.display());
+                    e
+                })
+            .unwrap_or_else(|_| BPlusTree::new());
 
             // Traverse primary tree to get UUID mappings and max ID
             let mut uuid_map = BTreeMap::new();
@@ -155,7 +155,7 @@ impl TargetIdMapping {
                     }
                 }
             });
-            
+
             if use_memory_cache {
                 Some(uuid_map)
             } else {
@@ -165,7 +165,7 @@ impl TargetIdMapping {
             // Fast path! No traversal needed
             None
         };
-        
+
         // Rebuild UUID index if it was missing
         if needs_uuid_rebuild && !uuid_index_entries.is_empty() {
             let batch: Vec<(&UUIDType, &u32)> = uuid_index_entries
@@ -176,7 +176,7 @@ impl TargetIdMapping {
                 error!("Failed to rebuild UUID index: {e}");
             }
         }
-        
+
         Ok(Self {
             virtual_id_counter,
             use_memory_cache,
@@ -197,40 +197,40 @@ impl TargetIdMapping {
         } else {
             self.disk_by_uuid.query(uuid).ok().flatten()
         };
-        
+
         match existing_virtual_id {
             None => {
                 // New entry: allocate new virtual_id
                 self.virtual_id_counter += 1;
                 let virtual_id = self.virtual_id_counter;
                 let record = VirtualIdRecord::new(provider_id, virtual_id, item_type, parent_virtual_id, *uuid);
-                
+
                 // Buffer for disk write
                 self.pending_virtual_id_upserts.push((virtual_id, record));
                 self.pending_uuid_upserts.push((*uuid, virtual_id));
-                
+
                 // Update memory cache if enabled
                 if let Some(ref mut mem_map) = self.mem_by_uuid {
                     mem_map.insert(*uuid, virtual_id);
                 }
-                
+
                 virtual_id
             }
             Some(virtual_id) => {
                 // Existing entry: check if update needed
                 // For update checks, we use the primary tree
                 let needs_update = if let Ok(Some(record)) = self.disk_by_virtual_id.query(&virtual_id) {
-                     record.provider_id == provider_id &&
+                    record.provider_id == provider_id &&
                         (record.item_type != item_type || record.parent_virtual_id != parent_virtual_id)
                 } else {
                     false
                 };
-                
+
                 if needs_update {
                     let new_record = VirtualIdRecord::new(provider_id, virtual_id, item_type, parent_virtual_id, *uuid);
                     self.pending_virtual_id_upserts.push((virtual_id, new_record));
                 }
-                
+
                 virtual_id
             }
         }
@@ -243,7 +243,7 @@ impl TargetIdMapping {
             .map_err(|e| {
                 error!("Failed to write virtual_id_counter to tree header at {}: {e}", self.path.display());
                 e
-        })?;
+            })?;
 
 
         // Flush pending virtual_id upserts
@@ -255,7 +255,7 @@ impl TargetIdMapping {
             self.disk_by_virtual_id.upsert_batch(&batch)?;
             self.pending_virtual_id_upserts.clear();
         }
-        
+
         // Flush pending UUID index upserts
         if !self.pending_uuid_upserts.is_empty() {
             let batch: Vec<(&UUIDType, &u32)> = self.pending_uuid_upserts
@@ -265,7 +265,7 @@ impl TargetIdMapping {
             self.disk_by_uuid.upsert_batch(&batch)?;
             self.pending_uuid_upserts.clear();
         }
-        
+
         Ok(())
     }
 
@@ -288,14 +288,14 @@ impl Drop for TargetIdMapping {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
     use shared::model::PlaylistItemType;
+    use tempfile::tempdir;
 
     #[test]
     fn test_disk_only_mode() -> Result<(), TuliproxError> {
         let dir = tempdir().map_err(|_| info_err!("Failed to create temp dir"))?;
         let path = dir.path().join("id_mapping.db");
-        
+
         // Create mapping in disk-only mode
         let uuid1 = UUIDType::default();
         {
@@ -304,22 +304,22 @@ mod tests {
             assert_eq!(vid1, 1);
             mapping.persist().map_err(|_| info_err!("Failed to persist mapping"))?;
         }
-        
+
         // Reopen and verify persistence
         {
             let mut mapping = TargetIdMapping::new(&path, false)?;
             let vid1_again = mapping.get_and_update_virtual_id(&uuid1, 100, PlaylistItemType::Live, 0);
             assert_eq!(vid1_again, 1); // Should get same virtual_id
         }
-        
+
         Ok(())
     }
-    
+
     #[test]
     fn test_memory_cache_mode() -> Result<(), TuliproxError> {
         let dir = tempdir().map_err(|_| info_err!("Failed to create temp dir"))?;
         let path = dir.path().join("id_mapping_mem.db");
-        
+
         let uuid1 = UUIDType::default();
         {
             let mut mapping = TargetIdMapping::new(&path, true)?;
@@ -327,14 +327,14 @@ mod tests {
             assert_eq!(vid1, 1);
             mapping.persist().map_err(|err| info_err!("{err}"))?;
         }
-        
+
         // Reopen with memory cache and verify
         {
             let mut mapping = TargetIdMapping::new(&path, true)?;
             let vid1_again = mapping.get_and_update_virtual_id(&uuid1, 100, PlaylistItemType::Video, 0);
             assert_eq!(vid1_again, 1);
         }
-        
+
         Ok(())
     }
 }
