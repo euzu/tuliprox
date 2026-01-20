@@ -10,7 +10,7 @@ use std::path::Path;
 use tokio::io::AsyncWriteExt;
 
 
-const XML_PREAMBLE: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+pub const XML_PREAMBLE: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE tv SYSTEM "xmltv.dtd">
 "#;
 
