@@ -45,7 +45,6 @@ fn playlist_comparator(
 
         match (match_a, match_b) {
             (Some((idx_a, caps_a)), Some((idx_b, caps_b))) => {
-                // Different regex indices → sort by their sequence order.
                 if idx_a != idx_b {
                     return match order {
                         SortOrder::Asc => idx_a.cmp(&idx_b),
@@ -66,15 +65,19 @@ fn playlist_comparator(
                 for name in named {
                     let va = caps_a.name(name).map(|m| m.as_str());
                     let vb = caps_b.name(name).map(|m| m.as_str());
-                    if let (Some(va), Some(vb)) = (va, vb) {
-                        let o = va.cmp(vb);
-                        if !matches!(o, Ordering::Equal) {
-                            return match order {
-                                SortOrder::Asc => o,
-                                SortOrder::Desc => o.reverse(),
-                                SortOrder::None => Ordering::Equal,
-                            };
-                        }
+                    let o = match (va, vb) {
+                        (Some(a), Some(b)) => a.cmp(b),
+                        (Some(_), None) => Ordering::Greater,
+                        (None, Some(_)) => Ordering::Less,
+                        _ => Ordering::Equal,
+                    };
+
+                    if o != Ordering::Equal {
+                        return match order {
+                            SortOrder::Asc => o,
+                            SortOrder::Desc => o.reverse(),
+                            SortOrder::None => Ordering::Equal,
+                        };
                     }
                 }
 
@@ -205,14 +208,23 @@ fn sort_channels_in_groups(
                 let va = vp_a.get(rule.field.as_str());
                 let vb = vp_b.get(rule.field.as_str());
 
-                let ord = match (va, vb) {
+                let ord = match (&va, &vb) {
                     (None, None) => Ordering::Equal,
                     (Some(_), None) => direction(rule.order, Ordering::Less),
                     (None, Some(_)) => direction(rule.order, Ordering::Greater),
                     (Some(va), Some(vb)) => {
-                        playlist_comparator(rule.sequence.as_ref(), rule.order, &va, &vb)
+                        playlist_comparator(rule.sequence.as_ref(), rule.order, va, vb)
                     }
                 };
+
+                if ord == Ordering::Equal {
+                    if let (Some(va), Some(vb)) = (&va, &vb) {
+                        let fallback = direction(rule.order, va.cmp(vb));
+                        if fallback != Ordering::Equal {
+                            return fallback;
+                        }
+                    }
+                }
 
                 if ord != Ordering::Equal {
                     return ord;

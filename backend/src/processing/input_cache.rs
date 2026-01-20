@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 use log::{error, warn};
-use crate::repository::storage::{build_input_storage_path, get_input_storage_path};
+use crate::repository::{build_input_storage_path, get_input_storage_path};
 
 pub const STATUS_FILE: &str = "status.json";
 

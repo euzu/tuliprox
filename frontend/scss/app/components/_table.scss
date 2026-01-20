@@ -15,6 +15,10 @@
     overflow: auto;
   }
 
+  &__nowrap {
+    white-space: nowrap;
+  }
+
   &__table {
     width: 100%;
     border-collapse: collapse;

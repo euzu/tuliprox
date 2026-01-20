@@ -6,6 +6,10 @@ use crate::utils::{is_false, default_connect_timeout_secs, is_default_connect_ti
 
 pub const DEFAULT_USER_AGENT: &str = "VLC/3.0.16 LibVLC/3.0.16";
 
+fn default_default_user_agent() -> Option<String> {
+    Some(DEFAULT_USER_AGENT.to_string())
+}
+
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -14,6 +18,8 @@ pub struct ConfigDto {
     pub process_parallel: bool,
     pub api: ConfigApiDto,
     pub working_dir: String,
+    #[serde(default = "default_default_user_agent", skip_serializing_if = "is_blank_optional_string")]
+    pub default_user_agent: Option<String>,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub backup_dir: Option<String>,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
@@ -65,6 +71,8 @@ pub struct MainConfigDto {
     #[serde(default, skip_serializing_if = "is_false")]
     pub process_parallel: bool,
     pub working_dir: String,
+    #[serde(default = "default_default_user_agent", skip_serializing_if = "is_blank_optional_string")]
+    pub default_user_agent: Option<String>,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub backup_dir: Option<String>,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
@@ -95,6 +103,7 @@ impl Default for MainConfigDto {
             process_parallel: false,
             disk_based_processing: false,
             working_dir: String::new(),
+            default_user_agent: default_default_user_agent(),
             backup_dir: None,
             user_config_dir: None,
             mapping_path: None,
@@ -115,6 +124,7 @@ impl From<&ConfigDto> for MainConfigDto {
             process_parallel: config.process_parallel,
             disk_based_processing: config.disk_based_processing,
             working_dir: config.working_dir.clone(),
+            default_user_agent: config.default_user_agent.clone(),
             backup_dir: config.backup_dir.clone(),
             user_config_dir: config.user_config_dir.clone(),
             mapping_path: config.mapping_path.clone(),
@@ -159,6 +169,10 @@ pub struct HdHomeRunDeviceOverview {
 
 impl ConfigDto {
     pub fn prepare(&mut self, include_computed: bool) -> Result<(), TuliproxError> {
+        if is_blank_optional_string(&self.default_user_agent) {
+            self.default_user_agent = default_default_user_agent();
+        }
+
         if let Some(mins) = self.sleep_timer_mins {
             if mins == 0 {
                 return Err(TuliproxError::new(TuliproxErrorKind::Info, "`sleep_timer_mins` must be > 0 when specified".to_string()));
@@ -250,6 +264,7 @@ impl ConfigDto {
         self.process_parallel = main_config.process_parallel;
         self.disk_based_processing = main_config.disk_based_processing;
         self.working_dir = main_config.working_dir.clone();
+        self.default_user_agent = main_config.default_user_agent.clone();
         self.backup_dir = main_config.backup_dir.clone();
         self.user_config_dir = main_config.user_config_dir.clone();
         self.mapping_path = main_config.mapping_path.clone();

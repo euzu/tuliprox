@@ -38,6 +38,7 @@ pub struct ProviderStreamFactoryOptions {
     pipe_stream: bool,
     url: Url,
     headers: HeaderMap,
+    default_user_agent: Option<axum::http::header::HeaderValue>,
     range_bytes: Arc<Option<AtomicUsize>>,
     range_requested: bool,
     reconnect_flag: Arc<AtomicOnceFlag>,
@@ -54,6 +55,7 @@ impl ProviderStreamFactoryOptions {
         req_headers: &HeaderMap,
         input_headers: Option<&HashMap<String, String>>,
         disabled_headers: Option<&ReverseProxyDisabledHeaderConfig>,
+        default_user_agent: Option<&str>,
     ) -> Self {
         let buffer_size = if stream_options.buffer_enabled {
             stream_options.buffer_size
@@ -66,7 +68,19 @@ impl ProviderStreamFactoryOptions {
         req_headers.remove("range");
 
         // We merge configured input headers with the headers from the request.
-        let headers = get_request_headers(input_headers, Some(&req_headers), disabled_headers);
+        let headers = get_request_headers(
+            input_headers,
+            Some(&req_headers),
+            disabled_headers,
+            default_user_agent,
+        );
+
+        let default_user_agent = default_user_agent
+            .and_then(|ua| {
+                let trimmed = ua.trim();
+                (!trimmed.is_empty()).then_some(trimmed)
+            })
+            .and_then(|ua| axum::http::header::HeaderValue::from_str(ua).ok());
 
         let url = stream_url.clone();
         let range_bytes = if matches!(item_type, PlaylistItemType::Live | PlaylistItemType::LiveUnknown) {
@@ -86,6 +100,7 @@ impl ProviderStreamFactoryOptions {
             reconnect_flag: Arc::new(AtomicOnceFlag::new()),
             url,
             headers,
+            default_user_agent,
             range_bytes,
             range_requested: requested_range.is_some(),
         }
@@ -226,7 +241,10 @@ fn prepare_client(
     if !headers.contains_key(axum::http::header::USER_AGENT) {
         headers.insert(
             axum::http::header::USER_AGENT,
-            axum::http::header::HeaderValue::from_static(DEFAULT_USER_AGENT),
+            stream_options
+                .default_user_agent
+                .clone()
+                .unwrap_or_else(|| axum::http::header::HeaderValue::from_static(DEFAULT_USER_AGENT)),
         );
     }
 
@@ -563,6 +581,7 @@ mod tests {
             &req_headers,
             None,
             disabled_headers,
+            None,
         );
         assert!(!options.was_range_requested());
         assert_eq!(options.get_total_bytes_send(), Some(0)); // Should track even if not requested
@@ -578,6 +597,7 @@ mod tests {
             &req_headers,
             None,
             disabled_headers,
+            None,
         );
         assert!(options.was_range_requested());
         assert_eq!(options.get_total_bytes_send(), Some(100));
@@ -593,6 +613,7 @@ mod tests {
             &req_headers,
             None,
             disabled_headers,
+            None,
         );
         assert!(!options.was_range_requested());
         assert_eq!(options.get_total_bytes_send(), None); // Should NOT track
@@ -609,6 +630,7 @@ mod tests {
             &req_headers,
             None,
             disabled_headers,
+            None,
         );
         assert!(!options.was_range_requested()); // Stripped by filter
         assert_eq!(options.get_total_bytes_send(), None); 

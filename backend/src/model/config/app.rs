@@ -19,6 +19,7 @@ const CHANNEL_UNAVAILABLE: &str = "channel_unavailable.ts";
 const USER_CONNECTIONS_EXHAUSTED: &str = "user_connections_exhausted.ts";
 const PROVIDER_CONNECTIONS_EXHAUSTED: &str = "provider_connections_exhausted.ts";
 const USER_ACCOUNT_EXPIRED: &str = "user_account_expired.ts";
+const PANEL_API_PROVISIONING: &str = "panel_api_provisioning.ts";
 
 fn generate_secret() -> [u8; 32] {
     let mut rng = rand::rng();
@@ -381,11 +382,13 @@ impl AppConfig {
             let user_connections_exhausted = load_and_set_file(&path.join(USER_CONNECTIONS_EXHAUSTED));
             let provider_connections_exhausted = load_and_set_file(&path.join(PROVIDER_CONNECTIONS_EXHAUSTED));
             let user_account_expired = load_and_set_file(&path.join(USER_ACCOUNT_EXPIRED));
+            let panel_api_provisioning = load_and_set_file(&path.join(PANEL_API_PROVISIONING));
             self.custom_stream_response.store(Some(Arc::new(CustomStreamResponse {
                 channel_unavailable,
                 user_connections_exhausted,
                 provider_connections_exhausted,
                 user_account_expired,
+                panel_api_provisioning,
             })));
         }
     }
@@ -412,5 +415,4 @@ impl AppConfig {
         self.get_server_info(server_info_name)
     }
 }
-
 

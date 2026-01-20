@@ -1,11 +1,13 @@
 use crate::model::macros;
 use shared::error::{TuliproxError, info_err_res};
-use shared::model::{PanelApiConfigDto, PanelApiQueryParamDto, PanelApiQueryParametersDto};
+use shared::model::{PanelApiAliasPoolDto, PanelApiAliasPoolSizeDto, PanelApiAliasPoolSizeValue, PanelApiConfigDto, PanelApiProvisioningDto, PanelApiQueryParamDto, PanelApiQueryParametersDto};
+use std::sync::Arc;
+use shared::utils::Internable;
 
 #[derive(Debug, Clone)]
 pub struct PanelApiQueryParam {
-    pub key: String,
-    pub value: String,
+    pub key: Arc<str>,
+    pub value: Arc<str>,
 }
 
 macros::from_impl!(PanelApiQueryParam);
@@ -29,18 +31,22 @@ impl From<&PanelApiQueryParam> for PanelApiQueryParamDto {
 
 #[derive(Debug, Clone)]
 pub struct PanelApiQueryParameters {
+    pub account_info: Vec<PanelApiQueryParam>,
     pub client_info: Vec<PanelApiQueryParam>,
     pub client_new: Vec<PanelApiQueryParam>,
     pub client_renew: Vec<PanelApiQueryParam>,
+    pub client_adult_content: Vec<PanelApiQueryParam>,
 }
 
 macros::from_impl!(PanelApiQueryParameters);
 impl From<&PanelApiQueryParametersDto> for PanelApiQueryParameters {
     fn from(dto: &PanelApiQueryParametersDto) -> Self {
         Self {
+            account_info: dto.account_info.iter().map(PanelApiQueryParam::from).collect(),
             client_info: dto.client_info.iter().map(PanelApiQueryParam::from).collect(),
             client_new: dto.client_new.iter().map(PanelApiQueryParam::from).collect(),
             client_renew: dto.client_renew.iter().map(PanelApiQueryParam::from).collect(),
+            client_adult_content: dto.client_adult_content.iter().map(PanelApiQueryParam::from).collect(),
         }
     }
 }
@@ -48,9 +54,11 @@ impl From<&PanelApiQueryParametersDto> for PanelApiQueryParameters {
 impl From<&PanelApiQueryParameters> for PanelApiQueryParametersDto {
     fn from(instance: &PanelApiQueryParameters) -> Self {
         Self {
+            account_info: instance.account_info.iter().map(PanelApiQueryParamDto::from).collect(),
             client_info: instance.client_info.iter().map(PanelApiQueryParamDto::from).collect(),
             client_new: instance.client_new.iter().map(PanelApiQueryParamDto::from).collect(),
             client_renew: instance.client_renew.iter().map(PanelApiQueryParamDto::from).collect(),
+            client_adult_content: instance.client_adult_content.iter().map(PanelApiQueryParamDto::from).collect(),
         }
     }
 }
@@ -125,12 +133,80 @@ impl PanelApiQueryParameters {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct PanelApiProvisioning {
+    pub timeout_sec: u64,
+    pub method: shared::model::PanelApiProvisioningMethod,
+    pub probe_interval_sec: u64,
+    pub cooldown_sec: u64,
+    pub offset: Option<Arc<str>>,
+}
+
+macros::from_impl!(PanelApiProvisioning);
+impl From<&PanelApiProvisioningDto> for PanelApiProvisioning {
+    fn from(dto: &PanelApiProvisioningDto) -> Self {
+        Self {
+            timeout_sec: dto.timeout_sec,
+            method: dto.method,
+            probe_interval_sec: dto.probe_interval_sec,
+            cooldown_sec: dto.cooldown_sec,
+            offset: dto.offset.as_ref().map(Internable::intern),
+        }
+    }
+}
+
+impl From<&PanelApiProvisioning> for PanelApiProvisioningDto {
+    fn from(instance: &PanelApiProvisioning) -> Self {
+        Self {
+            timeout_sec: instance.timeout_sec,
+            method: instance.method,
+            probe_interval_sec: instance.probe_interval_sec,
+            cooldown_sec: instance.cooldown_sec,
+            offset: instance.offset.as_ref().map(ToString::to_string),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PanelApiAliasPoolSize {
+    pub min: Option<PanelApiAliasPoolSizeValue>,
+    pub max: Option<PanelApiAliasPoolSizeValue>,
+}
+
+macros::from_impl!(PanelApiAliasPoolSize);
+impl From<&PanelApiAliasPoolSizeDto> for PanelApiAliasPoolSize {
+    fn from(dto: &PanelApiAliasPoolSizeDto) -> Self {
+        Self {
+            min: dto.min.clone(),
+            max: dto.max.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PanelApiAliasPool {
+    pub size: Option<PanelApiAliasPoolSize>,
+    pub remove_expired: bool,
+}
+
+macros::from_impl!(PanelApiAliasPool);
+impl From<&PanelApiAliasPoolDto> for PanelApiAliasPool {
+    fn from(dto: &PanelApiAliasPoolDto) -> Self {
+        Self {
+            size: dto.size.as_ref().map(PanelApiAliasPoolSize::from),
+            remove_expired: dto.remove_expired,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PanelApiConfig {
     pub enabled: bool,
-    pub url: String,
-    pub api_key: Option<String>,
+    pub url: Arc<str>,
+    pub api_key: Option<Arc<str>>,
+    pub provisioning: PanelApiProvisioning,
     pub query_parameter: PanelApiQueryParameters,
+    pub alias_pool: Option<PanelApiAliasPool>,
 }
 
 macros::from_impl!(PanelApiConfig);
@@ -138,9 +214,11 @@ impl From<&PanelApiConfigDto> for PanelApiConfig {
     fn from(dto: &PanelApiConfigDto) -> Self {
         Self {
             enabled: dto.enabled,
-            url: dto.url.clone(),
-            api_key: dto.api_key.clone(),
+            url: dto.url.clone().intern(),
+            api_key: dto.api_key.as_ref().map(Internable::intern),
+            provisioning: PanelApiProvisioning::from(&dto.provisioning),
             query_parameter: PanelApiQueryParameters::from(&dto.query_parameter),
+            alias_pool: dto.alias_pool.as_ref().map(PanelApiAliasPool::from),
         }
     }
 }
@@ -149,15 +227,24 @@ impl From<&PanelApiConfig> for PanelApiConfigDto {
     fn from(instance: &PanelApiConfig) -> Self {
         Self {
             enabled: instance.enabled,
-            url: instance.url.clone(),
-            api_key: instance.api_key.clone(),
+            url: instance.url.to_string(),
+            api_key: instance.api_key.as_ref().map(Arc::clone),
+            provisioning: PanelApiProvisioningDto::from(&instance.provisioning),
             query_parameter: PanelApiQueryParametersDto::from(&instance.query_parameter),
-
+            credits: None,
+            alias_pool: instance.alias_pool.as_ref().map(|p| PanelApiAliasPoolDto {
+                size: p.size.as_ref().map(|s| PanelApiAliasPoolSizeDto {
+                    min: s.min.clone(),
+                    max: s.max.clone(),
+                }),
+                remove_expired: p.remove_expired,
+            }),
         }
     }
 }
 
 impl PanelApiConfig {
+
     pub fn prepare(&mut self) -> Result<(), TuliproxError> {
         if !self.enabled {
             return Ok(());

@@ -30,6 +30,7 @@ pub struct StreamDetails {
     pub(crate) stream_info: ProviderStreamInfo,
     pub provider_name: Option<Arc<str>>,
     pub grace_period_millis: u64,
+    pub disable_provider_grace: bool,
     pub reconnect_flag: Option<Arc<AtomicOnceFlag>>,
     pub provider_handle: Option<ProviderHandle>,
 }
@@ -41,6 +42,7 @@ impl StreamDetails {
             stream_info: None,
             provider_name: None,
             grace_period_millis: default_grace_period_millis(),
+            disable_provider_grace: false,
             reconnect_flag: None,
             provider_handle: None,
         }

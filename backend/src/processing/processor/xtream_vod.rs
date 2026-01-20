@@ -2,8 +2,8 @@ use crate::model::FetchedPlaylist;
 use crate::model::{AppConfig, ConfigTarget};
 use crate::processing::processor::create_resolve_options_function_for_xtream_target;
 use crate::processing::processor::xtream::playlist_resolve_download_playlist_item;
-use crate::repository::storage::get_input_storage_path;
-use crate::repository::xtream_repository::persist_input_vod_info_batch;
+use crate::repository::get_input_storage_path;
+use crate::repository::persist_input_vod_info_batch;
 use log::{error, info, log_enabled, Level};
 use shared::error::TuliproxError;
 use shared::model::{InputType, PlaylistEntry, StreamProperties, VideoStreamProperties, XtreamVideoInfo};
@@ -41,6 +41,7 @@ pub async fn playlist_resolve_vod(app_config: &Arc<AppConfig>,
     let mut last_log_time = Instant::now();
     let mut processed_vod_info_count = 0;
     let mut batch = Vec::with_capacity(BATCH_SIZE);
+    let default_user_agent = app_config.config.load().default_user_agent.clone();
 
     provider_fpl.source.release_resources(XtreamCluster::Video);
 
@@ -54,7 +55,17 @@ pub async fn playlist_resolve_vod(app_config: &Arc<AppConfig>,
         let Some(provider_id) = pli.get_provider_id() else { continue; };
         processed_vod_info_count += 1;
         if provider_id != 0 {
-            if let Some(content) = playlist_resolve_download_playlist_item(client, pli, input, errors, resolve_delay, XtreamCluster::Video).await {
+            if let Some(content) = playlist_resolve_download_playlist_item(
+                client,
+                pli,
+                input,
+                errors,
+                resolve_delay,
+                XtreamCluster::Video,
+                default_user_agent.as_deref(),
+            )
+                .await
+            {
                 if content.is_empty() { continue; }
                 match serde_json::from_str::<XtreamVideoInfo>(&content) {
                     Ok(info) => {

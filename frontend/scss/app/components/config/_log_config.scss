@@ -1,0 +1,9 @@
+.tp__log-config-view__header {
+  .tp__form-field {
+    display: flex;
+    flex-flow: row wrap;
+    gap: var(--gap-default);
+    box-sizing: border-box;
+    align-items: center;
+  }
+}

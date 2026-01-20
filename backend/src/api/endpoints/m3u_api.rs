@@ -10,7 +10,7 @@ use crate::api::model::AppState;
 use crate::api::model::UserApiRequest;
 use crate::api::model::{create_custom_video_stream_response, CustomVideoStreamType};
 use crate::auth::Fingerprint;
-use crate::repository::m3u_repository::{m3u_get_item_for_stream_id, m3u_load_rewrite_playlist};
+use crate::repository::{m3u_get_item_for_stream_id, m3u_load_rewrite_playlist};
 use crate::repository::storage_const;
 use crate::utils::debug_if_enabled;
 use axum::response::IntoResponse;

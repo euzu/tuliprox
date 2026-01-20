@@ -1168,7 +1168,7 @@ dependencies = [
  "futures-signals",
  "gloo-render 0.2.0",
  "gloo-storage 0.3.0",
- "gloo-timers 0.2.6",
+ "gloo-timers 0.3.0",
  "gloo-utils 0.2.0",
  "implicit-clone",
  "indexmap",
@@ -1692,8 +1692,6 @@ version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b995a66bb87bebce9a0f4a95aed01daca4872c050bfcb21653361c03bc35e5c"
 dependencies = [
- "futures-channel",
- "futures-core",
  "js-sys",
  "wasm-bindgen",
 ]

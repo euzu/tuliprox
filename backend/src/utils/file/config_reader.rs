@@ -1,18 +1,23 @@
 use crate::api::model::AppState;
 use crate::model::Config;
 use crate::model::{ApiProxyConfig, AppConfig, SourcesConfig};
-use crate::repository::user_repository::{get_api_user_db_path, load_api_user};
+use crate::repository::{
+    csv_read_inputs, csv_write_inputs, get_api_user_db_path, is_csv_file, load_api_user,
+};
+use crate::utils;
 use crate::utils::file_reader;
 use crate::utils::sys_utils::exit;
 use crate::utils::{open_file, read_mappings_file, EnvResolvingReader, FileLockManager};
-use crate::utils;
 use arc_swap::access::Access;
 use arc_swap::{ArcSwap, ArcSwapAny};
 use chrono::Local;
 use log::{error, info, warn};
 use serde::Serialize;
 use shared::error::{info_err, info_err_res, TuliproxError};
-use shared::model::{ApiProxyConfigDto, AppConfigDto, ConfigDto, ConfigInputAliasDto, ConfigPaths, HdHomeRunDeviceOverview, InputType, SourcesConfigDto, TargetUserDto};
+use shared::model::{
+    ApiProxyConfigDto, AppConfigDto, ConfigDto, ConfigInputAliasDto, ConfigPaths,
+    HdHomeRunDeviceOverview, InputType, SourcesConfigDto, TargetUserDto,
+};
 use shared::utils::CONSTANTS;
 use std::env;
 use std::fs::File;
@@ -36,8 +41,7 @@ impl<L: Read, R: Read> Read for EitherReader<L, R> {
     }
 }
 
-pub fn config_file_reader(file: File, resolve_env: bool) -> impl Read
-{
+pub fn config_file_reader(file: File, resolve_env: bool) -> impl Read {
     if resolve_env {
         EitherReader::Left(EnvResolvingReader::new(file_reader(file)))
     } else {
@@ -45,7 +49,10 @@ pub fn config_file_reader(file: File, resolve_env: bool) -> impl Read
     }
 }
 
-pub async fn read_api_proxy_config(config: &AppConfig, resolve_env: bool) -> Result<Option<ApiProxyConfig>, TuliproxError> {
+pub async fn read_api_proxy_config(
+    config: &AppConfig,
+    resolve_env: bool,
+) -> Result<Option<ApiProxyConfig>, TuliproxError> {
     let paths = <Arc<ArcSwap<ConfigPaths>> as Access<ConfigPaths>>::load(&config.paths);
     let api_proxy_file_path = paths.api_proxy_file_path.as_str();
     if let Some(api_proxy_dto) = read_api_proxy_file(api_proxy_file_path, resolve_env)? {
@@ -64,35 +71,64 @@ pub async fn read_api_proxy_config(config: &AppConfig, resolve_env: bool) -> Res
     }
 }
 
-pub fn read_sources_file_from_path(sources_file: &Path, resolve_env: bool, include_computed: bool, hdhr_config: Option<&HdHomeRunDeviceOverview>) -> Result<SourcesConfigDto, TuliproxError> {
+pub fn read_sources_file_from_path(
+    sources_file: &Path,
+    resolve_env: bool,
+    include_computed: bool,
+    hdhr_config: Option<&HdHomeRunDeviceOverview>,
+) -> Result<SourcesConfigDto, TuliproxError> {
     match open_file(sources_file) {
         Ok(file) => {
-            let maybe_sources: Result<SourcesConfigDto, _> = serde_saphyr::from_reader(config_file_reader(file, resolve_env));
+            let maybe_sources: Result<SourcesConfigDto, _> =
+                serde_saphyr::from_reader(config_file_reader(file, resolve_env));
             match maybe_sources {
                 Ok(mut sources) => {
                     if resolve_env {
                         if let Err(err) = sources.prepare(include_computed, hdhr_config) {
-                            return info_err_res!("Can't read the sources-config file: {}: {err}", sources_file.display());
+                            return info_err_res!(
+                                "Can't read the sources-config file: {}: {err}",
+                                sources_file.display()
+                            );
                         }
                     }
                     Ok(sources)
                 }
-                Err(err) => info_err_res!("Can't read the sources-config file: {}: {err}", sources_file.display())
+                Err(err) => info_err_res!(
+                    "Can't read the sources-config file: {}: {err}",
+                    sources_file.display()
+                ),
             }
         }
-        Err(err) => info_err_res!("Can't read the sources-config file: {}: {err}", sources_file.display())
+        Err(err) => info_err_res!(
+            "Can't read the sources-config file: {}: {err}",
+            sources_file.display()
+        ),
     }
 }
 
-
-pub fn read_sources_file(sources_file: &str, resolve_env: bool, include_computed: bool, hdhr_config: Option<&HdHomeRunDeviceOverview>) -> Result<SourcesConfigDto, TuliproxError> {
-    read_sources_file_from_path(&PathBuf::from(sources_file), resolve_env, include_computed, hdhr_config)
+pub fn read_sources_file(
+    sources_file: &str,
+    resolve_env: bool,
+    include_computed: bool,
+    hdhr_config: Option<&HdHomeRunDeviceOverview>,
+) -> Result<SourcesConfigDto, TuliproxError> {
+    read_sources_file_from_path(
+        &PathBuf::from(sources_file),
+        resolve_env,
+        include_computed,
+        hdhr_config,
+    )
 }
 
-pub fn read_config_file(config_file: &str, resolve_env: bool, include_computed: bool) -> Result<ConfigDto, TuliproxError> {
+pub fn read_config_file(
+    config_file: &str,
+    resolve_env: bool,
+    include_computed: bool,
+) -> Result<ConfigDto, TuliproxError> {
     match open_file(&std::path::PathBuf::from(config_file)) {
         Ok(file) => {
-            let maybe_config: Result<ConfigDto, _> = serde_saphyr::from_reader(config_file_reader(file, resolve_env));
+            let maybe_config: Result<ConfigDto, _> =
+                serde_saphyr::from_reader(config_file_reader(file, resolve_env));
             match maybe_config {
                 Ok(mut config) => {
                     if resolve_env {
@@ -100,24 +136,33 @@ pub fn read_config_file(config_file: &str, resolve_env: bool, include_computed: 
                     }
                     Ok(config)
                 }
-                Err(err) => info_err_res!("Can't read the config file: {config_file}: {err}")
+                Err(err) => info_err_res!("Can't read the config file: {config_file}: {err}"),
             }
         }
-        Err(err) => info_err_res!("Can't read the config file: {config_file}: {err}")
+        Err(err) => info_err_res!("Can't read the config file: {config_file}: {err}"),
     }
 }
 
-pub fn read_app_config_dto(paths: &ConfigPaths,
-                           resolve_env: bool,
-                           include_computed: bool) -> Result<AppConfigDto, TuliproxError> {
+pub fn read_app_config_dto(
+    paths: &ConfigPaths,
+    resolve_env: bool,
+    include_computed: bool,
+) -> Result<AppConfigDto, TuliproxError> {
     let config_file = paths.config_file_path.as_str();
     let sources_file = paths.sources_file_path.as_str();
     let api_proxy_file = paths.api_proxy_file_path.as_str();
 
     let config = read_config_file(config_file, resolve_env, include_computed)?;
-    let sources = read_sources_file(sources_file, resolve_env, include_computed, config.get_hdhr_device_overview().as_ref())?;
+    let sources = read_sources_file(
+        sources_file,
+        resolve_env,
+        include_computed,
+        config.get_hdhr_device_overview().as_ref(),
+    )?;
     let mappings = if let Some(mappings_file) = paths.mapping_file_path.as_ref() {
-        read_mappings_file(mappings_file, resolve_env).unwrap_or(None).map(|(_, mappings)| mappings)
+        read_mappings_file(mappings_file, resolve_env)
+            .unwrap_or(None)
+            .map(|(_, mappings)| mappings)
     } else {
         None
     };
@@ -132,9 +177,14 @@ pub fn read_app_config_dto(paths: &ConfigPaths,
     })
 }
 
-pub async fn prepare_sources_batch(sources: &mut SourcesConfigDto, include_computed: bool) -> Result<(), TuliproxError> {
+pub async fn prepare_sources_batch(
+    sources: &mut SourcesConfigDto,
+    include_computed: bool,
+) -> Result<(), TuliproxError> {
     let mut current_index = 0;
-    let max_id_in_source = sources.inputs.iter()
+    let max_id_in_source = sources
+        .inputs
+        .iter()
         .flat_map(|item| {
             std::iter::once(item.id).chain(
                 item.aliases
@@ -168,12 +218,13 @@ pub async fn prepare_sources_batch(sources: &mut SourcesConfigDto, include_compu
     Ok(())
 }
 
-pub async fn get_batch_aliases(input_type: InputType, url: &str) -> Result<Option<(PathBuf, Vec<ConfigInputAliasDto>)>, TuliproxError> {
+pub async fn get_batch_aliases(
+    input_type: InputType,
+    url: &str,
+) -> Result<Option<(PathBuf, Vec<ConfigInputAliasDto>)>, TuliproxError> {
     if input_type == InputType::M3uBatch || input_type == InputType::XtreamBatch {
-        return match utils::csv_read_inputs(input_type, url).await {
-            Ok((file_path, batch_aliases)) => {
-                Ok(Some((file_path, batch_aliases)))
-            }
+        return match csv_read_inputs(input_type, url).await {
+            Ok((file_path, batch_aliases)) => Ok(Some((file_path, batch_aliases))),
             Err(err) => {
                 info_err_res!("{err}")
             }
@@ -182,7 +233,10 @@ pub async fn get_batch_aliases(input_type: InputType, url: &str) -> Result<Optio
     Ok(None)
 }
 
-pub async fn prepare_users(app_config_dto: &mut AppConfigDto, app_config: &AppConfig) -> Result<(), TuliproxError> {
+pub async fn prepare_users(
+    app_config_dto: &mut AppConfigDto,
+    app_config: &AppConfig,
+) -> Result<(), TuliproxError> {
     let use_user_db = app_config_dto
         .api_proxy
         .as_ref()
@@ -192,11 +246,18 @@ pub async fn prepare_users(app_config_dto: &mut AppConfigDto, app_config: &AppCo
         let user_db_path = get_api_user_db_path(app_config);
         if user_db_path.exists() {
             match load_api_user(app_config).await {
-                Ok(stored_users) => if let Some(api_proxy) = app_config_dto.api_proxy.as_mut() {
-                    api_proxy.user.extend(stored_users.iter().map(TargetUserDto::from));
-                },
+                Ok(stored_users) => {
+                    if let Some(api_proxy) = app_config_dto.api_proxy.as_mut() {
+                        api_proxy
+                            .user
+                            .extend(stored_users.iter().map(TargetUserDto::from));
+                    }
+                }
                 Err(err) => {
-                    warn!("Failed to load users from DB at {}: {err}", user_db_path.display());
+                    warn!(
+                        "Failed to load users from DB at {}: {err}",
+                        user_db_path.display()
+                    );
                 }
             }
         }
@@ -204,16 +265,23 @@ pub async fn prepare_users(app_config_dto: &mut AppConfigDto, app_config: &AppCo
     Ok(())
 }
 
-pub async fn read_initial_app_config(paths: &mut ConfigPaths,
-                                     resolve_env: bool,
-                                     include_computed: bool,
-                                     server_mode: bool) -> Result<AppConfig, TuliproxError> {
+pub async fn read_initial_app_config(
+    paths: &mut ConfigPaths,
+    resolve_env: bool,
+    include_computed: bool,
+    server_mode: bool,
+) -> Result<AppConfig, TuliproxError> {
     let config_path = paths.config_path.as_str();
     let config_file = paths.config_file_path.as_str();
     let sources_file = paths.sources_file_path.as_str();
 
     let config_dto = read_config_file(config_file, resolve_env, include_computed)?;
-    let mut sources_dto = read_sources_file(sources_file, resolve_env, include_computed, config_dto.get_hdhr_device_overview().as_ref())?;
+    let mut sources_dto = read_sources_file(
+        sources_file,
+        resolve_env,
+        include_computed,
+        config_dto.get_hdhr_device_overview().as_ref(),
+    )?;
     prepare_sources_batch(&mut sources_dto, include_computed).await?;
     let sources: SourcesConfig = SourcesConfig::try_from(sources_dto)?;
     let mut config: Config = Config::from(config_dto);
@@ -221,7 +289,10 @@ pub async fn read_initial_app_config(paths: &mut ConfigPaths,
     config.update_runtime();
 
     if paths.mapping_file_path.is_none() {
-        let mut path = config.mapping_path.as_ref().map_or_else(|| utils::get_default_mappings_path(config_path), ToString::to_string);
+        let mut path = config.mapping_path.as_ref().map_or_else(
+            || utils::get_default_mappings_path(config_path),
+            ToString::to_string,
+        );
         if resolve_env {
             path = resolve_env_var(&path);
         }
@@ -252,10 +323,14 @@ pub async fn read_initial_app_config(paths: &mut ConfigPaths,
                         .map(|p| p.display().to_string())
                         .collect();
 
-                    if vec.is_empty() { None } else { Some(vec) }
+                    if vec.is_empty() {
+                        None
+                    } else {
+                        Some(vec)
+                    }
                 };
                 app_config.paths.store(Arc::new(paths.clone()));
-            },
+            }
             Ok(None) => info!("Mapping file: not used"),
             Err(err) => exit!("{err}"),
         }
@@ -272,9 +347,13 @@ pub async fn read_initial_app_config(paths: &mut ConfigPaths,
     Ok(app_config)
 }
 
-pub fn read_api_proxy_file(api_proxy_file: &str, resolve_env: bool) -> Result<Option<ApiProxyConfigDto>, TuliproxError> {
+pub fn read_api_proxy_file(
+    api_proxy_file: &str,
+    resolve_env: bool,
+) -> Result<Option<ApiProxyConfigDto>, TuliproxError> {
     open_file(&std::path::PathBuf::from(api_proxy_file)).map_or(Ok(None), |file| {
-        let maybe_api_proxy: Result<ApiProxyConfigDto, _> = serde_saphyr::from_reader(config_file_reader(file, resolve_env));
+        let maybe_api_proxy: Result<ApiProxyConfigDto, _> =
+            serde_saphyr::from_reader(config_file_reader(file, resolve_env));
         match maybe_api_proxy {
             Ok(mut api_proxy_dto) => {
                 if resolve_env {
@@ -313,13 +392,20 @@ pub async fn read_api_proxy(config: &AppConfig, resolve_env: bool) -> Option<Api
     }
 }
 
-async fn write_config_file<T>(file_path: &str, backup_dir: &str, config: &T, default_name: &str) -> Result<(), TuliproxError>
+async fn write_config_file<T>(
+    file_path: &str,
+    backup_dir: &str,
+    config: &T,
+    default_name: &str,
+) -> Result<(), TuliproxError>
 where
     T: ?Sized + Serialize,
 {
     let path = PathBuf::from(file_path);
-    let filename = path.file_name().map_or(default_name.to_string(), |f| f.to_string_lossy().to_string());
-    
+    let filename = path.file_name().map_or(default_name.to_string(), |f| {
+        f.to_string_lossy().to_string()
+    });
+
     let mut serialized = String::new();
     let options = serde_saphyr::SerializerOptions {
         prefer_block_scalars: false,
@@ -337,43 +423,96 @@ where
         }
     }
 
-    let backup_path = PathBuf::from(backup_dir).join(format!("{filename}_{}", Local::now().format("%Y%m%d_%H%M%S")));
+    if path.exists() {
+        let backup_path = PathBuf::from(backup_dir).join(format!("{filename}_{}", Local::now().format("%Y%m%d_%H%M%S")));
 
-    match fs::copy(&path, &backup_path).await {
-        Ok(_) => {}
-        Err(err) => { error!("Could not backup file {}:{}", &backup_path.to_str().unwrap_or("?"), err) }
+        match fs::copy(&path, &backup_path).await {
+            Ok(_) => {}
+            Err(err) => {
+                error!("Could not backup file {}:{err}", &backup_path.to_str().unwrap_or("?"));
+            }
+        }
+        info!("Saving file to {}", &path.to_str().unwrap_or("?"));
     }
-    info!("Saving file to {}", &path.to_str().unwrap_or("?"));
 
-    fs::write(&path, serialized)
-        .await
-        .map_err(|err| info_err!("Could not write file {}: {}", &path.to_str().unwrap_or("?"), err))
+    let parent_dir = path.parent().ok_or_else(|| { info_err!("Could not write file {}: missing parent directory", &path.to_str().unwrap_or("?"))})?;
+
+    let dest_file_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(default_name);
+
+    let mut tmp_path = parent_dir.to_path_buf();
+    tmp_path.push(format!(".{dest_file_name}.tmp-{}-{}", std::process::id(), Local::now().timestamp_nanos_opt().unwrap_or_default()));
+
+    fs::write(&tmp_path, serialized).await.map_err(|err| { info_err!("Could not write temp file {}: {err}", &tmp_path.to_str().unwrap_or("?"))})?;
+
+    match fs::rename(&tmp_path, &path).await {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            // Windows doesn't allow overwriting an existing file via rename.
+            #[cfg(windows)]
+            {
+                if fs::remove_file(&path).await.is_ok() {
+                    if fs::rename(&tmp_path, &path).await.is_ok() {
+                        return Ok(());
+                    }
+                }
+            }
+
+            // Best-effort cleanup; if the temp file can't be removed, ignore it.
+            let _ = fs::remove_file(&tmp_path).await;
+            Err(info_err!(
+                "Could not replace file {} with {}: {err}",
+                &path.to_str().unwrap_or("?"),
+                &tmp_path.to_str().unwrap_or("?")
+            ))
+        }
+    }
 }
 
-pub async fn save_api_proxy(file_path: &str, backup_dir: &str, config: &ApiProxyConfigDto) -> Result<(), TuliproxError> {
+pub async fn save_api_proxy(
+    file_path: &str,
+    backup_dir: &str,
+    config: &ApiProxyConfigDto,
+) -> Result<(), TuliproxError> {
     write_config_file(file_path, backup_dir, config, "api-proxy.yml").await
 }
 
-pub async fn save_main_config(file_path: &str, backup_dir: &str, config: &ConfigDto) -> Result<(), TuliproxError> {
+pub async fn save_main_config(
+    file_path: &str,
+    backup_dir: &str,
+    config: &ConfigDto,
+) -> Result<(), TuliproxError> {
     write_config_file(file_path, backup_dir, config, "config.yml").await
 }
 
-pub async fn save_sources_config<T>(file_path: &str, backup_dir: &str, config: &T) -> Result<(), TuliproxError>
+pub async fn save_sources_config<T>(
+    file_path: &str,
+    backup_dir: &str,
+    config: &T,
+) -> Result<(), TuliproxError>
 where
     T: ?Sized + Serialize,
 {
     write_config_file(file_path, backup_dir, config, "source.yml").await
 }
 
-pub async fn persist_source_config(app_state: &Arc<AppState>, source_file_path: Option<&Path>, doc: SourcesConfigDto) -> Result<SourcesConfigDto, TuliproxError>
-{
+pub async fn persist_source_config(
+    app_state: &Arc<AppState>,
+    source_file_path: Option<&Path>,
+    doc: SourcesConfigDto,
+) -> Result<SourcesConfigDto, TuliproxError> {
     let source_file = {
-        source_file_path
-            .and_then(|p| p.to_str())
-            .map_or_else(|| {
-                let paths = <Arc<ArcSwap<ConfigPaths>> as Access<ConfigPaths>>::load(&app_state.app_config.paths);
+        source_file_path.and_then(|p| p.to_str()).map_or_else(
+            || {
+                let paths = <Arc<ArcSwap<ConfigPaths>> as Access<ConfigPaths>>::load(
+                    &app_state.app_config.paths,
+                );
                 paths.sources_file_path.clone()
-            }, ToString::to_string)
+            },
+            ToString::to_string,
+        )
     };
     let backup_dir = {
         let config = <Arc<ArcSwap<Config>> as Access<Config>>::load(&app_state.app_config.config);
@@ -382,9 +521,26 @@ pub async fn persist_source_config(app_state: &Arc<AppState>, source_file_path: 
 
     let mut source_config = doc.clone();
     for input in &mut source_config.inputs {
-        if matches!(input.input_type, InputType::XtreamBatch | InputType::M3uBatch) && utils::is_csv_file(input.url.as_str()) {
+        if input
+            .panel_api
+            .as_ref()
+            .is_some_and(|panel| panel.alias_pool.is_some())
+        {
+            if let Some(aliases) = input.aliases.as_mut() {
+                aliases.sort_by(|a, b| {
+                    let a_ts = a.exp_date.unwrap_or(i64::MAX);
+                    let b_ts = b.exp_date.unwrap_or(i64::MAX);
+                    a_ts.cmp(&b_ts).then_with(|| a.name.cmp(&b.name))
+                });
+            }
+        }
+        if matches!(
+            input.input_type,
+            InputType::XtreamBatch | InputType::M3uBatch
+        ) && is_csv_file(input.url.as_str())
+        {
             if let Some(aliases) = &input.aliases {
-                if let Err(err) = utils::csv_write_inputs(input.url.as_str(), aliases).await {
+                if let Err(err) = csv_write_inputs(input.url.as_str(), aliases).await {
                     error!("Could not persist aliases to csv {}: {}", input.url, err);
                 }
             }
@@ -407,7 +563,10 @@ pub async fn persist_source_config(app_state: &Arc<AppState>, source_file_path: 
     Ok(doc)
 }
 
-pub async fn validate_and_persist_source_config(app_state: &Arc<AppState>, dto: SourcesConfigDto) -> Result<SourcesConfigDto, TuliproxError> {
+pub async fn validate_and_persist_source_config(
+    app_state: &Arc<AppState>,
+    dto: SourcesConfigDto,
+) -> Result<SourcesConfigDto, TuliproxError> {
     {
         let mut new_dto = dto.clone();
         let config = <Arc<ArcSwap<Config>> as Access<Config>>::load(&app_state.app_config.config);
@@ -421,13 +580,16 @@ pub fn resolve_env_var(value: &str) -> String {
     if value.is_empty() {
         return String::new();
     }
-    CONSTANTS.re_env_var.replace_all(value, |caps: &regex::Captures| {
-        let var_name = &caps["var"];
-        env::var(var_name).unwrap_or_else(|e| {
-            error!("Could not resolve env var '{var_name}': {e}");
-            format!("${{env:{var_name}}}")
+    CONSTANTS
+        .re_env_var
+        .replace_all(value, |caps: &regex::Captures| {
+            let var_name = &caps["var"];
+            env::var(var_name).unwrap_or_else(|e| {
+                error!("Could not resolve env var '{var_name}': {e}");
+                format!("${{env:{var_name}}}")
+            })
         })
-    }).to_string()
+        .to_string()
 }
 
 #[cfg(test)]
@@ -436,7 +598,8 @@ mod tests {
 
     #[test]
     fn test_resolve() {
-        let resolved = resolve_env_var("${env:HOME}");
-        assert_eq!(resolved, std::env::var("HOME").unwrap());
+        // Use PATH which exists on both Windows and Unix
+        let resolved = resolve_env_var("${env:PATH}");
+        assert_eq!(resolved, std::env::var("PATH").unwrap());
     }
 }

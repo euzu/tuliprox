@@ -1,4 +1,4 @@
-use crate::repository::bplustree::BPlusTree;
+use crate::repository::BPlusTree;
 use std::io;
 use std::io::BufRead;
 use std::net::Ipv4Addr;

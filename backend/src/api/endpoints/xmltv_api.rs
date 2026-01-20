@@ -1,27 +1,27 @@
-use crate::api::api_utils::{get_user_target, serve_file, get_user_target_by_credentials, resource_response, try_unwrap_body, internal_server_error};
+use crate::api::api_utils::{get_user_target, get_user_target_by_credentials, internal_server_error, resource_response, serve_file, try_unwrap_body};
 use crate::api::model::AppState;
 use crate::api::model::UserApiRequest;
 use crate::model::Config;
 use crate::model::{ConfigTarget, ProxyUserCredentials, TargetOutput};
-use crate::repository::storage::get_target_storage_path;
+use crate::repository::get_target_storage_path;
+use crate::repository::m3u_get_epg_file_path;
 use crate::repository::storage_const;
-use crate::repository::xtream_repository::{xtream_get_epg_file_path, xtream_get_storage_path};
-use crate::{utils};
+use crate::repository::XML_PREAMBLE;
+use crate::repository::{xtream_get_epg_file_path, xtream_get_storage_path};
 use crate::utils::{async_file_reader, deobscure_text};
-use crate::utils::{EpgConsumer, EpgProcessor, format_xtream_time};
+use crate::utils::{format_xtream_time, EpgConsumer, EpgProcessor};
+use crate::utils;
 use axum::response::IntoResponse;
 use chrono::{Offset, TimeZone, Utc};
 use chrono_tz::Tz;
 use log::{error, trace};
 use quick_xml::events::Event;
-use shared::error::{TuliproxError, info_err};
-use shared::model::{PlaylistItemType, ShortEpgDto, parse_xmltv_time, ShortEpgResultDto};
+use shared::error::{info_err, TuliproxError};
+use shared::model::{parse_xmltv_time, PlaylistItemType, ShortEpgDto, ShortEpgResultDto};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
-use crate::repository::epg_repository::XML_PREAMBLE;
-use crate::repository::m3u_repository::m3u_get_epg_file_path;
 
 pub fn get_empty_epg_response() -> axum::response::Response {
     try_unwrap_body!(axum::response::Response::builder()
@@ -330,9 +330,14 @@ impl EpgConsumer for DtoEpgConsumer {
                     }
                 }
             }
-            Event::End(e) if e.name().as_ref() == b"programme" => {
-                if let Some(item) = self.current_item.take() {
-                    self.items.push(item);
+            Event::End(e) => {
+                if e.name().as_ref() == b"programme" {
+                    if let Some(item) = self.current_item.take() {
+                        self.items.push(item);
+                    }
+                }
+                if matches!(e.name().as_ref(), b"programme" | b"title" | b"desc") {
+                    self.current_tag.clear();
                 }
             }
             _ => {}

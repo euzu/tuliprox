@@ -89,7 +89,12 @@ async fn run_download_queue(cfg: &AppConfig, download_cfg: &VideoDownloadConfig,
             .reverse_proxy
             .as_ref()
             .and_then(|r| r.disabled_header.clone());
-        let headers = request::get_request_headers(Some(&download_cfg.headers), None, disabled_headers.as_ref());
+        let headers = request::get_request_headers(
+            Some(&download_cfg.headers),
+            None,
+            disabled_headers.as_ref(),
+            config.default_user_agent.as_deref(),
+        );
         let dq = Arc::clone(download_queue);
 
         match create_client(cfg).default_headers(headers).build() {

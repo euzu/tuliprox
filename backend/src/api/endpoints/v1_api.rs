@@ -18,7 +18,7 @@ use crate::api::endpoints::extract_accept_header::ExtractAcceptHeader;
 use crate::api::endpoints::v1_api_config::v1_api_config_register;
 use crate::api::endpoints::library_api::library_api_register;
 use crate::model::InputSource;
-use crate::repository::storage::get_geoip_path;
+use crate::repository::get_geoip_path;
 use crate::utils::GeoIp;
 use crate::utils::request::download_text_content;
 
@@ -91,7 +91,18 @@ async fn geoip_update(axum::extract::State(app_state): axum::extract::State<Arc<
                 headers: HashMap::default(),
             };
             let disabled_headers = app_state.get_disabled_headers();
-            return match download_text_content(&app_state.http_client.load(), disabled_headers.as_ref(), &input_source, None, None, false).await {
+            let default_user_agent = config.default_user_agent.clone();
+            return match download_text_content(
+                &app_state.http_client.load(),
+                disabled_headers.as_ref(),
+                &input_source,
+                None,
+                None,
+                false,
+                default_user_agent.as_deref(),
+            )
+                .await
+            {
                    Ok((content, _)) => {
                        let reader = Cursor::new(content);
                        let mut geoip = GeoIp::new();

@@ -15,19 +15,32 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-fn start_config_watch(app_state: &Arc<AppState>, cancel_token: &CancellationToken) -> Result<(), TuliproxError> {
+#[allow(clippy::too_many_lines)]
+fn start_config_watch(
+    app_state: &Arc<AppState>,
+    cancel_token: &CancellationToken,
+) -> Result<(), TuliproxError> {
     // let (tx, mut rx) = mpsc::channel::<notify::Result<Event>>(100);
     let (std_tx, std_rx) = std::sync::mpsc::channel();
     let (tx, mut rx) = tokio::sync::mpsc::channel(100);
 
-    let paths = <Arc<ArcSwap<ConfigPaths>> as Access<ConfigPaths>>::load(&app_state.app_config.paths);
-    let mapping_file_path = paths.mapping_file_path.as_ref().map_or_else(String::new, ToString::to_string);
+    let paths =
+        <Arc<ArcSwap<ConfigPaths>> as Access<ConfigPaths>>::load(&app_state.app_config.paths);
+    let mapping_file_path = paths
+        .mapping_file_path
+        .as_ref()
+        .map_or_else(String::new, ToString::to_string);
     let files = get_watch_files(app_state, &paths, mapping_file_path.as_str());
     //
     // // Add a path to be watched. All files and directories at that path and
     // // below will be monitored for changes.
     let path = Path::new(paths.config_path.as_str());
-    let recursive_mode = if !mapping_file_path.is_empty() && utils::is_directory(&mapping_file_path) { RecursiveMode::Recursive } else { RecursiveMode::NonRecursive };
+    let recursive_mode = if !mapping_file_path.is_empty() && utils::is_directory(&mapping_file_path)
+    {
+        RecursiveMode::Recursive
+    } else {
+        RecursiveMode::NonRecursive
+    };
 
     std::thread::spawn({
         let tx = tx.clone();
@@ -39,8 +52,18 @@ fn start_config_watch(app_state: &Arc<AppState>, cancel_token: &CancellationToke
         }
     });
 
-    let mut watcher = recommended_watcher(std_tx).map_err(|err| TuliproxError::new(TuliproxErrorKind::Info, format!("Failed to init config file watcher {err}")))?;
-    watcher.watch(path, recursive_mode).map_err(|err| TuliproxError::new(TuliproxErrorKind::Info, format!("Failed to start config file watcher {err}")))?;
+    let mut watcher = recommended_watcher(std_tx).map_err(|err| {
+        TuliproxError::new(
+            TuliproxErrorKind::Info,
+            format!("Failed to init config file watcher {err}"),
+        )
+    })?;
+    watcher.watch(path, recursive_mode).map_err(|err| {
+        TuliproxError::new(
+            TuliproxErrorKind::Info,
+            format!("Failed to start config file watcher {err}"),
+        )
+    })?;
     info!("Watching config file changes {}", path.display());
 
     let event_manager = Arc::clone(&app_state.event_manager);
@@ -58,7 +81,8 @@ fn start_config_watch(app_state: &Arc<AppState>, cancel_token: &CancellationToke
 
         let _keep_watcher_alive = watcher;
 
-        let mut debounce_timer = Box::pin(tokio::time::sleep(tokio::time::Duration::from_millis(0)));
+        let mut debounce_timer =
+            Box::pin(tokio::time::sleep(tokio::time::Duration::from_millis(0)));
         let mut timer_active = false;
         let mut pending_configs: HashMap<ConfigFile, PathBuf> = HashMap::new();
 
@@ -74,7 +98,17 @@ fn start_config_watch(app_state: &Arc<AppState>, cancel_token: &CancellationToke
             Some(res) = rx.recv() => {
                 match res {
                     Ok(event) => {
-                        if let EventKind::Access(AccessKind::Close(AccessMode::Write)) = event.kind {
+                        // Config updates may be written atomically (temp file + rename), which
+                        // doesn't always emit a Close(Write) event for the destination file.
+                        // Treat rename/modify/create/remove events as reload triggers as well.
+                        let is_write_event = matches!(
+                            event.kind,
+                            EventKind::Access(AccessKind::Close(AccessMode::Write))
+                                | EventKind::Modify(_)
+                                | EventKind::Create(_)
+                                | EventKind::Remove(_)
+                        );
+                        if is_write_event {
                             let mut trigger = false;
                             for path in event.paths {
                                 let mut resolved = None;
@@ -127,23 +161,33 @@ fn start_config_watch(app_state: &Arc<AppState>, cancel_token: &CancellationToke
     Ok(())
 }
 
-fn get_watch_files(app_state: &Arc<AppState>, paths: &ConfigPaths, mapping_file_path: &str) -> HashMap<PathBuf, (ConfigFile, bool)> {
-    let sources = <Arc<ArcSwap<SourcesConfig>> as Access<SourcesConfig>>::load(&app_state.app_config.sources);
+fn get_watch_files(
+    app_state: &Arc<AppState>,
+    paths: &ConfigPaths,
+    mapping_file_path: &str,
+) -> HashMap<PathBuf, (ConfigFile, bool)> {
+    let sources =
+        <Arc<ArcSwap<SourcesConfig>> as Access<SourcesConfig>>::load(&app_state.app_config.sources);
     let input_files_paths = sources.get_input_files();
     let mut files = HashMap::new();
-    [(paths.config_file_path.as_str(), ConfigFile::Config),
+    [
+        (paths.config_file_path.as_str(), ConfigFile::Config),
         (paths.api_proxy_file_path.as_str(), ConfigFile::ApiProxy),
         (mapping_file_path, ConfigFile::Mapping),
-        (paths.sources_file_path.as_str(), ConfigFile::Sources)
-    ].into_iter()
-        .filter(|(path, _)| !path.is_empty())
-        .for_each(|(path, config_file)| { files.insert(PathBuf::from(path), (config_file, is_directory(path))); });
-    for path in input_files_paths { files.insert(path, (ConfigFile::SourceFile, false)); }
+        (paths.sources_file_path.as_str(), ConfigFile::Sources),
+    ]
+    .into_iter()
+    .filter(|(path, _)| !path.is_empty())
+    .for_each(|(path, config_file)| {
+        files.insert(PathBuf::from(path), (config_file, is_directory(path)));
+    });
+    for path in input_files_paths {
+        files.insert(path, (ConfigFile::SourceFile, false));
+    }
     files
 }
 
-pub fn exec_config_watch(app_state: &Arc<AppState>,
-                         cancel: &CancellationToken) {
+pub fn exec_config_watch(app_state: &Arc<AppState>, cancel: &CancellationToken) {
     let hot_reload = {
         let config = <Arc<ArcSwap<Config>> as Access<Config>>::load(&app_state.app_config.config);
         config.config_hot_reload

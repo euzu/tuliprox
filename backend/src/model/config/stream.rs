@@ -74,4 +74,5 @@ pub struct CustomStreamResponse {
     pub user_connections_exhausted: Option<TransportStreamBuffer>, // user has no more connections
     pub provider_connections_exhausted: Option<TransportStreamBuffer>, // provider limit reached, has no more connections
     pub user_account_expired: Option<TransportStreamBuffer>,
+    pub panel_api_provisioning: Option<TransportStreamBuffer>,
 }

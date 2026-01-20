@@ -1,0 +1,72 @@
+.tp__schedules-config-view {
+  &__body {
+    display: flex;
+    flex-flow: column;
+    gap: var(--gap-default);
+    box-sizing: border-box;
+  }
+
+  &__schedule {
+    display: flex;
+    flex-flow: column;
+    gap: var(--gap-default);
+    box-sizing: border-box;
+    padding: var(--padding-default);
+
+    .tp__config-view__table {
+      th {
+        text-align: left;
+      }
+
+      th, td {
+        width: 1%;
+        white-space: nowrap;
+      }
+
+      th:last-child,
+      td:last-child {
+        width: auto;
+      }
+
+      td {
+        vertical-align: middle;
+      }
+
+      .tp__config-view__tags {
+        padding-left: var(--padding-default);
+      }
+    }
+
+  }
+
+  &__footer {
+    margin-top: var(--margin-default);
+    padding-top: var(--margin-default);
+    border-top: 1px solid var(--card-border-color);
+
+    svg {
+      width: 320px;
+      height: 90px;
+    }
+
+    fill: var(--label-color);
+  }
+
+  &__editor {
+    display: flex;
+    flex-flow: row wrap;
+    align-items: flex-end;
+    gap: var(--gap-default);
+    box-sizing: border-box;
+
+    .tp__icon-button {
+      svg {
+        width: 2.3rem;
+      }
+    }
+  }
+
+  &__delete-btn {
+    fill: var(--menu-button-warn-hover-color);
+  }
+}

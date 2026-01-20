@@ -1,4 +1,5 @@
 use crate::api::model::AppState;
+use crate::api::panel_api::sync_panel_api_exp_dates_on_boot;
 use crate::model::{AppConfig, ProcessTargets, ScheduleConfig};
 use crate::processing::processor::playlist::exec_processing;
 use crate::utils::exit;
@@ -58,11 +59,12 @@ async fn start_scheduler(client: reqwest::Client, expression: &str, app_state: A
                 if let Some(datetime) = upcoming.next() {
                     tokio::select! {
                         () = tokio::time::sleep_until(tokio::time::Instant::from(datetime_to_instant(datetime))) => {
-                           let app_config = Arc::clone(&app_state.app_config);
-                           let event_manager = Arc::clone(&app_state.event_manager);
-                           let playlist_state = app_state.playlists.clone();
-                           exec_processing(&client, app_config, Arc::clone(&targets), Some(event_manager),
-                                Some(playlist_state), Some(app_state.update_guard.clone())).await;
+                       let app_config = Arc::clone(&app_state.app_config);
+                       let event_manager = Arc::clone(&app_state.event_manager);
+                       let playlist_state = app_state.playlists.clone();
+                       sync_panel_api_exp_dates_on_boot(&app_state).await;
+                       exec_processing(&client, app_config, Arc::clone(&targets), Some(event_manager),
+                            Some(playlist_state), Some(app_state.update_guard.clone())).await;
                         }
                         () = cancel.cancelled() => {
                             break;

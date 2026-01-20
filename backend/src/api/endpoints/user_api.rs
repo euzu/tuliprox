@@ -5,9 +5,8 @@ use crate::auth::validator_user;
 use crate::auth::AuthBearer;
 use crate::model::PlaylistXtreamCategory;
 use crate::model::{AppConfig, ConfigTarget};
-use crate::repository::m3u_repository;
-use crate::repository::user_repository::{load_user_bouquet_as_json, save_user_bouquet};
-use crate::repository::xtream_repository::xtream_get_playlist_categories;
+use crate::repository::{iter_raw_m3u_target_playlist, load_user_bouquet_as_json, save_user_bouquet};
+use crate::repository::xtream_get_playlist_categories;
 use axum::response::IntoResponse;
 use bytes::Bytes;
 use futures::{stream, StreamExt};
@@ -29,7 +28,7 @@ fn get_categories_from_xtream(categories: Option<Vec<PlaylistXtreamCategory>>) -
 
 async fn get_categories_from_m3u_playlist(target: &ConfigTarget, config: &AppConfig) -> Vec<Arc<str>> {
     let mut groups = Vec::new();
-    if let Some((_guard, iter)) = m3u_repository::iter_raw_m3u_target_playlist(config, target, None).await {
+    if let Some((_guard, iter)) = iter_raw_m3u_target_playlist(config, target, None).await {
         let mut unique_groups = HashSet::new();
         for item in iter {
             if !unique_groups.contains(&item.group) {

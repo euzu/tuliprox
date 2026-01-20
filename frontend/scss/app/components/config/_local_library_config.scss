@@ -1,0 +1,25 @@
+.tp__library-config-view {
+  &__header {
+    display: flex;
+    flex-flow: column;
+    gap: var(--gap-default);
+    box-sizing: border-box;
+  }
+
+  &__list {
+    display: flex;
+    flex-flow: row;
+    gap: var(--gap-default);
+    &-item {
+      font-size: 1.1rem;
+      color: var(--text-color);
+    }
+  }
+
+  &__editor-row {
+    display: flex;
+    flex-flow: row wrap;
+    gap: var(--gap-default);
+    box-sizing: border-box;
+  }
+}

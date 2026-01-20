@@ -1,15 +1,15 @@
 use crate::model::ConfigTarget;
 use crate::model::{xtream_mapping_option_from_target_options, AppConfig, ProxyUserCredentials};
-use crate::repository::bplustree::{BPlusTreeQuery, PlaylistIteratorReader};
+use crate::repository::{BPlusTreeQuery, PlaylistIteratorReader};
 
-use crate::repository::user_repository::user_get_bouquet_filter;
-use crate::repository::xtream_repository::{xtream_get_file_path, xtream_get_storage_path};
+use crate::repository::user_get_bouquet_filter;
+use crate::repository::{xtream_get_file_path, xtream_get_storage_path};
 use crate::utils::FileReadGuard;
 use log::error;
 use shared::error::{TuliproxError, info_err, info_err_res};
 use shared::model::{PlaylistItemType, TargetType, XtreamCluster, XtreamMappingOptions, XtreamPlaylistItem};
 use std::collections::HashSet;
-use crate::repository::storage::get_file_path_for_db_index;
+use crate::repository::get_file_path_for_db_index;
 
 pub struct XtreamPlaylistIterator {
     reader: PlaylistIteratorReader<XtreamPlaylistItem>,

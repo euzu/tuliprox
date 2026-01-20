@@ -11,13 +11,18 @@ dist
 # Datasource local storage ignored files
 /dataSources/
 /dataSources.local.xml
+/dev/
 
 docker/binaries
 .DS_Store
 
+# Ignore documentation files
+AGENTS.md
+
 *.m3u
 
-.idea
+.idea/
+*.idea
 *.iml
 
 node_modules

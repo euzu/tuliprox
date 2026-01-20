@@ -1,5 +1,4 @@
 use crate::model::{AppConfig, ConfigInput, ConfigTarget};
-use crate::repository::{m3u_repository, xtream_repository};
 use crate::utils::{m3u, xtream};
 use axum::response::IntoResponse;
 use serde_json::{json};
@@ -7,11 +6,12 @@ use shared::model::{CommonPlaylistItem, InputType, M3uPlaylistItem, PlaylistItem
 use std::sync::Arc;
 use crate::api::api_utils::{empty_json_list_response, json_or_bin_response, stream_json_or_bin_response};
 use shared::utils::interner_gc;
+use crate::repository::{iter_raw_m3u_input_playlist, iter_raw_m3u_target_playlist, iter_raw_xtream_input_playlist, iter_raw_xtream_target_playlist};
 
 pub(in crate::api::endpoints) async fn get_playlist_for_target(cfg_target: Option<&ConfigTarget>, cfg: &AppConfig, cluster: XtreamCluster, accept: Option<&str>) -> impl IntoResponse + Send {
     if let Some(target) = cfg_target {
         if target.has_output(TargetType::Xtream) {
-            let Some((_guard, channel_iterator)) = xtream_repository::iter_raw_xtream_target_playlist(cfg, target, cluster).await else {
+            let Some((_guard, channel_iterator)) = iter_raw_xtream_target_playlist(cfg, target, cluster).await else {
               return empty_json_list_response();
             };
             let item_filter = if cluster == XtreamCluster::Series {
@@ -22,7 +22,7 @@ pub(in crate::api::endpoints) async fn get_playlist_for_target(cfg_target: Optio
             let converted_iterator: Box<dyn Iterator<Item=CommonPlaylistItem> + Send> = Box::new(channel_iterator.filter(item_filter).map(CommonPlaylistItem::from));
             return stream_json_or_bin_response(accept, converted_iterator).into_response();
         } else if target.has_output(TargetType::M3u) {
-            let Some((_guard, channel_iterator)) = m3u_repository::iter_raw_m3u_target_playlist(cfg, target, Some(cluster)).await else {
+            let Some((_guard, channel_iterator)) = iter_raw_m3u_target_playlist(cfg, target, Some(cluster)).await else {
                 return empty_json_list_response();
             };
             let item_filter = if cluster == XtreamCluster::Series {
@@ -43,13 +43,13 @@ pub(in crate::api::endpoints) async fn get_playlist_for_target(cfg_target: Optio
 pub(in crate::api::endpoints) async fn get_playlist_for_input(cfg_input: Option<&Arc<ConfigInput>>, cfg: &AppConfig, cluster: XtreamCluster, accept: Option<&str>) -> impl IntoResponse + Send {
     if let Some(input) = cfg_input {
         if matches!(input.input_type, InputType::Xtream | InputType::XtreamBatch) {
-            let Some((_guard, channel_iterator)) = xtream_repository::iter_raw_xtream_input_playlist(cfg, input, cluster).await else {
+            let Some((_guard, channel_iterator)) = iter_raw_xtream_input_playlist(cfg, input, cluster).await else {
                 return empty_json_list_response();
             };
             let converted_iterator: Box<dyn Iterator<Item=CommonPlaylistItem> + Send> = Box::new(channel_iterator.map(CommonPlaylistItem::from));
             return stream_json_or_bin_response(accept, converted_iterator).into_response();
         } else if matches!(input.input_type, InputType::M3u | InputType::M3uBatch) {
-            let Some((_guard, channels)) = m3u_repository::iter_raw_m3u_input_playlist(cfg, input, Some(cluster)).await else {
+            let Some((_guard, channels)) = iter_raw_m3u_input_playlist(cfg, input, Some(cluster)).await else {
               return empty_json_list_response();
             };
             let converted_iterator: Box<dyn Iterator<Item=CommonPlaylistItem> + Send> = Box::new(channels.map(CommonPlaylistItem::from));

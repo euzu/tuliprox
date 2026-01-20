@@ -43,10 +43,11 @@
 - **Local Library Module**: Comprehensive local video file scanning and metadata management.
   - Recursive scanning, automatic classification, and NFO/TMDB metadata resolution.
   - Incremental scanning and virtual ID management.
-- **Panel API Integration**: Optional integration to renew expired accounts or provision new aliases when connections are exhausted.
+- **Panel API Integration**: Optional integration to renew expired input accounts or provision new accounts to ensure a minimum valid input accounts.
 - **Playlist Caching**: Added `cache_duration` to inputs, allowing configurable provider playlist cache times during subsequent updates (e.g., `60s`, `5m` `12h`, `1d`).
 - **Database Viewer**: New CLI flags `--dbx` and `--dbm` to inspect internal database content.
-- **Added `disk_based_processing`** (boolean, default `false`) to `config.yml`. When enabled, input playlists are processed from disk instead of memory.
+- **Added `disk_based_processing`**: (boolean, default `false`) to `config.yml`. When enabled, input playlists are processed from disk instead of memory.
+- **User-Agent `default_user_agent`**: Ensures that outgoing requests always pass a default user agent.
 
 ## ⚙️ Engine & Storage Optimizations
 - **Slotted Page Architecture**: Improved space utilization and support for variable-length keys.

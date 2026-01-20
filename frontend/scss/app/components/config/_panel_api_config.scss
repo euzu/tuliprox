@@ -1,6 +1,6 @@
 @use "../../../size" as size;
 
-.tp__panel-config-view {
+.tp__panel-api-config-view {
   &__info-text {
     color: var(--modest-text-color);
     line-height: 1.35;
@@ -22,6 +22,12 @@
     gap: var(--gap-micro);
   }
 
+  &__input-badges {
+    display: flex;
+    flex-flow: row wrap;
+    gap: var(--gap-small);
+  }
+
   &__input-subtitle {
     color: var(--modest-text-color);
     font-size: 0.9rem;
@@ -32,6 +38,12 @@
     flex-flow: column;
     align-items: flex-end;
     gap: var(--gap-small);
+  }
+
+  &__credits-chip {
+    color: var(--warn-color);
+    border-color: var(--warn-color);
+    background: color-mix(in srgb, var(--warn-color) 18%, transparent);
   }
 
   &__toggle {

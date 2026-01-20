@@ -67,7 +67,11 @@
 @forward "components/accordion";
 @forward "components/cvs_table";
 @forward "components/config/config_view";
-@forward "components/config/panel_config_view";
+@forward "components/config/local_library_config";
+@forward "components/config/log_config";
+@forward "components/config/messaging_config";
+@forward "components/config/panel_api_config";
+@forward "components/config/schedules_config";
 @forward "components/tabset";
 @forward "components/select";
 @forward "components/form";

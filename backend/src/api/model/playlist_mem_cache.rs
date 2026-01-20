@@ -2,8 +2,7 @@ use std::collections::HashMap;
 use tokio::sync::RwLock;
 use shared::model::{M3uPlaylistItem, PlaylistItem, XtreamCluster, XtreamPlaylistItem};
 use crate::model::ConfigTarget;
-use crate::repository::bplustree::BPlusTree;
-use crate::repository::target_id_mapping::{VirtualIdRecord};
+use crate::repository::{BPlusTree, VirtualIdRecord};
 
 pub struct PlaylistXtreamStorage {
     pub id_mapping: BPlusTree<u32, VirtualIdRecord>,

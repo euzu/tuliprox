@@ -201,7 +201,8 @@ pub fn UserTable(props: &UserTableProps) -> Html {
                     12 => dto.credentials.created_at.as_ref().and_then(|ts| unix_ts_to_str(*ts))
                         .map(|s| html! { { s } }).unwrap_or_else(|| html! { <AppIcon name="Unlimited" /> }),
                     13 => dto.credentials.exp_date.as_ref().and_then(|ts| unix_ts_to_str(*ts))
-                        .map(|s| html! { { s } }).unwrap_or_else(|| html! { <AppIcon name="Unlimited" /> }),
+                        .map(|s| html! { <span class="tp__table__nowrap">{ s }</span> })
+                        .unwrap_or_else(|| html! { <AppIcon name="Unlimited" /> }),
                     14 => dto.credentials.comment.as_ref()
                         .map_or_else(|| html! {},
                                      |comment| html! { <RevealContent preview={Some(html! {comment.substring(0, 50)})}>{comment}</RevealContent> }),

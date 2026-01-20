@@ -3,7 +3,7 @@ use crate::api::model::{ActiveProviderManager, ConnectionManager, EventManager, 
 use crate::api::model::{ActiveUserManager, DownloadQueue};
 use crate::api::scheduler::exec_scheduler;
 use crate::model::{AppConfig, Config, ConfigTarget, HdHomeRunConfig, HdHomeRunDeviceConfig, ProcessTargets, ReverseProxyDisabledHeaderConfig, ScheduleConfig, SourcesConfig};
-use crate::repository::playlist_repository::load_target_into_memory_cache;
+use crate::repository::load_target_into_memory_cache;
 use crate::tools::lru_cache::LRUResourceCache;
 use crate::utils::request::create_client;
 use arc_swap::{ArcSwap, ArcSwapOption};
@@ -20,7 +20,7 @@ use tokio::sync::{Mutex};
 use tokio::task;
 use tokio_util::sync::CancellationToken;
 use crate::api::model::UpdateGuard;
-use crate::repository::storage::get_geoip_path;
+use crate::repository::get_geoip_path;
 use crate::utils::GeoIp;
 
 macro_rules! cancel_service {

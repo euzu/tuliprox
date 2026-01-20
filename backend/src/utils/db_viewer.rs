@@ -1,4 +1,4 @@
-use crate::repository::bplustree::{BPlusTreeDiskIterator, BPlusTreeQuery};
+use crate::repository::{BPlusTreeDiskIterator, BPlusTreeQuery};
 use env_logger::{Builder, Target};
 use log::{error, LevelFilter};
 use serde::{Deserialize, Serialize};

@@ -1,8 +1,8 @@
 use crate::model::Epg;
 use crate::model::{Config, ConfigTarget, TargetOutput};
-use crate::repository::m3u_repository::m3u_get_epg_file_path;
+use crate::repository::m3u_get_epg_file_path;
 use shared::model::PlaylistGroup;
-use crate::repository::xtream_repository::{xtream_get_epg_file_path, xtream_get_storage_path};
+use crate::repository::{xtream_get_epg_file_path, xtream_get_storage_path};
 use crate::utils::{async_file_writer, debug_if_enabled};
 use shared::error::{notify_err, TuliproxError};
 use std::collections::HashMap;

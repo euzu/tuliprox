@@ -1,5 +1,4 @@
-use crate::model::{macros, EpgConfig};
-use crate::utils::get_csv_file_path;
+use crate::model::{macros, EpgConfig, PanelApiConfig};
 use chrono::Utc;
 use log::warn;
 use shared::error::TuliproxError;
@@ -12,7 +11,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use url::Url;
-use crate::model::config::panel_api::PanelApiConfig;
+use crate::repository::get_csv_file_path;
 
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]

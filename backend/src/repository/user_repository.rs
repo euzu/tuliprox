@@ -1,9 +1,9 @@
 use crate::model::PlaylistXtreamCategory;
 use crate::model::{AppConfig, ProxyUserCredentials, TargetUser};
 use crate::model::Config;
-use crate::repository::bplustree::BPlusTree;
+use crate::repository::BPlusTree;
 use crate::repository::storage_const;
-use crate::repository::xtream_repository::xtream_get_playlist_categories;
+use crate::repository::xtream_get_playlist_categories;
 use crate::utils;
 use crate::utils::json_write_documents_to_file;
 use chrono::Local;

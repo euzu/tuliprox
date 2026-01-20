@@ -4,9 +4,8 @@ use crate::auth::AuthBasic;
 use crate::model::{AppConfig, ConfigTarget, ProxyUserCredentials};
 use crate::utils::arc_str_serde;
 use crate::processing::parser::xtream::get_xtream_url;
-use crate::repository::m3u_playlist_iterator::M3uPlaylistIterator;
-use crate::repository::m3u_repository;
-use crate::repository::xtream_playlist_iterator::XtreamPlaylistIterator;
+use crate::repository::{iter_raw_m3u_target_playlist, M3uPlaylistIterator};
+use crate::repository::XtreamPlaylistIterator;
 use axum::response::IntoResponse;
 use bytes::Bytes;
 use futures::{stream, Stream, StreamExt};
@@ -277,7 +276,7 @@ async fn lineup_status(
             cfg.get_target_for_username(&app_state.device.t_username)
         {
             if target.has_output(TargetType::M3u) {
-                if let Some((_guard, iter)) = m3u_repository::iter_raw_m3u_target_playlist(&cfg, &target, None).await
+                if let Some((_guard, iter)) = iter_raw_m3u_target_playlist(&cfg, &target, None).await
                 {
                     iter.count()
                 } else {

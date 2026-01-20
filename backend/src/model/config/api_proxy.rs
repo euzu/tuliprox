@@ -1,5 +1,5 @@
 use crate::model::{macros, AppConfig, Config, ProxyUserCredentials, TargetUser};
-use crate::repository::user_repository::{backup_api_user_db_file, get_api_user_db_path, load_api_user, merge_api_user};
+use crate::repository::{backup_api_user_db_file, get_api_user_db_path, load_api_user, merge_api_user};
 use log::debug;
 use std::cmp::PartialEq;
 use std::fs;
