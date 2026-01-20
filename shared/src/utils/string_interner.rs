@@ -3,11 +3,11 @@
 //! Provides a global string interner to deduplicate frequently repeated
 //! strings like `input_name` and `group` in playlist items.
 
+use crate::model::UUIDType;
 use serde::{Deserialize, Deserializer, Serializer};
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::sync::{Arc, LazyLock, RwLock};
-use crate::model::UUIDType;
 
 // Global interner store
 static INTERNER: LazyLock<RwLock<HashSet<Arc<str>>>> = LazyLock::new(|| {
@@ -28,7 +28,7 @@ impl Internable for &Cow<'_, str> {
     fn intern(self) -> Arc<str> {
         match self {
             Cow::Borrowed(s) => intern_str(s),
-            Cow::Owned(s) =>  intern_str(s),
+            Cow::Owned(s) => intern_string(s.clone()),
         }
     }
 }
@@ -78,53 +78,64 @@ impl Internable for i64 {
 /// Interns a string slice.
 fn intern_str(s: &str) -> Arc<str> {
     // Try read first
-    let guard = INTERNER.read().unwrap();
-    if let Some(existing) = guard.get(s) {
-        return Arc::clone(existing);
+    if let Ok(guard) = INTERNER.read() {
+        if let Some(existing) = guard.get(s) {
+            return Arc::clone(existing);
+        }
+        drop(guard);
     }
-    drop(guard);
 
     // Write lock
-    let mut guard = INTERNER.write().unwrap();
-    // Double check
-    if let Some(existing) = guard.get(s) {
-        return Arc::clone(existing);
-    }
+    if let Ok(mut guard) = INTERNER.write() {
+        // Double check
+        if let Some(existing) = guard.get(s) {
+            return Arc::clone(existing);
+        }
 
-    let arc: Arc<str> = Arc::from(s);
-    guard.insert(Arc::clone(&arc));
-    arc
+        let arc: Arc<str> = Arc::from(s);
+        guard.insert(Arc::clone(&arc));
+        return arc;
+    }
+    Arc::from(s)
 }
 
 /// Interns an owned string.
 fn intern_string(s: String) -> Arc<str> {
-    let guard = INTERNER.read().unwrap();
-    if let Some(existing) = guard.get(s.as_str()) {
-        return Arc::clone(existing);
-    }
-    drop(guard);
-
-    let mut guard = INTERNER.write().unwrap();
-    if let Some(existing) = guard.get(s.as_str()) {
-        return Arc::clone(existing);
+    // Try read first
+    if let Ok(guard) = INTERNER.read() {
+        if let Some(existing) = guard.get(s.as_str()) {
+            return Arc::clone(existing);
+        }
+        drop(guard);
     }
 
-    let arc: Arc<str> = Arc::from(s);
-    guard.insert(Arc::clone(&arc));
-    arc
+    // Write lock
+    if let Ok(mut guard) = INTERNER.write() {
+        // Double check
+        if let Some(existing) = guard.get(s.as_str()) {
+            return Arc::clone(existing);
+        }
+
+        let arc: Arc<str> = Arc::from(s);
+        guard.insert(Arc::clone(&arc));
+        return arc;
+    }
+    Arc::from(s)
 }
 
 /// Garbage collection: removes strings that are only referenced by the cache.
 pub fn interner_gc() -> usize {
-    let mut guard = INTERNER.write().unwrap();
-    let before = guard.len();
-    // Arc::strong_count == 1 means the cache is the only one holding it.
-    guard.retain(|s| Arc::strong_count(s) > 1);
-    let removed = before - guard.len();
-    if removed > 0 {
-        log::debug!("Pruned {removed} unused interned strings ({} remaining)", guard.len());
+    if let Ok(mut guard) = INTERNER.write() {
+        let before = guard.len();
+        // Arc::strong_count == 1 means the cache is the only one holding it.
+        guard.retain(|s| Arc::strong_count(s) > 1);
+        let removed = before - guard.len();
+        if removed > 0 {
+            log::debug!("Pruned {removed} unused interned strings ({} remaining)", guard.len());
+        }
+        return removed;
     }
-    removed
+    0
 }
 
 pub mod arc_str_serde {
@@ -253,13 +264,7 @@ where
     Ok(opt.unwrap_or_default().intern())
 }
 
-pub fn arc_str_none_default_on_null<'de, D>(deserializer: D) -> Result<Arc<str>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let opt = Option::<String>::deserialize(deserializer)?;
-    Ok(opt.unwrap_or_default().intern())
-}
+pub use arc_str_default_on_null as arc_str_none_default_on_null;
 
 pub fn deserialize_as_option_arc_str<'de, D>(deserializer: D) -> Result<Option<Arc<str>>, D::Error>
 where
@@ -273,14 +278,4 @@ where
     }
 }
 
-pub fn deserialize_as_option_arc_str_none<'de, D>(deserializer: D) -> Result<Option<Arc<str>>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let value: serde_json::Value = Deserialize::deserialize(deserializer)?;
-    match value {
-        serde_json::Value::String(s) => Ok(Some(s.intern())),
-        serde_json::Value::Number(s) => Ok(Some(s.to_string().intern())),
-        _ => Ok(None),
-    }
-}
+pub use deserialize_as_option_arc_str as deserialize_as_option_arc_str_none;
