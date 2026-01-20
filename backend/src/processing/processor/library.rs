@@ -76,6 +76,7 @@ fn to_playlist_item(entry: &MetadataCacheEntry, input_name: &Arc<str>, group_nam
         MediaMetadata::Series(_series) => {
             if let Some(additional_properties) = metadata_cache_entry_to_xtream_series_info(entry) {
                 let mut episodes = vec![];
+                let group_arc: Arc<str> = group_name.intern();
                 if let StreamProperties::Series(series_properties) = &additional_properties {
                     if let Some(details_props) = series_properties.details.as_ref() {
                         if let Some(prop_episodes) = details_props.episodes.as_ref() {
@@ -93,7 +94,7 @@ fn to_playlist_item(entry: &MetadataCacheEntry, input_name: &Arc<str>, group_nam
                                         uuid: generate_playlist_uuid(input_name, &episode.id.to_string(), PlaylistItemType::LocalSeries, &episode.direct_source),
                                         logo: logo.clone(),
                                         name: episode.title.clone(),
-                                        group: group_name.intern(),
+                                        group: Arc::clone(&group_arc),
                                         title: episode.title.clone(),
                                         url: episode.direct_source.clone(),
                                         xtream_cluster: XtreamCluster::Series,
@@ -156,25 +157,25 @@ pub fn metadata_cache_entry_to_xtream_movie_info(
         .and_then(|s| s.to_str())
         .map(ToString::to_string).unwrap_or_default();
 
-    let actor_names = movie.actors.as_ref().map(|a| a.iter().map(|a| a.name.clone()).collect::<Vec<_>>().join(", "));
+    let actor_names = movie.actors.as_ref().map(|a| a.iter().map(|a| a.name.clone()).collect::<Vec<_>>().join(", ").intern());
 
     let properties = VideoStreamProperties {
         name: movie.title.clone().into(),
         category_id: 0,
         stream_id: 0,
         stream_icon: movie.poster.as_deref().or(movie.fanart.as_deref()).unwrap_or("").to_owned().into(),
-        direct_source: String::new().into(),
+        direct_source: "".into(),
         custom_sid: None,
-        added: entry.file_modified.to_string().into(),
-        container_extension: container_extension.into(),
+        added: entry.file_modified.intern(),
+        container_extension: container_extension.intern(),
         rating: movie.rating,
         rating_5based: None,
-        stream_type: Some("movie".to_string().into()),
+        stream_type: Some("movie".intern()),
         trailer: movie.videos.as_ref().and_then(|v| v.iter().find(|video| video.site.eq_ignore_ascii_case("youtube")).map(|video| video.key.clone().into())),
         tmdb: movie.tmdb_id,
         is_adult: 0,
         details: Some(VideoStreamDetailProperties {
-            kinopoisk_url: movie.tmdb_id.map(|id| format!("https://www.themoviedb.org/movie/{id}").into()),
+            kinopoisk_url: movie.tmdb_id.map(|id| concat_string!("https://www.themoviedb.org/movie/", &id.to_string()).into()),
             o_name: movie.original_title.clone().map(Into::into),
             cover_big: movie.poster.clone().map(Into::into),
             movie_image: movie.poster.clone().map(Into::into),
@@ -182,8 +183,8 @@ pub fn metadata_cache_entry_to_xtream_movie_info(
             episode_run_time: movie.runtime,
             director: movie.directors.as_ref().map(|d| d.join(", ").into()),
             youtube_trailer: movie.videos.as_ref().and_then(|v| v.iter().find(|video| video.site.eq_ignore_ascii_case("youtube")).map(|video| video.key.clone().into())),
-            actors: actor_names.clone().map(Into::into),
-            cast: actor_names.map(Into::into),
+            actors:actor_names.clone(),
+            cast: actor_names.clone(),
             genre: movie.genres.as_ref().map(|g| g.join(", ").into()),
             description: movie.plot.clone().map(Into::into),
             plot: movie.plot.clone().map(Into::into),
@@ -213,7 +214,7 @@ pub fn metadata_cache_entry_to_xtream_movie_info(
             audio: None,
             bitrate: 0,
             runtime: movie.runtime.map(|r| (r * 60).to_string().into()),
-            status: Some("Released".to_string().into()),
+            status: Some("Released".intern()),
         }),
     };
 

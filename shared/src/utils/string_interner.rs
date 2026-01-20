@@ -69,6 +69,12 @@ impl Internable for u64 {
     }
 }
 
+impl Internable for i64 {
+    fn intern(self) -> Arc<str> {
+        intern_string(self.to_string())
+    }
+}
+
 /// Interns a string slice.
 fn intern_str(s: &str) -> Arc<str> {
     // Try read first

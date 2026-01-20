@@ -93,7 +93,7 @@ fn skip_digit(it: &mut std::str::Chars) -> Option<char> {
 
 fn create_empty_playlistitem_header(input_name: &Arc<str>, url: String) -> PlaylistItemHeader {
     PlaylistItemHeader {
-        url: url.intern(),
+        url: Arc::from(url),
         category_id: 0,
         input_name: Arc::clone(input_name),
         ..Default::default()
