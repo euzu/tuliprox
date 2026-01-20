@@ -7,7 +7,7 @@ use log::{error, warn};
 use shared::error::{string_to_io_error, to_io_error, TuliproxError};
 use shared::info_err;
 use shared::model::{ConfigInputAliasDto, InputType};
-use shared::utils::{get_credentials_from_url, get_credentials_from_url_str, parse_timestamp, sanitize_sensitive_info, trim_last_slash, Internable};
+use shared::utils::{get_credentials_from_url, get_credentials_from_url_str, parse_timestamp, sanitize_sensitive_info, Internable};
 use std::io;
 use std::io::{BufRead, Cursor, Error};
 use std::path::{Path, PathBuf};
@@ -76,7 +76,7 @@ fn csv_assign_mandatory_fields(alias: &mut ConfigInputAliasDto, input_type: Inpu
                             alias.password.as_deref()) {
                             Ok(alias_url) => {
                                 alias.url = alias_url.to_string();
-                            },
+                            }
                             Err(err) => {
                                 error!("Could not build m3u url for alias {}: {err}", alias.name);
                             }
@@ -329,11 +329,12 @@ pub async fn csv_patch_batch_append(
         .map_err(|err| info_err!("{err}"))
         .await?;
 
+
     let url = if input_type == InputType::M3uBatch {
-        format!(
-            "{}/get.php?username={username}&password={password}&type=m3u_plus",
-            trim_last_slash(base_url)
-        )
+        let base = Url::parse(base_url).map_err(|e| info_err!("{e}"))?;
+        build_m3u_url(&base, Some(username), Some(password))
+            .map_err(|e| info_err!("{e}"))?
+            .to_string()
     } else {
         base_url.to_string()
     };
@@ -371,7 +372,7 @@ pub async fn csv_patch_batch_update_exp_date(
     for alias in &mut aliases {
         if &alias.name == account_name
             || (alias.username == Some(username.to_string())
-                && alias.password == Some(password.to_string()))
+            && alias.password == Some(password.to_string()))
         {
             alias.exp_date = Some(exp_date);
             alias.max_connections = 1;
