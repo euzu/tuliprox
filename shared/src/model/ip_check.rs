@@ -1,4 +1,3 @@
-
 use crate::utils::is_blank_optional_string;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Default)]

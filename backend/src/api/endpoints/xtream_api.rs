@@ -910,7 +910,7 @@ async fn xtream_get_short_epg(
             if let Some(epg_path) = get_epg_path_for_target(config, target) {
                 if let Ok(exists) = tokio::fs::try_exists(&epg_path).await {
                     if exists {
-                        return serve_epg(app_state, &epg_path, user, target, pli.epg_channel_id).await;
+                        return serve_short_epg(app_state, &epg_path, user, target, pli.epg_channel_id).await;
                     }
                 }
             }

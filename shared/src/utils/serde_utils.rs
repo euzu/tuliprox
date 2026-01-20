@@ -1,4 +1,5 @@
 use crate::error::to_io_error;
+use crate::utils::Internable;
 use base64::engine::general_purpose;
 use base64::Engine;
 use chrono::{NaiveDateTime, ParseError, TimeZone, Utc};
@@ -7,7 +8,6 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use std::io;
 use std::sync::Arc;
-use crate::utils::Internable;
 
 fn value_to_string_array(value: &[Value]) -> Vec<Arc<str>> {
     value.iter().filter_map(value_to_arc_str).collect()
@@ -406,10 +406,10 @@ where
 /// Serde support for `XtreamCluster` fields.
 /// Serializes as string (e.g., "live", "video", "series") and deserializes via `FromStr`.
 pub mod xtream_cluster_serde {
-    use std::str::FromStr;
-    use serde::{Deserialize, Deserializer, Serializer};
-    use serde::de::Error;
     use crate::model::XtreamCluster;
+    use serde::de::Error;
+    use serde::{Deserialize, Deserializer, Serializer};
+    use std::str::FromStr;
 
     pub fn serialize<S>(value: &XtreamCluster, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -425,4 +425,12 @@ pub mod xtream_cluster_serde {
         let raw = String::deserialize(deserializer)?;
         XtreamCluster::from_str(&raw).map_err(D::Error::custom)
     }
+}
+
+pub fn serialize_as_base64<S>(value: &String, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let encoded = general_purpose::STANDARD.encode(value.as_bytes());
+    serializer.serialize_str(&encoded)
 }
