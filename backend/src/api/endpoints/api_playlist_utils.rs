@@ -2,7 +2,7 @@ use crate::model::{AppConfig, ConfigInput, ConfigTarget};
 use crate::utils::{m3u, xtream};
 use axum::response::IntoResponse;
 use serde_json::{json};
-use shared::model::{CommonPlaylistItem, InputType, TargetType, XtreamCluster};
+use shared::model::{CommonPlaylistItem, InputType, M3uPlaylistItem, PlaylistItemType, TargetType, XtreamCluster, XtreamPlaylistItem};
 use std::sync::Arc;
 use crate::api::api_utils::{empty_json_list_response, json_or_bin_response, stream_json_or_bin_response};
 use shared::utils::interner_gc;
@@ -14,13 +14,25 @@ pub(in crate::api::endpoints) async fn get_playlist_for_target(cfg_target: Optio
             let Some((_guard, channel_iterator)) = iter_raw_xtream_target_playlist(cfg, target, cluster).await else {
               return empty_json_list_response();
             };
-            let converted_iterator: Box<dyn Iterator<Item=CommonPlaylistItem> + Send> = Box::new(channel_iterator.map(CommonPlaylistItem::from));
+            let item_filter = if cluster == XtreamCluster::Series {
+                |pli: &XtreamPlaylistItem| !matches!(pli.item_type, PlaylistItemType::Series | PlaylistItemType::LocalSeries)
+            } else {
+                |_pli: &XtreamPlaylistItem| true
+            };
+            let converted_iterator: Box<dyn Iterator<Item=CommonPlaylistItem> + Send> = Box::new(channel_iterator.filter(item_filter).map(CommonPlaylistItem::from));
             return stream_json_or_bin_response(accept, converted_iterator).into_response();
         } else if target.has_output(TargetType::M3u) {
             let Some((_guard, channel_iterator)) = iter_raw_m3u_target_playlist(cfg, target, Some(cluster)).await else {
                 return empty_json_list_response();
             };
-            let converted_iterator: Box<dyn Iterator<Item=CommonPlaylistItem> + Send> = Box::new(channel_iterator.map(CommonPlaylistItem::from));
+            let item_filter = if cluster == XtreamCluster::Series {
+                |pli: &M3uPlaylistItem| !matches!(pli.item_type, PlaylistItemType::Series | PlaylistItemType::LocalSeries)
+            } else {
+                |_pli: &M3uPlaylistItem| true
+            };
+
+            let converted_iterator: Box<dyn Iterator<Item=CommonPlaylistItem> + Send> = Box::new(channel_iterator
+                .filter(item_filter).map(CommonPlaylistItem::from));
             return stream_json_or_bin_response(accept, converted_iterator).into_response();
         }
     }

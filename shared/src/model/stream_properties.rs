@@ -20,11 +20,7 @@ pub struct LiveStreamProperties {
     pub stream_icon: Arc<str>,
     #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
     pub direct_source: Arc<str>,
-    #[serde(
-        default,
-        deserialize_with = "deserialize_as_option_arc_str_none",
-        serialize_with = "serialize_option_string_as_null_if_empty"
-    )]
+    #[serde(default, deserialize_with = "deserialize_as_option_arc_str_none", serialize_with = "serialize_option_string_as_null_if_empty")]
     pub custom_sid: Option<Arc<str>>,
     #[serde(default, deserialize_with = "deserialize_as_option_arc_str_none")]
     pub added: Option<Arc<str>>,

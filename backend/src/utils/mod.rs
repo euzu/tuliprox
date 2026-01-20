@@ -11,6 +11,7 @@ mod binary_utils;
 mod telegram;
 mod geoip;
 mod db_viewer;
+mod epg_parser;
 
 pub use self::binary_utils::*;
 pub use self::logging::*;
@@ -19,6 +20,7 @@ pub use self::telegram::*;
 pub use self::geoip::*;
 pub use self::db_viewer::*;
 pub use shared::utils::*;
+pub use self::epg_parser::*;
 
 #[macro_export]
 macro_rules! debug_if_enabled {
