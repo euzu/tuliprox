@@ -162,7 +162,7 @@ pub fn csv_read_inputs_from_reader(
     let mut default_columns = vec![];
     default_columns.extend_from_slice(DEFAULT_COLUMNS);
     let mut header_defined = false;
-    for line in reader.lines() {
+    for (line_idx, line) in reader.lines().enumerate() {
         let line = line?;
         if line.is_empty() {
             continue;
@@ -204,10 +204,14 @@ pub fn csv_read_inputs_from_reader(
         let columns: Vec<&str> = line.split(CSV_SEPARATOR).collect();
         for (&header, &value) in default_columns.iter().zip(columns.iter()) {
             if let Err(err) = csv_assign_config_input_column(&mut config_input, header, value) {
-                error!("Could not parse input line: {line} err: {err}");
+                error!("Could not parse input line: {} err: {err}", line_idx+1);
             }
         }
         csv_assign_mandatory_fields(&mut config_input, input_type);
+        if config_input.url.is_empty() {
+            warn!("Skipping CSV line {}: missing or invalid url", line_idx + 1);
+            continue;
+        }
         result.push(config_input);
     }
     Ok(result)

@@ -26,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 
 const DEFAULT_SHARED_BUFFER_SIZE_BYTES: usize = 1024 * 1024 * 12; // 12 MB
 
-const YIELD_COUNTER: usize = 200;
+const YIELD_COUNTER: usize = 64;
 
 ///
 /// Wraps a `ReceiverStream` as Stream<Item = Result<Bytes, `StreamError`>>
@@ -163,6 +163,11 @@ impl SharedStreamState {
         let cancel_token = CancellationToken::new();
 
         {
+            let mut handles = self.task_handles.write().await;
+            handles.retain(|h| !h.is_finished());
+        }
+
+        {
             let mut subs = self.subscribers.write().await;
             subs.insert(*addr, cancel_token.clone());
             debug_if_enabled!("Shared stream subscriber added {}; total subscribers={}",
@@ -177,6 +182,7 @@ impl SharedStreamState {
         // If a client stops streaming (for example presses
         let timeout_duration = Duration::from_secs(300); // 5 minutes
         let mut last_active = Instant::now();
+        let mut last_lag_log = Instant::now().checked_sub(Duration::from_secs(10)).unwrap_or_else(Instant::now);
 
         let address = *addr;
         let handle = tokio::spawn(async move {
@@ -229,11 +235,15 @@ impl SharedStreamState {
                             }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                            let buffered_bytes = {
-                                let buffer = burst_buffer_for_log.read().await;
-                                buffer.current_bytes
-                            };
-                            warn!("Shared stream client lagged behind {address}. Skipped {skipped} messages (buffered {buffered_bytes} bytes, yield counter {yield_counter})");
+                            if last_lag_log.elapsed() > Duration::from_secs(5) {
+                                let buffered_bytes = {
+                                    let buffer = burst_buffer_for_log.read().await;
+                                    buffer.current_bytes
+                                };
+                                warn!("Shared stream client lagged behind {address}. Skipped {skipped} messages (buffered {buffered_bytes} bytes, yield counter {yield_counter})");
+                                last_lag_log = Instant::now();
+                            }
+                            tokio::task::yield_now().await;
                         }
                         Err(_) => break,
                     }
