@@ -2559,34 +2559,6 @@ async fn sync_panel_api_for_input_on_boot(
         );
     }
 
-    if optional.account_info {
-        let creds = accounts
-            .first()
-            .map(|acct| (acct.username.as_str(), acct.password.as_str()));
-        match panel_account_info(app_state.as_ref(), panel_cfg, creds).await {
-            Ok(Some(credits)) => {
-                let normalized = credits.trim().to_string();
-                if !normalized.is_empty()
-                    /* && panel_cfg.credits.as_deref().map(str::trim) != Some(normalized.as_str()) */
-                {
-                    sources_yml_patches.push(SourcesYmlPatch::UpdatePanelApiCredits {
-                        input_name: input.name.clone(),
-                        credits: normalized,
-                    });
-                    pending_sources_yml = true;
-                }
-            }
-            Ok(None) => {}
-            Err(err) => {
-                debug_if_enabled!(
-                    "panel_api account_info failed for {}: {}",
-                    sanitize_sensitive_info(&input.name),
-                    sanitize_sensitive_info(err.to_string().as_str())
-                );
-            }
-        }
-    }
-
     for acct in &mut accounts {
         let new_exp = match panel_client_info(
             app_state.as_ref(),
@@ -3625,6 +3597,34 @@ async fn sync_panel_api_for_input_on_boot(
                 input_name: input.name.clone(),
             });
             pending_sources_yml = true;
+        }
+    }
+
+    if optional.account_info {
+        let creds = accounts
+            .first()
+            .map(|acct| (acct.username.as_str(), acct.password.as_str()));
+        match panel_account_info(app_state.as_ref(), panel_cfg, creds).await {
+            Ok(Some(credits)) => {
+                let normalized = credits.trim().to_string();
+                if !normalized.is_empty()
+                    /* && panel_cfg.credits.as_deref().map(str::trim) != Some(normalized.as_str()) */
+                {
+                    sources_yml_patches.push(SourcesYmlPatch::UpdatePanelApiCredits {
+                        input_name: input.name.clone(),
+                        credits: normalized,
+                    });
+                    pending_sources_yml = true;
+                }
+            }
+            Ok(None) => {}
+            Err(err) => {
+                debug_if_enabled!(
+                    "panel_api account_info failed for {}: {}",
+                    sanitize_sensitive_info(&input.name),
+                    sanitize_sensitive_info(err.to_string().as_str())
+                );
+            }
         }
     }
 
