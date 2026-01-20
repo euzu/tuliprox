@@ -426,16 +426,14 @@ pub async fn csv_patch_batch_update_credentials(
             is_match = alias.username.as_deref() == Some(new_username)
                 && alias.password.as_deref() == Some(new_password);
         }
+
         if !is_match {
             if let (Some(u), Some(p)) = get_credentials_from_url_str(&alias.url) {
-                is_match = u == old_username && p == old_password;
+                is_match = (u == old_username && p == old_password)
+                    || (u == new_username && p == new_password);
             }
         }
-        if !is_match {
-            if let (Some(u), Some(p)) = get_credentials_from_url_str(&alias.url) {
-                is_match = u == new_username && p == new_password;
-            }
-        }
+
         if !is_match {
             continue;
         }
@@ -607,11 +605,5 @@ input_2;de566567;de2345f43g5;http://provider_2.tv:8080;1;2028-12-23 13:12:34
         for config in aliases {
             assert!(!config.url.contains("username"));
         }
-    }
-
-    #[test]
-    fn test_resolve() {
-        let resolved = resolve_env_var("${env:HOME}");
-        assert_eq!(resolved, std::env::var("HOME").unwrap());
     }
 }

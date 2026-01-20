@@ -619,7 +619,8 @@ mod tests {
 
     #[test]
     fn test_resolve() {
-        let resolved = resolve_env_var("${env:HOME}");
-        assert_eq!(resolved, std::env::var("HOME").unwrap());
+        // Use PATH which exists on both Windows and Unix
+        let resolved = resolve_env_var("${env:PATH}");
+        assert_eq!(resolved, std::env::var("PATH").unwrap());
     }
 }
