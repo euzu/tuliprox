@@ -797,6 +797,7 @@ impl SeriesStreamProperties {
                     Some(seasons)
                 },
                 episodes: {
+                    let tmdb = info.info.tmdb.parse::<u32>().ok();
                     let mut episodes: Vec<SeriesStreamDetailEpisodeProperties> = info.episodes.iter().flat_map(|(_, list)| list.iter()).map(|e|
                         SeriesStreamDetailEpisodeProperties {
                             id: e.id.parse::<u32>().unwrap_or_else(|_| {
@@ -810,7 +811,7 @@ impl SeriesStreamProperties {
                             custom_sid: e.custom_sid.clone(),
                             added: e.added.clone(),
                             direct_source: e.direct_source.clone(),
-                            tmdb: info.info.tmdb.parse::<u32>().ok(),
+                            tmdb,
                             release_date: e.info.air_date.clone(),
                             plot: None,
                             crew: e.info.crew.clone(),

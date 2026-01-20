@@ -1598,7 +1598,9 @@ where
         header[8..16].copy_from_slice(&HEADER_SIZE.to_le_bytes());
 
         let meta_bytes = self.metadata.to_bytes();
-
+        if meta_bytes.len() > METADATA_MAX_SIZE || 20 + meta_bytes.len() > PAGE_SIZE_USIZE {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Metadata too large for header page"));
+        }
         if !meta_bytes.is_empty() {
             let len = u32::try_from(meta_bytes.len()).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
             header[16..20].copy_from_slice(&len.to_le_bytes());

@@ -39,7 +39,8 @@ impl UUIDType {
         )
     }
 
-    /// Creates a `UUIDType` from a valid UUID string.
+    /// Creates a `UUIDType` from a UUID string; if parsing fails, hashes the input
+    /// to derive a deterministic 32-byte value.
     ///
     /// Implementation details:
     /// - A standard UUID is 16 bytes.

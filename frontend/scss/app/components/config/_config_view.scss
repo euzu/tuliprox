@@ -1,5 +1,14 @@
 @use "../../../size" as size;
 
+%toolbar-base {
+  display: flex;
+  flex-flow: row;
+  gap: var(--gap-large);
+  box-sizing: border-box;
+  width: 100%;
+  border-top: 1px solid var(--card-border-color);
+}
+
 .tp__config-view {
   display: flex;
   flex-flow: column;
@@ -43,13 +52,7 @@
   }
 
   &__toolbar {
-    padding-top: var(--padding-default);
-    display: flex;
-    flex-flow: row;
-    gap: var(--gap-large);
-    box-sizing: border-box;
-    width: 100%;
-    border-top: 1px solid var(--card-border-color);
+    @extend %toolbar-base;
   }
 
   &__tags {
@@ -294,10 +297,5 @@
 }
 
 .tp__form-page__toolbar {
-  display: flex;
-  flex-flow: row;
-  gap: var(--gap-large);
-  box-sizing: border-box;
-  width: 100%;
-  border-top: 1px solid var(--card-border-color);
+  @extend %toolbar-base;
 }

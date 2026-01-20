@@ -237,35 +237,36 @@ impl TargetIdMapping {
     }
 
     pub fn persist(&mut self) -> Result<(), Error> {
-        // Persist virtual_id_counter via B+Tree header metadata
-        self.disk_by_virtual_id
-            .set_metadata(&BPlusTreeMetadata::TargetIdMapping(self.virtual_id_counter))
-            .map_err(|e| {
-                error!("Failed to write virtual_id_counter to tree header at {}: {e}", self.path.display());
-                e
-            })?;
+        if self.has_pending_changes() {
+            // Persist virtual_id_counter via B+Tree header metadata
+            self.disk_by_virtual_id
+                .set_metadata(&BPlusTreeMetadata::TargetIdMapping(self.virtual_id_counter))
+                .map_err(|e| {
+                    error!("Failed to write virtual_id_counter to tree header at {}: {e}", self.path.display());
+                    e
+                })?;
 
 
-        // Flush pending virtual_id upserts
-        if !self.pending_virtual_id_upserts.is_empty() {
-            let batch: Vec<(&u32, &VirtualIdRecord)> = self.pending_virtual_id_upserts
-                .iter()
-                .map(|(k, v)| (k, v))
-                .collect();
-            self.disk_by_virtual_id.upsert_batch(&batch)?;
-            self.pending_virtual_id_upserts.clear();
+            // Flush pending virtual_id upserts
+            if !self.pending_virtual_id_upserts.is_empty() {
+                let batch: Vec<(&u32, &VirtualIdRecord)> = self.pending_virtual_id_upserts
+                    .iter()
+                    .map(|(k, v)| (k, v))
+                    .collect();
+                self.disk_by_virtual_id.upsert_batch(&batch)?;
+                self.pending_virtual_id_upserts.clear();
+            }
+
+            // Flush pending UUID index upserts
+            if !self.pending_uuid_upserts.is_empty() {
+                let batch: Vec<(&UUIDType, &u32)> = self.pending_uuid_upserts
+                    .iter()
+                    .map(|(k, v)| (k, v))
+                    .collect();
+                self.disk_by_uuid.upsert_batch(&batch)?;
+                self.pending_uuid_upserts.clear();
+            }
         }
-
-        // Flush pending UUID index upserts
-        if !self.pending_uuid_upserts.is_empty() {
-            let batch: Vec<(&UUIDType, &u32)> = self.pending_uuid_upserts
-                .iter()
-                .map(|(k, v)| (k, v))
-                .collect();
-            self.disk_by_uuid.upsert_batch(&batch)?;
-            self.pending_uuid_upserts.clear();
-        }
-
         Ok(())
     }
 

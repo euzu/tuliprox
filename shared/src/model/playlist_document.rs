@@ -292,6 +292,8 @@ impl XtreamPlaylistItem {
     }
 
     fn to_document_no_props(&self, resource_url: Option<String>) -> XtreamDocument {
+        let empty_str = "".intern();
+        let zero_str = "0".intern();
         let stream_icon = self.get_stream_icon(resource_url);
         match self.xtream_cluster {
             XtreamCluster::Live => {
@@ -301,14 +303,14 @@ impl XtreamPlaylistItem {
                     stream_type: default_as_live(),
                     stream_id: self.virtual_id,
                     stream_icon,
-                    epg_channel_id: self.epg_channel_id.clone().unwrap_or_else(|| "".intern()),
-                    added: "".intern(),
+                    epg_channel_id: self.epg_channel_id.clone().unwrap_or_else(|| Arc::clone(&empty_str)),
+                    added: Arc::clone(&empty_str),
                     is_adult: 0,
                     category_id: self.category_id.to_string().intern(),
                     category_ids: vec![self.category_id],
                     custom_sid: None,
                     tv_archive: 0,
-                    direct_source: "".intern(),
+                    direct_source: Arc::clone(&empty_str),
                     tv_archive_duration: 0,
                 })
             }
@@ -319,17 +321,17 @@ impl XtreamPlaylistItem {
                     stream_type: default_as_movie(),
                     stream_id: self.virtual_id,
                     stream_icon,
-                    rating: "0".intern(),
+                    rating: Arc::clone(&zero_str),
                     rating_5based: 0.0,
-                    tmdb: "".intern(),
-                    trailer: "".intern(),
-                    added: "".intern(),
+                    tmdb: Arc::clone(&empty_str),
+                    trailer: Arc::clone(&empty_str),
+                    added: Arc::clone(&empty_str),
                     is_adult: 0,
                     category_id: self.category_id.to_string().intern(),
                     category_ids: vec![self.category_id],
-                    container_extension: "".intern(),
+                    container_extension: Arc::clone(&empty_str),
                     custom_sid: None,
-                    direct_source: "".intern(),
+                    direct_source: Arc::clone(&empty_str),
                 })
             }
             XtreamCluster::Series => {
@@ -338,20 +340,20 @@ impl XtreamPlaylistItem {
                     name: self.title.clone(),
                     series_id: self.virtual_id,
                     cover: stream_icon.clone(),
-                    plot: "".intern(),
-                    cast: "".intern(),
-                    director: "".intern(),
-                    genre: "".intern(),
-                    release_date: "".intern(),
-                    release_date_alternate: "".intern(),
-                    last_modified: "".intern(),
-                    rating: "0".intern(),
-                    rating_5based: "0".intern(),
+                    plot: Arc::clone(&empty_str),
+                    cast: Arc::clone(&empty_str),
+                    director: Arc::clone(&empty_str),
+                    genre: Arc::clone(&empty_str),
+                    release_date: Arc::clone(&empty_str),
+                    release_date_alternate: Arc::clone(&empty_str),
+                    last_modified: Arc::clone(&empty_str),
+                    rating: Arc::clone(&zero_str),
+                    rating_5based: Arc::clone(&zero_str),
                     backdrop_path: if stream_icon.is_empty() { vec![] } else { vec![Arc::clone(&stream_icon)] },
-                    youtube_trailer: "".intern(),
-                    tmdb: "".intern(),
-                    episode_runtime: "0".intern(),
-                    category_id: self.category_id.to_string().intern(),
+                    youtube_trailer: Arc::clone(&empty_str),
+                    tmdb: empty_str,
+                    episode_runtime: zero_str,
+                    category_id: self.category_id.intern(),
                     category_ids: vec![self.category_id],
                 })
             }

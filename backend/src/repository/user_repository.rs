@@ -385,7 +385,7 @@ pub(crate) async fn user_get_series_bouquet(cfg: &Config, username: &str, target
 /// * `Some(HashSet)` - Set of category IDs or names to include
 /// * `None` - No filtering applied
 ///
-/// TODO xtream covnerts ids to u32 again, seperate m3u and xtream handling
+/// TODO xtream converts ids to u32 again, separate m3u and xtream handling
 pub async fn user_get_bouquet_filter(config: &Config, username: &str, category_id: Option<u32>, target: TargetType, cluster: XtreamCluster) -> Option<HashSet<String>> {
     if let Some(cid) = category_id {
         if cid > 0 {

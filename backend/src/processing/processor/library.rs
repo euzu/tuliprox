@@ -1,13 +1,13 @@
-use std::collections::HashMap;
 use crate::library::{MediaMetadata, MetadataAsyncIter, MetadataCacheEntry};
 use crate::model::{AppConfig, ConfigInput};
+use shared::concat_string;
 use shared::error::TuliproxError;
+use shared::model::UUIDType;
 use shared::model::{EpisodeStreamProperties, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, SeriesStreamDetailEpisodeProperties, SeriesStreamDetailProperties, SeriesStreamDetailSeasonProperties, SeriesStreamProperties, StreamProperties, VideoStreamDetailProperties, VideoStreamProperties, XtreamCluster};
 use shared::utils::{generate_playlist_uuid, Internable};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use shared::concat_string;
-use shared::model::UUIDType;
 
 pub async fn download_library_playlist(_client: &reqwest::Client, app_config: &Arc<AppConfig>, input: &ConfigInput) -> (Vec<PlaylistGroup>, Vec<TuliproxError>) {
     let config = &*app_config.config.load();
@@ -57,12 +57,14 @@ fn to_playlist_item(entry: &MetadataCacheEntry, input_name: &Arc<str>, group_nam
     match metadata {
         MediaMetadata::Movie(_) => {
             let additional_properties = metadata_cache_entry_to_xtream_movie_info(entry);
+            let title = metadata.title().intern();
+            let group = group_name.intern();
             channels.push(PlaylistItem {
                 header: PlaylistItemHeader {
                     uuid: UUIDType::from_valid_uuid(&entry.uuid),
-                    name: metadata.title().intern(),
-                    title: metadata.title().intern(),
-                    group: group_name.intern(),
+                    name: Arc::clone(&title),
+                    title,
+                    group,
                     logo: metadata.poster().unwrap_or("").intern(),
                     url: concat_string!("file://", &entry.file_path).into(),
                     xtream_cluster: XtreamCluster::Video,
@@ -183,7 +185,7 @@ pub fn metadata_cache_entry_to_xtream_movie_info(
             episode_run_time: movie.runtime,
             director: movie.directors.as_ref().map(|d| d.join(", ").into()),
             youtube_trailer: movie.videos.as_ref().and_then(|v| v.iter().find(|video| video.site.eq_ignore_ascii_case("youtube")).map(|video| video.key.clone().into())),
-            actors:actor_names.clone(),
+            actors: actor_names.clone(),
             cast: actor_names.clone(),
             genre: movie.genres.as_ref().map(|g| g.join(", ").into()),
             description: movie.plot.clone().map(Into::into),
@@ -236,7 +238,7 @@ pub fn metadata_cache_entry_to_xtream_series_info(
 
     let mut season_data = HashMap::new();
     series.seasons.as_ref().iter().for_each(|seasons| seasons.iter().for_each(|season_metadata| {
-        season_data.insert(season_metadata.season_number,SeriesStreamDetailSeasonProperties {
+        season_data.insert(season_metadata.season_number, SeriesStreamDetailSeasonProperties {
             name: season_metadata.name.clone().into(),
             season_number: season_metadata.season_number,
             episode_count: 0,
@@ -259,7 +261,7 @@ pub fn metadata_cache_entry_to_xtream_series_info(
             let episode_release_date = episode.aired.as_ref().map(ToString::to_string).unwrap_or_default();
             let tmdb_id = (episode.tmdb_id > 0).then_some(episode.tmdb_id);
 
-            let season_entry =season_data.entry(episode.season).or_insert_with(|| {
+            let season_entry = season_data.entry(episode.season).or_insert_with(|| {
                 SeriesStreamDetailSeasonProperties {
                     name: concat_string!(&series.title, " ", &episode.season.to_string()).into(),
                     season_number: episode.season,
@@ -271,8 +273,8 @@ pub fn metadata_cache_entry_to_xtream_series_info(
                     cover_big: None,
                     duration: None,
                 }
-             });
-             season_entry.episode_count = season_entry.episode_count.saturating_add(1);
+            });
+            season_entry.episode_count = season_entry.episode_count.saturating_add(1);
 
             SeriesStreamDetailEpisodeProperties {
                 id: tmdb_id.unwrap_or_default(),

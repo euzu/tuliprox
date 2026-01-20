@@ -638,7 +638,9 @@ pub fn parse_range(range: &str) -> Option<(u64, Option<u64>)> {
 }
 
 pub fn is_file_url(url: &str) -> bool {
-    url.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("file://"))
+    Url::parse(url)
+        .map(|u| u.scheme().eq_ignore_ascii_case("file"))
+        .unwrap_or(false)
 }
 
 #[cfg(test)]

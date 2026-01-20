@@ -170,7 +170,7 @@ pub fn InputTable(props: &InputTableProps) -> Html {
                             5 => alias.username.as_ref().map_or_else(|| html!{}, |u| html!{u}),
                             6 => alias.password.as_ref().map_or_else(|| html!{}, |pwd| html! { <HideContent content={pwd.to_string()}></HideContent>}),
                             9 => html! { alias.priority.to_string() },
-                            10 => html! { alias.max_connections },
+                            10 => html! { alias.max_connections.to_string() },
                             15 => alias.exp_date.as_ref().and_then(|ts| unix_ts_to_str(*ts))
                                 .map(|s| html! { { s } }).unwrap_or_else(|| html! { <AppIcon name="Unlimited" /> }),
                             _ => html! { },
