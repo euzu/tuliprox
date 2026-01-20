@@ -5,13 +5,15 @@
   gap: var(--gap-default);
   padding: var(--padding-default) 0;
   box-sizing: border-box;
+
   &__header {
     display: flex;
-    flex-flow: row nowrap;
+    flex-flow: row wrap;
     box-sizing: border-box;
     width: 100%;
     justify-content: space-between;
     align-items: center;
+    gap: var(--gap-default);
   }
 
   &__body {
