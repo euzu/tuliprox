@@ -1,4 +1,4 @@
-use crate::utils::{arc_str_option_serde, arc_str_serde, arc_str_serde_none, extract_extension_from_url, generate_playlist_uuid,
+use crate::utils::{arc_str_option_serde, arc_str_serde, extract_extension_from_url, generate_playlist_uuid,
                    get_provider_id, Internable};
 use crate::model::{xtream_const, ClusterFlags, CommonPlaylistItem, ConfigTargetOptions, EpisodeStreamProperties,
                    SeriesStreamProperties, StreamProperties, VideoStreamProperties, XtreamInfoDocument};
@@ -230,19 +230,19 @@ pub trait PlaylistEntry: Send + Sync {
 pub struct PlaylistItemHeader {
     #[serde(skip)]
     pub uuid: UUIDType, // calculated
-    #[serde(with = "arc_str_serde_none")]
+    #[serde(with = "arc_str_serde")]
     pub id: Arc<str>, // provider id
     pub virtual_id: VirtualId, // virtual id
-    #[serde(with = "arc_str_serde_none")]
+    #[serde(with = "arc_str_serde")]
     pub name: Arc<str>,
     pub chno: u32,
-    #[serde(with = "arc_str_serde_none")]
+    #[serde(with = "arc_str_serde")]
     pub logo: Arc<str>,
-    #[serde(with = "arc_str_serde_none")]
+    #[serde(with = "arc_str_serde")]
     pub logo_small: Arc<str>,
     #[serde(with = "arc_str_serde")]
     pub group: Arc<str>,
-    #[serde(with = "arc_str_serde_none")]
+    #[serde(with = "arc_str_serde")]
     pub title: Arc<str>,
     #[serde(with = "arc_str_serde")]
     pub parent_code: Arc<str>,
@@ -252,7 +252,7 @@ pub struct PlaylistItemHeader {
     pub time_shift: Arc<str>,
     #[serde(with = "arc_str_serde")]
     pub rec: Arc<str>,
-    #[serde(with = "arc_str_serde_none")]
+    #[serde(with = "arc_str_serde")]
     pub url: Arc<str>,
     #[serde(default, with = "arc_str_option_serde")]
     pub epg_channel_id: Option<Arc<str>>,
@@ -420,18 +420,18 @@ generate_field_accessor_impl_for_playlist_item_header!(id, /*virtual_id,*/ title
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct M3uPlaylistItem {
     pub virtual_id: VirtualId,
-    #[serde(with = "arc_str_serde_none")]
+    #[serde(with = "arc_str_serde")]
     pub provider_id: Arc<str>,
-    #[serde(with = "arc_str_serde_none")]
+    #[serde(with = "arc_str_serde")]
     pub name: Arc<str>,
     pub chno: u32,
-    #[serde(with = "arc_str_serde_none")]
+    #[serde(with = "arc_str_serde")]
     pub logo: Arc<str>,
-    #[serde(with = "arc_str_serde_none")]
+    #[serde(with = "arc_str_serde")]
     pub logo_small: Arc<str>,
     #[serde(with = "arc_str_serde")]
     pub group: Arc<str>,
-    #[serde(with = "arc_str_serde_none")]
+    #[serde(with = "arc_str_serde")]
     pub title: Arc<str>,
     #[serde(with = "arc_str_serde")]
     pub parent_code: Arc<str>,
@@ -441,7 +441,7 @@ pub struct M3uPlaylistItem {
     pub time_shift: Arc<str>,
     #[serde(with = "arc_str_serde")]
     pub rec: Arc<str>,
-    #[serde(with = "arc_str_serde_none")]
+    #[serde(with = "arc_str_serde")]
     pub url: Arc<str>,
     #[serde(default, with = "arc_str_option_serde")]
     pub epg_channel_id: Option<Arc<str>>,
@@ -648,21 +648,21 @@ impl XtreamMappingOptions {
 pub struct XtreamPlaylistItem {
     pub virtual_id: VirtualId,
     pub provider_id: u32,
-    #[serde(with = "arc_str_serde_none")]
+    #[serde(with = "arc_str_serde")]
     pub name: Arc<str>,
-    #[serde(with = "arc_str_serde_none")]
+    #[serde(with = "arc_str_serde")]
     pub logo: Arc<str>,
-    #[serde(with = "arc_str_serde_none")]
+    #[serde(with = "arc_str_serde")]
     pub logo_small: Arc<str>,
     #[serde(with = "arc_str_serde")]
     pub group: Arc<str>,
-    #[serde(with = "arc_str_serde_none")]
+    #[serde(with = "arc_str_serde")]
     pub title: Arc<str>,
     #[serde(with = "arc_str_serde")]
     pub parent_code: Arc<str>,
     #[serde(with = "arc_str_serde")]
     pub rec: Arc<str>,
-    #[serde(with = "arc_str_serde_none")]
+    #[serde(with = "arc_str_serde")]
     pub url: Arc<str>,
     #[serde(default, with = "arc_str_option_serde")]
     pub epg_channel_id: Option<Arc<str>>,

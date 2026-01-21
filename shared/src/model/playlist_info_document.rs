@@ -287,6 +287,7 @@ impl StreamProperties {
         let resource_url = options.get_resource_url(XtreamCluster::Video, item_type, virtual_id);
         let stream_icon = InfoDocUtils::make_resource_url(resource_url.as_deref(), &self.get_stream_icon(), "logo").intern();
         let empty_str = "".intern();
+        let zero_str = "0".intern();
 
         let info = if let Some(details) = video.details.as_ref() {
             XtreamVideoInfoData {
@@ -312,7 +313,7 @@ impl StreamProperties {
                 backdrop_path: details.backdrop_path.as_deref().map_or_else(Vec::new, |b| b.iter().enumerate().map(|(idx, p)|
                     InfoDocUtils::make_bdpath_resource_url(resource_url.as_deref(), p, idx, "nfo_").intern()
                 ).collect()),
-                duration_secs: details.duration_secs.as_ref().map(Arc::clone).unwrap_or_else(|| Arc::clone(&empty_str)),
+                duration_secs: details.duration_secs.as_ref().map_or_else(|| Arc::clone(&empty_str), Arc::clone),
                 duration: details.duration.as_ref().map(Arc::clone).unwrap_or_else(|| Arc::clone(&empty_str)),
                 video: InfoDocUtils::build_value(details.video.as_ref().map(Arc::as_ref)),
                 audio: InfoDocUtils::build_value(details.audio.as_ref().map(Arc::as_ref)),
@@ -343,13 +344,13 @@ impl StreamProperties {
                 country: Arc::clone(&empty_str),
                 genre: Arc::clone(&empty_str),
                 backdrop_path: vec![Arc::clone(&stream_icon)],
-                duration_secs: "0".intern(),
-                duration: "0".intern(),
+                duration_secs: Arc::clone(&zero_str),
+                duration: Arc::clone(&zero_str),
                 video: Value::Array(Vec::new()),
                 audio: Value::Array(Vec::new()),
                 bitrate: 0,
                 rating: InfoDocUtils::limited(video.rating.unwrap_or_default()).intern(),
-                runtime: "0".intern(),
+                runtime: zero_str,
                 status: "Released".intern(),
             }
         };
@@ -432,46 +433,47 @@ impl StreamProperties {
 
 impl Default for XtreamVideoInfoDoc {
     fn default() -> Self {
+        let empty_str = "".intern();
         Self {
             info: XtreamVideoInfoData {
-                kinopoisk_url: "".intern(),
-                tmdb_id: "".intern(),
-                name: "".intern(),
-                o_name: "".intern(),
-                cover_big: "".intern(),
-                movie_image: "".intern(),
-                release_date: "".intern(),
+                kinopoisk_url: Arc::clone(&empty_str),
+                tmdb_id: Arc::clone(&empty_str),
+                name: Arc::clone(&empty_str),
+                o_name: Arc::clone(&empty_str),
+                cover_big: Arc::clone(&empty_str),
+                movie_image: Arc::clone(&empty_str),
+                release_date: Arc::clone(&empty_str),
                 episode_run_time: 0,
-                youtube_trailer: "".intern(),
-                director: "".intern(),
-                actors: "".intern(),
-                cast: "".intern(),
-                description: "".intern(),
-                plot: "".intern(),
-                age: "".intern(),
-                mpaa_rating: "".intern(),
+                youtube_trailer: Arc::clone(&empty_str),
+                director: Arc::clone(&empty_str),
+                actors: Arc::clone(&empty_str),
+                cast: Arc::clone(&empty_str),
+                description: Arc::clone(&empty_str),
+                plot: Arc::clone(&empty_str),
+                age: Arc::clone(&empty_str),
+                mpaa_rating: Arc::clone(&empty_str),
                 rating_count_kinopoisk: 0,
-                country: "".intern(),
-                genre: "".intern(),
+                country: Arc::clone(&empty_str),
+                genre: Arc::clone(&empty_str),
                 backdrop_path: vec![],
-                duration_secs: "".intern(),
-                duration: "".intern(),
+                duration_secs: "0".intern(),
+                duration: Arc::clone(&empty_str),
                 video: Value::Array(Vec::new()),
                 audio: Value::Array(Vec::new()),
                 bitrate: 0,
-                rating: "".intern(),
-                runtime: "".intern(),
-                status: "".intern(),
+                rating: Arc::clone(&empty_str),
+                runtime: Arc::clone(&empty_str),
+                status: Arc::clone(&empty_str),
             },
             movie_data: XtreamVideoMovieData {
                 stream_id: 0,
-                name: "".intern(),
-                added: "".intern(),
-                category_id: "".intern(),
+                name: Arc::clone(&empty_str),
+                added: Arc::clone(&empty_str),
+                category_id: Arc::clone(&empty_str),
                 category_ids: vec![],
-                container_extension: "".intern(),
+                container_extension: Arc::clone(&empty_str),
                 custom_sid: None,
-                direct_source: "".intern(),
+                direct_source: empty_str,
             },
         }
     }

@@ -77,6 +77,7 @@ async fn playlist_resolve_series_info(app_config: &Arc<AppConfig>, client: &reqw
                 .await
             {
                 if !content.is_empty() {
+                    tokio::fs::write(&storage_path.join(format!("{provider_id}_series_info.json")), &content).await.ok();
                     match serde_json::from_str::<XtreamSeriesInfo>(&content) {
                         Ok(info) => {
                             let series_stream_props = SeriesStreamProperties::from_info(&info, pli);

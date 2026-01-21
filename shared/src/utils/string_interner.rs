@@ -138,24 +138,6 @@ pub fn interner_gc() -> usize {
     0
 }
 
-pub mod arc_str_serde {
-    use super::*;
-    pub fn serialize<S>(value: &Arc<str>, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(value)
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Arc<str>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        Ok(s.intern())
-    }
-}
-
 pub mod arc_str_vec_serde {
     use super::*;
     use serde::ser::SerializeSeq;
@@ -185,8 +167,9 @@ pub mod arc_str_vec_serde {
     }
 }
 
-pub mod arc_str_serde_none {
+pub mod arc_str_serde {
     use super::*;
+    use serde_json::Value;
     pub fn serialize<S>(value: &Arc<str>, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -198,13 +181,20 @@ pub mod arc_str_serde_none {
     where
         D: Deserializer<'de>,
     {
-        let s = String::deserialize(deserializer)?;
-        Ok(s.intern())
+        match Value::deserialize(deserializer)? {
+            Value::Null => Ok("".intern()),
+            Value::Bool(b) => Ok(b.to_string().intern()),
+            Value::Number(n) => Ok(n.to_string().intern()),
+            Value::String(v) => Ok(v.intern()),
+            Value::Array(_) => Ok("".intern()),
+            Value::Object(_) => Ok("".intern()),
+        }
     }
 }
 
 pub mod arc_str_option_serde {
     use super::*;
+    use serde_json::Value;
     pub fn serialize<S>(value: &Option<Arc<str>>, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -219,8 +209,16 @@ pub mod arc_str_option_serde {
     where
         D: Deserializer<'de>,
     {
-        let opt = Option::<String>::deserialize(deserializer)?;
-        Ok(opt.map(|s| s.intern()))
+        let opt = Option::<Value>::deserialize(deserializer)?;
+        match opt {
+            Some(value) => match value {
+                Value::Bool(b) => Ok(Some(b.to_string().intern())),
+                Value::Number(n) => Ok(Some(n.to_string().intern())),
+                Value::String(v) => Ok(Some(v.intern())),
+                Value::Null | Value::Array(_) | Value::Object(_) => Ok(None),
+            },
+            None => Ok(None)
+        }
     }
 
     pub fn serialize_null_if_empty<S>(value: &Option<Arc<str>>, serializer: S) -> Result<S::Ok, S::Error>
@@ -235,26 +233,6 @@ pub mod arc_str_option_serde {
     }
 }
 
-pub mod arc_str_option_serde_none {
-    use super::*;
-    pub fn serialize<S>(value: &Option<Arc<str>>, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match value {
-            Some(s) => serializer.serialize_str(s),
-            None => serializer.serialize_none(),
-        }
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Arc<str>>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let opt = Option::<String>::deserialize(deserializer)?;
-        Ok(opt.map(|s| s.intern()))
-    }
-}
 
 pub fn arc_str_default_on_null<'de, D>(deserializer: D) -> Result<Arc<str>, D::Error>
 where
@@ -277,5 +255,3 @@ where
         _ => Ok(None),
     }
 }
-
-pub use deserialize_as_option_arc_str as deserialize_as_option_arc_str_none;

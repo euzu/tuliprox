@@ -67,6 +67,7 @@ pub async fn playlist_resolve_vod(app_config: &Arc<AppConfig>,
                 .await
             {
                 if content.is_empty() { continue; }
+                tokio::fs::write(&storage_path.join(format!("{provider_id}_vod_info.json")), &content).await.ok();
                 match serde_json::from_str::<XtreamVideoInfo>(&content) {
                     Ok(info) => {
                         let video_stream_props = VideoStreamProperties::from_info(&info, pli);

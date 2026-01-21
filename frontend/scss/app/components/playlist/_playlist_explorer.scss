@@ -248,6 +248,9 @@ $series-backdrop-height: 300px;
         &-logo {
           box-sizing: border-box;
           height: 3rem;
+          width: 3rem;
+          border-radius: var(--border-radius);
+          overflow: hidden;
           object-fit: cover;
           object-position: center;
         }
