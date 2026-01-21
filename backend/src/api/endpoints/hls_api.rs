@@ -198,7 +198,10 @@ async fn resolve_stream_channel(
 ) -> StreamChannel {
     let unknown = "Unknown".intern();
     let mut channel = match get_stream_channel(app_state, target, virtual_id).await {
-        Some(channel) => channel,
+        Some(mut channel) => {
+            channel.url = hls_url.clone();
+            channel
+        },
         None => StreamChannel {
             target_id: target.id,
             virtual_id,

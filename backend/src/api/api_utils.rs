@@ -1090,19 +1090,6 @@ pub async fn local_stream_response(
         trace!("Try to open stream {}", sanitize_sensitive_info(&pli.url));
     }
 
-    let Some(library_paths) = app_state.app_config.config.load()
-        .library.as_ref()
-        .map(|lib| {
-            lib.scan_directories
-                .iter()
-                .map(|dir| dir.path.clone())
-                .collect::<Vec<_>>()
-        })
-    else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-
-
     if connection_permission == UserConnectionPermission::Exhausted {
         return create_custom_video_stream_response(
             app_state,
@@ -1122,10 +1109,24 @@ pub async fn local_stream_response(
         }
     };
 
-    // Verify path is within allowed media directories
-    // (requires configuration of allowed base paths)
-    if check_path && !is_path_within_allowed_directories(&path, &library_paths) {
-        return StatusCode::FORBIDDEN.into_response();
+    if check_path {
+        let Some(library_paths) = app_state.app_config.config.load()
+        .library.as_ref()
+        .map(|lib| {
+            lib.scan_directories
+                .iter()
+                .map(|dir| dir.path.clone())
+                .collect::<Vec<_>>()
+        })
+        else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+
+        // Verify path is within allowed media directories
+        // (requires configuration of allowed base paths)
+        if !is_path_within_allowed_directories(&path, &library_paths) {
+            return StatusCode::FORBIDDEN.into_response();
+        }
     }
 
     let Ok(mut file) = tokio::fs::File::open(&path).await else { return StatusCode::NOT_FOUND.into_response() };
