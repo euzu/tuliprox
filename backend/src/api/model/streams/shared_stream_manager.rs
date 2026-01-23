@@ -243,7 +243,9 @@ impl SharedStreamState {
                                 warn!("Shared stream client lagged behind {address}. Skipped {skipped} messages (buffered {buffered_bytes} bytes, yield counter {yield_counter})");
                                 last_lag_log = Instant::now();
                             }
-                            tokio::task::yield_now().await;
+                            // Sleep to prevent CPU spin when client is persistently lagging behind.
+                            // This provides backpressure for slow clients that can't keep up.
+                            sleep(Duration::from_millis(50)).await;
                         }
                         Err(_) => break,
                     }

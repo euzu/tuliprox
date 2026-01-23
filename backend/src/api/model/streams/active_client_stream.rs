@@ -59,7 +59,11 @@ impl ActiveClientStreamState {
 
             if unavailable {
                 if let Some(flag) = &self.send_custom_stream_flag {
-                    flag.store(CHANNEL_UNAVAILABLE_STREAM, Ordering::Release);
+                    // Only set CHANNEL_UNAVAILABLE if no custom stream flag is already set
+                    let current = flag.load(Ordering::Acquire);
+                    if current == INNER_STREAM {
+                        flag.store(CHANNEL_UNAVAILABLE_STREAM, Ordering::Release);
+                    }
                 }
             }
 
@@ -426,6 +430,8 @@ fn stream_grace_period(
                             CustomVideoStreamType::UserConnectionsExhausted,
                         )
                         .await;
+                    // Release the shared stream subscription to stop the subscriber loop
+                    connection_manager.shared_stream_manager.release_connection(&fingerprint.addr, true).await;
                     info!("User connections exhausted for active clients: {username}");
                     updated = true;
                 }
@@ -457,7 +463,7 @@ fn stream_grace_period(
                                     addr,
                                     virtual_id,
                                 )
-                                .await;
+                                    .await;
                             });
                         } else {
                             stream_strategy_flag_copy
@@ -468,6 +474,8 @@ fn stream_grace_period(
                                     CustomVideoStreamType::ProviderConnectionsExhausted,
                                 )
                                 .await;
+                            // Release the shared stream subscription to stop the subscriber loop
+                            connection_manager.shared_stream_manager.release_connection(&fingerprint.addr, true).await;
                             info!("Provider connections exhausted for active clients: {provider_name}");
                         }
                         updated = true;
