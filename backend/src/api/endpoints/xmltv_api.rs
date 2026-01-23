@@ -84,11 +84,13 @@ pub async fn serve_epg(
 }
 
 pub async fn serve_epg_web_ui(
+    app_state: &Arc<AppState>,
     accept: Option<&str>,
     epg_path: &Path,
     target: &Arc<ConfigTarget>,
 ) -> axum::response::Response {
     if file_exists_async(epg_path).await {
+        let _file_lock = app_state.app_config.file_locks.read_lock(epg_path).await;
         match BPlusTreeQuery::<Arc<str>, EpgChannel>::try_new(epg_path) {
             Ok(query) => {
                 let iterator: Box<dyn Iterator<Item=EpgChannel> + Send> = Box::new(query.disk_iter().map(|(_, v)| v));
@@ -122,6 +124,7 @@ async fn serve_epg_with_rewrites(
         return get_empty_epg_response();
     }
 
+    let _file_lock = app_state.app_config.file_locks.read_lock(epg_path).await;
     let mut query = match BPlusTreeQuery::<Arc<str>, EpgChannel>::try_new(epg_path) {
         Ok(query) => query,
         Err(err) => {
@@ -191,8 +194,9 @@ async fn serve_epg_with_rewrites(
 
                 for programme in programmes {
                     let mut elem = BytesStart::new("programme");
-                    elem.push_attribute(("start", format_xmltv_time_utc(programme.start).as_str()));
-                    elem.push_attribute(("stop", format_xmltv_time_utc(programme.stop).as_str()));
+                    let (user_start, user_stop) = apply_user_offset(programme.start, programme.stop, epg_processing_options.offset_minutes);
+                    elem.push_attribute(("start", format_xmltv_time_utc(user_start).as_str()));
+                    elem.push_attribute(("stop", format_xmltv_time_utc(user_stop).as_str()));
                     elem.push_attribute(("channel", &programme.channel[..]));
                     continue_on_err!(writer.write_event_async(Event::Start(elem)).await);
 
@@ -257,17 +261,22 @@ fn format_xmltv_time(ts: i64) -> String {
     }
 }
 
+fn apply_user_offset(start: i64, stop: i64, offset_minutes: i32) -> (i64, i64) {
+    let user_start = start + i64::from(offset_minutes) * 60;
+    let user_end = stop + i64::from(offset_minutes) * 60;
+    (user_start, user_end)
+}
+
 fn from_programme(stream_id: &Arc<str>, programme: &EpgProgramme, epg_processing_options: &EpgProcessingOptions) -> ShortEpgDto {
-    let user_start = programme.start + i64::from(epg_processing_options.offset_minutes) * 60;
-    let user_end = programme.stop + i64::from(epg_processing_options.offset_minutes) * 60;
+    let (user_start, user_end) = apply_user_offset(programme.start, programme.stop, epg_processing_options.offset_minutes);
 
     ShortEpgDto {
         id: Arc::clone(stream_id),
         epg_id: Arc::clone(&programme.channel),
         title: programme.title.as_ref().map_or_else(String::new, ToString::to_string),
         lang: String::new(),
-        start: format_xmltv_time(programme.start),
-        end: format_xmltv_time(programme.stop),
+        start: format_xmltv_time(user_start),
+        end: format_xmltv_time(user_end),
         description: programme.desc.as_ref().map_or_else(String::new, ToString::to_string),
         channel_id: Arc::clone(&programme.channel),
         start_timestamp: user_start.to_string(),
