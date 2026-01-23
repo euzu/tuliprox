@@ -42,6 +42,8 @@ pub struct VideoConfig {
     pub extensions: Vec<String>,
     pub download: Option<VideoDownloadConfig>,
     pub web_search: Option<String>,
+    pub ffprobe_enabled: bool,
+    pub ffprobe_timeout: Option<u64>,
 }
 macros::from_impl!(VideoConfig);
 impl From<&VideoConfigDto> for VideoConfig {
@@ -50,6 +52,8 @@ impl From<&VideoConfigDto> for VideoConfig {
             extensions: dto.extensions.clone(),
             download: dto.download.as_ref().map(Into::into),
             web_search: dto.web_search.clone(),
+            ffprobe_enabled: dto.ffprobe_enabled,
+            ffprobe_timeout: dto.ffprobe_timeout,
         }
     }
 }
@@ -60,6 +64,8 @@ impl From<&VideoConfig> for VideoConfigDto {
             extensions: instance.extensions.clone(),
             download: instance.download.as_ref().map(Into::into),
             web_search: instance.web_search.clone(),
+            ffprobe_enabled: instance.ffprobe_enabled,
+            ffprobe_timeout: instance.ffprobe_timeout,
         }
     }
 }

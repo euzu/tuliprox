@@ -1,4 +1,3 @@
-// Import the new MediaQuality struct
 use crate::model::MediaQuality;
 use crate::model::{ApiProxyServerInfo, AppConfig, ProxyUserCredentials};
 use crate::model::{ConfigTarget, StrmTargetOutput};
@@ -21,6 +20,7 @@ use std::sync::Arc;
 use tokio::fs::{create_dir_all, remove_dir, remove_file, File};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use shared::model::UUIDType;
+use crate::api::model::{ActiveProviderManager};
 
 /// Sanitizes a string to be safe for use as a file or directory name by
 /// following a strict "allow-list" approach and discarding invalid characters.
@@ -322,6 +322,7 @@ fn format_for_kodi(
     tmdb_id: u32,
     separator: &str,
     flat: bool,
+    flat_dedup_paths: &mut HashMap<u32, PathBuf>,
 ) -> (PathBuf, String) {
     let mut dir_path = PathBuf::new();
     let category = sanitize_for_filename(&strm_item_info.group, false);
@@ -339,7 +340,16 @@ fn format_for_kodi(
             let final_filename = base_name;
 
             if flat {
-                dir_path.push(format!("{folder_name}{separator}[{category}]"));
+                if tmdb_id > 0 {
+                    if let Some(path) = flat_dedup_paths.get(&tmdb_id) {
+                        dir_path = path.clone();
+                    } else {
+                        dir_path.push(folder_name);
+                        flat_dedup_paths.insert(tmdb_id, dir_path.clone());
+                    }
+                } else {
+                    dir_path.push(format!("{folder_name}{separator}[{category}]"));
+                }
             } else {
                 dir_path.push(category);
                 dir_path.push(folder_name);
@@ -384,6 +394,7 @@ fn format_for_plex(
     tmdb_id: u32,
     separator: &str,
     flat: bool,
+    flat_dedup_paths: &mut HashMap<u32, PathBuf>,
 ) -> (PathBuf, String) {
     let mut dir_path = PathBuf::new();
     let category = sanitize_for_filename(&strm_item_info.group, false);
@@ -401,7 +412,16 @@ fn format_for_plex(
             let final_filename = base_name;
 
             if flat {
-                dir_path.push(format!("{folder_name}{separator}[{category}]"));
+                if tmdb_id > 0 {
+                    if let Some(path) = flat_dedup_paths.get(&tmdb_id) {
+                        dir_path = path.clone();
+                    } else {
+                        dir_path.push(folder_name);
+                        flat_dedup_paths.insert(tmdb_id, dir_path.clone());
+                    }
+                } else {
+                    dir_path.push(format!("{folder_name}{separator}[{category}]"));
+                }
             } else {
                 dir_path.push(category);
                 dir_path.push(folder_name);
@@ -447,6 +467,7 @@ fn format_for_emby(
     tmdb_id: u32,
     separator: &str,
     flat: bool,
+    flat_dedup_paths: &mut HashMap<u32, PathBuf>,
 ) -> (PathBuf, String) {
     let mut dir_path = PathBuf::new();
     let category = sanitize_for_filename(&strm_item_info.group, false);
@@ -465,7 +486,16 @@ fn format_for_emby(
             let final_filename = format!("{base_name}{id_string}");
 
             if flat {
-                dir_path.push(format!("{folder_name}{separator}[{category}]"));
+                if tmdb_id > 0 {
+                    if let Some(path) = flat_dedup_paths.get(&tmdb_id) {
+                        dir_path = path.clone();
+                    } else {
+                        dir_path.push(folder_name);
+                        flat_dedup_paths.insert(tmdb_id, dir_path.clone());
+                    }
+                } else {
+                    dir_path.push(format!("{folder_name}{separator}[{category}]"));
+                }
             } else {
                 dir_path.push(category);
                 dir_path.push(folder_name);
@@ -512,6 +542,7 @@ fn format_for_jellyfin(
     tmdb_id: u32,
     separator: &str,
     flat: bool,
+    flat_dedup_paths: &mut HashMap<u32, PathBuf>,
 ) -> (PathBuf, String) {
     let mut dir_path = PathBuf::new();
     let category = sanitize_for_filename(&strm_item_info.group, false);
@@ -529,7 +560,16 @@ fn format_for_jellyfin(
             let final_filename = base_name;
 
             if flat {
-                dir_path.push(format!("{folder_name}{separator}[{category}]"));
+                if tmdb_id > 0 {
+                    if let Some(path) = flat_dedup_paths.get(&tmdb_id) {
+                        dir_path = path.clone();
+                    } else {
+                        dir_path.push(folder_name);
+                        flat_dedup_paths.insert(tmdb_id, dir_path.clone());
+                    }
+                } else {
+                    dir_path.push(format!("{folder_name}{separator}[{category}]"));
+                }
             } else {
                 dir_path.push(category);
                 dir_path.push(folder_name);
@@ -575,6 +615,7 @@ fn style_based_rename(
     style: StrmExportStyle,
     underscore_whitespace: bool,
     flat: bool,
+    flat_dedup_paths: &mut HashMap<u32, PathBuf>,
 ) -> (PathBuf, String) {
     let separator = if underscore_whitespace { "_" } else { " " };
 
@@ -583,17 +624,15 @@ fn style_based_rename(
 
     // Dispatch the call to the responsible function based on the style.
     match style {
-        StrmExportStyle::Kodi => format_for_kodi(strm_item_info, tmdb_id, separator, flat),
-        StrmExportStyle::Plex => format_for_plex(strm_item_info, tmdb_id, separator, flat),
-        StrmExportStyle::Emby => format_for_emby(strm_item_info, tmdb_id, separator, flat),
-        StrmExportStyle::Jellyfin => format_for_jellyfin(strm_item_info, tmdb_id, separator, flat),
+        StrmExportStyle::Kodi => format_for_kodi(strm_item_info, tmdb_id, separator, flat, flat_dedup_paths),
+        StrmExportStyle::Plex => format_for_plex(strm_item_info, tmdb_id, separator, flat, flat_dedup_paths),
+        StrmExportStyle::Emby => format_for_emby(strm_item_info, tmdb_id, separator, flat, flat_dedup_paths),
+        StrmExportStyle::Jellyfin => format_for_jellyfin(strm_item_info, tmdb_id, separator, flat, flat_dedup_paths),
     }
 }
 
-fn prepare_strm_files(
-    _app_config: &AppConfig,
+async fn prepare_strm_files(
     new_playlist: &mut [PlaylistGroup],
-    _root_path: &Path,
     strm_target_output: &StrmTargetOutput,
 ) -> Vec<StrmFile> {
     let channel_count = new_playlist
@@ -606,9 +645,12 @@ fn prepare_strm_files(
     let mut collisions: HashSet<Arc<String>> = HashSet::new();
     let mut result = Vec::with_capacity(channel_count);
 
+    let mut flat_dedup_paths = HashMap::new();
+
     // first we create the names to identify name collisions
     for pg in new_playlist.iter_mut() {
         for pli in pg.channels.iter_mut().filter(|c| filter_strm_item(c)) {
+            
             let strm_item_info = extract_item_info(pli);
 
             let (dir_path, strm_file_name) = style_based_rename(
@@ -617,13 +659,22 @@ fn prepare_strm_files(
                 strm_target_output.style,
                 strm_target_output.underscore_whitespace,
                 strm_target_output.flat,
+                &mut flat_dedup_paths,
             );
 
             // Conditionally generate the quality string based on the new config flag
             let separator = if strm_target_output.underscore_whitespace { "_" } else { " " };
             let quality_string = get_quality(strm_target_output, pli, separator);
+            
+            // Add category suffix for flat movie structure to avoid collisions
+            let category_suffix = if strm_target_output.flat && pli.get_tmdb_id().is_some() && pli.header.item_type == PlaylistItemType::Video {
+                let cat = sanitize_for_filename(&strm_item_info.group, false);
+                format!("{separator}[{cat}]")
+            } else { 
+                String::new() 
+            };
 
-            let final_filename = format!("{strm_file_name}{quality_string}");
+            let final_filename = format!("{strm_file_name}{quality_string}{category_suffix}");
             let filename = Arc::new(final_filename);
 
             if all_filenames.contains(&filename) {
@@ -642,7 +693,7 @@ fn prepare_strm_files(
         // This separator is specifically for the multi-version naming convention.
         // According to the docs (Plex, Jellyfin), this should be " - " (space-hyphen-space).
         // The user's `underscore_whitespace` setting should not apply to this structural separator.
-        let version_separator = " - ";
+        let version_separator = " ";
         let separator = if strm_target_output.underscore_whitespace { "_" } else { " " };
         result
             .iter_mut()
@@ -655,18 +706,7 @@ fn prepare_strm_files(
                 let base_filename = &s.file_name;
 
                 // Apply the specific multi-version naming convention for the selected style.
-                let new_filename = match strm_target_output.style {
-                    // Plex, Emby, and Kodi all follow the `Filename - Suffix` pattern.
-                    StrmExportStyle::Plex | StrmExportStyle::Emby | StrmExportStyle::Kodi => {
-                        format!("{base_filename}{version_separator}{version_label}")
-                    }
-
-                    // Jellyfin also follows this pattern, but explicitly shows an option for " - [Label]".
-                    // Using brackets makes the version distinct and is a clean implementation.
-                    StrmExportStyle::Jellyfin => {
-                        format!("{base_filename}{version_separator}[{version_label}]")
-                    }
-                };
+                let new_filename = format!("{base_filename}{version_separator}[{version_label}]");
 
                 s.file_name = Arc::new(new_filename);
             });
@@ -705,6 +745,8 @@ pub async fn write_strm_playlist(
     target: &ConfigTarget,
     target_output: &StrmTargetOutput,
     new_playlist: &mut [PlaylistGroup],
+    // Inject provider manager for connection checking
+    _provider_manager: Option<&Arc<ActiveProviderManager>>, 
 ) -> Result<(), TuliproxError> {
     if new_playlist.is_empty() {
         return Ok(());
@@ -740,11 +782,10 @@ pub async fn write_strm_playlist(
     let target_force_redirect = target.options.as_ref().and_then(|o| o.force_redirect.as_ref());
 
     let strm_files = prepare_strm_files(
-        app_config,
         new_playlist,
-        &root_path,
         target_output,
-    );
+    ).await;
+    
     for strm_file in strm_files {
         // file paths
         let output_path = truncate_filename(&root_path.join(&strm_file.dir_path), 255);
@@ -1081,15 +1122,3 @@ async fn remove_empty_dirs(root_path: PathBuf) {
     let tree_nodes = build_directory_tree(&root_path).await;
     delete_empty_dirs_from_tree(&root_path, tree_nodes).await;
 }
-
-
-// #[cfg(test)]
-// mod tests {
-//     use crate::repository::kodi_repository::remove_empty_dirs;
-//     use std::path::PathBuf;
-//
-//     #[tokio::test]
-//     async fn test_empty_dirs() {
-//         remove_empty_dirs(PathBuf::from("/tmp/hello")).await;
-//     }
-// }

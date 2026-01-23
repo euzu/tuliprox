@@ -8,8 +8,8 @@ use std::sync::{Arc, Weak};
 use tokio::sync::{Mutex, OwnedRwLockWriteGuard, RwLock};
 use tokio::task::JoinSet;
 
-use crate::api::model::{EventManager, EventMessage, PlaylistStorageState, UpdateGuard};
-use crate::messaging::send_message_json;
+use crate::api::model::{ActiveProviderManager, EventManager, EventMessage, PlaylistStorageState, UpdateGuard};
+use crate::messaging::{send_message_json};
 use crate::model::Epg;
 
 
@@ -544,9 +544,12 @@ pub struct PlaylistProcessingContext {
     pub disabled_headers: Option<ReverseProxyDisabledHeaderConfig>,
 
     // Coordination
-    processed_inputs: Arc<Mutex<HashSet<Arc<str>>>>,
+    pub processed_inputs: Arc<Mutex<HashSet<Arc<str>>>>,
     #[allow(clippy::type_complexity)]
-    input_locks: Arc<Mutex<HashMap<Arc<str>, Weak<RwLock<()>>>>>,
+    pub input_locks: Arc<Mutex<HashMap<Arc<str>, Weak<RwLock<()>>>>>,
+    
+    // New field for STRM probes
+    pub provider_manager: Option<Arc<ActiveProviderManager>>,
 }
 
 impl PlaylistProcessingContext {
@@ -720,8 +723,8 @@ async fn process_playlist_for_target(ctx: &PlaylistProcessingContext,
         step.broadcast("Executing transformations on '{}' playlist", &target.name);
         let mut processed_fpl = execute_pipe(target, &pipe, provider_fpl, &mut duplicates);
         processed_fpl.sort_by_provider_ordinal();
-        playlist_resolve_series(&ctx.config, &ctx.client, target, errors, &pipe, provider_fpl, &mut processed_fpl).await;
-        playlist_resolve_vod(&ctx.config, &ctx.client, target, errors, provider_fpl, &mut processed_fpl).await;
+        playlist_resolve_series(&ctx.config, &ctx.client, target, errors, &pipe, provider_fpl, &mut processed_fpl, ctx.provider_manager.as_ref()).await;
+        playlist_resolve_vod(&ctx.config, &ctx.client, target, errors, provider_fpl, &mut processed_fpl, ctx.provider_manager.as_ref()).await;
         // stats
         let input_entry_name = processed_fpl.input.name.clone();
         let group_count = processed_fpl.get_group_count();
@@ -766,7 +769,8 @@ async fn process_playlist_for_target(ctx: &PlaylistProcessingContext,
         if process_watch(&config, &ctx.client, target, &flat_new_playlist).await {
             step.tick("group watches");
         }
-        let result = persist_playlist(&ctx.config, &mut flat_new_playlist, flatten_tvguide(&new_epg).as_ref(), target, ctx.playlist_state.as_ref()).await;
+        // Pass provider_manager to persist_playlist
+        let result = persist_playlist(&ctx.config, &mut flat_new_playlist, flatten_tvguide(&new_epg).as_ref(), target, ctx.playlist_state.as_ref(), ctx.provider_manager.as_ref()).await;
         step.stop("Persisting playlists");
         result
     }
@@ -864,8 +868,9 @@ async fn process_watch(cfg: &Config, client: &reqwest::Client, target: &ConfigTa
 
 pub async fn exec_processing(client: &reqwest::Client, app_config: Arc<AppConfig>, targets: Arc<ProcessTargets>,
                              event_manager: Option<Arc<EventManager>>, playlist_state: Option<Arc<PlaylistStorageState>>,
-                             update_guard: Option<UpdateGuard>,
-                             disabled_headers: Option<ReverseProxyDisabledHeaderConfig>) {
+                             update_guard: Option<UpdateGuard>, disabled_headers: Option<ReverseProxyDisabledHeaderConfig>,
+                             provider_manager: Option<Arc<ActiveProviderManager>>
+                             ) {
         let _guard = if let Some(guard) = update_guard {
         if let Some(permit) = guard.try_playlist() {
             Some(permit)
@@ -890,6 +895,7 @@ pub async fn exec_processing(client: &reqwest::Client, app_config: Arc<AppConfig
         processed_inputs: Arc::new(Mutex::new(HashSet::new())),
         input_locks: Arc::new(Mutex::new(HashMap::new())),
         disabled_headers,
+        provider_manager, // Pass provider manager
     };
 
     let start_time = Instant::now();
@@ -941,20 +947,3 @@ pub async fn exec_processing(client: &reqwest::Client, app_config: Arc<AppConfig
 
     info!("{update_finished_message}");
 }
-
-// #[cfg(test)]
-// mod tests {
-// #[test]
-// fn test_jaro_winkeler() {
-//     let data = [("yessport5", "heyessport5gold"), ("yessport5", "heyesport5gold")];
-//
-//     data.iter().for_each(|(first, second)|
-//     println!("jaro_winkler {} = {} => {}", first, second, strsim::jaro_winkler(first, second)));
-//     // println!("jaro {}", strsim::jaro(data.0, data.1));
-//     // println!("levenhstein {}", strsim::levenshtein(data.0, data.1));
-//     // println!("damerau_levenshtein {:?}", strsim::damerau_levenshtein(data.0, data.1));
-//     // println!("osa distance {:?}", strsim::osa_distance(data.0, data.1));
-//     // println!("sorensen dice {:?}", strsim::sorensen_dice(data.0, data.1));
-// }
-
-// }

@@ -146,6 +146,17 @@ pub struct StrmTargetOutputDto {
     pub filter: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub add_quality_to_filename: bool,
+    
+    // New Fields for Metadata and Probe
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub resolve_tmdb_missing: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub probe_missing_quality: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_probe_size_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_analyze_duration: Option<u64>,
+
     #[serde(skip)]
     pub t_filter: Option<Filter>,
 }

@@ -2,7 +2,7 @@ use crate::error::{TuliproxError, TuliproxErrorKind};
 use crate::model::{ConfigApiDto, HdHomeRunConfigDto, IpCheckConfigDto, LibraryConfigDto, LogConfigDto, MessagingConfigDto,
                    ProxyConfigDto, ReverseProxyConfigDto, ScheduleConfigDto, VideoConfigDto, WebUiConfigDto};
 use crate::utils::{is_false, default_connect_timeout_secs, is_default_connect_timeout_secs, is_blank_optional_string,
-                   default_supported_video_extensions};
+                   default_supported_video_extensions, default_as_true}; // Added default_as_true
 
 pub const DEFAULT_USER_AGENT: &str = "VLC/3.0.16 LibVLC/3.0.16";
 
@@ -220,6 +220,8 @@ impl ConfigDto {
                     extensions: default_supported_video_extensions(),
                     download: None,
                     web_search: None,
+                    ffprobe_enabled: default_as_true(), // Default to enabled
+                    ffprobe_timeout: None,
                 });
             }
             Some(video) => {

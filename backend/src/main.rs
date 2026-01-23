@@ -221,7 +221,7 @@ async fn start_in_cli_mode(cfg: Arc<AppConfig>, targets: Arc<ProcessTargets>) {
         error!("Failed to build client {err}");
         reqwest::Client::new()
     });
-    playlist::exec_processing(&client, cfg, targets, None, None, None, None).await;
+    playlist::exec_processing(&client, cfg, targets, None, None, None, None, None).await;
 }
 
 async fn start_in_server_mode(cfg: Arc<AppConfig>, targets: Arc<ProcessTargets>) {

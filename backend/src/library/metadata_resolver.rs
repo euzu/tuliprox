@@ -15,6 +15,12 @@ pub struct MetadataResolver {
 
 impl MetadataResolver {
     // Creates a new metadata resolver from configuration
+    pub fn new(config: LibraryConfig, client: reqwest::Client) -> Self {
+        let storage_path = std::path::PathBuf::from(&config.metadata.path);
+        let storage = MetadataStorage::new(storage_path);
+        Self::from_config(&config, client, storage)
+    }
+
     pub fn from_config(config: &LibraryConfig, client: reqwest::Client, storage: MetadataStorage) -> Self {
         let tmdb_client = if config.metadata.tmdb.enabled {
             let api_key = config.metadata.tmdb.api_key.as_ref().map_or_else(|| TMDB_API_KEY.to_string(), ToString::to_string);
@@ -29,34 +35,49 @@ impl MetadataResolver {
         }
     }
 
-    // Resolves metadata for a video file using multiple sources
+    // Resolves metadata for a video file using multiple sources (Main entry point for Library Scanner)
     pub async fn resolve(&self, group: &MediaGroup) -> Option<MediaMetadata> {
         debug!("Resolving metadata for: {group}");
 
         // Step 1: Classify the file
-        let (movie, Some(file), metadata) = (match group {
-            MediaGroup::Movie { file, metadata } => (true, Some(file), metadata),
+        let (is_movie, Some(file), metadata) = (match group {
+            MediaGroup::Movie { file, metadata } => (true, Some(file), metadata.as_ref()),
             MediaGroup::Series { show_key: _, episodes } => {
                 let episode = episodes.first()?;
-                (false, Some(&episode.file), &episode.metadata)
+                (false, Some(&episode.file), episode.metadata.as_ref())
             }
         }) else { return None };
 
+        self.resolve_internal(is_movie, metadata, Some(file)).await
+    }
+
+    /// Public helper to resolve metadata purely from a title string (Main entry point for Xtream Processors)
+    pub async fn resolve_from_title(&self, title: &str, is_movie: bool) -> Option<MediaMetadata> {
+        let metadata = ptt_parse_title(title);
+        self.resolve_internal(is_movie, &metadata, None).await
+    }
+
+    // Internal logic shared by both resolve methods
+    async fn resolve_internal(&self, is_movie: bool, metadata: &PttMetadata, file: Option<&ScannedMediaFile>) -> Option<MediaMetadata> {
         // Step 2: Try TMDB if enabled
         if let Some(ref tmdb) = self.tmdb_client {
-            match self.resolve_from_tmdb(movie, file, metadata, tmdb).await {
+            match self.resolve_from_tmdb(is_movie, metadata, tmdb, file).await {
                 Ok(Some(metadata)) => {
-                    info!("Found TMDB metadata for: {}", file.file_path);
+                    if let Some(f) = file {
+                        info!("Found TMDB metadata for: {}", f.file_path);
+                    } else {
+                        info!("Found TMDB metadata for title: {}", metadata.title());
+                    }
                     return Some(metadata);
                 }
                 Ok(None) => {
-                    return None;
+                    // continue to fallback
                 }
                 Err(err) => error!("Error resolving TMDB metadata: {err}"),
             }
         }
 
-        // TODO series implementation missing
+        // TODO series implementation missing for NFO
         // if classification == MediaClassification::Movie {
         //     // Step 3: Try to read existing NFO file
         //     if let Some(metadata) = NfoReader::read_metadata(&file.path).await {
@@ -67,28 +88,38 @@ impl MetadataResolver {
 
         // Step 4: Fallback to filename parsing
         if self.fallback_to_filename {
-            info!("Using filename-based metadata for: {}", file.file_path);
-            Some(Self::resolve_from_filename(movie, metadata))
+            if let Some(f) = file {
+                info!("Using filename-based metadata for: {}", f.file_path);
+            }
+            Some(Self::resolve_from_filename(is_movie, metadata))
         } else {
-            warn!("No metadata found for: {}", file.file_path);
+            if let Some(f) = file {
+                warn!("No metadata found for: {}", f.file_path);
+            }
             None
         }
     }
 
     // Attempts to resolve metadata from TMDB
-    async fn resolve_from_tmdb(&self, movie: bool, file: &ScannedMediaFile, metadata: &PttMetadata, tmdb: &TmdbClient) -> Result<Option<MediaMetadata>, String> {
+    async fn resolve_from_tmdb(&self, movie: bool, metadata: &PttMetadata, tmdb: &TmdbClient, file: Option<&ScannedMediaFile>) -> Result<Option<MediaMetadata>, String> {
         if movie {
             tmdb.search_movie(metadata.tmdb, metadata.title.as_str(), metadata.year).await
         } else {
-            let (series_year, tmdb_id) = if metadata.year.is_some() { (metadata.year, metadata.tmdb) } else {
-                // Try to extract year from parent directory if available
-                file.path.parent()
-                    .and_then(|p| p.file_name())
-                    .and_then(|n| n.to_str())
-                    .map_or((None, None), |s| {
-                        let ptt = ptt_parse_title(s);
-                        (ptt.year, ptt.tmdb)
-                    })
+            let (series_year, tmdb_id) = if metadata.year.is_some() {
+                (metadata.year, metadata.tmdb)
+            } else {
+                // Try to extract year from parent directory if available (only if file context exists)
+                if let Some(f) = file {
+                    f.path.parent()
+                        .and_then(|p| p.file_name())
+                        .and_then(|n| n.to_str())
+                        .map_or((None, None), |s| {
+                            let ptt = ptt_parse_title(s);
+                            (ptt.year, ptt.tmdb)
+                        })
+                } else {
+                    (None, None)
+                }
             };
             tmdb.search_series(tmdb_id, metadata.title.as_str(), series_year).await
         }
@@ -197,7 +228,29 @@ mod tests {
         if let Some(MediaMetadata::Movie(movie)) = metadata {
             assert_eq!(movie.title, "The Matrix");
             assert_eq!(movie.year, Some(1999));
-            assert_eq!(movie.source, MetadataSource::Tmdb);
+            assert_eq!(movie.source, MetadataSource::FilenameParsed);
+        } else {
+            panic!("Expected movie metadata");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resolve_from_title_stream() {
+        let config = create_test_config(false);
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        let resolver = MetadataResolver::from_config(&config, client, MetadataStorage::new(PathBuf::from("/tmp")));
+        
+        let metadata = resolver.resolve_from_title("Inception.2010", true).await;
+        assert!(metadata.is_some());
+
+        if let Some(MediaMetadata::Movie(movie)) = metadata {
+            assert_eq!(movie.title, "Inception");
+            assert_eq!(movie.year, Some(2010));
+            assert_eq!(movie.source, MetadataSource::FilenameParsed);
         } else {
             panic!("Expected movie metadata");
         }

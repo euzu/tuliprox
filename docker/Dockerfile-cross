@@ -8,6 +8,13 @@
 # =================================================================
 
 # -----------------------------------------------------------------
+# Stage 0: Fetch static FFmpeg binaries
+# -----------------------------------------------------------------
+# We use a static build to ensure it works in the scratch image without libraries
+# Static ffmpeg image is multi-arch, so it pulls correct arch automatically
+FROM mwader/static-ffmpeg:7.1 AS ffmpeg-static
+
+# -----------------------------------------------------------------
 # Stage 1: Build the Rust binary for production
 # -----------------------------------------------------------------
 FROM ghcr.io/cross-rs/x86_64-unknown-linux-musl:main AS rust-build
@@ -156,7 +163,8 @@ ENV TZ=${TZ}
 
 # Install build dependencies and the lldb debugger for Alpine
 # Added 'perl' which is required to build the native OpenSSL library.
-RUN apk add --no-cache bash build-base openssl-dev lldb gdb perl
+# Added ffmpeg for probing
+RUN apk add --no-cache bash build-base openssl-dev lldb gdb perl ffmpeg
 
 # Update Rust toolchain and add the necessary target
 RUN rustup update && rustup target add $RUST_TARGET
@@ -193,6 +201,10 @@ COPY --from=tz-prep /output/etc/localtime /etc/localtime
 # Certificates
 COPY --from=rust-build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 
+# Copy static ffmpeg/ffprobe binaries
+COPY --from=ffmpeg-static /ffmpeg /usr/local/bin/
+COPY --from=ffmpeg-static /ffprobe /usr/local/bin/
+
 # RUN ln -sf /usr/share/zoneinfo/${TZ} /etc/localtime
 
 # App
@@ -213,7 +225,8 @@ ARG RUST_TARGET
 ARG TZ=UTC
 ENV TZ=${TZ}
 
-RUN apk add --no-cache bash curl ca-certificates tini
+# Install dependencies including ffmpeg
+RUN apk add --no-cache bash curl ca-certificates tini ffmpeg
 
 COPY --from=rust-build /usr/share/zoneinfo /usr/share/zoneinfo
 COPY --from=rust-build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/

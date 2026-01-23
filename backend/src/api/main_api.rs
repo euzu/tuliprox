@@ -133,8 +133,9 @@ fn exec_update_on_boot(
         let client = client.clone();
         let update_guard = Some(app_state.update_guard.clone());
         let disabled_headers = app_state.get_disabled_headers();
+        let provider_manager = Arc::clone(&app_state.active_provider);
         tokio::spawn(async move {
-            playlist::exec_processing(&client, app_config_clone, targets_clone, None, Some(playlist_state), update_guard, disabled_headers).await;
+            playlist::exec_processing(&client, app_config_clone, targets_clone, None, Some(playlist_state), update_guard, disabled_headers, Some(provider_manager)).await;
         });
     }
 }

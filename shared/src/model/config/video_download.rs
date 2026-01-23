@@ -3,7 +3,7 @@ use std::borrow::BorrowMut;
 use crate::info_err_res;
 use crate::error::{TuliproxError};
 use crate::model::DEFAULT_USER_AGENT;
-use crate::utils::{is_false, is_blank_optional_string, is_blank_optional_str, default_supported_video_extensions, is_default_supported_video_extensions};
+use crate::utils::{is_false, is_blank_optional_string, is_blank_optional_str, default_supported_video_extensions, is_default_supported_video_extensions, default_as_true, is_true};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -37,12 +37,18 @@ pub struct VideoConfigDto {
     pub download: Option<VideoDownloadConfigDto>,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub web_search: Option<String>,
+    #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
+    pub ffprobe_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ffprobe_timeout: Option<u64>,
 }
 
 impl VideoConfigDto {
     pub fn is_empty(&self) -> bool {
         self.extensions.is_empty() && is_blank_optional_str(self.web_search.as_deref())
         && (self.download.is_none() || self.download.as_ref().is_some_and(|d| d.is_empty()))
+        && self.ffprobe_enabled
+        && self.ffprobe_timeout.is_none()
     }
 
     pub fn clean(&mut self) {

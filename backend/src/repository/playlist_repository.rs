@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use crate::repository::{load_input_local_library_playlist, persist_input_library_playlist};
+use crate::api::model::ActiveProviderManager;
 
 struct LocalEpisodeKey {
     path: Arc<str>,
@@ -32,8 +33,14 @@ pub struct ProviderEpisodeKey {
     pub(crate) virtual_id: u32,
 }
 
-pub async fn persist_playlist(app_config: &Arc<AppConfig>, playlist: &mut [PlaylistGroup], epg: Option<&Epg>,
-                              target: &ConfigTarget, playlist_state: Option<&Arc<PlaylistStorageState>>) -> Result<(), Vec<TuliproxError>> {
+pub async fn persist_playlist(
+    app_config: &Arc<AppConfig>, 
+    playlist: &mut [PlaylistGroup], 
+    epg: Option<&Epg>,
+    target: &ConfigTarget, 
+    playlist_state: Option<&Arc<PlaylistStorageState>>,
+    provider_manager: Option<&Arc<ActiveProviderManager>>, // Added parameter
+) -> Result<(), Vec<TuliproxError>> {
     let mut errors = vec![];
     let config = &app_config.config.load();
     let target_path = match ensure_target_storage_path(config, &target.name) {
@@ -102,7 +109,7 @@ pub async fn persist_playlist(app_config: &Arc<AppConfig>, playlist: &mut [Playl
         let result = match output {
             TargetOutput::Xtream(_xtream_output) => xtream_write_playlist(app_config, target, pl).await,
             TargetOutput::M3u(m3u_output) => m3u_write_playlist(app_config, target, m3u_output, &target_path, pl).await,
-            TargetOutput::Strm(strm_output) => write_strm_playlist(app_config, target, strm_output, pl).await,
+            TargetOutput::Strm(strm_output) => write_strm_playlist(app_config, target, strm_output, pl, provider_manager).await,
             TargetOutput::HdHomeRun(_hdhomerun_output) => Ok(()),
         };
 
