@@ -59,7 +59,11 @@ impl ActiveClientStreamState {
 
             if unavailable {
                 if let Some(flag) = &self.send_custom_stream_flag {
-                    flag.store(CHANNEL_UNAVAILABLE_STREAM, Ordering::Release);
+                    // Only set CHANNEL_UNAVAILABLE if no custom stream flag is already set
+                    let current = flag.load(Ordering::Acquire);
+                    if current == INNER_STREAM {
+                        flag.store(CHANNEL_UNAVAILABLE_STREAM, Ordering::Release);
+                    }
                 }
             }
 
@@ -459,7 +463,7 @@ fn stream_grace_period(
                                     addr,
                                     virtual_id,
                                 )
-                                .await;
+                                    .await;
                             });
                         } else {
                             stream_strategy_flag_copy
