@@ -1,7 +1,7 @@
 use crate::api::model::ActiveProviderManager;
 use crate::library::MetadataResolver;
 use crate::model::FetchedPlaylist;
-use crate::model::{AppConfig, ConfigTarget, TargetOutput};
+use crate::model::{AppConfig, ConfigTarget};
 use crate::processing::parser::xtream::parse_xtream_series_info;
 use crate::processing::processor::create_resolve_options_function_for_xtream_target;
 use crate::processing::processor::playlist::ProcessingPipe;
@@ -18,17 +18,11 @@ use shared::model::{
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
+use crate::model::MediaQuality;
 
 create_resolve_options_function_for_xtream_target!(series);
 
 const BATCH_SIZE: usize = 100;
-
-fn should_probe(target: &ConfigTarget) -> bool {
-    target.output.iter().any(|o| match o {
-        TargetOutput::Strm(s) => s.probe_missing_quality,
-        _ => false,
-    })
-}
 
 #[allow(clippy::too_many_lines)]
 async fn playlist_resolve_series_info(
@@ -40,6 +34,12 @@ async fn playlist_resolve_series_info(
     resolve_delay: u16,
 ) -> Vec<PlaylistGroup> {
     let input = fpl.input;
+    
+    // Get input options
+    let input_options = input.options.as_ref();
+    let resolve_tmdb_missing = input_options.is_some_and(|o| o.resolve_tmdb);
+    // Note: Probing logic handled in calling function `playlist_resolve_series` for episodes
+
     let working_dir = &app_config.config.load().working_dir;
     let storage_path = match get_input_storage_path(&input.name, working_dir) {
         Ok(storage_path) => storage_path,
@@ -95,7 +95,6 @@ async fn playlist_resolve_series_info(
         let mut properties_updated = false;
 
         if should_download {
-            processed_series_info_count += 1;
             if let Some(content) = playlist_resolve_download_playlist_item(
                 app_config,
                 client,
@@ -110,26 +109,8 @@ async fn playlist_resolve_series_info(
                 if !content.is_empty() {
                     match serde_json::from_str::<XtreamSeriesInfo>(&content) {
                         Ok(info) => {
-                            let mut series_stream_props =
+                            let series_stream_props =
                                 SeriesStreamProperties::from_info(&info, pli);
-
-                            // Metadata Fallback for Series if TMDB or Release Date is missing
-                            if series_stream_props.tmdb.is_none()
-                                || series_stream_props.release_date.is_none()
-                            {
-                                if let Some(meta) = meta_resolver
-                                    .resolve_from_title(&series_stream_props.name, false)
-                                    .await
-                                {
-                                    if series_stream_props.tmdb.is_none() {
-                                        series_stream_props.tmdb = meta.tmdb_id();
-                                    }
-                                    if series_stream_props.release_date.is_none() {
-                                        series_stream_props.release_date =
-                                            meta.year().map(|y| format!("{y}-01-01").into());
-                                    }
-                                }
-                            }
 
                             // Update in-memory playlist items
                             pli.header.additional_properties =
@@ -145,9 +126,38 @@ async fn playlist_resolve_series_info(
                 }
             }
         }
+        
+        // Metadata Fallback for Series if TMDB or Release Date is missing
+        if resolve_tmdb_missing {
+             if let Some(StreamProperties::Series(series_stream_props)) = pli.header.additional_properties.as_mut() {
+                if series_stream_props.tmdb.is_none() || series_stream_props.release_date.is_none() {
+                    if let Some(meta) = meta_resolver
+                        .resolve_from_title(&series_stream_props.name, false)
+                        .await
+                    {
+                        let mut changed = false;
+                        if series_stream_props.tmdb.is_none() {
+                            series_stream_props.tmdb = meta.tmdb_id();
+                            changed = true;
+                        }
+                        if series_stream_props.release_date.is_none() {
+                            series_stream_props.release_date =
+                                meta.year().map(|y| format!("{y}-01-01").into());
+                            changed = true;
+                        }
+                        if changed {
+                            properties_updated = true;
+                        }
+                    }
+                }
+             }
+        }
+
 
         // Add to batch for persistence if properties were updated
         if properties_updated {
+            processed_series_info_count += 1;
+            
             if let Some(StreamProperties::Series(props)) =
                 pli.header.additional_properties.as_ref()
             {
@@ -240,8 +250,10 @@ pub async fn playlist_resolve_series(
 ) {
     let (resolve_series, resolve_delay) = get_resolve_series_options(target, processed_fpl);
 
-    // Check if we need to probe based on target configuration
-    let probe_requested = should_probe(target);
+    // Get input options
+    let input = processed_fpl.input;
+    let input_options = input.options.as_ref();
+    let probe_requested = input_options.is_some_and(|o| o.analyze_stream);
 
     // FFprobe check
     let ffprobe_enabled = cfg
@@ -280,19 +292,10 @@ pub async fn playlist_resolve_series(
             .as_ref()
             .and_then(|v| v.ffprobe_timeout)
             .unwrap_or(60);
-
-        // Find configured strm output for probe settings
-        let (analyze_duration, probe_size) = target
-            .output
-            .iter()
-            .find_map(|o| match o {
-                TargetOutput::Strm(s) if s.probe_missing_quality => Some((
-                    s.probe_analyze_duration.unwrap_or(10_000_000),
-                    s.probe_probe_size_bytes.unwrap_or(10_000_000),
-                )),
-                _ => None,
-            })
-            .unwrap_or((10_000_000, 10_000_000));
+            
+        // Use default analysis params for episodes if not specified
+        let analyze_duration = 10_000_000;
+        let probe_size = 10_000_000;
 
         if let Some(provider_mgr) = provider_manager {
             let dummy_addr = "127.0.0.1:0".parse().unwrap();
@@ -303,7 +306,7 @@ pub async fn playlist_resolve_series(
                 for pli in &mut group.channels {
                     let needs_probe = match pli.header.additional_properties.as_ref() {
                         Some(StreamProperties::Episode(props)) => {
-                            props.video.is_none() || props.audio.is_none()
+                            !MediaQuality::is_valid_media_info(props.video.as_deref()) || !MediaQuality::is_valid_media_info(props.audio.as_deref())
                         }
                         _ => false,
                     };
@@ -324,7 +327,7 @@ pub async fn playlist_resolve_series(
                                 shared::utils::sanitize_sensitive_info(&url)
                             );
 
-                            if let Some(quality) = crate::utils::ffmpeg::probe_url(
+                            if let Some((_quality, raw_video, raw_audio)) = crate::utils::ffmpeg::probe_url(
                                 &url,
                                 None,
                                 analyze_duration,
@@ -336,25 +339,13 @@ pub async fn playlist_resolve_series(
                                 if let Some(StreamProperties::Episode(e)) =
                                     pli.header.additional_properties.as_mut()
                                 {
-                                    let v_fmt = format!(
-                                        "{} {} {} {}",
-                                        quality.resolution,
-                                        quality.video_codec,
-                                        quality.dynamic_range,
-                                        quality.bit_depth
-                                    )
-                                    .trim()
-                                    .to_string();
-
-                                    let a_fmt = format!(
-                                        "{} {}",
-                                        quality.audio_codec, quality.audio_channels
-                                    )
-                                    .trim()
-                                    .to_string();
-
-                                    e.video = Some(v_fmt.into());
-                                    e.audio = Some(a_fmt.into());
+                                    // OVERWRITE with full JSON
+                                    if let Some(v) = raw_video {
+                                        e.video = Some(v.to_string().into());
+                                    }
+                                    if let Some(a) = raw_audio {
+                                        e.audio = Some(a.to_string().into());
+                                    }
                                 }
                             }
 

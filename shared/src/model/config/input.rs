@@ -168,6 +168,10 @@ pub struct ConfigInputOptionsDto {
     pub xtream_live_stream_use_prefix: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub xtream_live_stream_without_extension: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub resolve_tmdb: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub analyze_stream: bool,
 }
 
 impl Default for ConfigInputOptionsDto {
@@ -178,6 +182,8 @@ impl Default for ConfigInputOptionsDto {
             xtream_skip_series: false,
             xtream_live_stream_use_prefix: default_as_true(),
             xtream_live_stream_without_extension: false,
+            resolve_tmdb: false,
+            analyze_stream: false,
         }
     }
 }
@@ -189,6 +195,8 @@ impl ConfigInputOptionsDto {
             && !self.xtream_skip_series
             && self.xtream_live_stream_use_prefix
             && !self.xtream_live_stream_without_extension
+            && !self.resolve_tmdb
+            && !self.analyze_stream
     }
 
     pub fn clean(&mut self) {
@@ -197,6 +205,8 @@ impl ConfigInputOptionsDto {
         self.xtream_skip_series = false;
         self.xtream_live_stream_use_prefix = default_as_true();
         self.xtream_live_stream_without_extension = false;
+        self.resolve_tmdb = false;
+        self.analyze_stream = false;
     }
 }
 

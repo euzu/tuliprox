@@ -37,7 +37,7 @@ pub struct LiveStreamProperties {
     pub is_adult: i32,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Default, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct VideoStreamDetailProperties {
     #[serde(default, with = "arc_str_option_serde")]
     pub kinopoisk_url: Option<Arc<str>>,

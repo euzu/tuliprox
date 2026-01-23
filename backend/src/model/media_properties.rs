@@ -302,6 +302,28 @@ impl MediaQuality {
             audio_channels,
         })
     }
+
+    /// Validates if the provided JSON string contains meaningful media information.
+    /// Returns true if the string is valid JSON object and contains at least codec or dimension information.
+    /// Returns false for empty arrays "[]" or objects without specific keys.
+    pub fn is_valid_media_info(info: Option<&str>) -> bool {
+        if let Some(json_str) = info {
+             if let Ok(json) = serde_json::from_str::<serde_json::Value>(json_str) {
+                 // API often returns [] for empty info
+                 if let Some(arr) = json.as_array() {
+                     return !arr.is_empty();
+                 }
+                 if let Some(obj) = json.as_object() {
+                     // Check for minimal necessary fields
+                     // For video: codec_name, width, height
+                     // For audio: codec_name, channels
+                     // We check generically if it looks populated
+                     return obj.contains_key("codec_name") || obj.contains_key("width") || obj.contains_key("channels");
+                 }
+             }
+        }
+        false
+    }
 }
 
 

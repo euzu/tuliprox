@@ -48,6 +48,19 @@
 - **Database Viewer**: New CLI flags `--dbx` and `--dbm` to inspect internal database content.
 - **Added `disk_based_processing`**: (boolean, default `false`) to `config.yml`. When enabled, input playlists are processed from disk instead of memory.
 - **User-Agent `default_user_agent`**: Ensures that outgoing requests always pass a default user agent.
+- **FFprobe Integration**: Added capability to probe streams for codec, resolution, HDR (HDR10/HLG/DV), and audio channels using `ffprobe`. Probing strictly respects provider connection limits. If no slot is available (considering user limits), the item is skipped to prevent provider bans.
+- **Metadata Fallback**: Automatically fetches missing TMDB IDs and release dates via the TMDB API if the provider data is incomplete.
+
+### ⚙️ New Settings
+- **config.yml**:
+  - Added `video.ffprobe_enabled` (default: true) and `video.ffprobe_timeout`.
+- **source.yml (input options)**:
+  - Added `resolve_tmdb`: Triggers TMDB lookup if ID is missing.
+  - Added `analyze_stream`: Triggers ffprobe if technical info is missing.
+
+## 🛠 Optimizations
+- **Quality Tagging**: Generates enhanced filename tags (e.g., `[2160p 4K HEVC HDR TrueHD 7.1]`) for STRM files based on analysis results.
+- **Flat Grouping**: When `flat: true` option for STRM output is active, multiple versions (e.g., 4K and 1080p) of the same movie are now safely merged over all categories into a single folder based on TMDB ID, compatible with Jellyfin/Emby "Multi-Version" features.
 
 ## ⚙️ Engine & Storage Optimizations
 - **Slotted Page Architecture**: Improved space utilization and support for variable-length keys.

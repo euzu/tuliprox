@@ -2,6 +2,7 @@ use log::{debug, warn};
 use tokio::process::Command;
 use std::time::Duration;
 use crate::model::{MediaQuality};
+use serde_json::Value;
 
 // Checks if ffprobe is available in the system path
 pub async fn check_ffprobe_availability() -> bool {
@@ -11,7 +12,7 @@ pub async fn check_ffprobe_availability() -> bool {
     }
 }
 
-pub async fn probe_url(url: &str, user_agent: Option<&str>, analyze_duration: u64, probe_size: u64, timeout_secs: u64) -> Option<MediaQuality> {
+pub async fn probe_url(url: &str, user_agent: Option<&str>, analyze_duration: u64, probe_size: u64, timeout_secs: u64) -> Option<(MediaQuality, Option<Value>, Option<Value>)> {
     // Determine timeout: Ensure it's at least as long as the analyze duration + buffer, 
     // but respect the user setting if it's longer.
     let analyze_overhead = Duration::from_micros(analyze_duration) + Duration::from_secs(5);
@@ -22,12 +23,7 @@ pub async fn probe_url(url: &str, user_agent: Option<&str>, analyze_duration: u6
     
     command
         .arg("-v").arg("error")
-        // Select video stream 0
-        .arg("-select_streams").arg("v:0")
-        .arg("-show_entries").arg("stream=width,height,codec_name,pix_fmt,color_transfer,codec_tag_string")
-        // Select audio stream 0
-        .arg("-select_streams").arg("a:0")
-        .arg("-show_entries").arg("stream=codec_name,channels,channel_layout")
+        .arg("-show_streams") // Get all streams info
         .arg("-of").arg("json")
         // Optimization for network streams
         .arg("-analyzeduration").arg(analyze_duration.to_string())
@@ -49,27 +45,52 @@ pub async fn probe_url(url: &str, user_agent: Option<&str>, analyze_duration: u6
             }
 
             let stdout = String::from_utf8_lossy(&output.stdout);
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) {
+            if let Ok(json) = serde_json::from_str::<Value>(&stdout) {
                  let streams = json.get("streams").and_then(|s| s.as_array());
 
                  if let Some(stream_list) = streams {
                      let mut video_info: Option<String> = None;
                      let mut audio_info: Option<String> = None;
+                     let mut raw_video_json: Option<Value> = None;
+                     let mut raw_audio_json: Option<Value> = None;
 
                      for stream in stream_list {
-                         // Heuristic to detect video vs audio since we requested specific streams but order/presence isn't guaranteed
-                         let is_video = stream.get("width").is_some() || stream.get("height").is_some();
-                         let is_audio = stream.get("channels").is_some() || stream.get("channel_layout").is_some();
-
-                         if is_video && video_info.is_none() {
+                         // Check codec_type if available
+                         let codec_type = stream.get("codec_type").and_then(|s| s.as_str());
+                         
+                         // We prefer the first video/audio stream we find
+                         if codec_type == Some("video") && video_info.is_none() {
                              video_info = Some(stream.to_string());
-                         } else if is_audio && audio_info.is_none() {
+                             raw_video_json = Some(stream.clone());
+                         } else if codec_type == Some("audio") && audio_info.is_none() {
                              audio_info = Some(stream.to_string());
+                             raw_audio_json = Some(stream.clone());
+                         }
+                     }
+
+                     // Fallback heuristic if codec_type missing
+                     if video_info.is_none() {
+                         for stream in stream_list {
+                             if (stream.get("width").is_some() || stream.get("height").is_some()) && video_info.is_none() {
+                                 video_info = Some(stream.to_string());
+                                 raw_video_json = Some(stream.clone());
+                             }
+                         }
+                     }
+                     if audio_info.is_none() {
+                         for stream in stream_list {
+                              if (stream.get("channels").is_some() || stream.get("channel_layout").is_some()) && audio_info.is_none() {
+                                 audio_info = Some(stream.to_string());
+                                 raw_audio_json = Some(stream.clone());
+                             }
                          }
                      }
 
                      if video_info.is_some() || audio_info.is_some() {
-                         return MediaQuality::from_ffprobe_info(audio_info.as_deref(), video_info.as_deref());
+                         let mq = MediaQuality::from_ffprobe_info(audio_info.as_deref(), video_info.as_deref());
+                         if let Some(quality) = mq {
+                             return Some((quality, raw_video_json, raw_audio_json));
+                         }
                      }
                  }
             } else {

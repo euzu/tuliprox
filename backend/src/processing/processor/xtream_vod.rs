@@ -1,7 +1,7 @@
 use crate::api::model::ActiveProviderManager;
 use crate::library::MetadataResolver;
 use crate::model::FetchedPlaylist;
-use crate::model::{AppConfig, ConfigTarget, TargetOutput};
+use crate::model::{AppConfig, ConfigTarget};
 use crate::processing::processor::create_resolve_options_function_for_xtream_target;
 use crate::processing::processor::xtream::playlist_resolve_download_playlist_item;
 use crate::repository::get_input_storage_path;
@@ -12,19 +12,14 @@ use shared::model::{
     InputType, PlaylistEntry, PlaylistItemType, StreamProperties, VideoStreamDetailProperties,
     VideoStreamProperties, XtreamCluster, XtreamVideoInfo,
 };
+use shared::utils::Internable;
 use std::sync::Arc;
 use std::time::Instant;
+use crate::model::MediaQuality;
 
 create_resolve_options_function_for_xtream_target!(vod);
 
 const BATCH_SIZE: usize = 100;
-
-fn should_probe(target: &ConfigTarget) -> bool {
-    target.output.iter().any(|o| match o {
-        TargetOutput::Strm(s) => s.probe_missing_quality,
-        _ => false,
-    })
-}
 
 pub async fn playlist_resolve_vod(
     app_config: &Arc<AppConfig>,
@@ -37,8 +32,11 @@ pub async fn playlist_resolve_vod(
 ) {
     let (resolve_movies, resolve_delay) = get_resolve_vod_options(target, fpl);
 
-    // Check if we need to probe based on target configuration
-    let probe_requested = should_probe(target);
+    // Get input options
+    let input = fpl.input;
+    let input_options = input.options.as_ref();
+    let resolve_tmdb_missing = input_options.is_some_and(|o| o.resolve_tmdb);
+    let probe_requested = input_options.is_some_and(|o| o.analyze_stream);
 
     let ffprobe_enabled = app_config
         .config
@@ -61,11 +59,12 @@ pub async fn playlist_resolve_vod(
     // Determine effective probing: requested AND possible
     let do_probe = probe_requested && can_probe;
 
-    if !resolve_movies && !do_probe {
+    // Determine if we need to do anything
+    // We proceed if we need to download from provider OR probe OR resolve tmdb
+    if !resolve_movies && !do_probe && !resolve_tmdb_missing {
         return;
     }
 
-    let input = fpl.input;
     let working_dir = &app_config.config.load().working_dir;
     let storage_path = match get_input_storage_path(&input.name, working_dir) {
         Ok(storage_path) => storage_path,
@@ -97,7 +96,6 @@ pub async fn playlist_resolve_vod(
 
     provider_fpl.source.release_resources(XtreamCluster::Video);
 
-    let input = fpl.input;
     let input_name_arc = input.name.clone();
 
     for pli in fpl.items_mut() {
@@ -114,7 +112,6 @@ pub async fn playlist_resolve_vod(
 
         // 1. Resolve Info from API if missing or forced
         if provider_id != 0 && (!pli.has_details() && resolve_movies) {
-            processed_vod_info_count += 1;
             if let Some(content) = playlist_resolve_download_playlist_item(
                 app_config,
                 client,
@@ -129,32 +126,7 @@ pub async fn playlist_resolve_vod(
                 if !content.is_empty() {
                     match serde_json::from_str::<XtreamVideoInfo>(&content) {
                         Ok(info) => {
-                            let mut video_stream_props = VideoStreamProperties::from_info(&info, pli);
-
-                            // Fallback Metadata Resolution if TMDB/Year missing
-                            if video_stream_props.tmdb.is_none()
-                                || video_stream_props
-                                    .details
-                                    .as_ref()
-                                    .and_then(|d| d.release_date.as_ref())
-                                    .is_none()
-                            {
-                                if let Some(meta) = meta_resolver
-                                    .resolve_from_title(&video_stream_props.name, true)
-                                    .await
-                                {
-                                    if video_stream_props.tmdb.is_none() {
-                                        video_stream_props.tmdb = meta.tmdb_id();
-                                    }
-                                    if let Some(details) = video_stream_props.details.as_mut() {
-                                        if details.release_date.is_none() {
-                                            details.release_date =
-                                                meta.year().map(|y| format!("{y}-01-01").into());
-                                        }
-                                    }
-                                }
-                            }
-
+                            let video_stream_props = VideoStreamProperties::from_info(&info, pli);
                             // Update item
                             pli.header.additional_properties =
                                 Some(StreamProperties::Video(Box::new(video_stream_props)));
@@ -167,6 +139,61 @@ pub async fn playlist_resolve_vod(
                 }
             }
         }
+        
+        // 1.5 TMDB / Metadata Fallback
+        // Check if we have properties now (either newly fetched or existing)
+        if resolve_tmdb_missing {
+             if let Some(StreamProperties::Video(video_stream_props)) = pli.header.additional_properties.as_mut() {
+                  if video_stream_props.tmdb.is_none() || 
+                     video_stream_props.details.as_ref().and_then(|d| d.release_date.as_ref()).is_none() 
+                  {
+                      if let Some(meta) = meta_resolver
+                        .resolve_from_title(&video_stream_props.name, true)
+                        .await
+                        {
+                             let mut changed = false;
+                             if video_stream_props.tmdb.is_none() {
+                                 video_stream_props.tmdb = meta.tmdb_id();
+                                 changed = true;
+                             }
+                             if let Some(details) = video_stream_props.details.as_mut() {
+                                 if details.release_date.is_none() {
+                                     details.release_date = meta.year().map(|y| format!("{y}-01-01").into());
+                                     changed = true;
+                                 }
+                             }
+                             if changed {
+                                 properties_updated = true;
+                             }
+                        }
+                  }
+             } else if !pli.has_details() {
+                  // Case where we don't have details yet and didn't fetch them (resolve_movies=false)
+                  // but we want to resolve tmdb based on playlist title
+                  if let Some(meta) = meta_resolver.resolve_from_title(&pli.header.name, true).await {
+                      // Create partial properties
+                      let mut props = VideoStreamProperties {
+                          name: pli.header.name.clone(),
+                          category_id: pli.header.category_id,
+                          stream_id: pli.header.virtual_id, 
+                          stream_icon: pli.header.logo.clone(),
+                          direct_source: "".into(), custom_sid: None, added: "".into(), container_extension: "".into(),
+                          rating: None, rating_5based: None, stream_type: Some("movie".intern()), trailer: None, tmdb: None, is_adult: 0, details: None
+                      };
+                      props.tmdb = meta.tmdb_id();
+                       if let Some(year) = meta.year() {
+                           props.details = Some(VideoStreamDetailProperties {
+                                release_date: Some(format!("{year}-01-01").into()),
+                                ..VideoStreamDetailProperties::default() // You might need a Default impl for VideoStreamDetailProperties or fill all fields
+                           });
+                       }
+                      
+                      pli.header.additional_properties = Some(StreamProperties::Video(Box::new(props)));
+                      properties_updated = true;
+                  }
+             }
+        }
+
 
         // 2. FFprobe Analysis if enabled and needed
         // Determine if we need to probe (if details exist but video/audio info is missing)
@@ -175,7 +202,7 @@ pub async fn playlist_resolve_vod(
                 Some(StreamProperties::Video(props)) => props
                     .details
                     .as_ref()
-                    .map_or(true, |d| d.video.is_none() || d.audio.is_none()),
+                    .map_or(true, |d| !MediaQuality::is_valid_media_info(d.video.as_deref()) || !MediaQuality::is_valid_media_info(d.audio.as_deref())),
                 None => true, // If we didn't fetch API details above (e.g. resolve_movies=false), we might still want to probe
                 _ => false,
             };
@@ -217,7 +244,7 @@ pub async fn playlist_resolve_vod(
                     let probe_size = 10_000_000; // 10MB default
                     let user_agent = app_config.config.load().default_user_agent.clone();
 
-                    if let Some(quality) = crate::utils::ffmpeg::probe_url(
+                    if let Some((_quality, raw_video, raw_audio)) = crate::utils::ffmpeg::probe_url(
                         &provider_url,
                         user_agent.as_deref(),
                         analyze_duration,
@@ -237,11 +264,12 @@ pub async fn playlist_resolve_vod(
                                   direct_source: "".into(), custom_sid: None, added: "".into(), container_extension: "".into(),
                                   rating: None, rating_5based: None, stream_type: None, trailer: None, tmdb: None, is_adult: 0, details: None
                               };
-                            // Try metadata fallback for bare items
-                            if let Some(meta) =
-                                meta_resolver.resolve_from_title(&props.name, true).await
-                            {
-                                props.tmdb = meta.tmdb_id();
+                            // Try metadata fallback for bare items if not already done
+                            if resolve_tmdb_missing {
+                                if let Some(meta) = meta_resolver.resolve_from_title(&props.name, true).await
+                                {
+                                    props.tmdb = meta.tmdb_id();
+                                }
                             }
                             pli.header.additional_properties =
                                 Some(StreamProperties::Video(Box::new(props)));
@@ -251,66 +279,19 @@ pub async fn playlist_resolve_vod(
                             pli.header.additional_properties.as_mut()
                         {
                             if props.details.is_none() {
-                                props.details = Some(VideoStreamDetailProperties {
-                                     kinopoisk_url: None, o_name: None, cover_big: None, movie_image: None,
-                                     release_date: None, episode_run_time: None, youtube_trailer: None, director: None,
-                                     actors: None, cast: None, description: None, plot: None, age: None, mpaa_rating: None,
-                                     rating_count_kinopoisk: 0, country: None, genre: None, backdrop_path: None, duration_secs: None,
-                                     duration: None, video: None, audio: None, bitrate: 0, runtime: None, status: None
-                                 });
+                                // Default implementation required for VideoStreamDetailProperties
+                                // Assuming we fill minimal defaults
+                                props.details = Some(VideoStreamDetailProperties::default());
                             }
 
                             if let Some(details) = props.details.as_mut() {
-                                // Store technical details in the expected JSON format for StreamProperties
-                                let video_json = serde_json::json!({
-                                     "width": match quality.resolution {
-                                         crate::model::VideoResolution::P4320 => 4320,
-                                         crate::model::VideoResolution::P2160 => 2160,
-                                         crate::model::VideoResolution::P1440 => 1440,
-                                         crate::model::VideoResolution::P1080 => 1080,
-                                         crate::model::VideoResolution::P720 => 720,
-                                         crate::model::VideoResolution::SD => 480,
-                                         _ => 0
-                                     },
-                                     "codec_name": match quality.video_codec {
-                                         crate::model::VideoCodec::H264 => "h264",
-                                         crate::model::VideoCodec::H265 => "hevc",
-                                         crate::model::VideoCodec::MPEG4 => "mpeg4",
-                                         crate::model::VideoCodec::VC1 => "vc1",
-                                         crate::model::VideoCodec::AV1 => "av1",
-                                         _ => "unknown"
-                                     },
-                                     "pix_fmt": if quality.bit_depth == crate::model::VideoBitDepth::Ten { "yuv420p10le" } else { "yuv420p" },
-                                     "color_transfer": match quality.dynamic_range {
-                                         crate::model::VideoDynamicRange::HDR | crate::model::VideoDynamicRange::HDR10 => "smpte2084",
-                                         crate::model::VideoDynamicRange::HLG => "arib-std-b67",
-                                         crate::model::VideoDynamicRange::DV => "dovi",
-                                         _ => "bt709"
-                                     },
-                                     "codec_tag_string": if quality.dynamic_range == crate::model::VideoDynamicRange::DV { "dovi" } else { "" }
-                                 }).to_string();
-
-                                let audio_json = serde_json::json!({
-                                     "codec_name": match quality.audio_codec {
-                                         crate::model::AudioCodec::AAC => "aac",
-                                         crate::model::AudioCodec::AC3 => "ac3",
-                                         crate::model::AudioCodec::EAC3 => "eac3",
-                                         crate::model::AudioCodec::DTS => "dts",
-                                         crate::model::AudioCodec::TrueHD => "truehd",
-                                         crate::model::AudioCodec::FLAC => "flac",
-                                         _ => "unknown"
-                                     },
-                                     "channels": match quality.audio_channels {
-                                         crate::model::AudioChannels::Surround71 => 8,
-                                         crate::model::AudioChannels::Surround51 => 6,
-                                         crate::model::AudioChannels::Stereo => 2,
-                                         crate::model::AudioChannels::Mono => 1,
-                                         _ => 0
-                                     }
-                                 }).to_string();
-
-                                details.video = Some(video_json.into());
-                                details.audio = Some(audio_json.into());
+                                // OVERWRITE existing fields with FFprobe data
+                                if let Some(v) = raw_video {
+                                    details.video = Some(v.to_string().into());
+                                }
+                                if let Some(a) = raw_audio {
+                                    details.audio = Some(a.to_string().into());
+                                }
                                 properties_updated = true;
                             }
                         }
@@ -328,6 +309,8 @@ pub async fn playlist_resolve_vod(
 
         // Add to batch for persistence ONLY if we have properties and didn't abort
         if properties_updated {
+            processed_vod_info_count += 1;
+            
             if let Some(StreamProperties::Video(props)) = pli.header.additional_properties.as_ref() {
                 batch.push((provider_id, *props.clone()));
                 if batch.len() >= BATCH_SIZE {

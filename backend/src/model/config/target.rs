@@ -120,8 +120,6 @@ pub struct StrmTargetOutput {
     pub strm_props: Option<Vec<String>>,
     pub filter: Option<Filter>,
     pub add_quality_to_filename: bool,
-    pub resolve_tmdb_missing: bool,
-    pub probe_missing_quality: bool,
     pub probe_probe_size_bytes: Option<u64>,
     pub probe_analyze_duration: Option<u64>,
 }
@@ -139,8 +137,6 @@ impl From<&StrmTargetOutputDto> for StrmTargetOutput {
             strm_props: dto.strm_props.clone(),
             filter: dto.t_filter.clone(),
             add_quality_to_filename: dto.add_quality_to_filename,
-            resolve_tmdb_missing: dto.resolve_tmdb_missing,
-            probe_missing_quality: dto.probe_missing_quality,
             probe_probe_size_bytes: dto.probe_probe_size_bytes,
             probe_analyze_duration: dto.probe_analyze_duration,
         }
@@ -159,8 +155,6 @@ impl From<&StrmTargetOutput> for StrmTargetOutputDto {
             filter: instance.filter.as_ref().map(ToString::to_string),
             t_filter: instance.filter.clone(),
             add_quality_to_filename: instance.add_quality_to_filename,
-            resolve_tmdb_missing: instance.resolve_tmdb_missing,
-            probe_missing_quality: instance.probe_missing_quality,
             probe_probe_size_bytes: instance.probe_probe_size_bytes,
             probe_analyze_duration: instance.probe_analyze_duration,
         }

@@ -136,7 +136,7 @@ async fn main() {
     // Handle Library scan before starting main application
     if args.scan_library || args.force_library_rescan {
         info!("Library scan mode requested");
-        let app_config = utils::read_initial_app_config(&mut config_paths, true, true, false).await.unwrap_or_else(|err| exit!("{}", err));
+        let app_config = Arc::new(utils::read_initial_app_config(&mut config_paths, true, true, false).await.unwrap_or_else(|err| exit!("{}", err)));
         scan_library_cli(&app_config, args.force_library_rescan).await;
         return;
     }
@@ -230,7 +230,7 @@ async fn start_in_server_mode(cfg: Arc<AppConfig>, targets: Arc<ProcessTargets>)
     }
 }
 
-async fn scan_library_cli(app_config: &AppConfig, force_rescan: bool) {
+async fn scan_library_cli(app_config: &Arc<AppConfig>, force_rescan: bool) {
     info!("Starting Library scan from CLI (force_rescan: {force_rescan})");
 
     let Some(processor) = LibraryProcessor::from_app_config(app_config) else {
