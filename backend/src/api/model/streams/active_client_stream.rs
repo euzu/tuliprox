@@ -426,6 +426,8 @@ fn stream_grace_period(
                             CustomVideoStreamType::UserConnectionsExhausted,
                         )
                         .await;
+                    // Release the shared stream subscription to stop the subscriber loop
+                    connection_manager.shared_stream_manager.release_connection(&fingerprint.addr, true).await;
                     info!("User connections exhausted for active clients: {username}");
                     updated = true;
                 }
@@ -468,6 +470,8 @@ fn stream_grace_period(
                                     CustomVideoStreamType::ProviderConnectionsExhausted,
                                 )
                                 .await;
+                            // Release the shared stream subscription to stop the subscriber loop
+                            connection_manager.shared_stream_manager.release_connection(&fingerprint.addr, true).await;
                             info!("Provider connections exhausted for active clients: {provider_name}");
                         }
                         updated = true;
