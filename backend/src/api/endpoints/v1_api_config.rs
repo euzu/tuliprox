@@ -1,16 +1,16 @@
+use crate::api::api_utils::{internal_server_error, try_unwrap_body};
 use crate::api::model::AppState;
 use crate::model::{ApiProxyConfig, InputSource};
+use crate::utils::request::{download_text_content};
+use crate::utils::{persist_messaging_templates, prepare_sources_batch, prepare_users};
+use crate::utils;
 use axum::response::IntoResponse;
 use axum::Router;
+use log::error;
 use serde_json::json;
+use shared::error::{TuliproxError};
 use shared::model::{ApiProxyConfigDto, ApiProxyServerInfoDto, ConfigDto, SourcesConfigDto};
 use std::sync::Arc;
-use log::{error};
-use shared::error::TuliproxError;
-use crate::api::api_utils::{try_unwrap_body, internal_server_error};
-use crate::{utils};
-use crate::utils::{prepare_sources_batch, prepare_users};
-use crate::utils::request::download_text_content;
 
 pub(in crate::api::endpoints) async fn intern_save_config_api_proxy(backup_dir: &str, api_proxy: &ApiProxyConfigDto, file_path: &str) -> Option<TuliproxError> {
     match utils::save_api_proxy(file_path, backup_dir, api_proxy).await {
@@ -36,9 +36,14 @@ async fn intern_save_config_main(file_path: &str, backup_dir: &str, cfg: &Config
 
 async fn save_config_main(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
-    axum::extract::Json(cfg): axum::extract::Json<ConfigDto>,
+    axum::extract::Json(mut cfg): axum::extract::Json<ConfigDto>,
 ) -> impl axum::response::IntoResponse + Send {
     if cfg.is_valid() {
+        if let Err(err) = persist_messaging_templates(&app_state, &mut cfg).await {
+            error!("Failed to persist messaging templates: {err}");
+            return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({"error": err.to_string()}))).into_response();
+        }
+
         let paths = app_state.app_config.paths.load();
         let file_path = paths.config_file_path.as_str();
         let config = app_state.app_config.config.load();

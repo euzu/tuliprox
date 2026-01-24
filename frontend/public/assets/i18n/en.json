@@ -406,7 +406,12 @@
     "API_USER_AGENT": "User Agent",
     "ADVANCED": "Advanced",
     "TRAKT": "Trakt",
-    "SEASON": "Season"
+    "SEASON": "Season",
+    "SPECIFIC_TEMPLATES": "Specific Templates",
+    "MSG_KIND_INFO": "Info",
+    "MSG_KIND_STATS": "Stats",
+    "MSG_KIND_ERROR": "Error",
+    "MSG_KIND_WATCH": "Watch"
   },
   "TITLE": {
     "USER_BOUQUET_EDITOR": "Playlist Category Selection"

@@ -1,5 +1,6 @@
 # Changelog
 
+
 ## 3.3.0 (2026-01-03)
 
 ## ⚠️ Breaking Changes
@@ -100,6 +101,16 @@
 - **Fix**: Re-instated EPG Title Synchronization after playlist updates.
 - **Optimization**: Significant EPG memory reduction.
 - **Optimization**: Improved EPG parsing performance.
+
+## ⚙️ Messaging Refactoring
+- **Structured Messaging**: Transitioned from JSON-string-based notifications to a strictly typed messaging pipeline.
+- **Backend Model Migration**: Moved complex messaging models (`WatchChanges`, `ProcessingStats`) from the shared crate to the backend to reduce shared-library overhead.
+- **Unified API**: Consolidated all notification types into a single, type-safe `send_message` function.
+- **Template Improvements**:
+  - Renamed template context fields for better clarity (e.g., `event` → `processing`).
+  - Improved data accessibility in Handlebars templates with optimized context mapping (e.g., `{{processing.stats}}` or shorthand `{{stats}}`).
+- **Developer Ergonomics**: Added static constructor helpers for common notification scenarios.
+
 
 # 3.2.0 (2025-11-14)
 - Added `name` attribute to Staged Input.

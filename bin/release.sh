@@ -86,6 +86,7 @@ for PLATFORM in "${!ARCHITECTURES[@]}"; do
     mkdir -p "$DIR"
     cp "$BIN" "$DIR"
     cp ../config/*.yml "$DIR"
+    cp ../config/messaging_templates/*.templ "$DIR"/messaging_templates
     cp -rf "${FRONTEND_BUILD_DIR}" "$DIR"/web
     cp -rf "${RESOURCES_DIR}"/*.ts "$DIR"
 

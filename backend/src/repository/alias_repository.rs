@@ -1,5 +1,5 @@
 use crate::model::is_input_expired;
-use crate::utils::request::get_local_csv_file_content;
+use crate::utils::request::get_local_file_content;
 use crate::utils::EnvResolvingReader;
 use crate::utils::{file_reader, resolve_relative_path};
 use futures::TryFutureExt;
@@ -221,7 +221,7 @@ async fn csv_read_inputs_from_path(
     input_type: InputType,
     file_path: &Path,
 ) -> Result<(PathBuf, Vec<ConfigInputAliasDto>), Error> {
-    match get_local_csv_file_content(file_path).await {
+    match get_local_file_content(file_path).await {
         Ok(content) => Ok((
             file_path.to_path_buf(),
             csv_read_inputs_from_reader(

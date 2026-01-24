@@ -4,3 +4,25 @@
   gap: var(--gap-default);
   box-sizing: border-box;
 }
+
+.tp__messaging-config__templates {
+  margin-top: var(--gap-default);
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-small);
+
+  h3 {
+    margin: var(--gap-small) 0;
+    font-size: 1rem;
+    color: var(--text-color-secondary);
+  }
+}
+
+.tp__messaging-config__templates-view {
+  margin-top: var(--gap-small);
+  h3 {
+    margin: var(--gap-small) 0;
+    font-size: 0.9rem;
+    color: var(--text-color-secondary);
+  }
+}

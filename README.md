@@ -146,15 +146,19 @@ messaging:
     chat_ids:
       - '<telegram chat id>'
       - '<telegram chat id>:<message thread id>'
+    templates: # templates per message kind
+      stats: 'file:///path/to/stats_telegram.templ'
   discord:
     url: '<discord webhook url>'
-    template: '{"content": "{{message}}"}' # optional handlebars template
+    templates:
+      info: '{"content": "{{message}}"}'
   rest:
     url: '<api url>'
     method: 'POST' # optional, default POST
     headers:
       - 'Content-Type: application/json'
-    template: '{"text": "{{message}}"}' # optional handlebars template
+    templates:
+      error: '{"text": "Error: {{message}}"}'
 
   pushover:
     token: <api_token>
@@ -163,20 +167,36 @@ messaging:
 ```
 
 ### 1.4.1 Messaging Templating
-For `discord` and `rest` messaging, you can use [Handlebars](https://handlebarsjs.com/) templates to format the message body.
+For `discord`, `telegram` and `rest` messaging, you can use [Handlebars](https://handlebarsjs.com/) templates to format the message body.
 
-**Context Variables**:
-- `message`: The raw message content or event summary.
+**Loading Templates:**
+Templates can be provided in two ways:
+1.  **Raw String**: The template content is written directly in the configuration.
+2.  **URI**: A link to a file (`file://...`) or an external resource (`http(s)://...`).
+> **Note**: When saving through the Web UI, raw template strings are automatically moved to individual files in `/config/templates/` and referenced via `file://` to keep the configuration file clean.
+
+**Context Variables:**
+- `message`: The text content for `info` and `error` notifications.
 - `kind`: The type of notification (`info`, `stats`, `error`, `watch`).
 - `timestamp`: Current UTC timestamp in RFC3339 format.
-- `event`: If the message is a JSON string (like `watch` events), it is parsed and available as an object.
+- `stats`: A list of processed source statistics (available for `stats` kind).
+  - Each item contains `inputs` (list of `InputStats`) and `targets` (list of `TargetStats`).
+- `watch`: Change details for groups (available for `watch` kind).
+- `processing`: Detailed internal processing state.
+  - `errors`: Combined error messages from a processing run.
 
-**Example REST Template (JSON)**:
+**Example Multi-Source Telegram Template**:
 ```handlebars
-{
-  "summary": "Tuliprox {{kind}}: {{message}}",
-  "occurred_at": "{{timestamp}}"
-}
+*🔄 Playlist Update Report*
+
+{{#each stats}}
+*📥 Source Stats*
+{{#each inputs}}
+• *{{name}}* (`{{type}}`)
+  ⏱️ Took: `{{took}}` | ❌ Errors: `{{errors}}`
+  📊 `{{raw.groups}}`/`{{raw.channels}}` ➔ *`{{processed.groups}}`*/*`{{processed.channels}}`*
+{{/each}}
+{{/each}}
 ```
 
 **Example Discord Template (Complex Embed)**:
@@ -187,6 +207,11 @@ For `discord` and `rest` messaging, you can use [Handlebars](https://handlebarsj
     "title": "Event: {{kind}}",
     "description": "{{message}}",
     "color": 3447003,
+    "fields": [
+      {{#each stats}}
+      { "name": "Source {{@index}}", "value": "Processed {{#each inputs}}{{name}} {{/each}}", "inline": false }
+      {{/each}}
+    ],
     "footer": { "text": "Reported at {{timestamp}}" }
   }]
 }

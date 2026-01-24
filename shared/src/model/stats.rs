@@ -1,6 +1,6 @@
-use std::fmt::{Display};
-use serde::{Serialize, Serializer};
-use shared::model::InputType;
+use std::fmt::Display;
+use serde::{Deserialize, Serialize, Serializer, Deserializer};
+use crate::model::InputType;
 
 pub fn format_elapsed_time(seconds: u64) -> String {
     if seconds < 60 {
@@ -12,7 +12,6 @@ pub fn format_elapsed_time(seconds: u64) -> String {
     }
 }
 
-#[allow(clippy::trivially_copy_pass_by_ref)]
 fn serialize_elapsed_time<S>(secs: &u64, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
@@ -21,7 +20,29 @@ where
     serializer.serialize_str(&formatted)
 }
 
-#[derive(Debug, Clone, Serialize)]
+fn deserialize_elapsed_time<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    if s.ends_with(" secs") {
+        s.trim_end_matches(" secs").parse::<u64>().map_err(serde::de::Error::custom)
+    } else if s.ends_with(" mins") {
+        let parts: Vec<&str> = s.trim_end_matches(" mins").split(':').collect();
+        if parts.len() == 2 {
+            let mins = parts[0].parse::<u64>().map_err(serde::de::Error::custom)?;
+            let secs = parts[1].parse::<u64>().map_err(serde::de::Error::custom)?;
+            Ok(mins * 60 + secs)
+        } else {
+             // Fallback if no colon (e.g. just "5 mins")
+             parts[0].parse::<u64>().map(|m| m * 60).map_err(serde::de::Error::custom)
+        }
+    } else {
+        s.parse::<u64>().map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlaylistStats {
     #[serde(rename = "groups")]
     pub group_count: usize,
@@ -29,7 +50,7 @@ pub struct PlaylistStats {
     pub channel_count: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InputStats {
     pub name: String,
     #[serde(rename = "type")]
@@ -40,7 +61,7 @@ pub struct InputStats {
     pub raw_stats: PlaylistStats,
     #[serde(rename = "processed")]
     pub processed_stats: PlaylistStats,
-    #[serde(rename = "took", serialize_with = "serialize_elapsed_time")]
+    #[serde(rename = "took", serialize_with = "serialize_elapsed_time", deserialize_with = "deserialize_elapsed_time")]
     pub secs_took: u64,
 }
 
@@ -51,7 +72,7 @@ impl Display for InputStats {
 }
 
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TargetStats {
     #[serde(rename = "target")]
     pub name: String,
@@ -73,7 +94,7 @@ impl Display for TargetStats {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceStats {
     #[serde(rename = "inputs")]
     pub inputs: Vec<InputStats>,

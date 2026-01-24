@@ -1,4 +1,4 @@
-use crate::model::{AppConfig, Config, ConfigFavourites, ConfigInput, ConfigRename, ReverseProxyDisabledHeaderConfig, TVGuide};
+use crate::model::{AppConfig, ConfigFavourites, ConfigInput, ConfigRename, ReverseProxyDisabledHeaderConfig, TVGuide};
 use crate::utils::m3u;
 use crate::utils::xtream;
 use crate::utils::{epg, StepMeasureCallback};
@@ -9,7 +9,8 @@ use tokio::sync::{Mutex, OwnedRwLockWriteGuard, RwLock};
 use tokio::task::JoinSet;
 
 use crate::api::model::{EventManager, EventMessage, PlaylistStorageState, UpdateGuard};
-use crate::messaging::send_message_json;
+use crate::messaging::{send_message};
+use crate::model::messaging::{MessageContent};
 use crate::model::Epg;
 
 
@@ -37,7 +38,7 @@ use log::{debug, error, info, log_enabled, warn, Level};
 use shared::error::{get_errors_notify_message, notify_err, TuliproxError};
 use shared::foundation::filter::{get_field_value, set_field_value, Filter, ValueAccessor, ValueProvider};
 use shared::model::xtream_const::XTREAM_CLUSTER;
-use shared::model::{CounterModifier, FieldGetAccessor, FieldSetAccessor, InputType, ItemField, MsgKind,
+use shared::model::{CounterModifier, FieldGetAccessor, FieldSetAccessor, InputType, ItemField,
                     PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistUpdateState,
                     ProcessingOrder, XtreamCluster};
 use shared::utils::{create_alias_uuid, default_as_default, interner_gc, Internable};
@@ -762,8 +763,7 @@ async fn process_playlist_for_target(ctx: &PlaylistProcessingContext,
         map_playlist_counter(target, &mut flat_new_playlist);
         step.tick("assigning channel counter");
 
-        let config = ctx.config.config.load();
-        if process_watch(&config, &ctx.client, target, &flat_new_playlist).await {
+        if process_watch(&ctx.config, &ctx.client, target, &flat_new_playlist).await {
             step.tick("group watches");
         }
         let result = persist_playlist(&ctx.config, &mut flat_new_playlist, flatten_tvguide(&new_epg).as_ref(), target, ctx.playlist_state.as_ref()).await;
@@ -842,7 +842,7 @@ async fn process_epg(processed_fetched_playlists: &mut Vec<FetchedPlaylist<'_>>)
     (new_epg, new_playlist)
 }
 
-async fn process_watch(cfg: &Config, client: &reqwest::Client, target: &ConfigTarget, new_playlist: &[PlaylistGroup]) -> bool {
+async fn process_watch(app_config: &Arc<AppConfig>, client: &reqwest::Client, target: &ConfigTarget, new_playlist: &[PlaylistGroup]) -> bool {
     if let Some(watches) = &target.watch {
         if default_as_default().eq_ignore_ascii_case(&target.name) {
             error!("can't watch a target with no unique name");
@@ -853,7 +853,7 @@ async fn process_watch(cfg: &Config, client: &reqwest::Client, target: &ConfigTa
             new_playlist
                 .iter()
                 .filter(|pl| watches.iter().any(|r| r.is_match(&pl.title)))
-                .map(|pl| process_group_watch(client, cfg, &target.name, pl))
+                .map(|pl| process_group_watch(app_config, client, &target.name, pl))
         ).for_each_concurrent(16, |f| f).await;
 
         true
@@ -898,25 +898,14 @@ pub async fn exec_processing(client: &reqwest::Client, app_config: Arc<AppConfig
     for err in &errors {
         error!("{}", err.message);
     }
-    let config = app_config.config.load();
-    let messaging = config.messaging.as_ref();
 
     if !stats.is_empty() {
-        match serde_json::to_value(&stats) {
-            Ok(val) => {
-                match serde_json::to_string(&serde_json::Value::Object(
-                    serde_json::map::Map::from_iter([("stats".to_string(), val)]))) {
-                    Ok(stats_msg) => {
-                        // print stats
-                        info!("{stats_msg}");
-                        // send stats
-                        send_message_json(client, MsgKind::Stats, messaging, stats_msg.as_str()).await;
-                    }
-                    Err(err) => error!("Failed to serialize playlist stats {err}"),
-                }
-            }
-            Err(err) => error!("Failed to serialize playlist stats {err}")
+        // print stats
+        if let Ok(stats_msg) = serde_json::to_string(&stats) {
+            info!("stats: {stats_msg}");
         }
+        // send stats
+        send_message(&app_config, client, MessageContent::event_stats(stats)).await;
     }
 
     // send errors
@@ -924,9 +913,7 @@ pub async fn exec_processing(client: &reqwest::Client, app_config: Arc<AppConfig
         if let Some(events) = &event_manager {
             events.send_event(EventMessage::PlaylistUpdate(PlaylistUpdateState::Failure));
         }
-        if let Ok(error_msg) = serde_json::to_string(&serde_json::Value::Object(serde_json::map::Map::from_iter([("errors".to_string(), serde_json::Value::String(message))]))) {
-            send_message_json(client, MsgKind::Error, messaging, error_msg.as_str()).await;
-        }
+        send_message(&app_config, client, MessageContent::event_error(message)).await;
     } else if let Some(events) = &event_manager {
         events.send_event(EventMessage::PlaylistUpdate(PlaylistUpdateState::Success));
     }

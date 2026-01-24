@@ -169,6 +169,29 @@ macro_rules! edit_field_text_option {
 }
 
 #[macro_export]
+macro_rules! edit_field_textarea_option {
+    ($instance:expr, $label:expr, $field:ident, $action:path) => {{
+        let instance = $instance.clone();
+        html! {
+            <div class="tp__form-field tp__form-field__textarea">
+                <$crate::app::components::TextArea
+                    label={$label}
+                    name={stringify!($field)}
+                    value={instance.form.$field.as_ref().map_or_else(String::new, |v|v.to_string())}
+                    on_change={Callback::from(move |value: String| {
+                        instance.dispatch($action(if value.is_empty() {
+                            None
+                        } else {
+                            Some(value)
+                        }));
+                    })}
+                />
+            </div>
+        }
+    }};
+}
+
+#[macro_export]
 macro_rules! edit_field_text {
     ($instance:expr, $label:expr, $field:ident, $action:path) => {
         $crate::edit_field_text!(@inner $instance, $label, $field, $action, false)

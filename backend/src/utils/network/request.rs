@@ -287,7 +287,7 @@ pub async fn get_input_text_content(
                         }
                     }
 
-                    match get_local_csv_file_content(&filepath).await {
+                    match get_local_file_content(&filepath).await {
                         Ok(content) => Some(content),
                         Err(err) => {
                             return notify_err_res!("Failed : {}", err);
@@ -504,8 +504,10 @@ pub fn get_request_headers<S: ::std::hash::BuildHasher + Default>(
     headers
 }
 
-pub async fn get_local_csv_file_content(file_path: &Path) -> Result<String, std::io::Error> {
-    // Datei öffnen
+// read local file content and return it as a string.
+// Gzipped file content is supported.
+pub async fn get_local_file_content(file_path: &Path) -> Result<String, std::io::Error> {
+    // open file
     let file = File::open(file_path).await.map_err(|err| {
         std::io::Error::new(
             ErrorKind::NotFound,
@@ -515,21 +517,21 @@ pub async fn get_local_csv_file_content(file_path: &Path) -> Result<String, std:
 
     let mut buf_reader = async_file_reader(file);
 
-    // Peek die ersten 2 Bytes, um gzip zu erkennen
+    // Peek first 2 bytes to detect gzip encoding
     let buffer = buf_reader.fill_buf().await?;
     let is_gzipped = buffer.len() >= 2 && is_gzip(&buffer[0..2]);
 
     let mut decoded = String::new();
 
     if is_gzipped {
-        // Async Gzip Decoder verwenden
+        // Use async gzip decoder
         let mut gzip_decoder = async_compression::tokio::bufread::GzipDecoder::new(buf_reader);
         gzip_decoder
             .read_to_string(&mut decoded)
             .await
             .map_err(|e| std::io::Error::other(format!("Failed to decode gzip content: {e}")))?;
     } else {
-        // Plaintext lesen
+        // read plaintext
         buf_reader
             .read_to_string(&mut decoded)
             .await
@@ -806,7 +808,7 @@ pub async fn download_text_content(
     let result = if let Ok(url) = input.url.parse::<url::Url>() {
         let result = if url.scheme() == "file" {
             match url.to_file_path() {
-                Ok(file_path) => get_local_csv_file_content(&file_path)
+                Ok(file_path) => get_local_file_content(&file_path)
                     .await
                     .map(|c| (c, url.to_string())),
                 Err(()) => Err(string_to_io_error(format!(
@@ -1094,6 +1096,12 @@ pub fn parse_range(range: &str) -> Option<(u64, Option<u64>)> {
 pub fn is_file_url(url: &str) -> bool {
     Url::parse(url)
         .map(|u| u.scheme().eq_ignore_ascii_case("file"))
+        .unwrap_or(false)
+}
+
+pub fn is_uri(url: &str) -> bool {
+    Url::parse(url)
+        .map(|u| u.scheme().eq_ignore_ascii_case("file") || u.scheme().eq_ignore_ascii_case("http") || u.scheme().eq_ignore_ascii_case("https"))
         .unwrap_or(false)
 }
 
