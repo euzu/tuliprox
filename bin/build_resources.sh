@@ -32,7 +32,7 @@ for resource in "${resources[@]}"; do
   fi
 
   if which ffmpeg > /dev/null 2>&1; then
-    ffmpeg -loop 1 -i "./resources/${resource}.jpg" -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=44100 \
+    ffmpeg -y -nostdin -loop 1 -i "./resources/${resource}.jpg" -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=44100 \
        -c:v libx264 -r 30 -g 30 -keyint_min 30 -sc_threshold 0 -pix_fmt yuv420p -preset veryfast -crf 23 \
        -c:a aac -b:a 128k -ac 2 \
        -t 10 -muxrate 2000k \
