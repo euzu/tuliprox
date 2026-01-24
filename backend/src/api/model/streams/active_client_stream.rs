@@ -59,11 +59,12 @@ impl ActiveClientStreamState {
 
             if unavailable {
                 if let Some(flag) = &self.send_custom_stream_flag {
-                    // Only set CHANNEL_UNAVAILABLE if no custom stream flag is already set
-                    let current = flag.load(Ordering::Acquire);
-                    if current == INNER_STREAM {
-                        flag.store(CHANNEL_UNAVAILABLE_STREAM, Ordering::Release);
-                    }
+                    let _ = flag.compare_exchange(
+                        INNER_STREAM,
+                        CHANNEL_UNAVAILABLE_STREAM,
+                        Ordering::AcqRel,
+                        Ordering::Relaxed,
+                    );
                 }
             }
 
@@ -129,30 +130,39 @@ impl Stream for ActiveClientStream {
     type Item = Result<Bytes, StreamError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let res = self.state.poll_next_base(cx);
+        if !matches!(res, Poll::Ready(None)) {
+            return res;
+        }
+
         let flag = match &self.state.send_custom_stream_flag {
             Some(flag) => flag.load(Ordering::Acquire),
             None => INNER_STREAM,
         };
 
-        let res = self.state.poll_next_base(cx);
-        if !matches!(res, Poll::Ready(None)) || flag == INNER_STREAM {
-            return res;
+        if flag == INNER_STREAM {
+            return Poll::Ready(None);
         }
 
         let buffer_opt = match flag {
             USER_EXHAUSTED_STREAM => self.state.custom_video.0.as_mut(),
             PROVIDER_EXHAUSTED_STREAM => self.state.custom_video.1.as_mut(),
             CHANNEL_UNAVAILABLE_STREAM => self.state.custom_video.2.as_mut(),
+            PROVISIONING_STREAM => self.state.custom_video.3.as_mut(),
             _ => None,
         };
 
         if let Some(buffer) = buffer_opt {
             buffer.register_waker(cx.waker());
-            match buffer.next_chunk() {
-                Some(chunk) => Poll::Ready(Some(Ok(chunk))),
-                None => Poll::Pending,
+            if let Some(chunk) = buffer.next_chunk() {
+                Poll::Ready(Some(Ok(chunk)))
+            } else {
+                // log::warn!("Custom video buffer empty/finished for {} (flag: {})", self.state.fingerprint.addr, flag);
+                Poll::Ready(None)
             }
         } else {
+            // log::warn!("No custom video buffer configured for flag {} for {}", flag, self.state.fingerprint.addr);
+            // Poll inner again (will return None)
             Pin::new(&mut self.state.inner).poll_next(cx)
         }
     }

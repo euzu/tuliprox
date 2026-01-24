@@ -902,9 +902,7 @@ async fn xtream_get_short_epg(
                         if limit > 0 {
                             info_url = format!("{info_url}&limit={limit}");
                         }
-                        if user.proxy.is_redirect(pli.item_type)
-                            || target.is_force_redirect(pli.item_type)
-                        {
+                        if user.proxy.is_redirect(pli.item_type) || target.is_force_redirect(pli.item_type) {
                             return redirect(&info_url).into_response();
                         }
 
@@ -929,10 +927,7 @@ async fn xtream_get_short_epg(
                             )
                                 .into_response(),
                             Err(err) => {
-                                error!(
-                                    "Failed to download epg {}",
-                                    sanitize_sensitive_info(err.to_string().as_str())
-                                );
+                                error!("Failed to download epg {}", sanitize_sensitive_info(err.to_string().as_str()));
                                 empty_json_list_response()
                             }
                         };

@@ -52,6 +52,7 @@ $series-backdrop-height: 300px;
   &__header {
     display: flex;
     flex-flow: column;
+    width: 100%;
 
     &-toolbar {
       display: flex;
@@ -222,6 +223,12 @@ $series-backdrop-height: 300px;
     overflow: hidden;
     align-items: center;
 
+    &__header {
+      display: flex;
+      flex-flow: row;
+      width: 100%;
+    }
+
     &__rating {
       color: var(--playlist-rating-color) !important;
       background-color: var(--playlist-rating-background-color) !important;
@@ -233,6 +240,7 @@ $series-backdrop-height: 300px;
     }
 
     &__body {
+      position: relative;
       display: flex;
       flex-flow: column;
       flex: 1 1 auto;
@@ -246,16 +254,27 @@ $series-backdrop-height: 300px;
       }
 
       &-top {
+        position: relative;
         display: flex;
         flex-flow: column;
         gap: var(--gap-default);
         min-height: $series-backdrop-height;
         background-repeat: no-repeat;
-        background-size: 100%;
-        //background-position: right top;
+        background-size: 70%;
+        background-position: right top;
         border-radius: var(--border-radius);
         font-size: 1.2rem;
         box-sizing: border-box;
+        width: 100%;
+
+        &-backdrop {
+          position: absolute;
+          width: 100%;
+          height: 100%;
+          overflow: hidden;
+          pointer-events: none;
+          background-image: linear-gradient(to right, rgba(0, 0, 0, 1.0) 30%, rgba(0, 0, 0, 0.85) 50%, rgba(0, 0, 0, 0.75) 60%, rgba(0, 0, 0, 0.35) 70%, rgba(0, 0, 0, 0.0) 85%);
+        }
 
         &-content {
           display: flex;
@@ -266,8 +285,11 @@ $series-backdrop-height: 300px;
           background-size: cover;
           background-position: center;
           font-size: 1.2rem;
+          color: var(--text-color);
+          z-index: 1;
         }
       }
+
     }
 
     &__title {
