@@ -1,6 +1,6 @@
 [package]
 name = "shared"
-version = "3.2.50"
+version = "3.2.51"
 edition = "2021"
 rust-version = "1.89.0"
 
