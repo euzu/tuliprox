@@ -1,7 +1,7 @@
 use crate::model::{AppConfig, InputSource, MessagingConfig, MessageContent, TemplateContext};
 use crate::utils::{telegram_create_instance, telegram_send_message, SendMessageOption, SendMessageParseMode};
 use chrono::Utc;
-use handlebars::Handlebars;
+use handlebars::{Context, Handlebars, Helper, HelperResult, Output, RenderContext};
 use log::{debug, error};
 use reqwest::{header, Method};
 use serde_json::json;
@@ -17,7 +17,18 @@ fn is_enabled(kind: MsgKind, cfg: &MessagingConfig) -> bool {
     cfg.notify_on.contains(&kind)
 }
 
-static HANDLEBARS: LazyLock<Handlebars> = LazyLock::new(Handlebars::new);
+static HANDLEBARS: LazyLock<Handlebars> = LazyLock::new(|| {
+    let mut h = Handlebars::new();
+    h.register_helper("json_escape", Box::new(|h: &Helper, _: &Handlebars, _: &Context, _: &mut RenderContext, out: &mut dyn Output| -> HelperResult {
+        let param = h.param(0).and_then(|v| v.value().as_str()).unwrap_or("");
+        let escaped = serde_json::to_string(param).unwrap_or_else(|_| "".to_string());
+        if escaped.len() >= 2 {
+            out.write(&escaped[1..escaped.len()-1])?;
+        }
+        Ok(())
+    }));
+    h
+});
 
 async fn render_template(app_config: &Arc<AppConfig>, http_client: &reqwest::Client, template: Option<&str>, content: &MessageContent) -> String {
     let timestamp = Utc::now().to_rfc3339();

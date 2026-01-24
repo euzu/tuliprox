@@ -296,7 +296,7 @@ async fn xtream_login(app_config: &Arc<AppConfig>, client: &reqwest::Client, inp
                     login_info.status = Some(cur_status);
                     if !matches!(cur_status, ProxyUserStatus::Active | ProxyUserStatus::Trial) {
                         warn!("User status for user {username} is {cur_status:?}");
-                    send_message(app_config, client, MessageContent::Info(format!("User status for user {username} is {cur_status:?}"))).await;
+                    send_message(app_config, client, MessageContent::Error(format!("User status for user {username} is {cur_status:?}"))).await;
                     }
                 }
             }
@@ -328,8 +328,7 @@ pub async fn notify_account_expire(exp_date: Option<i64>, app_config: &Arc<AppCo
                 if let Some(datetime) = DateTime::<Utc>::from_timestamp(expiration_timestamp, 0) {
                     let formatted = datetime.format("%Y-%m-%d %H:%M:%S").to_string();
                     warn!("User account for user {username} expires {formatted}");
-                    send_message(app_config, client, MessageContent::Info(
-                                 format!("User account for user {username} expires {formatted}"))).await;
+                    send_message(app_config, client, MessageContent::Info(format!("User account for user {username} expires {formatted}"))).await;
                 }
             }
         } else {

@@ -9,12 +9,12 @@
         {{#each stats}}
         {
           "name": "📥 Source Stats",
-          "value": "{{#each inputs}}**{{name}}** (`{{type}}`)\n⏱️ Took: `{{took}}` | ❌ Errors: `{{errors}}` \n📊 `{{raw.groups}}`/`{{raw.channels}}` ➔ **`{{processed.groups}}`**/**`{{processed.channels}}`**\n{{#unless @last}}\n{{/unless}}{{/each}}",
+          "value": "{{#each inputs}}**{{json_escape name}}** (`{{json_escape type}}`)\n⏱️ Took: `{{json_escape took}}` | ❌ Errors: `{{errors}}` \n📊 `{{raw.groups}}`/`{{raw.channels}}` ➔ **`{{processed.groups}}`**/**`{{processed.channels}}`**\n{{#unless @last}}\n{{/unless}}{{/each}}",
           "inline": false
         },
         {
           "name": "🚀 Targets",
-          "value": "{{#each targets}}✅ `{{target}}`{{#unless @last}}\n{{/unless}}{{/each}}",
+          "value": "{{#each targets}}✅ `{{json_escape target}}`{{#unless @last}}\n{{/unless}}{{/each}}",
           "inline": false
         }{{#unless @last}},{{/unless}}
         {{/each}}
@@ -22,7 +22,7 @@
         {{#if stats}},{{/if}}
         {
           "name": "❌ Processing Errors",
-          "value": "```{{processing.errors}}```",
+          "value": "```{{json_escape processing.errors}}```",
           "inline": false
         }
         {{/if}}

@@ -23,6 +23,7 @@ use std::sync::Arc;
 use tokio::fs;
 use shared::concat_string;
 use crate::utils::request::{is_uri};
+use url::Url;
 
 enum EitherReader<L, R> {
     Left(L),
@@ -623,6 +624,13 @@ async fn persist_single_template(prefix: &str, kind: Option<&MsgKind>, template:
         return Ok(template.to_string());
     }
 
+    // Treat existing file paths as file URLs
+    if tokio::fs::metadata(template).await.is_ok() {
+        return Url::from_file_path(template)
+            .map(|u| u.to_string())
+            .map_err(|_| info_err!("Failed to convert path to file URL: {}", template));
+    }
+
     // It's a raw string, persist it
     if !file_exists_async(templates_dir).await {
         tokio::fs::create_dir_all(templates_dir)
@@ -639,7 +647,9 @@ async fn persist_single_template(prefix: &str, kind: Option<&MsgKind>, template:
     let file_path = templates_dir.join(filename);
     fs::write(&file_path, template).await.map_err(|e| info_err!("Failed to write template file: {e}"))?;
 
-    Ok(concat_string!("file://", &file_path.to_string_lossy()))
+    Url::from_file_path(&file_path)
+        .map(|u| u.to_string())
+        .map_err(|_| info_err!("Failed to convert persisted path to file URL: {}", file_path.display()))
 }
 
 

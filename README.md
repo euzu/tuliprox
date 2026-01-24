@@ -68,6 +68,7 @@ Options:
   --force-library-rescan           Force full library rescan
   --dbx                            Database file type: xtream
   --dbm                            Database file type: m3u
+  --dbe                            Database file type: epg
 ```
 
 ## 1. `config.yml`
@@ -173,7 +174,7 @@ For `discord`, `telegram` and `rest` messaging, you can use [Handlebars](https:/
 Templates can be provided in two ways:
 1.  **Raw String**: The template content is written directly in the configuration.
 2.  **URI**: A link to a file (`file://...`) or an external resource (`http(s)://...`).
-> **Note**: When saving through the Web UI, raw template strings are automatically moved to individual files in `/config/templates/` and referenced via `file://` to keep the configuration file clean.
+> **Note**: When saving through the Web UI, raw template strings are automatically moved to individual files in `/config/messaging_templates/` and referenced via `file://` to keep the configuration file clean.
 
 **Context Variables:**
 - `message`: The text content for `info` and `error` notifications.
@@ -769,6 +770,7 @@ library:
 # Show db content
 ./tuliprox --dbx /opt/tuliprox/data/all_channels/xtream/video.db
 ./tuliprox --dbm /opt/tuliprox/data/all_channels/m3u.db
+./tuliprox --dbe /opt/tuliprox/data/all_channels/xtream/epg.db
 ```
 
 **API Endpoints**:
