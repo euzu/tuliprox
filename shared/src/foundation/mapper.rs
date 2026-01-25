@@ -1248,8 +1248,10 @@ impl Expression {
 
                             
                             if let (Some(text), Some(pat)) = (string, pattern) {
-                                let re = Regex::new(pat).unwrap();
-                                Named(re.split(text).enumerate().map(|(i, s)| (i.to_string(), s.trim().to_string())).collect())
+                                match Regex::new(pat) {
+                                    Ok(re) => Named(re.split(text).enumerate().map(|(i, s)| (i.to_string(), s.trim().to_string())).collect()),
+                                    Err(e) => Failure(format!("Invalid regex pattern '{}': {}", pat, e)),
+                                }
                             } else {
                                 Undefined
                             }
@@ -1267,8 +1269,6 @@ impl Expression {
                                 _ => evaluated_arg.clone()
                             }
                         }
-                        // RUST_LOG=trace cargo test test_mapper_split_loop -- --nocapture
-
                         BuiltInFunction::First => {
                             match evaluated_args.first() {
                                 Some(value) => {
@@ -1550,15 +1550,14 @@ impl Expression {
                         if !ctx.has_var(ident) {
                             return Failure(format!("For each expression invalid! Variable with name {ident} not found."));
                         }
-                        let v = ctx.get_var(ident);
                         match ctx.get_var(ident) {
                             AnyValue | Failure(_) |Named(_) => v.clone(),
                             Undefined => Undefined,
-                            _ => Failure(format!("Variable with name {ident} has must be a list of values.")),
+                            _ => Failure(format!("Variable with name {ident} must be a list of values.")),
                         }
                     }
                     ForEachKey::FieldAccess(field) => {
-                         Failure(format!("Variable with name {field} has must be a list of values."))
+                         Failure(format!("Field {field} must be a list of values."))
                     }
                     ForEachKey::VarAccess(name, _) => {
                         match ctx.variables.get(name) {
@@ -1566,7 +1565,7 @@ impl Expression {
                             Some(value) => match value {
                                 AnyValue | Failure(_) | Named(_) => value.clone(),
                                 Undefined => Undefined,
-                                _ => Failure(format!("Variable with name {name} has must be a list of values.")),
+                                _ => Failure(format!("Variable with name {name} must be a list of values.")),
                             },
                         }
                     }
@@ -1586,7 +1585,7 @@ impl Expression {
                     _ => Vec::new()
                 };
                 for (_, val) in values {
-                    if val.len() > 0 {
+                    if !val.is_empty() {
                         ctx.set_var(expr_key_name, EvalResult::Value(val));
                         expr.expression.eval(ctx, accessor);
                     }

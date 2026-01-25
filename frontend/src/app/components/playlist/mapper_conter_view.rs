@@ -179,38 +179,22 @@ fn render_map_block(map_key: &MapKey, cases: &[MapCase], script: &MapperScript, 
     }
 }
 
+fn render_for_each_expr_key(key: &ForEachExprKey) -> Html {
+    match key {
+        ForEachExprKey::Identifier(ident) => render_identifier(ident),
+        ForEachExprKey::VarAccess(name, field) => render_var_access(name, field),
+    }
+}
 fn render_for_each_expr(expr: &ForEachExpr, script: &MapperScript, format_params: &mut FormatParams) -> Html {
-    let keys_html = html! {
-        <>
-            {
-                for expr.keys.iter().enumerate().map(|(i, key)| {
-                    let item = match key {
-                        ForEachExprKey::Text(text) => render_literal(text),
-                        ForEachExprKey::RangeFrom(from) => html! { <span class="range">{format!("{from}..")}</span> },
-                        ForEachExprKey::RangeTo(to) => html! { <span class="range">{format!("..{to}")}</span> },
-                        ForEachExprKey::RangeFull(from, to) => html! { <span class="range">{format!("{from}..{to}")}</span> },
-                        ForEachExprKey::RangeEq(val) => html! { <span class="range">{val.to_string()}</span> },
-                        ForEachExprKey::AnyMatch => html! { <span class="any-match">{"_"}</span> },
-                    };
-
-                    if i < expr.keys.len() - 1 {
-                        html! { <> { item } { ", " } </> }
-                    } else {
-                        html! { { item } }
-                    }
-                })
-            }
-        </>
-    };
-    let has_bracket = expr.keys.len() > 1;
     html! {
         <>
-            {indent(format_params.level, true)}
-            {if has_bracket {"("} else {""}}
-            {keys_html}
-            {if has_bracket {")"} else {""}}
-            {" => "} {render_expression(&expr.expression, script, format_params)}{","}
+            {render_for_each_expr_key(&expr.key)}{" => "}
+            <span class="bracket">{" {"}</span>
             {newline(format_params)}
+            {render_expression(&expr.expression, script, format_params)}
+            {newline(format_params.dec_level(1))}
+            {indent(format_params.level, true)}
+            <span class="bracket">{"}"}</span>
         </>
     }
 }
@@ -227,7 +211,7 @@ fn render_for_each_block(for_each_key: &ForEachKey, expr: &ForEachExpr, script: 
     html! {
         <>
             {indent(format_params.level, true)}
-            <span class="reserved">{"map "}</span>
+            <span class="reserved">{"for_each "}</span>
             {render_for_each_key(for_each_key)}
             <span class="bracket">{" {"}</span>
             {newline(format_params)}

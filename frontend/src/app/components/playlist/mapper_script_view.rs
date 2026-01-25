@@ -211,8 +211,8 @@ fn render_for_each_block(for_each_key: &ForEachKey, expr: &ForEachExpr, script: 
     html! {
         <>
             {indent(format_params.level, true)}
-            {render_for_each_key(for_each_key)}
             <span class="reserved">{"for_each "}</span>
+            {render_for_each_key(for_each_key)}
             <span class="bracket">{" {"}</span>
             {newline(format_params)}
             {render_for_each_expr(expr, script, format_params.inc_level(1))}
