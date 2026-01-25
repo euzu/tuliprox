@@ -192,7 +192,7 @@ fn render_for_each_expr(expr: &ForEachExpr, script: &MapperScript, format_params
             <span class="bracket">{" {"}</span>
             {newline(format_params)}
             {render_expression(&expr.expression, script, format_params)}
-            {newline(format_params.dec_level(1))}
+            {newline(format_params)}
             {indent(format_params.level, true)}
             <span class="bracket">{"}"}</span>
         </>

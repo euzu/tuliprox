@@ -1550,7 +1550,8 @@ impl Expression {
                         if !ctx.has_var(ident) {
                             return Failure(format!("For each expression invalid! Variable with name {ident} not found."));
                         }
-                        match ctx.get_var(ident) {
+                        let v = ctx.get_var(ident);
+                        match v {
                             AnyValue | Failure(_) |Named(_) => v.clone(),
                             Undefined => Undefined,
                             _ => Failure(format!("Variable with name {ident} must be a list of values.")),

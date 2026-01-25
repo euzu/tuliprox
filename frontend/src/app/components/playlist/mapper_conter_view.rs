@@ -1,6 +1,6 @@
 use std::ops::Deref;
 use regex::Regex;
-use shared::foundation::mapper::{MapperScript, Statement, Expression, ExprId, MapKey, BuiltInFunction, MapCase, AssignmentTarget, MatchCase, RegexSource, MapCaseKey};
+use shared::foundation::mapper::{MapperScript, Statement, Expression, ExprId, ForEachExpr, ForEachExprKey, ForEachKey, MapKey, BuiltInFunction, MapCase, AssignmentTarget, MatchCase, RegexSource, MapCaseKey};
 use yew::prelude::*;
 
 #[derive(Properties, PartialEq, Clone)]
@@ -192,7 +192,7 @@ fn render_for_each_expr(expr: &ForEachExpr, script: &MapperScript, format_params
             <span class="bracket">{" {"}</span>
             {newline(format_params)}
             {render_expression(&expr.expression, script, format_params)}
-            {newline(format_params.dec_level(1))}
+            {newline(format_params)}
             {indent(format_params.level, true)}
             <span class="bracket">{"}"}</span>
         </>
