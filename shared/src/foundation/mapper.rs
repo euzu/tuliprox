@@ -1254,18 +1254,6 @@ impl Expression {
                                 Undefined
                             }
                         },
-                        BuiltInFunction::Split => {
-                            let string = extract_evaluated_arg_value!(evaluated_args, 0);
-                            let pattern = extract_evaluated_arg_value!(evaluated_args, 1);
-
-                            
-                            if let (Some(text), Some(pat)) = (string, pattern) {
-                                let re = Regex::new(pat).unwrap();
-                                Named(re.split(text).enumerate().map(|(i, s)| (i.to_string(), s.trim().to_string())).collect())
-                            } else {
-                                Undefined
-                            }
-                        },
                         BuiltInFunction::Print => {
                             trace!("[MapperScript] {}", concat_args(&evaluated_args).join(""));
                             Undefined
