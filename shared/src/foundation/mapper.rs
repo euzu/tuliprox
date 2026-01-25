@@ -53,7 +53,7 @@ map_case_key = { any_match | number_range | map_case_key_list }
 map_case = { map_case_key ~ "=>" ~ expression }
 map_key = { var_access | field_access  }
 map_block = { "map" ~ map_key ~ "{" ~ NEWLINE* ~ (map_case ~ ("," ~ NEWLINE* ~ map_case)*)? ~ ","? ~ NEWLINE* ~ "}" }
-for_each_expr_key = { var_access | field_access }
+for_each_expr_key = { var_access }
 for_each_expr = { for_each_expr_key ~ "=>" ~ expression }
 for_each_var = { identifier | field_access }
 for_each_block = { "for_each" ~ for_each_var ~ "{" ~ NEWLINE* ~ for_each_expr ~ NEWLINE* ~ "}" }
