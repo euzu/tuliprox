@@ -256,7 +256,7 @@ pub async fn process_playlist_epg(fp: &mut FetchedPlaylist<'_>, epg: &mut Vec<Ep
     id_cache.collect_epg_id(fp);
 
     if id_cache.is_empty() && !id_cache.smart_match_enabled {
-        debug!("No epg ids found");
+        debug!("No epg ids found for input {}", &fp.input.name);
     } else {
         assign_channel_epg(epg, fp, &mut id_cache).await;
     }

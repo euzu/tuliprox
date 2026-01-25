@@ -14,19 +14,21 @@ use shared::utils::{generate_playlist_uuid, trim_last_slash, Internable};
 use std::sync::Arc;
 use tokio::task::spawn_blocking;
 
-async fn map_to_xtream_category(categories: DynReader) -> Result<Vec<XtreamCategory>, TuliproxError> {
+async fn map_to_xtream_category(categories: DynReader, input_name: &Arc<str>) -> Result<Vec<XtreamCategory>, TuliproxError> {
+    let input_name_clone = Arc::clone(input_name);
     spawn_blocking(move || {
         let reader = tokio_util::io::SyncIoBridge::new(categories);
         match serde_json::from_reader::<_, Vec<XtreamCategory>>(reader) {
             Ok(xtream_categories) => Ok(xtream_categories),
             Err(err) => {
-                notify_err_res!("Failed to process categories {}", &err)
+                notify_err_res!("Failed to process categories input {input_name_clone}: {err}")
             }
         }
-    }).await.map_err(|e| notify_err!("Mapping xtream categories failed: {e}"))?
+    }).await.map_err(|err| notify_err!("Mapping xtream categories failed for input {input_name}: {err}"))?
 }
 
-async fn map_to_xtream_streams(xtream_cluster: XtreamCluster, streams: DynReader) -> Result<Vec<StreamProperties>, TuliproxError> {
+async fn map_to_xtream_streams(xtream_cluster: XtreamCluster, streams: DynReader, input_name: &Arc<str>) -> Result<Vec<StreamProperties>, TuliproxError> {
+    let input_name_clone = Arc::clone(input_name);
     spawn_blocking(move || {
         let reader = tokio_util::io::SyncIoBridge::new(streams);
 
@@ -44,10 +46,10 @@ async fn map_to_xtream_streams(xtream_cluster: XtreamCluster, streams: DynReader
                 Ok(stream_list)
             }
             Err(err) => {
-                notify_err_res!("Failed to map to xtream streams {xtream_cluster}: {err}")
+                notify_err_res!("Failed to map to xtream streams {xtream_cluster} for input {input_name_clone}: {err}")
             }
         }
-    }).await.map_err(|e| notify_err!("Mapping xtream streams failed: {e}"))?
+    }).await.map_err(|e| notify_err!("Mapping xtream streams failed for input {input_name}: {e}"))?
 }
 
 fn create_xtream_series_episode_url(url: &str, username: &str, password: &str, episode: &SeriesStreamDetailEpisodeProperties) -> Arc<str> {
@@ -134,14 +136,14 @@ pub async fn parse_xtream(input: &ConfigInput,
                           xtream_cluster: XtreamCluster,
                           categories: DynReader,
                           streams: DynReader) -> Result<Option<Vec<PlaylistGroup>>, TuliproxError> {
-    match map_to_xtream_category(categories).await {
+    match map_to_xtream_category(categories, &input.name).await {
         Ok(xtream_categories) => {
             let input_name = input.name.clone();
             let url = input.url.as_str();
             let username = input.username.as_ref().map_or("", |v| v);
             let password = input.password.as_ref().map_or("", |v| v);
 
-            match map_to_xtream_streams(xtream_cluster, streams).await {
+            match map_to_xtream_streams(xtream_cluster, streams, &input.name).await {
                 Ok(xtream_streams) => {
                     let mut group_map: IndexMap<u32, XtreamCategory> =
                         xtream_categories.into_iter().map(|category| (category.category_id, category)).collect();
@@ -218,7 +220,7 @@ where
     F: FnMut(XtreamPlaylistItem) -> Result<(), TuliproxError> + Send + 'static,
 {
     // 1. Parse Categories
-    let xtream_categories = map_to_xtream_category(categories).await?;
+    let xtream_categories = map_to_xtream_category(categories, &input.name).await?;
 
     // 2. Prepare for Stream Parsing
     let input_name = input.name.clone();
@@ -398,7 +400,7 @@ mod tests {
     async fn test_read_json_stream_into_struct() -> std::io::Result<()> {
         if fs::exists("/tmp/vod_streams.json").unwrap_or(false) {
             let reader = Box::pin(async_file_reader(tokio::fs::File::open("/tmp/vod_streams.json").await?));
-            match map_to_xtream_streams(XtreamCluster::Video, reader).await {
+            match map_to_xtream_streams(XtreamCluster::Video, reader, "test").await {
                 Ok(_streams) => {
                     println!("{:?}", _streams.get(1));
                     println!("{:?}", _streams.get(100));

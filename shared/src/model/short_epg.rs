@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use crate::utils::{serialize_as_base64_padded, serialize_option_string_as_null_if_empty, arc_str_serde};
+use crate::utils::{serialize_as_base64_padded, arc_str_serde};
 #[derive(Debug, serde::Serialize, serde::Deserialize, Default)]
 pub struct ShortEpgDto {
     #[serde(with = "arc_str_serde")]
@@ -24,15 +24,12 @@ pub struct ShortEpgDto {
 #[derive(Debug, serde::Serialize, serde::Deserialize, Default)]
 pub struct ShortEpgResultDto {
     pub epg_listings: Vec<ShortEpgDto>,
-    #[serde(default, serialize_with = "serialize_option_string_as_null_if_empty")]
-    pub error: Option<String>,
 }
 
 impl ShortEpgResultDto {
     pub fn new(epg_listings: Vec<ShortEpgDto>) -> Self {
         Self {
             epg_listings,
-            error: None,
         }
     }
 }

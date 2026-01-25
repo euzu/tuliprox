@@ -304,7 +304,6 @@ pub async fn serve_short_epg(
                     } else {
                         epg_channel.programmes.iter().map(|p| from_programme(&stream_id, p, &epg_processing_options)).collect()
                     },
-                    error: None,
                 }
             } else {
                 ShortEpgResultDto::default()
