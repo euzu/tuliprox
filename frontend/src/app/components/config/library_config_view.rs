@@ -5,10 +5,10 @@ use crate::app::components::select::Select;
 use crate::app::components::{Card, Chip, DropDownOption, DropDownSelection, IconButton, ToggleSwitch};
 use crate::app::context::ConfigContext;
 use crate::{config_field, config_field_bool, config_field_child, config_field_optional,
-            edit_field_bool, edit_field_list, edit_field_text, edit_field_text_option, generate_form_reducer};
+            edit_field_bool, edit_field_list, edit_field_number, edit_field_number_u64, edit_field_text, edit_field_text_option, generate_form_reducer};
 use shared::model::{LibraryConfigDto, LibraryContentType, LibraryMetadataConfigDto,
                     LibraryMetadataReadConfigDto, LibraryPlaylistConfigDto, LibraryScanDirectoryDto,
-                    LibraryTmdbConfigDto};
+                    LibraryTmdbConfigDto, LibraryMetadataFormat};
 use std::rc::Rc;
 use yew::prelude::*;
 use yew_i18n::use_translation;
@@ -35,6 +35,11 @@ const LABEL_CONTENT_TYPE: &str = "LABEL.CONTENT_TYPE";
 const LABEL_AUTO: &str = "LABEL.AUTO";
 const LABEL_MOVIE: &str = "LABEL.MOVIE";
 const LABEL_SERIES: &str = "LABEL.SERIES";
+const LABEL_RATE_LIMIT_MS: &str = "LABEL.RATE_LIMIT_MS";
+const LABEL_CACHE_DURATION_DAYS: &str = "LABEL.CACHE_DURATION_DAYS";
+const LABEL_LANGUAGE: &str = "LABEL.LANGUAGE";
+const LABEL_FORMATS: &str = "LABEL.FORMATS";
+const LABEL_ADD_FORMAT: &str = "LABEL.ADD_FORMAT";
 
 const TYPE_AUTO: &str = "Auto";
 const TYPE_MOVIE: &str = "Movie";
@@ -66,6 +71,7 @@ generate_form_reducer!(
     fields {
         Path => path: String,
         FallbackToFilename => fallback_to_filename: bool,
+        Formats => formats: Vec<LibraryMetadataFormat>,
     }
 );
 
@@ -85,6 +91,9 @@ generate_form_reducer!(
     fields {
         Enabled => enabled: bool,
         ApiKey => api_key: Option<String>,
+        RateLimitMs => rate_limit_ms: u64,
+        CacheDurationDays => cache_duration_days: u32,
+        Language => language: String,
     }
 );
 
@@ -360,6 +369,13 @@ pub fn LibraryConfigView() -> Html {
                     <h1>{translate.t(LABEL_METADATA)}</h1>
                     { config_field!(metadata, translate.t(LABEL_METADATA_PATH), path) }
                     { config_field_bool!(metadata, translate.t(LABEL_FALLBACK_TO_FILENAME), fallback_to_filename) }
+                    { config_field_child!(translate.t(LABEL_FORMATS), {
+                        html! {
+                            <div class="tp__config-view__tags">
+                                { for metadata.formats.iter().map(|f| html! { <Chip label={format!("{f:?}")} /> }) }
+                            </div>
+                        }
+                    }) }
                 </Card>
 
                 <Card class="tp__config-view__card">
@@ -373,6 +389,9 @@ pub fn LibraryConfigView() -> Html {
                     <h1>{translate.t(LABEL_TMDB)}</h1>
                     { config_field_bool!(tmdb, translate.t(LABEL_ENABLED), enabled) }
                     { config_field_optional!(tmdb, translate.t(LABEL_API_KEY), api_key) }
+                    { config_field!(tmdb, translate.t(LABEL_RATE_LIMIT_MS), rate_limit_ms) }
+                    { config_field!(tmdb, translate.t(LABEL_CACHE_DURATION_DAYS), cache_duration_days) }
+                    { config_field!(tmdb, translate.t(LABEL_LANGUAGE), language) }
                 </Card>
 
                 <Card class="tp__config-view__card">
@@ -400,6 +419,30 @@ pub fn LibraryConfigView() -> Html {
                 <h1>{translate.t(LABEL_METADATA)}</h1>
                 { edit_field_text!(metadata_state, translate.t(LABEL_METADATA_PATH), path, LibraryMetadataConfigFormAction::Path) }
                 { edit_field_bool!(metadata_state, translate.t(LABEL_FALLBACK_TO_FILENAME), fallback_to_filename, LibraryMetadataConfigFormAction::FallbackToFilename) }
+                { config_field_child!(translate.t(LABEL_FORMATS), {
+                    let metadata_state = metadata_state.clone();
+                    let formats = metadata_state.form.formats.clone();
+                    html! {
+                        <div class="tp__config-view__tags">
+                             { for formats.iter().map(|f| {
+                                 let metadata_state = metadata_state.clone();
+                                 let f = *f;
+                                 html! { <Chip label={format!("{f:?}")} on_remove={Callback::from(move |_| {
+                                     let mut updated = metadata_state.form.formats.clone();
+                                     updated.retain(|&x| x != f);
+                                     metadata_state.dispatch(LibraryMetadataConfigFormAction::Formats(updated));
+                                 })} /> }
+                             }) }
+                             if !formats.contains(&LibraryMetadataFormat::Nfo) {
+                                 <IconButton name="Add" icon="Add" hint={translate.t(LABEL_ADD_FORMAT)} onclick={Callback::from(move |_| {
+                                     let mut updated = metadata_state.form.formats.clone();
+                                     updated.push(LibraryMetadataFormat::Nfo);
+                                     metadata_state.dispatch(LibraryMetadataConfigFormAction::Formats(updated));
+                                 })} />
+                             }
+                        </div>
+                    }
+                }) }
             </Card>
 
              <Card class="tp__config-view__card">
@@ -412,7 +455,10 @@ pub fn LibraryConfigView() -> Html {
              <Card class="tp__config-view__card">
                 <h1>{translate.t(LABEL_TMDB)}</h1>
                 { edit_field_bool!(tmdb_state, translate.t(LABEL_ENABLED), enabled, LibraryTmdbConfigFormAction::Enabled) }
-                { edit_field_text_option!(tmdb_state, translate.t(LABEL_API_KEY), api_key, LibraryTmdbConfigFormAction::ApiKey) }
+                { edit_field_text_option!(tmdb_state, translate.t(LABEL_API_KEY), api_key, LibraryTmdbConfigFormAction::ApiKey, true) }
+                { edit_field_number_u64!(tmdb_state, translate.t(LABEL_RATE_LIMIT_MS), rate_limit_ms, LibraryTmdbConfigFormAction::RateLimitMs) }
+                { edit_field_number!(tmdb_state, translate.t(LABEL_CACHE_DURATION_DAYS), cache_duration_days, LibraryTmdbConfigFormAction::CacheDurationDays) }
+                { edit_field_text!(tmdb_state, translate.t(LABEL_LANGUAGE), language, LibraryTmdbConfigFormAction::Language) }
              </Card>
 
              <Card class="tp__config-view__card">

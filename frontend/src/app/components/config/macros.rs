@@ -387,6 +387,31 @@ macro_rules! edit_field_number_u64 {
 }
 
 #[macro_export]
+macro_rules! edit_field_number_usize {
+    ($instance:expr, $label:expr, $field:ident, $action:path) => {{
+        let instance = $instance.clone();
+        html! {
+            <div class="tp__form-field tp__form-field__number">
+                <$crate::app::components::number_input::NumberInput
+                    label={$label}
+                    name={stringify!($field)}
+                    value={instance.form.$field as i64}
+                    on_change={Callback::from(move |value: Option<i64>| {
+                        match value {
+                             Some(value) => {
+                                 let val = usize::try_from(value).unwrap_or(0);
+                                 instance.dispatch($action(val))
+                             },
+                             None => instance.dispatch($action(0)),
+                        }
+                    })}
+                />
+            </div>
+        }
+    }};
+}
+
+#[macro_export]
 macro_rules! edit_field_number_option {
     ($instance:expr, $label:expr, $field:ident, $action:path) => {{
         let instance = $instance.clone();
