@@ -322,7 +322,7 @@ pub fn MessagingConfigView() -> Html {
              html! { <div class="tp__messaging-config-view__notify-on">
                  { for  notify_on_options.iter().map(|t| {
                      let is_selected = msg_state.form.notify_on.contains(t);
-                      let class = if is_selected { "tp__text-button tp__button-primary" } else { "tp__text-button" };
+                      let class = if is_selected { "tp__text-button primary" } else { "tp__text-button" };
                      html! {
                      <Chip label={t.to_string()} class={class}/>
                  }}) }

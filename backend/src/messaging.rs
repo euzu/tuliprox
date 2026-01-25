@@ -21,7 +21,7 @@ static HANDLEBARS: LazyLock<Handlebars> = LazyLock::new(|| {
     let mut h = Handlebars::new();
     h.register_helper("json_escape", Box::new(|h: &Helper, _: &Handlebars, _: &Context, _: &mut RenderContext, out: &mut dyn Output| -> HelperResult {
         let param = h.param(0).and_then(|v| v.value().as_str()).unwrap_or("");
-        let escaped = serde_json::to_string(param).unwrap_or_else(|_| "".to_string());
+        let escaped = serde_json::to_string(param).unwrap_or_else(|_| String::new());
         if escaped.len() >= 2 {
             out.write(&escaped[1..escaped.len()-1])?;
         }

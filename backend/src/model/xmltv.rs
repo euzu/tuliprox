@@ -175,7 +175,7 @@ pub struct TVGuide {
 
 impl TVGuide {
     pub fn new(mut epg_sources: Vec<PersistedEpgSource>) -> Self {
-        epg_sources.sort_by(|a, b| a.priority.cmp(&b.priority));
+        epg_sources.sort_by_key(|a| a.priority);
         Self {
             epg_sources,
         }

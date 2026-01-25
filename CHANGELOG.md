@@ -1,6 +1,5 @@
 # Changelog
 
-
 ## 3.3.0 (2026-01-03)
 
 ## ⚠️ Breaking Changes
@@ -70,6 +69,8 @@
 - **Performance Monitoring**: Added CPU usage display to the dashboard.
 - **Stream Table Enhancements**: Added "Copy-To-Clipboard" functions and improved connection monitoring.
 - **UX Improvements**: Implemented API-user category selection and better session tracking for HLS.
+- Added **Stream Buffer** settings (Enabled, Size) to Reverse Proxy configuration UI.
+- Added **TMDB** settings (Rate Limit, Cache Duration, Language) and **Metadata Formats** (NFO support) to Library configuration UI.
 
 ## 🚀 Performance & Stability
 - **Connection Reconciliation & GC**: Resolved a critical issue where provider connection counters could leak or become stale during hot reloads. Added automatic garbage collection for unused provider records to prevent logical memory buildup.

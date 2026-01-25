@@ -30,7 +30,7 @@
   }
 }
 
-.tp__icon-button.tp__button-primary {
+.tp__icon-button.primary {
   background-color: var(--text-button-primary-background-color);
   color: var(--text-button-primary-color);
   fill : var(--text-button-primary-color);
@@ -42,7 +42,7 @@
     outline: none;
   }
 }
-.tp__icon-button.tp__button-secondary {
+.tp__icon-button.secondary {
   background-color: var(--text-button-secondary-background-color);
   color: var(--text-button-secondary-color);
   fill : var(--text-button-secondary-color);
@@ -54,7 +54,7 @@
     outline: none;
   }
 }
-.tp__icon-button.tp__button-active {
+.tp__icon-button.active {
   background-color: var(--text-button-active-background-color);
   color: var(--text-button-active-color);
   fill : var(--text-button-active-color);

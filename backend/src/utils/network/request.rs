@@ -1095,14 +1095,12 @@ pub fn parse_range(range: &str) -> Option<(u64, Option<u64>)> {
 
 pub fn is_file_url(url: &str) -> bool {
     Url::parse(url)
-        .map(|u| u.scheme().eq_ignore_ascii_case("file"))
-        .unwrap_or(false)
+        .is_ok_and(|u| u.scheme().eq_ignore_ascii_case("file"))
 }
 
 pub fn is_uri(url: &str) -> bool {
     Url::parse(url)
-        .map(|u| u.scheme().eq_ignore_ascii_case("file") || u.scheme().eq_ignore_ascii_case("http") || u.scheme().eq_ignore_ascii_case("https"))
-        .unwrap_or(false)
+        .is_ok_and(|u| u.scheme().eq_ignore_ascii_case("file") || u.scheme().eq_ignore_ascii_case("http") || u.scheme().eq_ignore_ascii_case("https"))
 }
 
 #[cfg(test)]

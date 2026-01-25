@@ -52,22 +52,19 @@
 
     &-desktop {
       display: block;
+      @media (max-width: size.$mobile-breakpoint) {
+        display: none !important;
+      }
     }
 
 
     &-mobile {
       display: none;
-    }
-
-    @media (max-width: size.$mobile-breakpoint) {
-      &-desktop {
-        display: none;
-      }
-
-      &-mobile {
-        display: block;
+      @media (max-width: size.$mobile-breakpoint) {
+        display: block !important;
       }
     }
+
   }
 
   &__body {

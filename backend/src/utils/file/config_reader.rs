@@ -628,7 +628,7 @@ async fn persist_single_template(prefix: &str, kind: Option<&MsgKind>, template:
     if tokio::fs::metadata(template).await.is_ok() {
         return Url::from_file_path(template)
             .map(|u| u.to_string())
-            .map_err(|_| info_err!("Failed to convert path to file URL: {}", template));
+            .map_err(|()| info_err!("Failed to convert path to file URL: {}", template));
     }
 
     // It's a raw string, persist it
@@ -649,7 +649,7 @@ async fn persist_single_template(prefix: &str, kind: Option<&MsgKind>, template:
 
     Url::from_file_path(&file_path)
         .map(|u| u.to_string())
-        .map_err(|_| info_err!("Failed to convert persisted path to file URL: {}", file_path.display()))
+        .map_err(|()| info_err!("Failed to convert persisted path to file URL: {}", file_path.display()))
 }
 
 

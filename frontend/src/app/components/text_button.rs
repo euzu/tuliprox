@@ -1,5 +1,5 @@
 use web_sys::MouseEvent;
-use yew::{function_component, html, Callback, Html, Properties};
+use yew::{classes, function_component, html, Callback, Html, Properties};
 use crate::app::components::AppIcon;
 
 #[derive(Properties, Clone, PartialEq, Debug)]
@@ -32,7 +32,7 @@ pub fn TextButton(props: &TextButtonProps) -> Html {
         <button
             autofocus={props.autofocus}
             onclick={handle_click}
-            class={if props.class.is_empty() {"tp__text-button".to_string()} else {format!("tp__text-button tp__button-{}", props.class)}}>
+            class={classes!("tp__text-button", props.class.clone())}>
          if !props.icon.is_empty() {
             <AppIcon name={props.icon.clone()}></AppIcon>
          }

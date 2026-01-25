@@ -266,7 +266,7 @@ impl MultiProviderLineup {
                 .push(provider);
         }
         let mut values: Vec<(i16, Vec<ProviderConfigWrapper>)> = providers.into_iter().collect();
-        values.sort_by(|(p1, _), (p2, _)| p1.cmp(p2));
+        values.sort_by_key(|(p1, _)| *p1);
         let providers: Vec<ProviderPriorityGroup> = values.into_iter().map(|(_, mut group)| {
             if group.len() > 1 {
                 ProviderPriorityGroup::MultiProviderGroup(AtomicUsize::new(0), group)

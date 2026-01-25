@@ -176,8 +176,7 @@ fn is_input_expired_at(exp_date: Option<i64>, now: u64) -> bool {
         return false;
     };
     u64::try_from(exp_date)
-        .map(|exp_ts| exp_ts <= now)
-        .unwrap_or(true)
+        .map_or(true, |exp_ts| exp_ts <= now)
 }
 
 fn is_expiring_with_offset_at(exp_date: Option<i64>, offset_secs: u64, now: u64) -> bool {
@@ -2640,14 +2639,12 @@ async fn sync_panel_api_for_input_on_boot(
         let root_exp_missing = root_exp_date.is_none();
         let root_expired = match root_exp_date {
             Some(ts) => u64::try_from(ts)
-                .map(|exp_ts| exp_ts <= now)
-                .unwrap_or(true),
+                .map_or(true, |exp_ts| exp_ts <= now),
             None => false,
         };
         let root_expiring = match root_exp_date {
             Some(ts) => u64::try_from(ts)
-                .map(|exp_ts| exp_ts > now && exp_ts <= offset_deadline)
-                .unwrap_or(true),
+                .map_or(true, |exp_ts| exp_ts > now && exp_ts <= offset_deadline),
             None => false,
         };
         let should_refresh_root = root_exp_missing || root_expired || root_expiring;
@@ -3099,8 +3096,7 @@ async fn sync_panel_api_for_input_on_boot(
             }
             match a.exp_date {
                 Some(ts) => u64::try_from(ts)
-                    .map(|exp_ts| exp_ts > offset_deadline)
-                    .unwrap_or(false),
+                    .is_ok_and(|exp_ts| exp_ts > offset_deadline),
                 None => false,
             }
         })
@@ -3125,8 +3121,7 @@ async fn sync_panel_api_for_input_on_boot(
                 match a.exp_date {
                     None => true,
                     Some(ts) => u64::try_from(ts)
-                        .map(|exp_ts| exp_ts <= offset_deadline)
-                        .unwrap_or(true),
+                        .map_or(true, |exp_ts| exp_ts <= offset_deadline),
                 }
             })
             .map(|(idx, _)| idx)

@@ -326,7 +326,7 @@ impl TVGuide {
                 epg_sources.push(epg);
             }
         }
-        epg_sources.sort_by(|a, b| a.priority.cmp(&b.priority));
+        epg_sources.sort_by_key(|a| a.priority);
         Some(epg_sources)
     }
 }
@@ -469,7 +469,7 @@ pub fn flatten_tvguide(tv_guides: &[Epg]) -> Option<Epg> {
         let epg_attrib_id = EPG_ATTRIB_ID.intern();
         let epg_attrib_channel = EPG_ATTRIB_CHANNEL.intern();
         // sort by priority
-        sorted_guides.sort_by(|a, b| a.priority.cmp(&b.priority));
+        sorted_guides.sort_by_key(|a| a.priority);
         // if executed parallel it does not matter how we sort.
         sorted_guides.par_iter().for_each(|guide| {
             let mut children = vec![];
