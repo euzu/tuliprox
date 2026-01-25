@@ -125,6 +125,8 @@ pub struct VideoStreamProperties {
     pub stream_type: Option<Arc<str>>,
     #[serde(default, deserialize_with = "deserialize_as_option_arc_str")]
     pub trailer: Option<Arc<str>>,
+    #[serde(default, deserialize_with = "deserialize_as_option_arc_str")]
+    pub genre: Option<Arc<str>>,
     #[serde(default, deserialize_with = "deserialize_number_from_string")]
     pub tmdb: Option<u32>,
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
@@ -368,6 +370,14 @@ impl StreamProperties {
             StreamProperties::Video(video) => video.tmdb,
             StreamProperties::Series(series) => series.tmdb,
             StreamProperties::Episode(episode) => episode.tmdb,
+        }
+    }
+    pub fn get_genre(&self) -> Option<Arc<str>> {
+        match self {
+            StreamProperties::Live(_) => None,
+            StreamProperties::Video(video) => video.genre.as_ref().map(Arc::clone),
+            StreamProperties::Series(series) => series.genre.as_ref().map(Arc::clone),
+            StreamProperties::Episode(_) => None,
         }
     }
 
@@ -615,6 +625,7 @@ impl VideoStreamProperties {
             rating_5based: None, // from PlaylistItem
             stream_type: None, // from PlaylistItem
             trailer: info.info.youtube_trailer.clone(),
+            genre: info.info.genre.clone(),
             tmdb: info.info.tmdb_id.parse::<u32>().ok(),
             is_adult: 0,  // from PlaylistItem
             details: Some(VideoStreamDetailProperties {
@@ -655,6 +666,9 @@ impl VideoStreamProperties {
             }
             if props.trailer.is_none() {
                 props.trailer = video.trailer.clone();
+            }
+            if props.genre.is_none() {
+                props.genre = video.genre.clone();
             }
             props.is_adult = video.is_adult;
         } else {

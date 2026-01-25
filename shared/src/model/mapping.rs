@@ -109,6 +109,7 @@ pub enum MapperOperation {
     Lowercase { field: String },
     Uppercase { field: String },
     Capitalize { field: String },
+    Split { field: String, value: String },
     Suffix { field: String, value: String },
     Prefix { field: String, value: String },
     Set { field: String, value: String },
@@ -135,7 +136,8 @@ impl MapperOperation {
                 }
             }
 
-            MapperOperation::Suffix { ref field, ref mut value }
+            MapperOperation::Split { ref field, ref mut value }
+            | MapperOperation::Suffix { ref field, ref mut value }
             | MapperOperation::Prefix { ref field, ref mut value }
             | MapperOperation::Set { ref field, ref mut value } => {
                 if !valid_property!(field.as_str(), MAPPER_FIELDS) {

@@ -21,6 +21,7 @@ pub fn get_field_value(pli: &PlaylistItem, field: ItemField) -> Arc<str> {
         ItemField::Group => Arc::clone(&header.group),
         ItemField::Name => Arc::clone(&header.name),
         ItemField::Title => Arc::clone(&header.title),
+        ItemField::Genre => Arc::clone(&header.genre),
         ItemField::Url => Arc::clone(&header.url),
         ItemField::Input => Arc::clone(&header.input_name),
         ItemField::Type => header.item_type.intern(),
@@ -34,6 +35,7 @@ pub fn set_field_value(pli: &mut PlaylistItem, field: ItemField, value: String) 
         ItemField::Group => header.group = value.intern(),
         ItemField::Name => header.name = value.intern(),
         ItemField::Title => header.title = value.intern(),
+        ItemField::Genre => header.genre = value.intern(),
         ItemField::Url => header.url = value.intern(),
         ItemField::Input => header.input_name = value.intern(),
         ItemField::Caption => {
@@ -99,7 +101,7 @@ impl PartialEq for CompiledRegex {
 #[derive(Parser)]
 #[grammar_inline = r#"
 WHITESPACE = _{ " " | "\t" | "\r" | "\n"}
-field = { ^"group" | ^"title" | ^"name" | ^"url" | ^"input" | ^"caption"}
+field = { ^"group" | ^"title" | ^"name" | ^"genre" | ^"url" | ^"input" | ^"caption"}
 and = { ^"and" }
 or = { ^"or" }
 not = { ^"not" }

@@ -1743,6 +1743,18 @@ Example `if then else` block
   }
 ```
 
+Example `for each` block
+
+```dsl
+  # Maybe there is no station
+  genres = split(@Genre, "[,/&]")
+  for_each genres {
+     genre => {
+        add_favourite(concat("Genre - ", genre))
+     }
+  }
+```
+
 Example of removing prefix
 `@Caption = replace(@Caption, "UK:",  "EN:"`
 

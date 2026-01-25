@@ -245,6 +245,8 @@ pub struct PlaylistItemHeader {
     #[serde(with = "arc_str_serde")]
     pub title: Arc<str>,
     #[serde(with = "arc_str_serde")]
+    pub genre: Arc<str>,
+    #[serde(with = "arc_str_serde")]
     pub parent_code: Arc<str>,
     #[serde(with = "arc_str_serde")]
     pub audio_track: Arc<str>,
@@ -280,6 +282,7 @@ impl Default for PlaylistItemHeader {
             logo_small: "".intern(),
             group: "".intern(),
             title: "".intern(),
+            genre: "".intern(),
             parent_code: "".intern(),
             audio_track: "".intern(),
             time_shift: "".intern(),
@@ -355,7 +358,7 @@ macro_rules! generate_field_accessor_impl_for_playlist_item_header {
                 )*
 
                 if bytes.eq_ignore_ascii_case(b"group") {
-                        Some(Arc::clone(&self.group))
+                    Some(Arc::clone(&self.group))
                 } else if bytes.eq_ignore_ascii_case(b"caption") {
                     Some(if self.title.is_empty() {
                         Arc::clone(&self.name)
@@ -415,7 +418,7 @@ macro_rules! generate_field_accessor_impl_for_playlist_item_header {
     }
 }
 
-generate_field_accessor_impl_for_playlist_item_header!(id, /*virtual_id,*/ title, name, logo, logo_small, parent_code, audio_track, time_shift, rec, url;);
+generate_field_accessor_impl_for_playlist_item_header!(id, /*virtual_id,*/ title, genre, name, logo, logo_small, parent_code, audio_track, time_shift, rec, url;);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct M3uPlaylistItem {
@@ -433,6 +436,8 @@ pub struct M3uPlaylistItem {
     pub group: Arc<str>,
     #[serde(with = "arc_str_serde")]
     pub title: Arc<str>,
+    #[serde(with = "arc_str_serde")]
+    pub genre: Arc<str>,
     #[serde(with = "arc_str_serde")]
     pub parent_code: Arc<str>,
     #[serde(with = "arc_str_serde")]
@@ -498,6 +503,7 @@ impl M3uPlaylistItem {
             logo_small: Arc::clone(&self.logo_small),
             group: Arc::clone(&self.group),
             title: Arc::clone(&self.title),
+            genre: Arc::clone(&self.genre),
             parent_code: Arc::clone(&self.parent_code),
             audio_track: Arc::clone(&self.audio_track),
             time_shift: Arc::clone(&self.time_shift),
@@ -604,7 +610,7 @@ macro_rules! generate_field_accessor_impl_for_m3u_playlist_item {
     }
 }
 
-generate_field_accessor_impl_for_m3u_playlist_item!(title, name, provider_id, logo, logo_small, parent_code, audio_track, time_shift, rec, url;);
+generate_field_accessor_impl_for_m3u_playlist_item!(title, genre, name, provider_id, logo, logo_small, parent_code, audio_track, time_shift, rec, url;);
 
 impl From<M3uPlaylistItem> for CommonPlaylistItem {
     fn from(item: M3uPlaylistItem) -> Self {
@@ -659,6 +665,8 @@ pub struct XtreamPlaylistItem {
     #[serde(with = "arc_str_serde")]
     pub title: Arc<str>,
     #[serde(with = "arc_str_serde")]
+    pub genre: Arc<str>,
+    #[serde(with = "arc_str_serde")]
     pub parent_code: Arc<str>,
     #[serde(with = "arc_str_serde")]
     pub rec: Arc<str>,
@@ -689,6 +697,7 @@ impl XtreamPlaylistItem {
             logo_small: self.logo_small.clone(),
             group: self.group.clone(),
             title: self.title.clone(),
+            genre: self.genre.clone(),
             parent_code: self.parent_code.clone(),
             audio_track: "".intern(),
             time_shift: "".intern(),
@@ -886,7 +895,7 @@ pub struct PlaylistItem {
     pub header: PlaylistItemHeader,
 }
 
-generate_field_accessor_impl_for_xtream_playlist_item!(group, title, name, logo, logo_small, parent_code, rec, url;);
+generate_field_accessor_impl_for_xtream_playlist_item!(group, title, genre, name, logo, logo_small, parent_code, rec, url;);
 
 impl PlaylistItem {
 
@@ -911,6 +920,7 @@ impl PlaylistItem {
                             rating_5based: None,
                             stream_type: Some("movie".intern()),
                             trailer: None,
+                            genre: None,
                             tmdb: None,
                             is_adult: 0,
                             details: None,
@@ -984,6 +994,7 @@ impl From<&PlaylistItem> for XtreamPlaylistItem {
             logo_small: Arc::clone(&header.logo_small),
             group: Arc::clone(&header.group),
             title: Arc::clone(&header.title),
+            genre: Arc::clone(&header.genre),
             parent_code: Arc::clone(&header.parent_code),
             rec: Arc::clone(&header.rec),
             url: Arc::clone(&header.url),
@@ -1011,6 +1022,7 @@ impl From<&PlaylistItem> for M3uPlaylistItem {
             logo_small: Arc::clone(&header.logo_small),
             group: Arc::clone(&header.group),
             title: Arc::clone(&header.title),
+            genre: Arc::clone(&header.genre),
             parent_code: Arc::clone(&header.parent_code),
             audio_track: Arc::clone(&header.audio_track),
             time_shift: Arc::clone(&header.time_shift),
@@ -1040,6 +1052,7 @@ impl From<&PlaylistItem> for CommonPlaylistItem {
             logo_small: header.logo_small.clone(),
             group: Arc::clone(&header.group),
             title: header.title.clone(),
+            genre: header.genre.clone(),
             parent_code: header.parent_code.clone(),
             audio_track: header.audio_track.clone(),
             time_shift: header.time_shift.clone(),
@@ -1064,6 +1077,7 @@ impl From<&XtreamPlaylistItem> for PlaylistItem {
             id: item.provider_id.to_string().intern(),
             name: item.name.clone(),
             title: item.title.clone(),
+            genre: item.genre.clone(),
             logo: item.logo.clone(),
             logo_small: item.logo_small.clone(),
             group: item.group.clone(),
@@ -1096,6 +1110,7 @@ impl From<&M3uPlaylistItem> for PlaylistItem {
             id: item.provider_id.clone(),
             name: item.name.clone(),
             title: item.title.clone(),
+            genre: item.genre.clone(),
             logo: item.logo.clone(),
             logo_small: item.logo_small.clone(),
             group: item.group.clone(),

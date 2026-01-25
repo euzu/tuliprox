@@ -173,7 +173,8 @@ pub fn metadata_cache_entry_to_xtream_movie_info(
         rating: movie.rating,
         rating_5based: None,
         stream_type: Some("movie".intern()),
-        trailer: movie.videos.as_ref().and_then(|v| v.iter().find(|video| video.site.eq_ignore_ascii_case("youtube")).map(|video| video.key.clone().into())),
+        trailer: movie.videos.as_ref().and_then(|v| v.iter().find(|video| video.site.eq_ignore_ascii_case("youtube")).map(|video| video.key.clone().into())),        
+        genre: movie.genres.as_ref().map(|d| d.join(", ").into()),
         tmdb: movie.tmdb_id,
         is_adult: 0,
         details: Some(VideoStreamDetailProperties {

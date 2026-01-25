@@ -40,6 +40,8 @@ pub struct CommonPlaylistItem {
     #[serde(with = "arc_str_serde")]
     pub group: Arc<str>,
     #[serde(with = "arc_str_serde")]
+    pub genre: Arc<str>,
+    #[serde(with = "arc_str_serde")]
     pub title: Arc<str>,
     #[serde(with = "arc_str_serde")]
     pub parent_code: Arc<str>,
