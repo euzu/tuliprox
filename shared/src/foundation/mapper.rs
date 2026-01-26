@@ -1231,9 +1231,8 @@ impl Expression {
                             let string = extract_evaluated_arg_value!(evaluated_args, 0);
                             let pattern = extract_evaluated_arg_value!(evaluated_args, 1);
 
-
                             if let (Some(text), Some(pat)) = (string, pattern) {
-                                match Regex::new(pat) {
+                                match crate::model::REGEX_CACHE.get_or_compile(pat) {
                                     Ok(re) => Named(re.split(text).enumerate().map(|(i, s)| (i.to_string(), s.trim().to_string())).collect()),
                                     Err(e) => Failure(format!("Invalid regex pattern '{}': {}", pat, e)),
                                 }
