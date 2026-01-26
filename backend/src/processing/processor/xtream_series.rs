@@ -10,7 +10,7 @@ use crate::processing::processor::xtream::playlist_resolve_download_playlist_ite
 use crate::repository::{
     get_input_storage_path, persist_input_series_info_batch, MemoryPlaylistSource, PlaylistSource,
 };
-use log::{error, info, log_enabled, warn, Level};
+use log::{error, info, log_enabled, warn, Level, debug};
 use shared::error::TuliproxError;
 use shared::model::{
     InputType, PlaylistEntry, PlaylistItemType, PlaylistGroup, SeriesStreamProperties,
@@ -21,6 +21,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use crate::model::MediaQuality;
 use serde_json::Value;
+use crate::ptt::ptt_parse_title;
 
 create_resolve_options_function_for_xtream_target!(series);
 
@@ -173,11 +174,28 @@ async fn playlist_resolve_series_info(
         // Metadata Fallback for Series if TMDB or Release Date is missing
         if resolve_tmdb_missing {
              if let Some(StreamProperties::Series(series_stream_props)) = pli.header.additional_properties.as_mut() {
-                if !series_stream_props.name.is_empty() && 
-                   (series_stream_props.tmdb.is_none() || series_stream_props.release_date.is_none()) 
+                // 1. Try to extract year from title if date is missing
+                if series_stream_props.release_date.is_none() && !series_stream_props.name.is_empty() {
+                      let meta = ptt_parse_title(&series_stream_props.name);
+                      if let Some(year) = meta.year {
+                          series_stream_props.release_date = Some(format!("{year}-01-01").into());
+                          properties_updated = true;
+                      }
+                }
+
+                let has_tmdb = series_stream_props.tmdb.is_some();
+                let has_date = series_stream_props.release_date.is_some();
+
+                if !series_stream_props.name.is_empty() && (!has_tmdb || !has_date)
                 {
+                    let reason = if !has_tmdb && !has_date { "missing_tmdb_and_date" } 
+                                 else if !has_tmdb { "missing_tmdb" } 
+                                 else { "missing_date" };
+                    debug!("Resolving TMDB for Series '{}' (ID: {}). Reason: {}", series_stream_props.name, provider_id, reason);
+
+                    // Use existing TMDB ID if available
                     if let Some(meta) = meta_resolver
-                        .resolve_from_title(&series_stream_props.name, false)
+                        .resolve_from_title(&series_stream_props.name, series_stream_props.tmdb, false)
                         .await
                     {
                         let mut changed = false;
@@ -208,7 +226,14 @@ async fn playlist_resolve_series_info(
                              
                              // Iterate episodes and check if we need to probe
                              for ep in episodes {
-                                 let needs_probe = !MediaQuality::is_valid_media_info(ep.video.as_deref()) || !MediaQuality::is_valid_media_info(ep.audio.as_deref());
+                                 let mut missing_info = Vec::new();
+                                 let missing_video = !MediaQuality::is_valid_media_info(ep.video.as_deref());
+                                 let missing_audio = !MediaQuality::is_valid_media_info(ep.audio.as_deref());
+                                 
+                                 if missing_video { missing_info.push("video"); }
+                                 if missing_audio { missing_info.push("audio"); }
+                                 
+                                 let needs_probe = !missing_info.is_empty();
 
                                  if needs_probe {
                                      // Acquire connection
@@ -216,8 +241,8 @@ async fn playlist_resolve_series_info(
                                          let episode_url = create_xtream_series_episode_url(input_url, input_username, input_password, ep);
                                          
                                          crate::utils::debug_if_enabled!(
-                                            "Probing episode quality for {}",
-                                            shared::utils::sanitize_sensitive_info(&episode_url)
+                                            "Probing episode '{}' (ID: {}). Missing: [{}]",
+                                            ep.title, ep.id, missing_info.join(", ")
                                          );
 
                                          if let Some((_quality, raw_video, raw_audio)) = crate::utils::ffmpeg::probe_url(

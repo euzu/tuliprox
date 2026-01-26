@@ -6,7 +6,7 @@ use crate::processing::processor::create_resolve_options_function_for_xtream_tar
 use crate::processing::processor::xtream::playlist_resolve_download_playlist_item;
 use crate::repository::get_input_storage_path;
 use crate::repository::persist_input_vod_info_batch;
-use log::{error, info, log_enabled, warn, Level};
+use log::{error, info, log_enabled, warn, Level, debug};
 use shared::error::TuliproxError;
 use shared::model::{
     InputType, PlaylistEntry, PlaylistItemType, StreamProperties, VideoStreamDetailProperties,
@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use crate::model::MediaQuality;
 use serde_json::Value;
+use crate::ptt::ptt_parse_title;
 
 create_resolve_options_function_for_xtream_target!(vod);
 
@@ -168,15 +169,35 @@ pub async fn playlist_resolve_vod(
         }
         
         // 1.5 TMDB / Metadata Fallback
-        // Check if we have properties now (either newly fetched or existing)
         if resolve_tmdb_missing {
              if let Some(StreamProperties::Video(video_stream_props)) = pli.header.additional_properties.as_mut() {
-                  if (video_stream_props.tmdb.is_none() || 
-                     video_stream_props.details.as_ref().and_then(|d| d.release_date.as_ref()).is_none()) &&
-                     !video_stream_props.name.is_empty()
-                  {
+                  // 1. Try to extract year from title if date is missing
+                  if video_stream_props.details.as_ref().and_then(|d| d.release_date.as_ref()).is_none() && !video_stream_props.name.is_empty() {
+                      let meta = ptt_parse_title(&video_stream_props.name);
+                      if let Some(year) = meta.year {
+                          if video_stream_props.details.is_none() {
+                              video_stream_props.details = Some(VideoStreamDetailProperties::default());
+                          }
+                          if let Some(details) = video_stream_props.details.as_mut() {
+                              details.release_date = Some(format!("{year}-01-01").into());
+                              properties_updated = true;
+                          }
+                      }
+                  }
+
+                  let has_tmdb = video_stream_props.tmdb.is_some();
+                  let has_date = video_stream_props.details.as_ref().and_then(|d| d.release_date.as_ref()).is_some();
+                  
+                  if (!has_tmdb || !has_date) && !video_stream_props.name.is_empty() {
+                      let reason = if !has_tmdb && !has_date { "missing_tmdb_and_date" } 
+                                   else if !has_tmdb { "missing_tmdb" } 
+                                   else { "missing_date" };
+                      
+                      debug!("Resolving TMDB for VOD '{}' (ID: {}). Reason: {}", video_stream_props.name, provider_id, reason);
+
+                      // Pass the existing TMDB ID if we have it, to avoid unnecessary search by title
                       if let Some(meta) = meta_resolver
-                        .resolve_from_title(&video_stream_props.name, true)
+                        .resolve_from_title(&video_stream_props.name, video_stream_props.tmdb, true)
                         .await
                         {
                              let mut changed = false;
@@ -196,9 +217,14 @@ pub async fn playlist_resolve_vod(
                         }
                   }
              } else if !pli.has_details() && !pli.header.name.is_empty() {
-                  // Case where we don't have details yet and didn't fetch them (resolve_movies=false)
-                  // but we want to resolve tmdb based on playlist title
-                  if let Some(meta) = meta_resolver.resolve_from_title(&pli.header.name, true).await {
+                  // Fallback for items with absolutely no details, try to parse title first
+                  let meta_title = ptt_parse_title(&pli.header.name);
+                  
+                  // Only if title parsing fails or we absolutely need TMDB ID, we call the API
+                  // But usually we want TMDB ID.
+                  debug!("Resolving TMDB for VOD '{}' (ID: {}). Reason: missing_details", pli.header.name, provider_id);
+                  
+                  if let Some(meta) = meta_resolver.resolve_from_title(&pli.header.name, None, true).await {
                       // Create partial properties
                       let mut props = VideoStreamProperties {
                           name: pli.header.name.clone(),
@@ -209,10 +235,12 @@ pub async fn playlist_resolve_vod(
                           rating: None, rating_5based: None, stream_type: Some("movie".intern()), trailer: None, tmdb: None, is_adult: 0, details: None
                       };
                       props.tmdb = meta.tmdb_id();
-                       if let Some(year) = meta.year() {
+                       // Use year from either PTT (from title) or TMDB result
+                       let year = meta.year().or(meta_title.year);
+                       if let Some(y) = year {
                            props.details = Some(VideoStreamDetailProperties {
-                                release_date: Some(format!("{year}-01-01").into()),
-                                ..VideoStreamDetailProperties::default() // You might need a Default impl for VideoStreamDetailProperties or fill all fields
+                                release_date: Some(format!("{y}-01-01").into()),
+                                ..VideoStreamDetailProperties::default()
                            });
                        }
                       
@@ -224,113 +252,117 @@ pub async fn playlist_resolve_vod(
 
 
         // 2. FFprobe Analysis if enabled and needed
-        // Determine if we need to probe (if details exist but video/audio info is missing)
-        let needs_probe = do_probe
-            && match pli.header.additional_properties.as_ref() {
-                Some(StreamProperties::Video(props)) => props
-                    .details
-                    .as_ref()
-                    .map_or(true, |d| !MediaQuality::is_valid_media_info(d.video.as_deref()) || !MediaQuality::is_valid_media_info(d.audio.as_deref())),
-                None => true, // If we didn't fetch API details above (e.g. resolve_movies=false), we might still want to probe
+        if do_probe {
+            let mut missing_info = Vec::new();
+            let needs_probe = match pli.header.additional_properties.as_ref() {
+                Some(StreamProperties::Video(props)) => {
+                    let details = props.details.as_ref();
+                    let missing_video = !MediaQuality::is_valid_media_info(details.and_then(|d| d.video.as_deref()));
+                    let missing_audio = !MediaQuality::is_valid_media_info(details.and_then(|d| d.audio.as_deref()));
+                    
+                    if missing_video { missing_info.push("video"); }
+                    if missing_audio { missing_info.push("audio"); }
+                    
+                    !missing_info.is_empty()
+                },
+                None => {
+                    missing_info.push("all_details");
+                    true 
+                }, 
                 _ => false,
             };
 
-        if needs_probe {
-            if let Some(provider_mgr) = provider_manager {
-                let ffprobe_timeout = app_config
-                    .config
-                    .load()
-                    .video
-                    .as_ref()
-                    .and_then(|v| v.ffprobe_timeout)
-                    .unwrap_or(60);
+            if needs_probe {
+                if let Some(provider_mgr) = provider_manager {
+                    debug!("Probing VOD '{}' (ID: {}). Missing: [{}]", pli.header.name, provider_id, missing_info.join(", "));
 
-                // Try acquire connection
-                // Uses 0.0.0.0 as we are internal
-                let dummy_addr = "127.0.0.1:0".parse().unwrap();
+                    let ffprobe_timeout = app_config
+                        .config
+                        .load()
+                        .video
+                        .as_ref()
+                        .and_then(|v| v.ffprobe_timeout)
+                        .unwrap_or(60);
 
-                // CRITICAL: Check connection limit before probing
-                if let Some(handle) = provider_mgr
-                    .acquire_connection_with_grace_override(&input_name_arc, &dummy_addr, false)
-                    .await
-                {
-                    let url = pli.header.url.as_ref();
-                    let provider_url = if let Some(_alloc) = handle.allocation.get_provider_config()
+                    // Try acquire connection
+                    let dummy_addr = "127.0.0.1:0".parse().unwrap();
+
+                    // CRITICAL: Check connection limit before probing
+                    if let Some(handle) = provider_mgr
+                        .acquire_connection_with_grace_override(&input_name_arc, &dummy_addr, false)
+                        .await
                     {
-                        url.to_string()
-                    } else {
-                        url.to_string()
-                    };
-
-                    crate::utils::debug_if_enabled!(
-                        "Probing stream quality for {}",
-                        shared::utils::sanitize_sensitive_info(&provider_url)
-                    );
-
-                    // Probe with ffmpeg
-                    let analyze_duration = 10_000_000; // 10s default
-                    let probe_size = 10_000_000; // 10MB default
-                    let user_agent = app_config.config.load().default_user_agent.clone();
-
-                    if let Some((_quality, raw_video, raw_audio)) = crate::utils::ffmpeg::probe_url(
-                        &provider_url,
-                        user_agent.as_deref(),
-                        analyze_duration,
-                        probe_size,
-                        ffprobe_timeout,
-                    )
-                    .await
-                    {
-                        // Update PlaylistItem with quality info
-                        if pli.header.additional_properties.is_none() {
-                            // Create basic properties if missing
-                            let mut props = VideoStreamProperties {
-                                  name: pli.header.name.clone(),
-                                  category_id: pli.header.category_id,
-                                  stream_id: pli.header.virtual_id, 
-                                  stream_icon: pli.header.logo.clone(),
-                                  direct_source: "".into(), custom_sid: None, added: "".into(), container_extension: "".into(),
-                                  rating: None, rating_5based: None, stream_type: None, trailer: None, tmdb: None, is_adult: 0, details: None
-                              };
-                            // Try metadata fallback for bare items if not already done
-                            if resolve_tmdb_missing {
-                                if let Some(meta) = meta_resolver.resolve_from_title(&props.name, true).await
-                                {
-                                    props.tmdb = meta.tmdb_id();
-                                }
-                            }
-                            pli.header.additional_properties =
-                                Some(StreamProperties::Video(Box::new(props)));
-                        }
-
-                        if let Some(StreamProperties::Video(props)) =
-                            pli.header.additional_properties.as_mut()
+                        let url = pli.header.url.as_ref();
+                        let provider_url = if let Some(_alloc) = handle.allocation.get_provider_config()
                         {
-                            if props.details.is_none() {
-                                // Default implementation required for VideoStreamDetailProperties
-                                // Assuming we fill minimal defaults
-                                props.details = Some(VideoStreamDetailProperties::default());
+                            url.to_string()
+                        } else {
+                            url.to_string()
+                        };
+
+                        // Probe with ffmpeg
+                        let analyze_duration = 10_000_000; // 10s default
+                        let probe_size = 10_000_000; // 10MB default
+                        let user_agent = app_config.config.load().default_user_agent.clone();
+
+                        if let Some((_quality, raw_video, raw_audio)) = crate::utils::ffmpeg::probe_url(
+                            &provider_url,
+                            user_agent.as_deref(),
+                            analyze_duration,
+                            probe_size,
+                            ffprobe_timeout,
+                        )
+                        .await
+                        {
+                            // Update PlaylistItem with quality info
+                            if pli.header.additional_properties.is_none() {
+                                // Create basic properties if missing
+                                let mut props = VideoStreamProperties {
+                                      name: pli.header.name.clone(),
+                                      category_id: pli.header.category_id,
+                                      stream_id: pli.header.virtual_id, 
+                                      stream_icon: pli.header.logo.clone(),
+                                      direct_source: "".into(), custom_sid: None, added: "".into(), container_extension: "".into(),
+                                      rating: None, rating_5based: None, stream_type: None, trailer: None, tmdb: None, is_adult: 0, details: None
+                                  };
+                                // Try metadata fallback for bare items if not already done
+                                if resolve_tmdb_missing {
+                                    if let Some(meta) = meta_resolver.resolve_from_title(&props.name, None, true).await
+                                    {
+                                        props.tmdb = meta.tmdb_id();
+                                    }
+                                }
+                                pli.header.additional_properties =
+                                    Some(StreamProperties::Video(Box::new(props)));
                             }
 
-                            if let Some(details) = props.details.as_mut() {
-                                // OVERWRITE existing fields with FFprobe data
-                                if let Some(v) = raw_video {
-                                    details.video = Some(v.to_string().into());
+                            if let Some(StreamProperties::Video(props)) =
+                                pli.header.additional_properties.as_mut()
+                            {
+                                if props.details.is_none() {
+                                    props.details = Some(VideoStreamDetailProperties::default());
                                 }
-                                if let Some(a) = raw_audio {
-                                    details.audio = Some(a.to_string().into());
+
+                                if let Some(details) = props.details.as_mut() {
+                                    // OVERWRITE existing fields with FFprobe data
+                                    if let Some(v) = raw_video {
+                                        details.video = Some(v.to_string().into());
+                                    }
+                                    if let Some(a) = raw_audio {
+                                        details.audio = Some(a.to_string().into());
+                                    }
+                                    properties_updated = true;
                                 }
-                                properties_updated = true;
                             }
                         }
-                    }
 
-                    provider_mgr.release_handle(&handle).await;
-                } else {
-                    warn!("Processing ABORTED for VOD {}: No provider connection available for probe. Will retry next update.", pli.header.name);
-                    // CRITICAL Requirement: Abort processing for this item if no connection, so it stays "incomplete"
-                    // and is retried next time.
-                    continue;
+                        provider_mgr.release_handle(&handle).await;
+                    } else {
+                        warn!("Processing ABORTED for VOD {}: No provider connection available for probe. Will retry next update.", pli.header.name);
+                        // CRITICAL Requirement: Abort processing for this item if no connection, so it stays "incomplete"
+                        // and is retried next time.
+                        continue;
+                    }
                 }
             }
         }

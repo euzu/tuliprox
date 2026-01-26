@@ -4,6 +4,7 @@ use shared::model::{LibraryConfigDto, LibraryContentType, LibraryMetadataFormat}
 use std::path::PathBuf;
 use std::sync::Arc;
 use shared::utils::{default_metadata_path, Internable};
+use crate::utils::make_path_absolute;
 
 #[derive(Debug, Clone, Default)]
 pub struct LibraryScanDirectory {
@@ -55,11 +56,16 @@ pub struct LibraryConfig {
 }
 
 impl LibraryConfig {
-    pub fn prepare(&mut self) -> Result<(), TuliproxError> {
+    pub fn prepare(&mut self, working_dir: &str) -> Result<(), TuliproxError> {
         if self.enabled {
             if self.metadata.path.is_empty() {
                 self.metadata.path = default_metadata_path();
             }
+
+            // Resolve metadata path to absolute path based on working_dir
+            let meta_path = PathBuf::from(&self.metadata.path);
+            self.metadata.path = make_path_absolute(&meta_path, working_dir).to_string_lossy().to_string();
+
             for dir in &mut self.scan_directories {
                 match PathBuf::from(&dir.path).canonicalize() {
                     Ok(path_buf) => {

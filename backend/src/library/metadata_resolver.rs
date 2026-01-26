@@ -52,12 +52,16 @@ impl MetadataResolver {
     }
 
     /// Public helper to resolve metadata purely from a title string (Main entry point for Xtream Processors)
-    pub async fn resolve_from_title(&self, title: &str, is_movie: bool) -> Option<MediaMetadata> {
+    pub async fn resolve_from_title(&self, title: &str, known_tmdb_id: Option<u32>, is_movie: bool) -> Option<MediaMetadata> {
         // If the title is empty or just whitespace, we can't search.
         if title.trim().is_empty() {
              return None;
         }
-        let metadata = ptt_parse_title(title);
+        let mut metadata = ptt_parse_title(title);
+        // Inject the known ID if available to prevent unnecessary name search
+        if known_tmdb_id.is_some() {
+            metadata.tmdb = known_tmdb_id;
+        }
         self.resolve_internal(is_movie, &metadata, None).await
     }
 
@@ -260,7 +264,7 @@ mod tests {
             .unwrap_or_else(|_| reqwest::Client::new());
         let resolver = MetadataResolver::from_config(&config, client, MetadataStorage::new(PathBuf::from("/tmp")));
         
-        let metadata = resolver.resolve_from_title("Inception.2010", true).await;
+        let metadata = resolver.resolve_from_title("Inception.2010", None, true).await;
         assert!(metadata.is_some());
 
         if let Some(MediaMetadata::Movie(movie)) = metadata {
