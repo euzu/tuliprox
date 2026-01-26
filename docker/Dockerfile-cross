@@ -112,7 +112,7 @@ RUN ffmpeg -loop 1 -i ./resources/channel_unavailable.jpg -t 10 -r 1 -an \
      -vf "scale=1920:1080" \
      -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p \
      ./resources/user_account_expired.ts && \
-   ffmpeg -loop 1 -i ./resources/panel_api_provisioning.ppm -t 10 -r 1 -an \
+   ffmpeg -loop 1 -i ./resources/panel_api_provisioning.jpg -t 10 -r 1 -an \
      -vf "scale=1920:1080" \
      -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p \
      ./resources/panel_api_provisioning.ts
