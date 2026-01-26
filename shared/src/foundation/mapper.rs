@@ -1578,6 +1578,12 @@ impl Expression {
                     }
                     expr.expression.eval(ctx, accessor);
                 }
+                if let Some(key_var) = &expr.key_var {
+                    ctx.variables.remove(key_var);
+                }
+                if let Some(value_var) = &expr.value_var {
+                    ctx.variables.remove(value_var);
+                }
                 Undefined
             }
             Expression::Block(expressions) => {

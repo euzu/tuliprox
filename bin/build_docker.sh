@@ -204,9 +204,10 @@ for IMAGE_NAME in "${!MULTI_PLATFORM_IMAGES[@]}"; do
     echo "🎯 Building multi-platform image: ${IMAGE_NAME} with target ${BUILD_TARGET}"
     
     # Prepare tags based on branch
-    DOCKER_TAGS="-t ghcr.io/${REPO_OWNER}/${IMAGE_NAME}:${VERSION} -t ghcr.io/${REPO_OWNER}/${IMAGE_NAME}:${TAG_SUFFIX}"
-    BUILT_IMAGES+=("ghcr.io/${REPO_OWNER}/${IMAGE_NAME}:${VERSION}")
-    BUILT_IMAGES+=("ghcr.io/${REPO_OWNER}/${IMAGE_NAME}:${TAG_SUFFIX}")
+    REPO_OWNER_LC="${REPO_OWNER,,}"
+    DOCKER_TAGS="-t ghcr.io/${REPO_OWNER_LC}/${IMAGE_NAME}:${VERSION} -t ghcr.io/${REPO_OWNER_LC}/${IMAGE_NAME}:${TAG_SUFFIX}"
+    BUILT_IMAGES+=("ghcr.io/${REPO_OWNER_LC}/${IMAGE_NAME}:${VERSION}")
+    BUILT_IMAGES+=("ghcr.io/${REPO_OWNER_LC}/${IMAGE_NAME}:${TAG_SUFFIX}")
 
     # Build and push multi-platform image directly with cache
     BUILDX_CACHE_ARGS=()

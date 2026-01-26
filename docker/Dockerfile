@@ -93,31 +93,14 @@ WORKDIR /src
 COPY resources ./resources
 
 # Combine ffmpeg commands into a single layer to reduce image size
-RUN ffmpeg -y -nostdin -loop 1 -i ./resources/channel_unavailable.jpg -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=44100 \
-       -c:v libx264 -r 30 -g 30 -keyint_min 30 -sc_threshold 0 -pix_fmt yuv420p -preset veryfast -crf 23 \
-       -c:a aac -b:a 128k -ac 2 \
-       -t 10 -muxrate 2000k \
-       -f mpegts ./resources/channel_unavailable.ts && \
- ffmpeg -y -nostdin -loop 1 -i ./resources/user_connections_exhausted.jpg -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=44100 \
-       -c:v libx264 -r 30 -g 30 -keyint_min 30 -sc_threshold 0 -pix_fmt yuv420p -preset veryfast -crf 23 \
-       -c:a aac -b:a 128k -ac 2 \
-       -t 10 -muxrate 2000k \
-       -f mpegts ./resources/user_connections_exhausted.ts && \
- ffmpeg -y -nostdin -loop 1 -i ./resources/provider_connections_exhausted.jpg -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=44100 \
-       -c:v libx264 -r 30 -g 30 -keyint_min 30 -sc_threshold 0 -pix_fmt yuv420p -preset veryfast -crf 23 \
-       -c:a aac -b:a 128k -ac 2 \
-       -t 10 -muxrate 2000k \
-       -f mpegts ./resources/provider_connections_exhausted.ts && \
- ffmpeg -y -nostdin -loop 1 -i ./resources/user_account_expired.jpg -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=44100 \
-       -c:v libx264 -r 30 -g 30 -keyint_min 30 -sc_threshold 0 -pix_fmt yuv420p -preset veryfast -crf 23 \
-       -c:a aac -b:a 128k -ac 2 \
-       -t 10 -muxrate 2000k \
-       -f mpegts ./resources/user_account_expired.ts && \
- ffmpeg -y -nostdin -loop 1 -i ./resources/panel_api_provisioning.jpg -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=44100 \
-       -c:v libx264 -r 30 -g 30 -keyint_min 30 -sc_threshold 0 -pix_fmt yuv420p -preset veryfast -crf 23 \
-       -c:a aac -b:a 128k -ac 2 \
-       -t 10 -muxrate 2000k \
-       -f mpegts ./resources/panel_api_provisioning.ts
+RUN for img in channel_unavailable user_connections_exhausted provider_connections_exhausted user_account_expired panel_api_provisioning; do \
+      ffmpeg -y -nostdin -loop 1 -i ./resources/${img}.jpg \
+        -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=44100 \
+        -c:v libx264 -r 30 -g 30 -keyint_min 30 -sc_threshold 0 -pix_fmt yuv420p -preset veryfast -crf 23 \
+        -c:a aac -b:a 128k -ac 2 \
+        -t 10 -muxrate 2000k \
+        -f mpegts ./resources/${img}.ts || exit 1; \
+    done
 
 # -----------------------------------------------------------------
 # Stage 4: Prepare timezone data

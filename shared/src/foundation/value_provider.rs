@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use log::{error, trace};
-use crate::model::{FieldGetAccessor, FieldSetAccessor, ItemField, PlaylistItem, PlaylistItemType};
+use crate::model::{FieldGetAccessor, FieldSetAccessor, ItemField, PlaylistItem};
 use crate::utils::{deunicode_string, Internable};
 
 #[macro_export]
@@ -30,16 +30,16 @@ macro_rules! set_genre {
             } else {
                 let empty_str = "".intern();
                 match $header.item_type {
-                    PlaylistItemType::LocalVideo
-                    | PlaylistItemType::Video => {
+                    $crate::model::PlaylistItemType::LocalVideo
+                    | $crate::model::PlaylistItemType::Video => {
                         $header.additional_properties = Some($crate::model::StreamProperties::Video(Box::from($crate::model::VideoStreamProperties {
                             name: $header.title.clone(),
                             category_id: $header.category_id,
                             stream_id: $header.virtual_id,
                             stream_icon: $header.logo.clone(),
-                            direct_source: Arc::clone(&empty_str),
+                            direct_source: ::std::sync::Arc::clone(&empty_str),
                             custom_sid: None,
-                            added: Arc::clone(&empty_str),
+                            added: ::std::sync::Arc::clone(&empty_str),
                             container_extension: $header.get_container_extension().unwrap_or_else(|| Arc::clone(&empty_str)),
                             rating: None,
                             rating_5based: None,
@@ -54,16 +54,16 @@ macro_rules! set_genre {
                         })));
                         true
                     }
-                    PlaylistItemType::LocalSeriesInfo
-                    | PlaylistItemType::SeriesInfo => {
+                    $crate::model::PlaylistItemType::LocalSeriesInfo
+                    | $crate::model::PlaylistItemType::SeriesInfo => {
                         $header.additional_properties = Some($crate::model::StreamProperties::Series(Box::from($crate::model::SeriesStreamProperties {
                             name: $header.title.clone(),
                             category_id: $header.category_id,
                             series_id: $header.virtual_id,
                             backdrop_path: None,
-                            cast: Arc::clone(&empty_str),
-                            cover: Arc::clone(&empty_str),
-                            director: Arc::clone(&empty_str),
+                            cast: ::std::sync::Arc::clone(&empty_str),
+                            cover: ::std::sync::Arc::clone(&empty_str),
+                            director: ::std::sync::Arc::clone(&empty_str),
                             episode_run_time: None,
                             genre: Some($value.intern()),
                             last_modified: None,
@@ -71,7 +71,7 @@ macro_rules! set_genre {
                             rating: 0.0,
                             rating_5based: 0.0,
                             release_date: None,
-                            youtube_trailer: Arc::clone(&empty_str),
+                            youtube_trailer: ::std::sync::Arc::clone(&empty_str),
                             tmdb: None,
                             details: None,
                         })));
@@ -89,9 +89,9 @@ macro_rules! get_genre {
         $header.additional_properties.as_ref().and_then(|props| {
             match props {
                 $crate::model::StreamProperties::Video(v) => {
-                    v.details.as_ref().and_then(|details| details.genre.as_ref().map(Arc::clone))
+                    v.details.as_ref().and_then(|details| details.genre.as_ref().map(::std::sync::Arc::clone))
                 }
-                $crate::model::StreamProperties::Series(s) => { s.genre.as_ref().map(Arc::clone) }
+                $crate::model::StreamProperties::Series(s) => { s.genre.as_ref().map(::std::sync::Arc::clone) }
                 $crate::model::StreamProperties::Live(_)
                 | $crate::model::StreamProperties::Episode(_) => None
             }
