@@ -18,6 +18,7 @@ docker/binaries
 
 # Ignore documentation files
 AGENTS.md
+PLANS.md
 
 *.m3u
 
