@@ -408,14 +408,3 @@ pub fn xmltv_api_register() -> axum::Router<Arc<AppState>> {
         )
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::api::endpoints::xmltv_api::format_xmltv_time;
-    use crate::utils::format_xmltv_time_utc;
-
-    #[test]
-    pub fn test_format_xmltv_time() {
-        println!("{}", format_xmltv_time(1769107887));
-        println!("{}", format_xmltv_time_utc(1769107887));
-    }
-}

@@ -10,19 +10,22 @@ macro_rules! set_genre {
                 match additional_properties {
                     $crate::model::StreamProperties::Video(v) => {
                         if let Some(details) = &mut v.details {
-                            details.genre = Some($value.intern())
+                            details.genre = Some($value.intern());
+                            true
                         } else {
                             v.details = Some($crate::model::VideoStreamDetailProperties {
                                 genre: Some($value.intern()),
                                 ..$crate::model::VideoStreamDetailProperties::default()
-                            })
+                            });
+                            true
                         }
                     }
                     $crate::model::StreamProperties::Series(s) => {
-                        s.genre = Some($value.intern())
+                        s.genre = Some($value.intern());
+                        true
                     }
                     $crate::model::StreamProperties::Live(_)
-                    | $crate::model::StreamProperties::Episode(_) => {}
+                    | $crate::model::StreamProperties::Episode(_) => false,
                 }
             } else {
                 let empty_str = "".intern();
@@ -49,8 +52,10 @@ macro_rules! set_genre {
                                 ..$crate::model::VideoStreamDetailProperties::default()
                             }),
                         })));
+                        true
                     }
-                    PlaylistItemType::SeriesInfo => {
+                    PlaylistItemType::LocalSeriesInfo
+                    | PlaylistItemType::SeriesInfo => {
                         $header.additional_properties = Some($crate::model::StreamProperties::Series(Box::from($crate::model::SeriesStreamProperties {
                             name: $header.title.clone(),
                             category_id: $header.category_id,
@@ -70,12 +75,11 @@ macro_rules! set_genre {
                             tmdb: None,
                             details: None,
                         })));
+                        true
                     }
-                    PlaylistItemType::LocalSeriesInfo => {}
-                    _ => {}
+                    _ => false,
                 }
             }
-
     };
 }
 
@@ -119,7 +123,7 @@ pub fn set_field_value(pli: &mut PlaylistItem, field: ItemField, value: String) 
         ItemField::Name => header.name = value.intern(),
         ItemField::Title => header.title = value.intern(),
         ItemField::Genre => {
-            set_genre!(header, value);
+            return set_genre!(header, value);
         }
         ItemField::Url => header.url = value.intern(),
         ItemField::Input => header.input_name = value.intern(),

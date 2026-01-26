@@ -63,6 +63,7 @@
 - **Accent-Independent Matching**: Integrated `match_as_ascii` flag for robust text matching (e.g., "Cinema" matches "Cinéma").
 - **Deunicoding Support**: `ValueProvider` and `ValueAccessor` now support on-the-fly deunicoding.
 - **Flexible Sorting**: Added `order: none` support to retain source order in mappings.
+- **Mapper Loop enhancement**: Updated `for_each` syntax to `variable.for_each((key, value) => { ... })`. Added support for `_` ignored variables in loop.
 
 ## 💻 WebUI & API
 - **Source Editor Integration**: Redesigned UI for global input management and hot-reloading.
@@ -70,6 +71,8 @@
 - **Performance Monitoring**: Added CPU usage display to the dashboard.
 - **Stream Table Enhancements**: Added "Copy-To-Clipboard" functions and improved connection monitoring.
 - **UX Improvements**: Implemented API-user category selection and better session tracking for HLS.
+- **Filter View**: Compacted pretty printing for filters.
+- **Mapper View**: Updated to support new `for_each` syntax.
 - Added **Stream Buffer** settings (Enabled, Size) to Reverse Proxy configuration UI.
 - Added **TMDB** settings (Rate Limit, Cache Duration, Language) and **Metadata Formats** (NFO support) to Library configuration UI.
 

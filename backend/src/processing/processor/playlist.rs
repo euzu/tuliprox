@@ -9,8 +9,8 @@ use tokio::sync::{Mutex, OwnedRwLockWriteGuard, RwLock};
 use tokio::task::JoinSet;
 
 use crate::api::model::{EventManager, EventMessage, PlaylistStorageState, UpdateGuard};
-use crate::messaging::{send_message};
-use crate::model::messaging::{MessageContent};
+use crate::messaging::send_message;
+use crate::model::messaging::MessageContent;
 use crate::model::Epg;
 
 
@@ -35,17 +35,17 @@ use crate::utils::{debug_if_enabled, trace_if_enabled};
 use futures::StreamExt;
 use indexmap::IndexMap;
 use log::{debug, error, info, log_enabled, warn, Level};
+use shared::concat_string;
 use shared::error::{get_errors_notify_message, notify_err, TuliproxError};
-use shared::foundation::{Filter};
+use shared::foundation::{get_field_value, set_field_value, ValueAccessor, ValueProvider};
+use shared::foundation::Filter;
 use shared::model::xtream_const::XTREAM_CLUSTER;
+use shared::model::UUIDType;
 use shared::model::{CounterModifier, FieldGetAccessor, FieldSetAccessor, InputType, ItemField,
                     PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistUpdateState,
                     ProcessingOrder, XtreamCluster};
 use shared::utils::{create_alias_uuid, default_as_default, interner_gc, Internable};
 use std::time::Instant;
-use shared::concat_string;
-use shared::foundation::{get_field_value, set_field_value, ValueAccessor, ValueProvider};
-use shared::model::UUIDType;
 
 fn is_valid(pli: &PlaylistItem, filter: &Filter, match_as_ascii: bool) -> bool {
     let provider = ValueProvider { pli, match_as_ascii };
@@ -867,7 +867,7 @@ pub async fn exec_processing(client: &reqwest::Client, app_config: Arc<AppConfig
                              event_manager: Option<Arc<EventManager>>, playlist_state: Option<Arc<PlaylistStorageState>>,
                              update_guard: Option<UpdateGuard>,
                              disabled_headers: Option<ReverseProxyDisabledHeaderConfig>) {
-        let _guard = if let Some(guard) = update_guard {
+    let _guard = if let Some(guard) = update_guard {
         if let Some(permit) = guard.try_playlist() {
             Some(permit)
         } else {

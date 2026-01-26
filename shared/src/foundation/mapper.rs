@@ -1,7 +1,8 @@
 #![allow(clippy::empty_docs)]
 
-use crate::error::{info_err_res, info_err, TuliproxError};
+use crate::error::{info_err, info_err_res, TuliproxError};
 use crate::foundation::mapper::EvalResult::{AnyValue, Failure, Named, Number, Undefined, Value};
+use crate::foundation::value_provider::ValueAccessor;
 use crate::model::{PatternTemplate, PlaylistItemType, TemplateValue};
 use crate::utils::{Capitalize, Internable};
 use log::{debug, trace};
@@ -17,7 +18,6 @@ use std::fmt::Write;
 use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::Arc;
-use crate::foundation::value_provider::ValueAccessor;
 
 #[derive(Parser)]
 #[grammar_inline = r##"
@@ -211,7 +211,7 @@ pub enum Expression {
     Assignment { target: AssignmentTarget, expr: ExprId },
     MatchBlock(Vec<MatchCase>),
     MapBlock { key: MapKey, cases: Vec<MapCase> },
-    ForEachBlock{ key: ForEachKey, expr: ForEachExpr },
+    ForEachBlock { key: ForEachKey, expr: ForEachExpr },
     NullValue,
     Block(Vec<ExprId>),
 }
@@ -233,7 +233,7 @@ impl PartialEq for Expression {
             (Assignment { target: t1, expr: e1 }, Assignment { target: t2, expr: e2 }) => t1 == t2 && e1 == e2,
             (MatchBlock(m1), MatchBlock(m2)) => m1 == m2,
             (MapBlock { key: k1, cases: c1 }, MapBlock { key: k2, cases: c2 }) => k1 == k2 && c1 == c2,
-            (ForEachBlock{ key: k1, expr: c1 }, ForEachBlock { key: k2, expr: c2 }) => k1 == k2 && c1 == c2,
+            (ForEachBlock { key: k1, expr: c1 }, ForEachBlock { key: k2, expr: c2 }) => k1 == k2 && c1 == c2,
             (NullValue, NullValue) => true,
             (Block(b1), Block(b2)) => b1 == b2,
             _ => false,
@@ -653,11 +653,11 @@ impl MapperScript {
         let mut inner = pair.into_inner();
         let key = Self::parse_for_each_param(inner.next().unwrap())?;
         let val = Self::parse_for_each_param(inner.next().unwrap())?;
-        
+
         if key.is_none() && val.is_none() {
-             return info_err_res!("At least one parameter must be named in for_each loop");
+            return info_err_res!("At least one parameter must be named in for_each loop");
         }
-        
+
         Ok((key, val))
     }
 
@@ -676,23 +676,23 @@ impl MapperScript {
         };
 
         if let Some(params_pair) = pairs.next() { // .for_each
-             let (key_var, value_var) = Self::parse_for_each_params(params_pair)?;
-             
-             let expr_pair = pairs.next().unwrap();
-             if let Some(expr) = MapperScript::parse_expression(expr_pair, expressions)? {
+            let (key_var, value_var) = Self::parse_for_each_params(params_pair)?;
+
+            let expr_pair = pairs.next().unwrap();
+            if let Some(expr) = MapperScript::parse_expression(expr_pair, expressions)? {
                 expressions.push(expr);
                 let expr_id = ExprId(expressions.len() - 1);
-                return Ok(Some(Expression::ForEachBlock { 
-                    key, 
+                return Ok(Some(Expression::ForEachBlock {
+                    key,
                     expr: ForEachExpr {
                         key_var,
                         value_var,
-                        expression: expr_id
-                    } 
-                }))
-             }
+                        expression: expr_id,
+                    },
+                }));
+            }
         }
-        
+
         Ok(None)
     }
 }
@@ -908,7 +908,7 @@ impl<'a> MapperContext<'a> {
         }
         Ok(())
     }
-    
+
     fn validate_for_each_block(&mut self, identifiers: &mut HashSet<String>, key: &ForEachKey, expr: &ForEachExpr) -> Result<(), TuliproxError> {
         match key {
             ForEachKey::Identifier(ident)
@@ -919,23 +919,23 @@ impl<'a> MapperContext<'a> {
             }
         }
         let mut local_identifiers = identifiers.clone();
-        
+
         if let Some(key_var) = &expr.key_var {
             if local_identifiers.contains(key_var) {
-                 return info_err_res!("For each key variable shadows existing identifier {}", key_var);
+                return info_err_res!("For each key variable shadows existing identifier {}", key_var);
             }
             local_identifiers.insert(key_var.clone());
         }
-        
+
         if let Some(value_var) = &expr.value_var {
-             if local_identifiers.contains(value_var) {
-                 return info_err_res!("For each value variable shadows existing identifier {}", value_var);
+            if local_identifiers.contains(value_var) {
+                return info_err_res!("For each value variable shadows existing identifier {}", value_var);
             }
             local_identifiers.insert(value_var.clone());
         }
 
         self.validate_expr(expr.expression, &mut local_identifiers)?;
-        
+
         Ok(())
     }
 }
@@ -1231,7 +1231,7 @@ impl Expression {
                             let string = extract_evaluated_arg_value!(evaluated_args, 0);
                             let pattern = extract_evaluated_arg_value!(evaluated_args, 1);
 
-                            
+
                             if let (Some(text), Some(pat)) = (string, pattern) {
                                 match Regex::new(pat) {
                                     Ok(re) => Named(re.split(text).enumerate().map(|(i, s)| (i.to_string(), s.trim().to_string())).collect()),
@@ -1240,7 +1240,7 @@ impl Expression {
                             } else {
                                 Undefined
                             }
-                        },
+                        }
                         BuiltInFunction::Print => {
                             trace!("[MapperScript] {}", concat_args(&evaluated_args).join(""));
                             Undefined
@@ -1388,7 +1388,7 @@ impl Expression {
                             let group_name = extract_evaluated_arg_value!(evaluated_args, 0);
                             if let Some(group) = group_name {
                                 let item_type = accessor.pli.header.item_type;
-                                if item_type != PlaylistItemType::Series &&  item_type != PlaylistItemType::LocalSeries {
+                                if item_type != PlaylistItemType::Series && item_type != PlaylistItemType::LocalSeries {
                                     let mut pli = accessor.pli.clone();
                                     pli.header.group = group.intern();
                                     pli.header.uuid = crate::utils::create_alias_uuid(&accessor.pli.header.uuid, group);
@@ -1529,7 +1529,7 @@ impl Expression {
                 }
                 Undefined
             }
-            Expression::ForEachBlock {key, expr} => {
+            Expression::ForEachBlock { key, expr } => {
                 let key_value = match key {
                     ForEachKey::Identifier(ident) => {
                         if !ctx.has_var(ident) {
@@ -1547,14 +1547,24 @@ impl Expression {
                             None => Failure(format!("Variable with name {name} not found.")),
                             Some(value) => match value {
                                 AnyValue | Failure(_) => value.clone(),
-                                Named(_) => Failure(format!("Variable with name {name} has no field {field} that returns a Named list.")),
+                                Named(values) => {
+                                    let filtered: Vec<(String, String)> = values.iter()
+                                        .filter(|(k, _)| k == field)
+                                        .map(|(k, v)| (k.clone(), v.clone()))
+                                        .collect();
+                                    if filtered.is_empty() {
+                                        Undefined
+                                    } else {
+                                        Named(filtered)
+                                    }
+                                }
                                 Undefined => Undefined,
-                                _ => Failure(format!("Variable with name {name} must be a list of values.")),
+                                _ => Failure(format!("Variable with name {name} must be a Named list.")),
                             },
                         }
                     }
                 };
-                
+
                 let values = match key_value {
                     Named(key_value) => key_value,
                     Failure(_) => return key_value,
@@ -1814,7 +1824,7 @@ mod tests {
                 name: "Series 1".to_string().into(),
                 item_type: PlaylistItemType::SeriesInfo,
                 additional_properties: Some(StreamProperties::Series(Box::new(SeriesStreamProperties {
-                        genre: Some("A, B, C".intern()),
+                    genre: Some("A, B, C".intern()),
                     ..SeriesStreamProperties::default()
                 }))),
                 ..Default::default()

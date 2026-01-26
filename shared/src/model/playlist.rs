@@ -410,8 +410,7 @@ macro_rules! generate_field_accessor_impl_for_playlist_item_header {
                         false
                     }
                 } else if bytes.eq_ignore_ascii_case(b"genre") {
-                    crate::set_genre!(self, value);
-                    true
+                    return crate::set_genre!(self, value);
                 } else {
                     false
                 }
