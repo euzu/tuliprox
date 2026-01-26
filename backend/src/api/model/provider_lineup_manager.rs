@@ -960,6 +960,7 @@ mod tests {
             priority,
             max_connections,
             exp_date: None,
+            enabled: true,
         }
     }
 

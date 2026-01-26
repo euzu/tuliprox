@@ -1,5 +1,5 @@
 use crate::error::{TuliproxError, TuliproxErrorKind};
-use crate::foundation::filter::{apply_templates_to_pattern, get_filter, Filter};
+use crate::foundation::{apply_templates_to_pattern, get_filter, Filter};
 use crate::model::{ItemField, PatternTemplate, TemplateValue};
 use crate::{handle_tuliprox_error_result_list, info_err, info_err_res};
 use regex::Regex;

@@ -194,7 +194,8 @@ async fn serve_epg_with_rewrites(
 
                 for programme in programmes {
                     let mut elem = BytesStart::new("programme");
-                    let (user_start, user_stop) = apply_user_offset(programme.start, programme.stop, epg_processing_options.offset_minutes);
+                    // We dont need to apply offset because the time contains the time zone offset as +00000
+                    let (user_start, user_stop) = (programme.start, programme.stop); // apply_user_offset(programme.start, programme.stop, epg_processing_options.offset_minutes);
                     elem.push_attribute(("start", format_xmltv_time_utc(user_start).as_str()));
                     elem.push_attribute(("stop", format_xmltv_time_utc(user_stop).as_str()));
                     elem.push_attribute(("channel", channel.id.as_ref()));
@@ -285,6 +286,8 @@ fn from_programme(stream_id: &Arc<str>, epg_id: &Arc<str>,  programme: &EpgProgr
     }
 }
 
+const DEFAULT_SHORT_EPG_LIMIT: u32 = 4;
+
 pub async fn serve_short_epg(
     app_state: &Arc<AppState>,
     epg_path: &Path,
@@ -295,6 +298,8 @@ pub async fn serve_short_epg(
     limit: u32,
 ) -> axum::response::Response {
     let short_epg = {
+        // It seems provider set limit to 4 if it is undefined oor 0.
+        let limit = if limit > 0 { limit} else { DEFAULT_SHORT_EPG_LIMIT };
         if file_exists_async(epg_path).await {
             if let Some(epg_channel) = get_epg_channel(app_state, channel_id, epg_path).await {
                 let epg_processing_options = get_epg_processing_options(app_state, user, target);
@@ -401,4 +406,16 @@ pub fn xmltv_api_register() -> axum::Router<Arc<AppState>> {
         .route(&format!("/{}/{{username}}/{{password}}/{{resource}}", storage_const::EPG_RESOURCE_PATH),
                axum::routing::get(epg_api_resource),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::api::endpoints::xmltv_api::format_xmltv_time;
+    use crate::utils::format_xmltv_time_utc;
+
+    #[test]
+    pub fn test_format_xmltv_time() {
+        println!("{}", format_xmltv_time(1769107887));
+        println!("{}", format_xmltv_time_utc(1769107887));
+    }
 }

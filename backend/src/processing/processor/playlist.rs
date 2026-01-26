@@ -36,7 +36,7 @@ use futures::StreamExt;
 use indexmap::IndexMap;
 use log::{debug, error, info, log_enabled, warn, Level};
 use shared::error::{get_errors_notify_message, notify_err, TuliproxError};
-use shared::foundation::filter::{get_field_value, set_field_value, Filter, ValueAccessor, ValueProvider};
+use shared::foundation::{Filter};
 use shared::model::xtream_const::XTREAM_CLUSTER;
 use shared::model::{CounterModifier, FieldGetAccessor, FieldSetAccessor, InputType, ItemField,
                     PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistUpdateState,
@@ -44,6 +44,7 @@ use shared::model::{CounterModifier, FieldGetAccessor, FieldSetAccessor, InputTy
 use shared::utils::{create_alias_uuid, default_as_default, interner_gc, Internable};
 use std::time::Instant;
 use shared::concat_string;
+use shared::foundation::{get_field_value, set_field_value, ValueAccessor, ValueProvider};
 use shared::model::UUIDType;
 
 fn is_valid(pli: &PlaylistItem, filter: &Filter, match_as_ascii: bool) -> bool {

@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use log::error;
 use futures_signals::signal::Mutable;
 use futures_signals::signal::SignalExt;
-use shared::foundation::filter::{get_filter, prepare_templates};
-use shared::foundation::mapper::MapperScript;
+use shared::foundation::{get_filter, prepare_templates};
+use shared::foundation::MapperScript;
 use shared::utils::{concat_path, concat_path_leading_slash};
 use crate::error::Error;
 

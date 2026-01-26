@@ -379,6 +379,7 @@ mod tests {
     use crate::utils::async_file_reader;
     use shared::model::{XtreamCluster, XtreamSeriesInfo};
     use std::fs;
+    use shared::utils::Internable;
 
     #[test]
     fn test_read_json_file_into_struct() {
@@ -400,7 +401,7 @@ mod tests {
     async fn test_read_json_stream_into_struct() -> std::io::Result<()> {
         if fs::exists("/tmp/vod_streams.json").unwrap_or(false) {
             let reader = Box::pin(async_file_reader(tokio::fs::File::open("/tmp/vod_streams.json").await?));
-            match map_to_xtream_streams(XtreamCluster::Video, reader, "test").await {
+            match map_to_xtream_streams(XtreamCluster::Video, reader, &"test".intern()).await {
                 Ok(_streams) => {
                     println!("{:?}", _streams.get(1));
                     println!("{:?}", _streams.get(100));

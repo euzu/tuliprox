@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use crate::info_err_res;
 use crate::error::{TuliproxError};
-use crate::foundation::filter::prepare_templates;
+use crate::foundation::prepare_templates;
 use crate::model::{ConfigInputDto, HdHomeRunDeviceOverview, PatternTemplate};
 use crate::model::config::target::ConfigTargetDto;
 use crate::utils::{arc_str_vec_serde, default_as_default, Internable};

@@ -37,7 +37,7 @@ pub struct LiveStreamProperties {
     pub is_adult: i32,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Default, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct VideoStreamDetailProperties {
     #[serde(default, with = "arc_str_option_serde")]
     pub kinopoisk_url: Option<Arc<str>>,
@@ -79,17 +79,9 @@ pub struct VideoStreamDetailProperties {
     pub duration_secs: Option<Arc<str>>,
     #[serde(default, with = "arc_str_option_serde")]
     pub duration: Option<Arc<str>>,
-    #[serde(
-        default,
-        serialize_with = "serialize_json_as_opt_string",
-        deserialize_with = "deserialize_json_as_opt_string"
-    )]
+    #[serde(default, serialize_with = "serialize_json_as_opt_string", deserialize_with = "deserialize_json_as_opt_string")]
     pub video: Option<Arc<str>>,
-    #[serde(
-        default,
-        serialize_with = "serialize_json_as_opt_string",
-        deserialize_with = "deserialize_json_as_opt_string"
-    )]
+    #[serde(default, serialize_with = "serialize_json_as_opt_string", deserialize_with = "deserialize_json_as_opt_string")]
     pub audio: Option<Arc<str>>,
     #[serde(default)]
     pub bitrate: u32,
@@ -99,7 +91,7 @@ pub struct VideoStreamDetailProperties {
     pub status: Option<Arc<str>>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Default, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct VideoStreamProperties {
     #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
     pub name: Arc<str>,
@@ -215,7 +207,7 @@ pub struct SeriesStreamDetailProperties {
     pub episodes: Option<Vec<SeriesStreamDetailEpisodeProperties>>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Default, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct SeriesStreamProperties {
     #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
     pub name: Arc<str>,

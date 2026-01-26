@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use crate::model::macros;
-use shared::foundation::filter::{CompiledRegex, Filter};
+use shared::foundation::{CompiledRegex, Filter};
 use shared::model::{ConfigFavouritesDto, ItemField, XtreamCluster};
 
 #[derive(Debug, Clone)]

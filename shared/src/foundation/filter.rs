@@ -2,6 +2,10 @@
 
 use pest_derive::Parser;
 
+use crate::error::{info_err_res, TuliproxError};
+use crate::info_err;
+pub use crate::model::{ItemField, PatternTemplate, PlaylistItemType, TemplateValue};
+use crate::utils::{DirectedGraph, Internable, CONSTANTS};
 use enum_iterator::all;
 use indexmap::IndexSet;
 use log::{error, log_enabled, trace, Level};
@@ -10,79 +14,7 @@ use pest::Parser;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
-use crate::error::{info_err_res, TuliproxError};
-use crate::info_err;
-pub use crate::model::{ItemField, PatternTemplate, PlaylistItem, PlaylistItemType, FieldGetAccessor, FieldSetAccessor, TemplateValue};
-use crate::utils::{deunicode_string, DirectedGraph, Internable, CONSTANTS};
-
-pub fn get_field_value(pli: &PlaylistItem, field: ItemField) -> Arc<str> {
-    let header = &pli.header;
-    match field {
-        ItemField::Group => Arc::clone(&header.group),
-        ItemField::Name => Arc::clone(&header.name),
-        ItemField::Title => Arc::clone(&header.title),
-        ItemField::Url => Arc::clone(&header.url),
-        ItemField::Input => Arc::clone(&header.input_name),
-        ItemField::Type => header.item_type.intern(),
-        ItemField::Caption => if header.title.is_empty() { Arc::clone(&header.name) } else { Arc::clone(&header.title) },
-    }
-}
-
-pub fn set_field_value(pli: &mut PlaylistItem, field: ItemField, value: String) -> bool {
-    let header = &mut pli.header;
-    match field {
-        ItemField::Group => header.group = value.intern(),
-        ItemField::Name => header.name = value.intern(),
-        ItemField::Title => header.title = value.intern(),
-        ItemField::Url => header.url = value.intern(),
-        ItemField::Input => header.input_name = value.intern(),
-        ItemField::Caption => {
-            header.title = value.intern();
-            header.name = header.title.clone();
-        }
-        ItemField::Type => {},
-    }
-    true
-}
-
-pub struct ValueProvider<'a> {
-    pub pli: &'a PlaylistItem,
-    pub match_as_ascii: bool,
-}
-
-impl ValueProvider<'_> {
-    pub fn get(&self, field: &str) -> Option<Arc<str>> {
-        let val = self.pli.header.get_field(field)?;
-        if self.match_as_ascii {
-            return Some(deunicode_string(&val).into_owned().into())
-        }
-        Some(val)
-    }
-}
-
-pub struct ValueAccessor<'a> {
-    pub pli: &'a mut PlaylistItem,
-    pub virtual_items: Vec<(String, PlaylistItem)>,
-    pub match_as_ascii: bool,
-}
-
-impl ValueAccessor<'_> {
-    pub fn get(&self, field: &str) -> Option<Arc<str>> {
-        let val = self.pli.header.get_field(field)?;
-        if self.match_as_ascii {
-            return Some(deunicode_string(&val).into_owned().into())
-        }
-        Some(val)
-    }
-
-    pub fn set(&mut self, field: &str, value: &str) {
-        if self.pli.header.set_field(field, value) {
-            trace!("Property {field} set to {value}");
-        } else {
-            error!("Can't set unknown field {field} set to {value}");
-        }
-    }
-}
+use crate::foundation::value_provider::ValueProvider;
 
 #[derive(Debug, Clone)]
 pub struct CompiledRegex {
@@ -99,7 +31,7 @@ impl PartialEq for CompiledRegex {
 #[derive(Parser)]
 #[grammar_inline = r#"
 WHITESPACE = _{ " " | "\t" | "\r" | "\n"}
-field = { ^"group" | ^"title" | ^"name" | ^"url" | ^"input" | ^"caption"}
+field = { ^"group" | ^"title" | ^"name" | ^"genre" | ^"url" | ^"input" | ^"caption"}
 and = { ^"and" }
 or = { ^"or" }
 not = { ^"not" }
@@ -183,7 +115,7 @@ impl Filter {
             Self::FieldComparison(field, rewc) => {
                 let (is_match, value) = if field == &ItemField::Caption {
                     get_caption(provider, rewc)
-               } else if let Some(value) = provider.get(field.as_str()) {
+                } else if let Some(value) = provider.get(field.as_str()) {
                     (rewc.re.is_match(&value), value)
                 } else {
                     (false, "".intern())
@@ -550,7 +482,6 @@ fn build_dependency_graph(
 }
 
 pub fn prepare_templates(templates: &mut Vec<PatternTemplate>) -> Result<Vec<PatternTemplate>, TuliproxError> {
-
     let graph = build_dependency_graph(templates)?;
     let mut template_values = HashMap::new();
     let mut template_map = HashMap::with_capacity(templates.len());

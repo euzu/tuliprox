@@ -13,6 +13,8 @@ pub enum ItemField {
     Name,
     #[serde(rename = "title")]
     Title,
+    #[serde(rename = "genre")]
+    Genre,
     #[serde(rename = "url")]
     Url,
     #[serde(rename = "input")]
@@ -27,6 +29,7 @@ impl ItemField {
     const GROUP: &'static str = "Group";
     const NAME: &'static str = "Name";
     const TITLE: &'static str = "Title";
+    const GENRE: &'static str = "Genre";
     const URL: &'static str = "Url";
     const INPUT: &'static str = "Input";
     const TYPE: &'static str = "Type";
@@ -37,6 +40,7 @@ impl ItemField {
             Self::Group => Self::GROUP,
             Self::Name => Self::NAME,
             Self::Title => Self::TITLE,
+            Self::Genre => Self::GENRE,
             Self::Url => Self::URL,
             Self::Input => Self::INPUT,
             Self::Type => Self::TYPE,
@@ -51,6 +55,7 @@ impl Display for ItemField {
             Self::Group => Self::GROUP,
             Self::Name => Self::NAME,
             Self::Title => Self::TITLE,
+            Self::Genre => Self::GENRE,
             Self::Url => Self::URL,
             Self::Input => Self::INPUT,
             Self::Type => Self::TYPE,
@@ -69,6 +74,8 @@ impl FromStr for ItemField {
             Ok(Self::Name)
         } else if s.eq_ignore_ascii_case(Self::TITLE) {
             Ok(Self::Title)
+        } else if s.eq_ignore_ascii_case(Self::GENRE) {
+            Ok(Self::Genre)
         } else if s.eq_ignore_ascii_case(Self::CAPTION) {
             Ok(Self::Caption)
         } else if s.eq_ignore_ascii_case(Self::URL) {

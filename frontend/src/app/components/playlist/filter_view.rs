@@ -1,4 +1,4 @@
-use shared::foundation::filter::Filter;
+use shared::foundation::Filter;
 use yew::prelude::*;
 
 #[derive(Properties, PartialEq, Clone)]
@@ -42,7 +42,7 @@ fn newline(pretty: bool) -> Html {
     if pretty {
         html! { <br /> }
     } else {
-        html!{}
+        html! {}
     }
 }
 
@@ -53,11 +53,7 @@ fn render_filter(filter: &Filter, pretty: bool, level: usize, do_indent: bool, p
             <>
                 { indent(level, do_indent &&  pretty) }
                 <span class={format!("bracket bracket-{}", p_count % 6)}>{"("}</span>
-                {newline(pretty)}
-                { indent(level +1 , pretty) }
-                { render_filter(inner, pretty, level + 1, false, p_count+1) }
-                {newline(pretty)}
-                { indent(level , pretty) }
+                { render_filter(inner, pretty, level, false, p_count+1) }
                 <span class={format!("bracket bracket-{}", p_count % 6)}>{ ")" }</span>
             </>
          }
@@ -66,7 +62,7 @@ fn render_filter(filter: &Filter, pretty: bool, level: usize, do_indent: bool, p
             <>
                { indent(level, do_indent &&  pretty) }
                 <span class="comparison">
-                    <span class="field">{format!("{:?}", field)}</span>
+                    <span class="field">{format!("{}", field)}</span>
                     {" ~ "}
                     <span class="regex">{format!("\"{}\"", regex.restr)}</span>
                 </span>
@@ -77,7 +73,20 @@ fn render_filter(filter: &Filter, pretty: bool, level: usize, do_indent: bool, p
                { indent(level, do_indent && pretty) }
                 <span class="comparison">
                     <span class="field">{format!("{:?}", field)}</span>{" = "}
-                    <span class="enum">{format!("{:?}", t)}</span>
+                    <span class="enum">{
+                        {
+                           match t {
+                                shared::model::PlaylistItemType::Live => "live",
+                                shared::model::PlaylistItemType::Video
+                                | shared::model::PlaylistItemType::LocalVideo => "movie",
+                                shared::model::PlaylistItemType::Series
+                                | shared::model::PlaylistItemType::SeriesInfo
+                                | shared::model::PlaylistItemType::LocalSeries
+                                | shared::model::PlaylistItemType::LocalSeriesInfo => "series",
+                                _ => "unsupported"
+                            }
+                        }
+                    }</span>
                 </span>
             </>
         },
@@ -86,20 +95,17 @@ fn render_filter(filter: &Filter, pretty: bool, level: usize, do_indent: bool, p
                 <>
                     { indent(level, do_indent && pretty) }
                     <span class="unary_op">{format!(" {:?} ", op)}</span>
-                    {newline(pretty)}
-                    { indent(level, pretty) }
-                    { render_filter(inner, pretty, level, do_indent && pretty, p_count) }
+                    { render_filter(inner, pretty, level, false, p_count) }
                 </>
             }
-        },
+        }
         Filter::BinaryExpression(left, op, right) => html! {
             <span class="binary_op-wrapper">
                  { render_filter(left, pretty, level, do_indent && pretty, p_count) }
                  { newline(pretty) }
                  { indent(level, pretty) }
                  <span class="binary_op">{format!(" {:?} ", op)}</span>
-                 { newline(pretty) }
-                 { render_filter(right, pretty, level, pretty, p_count) }
+                 { render_filter(right, pretty, level, false, p_count) }
             </span>
         },
     }

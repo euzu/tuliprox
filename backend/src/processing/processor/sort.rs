@@ -1,5 +1,5 @@
 use crate::model::{ConfigSortRule, ConfigTarget};
-use shared::foundation::filter::ValueProvider;
+use shared::foundation::ValueProvider;
 use shared::model::{PlaylistGroup, SortOrder, SortTarget};
 use std::cmp::Ordering;
 use std::sync::Arc;
@@ -240,7 +240,7 @@ fn sort_channels_in_groups(
 mod tests {
     use crate::model::ConfigSortRule;
     use crate::processing::processor::sort::playlist_comparator;
-    use shared::foundation::filter::Filter;
+    use shared::foundation::Filter;
     use shared::model::{ItemField, PlaylistItem, PlaylistItemHeader, SortOrder, SortTarget};
     use std::cmp::Ordering;
     use std::sync::Arc;

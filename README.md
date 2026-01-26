@@ -1770,6 +1770,40 @@ Example `if then else` block
   }
 ```
 
+Example `for each` block
+
+Iterates over a `Named` result (a list of key-value tuples).
+The syntax is `variable.for_each( (key, value) => { ... })`.
+The parameters `key` and `value` are variable names you define to access the tuple elements inside the loop.
+
+You can use `_` for parameters you want to ignore (e.g., `(_, value)` or `(key, _)`). However, at least one parameter must be named (you cannot use `(_, _)`).
+
+`Named` variables are created by:
+1. **`split()` function**: keys are indices ("0", "1", ...), values are the split parts.
+2. **Regex with capture groups**: keys are group names (or indices), values are the captured matches.
+
+```dsl
+  # 1. Using split()
+  # Split the genre string into a Named result (index as key, genre as value)
+  genres = split(@Genre, "[,/&]")
+  
+  # Iterate over each genre, ignoring the index
+  genres.for_each((_, genre) => {
+     # 'genre' will contain the split string value
+     add_favourite(concat("Genre - ", genre))
+  })
+
+  # 2. Using Regex with named capture groups
+  # Extract info using regex, creating a Named result like [("Movie", "Inception"), ("Year", "2010")]
+  info = @Title ~ "(?P<Movie>.*?)\s-\s(?P<Year>\d{4})"
+  
+  info.for_each((k, v) => {
+      # k will be "Movie" then "Year"
+      # v will be "Inception" then "2010"
+      print(concat("Found ", k, ": ", v))
+  })
+```
+
 Example of removing prefix
 `@Caption = replace(@Caption, "UK:",  "EN:"`
 

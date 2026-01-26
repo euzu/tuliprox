@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use crate::error::{TuliproxError};
-use crate::foundation::filter::{get_filter, Filter};
+use crate::foundation::{get_filter, Filter};
 use crate::model::{PatternTemplate, XtreamCluster};
 use crate::utils::{arc_str_serde, xtream_cluster_serde};
 
