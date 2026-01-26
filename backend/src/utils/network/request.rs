@@ -1103,6 +1103,12 @@ pub fn is_uri(url: &str) -> bool {
         .is_ok_and(|u| u.scheme().eq_ignore_ascii_case("file") || u.scheme().eq_ignore_ascii_case("http") || u.scheme().eq_ignore_ascii_case("https"))
 }
 
+pub fn is_uri(url: &str) -> bool {
+    Url::parse(url)
+        .map(|u| u.scheme().eq_ignore_ascii_case("file") || u.scheme().eq_ignore_ascii_case("http") || u.scheme().eq_ignore_ascii_case("https"))
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use shared::utils::{get_base_url_from_str, replace_url_extension, sanitize_sensitive_info};

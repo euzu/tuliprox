@@ -6,6 +6,7 @@ use std::str::FromStr;
 use yew::platform::spawn_local;
 use yew::prelude::*;
 use yew_i18n::use_translation;
+use shared::concat_string;
 use shared::error::{info_err_res, TuliproxError};
 use shared::model::{ConfigInputAliasDto, ConfigInputDto, SortOrder};
 use crate::app::components::menu_item::MenuItem;
@@ -149,7 +150,7 @@ pub fn InputTable(props: &InputTableProps) -> Html {
                             _ => html! {""},
                         }
                     },
-                    InputRow::Alias(alias, dto) => {
+                    InputRow::Alias(alias, _dto) => {
                         match col {
                             0 => {
                                 let popup_onclick = popup_onclick.clone();
@@ -162,8 +163,9 @@ pub fn InputTable(props: &InputTableProps) -> Html {
                                 }
                             }
                             1 => html! {
-                                <Chip class={ format!("{} tp__input-table__alias", convert_bool_to_chip_style(dto.enabled).map_or_else(String::new, |s| if s == "active" { "alias".to_string() } else {s} )) }
-                                 label={translator.t("LABEL.ALIAS")}  />
+                                <Chip class={format!("{} tp__input-table__alias", convert_bool_to_chip_style(alias.enabled).map_or("alias", |s| if s == "active" { "alias" } else {"inactive"} )) }
+                                 label={if alias.enabled {translator.t("LABEL.ALIAS")} else { translator.t("LABEL.DISABLED")} }
+                                  />
                             },
                             2 => html! { alias.name.as_ref() },
                             4 => html! { alias.url.as_str() },

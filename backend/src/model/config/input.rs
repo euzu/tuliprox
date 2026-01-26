@@ -1,17 +1,17 @@
 use crate::model::{macros, EpgConfig, PanelApiConfig};
+use crate::repository::get_csv_file_path;
 use chrono::Utc;
 use log::warn;
+use shared::check_input_credentials;
 use shared::error::TuliproxError;
 use shared::model::{ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, InputFetchMethod, InputType, StagedInputDto};
 use shared::utils::{get_credentials_from_url, Internable};
 use shared::{check_input_connections, info_err_res, write_if_some};
-use shared::check_input_credentials;
 use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use url::Url;
-use crate::repository::get_csv_file_path;
 
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
@@ -105,6 +105,7 @@ pub struct ConfigInputAlias {
     pub priority: i16,
     pub max_connections: u16,
     pub exp_date: Option<i64>,
+    pub enabled: bool,
 }
 
 macros::from_impl!(ConfigInputAlias);
@@ -119,6 +120,7 @@ impl From<&ConfigInputAliasDto> for ConfigInputAlias {
             priority: dto.priority,
             max_connections: dto.max_connections,
             exp_date: dto.exp_date,
+            enabled: dto.enabled,
         }
     }
 }
@@ -163,6 +165,15 @@ impl ConfigInput {
         if is_input_expired(self.exp_date) {
             warn!("Account {} expired for provider: {}", self.username.as_ref().map_or("?", |s| s.as_str()), self.name);
             self.enabled = false;
+        }
+
+        if let Some(aliases) = &mut self.aliases {
+            for alias in aliases {
+                if is_input_expired(alias.exp_date) {
+                    warn!("Account {} expired for provider: {}", alias.username.as_ref().map_or("?", |s| s.as_str()), alias.name);
+                    alias.enabled = false;
+                }
+            }
         }
 
         if let Some(panel_api) = &mut self.panel_api {
@@ -210,15 +221,20 @@ impl ConfigInput {
                 }
 
                 if !aliases.is_empty() {
-                    let mut first = aliases.remove(0);
-                    self.id = first.id;
-                    self.username = first.username.take();
-                    self.password = first.password.take();
-                    self.url = first.url.trim().to_string();
-                    self.max_connections = first.max_connections;
-                    self.priority = first.priority;
-                    if self.name.is_empty() {
-                        self.name.clone_from(&first.name);
+                    if let Some(index) = aliases.iter().position(|alias| alias.enabled) {
+                        let mut first = aliases.remove(index);
+                        self.id = first.id;
+                        self.username = first.username.take();
+                        self.password = first.password.take();
+                        self.url = first.url.trim().to_string();
+                        self.max_connections = first.max_connections;
+                        self.priority = first.priority;
+                        self.enabled = first.enabled;
+                        if self.name.is_empty() {
+                            self.name.clone_from(&first.name);
+                        }
+                    } else {
+                        self.enabled = false;
                     }
                 }
             }
@@ -253,6 +269,23 @@ impl ConfigInput {
             panel_api: self.panel_api.clone(),
             cache_duration_seconds: self.cache_duration_seconds,
         }
+    }
+
+    pub fn has_enabled_aliases(&self) -> bool {
+        self.aliases
+            .as_ref()
+            .is_some_and(|aliases| aliases.iter().any(|a| a.enabled))
+    }
+
+    pub fn get_enabled_aliases(&self) -> Option<Vec<&ConfigInputAlias>> {
+        self.aliases.as_ref().map_or(None, |aliases| {
+            let result: Vec<_> = aliases.iter().filter(|alias| alias.enabled).collect();
+            if result.is_empty() {
+                None
+            } else {
+                Some(result)
+            }
+        })
     }
 }
 

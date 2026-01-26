@@ -247,7 +247,7 @@ impl MultiProviderLineup {
     ) -> Self {
         let input_connection = get_or_create_provider_connection(provider_connections, &cfg_input.name);
         let mut inputs = vec![ProviderConfigWrapper::new(ProviderConfig::new(cfg_input, input_connection, Arc::clone(connection_change)))];
-        if let Some(aliases) = &cfg_input.aliases {
+        if let Some(aliases) = cfg_input.get_enabled_aliases() {
             for alias in aliases {
                 let alias_connection = get_or_create_provider_connection(provider_connections, &alias.name);
                 inputs.push(ProviderConfigWrapper::new(ProviderConfig::new_alias(
@@ -540,7 +540,7 @@ impl ProviderLineupManager {
             event_manager.send_provider_event(name, connections);
         });
 
-        if cfg_input.aliases.as_ref().is_some_and(|a| !a.is_empty()) {
+        if cfg_input.has_enabled_aliases() {
             ProviderLineup::Multi(MultiProviderLineup::new(cfg_input, provider_connections, &on_connection_change))
         } else {
             let connection = get_or_create_provider_connection(provider_connections, &cfg_input.name);
@@ -575,6 +575,7 @@ impl ProviderLineupManager {
                     };
 
                     if a_alias.max_connections != b_alias.max_connections
+                        || a_alias.enabled != b_alias.enabled
                         || a_alias.priority != b_alias.priority
                         || a_alias.username != b_alias.username
                         || a_alias.password != b_alias.password

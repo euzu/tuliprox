@@ -1364,6 +1364,7 @@ async fn patch_source_yml_add_alias(
         priority: 0,
         max_connections: 1,
         exp_date,
+        enabled: true,
     };
 
    input.upsert_alias(alias)?;
@@ -1632,6 +1633,7 @@ fn apply_sources_yml_patches(
                     priority: 0,
                     max_connections: 1,
                     exp_date: *exp_date,
+                    enabled: true,
                 };
                 alias.prepare(next_index, &input_type)?;
                 aliases.push(alias);

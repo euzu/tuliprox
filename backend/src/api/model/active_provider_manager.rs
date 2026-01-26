@@ -67,7 +67,7 @@ impl ActiveProviderManager {
     }
 
     fn get_config_inputs(cfg: &AppConfig) -> Vec<Arc<ConfigInput>> {
-        cfg.sources.load().inputs.iter().map(Arc::clone).collect()
+        cfg.sources.load().inputs.iter().filter(|i| i.enabled).map(Arc::clone).collect()
     }
 
     fn get_grace_options(cfg: &AppConfig) -> (u64, u64) {

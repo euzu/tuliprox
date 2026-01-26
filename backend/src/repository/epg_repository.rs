@@ -107,11 +107,7 @@ pub fn epg_write_file(target: &ConfigTarget, epg: &Epg, path: &Path, playlist: O
                                     desc.clone_from(&child.value);
                                 }
                             }
-                            channel.programmes.push(EpgProgramme {
-                                start: start_time,
-                                stop: stop_time,
-                                channel: Arc::clone(channel_id), title, desc
-                            });
+                            channel.programmes.push(EpgProgramme::new_all(start_time, stop_time, Arc::clone(channel_id), title, desc));
                         }
                     }
                 }

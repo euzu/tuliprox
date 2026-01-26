@@ -23,6 +23,7 @@ const FIELD_NAME: &str = "name";
 const FIELD_USERNAME: &str = "username";
 const FIELD_PASSWORD: &str = "password";
 const FIELD_EXP_DATE: &str = "exp_date";
+const FIELD_ENABLED: &str = "enabled";
 const FIELD_UNKNOWN: &str = "?";
 const DEFAULT_COLUMNS: &[&str] = &[
     FIELD_URL,
@@ -32,6 +33,7 @@ const DEFAULT_COLUMNS: &[&str] = &[
     FIELD_USERNAME,
     FIELD_PASSWORD,
     FIELD_EXP_DATE,
+    FIELD_ENABLED
 ];
 const CSV_EXTENSION: &str = ".csv";
 
@@ -108,6 +110,16 @@ fn csv_assign_mandatory_fields(alias: &mut ConfigInputAliasDto, input_type: Inpu
     }
 }
 
+fn str_to_bool(val: &str) -> bool {
+    if val.is_empty() || val == "1" {
+        return true;
+    }
+    if val == "0"  || val.eq_ignore_ascii_case("f")  || val.eq_ignore_ascii_case("false") {
+        return false;
+    }
+    true
+}
+
 fn csv_assign_config_input_column(
     config_input: &mut ConfigInputAliasDto,
     header: &str,
@@ -142,6 +154,9 @@ fn csv_assign_config_input_column(
                     error!("Failed to parse exp_date '{value}': {e}");
                     None
                 });
+            }
+            FIELD_ENABLED => {
+                config_input.enabled = str_to_bool(value);
             }
             _ => {}
         }
@@ -180,6 +195,7 @@ pub fn csv_read_inputs_from_reader(
                         FIELD_USERNAME => FIELD_USERNAME,
                         FIELD_PASSWORD => FIELD_PASSWORD,
                         FIELD_EXP_DATE => FIELD_EXP_DATE,
+                        FIELD_ENABLED => FIELD_ENABLED,
                         _ => {
                             error!("Field {s} is unsupported for csv input");
                             FIELD_UNKNOWN
@@ -199,6 +215,7 @@ pub fn csv_read_inputs_from_reader(
             priority: 0,
             max_connections: 1,
             exp_date: None,
+            enabled: true,
         };
 
         let columns: Vec<&str> = line.split(CSV_SEPARATOR).collect();
@@ -276,6 +293,8 @@ async fn csv_write_input_to_path(
     content.push(CSV_SEPARATOR);
     content.push_str(FIELD_URL);
     content.push(CSV_SEPARATOR);
+    content.push_str(FIELD_ENABLED);
+    content.push(CSV_SEPARATOR);
     content.push_str(FIELD_MAX_CON);
     content.push(CSV_SEPARATOR);
     content.push_str(FIELD_PRIO);
@@ -291,6 +310,8 @@ async fn csv_write_input_to_path(
         content.push_str(alias.password.as_deref().unwrap_or(""));
         content.push(CSV_SEPARATOR);
         content.push_str(&alias.url);
+        content.push(CSV_SEPARATOR);
+        content.push_str(if alias.enabled { "1" } else {"0"} );
         content.push(CSV_SEPARATOR);
         content.push_str(&alias.max_connections.to_string());
         content.push(CSV_SEPARATOR);
@@ -352,6 +373,7 @@ pub async fn csv_patch_batch_append(
         priority: 0,
         max_connections: 1,
         exp_date,
+        enabled: true,
     };
     aliases.push(alias);
 

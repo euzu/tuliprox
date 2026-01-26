@@ -510,7 +510,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                                                 onclick={handle_edit_alias_list_item.clone()}/>
                                             </div>
                                             <div class="tp__form-list__item-content">
-                                                <span><strong>{&alias.name}</strong>{" - "}{&alias.url}</span>
+                                                <span class={if alias.enabled {""} else {"inactive"}}><strong>{&alias.name}</strong>{" - "}{&alias.url}</span>
                                             </div>
                                         </div>
                                     }

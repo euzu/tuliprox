@@ -254,12 +254,10 @@ pub struct ConfigInputAliasDto {
     pub priority: i16,
     #[serde(default)]
     pub max_connections: u16,
-    #[serde(
-        default,
-        deserialize_with = "deserialize_timestamp",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, deserialize_with = "deserialize_timestamp", skip_serializing_if = "Option::is_none")]
     pub exp_date: Option<i64>,
+    #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
+    pub enabled: bool,
 
 }
 
