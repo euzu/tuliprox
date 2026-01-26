@@ -147,6 +147,8 @@ struct StrmItemInfo {
     series_name: Option<Arc<str>>,
     #[serde(with = "arc_str_option_serde", skip_serializing_if = "is_blank_optional_arc_str")]
     release_date: Option<Arc<str>>,
+    #[serde(with = "arc_str_option_serde", skip_serializing_if = "is_blank_optional_arc_str")]
+    series_release_date: Option<Arc<str>>, // Global series release date
     #[serde(default, skip_serializing_if = "Option::is_none")]
     season: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -172,21 +174,24 @@ fn extract_item_info(pli: &mut PlaylistItem) -> StrmItemInfo {
     let virtual_id = header.virtual_id;
     let input_name = header.input_name.clone();
     let url = header.url.clone();
-    let (series_name, release_date, added, tmdb_id, season, episode) = match header.item_type {
+    let (series_name, release_date, series_release_date, added, tmdb_id, season, episode) = match header.item_type {
         PlaylistItemType::Series
         | PlaylistItemType::LocalSeries => {
+            // Series name comes from header.name. This was formatted as "Name (Year)" by xtream_series.rs if applicable
             let series_name = Some(header.name.clone());
-            let (release_date, added, tmdb_id, season, episode) = match header.additional_properties.as_ref() {
-                None => (None, None, None, None, None),
+            let (release_date, series_release_date, added, tmdb_id, season, episode) = match header.additional_properties.as_ref() {
+                None => (None, None, None, None, None, None),
                 Some(props) => (
                     props.get_release_date(),
+                    // Extract series-level release date from Episode properties
+                    if let StreamProperties::Episode(ep) = props { ep.series_release_date.clone() } else { None },
                     props.get_added(),
                     props.get_tmdb_id().filter(|&id| id != 0),
                     props.get_season(),
                     props.get_episode(),
                 )
             };
-            (series_name, release_date, added, tmdb_id, season, episode)
+            (series_name, release_date, series_release_date, added, tmdb_id, season, episode)
         }
         PlaylistItemType::Video
         | PlaylistItemType::LocalVideo => {
@@ -199,9 +204,9 @@ fn extract_item_info(pli: &mut PlaylistItem) -> StrmItemInfo {
                     props.get_tmdb_id().filter(|&id| id != 0),
                 )
             };
-            (name, release_date, added, tmdb_id, None, None)
+            (name, release_date, None, added, tmdb_id, None, None)
         }
-        _ => (None, None, None, None, None, None),
+        _ => (None, None, None, None, None, None, None),
     };
     StrmItemInfo {
         group,
@@ -213,6 +218,7 @@ fn extract_item_info(pli: &mut PlaylistItem) -> StrmItemInfo {
         url,
         series_name,
         release_date,
+        series_release_date,
         season,
         episode,
         added: added.as_ref().map_or_else(|| Some(0), |a| a.parse::<u64>().ok()),
@@ -359,15 +365,17 @@ fn format_for_kodi(
         PlaylistItemType::Series
         | PlaylistItemType::LocalSeries => {
             let id_string = if tmdb_id > 0 { format!("{separator}{{tmdb={tmdb_id}}}") } else { String::new() };
+            // For Series, strm_item_info.series_name already contains Name (Year) if processed correctly,
+            // but we must use the GLOBAL series release date for the folder name
             let series_name_raw = strm_item_info.series_name.as_ref().unwrap_or(&strm_item_info.title);
-            let (name, year) = style_rename_year(series_name_raw, &CONSTANTS.export_style_config, strm_item_info.release_date.as_ref());
+            let (name, year) = style_rename_year(series_name_raw, &CONSTANTS.export_style_config, strm_item_info.series_release_date.as_ref());
             let sanitized_series_name = sanitize_for_filename(name.trim(), false);
             let year_string = year.map_or(String::new(), |y| format!("{separator}({y})"));
 
             let series_folder_name = format!("{sanitized_series_name}{year_string}{id_string}");
 
-            let season_num=strm_item_info.season.unwrap_or(1u32);
-            let episode_num = strm_item_info.episode.unwrap_or(1u32);
+            let season_num = strm_item_info.season.unwrap_or(1);
+            let episode_num = strm_item_info.episode.unwrap_or(1);
 
             let final_filename = format!("{sanitized_series_name}{separator}S{season_num:02}E{episode_num:02}");
             let season_folder = format!("Season{separator}{season_num:02}");
@@ -432,7 +440,7 @@ fn format_for_plex(
         | PlaylistItemType::LocalSeries => {
             let id_string = if tmdb_id > 0 { format!("{separator}{{tmdb-{tmdb_id}}}") } else { String::new() };
             let series_name_raw = strm_item_info.series_name.as_ref().unwrap_or(&strm_item_info.title);
-            let (name, year) = style_rename_year(series_name_raw, &CONSTANTS.export_style_config, strm_item_info.release_date.as_ref());
+            let (name, year) = style_rename_year(series_name_raw, &CONSTANTS.export_style_config, strm_item_info.series_release_date.as_ref());
             let sanitized_series_name = sanitize_for_filename(name.trim(), false);
             let year_string = year.map_or(String::new(), |y| format!("{separator}({y})"));
 
@@ -507,7 +515,7 @@ fn format_for_emby(
             // For series, the ID goes in the folder name.
             let id_string = if tmdb_id > 0 { format!("{separator}[tmdbid={tmdb_id}]") } else { String::new() };
             let series_name_raw = strm_item_info.series_name.as_ref().unwrap_or(&strm_item_info.title);
-            let (name, year) = style_rename_year(series_name_raw, &CONSTANTS.export_style_config, strm_item_info.release_date.as_ref());
+            let (name, year) = style_rename_year(series_name_raw, &CONSTANTS.export_style_config, strm_item_info.series_release_date.as_ref());
             let sanitized_series_name = sanitize_for_filename(name.trim(), false);
             let year_string = year.map_or(String::new(), |y| format!("{separator}({y})"));
 
@@ -535,7 +543,7 @@ fn format_for_emby(
 }
 
 /// Formats names according to the official Jellyfin documentation.
-/// Movie: /Movie Name (Year) [tmdbid-XXXXX]/Movie Name (Year).strm
+/// Movie: /Movie Name (Year) [tmdbid-XXXXX]/Movie Name (Year) [tmdbid-XXXXX].strm
 /// Series: /Show Name (Year) [tmdbid-XXXXX]/Season 01/Show Name - S01E01.strm
 fn format_for_jellyfin(
     strm_item_info: &StrmItemInfo,
@@ -556,8 +564,9 @@ fn format_for_jellyfin(
             let year_string = year.map_or(String::new(), |y| format!("{separator}({y})"));
 
             let base_name = format!("{sanitized_title}{year_string}");
+            // Jellyfin requirement: file name MUST start with parent folder name to detect versions
             let folder_name = format!("{base_name}{id_string}");
-            let final_filename = base_name;
+            let final_filename = folder_name.clone();
 
             if flat {
                 if tmdb_id > 0 {
@@ -580,7 +589,7 @@ fn format_for_jellyfin(
         | PlaylistItemType::LocalSeries => {
             let id_string = if tmdb_id > 0 { format!("{separator}[tmdbid-{tmdb_id}]") } else { String::new() };
             let series_name_raw = strm_item_info.series_name.as_ref().unwrap_or(&strm_item_info.title);
-            let (name, year) = style_rename_year(series_name_raw, &CONSTANTS.export_style_config, strm_item_info.release_date.as_ref());
+            let (name, year) = style_rename_year(series_name_raw, &CONSTANTS.export_style_config, strm_item_info.series_release_date.as_ref());
             let sanitized_series_name = sanitize_for_filename(name.trim(), false);
             let year_string = year.map_or(String::new(), |y| format!("{separator}({y})"));
 
@@ -639,10 +648,10 @@ async fn prepare_strm_files(
         .iter()
         .map(|g| g.filter_count(filter_strm_item))
         .sum();
-    // contains all filenames to detect collisions
-    let mut all_filenames = HashSet::with_capacity(channel_count);
-    // contains only collision filenames
-    let mut collisions: HashSet<Arc<String>> = HashSet::new();
+    // contains all paths (dir + filename) to detect collisions
+    let mut all_filenames: HashSet<PathBuf> = HashSet::with_capacity(channel_count);
+    // contains only collision filenames (PathBuf)
+    let mut collisions: HashSet<PathBuf> = HashSet::new();
     let mut result = Vec::with_capacity(channel_count);
 
     let mut flat_dedup_paths = HashMap::new();
@@ -676,13 +685,16 @@ async fn prepare_strm_files(
 
             let final_filename = format!("{strm_file_name}{quality_string}{category_suffix}");
             let filename = Arc::new(final_filename);
+            
+            // Construct the full relative path for collision checking
+            let full_relative_path = dir_path.join(filename.as_str());
 
-            if all_filenames.contains(&filename) {
-                collisions.insert(Arc::clone(&filename));
+            if all_filenames.contains(&full_relative_path) {
+                collisions.insert(full_relative_path.clone());
             }
-            all_filenames.insert(Arc::clone(&filename));
+            all_filenames.insert(full_relative_path);
             result.push(StrmFile {
-                file_name: Arc::clone(&filename),
+                file_name: filename,
                 dir_path,
                 strm_info: strm_item_info,
             });
@@ -691,24 +703,25 @@ async fn prepare_strm_files(
 
     if !collisions.is_empty() {
         // This separator is specifically for the multi-version naming convention.
-        // According to the docs (Plex, Jellyfin), this should be " - " (space-hyphen-space).
-        // The user's `underscore_whitespace` setting should not apply to this structural separator.
         let version_separator = " ";
         let separator = if strm_target_output.underscore_whitespace { "_" } else { " " };
+        
         result
             .iter_mut()
-            .filter(|s| collisions.contains(&s.file_name))
             .for_each(|s| {
-                // Create a descriptive and unique identifier for this version.
-                let version_label = format!("Version{}id#{}", separator, s.strm_info.virtual_id);
+                let full_relative_path = s.dir_path.join(s.file_name.as_str());
+                if collisions.contains(&full_relative_path) {
+                    // Create a descriptive and unique identifier for this version.
+                    let version_label = format!("Version{}id#{}", separator, s.strm_info.virtual_id);
 
-                // The base filename is the part that is identical for all versions.
-                let base_filename = &s.file_name;
+                    // The base filename is the part that is identical for all versions.
+                    let base_filename = &s.file_name;
 
-                // Apply the specific multi-version naming convention for the selected style.
-                let new_filename = format!("{base_filename}{version_separator}[{version_label}]");
+                    // Apply the specific multi-version naming convention for the selected style.
+                    let new_filename = format!("{base_filename}{version_separator}[{version_label}]");
 
-                s.file_name = Arc::new(new_filename);
+                    s.file_name = Arc::new(new_filename);
+                }
             });
     }
     result

@@ -926,6 +926,7 @@ impl PlaylistItem {
                                 season: 0,
                                 added: None,
                                 release_date: None,
+                                series_release_date: None,
                                 tmdb: None,
                                 movie_image: "".intern(),
                                 container_extension: container_extension.intern(),

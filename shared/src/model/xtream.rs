@@ -29,7 +29,7 @@ pub struct XtreamVideoInfoMovieData {
 pub struct XtreamVideoInfoInfo {
     #[serde(default, with = "arc_str_option_serde")]
     pub kinopoisk_url: Option<Arc<str>>,
-    #[serde(default, with = "arc_str_serde")]
+    #[serde(default, with = "arc_str_serde", alias = "tmdb", alias = "tmdbid", alias = "tmdb_id")]
     pub tmdb_id: Arc<str>, // is in get_vod_streams
     #[serde(default, with = "arc_str_serde")]
     pub name: Arc<str>, // is in get_vod_streams
@@ -39,7 +39,7 @@ pub struct XtreamVideoInfoInfo {
     pub cover_big: Option<Arc<str>>,
     #[serde(default, with = "arc_str_option_serde")]
     pub movie_image: Option<Arc<str>>,
-    #[serde(default, with = "arc_str_option_serde")]
+    #[serde(default, with = "arc_str_option_serde", alias = "releasedate", alias = "releaseDate")]
     pub releasedate: Option<Arc<str>>,
     #[serde(default, deserialize_with = "deserialize_number_from_string")]
     pub episode_run_time: Option<u32>,
@@ -131,7 +131,7 @@ pub struct XtreamSeriesInfoInfo {
     pub director: Arc<str>,
     #[serde(default, with = "arc_str_serde")]
     pub genre: Arc<str>,
-    #[serde(default, with = "arc_str_serde")]
+    #[serde(default, with = "arc_str_serde", alias = "releasedate", alias = "releaseDate")]
     pub release_date: Arc<str>,
     #[serde(default, with = "arc_str_serde")]
     pub last_modified: Arc<str>,

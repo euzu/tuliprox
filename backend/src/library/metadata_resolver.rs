@@ -53,6 +53,10 @@ impl MetadataResolver {
 
     /// Public helper to resolve metadata purely from a title string (Main entry point for Xtream Processors)
     pub async fn resolve_from_title(&self, title: &str, is_movie: bool) -> Option<MediaMetadata> {
+        // If the title is empty or just whitespace, we can't search.
+        if title.trim().is_empty() {
+             return None;
+        }
         let metadata = ptt_parse_title(title);
         self.resolve_internal(is_movie, &metadata, None).await
     }
@@ -61,7 +65,14 @@ impl MetadataResolver {
     async fn resolve_internal(&self, is_movie: bool, metadata: &PttMetadata, file: Option<&ScannedMediaFile>) -> Option<MediaMetadata> {
         // Step 2: Try TMDB if enabled
         if let Some(ref tmdb) = self.tmdb_client {
-            match self.resolve_from_tmdb(is_movie, metadata, tmdb, file).await {
+            // Determine if we should use file-based logic or pure title/stream logic
+            let result = if let Some(f) = file {
+                self.resolve_from_tmdb_file(is_movie, metadata, tmdb, f).await
+            } else {
+                self.resolve_from_tmdb_title(is_movie, metadata, tmdb).await
+            };
+
+            match result {
                 Ok(Some(metadata)) => {
                     if let Some(f) = file {
                         info!("Found TMDB metadata for: {}", f.file_path);
@@ -99,29 +110,34 @@ impl MetadataResolver {
             None
         }
     }
-
-    // Attempts to resolve metadata from TMDB
-    async fn resolve_from_tmdb(&self, movie: bool, metadata: &PttMetadata, tmdb: &TmdbClient, file: Option<&ScannedMediaFile>) -> Result<Option<MediaMetadata>, String> {
+    
+    // Attempts to resolve metadata from TMDB using a local file context (allowing parent directory fallback)
+    async fn resolve_from_tmdb_file(&self, movie: bool, metadata: &PttMetadata, tmdb: &TmdbClient, file: &ScannedMediaFile) -> Result<Option<MediaMetadata>, String> {
         if movie {
             tmdb.search_movie(metadata.tmdb, metadata.title.as_str(), metadata.year).await
         } else {
             let (series_year, tmdb_id) = if metadata.year.is_some() {
                 (metadata.year, metadata.tmdb)
             } else {
-                // Try to extract year from parent directory if available (only if file context exists)
-                if let Some(f) = file {
-                    f.path.parent()
-                        .and_then(|p| p.file_name())
-                        .and_then(|n| n.to_str())
-                        .map_or((None, None), |s| {
-                            let ptt = ptt_parse_title(s);
-                            (ptt.year, ptt.tmdb)
-                        })
-                } else {
-                    (None, None)
-                }
+                // Try to extract year from parent directory if available
+                file.path.parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    .map_or((None, None), |s| {
+                        let ptt = ptt_parse_title(s);
+                        (ptt.year, ptt.tmdb)
+                    })
             };
             tmdb.search_series(tmdb_id, metadata.title.as_str(), series_year).await
+        }
+    }
+
+    // Attempts to resolve metadata from TMDB using only the parsed title/metadata (for streams)
+    async fn resolve_from_tmdb_title(&self, movie: bool, metadata: &PttMetadata, tmdb: &TmdbClient) -> Result<Option<MediaMetadata>, String> {
+        if movie {
+            tmdb.search_movie(metadata.tmdb, metadata.title.as_str(), metadata.year).await
+        } else {
+            tmdb.search_series(metadata.tmdb, metadata.title.as_str(), metadata.year).await
         }
     }
 

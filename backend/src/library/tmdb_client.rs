@@ -37,7 +37,8 @@ impl TmdbClient {
 
     // Searches for a movie by title and optional year
     pub async fn search_movie(&self, tmdb_id: Option<u32>, title: &str, year: Option<u32>) -> Result<Option<MediaMetadata>, String> {
-        debug!("TMDB search movie: {title}");
+        let year_display = year.map_or_else(|| "None".to_string(), |y| y.to_string());
+        debug!("TMDB search movie: {title} ({year_display})");
 
         if let Some(movie_id) = tmdb_id {
             return self.fetch_movie_details(movie_id).await;
@@ -88,7 +89,12 @@ impl TmdbClient {
         }
 
         let content_bytes = response.bytes().await.map_err(|err| err.to_string())?;
-        let _raw_data_path = self.storage.store_tmdb_movie_info(movie_id, &content_bytes).await.map_err(|err| err.to_string())?;
+
+        // Attempt to store the raw data, but don't fail the operation if storage fails
+        if let Err(err) = self.storage.store_tmdb_movie_info(movie_id, &content_bytes).await {
+            warn!("Failed to cache TMDB movie info: {err}");
+        }
+
         let details: TmdbMovieDetails = serde_json::from_slice(&content_bytes).map_err(|err| err.to_string())?;
         self.fetched_movie_metadata.write().await.insert(movie_id);
 
@@ -241,7 +247,7 @@ impl TmdbClient {
                 // Serialize updated raw JSON and store
                 if let Ok(raw_series_bytes) = serde_json::to_vec(&raw_series) {
                     if let Err(err) = self.storage.store_tmdb_series_info(series_id, &raw_series_bytes).await {
-                        error!("Failed to store raw TMDB series info: {err}");
+                        warn!("Failed to cache raw TMDB series info: {err}");
                     }
                 }
 

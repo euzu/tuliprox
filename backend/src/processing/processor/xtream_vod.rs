@@ -16,6 +16,7 @@ use shared::utils::Internable;
 use std::sync::Arc;
 use std::time::Instant;
 use crate::model::MediaQuality;
+use serde_json::Value;
 
 create_resolve_options_function_for_xtream_target!(vod);
 
@@ -65,6 +66,21 @@ pub async fn playlist_resolve_vod(
         return;
     }
 
+    let mut vod_info_count = 0;
+    // Calculate how many items actually need updates to provide a meaningful progress log
+    for pli in fpl.items() {
+         if pli.header.xtream_cluster == XtreamCluster::Video
+            && pli.header.item_type == PlaylistItemType::Video 
+            && pli.get_provider_id().is_some() 
+            && ( (!pli.has_details() && resolve_movies) || resolve_tmdb_missing || do_probe ) {
+            vod_info_count += 1;
+         }
+    }
+    
+    if vod_info_count > 0 {
+         info!("Found {vod_info_count} vod info candidates for resolution");
+    }
+
     let working_dir = &app_config.config.load().working_dir;
     let storage_path = match get_input_storage_path(&input.name, working_dir) {
         Ok(storage_path) => storage_path,
@@ -76,10 +92,6 @@ pub async fn playlist_resolve_vod(
             return;
         }
     };
-
-    let vod_info_count = fpl.get_missing_vod_info_count();
-    // Also count items that need probing if enabled (this logic is simplified, we iterate all anyway)
-    info!("Found missing {vod_info_count} vod info to resolve");
 
     let mut last_log_time = Instant::now();
     let mut processed_vod_info_count = 0;
@@ -97,6 +109,9 @@ pub async fn playlist_resolve_vod(
     provider_fpl.source.release_resources(XtreamCluster::Video);
 
     let input_name_arc = input.name.clone();
+
+    // To update the source in memory, we collect the updated items
+    let mut updated_source_items: Vec<(u32, VideoStreamProperties)> = Vec::new();
 
     for pli in fpl.items_mut() {
         if pli.header.xtream_cluster != XtreamCluster::Video
@@ -124,16 +139,28 @@ pub async fn playlist_resolve_vod(
             .await
             {
                 if !content.is_empty() {
-                    match serde_json::from_str::<XtreamVideoInfo>(&content) {
-                        Ok(info) => {
-                            let video_stream_props = VideoStreamProperties::from_info(&info, pli);
-                            // Update item
-                            pli.header.additional_properties =
-                                Some(StreamProperties::Video(Box::new(video_stream_props)));
-                            properties_updated = true;
+                    match serde_json::from_str::<Value>(&content) {
+                        Ok(mut json_value) => {
+                            // Normalize JSON to handle duplicate keys
+                            if let Some(info) = json_value.get_mut("info").and_then(|v| v.as_object_mut()) {
+                                crate::model::normalize_release_date(info);
+                            }
+
+                            match serde_json::from_value::<XtreamVideoInfo>(json_value) {
+                                Ok(info) => {
+                                    let video_stream_props = VideoStreamProperties::from_info(&info, pli);
+                                    // Update item
+                                    pli.header.additional_properties =
+                                        Some(StreamProperties::Video(Box::new(video_stream_props)));
+                                    properties_updated = true;
+                                }
+                                Err(err) => {
+                                    error!("Failed to map video info to struct for provider {} stream_id {provider_id}: {err}", input.name);
+                                }
+                            }
                         }
                         Err(err) => {
-                            error!("Failed to parse video info for provider {} stream_id {provider_id}: {err} {content}", input.name);
+                            error!("Failed to parse video info JSON for provider {} stream_id {provider_id}: {err} {content}", input.name);
                         }
                     }
                 }
@@ -144,8 +171,9 @@ pub async fn playlist_resolve_vod(
         // Check if we have properties now (either newly fetched or existing)
         if resolve_tmdb_missing {
              if let Some(StreamProperties::Video(video_stream_props)) = pli.header.additional_properties.as_mut() {
-                  if video_stream_props.tmdb.is_none() || 
-                     video_stream_props.details.as_ref().and_then(|d| d.release_date.as_ref()).is_none() 
+                  if (video_stream_props.tmdb.is_none() || 
+                     video_stream_props.details.as_ref().and_then(|d| d.release_date.as_ref()).is_none()) &&
+                     !video_stream_props.name.is_empty()
                   {
                       if let Some(meta) = meta_resolver
                         .resolve_from_title(&video_stream_props.name, true)
@@ -167,7 +195,7 @@ pub async fn playlist_resolve_vod(
                              }
                         }
                   }
-             } else if !pli.has_details() {
+             } else if !pli.has_details() && !pli.header.name.is_empty() {
                   // Case where we don't have details yet and didn't fetch them (resolve_movies=false)
                   // but we want to resolve tmdb based on playlist title
                   if let Some(meta) = meta_resolver.resolve_from_title(&pli.header.name, true).await {
@@ -312,6 +340,10 @@ pub async fn playlist_resolve_vod(
             processed_vod_info_count += 1;
             
             if let Some(StreamProperties::Video(props)) = pli.header.additional_properties.as_ref() {
+                // Collect item to update source later
+                // We need to store provider_id to match with source item
+                updated_source_items.push((provider_id, props.as_ref().clone()));
+
                 batch.push((provider_id, *props.clone()));
                 if batch.len() >= BATCH_SIZE {
                     if let Err(err) = persist_input_vod_info_batch(
@@ -349,6 +381,25 @@ pub async fn playlist_resolve_vod(
         }
     }
 
+    // Write-back to source memory cache to avoid reprocessing on next target/iteration
+    if !updated_source_items.is_empty() && provider_fpl.is_memory() {
+        // Map updates for O(1) lookup
+        let updates_map: std::collections::HashMap<u32, VideoStreamProperties> = 
+            updated_source_items.into_iter().collect();
+
+        // Update items in provider_fpl
+        for item in provider_fpl.items_mut() {
+            if let Some(provider_id) = item.get_provider_id() {
+                if let Some(new_props) = updates_map.get(&provider_id) {
+                     item.header.additional_properties = Some(StreamProperties::Video(Box::new(new_props.clone())));
+                }
+            }
+        }
+    }
+
     provider_fpl.source.obtain_resources().await;
-    info!("resolved {processed_vod_info_count}/{vod_info_count} vod info");
+    
+    if resolve_movies && vod_info_count > 0 {
+        info!("resolved {processed_vod_info_count}/{vod_info_count} vod info");
+    }
 }

@@ -137,14 +137,18 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
                         Ok(info) => {
                             // parse series info
                             let series_stream_props = SeriesStreamProperties::from_info(&info, pli);
-                            
+
                             if let Ok(storage_path) = get_input_storage_path(&input.name, working_dir) {
                                 // update input db
                                 if let Err(err) = persists_input_series_info(app_config, &storage_path, cluster, &input.name, provider_id, &series_stream_props).await {
                                     error!("Failed to persist series info for input {}: {err}", &input.name);
                                 }
                             }
-                            if let Some(mut episodes) = parse_xtream_series_info(&pli.get_uuid(), &series_stream_props, &group, &series_name, input) {
+
+                            // Capture release date for children
+                            let series_release_date = series_stream_props.release_date.clone();
+
+                            if let Some(mut episodes) = parse_xtream_series_info(&pli.get_uuid(), &series_stream_props, &group, &series_name, input, series_release_date) {
                                 let config = &app_state.app_config.config.load();
                                 match get_target_storage_path(config, target.name.as_str()) {
                                     None => {
@@ -155,7 +159,7 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
                                         let mut provider_series: HashMap<Arc<str>, Vec<ProviderEpisodeKey>> = HashMap::new();
                                         {
                                             let (mut target_id_mapping, _file_lock) = get_target_id_mapping(&app_state.app_config, &target_path, target.use_memory_cache).await?;
-                                            
+
                                             if let Some(parent_id) = pli.get_provider_id() {
                                                 let category_id = pli.get_category_id().unwrap_or(0);
                                                 for episode in &mut episodes {
