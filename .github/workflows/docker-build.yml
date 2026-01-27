@@ -246,7 +246,7 @@ jobs:
 
       - name: Build and push Docker images
         env:
-          GITHUB_IO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_IO_TOKEN: ${{ secrets.GHCR_IO_TOKEN }}
           REPO_OWNER: ${{ github.repository_owner }}
           FRONTEND_CACHE_HIT: ${{ steps.cache-frontend.outputs.cache-hit }}
           CARGO_DEPS_CACHE_HIT: ${{ steps.cache-cargo-deps.outputs.cache-hit }}
