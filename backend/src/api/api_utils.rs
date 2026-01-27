@@ -1059,7 +1059,10 @@ async fn try_shared_stream_response_if_any(
                 headers.clone(),
                 StatusCode::OK,
             )));
-            let grace_period_options = app_state.get_grace_options();
+            let mut grace_period_options = app_state.get_grace_options();
+            if connect_permission != UserConnectionPermission::GracePeriod {
+                grace_period_options.period_millis = 0;
+            }
             let mut stream_details = StreamDetails::from_stream(stream, grace_period_options);
 
             stream_details.provider_name = provider;

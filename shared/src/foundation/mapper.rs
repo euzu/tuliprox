@@ -2,10 +2,9 @@
 
 use crate::error::{info_err, info_err_res, TuliproxError};
 use crate::foundation::mapper::EvalResult::{AnyValue, Failure, Named, Number, Undefined, Value};
-use crate::foundation::value_provider::ValueAccessor;
-use crate::model::{PatternTemplate, PlaylistItemType, TemplateValue};
+use crate::model::{FieldGetAccessor, FieldSetAccessor, PatternTemplate, PlaylistItem, PlaylistItemType, TemplateValue};
 use crate::utils::{deunicode_string, Capitalize, Internable};
-use log::{debug, trace};
+use log::{debug, error, trace};
 use pest::iterators::{Pair, Pairs};
 use pest::Parser;
 use pest_derive::Parser;
@@ -68,6 +67,32 @@ statements = _{ (statement_reparator* ~ (statement | comment))* ~ statement_repa
 main = { SOI ~ statements? ~ EOI }
 "##]
 struct MapperParser;
+
+
+///
+/// The `ValueAccessor` does not respect `match_as_ascii` when returning values.
+/// This is intentional because assignments must not change the value content through normalization.
+/// Normalization should only be applied during comparisons or when processing values with regular expressions.
+///
+pub struct ValueAccessor<'a> {
+    pub pli: &'a mut PlaylistItem,
+    pub virtual_items: Vec<(String, PlaylistItem)>,
+    pub match_as_ascii: bool,
+}
+
+impl ValueAccessor<'_> {
+    pub fn get(&self, field: &str) -> Option<Arc<str>> {
+        self.pli.header.get_field(field)
+    }
+
+    pub fn set(&mut self, field: &str, value: &str) {
+        if self.pli.header.set_field(field, value) {
+            trace!("Property {field} set to {value}");
+        } else {
+            error!("Can't set unknown field {field} set to {value}");
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ExprId(pub usize);
