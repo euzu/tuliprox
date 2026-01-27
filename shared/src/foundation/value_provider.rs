@@ -159,11 +159,7 @@ pub struct ValueAccessor<'a> {
 
 impl ValueAccessor<'_> {
     pub fn get(&self, field: &str) -> Option<Arc<str>> {
-        let val = self.pli.header.get_field(field)?;
-        if self.match_as_ascii {
-            return Some(deunicode_string(&val).into_owned().into());
-        }
-        Some(val)
+        self.pli.header.get_field(field)
     }
 
     pub fn set(&mut self, field: &str, value: &str) {

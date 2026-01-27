@@ -256,7 +256,8 @@ pub async fn parse_m3u(cfg: &Config, input: &ConfigInput, lines: DynReader) -> V
     consume_m3u(cfg, input, lines, |item| {
         let key = {
             let header = &item.header;
-            format!("{}{}", &header.xtream_cluster, &header.group)
+            let normalized_group = shared::utils::deunicode_string(&header.group).to_lowercase();
+            format!("{}{}", &header.xtream_cluster, normalized_group)
         };
         group_map.entry(key).or_default().push(item);
     }).await;
