@@ -264,8 +264,9 @@ fn format_xmltv_time(ts: i64) -> String {
 
 
 fn apply_user_offset(start: i64, stop: i64, offset_minutes: i32) -> (i64, i64) {
-    let user_start = start + i64::from(offset_minutes) * 60;
-    let user_end = stop + i64::from(offset_minutes) * 60;
+    let offset = i64::from(offset_minutes) * 60;
+    let user_start = start + offset;
+    let user_end = stop + offset;
     (user_start, user_end)
 }
 
@@ -284,6 +285,8 @@ fn from_programme(stream_id: &Arc<str>, epg_id: &Arc<str>,  programme: &EpgProgr
         start_timestamp: user_start.to_string(),
         stop_timestamp: user_end.to_string(),
         stream_id: Arc::clone(stream_id),
+        now_playing: None,
+        has_archive: None,
     }
 }
 

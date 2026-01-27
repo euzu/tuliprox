@@ -1,7 +1,7 @@
 // https://github.com/tellytv/go.xtream-codes/blob/master/structs.go
 // Xtream api -> https://9tzx6f0ozj.apidog.io/
 use crate::api::api_utils;
-use crate::api::api_utils::{create_api_proxy_user, create_session_fingerprint, empty_json_list_response, empty_json_response_as_array, empty_json_response_as_object, force_provider_stream_response, get_user_target, get_user_target_by_credentials, internal_server_error, is_seek_request, local_stream_response, redirect, redirect_response, resource_response, separate_number_and_remainder, stream_response, try_option_bad_request, try_result_bad_request, try_result_not_found, try_unwrap_body, RedirectParams};
+use crate::api::api_utils::{create_api_proxy_user, create_session_fingerprint, empty_json_response_as_array, empty_json_response_as_object, force_provider_stream_response, get_user_target, get_user_target_by_credentials, internal_server_error, is_seek_request, local_stream_response, redirect, redirect_response, resource_response, separate_number_and_remainder, stream_response, try_option_bad_request, try_result_bad_request, try_result_not_found, try_unwrap_body, RedirectParams};
 use crate::api::endpoints::hls_api::handle_hls_stream_request;
 use crate::api::endpoints::xmltv_api::{get_empty_epg_response, get_epg_path_for_target, serve_short_epg};
 use crate::api::model::AppState;
@@ -26,11 +26,10 @@ use futures::stream::{self, StreamExt};
 use futures::Stream;
 use log::{debug, error, warn};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use shared::concat_string;
 use shared::error::{info_err, info_err_res, TuliproxError};
-use shared::model::{create_stream_channel_with_type, PlaylistEntry, PlaylistItemType, ProxyType,
-                    TargetType, UserConnectionPermission, XtreamCluster, XtreamPlaylistItem};
+use shared::model::{create_stream_channel_with_type, PlaylistEntry, PlaylistItemType, ProxyType, ShortEpgResultDto, TargetType, UserConnectionPermission, XtreamCluster, XtreamPlaylistItem};
 use shared::utils::{deserialize_as_string, extract_extension_from_url, generate_playlist_uuid, sanitize_sensitive_info, trim_slash, Internable, HLS_EXT};
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
@@ -928,7 +927,7 @@ async fn xtream_get_short_epg(
                                 .into_response(),
                             Err(err) => {
                                 error!("Failed to download epg {}", sanitize_sensitive_info(err.to_string().as_str()));
-                                empty_json_list_response()
+                                axum::Json(json!(ShortEpgResultDto::default())).into_response()
                             }
                         };
                     }
@@ -937,7 +936,7 @@ async fn xtream_get_short_epg(
         }
     }
     warn!("Can't find short epg with id: {target_name}/{stream_id}");
-    empty_json_list_response()
+    axum::Json(json!(ShortEpgResultDto::default())).into_response()
 }
 
 async fn xtream_player_api_handle_content_action(
@@ -982,6 +981,7 @@ async fn xtream_player_api_handle_content_action(
     Some(api_utils::empty_json_list_response().into_response())
 }
 
+#[allow(clippy::too_many_lines)]
 async fn xtream_get_catchup_response(
     app_state: &Arc<AppState>,
     target: &Arc<ConfigTarget>,
@@ -989,7 +989,11 @@ async fn xtream_get_catchup_response(
     start: &str,
     end: &str,
 ) -> impl IntoResponse + Send {
-    let req_virtual_id: u32 = try_result_bad_request!(FromStr::from_str(stream_id));
+    let req_virtual_id: u32 = if let Ok(id) = stream_id.parse::<u32>() {
+        id
+    } else {
+        return axum::Json(json!(ShortEpgResultDto::default())).into_response();
+    };
     let pli = try_result_bad_request!(xtream_get_item_for_stream_id(
         req_virtual_id,
         app_state,

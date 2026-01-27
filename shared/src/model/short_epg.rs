@@ -19,6 +19,10 @@ pub struct ShortEpgDto {
     pub stop_timestamp: String,  // Format "1768434300"
     #[serde(with = "arc_str_serde")]
     pub stream_id: Arc<str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub now_playing: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_archive: Option<u8>
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Default)]
