@@ -22,6 +22,7 @@ const LABEL_RETRY: &str = "LABEL.RETRY";
 const LABEL_THROTTLE: &str = "LABEL.THROTTLE";
 const LABEL_GRACE_PERIOD_MILLIS: &str = "LABEL.GRACE_PERIOD_MILLIS";
 const LABEL_GRACE_PERIOD_TIMEOUT_SECS: &str = "LABEL.GRACE_PERIOD_TIMEOUT_SECS";
+const LABEL_GRACE_PERIOD_HOLD_STREAM: &str = "LABEL.GRACE_PERIOD_HOLD_STREAM";
 const LABEL_THROTTLE_KBPS: &str = "LABEL.THROTTLE_KBPS";
 const LABEL_STREAM_BUFFER: &str = "LABEL.STREAM_BUFFER";
 const LABEL_BUFFER_ENABLED: &str = "LABEL.BUFFER_ENABLED";
@@ -88,6 +89,7 @@ generate_form_reducer!(
         GracePeriodTimeoutSecs => grace_period_timeout_secs: u64,
         ThrottleKbps => throttle_kbps: u64,
         SharedBurstBufferMb => shared_burst_buffer_mb: u64,
+        GracePeriodHoldStream => grace_period_hold_stream: bool,
     }
 );
 
@@ -272,6 +274,7 @@ pub fn ReverseProxyConfigView() -> Html {
                 { config_field!(stream_state.form, translate.t(LABEL_GRACE_PERIOD_TIMEOUT_SECS), grace_period_timeout_secs) }
                 { config_field!(stream_state.form, translate.t(LABEL_THROTTLE_KBPS), throttle_kbps) }
                 { config_field!(stream_state.form, translate.t(LABEL_SHARED_BURST_BUFFER_MB), shared_burst_buffer_mb) }
+                { config_field_bool!(stream_state.form, translate.t(LABEL_GRACE_PERIOD_HOLD_STREAM), grace_period_hold_stream) }
             </Card>
         }
     };
@@ -417,6 +420,7 @@ pub fn ReverseProxyConfigView() -> Html {
             { edit_field_number_u64!(stream_state, translate.t(LABEL_GRACE_PERIOD_TIMEOUT_SECS), grace_period_timeout_secs, StreamConfigFormAction::GracePeriodTimeoutSecs) }
             { edit_field_number_u64!(stream_state, translate.t(LABEL_THROTTLE_KBPS), throttle_kbps, StreamConfigFormAction::ThrottleKbps) }
             { edit_field_number_u64!(stream_state, translate.t(LABEL_SHARED_BURST_BUFFER_MB), shared_burst_buffer_mb, StreamConfigFormAction::SharedBurstBufferMb) }
+            { edit_field_bool!(stream_state, translate.t(LABEL_GRACE_PERIOD_HOLD_STREAM), grace_period_hold_stream, StreamConfigFormAction::GracePeriodHoldStream) }
         </Card>
     };
     let render_stream_buffer_edit = || {

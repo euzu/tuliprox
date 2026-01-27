@@ -247,21 +247,18 @@ async fn playlist_episode_item(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     axum::extract::Json(playlist_req): axum::extract::Json<PlaylistRequest>,
 ) -> impl IntoResponse + Send {
-    match playlist_req {
-        PlaylistRequest::Target(target_id) => {
-            if let Some(target) = app_state.app_config.get_target_by_id(target_id) {
-                if target.has_output(TargetType::Xtream) {
-                    if let Ok(vid) = virtual_id.parse::<u32>() {
-                        if let Ok(pli) = xtream_get_item_for_stream_id(
-                            vid, &app_state, &target, Some(XtreamCluster::Series)
-                        ).await {
-                           return axum::Json(json!(UiPlaylistItem::from(pli))).into_response();
-                        }
+    if let PlaylistRequest::Target(target_id) = playlist_req {
+        if let Some(target) = app_state.app_config.get_target_by_id(target_id) {
+            if target.has_output(TargetType::Xtream) {
+                if let Ok(vid) = virtual_id.parse::<u32>() {
+                    if let Ok(pli) = xtream_get_item_for_stream_id(
+                        vid, &app_state, &target, Some(XtreamCluster::Series)
+                    ).await {
+                       return axum::Json(json!(UiPlaylistItem::from(pli))).into_response();
                     }
                 }
             }
         }
-        _ => {}
     }
     axum::http::StatusCode::NO_CONTENT.into_response()
 }

@@ -46,6 +46,9 @@ pub struct StreamConfigDto {
     pub throttle_kbps: u64,
     #[serde(default = "default_shared_burst_buffer_mb", skip_serializing_if = "is_default_shared_burst_buffer_mb")]
     pub shared_burst_buffer_mb: u64,
+    /// If true, wait for grace period check before streaming. If false (default), start streaming instantly.
+    #[serde(default)]
+    pub grace_period_hold_stream: bool,
 }
 
 impl Default for StreamConfigDto {
@@ -58,6 +61,7 @@ impl Default for StreamConfigDto {
             grace_period_timeout_secs: default_grace_period_timeout_secs(),
             throttle_kbps: 0,
             shared_burst_buffer_mb: default_shared_burst_buffer_mb(),
+            grace_period_hold_stream: false,
         }
     }
 }
@@ -72,6 +76,7 @@ impl StreamConfigDto {
         && self.grace_period_timeout_secs == empty.grace_period_timeout_secs
         && self.throttle_kbps == empty.throttle_kbps
         && self.shared_burst_buffer_mb == default_shared_burst_buffer_mb()
+        && self.grace_period_hold_stream == empty.grace_period_hold_stream
     }
 
 

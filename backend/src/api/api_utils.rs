@@ -434,12 +434,12 @@ async fn create_stream_response_details(
     virtual_id: VirtualId,
 ) -> StreamDetails {
     let mut streaming_strategy = resolve_streaming_strategy(app_state, stream_url, fingerprint, input, force_provider).await;
-    let config_grace_period_millis = app_state.app_config.config
+    let (config_grace_period_millis, grace_period_hold_stream) = app_state.app_config.config
         .load()
         .reverse_proxy
         .as_ref()
         .and_then(|r| r.stream.as_ref())
-        .map_or_else(default_grace_period_millis, |s| s.grace_period_millis);
+        .map_or_else(|| (default_grace_period_millis(), false), |s| (s.grace_period_millis, s.grace_period_hold_stream));
     let grace_period_millis = get_grace_period_millis(
         connection_permission,
         &streaming_strategy.provider_stream_state,
@@ -483,6 +483,7 @@ async fn create_stream_response_details(
                 stream_info,
                 provider_name: guard_provider_name.clone(),
                 grace_period_millis,
+                grace_period_hold_stream,
                 disable_provider_grace: false,
                 reconnect_flag: None,
                 provider_handle: streaming_strategy.provider_handle.clone(),
@@ -549,6 +550,7 @@ async fn create_stream_response_details(
                 stream_info,
                 provider_name: guard_provider_name.clone(),
                 grace_period_millis,
+                grace_period_hold_stream,
                 disable_provider_grace: false,
                 reconnect_flag,
                 provider_handle,
