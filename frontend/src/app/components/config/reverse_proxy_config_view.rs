@@ -269,12 +269,12 @@ pub fn ReverseProxyConfigView() -> Html {
             <Card class="tp__config-view__card">
                 <h1>{translate.t(LABEL_STREAM)}</h1>
                 { config_field_bool!(stream_state.form, translate.t(LABEL_RETRY), retry) }
-                { config_field_optional!(stream_state.form, translate.t(LABEL_THROTTLE), throttle) }
                 { config_field!(stream_state.form, translate.t(LABEL_GRACE_PERIOD_MILLIS), grace_period_millis) }
                 { config_field!(stream_state.form, translate.t(LABEL_GRACE_PERIOD_TIMEOUT_SECS), grace_period_timeout_secs) }
+                { config_field_bool!(stream_state.form, translate.t(LABEL_GRACE_PERIOD_HOLD_STREAM), grace_period_hold_stream) }
+                { config_field_optional!(stream_state.form, translate.t(LABEL_THROTTLE), throttle) }
                 { config_field!(stream_state.form, translate.t(LABEL_THROTTLE_KBPS), throttle_kbps) }
                 { config_field!(stream_state.form, translate.t(LABEL_SHARED_BURST_BUFFER_MB), shared_burst_buffer_mb) }
-                { config_field_bool!(stream_state.form, translate.t(LABEL_GRACE_PERIOD_HOLD_STREAM), grace_period_hold_stream) }
             </Card>
         }
     };
@@ -415,12 +415,12 @@ pub fn ReverseProxyConfigView() -> Html {
         <Card class="tp__config-view__card">
             <h1>{translate.t(LABEL_STREAM)}</h1>
             { edit_field_bool!(stream_state, translate.t(LABEL_RETRY), retry, StreamConfigFormAction::Retry) }
-            { edit_field_text_option!(stream_state, translate.t(LABEL_THROTTLE), throttle, StreamConfigFormAction::Throttle) }
             { edit_field_number_u64!(stream_state, translate.t(LABEL_GRACE_PERIOD_MILLIS), grace_period_millis, StreamConfigFormAction::GracePeriodMillis) }
             { edit_field_number_u64!(stream_state, translate.t(LABEL_GRACE_PERIOD_TIMEOUT_SECS), grace_period_timeout_secs, StreamConfigFormAction::GracePeriodTimeoutSecs) }
+            { edit_field_bool!(stream_state, translate.t(LABEL_GRACE_PERIOD_HOLD_STREAM), grace_period_hold_stream, StreamConfigFormAction::GracePeriodHoldStream) }
+            { edit_field_text_option!(stream_state, translate.t(LABEL_THROTTLE), throttle, StreamConfigFormAction::Throttle) }
             { edit_field_number_u64!(stream_state, translate.t(LABEL_THROTTLE_KBPS), throttle_kbps, StreamConfigFormAction::ThrottleKbps) }
             { edit_field_number_u64!(stream_state, translate.t(LABEL_SHARED_BURST_BUFFER_MB), shared_burst_buffer_mb, StreamConfigFormAction::SharedBurstBufferMb) }
-            { edit_field_bool!(stream_state, translate.t(LABEL_GRACE_PERIOD_HOLD_STREAM), grace_period_hold_stream, StreamConfigFormAction::GracePeriodHoldStream) }
         </Card>
     };
     let render_stream_buffer_edit = || {
@@ -438,8 +438,8 @@ pub fn ReverseProxyConfigView() -> Html {
         html! {
             <div class="tp__reverse-proxy-config-view__body tp__config-view-page__body">
                 { render_settings_view() }
-                { render_disabled_header_view() }
                 { render_geoip() }
+                { render_disabled_header_view() }
                 { render_cache() }
                 { render_resource_retry_view() }
                 { render_rate_limit() }
@@ -452,8 +452,8 @@ pub fn ReverseProxyConfigView() -> Html {
     let render_edit_mode = || html! {
         <div class="tp__reverse-proxy-config-view__body tp__config-view-page__body">
             { render_settings_edit() }
-            { render_disabled_header_edit() }
             { render_geoip_edit() }
+            { render_disabled_header_edit() }
             { render_cache_edit() }
             { render_resource_retry_edit() }
             { render_rate_limit_edit() }

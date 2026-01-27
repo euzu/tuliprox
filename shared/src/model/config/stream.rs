@@ -42,13 +42,13 @@ pub struct StreamConfigDto {
     pub grace_period_millis: u64,
     #[serde(default = "default_grace_period_timeout_secs", skip_serializing_if = "is_default_grace_period_timeout_secs")]
     pub grace_period_timeout_secs: u64,
+    /// If true, wait for grace period check before streaming. If false (default), start streaming instantly.
+    #[serde(default)]
+    pub grace_period_hold_stream: bool,
     #[serde(default, skip)]
     pub throttle_kbps: u64,
     #[serde(default = "default_shared_burst_buffer_mb", skip_serializing_if = "is_default_shared_burst_buffer_mb")]
     pub shared_burst_buffer_mb: u64,
-    /// If true, wait for grace period check before streaming. If false (default), start streaming instantly.
-    #[serde(default)]
-    pub grace_period_hold_stream: bool,
 }
 
 impl Default for StreamConfigDto {

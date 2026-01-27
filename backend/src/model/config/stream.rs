@@ -34,10 +34,10 @@ pub struct StreamConfig {
     pub buffer: Option<StreamBufferConfig>,
     pub grace_period_millis: u64,
     pub grace_period_timeout_secs: u64,
+    pub grace_period_hold_stream: bool,
     pub throttle_str: Option<String>,
     pub throttle_kbps: u64,
     pub shared_burst_buffer_mb: u64,
-    pub grace_period_hold_stream: bool,
 }
 
 macros::from_impl!(StreamConfig);

@@ -1,7 +1,7 @@
 use crate::api::model::provider_lineup_manager::{ProviderAllocation, ProviderLineupManager};
 use crate::api::model::{EventManager, ProviderConfig};
-use crate::model::{AppConfig, ConfigInput};
-use shared::utils::{default_grace_period_millis, default_grace_period_timeout_secs, sanitize_sensitive_info};
+use crate::model::{AppConfig, ConfigInput, GracePeriodOptions};
+use shared::utils::{sanitize_sensitive_info};
 use log::{error};
 use crate::utils::{debug_if_enabled, trace_if_enabled};
 use std::collections::{HashMap, HashSet};
@@ -57,10 +57,10 @@ pub struct ActiveProviderManager {
 
 impl ActiveProviderManager {
     pub fn new(cfg: &AppConfig, event_manager: &Arc<EventManager>) -> Self {
-        let (grace_period_millis, grace_period_timeout_secs) = Self::get_grace_options(cfg);
+        let grace_period_options = Self::get_grace_options(cfg);
         let inputs = Self::get_config_inputs(cfg);
         Self {
-            providers: ProviderLineupManager::new(inputs, grace_period_millis, grace_period_timeout_secs, event_manager),
+            providers: ProviderLineupManager::new(inputs, grace_period_options, event_manager),
             connections: RwLock::new(Connections::default()),
             next_allocation_id: AtomicU64::new(1),
         }
@@ -70,17 +70,14 @@ impl ActiveProviderManager {
         cfg.sources.load().inputs.iter().filter(|i| i.enabled).map(Arc::clone).collect()
     }
 
-    fn get_grace_options(cfg: &AppConfig) -> (u64, u64) {
-        let (grace_period_millis, grace_period_timeout_secs) = cfg.config.load().reverse_proxy.as_ref()
-            .and_then(|r| r.stream.as_ref())
-            .map_or_else(|| (default_grace_period_millis(), default_grace_period_timeout_secs()), |s| (s.grace_period_millis, s.grace_period_timeout_secs));
-        (grace_period_millis, grace_period_timeout_secs)
+    fn get_grace_options(cfg: &AppConfig) -> GracePeriodOptions {
+        cfg.config.load().get_grace_options()
     }
 
     pub async fn update_config(&self, cfg: &AppConfig) {
-        let (grace_period_millis, grace_period_timeout_secs) = Self::get_grace_options(cfg);
+        let grace_period_options = Self::get_grace_options(cfg);
         let inputs = Self::get_config_inputs(cfg);
-        self.providers.update_config(inputs, grace_period_millis, grace_period_timeout_secs);
+        self.providers.update_config(inputs, &grace_period_options);
         self.reconcile_connections().await;
     }
 

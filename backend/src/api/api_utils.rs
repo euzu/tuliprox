@@ -28,7 +28,7 @@ use log::{debug, error, info, log_enabled, trace, warn};
 use serde::Serialize;
 use shared::concat_string;
 use shared::model::{Claims, InputFetchMethod, PlaylistEntry, PlaylistItemType, ProxyType, StreamChannel, TargetType, UserConnectionPermission, VirtualId, XtreamCluster};
-use shared::utils::{bin_serialize, default_grace_period_millis, human_readable_kbps, trim_slash, Internable, CONTENT_TYPE_CBOR};
+use shared::utils::{bin_serialize, human_readable_kbps, trim_slash, Internable, CONTENT_TYPE_CBOR};
 use shared::utils::{
     extract_extension_from_url, replace_url_extension, sanitize_sensitive_info, DASH_EXT, HLS_EXT,
 };
@@ -434,16 +434,11 @@ async fn create_stream_response_details(
     virtual_id: VirtualId,
 ) -> StreamDetails {
     let mut streaming_strategy = resolve_streaming_strategy(app_state, stream_url, fingerprint, input, force_provider).await;
-    let (config_grace_period_millis, grace_period_hold_stream) = app_state.app_config.config
-        .load()
-        .reverse_proxy
-        .as_ref()
-        .and_then(|r| r.stream.as_ref())
-        .map_or_else(|| (default_grace_period_millis(), false), |s| (s.grace_period_millis, s.grace_period_hold_stream));
-    let grace_period_millis = get_grace_period_millis(
+    let mut grace_period_options = app_state.get_grace_options();
+    grace_period_options.period_millis = get_grace_period_millis(
         connection_permission,
         &streaming_strategy.provider_stream_state,
-        config_grace_period_millis,
+        grace_period_options.period_millis,
     );
 
     let guard_provider_name = streaming_strategy
@@ -468,7 +463,7 @@ async fn create_stream_response_details(
             app_state,
             input,
             guard_provider_name.clone(),
-            grace_period_millis,
+            &grace_period_options,
             fingerprint.addr,
             virtual_id,
         );
@@ -482,8 +477,7 @@ async fn create_stream_response_details(
                 stream,
                 stream_info,
                 provider_name: guard_provider_name.clone(),
-                grace_period_millis,
-                grace_period_hold_stream,
+                grace_period: grace_period_options,
                 disable_provider_grace: false,
                 reconnect_flag: None,
                 provider_handle: streaming_strategy.provider_handle.clone(),
@@ -549,8 +543,7 @@ async fn create_stream_response_details(
                 stream,
                 stream_info,
                 provider_name: guard_provider_name.clone(),
-                grace_period_millis,
-                grace_period_hold_stream,
+                grace_period: grace_period_options,
                 disable_provider_grace: false,
                 reconnect_flag,
                 provider_handle,
@@ -1054,7 +1047,8 @@ async fn try_shared_stream_response_if_any(
                 headers.clone(),
                 StatusCode::OK,
             )));
-            let mut stream_details = StreamDetails::from_stream(stream);
+            let grace_period_options = app_state.get_grace_options();
+            let mut stream_details = StreamDetails::from_stream(stream, grace_period_options);
 
             stream_details.provider_name = provider;
             stream_channel.shared = true;

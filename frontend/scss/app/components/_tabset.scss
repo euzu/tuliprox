@@ -51,7 +51,6 @@
     }
 
     &-desktop {
-      display: block;
       @media (max-width: size.$mobile-breakpoint) {
         display: none !important;
       }
