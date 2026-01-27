@@ -292,9 +292,20 @@ pub fn parse_xmltv_time(t: &str) -> Option<i64> {
         .map(|dt| dt.with_timezone(&Utc).timestamp())
 }
 
-pub fn format_xmltv_time_utc(ts: i64) -> String {
+pub fn format_xmltv_time_utc(ts: i64, offset_minutes: i32) -> String {
     let dt = Utc.timestamp_opt(ts, 0).unwrap();
-    dt.format("%Y%m%d%H%M%S %z").to_string()
+    if offset_minutes == 0 {
+        dt.format("%Y%m%d%H%M%S %z").to_string()
+    } else {
+        match chrono::FixedOffset::east_opt(offset_minutes * 60) {
+            Some(offset) => {
+                dt.with_timezone(&offset).format("%Y%m%d%H%M%S %z").to_string()
+            }
+            None => {
+                dt.format("%Y%m%d%H%M%S %z").to_string()
+            }
+        }
+    }
 }
 
 #[cfg(test)]
