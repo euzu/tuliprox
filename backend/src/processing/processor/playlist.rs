@@ -1,4 +1,4 @@
-use crate::model::{AppConfig, ConfigFavourites, ConfigInput, ConfigRename, ReverseProxyDisabledHeaderConfig, TVGuide};
+use crate::model::{AppConfig, ConfigFavourites, ConfigInput, ConfigRename, MessageContent, ReverseProxyDisabledHeaderConfig, TVGuide};
 use crate::utils::m3u;
 use crate::utils::xtream;
 use crate::utils::{epg, StepMeasureCallback};
@@ -9,7 +9,7 @@ use tokio::sync::{Mutex, OwnedRwLockWriteGuard, RwLock};
 use tokio::task::JoinSet;
 
 use crate::api::model::{ActiveProviderManager, EventManager, EventMessage, PlaylistStorageState, UpdateGuard};
-use crate::messaging::{send_message_json};
+use crate::messaging::send_message;
 use crate::model::Epg;
 
 
