@@ -9,7 +9,7 @@ use log::{error, info, log_enabled, Level};
 use shared::error::TuliproxError;
 use shared::model::{InputType, PlaylistEntry, SeriesStreamProperties, StreamProperties, XtreamSeriesInfo};
 use shared::model::{PlaylistGroup, PlaylistItemType, XtreamCluster};
-use std::collections::HashMap;
+use indexmap::IndexMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -46,7 +46,7 @@ async fn playlist_resolve_series_info(app_config: &Arc<AppConfig>, client: &reqw
 
     let mut last_log_time = Instant::now();
     let mut processed_series_info_count = 0;
-    let mut group_series: HashMap<u32, PlaylistGroup> = HashMap::new();
+    let mut group_series: IndexMap<u32, PlaylistGroup> = IndexMap::new();
     let mut batch = Vec::with_capacity(BATCH_SIZE);
 
     let input = fpl.input;
