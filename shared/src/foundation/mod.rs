@@ -1,8 +1,9 @@
-pub mod filter;
-pub mod mapper;
-//
-// pub use filter::{Filter,
-//                  get_filter, prepare_templates, ValueProvider,  ValueAccessor,
-//                  get_field_value, set_field_value,
-//                  apply_templates_to_pattern, apply_templates_to_pattern_single};
-// pub use mapper::*;
+mod filter;
+mod mapper;
+mod value_provider;
+
+pub use filter::{Filter, CompiledRegex,
+                 prepare_templates, get_filter, apply_templates_to_pattern,
+                 apply_templates_to_pattern_single};
+pub use mapper::*;
+pub use value_provider::*;

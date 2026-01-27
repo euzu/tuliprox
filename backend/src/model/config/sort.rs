@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use regex::Regex;
 use shared::model::{ConfigSortRuleDto, ConfigSortDto, ItemField, SortOrder, SortTarget};
-use shared::foundation::filter::Filter;
+use shared::foundation::Filter;
 use crate::model::macros;
 
 

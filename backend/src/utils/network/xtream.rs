@@ -1,20 +1,23 @@
 use crate::api::model::AppState;
 use crate::messaging::send_message;
-use crate::model::{is_input_expired, xtream_mapping_option_from_target_options, AppConfig, Config, ConfigInput, ConfigTarget, XtreamLoginInfo, XtreamTargetOutput};
+use crate::model::{is_input_expired, xtream_mapping_option_from_target_options, AppConfig,
+                   ConfigInput, ConfigTarget, MessageContent, XtreamLoginInfo, XtreamTargetOutput};
 use crate::model::{InputSource, ProxyUserCredentials};
 use crate::processing::parser::xtream;
 use crate::processing::parser::xtream::parse_xtream_series_info;
 use crate::repository::BPlusTreeUpdate;
-use crate::repository::{get_target_id_mapping, rewrite_provider_series_info_episode_virtual_id, ProviderEpisodeKey};
-use crate::repository::{ensure_input_storage_path, get_input_storage_path, get_target_storage_path};
 use crate::repository::VirtualIdRecord;
+use crate::repository::{ensure_input_storage_path, get_input_storage_path, get_target_storage_path};
 use crate::repository::{get_live_cat_collection_path, get_series_cat_collection_path, get_vod_cat_collection_path, xtream_get_file_path, CategoryEntry};
+use crate::repository::{get_target_id_mapping, rewrite_provider_series_info_episode_virtual_id, ProviderEpisodeKey};
 use crate::repository::{persist_input_vod_info, persists_input_series_info, write_playlist_batch_item_upsert, write_playlist_item_update};
 use crate::utils::{file_exists_async, request};
 use chrono::{DateTime, Utc};
 use log::{error, info, warn};
-use shared::error::{TuliproxError};
-use shared::model::{MsgKind, PlaylistEntry, PlaylistGroup, ProxyUserStatus, SeriesStreamProperties, StreamProperties, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem, XtreamSeriesInfo, XtreamVideoInfo, XtreamVideoInfoDoc};
+use shared::error::TuliproxError;
+use shared::model::{PlaylistEntry, PlaylistGroup, ProxyUserStatus, SeriesStreamProperties,
+                    StreamProperties, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem,
+                    XtreamSeriesInfo, XtreamVideoInfo, XtreamVideoInfoDoc};
 use shared::utils::{extract_extension_from_url, get_i64_from_serde_value, get_string_from_serde_value, sanitize_sensitive_info, Internable};
 use std::collections::HashMap;
 use std::io::Error;
@@ -290,8 +293,6 @@ async fn xtream_login(app_config: &Arc<AppConfig>, client: &reqwest::Client, inp
         exp_date: None,
     };
 
-    let cfg = app_config.config.load();
-
     if let Some(user_info) = content.get("user_info") {
         if let Some(status_value) = user_info.get("status") {
             if let Some(status) = get_string_from_serde_value(status_value) {
@@ -299,8 +300,7 @@ async fn xtream_login(app_config: &Arc<AppConfig>, client: &reqwest::Client, inp
                     login_info.status = Some(cur_status);
                     if !matches!(cur_status, ProxyUserStatus::Active | ProxyUserStatus::Trial) {
                         warn!("User status for user {username} is {cur_status:?}");
-                        send_message(client, MsgKind::Info, cfg.messaging.as_ref(),
-                                     &format!("User status for user {username} is {cur_status:?}")).await;
+                    send_message(app_config, client, MessageContent::Error(format!("User status for user {username} is {cur_status:?}"))).await;
                     }
                 }
             }
@@ -309,7 +309,7 @@ async fn xtream_login(app_config: &Arc<AppConfig>, client: &reqwest::Client, inp
         if let Some(exp_value) = user_info.get("exp_date") {
             if let Some(expiration_timestamp) = get_i64_from_serde_value(exp_value) {
                 login_info.exp_date = Some(expiration_timestamp);
-                notify_account_expire(login_info.exp_date, &cfg, client, username, &input.name).await;
+                notify_account_expire(login_info.exp_date, app_config, client, username, &input.name).await;
             }
         }
     }
@@ -321,7 +321,7 @@ async fn xtream_login(app_config: &Arc<AppConfig>, client: &reqwest::Client, inp
     }
 }
 
-pub async fn notify_account_expire(exp_date: Option<i64>, cfg: &Config, client: &reqwest::Client,
+pub async fn notify_account_expire(exp_date: Option<i64>, app_config: &Arc<AppConfig>, client: &reqwest::Client,
                                    username: &str, input_name: &str) {
     if let Some(expiration_timestamp) = exp_date {
         let now_secs = Utc::now().timestamp(); // UTC-Time
@@ -332,21 +332,19 @@ pub async fn notify_account_expire(exp_date: Option<i64>, cfg: &Config, client: 
                 if let Some(datetime) = DateTime::<Utc>::from_timestamp(expiration_timestamp, 0) {
                     let formatted = datetime.format("%Y-%m-%d %H:%M:%S").to_string();
                     warn!("User account for user {username} expires {formatted}");
-                    send_message(client, MsgKind::Info, cfg.messaging.as_ref(),
-                                 &format!("User account for user {username} expires {formatted}")).await;
+                    send_message(app_config, client, MessageContent::Info(format!("User account for user {username} expires {formatted}"))).await;
                 }
             }
         } else {
             warn!("User account for user {username} is expired");
-            send_message(client, MsgKind::Info, cfg.messaging.as_ref(),
-                         &format!("User account for user {username} for provider {input_name} is expired")).await;
+            send_message(app_config, client, MessageContent::Info(
+                         format!("User account for user {username} for provider {input_name} is expired"))).await;
         }
     }
 }
 
 pub async fn download_xtream_playlist(app_config: &Arc<AppConfig>, client: &reqwest::Client, input: &ConfigInput, clusters: Option<&[XtreamCluster]>)
                                       -> (Vec<PlaylistGroup>, Vec<TuliproxError>, bool) {
-    let cfg = app_config.config.load();
     let input_source: InputSource = {
         match input.staged.as_ref() {
             None => input.into(),
@@ -360,7 +358,7 @@ pub async fn download_xtream_playlist(app_config: &Arc<AppConfig>, client: &reqw
     let base_url = get_xtream_stream_url_base(&input_source.url, username, password);
     let input_source_login = input_source.with_url(base_url.clone());
 
-    check_alias_user_state(&cfg, client, input).await;
+    check_alias_user_state(app_config, client, input).await;
 
     if let Err(err) = xtream_login(app_config, client, &input_source_login, username).await {
         error!("Could not log in with xtream user {username} for provider {}. {err}", input.name);
@@ -370,6 +368,7 @@ pub async fn download_xtream_playlist(app_config: &Arc<AppConfig>, client: &reqw
     let mut playlist_groups: Vec<PlaylistGroup> = Vec::with_capacity(128);
     let skip_cluster = get_skip_cluster(input);
 
+    let cfg = app_config.config.load();
     let working_dir = &cfg.working_dir;
 
     let mut errors = vec![];
@@ -429,11 +428,11 @@ pub async fn download_xtream_playlist(app_config: &Arc<AppConfig>, client: &reqw
     (playlist_groups, errors, cfg.disk_based_processing)
 }
 
-async fn check_alias_user_state(cfg: &Arc<Config>, client: &reqwest::Client, input: &ConfigInput) {
+async fn check_alias_user_state(app_config: &Arc<AppConfig>, client: &reqwest::Client, input: &ConfigInput) {
     if let Some(aliases) = input.aliases.as_ref() {
         for alias in aliases {
             if is_input_expired(alias.exp_date) {
-                notify_account_expire(alias.exp_date, cfg, client, alias.username.as_ref()
+                notify_account_expire(alias.exp_date, app_config, client, alias.username.as_ref()
                     .map_or("", |s| s.as_str()), &alias.name).await;
             }
         }

@@ -194,10 +194,11 @@ async fn serve_epg_with_rewrites(
 
                 for programme in programmes {
                     let mut elem = BytesStart::new("programme");
-                    let (user_start, user_stop) = apply_user_offset(programme.start, programme.stop, epg_processing_options.offset_minutes);
+                    // We dont need to apply offset because the time contains the time zone offset as +00000
+                    let (user_start, user_stop) = (programme.start, programme.stop); // apply_user_offset(programme.start, programme.stop, epg_processing_options.offset_minutes);
                     elem.push_attribute(("start", format_xmltv_time_utc(user_start).as_str()));
                     elem.push_attribute(("stop", format_xmltv_time_utc(user_stop).as_str()));
-                    elem.push_attribute(("channel", &programme.channel[..]));
+                    elem.push_attribute(("channel", channel.id.as_ref()));
                     continue_on_err!(writer.write_event_async(Event::Start(elem)).await);
 
                     if let Some(title) = &programme.title {
@@ -267,23 +268,25 @@ fn apply_user_offset(start: i64, stop: i64, offset_minutes: i32) -> (i64, i64) {
     (user_start, user_end)
 }
 
-fn from_programme(stream_id: &Arc<str>, programme: &EpgProgramme, epg_processing_options: &EpgProcessingOptions) -> ShortEpgDto {
+fn from_programme(stream_id: &Arc<str>, epg_id: &Arc<str>,  programme: &EpgProgramme, epg_processing_options: &EpgProcessingOptions) -> ShortEpgDto {
     let (user_start, user_end) = apply_user_offset(programme.start, programme.stop, epg_processing_options.offset_minutes);
 
     ShortEpgDto {
         id: Arc::clone(stream_id),
-        epg_id: Arc::clone(&programme.channel),
+        epg_id: Arc::clone(epg_id),
         title: programme.title.as_ref().map_or_else(String::new, ToString::to_string),
         lang: String::new(),
         start: format_xmltv_time(user_start),
         end: format_xmltv_time(user_end),
         description: programme.desc.as_ref().map_or_else(String::new, ToString::to_string),
-        channel_id: Arc::clone(&programme.channel),
+        channel_id: Arc::clone(epg_id),
         start_timestamp: user_start.to_string(),
         stop_timestamp: user_end.to_string(),
         stream_id: Arc::clone(stream_id),
     }
 }
+
+const DEFAULT_SHORT_EPG_LIMIT: u32 = 4;
 
 pub async fn serve_short_epg(
     app_state: &Arc<AppState>,
@@ -295,16 +298,17 @@ pub async fn serve_short_epg(
     limit: u32,
 ) -> axum::response::Response {
     let short_epg = {
+        // It seems provider set limit to 4 if it is undefined oor 0.
+        let limit = if limit > 0 { limit} else { DEFAULT_SHORT_EPG_LIMIT };
         if file_exists_async(epg_path).await {
             if let Some(epg_channel) = get_epg_channel(app_state, channel_id, epg_path).await {
                 let epg_processing_options = get_epg_processing_options(app_state, user, target);
                 ShortEpgResultDto {
                     epg_listings: if limit > 0 {
-                        epg_channel.get_programme_with_limit(limit).iter().map(|p| from_programme(&stream_id, p, &epg_processing_options)).collect()
+                        epg_channel.get_programme_with_limit(limit).iter().map(|p| from_programme(&stream_id, channel_id, p, &epg_processing_options)).collect()
                     } else {
-                        epg_channel.programmes.iter().map(|p| from_programme(&stream_id, p, &epg_processing_options)).collect()
+                        epg_channel.programmes.iter().map(|p| from_programme(&stream_id, channel_id, p, &epg_processing_options)).collect()
                     },
-                    error: None,
                 }
             } else {
                 ShortEpgResultDto::default()
@@ -403,3 +407,4 @@ pub fn xmltv_api_register() -> axum::Router<Arc<AppState>> {
                axum::routing::get(epg_api_resource),
         )
 }
+

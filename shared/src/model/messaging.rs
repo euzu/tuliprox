@@ -1,9 +1,9 @@
 use std::fmt;
 use std::str::FromStr;
-use crate::info_err_res;
+use crate::{concat_string, info_err_res};
 use crate::error::{TuliproxError};
 
-#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash)]
 pub enum MsgKind {
     #[serde(rename = "info")]
     Info,
@@ -14,6 +14,12 @@ pub enum MsgKind {
     #[serde(rename = "watch")]
     Watch,
 }
+impl MsgKind {
+    pub fn template_filename(&self, prefix: &str) -> String {
+        concat_string!(prefix, "_", &self.to_string().to_lowercase(), ".templ")
+    }
+}
+
 impl fmt::Display for MsgKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {

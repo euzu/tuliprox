@@ -5,8 +5,8 @@ use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 use log::{trace};
 use crate::error::{TuliproxError, info_err_res};
-use crate::foundation::filter::{apply_templates_to_pattern_single, get_filter, prepare_templates, Filter};
-use crate::foundation::mapper::MapperScript;
+use crate::foundation::{apply_templates_to_pattern_single, get_filter, prepare_templates, Filter};
+use crate::foundation::MapperScript;
 use crate::model::PatternTemplate;
 pub const COUNTER_FIELDS: &[&str] = &["name", "title", "caption", "chno"];
 
@@ -109,6 +109,7 @@ pub enum MapperOperation {
     Lowercase { field: String },
     Uppercase { field: String },
     Capitalize { field: String },
+    Split { field: String, value: String },
     Suffix { field: String, value: String },
     Prefix { field: String, value: String },
     Set { field: String, value: String },
@@ -135,7 +136,8 @@ impl MapperOperation {
                 }
             }
 
-            MapperOperation::Suffix { ref field, ref mut value }
+            MapperOperation::Split { ref field, ref mut value }
+            | MapperOperation::Suffix { ref field, ref mut value }
             | MapperOperation::Prefix { ref field, ref mut value }
             | MapperOperation::Set { ref field, ref mut value } => {
                 if !valid_property!(field.as_str(), MAPPER_FIELDS) {

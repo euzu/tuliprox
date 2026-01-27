@@ -169,6 +169,29 @@ macro_rules! edit_field_text_option {
 }
 
 #[macro_export]
+macro_rules! edit_field_textarea_option {
+    ($instance:expr, $label:expr, $field:ident, $action:path) => {{
+        let instance = $instance.clone();
+        html! {
+            <div class="tp__form-field tp__form-field__textarea">
+                <$crate::app::components::TextArea
+                    label={$label}
+                    name={stringify!($field)}
+                    value={instance.form.$field.as_ref().map_or_else(String::new, |v|v.to_string())}
+                    on_change={Callback::from(move |value: String| {
+                        instance.dispatch($action(if value.is_empty() {
+                            None
+                        } else {
+                            Some(value)
+                        }));
+                    })}
+                />
+            </div>
+        }
+    }};
+}
+
+#[macro_export]
 macro_rules! edit_field_text {
     ($instance:expr, $label:expr, $field:ident, $action:path) => {
         $crate::edit_field_text!(@inner $instance, $label, $field, $action, false)
@@ -355,6 +378,31 @@ macro_rules! edit_field_number_u64 {
                             Err(_) => return,
                           },
                           None => instance.dispatch($action(0)),
+                        }
+                    })}
+                />
+            </div>
+        }
+    }};
+}
+
+#[macro_export]
+macro_rules! edit_field_number_usize {
+    ($instance:expr, $label:expr, $field:ident, $action:path) => {{
+        let instance = $instance.clone();
+        html! {
+            <div class="tp__form-field tp__form-field__number">
+                <$crate::app::components::number_input::NumberInput
+                    label={$label}
+                    name={stringify!($field)}
+                    value={instance.form.$field as i64}
+                    on_change={Callback::from(move |value: Option<i64>| {
+                        match value {
+                             Some(value) => {
+                                 let val = usize::try_from(value).unwrap_or(0);
+                                 instance.dispatch($action(val))
+                             },
+                             None => instance.dispatch($action(0)),
                         }
                     })}
                 />

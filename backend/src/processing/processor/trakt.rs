@@ -268,7 +268,7 @@ pub async fn process_trakt_categories_for_target(
     target: &ConfigTarget,
 ) -> Result<Option<Vec<PlaylistGroup>>, Vec<TuliproxError>> {
     let Some(trakt_config) = target.get_xtream_output().and_then(|output| output.trakt.as_ref()) else {
-        debug!("No Trakt configuration found for target {}", target.name);
+        trace!("No Trakt configuration found for target {}", target.name);
         return Ok(None);
     };
     if !trakt_config.enabled {

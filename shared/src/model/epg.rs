@@ -90,7 +90,14 @@ pub struct EpgProgramme {
     pub title: Option<Arc<str>>,
     pub desc: Option<Arc<str>>,
     #[serde(skip)]
-    pub channel: Arc<str>,
+    channel: Arc<str>,
+}
+
+impl EpgProgramme {
+    // the channel_id is only available when read from xml file, reading from db do not return any epg_id
+    pub fn get_transient_channel_id(&self) -> &Arc<str> {
+        &self.channel
+    }
 }
 
 impl EpgProgramme {
@@ -101,6 +108,15 @@ impl EpgProgramme {
             channel,
             title: None,
             desc: None,
+        }
+    }
+    pub fn new_all(start: i64, stop: i64, channel: Arc<str>, title: Option<Arc<str>>, desc: Option<Arc<str>>) -> Self {
+        Self {
+            start,
+            stop,
+            channel,
+            title,
+            desc,
         }
     }
 }

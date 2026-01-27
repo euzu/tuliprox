@@ -1,12 +1,16 @@
 #!/bin/bash
 set -euo pipefail
 
-# Check for required environment variable
-if [ ! -f "${HOME}/.ghcr.io" ]; then
-    echo "🧨 Error: ${HOME}/.ghcr.io file not found"
+# Required environment variables (set by CI)
+if [ -z "${REPO_OWNER:-}" ]; then
+    echo "🧨 Error: REPO_OWNER env var is required"
     exit 1
 fi
-source "${HOME}/.ghcr.io"
+
+if [ -z "${GITHUB_IO_TOKEN:-}" ]; then
+    echo "🧨 Error: GITHUB_IO_TOKEN env var is required"
+    exit 1
+fi
 
 # -----------------------------
 # Rust / Cargo Setup
@@ -116,7 +120,7 @@ echo "📦 Version: ${VERSION}"
 # Build resources if needed (check if resources are already built)
 # Note: Docker build handles resource creation with its own ffmpeg container
 RESOURCES_BUILT=true
-for resource in "channel_unavailable.ts" "user_connections_exhausted.ts" "provider_connections_exhausted.ts" "user_account_expired.ts"; do
+for resource in "channel_unavailable.ts" "user_connections_exhausted.ts" "provider_connections_exhausted.ts" "user_account_expired.ts" "panel_api_provisioning.ts"; do
     if [ ! -f "${RESOURCES_DIR}/${resource}" ]; then
         RESOURCES_BUILT=false
         break
@@ -151,15 +155,16 @@ cd "$WORKING_DIR"
 
 # Build binaries for all architectures first
 echo "🏗️ Building binaries for all architectures..."
+
+# Avoid executing stale build artifacts when caches are missing or the runner image changes.
+if [ "${TULIPROX_FORCE_CLEAN:-0}" = "1" ] || [ "${CARGO_DEPS_CACHE_HIT:-false}" != "true" ]; then
+    cargo clean || true
+fi
+
 for PLATFORM in "${!ARCHITECTURES[@]}"; do
     ARCHITECTURE=${ARCHITECTURES[$PLATFORM]}
     
     echo "🔨 Building binary for architecture: $ARCHITECTURE"
-
-    # Don't clean if we have cached dependencies
-    if [ -z "${CARGO_DEPS_CACHE_HIT:-}" ]; then
-        cargo clean || true
-    fi
 
     # Use incremental compilation and enable cache-friendly flags
     env RUSTFLAGS="--remap-path-prefix $HOME=~ -C incremental=/tmp/rust-incremental-${ARCHITECTURE}" \
@@ -188,7 +193,7 @@ cd "${DOCKER_DIR}"
 
 # Login to GitHub Container Registry (needed before buildx push)
 echo "🔑 Logging into GitHub Container Registry..."
-docker login ghcr.io -u euzu -p "${GHCR_IO_TOKEN}"
+printf '%s' "${GITHUB_IO_TOKEN}" | docker login ghcr.io --username "${REPO_OWNER}" --password-stdin
 
 declare -a BUILT_IMAGES=()
 
@@ -199,9 +204,10 @@ for IMAGE_NAME in "${!MULTI_PLATFORM_IMAGES[@]}"; do
     echo "🎯 Building multi-platform image: ${IMAGE_NAME} with target ${BUILD_TARGET}"
     
     # Prepare tags based on branch
-    DOCKER_TAGS="-t ghcr.io/euzu/${IMAGE_NAME}:${VERSION} -t ghcr.io/euzu/${IMAGE_NAME}:${TAG_SUFFIX}"
-    BUILT_IMAGES+=("ghcr.io/euzu/${IMAGE_NAME}:${VERSION}")
-    BUILT_IMAGES+=("ghcr.io/euzu/${IMAGE_NAME}:${TAG_SUFFIX}")
+    REPO_OWNER_LC="${REPO_OWNER,,}"
+    DOCKER_TAGS="-t ghcr.io/${REPO_OWNER_LC}/${IMAGE_NAME}:${VERSION} -t ghcr.io/${REPO_OWNER_LC}/${IMAGE_NAME}:${TAG_SUFFIX}"
+    BUILT_IMAGES+=("ghcr.io/${REPO_OWNER_LC}/${IMAGE_NAME}:${VERSION}")
+    BUILT_IMAGES+=("ghcr.io/${REPO_OWNER_LC}/${IMAGE_NAME}:${TAG_SUFFIX}")
 
     # Build and push multi-platform image directly with cache
     BUILDX_CACHE_ARGS=()

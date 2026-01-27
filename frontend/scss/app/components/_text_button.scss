@@ -33,42 +33,42 @@
   }
 }
 
-.tp__text-button.tp__button-primary {
+.tp__text-button.primary {
    background-color: var(--text-button-primary-background-color);
    border-color: var(--text-button-primary-border-color);
    color: var(--text-button-primary-color);
-   fill : var(--text-button-primary-color);
+   fill: var(--text-button-primary-color);
    &:focus,
    &:hover {
       background-color: var(--text-button-primary-hover-background-color);
       color: var(--text-button-primary-hover-color);
-      fill : var(--text-button-primary-hover-color);
+      fill: var(--text-button-primary-hover-color);
       outline: none;
    }
 }
-.tp__text-button.tp__button-secondary {
+.tp__text-button.secondary {
   background-color: var(--text-button-secondary-background-color);
   border-color: var(--text-button-secondary-border-color);
   color: var(--text-button-secondary-color);
-  fill : var(--text-button-secondary-color);
+  fill: var(--text-button-secondary-color);
   &:focus,
   &:hover {
     background-color: var(--text-button-secondary-hover-background-color);
     color: var(--text-button-secondary-hover-color);
-    fill : var(--text-button-secondary-hover-color);
+    fill: var(--text-button-secondary-hover-color);
     outline: none;
   }
 }
-.tp__text-button.tp__button-active {
+.tp__text-button.active {
   background-color: var(--text-button-active-background-color);
   border-color: var(--text-button-active-border-color);
   color: var(--text-button-active-color);
-  fill : var(--text-button-active-color);
+  fill: var(--text-button-active-color);
   &:focus,
   &:hover {
     background-color: var(--text-button-active-hover-background-color);
     color: var(--text-button-active-hover-color);
-    fill : var(--text-button-active-hover-color);
+    fill: var(--text-button-active-hover-color);
     outline: none;
   }
 }

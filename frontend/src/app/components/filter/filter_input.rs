@@ -4,7 +4,7 @@ use crate::app::components::{AppIcon, FilterEditor, FilterView};
 use crate::app::ConfigContext;
 use crate::model::{DialogAction, DialogActions, DialogResult};
 use crate::services::DialogService;
-use shared::foundation::filter::get_filter;
+use shared::foundation::get_filter;
 use shared::model::PatternTemplate;
 use yew::platform::spawn_local;
 use yew::prelude::*;

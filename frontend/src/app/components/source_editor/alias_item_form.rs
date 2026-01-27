@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use crate::app::components::{Card, TextButton};
-use crate::{edit_field_date, edit_field_number_i16, edit_field_number_u16, edit_field_text, edit_field_text_option, generate_form_reducer};
+use crate::{edit_field_bool, edit_field_date, edit_field_number_i16, edit_field_number_u16, edit_field_text, edit_field_text_option, generate_form_reducer};
 use shared::model::ConfigInputAliasDto;
 use yew::{function_component, html, use_reducer, Callback, Html, Properties, UseReducerHandle};
 use yew_i18n::use_translation;
@@ -13,11 +13,13 @@ const LABEL_PASSWORD: &str = "LABEL.PASSWORD";
 const LABEL_PRIORITY: &str = "LABEL.PRIORITY";
 const LABEL_MAX_CONNECTIONS: &str = "LABEL.MAX_CONNECTIONS";
 const LABEL_EXP_DATE: &str = "LABEL.EXP_DATE";
+const LABEL_ENABLED: &str = "LABEL.ENABLED";
 
 generate_form_reducer!(
     state: AliasFormState { form: ConfigInputAliasDto },
     action_name: AliasFormAction,
     fields {
+        Enabled => enabled: bool,
         Name => name: Arc<str>,
         Url => url: String,
         Username => username: Option<String>,
@@ -51,6 +53,7 @@ pub fn AliasItemForm(props: &AliasItemFormProps) -> Html {
                 priority: 0,
                 max_connections: 1,
                 exp_date: None,
+                enabled: true,
             }),
             modified: false,
         }
@@ -76,6 +79,7 @@ pub fn AliasItemForm(props: &AliasItemFormProps) -> Html {
 
     html! {
         <Card class="tp__config-view__card tp__item-form">
+            { edit_field_bool!(form_state, translate.t(LABEL_ENABLED), enabled, AliasFormAction::Enabled) }
             { edit_field_text!(form_state, translate.t(LABEL_ALIAS_NAME), name, AliasFormAction::Name) }
             { edit_field_text!(form_state, translate.t(LABEL_URL), url, AliasFormAction::Url) }
             <div class="tp__config-view__cols-2">

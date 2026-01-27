@@ -224,7 +224,7 @@ pub fn SchedulesConfigView() -> Html {
                     options={target_options.clone()}
                 />
            }})}
-          <IconButton name="AddSchedule" icon="ScheduleAdd" class="tp__button-primary" onclick={handle_add_schedule} />
+          <IconButton name="AddSchedule" icon="ScheduleAdd" class="primary" onclick={handle_add_schedule} />
           </div>
       }
     };

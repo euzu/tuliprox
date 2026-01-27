@@ -1,5 +1,6 @@
 # Changelog
 
+
 ## 3.3.0 (2026-01-03)
 
 ## ⚠️ Breaking Changes
@@ -75,6 +76,7 @@
 - **Accent-Independent Matching**: Integrated `match_as_ascii` flag for robust text matching (e.g., "Cinema" matches "Cinéma").
 - **Deunicoding Support**: `ValueProvider` and `ValueAccessor` now support on-the-fly deunicoding.
 - **Flexible Sorting**: Added `order: none` support to retain source order in mappings.
+- **Mapper Loop enhancement**: Updated `for_each` syntax to `variable.for_each((key, value) => { ... })`. Added support for `_` ignored variables in loop.
 
 ## 💻 WebUI & API
 - **Source Editor Integration**: Redesigned UI for global input management and hot-reloading.
@@ -82,6 +84,10 @@
 - **Performance Monitoring**: Added CPU usage display to the dashboard.
 - **Stream Table Enhancements**: Added "Copy-To-Clipboard" functions and improved connection monitoring.
 - **UX Improvements**: Implemented API-user category selection and better session tracking for HLS.
+- **Filter View**: Compacted pretty printing for filters.
+- **Mapper View**: Updated to support new `for_each` syntax.
+- Added **Stream Buffer** settings (Enabled, Size) to Reverse Proxy configuration UI.
+- Added **TMDB** settings (Rate Limit, Cache Duration, Language) and **Metadata Formats** (NFO support) to Library configuration UI.
 
 ## 🚀 Performance & Stability
 - **Connection Reconciliation & GC**: Resolved a critical issue where provider connection counters could leak or become stale during hot reloads. Added automatic garbage collection for unused provider records to prevent logical memory buildup.
@@ -113,6 +119,17 @@
 - **Fix**: Re-instated EPG Title Synchronization after playlist updates.
 - **Optimization**: Significant EPG memory reduction.
 - **Optimization**: Improved EPG parsing performance.
+
+## ⚙️ Messaging Refactoring
+- **Structured Messaging**: Transitioned from JSON-string-based notifications to a strictly typed messaging pipeline.
+- **Backend Model Migration**: Moved complex messaging models (`WatchChanges`, `ProcessingStats`) from the shared crate to the backend to reduce shared-library overhead.
+- **Unified API**: Consolidated all notification types into a single, type-safe `send_message` function.
+- **Template Improvements**:
+  - Added per-message-type templates for Telegram, Discord, and REST messaging channels with support for Info, Stats, Error, and Watch notifications.
+  - Renamed template context fields for better clarity (e.g., `event` → `processing`).
+  - Improved data accessibility in Handlebars templates with optimized context mapping (e.g., `{{processing.stats}}` or shorthand `{{stats}}`).
+  - Implemented template loading from files and HTTP/HTTPS URIs with automatic discovery from configuration directories.
+  - Added UI components for managing per-type templates with textarea editor support.
 
 # 3.2.0 (2025-11-14)
 - Added `name` attribute to Staged Input.

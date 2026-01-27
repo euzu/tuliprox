@@ -3,7 +3,7 @@ use crate::app::ConfigContext;
 use shared::model::PatternTemplate;
 use yew::{classes, function_component, html, use_context, use_effect_with, use_state, Callback, Html, Properties, TargetCast};
 use yew_i18n::use_translation;
-use shared::foundation::filter::{get_filter};
+use shared::foundation::{get_filter};
 use crate::app::components::{CollapsePanel, FilterView};
 
 #[derive(Properties, Clone, PartialEq, Debug)]

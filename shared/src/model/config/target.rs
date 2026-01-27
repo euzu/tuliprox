@@ -2,7 +2,7 @@ use crate::utils::is_blank_optional_string;
 use log::warn;
 use crate::error::{TuliproxError, TuliproxErrorKind};
 use crate::{info_err_res, handle_tuliprox_error_result_list};
-use crate::foundation::filter::{get_filter, Filter};
+use crate::foundation::{get_filter, Filter};
 use crate::model::{ClusterFlags, ConfigFavouritesDto, ConfigRenameDto, ConfigSortDto, HdHomeRunDeviceOverview,
                    PatternTemplate, ProcessingOrder, StrmExportStyle, TargetType, TraktConfigDto};
 use crate::utils::{is_true, is_false, default_as_true, default_resolve_delay_secs, default_as_default,

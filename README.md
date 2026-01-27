@@ -68,6 +68,7 @@ Options:
   --force-library-rescan           Force full library rescan
   --dbx                            Database file type: xtream
   --dbm                            Database file type: m3u
+  --dbe                            Database file type: epg
 ```
 
 ## 1. `config.yml`
@@ -146,15 +147,19 @@ messaging:
     chat_ids:
       - '<telegram chat id>'
       - '<telegram chat id>:<message thread id>'
+    templates: # templates per message kind
+      stats: 'file:///path/to/stats_telegram.templ'
   discord:
     url: '<discord webhook url>'
-    template: '{"content": "{{message}}"}' # optional handlebars template
+    templates:
+      info: '{"content": "{{message}}"}'
   rest:
     url: '<api url>'
     method: 'POST' # optional, default POST
     headers:
       - 'Content-Type: application/json'
-    template: '{"text": "{{message}}"}' # optional handlebars template
+    templates:
+      error: '{"text": "Error: {{message}}"}'
 
   pushover:
     token: <api_token>
@@ -163,20 +168,36 @@ messaging:
 ```
 
 ### 1.4.1 Messaging Templating
-For `discord` and `rest` messaging, you can use [Handlebars](https://handlebarsjs.com/) templates to format the message body.
+For `discord`, `telegram` and `rest` messaging, you can use [Handlebars](https://handlebarsjs.com/) templates to format the message body.
 
-**Context Variables**:
-- `message`: The raw message content or event summary.
+**Loading Templates:**
+Templates can be provided in two ways:
+1.  **Raw String**: The template content is written directly in the configuration.
+2.  **URI**: A link to a file (`file://...`) or an external resource (`http(s)://...`).
+> **Note**: When saving through the Web UI, raw template strings are automatically moved to individual files in `/config/messaging_templates/` and referenced via `file://` to keep the configuration file clean.
+
+**Context Variables:**
+- `message`: The text content for `info` and `error` notifications.
 - `kind`: The type of notification (`info`, `stats`, `error`, `watch`).
 - `timestamp`: Current UTC timestamp in RFC3339 format.
-- `event`: If the message is a JSON string (like `watch` events), it is parsed and available as an object.
+- `stats`: A list of processed source statistics (available for `stats` kind).
+  - Each item contains `inputs` (list of `InputStats`) and `targets` (list of `TargetStats`).
+- `watch`: Change details for groups (available for `watch` kind).
+- `processing`: Detailed internal processing state.
+  - `errors`: Combined error messages from a processing run.
 
-**Example REST Template (JSON)**:
+**Example Multi-Source Telegram Template**:
 ```handlebars
-{
-  "summary": "Tuliprox {{kind}}: {{message}}",
-  "occurred_at": "{{timestamp}}"
-}
+*🔄 Playlist Update Report*
+
+{{#each stats}}
+*📥 Source Stats*
+{{#each inputs}}
+• *{{name}}* (`{{type}}`)
+  ⏱️ Took: `{{took}}` | ❌ Errors: `{{errors}}`
+  📊 `{{raw.groups}}`/`{{raw.channels}}` ➔ *`{{processed.groups}}`*/*`{{processed.channels}}`*
+{{/each}}
+{{/each}}
 ```
 
 **Example Discord Template (Complex Embed)**:
@@ -187,6 +208,11 @@ For `discord` and `rest` messaging, you can use [Handlebars](https://handlebarsj
     "title": "Event: {{kind}}",
     "description": "{{message}}",
     "color": 3447003,
+    "fields": [
+      {{#each stats}}
+      { "name": "Source {{@index}}", "value": "Processed {{#each inputs}}{{name}} {{/each}}", "inline": false }
+      {{/each}}
+    ],
     "footer": { "text": "Reported at {{timestamp}}" }
   }]
 }
@@ -786,6 +812,7 @@ library:
 # Show db content
 ./tuliprox --dbx /opt/tuliprox/data/all_channels/xtream/video.db
 ./tuliprox --dbm /opt/tuliprox/data/all_channels/m3u.db
+./tuliprox --dbe /opt/tuliprox/data/all_channels/xtream/epg.db
 ```
 
 **API Endpoints**:
@@ -1482,7 +1509,7 @@ This will create 2 new categories with matched entries.
 The filter is a string with a statement (@see filter statements).
 The filter can have UnaryExpression `NOT`, BinaryExpression `AND OR`, Regexp Comparison `(Group|Title|Name|Url) ~ "regexp"`
 and Type Comparsison `Type = vod` or `Type = live` or `Type = series`.
-Filter fields are `Group`, `Title`, `Name`, `Caption`, `Url`, `Input` and `Type`.
+Filter fields are `Group`, `Title`, `Name`, `Caption`, `Url`, `Genre`, `Input` and `Type`.
 Example filter:  `((Group ~ "^DE.*") AND (NOT Title ~ ".*Shopping.*")) OR (Group ~ "^AU.*")`
 
 If you use characters like `+ | [ ] ( )` in filters don't forget to escape them!!
@@ -1788,6 +1815,40 @@ Example `if then else` block
          # station does not exists
      } 
   }
+```
+
+Example `for each` block
+
+Iterates over a `Named` result (a list of key-value tuples).
+The syntax is `variable.for_each( (key, value) => { ... })`.
+The parameters `key` and `value` are variable names you define to access the tuple elements inside the loop.
+
+You can use `_` for parameters you want to ignore (e.g., `(_, value)` or `(key, _)`). However, at least one parameter must be named (you cannot use `(_, _)`).
+
+`Named` variables are created by:
+1. **`split()` function**: keys are indices ("0", "1", ...), values are the split parts.
+2. **Regex with capture groups**: keys are group names (or indices), values are the captured matches.
+
+```dsl
+  # 1. Using split()
+  # Split the genre string into a Named result (index as key, genre as value)
+  genres = split(@Genre, "[,/&]")
+  
+  # Iterate over each genre, ignoring the index
+  genres.for_each((_, genre) => {
+     # 'genre' will contain the split string value
+     add_favourite(concat("Genre - ", genre))
+  })
+
+  # 2. Using Regex with named capture groups
+  # Extract info using regex, creating a Named result like [("Movie", "Inception"), ("Year", "2010")]
+  info = @Title ~ "(?P<Movie>.*?)\s-\s(?P<Year>\d{4})"
+  
+  info.for_each((k, v) => {
+      # k will be "Movie" then "Year"
+      # v will be "Inception" then "2010"
+      print(concat("Found ", k, ": ", v))
+  })
 ```
 
 Example of removing prefix

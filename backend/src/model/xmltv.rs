@@ -175,7 +175,7 @@ pub struct TVGuide {
 
 impl TVGuide {
     pub fn new(mut epg_sources: Vec<PersistedEpgSource>) -> Self {
-        epg_sources.sort_by(|a, b| a.priority.cmp(&b.priority));
+        epg_sources.sort_by_key(|a| a.priority);
         Self {
             epg_sources,
         }
@@ -194,7 +194,7 @@ fn filter_channels_and_programmes(
 ) {
     let mut prog_map: HashMap<Arc<str>, Vec<EpgProgramme>> = HashMap::new();
     for prog in programmes.drain(..) {
-        prog_map.entry(prog.channel.clone()).or_default().push(prog);
+        prog_map.entry(prog.get_transient_channel_id().clone()).or_default().push(prog);
     }
 
     for channel in channels.iter_mut() {

@@ -1,5 +1,5 @@
 use crate::error::{info_err_res, TuliproxError};
-use crate::foundation::filter::apply_templates_to_pattern_single;
+use crate::foundation::apply_templates_to_pattern_single;
 use crate::model::{ItemField, PatternTemplate};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]

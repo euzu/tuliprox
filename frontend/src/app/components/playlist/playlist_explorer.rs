@@ -22,7 +22,6 @@ use yew_i18n::use_translation;
 const COPY_LINK_TULIPROX_VIRTUAL_ID: &str = "copy_link_tuliprox_virtual_id";
 const COPY_LINK_TULIPROX_WEBPLAYER_URL: &str = "copy_link_tuliprox_webplayer_url";
 const COPY_LINK_PROVIDER_URL: &str = "copy_link_provider_url";
-const BACKGROUND_GRADIENT: &str = "linear-gradient(to right, rgba(0, 0, 0, 0.90) 30%, rgba(0, 0, 0, 0.75) 50%, rgba(0, 0, 0, 0.55) 60%, rgba(0, 0, 0, 0.35) 70%, rgba(0, 0, 0, 0.0) 85%)";
 
 #[derive(Clone)]
 struct ChannelSelection {
@@ -529,11 +528,12 @@ pub fn PlaylistExplorer() -> Html {
 
         let style = backdrop
             .as_ref()
-            .map(|b| format!("background-image: {BACKGROUND_GRADIENT}, url(\"{b}\");"))
+            .map(|b| format!("background-image: url(\"{b}\");"))
             .unwrap_or_default();
 
         let series_html = html! {
             <div class="tp__playlist-explorer__series-info__body-top" style={style}>
+                <div class="tp__playlist-explorer__series-info__body-top-backdrop"></div>
                 <div class="tp__playlist-explorer__series-info__body-top-content">
                     <span class="tp__playlist-explorer__series-info__title">{series_info.title.clone()}</span>
                     <span class="tp__playlist-explorer__series-info__infos">
@@ -543,11 +543,11 @@ pub fn PlaylistExplorer() -> Html {
                              <span class="tp__playlist-explorer__series-info__nowrap">
                                  <Chip class="tp__playlist-explorer__series-info__rating" label={format_float_localized(rating, 1, false)} />
                             </span>
-                            {"⬤"}
+                            {"◦"}
                             </>
                         })}
                         <span class="tp__playlist-explorer__series-info__nowrap">{release_date}</span>
-                        {"⬤"}
+                        {"◦"}
                         <span>{genre}</span>
                     </span>
                     <span class="tp__playlist-explorer__series-info__plot">{plot}</span>

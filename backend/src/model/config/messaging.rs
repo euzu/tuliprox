@@ -1,12 +1,20 @@
 use log::warn;
 use crate::model::macros;
 use shared::model::{DiscordMessagingConfigDto, MessagingConfigDto, MsgKind, PushoverMessagingConfigDto, RestMessagingConfigDto, TelegramMessagingConfigDto};
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct TelegramMessagingConfig {
     pub bot_token: String,
     pub chat_ids: Vec<String>,
     pub markdown: bool,
+    pub templates: std::collections::HashMap<MsgKind, String>,
+}
+
+impl TelegramMessagingConfig {
+    pub fn prepare(&mut self, templates_dir: &Path) {
+        discover_templates("telegram", &mut self.templates, templates_dir);
+    }
 }
 
 macros::from_impl!(TelegramMessagingConfig);
@@ -16,6 +24,7 @@ impl From<&TelegramMessagingConfigDto> for TelegramMessagingConfig {
             bot_token: dto.bot_token.clone(),
             chat_ids: dto.chat_ids.clone(),
             markdown: dto.markdown,
+            templates: dto.templates.clone(),
         }
     }
 }
@@ -26,6 +35,7 @@ impl From<&TelegramMessagingConfig> for TelegramMessagingConfigDto {
             bot_token: instance.bot_token.clone(),
             chat_ids: instance.chat_ids.clone(),
             markdown: instance.markdown,
+            templates: instance.templates.clone(),
         }
     }
 }
@@ -35,7 +45,13 @@ pub struct RestMessagingConfig {
     pub url: String,
     pub method: String,
     pub headers: std::collections::HashMap<String, String>,
-    pub template: Option<String>,
+    pub templates: std::collections::HashMap<MsgKind, String>,
+}
+
+impl RestMessagingConfig {
+    pub fn prepare(&mut self, templates_dir: &Path) {
+        discover_templates("rest", &mut self.templates, templates_dir);
+    }
 }
 
 macros::from_impl!(RestMessagingConfig);
@@ -53,7 +69,7 @@ impl From<&RestMessagingConfigDto> for RestMessagingConfig {
             url: dto.url.clone(),
             method: dto.method.clone().unwrap_or_else(|| "POST".to_string()),
             headers,
-            template: dto.template.clone(),
+            templates: dto.templates.clone(),
         }
     }
 }
@@ -67,7 +83,7 @@ impl From<&RestMessagingConfig> for RestMessagingConfigDto {
             url: model.url.clone(),
             method: Some(model.method.clone()),
             headers,
-            template: model.template.clone(),
+            templates: model.templates.clone(),
         }
     }
 }
@@ -75,7 +91,13 @@ impl From<&RestMessagingConfig> for RestMessagingConfigDto {
 #[derive(Debug, Clone)]
 pub struct DiscordMessagingConfig {
     pub url: String,
-    pub template: Option<String>,
+    pub templates: std::collections::HashMap<MsgKind, String>,
+}
+
+impl DiscordMessagingConfig {
+    pub fn prepare(&mut self, templates_dir: &Path) {
+        discover_templates("discord", &mut self.templates, templates_dir);
+    }
 }
 
 macros::from_impl!(DiscordMessagingConfig);
@@ -83,7 +105,7 @@ impl From<&DiscordMessagingConfigDto> for DiscordMessagingConfig {
     fn from(dto: &DiscordMessagingConfigDto) -> Self {
         Self {
             url: dto.url.clone(),
-            template: dto.template.clone(),
+            templates: dto.templates.clone(),
         }
     }
 }
@@ -92,7 +114,7 @@ impl From<&DiscordMessagingConfig> for DiscordMessagingConfigDto {
     fn from(instance: &DiscordMessagingConfig) -> Self {
         Self {
             url: instance.url.clone(),
-            template: instance.template.clone(),
+            templates: instance.templates.clone(),
         }
     }
 }
@@ -134,6 +156,21 @@ pub struct MessagingConfig {
     pub discord: Option<DiscordMessagingConfig>,
 }
 
+impl MessagingConfig {
+    pub fn prepare(&mut self, config_path: &str) {
+        let templates_dir = PathBuf::from(config_path).join("messaging_templates");
+        if let Some(t) = &mut self.telegram {
+            t.prepare(&templates_dir);
+        }
+        if let Some(r) = &mut self.rest {
+            r.prepare(&templates_dir);
+        }
+        if let Some(d) = &mut self.discord {
+            d.prepare(&templates_dir);
+        }
+    }
+}
+
 macros::from_impl!(MessagingConfig);
 impl From<&MessagingConfigDto> for MessagingConfig {
     fn from(dto: &MessagingConfigDto) -> Self {
@@ -155,6 +192,19 @@ impl From<&MessagingConfig> for MessagingConfigDto {
             rest: instance.rest.as_ref().map(Into::into),
             pushover: instance.pushover.as_ref().map(Into::into),
             discord: instance.discord.as_ref().map(Into::into),
+        }
+    }
+}
+
+fn discover_templates(prefix: &str, templates: &mut std::collections::HashMap<MsgKind, String>, templates_dir: &Path) {
+    let variants = [MsgKind::Info, MsgKind::Stats, MsgKind::Error, MsgKind::Watch];
+    for kind in variants {
+        if let std::collections::hash_map::Entry::Vacant(e) = templates.entry(kind) {
+            let filename = kind.template_filename(prefix);
+            let file_path = templates_dir.join(filename);
+            if file_path.exists() {
+                e.insert(format!("file://{}", file_path.to_string_lossy()));
+            }
         }
     }
 }

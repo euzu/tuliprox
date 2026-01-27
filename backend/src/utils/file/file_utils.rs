@@ -361,8 +361,7 @@ pub fn cleanup_unlisted_files_with_suffix(
             let delete = {
                 let zero_size = entry
                     .metadata()
-                    .map(|m| m.len() == 0)
-                    .unwrap_or(false);
+                    .is_ok_and(|m| m.len() == 0);
 
                 let suffix_match = path
                     .file_name()

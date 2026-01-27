@@ -1,5 +1,5 @@
-use shared::foundation::filter::Filter;
-use shared::foundation::mapper::MapperScript;
+use shared::foundation::Filter;
+use shared::foundation::MapperScript;
 use shared::model::{MapperDto, MappingCounter, MappingCounterDefinition, MappingDefinitionDto, MappingDto, MappingsDto, PatternTemplate};
 use crate::model::macros;
 

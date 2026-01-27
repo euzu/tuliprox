@@ -7,8 +7,8 @@ use shared::model::{ConfigTargetDto, ConfigTargetOptions, HdHomeRunTargetOutputD
                     ProcessingOrder, StrmExportStyle, StrmTargetOutputDto, TargetOutputDto, TargetType, TraktConfigDto, XtreamTargetOutputDto};
 use shared::model::PlaylistItemType;
 use std::sync::Arc;
-use shared::foundation::filter::Filter;
-use shared::foundation::filter::ValueProvider;
+use shared::foundation::Filter;
+use shared::foundation::ValueProvider;
 
 #[derive(Clone, Debug)]
 pub struct ProcessTargets {

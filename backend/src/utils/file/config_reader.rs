@@ -5,19 +5,15 @@ use crate::repository::{
     csv_read_inputs, csv_write_inputs, get_api_user_db_path, is_csv_file, load_api_user,
 };
 use crate::utils;
-use crate::utils::file_reader;
+use crate::utils::{file_exists_async, file_reader};
 use crate::utils::sys_utils::exit;
 use crate::utils::{open_file, read_mappings_file, EnvResolvingReader, FileLockManager};
-use arc_swap::access::Access;
 use arc_swap::{ArcSwap, ArcSwapAny};
 use chrono::Local;
 use log::{error, info, warn};
 use serde::Serialize;
 use shared::error::{info_err, info_err_res, TuliproxError};
-use shared::model::{
-    ApiProxyConfigDto, AppConfigDto, ConfigDto, ConfigInputAliasDto, ConfigPaths,
-    HdHomeRunDeviceOverview, InputType, SourcesConfigDto, TargetUserDto,
-};
+use shared::model::{ApiProxyConfigDto, AppConfigDto, ConfigDto, ConfigInputAliasDto, ConfigPaths, HdHomeRunDeviceOverview, InputType, MsgKind, SourcesConfigDto, TargetUserDto};
 use shared::utils::CONSTANTS;
 use std::env;
 use std::fs::File;
@@ -25,6 +21,9 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
+use shared::concat_string;
+use crate::utils::request::{is_uri};
+use url::Url;
 
 enum EitherReader<L, R> {
     Left(L),
@@ -53,7 +52,7 @@ pub async fn read_api_proxy_config(
     config: &AppConfig,
     resolve_env: bool,
 ) -> Result<Option<ApiProxyConfig>, TuliproxError> {
-    let paths = <Arc<ArcSwap<ConfigPaths>> as Access<ConfigPaths>>::load(&config.paths);
+    let paths = config.paths.load();
     let api_proxy_file_path = paths.api_proxy_file_path.as_str();
     if let Some(api_proxy_dto) = read_api_proxy_file(api_proxy_file_path, resolve_env)? {
         let mut errors = vec![];
@@ -371,7 +370,7 @@ pub fn read_api_proxy_file(
 }
 
 pub async fn read_api_proxy(config: &AppConfig, resolve_env: bool) -> Option<ApiProxyConfig> {
-    let paths = <Arc<ArcSwap<ConfigPaths>> as Access<ConfigPaths>>::load(&config.paths);
+    let paths = config.paths.load();
     match read_api_proxy_file(paths.api_proxy_file_path.as_str(), resolve_env) {
         Ok(Some(api_proxy_dto)) => {
             let mut errors = vec![];
@@ -506,16 +505,14 @@ pub async fn persist_source_config(
     let source_file = {
         source_file_path.and_then(|p| p.to_str()).map_or_else(
             || {
-                let paths = <Arc<ArcSwap<ConfigPaths>> as Access<ConfigPaths>>::load(
-                    &app_state.app_config.paths,
-                );
+                let paths = app_state.app_config.paths.load();
                 paths.sources_file_path.clone()
             },
             ToString::to_string,
         )
     };
     let backup_dir = {
-        let config = <Arc<ArcSwap<Config>> as Access<Config>>::load(&app_state.app_config.config);
+        let config = app_state.app_config.config.load();
         config.get_backup_dir().to_string()
     };
 
@@ -569,7 +566,7 @@ pub async fn validate_and_persist_source_config(
 ) -> Result<SourcesConfigDto, TuliproxError> {
     {
         let mut new_dto = dto.clone();
-        let config = <Arc<ArcSwap<Config>> as Access<Config>>::load(&app_state.app_config.config);
+        let config = app_state.app_config.config.load();
         new_dto.prepare(true, config.get_hdhr_device_overview().as_ref())?;
     }
 
@@ -591,6 +588,70 @@ pub fn resolve_env_var(value: &str) -> String {
         })
         .to_string()
 }
+
+pub async fn persist_messaging_templates(app_state: &Arc<AppState>, cfg: &mut ConfigDto) -> Result<(), TuliproxError> {
+    let templates_dir = {
+        let paths = app_state.app_config.paths.load();
+        PathBuf::from(&paths.config_path).join("messaging_templates")
+    };
+
+    if let Some(messaging) = &mut cfg.messaging {
+        // Discord
+        if let Some(discord) = &mut messaging.discord {
+            for (kind, template) in &mut discord.templates {
+                *template = persist_single_template("discord", Some(kind), template, &templates_dir).await?;
+            }
+        }
+        // Telegram
+        if let Some(telegram) = &mut messaging.telegram {
+            for (kind, template) in &mut telegram.templates {
+                *template = persist_single_template("telegram", Some(kind), template, &templates_dir).await?;
+            }
+        }
+        // Rest
+        if let Some(rest) = &mut messaging.rest {
+            for (kind, template) in &mut rest.templates {
+                *template = persist_single_template("rest", Some(kind), template, &templates_dir).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+
+async fn persist_single_template(prefix: &str, kind: Option<&MsgKind>, template: &str, templates_dir: &Path) -> Result<String, TuliproxError> {
+    if template.is_empty() || is_uri(template) {
+        return Ok(template.to_string());
+    }
+
+    // Treat existing file paths as file URLs
+    if tokio::fs::metadata(template).await.is_ok() {
+        return Url::from_file_path(template)
+            .map(|u| u.to_string())
+            .map_err(|()| info_err!("Failed to convert path to file URL: {template}"));
+    }
+
+    // It's a raw string, persist it
+    if !file_exists_async(templates_dir).await {
+        tokio::fs::create_dir_all(templates_dir)
+            .await
+            .map_err(|e| info_err!("Messaging templates dir: failed to create dir: {} {e}", templates_dir.display()))?;
+    }
+
+    let filename = if let Some(k) = kind {
+        k.template_filename(prefix)
+    } else {
+        concat_string!(prefix, "_default.templ")
+    };
+
+    let file_path = templates_dir.join(filename);
+    fs::write(&file_path, template).await.map_err(|e| info_err!("Failed to write template file: {e}"))?;
+
+    Url::from_file_path(&file_path)
+        .map(|u| u.to_string())
+        .map_err(|()| info_err!("Failed to convert persisted path to file URL: {}", file_path.display()))
+}
+
 
 #[cfg(test)]
 mod tests {

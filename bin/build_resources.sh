@@ -21,7 +21,7 @@ while getopts "fh" opt; do
   esac
 done
 
-declare -a resources=("channel_unavailable" "user_connections_exhausted" "provider_connections_exhausted" "user_account_expired")
+declare -a resources=("channel_unavailable" "user_connections_exhausted" "provider_connections_exhausted" "user_account_expired" "panel_api_provisioning")
 
 for resource in "${resources[@]}"; do
   if [ "$flag_force" = false ]; then
@@ -32,7 +32,11 @@ for resource in "${resources[@]}"; do
   fi
 
   if which ffmpeg > /dev/null 2>&1; then
-    ffmpeg -loop 1 -i "./resources/${resource}.jpg" -t 10 -r 1 -an -vf "scale=1920:1080" -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p "./resources/${resource}.ts"
+        ffmpeg -y -nostdin -loop 1 -i "./resources/${resource}.jpg" -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=44100 \
+           -c:v libx264 -r 30 -g 30 -keyint_min 30 -sc_threshold 0 -pix_fmt yuv420p -preset veryfast -crf 23 \
+           -c:a aac -b:a 128k -ac 2 \
+           -t 10 -muxrate 2000k \
+           -f mpegts "./resources/${resource}.ts"
   else
     echo "ffmpeg not found"
     exit

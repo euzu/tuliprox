@@ -1,5 +1,7 @@
+use std::sync::Arc;
 use log::{debug, error};
 use url::Url;
+use crate::model::AppConfig;
 
 /// Requests will be sent according to bot instance.
 #[derive(Clone)]
@@ -62,6 +64,7 @@ pub fn telegram_create_instance(bot_token: &str, chat_id: &str) -> BotInstance {
 }
 
 pub async fn telegram_send_message(
+    _app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
     instance: &BotInstance,
     msg: &str,

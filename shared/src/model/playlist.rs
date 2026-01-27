@@ -370,6 +370,8 @@ macro_rules! generate_field_accessor_impl_for_playlist_item_header {
                     self.epg_channel_id.as_ref().map(Arc::clone)
                 } else if bytes.eq_ignore_ascii_case(b"chno") {
                     Some(self.chno.to_string().intern())
+                } else if bytes.eq_ignore_ascii_case(b"genre") {
+                    crate::get_genre!(self)
                 } else {
                     None
                 }
@@ -407,6 +409,8 @@ macro_rules! generate_field_accessor_impl_for_playlist_item_header {
                     } else {
                         false
                     }
+                } else if bytes.eq_ignore_ascii_case(b"genre") {
+                    return crate::set_genre!(self, value);
                 } else {
                     false
                 }

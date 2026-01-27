@@ -87,6 +87,10 @@ impl Config {
             library.prepare(&self.working_dir)?;
         }
 
+        if let Some(messaging) = self.messaging.as_mut() {
+            messaging.prepare(config_path);
+        }
+
         Ok(())
     }
 

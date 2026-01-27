@@ -62,6 +62,12 @@ $form-width: 480px;
       display: flex;
       flex-flow: row nowrap;
     }
+
+    &-content{
+      .inactive {
+        text-decoration: line-through;
+      }
+    }
   }
 
   .tp__form-list__toolbar {

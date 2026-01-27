@@ -1,8 +1,8 @@
 #![allow(clippy::empty_docs)]
 
-use crate::error::{info_err_res, info_err, TuliproxError};
-use crate::foundation::filter::ValueAccessor;
+use crate::error::{info_err, info_err_res, TuliproxError};
 use crate::foundation::mapper::EvalResult::{AnyValue, Failure, Named, Number, Undefined, Value};
+use crate::foundation::value_provider::ValueAccessor;
 use crate::model::{PatternTemplate, PlaylistItemType, TemplateValue};
 use crate::utils::{Capitalize, Internable};
 use log::{debug, trace};
@@ -33,15 +33,15 @@ number_range_to = { ".." ~ number }
 number_range_full = { number ~ ".." ~ number }
 number_range_eq = { number }
 number_range = _{ number_range_full | number_range_from | number_range_to | number_range_eq}
-field = { ^"name" | ^"title" | ^"caption" | ^"group" | ^"id" | ^"chno" | ^"logo" | ^"logo_small" | ^"parent_code" | ^"audio_track" | ^"time_shift" | ^"rec" | ^"url" | ^"epg_channel_id" | ^"epg_id" }
+field = { ^"name" | ^"title" | ^"caption" | ^"group" | ^"id" | ^"chno" | ^"logo" | ^"logo_small" | ^"parent_code" | ^"audio_track" | ^"time_shift" | ^"rec" | ^"url" | ^"epg_channel_id" | ^"epg_id" | ^"genre" }
 field_access = _{ "@" ~ field }
 regex_source = _{ field_access | identifier }
 regex_expr = { regex_source ~ regex_op ~ string_literal }
 block_expr = { "{" ~ statements ~ "}" }
 condition = { function_call | var_access | field_access }
 assignment = { (field_access | identifier) ~ "=" ~ expression }
-expression = { assignment | map_block | match_block | function_call | regex_expr | string_literal | number | var_access | field_access | null | block_expr }
-function_name = { "concat" | "uppercase" | "lowercase" | "capitalize" | "trim" | "print" | "number" | "first" | "template" | "replace" | "pad" | "format" | "add_favourite" }
+expression = { assignment | map_block | match_block | for_each_block | function_call | regex_expr | string_literal | number | var_access | field_access | null | block_expr }
+function_name = { "concat" | "uppercase" | "lowercase" | "capitalize" | "split" | "trim" | "print" | "number" | "first" | "template" | "replace" | "pad" | "format" | "add_favourite" }
 function_call = { function_name ~ "(" ~ (expression ~ ("," ~ expression)*)? ~ ")" }
 any_match = { "_" }
 match_case_key = { any_match | identifier }
@@ -53,6 +53,14 @@ map_case_key = { any_match | number_range | map_case_key_list }
 map_case = { map_case_key ~ "=>" ~ expression }
 map_key = { var_access | field_access  }
 map_block = { "map" ~ map_key ~ "{" ~ NEWLINE* ~ (map_case ~ ("," ~ NEWLINE* ~ map_case)*)? ~ ","? ~ NEWLINE* ~ "}" }
+for_each_param = { any_match | identifier }
+for_each_params = { "(" ~ for_each_param ~ "," ~ for_each_param ~ ")" }
+for_each_target_nested = { identifier ~ "." ~ identifier }
+for_each_target_simple = { identifier }
+for_each_block = { 
+    (for_each_target_nested ~ ^".for_each" ~ "(" ~ for_each_params ~ "=>" ~ expression ~ ")") | 
+    (for_each_target_simple ~ ^".for_each" ~ "(" ~ for_each_params ~ "=>" ~ expression ~ ")") 
+}
 statement = _{ expression }
 comment = _{ "#" ~ (!NEWLINE ~ ANY)* }
 statement_reparator = _{ ";" | NEWLINE }
@@ -109,11 +117,25 @@ pub enum MapKey {
 
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum ForEachKey {
+    Identifier(String),
+    VarAccess(String, String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForEachExpr {
+    pub key_var: Option<String>,
+    pub value_var: Option<String>,
+    pub expression: ExprId,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum BuiltInFunction {
     Concat,
     Uppercase,
     Lowercase,
     Capitalize,
+    Split,
     Trim,
     Print,
     ToNumber,
@@ -134,6 +156,7 @@ impl FromStr for BuiltInFunction {
             "capitalize" => Ok(Self::Capitalize),
             "lowercase" => Ok(Self::Lowercase),
             "uppercase" => Ok(Self::Uppercase),
+            "split" => Ok(Self::Split),
             "trim" => Ok(Self::Trim),
             "print" => Ok(Self::Print),
             "number" => Ok(Self::ToNumber),
@@ -155,6 +178,7 @@ impl Display for BuiltInFunction {
             Self::Capitalize => "capitalize",
             Self::Lowercase => "lowercase",
             Self::Uppercase => "uppercase",
+            Self::Split => "split",
             Self::Trim => "trim",
             Self::Print => "print",
             Self::ToNumber => "number",
@@ -187,6 +211,7 @@ pub enum Expression {
     Assignment { target: AssignmentTarget, expr: ExprId },
     MatchBlock(Vec<MatchCase>),
     MapBlock { key: MapKey, cases: Vec<MapCase> },
+    ForEachBlock { key: ForEachKey, expr: ForEachExpr },
     NullValue,
     Block(Vec<ExprId>),
 }
@@ -208,6 +233,7 @@ impl PartialEq for Expression {
             (Assignment { target: t1, expr: e1 }, Assignment { target: t2, expr: e2 }) => t1 == t2 && e1 == e2,
             (MatchBlock(m1), MatchBlock(m2)) => m1 == m2,
             (MapBlock { key: k1, cases: c1 }, MapBlock { key: k2, cases: c2 }) => k1 == k2 && c1 == c2,
+            (ForEachBlock { key: k1, expr: c1 }, ForEachBlock { key: k2, expr: c2 }) => k1 == k2 && c1 == c2,
             (NullValue, NullValue) => true,
             (Block(b1), Block(b2)) => b1 == b2,
             _ => false,
@@ -546,6 +572,11 @@ impl MapperScript {
             Rule::map_block => {
                 Self::parse_map_block(pair.into_inner(), expressions)
             }
+
+            Rule::for_each_block => {
+                Self::parse_for_each_block(pair.into_inner(), expressions)
+            }
+
             Rule::null => {
                 Ok(Some(Expression::NullValue))
             }
@@ -607,6 +638,62 @@ impl MapperScript {
         } else {
             Ok(Some(Expression::MapBlock { key, cases }))
         }
+    }
+
+    fn parse_for_each_param(pair: Pair<Rule>) -> Result<Option<String>, TuliproxError> {
+        let inner = pair.into_inner().next().unwrap();
+        match inner.as_rule() {
+            Rule::identifier => Ok(Some(inner.as_str().to_string())),
+            Rule::any_match => Ok(None),
+            _ => info_err_res!("Unexpected for_each_param: {:?}", inner.as_rule()),
+        }
+    }
+
+    fn parse_for_each_params(pair: Pair<Rule>) -> Result<(Option<String>, Option<String>), TuliproxError> {
+        let mut inner = pair.into_inner();
+        let key = Self::parse_for_each_param(inner.next().unwrap())?;
+        let val = Self::parse_for_each_param(inner.next().unwrap())?;
+
+        if key.is_none() && val.is_none() {
+            return info_err_res!("At least one parameter must be named in for_each loop");
+        }
+
+        Ok((key, val))
+    }
+
+    fn parse_for_each_block(mut pairs: Pairs<Rule>, expressions: &mut Vec<Expression>) -> Result<Option<Expression>, TuliproxError> {
+        let first = pairs.next().unwrap();
+        let key = match first.as_rule() {
+            Rule::for_each_target_simple => {
+                ForEachKey::Identifier(first.as_str().trim().to_string())
+            }
+            Rule::for_each_target_nested => {
+                let text = first.as_str();
+                let splitted: Vec<&str> = text.splitn(2, '.').collect();
+                ForEachKey::VarAccess(splitted[0].trim().to_string(), splitted[1].trim().to_string())
+            }
+            _ => return info_err_res!("Unexpected for each target: {:?}", first.as_rule()),
+        };
+
+        if let Some(params_pair) = pairs.next() { // .for_each
+            let (key_var, value_var) = Self::parse_for_each_params(params_pair)?;
+
+            let expr_pair = pairs.next().unwrap();
+            if let Some(expr) = MapperScript::parse_expression(expr_pair, expressions)? {
+                expressions.push(expr);
+                let expr_id = ExprId(expressions.len() - 1);
+                return Ok(Some(Expression::ForEachBlock {
+                    key,
+                    expr: ForEachExpr {
+                        key_var,
+                        value_var,
+                        expression: expr_id,
+                    },
+                }));
+            }
+        }
+
+        Ok(None)
     }
 }
 
@@ -709,6 +796,11 @@ impl<'a> MapperContext<'a> {
                             return info_err_res!("Function accepts only one argument {:?}, {} given", name, args.len());
                         }
                     }
+                    BuiltInFunction::Split => {
+                        if args.len() != 2 {
+                            return info_err_res!("Function accepts two arguments {:?}, {} given", name, args.len());
+                        }
+                    }
                     BuiltInFunction::Replace => {
                         if args.len() != 3 {
                             return info_err_res!("Function accepts three arguments {:?}, {} given", name, args.len());
@@ -730,6 +822,9 @@ impl<'a> MapperContext<'a> {
             }
             Expression::MapBlock { key, cases } => {
                 self.validate_map_block(identifiers, key, cases)?;
+            }
+            Expression::ForEachBlock { key, expr } => {
+                self.validate_for_each_block(identifiers, key, expr)?;
             }
             Expression::Block(expressions) => {
                 for expr_id in expressions {
@@ -811,6 +906,36 @@ impl<'a> MapperContext<'a> {
             }
             self.validate_expr(map_case.expression, identifiers)?;
         }
+        Ok(())
+    }
+
+    fn validate_for_each_block(&mut self, identifiers: &mut HashSet<String>, key: &ForEachKey, expr: &ForEachExpr) -> Result<(), TuliproxError> {
+        match key {
+            ForEachKey::Identifier(ident)
+            | ForEachKey::VarAccess(ident, _) => {
+                if !identifiers.contains(ident.as_str()) {
+                    return info_err_res!("For each key identifier unknown {}", ident);
+                }
+            }
+        }
+        let mut local_identifiers = identifiers.clone();
+
+        if let Some(key_var) = &expr.key_var {
+            if local_identifiers.contains(key_var) {
+                return info_err_res!("For each key variable shadows existing identifier {}", key_var);
+            }
+            local_identifiers.insert(key_var.clone());
+        }
+
+        if let Some(value_var) = &expr.value_var {
+            if local_identifiers.contains(value_var) {
+                return info_err_res!("For each value variable shadows existing identifier {}", value_var);
+            }
+            local_identifiers.insert(value_var.clone());
+        }
+
+        self.validate_expr(expr.expression, &mut local_identifiers)?;
+
         Ok(())
     }
 }
@@ -1102,6 +1227,19 @@ impl Expression {
                         BuiltInFunction::Trim => Value(concat_args(&evaluated_args).iter().map(|s| s.trim()).collect::<Vec<_>>().join(" ").trim().to_string()),
                         BuiltInFunction::Lowercase => Value(concat_args(&evaluated_args).join(" ").to_lowercase()),
                         BuiltInFunction::Capitalize => Value(concat_args(&evaluated_args).iter().map(Capitalize::capitalize).collect::<Vec<_>>().join(" ")),
+                        BuiltInFunction::Split => {
+                            let string = extract_evaluated_arg_value!(evaluated_args, 0);
+                            let pattern = extract_evaluated_arg_value!(evaluated_args, 1);
+
+                            if let (Some(text), Some(pat)) = (string, pattern) {
+                                match crate::model::REGEX_CACHE.get_or_compile(pat) {
+                                    Ok(re) => Named(re.split(text).enumerate().map(|(i, s)| (i.to_string(), s.trim().to_string())).collect()),
+                                    Err(e) => Failure(format!("Invalid regex pattern '{}': {}", pat, e)),
+                                }
+                            } else {
+                                Undefined
+                            }
+                        }
                         BuiltInFunction::Print => {
                             trace!("[MapperScript] {}", concat_args(&evaluated_args).join(""));
                             Undefined
@@ -1249,7 +1387,7 @@ impl Expression {
                             let group_name = extract_evaluated_arg_value!(evaluated_args, 0);
                             if let Some(group) = group_name {
                                 let item_type = accessor.pli.header.item_type;
-                                if item_type != PlaylistItemType::Series &&  item_type != PlaylistItemType::LocalSeries {
+                                if item_type != PlaylistItemType::Series && item_type != PlaylistItemType::LocalSeries {
                                     let mut pli = accessor.pli.clone();
                                     pli.header.group = group.intern();
                                     pli.header.uuid = crate::utils::create_alias_uuid(&accessor.pli.header.uuid, group);
@@ -1390,6 +1528,64 @@ impl Expression {
                 }
                 Undefined
             }
+            Expression::ForEachBlock { key, expr } => {
+                let key_value = match key {
+                    ForEachKey::Identifier(ident) => {
+                        if !ctx.has_var(ident) {
+                            return Failure(format!("For each expression invalid! Variable with name {ident} not found."));
+                        }
+                        let v = ctx.get_var(ident);
+                        match v {
+                            Named(_) | AnyValue | Failure(_) => v.clone(),
+                            Undefined => Undefined,
+                            _ => Failure(format!("Variable with name {ident} must be a Named list.")),
+                        }
+                    }
+                    ForEachKey::VarAccess(name, field) => {
+                        match ctx.variables.get(name) {
+                            None => Failure(format!("Variable with name {name} not found.")),
+                            Some(value) => match value {
+                                AnyValue | Failure(_) => value.clone(),
+                                Named(values) => {
+                                    let filtered: Vec<(String, String)> = values.iter()
+                                        .filter(|(k, _)| k == field)
+                                        .map(|(k, v)| (k.clone(), v.clone()))
+                                        .collect();
+                                    if filtered.is_empty() {
+                                        Undefined
+                                    } else {
+                                        Named(filtered)
+                                    }
+                                }
+                                Undefined => Undefined,
+                                _ => Failure(format!("Variable with name {name} must be a Named list.")),
+                            },
+                        }
+                    }
+                };
+
+                let values = match key_value {
+                    Named(key_value) => key_value,
+                    Failure(_) => return key_value,
+                    _ => Vec::new()
+                };
+                for (k, val) in values {
+                    if let Some(key_var) = &expr.key_var {
+                        ctx.set_var(key_var, EvalResult::Value(k));
+                    }
+                    if let Some(value_var) = &expr.value_var {
+                        ctx.set_var(value_var, EvalResult::Value(val));
+                    }
+                    expr.expression.eval(ctx, accessor);
+                }
+                if let Some(key_var) = &expr.key_var {
+                    ctx.variables.remove(key_var);
+                }
+                if let Some(value_var) = &expr.value_var {
+                    ctx.variables.remove(value_var);
+                }
+                Undefined
+            }
             Expression::Block(expressions) => {
                 let mut result = Undefined;
                 for expr in expressions {
@@ -1404,7 +1600,7 @@ impl Expression {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{PlaylistItem, PlaylistItemHeader};
+    use crate::model::{PlaylistItem, PlaylistItemHeader, SeriesStreamProperties, StreamProperties, VideoStreamDetailProperties, VideoStreamProperties};
 
     #[test]
     fn test_mapper_dsl_eval() {
@@ -1590,5 +1786,57 @@ mod tests {
         let mut accessor = ValueAccessor { pli: &mut episode, virtual_items: vec![], match_as_ascii: false };
         mapper.eval(&mut accessor, None);
         assert_eq!(accessor.virtual_items.len(), 0);
+    }
+
+    #[test]
+    fn test_mapper_split_loop() {
+        use crate::model::PlaylistItemType;
+        let dsl = r#"
+            genres = split(@Genre, ",")
+            print(genres)
+            genres.for_each((_, gen) => {
+                    add_favourite(concat("Genre - ", gen))
+                })
+        "#;
+
+        let mapper = MapperScript::parse(dsl, None).expect("Parsing failed");
+
+        // Test with Video (should work)
+        let mut video = PlaylistItem {
+            header: PlaylistItemHeader {
+                name: "Movie 1".to_string().into(),
+                item_type: PlaylistItemType::Video,
+                additional_properties: Some(StreamProperties::Video(Box::new(VideoStreamProperties {
+                    details: Some(VideoStreamDetailProperties {
+                        genre: Some("A, B, C".intern()),
+                        ..VideoStreamDetailProperties::default()
+                    }),
+                    ..VideoStreamProperties::default()
+                }))),
+                ..Default::default()
+            }
+        };
+        let mut accessor = ValueAccessor { pli: &mut video, virtual_items: vec![], match_as_ascii: false };
+        mapper.eval(&mut accessor, None);
+        assert_eq!(accessor.virtual_items.len(), 3);
+        assert_eq!(&*accessor.virtual_items[0].1.header.group, "Genre - A");
+        assert_eq!(&*accessor.virtual_items[1].1.header.group, "Genre - B");
+        assert_eq!(&*accessor.virtual_items[2].1.header.group, "Genre - C");
+
+        // Test with SeriesInfo (should work)
+        let mut series_info = PlaylistItem {
+            header: PlaylistItemHeader {
+                name: "Series 1".to_string().into(),
+                item_type: PlaylistItemType::SeriesInfo,
+                additional_properties: Some(StreamProperties::Series(Box::new(SeriesStreamProperties {
+                    genre: Some("A, B, C".intern()),
+                    ..SeriesStreamProperties::default()
+                }))),
+                ..Default::default()
+            }
+        };
+        let mut accessor = ValueAccessor { pli: &mut series_info, virtual_items: vec![], match_as_ascii: false };
+        mapper.eval(&mut accessor, None);
+        assert_eq!(accessor.virtual_items.len(), 3);
     }
 }

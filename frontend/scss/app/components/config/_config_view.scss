@@ -53,6 +53,7 @@
 
   &__toolbar {
     @extend %toolbar-base;
+    padding-top: var(--padding-default);
   }
 
   &__tags {
