@@ -2,10 +2,9 @@
 
 use crate::error::{info_err, info_err_res, TuliproxError};
 use crate::foundation::mapper::EvalResult::{AnyValue, Failure, Named, Number, Undefined, Value};
-use crate::foundation::value_provider::ValueAccessor;
-use crate::model::{PatternTemplate, PlaylistItemType, TemplateValue};
-use crate::utils::{Capitalize, Internable};
-use log::{debug, trace};
+use crate::model::{FieldGetAccessor, FieldSetAccessor, PatternTemplate, PlaylistItem, PlaylistItemType, TemplateValue};
+use crate::utils::{deunicode_string, Capitalize, Internable};
+use log::{debug, error, trace};
 use pest::iterators::{Pair, Pairs};
 use pest::Parser;
 use pest_derive::Parser;
@@ -68,6 +67,32 @@ statements = _{ (statement_reparator* ~ (statement | comment))* ~ statement_repa
 main = { SOI ~ statements? ~ EOI }
 "##]
 struct MapperParser;
+
+
+///
+/// The `ValueAccessor` does not respect `match_as_ascii` when returning values.
+/// This is intentional because assignments must not change the value content through normalization.
+/// Normalization should only be applied during comparisons or when processing values with regular expressions.
+///
+pub struct ValueAccessor<'a> {
+    pub pli: &'a mut PlaylistItem,
+    pub virtual_items: Vec<(String, PlaylistItem)>,
+    pub match_as_ascii: bool,
+}
+
+impl ValueAccessor<'_> {
+    pub fn get(&self, field: &str) -> Option<Arc<str>> {
+        self.pli.header.get_field(field)
+    }
+
+    pub fn set(&mut self, field: &str, value: &str) {
+        if self.pli.header.set_field(field, value) {
+            trace!("Property {field} set to {value}");
+        } else {
+            error!("Can't set unknown field {field} set to {value}");
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ExprId(pub usize);
@@ -1145,7 +1170,10 @@ impl Expression {
                     }
                     RegexSource::Field(field) => accessor.get(field),
                 };
-                if let Some(val) = source {
+                if let Some(mut val) = source {
+                    if accessor.match_as_ascii {
+                        val = deunicode_string(&val).into_owned().into();
+                    }
                     let mut values = vec![];
                     for caps in re_pattern.captures_iter(&val) {
                         // Positional groups
@@ -1437,10 +1465,19 @@ impl Expression {
                         if !ctx.has_var(ident) {
                             return Failure(format!("Map expression invalid! Variable with name {ident} not found."));
                         }
-                        ctx.get_var(ident).clone()
+                        let mut val = ctx.get_var(ident).clone();
+                        if accessor.match_as_ascii {
+                            if let Value(text) = val {
+                                val = Value(deunicode_string(&text).into_owned());
+                            }
+                        }
+                        val
                     }
                     MapKey::FieldAccess(field) => {
-                        if let Some(val) = accessor.get(field) {
+                        if let Some(mut val) = accessor.get(field) {
+                            if accessor.match_as_ascii {
+                                val = deunicode_string(&val).into_owned().into();
+                            }
                             Value(val.to_string())
                         } else {
                             Undefined
@@ -1455,7 +1492,11 @@ impl Expression {
                                 Named(values) => {
                                     for (key, val) in values {
                                         if key == field {
-                                            return Value(val.to_string());
+                                            let mut res_val = val.to_string();
+                                            if accessor.match_as_ascii {
+                                                res_val = deunicode_string(&res_val).into_owned();
+                                            }
+                                            return Value(res_val);
                                         }
                                     }
                                     Failure(format!("Variable with name {name} has no field {field}."))

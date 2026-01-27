@@ -9,12 +9,13 @@ use axum::response::IntoResponse;
 use axum::{Router};
 use log::{debug, error};
 use serde_json::json;
-use shared::model::{InputType, PlaylistEpgRequest, PlaylistRequest, ProxyType, TargetType, WebplayerUrlRequest, XtreamCluster};
+use shared::model::{InputType, PlaylistEpgRequest, PlaylistRequest, ProxyType, TargetType, UiPlaylistItem, WebplayerUrlRequest, XtreamCluster};
 use shared::utils::{sanitize_sensitive_info, Internable};
 use std::sync::Arc;
 use url::Url;
 use crate::api::endpoints::xmltv_api::{serve_epg_web_ui};
 use crate::api::endpoints::xtream_api::xtream_get_stream_info_response;
+use crate::repository::xtream_get_item_for_stream_id;
 
 fn create_config_input_for_m3u(url: &str) -> ConfigInput {
     ConfigInput {
@@ -238,4 +239,26 @@ pub fn v1_api_playlist_register(router: Router<Arc<AppState>>) -> axum::Router<A
         .route("/playlist/vod", axum::routing::post(playlist_content_vod))
         .route("/playlist/series", axum::routing::post(playlist_content_series))
         .route("/playlist/series_info/{virtual_id}/{provider_id}", axum::routing::post(playlist_series_info))
+        .route("/playlist/series/episode/{virtual_id}", axum::routing::post(playlist_episode_item))
+}
+
+async fn playlist_episode_item(
+    axum::extract::Path(virtual_id): axum::extract::Path<String>,
+    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+    axum::extract::Json(playlist_req): axum::extract::Json<PlaylistRequest>,
+) -> impl IntoResponse + Send {
+    if let PlaylistRequest::Target(target_id) = playlist_req {
+        if let Some(target) = app_state.app_config.get_target_by_id(target_id) {
+            if target.has_output(TargetType::Xtream) {
+                if let Ok(vid) = virtual_id.parse::<u32>() {
+                    if let Ok(pli) = xtream_get_item_for_stream_id(
+                        vid, &app_state, &target, Some(XtreamCluster::Series)
+                    ).await {
+                       return axum::Json(json!(UiPlaylistItem::from(pli))).into_response();
+                    }
+                }
+            }
+        }
+    }
+    axum::http::StatusCode::NO_CONTENT.into_response()
 }

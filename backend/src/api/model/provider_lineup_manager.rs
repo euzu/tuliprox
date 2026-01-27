@@ -1,6 +1,6 @@
 use crate::api::model::provider_config::ProviderConfigWrapper;
 use crate::api::model::{EventManager, ProviderConfig, ProviderConfigConnection, ProviderConnectionChangeCallback};
-use crate::model::{is_input_expired, ConfigInput};
+use crate::model::{is_input_expired, ConfigInput, GracePeriodOptions};
 use crate::utils::debug_if_enabled;
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
@@ -514,15 +514,15 @@ pub(in crate::api::model) struct ProviderLineupManager {
 }
 
 impl ProviderLineupManager {
-    pub fn new(inputs: Vec<Arc<ConfigInput>>, grace_period_millis: u64, grace_period_timeout_secs: u64, event_manager: &Arc<EventManager>) -> Self {
+    pub fn new(inputs: Vec<Arc<ConfigInput>>, grace_period_options: GracePeriodOptions, event_manager: &Arc<EventManager>) -> Self {
         let provider_connections: DashMap<Arc<str>, Arc<RwLock<ProviderConfigConnection>>> = DashMap::new();
         let lineups = inputs
             .iter()
             .map(|i| Self::create_lineup(i, &provider_connections, event_manager))
             .collect();
         Self {
-            grace_period_millis: AtomicU64::new(grace_period_millis),
-            grace_period_timeout_secs: AtomicU64::new(grace_period_timeout_secs),
+            grace_period_millis: AtomicU64::new(grace_period_options.period_millis),
+            grace_period_timeout_secs: AtomicU64::new(grace_period_options.timeout_secs),
             inputs: Arc::new(ArcSwap::from_pointee(inputs)),
             providers: Arc::new(ArcSwap::from_pointee(lineups)),
             provider_connections,
@@ -609,9 +609,9 @@ impl ProviderLineupManager {
         false
     }
 
-    pub fn update_config(&self, new_inputs: Vec<Arc<ConfigInput>>, grace_period_millis: u64, grace_period_timeout_secs: u64) {
-        self.grace_period_millis.store(grace_period_millis, Ordering::Relaxed);
-        self.grace_period_timeout_secs.store(grace_period_timeout_secs, Ordering::Relaxed);
+    pub fn update_config(&self, new_inputs: Vec<Arc<ConfigInput>>, grace_period_options: &GracePeriodOptions) {
+        self.grace_period_millis.store(grace_period_options.period_millis, Ordering::Relaxed);
+        self.grace_period_timeout_secs.store(grace_period_options.timeout_secs, Ordering::Relaxed);
 
         if !self.has_changed(&new_inputs) {
             return;

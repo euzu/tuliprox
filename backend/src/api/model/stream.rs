@@ -5,7 +5,7 @@ use axum::http::StatusCode;
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use url::Url;
-use shared::utils::default_grace_period_millis;
+use crate::model::GracePeriodOptions;
 use crate::tools::atomic_once_flag::AtomicOnceFlag;
 
 pub type BoxedProviderStream = BoxStream<'static, Result<Bytes, StreamError>>;
@@ -29,19 +29,19 @@ pub struct StreamDetails {
     pub stream: Option<BoxedProviderStream>,
     pub(crate) stream_info: ProviderStreamInfo,
     pub provider_name: Option<Arc<str>>,
-    pub grace_period_millis: u64,
+    pub grace_period: GracePeriodOptions,
     pub disable_provider_grace: bool,
     pub reconnect_flag: Option<Arc<AtomicOnceFlag>>,
     pub provider_handle: Option<ProviderHandle>,
 }
 
 impl StreamDetails {
-    pub fn from_stream(stream: BoxedProviderStream) -> Self {
+    pub fn from_stream(stream: BoxedProviderStream, grace_period_options: GracePeriodOptions) -> Self {
         Self {
             stream: Some(stream),
             stream_info: None,
             provider_name: None,
-            grace_period_millis: default_grace_period_millis(),
+            grace_period: grace_period_options,
             disable_provider_grace: false,
             reconnect_flag: None,
             provider_handle: None,
@@ -54,7 +54,7 @@ impl StreamDetails {
 
     #[inline]
     pub fn has_grace_period(&self) -> bool {
-        self.grace_period_millis > 0
+        self.grace_period.period_millis > 0
     }
 }
 

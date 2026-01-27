@@ -5,7 +5,7 @@ use log::{error, info};
 use path_clean::PathClean;
 use shared::error::TuliproxError;
 use shared::model::{ConfigDto, HdHomeRunDeviceOverview};
-use shared::utils::set_sanitize_sensitive_info;
+use shared::utils::{default_grace_period_millis, default_grace_period_timeout_secs, set_sanitize_sensitive_info};
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
@@ -36,6 +36,23 @@ fn create_directories(cfg: &Config, temp_path: &Path) {
             } else {
                 info!("Created directory: {path_value}");
             }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct GracePeriodOptions {
+    pub period_millis: u64,
+    pub timeout_secs: u64,
+    pub hold_stream: bool,
+}
+
+impl Default for GracePeriodOptions {
+    fn default() -> Self {
+        Self {
+            period_millis: default_grace_period_millis(),
+            timeout_secs: default_grace_period_timeout_secs(),
+            hold_stream: false,
         }
     }
 }
@@ -137,6 +154,18 @@ impl Config {
         self.reverse_proxy
             .as_ref()
             .and_then(|r| r.disabled_header.clone())
+    }
+
+    pub fn get_grace_options(&self) -> GracePeriodOptions {
+        self.reverse_proxy
+            .as_ref()
+            .and_then(|r| r.stream.as_ref())
+            .map_or_else(GracePeriodOptions::default,
+                         |s| GracePeriodOptions {
+                             period_millis: s.grace_period_millis,
+                             timeout_secs: s.grace_period_timeout_secs,
+                             hold_stream: s.grace_period_hold_stream,
+                         })
     }
 }
 

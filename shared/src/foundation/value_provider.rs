@@ -1,6 +1,5 @@
 use std::sync::Arc;
-use log::{error, trace};
-use crate::model::{FieldGetAccessor, FieldSetAccessor, ItemField, PlaylistItem};
+use crate::model::{FieldGetAccessor, ItemField, PlaylistItem};
 use crate::utils::{deunicode_string, Internable};
 
 #[macro_export]
@@ -148,29 +147,5 @@ impl ValueProvider<'_> {
             return Some(deunicode_string(&val).into_owned().into());
         }
         Some(val)
-    }
-}
-
-pub struct ValueAccessor<'a> {
-    pub pli: &'a mut PlaylistItem,
-    pub virtual_items: Vec<(String, PlaylistItem)>,
-    pub match_as_ascii: bool,
-}
-
-impl ValueAccessor<'_> {
-    pub fn get(&self, field: &str) -> Option<Arc<str>> {
-        let val = self.pli.header.get_field(field)?;
-        if self.match_as_ascii {
-            return Some(deunicode_string(&val).into_owned().into());
-        }
-        Some(val)
-    }
-
-    pub fn set(&mut self, field: &str, value: &str) {
-        if self.pli.header.set_field(field, value) {
-            trace!("Property {field} set to {value}");
-        } else {
-            error!("Can't set unknown field {field} set to {value}");
-        }
     }
 }

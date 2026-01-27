@@ -49,6 +49,7 @@
 - **Database Viewer**: New CLI flags `--dbx` and `--dbm` to inspect internal database content.
 - **Added `disk_based_processing`**: (boolean, default `false`) to `config.yml`. When enabled, input playlists are processed from disk instead of memory.
 - **User-Agent `default_user_agent`**: Ensures that outgoing requests always pass a default user agent.
+- **Streaming**: Added `grace_period_hold_stream` configuration option to delay stream output until grace period connection checks are completed.
 
 ## ⚙️ Engine & Storage Optimizations
 - **Slotted Page Architecture**: Improved space utilization and support for variable-length keys.
@@ -106,6 +107,7 @@
 - **Fix**: Re-instated EPG Title Synchronization after playlist updates.
 - **Optimization**: Significant EPG memory reduction.
 - **Optimization**: Improved EPG parsing performance.
+- **EPG**: Fixed XMLTV timeshift to correctly apply user-defined timezone offsets in the generated XML output.
 
 ## ⚙️ Messaging Refactoring
 - **Structured Messaging**: Transitioned from JSON-string-based notifications to a strictly typed messaging pipeline.

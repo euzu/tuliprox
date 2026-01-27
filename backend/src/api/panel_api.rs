@@ -3,10 +3,7 @@ use crate::api::model::{
     create_panel_api_provisioning_stream_with_stop, create_provider_connections_exhausted_stream,
     AppState, StreamDetails,
 };
-use crate::model::{
-    is_input_expired, ConfigInput, ConfigInputAlias, PanelApiConfig, PanelApiQueryParam,
-    ProxyUserCredentials,
-};
+use crate::model::{is_input_expired, ConfigInput, ConfigInputAlias, GracePeriodOptions, PanelApiConfig, PanelApiQueryParam, ProxyUserCredentials};
 use crate::repository::{
     csv_patch_batch_append, csv_patch_batch_remove_expired, csv_patch_batch_sort_by_exp_date,
     csv_patch_batch_update_credentials, csv_patch_batch_update_exp_date, get_csv_file_path,
@@ -4120,7 +4117,7 @@ pub fn create_panel_api_provisioning_stream_details(
     app_state: &Arc<AppState>,
     input: &ConfigInput,
     provider_name: Option<Arc<str>>,
-    grace_period_millis: u64,
+    grace_period_options: &GracePeriodOptions,
     addr: SocketAddr,
     virtual_id: VirtualId,
 ) -> StreamDetails {
@@ -4143,7 +4140,7 @@ pub fn create_panel_api_provisioning_stream_details(
             stream,
             stream_info,
             provider_name,
-            grace_period_millis,
+            grace_period: *grace_period_options,
             disable_provider_grace: true,
             reconnect_flag: None,
             provider_handle: None,
@@ -4168,7 +4165,7 @@ pub fn create_panel_api_provisioning_stream_details(
         stream,
         stream_info,
         provider_name,
-        grace_period_millis,
+        grace_period: *grace_period_options,
         disable_provider_grace: true,
         reconnect_flag: None,
         provider_handle: None,

@@ -194,10 +194,9 @@ async fn serve_epg_with_rewrites(
 
                 for programme in programmes {
                     let mut elem = BytesStart::new("programme");
-                    // We dont need to apply offset because the time contains the time zone offset as +00000
-                    let (user_start, user_stop) = (programme.start, programme.stop); // apply_user_offset(programme.start, programme.stop, epg_processing_options.offset_minutes);
-                    elem.push_attribute(("start", format_xmltv_time_utc(user_start).as_str()));
-                    elem.push_attribute(("stop", format_xmltv_time_utc(user_stop).as_str()));
+                    let (user_start, user_stop) = (programme.start, programme.stop);
+                    elem.push_attribute(("start", format_xmltv_time_utc(user_start, epg_processing_options.offset_minutes).as_str()));
+                    elem.push_attribute(("stop", format_xmltv_time_utc(user_stop, epg_processing_options.offset_minutes).as_str()));
                     elem.push_attribute(("channel", channel.id.as_ref()));
                     continue_on_err!(writer.write_event_async(Event::Start(elem)).await);
 
@@ -262,9 +261,12 @@ fn format_xmltv_time(ts: i64) -> String {
     }
 }
 
+
+
 fn apply_user_offset(start: i64, stop: i64, offset_minutes: i32) -> (i64, i64) {
-    let user_start = start + i64::from(offset_minutes) * 60;
-    let user_end = stop + i64::from(offset_minutes) * 60;
+    let offset = i64::from(offset_minutes) * 60;
+    let user_start = start + offset;
+    let user_end = stop + offset;
     (user_start, user_end)
 }
 
@@ -283,6 +285,8 @@ fn from_programme(stream_id: &Arc<str>, epg_id: &Arc<str>,  programme: &EpgProgr
         start_timestamp: user_start.to_string(),
         stop_timestamp: user_end.to_string(),
         stream_id: Arc::clone(stream_id),
+        now_playing: None,
+        has_archive: None,
     }
 }
 

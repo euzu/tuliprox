@@ -291,6 +291,7 @@ Attributes:
 - `throttle` Allowed units are `KB/s`,`MB/s`,`KiB/s`,`MiB/s`,`kbps`,`mbps`,`Mibps`. Default unit is `kbps`
 - `grace_period_millis`  default set to 300 milliseconds.
 - `grace_period_timeout_secs` default set to 2 seconds.
+- `grace_period_hold_stream` if set to `true`, the stream will only start after the grace period check has completed. Default is `false`.
 - `shared_burst_buffer_mb` optional (default `12`). Minimum burst buffer size (in MB) used for shared streams.
 
 ##### 1.6.1.1 `retry`
@@ -341,6 +342,9 @@ If the connection is not throttled, the player will play its buffered content lo
 
 ##### 1.6.1.4 `grace_period_timeout_secs`
 How long the grace grant will last, until another grace grant can made.
+
+##### 1.6.1.5 `grace_period_hold_stream`
+If set to `true`, tuliprox will wait until the grace period check (defined by `grace_period_millis`) is finished before sending any data to the client. This is useful for players that might time out or error if they receive data and then a "connections exhausted" stream switch occurs. Default is `false`.
 
 #### 1.6.2 `cache`
 LRU-Cache is for resources. If it is `enabled`, the resources/images are persisted in the given `dir`. If the cache size exceeds `size`,

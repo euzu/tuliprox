@@ -59,7 +59,8 @@ pub fn apply_filter_to_source(source: &mut dyn PlaylistSource, filter: &Filter) 
             let group_title = pli.header.group.clone();
             let cluster = pli.header.xtream_cluster;
             let cat_id = pli.header.category_id;
-            let key = (cluster, group_title.clone());
+            let normalized_group = shared::utils::deunicode_string(&group_title).to_lowercase().intern();
+            let key = (cluster, normalized_group);
             groups.entry(key)
                 .or_insert_with(|| PlaylistGroup {
                     id: cat_id,
@@ -684,7 +685,8 @@ fn flatten_groups(playlistgroups: Vec<PlaylistGroup>) -> Vec<PlaylistGroup> {
     let mut idx: usize = 0;
     let mut group_map: HashMap<CategoryKey, usize> = HashMap::new();
     for group in playlistgroups {
-        let key = (group.xtream_cluster, group.title.clone());
+        let normalized_title: Arc<str> = shared::utils::deunicode_string(&group.title).to_lowercase().intern();
+        let key = (group.xtream_cluster, normalized_title);
         match group_map.entry(key) {
             std::collections::hash_map::Entry::Vacant(v) => {
                 v.insert(idx);
