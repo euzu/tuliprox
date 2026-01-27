@@ -150,7 +150,7 @@ pub fn get_build_time() -> Option<String> {
 }
 
 #[allow(clippy::missing_panics_doc)]
-pub async fn serve_file(file_path: &Path, mime_type: String) -> impl IntoResponse + Send {
+pub async fn serve_file(file_path: &Path, mime_type: String, cache_control: Option<&str>) -> impl IntoResponse + Send {
     match tokio::fs::try_exists(file_path).await {
         Ok(exists) => {
             if !exists {
@@ -158,25 +158,37 @@ pub async fn serve_file(file_path: &Path, mime_type: String) -> impl IntoRespons
             }
         }
         Err(err) => {
-            error!("Failed to open egp file {}, {err:?}", file_path.display());
+            error!("Failed to open file {}, {err:?}", file_path.display());
             return axum::http::StatusCode::NOT_FOUND.into_response();
         }
     }
 
     match tokio::fs::File::open(file_path).await {
         Ok(file) => {
+            let last_modified = file.metadata().await.ok()
+                .and_then(|m| m.modified().ok())
+                .map(|m| {
+                    let dt: DateTime<Utc> = m.into();
+                    dt.format("%a, %d %b %Y %H:%M:%S GMT").to_string()
+                });
+
             let reader = async_file_reader(file);
             let stream = tokio_util::io::ReaderStream::new(reader);
             let body = axum::body::Body::from_stream(stream);
 
-            try_unwrap_body!(axum::response::Response::builder()
+            let mut builder = axum::response::Response::builder()
                 .status(axum::http::StatusCode::OK)
                 .header(axum::http::header::CONTENT_TYPE, mime_type)
                 .header(
                     axum::http::header::CACHE_CONTROL,
-                    axum::http::header::HeaderValue::from_static("no-cache")
-                )
-                .body(body))
+                    cache_control.unwrap_or("no-cache")
+                );
+
+            if let Some(lm) = last_modified {
+                builder = builder.header(axum::http::header::LAST_MODIFIED, lm);
+            }
+
+            try_unwrap_body!(builder.body(body))
         }
         Err(_) => internal_server_error!(),
     }
@@ -1293,6 +1305,11 @@ async fn build_resource_stream_response(
             response_builder = response_builder.header(key, value);
         }
     }
+
+    if !response_builder.headers_ref().is_some_and(|h| h.contains_key(header::CACHE_CONTROL)) {
+        response_builder = response_builder.header(header::CACHE_CONTROL, "public, max-age=14400");
+    }
+
     let byte_stream = response
         .bytes_stream()
         .map_err(|err| StreamError::reqwest(&err));
@@ -1402,7 +1419,7 @@ pub async fn resource_response(
         let mut guard = cache.lock().await;
         if let Some((resource_path, mime_type)) = guard.get_content(resource_url) {
             trace_if_enabled!("Responding resource from cache {}", sanitize_sensitive_info(resource_url));
-            return serve_file(&resource_path, mime_type.unwrap_or_else(|| mime::APPLICATION_OCTET_STREAM.to_string()))
+            return serve_file(&resource_path, mime_type.unwrap_or_else(|| mime::APPLICATION_OCTET_STREAM.to_string()), Some("public, max-age=14400"))
                 .await
                 .into_response();
         }

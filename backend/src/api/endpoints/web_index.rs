@@ -219,7 +219,7 @@ async fn index(
             error!("Failed to read web ui index.html: {err}");
         }
     }
-    serve_file(&path, mime::TEXT_HTML_UTF_8.to_string()).await.into_response()
+    serve_file(&path, mime::TEXT_HTML_UTF_8.to_string(), None).await.into_response()
 }
 
 async fn index_config(
@@ -279,7 +279,7 @@ async fn index_config(
             }
         }
     }
-    serve_file(&path, mime::APPLICATION_JSON.to_string()).await.into_response()
+    serve_file(&path, mime::APPLICATION_JSON.to_string(), None).await.into_response()
 }
 
 pub fn index_register_without_path(web_dir_path: &Path) -> axum::Router<Arc<AppState>> {
