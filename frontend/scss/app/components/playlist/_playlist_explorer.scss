@@ -262,22 +262,20 @@ $series-backdrop-mobile-height: 150px;
         min-height: $series-backdrop-height;
         max-height: $series-backdrop-height;
         height: $series-backdrop-height;
-        @media (max-width: size.$mobile-breakpoint) {
-          min-height: $series-backdrop-mobile-height;
-          max-height: $series-backdrop-mobile-height;
-          height: $series-backdrop-mobile-height;
-        }
         background-repeat: no-repeat;
         background-size: 70%;
         background-position: right top;
         border-radius: var(--border-radius);
         font-size: 1.2rem;
-        @media (max-width: size.$mobile-breakpoint) {
-          font-size: 1rem;
-        }
         box-sizing: border-box;
         width: 100%;
         overflow: hidden;
+        @media (max-width: size.$mobile-breakpoint) {
+          min-height: $series-backdrop-mobile-height;
+          max-height: $series-backdrop-mobile-height;
+          height: $series-backdrop-mobile-height;
+          font-size: 1rem;
+        }
 
         &-backdrop {
           position: absolute;

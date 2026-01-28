@@ -1,6 +1,5 @@
 use crate::utils::{arc_str_serde, arc_str_option_serde, arc_str_vec_serde, Internable};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::Arc;
 use indexmap::IndexMap;
 use serde_json::Value;
@@ -398,7 +397,7 @@ impl StreamProperties {
                                         resource_url: Option<&str>,
                                         episodes: &[SeriesStreamDetailEpisodeProperties]) -> IndexMap<String, Vec<XtreamSeriesEpisodeInfoDoc>> {
         let empty_str = "".intern();
-        let mut map: HashMap<u32, Vec<XtreamSeriesEpisodeInfoDoc>> = HashMap::new();
+        let mut map: IndexMap<u32, Vec<XtreamSeriesEpisodeInfoDoc>> = IndexMap::new();
         for ep in episodes {
             let doc = XtreamSeriesEpisodeInfoDoc {
                 id: ep.id.intern(),
