@@ -6,7 +6,7 @@ use axum::response::IntoResponse;
 use axum::Router;
 use serde_json::json;
 use shared::model::{ApiProxyConfigDto, ProxyUserCredentialsDto};
-use shared::utils::mask_credentials;
+use shared::utils::{concat_path_leading_slash, mask_credentials};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -237,18 +237,18 @@ async fn delete_config_api_proxy_user(
     axum::http::StatusCode::OK.into_response()
 }
 
-pub fn v1_api_user_register(router: Router<Arc<AppState>>) -> axum::Router<Arc<AppState>> {
+pub fn v1_api_user_register(router: Router<Arc<AppState>>, web_ui_path: &str) -> axum::Router<Arc<AppState>> {
     router
         .route(
-            "/user/{target}",
+            &concat_path_leading_slash(web_ui_path, "/user/{target}"),
             axum::routing::post(save_config_api_proxy_user),
         )
         .route(
-            "/user/{target}",
+            &concat_path_leading_slash(web_ui_path, "/user/{target}"),
             axum::routing::put(save_config_api_proxy_user),
         )
         .route(
-            "/user/{target}/{username}",
+            &concat_path_leading_slash(web_ui_path, "/user/{target}/{username}"),
             axum::routing::delete(delete_config_api_proxy_user),
         )
 }
