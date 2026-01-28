@@ -633,6 +633,10 @@ log_sha "VERSION (current)" "${VERSION}"
 log_sha "VERSION (release)" "v${BUMP_VERSION}"
 log_sha "RUN_KEY (saved)" "${RUN_KEY}"
 
+if ! extract_release_notes_from_changelog "v${BUMP_VERSION}" "${WORKING_DIR}/CHANGELOG.md" >/dev/null; then
+  die "CHANGELOG.md does not contain release notes for version 'v${BUMP_VERSION}'."
+fi
+
 read -rp "Releasing version: '${BUMP_VERSION}', please confirm? [y/N] " answer
 
 # Default 'N', cancel, if not 'y' or 'Y'
