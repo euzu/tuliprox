@@ -153,33 +153,34 @@ impl ConfigInput {
     pub fn prepare(&mut self) -> Result<Option<PathBuf>, TuliproxError> {
         let batch_file_path = self.prepare_batch();
         self.name = self.name.trim().intern();
-        check_input_credentials!(self, self.input_type, false, false);
-        check_input_connections!(self, self.input_type, false);
-        if let Some(staged_input) = &mut self.staged {
-            check_input_credentials!(staged_input, staged_input.input_type, false, true);
-            if !matches!(staged_input.input_type, InputType::M3u | InputType::Xtream) {
-                return info_err_res!("Staged input can only be from type m3u or xtream");
-            }
-        }
-
-        if is_input_expired(self.exp_date) {
-            warn!("Account {} expired for provider: {}", self.username.as_ref().map_or("?", |s| s.as_str()), self.name);
-            self.enabled = false;
-        }
-
-        if let Some(aliases) = &mut self.aliases {
-            for alias in aliases {
-                if is_input_expired(alias.exp_date) {
-                    warn!("Account {} expired for provider: {}", alias.username.as_ref().map_or("?", |s| s.as_str()), alias.name);
-                    alias.enabled = false;
+        if self.enabled {
+            check_input_credentials!(self, self.input_type, false, false);
+            check_input_connections!(self, self.input_type, false);
+            if let Some(staged_input) = &mut self.staged {
+                check_input_credentials!(staged_input, staged_input.input_type, false, true);
+                if !matches!(staged_input.input_type, InputType::M3u | InputType::Xtream) {
+                    return info_err_res!("Staged input can only be from type m3u or xtream");
                 }
             }
-        }
 
-        if let Some(panel_api) = &mut self.panel_api {
-            panel_api.prepare()?;
-        }
+            if is_input_expired(self.exp_date) {
+                warn!("Account {} expired for provider: {}", self.username.as_ref().map_or("?", |s| s.as_str()), self.name);
+                self.enabled = false;
+            }
 
+            if let Some(aliases) = &mut self.aliases {
+                for alias in aliases {
+                    if is_input_expired(alias.exp_date) {
+                        warn!("Account {} expired for provider: {}", alias.username.as_ref().map_or("?", |s| s.as_str()), alias.name);
+                        alias.enabled = false;
+                    }
+                }
+            }
+
+            if let Some(panel_api) = &mut self.panel_api {
+                panel_api.prepare()?;
+            }
+        }
         Ok(batch_file_path)
     }
 
@@ -212,29 +213,33 @@ impl ConfigInput {
 
             self.t_batch_url = Some(self.url.clone());
             let file_path = get_csv_file_path(self.url.as_str()).ok();
+            if self.enabled {
 
-            if let Some(aliases) = self.aliases.as_mut() {
-                for alias in aliases.iter() {
-                    if is_input_expired(alias.exp_date) {
-                        warn!("Alias-Account {} expired for provider: {}", alias.username.as_ref().map_or("?", |s| s.as_str()), alias.name);
-                    }
-                }
-
-                if !aliases.is_empty() {
-                    if let Some(index) = aliases.iter().position(|alias| alias.enabled) {
-                        let mut first = aliases.remove(index);
-                        self.id = first.id;
-                        self.username = first.username.take();
-                        self.password = first.password.take();
-                        self.url = first.url.trim().to_string();
-                        self.max_connections = first.max_connections;
-                        self.priority = first.priority;
-                        self.enabled = first.enabled;
-                        if self.name.is_empty() {
-                            self.name.clone_from(&first.name);
+                if let Some(aliases) = self.aliases.as_mut() {
+                    if !aliases.is_empty() {
+                        for alias in aliases.iter_mut() {
+                            if is_input_expired(alias.exp_date) {
+                                alias.enabled = false;
+                                warn!("Alias-Account {} expired for provider: {}", alias.username.as_ref().map_or("?", |s| s.as_str()), alias.name);
+                            }
                         }
-                    } else {
-                        self.enabled = false;
+
+                        if let Some(index) = aliases.iter().position(|alias| alias.enabled) {
+                            let mut first = aliases.remove(index);
+                            self.id = first.id;
+                            self.username = first.username.take();
+                            self.password = first.password.take();
+                            self.url = first.url.trim().to_string();
+                            self.max_connections = first.max_connections;
+                            self.priority = first.priority;
+                            self.enabled = first.enabled;
+                            self.exp_date = first.exp_date;
+                            if self.name.is_empty() {
+                                self.name.clone_from(&first.name);
+                            }
+                        } else {
+                            self.enabled = false;
+                        }
                     }
                 }
             }

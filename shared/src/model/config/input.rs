@@ -440,7 +440,7 @@ impl ConfigInputDto {
 
                     let (u, p, r) = self.aliases
                         .as_ref()
-                        .and_then(|aliases| aliases.first())
+                        .and_then(|aliases| aliases.iter().find(|a| a.enabled))
                         .map(|alias| (alias.username.clone(), alias.password.clone(), Some(alias.url.clone())))
                         .unwrap_or((None, None, None));
 
@@ -455,7 +455,7 @@ impl ConfigInputDto {
 
                     self.aliases
                         .as_ref()
-                        .and_then(|aliases| aliases.first())
+                        .and_then(|aliases| aliases.iter().find(|a| a.enabled))
                         .map(|alias| {
                             let (u, p) = get_credentials_from_url_str(alias.url.as_str());
                             (u, p, Some(alias.url.clone()))
