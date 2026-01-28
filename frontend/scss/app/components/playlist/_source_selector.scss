@@ -29,6 +29,7 @@
     margin-bottom: var(--margin-micro);
     border-bottom: 1px solid var(--card-border-color);
   }
+
   &__source-picker__body {
     margin-top: var(--margin-micro);
     .tp__panel {
@@ -40,6 +41,11 @@
      display: flex;
      flex-flow: row wrap;
      gap: var(--gap-default);
+    @media (max-width: size.$mobile-breakpoint) {
+      flex-flow: row nowrap;
+      overflow-x: auto;
+      min-height: 4rem;
+    }
   }
 
   &__source-custom-options {
