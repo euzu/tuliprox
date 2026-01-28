@@ -452,6 +452,7 @@ async fn xtream_get_item_for_stream_id_from_memory(
                     }
                     PlaylistItemType::Series
                     | PlaylistItemType::LocalSeries => {
+                        log::debug!("In-memory series item requested. VirtualID: {}, ParentVirtualID: {}, MappingProviderID: {}", virtual_id, mapping.parent_virtual_id, mapping.provider_id);
                         if let Some(item) = xtream_storage.series.query(&mapping.parent_virtual_id) {
                             let mut xc_item = item.clone();
                             xc_item.provider_id = mapping.provider_id;
@@ -465,6 +466,7 @@ async fn xtream_get_item_for_stream_id_from_memory(
                         }
                     }
                     PlaylistItemType::Catchup => {
+                        log::debug!("In-memory catchup item requested. VirtualID: {}, ParentVirtualID: {}, MappingProviderID: {}", virtual_id, mapping.parent_virtual_id, mapping.provider_id);
                         let cluster = try_cluster!(xtream_cluster, mapping.item_type, virtual_id)?;
                         let item = match cluster {
                             XtreamCluster::Live => xtream_storage.live.query(&mapping.parent_virtual_id),
@@ -539,6 +541,7 @@ pub async fn xtream_get_item_for_stream_id(
                 }
                 PlaylistItemType::Series
                 | PlaylistItemType::LocalSeries => {
+                    log::debug!("Disk series item requested. VirtualID: {}, ParentVirtualID: {}, MappingProviderID: {}", virtual_id, mapping.parent_virtual_id, mapping.provider_id);
                     if let Ok(mut item) = xtream_read_series_item_for_stream_id(app_config, mapping.parent_virtual_id, &storage_path).await {
                         item.provider_id = mapping.provider_id;
                         item.item_type = PlaylistItemType::Series;
@@ -549,6 +552,7 @@ pub async fn xtream_get_item_for_stream_id(
                     }
                 }
                 PlaylistItemType::Catchup => {
+                    log::debug!("Disk catchup item requested. VirtualID: {}, ParentVirtualID: {}, MappingProviderID: {}", virtual_id, mapping.parent_virtual_id, mapping.provider_id);
                     let cluster = try_cluster!(xtream_cluster, mapping.item_type, virtual_id)?;
                     let mut item = xtream_read_item_for_stream_id(app_config, mapping.parent_virtual_id, &storage_path, cluster).await?;
                     item.provider_id = mapping.provider_id;

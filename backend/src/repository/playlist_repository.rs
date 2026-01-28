@@ -11,7 +11,7 @@ use crate::repository::write_strm_playlist;
 use crate::repository::{TargetIdMapping, VirtualIdRecord};
 use crate::repository::{load_input_xtream_playlist, persist_input_xtream_playlist, xtream_get_file_path, xtream_get_storage_path, xtream_write_playlist};
 use crate::utils;
-use log::info;
+use log::{info, warn};
 use crate::repository::{LocalLibraryDiskPlaylistSource, M3uDiskPlaylistSource, MemoryPlaylistSource, PlaylistSource, XtreamDiskPlaylistSource};
 use shared::error::{info_err, TuliproxError};
 use shared::model::xtream_const::XTREAM_CLUSTER;
@@ -338,6 +338,10 @@ pub async fn load_target_into_memory_cache(app_state: &AppState, target: &Arc<Co
 }
 
 pub async fn persist_input_playlist(app_config: &Arc<AppConfig>, input: &ConfigInput, mut playlist: Vec<PlaylistGroup>) -> (Vec<PlaylistGroup>, Option<TuliproxError>) {
+    if playlist.is_empty() {
+        warn!("Skipping empty playlist for input {}", input.name);
+        return (playlist, None);
+    }
     playlist.iter_mut().for_each(PlaylistGroup::on_load);
 
     match input.input_type {

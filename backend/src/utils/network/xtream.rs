@@ -159,12 +159,12 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
                                         {
                                             let (mut target_id_mapping, _file_lock) = get_target_id_mapping(&app_state.app_config, &target_path, target.use_memory_cache).await?;
 
-                                            if let Some(parent_id) = pli.get_provider_id() {
+                                            if let Some(_parent_id) = pli.get_provider_id() {
                                                 let category_id = pli.get_category_id().unwrap_or(0);
                                                 for episode in &mut episodes {
-                                                    episode.header.virtual_id = target_id_mapping.get_and_update_virtual_id(&episode.header.uuid, provider_id, episode.header.item_type, parent_id);
-                                                    episode.header.category_id = category_id;
                                                     let episode_provider_id = episode.header.get_provider_id().unwrap_or(0);
+                                                    episode.header.virtual_id = target_id_mapping.get_and_update_virtual_id(&episode.header.uuid, episode_provider_id, episode.header.item_type, pli.virtual_id);
+                                                    episode.header.category_id = category_id;
                                                     provider_series.entry(pli.get_uuid().intern())
                                                         .or_default()
                                                         .push(ProviderEpisodeKey {
@@ -174,10 +174,10 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
                                                     if target.use_memory_cache {
                                                         in_memory_updates.push(
                                                             VirtualIdRecord::new(
-                                                                episode.header.get_provider_id().unwrap_or(0),
+                                                                episode_provider_id,
                                                                 episode.header.virtual_id,
                                                                 episode.header.item_type,
-                                                                provider_id,
+                                                                pli.virtual_id,
                                                                 episode.get_uuid(),
                                                             ),
                                                         );
