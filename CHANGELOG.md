@@ -78,6 +78,7 @@
 - Added **TMDB** settings (Rate Limit, Cache Duration, Language) and **Metadata Formats** (NFO support) to Library configuration UI.
 
 ## 🚀 Performance & Stability
+- **Deadlock Resolution**: Fixed a potential deadlock in `ProviderLineupManager::reconcile_connections` by refactoring `DashMap` iterations to use snapshots, preventing internal shard locks from being held during async lock acquisition.
 - **Connection Reconciliation & GC**: Resolved a critical issue where provider connection counters could leak or become stale during hot reloads. Added automatic garbage collection for unused provider records to prevent logical memory buildup.
 - **Full Async Runtime**: Transitioned to `#[tokio::main]` and async I/O throughout the entire application.
 - **Non-Blocking Operations**: Cache persistence, playlist exports, and config saves moved to async tasks to prevent runtime stalls.

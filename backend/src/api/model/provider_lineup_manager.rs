@@ -631,11 +631,15 @@ impl ProviderLineupManager {
 
     pub async fn reconcile_connections(&self, mut counts: HashMap<Arc<str>, usize>) {
         // 1. Synchronize known providers from actual counts.
-        // This avoids a transient "zero state" by updating each provider in one step.
-        for entry in &self.provider_connections {
-            let name = entry.key();
-            let count = counts.remove(name).unwrap_or(0);
-            let mut conn = entry.value().write().await;
+        // We take a snapshot of the keys and locks to avoid holding the DashMap's internal
+        // shard locks while awaiting the RwLock of each provider. Holding both can lead to deadlocks.
+        let snapshot: Vec<_> = self.provider_connections.iter()
+            .map(|e| (e.key().clone(), Arc::clone(e.value())))
+            .collect();
+
+        for (name, conn_lock) in snapshot {
+            let count = counts.remove(&name).unwrap_or(0);
+            let mut conn = conn_lock.write().await;
             conn.current_connections = count;
             if count == 0 {
                 conn.granted_grace = false;
