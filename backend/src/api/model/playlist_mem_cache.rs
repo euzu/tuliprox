@@ -1,11 +1,10 @@
 use std::collections::HashMap;
 use tokio::sync::RwLock;
-use shared::model::{M3uPlaylistItem, PlaylistItem, XtreamCluster, XtreamPlaylistItem};
+use shared::model::{M3uPlaylistItem, PlaylistItem, VirtualId, XtreamCluster, XtreamPlaylistItem};
 use crate::model::ConfigTarget;
 use crate::repository::{BPlusTree, VirtualIdRecord};
 
 pub struct PlaylistXtreamStorage {
-    pub id_mapping: BPlusTree<u32, VirtualIdRecord>,
     pub live: BPlusTree<u32, XtreamPlaylistItem>,
     pub vod: BPlusTree<u32, XtreamPlaylistItem>,
     pub series: BPlusTree<u32, XtreamPlaylistItem>,
@@ -21,6 +20,7 @@ pub enum PlaylistStorage {
 pub struct TargetPlaylistStorage {
     pub xtream: Option<PlaylistXtreamStorage>,
     pub m3u: Option<PlaylistM3uStorage>,
+    pub id_mapping: Option<BPlusTree<VirtualId, VirtualIdRecord>>,
 }
 
 pub type TargetPlaylistStorageMap = HashMap<String, TargetPlaylistStorage>;
@@ -40,9 +40,9 @@ impl PlaylistStorageState {
     pub async fn update_target_id_mapping(&self, target: &ConfigTarget, mapping: Vec<VirtualIdRecord>) {
         if target.use_memory_cache {
             if let Some(storage) = self.data.write().await.get_mut(&target.name) {
-                if let Some(xtream) = storage.xtream.as_mut() {
+                if let Some(id_mapping) = storage.id_mapping.as_mut() {
                     for record in mapping {
-                        xtream.id_mapping.insert(record.virtual_id, record);
+                        id_mapping.insert(record.virtual_id, record);
                     }
                 }
             }
@@ -81,6 +81,22 @@ impl PlaylistStorageState {
         }
     }
 
+    pub async fn cache_id_mapping(&self, target_name: &str, id_mapping: BPlusTree<VirtualId, VirtualIdRecord>) {
+        match self.data.write().await.entry(target_name.to_string()) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                let storage = entry.get_mut();
+                storage.id_mapping = Some(id_mapping);
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(TargetPlaylistStorage {
+                    xtream: None,
+                    m3u: None,
+                    id_mapping: Some(id_mapping),
+                });
+            }
+        }
+    }
+
     pub async fn cache_playlist(&self, target_name: &str, playlist: PlaylistStorage) {
         match playlist {
             PlaylistStorage::M3uPlaylist(m3u_playlist) => {
@@ -93,6 +109,7 @@ impl PlaylistStorageState {
                         entry.insert(TargetPlaylistStorage {
                             xtream: None,
                             m3u: Some(*m3u_playlist),
+                            id_mapping: None,
                         });
                     }
                 }
@@ -107,6 +124,7 @@ impl PlaylistStorageState {
                         entry.insert(TargetPlaylistStorage {
                             xtream: Some(*xtream_playlist),
                             m3u: None,
+                            id_mapping: None,
                         });
                     }
                 }

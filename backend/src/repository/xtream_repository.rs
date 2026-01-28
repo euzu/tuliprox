@@ -326,10 +326,6 @@ async fn create_categories(playlist: &mut [PlaylistGroup], path: &Path) -> Vec<(
 
     let mut new_categories: IndexMap<CategoryKey, CategoryEntry> = IndexMap::new();
 
-    let mut last_cluster: Option<XtreamCluster> = None;
-    let mut last_group = "".intern();
-    let mut last_category_id: u32 = 0;
-
     for plg in playlist.iter_mut() {
         if plg.channels.is_empty() {
             continue;
@@ -339,34 +335,27 @@ async fn create_categories(playlist: &mut [PlaylistGroup], path: &Path) -> Vec<(
             let cluster = channel.header.xtream_cluster;
             let group = &channel.header.group;
 
-            // Fast path
-            if last_cluster == Some(cluster) && &last_group == group {
-                channel.header.category_id = last_category_id;
-                continue;
-            }
+            let entry = new_categories.entry((cluster, group.clone()))
+                .or_insert_with(|| {
+                    let cat_id = existing_cat_ids
+                        .get(&(cluster, group.clone()))
+                        .copied()
+                        .unwrap_or_else(|| {
+                            cat_id_counter += 1;
+                            cat_id_counter
+                        });
 
-            let key = (cluster, Arc::clone(group));
-
-            let entry = new_categories.entry(key.clone()).or_insert_with(|| {
-                let cat_id = existing_cat_ids.get(&key).copied().unwrap_or_else(|| {
-                    cat_id_counter += 1;
-                    cat_id_counter
+                    CategoryEntry {
+                        category_id: cat_id,
+                        category_name: group.clone(),
+                        parent_id: 0,
+                    }
                 });
 
-                CategoryEntry {
-                    category_id: cat_id,
-                    category_name: group.clone(),
-                    parent_id: 0,
-                }
-            });
-
-            last_cluster = Some(cluster);
-            last_group = Arc::clone(group);
-            last_category_id = entry.category_id;
-
-            channel.header.category_id = last_category_id;
+            channel.header.category_id = entry.category_id;
         }
     }
+
     new_categories.into_iter()
         .map(|((cluster, _group), value)| (cluster, value))
         .collect::<Vec<(XtreamCluster, CategoryEntry)>>()
@@ -437,12 +426,9 @@ async fn xtream_get_item_for_stream_id_from_memory(
     xtream_cluster: Option<XtreamCluster>,
 ) -> Result<Option<(XtreamPlaylistItem, VirtualIdRecord)>, Error> {
     if let Some(playlist) = app_state.playlists.data.read().await.get(target.name.as_str()) {
-        return match playlist.xtream.as_ref() {
-            None => {
-                Ok(None)
-            }
-            Some(xtream_storage) => {
-                let mapping = xtream_storage.id_mapping.query(&virtual_id).ok_or_else(|| string_to_io_error(format!("Could not find mapping for target {} and id {}", target.name, virtual_id)))?.clone();
+        return match (playlist.xtream.as_ref(), playlist.id_mapping.as_ref()) {
+            (Some(xtream_storage), Some(id_mapping)) => {
+                let mapping = id_mapping.query(&virtual_id).ok_or_else(|| string_to_io_error(format!("Could not find mapping for target {} and id {}", target.name, virtual_id)))?.clone();
                 let result = match mapping.item_type {
                     PlaylistItemType::SeriesInfo
                     | PlaylistItemType::LocalSeriesInfo => {
@@ -497,6 +483,7 @@ async fn xtream_get_item_for_stream_id_from_memory(
 
                 result.map(|xpli| Some((xpli, mapping)))
             }
+            _ => Ok(None)
         };
     }
     //Err(string_to_io_error(format!("Failed to read xtream item for id {virtual_id}. No entry found.")))
