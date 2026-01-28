@@ -4,6 +4,13 @@
 #![allow(clippy::return_self_not_must_use)]
 #![allow(clippy::missing_errors_doc)]
 
+#[cfg(target_os = "linux")]
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+// #[cfg(not(target_env = "msvc"))]
+// #[global_allocator]
+// static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 #[macro_use]
 mod modules;
 

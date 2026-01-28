@@ -689,34 +689,11 @@ async fn xtream_player_api_timeshift_stream(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     axum::extract::Form(api_form_req): axum::extract::Form<UserApiRequest>,
 ) -> impl IntoResponse + Send {
-    let username = get_non_empty(
-        &timeshift_request.username,
-        &api_form_req.username,
-        &api_req.username,
-    )
-        .to_string();
-    let password = get_non_empty(
-        &timeshift_request.password,
-        &api_form_req.password,
-        &api_req.password,
-    )
-        .to_string();
-    let stream_id = get_non_empty(
-        &timeshift_request.stream_id,
-        &api_req.stream_id,
-        &api_form_req.stream_id,
-    )
-        .to_string();
-    let duration = get_non_empty(
-        &timeshift_request.duration,
-        &timeshift_request.duration,
-        &api_form_req.duration,
-    );
-    let start = get_non_empty(
-        &timeshift_request.start,
-        &timeshift_request.start,
-        &api_form_req.start,
-    );
+    let username = get_non_empty(&timeshift_request.username, &api_form_req.username, &api_req.username).to_string();
+    let password = get_non_empty(&timeshift_request.password, &api_form_req.password, &api_req.password).to_string();
+    let stream_id = get_non_empty(&timeshift_request.stream_id, &api_req.stream_id, &api_form_req.stream_id).to_string();
+    let duration = get_non_empty(&timeshift_request.duration, &timeshift_request.duration, &api_form_req.duration);
+    let start = get_non_empty(&timeshift_request.start, &timeshift_request.start, &api_form_req.start);
 
     let action_path = format!("{duration}/{start}");
     api_req.username.clone_from(&username);
@@ -1050,7 +1027,7 @@ async fn xtream_get_catchup_response(
                 &uuid,
                 catchup_provider_id,
                 PlaylistItemType::Catchup,
-                pli.virtual_id,
+                pli.provider_id,
             );
 
             if target.use_memory_cache {
@@ -1059,7 +1036,7 @@ async fn xtream_get_catchup_response(
                         catchup_provider_id,
                         virtual_id,
                         PlaylistItemType::Catchup,
-                        pli.virtual_id,
+                        pli.provider_id,
                         uuid,
                     ),
                 );
