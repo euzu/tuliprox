@@ -1,9 +1,11 @@
+@use "../../../size" as size;
 $movie-card-height: 24rem;
 $movie-card-width: 16rem;
 $live-card-width: 17.5rem;
 $episode-card-height: 13rem;
 $episode-card-width: 18rem;
 $series-backdrop-height: 300px;
+$series-backdrop-mobile-height: 150px;
 
 @mixin card-base($height, $width) {
   position: relative;
@@ -38,7 +40,7 @@ $series-backdrop-height: 300px;
   flex-flow: column;
   gap: var(--gap-default);
   box-sizing: border-box;
-  overflow: hidden;
+  overflow: auto;
   background-color: var(--card-background-color);
   color: var(--card-color);
   border: 1px solid var(--border-color);
@@ -92,7 +94,6 @@ $series-backdrop-height: 300px;
     flex-flow: column;
     gap: var(--gap-default);
     box-sizing: border-box;
-    overflow: hidden;
   }
 
   &__group,
@@ -259,6 +260,8 @@ $series-backdrop-height: 300px;
         flex-flow: column;
         gap: var(--gap-default);
         min-height: $series-backdrop-height;
+        max-height: $series-backdrop-height;
+        height: $series-backdrop-height;
         background-repeat: no-repeat;
         background-size: 70%;
         background-position: right top;
@@ -266,6 +269,13 @@ $series-backdrop-height: 300px;
         font-size: 1.2rem;
         box-sizing: border-box;
         width: 100%;
+        overflow: hidden;
+        @media (max-width: size.$mobile-breakpoint) {
+          min-height: $series-backdrop-mobile-height;
+          max-height: $series-backdrop-mobile-height;
+          height: $series-backdrop-mobile-height;
+          font-size: 1rem;
+        }
 
         &-backdrop {
           position: absolute;
@@ -295,6 +305,9 @@ $series-backdrop-height: 300px;
     &__title {
       font-weight: bold;
       font-size: 2.5rem;
+      @media (max-width: size.$mobile-breakpoint) {
+        font-size: 1.1rem;
+      }
       color: var(--series-info-title-color, white);
     }
 

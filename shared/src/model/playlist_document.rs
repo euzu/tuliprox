@@ -6,9 +6,8 @@ use crate::model::{
     XtreamSeriesInfoData, XtreamSeriesInfoDoc, XtreamVideoInfoData,
     XtreamVideoInfoDoc, XtreamVideoMovieData,
 };
-use std::collections::HashMap;
 use std::sync::Arc;
-
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -196,7 +195,7 @@ impl XtreamPlaylistItem {
                         category_id: self.category_id.intern(),
                         category_ids: vec![self.category_id],
                     },
-                    episodes: HashMap::new(),
+                    episodes: IndexMap::new(),
                 })
             }
         }

@@ -1,3 +1,5 @@
+@use "./size" as size;
+
 @keyframes tp__pulse-bg {
   0% {
     background-color: var(--pulse-color-1);
@@ -108,4 +110,10 @@ li {
   -webkit-user-select: none;  /* Chrome, Safari, Opera */
   -moz-user-select: none;     /* Firefox */
   -ms-user-select: none;      /* IE/Edge */
+}
+
+@media (max-width: size.$mobile-breakpoint) {
+  h1 {
+    font-size: 1.1rem;
+  }
 }

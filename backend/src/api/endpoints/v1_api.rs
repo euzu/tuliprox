@@ -160,7 +160,7 @@ pub fn v1_api_register(web_auth_enabled: bool, app_state: Arc<AppState>, web_ui_
         .route("/file/download/info", axum::routing::get(download_api::download_file_info))
         .route("/ipinfo", axum::routing::get(ipinfo));
     router = v1_api_config_register(router);
-    router = v1_api_user_register(router);
+    router = v1_api_user_register(router, web_ui_path);
     router = v1_api_playlist_register(router);
     router = library_api_register(router);
     if web_auth_enabled {
@@ -170,7 +170,7 @@ pub fn v1_api_register(web_auth_enabled: bool, app_state: Arc<AppState>, web_ui_
 
     let mut base_router = axum::Router::new();
     if config.web_ui.as_ref().is_none_or(|c| c.user_ui_enabled) {
-        base_router = base_router.merge(user_api_register(app_state));
+        base_router = base_router.merge(user_api_register(app_state, web_ui_path));
     }
     base_router.nest(&concat_path_leading_slash(web_ui_path, "api/v1"), router)
 }

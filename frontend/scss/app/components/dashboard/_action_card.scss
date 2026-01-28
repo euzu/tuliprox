@@ -1,5 +1,3 @@
-@use "./../../../size";
-
 .tp__action-card {
   display: flex;
   flex-flow: row nowrap;
@@ -7,14 +5,18 @@
   flex: 1 1 auto;
   gap: var(--gap-default);
   fill: var(--card-color);
+  box-sizing: border-box;
+  max-width: var(--action-card-width);
 
   &__icon {
     fill: inherit;
     width: 3rem;
+    max-width: 3rem;
     transform: translateY(-0.5rem);
 
     img {
       width: 3rem;
+      max-width: 3rem;
     }
     .svg-icon {
       width: 3rem;
@@ -22,6 +24,14 @@
       max-width: 3rem;
       max-height: 3rem;
     }
+  }
+
+  &__main {
+    display: flex;
+    flex-flow: column;
+    align-content: flex-start;
+    flex: 1 1 auto;
+    gap: var(--gap-small);
   }
 
   &__body {
@@ -46,11 +56,5 @@
     span {
       white-space: nowrap;
     }
-  }
-}
-
-@media (max-width: size.$mobile-breakpoint) {
-  .tp__action-card {
-    flex-flow: column;
   }
 }

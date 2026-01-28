@@ -1050,7 +1050,7 @@ async fn xtream_get_catchup_response(
                 &uuid,
                 catchup_provider_id,
                 PlaylistItemType::Catchup,
-                pli.provider_id,
+                pli.virtual_id,
             );
 
             if target.use_memory_cache {
@@ -1059,7 +1059,7 @@ async fn xtream_get_catchup_response(
                         catchup_provider_id,
                         virtual_id,
                         PlaylistItemType::Catchup,
-                        pli.provider_id,
+                        pli.virtual_id,
                         uuid,
                     ),
                 );
