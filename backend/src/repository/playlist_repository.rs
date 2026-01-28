@@ -15,7 +15,7 @@ use log::{info, warn};
 use crate::repository::{LocalLibraryDiskPlaylistSource, M3uDiskPlaylistSource, MemoryPlaylistSource, PlaylistSource, XtreamDiskPlaylistSource};
 use shared::error::{info_err, TuliproxError};
 use shared::model::xtream_const::XTREAM_CLUSTER;
-use shared::model::{InputType, M3uPlaylistItem, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, StreamProperties, XtreamCluster, XtreamPlaylistItem};
+use shared::model::{InputType, M3uPlaylistItem, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, StreamProperties, VirtualId, XtreamCluster, XtreamPlaylistItem};
 use shared::utils::{is_dash_url, is_hls_url, Internable};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -32,6 +32,7 @@ pub struct ProviderEpisodeKey {
     pub(crate) virtual_id: u32,
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn persist_playlist(app_config: &Arc<AppConfig>, playlist: &mut [PlaylistGroup], epg: Option<&Epg>,
                               target: &ConfigTarget, playlist_state: Option<&Arc<PlaylistStorageState>>) -> Result<(), Vec<TuliproxError>> {
     let mut errors = vec![];
@@ -129,6 +130,9 @@ pub async fn persist_playlist(app_config: &Arc<AppConfig>, playlist: &mut [Playl
 
     if target.use_memory_cache {
         if let Some(playlist_storage) = playlist_state {
+            if let Ok(id_mapping) = load_id_mapping_target_storage(app_config, target).await {
+                playlist_storage.cache_id_mapping(&target.name, id_mapping).await;
+            }
             for output in &target.output {
                 match output {
                     TargetOutput::Xtream(_) => {
@@ -269,21 +273,25 @@ async fn load_xtream_playlist_as_tree(app_config: &AppConfig, storage_path: &Pat
     tree
 }
 
-async fn load_xtream_target_storage(app_config: &AppConfig, target: &ConfigTarget) -> Result<PlaylistXtreamStorage, TuliproxError> {
+async fn load_id_mapping_target_storage(app_config: &AppConfig, target: &ConfigTarget) -> Result<BPlusTree<VirtualId, VirtualIdRecord>, TuliproxError> {
     let config = app_config.config.load();
     let target_path = get_target_storage_path(&config, target.name.as_str()).ok_or_else(||
         info_err!("Could not find path for target {}", &target.name))?;
 
+    load_target_id_mapping_as_tree(app_config, &target_path, target).await
+}
+
+async fn load_xtream_target_storage(app_config: &AppConfig, target: &ConfigTarget) -> Result<PlaylistXtreamStorage, TuliproxError> {
+    let config = app_config.config.load();
+
     let storage_path = xtream_get_storage_path(&config, target.name.as_str()).ok_or_else(||
         info_err!("Could not find path for target {} xtream output", &target.name))?;
 
-    let target_id_mapping = load_target_id_mapping_as_tree(app_config, &target_path, target).await?;
     let live_storage = load_xtream_playlist_as_tree(app_config, &storage_path, XtreamCluster::Live).await;
     let vod_storage = load_xtream_playlist_as_tree(app_config, &storage_path, XtreamCluster::Video).await;
     let series_storage = load_xtream_playlist_as_tree(app_config, &storage_path, XtreamCluster::Series).await;
 
     Ok(PlaylistXtreamStorage {
-        id_mapping: target_id_mapping,
         live: live_storage,
         vod: vod_storage,
         series: series_storage,

@@ -4,7 +4,7 @@ use log::error;
 use serde::{Deserialize, Serialize};
 use shared::error::TuliproxError;
 use shared::info_err;
-use shared::model::PlaylistItemType;
+use shared::model::{PlaylistItemType};
 use shared::model::UUIDType;
 use std::cmp::max;
 use std::collections::HashMap;
@@ -70,7 +70,6 @@ pub struct TargetIdMapping {
     pending_uuid_upserts: HashMap<UUIDType, u32>,
     path: PathBuf,
 }
-
 
 impl TargetIdMapping {
 
