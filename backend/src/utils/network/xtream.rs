@@ -100,7 +100,7 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
                 XtreamCluster::Live => {}
                 XtreamCluster::Video => {
                     let working_dir = &app_config.config.load().working_dir;
-                    if let Ok(storage_path) = get_input_storage_path(&input.name, working_dir) {
+                    if let Ok(storage_path) = get_input_storage_path(&input.name, working_dir).await {
                         match serde_json::from_str::<XtreamVideoInfo>(&content) {
                             Ok(info) => {
                                 // parse downloaded info into StreamProperties
@@ -141,7 +141,7 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
                             // parse series info
                             let series_stream_props = SeriesStreamProperties::from_info(&info, pli);
 
-                            if let Ok(storage_path) = get_input_storage_path(&input.name, working_dir) {
+                            if let Ok(storage_path) = get_input_storage_path(&input.name, working_dir).await {
                                 // update input db
                                 if let Err(err) = persists_input_series_info(app_config, &storage_path, cluster, &input.name, provider_id, &series_stream_props).await {
                                     error!("Failed to persist series info for input {}: {err}", &input.name);
@@ -511,7 +511,7 @@ async fn process_xtream_cluster_to_disk(
     let cfg = app_config.config.load();
     // trace!("Starting process_xtream_cluster_to_disk for cluster {}", cluster);
     let storage_path = {
-        ensure_input_storage_path(&cfg, &input.name)?
+        ensure_input_storage_path(&cfg, &input.name).await?
     };
     let xtream_path = xtream_get_file_path(&storage_path, cluster);
 

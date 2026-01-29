@@ -282,7 +282,7 @@ async fn playlist_download_from_input(client: &reqwest::Client, app_config: &Arc
     let working_dir = &config.working_dir;
 
     // Check Status
-    let storage_path = input_cache::resolve_input_storage_path(working_dir, &input.name);
+    let storage_path = input_cache::resolve_input_storage_path(working_dir, &input.name).await;
     let mut status = input_cache::load_input_status(&storage_path);
     let cache_duration = input.cache_duration_seconds;
 
