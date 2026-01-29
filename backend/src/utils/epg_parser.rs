@@ -9,11 +9,6 @@ use crate::api::model::AppState;
 /// Parses user-defined EPG timeshift configuration.
 /// Supports either a numeric offset (e.g. "+2:30", "-1:15")
 /// or a timezone name (e.g. "`Europe/Berlin`", "`UTC`", "`America/New_York`").
-///
-/// Returns the total offset in minutes (i32).
-/// Parses user-defined EPG timeshift configuration.
-/// Supports either a numeric offset (e.g. "+2:30", "-1:15")
-/// or a timezone name (e.g. "`Europe/Berlin`", "`UTC`", "`America/New_York`").
 fn parse_timeshift(time_shift: Option<&str>) -> EpgTimeShift {
     if let Some(offset) = time_shift {
         if offset.is_empty() {
@@ -141,8 +136,8 @@ mod tests {
     #[test]
     fn test_parse_timezone() {
         // Check timezone parsing creates the correct variant
-        let berlin = parse_timeshift(Some(&"Europe/Amsterdam".to_string()));
-         if let EpgTimeShift::TimeZone(tz) = berlin {
+        let amterdam = parse_timeshift(Some(&"Europe/Amsterdam".to_string()));
+         if let EpgTimeShift::TimeZone(tz) = amterdam {
             assert_eq!(tz.name(), "Europe/Amsterdam");
         } else {
             panic!("Expected TimeZone for Europe/Amsterdam");

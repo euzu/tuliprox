@@ -285,9 +285,14 @@ impl TVGuide {
                                 }
 
                                 if add_channel && !children.contains_key(&tag_epg_id) {
+                                    let display_name = tag.children.as_ref().and_then(|children| {
+                                        children.iter()
+                                            .find(|c| c.name.as_ref() == EPG_TAG_DISPLAY_NAME)
+                                            .and_then(|c| c.value.clone())
+                                    });
                                     children.insert(Arc::clone(&tag_epg_id), EpgChannel {
                                         id: Arc::clone(&tag_epg_id),
-                                        title: Some(tag.name),
+                                        title: display_name,
                                         icon: if let XmlTagIcon::Src(src) = &tag.icon { Some(Arc::clone(src)) } else { None },
                                         programmes: vec![],
                                     });

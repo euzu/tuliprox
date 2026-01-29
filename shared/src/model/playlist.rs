@@ -452,7 +452,7 @@ pub struct M3uPlaylistItem {
     #[serde(with = "arc_str_serde")]
     pub input_name: Arc<str>,
     pub item_type: PlaylistItemType,
-    #[serde(with = "arc_str_serde")]
+    #[serde(skip_serializing, default)]
     pub t_stream_url: Arc<str>,
     #[serde(skip)]
     pub t_resource_url: Option<String>,

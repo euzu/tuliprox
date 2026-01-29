@@ -273,6 +273,9 @@ fn get_applied_epg_timeshift(programme: &EpgProgramme, epg_processing_options: &
         EpgTimeShift::TimeZone(tz) => {
             let s_dt = chrono::Utc.timestamp_opt(programme.start, 0).unwrap().with_timezone(tz);
             let e_dt = chrono::Utc.timestamp_opt(programme.stop, 0).unwrap().with_timezone(tz);
+            // We use the original timestamps (programme.start/stop) here because TimeZone adjustment
+            // is only for the visual string representation. The absolute event time (UTC) remains unchanged.
+            // Unlike 'Fixed' offset which artificially shifts the event time.
             (s_dt.format("%Y-%m-%d %H:%M:%S").to_string(), e_dt.format("%Y-%m-%d %H:%M:%S").to_string(), programme.start, programme.stop)
         }
     }
