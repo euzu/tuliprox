@@ -5,7 +5,7 @@ use crate::utils::request::get_remote_content_as_stream;
 use crate::utils::{async_file_reader, parse_xmltv_time};
 use chrono::{Datelike, TimeZone, Utc};
 use futures::TryFutureExt;
-use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
+use quick_xml::events::{Event};
 use shared::concat_string;
 use shared::error::{TuliproxError, TuliproxErrorKind};
 use shared::model::{EpgChannel, EpgProgramme, InputFetchMethod};
@@ -13,7 +13,7 @@ use shared::utils::{sanitize_sensitive_info, Internable};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead};
 use url::Url;
 
 pub const EPG_TAG_TV: &str = "tv";
@@ -68,97 +68,7 @@ pub struct Epg {
     pub priority: i16,
     pub logo_override: bool,
     pub attributes: Option<HashMap<Arc<str>, Arc<str>>>,
-    pub children: Vec<Arc<XmlTag>>,
-}
-
-impl Epg {
-    pub async fn write_to_async<W: AsyncWrite + Unpin>(
-        &self,
-        writer: &mut quick_xml::writer::Writer<W>,
-        rename_map: Option<&HashMap<Arc<str>, Arc<str>>>,
-    ) -> Result<(), quick_xml::Error> {
-        // Start tv-element
-        let mut elem = BytesStart::new("tv");
-        if let Some(attrs) = &self.attributes {
-            for (k, v) in attrs {
-                elem.push_attribute((k.as_ref(), v.as_ref()));
-            }
-        }
-        writer.write_event_async(Event::Start(elem)).await?;
-
-        // Stack for iterative writing
-        // bool = End-Event written?
-        let mut stack: Vec<(&XmlTag, bool)> = self
-            .children
-            .iter()
-            .rev()
-            .map(|c| (c.as_ref(), false))
-            .collect();
-
-        let mut write_counter = 0usize;
-        let mut current_channel_id: Option<Arc<str>> = None;
-        let epg_id_key = EPG_ATTRIB_ID.intern();
-
-        while let Some((tag, ended)) = stack.pop() {
-            if ended {
-                if tag.name.as_ref() == EPG_TAG_CHANNEL {
-                    current_channel_id = None;
-                }
-                // End-Event
-                writer
-                    .write_event_async(Event::End(BytesEnd::new(tag.name.as_ref())))
-                    .await?;
-            } else {
-                // Start-Event for the tag
-                let mut elem = BytesStart::new(tag.name.as_ref());
-                if let Some(attrs) = &tag.attributes {
-                    for (k, v) in attrs {
-                        elem.push_attribute((k.as_ref(), v.as_ref()));
-                    }
-                }
-
-                if tag.name.as_ref() == EPG_TAG_CHANNEL {
-                    current_channel_id = tag.get_attribute_value(&epg_id_key).cloned();
-                }
-
-                writer.write_event_async(Event::Start(elem)).await?;
-
-                // write text
-                let value_to_write = if tag.name.as_ref() == EPG_TAG_DISPLAY_NAME {
-                    current_channel_id.as_ref()
-                        .and_then(|cid| rename_map.and_then(|m| m.get(cid))
-                            .or(tag.value.as_ref()))
-                } else {
-                    tag.value.as_ref()
-                };
-
-                if let Some(text) = value_to_write {
-                    writer.write_event_async(Event::Text(BytesText::new(text))).await?;
-                }
-
-                // End-Marker push + children push
-                stack.push((tag, true));
-                if let Some(children) = &tag.children {
-                    for child in children.iter().rev() {
-                        stack.push((child.as_ref(), false));
-                    }
-                }
-            }
-            write_counter += 1;
-            if write_counter >= 50 {
-                writer.get_mut().flush().await?; // flush underlying writer
-                write_counter = 0;
-            }
-        }
-
-        // write tv-end
-        writer.write_event_async(Event::End(BytesEnd::new("tv"))).await?;
-
-        let inner = writer.get_mut();
-        inner.flush().await?;
-
-        Ok(())
-    }
+    pub children: Vec<Arc<EpgChannel>>,
 }
 
 #[derive(Debug, Clone)]

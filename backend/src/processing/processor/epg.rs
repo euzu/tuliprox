@@ -1,11 +1,11 @@
-use crate::model::{Epg, TVGuide, XmlTag, XmlTagIcon, EPG_ATTRIB_ID};
+use crate::model::{Epg, TVGuide};
 use crate::model::{EpgConfig, EpgSmartMatchConfig};
 use crate::model::FetchedPlaylist;
 use crate::processing::parser::xmltv::normalize_channel_name;
 use log::{debug, trace, warn};
 use rphonetic::{DoubleMetaphone, Encoder};
 use std::collections::{HashMap, HashSet};
-use shared::model::{EpgSmartMatchConfigDto, PlaylistItem, XtreamCluster};
+use shared::model::{EpgChannel, EpgSmartMatchConfigDto, PlaylistItem, XtreamCluster};
 use std::sync::Arc;
 use shared::utils::Internable;
 
@@ -167,12 +167,11 @@ async fn assign_channel_epg(new_epg: &mut Vec<Epg>, fp: &mut FetchedPlaylist<'_>
         let mut processed_epgs = vec![];
         if let Some(epg_sources) = tv_guide.filter(id_cache).await {
             let mut icon_assigned = HashSet::new();
-            let epg_attrib_id = EPG_ATTRIB_ID.intern();
             for epg_source in epg_sources {
                 // icon tags
-                let icon_tags: HashMap<&Arc<str>, &Arc<XmlTag>> = epg_source.children.iter()
-                    .filter(|tag| tag.icon != XmlTagIcon::Undefined)
-                    .filter_map(|tag| tag.get_attribute_value(&epg_attrib_id).map(|id| (id, tag)))
+                let icon_tags: HashMap<&Arc<str>, &Arc<EpgChannel>> = epg_source.children.iter()
+                    .filter(|tag| tag.icon.as_ref().is_some_and(|i| !i.is_empty()))
+                    .map(|tag| (&tag.id, tag))
                     .collect();
 
                 let assign_values = |chan: &mut PlaylistItem| {
@@ -204,14 +203,14 @@ async fn assign_channel_epg(new_epg: &mut Vec<Epg>, fp: &mut FetchedPlaylist<'_>
                         if !icon_assigned.contains(epg_channel_id) &&
                             (epg_source.logo_override || chan.header.logo.is_empty() || chan.header.logo_small.is_empty()) {
                             if let Some(icon_tag) = icon_tags.get(epg_channel_id) {
-                                if let XmlTagIcon::Src(icon) = &icon_tag.icon {
+                                if let Some(icon) = icon_tag.icon.as_ref() {
                                     icon_assigned.insert(epg_channel_id.clone());
                                     if epg_source.logo_override || chan.header.logo.is_empty() {
                                         trace!("Matched channel {} to epg icon {icon}", chan.header.name);
-                                        chan.header.logo = icon.clone();
+                                        chan.header.logo = Arc::clone(icon);
                                     }
                                     if epg_source.logo_override || chan.header.logo_small.is_empty() {
-                                        chan.header.logo_small = icon.clone();
+                                        chan.header.logo_small = Arc::clone(icon);
                                     }
                                 }
                             }

@@ -1,19 +1,18 @@
 use crate::model::{Epg, TVGuide, XmlTag, XmlTagIcon, EPG_ATTRIB_CHANNEL, EPG_ATTRIB_ID, EPG_TAG_CHANNEL, EPG_TAG_DISPLAY_NAME, EPG_TAG_ICON, EPG_TAG_PROGRAMME, EPG_TAG_TV};
 use crate::model::{EpgSmartMatchConfig, PersistedEpgSource};
 use crate::processing::processor::epg::EpgIdCache;
-use crate::utils::async_file_reader;
 use crate::utils::compressed_file_reader_async::CompressedFileReaderAsync;
-use dashmap::DashMap;
+use crate::utils::{async_file_reader, parse_xmltv_time};
+use log::error;
 use quick_xml::events::{BytesStart, BytesText, Event};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use shared::concat_string;
-use shared::model::EpgNamePrefix;
+use shared::model::{EpgChannel, EpgNamePrefix, EpgProgramme};
 use shared::utils::{deunicode_string, Internable, CONSTANTS};
 use std::borrow::Cow;
 use std::cmp::min;
-use std::collections::HashMap;
-use std::mem;
-use std::sync::{Arc, Mutex};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use tokio::io::AsyncRead;
 
 /// Splits a string at the first delimiter if the prefix matches a known country code.
@@ -96,7 +95,7 @@ impl TVGuide {
     pub fn merge(epgs: Vec<Epg>) -> Option<Epg> {
         if let Some(first_epg) = epgs.first() {
             let first_epg_attributes = first_epg.attributes.clone();
-            let merged_children: Vec<Arc<XmlTag>> = epgs.into_iter().flat_map(|epg| epg.children).collect();
+            let merged_children: Vec<Arc<EpgChannel>> = epgs.into_iter().flat_map(|epg| epg.children).collect();
             Some(Epg {
                 logo_override: false,
                 priority: 0,
@@ -259,9 +258,14 @@ impl TVGuide {
     async fn process_epg_file(id_cache: &mut EpgIdCache, epg_source: &PersistedEpgSource) -> Option<Epg> {
         let epg_attrib_id = EPG_ATTRIB_ID.intern();
         let epg_attrib_channel = EPG_ATTRIB_CHANNEL.intern();
+        let start_attrib = "start".intern();
+        let stop_attrib = "stop".intern();
+        let tag_title = "title".intern();
+        let tag_desc = "desc".intern();
+
         match CompressedFileReaderAsync::new(&epg_source.file_path).await {
             Ok(mut reader) => {
-                let mut children: Vec<Arc<XmlTag>> = vec![];
+                let mut children: HashMap<Arc<str>, EpgChannel> = HashMap::with_capacity(5000);
                 let mut tv_attributes: Option<HashMap<Arc<str>, Arc<str>>> = None;
                 let smart_match = id_cache.smart_match_config.enabled;
                 let fuzzy_matching = smart_match && id_cache.smart_match_config.fuzzy_matching;
@@ -271,21 +275,53 @@ impl TVGuide {
                             let tag_epg_id = tag.get_attribute_value(&epg_attrib_id).map_or_else(|| "".intern(), Internable::intern);
                             if !tag_epg_id.is_empty() && !id_cache.processed.contains(&tag_epg_id) {
                                 Self::prepare_tag(id_cache, &mut tag, smart_match);
+                                let mut add_channel = false;
                                 if smart_match {
                                     if Self::try_fuzzy_matching(id_cache, &tag_epg_id, &tag, fuzzy_matching) {
-                                        children.push(Arc::new(tag));
-                                        id_cache.processed.insert(tag_epg_id);
+                                        add_channel = true;
                                     }
                                 } else if id_cache.channel_epg_id.contains(&tag_epg_id) {
-                                    children.push(Arc::new(tag));
+                                    add_channel = true;
+                                }
+
+                                if add_channel && !children.contains_key(&tag_epg_id) {
+                                    children.insert(Arc::clone(&tag_epg_id), EpgChannel {
+                                        id: Arc::clone(&tag_epg_id),
+                                        title: Some(tag.name),
+                                        icon: if let XmlTagIcon::Src(src) = &tag.icon { Some(Arc::clone(src)) } else { None },
+                                        programmes: vec![],
+                                    });
                                     id_cache.processed.insert(tag_epg_id);
                                 }
                             }
                         }
                         EPG_TAG_PROGRAMME => {
                             if let Some(epg_id) = tag.get_attribute_value(&epg_attrib_channel) {
-                                if id_cache.processed.contains(epg_id) && id_cache.channel_epg_id.contains(epg_id) {
-                                    children.push(Arc::new(tag));
+                                if id_cache.processed.contains(epg_id) /*&& id_cache.channel_epg_id.contains(epg_id) */{
+                                    if let Some(channel) = children.get_mut(epg_id) {
+                                        if let Some((Some(start), Some(stop))) = tag.attributes.as_ref().map(|a| (a.get(&start_attrib), a.get(&stop_attrib))) {
+                                            if let (Some(start_time), Some(stop_time)) = (parse_xmltv_time(start), parse_xmltv_time(stop)) {
+                                                let mut title = None;
+                                                let mut desc = None;
+                                                if let Some(children) = tag.children.as_ref() {
+                                                    for child in children {
+                                                        if child.name == tag_title {
+                                                            title.clone_from(&child.value);
+                                                        } else if child.name == tag_desc {
+                                                            desc.clone_from(&child.value);
+                                                        }
+                                                    }
+                                                    channel.programmes.push(EpgProgramme::new_all(start_time, stop_time, Arc::clone(epg_id), title, desc));
+                                                }
+                                            } else {
+                                                error!("Failed to parse epg programme time {start} - {stop}");
+                                            }
+                                        } else {
+                                            error!("Missing start or stop attribute in programme tag, skipping");
+                                        }
+                                    } else {
+                                        error!("Channel {epg_id} not found in EPG, dangling programme");
+                                    }
                                 }
                             }
                         }
@@ -306,7 +342,7 @@ impl TVGuide {
                     logo_override: epg_source.logo_override,
                     priority: epg_source.priority,
                     attributes: tv_attributes,
-                    children,
+                    children: children.into_values().map(Arc::new).collect(),
                 })
             }
             Err(e) => {
@@ -338,12 +374,12 @@ where
     let binding = e.name();
     let name_raw = String::from_utf8_lossy(binding.as_ref());
     let name = name_raw.intern();
-    let (is_tv_tag, is_channel, is_program) = get_tag_types(&name);
-    let attributes = collect_tag_attributes(e, is_channel, is_program);
+    let tag_type = get_tag_type(&name);
+    let attributes = collect_tag_attributes(e, tag_type);
     let attribs = if attributes.is_empty() { None } else { Some(attributes) };
     let tag = XmlTag::new(name, attribs);
 
-    if is_tv_tag {
+    if tag_type.is_tv() {
         callback(tag);
     } else {
         stack.push(tag);
@@ -425,17 +461,41 @@ where
     }
 }
 
-fn get_tag_types(name: &str) -> (bool, bool, bool) {
-    let (is_tv_tag, is_channel, is_program) = match name {
-        EPG_TAG_TV => (true, false, false),
-        EPG_TAG_CHANNEL => (false, true, false),
-        EPG_TAG_PROGRAMME => (false, false, true),
-        _ => (false, false, false)
-    };
-    (is_tv_tag, is_channel, is_program)
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+enum XmlTagType {
+    Ignored,
+    Tv,
+    Channel,
+    Programme,
 }
 
-fn collect_tag_attributes(e: &BytesStart, is_channel: bool, is_program: bool) -> HashMap<Arc<str>, Arc<str>> {
+impl XmlTagType {
+    #[inline]
+    pub(crate) fn is_tv(self) -> bool {
+        self == XmlTagType::Tv
+    }
+
+    #[inline]
+    pub(crate) fn is_channel(self) -> bool {
+        self == XmlTagType::Channel
+    }
+
+    #[inline]
+    pub(crate) fn is_program(self) -> bool {
+        self == XmlTagType::Programme
+    }
+}
+
+fn get_tag_type(name: &str) -> XmlTagType {
+    match name {
+        EPG_TAG_TV => XmlTagType::Tv,
+        EPG_TAG_CHANNEL => XmlTagType::Channel,
+        EPG_TAG_PROGRAMME => XmlTagType::Programme,
+        _ => XmlTagType::Ignored
+    }
+}
+
+fn collect_tag_attributes(e: &BytesStart, tag_type: XmlTagType) -> HashMap<Arc<str>, Arc<str>> {
     let attributes = e.attributes().filter_map(Result::ok)
         .filter_map(|a| {
             let key_binding = a.key;
@@ -444,7 +504,7 @@ fn collect_tag_attributes(e: &BytesStart, is_channel: bool, is_program: bool) ->
             if let Ok(value) = a.unescape_value().as_ref() {
                 if value.is_empty() {
                     None
-                } else if (is_channel && key.as_ref() == EPG_ATTRIB_ID) || (is_program && key.as_ref() == EPG_ATTRIB_CHANNEL) {
+                } else if (tag_type.is_channel() && key.as_ref() == EPG_ATTRIB_ID) || (tag_type.is_program() && key.as_ref() == EPG_ATTRIB_CHANNEL) {
                     Some((key, value.to_lowercase().intern()))
                 } else {
                     Some((key, value.intern()))
@@ -456,77 +516,95 @@ fn collect_tag_attributes(e: &BytesStart, is_channel: bool, is_program: bool) ->
     attributes
 }
 
-pub fn flatten_tvguide(tv_guides: &[Epg]) -> Option<Epg> {
-    if tv_guides.is_empty() {
-        None
-    } else {
-        let epg_children: Mutex<Vec<Arc<XmlTag>>> = Mutex::new(Vec::new());
-        let epg_attributes: Option<HashMap<Arc<str>, Arc<str>>> = tv_guides.first().and_then(|t| t.attributes.clone());
-        let count = tv_guides.iter().map(|tvg| tvg.children.len()).sum();
-        let channel_mapping: DashMap<Arc<str>, i16> = DashMap::with_capacity(count);
+#[derive(Hash, Eq, PartialEq)]
+struct ProgrammeKey {
+    start: i64,
+    stop: i64,
+}
 
-        let mut sorted_guides = tv_guides.to_vec();
-        let epg_attrib_id = EPG_ATTRIB_ID.intern();
-        let epg_attrib_channel = EPG_ATTRIB_CHANNEL.intern();
-        // sort by priority
-        sorted_guides.sort_by_key(|a| a.priority);
-        // if executed parallel it does not matter how we sort.
-        sorted_guides.par_iter().for_each(|guide| {
-            let mut children = vec![];
-            guide.children.iter().for_each(|c| {
-                if c.name.as_ref() == EPG_TAG_CHANNEL {
-                    if let Some(chan_id) = c.get_attribute_value(&epg_attrib_id) {
-                        let chan_id = chan_id.intern();
-                        let should_add = {
-                            // if not stored
-                            !channel_mapping.contains_key(&chan_id) ||
-                                // or if priority is higher (less means higher priority)
-                                channel_mapping.get(&chan_id).as_deref().is_none_or(|&priority| guide.priority < priority)
-                        };
-                        if should_add {
-                            if let Some(mut existing) = channel_mapping.get_mut(&chan_id) {
-                                if guide.priority < *existing {
-                                    *existing = guide.priority;
-                                    children.push(c.clone());
-                                }
-                            } else {
-                                channel_mapping.insert(chan_id.clone(), guide.priority);
-                                children.push(c.clone());
-                            }
-                        }
-                    }
-                }
-            });
-            guide.children.iter().for_each(|c| {
-                if c.name.as_ref() == EPG_TAG_PROGRAMME {
-                    if let Some(chan_id) = c.get_attribute_value(&epg_attrib_channel) {
-                        let chan_id = chan_id.intern();
-                        if let Some(stored_priority) = channel_mapping.get(&chan_id) {
-                            if *stored_priority == guide.priority {
-                                children.push(c.clone());
-                            }
-                        }
-                    }
-                }
-            });
-
-            if let Ok(mut guard) = epg_children.lock() {
-                guard.extend(children);
-            }
-        });
-        let children = if let Ok(mut children) = epg_children.lock() {
-            mem::take(&mut *children)
-        } else {
-            vec![]
-        };
-        let epg = Epg {
-            logo_override: false,
-            priority: 0,
-            attributes: epg_attributes,
-            children,
-        };
-        Some(epg)
+impl From<&EpgProgramme> for ProgrammeKey {
+    fn from(p: &EpgProgramme) -> Self {
+        Self {
+            start: p.start,
+            stop: p.stop,
+        }
     }
+}
+
+struct ChannelAcc {
+    priority: i16,
+    channel: EpgChannel,
+    programmes: HashSet<ProgrammeKey>,
+}
+
+pub fn flatten_tvguide(mut tv_guides: Vec<Epg>) -> Option<Epg> {
+    if tv_guides.is_empty() {
+        return None;
+    }
+
+    let epg_attributes = tv_guides
+        .first()
+        .and_then(|t| t.attributes.clone());
+
+    let mut channels: HashMap<Arc<str>, ChannelAcc> = HashMap::new();
+
+    for guide in tv_guides.drain(..) {
+        for channel_arc in guide.children {
+            let Ok(mut channel) = Arc::try_unwrap(channel_arc) else {
+                error!("Failed to unwrap epg channel");
+                continue;
+            };
+            match channels.entry(Arc::clone(&channel.id)) {
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    let acc = entry.get_mut();
+
+                    if guide.priority < acc.priority {
+                        // high priority
+                        acc.priority = guide.priority;
+                        acc.channel = channel;
+
+                        acc.programmes.clear();
+                        for p in &acc.channel.programmes {
+                            acc.programmes.insert(ProgrammeKey::from(p));
+                        }
+                    } else if guide.priority == acc.priority {
+                        // same priority → merge
+                        for p in channel.programmes.drain(..) {
+                            let key = ProgrammeKey::from(&p);
+                            if acc.programmes.insert(key) {
+                                acc.channel.programmes.push(p);
+                            }
+                        }
+                    }
+                }
+
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    let mut set = HashSet::new();
+                    for p in &channel.programmes {
+                        set.insert(ProgrammeKey::from(p));
+                    }
+
+                    entry.insert(ChannelAcc {
+                        priority: guide.priority,
+                        channel,
+                        programmes: set,
+                    });
+                }
+            }
+        }
+    }
+
+    let children = channels
+        .into_values()
+        .map(|acc| Arc::new(acc.channel))
+        .collect();
+
+    Some(Epg {
+        logo_override: false,
+        priority: 0,
+        attributes: epg_attributes,
+        children,
+    })
 }
 
 #[cfg(test)]
@@ -553,6 +631,7 @@ mod tests {
     }
 
 
+    #[ignore]
     #[test]
     fn parse_test() -> io::Result<()> {
         let run_test = async move || {

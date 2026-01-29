@@ -769,7 +769,7 @@ async fn process_playlist_for_target(ctx: &PlaylistProcessingContext,
         if process_watch(&ctx.config, &ctx.client, target, &flat_new_playlist).await {
             step.tick("group watches");
         }
-        let result = persist_playlist(&ctx.config, &mut flat_new_playlist, flatten_tvguide(&new_epg).as_ref(), target, ctx.playlist_state.as_ref()).await;
+        let result = persist_playlist(&ctx.config, &mut flat_new_playlist, flatten_tvguide(new_epg).as_ref(), target, ctx.playlist_state.as_ref()).await;
         step.stop("Persisting playlists");
         result
     }
