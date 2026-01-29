@@ -98,18 +98,32 @@ fn playlist_comparator(
     }
 }
 
+macro_rules! sort_groups_by_source_order {
+    ($groups: ident) => {
+        $groups.sort_by(|a, b| {
+            let order1 = a.channels.first().as_ref().map_or(u32::MAX, |c| c.header.source_ordinal);
+            let order2 = b.channels.first().as_ref().map_or(u32::MAX, |c| c.header.source_ordinal);
+            order1.cmp(&order2)
+        });
+    };
+}
+
 pub(in crate::processing::processor) fn sort_playlist(
     target: &ConfigTarget,
     playlist: &mut [PlaylistGroup],
 ) -> bool {
     let Some(sort) = &target.sort else {
-        return false;
+        for group in &mut *playlist {
+            group.channels.sort_by(|a, b| a.header.source_ordinal.cmp(&b.header.source_ordinal));
+        }
+        sort_groups_by_source_order!(playlist);
+        return true;
     };
 
     let rules = &sort.rules;
     let match_as_ascii = sort.match_as_ascii;
-    sort_groups(playlist, rules, match_as_ascii);
     sort_channels_in_groups(playlist, rules, match_as_ascii);
+    sort_groups(playlist, rules, match_as_ascii);
 
     true
 }
@@ -126,6 +140,7 @@ fn sort_groups(
         .collect();
 
     if group_rules.is_empty() {
+        sort_groups_by_source_order!(groups);
         return;
     }
 
@@ -170,7 +185,9 @@ fn sort_groups(
             }
         }
 
-        Ordering::Equal
+        let order1 = a_chan.as_ref().map_or(u32::MAX, |c| c.header.source_ordinal);
+        let order2 = b_chan.as_ref().map_or(u32::MAX, |c| c.header.source_ordinal);
+        order1.cmp(&order2)
     });
 }
 
@@ -186,6 +203,11 @@ fn sort_channels_in_groups(
         .collect();
 
     if channel_rules.is_empty() {
+        for group in groups {
+            group
+                .channels
+                .sort_by(|a, b| a.header.source_ordinal.cmp(&b.header.source_ordinal));
+        }
         return;
     }
 
@@ -231,7 +253,7 @@ fn sort_channels_in_groups(
                 }
             }
 
-            Ordering::Equal
+            a.header.source_ordinal.cmp(&b.header.source_ordinal)
         });
     }
 }
@@ -261,16 +283,16 @@ mod tests {
             ("T", "SD"),
             ("A", "FHD"),
         ]
-        .into_iter()
-        .enumerate()
-        .map(|(i, (name, quality))| PlaylistItem {
-            header: PlaylistItemHeader {
-                title: format!("Chanel {name} [{quality}]").into(),
-                source_ordinal: i as u32,
-                ..Default::default()
-            },
-        })
-        .collect();
+            .into_iter()
+            .enumerate()
+            .map(|(i, (name, quality))| PlaylistItem {
+                header: PlaylistItemHeader {
+                    title: format!("Chanel {name} [{quality}]").into(),
+                    source_ordinal: i as u32,
+                    ..Default::default()
+                },
+            })
+            .collect();
 
         let channel_sort = ConfigSortRule {
             target: SortTarget::Channel,
@@ -349,16 +371,16 @@ mod tests {
             "US| West e",
             "US| West f",
         ]
-        .into_iter()
-        .enumerate()
-        .map(|(i, name)| PlaylistItem {
-            header: PlaylistItemHeader {
-                title: name.to_string().into(),
-                source_ordinal: i as u32,
-                ..Default::default()
-            },
-        })
-        .collect();
+            .into_iter()
+            .enumerate()
+            .map(|(i, name)| PlaylistItem {
+                header: PlaylistItemHeader {
+                    title: name.to_string().into(),
+                    source_ordinal: i as u32,
+                    ..Default::default()
+                },
+            })
+            .collect();
 
         let channel_sort = ConfigSortRule {
             target: SortTarget::Channel,
@@ -426,5 +448,4 @@ mod tests {
 
         assert_eq!(expected, sorted);
     }
-
 }
