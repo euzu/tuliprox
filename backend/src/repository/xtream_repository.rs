@@ -58,9 +58,9 @@ pub fn get_series_cat_collection_path(path: &Path) -> PathBuf {
     get_collection_path(path, storage_const::COL_CAT_SERIES)
 }
 
-pub fn ensure_xtream_storage_path(cfg: &Config, target_name: &str) -> Result<PathBuf, TuliproxError> {
+pub async fn ensure_xtream_storage_path(cfg: &Config, target_name: &str) -> Result<PathBuf, TuliproxError> {
     if let Some(path) = xtream_get_storage_path(cfg, target_name) {
-        if std::fs::create_dir_all(&path).is_err() {
+        if tokio::fs::create_dir_all(&path).await.is_err() {
             let msg = format!(
                 "Failed to save xtream data, can't create directory {}",
                 &path.display()
@@ -118,7 +118,7 @@ pub async fn write_playlist_item_update(
 ) -> Result<(), TuliproxError> {
     let storage_path = {
         let config = app_config.config.load();
-        ensure_xtream_storage_path(&config, target_name)?
+        ensure_xtream_storage_path(&config, target_name).await?
     };
     let xtream_path = xtream_get_file_path(&storage_path, pli.xtream_cluster);
     {
@@ -143,7 +143,7 @@ pub async fn write_playlist_batch_item_upsert(
 ) -> Result<(), TuliproxError> {
     let storage_path = {
         let config = app_config.config.load();
-        ensure_xtream_storage_path(&config, target_name)?
+        ensure_xtream_storage_path(&config, target_name).await?
     };
     let xtream_path = xtream_get_file_path(&storage_path, xtream_cluster);
     {
@@ -245,7 +245,7 @@ pub async fn xtream_write_playlist(
 ) -> Result<(), TuliproxError> {
     let path = {
         let config = app_cfg.config.load();
-        ensure_xtream_storage_path(&config, target.name.as_str())?
+        ensure_xtream_storage_path(&config, target.name.as_str()).await?
     };
     let mut errors = Vec::new();
     let mut cat_live_col = Vec::with_capacity(1_000);
@@ -578,7 +578,7 @@ pub async fn iter_raw_xtream_target_playlist(app_config: &AppConfig, target: &Co
 pub async fn iter_raw_xtream_input_playlist(app_config: &AppConfig, input: &ConfigInput, cluster: XtreamCluster) -> Option<(FileReadGuard, Box<dyn Iterator<Item=XtreamPlaylistItem> + Send>)> {
     let config = app_config.config.load();
     let working_dir = &config.working_dir;
-    let storage_path = get_input_storage_path(&input.name, working_dir).ok()?;
+    let storage_path = get_input_storage_path(&input.name, working_dir).await.ok()?;
     let xtream_path = xtream_get_file_path(&storage_path, cluster);
 
     iter_raw_xtream_playlist::<u32, u32>(app_config, &xtream_path).await

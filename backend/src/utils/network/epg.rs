@@ -11,7 +11,7 @@ use shared::error::{info_err, TuliproxError};
 use shared::utils::{sanitize_sensitive_info, short_hash};
 use std::path::PathBuf;
 
-pub fn get_input_raw_epg_file_path(url: &str, input: &ConfigInput, working_dir: &str) -> std::io::Result<PathBuf> {
+pub async fn get_input_raw_epg_file_path(url: &str, input: &ConfigInput, working_dir: &str) -> std::io::Result<PathBuf> {
     let file_prefix = short_hash(url);
 
     if let Some(persist_path) = input.persist.as_deref() {
@@ -23,7 +23,7 @@ pub fn get_input_raw_epg_file_path(url: &str, input: &ConfigInput, working_dir: 
         }
     }
 
-    let download_path = get_input_storage_path(&input.name, working_dir)?;
+    let download_path = get_input_storage_path(&input.name, working_dir).await?;
     Ok(download_path.join(format!("{}_{}", file_prefix, storage_const::FILE_EPG)))
 }
 
@@ -32,7 +32,7 @@ async fn download_epg_file(url: &str, ctx: &PlaylistProcessingContext,
                            headers: Option<&reqwest::header::HeaderMap>,
                            working_dir: &str) -> Result<PathBuf, TuliproxError> {
     debug!("Getting epg file path for url: {}", sanitize_sensitive_info(url));
-    let persist_file_path = get_input_raw_epg_file_path(url, input, working_dir).map_err(|e| info_err!("Could not access epg file download directory: {}", e))?;
+    let persist_file_path = get_input_raw_epg_file_path(url, input, working_dir).await.map_err(|e| info_err!("Could not access epg file download directory: {}", e))?;
 
     if input.cache_duration_seconds > 0 {
         if let Ok(metadata) = tokio::fs::metadata(&persist_file_path).await {

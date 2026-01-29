@@ -26,7 +26,7 @@ async fn playlist_resolve_series_info(app_config: &Arc<AppConfig>, client: &reqw
 
     let input = fpl.input;
     let working_dir = &app_config.config.load().working_dir;
-    let storage_path = match get_input_storage_path(&input.name, working_dir) {
+    let storage_path = match get_input_storage_path(&input.name, working_dir).await {
         Ok(storage_path) => storage_path,
         Err(err) => {
             error!("Can't resolve series info, input storage directory for input '{}' failed: {err}", input.name);
