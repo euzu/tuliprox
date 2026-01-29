@@ -54,14 +54,14 @@ pub async fn ensure_m3u_storage_path(cfg: &Config, target_name: &str) -> Result<
     if let Some(path) = m3u_get_storage_path(cfg, target_name) {
         if tokio::fs::create_dir_all(&path).await.is_err() {
             let msg = format!(
-                "Failed to save xtream data, can't create directory {}",
+                "Failed to save m3u data, can't create directory {}",
                 &path.display()
             );
             return notify_err_res!("{msg}");
         }
         Ok(path)
     } else {
-        let msg = format!("Failed to save xtream data, can't create directory for target {target_name}");
+        let msg = format!("Failed to save m3u data, can't create directory for target {target_name}");
         notify_err_res!("{msg}")
     }
 }
