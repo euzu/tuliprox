@@ -101,8 +101,8 @@ fn playlist_comparator(
 macro_rules! sort_groups_by_source_order {
     ($groups: ident) => {
         $groups.sort_by(|a, b| {
-            let order1 = a.channels.first().as_ref().map_or(0, |c| c.header.source_ordinal);
-            let order2 = b.channels.first().as_ref().map_or(1, |c| c.header.source_ordinal);
+            let order1 = a.channels.first().as_ref().map_or(u32::MAX, |c| c.header.source_ordinal);
+            let order2 = b.channels.first().as_ref().map_or(u32::MAX, |c| c.header.source_ordinal);
             order1.cmp(&order2)
         });
     };
@@ -185,8 +185,8 @@ fn sort_groups(
             }
         }
 
-        let order1 = a_chan.as_ref().map_or(0, |c| c.header.source_ordinal);
-        let order2 = b_chan.as_ref().map_or(1, |c| c.header.source_ordinal);
+        let order1 = a_chan.as_ref().map_or(u32::MAX, |c| c.header.source_ordinal);
+        let order2 = b_chan.as_ref().map_or(u32::MAX, |c| c.header.source_ordinal);
         order1.cmp(&order2)
     });
 }
