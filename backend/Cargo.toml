@@ -80,9 +80,8 @@ mime_guess = "2"
 libc = "0.2"
 [target.'cfg(target_os = "windows")'.dependencies]
 winapi = { version = "0.3", features = ["psapi", "minwindef", "processthreadsapi"] }
-[target.'cfg(target_os = "linux")'.dependencies]
-mimalloc = "0.1"
-
+#[target.'cfg(target_os = "linux")'.dependencies]
+#mimalloc = "0.1"
 #[target.'cfg(not(target_env = "msvc"))'.dependencies]
 #tikv-jemallocator =  "0.6"
 # tikv-jemallocator =  { version = "*", features = ["profiling", "unprefixed_malloc_on_supported_platforms"] }
