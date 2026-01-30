@@ -32,3 +32,6 @@ pub use sorted_index::*;
 pub use alias_repository::*;
 pub use playlist_source::*;
 pub use library_repository::*;
+
+#[cfg(test)]
+mod bplustree_stress;

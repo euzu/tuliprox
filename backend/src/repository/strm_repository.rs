@@ -944,8 +944,7 @@ fn get_strm_url(
         _ => None,
     } {
         let url = &str_item_info.url;
-        let ext = extract_extension_from_url(url)
-            .map_or_else(String::new, std::string::ToString::to_string);
+        let ext = extract_extension_from_url(url).unwrap_or_default();
         format!(
             "{}/{stream_type}/{}/{}/{}{ext}",
             server_info.get_base_url(),

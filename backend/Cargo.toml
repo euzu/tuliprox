@@ -58,6 +58,7 @@ rayon = "1.11"
 base64 = "0.22"
 paste = "1.0"
 indexmap = "2"
+parking_lot = "0.12"
 lz4_flex = "0.12"
 memmap2 = "0.9"
 fs2 = "0.4"
@@ -68,13 +69,13 @@ hyper = "1.8"
 hyper-util = "0.1"
 socket2 = { version = "0.6", features = ["all"] }
 async-compression = { version = "0.4", features = ["tokio"] }
-crc32fast = "1.5"
 chrono-tz = "0.10.4"
 zeroize = "1.8.2"
 sysinfo = { version = "0.37.2", default-features = false, features = ["system"] }
 uuid = { version = "1", features = ["v4"] }
 fancy-regex = "0.17.0"
 mime_guess = "2"
+crc32fast = "1.5.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"

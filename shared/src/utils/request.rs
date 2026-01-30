@@ -1,6 +1,8 @@
 use std::borrow::Cow;
+use std::path::Path;
 use std::sync::atomic::Ordering;
 use url::Url;
+use crate::concat_string;
 use crate::utils::{CONSTANTS, DASH_EXT, DASH_EXT_FRAGMENT, DASH_EXT_QUERY, HLS_EXT, HLS_EXT_FRAGMENT, HLS_EXT_QUERY};
 
 
@@ -31,28 +33,16 @@ pub fn sanitize_sensitive_info(query: &str) -> Cow<'_, str> {
     Cow::Owned(result)
 }
 
-#[inline]
-fn ensure_extension(ext: &str) -> Option<&str> {
-    if ext.len() > 4 {
-        return None;
-    }
-    Some(ext)
-}
+pub fn extract_extension_from_url(url: &str) -> Option<String> {
+    // 1. Remove Query-Parameter (f.e. ?token=abc123)
+    let path_only = url.split('?').next().unwrap_or(url);
 
-pub fn extract_extension_from_url(url: &str) -> Option<&str> {
-    if let Some(protocol_pos) = url.find("://") {
-        if let Some(last_slash_pos) = url[protocol_pos + 3..].rfind('/') {
-            let path = &url[protocol_pos + 3 + last_slash_pos + 1..];
-            if let Some(last_dot_pos) = path.rfind('.') {
-                return ensure_extension(&path[last_dot_pos..]);
-            }
-        }
-    } else if let Some(last_dot_pos) = url.rfind('.') {
-        if last_dot_pos > url.rfind('/').unwrap_or(0) {
-            return ensure_extension(&url[last_dot_pos..]);
-        }
-    }
-    None
+    // 2. Remove Fragment (z. B. #section)
+    let path_only = path_only.split('#').next().unwrap_or(path_only);
+
+    Path::new(path_only)
+        .extension()
+        .and_then(|ext| ext.to_str()).map(|ext| concat_string!(".", ext))
 }
 
 pub fn is_hls_url(url: &str) -> bool {

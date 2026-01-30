@@ -101,6 +101,9 @@ struct Args {
 
     #[arg(long = "dbe")]
     db_epg_file_name: Option<String>,
+
+    #[arg(long = "dbv")]
+    db_tim_file_name: Option<String>,
 }
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -118,7 +121,10 @@ const BUILD_TIMESTAMP: &str = env!("VERGEN_BUILD_TIMESTAMP");
 async fn main() {
     let args = Args::parse();
 
-    db_viewer(args.db_xtream_file_name.as_deref(), args.db_m3u_file_name.as_deref(), args.db_epg_file_name.as_deref());
+    db_viewer(args.db_xtream_file_name.as_deref(),
+              args.db_m3u_file_name.as_deref(),
+              args.db_epg_file_name.as_deref(),
+              args.db_tim_file_name.as_deref());
 
     if args.genpwd {
         match generate_password() {

@@ -901,7 +901,7 @@ impl PlaylistItem {
                 match header.xtream_cluster {
                     XtreamCluster::Live => None,
                     XtreamCluster::Video => {
-                        let container_extension = extract_extension_from_url(&header.url).map(|e| e.strip_prefix('.').unwrap_or(e).to_string()).unwrap_or_default();
+                        let container_extension = extract_extension_from_url(&header.url).map(|e| e.strip_prefix('.').unwrap_or(&*e).to_string()).unwrap_or_default();
                         Some(StreamProperties::Video(Box::new(VideoStreamProperties {
                             name: header.name.clone(),
                             category_id: header.category_id,
@@ -922,7 +922,7 @@ impl PlaylistItem {
                     }
                     XtreamCluster::Series => {
                         if header.item_type == PlaylistItemType::Series {
-                            let container_extension = extract_extension_from_url(&header.url).map(|e| e.strip_prefix('.').unwrap_or(e).to_string()).unwrap_or_default();
+                            let container_extension = extract_extension_from_url(&header.url).map(|e| e.strip_prefix('.').unwrap_or(&e).to_string()).unwrap_or_default();
                             // TODO maybe from link ? like s01e02 or something like this
                             Some(StreamProperties::Episode(EpisodeStreamProperties {
                                 episode_id: 0,

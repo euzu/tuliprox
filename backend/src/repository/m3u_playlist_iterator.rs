@@ -121,7 +121,7 @@ impl M3uPlaylistIterator {
             )
         };
 
-        extract_extension_from_url(&m3u_pli.url).map(|ext| shared::concat_string!(&rewritten_url, ext)).unwrap_or(rewritten_url)
+        extract_extension_from_url(&m3u_pli.url).map(|ext| shared::concat_string!(&rewritten_url, &ext)).unwrap_or(rewritten_url)
     }
 
     fn get_stream_url(&self, m3u_pli: &M3uPlaylistItem, typed: bool) -> String {

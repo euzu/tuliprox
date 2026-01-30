@@ -385,7 +385,7 @@ async fn xtream_read_item_for_stream_id(
     {
         let _file_lock = cfg.file_locks.read_lock(&xtream_path).await;
         let mut query = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path)?;
-        match query.query(&stream_id) {
+        match query.query_zero_copy(&stream_id) {
             Ok(Some(item)) => Ok(item),
             Ok(None) => Err(Error::new(ErrorKind::NotFound, format!("Item {stream_id} not found in {cluster}"))),
             Err(err) => Err(Error::other(format!("Query failed for {stream_id} in {cluster}: {err}"))),
@@ -402,7 +402,7 @@ async fn xtream_read_series_item_for_stream_id(
     {
         let _file_lock = cfg.file_locks.read_lock(&xtream_path).await;
         let mut query = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path)?;
-        match query.query(&stream_id) {
+        match query.query_zero_copy(&stream_id) {
             Ok(Some(item)) => Ok(item),
             Ok(None) => Err(Error::new(ErrorKind::NotFound, format!("Item {stream_id} not found in series"))),
             Err(err) => Err(Error::other(format!("Query failed for {stream_id} in series: {err}"))),
@@ -516,7 +516,7 @@ pub async fn xtream_get_item_for_stream_id(
             let _file_lock = app_config.file_locks.read_lock(&target_id_mapping_file).await;
 
             let mut target_id_mapping = BPlusTreeQuery::<u32, VirtualIdRecord>::try_new(&target_id_mapping_file).map_err(|err| string_to_io_error(format!("Could not load id mapping for target {} err:{err}", target.name)))?;
-            let mapping = match target_id_mapping.query(&virtual_id) {
+            let mapping = match target_id_mapping.query_zero_copy(&virtual_id) {
                 Ok(Some(record)) => Ok(record),
                 Ok(None) => Err(string_to_io_error(format!("Could not find mapping for target {} and id {}", target.name, virtual_id))),
                 Err(err) => Err(string_to_io_error(format!("Query failed for id {virtual_id}: {err}"))),

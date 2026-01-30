@@ -406,25 +406,23 @@ fn get_query_path(action_path: &str, stream_ext: Option<&String>, pli: &XtreamPl
         false
     };
 
-    let extracted_ext;
-    let extension: &str = if discard_extension {
-        ""
+    let extension: String = if discard_extension {
+        String::new()
     } else if let Some(ext) = stream_ext {
-        ext
+        ext.into()
     } else {
-        extracted_ext = extract_extension_from_url(&pli.url);
-        extracted_ext.unwrap_or("")
+        extract_extension_from_url(&pli.url).unwrap_or_default()
     };
 
     let provider_id = pli.provider_id.to_string();
 
     let query_path = if action_path.is_empty() {
-        concat_string!(&provider_id, extension)
+        concat_string!(&provider_id, &extension)
     } else {
         let path = trim_slash(action_path);
-        concat_string!(path.as_ref(), "/", &provider_id, extension)
+        concat_string!(path.as_ref(), "/", &provider_id, &extension)
     };
-    (query_path, extension.to_string())
+    (query_path, extension)
 }
 
 #[allow(clippy::too_many_lines)]

@@ -57,8 +57,15 @@
 - **Atomic I/O Layer**: Refactored for atomic writes and file locking, ensuring data integrity.
 - **B+Tree Compaction**: Reclaim space after deletions or mass updates.
 - **Batch Upsert**: Significantly higher throughput during mass inserts/updates.
+- **Persistent Value Caching**: Implemented high-performance, thread-safe value caching
+- **Compressed Read Optimization**: Caches decompressed values in memory to eliminate redundant decompression overhead during frequent queries.
+- **Packed Block Update Optimization**: Caches exact byte offsets within 4KB blocks, enabling direct disk writes for same-size updates and bypassing expensive Read-Scan-Modify-Write cycles.
+- **Buffer Reuse**: Introduced reusable serialization buffers in `BPlusTreeUpdate` to minimize heap allocations during write operations.
+- **Configurable Flush Policy**: Added `Immediate`, `Batch`, and `None` flush policies to optimize disk synchronization overhead.
 - **Disk-Based Provider Processing**: New `disk_based_processing` config option massively reduces RAM usage by streaming playlist data from disk (BPlusTree) during updates.
 - **String Interning**: Implemented `Arc<str>` string interning for playlist items to further reduce memory footprint.
+- **Zero-Copy B+Tree Scan**: Implemented zero-copy scanning for B+Tree internal nodes, significantly reducing heap allocations and improving random read throughput (up to 96k ops/sec).
+- **Optimized Key Lookups**: `XtreamRepository` and `M3uRepository` now use zero-copy queries for `u32` keys, enhancing performance for high-traffic endpoints.
 
 ## 🔍 Mapping & Filtering Enhancements
 - **Accent-Independent Matching**: Integrated `match_as_ascii` flag for robust text matching (e.g., "Cinema" matches "Cinéma").

@@ -587,8 +587,7 @@ where
     pub fn get_query_path(&self, provider_id: u32, url: &str) -> String {
         let extension = self.stream_ext.map_or_else(
             || {
-                extract_extension_from_url(url)
-                    .map_or_else(String::new, ToString::to_string)
+                extract_extension_from_url(url).unwrap_or_default()
             },
             ToString::to_string,
         );
