@@ -37,7 +37,7 @@ mime = "0.3"
 log = "0.4"
 env_logger = "0.11"
 rmp-serde = "1"
-rand = "0.9"
+rand = { version = "0.9", features = ["thread_rng"] }
 fastrand = "2"
 rpassword = "7.4"
 flate2 = "1.1"

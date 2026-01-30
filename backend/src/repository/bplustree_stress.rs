@@ -18,7 +18,7 @@ fn random_string(len: usize) -> String {
 fn stress_test_bplustree() {
     let temp_file = NamedTempFile::new().unwrap();
     let filepath = temp_file.path().to_path_buf();
-    let log_path = std::path::Path::new("/projects/tuliprox/stress_results.txt");
+    let log_path = std::path::Path::new("/tmp/stress_results.txt");
     let mut log_file = std::fs::File::create(log_path).unwrap();
     use std::io::Write;
 

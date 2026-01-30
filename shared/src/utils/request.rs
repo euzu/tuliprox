@@ -33,17 +33,36 @@ pub fn sanitize_sensitive_info(query: &str) -> Cow<'_, str> {
     Cow::Owned(result)
 }
 
-pub fn extract_extension_from_url(url: &str) -> Option<String> {
-    // 1. Remove Query-Parameter (f.e. ?token=abc123)
-    let path_only = url.split('?').next().unwrap_or(url);
+/// Extracts the file extension from a URL path (query/fragment stripped).
+/// Returns the extension **prefixed with a dot** (e.g., ".m3u8").
+pub fn extract_extension_from_url(input: &str) -> Option<String> {
+    // 1. Strip query + fragment
+    let input = input
+        .split('?').next()
+        .unwrap_or(input)
+        .split('#').next()
+        .unwrap_or(input);
 
-    // 2. Remove Fragment (z. B. #section)
-    let path_only = path_only.split('#').next().unwrap_or(path_only);
+    // 2. Remove scheme (http://, file://, etc.)
+    let path = input
+        .split("://").last().unwrap_or(input);
 
-    Path::new(path_only)
-        .extension()
-        .and_then(|ext| ext.to_str()).map(|ext| concat_string!(".", ext))
+    // 3. Take last path segment
+    let filename = path
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())?;
+
+    // 4. Extract extension
+    let ext = filename
+        .rsplit('.')
+        .next()
+        .filter(|e| *e != filename)?; // ensures dot exists
+
+    Some(concat_string!(".", ext))
 }
+
+
 
 pub fn is_hls_url(url: &str) -> bool {
     let lc_url = url.to_lowercase();
