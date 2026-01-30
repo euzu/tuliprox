@@ -1,5 +1,4 @@
 use std::borrow::Cow;
-use std::path::Path;
 use std::sync::atomic::Ordering;
 use url::Url;
 use crate::concat_string;
