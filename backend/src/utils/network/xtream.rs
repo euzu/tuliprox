@@ -296,7 +296,7 @@ async fn xtream_login(app_config: &Arc<AppConfig>, client: &reqwest::Client, inp
                     login_info.status = Some(cur_status);
                     if !matches!(cur_status, ProxyUserStatus::Active | ProxyUserStatus::Trial) {
                         warn!("User status for user {username} is {cur_status:?}");
-                    send_message(app_config, client, MessageContent::Error(format!("User status for user {username} is {cur_status:?}"))).await;
+                        send_message(app_config, client, MessageContent::Error(format!("User status for user {username} is {cur_status:?}"))).await;
                     }
                 }
             }
@@ -334,7 +334,7 @@ pub async fn notify_account_expire(exp_date: Option<i64>, app_config: &Arc<AppCo
         } else {
             warn!("User account for user {username} is expired");
             send_message(app_config, client, MessageContent::Info(
-                         format!("User account for user {username} for provider {input_name} is expired"))).await;
+                format!("User account for user {username} for provider {input_name} is expired"))).await;
         }
     }
 }
@@ -479,12 +479,12 @@ pub fn create_vod_info_from_item(target: &ConfigTarget, user: &ProxyUserCredenti
     let stream_id = if user.proxy.is_redirect(pli.item_type) || target.is_force_redirect(pli.item_type) { pli.provider_id } else { pli.virtual_id };
     let added = pli.additional_properties.as_ref().and_then(StreamProperties::get_last_modified).unwrap_or(0);
     let name = &pli.name;
-    let extension = pli
+    let extension: String = pli
         .get_container_extension()
-        .as_deref()
         .filter(|ce| !ce.is_empty())
+        .map(|s| s.to_string())
         .or_else(|| extract_extension_from_url(&pli.url))
-        .map_or_else(String::new, ToString::to_string);
+        .unwrap_or_default();
 
     let mut doc = XtreamVideoInfoDoc::default();
     doc.info.name.clone_from(name);

@@ -295,7 +295,7 @@ $series-backdrop-mobile-height: 150px;
           background-size: cover;
           background-position: center;
           font-size: 1.2rem;
-          color: var(--text-color);
+          color: var(--series-info-title-color, white);
           z-index: 1;
         }
       }

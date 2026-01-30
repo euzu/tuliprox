@@ -224,8 +224,7 @@ async fn m3u_api_stream(
     }
 
     let extension = stream_ext.unwrap_or_else(|| {
-        extract_extension_from_url(&pli.url)
-            .map_or_else(String::new, std::string::ToString::to_string)
+        extract_extension_from_url(&pli.url).unwrap_or_default()
     });
 
     let is_hls_request = pli.item_type == PlaylistItemType::LiveHls

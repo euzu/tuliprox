@@ -20,3 +20,12 @@ where
         to_io_error(e)
     })
 }
+
+#[inline]
+pub fn binary_serialize_into<W, T>(writer: &mut W, value: &T) -> io::Result<()>
+where
+    W: io::Write,
+    T: ?Sized + serde::Serialize,
+{
+    rmp_serde::encode::write(writer, value).map_err(to_io_error)
+}

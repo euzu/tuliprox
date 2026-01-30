@@ -175,7 +175,7 @@ pub async fn m3u_get_item_for_stream_id(stream_id: u32, app_state: &AppState, ta
         let _file_lock = cfg.file_locks.read_lock(&m3u_path).await;
 
         let mut query = BPlusTreeQuery::<u32, M3uPlaylistItem>::try_new(&m3u_path)?;
-        match query.query(&stream_id) {
+        match query.query_zero_copy(&stream_id) {
             Ok(Some(item)) => Ok(item),
             Ok(None) => Err(string_to_io_error(format!("Item not found: {stream_id}"))),
             Err(err) => Err(string_to_io_error(format!("Query failed for {stream_id}: {err}"))),

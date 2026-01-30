@@ -4631,6 +4631,7 @@ dependencies = [
  "mime_guess",
  "notify",
  "openssl",
+ "parking_lot",
  "paste",
  "path-clean",
  "pest",
