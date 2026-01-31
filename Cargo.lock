@@ -4618,6 +4618,7 @@ dependencies = [
  "fs2",
  "futures",
  "handlebars",
+ "http-body-util",
  "hyper",
  "hyper-util",
  "indexmap",

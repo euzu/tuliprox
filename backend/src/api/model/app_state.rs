@@ -5,7 +5,7 @@ use crate::api::scheduler::exec_scheduler;
 use crate::model::{AppConfig, Config, ConfigTarget, GracePeriodOptions, HdHomeRunConfig, HdHomeRunDeviceConfig, ProcessTargets, ReverseProxyDisabledHeaderConfig, ScheduleConfig, SourcesConfig};
 use crate::repository::load_target_into_memory_cache;
 use crate::tools::lru_cache::LRUResourceCache;
-use crate::utils::request::create_client;
+use crate::utils::request::{create_client, create_client_with_redirect};
 use arc_swap::{ArcSwap, ArcSwapOption};
 use log::{error, info};
 use reqwest::Client;
@@ -195,6 +195,21 @@ pub fn create_http_client(app_config: &AppConfig) -> Client {
     Client::new()
 }
 
+pub fn create_http_client_no_redirect(app_config: &AppConfig) -> Client {
+    let mut builder = create_client_with_redirect(app_config, reqwest::redirect::Policy::none())
+        .http1_only();
+    let config = app_config.config.load(); // because of RAII connection dropping
+    if config.connect_timeout_secs > 0 {
+        builder =
+            builder.connect_timeout(Duration::from_secs(u64::from(config.connect_timeout_secs)));
+    }
+    if let Ok(client) = builder.build() {
+        return client;
+    }
+    error!("Failed to create HTTP client (no redirect), using unconfigured http client");
+    Client::new()
+}
+
 pub fn create_cache(config: &Config) -> Option<Arc<Mutex<LRUResourceCache>>> {
     let lru_cache = config
         .reverse_proxy
@@ -258,6 +273,7 @@ pub struct AppState {
     pub forced_targets: Arc<ArcSwap<ProcessTargets>>, // as program arguments
     pub app_config: Arc<AppConfig>,
     pub http_client: Arc<ArcSwap<Client>>,
+    pub http_client_no_redirect: Arc<ArcSwap<Client>>,
     pub downloads: Arc<DownloadQueue>,
     pub cache: Arc<ArcSwapOption<Mutex<LRUResourceCache>>>,
     pub shared_stream_manager: Arc<SharedStreamManager>,
@@ -305,6 +321,8 @@ impl AppState {
         // client
         let client = create_http_client(&self.app_config);
         self.http_client.store(Arc::new(client));
+        let client_no_redirect = create_http_client_no_redirect(&self.app_config);
+        self.http_client_no_redirect.store(Arc::new(client_no_redirect));
 
         // cache
         let config = self.app_config.config.load();

@@ -11,7 +11,7 @@ use crate::api::endpoints::xmltv_api::xmltv_api_register;
 use crate::api::endpoints::xtream_api::xtream_api_register;
 use crate::api::hdhomerun_proprietary::spawn_proprietary_tasks;
 use crate::api::hdhomerun_ssdp::spawn_ssdp_discover_task;
-use crate::api::model::{create_cache, create_http_client, ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager, DownloadQueue, EventManager, HdHomerunAppState, PlaylistStorageState, SharedStreamManager, UpdateGuard};
+use crate::api::model::{create_cache, create_http_client, create_http_client_no_redirect, ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager, DownloadQueue, EventManager, HdHomerunAppState, PlaylistStorageState, SharedStreamManager, UpdateGuard};
 use crate::api::scheduler::{exec_interner_prune, exec_scheduler};
 use crate::api::serve::serve;
 use crate::model::{AppConfig, Config, Healthcheck, ProcessTargets, RateLimitConfig};
@@ -97,11 +97,13 @@ async fn create_shared_data(
     let connection_manager = Arc::new(ConnectionManager::new(&active_users, &active_provider, &shared_stream_manager, &event_manager));
 
     let client = create_http_client(app_config);
+    let client_no_redirect = create_http_client_no_redirect(app_config);
 
     AppState {
         forced_targets: Arc::new(ArcSwap::new(Arc::clone(forced_targets))),
         app_config: Arc::clone(app_config),
         http_client: Arc::new(ArcSwap::from_pointee(client)),
+        http_client_no_redirect: Arc::new(ArcSwap::from_pointee(client_no_redirect)),
         downloads: Arc::new(DownloadQueue::new()),
         cache: Arc::new(ArcSwapOption::from(cache)),
         shared_stream_manager,
