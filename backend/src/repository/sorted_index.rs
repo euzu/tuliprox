@@ -664,7 +664,7 @@ mod tests {
                 assert_eq!(offset, 100);
                 assert_eq!(length, 50);
             }
-            _ => panic!("Expected Single location"),
+            ValueLocation::Packed { .. } => panic!("Expected Single location"),
         }
 
         assert_eq!(entries[1].sort_key, "banana".to_string());
@@ -675,7 +675,7 @@ mod tests {
                 assert_eq!(index, 3);
                 assert_eq!(length, 75);
             }
-            _ => panic!("Expected Packed location"),
+            ValueLocation::Single { .. } => panic!("Expected Packed location"),
         }
 
         assert_eq!(entries[2].sort_key, "cherry".to_string());
@@ -685,7 +685,7 @@ mod tests {
                 assert_eq!(offset, 300);
                 assert_eq!(length, 100);
             }
-            _ => panic!("Expected Single location"),
+            ValueLocation::Packed { .. } => panic!("Expected Single location"),
         }
     }
 

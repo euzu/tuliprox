@@ -311,7 +311,7 @@ mod tests {
         let entry = MetadataCacheEntry::new(
             "/test/movie.mp4".to_string(),
             1024,
-            1234567890,
+            1_234_567_890,
             MediaMetadata::Movie(MovieMetadata {
                 title: "Test Movie".to_string(),
                 year: Some(2020),

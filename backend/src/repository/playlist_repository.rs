@@ -408,7 +408,7 @@ pub async fn load_input_playlist(ctx: &PlaylistProcessingContext, input: &Config
     match input.input_type {
         InputType::Xtream | InputType::XtreamBatch => {
             if disk_based_processing {
-                Ok(Box::new(XtreamDiskPlaylistSource::new(app_config, &storage_path).await))
+                Ok(Box::new(XtreamDiskPlaylistSource::new(app_config, &storage_path)))
             } else {
                 let clusters_to_load = if let Some(c) = clusters {
                     c
@@ -423,7 +423,7 @@ pub async fn load_input_playlist(ctx: &PlaylistProcessingContext, input: &Config
             // Load M3U
             let file_path = get_input_m3u_playlist_file_path(&storage_path, &input.name);
             if disk_based_processing && file_path.exists() {
-                Ok(Box::new(M3uDiskPlaylistSource::new(app_config, &file_path).await))
+                Ok(Box::new(M3uDiskPlaylistSource::new(app_config, &file_path)))
             } else {
                 let groups = load_input_m3u_playlist(app_config, &file_path).await?;
                 Ok(Box::new(MemoryPlaylistSource::new(groups)))
@@ -432,7 +432,7 @@ pub async fn load_input_playlist(ctx: &PlaylistProcessingContext, input: &Config
         InputType::Library => {
             let file_path = get_input_local_library_playlist_file_path(&storage_path, &input.name);
             if disk_based_processing && file_path.exists() {
-                Ok(Box::new(LocalLibraryDiskPlaylistSource::new(app_config, &file_path).await))
+                Ok(Box::new(LocalLibraryDiskPlaylistSource::new(app_config, &file_path)))
             } else {
                 let groups = load_input_local_library_playlist(app_config, &file_path).await?;
                 Ok(Box::new(MemoryPlaylistSource::new(groups)))

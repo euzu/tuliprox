@@ -4146,7 +4146,7 @@ mod tests {
                     id: record.id,
                     data: format!("{content} {}", record.id + 9000),
                 };
-                tree_update.update(&i, new_record).map_err(|e| e.to_io())?;
+                tree_update.update(&i, new_record).map_err(BPlusTreeError::to_io)?;
             } else {
                 panic!("{content} {i} not found");
             }
@@ -4256,7 +4256,7 @@ mod tests {
         assert_eq!(update.len().expect("Update len failed"), test_size as usize);
 
         // Update existing key - length should stay same
-        update.update(&1, Record { id: 1, data: "updated".to_string() }).map_err(|e| e.to_io())?;
+        update.update(&1, Record { id: 1, data: "updated".to_string() }).map_err(BPlusTreeError::to_io)?;
         assert_eq!(update.len().expect("Update len failed after update"), test_size as usize);
 
         // Insert new key - length should increase
@@ -4313,7 +4313,7 @@ mod tests {
         let mut tree_update = BPlusTreeUpdate::<u32, Record>::try_new(&filepath)?;
         for i in 0u32..100 {
             if i % 2 == 0 {
-                tree_update.update(&i, Record { id: i, data: format!("UpdatedContent {i}") }).map_err(|e| e.to_io())?;
+                tree_update.update(&i, Record { id: i, data: format!("UpdatedContent {i}") }).map_err(BPlusTreeError::to_io)?;
             }
         }
 
@@ -4357,7 +4357,7 @@ mod tests {
         let padding: String = generate_random_string(400);
         for i in 0u32..10 {
             // Each record has unique data to prevent compression
-            tree.insert(i, Record { id: i, data: format!("{}{}", padding, i) });
+            tree.insert(i, Record { id: i, data: format!("{padding}{i}") });
         }
         tree.store(&filepath)?;
 
@@ -4367,7 +4367,7 @@ mod tests {
         let mut tree_update = BPlusTreeUpdate::<u32, Record>::try_new(&filepath)?;
         let same_size_padding: String = generate_random_string(400);
         for i in 0u32..10 {
-            tree_update.update(&i, Record { id: i, data: format!("{}{}", same_size_padding, i) }).map_err(|e| e.to_io())?;
+            tree_update.update(&i, Record { id: i, data: format!("{same_size_padding}{i}") }).map_err(BPlusTreeError::to_io)?;
         }
 
         let size_after_same_update = std::fs::metadata(&filepath)?.len();
@@ -4388,7 +4388,7 @@ mod tests {
         let mut tree_update = BPlusTreeUpdate::<u32, Record>::try_new(&filepath)?;
         let smaller_padding: String = generate_random_string(200);
         for i in 0u32..10 {
-            tree_update.update(&i, Record { id: i, data: format!("{}{}", smaller_padding, i) }).map_err(|e| e.to_io())?;
+            tree_update.update(&i, Record { id: i, data: format!("{smaller_padding}{i}") }).map_err(BPlusTreeError::to_io)?;
         }
 
         let size_after_smaller_update = std::fs::metadata(&filepath)?.len();
@@ -4398,7 +4398,7 @@ mod tests {
         // 5000 chars is much larger than the original ~400 byte allocation
         let larger_padding: String = generate_random_string(5000);
         for i in 0u32..1 {
-            tree_update.update(&i, Record { id: i, data: format!("{}{}", larger_padding, i) }).map_err(|e| e.to_io())?;
+            tree_update.update(&i, Record { id: i, data: format!("{larger_padding}{i}") }).map_err(BPlusTreeError::to_io)?;
         }
 
         let size_after_larger_update = std::fs::metadata(&filepath)?.len();
@@ -4444,7 +4444,7 @@ mod tests {
 
         // 2. Multiple Updates (COW)
         for i in (0..test_size).step_by(10) {
-            tree_update.update(&i, Record { id: i, data: format!("UpdatedContent {i}") }).map_err(|e| e.to_io())?;
+            tree_update.update(&i, Record { id: i, data: format!("UpdatedContent {i}") }).map_err(BPlusTreeError::to_io)?;
         }
 
         // 3. Verify Query Integrity (Must return NEW values)
@@ -4497,7 +4497,7 @@ mod tests {
         assert_eq!(tree_update.query_le(&5).unwrap().unwrap().id, 0);
 
         // 2. COW Update
-        tree_update.update(&10, Record { id: 10, data: "NewVal".to_string() }).map_err(|e| e.to_io())?;
+        tree_update.update(&10, Record { id: 10, data: "NewVal".to_string() }).map_err(BPlusTreeError::to_io)?;
 
         // 3. Verify LE returns the LATEST value
         let val = tree_update.query_le(&15).expect("Query failed").expect("Should find LE key after COW update");
@@ -4574,7 +4574,7 @@ mod tests {
             .map(|(k, v)| (k, v))
             .collect();
 
-        tree_update.update_batch(&update_refs).map_err(|e| e.to_io())?;
+        tree_update.update_batch(&update_refs).map_err(BPlusTreeError::to_io)?;
         drop(tree_update);
 
         // Verify all updates
@@ -4612,7 +4612,7 @@ mod tests {
 
         // Test empty batch - should be no-op
         let empty_batch: Vec<(&u32, &Record)> = vec![];
-        let result = tree_update.update_batch(&empty_batch).map_err(|e| e.to_io())?;
+        let result = tree_update.update_batch(&empty_batch).map_err(BPlusTreeError::to_io)?;
 
         assert_eq!(result, initial_root, "Empty batch should not change root offset");
 
@@ -4656,7 +4656,7 @@ mod tests {
             .collect();
 
         // Perform batch update
-        tree_update.update_batch(&update_refs).map_err(|e| e.to_io())?;
+        tree_update.update_batch(&update_refs).map_err(BPlusTreeError::to_io)?;
         drop(tree_update);
 
         // Verify all updates via iterator
@@ -4704,7 +4704,7 @@ mod tests {
             .map(|(k, v)| (k, v))
             .collect();
 
-        tree_update.update_batch(&update_refs).map_err(|e| e.to_io())?;
+        tree_update.update_batch(&update_refs).map_err(BPlusTreeError::to_io)?;
 
         let size_before_compact = std::fs::metadata(&filepath)?.len();
 
@@ -4756,9 +4756,9 @@ mod tests {
         // Verify all data is present in the NEW file
         let mut tree_check = BPlusTreeQuery::<u32, Record>::try_new(&filepath)?;
 
-        assert!(tree_check.query(&1).map_err(|e| e.to_io())?.is_some(), "Should have key 1");
-        assert!(tree_check.query(&2).map_err(|e| e.to_io())?.is_some(), "Should have key 2");
-        assert!(tree_check.query(&3).map_err(|e| e.to_io())?.is_some(), "Should have key 3 - if missing, file handle wasn't updated");
+        assert!(tree_check.query(&1).map_err(BPlusTreeError::to_io)?.is_some(), "Should have key 1");
+        assert!(tree_check.query(&2).map_err(BPlusTreeError::to_io)?.is_some(), "Should have key 2");
+        assert!(tree_check.query(&3).map_err(BPlusTreeError::to_io)?.is_some(), "Should have key 3 - if missing, file handle wasn't updated");
 
         Ok(())
     }
@@ -4935,10 +4935,11 @@ mod tests {
         // Expected size without packing:
         // 1000 items * 4096 bytes/block = 4,096,000 bytes (~4MB)
         // Plus internal nodes
-        let unpacked_size_estimate = count as u64 * super::PAGE_SIZE_USIZE as u64;
+        let unpacked_size_estimate =
+            u64::from(count) * u64::try_from(super::PAGE_SIZE_USIZE).unwrap();
 
-        println!("File size with packing: {} bytes", file_size);
-        println!("Estimated unpacked size: {} bytes", unpacked_size_estimate);
+        println!("File size with packing: {file_size} bytes");
+        println!("Estimated unpacked size: {unpacked_size_estimate} bytes");
 
         // We expect significant savings.
         // 1000 items * ~60 bytes / 4096 bytes/block ~= 15 blocks
@@ -5008,7 +5009,7 @@ mod tests {
         let val1 = "A".repeat(10000);
         let val2 = "B".repeat(10000);
 
-        let updates = vec![
+        let updates = [
             (1, val1.clone()),
             (2, val2.clone()),
         ];
@@ -5072,7 +5073,7 @@ mod tests {
         let mut tree_update = BPlusTreeUpdate::<u32, String>::try_new(&filepath)?;
 
         // Batch contains same key multiple times
-        let updates = vec![
+        let updates = [
             (1, "First".to_string()),
             (1, "Second".to_string()),
             (2, "Two".to_string()),
@@ -5117,7 +5118,7 @@ mod tests {
 
         let size_before = std::fs::metadata(&filepath)?.len();
         // Each individual update writes a full path, increasing file size significantly.
-        assert!(size_before > count as u64 * 4000);
+        assert!(size_before > u64::from(count) * 4000);
 
         // Now Compact
         tree_update.compact(&filepath)?;
@@ -5127,7 +5128,7 @@ mod tests {
         // 200 items * 100 bytes = 20KB payload.
         // Should pack into ~5-6 blocks (4KB each).
 
-        println!("Size before: {}, Size after: {}", size_before, size_after);
+        println!("Size before: {size_before}, Size after: {size_after}");
         assert!(size_after < size_before / 10, "Compaction should pack values");
         assert!(size_after < 100 * 1024, "File should be small"); // < 100KB
 
@@ -5208,7 +5209,7 @@ mod tests {
             let keys: Vec<u32> = (0..count).collect();
             let value_info: Vec<ValueInfo> = (0..count)
                 .map(|i| ValueInfo {
-                    mode: ValueStorageMode::Packed(i as u64 * 4096, (i % 16) as u16),
+                    mode: ValueStorageMode::Packed(u64::from(i) * 4096, (i % 16) as u16),
                     length: 100,
                     cache: Mutex::new(None),
                 })
@@ -5277,7 +5278,7 @@ mod tests {
 
         // File size should have grown slightly (promoted values written at EOF)
         // but not dramatically since most values are still packed
-        println!("Size initial: {}, Size after: {}", size_initial, size_after);
+        println!("Size initial: {size_initial}, Size after: {size_after}");
         assert!(size_after >= size_initial, "File should not shrink");
 
         // Verify all data is correct
@@ -5303,7 +5304,7 @@ mod tests {
 
         let mut tree = BPlusTree::<u32, String>::new();
         for i in 0..10 {
-            tree.insert(i, format!("value_{}", i));
+            tree.insert(i, format!("value_{i}"));
         }
         tree.store(&filepath)?;
 
@@ -5312,12 +5313,12 @@ mod tests {
         // Test None policy - should not error
         update.flush_policy = super::FlushPolicy::None;
         for i in 0..5 {
-            update.update(&i, format!("new_{}", i)).map_err(super::BPlusTreeError::to_io)?;
+            update.update(&i, format!("new_{i}")).map_err(super::BPlusTreeError::to_io)?;
         }
 
         // Verify values within same session
         for i in 0..5 {
-            assert_eq!(update.query(&i).map_err(super::BPlusTreeError::to_io)?.unwrap(), format!("new_{}", i));
+            assert_eq!(update.query(&i).map_err(super::BPlusTreeError::to_io)?.unwrap(), format!("new_{i}"));
         }
 
         // Test Batch policy
@@ -5424,8 +5425,8 @@ mod tests {
         let page = SlottedPage::new(&mut data, PageType::Leaf).expect("Init failed");
         assert_eq!(page.header.page_type, PageType::Leaf);
         assert_eq!(page.header.cell_count, 0);
-        assert_eq!(page.header.free_start, PAGE_HEADER_SIZE as u16);
-        assert_eq!(page.header.free_end, PAGE_SIZE as u16);
+        assert_eq!(page.header.free_start, PAGE_HEADER_SIZE);
+        assert_eq!(page.header.free_end, PAGE_SIZE);
         assert_eq!(page.free_space(), PAGE_SIZE_USIZE - PAGE_HEADER_SIZE_USIZE);
     }
 
@@ -5439,11 +5440,11 @@ mod tests {
 
         // Insert length-prefixed for test realism
         let mut cell1 = Vec::new();
-        cell1.extend_from_slice(&(val1.len() as u32).to_le_bytes());
+        cell1.extend_from_slice(&u32::try_from(val1.len()).unwrap().to_le_bytes());
         cell1.extend_from_slice(val1);
 
         let mut cell2 = Vec::new();
-        cell2.extend_from_slice(&(val2.len() as u32).to_le_bytes());
+        cell2.extend_from_slice(&u32::try_from(val2.len()).unwrap().to_le_bytes());
         cell2.extend_from_slice(val2);
 
         page.insert_at_index(0, &cell1).unwrap();
@@ -5465,7 +5466,7 @@ mod tests {
 
         let payload = vec![0xAAu8; 500];
         let mut cell = Vec::new();
-        cell.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        cell.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_le_bytes());
         cell.extend_from_slice(&payload);
 
         for i in 0..6 {
@@ -5496,7 +5497,7 @@ mod tests {
         // Case 1: Split single item page -> Should return None (no-op)
         let val = b"item";
         let mut cell = Vec::new();
-        cell.extend_from_slice(&(val.len() as u32).to_le_bytes());
+        cell.extend_from_slice(&u32::try_from(val.len()).unwrap().to_le_bytes());
         cell.extend_from_slice(val);
         page.insert_at_index(0, &cell).unwrap();
 
@@ -5506,7 +5507,7 @@ mod tests {
                 assert_eq!(page.header.cell_count, 1); // Original page untouched
             }
             Ok(Some(_)) => panic!("Split of single item should result in None"),
-            Err(e) => panic!("Split of single item should result in no-op, not error: {:?}", e),
+            Err(e) => panic!("Split of single item should result in no-op, not error: {e:?}"),
         }
     }
 
@@ -5535,4 +5536,3 @@ mod tests {
         Ok(())
     }
 }
-

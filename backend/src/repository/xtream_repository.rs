@@ -121,17 +121,23 @@ pub async fn write_playlist_item_update(
         ensure_xtream_storage_path(&config, target_name).await?
     };
     let xtream_path = xtream_get_file_path(&storage_path, pli.xtream_cluster);
-    {
-        let _file_lock = app_config.file_locks.write_lock(&xtream_path).await;
-        let mut tree = if xtream_path.exists() {
-            BPlusTreeUpdate::try_new(&xtream_path).map_err(|err| cant_write_result!(&xtream_path, err))?
+    let _file_lock = app_config.file_locks.write_lock(&xtream_path).await;
+    let xtream_path_clone = xtream_path.clone();
+    let pli = pli.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut tree = if xtream_path_clone.exists() {
+            BPlusTreeUpdate::try_new(&xtream_path_clone).map_err(|err| cant_write_result!(&xtream_path_clone, err))?
         } else {
             // This case should rarely happen as the file is usually pre-created, but for safety:
-            return Err(cant_write_result!(&xtream_path, "BPlusTree file not found for append"));
+            return Err(cant_write_result!(&xtream_path_clone, "BPlusTree file not found for append"));
         };
 
-        tree.update(&pli.virtual_id, pli.clone()).map_err(|err| cant_write_result!(&xtream_path, err))?;
-    }
+        let virtual_id = pli.virtual_id;
+        tree.update(&virtual_id, pli).map_err(|err| cant_write_result!(&xtream_path_clone, err))?;
+        Ok(())
+    })
+    .await
+    .map_err(|err| cant_write_result!(&xtream_path, err))??;
     Ok(())
 }
 
@@ -146,18 +152,23 @@ pub async fn write_playlist_batch_item_upsert(
         ensure_xtream_storage_path(&config, target_name).await?
     };
     let xtream_path = xtream_get_file_path(&storage_path, xtream_cluster);
-    {
-        let _file_lock = app_config.file_locks.write_lock(&xtream_path).await;
-        let mut tree = if xtream_path.exists() {
-            BPlusTreeUpdate::try_new(&xtream_path).map_err(|err| cant_write_result!(&xtream_path, err))?
+    let _file_lock = app_config.file_locks.write_lock(&xtream_path).await;
+    let xtream_path_clone = xtream_path.clone();
+    let pli_list: Vec<XtreamPlaylistItem> = pli_list.to_vec();
+    tokio::task::spawn_blocking(move || {
+        let mut tree = if xtream_path_clone.exists() {
+            BPlusTreeUpdate::try_new(&xtream_path_clone).map_err(|err| cant_write_result!(&xtream_path_clone, err))?
         } else {
             // This case should rarely happen as the file is usually pre-created, but for safety:
-            return Err(cant_write_result!(&xtream_path, "BPlusTree file not found for append"));
+            return Err(cant_write_result!(&xtream_path_clone, "BPlusTree file not found for append"));
         };
 
         let batch: Vec<(&u32, &XtreamPlaylistItem)> = pli_list.iter().map(|pli| (&pli.virtual_id, pli)).collect();
-        tree.upsert_batch(&batch).map_err(|err| cant_write_result!(&xtream_path, err))?;
-    }
+        tree.upsert_batch(&batch).map_err(|err| cant_write_result!(&xtream_path_clone, err))?;
+        Ok(())
+    })
+    .await
+    .map_err(|err| cant_write_result!(&xtream_path, err))??;
     Ok(())
 }
 
@@ -803,13 +814,18 @@ async fn persist_input_info(app_config: &Arc<AppConfig>, storage_path: &Path, cl
                             input_name: &str, provider_id: u32, props: StreamProperties) -> Result<(), Error> {
     let xtream_path = xtream_get_file_path(storage_path, cluster);
     if xtream_path.exists() {
-        {
-            let _file_lock = app_config.file_locks.write_lock(&xtream_path).await;
-            let mut tree: BPlusTreeUpdate<u32, XtreamPlaylistItem> = BPlusTreeUpdate::try_new(&xtream_path).map_err(|err| Error::other(format!("failed to open BPlusTree for input {input_name}: {err}")))?;
+        let _file_lock = app_config.file_locks.write_lock(&xtream_path).await;
+        let xtream_path = xtream_path.clone();
+        let input_name = input_name.to_string();
+        let input_name_for_err = input_name.clone();
+        tokio::task::spawn_blocking(move || -> Result<(), Error> {
+            let mut tree: BPlusTreeUpdate<u32, XtreamPlaylistItem> = BPlusTreeUpdate::try_new(&xtream_path)
+                .map_err(|err| Error::other(format!("failed to open BPlusTree for input {input_name}: {err}")))?;
             match tree.query(&provider_id) {
                 Ok(Some(mut pli)) => {
                     pli.additional_properties = Some(props);
-                    tree.update(&provider_id, pli).map_err(|err| Error::other(format!("failed to write {cluster} info for input {input_name}: {err}")))?;
+                    tree.update(&provider_id, pli)
+                        .map_err(|err| Error::other(format!("failed to write {cluster} info for input {input_name}: {err}")))?;
                 }
                 Ok(None) => {
                     error!("Could not find input entry for provider_id: {provider_id} and input: {input_name}");
@@ -818,7 +834,10 @@ async fn persist_input_info(app_config: &Arc<AppConfig>, storage_path: &Path, cl
                     error!("Failed to query BPlusTree for provider_id: {provider_id} and input: {input_name}: {err}");
                 }
             }
-        }
+            Ok(())
+        })
+        .await
+        .map_err(|err| Error::other(format!("Failed to join persist task for input {input_name_for_err}: {err}")))??;
     }
     Ok(())
 }
@@ -829,31 +848,40 @@ pub async fn persist_input_info_batch(app_config: &Arc<AppConfig>, storage_path:
     let xtream_path = xtream_get_file_path(storage_path, cluster);
     if xtream_path.exists() {
         let _file_lock = app_config.file_locks.write_lock(&xtream_path).await;
-        let mut tree: BPlusTreeUpdate<u32, XtreamPlaylistItem> = BPlusTreeUpdate::try_new(&xtream_path)
-            .map_err(|err| Error::other(format!("failed to open BPlusTree for input {input_name}: {err}")))?;
+        let xtream_path = xtream_path.clone();
+        let input_name = input_name.to_string();
+        let input_name_for_err = input_name.clone();
+        tokio::task::spawn_blocking(move || -> Result<(), Error> {
+            let mut tree: BPlusTreeUpdate<u32, XtreamPlaylistItem> = BPlusTreeUpdate::try_new(&xtream_path)
+                .map_err(|err| Error::other(format!("failed to open BPlusTree for input {input_name}: {err}")))?;
 
-        let mut updated_plis = Vec::with_capacity(updates.len());
-        for (provider_id, props) in updates {
-            match tree.query(&provider_id) {
-                Ok(Some(mut pli)) => {
-                    pli.additional_properties = Some(props);
-                    updated_plis.push((provider_id, pli));
-                }
-                Ok(None) => {
-                    error!("Could not find input entry for provider_id: {provider_id} and input: {input_name}");
-                }
-                Err(err) => {
-                    error!("Failed to query BPlusTree for provider_id: {provider_id} and input: {input_name}: {err}");
+            let mut updated_plis = Vec::with_capacity(updates.len());
+            for (provider_id, props) in updates {
+                match tree.query(&provider_id) {
+                    Ok(Some(mut pli)) => {
+                        pli.additional_properties = Some(props);
+                        updated_plis.push((provider_id, pli));
+                    }
+                    Ok(None) => {
+                        error!("Could not find input entry for provider_id: {provider_id} and input: {input_name}");
+                    }
+                    Err(err) => {
+                        error!("Failed to query BPlusTree for provider_id: {provider_id} and input: {input_name}: {err}");
+                    }
                 }
             }
-        }
 
-        if !updated_plis.is_empty() {
-            let refs: Vec<(&u32, &XtreamPlaylistItem)> = updated_plis.iter()
-                .map(|(id, pli)| (id, pli))
-                .collect();
-            tree.update_batch(&refs).map_err(|err| Error::other(format!("failed to write batch {cluster} info for input {input_name}: {err}")))?;
-        }
+            if !updated_plis.is_empty() {
+                let refs: Vec<(&u32, &XtreamPlaylistItem)> = updated_plis.iter()
+                    .map(|(id, pli)| (id, pli))
+                    .collect();
+                tree.update_batch(&refs)
+                    .map_err(|err| Error::other(format!("failed to write batch {cluster} info for input {input_name}: {err}")))?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|err| Error::other(format!("Failed to join persist batch task for input {input_name_for_err}: {err}")))??;
     }
     Ok(())
 }
@@ -937,4 +965,3 @@ pub async fn load_input_xtream_playlist(app_config: &Arc<AppConfig>, storage_pat
 
     Ok(groups.into_values().collect())
 }
-

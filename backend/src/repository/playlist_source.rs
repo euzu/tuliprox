@@ -1,7 +1,6 @@
 use crate::model::AppConfig;
 use crate::repository::BPlusTreeQuery;
 use crate::repository::xtream_get_file_path;
-use crate::utils::FileReadGuard;
 use futures::future::BoxFuture;
 use indexmap::IndexMap;
 use log::{error, warn};
@@ -59,13 +58,13 @@ impl PlaylistSource for EmptyPlaylistSource {
 pub struct XtreamDiskPlaylistSource {
     app_config: Arc<AppConfig>,
     storage_path: PathBuf,
-    live: Option<(BPlusTreeQuery<u32, XtreamPlaylistItem>, Arc<FileReadGuard>)>,
-    vod: Option<(BPlusTreeQuery<u32, XtreamPlaylistItem>, Arc<FileReadGuard>)>,
-    series: Option<(BPlusTreeQuery<u32, XtreamPlaylistItem>, Arc<FileReadGuard>)>,
+    live: Option<BPlusTreeQuery<u32, XtreamPlaylistItem>>,
+    vod: Option<BPlusTreeQuery<u32, XtreamPlaylistItem>>,
+    series: Option<BPlusTreeQuery<u32, XtreamPlaylistItem>>,
 }
 
 impl XtreamDiskPlaylistSource {
-    pub(crate) async fn new(app_config: &Arc<AppConfig>, storage_path: &Path) -> Self {
+    pub(crate) fn new(app_config: &Arc<AppConfig>, storage_path: &Path) -> Self {
         let mut source = XtreamDiskPlaylistSource {
             app_config: Arc::clone(app_config),
             storage_path: storage_path.to_path_buf(),
@@ -73,26 +72,23 @@ impl XtreamDiskPlaylistSource {
             vod: None,
             series: None,
         };
-        source.reload().await;
+        source.reload();
         source
     }
 
-    async fn reload(&mut self) {
+    fn reload(&mut self) {
         if self.live.is_none() {
             let live_path = xtream_get_file_path(&self.storage_path, XtreamCluster::Live);
-            self.live = load_bplustree_query::<u32, XtreamPlaylistItem>(&self.app_config, &live_path).await
-                .map(|(query, guard)| (query, Arc::new(guard)));
+            self.live = load_bplustree_query::<u32, XtreamPlaylistItem>(&live_path);
         }
         if self.vod.is_none() {
             let vod_path = xtream_get_file_path(&self.storage_path, XtreamCluster::Video);
-            self.vod = load_bplustree_query::<u32, XtreamPlaylistItem>(&self.app_config, &vod_path).await
-                .map(|(query, guard)| (query, Arc::new(guard)));
+            self.vod = load_bplustree_query::<u32, XtreamPlaylistItem>(&vod_path);
         }
 
         if self.series.is_none() {
             let series_path = xtream_get_file_path(&self.storage_path, XtreamCluster::Series);
-            self.series = load_bplustree_query::<u32, XtreamPlaylistItem>(&self.app_config, &series_path).await
-                .map(|(query, guard)| (query, Arc::new(guard)));
+            self.series = load_bplustree_query::<u32, XtreamPlaylistItem>(&series_path);
         }
     }
 }
@@ -101,36 +97,36 @@ impl PlaylistSource for XtreamDiskPlaylistSource {
     fn is_memory(&self) -> bool { false }
 
     fn get_channel_count(&mut self) -> usize {
-        self.live.as_mut().map_or(0usize, |(t, _)| t.len().unwrap_or(0usize))
-            + self.vod.as_mut().map_or(0usize, |(t, _)| t.len().unwrap_or(0usize))
-            + self.series.as_mut().map_or(0usize, |(t, _)| t.len().unwrap_or(0usize))
+        self.live.as_mut().map_or(0usize, |t| t.len().unwrap_or(0usize))
+            + self.vod.as_mut().map_or(0usize, |t| t.len().unwrap_or(0usize))
+            + self.series.as_mut().map_or(0usize, |t| t.len().unwrap_or(0usize))
     }
 
     fn get_group_count(&mut self) -> usize {
         let mut groups = HashSet::new();
-        if let Some((query, _)) = self.live.as_mut() { for (_, item) in query.iter() { groups.insert(item.group.clone()); } }
-        if let Some((query, _)) = self.vod.as_mut() { for (_, item) in query.iter() { groups.insert(item.group.clone()); } }
-        if let Some((query, _)) = self.series.as_mut() { for (_, item) in query.iter() { groups.insert(item.group.clone()); } }
+        if let Some(query) = self.live.as_mut() { for (_, item) in query.iter() { groups.insert(item.group.clone()); } }
+        if let Some(query) = self.vod.as_mut() { for (_, item) in query.iter() { groups.insert(item.group.clone()); } }
+        if let Some(query) = self.series.as_mut() { for (_, item) in query.iter() { groups.insert(item.group.clone()); } }
         groups.len()
     }
 
     fn is_empty(&mut self) -> bool {
-        self.live.as_mut().is_none_or(|(q, _)| q.is_empty().unwrap_or(true))
-            && self.vod.as_mut().is_none_or(|(q, _)| q.is_empty().unwrap_or(true))
-            && self.series.as_mut().is_none_or(|(q, _)| q.is_empty().unwrap_or(true))
+        self.live.as_mut().is_none_or(|q| q.is_empty().unwrap_or(true))
+            && self.vod.as_mut().is_none_or(|q| q.is_empty().unwrap_or(true))
+            && self.series.as_mut().is_none_or(|q| q.is_empty().unwrap_or(true))
     }
 
     fn into_items(&mut self) -> Box<dyn Iterator<Item=PlaylistItem> + Send + '_> {
-        let live = self.live.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map(|(_, item)| PlaylistItem::from(&item));
-        let vod = self.vod.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map(|(_, item)| PlaylistItem::from(&item));
-        let series = self.series.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map(|(_, item)| PlaylistItem::from(&item));
+        let live = self.live.as_mut().into_iter().flat_map(|q| q.iter()).map(|(_, item)| PlaylistItem::from(&item));
+        let vod = self.vod.as_mut().into_iter().flat_map(|q| q.iter()).map(|(_, item)| PlaylistItem::from(&item));
+        let series = self.series.as_mut().into_iter().flat_map(|q| q.iter()).map(|(_, item)| PlaylistItem::from(&item));
         Box::new(live.chain(vod).chain(series))
     }
 
     fn items<'a>(&'a mut self) -> Box<dyn Iterator<Item=Cow<'a, PlaylistItem>> + Send + 'a> {
-        let live = self.live.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map(|(_, item)| Cow::Owned(PlaylistItem::from(&item)));
-        let vod = self.vod.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map(|(_, item)| Cow::Owned(PlaylistItem::from(&item)));
-        let series = self.series.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map(|(_, item)| Cow::Owned(PlaylistItem::from(&item)));
+        let live = self.live.as_mut().into_iter().flat_map(|q| q.iter()).map(|(_, item)| Cow::Owned(PlaylistItem::from(&item)));
+        let vod = self.vod.as_mut().into_iter().flat_map(|q| q.iter()).map(|(_, item)| Cow::Owned(PlaylistItem::from(&item)));
+        let series = self.series.as_mut().into_iter().flat_map(|q| q.iter()).map(|(_, item)| Cow::Owned(PlaylistItem::from(&item)));
         Box::new(live.chain(vod).chain(series))
     }
 
@@ -162,7 +158,7 @@ impl PlaylistSource for XtreamDiskPlaylistSource {
 
     fn get_missing_vod_info_count(&mut self) -> usize {
         let mut count = 0;
-        if let Some((query, _)) = self.vod.as_mut() {
+        if let Some(query) = self.vod.as_mut() {
             for (_, item) in query.iter() {
                 if item.item_type == PlaylistItemType::Video && item.provider_id > 0 && !item.has_details() {
                     count += 1;
@@ -174,7 +170,7 @@ impl PlaylistSource for XtreamDiskPlaylistSource {
 
     fn get_missing_series_info_count(&mut self) -> usize {
         let mut count = 0;
-        if let Some((query, _)) = self.series.as_mut() {
+        if let Some(query) = self.series.as_mut() {
             for (_, item) in query.iter() {
                 if item.item_type == PlaylistItemType::SeriesInfo && item.provider_id > 0 && !item.has_details() {
                     count += 1;
@@ -192,13 +188,13 @@ impl PlaylistSource for XtreamDiskPlaylistSource {
         // Build groups on-the-fly using disk iterator (streams one leaf at a time)
         let mut groups_map: IndexMap<(XtreamCluster, u32), PlaylistGroup> = IndexMap::new();
         let mut iters: Vec<(XtreamCluster, Box<dyn Iterator<Item=XtreamPlaylistItem> + Send>)> = vec![];
-        if let Some((q, _)) = self.live.as_mut() {
+        if let Some(q) = self.live.as_mut() {
             iters.push((XtreamCluster::Live, Box::new(q.iter().map(|(_, item)| item))));
         }
-        if let Some((q, _)) = self.vod.as_mut() {
+        if let Some(q) = self.vod.as_mut() {
             iters.push((XtreamCluster::Video, Box::new(q.iter().map(|(_, item)| item))));
         }
-        if let Some((q, _)) = self.series.as_mut() {
+        if let Some(q) = self.series.as_mut() {
             iters.push((XtreamCluster::Series, Box::new(q.iter().map(|(_, item)| item))));
         }
 
@@ -233,15 +229,9 @@ impl PlaylistSource for XtreamDiskPlaylistSource {
         let vod_path = xtream_get_file_path(&self.storage_path, XtreamCluster::Video);
         let series_path = xtream_get_file_path(&self.storage_path, XtreamCluster::Series);
 
-        let live = self.live.as_ref().and_then(|(_, guard)| {
-            BPlusTreeQuery::try_new(&live_path).ok().map(|q| (q, Arc::clone(guard)))
-        });
-        let vod = self.vod.as_ref().and_then(|(_, guard)| {
-            BPlusTreeQuery::try_new(&vod_path).ok().map(|q| (q, Arc::clone(guard)))
-        });
-        let series = self.series.as_ref().and_then(|(_, guard)| {
-            BPlusTreeQuery::try_new(&series_path).ok().map(|q| (q, Arc::clone(guard)))
-        });
+        let live = self.live.as_ref().and_then(|_| BPlusTreeQuery::try_new(&live_path).ok());
+        let vod = self.vod.as_ref().and_then(|_| BPlusTreeQuery::try_new(&vod_path).ok());
+        let series = self.series.as_ref().and_then(|_| BPlusTreeQuery::try_new(&series_path).ok());
 
         Box::new(Self {
             app_config: Arc::clone(&self.app_config),
@@ -262,7 +252,7 @@ impl PlaylistSource for XtreamDiskPlaylistSource {
 
     fn obtain_resources(&mut self) -> BoxFuture<'_, ()> {
         Box::pin(async move {
-            self.reload().await;
+            self.reload();
         })
     }
     fn sort_by_provider_ordinal(&mut self) {
@@ -277,28 +267,21 @@ macro_rules! impl_single_file_disk_source {
             app_config: Arc<AppConfig>,
             file_path: PathBuf,
             playlist: Option<BPlusTreeQuery<$key_type, $entry_type >>,
-            guard: Option<Arc<FileReadGuard>>,
           }
 
           impl [<$name DiskPlaylistSource>] {
-            pub(crate) async fn new(app_config: &Arc<AppConfig>, file_path: &Path) -> Self {
+            pub(crate) fn new(app_config: &Arc<AppConfig>, file_path: &Path) -> Self {
                 let mut source = Self {
                     app_config: Arc::clone(app_config),
                     file_path: file_path.to_path_buf(),
                     playlist: None,
-                    guard: None,
                 };
-                source.reload().await;
+                source.reload();
                 source
             }
 
-            async fn reload(&mut self) {
-                self.guard = None;
-                self.playlist = load_bplustree_query::<$key_type, $entry_type>(&self.app_config, &self.file_path).await
-                    .map(|(query, guard)| {
-                        self.guard = Some(Arc::new(guard));
-                        query
-                    });
+            fn reload(&mut self) {
+                self.playlist = load_bplustree_query::<$key_type, $entry_type>(&self.file_path);
             }
         }
 
@@ -383,7 +366,7 @@ macro_rules! impl_single_file_disk_source {
                 }
             }
             fn clone_box(&self) -> Box<dyn PlaylistSource> {
-                let playlist = if self.playlist.is_some() && self.guard.is_some() {
+                let playlist = if self.playlist.is_some() {
                     BPlusTreeQuery::try_new(&self.file_path).ok()
                 } else { None };
 
@@ -391,18 +374,16 @@ macro_rules! impl_single_file_disk_source {
                     app_config: Arc::clone(&self.app_config),
                     file_path: self.file_path.clone(),
                     playlist,
-                    guard: self.guard.clone(),
                 })
             }
 
             fn release_resources(&mut self, _cluster: XtreamCluster) {
-                self.guard = None;
                 self.playlist = None;
             }
 
             fn obtain_resources(&mut self) -> BoxFuture<'_, ()> {
                 Box::pin(async move {
-                    self.reload().await;
+                    self.reload();
                 })
             }
 
@@ -512,15 +493,14 @@ impl PlaylistSource for MemoryPlaylistSource {
     }
 }
 
-async fn load_bplustree_query<K, P>(app_config: &Arc<AppConfig>, file_path: &Path) -> Option<(BPlusTreeQuery<K, P>, FileReadGuard)>
+fn load_bplustree_query<K, P>(file_path: &Path) -> Option<BPlusTreeQuery<K, P>>
 where
     K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
     P: Serialize + for<'de> Deserialize<'de> + Clone + Send + 'static,
 {
     if file_path.exists() {
-        let guard = app_config.file_locks.read_lock(file_path).await;
         match BPlusTreeQuery::<K, P>::try_new(file_path) {
-            Ok(query) => Some((query, guard)),
+            Ok(query) => Some(query),
             Err(err) => {
                 error!("Error loading disk playlist {}: {err}", file_path.display());
                 None
