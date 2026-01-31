@@ -100,7 +100,7 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
                 XtreamCluster::Live => {}
                 XtreamCluster::Video => {
                     let working_dir = &app_config.config.load().working_dir;
-                    if let Ok(storage_path) = get_input_storage_path(&input.name, working_dir) {
+                    if let Ok(storage_path) = get_input_storage_path(&input.name, working_dir).await {
                         match serde_json::from_str::<XtreamVideoInfo>(&content) {
                             Ok(info) => {
                                 // parse downloaded info into StreamProperties
@@ -141,7 +141,7 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
                             // parse series info
                             let series_stream_props = SeriesStreamProperties::from_info(&info, pli);
 
-                            if let Ok(storage_path) = get_input_storage_path(&input.name, working_dir) {
+                            if let Ok(storage_path) = get_input_storage_path(&input.name, working_dir).await {
                                 // update input db
                                 if let Err(err) = persists_input_series_info(app_config, &storage_path, cluster, &input.name, provider_id, &series_stream_props).await {
                                     error!("Failed to persist series info for input {}: {err}", &input.name);
@@ -163,12 +163,12 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
                                         {
                                             let (mut target_id_mapping, _file_lock) = get_target_id_mapping(&app_state.app_config, &target_path, target.use_memory_cache).await?;
 
-                                            if let Some(parent_id) = pli.get_provider_id() {
+                                            if let Some(_parent_id) = pli.get_provider_id() {
                                                 let category_id = pli.get_category_id().unwrap_or(0);
                                                 for episode in &mut episodes {
-                                                    episode.header.virtual_id = target_id_mapping.get_and_update_virtual_id(&episode.header.uuid, provider_id, episode.header.item_type, parent_id);
-                                                    episode.header.category_id = category_id;
                                                     let episode_provider_id = episode.header.get_provider_id().unwrap_or(0);
+                                                    episode.header.virtual_id = target_id_mapping.get_and_update_virtual_id(&episode.header.uuid, episode_provider_id, episode.header.item_type, pli.virtual_id);
+                                                    episode.header.category_id = category_id;
                                                     provider_series.entry(pli.get_uuid().intern())
                                                         .or_default()
                                                         .push(ProviderEpisodeKey {
@@ -178,10 +178,10 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
                                                     if target.use_memory_cache {
                                                         in_memory_updates.push(
                                                             VirtualIdRecord::new(
-                                                                episode.header.get_provider_id().unwrap_or(0),
+                                                                episode_provider_id,
                                                                 episode.header.virtual_id,
                                                                 episode.header.item_type,
-                                                                provider_id,
+                                                                pli.virtual_id,
                                                                 episode.get_uuid(),
                                                             ),
                                                         );
@@ -300,7 +300,7 @@ async fn xtream_login(app_config: &Arc<AppConfig>, client: &reqwest::Client, inp
                     login_info.status = Some(cur_status);
                     if !matches!(cur_status, ProxyUserStatus::Active | ProxyUserStatus::Trial) {
                         warn!("User status for user {username} is {cur_status:?}");
-                    send_message(app_config, client, MessageContent::Error(format!("User status for user {username} is {cur_status:?}"))).await;
+                        send_message(app_config, client, MessageContent::Error(format!("User status for user {username} is {cur_status:?}"))).await;
                     }
                 }
             }
@@ -338,7 +338,7 @@ pub async fn notify_account_expire(exp_date: Option<i64>, app_config: &Arc<AppCo
         } else {
             warn!("User account for user {username} is expired");
             send_message(app_config, client, MessageContent::Info(
-                         format!("User account for user {username} for provider {input_name} is expired"))).await;
+                format!("User account for user {username} for provider {input_name} is expired"))).await;
         }
     }
 }
@@ -483,12 +483,12 @@ pub fn create_vod_info_from_item(target: &ConfigTarget, user: &ProxyUserCredenti
     let stream_id = if user.proxy.is_redirect(pli.item_type) || target.is_force_redirect(pli.item_type) { pli.provider_id } else { pli.virtual_id };
     let added = pli.additional_properties.as_ref().and_then(StreamProperties::get_last_modified).unwrap_or(0);
     let name = &pli.name;
-    let extension = pli
+    let extension: String = pli
         .get_container_extension()
-        .as_deref()
         .filter(|ce| !ce.is_empty())
+        .map(|s| s.to_string())
         .or_else(|| extract_extension_from_url(&pli.url))
-        .map_or_else(String::new, ToString::to_string);
+        .unwrap_or_default();
 
     let mut doc = XtreamVideoInfoDoc::default();
     doc.info.name.clone_from(name);
@@ -515,7 +515,7 @@ async fn process_xtream_cluster_to_disk(
     let cfg = app_config.config.load();
     // trace!("Starting process_xtream_cluster_to_disk for cluster {}", cluster);
     let storage_path = {
-        ensure_input_storage_path(&cfg, &input.name)?
+        ensure_input_storage_path(&cfg, &input.name).await?
     };
     let xtream_path = xtream_get_file_path(&storage_path, cluster);
 

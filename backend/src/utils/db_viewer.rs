@@ -1,4 +1,4 @@
-use crate::repository::{BPlusTreeDiskIterator, BPlusTreeQuery};
+use crate::repository::{BPlusTreeDiskIterator, BPlusTreeQuery, VirtualIdRecord};
 use env_logger::{Builder, Target};
 use log::{error, LevelFilter};
 use serde::{Deserialize, Serialize};
@@ -12,9 +12,13 @@ enum DbType {
     Xtream,
     M3u,
     Epg,
+    TargetIdMapping
 }
 
-pub fn db_viewer(xtream_filename: Option<&str>, m3u_filename: Option<&str>, epg_filename: Option<&str>) {
+pub fn db_viewer(xtream_filename: Option<&str>,
+                 m3u_filename: Option<&str>,
+                 epg_filename: Option<&str>,
+                 tim_filename: Option<&str>,) {
     let mut any_processed = false;
     if let Some(filename) = xtream_filename {
         any_processed = true;
@@ -32,6 +36,13 @@ pub fn db_viewer(xtream_filename: Option<&str>, m3u_filename: Option<&str>, epg_
     if let Some(filename) = epg_filename {
         any_processed = true;
         if !dump_db(filename, DbType::Epg) {
+            exit_app(1);
+        }
+    }
+
+    if let Some(filename) = tim_filename {
+        any_processed = true;
+        if !dump_db(filename, DbType::TargetIdMapping) {
             exit_app(1);
         }
     }
@@ -64,6 +75,12 @@ fn dump_db(filename: &str, db_type: DbType) -> bool {
                 }
                 DbType::Epg => {
                     if let Ok(mut query) = BPlusTreeQuery::<Arc<str>, EpgChannel>::try_new(&path) {
+                        let iterator = query.iter();
+                        return print_json_from_iter(iterator);
+                    }
+                }
+                DbType::TargetIdMapping => {
+                    if let Ok(mut query) = BPlusTreeQuery::<u32, VirtualIdRecord>::try_new(&path) {
                         let iterator = query.iter();
                         return print_json_from_iter(iterator);
                     }

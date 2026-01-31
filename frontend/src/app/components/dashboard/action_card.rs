@@ -23,9 +23,10 @@ pub fn ActionCard(props: &ActionProps) -> Html {
 
     html! {
         <div class={classes!("tp__action-card", if props.classname.is_empty() {String::new()} else {props.classname.to_string()})}>
-            <div class="tp__action-card__icon">
-                <AppIcon name={props.icon.clone()} />
-            </div>
+          <div class="tp__action-card__icon">
+            <AppIcon name={props.icon.clone()} />
+          </div>
+          <div class="tp__action-card__main">
             <div class="tp__action-card__body">
                 <span class="tp__action-card__title">
                     {props.title.clone()}
@@ -42,6 +43,7 @@ pub fn ActionCard(props: &ActionProps) -> Html {
                 </span>
             </div>
             {for props.children.iter() }
+          </div>
         </div>
     }
 }

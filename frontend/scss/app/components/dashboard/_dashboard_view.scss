@@ -22,11 +22,11 @@
 
     &-actions {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: var(--action-card-width) var(--action-card-width);
       gap: var(--gap-larger);
 
       @media (max-width: size.$dashboard-mobile-breakpoint) {
-        grid-template-columns: 1fr;
+        grid-template-columns: var(--action-card-width);
       }
 
       .span-two {
@@ -36,7 +36,7 @@
 
     &-stats {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(var(--action-card-width), 1fr));
       gap: var(--gap-larger);
     }
   }

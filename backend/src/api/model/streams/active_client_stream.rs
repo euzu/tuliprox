@@ -14,7 +14,7 @@ use bytes::Bytes;
 use futures::task::AtomicWaker;
 use futures::Stream;
 use futures::StreamExt;
-use log::{error, info};
+use log::{debug, error, info};
 use shared::model::{StreamChannel, UserConnectionPermission, VirtualId};
 use shared::utils::sanitize_sensitive_info;
 use std::pin::Pin;
@@ -27,6 +27,7 @@ const USER_EXHAUSTED_STREAM: u8 = 1_u8;
 const PROVIDER_EXHAUSTED_STREAM: u8 = 2_u8;
 const CHANNEL_UNAVAILABLE_STREAM: u8 = 3_u8;
 const PROVISIONING_STREAM: u8 = 4_u8;
+const GRACE_PENDING: u8 = 255_u8; // Grace period check hasn't completed yet
 
 struct GraceProvisioningInfo {
     input: Arc<ConfigInput>,
@@ -100,6 +101,14 @@ impl ActiveClientStreamState {
             Some(flag) => flag.load(Ordering::Acquire),
             None => INNER_STREAM,
         };
+
+        // When hold_stream_active is true and flag is GRACE_PENDING, we wait for the grace period
+        // check to complete before starting to stream. The grace period task will update the flag.
+        if flag == GRACE_PENDING {
+            // Still waiting for grace period check to complete
+            // The grace period task will wake us when done
+            return Poll::Pending;
+        }
 
         if flag == INNER_STREAM {
             match Pin::new(&mut self.inner).poll_next(cx) {
@@ -276,6 +285,7 @@ pub(crate) async fn create_active_client_stream(
 
     let provisioning_info = resolve_grace_period_provisioning(app_state, &stream_details);
     let has_provisioning = provisioning_info.is_some();
+    let hold_stream = stream_details.grace_period.hold_stream;
 
     let (grace_stop_flag, waker) = if grant_user_grace_period
         || (stream_details.has_grace_period() && stream_details.provider_name.is_some())
@@ -290,6 +300,7 @@ pub(crate) async fn create_active_client_stream(
             virtual_id,
             provisioning_info,
             Some(Arc::clone(&waker)),
+            hold_stream,
         );
         let maybe_waker = flag.as_ref().map(|_| waker);
         (flag, maybe_waker)
@@ -304,6 +315,7 @@ pub(crate) async fn create_active_client_stream(
                 virtual_id,
                 provisioning_info,
                 None,
+                hold_stream,
             ),
             None,
         )
@@ -393,6 +405,7 @@ fn stream_grace_period(
     virtual_id: VirtualId,
     provisioning_info: Option<GraceProvisioningInfo>,
     waker: Option<Arc<AtomicWaker>>,
+    hold_stream: bool,
 ) -> Option<Arc<AtomicU8>> {
     let active_users = Arc::clone(&app_state.active_users);
     let active_provider = Arc::clone(&app_state.active_provider);
@@ -415,10 +428,12 @@ fn stream_grace_period(
         None
     };
 
+    debug!("hold stream {hold_stream}");
+
     if provider_grace_check.is_some() || user_grace_check.is_some() {
-        let stream_strategy_flag = Arc::new(AtomicU8::new(INNER_STREAM));
+        let stream_strategy_flag = Arc::new(AtomicU8::new(if hold_stream {GRACE_PENDING} else {INNER_STREAM}));
         let stream_strategy_flag_copy = Arc::clone(&stream_strategy_flag);
-        let grace_period_millis = stream_details.grace_period_millis;
+        let grace_period_millis = stream_details.grace_period.period_millis;
 
         let user_manager = Arc::clone(&active_users);
         let provider_manager = Arc::clone(&active_provider);

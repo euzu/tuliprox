@@ -9,9 +9,9 @@ use crate::repository::XML_PREAMBLE;
 use crate::repository::{get_target_storage_path, BPlusTreeQuery};
 use crate::repository::{xtream_get_epg_file_path_for_target, xtream_get_storage_path};
 use crate::utils;
-use crate::utils::{deobscure_text, file_exists_async, format_xmltv_time_utc, get_epg_processing_options, obscure_text, EpgProcessingOptions};
+use crate::utils::{deobscure_text, file_exists_async, format_xmltv_time_utc, get_epg_processing_options, obscure_text, EpgProcessingOptions, EpgTimeShift};
 use axum::response::IntoResponse;
-use chrono::DateTime;
+use chrono::{DateTime, TimeZone};
 use log::{error, trace};
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 use shared::concat_string;
@@ -135,7 +135,7 @@ async fn serve_epg_with_rewrites(
 
     let epg_processing_options = get_epg_processing_options(app_state, user, target);
 
-    let base_url = if epg_processing_options.offset_minutes != 0 || epg_processing_options.rewrite_urls {
+    let base_url = if !matches!(epg_processing_options.time_shift, EpgTimeShift::None) || epg_processing_options.rewrite_urls {
         let server_info = app_state.app_config.get_user_server_info(user);
         Some(concat_string!(&server_info.get_base_url(), "/", storage_const::EPG_RESOURCE_PATH, "/", &user.username, "/", &user.password))
     } else {
@@ -194,10 +194,9 @@ async fn serve_epg_with_rewrites(
 
                 for programme in programmes {
                     let mut elem = BytesStart::new("programme");
-                    // We dont need to apply offset because the time contains the time zone offset as +00000
-                    let (user_start, user_stop) = (programme.start, programme.stop); // apply_user_offset(programme.start, programme.stop, epg_processing_options.offset_minutes);
-                    elem.push_attribute(("start", format_xmltv_time_utc(user_start).as_str()));
-                    elem.push_attribute(("stop", format_xmltv_time_utc(user_stop).as_str()));
+                    let (user_start, user_stop) = (programme.start, programme.stop);
+                    elem.push_attribute(("start", format_xmltv_time_utc(user_start, &epg_processing_options.time_shift).as_str()));
+                    elem.push_attribute(("stop", format_xmltv_time_utc(user_stop, &epg_processing_options.time_shift).as_str()));
                     elem.push_attribute(("channel", channel.id.as_ref()));
                     continue_on_err!(writer.write_event_async(Event::Start(elem)).await);
 
@@ -262,27 +261,43 @@ fn format_xmltv_time(ts: i64) -> String {
     }
 }
 
-fn apply_user_offset(start: i64, stop: i64, offset_minutes: i32) -> (i64, i64) {
-    let user_start = start + i64::from(offset_minutes) * 60;
-    let user_end = stop + i64::from(offset_minutes) * 60;
-    (user_start, user_end)
+fn get_applied_epg_timeshift(programme: &EpgProgramme, epg_processing_options: &EpgProcessingOptions) -> (String, String, i64, i64) {
+    match &epg_processing_options.time_shift {
+        EpgTimeShift::None => (format_xmltv_time(programme.start), format_xmltv_time(programme.stop), programme.start, programme.stop),
+        EpgTimeShift::Fixed(m) => {
+            let off = i64::from(*m) * 60;
+            let s = programme.start + off;
+            let e = programme.stop + off;
+            (format_xmltv_time(s), format_xmltv_time(e), s, e)
+        }
+        EpgTimeShift::TimeZone(tz) => {
+            let s_dt = chrono::Utc.timestamp_opt(programme.start, 0).unwrap().with_timezone(tz);
+            let e_dt = chrono::Utc.timestamp_opt(programme.stop, 0).unwrap().with_timezone(tz);
+            // We use the original timestamps (programme.start/stop) here because TimeZone adjustment
+            // is only for the visual string representation. The absolute event time (UTC) remains unchanged.
+            // Unlike 'Fixed' offset which artificially shifts the event time.
+            (s_dt.format("%Y-%m-%d %H:%M:%S").to_string(), e_dt.format("%Y-%m-%d %H:%M:%S").to_string(), programme.start, programme.stop)
+        }
+    }
 }
 
 fn from_programme(stream_id: &Arc<str>, epg_id: &Arc<str>,  programme: &EpgProgramme, epg_processing_options: &EpgProcessingOptions) -> ShortEpgDto {
-    let (user_start, user_end) = apply_user_offset(programme.start, programme.stop, epg_processing_options.offset_minutes);
+    let (start_str, end_str, start_ts, stop_ts) = get_applied_epg_timeshift(programme, epg_processing_options);
 
     ShortEpgDto {
         id: Arc::clone(stream_id),
         epg_id: Arc::clone(epg_id),
         title: programme.title.as_ref().map_or_else(String::new, ToString::to_string),
         lang: String::new(),
-        start: format_xmltv_time(user_start),
-        end: format_xmltv_time(user_end),
+        start: start_str,
+        end: end_str,
         description: programme.desc.as_ref().map_or_else(String::new, ToString::to_string),
         channel_id: Arc::clone(epg_id),
-        start_timestamp: user_start.to_string(),
-        stop_timestamp: user_end.to_string(),
+        start_timestamp: start_ts.to_string(),
+        stop_timestamp: stop_ts.to_string(),
         stream_id: Arc::clone(stream_id),
+        now_playing: None,
+        has_archive: None,
     }
 }
 

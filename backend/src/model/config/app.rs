@@ -1,8 +1,6 @@
 use crate::api::model::TransportStreamBuffer;
-use crate::model::{ApiProxyConfig, ApiProxyServerInfo, Config, ConfigInput, ConfigInputOptions,
-                   ConfigTarget, CustomStreamResponse, HdHomeRunConfig, Mappings, ProxyUserCredentials, ReverseProxyDisabledHeaderConfig, SourcesConfig, TargetOutput};
+use crate::model::{ApiProxyConfig, ApiProxyServerInfo, Config, ConfigInput, ConfigInputOptions, ConfigTarget, CustomStreamResponse, GracePeriodOptions, HdHomeRunConfig, Mappings, ProxyUserCredentials, ReverseProxyDisabledHeaderConfig, SourcesConfig, TargetOutput};
 use crate::utils;
-use arc_swap::access::Access;
 use arc_swap::{ArcSwap, ArcSwapOption};
 use log::{error, warn};
 use rand::Rng;
@@ -62,7 +60,7 @@ impl AppConfig {
 
     pub fn set_mappings(&self, mapping_path: &str, mappings_cfg: &Mappings) {
         self.set_mapping_path(Some(mapping_path));
-        let sources = <Arc<ArcSwap<SourcesConfig>> as Access<SourcesConfig>>::load(&self.sources);
+        let sources = self.sources.load();
         for source in &sources.sources {
             for target in &source.targets {
                 if let Some(mapping_ids) = &target.mapping_ids {
@@ -95,11 +93,11 @@ impl AppConfig {
     }
     fn check_target_user(&self) -> Result<(), TuliproxError> {
         let check_homerun = {
-            let config = <Arc<ArcSwap<Config>> as Access<Config>>::load(&self.config);
+            let config = self.config.load();
             self.hdhomerun.store(config.hdhomerun.as_ref().map(|h| Arc::new(h.clone())));
             config.hdhomerun.as_ref().is_some_and(|h| h.enabled)
         };
-        let sources = <Arc<ArcSwap<SourcesConfig>> as Access<SourcesConfig>>::load(&self.sources);
+        let sources = self.sources.load();
         for source in &sources.sources {
             for target in &source.targets {
                 for output in &target.output {
@@ -141,19 +139,19 @@ impl AppConfig {
     }
 
     pub fn is_reverse_proxy_resource_rewrite_enabled(&self) -> bool {
-        let config = <Arc<ArcSwap<Config>> as Access<Config>>::load(&self.config);
+        let config = self.config.load();
         config.reverse_proxy.as_ref().is_none_or(|r| !r.resource_rewrite_disabled)
     }
 
     pub fn get_reverse_proxy_rewrite_secret(&self) -> Option<[u8; 16]> {
-        let config = <Arc<ArcSwap<Config>> as Access<Config>>::load(&self.config);
+        let config = self.config.load();
         config.reverse_proxy.as_ref().map(|r| r.rewrite_secret)
     }
 
     fn intern_get_target_for_user(&self, user_target: Option<(ProxyUserCredentials, String)>) -> Option<(ProxyUserCredentials, Arc<ConfigTarget>)> {
         match user_target {
             Some((user, target_name)) => {
-                let sources = <Arc<ArcSwap<SourcesConfig>> as Access<SourcesConfig>>::load(&self.sources);
+                let sources = self.sources.load();
                 for source in &sources.sources {
                     for target in &source.targets {
                         if target_name.eq_ignore_ascii_case(&target.name) {
@@ -168,7 +166,7 @@ impl AppConfig {
     }
 
     pub fn get_inputs_for_target(&self, target_name: &str) -> Option<Vec<Arc<ConfigInput>>> {
-        let sources = <Arc<ArcSwap<SourcesConfig>> as Access<SourcesConfig>>::load(&self.sources);
+        let sources = self.sources.load();
         if let Some(inputs) = sources.get_source_inputs_by_target_by_name(target_name) {
             let result: Vec<Arc<ConfigInput>> = sources
                 .inputs
@@ -204,7 +202,7 @@ impl AppConfig {
     }
 
     pub fn get_input_by_name(&self, input_name: &Arc<str>) -> Option<Arc<ConfigInput>> {
-        let sources = <Arc<ArcSwap<SourcesConfig>> as Access<SourcesConfig>>::load(&self.sources);
+        let sources = self.sources.load();
         for input in &sources.inputs {
             if &input.name == input_name {
                 return Some(Arc::clone(input));
@@ -214,7 +212,7 @@ impl AppConfig {
     }
 
     pub fn get_input_options_by_name(&self, input_name: &Arc<str>) -> Option<ConfigInputOptions> {
-        let sources = <Arc<ArcSwap<SourcesConfig>> as Access<SourcesConfig>>::load(&self.sources);
+        let sources = self.sources.load();
         for input in &sources.inputs {
             if &input.name == input_name {
                 return input.options.clone();
@@ -224,7 +222,7 @@ impl AppConfig {
     }
 
     pub fn get_input_by_id(&self, input_id: u16) -> Option<Arc<ConfigInput>> {
-        let sources = <Arc<ArcSwap<SourcesConfig>> as Access<SourcesConfig>>::load(&self.sources);
+        let sources = self.sources.load();
             for input in &sources.inputs {
                 if input.id == input_id {
                     return Some(Arc::clone(input));
@@ -241,13 +239,13 @@ impl AppConfig {
     }
 
     pub fn get_target_by_id(&self, target_id: u16) -> Option<Arc<ConfigTarget>> {
-        let sources = <Arc<ArcSwap<SourcesConfig>> as Access<SourcesConfig>>::load(&self.sources);
+        let sources = self.sources.load();
         sources.get_target_by_id(target_id)
     }
 
     fn check_unique_input_names(&self) -> Result<(), TuliproxError> {
         let mut seen_names: HashSet<String> = HashSet::new();
-        let sources = <Arc<ArcSwap<SourcesConfig>> as Access<SourcesConfig>>::load(&self.sources);
+        let sources = self.sources.load();
         for input in &sources.inputs {
             let input_name = input.name.trim();
             if input_name.is_empty() {
@@ -276,7 +274,7 @@ impl AppConfig {
 
 
     fn check_scheduled_targets(&self, target_names: &HashSet<Cow<str>>) -> Result<(), TuliproxError> {
-        let config = <Arc<ArcSwap<Config>> as Access<Config>>::load(&self.config);
+        let config = self.config.load();
         if let Some(schedules) = &config.schedules {
             for schedule in schedules {
                 if let Some(targets) = &schedule.targets {
@@ -309,7 +307,7 @@ impl AppConfig {
     }
 
     fn prepare_sources(&self) -> Result<(), TuliproxError> {
-        let sources = <Arc<ArcSwap<SourcesConfig>> as Access<SourcesConfig>>::load(&self.sources);
+        let sources = self.sources.load();
         let target_names = sources.get_unique_target_names();
         self.check_scheduled_targets(&target_names)?;
         self.check_unique_input_names()?;
@@ -327,7 +325,7 @@ impl AppConfig {
     }
 
     fn prepare_mapping_path(&self) {
-        let config = <Arc<ArcSwap<Config>> as Access<Config>>::load(&self.config);
+        let config = self.config.load();
         self.set_mapping_path(config.mapping_path.as_deref());
     }
 
@@ -337,7 +335,7 @@ impl AppConfig {
     }
 
     fn prepare_custom_stream_response(&self) {
-        let config = <Arc<ArcSwap<Config>> as Access<Config>>::load(&self.config);
+        let config = self.config.load();
         if let Some(custom_stream_response_path) = config.custom_stream_response_path.as_ref() {
             fn load_and_set_file(file_path: &Path) -> Option<TransportStreamBuffer> {
                 if file_path.exists() {
@@ -417,8 +415,12 @@ impl AppConfig {
     }
 
     pub fn get_disabled_headers(&self) -> Option<ReverseProxyDisabledHeaderConfig> {
-        let config = <Arc<ArcSwap<Config>> as Access<Config>>::load(&self.config);
+        let config = self.config.load();
         config.get_disabled_headers()
+    }
+
+    pub fn get_grace_options(&self) -> GracePeriodOptions {
+        self.config.load().get_grace_options()
     }
 }
 

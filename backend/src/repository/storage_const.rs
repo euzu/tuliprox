@@ -4,6 +4,8 @@ pub(in crate::repository) const FILE_SUFFIX_INDEX: &str = "idx";
 pub(in crate::repository) const FILE_ID_MAPPING: &str = "id_mapping.db";
 pub(in crate::repository) const FILE_STRM: &str = "strm";
 pub(in crate::repository) const FILE_M3U: &str = "m3u";
+pub(in crate::repository) const PATH_M3U: &str = "m3u";
+
 pub const M3U_STREAM_PATH: &str = "m3u-stream";
 pub const M3U_RESOURCE_PATH: &str = "resource/m3u";
 pub const EPG_RESOURCE_PATH: &str = "resource/epg";

@@ -12,10 +12,8 @@ use crate::repository::{
 };
 use log::{error, info, log_enabled, warn, Level, debug};
 use shared::error::TuliproxError;
-use shared::model::{
-    InputType, PlaylistEntry, PlaylistItemType, PlaylistGroup, SeriesStreamProperties,
-    StreamProperties, XtreamCluster, XtreamSeriesInfo,
-};
+use shared::model::{InputType, PlaylistEntry, SeriesStreamProperties, StreamProperties, XtreamSeriesInfo};
+use shared::model::{PlaylistGroup, PlaylistItemType, XtreamCluster};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -66,7 +64,7 @@ async fn playlist_resolve_series_info(
     }
 
     let working_dir = &app_config.config.load().working_dir;
-    let storage_path = match get_input_storage_path(&input.name, working_dir) {
+    let storage_path = match get_input_storage_path(&input.name, working_dir).await {
         Ok(storage_path) => storage_path,
         Err(err) => {
             error!(

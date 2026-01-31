@@ -1,6 +1,6 @@
 [package]
 name = "tuliprox"
-version = "3.2.58"
+version = "3.2.68"
 edition = "2021"
 rust-version = "1.89.0"
 
@@ -58,6 +58,7 @@ rayon = "1.11"
 base64 = "0.22"
 paste = "1.0"
 indexmap = "2"
+parking_lot = "0.12"
 lz4_flex = "0.12"
 memmap2 = "0.9"
 fs2 = "0.4"
@@ -68,18 +69,22 @@ hyper = "1.8"
 hyper-util = "0.1"
 socket2 = { version = "0.6", features = ["all"] }
 async-compression = { version = "0.4", features = ["tokio"] }
-crc32fast = "1.5"
-#[cfg(target_os = "macos")]
-libc = "0.2"
-#[cfg(target_os = "windows")]
-winapi = { version = "0.3", features = ["psapi", "minwindef", "processthreadsapi"] }
 chrono-tz = "0.10.4"
 zeroize = "1.8.2"
 sysinfo = { version = "0.37.2", default-features = false, features = ["system"] }
 uuid = { version = "1", features = ["v4"] }
 fancy-regex = "0.17.0"
 mime_guess = "2"
-# [target.'cfg(not(target_env = "msvc"))'.dependencies]
+crc32fast = "1.5.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+[target.'cfg(target_os = "windows")'.dependencies]
+winapi = { version = "0.3", features = ["psapi", "minwindef", "processthreadsapi"] }
+#[target.'cfg(target_os = "linux")'.dependencies]
+#mimalloc = "0.1"
+#[target.'cfg(not(target_env = "msvc"))'.dependencies]
+#tikv-jemallocator =  "0.6"
 # tikv-jemallocator =  { version = "*", features = ["profiling", "unprefixed_malloc_on_supported_platforms"] }
 
 [build-dependencies]

@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::sync::atomic::Ordering;
 use url::Url;
+use crate::concat_string;
 use crate::utils::{CONSTANTS, DASH_EXT, DASH_EXT_FRAGMENT, DASH_EXT_QUERY, HLS_EXT, HLS_EXT_FRAGMENT, HLS_EXT_QUERY};
 
 
@@ -31,29 +32,36 @@ pub fn sanitize_sensitive_info(query: &str) -> Cow<'_, str> {
     Cow::Owned(result)
 }
 
-#[inline]
-fn ensure_extension(ext: &str) -> Option<&str> {
-    if ext.len() > 4 {
-        return None;
-    }
-    Some(ext)
+/// Extracts the file extension from a URL path (query/fragment stripped).
+/// Returns the extension **prefixed with a dot** (e.g., ".m3u8").
+pub fn extract_extension_from_url(input: &str) -> Option<String> {
+    // 1. Strip query + fragment
+    let input = input
+        .split('?').next()
+        .unwrap_or(input)
+        .split('#').next()
+        .unwrap_or(input);
+
+    // 2. Remove scheme (http://, file://, etc.)
+    let path = input
+        .split("://").last().unwrap_or(input);
+
+    // 3. Take last path segment
+    let filename = path
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())?;
+
+    // 4. Extract extension
+    let ext = filename
+        .rsplit('.')
+        .next()
+        .filter(|e| *e != filename)?; // ensures dot exists
+
+    Some(concat_string!(".", ext))
 }
 
-pub fn extract_extension_from_url(url: &str) -> Option<&str> {
-    if let Some(protocol_pos) = url.find("://") {
-        if let Some(last_slash_pos) = url[protocol_pos + 3..].rfind('/') {
-            let path = &url[protocol_pos + 3 + last_slash_pos + 1..];
-            if let Some(last_dot_pos) = path.rfind('.') {
-                return ensure_extension(&path[last_dot_pos..]);
-            }
-        }
-    } else if let Some(last_dot_pos) = url.rfind('.') {
-        if last_dot_pos > url.rfind('/').unwrap_or(0) {
-            return ensure_extension(&url[last_dot_pos..]);
-        }
-    }
-    None
-}
+
 
 pub fn is_hls_url(url: &str) -> bool {
     let lc_url = url.to_lowercase();

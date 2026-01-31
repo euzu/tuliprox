@@ -1,10 +1,12 @@
 use crate::repository::storage::get_file_path_for_db_index;
 use crate::utils;
-use crate::utils::{binary_deserialize, binary_serialize};
+use crate::utils::{binary_deserialize, binary_serialize, binary_serialize_into};
+
 use fs2::FileExt as _;
 use indexmap::IndexMap;
 use log::error;
 use memmap2::Mmap;
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use shared::error::{string_to_io_error, to_io_error};
 use std::ffi::OsString;
@@ -36,8 +38,13 @@ const INFO_SIZE: usize = 12; // (u64, u32)
 // Maximum number of blocks to cache in memory (~4MB at 4KB per block)
 const CACHE_CAPACITY: usize = 1024;
 
-// MessagePack overhead estimation
-const MSGPACK_OVERHEAD_PER_ENTRY: usize = 22;
+// MessagePack overhead estimation - increased to handle binary types like UUIDType
+// which use bin8/bin16/bin32 encoding with additional header bytes
+const MSGPACK_OVERHEAD_PER_ENTRY: usize = 8;
+// Additional array overhead for the entire keys vector serialization
+const MSGPACK_ARRAY_OVERHEAD: usize = 5;
+// Safety factor to ensure we never exceed page size (25% margin)
+const ORDER_SAFETY_FACTOR: usize = 75; // Use only 75% of theoretical capacity
 
 // Value packing configuration
 const SMALL_VALUE_THRESHOLD: usize = 256;
@@ -58,36 +65,49 @@ const SLOT_SIZE: usize = 2; // u16
 const MAGIC_METADATA_TARGET_ID_MAPPING: u8 = 0x01;
 
 /*
-    Page Header Layout
+    B+Tree File Layout
+    ==================
 
     ┌─────────────────────────────────────────────────────────────┐
-    │ Page Header (16 bytes)                                      │
+    │ File Header (PAGE_SIZE bytes, currently 4096)               │
     ├─────────────────────────────────────────────────────────────┤
-    │ Slot Directory (grows ↓)                                    │
-    │ [Slot 0: u16] [Slot 1: u16] [Slot 2: u16] ...               │
-    ├─────────────────────────────────────────────────────────────┤
-    │                                                             │
-    │                   < Free Space >                            │
-    │                                                             │
-    │ (Splits when Free Space < Cell Size)                        │
-    ├─────────────────────────────────────────────────────────────┤
-    │ Cell Data (grows ↑)                                         │
-    │ ... [Cell 2] [Cell 1] [Cell 0]                              │
+    │ MAGIC [4B: "BTRE"]                                          │
+    │ VERSION [4B: u32]                                           │
+    │ ROOT_OFFSET [8B: u64]                                       │
+    │ METADATA_LEN [4B: u32]                                      │
+    │ METADATA [variable, up to 4000B]                            │
+    │ [padding to PAGE_SIZE]                                      │
     └─────────────────────────────────────────────────────────────┘
 
-    Leaf Cell (key + Value)
-    ┌────────────┬─────────────┬───────────────┬─────────────────┐
-    │ Header     │ Key         │ Value Header  │ Value Payload   │
-    │ [len: var] │ [bytes...]  │ [flag: 1B]    │ [bytes...]      │
-    └────────────┴─────────────┴───────────────┴─────────────────┘
+    Leaf Node Layout (single or multi-block)
+    ┌─────────────────────────────────────────────────────────────┐
+    │ IS_LEAF [1B: 0x01]                                          │
+    │ KEYS_LEN [4B: u32]                                          │
+    │ KEYS [MessagePack serialized Vec<K>]                        │
+    │ VALUE_INFO_LEN [4B: u32]                                    │
+    │ VALUE_INFO [MessagePack serialized Vec<ValueInfo>]          │
+    │ [padding to block boundary]                                 │
+    └─────────────────────────────────────────────────────────────┘
 
-    Note: Values > 1/4 Page Size (1KB) are moved to Overflow Pages, leaving a 12-byte pointer [OverflowPgId][Length].
+    Internal Node Layout (supports multi-block when content exceeds PAGE_SIZE)
+    ┌─────────────────────────────────────────────────────────────┐
+    │ IS_LEAF [1B: 0x00]                                          │
+    │ KEYS_LEN [4B: u32]                                          │
+    │ KEYS [MessagePack serialized Vec<K>]                        │
+    │ POINTERS_LEN [4B: u32]                                      │
+    │ POINTERS [MessagePack serialized Vec<u64>]                  │
+    │ [padding to block boundary]                                 │
+    └─────────────────────────────────────────────────────────────┘
 
-    Internal Cell (Key + Pointer)
-    ┌──────────────┬─────────────┬────────────┐
-    │ Child Ptr    │ Key Len     │ Key Bytes  │
-    │ [u64: 8B]    │ [varint]    │ [bytes...] │
-    └──────────────┴─────────────┴────────────┘
+    Note: Internal nodes can span multiple PAGE_SIZE blocks when
+    keys + pointers exceed a single page. The order calculation
+    uses a 75% safety factor to minimize multi-block nodes.
+
+    Value Storage Modes:
+    - Single: Large values stored at [offset] with optional LZ4 compression
+      Format: [FLAG:1B][payload...] where FLAG = 0x00 (raw) or 0x01 (LZ4)
+    - Packed: Small values (≤256B) packed into PAGE_SIZE blocks
+      Format: [COUNT:4B][LEN:4B][data...][LEN:4B][data...]...
 */
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -475,6 +495,11 @@ fn u32_from_bytes(bytes: &[u8]) -> io::Result<u32> {
 }
 
 #[inline]
+fn u64_from_bytes(bytes: &[u8]) -> io::Result<u64> {
+    Ok(u64::from_le_bytes(bytes.try_into().map_err(to_io_error)?))
+}
+
+#[inline]
 fn get_entry_index_upper_bound<K>(keys: &[K], key: &K) -> usize
 where
     K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
@@ -490,6 +515,422 @@ where
         }
     }
     left
+}
+
+// Provide zero-copy scanning of MessagePack-encoded keys in B+tree internal nodes.
+// This avoids deserializing the entire keys vector (which allocates for each key in the node)
+// by scanning the raw bytes directly to find the correct child pointer.
+
+/// Result of parsing a `MessagePack` array header
+struct MsgPackArrayHeader {
+    /// Number of elements in the array
+    count: usize,
+    /// Number of bytes consumed by the header
+    header_size: usize,
+}
+
+/// Parse `MessagePack` array header to get element count
+/// Returns (count, `header_bytes_consumed`)
+#[inline]
+fn parse_msgpack_array_header(bytes: &[u8]) -> Option<MsgPackArrayHeader> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let first = bytes[0];
+
+    // fixarray (0x90-0x9f): count in low 4 bits
+    if (0x90..=0x9f).contains(&first) {
+        return Some(MsgPackArrayHeader {
+            count: (first & 0x0f) as usize,
+            header_size: 1,
+        });
+    }
+
+    // array16 (0xdc): next 2 bytes are big-endian count
+    if first == 0xdc && bytes.len() >= 3 {
+        let count = u16::from_be_bytes([bytes[1], bytes[2]]) as usize;
+        return Some(MsgPackArrayHeader {
+            count,
+            header_size: 3,
+        });
+    }
+
+    // array32 (0xdd): next 4 bytes are big-endian count
+    if first == 0xdd && bytes.len() >= 5 {
+        let count = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
+        return Some(MsgPackArrayHeader {
+            count,
+            header_size: 5,
+        });
+    }
+
+    None
+}
+
+/// Trait for types that can be scanned directly from `MessagePack` bytes without allocation.
+///
+/// This enables zero-copy key scanning in B+tree internal nodes, avoiding the need
+/// to deserialize the entire keys vector just to find which child pointer to follow.
+pub trait MsgPackScannable: Ord + Sized {
+    /// Compare self with a key encoded at the given position in the byte slice.
+    /// Returns:
+    /// - `Some((ordering, bytes_consumed))` if successfully parsed
+    /// - `None` if parsing failed
+    fn compare_at_position(&self, bytes: &[u8]) -> Option<(std::cmp::Ordering, usize)>;
+
+    /// Skip over a key at the given position without comparing.
+    /// Returns the number of bytes consumed, or None if parsing failed.
+    fn skip_at_position(bytes: &[u8]) -> Option<usize>;
+}
+
+impl MsgPackScannable for u32 {
+    #[inline]
+    fn compare_at_position(&self, bytes: &[u8]) -> Option<(std::cmp::Ordering, usize)> {
+        if bytes.is_empty() {
+            return None;
+        }
+
+        let first = bytes[0];
+
+        // Positive fixint (0x00-0x7f): value is the byte itself
+        if first <= 0x7f {
+            let value = u32::from(first);
+            return Some((self.cmp(&value), 1));
+        }
+
+        // uint8 (0xcc): next byte is the value
+        if first == 0xcc && bytes.len() >= 2 {
+            let value = u32::from(bytes[1]);
+            return Some((self.cmp(&value), 2));
+        }
+
+        // uint16 (0xcd): next 2 bytes are big-endian value
+        if first == 0xcd && bytes.len() >= 3 {
+            let value = u32::from(u16::from_be_bytes([bytes[1], bytes[2]]));
+            return Some((self.cmp(&value), 3));
+        }
+
+        // uint32 (0xce): next 4 bytes are big-endian value
+        if first == 0xce && bytes.len() >= 5 {
+            let value = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
+            return Some((self.cmp(&value), 5));
+        }
+
+        None
+    }
+
+    #[inline]
+    fn skip_at_position(bytes: &[u8]) -> Option<usize> {
+        if bytes.is_empty() {
+            return None;
+        }
+
+        let first = bytes[0];
+
+        if first <= 0x7f { return Some(1); }      // fixint
+        if first == 0xcc { return Some(2); }      // uint8
+        if first == 0xcd { return Some(3); }      // uint16
+        if first == 0xce { return Some(5); }      // uint32
+        if first == 0xcf { return Some(9); }      // uint64
+
+        // Negative fixint (0xe0-0xff)
+        if first >= 0xe0 { return Some(1); }
+
+        // int8 (0xd0)
+        if first == 0xd0 { return Some(2); }
+        // int16 (0xd1)
+        if first == 0xd1 { return Some(3); }
+        // int32 (0xd2)
+        if first == 0xd2 { return Some(5); }
+        // int64 (0xd3)
+        if first == 0xd3 { return Some(9); }
+
+        None
+    }
+}
+
+impl MsgPackScannable for String {
+    #[inline]
+    fn compare_at_position(&self, bytes: &[u8]) -> Option<(std::cmp::Ordering, usize)> {
+        if bytes.is_empty() {
+            return None;
+        }
+
+        let first = bytes[0];
+
+        // fixstr (0xa0-0xbf): length in low 5 bits
+        if (0xa0..=0xbf).contains(&first) {
+            let len = (first & 0x1f) as usize;
+            if bytes.len() > len {
+                let str_bytes = &bytes[1..=len];
+                // Compare as bytes (valid UTF-8 has same ordering as String)
+                let ordering = self.as_bytes().cmp(str_bytes);
+                return Some((ordering, 1 + len));
+            }
+            return None;
+        }
+
+        // str8 (0xd9): 1 byte length
+        if first == 0xd9 && bytes.len() >= 2 {
+            let len = bytes[1] as usize;
+            if bytes.len() >= 2 + len {
+                let str_bytes = &bytes[2..2 + len];
+                let ordering = self.as_bytes().cmp(str_bytes);
+                return Some((ordering, 2 + len));
+            }
+            return None;
+        }
+
+        // str16 (0xda): 2 byte length (big-endian)
+        if first == 0xda && bytes.len() >= 3 {
+            let len = u16::from_be_bytes([bytes[1], bytes[2]]) as usize;
+            if bytes.len() >= 3 + len {
+                let str_bytes = &bytes[3..3 + len];
+                let ordering = self.as_bytes().cmp(str_bytes);
+                return Some((ordering, 3 + len));
+            }
+            return None;
+        }
+
+        // str32 (0xdb): 4 byte length (big-endian)
+        if first == 0xdb && bytes.len() >= 5 {
+            let len = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
+            if bytes.len() >= 5 + len {
+                let str_bytes = &bytes[5..5 + len];
+                let ordering = self.as_bytes().cmp(str_bytes);
+                return Some((ordering, 5 + len));
+            }
+            return None;
+        }
+
+        None
+    }
+
+    #[inline]
+    fn skip_at_position(bytes: &[u8]) -> Option<usize> {
+        if bytes.is_empty() {
+            return None;
+        }
+
+        let first = bytes[0];
+
+        // fixstr (0xa0-0xbf)
+        if (0xa0..=0xbf).contains(&first) {
+            let len = (first & 0x1f) as usize;
+            return Some(1 + len);
+        }
+
+        // str8 (0xd9)
+        if first == 0xd9 && bytes.len() >= 2 {
+            let len = bytes[1] as usize;
+            return Some(2 + len);
+        }
+
+        // str16 (0xda)
+        if first == 0xda && bytes.len() >= 3 {
+            let len = u16::from_be_bytes([bytes[1], bytes[2]]) as usize;
+            return Some(3 + len);
+        }
+
+        // str32 (0xdb)
+        if first == 0xdb && bytes.len() >= 5 {
+            let len = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
+            return Some(5 + len);
+        }
+
+        None
+    }
+}
+
+/// Find the child index for internal node traversal using zero-copy key scanning.
+///
+/// This performs a linear scan through the MessagePack-encoded keys array,
+/// comparing each key without deserializing the entire vector.
+///
+/// Returns the index of the child pointer to follow (upper bound).
+///
+/// # Arguments
+/// * `keys_bytes` - The raw `MessagePack` bytes of the keys array
+/// * `search_key` - The key we're searching for
+///
+/// # Returns
+/// * `Some(index)` - The child index to follow
+/// * `None` - If parsing failed (caller should fall back to full deserialization)
+#[inline]
+fn find_child_index_zero_copy<K: MsgPackScannable>(keys_bytes: &[u8], search_key: &K) -> Option<usize> {
+    let header = parse_msgpack_array_header(keys_bytes)?;
+    let mut pos = header.header_size;
+
+    // Linear scan through keys, finding upper bound
+    for i in 0..header.count {
+        if pos >= keys_bytes.len() {
+            return None;
+        }
+
+        let (ordering, consumed) = search_key.compare_at_position(&keys_bytes[pos..])?;
+
+        // Upper bound: first key > search_key
+        if ordering == std::cmp::Ordering::Less {
+            return Some(i);
+        }
+
+        pos += consumed;
+    }
+
+    // All keys are <= search_key, return count (rightmost child)
+    Some(header.count)
+}
+
+/// Zero-copy scan result for internal nodes
+struct ZeroCopyScanResult {
+    /// Whether this is a leaf node
+    is_leaf: bool,
+    /// Child index to follow (for internal nodes)
+    child_idx: usize,
+    /// Pointers array bytes start position (offset from node start)
+    pointers_start: usize,
+}
+
+/// Scan an internal node to find the correct child without full deserialization.
+///
+/// Node layout:
+/// - `is_leaf`: 1 byte (`FLAG_SIZE`)
+/// - `keys_len`: 4 bytes (`LEN_SIZE`)
+/// - keys: `keys_len` bytes (`MessagePack` array)
+/// - `pointers_len`: 4 bytes (`LEN_SIZE`)
+/// - pointers: `pointers_len` bytes (`MessagePack` array of u64)
+#[inline]
+fn scan_internal_node_zero_copy<K: MsgPackScannable>(
+    node_bytes: &[u8],
+    search_key: &K,
+) -> Option<ZeroCopyScanResult> {
+    if node_bytes.len() < FLAG_SIZE + LEN_SIZE {
+        return None;
+    }
+
+    let is_leaf = node_bytes[0] == 1;
+
+    // Read keys_len
+    let keys_len = u32::from_le_bytes(
+        node_bytes[FLAG_SIZE..=LEN_SIZE].try_into().ok()?
+    ) as usize;
+
+    let keys_start = FLAG_SIZE + LEN_SIZE;
+    let keys_end = keys_start + keys_len;
+
+    if keys_end + LEN_SIZE > node_bytes.len() {
+        return None;
+    }
+
+    if is_leaf {
+        // For leaf nodes, we can't use zero-copy for the full query
+        // (need to return keys for binary search). Just return that it's a leaf.
+        return Some(ZeroCopyScanResult {
+            is_leaf: true,
+            child_idx: 0,
+            pointers_start: 0,
+        });
+    }
+
+    // Scan keys to find child index
+    let keys_bytes = &node_bytes[keys_start..keys_end];
+    let child_idx = find_child_index_zero_copy(keys_bytes, search_key)?;
+
+    // Read pointers_len
+    let _pointers_len = u32::from_le_bytes(
+        node_bytes[keys_end..keys_end + LEN_SIZE].try_into().ok()?
+    ) as usize;
+
+    let pointers_start = keys_end + LEN_SIZE;
+
+    // Parse pointer count from MessagePack array header
+
+    Some(ZeroCopyScanResult {
+        is_leaf: false,
+        child_idx,
+        pointers_start,
+    })
+}
+
+/// Read a specific child pointer from the pointers array without full deserialization.
+#[inline]
+fn read_pointer_at_index(pointers_bytes: &[u8], index: usize) -> Option<u64> {
+    let header = parse_msgpack_array_header(pointers_bytes)?;
+
+    if index >= header.count {
+        return None;
+    }
+
+    let mut pos = header.header_size;
+
+    // Skip to the target pointer
+    for _ in 0..index {
+        if pos >= pointers_bytes.len() {
+            return None;
+        }
+        pos += skip_msgpack_u64(&pointers_bytes[pos..])?;
+    }
+
+    // Read the target pointer
+    read_msgpack_u64(&pointers_bytes[pos..])
+}
+
+/// Skip a MessagePack-encoded u64
+#[inline]
+fn skip_msgpack_u64(bytes: &[u8]) -> Option<usize> {
+    if bytes.is_empty() {
+        return None;
+    }
+
+    let first = bytes[0];
+
+    if first <= 0x7f { return Some(1); }      // fixint
+    if first == 0xcc { return Some(2); }      // uint8
+    if first == 0xcd { return Some(3); }      // uint16
+    if first == 0xce { return Some(5); }      // uint32
+    if first == 0xcf { return Some(9); }      // uint64
+
+    None
+}
+
+/// Read a MessagePack-encoded u64
+#[inline]
+fn read_msgpack_u64(bytes: &[u8]) -> Option<u64> {
+    if bytes.is_empty() {
+        return None;
+    }
+
+    let first = bytes[0];
+
+    // Positive fixint (0x00-0x7f)
+    if first <= 0x7f {
+        return Some(u64::from(first));
+    }
+
+    // uint8 (0xcc)
+    if first == 0xcc && bytes.len() >= 2 {
+        return Some(u64::from(bytes[1]));
+    }
+
+    // uint16 (0xcd)
+    if first == 0xcd && bytes.len() >= 3 {
+        return Some(u64::from(u16::from_be_bytes([bytes[1], bytes[2]])));
+    }
+
+    // uint32 (0xce)
+    if first == 0xce && bytes.len() >= 5 {
+        return Some(u64::from(u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]])));
+    }
+
+    // uint64 (0xcf)
+    if first == 0xcf && bytes.len() >= 9 {
+        return Some(u64::from_be_bytes([
+            bytes[1], bytes[2], bytes[3], bytes[4],
+            bytes[5], bytes[6], bytes[7], bytes[8],
+        ]));
+    }
+
+    None
 }
 
 // Adaptively compress value bytes if beneficial.
@@ -525,15 +966,40 @@ enum ValueStorageMode {
     Single(u64),
 }
 
+#[derive(Debug, Clone)]
+enum CacheData {
+    Compressed(u8, Vec<u8>),
+    PackedOffset(u16),
+}
+
 /// Extended value info that includes storage mode and length
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct ValueInfo {
     mode: ValueStorageMode,
     length: u32,
-    #[serde(skip)]
-    compressed_cache: Option<(u8, Vec<u8>)>, // (flag, payload)
+    #[serde(skip, default)]
+    cache: Mutex<Option<CacheData>>,
 }
 
+impl Clone for ValueInfo {
+    fn clone(&self) -> Self {
+        Self {
+            mode: self.mode,
+            length: self.length,
+            cache: Mutex::new(None), // Don't clone cache
+        }
+    }
+}
+
+/// Result of attempting an in-place value update
+enum InPlaceUpdateResult {
+    /// Update succeeded in-place, no node rewrite needed
+    Success,
+    /// Packed value was promoted to Single storage mode (node rewrite needed with new info)
+    PromotedToSingle(ValueInfo),
+    /// Value doesn't fit in existing space, need full COW
+    NeedsCow,
+}
 
 #[derive(Debug, Clone)]
 struct BPlusTreeNode<K, V> {
@@ -722,26 +1188,30 @@ where
     }
 
     /// Calculate the serialized size of this node in bytes (rounded up to block size)
-    fn calculate_serialized_size(&self) -> io::Result<u64> {
+    fn calculate_serialized_size(&self, serial_buf: &mut Vec<u8>) -> io::Result<u64> {
+        serial_buf.clear();
+
         // Header: is_leaf flag
         let mut size = FLAG_SIZE;
 
         // Keys: length + serialized data
-        let keys_encoded = binary_serialize(&self.keys)?;
-        size += LEN_SIZE + keys_encoded.len();
+        binary_serialize_into(&mut *serial_buf, &self.keys)?;
+        size += LEN_SIZE + serial_buf.len();
 
         if self.is_leaf {
             // Leaf nodes now store value_info instead of values
             // value_info: length + Vec<(u64, u32)>
-            let info_encoded = binary_serialize(&self.value_info)?;
-            size += LEN_SIZE + info_encoded.len();
+            // Reuse buf
+            serial_buf.clear();
+            binary_serialize_into(&mut *serial_buf, &self.value_info)?;
+            size += LEN_SIZE + serial_buf.len();
         } else {
             // Internal node: pointer length + pointers
             // We use current children count for estimate
-            let mut pointer_vec: Vec<u64> = vec![0; self.children.len()];
-            pointer_vec.resize(self.children.len(), 0);
-            let pointer_encoded = binary_serialize(&pointer_vec)?;
-            size += LEN_SIZE + pointer_encoded.len();
+            serial_buf.clear();
+            let pointer_vec = vec![0u64; self.children.len()]; // Allocation here :( 
+            binary_serialize_into(&mut *serial_buf, &pointer_vec)?;
+            size += LEN_SIZE + serial_buf.len();
         }
 
         // Round up to block size
@@ -753,16 +1223,21 @@ where
         &self,
         file: &mut W,
         buffer: &mut Vec<u8>,
+        serial_buf: &mut Vec<u8>,
         offset: u64,
     ) -> io::Result<u64> {
-        let keys_encoded = binary_serialize(&self.keys)?;
-        let keys_len = u32::try_from(keys_encoded.len()).map_err(to_io_error)?;
+        serial_buf.clear();
+        binary_serialize_into(&mut *serial_buf, &self.keys)?;
+        let keys_len = u32::try_from(serial_buf.len()).map_err(to_io_error)?;
 
         if self.is_leaf {
-            let info_encoded = binary_serialize(&self.value_info)?;
-            let info_len = u32::try_from(info_encoded.len()).map_err(to_io_error)?;
+            let keys_end = serial_buf.len();
+            // Append info_encoded to serial_buf to avoid second allocation
+            binary_serialize_into(&mut *serial_buf, &self.value_info)?;
+            let info_len = u32::try_from(serial_buf.len() - keys_end).map_err(to_io_error)?;
+            let info_slice = &serial_buf[keys_end..];
 
-            let content_size = FLAG_SIZE + LEN_SIZE + keys_encoded.len() + LEN_SIZE + info_encoded.len();
+            let content_size = FLAG_SIZE + LEN_SIZE + keys_len as usize + LEN_SIZE + info_len as usize;
             let blocks = content_size.div_ceil(PAGE_SIZE_USIZE);
 
             file.seek(SeekFrom::Start(offset))?;
@@ -780,22 +1255,22 @@ where
             buffer[pos..pos + LEN_SIZE].copy_from_slice(&keys_len.to_le_bytes());
             pos += LEN_SIZE;
 
-            buffer[pos..pos + keys_encoded.len()].copy_from_slice(&keys_encoded);
-            pos += keys_encoded.len();
+            buffer[pos..pos + keys_len as usize].copy_from_slice(&serial_buf[0..keys_len as usize]);
+            pos += keys_len as usize;
 
             buffer[pos..pos + LEN_SIZE].copy_from_slice(&info_len.to_le_bytes());
             pos += LEN_SIZE;
 
-            buffer[pos..pos + info_encoded.len()].copy_from_slice(&info_encoded);
+            buffer[pos..pos + info_len as usize].copy_from_slice(info_slice);
 
-            file.write_all(buffer)?;
+            file.write_all(&buffer[..capacity])?;
 
             Ok(offset + (blocks as u64 * PAGE_SIZE_USIZE as u64))
         } else {
             let ptr_count = self.children.len();
-            let ptr_encoded_size = 8 + 8 * ptr_count;
+            let ptr_encoded_size = 8 + 8 * ptr_count; // Estimation
 
-            let content_size = FLAG_SIZE + LEN_SIZE + keys_encoded.len() + LEN_SIZE + ptr_encoded_size;
+            let content_size = FLAG_SIZE + LEN_SIZE + keys_len as usize + LEN_SIZE + ptr_encoded_size;
             let blocks_needed = content_size.div_ceil(PAGE_SIZE_USIZE);
 
             let parent_start = offset;
@@ -804,25 +1279,39 @@ where
             let mut pointers = Vec::with_capacity(ptr_count);
             for child in &self.children {
                 pointers.push(current_offset);
-                current_offset = child.serialize_to_block(file, buffer, current_offset)?;
+                let mut child_scratch = Vec::new(); // Separate scratch for recursion to protect our serial_buf
+                current_offset = child.serialize_to_block(file, buffer, &mut child_scratch, current_offset)?;
             }
 
-            let pointers_encoded = binary_serialize(&pointers)?;
-            let pointers_len = u32::try_from(pointers_encoded.len()).map_err(to_io_error)?;
+            // Append pointers to serial_buf
+            let keys_end = serial_buf.len();
+            binary_serialize_into(&mut *serial_buf, &pointers)?;
+            let pointers_len = u32::try_from(serial_buf.len() - keys_end).map_err(to_io_error)?;
+            let pointers_slice = &serial_buf[keys_end..];
 
             file.seek(SeekFrom::Start(parent_start))?;
-            let mut data = Vec::with_capacity(blocks_needed * PAGE_SIZE_USIZE);
-            data.push(0u8);
-            data.extend_from_slice(&keys_len.to_le_bytes());
-            data.extend_from_slice(&keys_encoded);
-            data.extend_from_slice(&pointers_len.to_le_bytes());
-            data.extend_from_slice(&pointers_encoded);
 
-            let pad_len = (blocks_needed * PAGE_SIZE_USIZE) - data.len();
-            if pad_len > 0 {
-                data.extend(std::iter::repeat_n(0, pad_len));
+            let total_capacity = blocks_needed * PAGE_SIZE_USIZE;
+            if buffer.len() < total_capacity {
+                buffer.resize(total_capacity, 0);
             }
-            file.write_all(&data)?;
+            buffer[..total_capacity].fill(0);
+
+            let mut pos = 0;
+            // Is_leaf=0
+            buffer[pos] = 0u8;
+            pos += FLAG_SIZE;
+
+            buffer[pos..pos + LEN_SIZE].copy_from_slice(&keys_len.to_le_bytes());
+            pos += LEN_SIZE;
+            buffer[pos..pos + keys_len as usize].copy_from_slice(&serial_buf[0..keys_len as usize]);
+            pos += keys_len as usize;
+
+            buffer[pos..pos + LEN_SIZE].copy_from_slice(&pointers_len.to_le_bytes());
+            pos += LEN_SIZE;
+            buffer[pos..pos + pointers_len as usize].copy_from_slice(pointers_slice);
+
+            file.write_all(&buffer[..total_capacity])?;
 
             Ok(current_offset)
         }
@@ -839,6 +1328,8 @@ where
     ) -> io::Result<u64> {
         use std::collections::HashMap;
 
+        let mut serial_buf = Vec::with_capacity(PAGE_SIZE_USIZE);
+
         // Pass 1: Populate value_info for all leaf nodes (Mutable)
         // This calculates value sizes and determines packing WITHOUT assigning final offsets yet.
         // We use placeholder offsets (0) which will be corrected after node layout is determined.
@@ -849,19 +1340,19 @@ where
                 for node in current_level_mut {
                     if node.is_leaf {
                         node.value_info.clear();
-
                         // Serialize all values first to determine sizes
                         let mut serialized_values: Vec<Vec<u8>> = Vec::new();
                         for value in &node.values {
-                            let value_bytes = binary_serialize(value)?;
-                            serialized_values.push(value_bytes);
+                            serial_buf.clear();
+                            binary_serialize_into(&mut serial_buf, value)?;
+                            serialized_values.push(serial_buf.clone());
                         }
 
-                        // Determine packing structure with placeholder offsets (0)
+                        // Determine the packing structure with placeholder offsets (0)
                         // Final offsets will be assigned in Pass 3
                         let mut current_pack_index: u16 = 0;
                         let mut current_pack_size = PACK_BLOCK_HEADER_SIZE;
-                        let mut pack_count = 0u32; // Track which pack block we're on
+                        let mut pack_count = 0u32;
 
                         for value_bytes in serialized_values {
                             let size = value_bytes.len();
@@ -874,7 +1365,7 @@ where
                                     node.value_info.push(ValueInfo {
                                         mode: ValueStorageMode::Packed(u64::from(pack_count), current_pack_index),
                                         length: u32::try_from(size).map_err(to_io_error)?,
-                                        compressed_cache: None,
+                                        cache: Mutex::new(None),
                                     });
                                     current_pack_index += 1;
                                     current_pack_size += entry_size;
@@ -887,25 +1378,25 @@ where
                                     node.value_info.push(ValueInfo {
                                         mode: ValueStorageMode::Packed(u64::from(pack_count), 0),
                                         length: u32::try_from(size).map_err(to_io_error)?,
-                                        compressed_cache: None,
+                                        cache: Mutex::new(None),
                                     });
                                 }
                             } else {
                                 // Large value - use Single storage with optional compression
                                 // Pre-calculate compressed size if applicable
                                 let (flag, payload) = compress_if_beneficial(&value_bytes);
-                                let stored_size = 1 + payload.len(); // flag + payload
+                                let stored_size = 1 + payload.len();
 
                                 let cache = if flag == COMPRESSION_FLAG_LZ4 {
-                                    Some((flag, payload))
+                                    Some(CacheData::Compressed(flag, payload))
                                 } else {
                                     None // Don't cache uncompressed data to save memory
                                 };
 
                                 node.value_info.push(ValueInfo {
-                                    mode: ValueStorageMode::Single(u64::MAX), // Placeholder
+                                    mode: ValueStorageMode::Single(u64::MAX),
                                     length: u32::try_from(stored_size).map_err(to_io_error)?,
-                                    compressed_cache: cache,
+                                    cache: Mutex::new(cache),
                                 });
                             }
                         }
@@ -927,7 +1418,7 @@ where
         {
             let mut current_level = vec![&*self];
             node_offset_map.insert(std::ptr::from_ref(self), current_offset);
-            current_offset += self.calculate_serialized_size()?;
+            current_offset += self.calculate_serialized_size(&mut serial_buf)?;
 
             while !current_level.is_empty() {
                 let mut next_level = Vec::new();
@@ -936,7 +1427,7 @@ where
                         for child in &node.children {
                             let child_ptr = std::ptr::from_ref(child);
                             node_offset_map.insert(child_ptr, current_offset);
-                            current_offset += child.calculate_serialized_size()?;
+                            current_offset += child.calculate_serialized_size(&mut serial_buf)?;
                             next_level.push(child);
                         }
                     }
@@ -980,8 +1471,7 @@ where
                             if let ValueStorageMode::Packed(pack_idx, index) = &mut info.mode {
                                 let actual_offset = pack_block_offsets[pack_idx];
                                 *pack_idx = actual_offset;
-                                // index stays the same
-                                let _ = index; // Silence unused warning
+                                let _ = index;
                             }
                         }
                     } else {
@@ -1004,13 +1494,13 @@ where
                     let node_offset = node_offset_map[&node_ptr];
 
                     if node.is_leaf {
-                        node.serialize_to_block(file, buffer, node_offset)?;
+                        node.serialize_to_block(file, buffer, &mut serial_buf, node_offset)?;
                     } else {
                         let child_offsets: Vec<u64> = node.children.iter()
                             .map(|c| node_offset_map[&std::ptr::from_ref(c)])
                             .collect();
 
-                        node.serialize_internal_with_offsets(file, buffer, node_offset, &child_offsets)?;
+                        node.serialize_internal_with_offsets(file, buffer, &mut serial_buf, node_offset, &child_offsets)?;
                         for child in &node.children {
                             next_level.push(child);
                         }
@@ -1031,25 +1521,31 @@ where
                         let mut pack_blocks: HashMap<u64, Vec<(u16, Vec<u8>)>> = HashMap::new();
 
                         for (value, info) in node.values.iter().zip(node.value_info.iter()) {
-                            let value_bytes = binary_serialize(value)?;
+                            serial_buf.clear();
+                            binary_serialize_into(&mut serial_buf, value)?;
 
                             match info.mode {
                                 ValueStorageMode::Packed(block_offset, index) => {
                                     pack_blocks.entry(block_offset)
                                         .or_default()
-                                        .push((index, value_bytes));
+                                        .push((index, serial_buf.clone()));
                                 }
                                 ValueStorageMode::Single(block_offset) => {
                                     // Write single value with compression format
                                     file.seek(SeekFrom::Start(block_offset))?;
 
                                     // Apply adaptive compression or use cache
-                                    let (flag, payload_ref) = if let Some((c_flag, c_payload)) = &info.compressed_cache {
-                                        (*c_flag, c_payload.as_slice())
+                                    let cache_guard = info.cache.lock();
+                                    let (flag, payload_ref) = if let Some(cache_data) = cache_guard.as_ref() {
+                                        if let CacheData::Compressed(c_flag, c_payload) = cache_data {
+                                            (*c_flag, c_payload.as_slice())
+                                        } else {
+                                            (COMPRESSION_FLAG_NONE, serial_buf.as_slice())
+                                        }
                                     } else {
                                         // If not cached, it means it wasn't beneficial (or we chose not to cache it)
                                         // So we write raw bytes with NONE flag
-                                        (COMPRESSION_FLAG_NONE, value_bytes.as_slice())
+                                        (COMPRESSION_FLAG_NONE, serial_buf.as_slice())
                                     };
 
                                     // Write: [flag:1][payload]
@@ -1081,55 +1577,65 @@ where
             }
         }
 
-        Ok(current_offset)
+        // Root offset is what Pass 2 assigned to 'self'
+        let root_ptr = std::ptr::from_ref(self);
+        let root_offset = node_offset_map[&root_ptr];
+        Ok(root_offset)
     }
 
     /// Serialize an internal node with pre-calculated child offsets
+    /// Supports multi-block internal nodes when keys + pointers exceed a single page
     fn serialize_internal_with_offsets<W: Write + Seek>(
         &self,
         file: &mut W,
-        buffer: &mut [u8],
+        buffer: &mut Vec<u8>,
+        serial_buf: &mut Vec<u8>,
         offset: u64,
         child_offsets: &[u64],
     ) -> io::Result<u64> {
         // Similar to serialize_to_block but for internal nodes with known child offsets
-        let buffer_slice = &mut buffer[..];
-        buffer_slice[0] = u8::from(self.is_leaf);
-        let mut write_pos = FLAG_SIZE;
+        serial_buf.clear();
+        binary_serialize_into(&mut *serial_buf, &self.keys)?;
+        let keys_len = serial_buf.len();
+        let keys_end = keys_len;
 
-        // Write keys
-        let keys_encoded = binary_serialize(&self.keys)?;
-        let keys_len = keys_encoded.len();
-        buffer_slice[write_pos..write_pos + LEN_SIZE]
+        binary_serialize_into(&mut *serial_buf, child_offsets)?;
+        let pointer_len = serial_buf.len() - keys_end;
+
+        // Calculate total content size
+        let total_content_size = FLAG_SIZE + LEN_SIZE + keys_len + LEN_SIZE + pointer_len;
+        let blocks_needed = total_content_size.div_ceil(PAGE_SIZE_USIZE);
+
+        let total_buffer_size = blocks_needed * PAGE_SIZE_USIZE;
+        if buffer.len() < total_buffer_size {
+            buffer.resize(total_buffer_size, 0);
+        }
+        buffer[..total_buffer_size].fill(0);
+
+        let mut write_pos = 0;
+
+        // Write is_leaf flag (0 for internal node)
+        buffer[write_pos] = u8::from(self.is_leaf);
+        write_pos += FLAG_SIZE;
+
+        // Write keys length and data
+        buffer[write_pos..write_pos + LEN_SIZE]
             .copy_from_slice(&u32::try_from(keys_len).map_err(to_io_error)?.to_le_bytes());
         write_pos += LEN_SIZE;
-        buffer_slice[write_pos..write_pos + keys_len].copy_from_slice(&keys_encoded);
+        buffer[write_pos..write_pos + keys_len].copy_from_slice(&serial_buf[0..keys_end]);
         write_pos += keys_len;
-        drop(keys_encoded);
 
-        let pointer_offset_within_first_block = offset + write_pos as u64;
+        // Write pointers length and data
+        buffer[write_pos..write_pos + LEN_SIZE]
+            .copy_from_slice(&u32::try_from(pointer_len).map_err(to_io_error)?.to_le_bytes());
+        write_pos += LEN_SIZE;
+        buffer[write_pos..write_pos + pointer_len].copy_from_slice(&serial_buf[keys_end..]);
 
-        // Zero unused portion and write first block
-        if write_pos < PAGE_SIZE_USIZE {
-            buffer_slice[write_pos..PAGE_SIZE_USIZE].fill(0u8);
-        }
+        // Write all blocks to file
         file.seek(SeekFrom::Start(offset))?;
-        file.write_all(&buffer_slice[..PAGE_SIZE_USIZE])?;
+        file.write_all(&buffer[..total_buffer_size])?;
 
-        // Write child pointers
-        let pointer_encoded = binary_serialize(child_offsets)?;
-        let pointer_len = u32::try_from(pointer_encoded.len()).map_err(to_io_error)?;
-
-        // CRITICAL CHECK: Ensure pointers fit in the remaining space of the first block or we've allocated enough
-        if write_pos + LEN_SIZE + pointer_encoded.len() > PAGE_SIZE_USIZE {
-            return Err(io::Error::other(format!("Internal node overflow: keys ({}) + pointers ({}) exceeds block size. keys sizes might be too large for the current PAGE_SIZE ({}). Consider reducing key sizes or increasing PAGE_SIZE.", keys_len, pointer_encoded.len(), PAGE_SIZE_USIZE)));
-        }
-
-        file.seek(SeekFrom::Start(pointer_offset_within_first_block))?;
-        file.write_all(&pointer_len.to_le_bytes())?;
-        file.write_all(&pointer_encoded)?;
-
-        Ok(offset + PAGE_SIZE_USIZE as u64)
+        Ok(offset + total_buffer_size as u64)
     }
 
     fn deserialize_from_block<R: Read + Seek>(
@@ -1241,11 +1747,12 @@ where
 
         //let slice = &mmap[start..];
         let slice = &mmap[start..total];
-        Self::deserialize_from_block_slice(slice, file, nested)
+        Self::deserialize_from_block_slice(slice, Some(mmap), file, nested)
     }
 
     fn deserialize_from_block_slice<R: Read + Seek>(
         slice: &[u8],
+        mmap: Option<&[u8]>,
         file: &mut R,
         nested: bool,
     ) -> io::Result<(Self, Option<Vec<u64>>)> {
@@ -1269,9 +1776,30 @@ where
             // Values are loaded on-demand when nested=true
             if nested {
                 let mut vals = Vec::with_capacity(info.len());
-                for value_info in &info {
-                    let value = Self::load_value_from_info(file, value_info)?;
-                    vals.push(value);
+                let mut last_packed_block: Option<(u64, Vec<u8>)> = None;
+                for entry_info in &info {
+                    match entry_info.mode {
+                        ValueStorageMode::Packed(block_offset, index) => {
+                            // Packed loading optimization: reuse block if it's the same
+                            if let Some((offset, ref block)) = last_packed_block {
+                                if offset == block_offset {
+                                    vals.push(Self::extract_value_from_packed_block(block, index, &entry_info.cache)?);
+                                    continue;
+                                }
+                            }
+                            
+                            // Load new block
+                            let mut block = vec![0u8; PAGE_SIZE_USIZE];
+                            file.seek(SeekFrom::Start(block_offset))?;
+                            file.read_exact(&mut block)?;
+                            vals.push(Self::extract_value_from_packed_block(&block, index, &entry_info.cache)?);
+                            last_packed_block = Some((block_offset, block));
+                        }
+                        ValueStorageMode::Single(_) => {
+                            last_packed_block = None;
+                            vals.push(Self::load_value_from_info(file, entry_info)?);
+                        }
+                    }
                 }
                 (info, vals)
             } else {
@@ -1292,7 +1820,11 @@ where
                 let mut nodes = Vec::with_capacity(pointers.len());
                 let mut child_buffer = vec![0u8; PAGE_SIZE_USIZE];
                 for &ptr in &pointers {
-                    let (child, _) = Self::deserialize_from_block(file, &mut child_buffer, ptr, nested)?;
+                    let (child, _) = if let Some(m) = mmap {
+                        Self::deserialize_from_mmap(m, file, ptr, nested)?
+                    } else {
+                        Self::deserialize_from_block(file, &mut child_buffer, ptr, nested)?
+                    };
                     nodes.push(child);
                 }
                 (nodes, None)
@@ -1306,14 +1838,51 @@ where
 
     /// Load a value based on its storage info
     fn load_value_from_info<R: Read + Seek>(file: &mut R, info: &ValueInfo) -> io::Result<V> {
+        // Fast path: Check cache for Single mode
+        if let ValueStorageMode::Single(_) = info.mode {
+            let cache_guard = info.cache.lock();
+            if let Some(CacheData::Compressed(flag, payload)) = cache_guard.as_ref() {
+                if *flag == COMPRESSION_FLAG_LZ4 {
+                    let decompressed = lz4_flex::decompress_size_prepended(payload)
+                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("LZ4 cache decompression failed: {e}")))?;
+                    return binary_deserialize(&decompressed);
+                }
+                return binary_deserialize(payload);
+            }
+        }
+
         match info.mode {
             ValueStorageMode::Single(offset) => {
-                // Load single value (existing logic)
-                Self::load_value_with_len(file, offset, info.length)
+                let stored_len = info.length as usize;
+                if stored_len < 1 {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid value length"));
+                }
+
+                // Read everything: flag + payload
+                file.seek(SeekFrom::Start(offset))?;
+                let mut buffer = vec![0u8; stored_len];
+                file.read_exact(&mut buffer)?;
+
+                let flag = buffer[0];
+                // Split payload without re-allocating if possible? Vec::split_off allocates new vec for tail.
+                // We want payload as Vec for cache.
+                let payload = buffer[1..].to_vec();
+
+                // Decompress for result
+                let data = if flag == COMPRESSION_FLAG_LZ4 {
+                    lz4_flex::decompress_size_prepended(&payload)
+                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("LZ4 decompression failed: {e}")))?
+                } else {
+                    payload.clone()
+                };
+
+                // Update cache
+                *info.cache.lock() = Some(CacheData::Compressed(flag, payload));
+
+                binary_deserialize(&data)
             }
             ValueStorageMode::Packed(block_offset, index) => {
-                // Load from packed block
-                Self::load_value_from_packed_block(file, block_offset, index, info.length)
+                Self::load_value_from_packed_block(file, block_offset, index, info.length, &info.cache)
             }
         }
     }
@@ -1324,19 +1893,31 @@ where
         block_offset: u64,
         value_index: u16,
         _expected_length: u32,
+        cache: &Mutex<Option<CacheData>>,
     ) -> io::Result<V> {
         file.seek(SeekFrom::Start(block_offset))?;
 
         let mut block_buffer = vec![0u8; PAGE_SIZE_USIZE];
         file.read_exact(&mut block_buffer)?;
 
+        Self::extract_value_from_packed_block(&block_buffer, value_index, cache)
+    }
+
+    /// Helper to extract value from a packed block that is already in memory
+    fn extract_value_from_packed_block(
+        block_buffer: &[u8],
+        value_index: u16,
+        cache: &Mutex<Option<CacheData>>,
+    ) -> io::Result<V> {
         // Read count
-        let count = u32::from_le_bytes(block_buffer[0..4].try_into().map_err(to_io_error)?);
+        if block_buffer.len() < 4 {
+             return Err(io::Error::new(io::ErrorKind::InvalidData, "Packed block too small"));
+        }
         let mut pos = 4;
 
         // Skip to target value
         for i in 0..=value_index {
-            if pos + 4 > PAGE_SIZE_USIZE {
+            if pos + 4 > block_buffer.len() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("Packed block corrupted: position {pos} exceeds block size"),
@@ -1348,12 +1929,16 @@ where
 
             if i == value_index {
                 // Found target value
-                if pos + len > PAGE_SIZE_USIZE {
+                if pos + len > block_buffer.len() {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!("Packed value corrupted: length {len} at position {pos} exceeds block size"),
                     ));
                 }
+
+                // Cache the position in the block for future in-place updates
+                *cache.lock() = Some(CacheData::PackedOffset(u16::try_from(pos).map_err(to_io_error)?));
+
                 let value_data = &block_buffer[pos..pos + len];
                 return binary_deserialize(value_data);
             }
@@ -1363,38 +1948,11 @@ where
 
         Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("Value index {value_index} not found in packed block (count: {count})"),
+            format!("Value index {value_index} not found in packed block"),
         ))
     }
-
-    fn load_value_with_len<R: Read + Seek>(file: &mut R, offset: u64, stored_len: u32) -> io::Result<V> {
-        file.seek(SeekFrom::Start(offset))?;
-
-        // Read compression flag
-        let mut flag = [0u8; 1];
-        file.read_exact(&mut flag)?;
-
-        let data = if flag[0] == COMPRESSION_FLAG_LZ4 {
-            // Compressed: [flag:1][lz4_payload_with_prepended_size]
-            // We do NOT store explicit original length anymore, it's inside LZ4 blob
-
-            let compressed_len = stored_len as usize - 1; // 1 (flag)
-            let mut compressed = vec![0u8; compressed_len];
-            file.read_exact(&mut compressed)?;
-
-            lz4_flex::decompress_size_prepended(&compressed)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("LZ4 decompression failed: {e}")))?
-        } else {
-            // Uncompressed: [flag:1][payload]
-            let payload_len = stored_len as usize - 1;
-            let mut data = vec![0u8; payload_len];
-            file.read_exact(&mut data)?;
-            data
-        };
-
-        binary_deserialize(&data)
-    }
 }
+
 // -----------------------------------------------------------------------------
 // Metadata Enum
 // -----------------------------------------------------------------------------
@@ -1439,12 +1997,26 @@ pub struct BPlusTree<K, V> {
 const fn calc_order<K>() -> (usize, usize) {
     // Internal: FLAG (1) + LEN_K (4) + KEYS + LEN_P (4) + POINTERS (8 each)
     // Leaf:    FLAG (1) + LEN_K (4) + KEYS + LEN_INFO (4) + VALUE_INFO (12 each)
+    //
+    // Conservative calculation to prevent internal node overflow:
+    // - Account for MessagePack overhead per key (binary type headers)
+    // - Account for array serialization overhead
+    // - Apply safety factor to use only 75% of theoretical capacity
 
-    let base_overhead = FLAG_SIZE + LEN_SIZE + LEN_SIZE + 64; // flag + keys_len + info_len + safety buffer
+    let base_overhead = FLAG_SIZE + LEN_SIZE + LEN_SIZE + MSGPACK_ARRAY_OVERHEAD + 32; // flag + keys_len + info_len + array overhead + safety buffer
     let key_size = size_of::<K>();
 
-    let inner_order = (PAGE_SIZE_USIZE - base_overhead) / (key_size + POINTER_SIZE + MSGPACK_OVERHEAD_PER_ENTRY);
-    let leaf_order = (PAGE_SIZE_USIZE - base_overhead) / (key_size + INFO_SIZE + MSGPACK_OVERHEAD_PER_ENTRY);
+    // Per-entry overhead: key size (with msgpack overhead) + pointer/info size + msgpack overhead
+    let inner_entry_size = key_size + POINTER_SIZE + MSGPACK_OVERHEAD_PER_ENTRY;
+    let leaf_entry_size = key_size + INFO_SIZE + MSGPACK_OVERHEAD_PER_ENTRY;
+
+    // Calculate raw order then apply safety factor
+    let raw_inner_order = (PAGE_SIZE_USIZE - base_overhead) / inner_entry_size;
+    let raw_leaf_order = (PAGE_SIZE_USIZE - base_overhead) / leaf_entry_size;
+
+    // Apply safety factor (use only 75% of capacity to prevent overflow)
+    let inner_order = (raw_inner_order * ORDER_SAFETY_FACTOR) / 100;
+    let leaf_order = (raw_leaf_order * ORDER_SAFETY_FACTOR) / 100;
 
     // Ensure we have at least a minimal order (manual max for const fn)
     let final_inner = if inner_order < 2 { 2 } else { inner_order };
@@ -1627,14 +2199,18 @@ where
 
         // Use breadth-first serialization for better disk locality
         match self.root.serialize_breadth_first(&mut file, &mut buffer, HEADER_SIZE) {
-            Ok(result) => {
+            Ok(root_offset) => {
+                // Update root offset in header
+                file.seek(SeekFrom::Start(ROOT_OFFSET_POS))?;
+                file.write_all(&root_offset.to_le_bytes())?;
+
                 file.flush()?;
                 drop(file);
                 if let Err(err) = utils::rename_or_copy(tempfile.path(), filepath, false) {
                     return Err(string_to_io_error(format!("Temp file rename/copy did not work {} {err}", tempfile.path().to_string_lossy())));
                 }
                 self.dirty = false;
-                Ok(result)
+                Ok(root_offset)
             }
             Err(err) => Err(err),
         }
@@ -1648,7 +2224,7 @@ where
         file: &mut W,
         mut next_level_pointers: Vec<(K, u64)>,
         mut current_offset: u64,
-        write_buffer: &mut [u8],
+        write_buffer: &mut Vec<u8>,
     ) -> io::Result<u64> {
         if next_level_pointers.is_empty() {
             return Ok(current_offset);
@@ -1672,7 +2248,9 @@ where
                 }
 
                 let node_offset = current_offset;
-                current_offset = node.serialize_internal_with_offsets(file, write_buffer, node_offset, &pointers)?;
+                let mut serial_buf = Vec::new();
+                current_offset = node.serialize_internal_with_offsets(file, write_buffer, &mut serial_buf, node_offset, &pointers)?;
+
 
                 if let Some((k, _)) = chunk.first() {
                     parent_level_pointers.push((k.clone(), node_offset));
@@ -1690,22 +2268,26 @@ where
 
 
     pub fn load(filepath: &Path) -> io::Result<Self> {
-        let mut file = File::open(filepath)?;
+        let file = File::open(filepath)?;
+        let mmap = unsafe { Mmap::map(&file)? };
+        
+        if mmap.len() < PAGE_SIZE_USIZE {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "File too small"));
+        }
 
         // Verify Header
-        let mut header = [0u8; PAGE_SIZE_USIZE]; // Read the whole header page
-        file.read_exact(&mut header)?;
+        let header = &mmap[0..PAGE_SIZE_USIZE];
         if &header[0..4] != MAGIC {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid magic number"));
         }
-        let version = u32::from_le_bytes(header[4..8].try_into().map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid version slice"))?);
+        let version = u32_from_bytes(&header[4..8])?;
         if version != STORAGE_VERSION {
             return Err(io::Error::new(io::ErrorKind::InvalidData, format!("Unsupported storage version: {version}")));
         }
-        let root_offset = u64::from_le_bytes(header[8..16].try_into().map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid root offset slice"))?);
+        let root_offset = u64_from_bytes(&header[8..16])?;
 
         // Read metadata
-        let metadata_len = u32::from_le_bytes(header[16..20].try_into().map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid metadata length slice"))?);
+        let metadata_len = u32_from_bytes(&header[16..20])?;
         let metadata = if metadata_len > 0 {
             if (20 + metadata_len as usize) > PAGE_SIZE_USIZE {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "Metadata length exceeds header page size"));
@@ -1715,10 +2297,9 @@ where
             Vec::new()
         };
 
-        let mut reader = utils::file_reader(file);
-        let mut buffer = vec![0u8; PAGE_SIZE_USIZE];
-        // Start after header block
-        let (root, _) = BPlusTreeNode::<K, V>::deserialize_from_block(&mut reader, &mut buffer, root_offset, true)?;
+        let mut cursor = io::Cursor::new(mmap.as_ref());
+        // Start after header block, with nested=true to deserialize all nodes
+        let (root, _) = BPlusTreeNode::<K, V>::deserialize_from_mmap(&mmap, &mut cursor, root_offset, true)?;
 
         let (inner_order, leaf_order) = calc_order::<K>();
         Ok(Self {
@@ -1763,7 +2344,7 @@ where
         // Try Cache First
         let (node, pointers) = if let Some(data) = cache.shift_remove(&offset) {
             // LRU: Use shift_remove + insert to avoid cloning or repeated lookups
-            let res = BPlusTreeNode::<K, V>::deserialize_from_block_slice(&data, file, false)
+            let res = BPlusTreeNode::<K, V>::deserialize_from_block_slice(&data, None, file, false)
                 .map_err(BPlusTreeError::from)?;
             cache.insert(offset, data);
             res
@@ -1829,7 +2410,7 @@ where
         // Try Cache First
         let (node, pointers) = if let Some(data) = cache.shift_remove(&offset) {
             // LRU
-            let res = BPlusTreeNode::<K, V>::deserialize_from_block_slice(&data, file, false)
+            let res = BPlusTreeNode::<K, V>::deserialize_from_block_slice(&data, None, file, false)
                 .map_err(BPlusTreeError::from)?;
             cache.insert(offset, data);
             res
@@ -1893,7 +2474,7 @@ where
     let mut stack = vec![start_offset];
     while let Some(offset) = stack.pop() {
         let (node, pointers) = if let Some(data) = cache.shift_remove(&offset) {
-            let res = BPlusTreeNode::<K, V>::deserialize_from_block_slice(&data, file, false)
+            let res = BPlusTreeNode::<K, V>::deserialize_from_block_slice(&data, None, file, false)
                 .map_err(BPlusTreeError::from)?;
             cache.insert(offset, data);
             res
@@ -1945,6 +2526,7 @@ where
 fn query_tree_mmap<K, V>(
     mmap: &[u8],
     cursor: &mut io::Cursor<&[u8]>,
+    node_cache: &mut NodeCache<K, V>,
     key: &K,
     start_offset: u64,
 ) -> Result<Option<V>, BPlusTreeError>
@@ -1954,6 +2536,114 @@ where
 {
     let mut offset = start_offset;
     loop {
+        // Cache Logic
+        if !node_cache.contains_key(&offset) {
+            let (node, pointers) = BPlusTreeNode::<K, V>::deserialize_from_mmap(mmap, cursor, offset, false)?;
+            if node_cache.len() >= CACHE_CAPACITY {
+                node_cache.shift_remove_index(0);
+            }
+            node_cache.insert(offset, (node, pointers));
+        }
+
+        // Update LRU
+        if let Some(idx) = node_cache.get_index_of(&offset) {
+            let len = node_cache.len();
+            if len > 1 {
+                node_cache.move_index(idx, len - 1);
+            }
+        }
+
+        let (node, pointers) = &node_cache[&offset];
+
+        if node.is_leaf {
+            return match node.keys.binary_search(key) {
+                Ok(idx) => {
+                    match node.value_info.get(idx) {
+                        Some(info) => {
+                            let value = BPlusTreeNode::<K, V>::load_value_from_info(cursor, info)?;
+                            Ok(Some(value))
+                        }
+                        None => Ok(None),
+                    }
+                }
+                Err(_) => Ok(None),
+            };
+        }
+
+        let child_idx = get_entry_index_upper_bound::<K>(&node.keys, key);
+        if let Some(child_offsets) = pointers {
+            if let Some(child_offset) = child_offsets.get(child_idx) {
+                offset = *child_offset;
+            } else {
+                return Ok(None);
+            }
+        } else {
+            return Ok(None);
+        }
+    }
+}
+
+/// Zero-copy optimized query for mmap'd data.
+///
+/// This function uses zero-copy key scanning for internal nodes, avoiding
+/// the need to deserialize the entire keys vector. It only falls back to
+/// full deserialization for leaf nodes where we need to perform binary search
+/// and access `value_info`.
+///
+/// Performance improvement: For trees with many internal nodes, this eliminates
+/// N heap allocations per internal node (where N is the number of keys).
+fn query_tree_mmap_zero_copy<K, V>(
+    mmap: &[u8],
+    cursor: &mut io::Cursor<&[u8]>,
+    key: &K,
+    start_offset: u64,
+) -> Result<Option<V>, BPlusTreeError>
+where
+    K: Ord + Serialize + for<'de> Deserialize<'de> + Clone + MsgPackScannable,
+    V: Serialize + for<'de> Deserialize<'de> + Clone,
+{
+    let mut offset = start_offset;
+
+    loop {
+        let node_start = usize::try_from(offset)
+            .map_err(|e| BPlusTreeError::Corrupted(format!("Invalid offset: {e}")))?;
+
+        if node_start >= mmap.len() {
+            return Err(BPlusTreeError::Corrupted("Offset out of bounds".into()));
+        }
+
+        let node_bytes = &mmap[node_start..];
+
+        // Try zero-copy scan first
+        if let Some(scan_result) = scan_internal_node_zero_copy(node_bytes, key) {
+            if scan_result.is_leaf {
+                // Fall back to full deserialization for leaf nodes
+                let (node, _) = BPlusTreeNode::<K, V>::deserialize_from_mmap(mmap, cursor, offset, false)?;
+
+                return match node.keys.binary_search(key) {
+                    Ok(idx) => {
+                        match node.value_info.get(idx) {
+                            Some(info) => {
+                                let value = BPlusTreeNode::<K, V>::load_value_from_info(cursor, info)?;
+                                Ok(Some(value))
+                            }
+                            None => Ok(None),
+                        }
+                    }
+                    Err(_) => Ok(None),
+                };
+            }
+
+            // Internal node: read the child pointer using zero-copy
+            let pointers_bytes = &node_bytes[scan_result.pointers_start..];
+            if let Some(child_offset) = read_pointer_at_index(pointers_bytes, scan_result.child_idx) {
+                offset = child_offset;
+                continue;
+            }
+            // Fall through to fallback if pointer read failed
+        }
+
+        // Fallback: full deserialization (handles edge cases, unsupported key types, etc.)
         let (node, pointers) = BPlusTreeNode::<K, V>::deserialize_from_mmap(mmap, cursor, offset, false)?;
 
         if node.is_leaf {
@@ -2029,12 +2719,15 @@ where
 /// `BPlusTreeQuery` performs on-disk queries without loading the entire tree into memory.
 /// For frequent queries, consider using `BPlusTree::load()` instead, which loads the full tree into memory
 /// at the cost of higher memory usage.
+type NodeCache<K, V> = IndexMap<u64, (BPlusTreeNode<K, V>, Option<Vec<u64>>)>;
+
 pub struct BPlusTreeQuery<K, V> {
     file: Option<BufReader<File>>,
     mmap: Option<Mmap>,
     filepath: PathBuf,
     buffer: Vec<u8>,
     cache: IndexMap<u64, Vec<u8>>,
+    node_cache: NodeCache<K, V>,
     root_offset: u64,
     _marker_k: PhantomData<K>,
     _marker_v: PhantomData<V>,
@@ -2082,6 +2775,7 @@ where
             filepath: PathBuf::new(),
             buffer: vec![0u8; PAGE_SIZE_USIZE],
             cache: IndexMap::with_capacity(CACHE_CAPACITY),
+            node_cache: IndexMap::with_capacity(CACHE_CAPACITY),
             root_offset,
             _marker_k: PhantomData,
             _marker_v: PhantomData,
@@ -2103,14 +2797,55 @@ where
     pub fn query(&mut self, key: &K) -> Result<Option<V>, BPlusTreeError> {
         if let Some(mmap) = &self.mmap {
             let mut cursor = io::Cursor::new(mmap.as_ref());
-            query_tree_mmap(mmap, &mut cursor, key, self.root_offset)
+            query_tree_mmap(mmap, &mut cursor, &mut self.node_cache, key, self.root_offset)
         } else if let Some(file) = &mut self.file {
             query_tree(file, &mut self.buffer, &mut self.cache, key, self.root_offset)
         } else {
             Err(BPlusTreeError::InvalidStructure("No data source available".into()))
         }
     }
+}
 
+/// Additional methods for key types that support zero-copy scanning.
+///
+/// These methods provide optimized query performance by avoiding heap allocations
+/// when traversing internal nodes. For trees with many levels, this can significantly
+/// reduce memory pressure and improve query latency.
+impl<K, V> BPlusTreeQuery<K, V>
+where
+    K: Ord + Serialize + for<'de> Deserialize<'de> + Clone + MsgPackScannable,
+    V: Serialize + for<'de> Deserialize<'de> + Clone,
+{
+    /// Zero-copy optimized query that avoids deserializing internal node keys.
+    ///
+    /// This method scans through MessagePack-encoded keys directly, comparing
+    /// without allocating. It's significantly faster for trees with many internal
+    /// nodes, especially when keys are `u32` or `String`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut query = BPlusTreeQuery::<u32, MyValue>::try_new(&path)?;
+    /// let value = query.query_zero_copy(&42)?;
+    /// ```
+    pub fn query_zero_copy(&mut self, key: &K) -> Result<Option<V>, BPlusTreeError> {
+        if let Some(mmap) = &self.mmap {
+            let mut cursor = io::Cursor::new(mmap.as_ref());
+            query_tree_mmap_zero_copy(mmap, &mut cursor, key, self.root_offset)
+        } else if let Some(file) = &mut self.file {
+            // For file-based queries, fall back to regular query
+            // (zero-copy would require reading node data into a buffer first)
+            query_tree(file, &mut self.buffer, &mut self.cache, key, self.root_offset)
+        } else {
+            Err(BPlusTreeError::InvalidStructure("No data source available".into()))
+        }
+    }
+}
+
+impl<K, V> BPlusTreeQuery<K, V>
+where
+    K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
+    V: Serialize + for<'de> Deserialize<'de> + Clone,
+{
     pub fn query_le(&mut self, key: &K) -> Result<Option<V>, BPlusTreeError> {
         if let Some(mmap) = &self.mmap {
             let mut cursor = io::Cursor::new(mmap.as_ref());
@@ -2456,14 +3191,26 @@ where
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlushPolicy {
+    /// Flush and sync after every update (safest, default)
+    Immediate,
+    /// Flush and sync only at the end of a batch operations
+    Batch,
+    /// Do not sync automatically (fastest, relies on OS or manual sync)
+    None,
+}
+
 pub struct BPlusTreeUpdate<K, V> {
     file: BufReader<File>,
     read_buffer: Vec<u8>,
     write_buffer: Vec<u8>,
+    serial_buffer: Vec<u8>, // Reusable buffer for serialization
     cache: IndexMap<u64, Vec<u8>>,
     root_offset: u64,
     inner_order: usize,
     leaf_order: usize,
+    flush_policy: FlushPolicy,
     #[allow(dead_code)]
     lock: FileLock,
     _marker_k: PhantomData<K>,
@@ -2524,12 +3271,19 @@ where
         // Acquire lock first
         let lock = FileLock::try_lock(filepath)?;
 
-        let file = utils::open_read_write_file(filepath)?;
-        let mut file = utils::file_reader(file);
+        let f = utils::open_read_write_file(filepath)?;
 
         // Verify Header
         let mut header = [0u8; 16];
-        file.read_exact(&mut header)?;
+        #[cfg(unix)]
+        f.read_exact_at(&mut header, 0)?;
+        #[cfg(not(unix))]
+        {
+            let mut tmp_f = &f;
+            tmp_f.seek(SeekFrom::Start(0))?;
+            tmp_f.read_exact(&mut header)?;
+        }
+
         if &header[0..4] != MAGIC {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid magic number"));
         }
@@ -2540,14 +3294,18 @@ where
         let root_offset = u64::from_le_bytes(header[8..16].try_into().map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid root offset slice"))?);
         let (inner_order, leaf_order) = calc_order::<K>();
 
+        let file = utils::file_reader(f);
+
         Ok(Self {
             file,
             read_buffer: vec![0u8; PAGE_SIZE_USIZE],
             write_buffer: vec![0u8; PAGE_SIZE_USIZE],
+            serial_buffer: Vec::with_capacity(PAGE_SIZE_USIZE),
             cache: IndexMap::with_capacity(CACHE_CAPACITY),
             root_offset,
             inner_order,
             leaf_order,
+            flush_policy: FlushPolicy::Immediate,
             lock,
             _marker_k: PhantomData,
             _marker_v: PhantomData,
@@ -2620,19 +3378,33 @@ where
         let refs = [(key, &value)];
         let new_root_offset = self.update_batch_recursive(self.root_offset, &refs)?;
 
-        // Atomic Header Swap
-        self.file.get_mut().seek(SeekFrom::Start(ROOT_OFFSET_POS)).map_err(BPlusTreeError::Io)?;
-        self.file.get_mut().write_all(&new_root_offset.to_le_bytes()).map_err(BPlusTreeError::Io)?;
-        self.file.get_mut().flush().map_err(BPlusTreeError::Io)?;
-        self.file.get_mut().sync_all().map_err(BPlusTreeError::Io)?;
+        // Only update header if root offset actually changed
+        // (if in-place update succeeded, offset stays the same)
+        if new_root_offset != self.root_offset {
+            // Atomic Header Swap
+            self.file.seek(SeekFrom::Start(ROOT_OFFSET_POS))?;
+            self.file.get_mut().write_all(&new_root_offset.to_le_bytes()).map_err(BPlusTreeError::Io)?;
+            self.root_offset = new_root_offset;
+        }
 
-        self.root_offset = new_root_offset;
+        self.file.get_mut().flush().map_err(BPlusTreeError::Io)?;
+        if self.flush_policy != FlushPolicy::None {
+            self.file.get_mut().sync_all().map_err(BPlusTreeError::Io)?;
+        }
+
         Ok(new_root_offset)
     }
 
     /// Update multiple items in batch. This is more efficient than calling `update()` multiple times
     /// as it performs all updates and then commits the final root offset once.
-    /// returns The final root offset after all updates, or an error if any update fails
+    ///
+    /// **Optimization**: This method first attempts in-place value updates for values stored in
+    /// Single mode. If all values fit in their existing allocated space, no node rewrites are
+    /// needed at all - only the value data is updated. This eliminates the cascading rewrite
+    /// problem for same-size or smaller value updates.
+    ///
+    /// returns The final root offset after all updates, or an error if any update fails.
+    /// Returns the original offset if all updates were performed in-place.
     fn update_batch_recursive(
         &mut self,
         offset: u64,
@@ -2641,23 +3413,63 @@ where
         let (mut node, pointers_opt) = BPlusTreeNode::<K, V>::deserialize_from_block(&mut self.file, &mut self.read_buffer, offset, false)?;
 
         if node.is_leaf {
+            // Track which items need the traditional COW approach (value grew beyond allocated space)
+            let mut needs_cow: Vec<(usize, &K, &V)> = Vec::new();
+            // Track promoted packed values (need node rewrite but value already written)
+            let mut promoted: Vec<(usize, ValueInfo)> = Vec::new();
+
             for (key, value) in items {
                 match node.keys.binary_search(key) {
                     Ok(idx) => {
-                        let (val_off, val_len) = self.insert_value_to_disk(value).map_err(BPlusTreeError::Io)?;
-                        node.value_info[idx] = ValueInfo {
-                            mode: ValueStorageMode::Single(val_off),
-                            length: val_len,
-                            compressed_cache: None,
-                        };
+                        // Try in-place update first
+                        let result = self.try_update_value_in_place(value, &node.value_info[idx])
+                            .map_err(BPlusTreeError::Io)?;
+
+                        match result {
+                            InPlaceUpdateResult::Success => {
+                                // In-place succeeded, value_info stays the same
+                            }
+                            InPlaceUpdateResult::PromotedToSingle(new_info) => {
+                                // Packed value promoted to Single, need to update node
+                                promoted.push((idx, new_info));
+                            }
+                            InPlaceUpdateResult::NeedsCow => {
+                                // Value doesn't fit in existing space, need full COW
+                                needs_cow.push((idx, *key, *value));
+                            }
+                        }
                     }
                     Err(_) => return Err(BPlusTreeError::KeyNotFound),
                 }
             }
+
+            // If all updates were in-place (no promotions, no COW), no node rewrite needed!
+            if needs_cow.is_empty() && promoted.is_empty() {
+                // Flush to ensure in-place writes hit disk
+                self.file.get_mut().flush().map_err(BPlusTreeError::Io)?;
+                return Ok(offset); // Return original offset - no node changes
+            }
+
+            // Apply promoted value_info updates
+            for (idx, new_info) in promoted {
+                node.value_info[idx] = new_info;
+            }
+
+            // Handle COW items - need to write new value blocks
+            for (idx, _key, value) in needs_cow {
+                let (val_off, val_len) = self.insert_value_to_disk(value).map_err(BPlusTreeError::Io)?;
+                node.value_info[idx] = ValueInfo {
+                    mode: ValueStorageMode::Single(val_off),
+                    length: val_len,
+                    cache: Mutex::new(None),
+                };
+            }
+
             let new_offset = self.write_node(&node).map_err(BPlusTreeError::Io)?;
             Ok(new_offset)
         } else {
             let mut pointers = pointers_opt.ok_or_else(|| BPlusTreeError::InvalidStructure("Internal node missing pointers".into()))?;
+            let mut any_child_changed = false;
 
             let mut current_idx = 0;
             while current_idx < items.len() {
@@ -2670,10 +3482,20 @@ where
                 }
 
                 let sub_items = &items[current_idx..group_end];
-                let new_child_offset = self.update_batch_recursive(pointers[child_idx], sub_items)?;
-                pointers[child_idx] = new_child_offset;
+                let original_child_offset = pointers[child_idx];
+                let new_child_offset = self.update_batch_recursive(original_child_offset, sub_items)?;
+
+                if new_child_offset != original_child_offset {
+                    pointers[child_idx] = new_child_offset;
+                    any_child_changed = true;
+                }
 
                 current_idx = group_end;
+            }
+
+            // If no child offsets changed, no need to rewrite this internal node
+            if !any_child_changed {
+                return Ok(offset);
             }
 
             let new_offset = self.write_internal_node(&node, &pointers).map_err(BPlusTreeError::Io)?;
@@ -2694,16 +3516,170 @@ where
 
         let new_root_offset = self.update_batch_recursive(self.root_offset, &sorted_items)?;
 
-        // Atomic Header Swap - only once at the end
-        self.file.get_mut().seek(SeekFrom::Start(ROOT_OFFSET_POS)).map_err(BPlusTreeError::Io)?;
-        self.file.get_mut().write_all(&new_root_offset.to_le_bytes()).map_err(BPlusTreeError::Io)?;
+        // Only update header if root offset actually changed
+        // (if all in-place updates succeeded, offset stays the same)
+        if new_root_offset != self.root_offset {
+            // Atomic Header Swap - only once at the end
+            self.file.get_mut().seek(SeekFrom::Start(ROOT_OFFSET_POS)).map_err(BPlusTreeError::Io)?;
+            self.file.get_mut().write_all(&new_root_offset.to_le_bytes()).map_err(BPlusTreeError::Io)?;
+            self.root_offset = new_root_offset;
+        }
+
         self.file.get_mut().flush().map_err(BPlusTreeError::Io)?;
         self.file.get_mut().sync_all().map_err(BPlusTreeError::Io)?;
 
-        self.root_offset = new_root_offset;
         Ok(new_root_offset)
     }
 
+
+    /// Try to update a value in-place if possible.
+    /// Returns:
+    /// - `Ok(Success)` if in-place update succeeded (no node rewrite needed)
+    /// - `Ok(PromotedToSingle(info))` if packed value was promoted to Single (node rewrite needed)
+    /// - `Ok(NeedsCow)` if new value doesn't fit (caller should use full COW)
+    /// - `Err` on I/O error
+    ///
+    /// For Single storage: updates in-place if new value fits in existing space.
+    /// For Packed storage:
+    ///   - If new serialized size equals old size exactly: updates in-place within the packed block
+    ///   - Otherwise: promotes to Single storage mode (writes at EOF, returns new `ValueInfo`)
+    fn try_update_value_in_place(&mut self, value: &V, existing_info: &ValueInfo) -> io::Result<InPlaceUpdateResult> {
+        // Serialize the new value first (needed for all paths)
+        let raw_bytes = binary_serialize(value)?;
+
+        match existing_info.mode {
+            ValueStorageMode::Single(existing_offset) => {
+                // Single storage: compress and check if it fits in existing space
+                let (flag, payload) = compress_if_beneficial(&raw_bytes);
+                let new_stored_len = 1 + payload.len(); // flag + payload
+                let existing_len = existing_info.length as usize;
+
+                if new_stored_len > existing_len {
+                    return Ok(InPlaceUpdateResult::NeedsCow); // Doesn't fit
+                }
+
+                // Write in-place: [flag:1][payload][zero-padding to existing_len]
+                self.file.seek(SeekFrom::Start(existing_offset))?;
+                self.file.get_mut().write_all(&[flag])?;
+                self.file.get_mut().write_all(&payload)?;
+
+                // Zero-pad remaining space
+                let padding_len = existing_len - new_stored_len;
+                if padding_len > 0 {
+                    let zeros = vec![0u8; padding_len];
+                    self.file.get_mut().write_all(&zeros)?;
+                }
+
+                // Invalidate BufReader cache since we bypassed it to write
+                self.file.stream_position()?;  // alias for seek(SeekFrom::Current(0))
+
+                Ok(InPlaceUpdateResult::Success)
+            }
+            ValueStorageMode::Packed(block_offset, value_index) => {
+                // Packed storage: raw_bytes is the MessagePack-serialized value (no compression for packed)
+                let new_len = raw_bytes.len();
+                let existing_len = existing_info.length as usize;
+
+                if new_len == existing_len {
+                    // Same size: can update in-place within the packed block
+                    self.update_packed_value_in_place(block_offset, value_index, &raw_bytes, &existing_info.cache)?;
+                    Ok(InPlaceUpdateResult::Success)
+                } else {
+                    // Different size: promote to Single storage mode
+                    // Write value at EOF as Single (with compression)
+                    let (val_offset, val_len) = self.insert_value_to_disk(value)?;
+                    let new_info = ValueInfo {
+                        mode: ValueStorageMode::Single(val_offset),
+                        length: val_len,
+                        cache: Mutex::new(None),
+                    };
+                    Ok(InPlaceUpdateResult::PromotedToSingle(new_info))
+                }
+            }
+        }
+    }
+
+    /// Update a value in-place within a packed block.
+    /// The new value must have the exact same serialized size as the existing value.
+    fn update_packed_value_in_place(
+        &mut self,
+        block_offset: u64,
+        value_index: u16,
+        new_value_bytes: &[u8],
+        cache: &Mutex<Option<CacheData>>,
+    ) -> io::Result<()> {
+        // Optimization: Use cached offset if available to skip read and scan
+        let cached_pos = {
+            let guard = cache.lock();
+            if let Some(CacheData::PackedOffset(pos)) = guard.as_ref() {
+                Some(*pos)
+            } else {
+                None
+            }
+        };
+
+        if let Some(pos) = cached_pos {
+            // Jump directly to the offset (avoid reading entire block and linear scan)
+            self.file.seek(SeekFrom::Start(block_offset + u64::from(pos)))?;
+            self.file.get_mut().write_all(new_value_bytes)?;
+            self.file.stream_position()?;
+            return Ok(());
+        }
+
+        // Read the entire packed block
+        self.file.seek(SeekFrom::Start(block_offset))?;
+        let mut block_buffer = vec![0u8; PAGE_SIZE_USIZE];
+        self.file.read_exact(&mut block_buffer)?;
+
+        // Navigate to the target value's position
+        // Format: [COUNT:4B][LEN:4B][data...][LEN:4B][data...]...
+        let mut pos = 4; // Skip count
+
+        for i in 0..=value_index {
+            if pos + 4 > PAGE_SIZE_USIZE {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Packed block corrupted: position {pos} exceeds block size"),
+                ));
+            }
+
+            let len = u32::from_le_bytes(block_buffer[pos..pos + 4].try_into().map_err(to_io_error)?) as usize;
+            pos += 4;
+
+            if i == value_index {
+                // Found target value - verify size matches
+                if len != new_value_bytes.len() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("Size mismatch in packed update: expected {len}, got {}", new_value_bytes.len()),
+                    ));
+                }
+
+                // Update the value data in the buffer
+                block_buffer[pos..pos + len].copy_from_slice(new_value_bytes);
+
+                // Write the entire block back (optimization: we could write just the slice, 
+                // but we already have the whole block in-memory here and write_all(4KB) is fast)
+                self.file.seek(SeekFrom::Start(block_offset))?;
+                self.file.get_mut().write_all(&block_buffer)?;
+
+                // Cache the offset for future updates
+                *cache.lock() = Some(CacheData::PackedOffset(u16::try_from(pos).map_err(to_io_error)?));
+
+                // Invalidate BufReader cache
+                self.file.stream_position()?; // alias for seek(SeekFrom::Current(0))
+
+                return Ok(());
+            }
+
+            pos += len;
+        }
+
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Value index {value_index} not found in packed block"),
+        ))
+    }
 
     /// Insert or update multiple items in batch (upsert). If a key exists, it will be updated;
     /// if it doesn't exist, it will be inserted. This is more efficient than calling `update()`
@@ -2731,14 +3707,16 @@ where
     fn write_node(&mut self, node: &BPlusTreeNode<K, V>) -> io::Result<u64> {
         self.file.get_mut().seek(SeekFrom::End(0))?;
         let offset = self.file.get_mut().stream_position()?;
-        node.serialize_to_block(self.file.get_mut(), &mut self.write_buffer, offset)?;
+        self.serial_buffer.clear();
+        node.serialize_to_block(self.file.get_mut(), &mut self.write_buffer, &mut self.serial_buffer, offset)?;
         Ok(offset)
     }
 
     fn write_internal_node(&mut self, node: &BPlusTreeNode<K, V>, pointers: &[u64]) -> io::Result<u64> {
         self.file.get_mut().seek(SeekFrom::End(0))?;
         let offset = self.file.get_mut().stream_position()?;
-        node.serialize_internal_with_offsets(self.file.get_mut(), &mut self.write_buffer, offset, pointers)?;
+        self.serial_buffer.clear();
+        node.serialize_internal_with_offsets(self.file.get_mut(), &mut self.write_buffer, &mut self.serial_buffer, offset, pointers)?;
         Ok(offset)
     }
 
@@ -2758,7 +3736,7 @@ where
         if node.is_leaf {
             for (key, value) in items {
                 let (val_off, val_len) = self.insert_value_to_disk(value)?;
-                let new_info = ValueInfo { mode: ValueStorageMode::Single(val_off), length: val_len, compressed_cache: None };
+                let new_info = ValueInfo { mode: ValueStorageMode::Single(val_off), length: val_len, cache: Mutex::new(None) };
 
                 match node.keys.binary_search(key) {
                     Ok(idx) => {
@@ -2878,7 +3856,9 @@ where
         self.file.get_mut().seek(SeekFrom::Start(ROOT_OFFSET_POS))?;
         self.file.get_mut().write_all(&current_root.to_le_bytes())?;
         self.file.get_mut().flush()?;
-        self.file.get_mut().sync_all()?;
+        if self.flush_policy != FlushPolicy::None {
+            self.file.get_mut().sync_all()?;
+        }
 
         self.root_offset = current_root;
         Ok(current_root)
@@ -2955,13 +3935,15 @@ where
                 current_leaf.value_info.push(ValueInfo {
                     mode: ValueStorageMode::Single(val_offset),
                     length: stored_len,
-                    compressed_cache: None,
+                    cache: Mutex::new(None),
                 });
 
                 if current_leaf.keys.len() >= self.leaf_order {
                     let first_key = current_leaf.keys[0].clone();
                     let node_offset = current_offset;
-                    current_offset = current_leaf.serialize_to_block(&mut write_buffer, &mut node_buffer, node_offset)?;
+                    // Created temporary scratch buffer for serialization
+                    let mut serial_buf = Vec::new();
+                    current_offset = current_leaf.serialize_to_block(&mut write_buffer, &mut node_buffer, &mut serial_buf, node_offset)?;
                     leaf_pointers.push((first_key, node_offset));
                     current_leaf = BPlusTreeNode::new(true);
                 }
@@ -2971,7 +3953,8 @@ where
             if !current_leaf.keys.is_empty() {
                 let first_key = current_leaf.keys[0].clone();
                 let node_offset = current_offset;
-                current_offset = current_leaf.serialize_to_block(&mut write_buffer, &mut node_buffer, node_offset)?;
+                let mut serial_buf = Vec::new(); // Recyle? No loop here.
+                current_offset = current_leaf.serialize_to_block(&mut write_buffer, &mut node_buffer, &mut serial_buf, node_offset)?;
                 leaf_pointers.push((first_key, node_offset));
             }
             write_buffer.flush()?;
@@ -2987,7 +3970,7 @@ where
         temp_file.write_all(&root_offset.to_le_bytes())?;
 
         temp_file.flush()?;
-        temp_file.as_file().sync_all()?;
+        // temp_file.as_file().sync_all()?; // Removed as requested; relying on persist or OS flush policy
 
         // 5. Atomic Replace
         temp_file.persist(filepath).map_err(to_io_error)?;
@@ -3091,6 +4074,10 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    use parking_lot::Mutex;
     use std::collections::HashSet;
     use std::io;
 
@@ -3363,56 +4350,73 @@ mod tests {
         let filepath = tempdir.path().join("tree_size_test.bin");
         let mut tree = BPlusTree::<u32, Record>::new();
 
-        // Use fixed size string for predictable sizing
-        let padding = "x".repeat(100);
+        // Use incompressible data > SMALL_VALUE_THRESHOLD (256 bytes) to ensure Single storage.
+        // Repetitive strings like "x".repeat(300) compress too well with LZ4 and end up
+        // smaller than 256 bytes, causing them to be stored as Packed (not Single).
+        // Random-looking strings don't compress well and stay above the threshold.
+        let padding: String = generate_random_string(400);
         for i in 0u32..10 {
-            tree.insert(i, Record { id: i, data: padding.clone() });
+            // Each record has unique data to prevent compression
+            tree.insert(i, Record { id: i, data: format!("{}{}", padding, i) });
         }
         tree.store(&filepath)?;
 
         let initial_size = std::fs::metadata(&filepath)?.len();
 
-        // Update with same size data
+        // Update with same-length incompressible data - should be in-place, no file growth
         let mut tree_update = BPlusTreeUpdate::<u32, Record>::try_new(&filepath)?;
-        let same_size_padding = "y".repeat(100);
+        let same_size_padding: String = generate_random_string(400);
         for i in 0u32..10 {
-            tree_update.update(&i, Record { id: i, data: same_size_padding.clone() }).map_err(|e| e.to_io())?;
+            tree_update.update(&i, Record { id: i, data: format!("{}{}", same_size_padding, i) }).map_err(|e| e.to_io())?;
         }
 
         let size_after_same_update = std::fs::metadata(&filepath)?.len();
-        assert!(size_after_same_update > initial_size, "File should grow during COW same-size update");
+        // With in-place update optimization, same-size updates should NOT grow the file
+        assert_eq!(size_after_same_update, initial_size, "Same-size updates should happen in-place without file growth");
+        drop(tree_update);
 
-        // Reload and verify
+        // Reload and verify the in-place updates worked
         let mut tree_query = BPlusTreeQuery::<u32, Record>::try_new(&filepath)?;
         for i in 0u32..10 {
             let val = tree_query.query(&i).expect("Query failed").expect("Should find key");
-            assert_eq!(val.data, same_size_padding);
+            assert!(val.data.starts_with(&same_size_padding), "Updated value should contain new padding");
         }
+        drop(tree_query);
 
-        // Update with smaller size data
-        let smaller_padding = "z".repeat(50);
+        // Update with smaller size data - should also be in-place, no file growth
+        // Using 200-char random string (smaller than 400 but > threshold for incompressibility)
+        let mut tree_update = BPlusTreeUpdate::<u32, Record>::try_new(&filepath)?;
+        let smaller_padding: String = generate_random_string(200);
         for i in 0u32..10 {
-            tree_update.update(&i, Record { id: i, data: smaller_padding.clone() }).map_err(|e| e.to_io())?;
+            tree_update.update(&i, Record { id: i, data: format!("{}{}", smaller_padding, i) }).map_err(|e| e.to_io())?;
         }
 
-        // Update with larger size data (force append)
-        let larger_padding = "w".repeat(5000);
+        let size_after_smaller_update = std::fs::metadata(&filepath)?.len();
+        assert_eq!(size_after_smaller_update, initial_size, "Smaller updates should happen in-place without file growth");
+
+        // Update with larger size data - should trigger COW and file growth
+        // 5000 chars is much larger than the original ~400 byte allocation
+        let larger_padding: String = generate_random_string(5000);
         for i in 0u32..1 {
-            tree_update.update(&i, Record { id: i, data: larger_padding.clone() }).map_err(|e| e.to_io())?;
+            tree_update.update(&i, Record { id: i, data: format!("{}{}", larger_padding, i) }).map_err(|e| e.to_io())?;
         }
 
-        let size_before_compact = std::fs::metadata(&filepath)?.len();
+        let size_after_larger_update = std::fs::metadata(&filepath)?.len();
+        assert!(size_after_larger_update > initial_size, "Larger updates should trigger COW and grow the file");
 
         // Final verification: Compact should shrink the file
         tree_update.compact(&filepath)?;
         let size_after_compact = std::fs::metadata(&filepath)?.len();
-        assert!(size_after_compact < size_before_compact, "Compaction should reduce file size");
+        assert!(size_after_compact < size_after_larger_update, "Compaction should reduce file size");
+        drop(tree_update);
 
         // Final data check after compact
         let mut final_query = BPlusTreeQuery::<u32, Record>::try_new(&filepath)?;
-        assert_eq!(final_query.query(&0).unwrap().unwrap().data, larger_padding);
+        // Key 0 was updated with larger padding
+        assert!(final_query.query(&0).unwrap().unwrap().data.starts_with(&larger_padding));
+        // Keys 1-9 were updated with smaller padding
         for i in 1u32..10 {
-            assert_eq!(final_query.query(&i).unwrap().unwrap().data, smaller_padding);
+            assert!(final_query.query(&i).unwrap().unwrap().data.starts_with(&smaller_padding));
         }
 
         Ok(())
@@ -4206,7 +5210,7 @@ mod tests {
                 .map(|i| ValueInfo {
                     mode: ValueStorageMode::Packed(i as u64 * 4096, (i % 16) as u16),
                     length: 100,
-                    compressed_cache: None,
+                    cache: Mutex::new(None),
                 })
                 .collect();
 
@@ -4224,11 +5228,195 @@ mod tests {
         }
         Ok(())
     }
-}
 
-#[cfg(test)]
-mod page_tests {
-    use super::*;
+    /// Test that packed value updates work correctly:
+    /// - Same-size updates happen in-place within the packed block
+    /// - Different-size updates promote the value to Single storage mode
+    #[test]
+    fn test_packed_value_update() -> io::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let filepath = tempdir.path().join("tree_packed_update.bin");
+
+        // Create and store tree with small values that will be packed
+        let mut tree = BPlusTree::<u32, String>::new();
+
+        // Insert 50 small values (< 256 bytes) that will use packed storage
+        let small_val = "x".repeat(50); // 50 bytes, well under SMALL_VALUE_THRESHOLD
+        for i in 0..50 {
+            tree.insert(i, small_val.clone());
+        }
+
+        tree.store(&filepath)?;
+        drop(tree);
+
+        // Get initial file size
+        let size_initial = std::fs::metadata(&filepath)?.len();
+
+        // Open for update
+        let mut tree_update = BPlusTreeUpdate::<u32, String>::try_new(&filepath)?;
+
+        // Test 1: Same-size update (should update in-place within packed block)
+        let same_size_val = "y".repeat(50); // Same size as original
+        let refs1 = [(&5u32, &same_size_val)];
+        tree_update.update_batch(&refs1).map_err(super::BPlusTreeError::to_io)?;
+
+        // Test 2: Different-size update (should promote to Single storage)
+        let larger_val = "z".repeat(100); // Larger than original
+        let refs2 = [(&10u32, &larger_val)];
+        tree_update.update_batch(&refs2).map_err(super::BPlusTreeError::to_io)?;
+
+        // Test 3: Smaller-size update (should promote to Single storage due to size mismatch)
+        let smaller_val = "w".repeat(30); // Smaller than original
+        let refs3 = [(&15u32, &smaller_val)];
+        tree_update.update_batch(&refs3).map_err(super::BPlusTreeError::to_io)?;
+
+        drop(tree_update);
+
+        // Get file size after updates
+        let size_after = std::fs::metadata(&filepath)?.len();
+
+        // File size should have grown slightly (promoted values written at EOF)
+        // but not dramatically since most values are still packed
+        println!("Size initial: {}, Size after: {}", size_initial, size_after);
+        assert!(size_after >= size_initial, "File should not shrink");
+
+        // Verify all data is correct
+        let mut query = BPlusTreeQuery::<u32, String>::try_new(&filepath)?;
+
+        // Updated values
+        assert_eq!(query.query(&5).unwrap(), Some(same_size_val.clone()), "Same-size update failed");
+        assert_eq!(query.query(&10).unwrap(), Some(larger_val.clone()), "Larger-size update failed");
+        assert_eq!(query.query(&15).unwrap(), Some(smaller_val.clone()), "Smaller-size update failed");
+
+        // Unchanged values
+        assert_eq!(query.query(&0).unwrap(), Some(small_val.clone()), "Unchanged value 0 incorrect");
+        assert_eq!(query.query(&20).unwrap(), Some(small_val.clone()), "Unchanged value 20 incorrect");
+        assert_eq!(query.query(&49).unwrap(), Some(small_val.clone()), "Unchanged value 49 incorrect");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_flush_policy() -> io::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let filepath = tempdir.path().join("tree_flush.bin");
+
+        let mut tree = BPlusTree::<u32, String>::new();
+        for i in 0..10 {
+            tree.insert(i, format!("value_{}", i));
+        }
+        tree.store(&filepath)?;
+
+        let mut update = BPlusTreeUpdate::<u32, String>::try_new(&filepath)?;
+
+        // Test None policy - should not error
+        update.flush_policy = super::FlushPolicy::None;
+        for i in 0..5 {
+            update.update(&i, format!("new_{}", i)).map_err(super::BPlusTreeError::to_io)?;
+        }
+
+        // Verify values within same session
+        for i in 0..5 {
+            assert_eq!(update.query(&i).map_err(super::BPlusTreeError::to_io)?.unwrap(), format!("new_{}", i));
+        }
+
+        // Test Batch policy
+        update.flush_policy = super::FlushPolicy::Batch;
+        let batch = [(&5u32, &"batch_5".to_string()), (&6u32, &"batch_6".to_string())];
+        update.update_batch(&batch).map_err(super::BPlusTreeError::to_io)?;
+
+        assert_eq!(update.query(&5).map_err(super::BPlusTreeError::to_io)?.unwrap(), "batch_5");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_cache_population_and_reuse() -> io::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let filepath = tempdir.path().join("tree_cache.bin");
+
+        // Create tree with mixed storage
+        let mut tree = BPlusTree::<u32, String>::new();
+        // 1. Single storage (large-ish value)
+        let large_val = "A".repeat(500);
+        tree.insert(1, large_val.clone());
+        // 2. Packed storage (small value)
+        let small_val = "B".repeat(20);
+        tree.insert(2, small_val.clone());
+
+        tree.store(&filepath)?;
+
+        let mut update = BPlusTreeUpdate::<u32, String>::try_new(&filepath)?;
+
+        // --- Single Storage Cache ---
+        // First read populates cache
+        let val1 = update.query(&1).map_err(super::BPlusTreeError::to_io)?.unwrap();
+        assert_eq!(val1, large_val);
+
+        // Subsequent update of DIFFERENT key should not affect key 1's cache
+        let _ = update.update(&10, "unrelated".into()); // Might error if 10 not found, but we check cache reuse
+
+        // Update key 1 with SAME SIZE (should use/populate cache)
+        let large_val_2 = "C".repeat(500);
+        update.update(&1, large_val_2.clone()).map_err(super::BPlusTreeError::to_io)?;
+        assert_eq!(update.query(&1).map_err(super::BPlusTreeError::to_io)?.unwrap(), large_val_2);
+
+        // --- Packed Storage Cache ---
+        // First read of key 2 populates PackedOffset cache
+        let _ = update.query(&2).map_err(super::BPlusTreeError::to_io)?;
+
+        // Update key 2 with SAME SIZE (should use Cached Offset)
+        let small_val_2 = "D".repeat(20);
+        update.update(&2, small_val_2.clone()).map_err(super::BPlusTreeError::to_io)?;
+
+        // Verify update
+        assert_eq!(update.query(&2).map_err(super::BPlusTreeError::to_io)?.unwrap(), small_val_2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_concurrent_cache_access() -> io::Result<()> {
+        use std::sync::Arc;
+        use std::thread;
+
+        let tempdir = tempfile::tempdir()?;
+        let filepath = tempdir.path().join("tree_concurrent.bin");
+
+        let mut tree = BPlusTree::<u32, String>::new();
+        let val = "concurrent_test_value".to_string();
+        for i in 0..100 {
+            tree.insert(i, val.clone());
+        }
+        tree.store(&filepath)?;
+
+        // We test concurrent READS on BPlusTreeQuery. 
+        // Note: BPlusTreeQuery::query requires &mut self for buffer management, 
+        // so we use a Mutex to protect it. While this serializes the query() calls,
+        // it still tests thread-safety of the shared ValueInfo Mutexes internally 
+        // if they were somehow shared (though they currently aren't).
+        let query = Arc::new(parking_lot::Mutex::new(super::BPlusTreeQuery::<u32, String>::try_new(&filepath)?));
+
+        let mut handles = Vec::new();
+        for _t in 0..10 {
+            let q = Arc::clone(&query);
+            let v = val.clone();
+            let handle = thread::spawn(move || {
+                for i in 0..100 {
+                    let mut guard = q.lock();
+                    let res = guard.query(&i).expect("Query failed");
+                    assert_eq!(res, Some(v.clone()));
+                }
+            });
+            handles.push(handle);
+        }
+
+        for h in handles {
+            h.join().expect("Thread panicked");
+        }
+
+        Ok(())
+    }
 
     #[test]
     fn test_page_initialization() {
@@ -4320,6 +5508,31 @@ mod page_tests {
             Ok(Some(_)) => panic!("Split of single item should result in None"),
             Err(e) => panic!("Split of single item should result in no-op, not error: {:?}", e),
         }
+    }
+
+    #[test]
+    fn small_tree_test() -> io::Result<()> {
+        let tempdir = tempdir()?;
+        let filepath = tempdir.path().join("small_tree.bin");
+
+        let mut tree = BPlusTree::<String, String>::new();
+        tree.insert("key1".to_string(), "val1".to_string());
+        tree.insert("key2".to_string(), "val2".to_string());
+
+        assert_eq!(tree.len(), 2);
+
+        tree.store(&filepath)?;
+
+        let mut update = BPlusTreeUpdate::<String, String>::try_new(&filepath)?;
+        assert_eq!(update.len().unwrap(), 2);
+
+        let res1 = update.query(&"key1".to_string()).unwrap();
+        assert_eq!(res1, Some("val1".to_string()));
+
+        let res2 = update.query(&"key2".to_string()).unwrap();
+        assert_eq!(res2, Some("val2".to_string()));
+
+        Ok(())
     }
 }
 

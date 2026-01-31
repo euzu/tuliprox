@@ -7,6 +7,7 @@ use std::sync::Arc;
 use tokio::io::AsyncBufReadExt;
 use indexmap::IndexMap;
 use shared::concat_string;
+use crate::repository::CategoryKey;
 
 // other implementations like calculating text_distance on all titles took too much time
 // we keep it now as simple as possible and less memory intensive.
@@ -252,11 +253,12 @@ pub async fn consume_m3u<F: FnMut(PlaylistItem)>(cfg: &Config, input: &ConfigInp
 
 pub async fn parse_m3u(cfg: &Config, input: &ConfigInput, lines: DynReader) -> Vec<PlaylistGroup>
 {
-    let mut group_map: IndexMap<String, Vec<PlaylistItem>> = IndexMap::new();
+    let mut group_map: IndexMap<CategoryKey, Vec<PlaylistItem>> = IndexMap::new();
     consume_m3u(cfg, input, lines, |item| {
         let key = {
             let header = &item.header;
-            format!("{}{}", &header.xtream_cluster, &header.group)
+            let normalized_group = shared::utils::deunicode_string(&header.group).to_lowercase().intern();
+            (header.xtream_cluster, normalized_group)
         };
         group_map.entry(key).or_default().push(item);
     }).await;

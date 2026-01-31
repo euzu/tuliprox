@@ -230,12 +230,13 @@ pub fn PlaylistExplorer() -> Html {
                                         let cluster = dto.cluster;
                                         let translate_clone = translate_clone.clone();
                                         let target_id = *target_id;
+                                        let services_clone = services.clone();
                                         spawn_local(async move {
                                             if let Some(url) = services.playlist.get_playlist_webplayer_url(target_id, virtual_id, cluster).await {
                                                 copy_to_clipboard.emit(url);
-                                                services.toastr.success(translate_clone.t("MESSAGES.PLAYLIST.WEBPLAYER_URL_COPY_TO_CLIPBOARD"));
+                                                services_clone.toastr.success(translate_clone.t("MESSAGES.PLAYLIST.WEBPLAYER_URL_COPY_TO_CLIPBOARD"));
                                             } else {
-                                                services.toastr.error(translate_clone.t("MESSAGES.FAILED_TO_RETRIEVE_WEBPLAYER_URL"));
+                                                services_clone.toastr.error(translate_clone.t("MESSAGES.FAILED_TO_RETRIEVE_WEBPLAYER_URL"));
                                             }
                                         });
                                     }
@@ -248,7 +249,23 @@ pub fn PlaylistExplorer() -> Html {
                     }
                     ExplorerAction::CopyLinkProviderUrl => {
                         if let Some(dto) = &*selected_channel {
-                            copy_to_clipboard.emit(dto.url.to_string());
+                             let url = dto.url.clone();
+                             if !url.is_empty() {
+                                copy_to_clipboard.emit(url);
+                             } else {
+                                // Try to fetch episode
+                                if let Some(playlist_request) = playlist_ctx.playlist_request.as_ref() {
+                                     let copy_to_clipboard = copy_to_clipboard.clone();
+                                     let services = services.clone();
+                                     let virtual_id = dto.virtual_id;
+                                     let playlist_request = playlist_request.clone();
+                                     spawn_local(async move {
+                                         if let Some(pli) = services.playlist.get_episode(virtual_id, &playlist_request).await {
+                                             copy_to_clipboard.emit(pli.url.to_string());
+                                         }
+                                     });
+                                }
+                             }
                         }
                     }
                 }

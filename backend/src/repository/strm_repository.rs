@@ -777,7 +777,7 @@ pub async fn write_strm_playlist(
     let normalized_dir = normalize_string_path(&target_output.directory);
     let strm_file_prefix = hash_string_as_hex(&normalized_dir);
     let strm_index_path =
-        strm_get_file_paths(&strm_file_prefix, &ensure_target_storage_path(&config, target.name.as_str())?);
+        strm_get_file_paths(&strm_file_prefix, &ensure_target_storage_path(&config, target.name.as_str()).await?);
     let existing_strm = {
         let _file_lock = app_config
             .file_locks
@@ -998,8 +998,7 @@ fn get_strm_url(
         _ => None,
     } {
         let url = &str_item_info.url;
-        let ext = extract_extension_from_url(url)
-            .map_or_else(String::new, std::string::ToString::to_string);
+        let ext = extract_extension_from_url(url).unwrap_or_default();
         format!(
             "{}/{stream_type}/{}/{}/{}{ext}",
             server_info.get_base_url(),

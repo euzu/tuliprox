@@ -12,7 +12,7 @@ use crate::utils::FileReadGuard;
 use std::collections::HashSet;
 use std::iter::Peekable;
 use log::error;
-use shared::utils::Internable;
+use shared::utils::{extract_extension_from_url, Internable};
 
 #[allow(clippy::struct_excessive_bools)]
 pub struct M3uPlaylistIterator {
@@ -41,7 +41,7 @@ impl M3uPlaylistIterator {
 
         let m3u_output = target.get_m3u_output().ok_or_else(|| info_err!("Unexpected failure, missing m3u target output for target {}",  target.name))?;
         let config = cfg.config.load();
-        let target_path = ensure_target_storage_path(&config, target.name.as_str())?;
+        let target_path = ensure_target_storage_path(&config, target.name.as_str()).await?;
         let m3u_path = m3u_get_file_path_for_db(&target_path);
 
         let file_lock = cfg.file_locks.read_lock(&m3u_path).await;
@@ -107,7 +107,7 @@ impl M3uPlaylistIterator {
             + 32; // separators and id
         if typed { cap += stream_type.len() + 1; }
 
-        if typed {
+        let rewritten_url = if typed {
             shared::concat_string!(
                 cap = cap;
                 &self.base_url, "/", prefix_path, "/", stream_type, "/",
@@ -119,7 +119,9 @@ impl M3uPlaylistIterator {
                 &self.base_url, "/", prefix_path, "/",
                 &self.username, "/", &self.password, "/", &m3u_pli.virtual_id.to_string()
             )
-        }
+        };
+
+        extract_extension_from_url(&m3u_pli.url).map(|ext| shared::concat_string!(&rewritten_url, &ext)).unwrap_or(rewritten_url)
     }
 
     fn get_stream_url(&self, m3u_pli: &M3uPlaylistItem, typed: bool) -> String {

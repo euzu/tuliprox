@@ -1,7 +1,7 @@
 use crate::utils::{arc_str_serde, arc_str_option_serde, arc_str_vec_serde, Internable};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::Arc;
+use indexmap::IndexMap;
 use serde_json::Value;
 use crate::concat_string;
 use crate::model::{PlaylistItemType, SeriesStreamDetailEpisodeProperties, SeriesStreamDetailSeasonProperties,
@@ -120,7 +120,7 @@ pub struct XtreamSeriesInfoDoc {
     #[serde(default)]
     pub seasons: Vec<XtreamSeriesSeasonInfoDoc>,
     pub info: XtreamSeriesInfoData,
-    pub episodes: HashMap<String, Vec<XtreamSeriesEpisodeInfoDoc>>,
+    pub episodes: IndexMap<String, Vec<XtreamSeriesEpisodeInfoDoc>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -277,7 +277,7 @@ impl StreamProperties {
             episodes: if let Some(episodes) = series.details.as_ref().and_then(|d| d.episodes.as_ref()) {
                 self.series_episodes_to_info_document(options, resource_url.as_deref(), episodes)
             } else {
-                HashMap::new()
+                IndexMap::new()
             }
         }
     }
@@ -395,9 +395,9 @@ impl StreamProperties {
 
     fn series_episodes_to_info_document(&self, options: &XtreamMappingOptions,
                                         resource_url: Option<&str>,
-                                        episodes: &[SeriesStreamDetailEpisodeProperties]) -> HashMap<String, Vec<XtreamSeriesEpisodeInfoDoc>> {
+                                        episodes: &[SeriesStreamDetailEpisodeProperties]) -> IndexMap<String, Vec<XtreamSeriesEpisodeInfoDoc>> {
         let empty_str = "".intern();
-        let mut map: HashMap<u32, Vec<XtreamSeriesEpisodeInfoDoc>> = HashMap::new();
+        let mut map: IndexMap<u32, Vec<XtreamSeriesEpisodeInfoDoc>> = IndexMap::new();
         for ep in episodes {
             let doc = XtreamSeriesEpisodeInfoDoc {
                 id: ep.id.intern(),

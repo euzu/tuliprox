@@ -1156,7 +1156,7 @@ dependencies = [
 
 [[package]]
 name = "frontend"
-version = "3.2.58"
+version = "3.2.68"
 dependencies = [
  "anyhow",
  "base64",
@@ -2271,6 +2271,8 @@ checksum = "0ad4bb2b565bca0645f4d68c5c9af97fba094e9791da685bf83cb5f3ce74acf2"
 dependencies = [
  "equivalent",
  "hashbrown 0.16.1",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]
@@ -4015,7 +4017,7 @@ dependencies = [
 
 [[package]]
 name = "shared"
-version = "3.2.58"
+version = "3.2.68"
 dependencies = [
  "base64",
  "bitflags 2.10.0",
@@ -4602,7 +4604,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tuliprox"
-version = "3.2.58"
+version = "3.2.68"
 dependencies = [
  "arc-swap",
  "async-compression",
@@ -4639,6 +4641,7 @@ dependencies = [
  "mime_guess",
  "notify",
  "openssl",
+ "parking_lot",
  "paste",
  "path-clean",
  "pest",

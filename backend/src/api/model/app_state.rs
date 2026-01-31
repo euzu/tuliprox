@@ -2,7 +2,7 @@ use crate::api::config_watch::exec_config_watch;
 use crate::api::model::{ActiveProviderManager, ConnectionManager, EventManager, PlaylistStorage, PlaylistStorageState, SharedStreamManager};
 use crate::api::model::{ActiveUserManager, DownloadQueue};
 use crate::api::scheduler::exec_scheduler;
-use crate::model::{AppConfig, Config, ConfigTarget, HdHomeRunConfig, HdHomeRunDeviceConfig, ProcessTargets, ReverseProxyDisabledHeaderConfig, ScheduleConfig, SourcesConfig};
+use crate::model::{AppConfig, Config, ConfigTarget, GracePeriodOptions, HdHomeRunConfig, HdHomeRunDeviceConfig, ProcessTargets, ReverseProxyDisabledHeaderConfig, ScheduleConfig, SourcesConfig};
 use crate::repository::load_target_into_memory_cache;
 use crate::tools::lru_cache::LRUResourceCache;
 use crate::utils::request::create_client;
@@ -11,7 +11,7 @@ use log::{error, info};
 use reqwest::Client;
 use shared::error::TuliproxError;
 use shared::model::{UserConnectionPermission};
-use shared::utils::small_vecs_equal_unordered;
+use shared::utils::{small_vecs_equal_unordered};
 use std::collections::HashMap;
 use std::sync::atomic::AtomicI8;
 use std::sync::Arc;
@@ -444,6 +444,10 @@ impl AppState {
 
     pub fn get_disabled_headers(&self) -> Option<ReverseProxyDisabledHeaderConfig> {
         self.app_config.get_disabled_headers()
+    }
+
+    pub fn get_grace_options(&self) -> GracePeriodOptions {
+        self.app_config.get_grace_options()
     }
 }
 

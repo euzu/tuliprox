@@ -15,6 +15,7 @@ pub struct PlaylistService {
     playlist_api_webplayer_url_path: String,
     playlist_api_epg_path: String,
     playlist_api_series_info_path: String,
+    playlist_api_episode_info_path: String,
 }
 impl Default for PlaylistService {
     fn default() -> Self {
@@ -33,6 +34,7 @@ impl PlaylistService {
             playlist_api_webplayer_url_path: concat_path_leading_slash(&base_href, "api/v1/playlist/webplayer"),
             playlist_api_epg_path: concat_path_leading_slash(&base_href, "api/v1/playlist/epg"),
             playlist_api_series_info_path: concat_path_leading_slash(&base_href, "api/v1/playlist/series_info"),
+            playlist_api_episode_info_path: concat_path_leading_slash(&base_href, "api/v1/playlist/series/episode"),
         }
     }
     pub async fn update_targets(&self, targets: &[&str]) -> bool {
@@ -100,6 +102,14 @@ impl PlaylistService {
             None
         }, |response| {
             response.as_ref().map(|doc| SeriesStreamProperties::from_info_doc(doc, pli.virtual_id))
+        })
+    }
+
+    pub async fn get_episode(&self, virtual_id: u32, playlist_request: &PlaylistRequest) -> Option<UiPlaylistItem> {
+        let path = format!("{}/{virtual_id}", self.playlist_api_episode_info_path);
+        request_post::<&PlaylistRequest, UiPlaylistItem>(&path, playlist_request, None, None).await.unwrap_or_else(|err| {
+            error!("{err}");
+            None
         })
     }
 }

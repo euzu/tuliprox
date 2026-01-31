@@ -83,7 +83,7 @@ pub async fn playlist_resolve_vod(
     }
 
     let working_dir = &app_config.config.load().working_dir;
-    let storage_path = match get_input_storage_path(&input.name, working_dir) {
+    let storage_path = match get_input_storage_path(&input.name, working_dir).await {
         Ok(storage_path) => storage_path,
         Err(err) => {
             error!(

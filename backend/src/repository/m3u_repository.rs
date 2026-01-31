@@ -5,13 +5,13 @@ use crate::repository::bplustree::{BPlusTree, BPlusTreeQuery};
 use crate::repository::m3u_playlist_iterator::M3uPlaylistM3uTextIterator;
 use crate::repository::playlist_repository::get_input_m3u_playlist_file_path;
 use crate::repository::storage::{get_input_storage_path, get_target_storage_path};
-use crate::repository::storage_const;
+use crate::repository::{storage_const};
 use crate::repository::xtream_repository::CategoryKey;
 use crate::utils;
 use crate::utils::{async_file_writer, file_exists_async, FileReadGuard, IO_BUFFER_SIZE};
 use indexmap::IndexMap;
 use log::error;
-use shared::concat_string;
+use shared::{concat_string, notify_err_res};
 use shared::error::{notify_err, str_to_io_error, string_to_io_error, TuliproxError};
 use shared::model::{M3uPlaylistItem, PlaylistGroup};
 use shared::model::{PlaylistItem, PlaylistItemType, XtreamCluster};
@@ -29,21 +29,41 @@ macro_rules! cant_write_result {
     }
 }
 
-pub fn m3u_get_file_path_for_db(target_path: &Path) -> PathBuf {
-    target_path.join(PathBuf::from(concat_string!(storage_const::FILE_M3U, ".", storage_const::FILE_SUFFIX_DB)))
-}
-
-pub fn m3u_get_epg_file_path_for_target(target_path: &Path) -> PathBuf {
-    let path = target_path.join(PathBuf::from(concat_string!(storage_const::FILE_M3U, ".", storage_const::FILE_SUFFIX_DB)));
-    utils::add_prefix_to_filename(&path, "epg_", Some(storage_const::FILE_SUFFIX_DB))
-}
-
 macro_rules! await_playlist_write {
     ($expr:expr, $fmt:literal $(, $args:expr)* ) => {{
         $expr.await.map_err(|err| {
             notify_err!($fmt $(, $args)*, err)
         })?
     }};
+}
+
+pub fn m3u_get_file_path_for_db(target_path: &Path) -> PathBuf {
+    target_path.join(storage_const::PATH_M3U).join(concat_string!(storage_const::FILE_M3U, ".", storage_const::FILE_SUFFIX_DB))
+}
+
+pub fn m3u_get_epg_file_path_for_target(target_path: &Path) -> PathBuf {
+    let path = target_path.join(storage_const::PATH_M3U).join(concat_string!(storage_const::FILE_M3U, ".", storage_const::FILE_SUFFIX_DB));
+    utils::add_prefix_to_filename(&path, "epg_", Some(storage_const::FILE_SUFFIX_DB))
+}
+
+pub fn m3u_get_storage_path(cfg: &Config, target_name: &str) -> Option<PathBuf> {
+    get_target_storage_path(cfg, target_name).map(|target_path| target_path.join(PathBuf::from(storage_const::PATH_M3U)))
+}
+
+pub async fn ensure_m3u_storage_path(cfg: &Config, target_name: &str) -> Result<PathBuf, TuliproxError> {
+    if let Some(path) = m3u_get_storage_path(cfg, target_name) {
+        if tokio::fs::create_dir_all(&path).await.is_err() {
+            let msg = format!(
+                "Failed to save m3u data, can't create directory {}",
+                &path.display()
+            );
+            return notify_err_res!("{msg}");
+        }
+        Ok(path)
+    } else {
+        let msg = format!("Failed to save m3u data, can't create directory for target {target_name}");
+        notify_err_res!("{msg}")
+    }
 }
 
 async fn persist_m3u_playlist_as_text(
@@ -89,6 +109,9 @@ pub async fn m3u_write_playlist(
     if new_playlist.is_empty() {
         return Ok(());
     }
+
+    let config = cfg.config.load();
+    let _m3u_path = ensure_m3u_storage_path(&config, target.name.as_str()).await?;
 
     let m3u_path = m3u_get_file_path_for_db(target_path);
     let m3u_playlist = Arc::new(
@@ -152,7 +175,7 @@ pub async fn m3u_get_item_for_stream_id(stream_id: u32, app_state: &AppState, ta
         let _file_lock = cfg.file_locks.read_lock(&m3u_path).await;
 
         let mut query = BPlusTreeQuery::<u32, M3uPlaylistItem>::try_new(&m3u_path)?;
-        match query.query(&stream_id) {
+        match query.query_zero_copy(&stream_id) {
             Ok(Some(item)) => Ok(item),
             Ok(None) => Err(string_to_io_error(format!("Item not found: {stream_id}"))),
             Err(err) => Err(string_to_io_error(format!("Query failed for {stream_id}: {err}"))),
@@ -169,7 +192,7 @@ pub async fn iter_raw_m3u_target_playlist(config: &AppConfig, target: &ConfigTar
 
 pub async fn iter_raw_m3u_input_playlist(app_config: &AppConfig, input: &ConfigInput, cluster: Option<XtreamCluster>) -> Option<(FileReadGuard, Box<dyn Iterator<Item=M3uPlaylistItem> + Send>)> {
     let working_dir = &app_config.config.load().working_dir;
-    let storage_path = get_input_storage_path(&input.name, working_dir).ok()?;
+    let storage_path = get_input_storage_path(&input.name, working_dir).await.ok()?;
     let m3u_path = get_input_m3u_playlist_file_path(&storage_path, &input.name);
 
     iter_raw_m3u_playlist::<u32, Arc<str>>(app_config, &m3u_path, cluster).await

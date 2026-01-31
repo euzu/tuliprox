@@ -12,6 +12,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use shared::model::UUIDType;
+use shared::utils::Internable;
 
 pub trait PlaylistSource: Send + Sync {
     fn is_memory(&self) -> bool;
@@ -355,7 +356,8 @@ macro_rules! impl_single_file_disk_source {
                     let mut groups_map: IndexMap<(XtreamCluster, Arc<str>), PlaylistGroup> = IndexMap::new();
                     for (_, item) in q.iter() {
                         let cluster = XtreamCluster::try_from(item.item_type).unwrap_or(XtreamCluster::Live);
-                        let key = (cluster, item.group.clone());
+                        let normalized_group = shared::utils::deunicode_string(&item.group).to_lowercase().intern();
+                        let key = (cluster, normalized_group);
                         groups_map.entry(key)
                             .or_insert_with(|| PlaylistGroup {
                                 id: 0,

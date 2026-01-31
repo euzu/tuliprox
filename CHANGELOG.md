@@ -51,6 +51,7 @@
 - **User-Agent `default_user_agent`**: Ensures that outgoing requests always pass a default user agent.
 - **FFprobe Integration**: Added capability to probe streams for codec, resolution, HDR (HDR10/HLG/DV), and audio channels using `ffprobe`. Probing strictly respects provider connection limits. If no slot is available (considering user limits), the item is skipped to prevent provider bans.
 - **Metadata Fallback**: Automatically fetches missing TMDB IDs and release dates via the TMDB API if the provider data is incomplete.
+- **Streaming**: Added `grace_period_hold_stream` configuration option to delay stream output until grace period connection checks are completed.
 
 ### ⚙️ New Settings
 - **config.yml**:
@@ -69,8 +70,15 @@
 - **Atomic I/O Layer**: Refactored for atomic writes and file locking, ensuring data integrity.
 - **B+Tree Compaction**: Reclaim space after deletions or mass updates.
 - **Batch Upsert**: Significantly higher throughput during mass inserts/updates.
+- **Persistent Value Caching**: Implemented high-performance, thread-safe value caching
+- **Compressed Read Optimization**: Caches decompressed values in memory to eliminate redundant decompression overhead during frequent queries.
+- **Packed Block Update Optimization**: Caches exact byte offsets within 4KB blocks, enabling direct disk writes for same-size updates and bypassing expensive Read-Scan-Modify-Write cycles.
+- **Buffer Reuse**: Introduced reusable serialization buffers in `BPlusTreeUpdate` to minimize heap allocations during write operations.
+- **Configurable Flush Policy**: Added `Immediate`, `Batch`, and `None` flush policies to optimize disk synchronization overhead.
 - **Disk-Based Provider Processing**: New `disk_based_processing` config option massively reduces RAM usage by streaming playlist data from disk (BPlusTree) during updates.
 - **String Interning**: Implemented `Arc<str>` string interning for playlist items to further reduce memory footprint.
+- **Zero-Copy B+Tree Scan**: Implemented zero-copy scanning for B+Tree internal nodes, significantly reducing heap allocations and improving random read throughput (up to 96k ops/sec).
+- **Optimized Key Lookups**: `XtreamRepository` and `M3uRepository` now use zero-copy queries for `u32` keys, enhancing performance for high-traffic endpoints.
 
 ## 🔍 Mapping & Filtering Enhancements
 - **Accent-Independent Matching**: Integrated `match_as_ascii` flag for robust text matching (e.g., "Cinema" matches "Cinéma").
@@ -90,6 +98,7 @@
 - Added **TMDB** settings (Rate Limit, Cache Duration, Language) and **Metadata Formats** (NFO support) to Library configuration UI.
 
 ## 🚀 Performance & Stability
+- **Deadlock Resolution**: Fixed a potential deadlock in `ProviderLineupManager::reconcile_connections` by refactoring `DashMap` iterations to use snapshots, preventing internal shard locks from being held during async lock acquisition.
 - **Connection Reconciliation & GC**: Resolved a critical issue where provider connection counters could leak or become stale during hot reloads. Added automatic garbage collection for unused provider records to prevent logical memory buildup.
 - **Full Async Runtime**: Transitioned to `#[tokio::main]` and async I/O throughout the entire application.
 - **Non-Blocking Operations**: Cache persistence, playlist exports, and config saves moved to async tasks to prevent runtime stalls.
@@ -119,6 +128,7 @@
 - **Fix**: Re-instated EPG Title Synchronization after playlist updates.
 - **Optimization**: Significant EPG memory reduction.
 - **Optimization**: Improved EPG parsing performance.
+- **EPG**: Fixed XMLTV timeshift to correctly apply user-defined timezone offsets in the generated XML output.
 
 ## ⚙️ Messaging Refactoring
 - **Structured Messaging**: Transitioned from JSON-string-based notifications to a strictly typed messaging pipeline.

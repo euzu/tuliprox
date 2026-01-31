@@ -14,6 +14,7 @@ use log::error;
 use shared::model::{PlaylistBouquetDto, TargetType, XtreamCluster};
 use std::collections::HashSet;
 use std::sync::Arc;
+use shared::utils::concat_path_leading_slash;
 
 fn get_categories_from_xtream(categories: Option<Vec<PlaylistXtreamCategory>>) -> Vec<String> {
     let mut groups: Vec<String> = Vec::new();
@@ -144,10 +145,10 @@ async fn playlist_bouquet(
         .body(axum::body::Body::from("{}")))
 }
 
-pub fn user_api_register(app_state: Arc<AppState>) -> axum::Router<Arc<AppState>> {
+pub fn user_api_register(app_state: Arc<AppState>, web_ui_path: &str) -> axum::Router<Arc<AppState>> {
     axum::Router::new()
         .nest(
-            "/api/v1/user",
+            &concat_path_leading_slash(web_ui_path, "/api/v1/user"),
             axum::Router::new()
                 .route("/playlist/categories", axum::routing::get(playlist_categories))
                 .route("/playlist/bouquet", axum::routing::get(playlist_bouquet))
