@@ -1,13 +1,16 @@
+use crate::api::model::{StreamError, STREAM_IDLE_TIMEOUT};
 use crate::utils::request::DynReader;
 use crate::utils::{async_file_writer, IO_BUFFER_SIZE};
 use bytes::Bytes;
 use log::{debug, error};
-use std::path::{Path,};
+use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::select;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
-use crate::api::model::StreamError;
+use tokio::time::{sleep, Duration, Instant};
+use crate::utils::debug_if_enabled;
 
 pub fn tee_stream<S, W>(
     mut stream: S,
@@ -28,31 +31,49 @@ where
         let mut write_err: Option<StreamError> = None;
         let mut write_counter = 0usize;
 
-        while let Some(chunk) = stream.next().await {
-            match chunk {
-                Ok(bytes) => {
-                    if writer_active {
-                        total_size += bytes.len();
-                        if let Err(e) = writer.write_all(&bytes).await {
-                            writer_active = false;
-                            write_err = Some(StreamError::StdIo(e.to_string()));
-                        } else {
-                            write_counter += bytes.len();
-                            if write_counter >= IO_BUFFER_SIZE {
-                                write_counter = 0;
-                                if let Err(err) = writer.flush().await {
+        let idle_timeout = Duration::from_secs(STREAM_IDLE_TIMEOUT);
+        let idle = sleep(idle_timeout);
+        tokio::pin!(idle);
+
+        loop {
+            select! {
+                () = &mut idle => {
+                   debug!("Persist pipe stream idle for too long, closing");
+                   break;
+                }
+
+                chunk = stream.next() => {
+                    idle.as_mut().reset(Instant::now() + idle_timeout);
+                    match chunk {
+                        Some(Ok(bytes)) => {
+                            if writer_active {
+                                total_size += bytes.len();
+                                if let Err(e) = writer.write_all(&bytes).await {
                                     writer_active = false;
-                                    write_err = Some(StreamError::StdIo(format!("Failed periodic flush of tee_stream writer {err}")));
+                                    write_err = Some(StreamError::StdIo(e.to_string()));
+                                } else {
+                                    write_counter += bytes.len();
+                                    if write_counter >= IO_BUFFER_SIZE {
+                                        write_counter = 0;
+                                        if let Err(err) = writer.flush().await {
+                                            writer_active = false;
+                                            write_err = Some(StreamError::StdIo(format!("Failed periodic flush of tee_stream writer {err}")));
+                                        }
+                                    }
                                 }
                             }
+
+                            let _ = tx.send(Ok(bytes)).await;
+                        }
+                        Some(Err(e)) => {
+                            let _ = tx.send(Err(e)).await;
+                        }
+                        None => {
+                            debug_if_enabled!("Persist pipe stream ended. Closing {}", resource_path.display());
+                            break;
                         }
                     }
-
-                    let _ = tx.send(Ok(bytes)).await;
-                }
-                Err(e) => {
-                    let _ = tx.send(Err(e)).await;
-                }
+               }
             }
         }
 

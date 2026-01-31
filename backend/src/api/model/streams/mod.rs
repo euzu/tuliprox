@@ -22,3 +22,5 @@ pub(in crate::api) use self::timed_client_stream::*;
 pub(in crate::api) use self::custom_video_stream::*;
 pub(in crate::api) use self::provisioning_stream::*;
 pub use self::persist_pipe_stream::*;
+
+pub const STREAM_IDLE_TIMEOUT: u64 = 60;

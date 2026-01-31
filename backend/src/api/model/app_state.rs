@@ -188,7 +188,11 @@ pub fn create_http_client(app_config: &AppConfig) -> Client {
         builder =
             builder.connect_timeout(Duration::from_secs(u64::from(config.connect_timeout_secs)));
     }
-    builder.build().unwrap_or_else(|_| Client::new())
+    if let Ok(client) = builder.build() {
+        return client;
+    }
+    error!("Failed to create HTTP client, using unconfigured http client");
+    Client::new()
 }
 
 pub fn create_cache(config: &Config) -> Option<Arc<Mutex<LRUResourceCache>>> {
