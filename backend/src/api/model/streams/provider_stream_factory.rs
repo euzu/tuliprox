@@ -215,7 +215,8 @@ fn prepare_client(
     stream_options: &ProviderStreamFactoryOptions,
     url_override: Option<&Url>,
 ) -> (reqwest::RequestBuilder, bool) {
-    let url = url_override.unwrap_or_else(|| stream_options.get_url());
+    let original_url = stream_options.get_url();
+    let url = url_override.unwrap_or(original_url);
     let range_start = stream_options.get_total_bytes_send();
     let original_headers = stream_options.get_headers();
 
@@ -229,6 +230,17 @@ fn prepare_client(
     for (key, value) in original_headers {
         if filter_request_header(key.as_str()) {
             headers.insert(key.clone(), value.clone());
+        }
+    }
+
+    if let Some(override_url) = url_override {
+        let cross_origin =
+            override_url.scheme() != original_url.scheme()
+                || override_url.host_str() != original_url.host_str()
+                || override_url.port_or_known_default() != original_url.port_or_known_default();
+        if cross_origin {
+            headers.remove(axum::http::header::AUTHORIZATION);
+            headers.remove(axum::http::header::COOKIE);
         }
     }
 
