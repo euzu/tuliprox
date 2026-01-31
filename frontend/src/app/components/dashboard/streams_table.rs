@@ -19,6 +19,7 @@ use yew::platform::spawn_local;
 use yew::prelude::*;
 use yew_hooks::use_clipboard;
 use yew_i18n::use_translation;
+use shared::concat_string;
 
 const LIVE: &str = "Live";
 const MOVIE: &str = "Movie";
@@ -138,7 +139,7 @@ pub fn StreamsTable(props: &StreamsTableProps) -> Html {
             html! {
                 {
                     if col < headers.len() {
-                       translator.t(&format!("LABEL.{}", headers[col]))
+                       translator.t(&concat_string!("LABEL.", headers[col]))
                     } else {
                       String::new()
                     }

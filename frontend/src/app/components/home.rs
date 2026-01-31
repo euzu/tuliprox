@@ -2,7 +2,7 @@ use crate::app::components::{AppIcon, DashboardView, EpgView, IconButton, InputR
 use crate::app::context::{ConfigContext, PlaylistContext, StatusContext};
 use crate::hooks::{use_server_status, use_service_context};
 use crate::model::{EventMessage, ViewType};
-use shared::model::{AppConfigDto, ConfigInputDto, LibraryScanSummaryStatus, PlaylistUpdateState, StatusCheck, SystemInfo};
+use shared::model::{ApiProxyConfigDto, AppConfigDto, ConfigInputDto, LibraryScanSummaryStatus, PlaylistUpdateState, StatusCheck, SystemInfo};
 use std::collections::HashMap;
 use std::future;
 use std::rc::Rc;
@@ -21,6 +21,7 @@ pub fn Home() -> Html {
     let services = use_service_context();
     let translate = use_translation();
     let config = use_state(|| None::<Rc<AppConfigDto>>);
+    let api_proxy_config = use_state(|| None::<Rc<ApiProxyConfigDto>>);
     let status = use_state(|| None::<Rc<StatusCheck>>);
     let system_info = use_state(|| None::<Rc<SystemInfo>>);
     let view_visible = use_state(|| ViewType::Dashboard);
@@ -93,6 +94,17 @@ pub fn Home() -> Html {
                 }
             ).await
         });
+
+        let services_ctx = services.clone();
+        let api_proxy_config_state = api_proxy_config.clone();
+        let _ = use_future(|| async move {
+            services_ctx.config.api_proxy_config_subscribe(
+                &mut |cfg| {
+                    api_proxy_config_state.set(cfg.clone());
+                    future::ready(())
+                }
+            ).await
+        });
     }
 
     {
@@ -137,6 +149,7 @@ pub fn Home() -> Html {
 
     let config_context = ConfigContext {
         config: (*config).clone(),
+        api_proxy: (*api_proxy_config).clone(),
     };
 
     let status_context = StatusContext {

@@ -1,6 +1,6 @@
 use crate::model::WebConfig;
-use crate::services::{get_base_href, request_get, request_post, EventService};
-use shared::model::{AppConfigDto, ConfigDto, ConfigInputDto, IpCheckDto, LibraryScanRequest,  SourcesConfigDto, TargetOutputDto};
+use crate::services::{get_base_href, request_get, request_post, request_put, EventService};
+use shared::model::{ApiProxyConfigDto, AppConfigDto, ConfigDto, ConfigInputDto, IpCheckDto, LibraryScanRequest, SourcesConfigDto, TargetOutputDto};
 use std::cell::RefCell;
 use std::future::Future;
 use std::rc::Rc;
@@ -16,9 +16,12 @@ use crate::error::Error;
 pub struct ConfigService {
     pub ui_config: Rc<WebConfig>,
     pub server_config: RefCell<Option<Rc<AppConfigDto>>>,
+    pub api_proxy_config: RefCell<Option<Rc<ApiProxyConfigDto>>>,
     config_channel: Mutable<Option<Rc<AppConfigDto>>>,
+    api_proxy_config_channel: Mutable<Option<Rc<ApiProxyConfigDto>>>,
     is_fetching: AtomicBool,
     config_path: String,
+    api_proxy_config_path: String,
     sources_path: String,
     ip_check_path: String,
     batch_input_content_path: String,
@@ -34,9 +37,12 @@ impl ConfigService {
         Self {
             ui_config: Rc::new(config.clone()),
             server_config: RefCell::new(None),
+            api_proxy_config: RefCell::new(None),
             config_channel: Mutable::new(None),
+            api_proxy_config_channel: Mutable::new(None),
             is_fetching: AtomicBool::new(false),
             config_path: config_path.clone(),
+            api_proxy_config_path: concat_path(&config_path, "apiproxy"),
             sources_path: concat_path(&config_path, "sources"),
             ip_check_path: concat_path_leading_slash(&base_href, "api/v1/ipinfo"),
             batch_input_content_path: concat_path_leading_slash(&base_href, "api/v1/config/batchContent"),
@@ -55,16 +61,25 @@ impl ConfigService {
         fut.await
     }
 
-    pub async fn get_server_config(&self) -> Option<Rc<AppConfigDto>> {
+    pub async fn api_proxy_config_subscribe<F, U>(&self, callback: &mut F)
+    where
+        U: Future<Output=()>,
+        F: FnMut(Option<Rc<ApiProxyConfigDto>>) -> U,
+    {
+        let fut = self.api_proxy_config_channel.signal_cloned().for_each(callback);
+        fut.await
+    }
+
+    pub async fn get_server_config(&self) -> (Option<Rc<AppConfigDto>>, Option<Rc<ApiProxyConfigDto>>) {
         self.fetch_server_config().await;
-        self.server_config.borrow().clone()
+        (self.server_config.borrow().clone(), self.api_proxy_config.borrow().clone())
     }
 
     async fn fetch_server_config(&self) {
         if self.is_fetching.swap(true, Ordering::AcqRel) {
             return;
         }
-        let result = match request_get::<AppConfigDto>(&self.config_path, None, None).await {
+        let config_result = match request_get::<AppConfigDto>(&self.config_path, None, None).await {
             Ok(Some(mut app_config)) => {
                 let templates = {
                     if let Some(templ) = app_config.sources.templates.as_mut() {
@@ -117,8 +132,20 @@ impl ConfigService {
                 None
             }
         };
-        self.server_config.replace(result.clone());
-        self.config_channel.set(result);
+
+        let api_proxy_result = match request_get::<ApiProxyConfigDto>(&self.api_proxy_config_path, None, None).await {
+            Ok(Some(api_proxy_config)) => Some(Rc::new(api_proxy_config)),
+            Ok(None) => Some(Rc::new(ApiProxyConfigDto::default())),
+            Err(err) => {
+                error!("{err}");
+                None
+            }
+        };
+
+        self.server_config.replace(config_result.clone());
+        self.config_channel.set(config_result);
+        self.api_proxy_config.replace(api_proxy_result.clone());
+        self.api_proxy_config_channel.set(api_proxy_result);
         self.is_fetching.store(false, Ordering::Release);
     }
 
@@ -142,6 +169,21 @@ impl ConfigService {
         let path = concat_path(&self.config_path, "main");
         self.event_service.set_config_change_message_blocked(true);
         match request_post::<ConfigDto, ()>(&path, dto, None, None).await {
+            Ok(_) => {
+                self.event_service.set_config_change_message_blocked(false);
+                Ok(())
+            },
+            Err(err) => {
+                self.event_service.set_config_change_message_blocked(false);
+                error!("{err}");
+                Err(err)
+            }
+        }
+    }
+
+    pub async fn save_api_proxy_config(&self, dto: ApiProxyConfigDto) -> Result<(), Error> {
+        self.event_service.set_config_change_message_blocked(true);
+        match request_put::<ApiProxyConfigDto, ()>(&self.api_proxy_config_path, dto, None, None).await {
             Ok(_) => {
                 self.event_service.set_config_change_message_blocked(false);
                 Ok(())

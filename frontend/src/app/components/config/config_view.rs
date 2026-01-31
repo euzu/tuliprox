@@ -8,7 +8,7 @@ use log::warn;
 use yew::platform::spawn_local;
 use yew::prelude::*;
 use yew_i18n::use_translation;
-use shared::model::{ConfigDto, SourcesConfigDto};
+use shared::model::{ApiProxyConfigDto, ConfigDto, SourcesConfigDto};
 use crate::app::components::config::config_update::update_config;
 use crate::app::{ConfigContext};
 use crate::hooks::use_service_context;
@@ -39,6 +39,7 @@ fn config_form_to_config_page(form: &ConfigForm) -> ConfigPage {
     match form {
         ConfigForm::Main(_, _) => ConfigPage::Main,
         ConfigForm::Api(_, _) => ConfigPage::Api,
+        ConfigForm::ApiProxy(_, _) => ConfigPage::Api,
         ConfigForm::Log(_, _) => ConfigPage::Log,
         ConfigForm::Schedules(_, _) => ConfigPage::Schedules,
         ConfigForm::Video(_, _) => ConfigPage::Video,
@@ -57,6 +58,7 @@ fn config_form_to_config_page(form: &ConfigForm) -> ConfigPage {
 struct ConfigFormState {
     pub main: Option<ConfigForm>,
     pub api: Option<ConfigForm>,
+    pub api_proxy: Option<ConfigForm>,
     pub log: Option<ConfigForm>,
     pub schedules: Option<ConfigForm>,
     pub video: Option<ConfigForm>,
@@ -151,7 +153,7 @@ pub fn ConfigView() -> Html {
         Callback::from(move |_| {
             let forms = &*get_form_state;
             let modified_forms: Vec<ConfigForm> = collect_modified!(forms, [
-                main, api, log, schedules, video, messaging, web_ui,
+                main, api, api_proxy, log, schedules, video, messaging, web_ui,
                 reverse_proxy, hd_homerun, proxy, ipcheck, panel, library
             ]);
 
@@ -163,9 +165,11 @@ pub fn ConfigView() -> Html {
 
             let mut modified_main_forms = Vec::new();
             let mut modified_sources: Option<SourcesConfigDto> = None;
+            let mut modified_api_proxy: Option<ApiProxyConfigDto> = None;
             for form in modified_forms {
                 match form {
                     ConfigForm::Panel(_, sources) => modified_sources = Some(sources),
+                    ConfigForm::ApiProxy(_, api_proxy) => modified_api_proxy = Some(api_proxy),
                     other => modified_main_forms.push(other),
                 }
             }
@@ -182,6 +186,13 @@ pub fn ConfigView() -> Html {
                     return;
                 }
                 modified_main_dto = Some(config_dto);
+            }
+
+            if let Some(api_proxy) = modified_api_proxy.as_mut() {
+                if let Err(err) = api_proxy.prepare() {
+                    services.toastr.error(err.to_string());
+                    return;
+                }
             }
 
             if let Some(sources) = modified_sources.as_mut() {
@@ -210,6 +221,19 @@ pub fn ConfigView() -> Html {
                     }
                 }
 
+                if let Some(api_proxy_dto) = modified_api_proxy {
+                    match services.config.save_api_proxy_config(api_proxy_dto).await {
+                        Ok(()) => {
+                            services.toastr.success(translate.t("MESSAGES.SAVE.API_PROXY_CONFIG.SUCCESS"));
+                        }
+                        Err(err) => {
+                            ok = false;
+                            services.toastr.error(translate.t("MESSAGES.SAVE.API_PROXY_CONFIG.FAIL"));
+                            services.toastr.error(err.to_string());
+                        }
+                    }
+                }
+
                 if let Some(sources_dto) = modified_sources {
                     match services.config.save_sources(sources_dto).await {
                         Ok(()) => {
@@ -225,9 +249,14 @@ pub fn ConfigView() -> Html {
 
                 if ok {
                     set_edit_mode.set(false);
-                    if services.config.get_server_config().await.is_none() {
-                        // Log but don't fail - save succeeded, refresh is best-effort
+                    let (app_config, api_proxy_config) = services.config.get_server_config().await;
+                    if app_config.is_none() {
+                        // Log but don't fail - save succeeded; refresh is best-effort
                         warn!("Config refresh failed");
+                    }
+                    if api_proxy_config.is_none() {
+                        // Log but don't fail - save succeeded; refresh is best-effort
+                        warn!("ApiProxy Config refresh failed");
                     }
                 }
             });
@@ -242,6 +271,7 @@ pub fn ConfigView() -> Html {
             match form_data {
                 ConfigForm::Main(_, _) => new_state.main = Some(form_data),
                 ConfigForm::Api(_, _) => new_state.api = Some(form_data),
+                ConfigForm::ApiProxy(_, _) => new_state.api_proxy = Some(form_data),
                 ConfigForm::Log(_, _) => new_state.log = Some(form_data),
                 ConfigForm::Schedules(_, _) => new_state.schedules = Some(form_data),
                 ConfigForm::Video(_, _) => new_state.video = Some(form_data),
