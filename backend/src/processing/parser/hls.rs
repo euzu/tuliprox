@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use crate::model::ProxyUserCredentials;
 use crate::utils::{deobfuscate_text, obfuscate_text};
-use shared::utils::{CONSTANTS, HLS_PREFIX};
+use shared::utils::{extract_extension_from_url, CONSTANTS, HLS_PREFIX};
 use std::str;
 use url::Url;
 use shared::concat_string;
@@ -11,13 +11,22 @@ const TOKEN_SEPARATOR_STR: &str = "\x1F";
 
 fn create_hls_session_token_and_url(secret: &[u8], session_token: &str, stream_url: &str) -> Option<String> {
     if let Ok(cookie_value) = obfuscate_text(secret, &concat_string!(session_token, TOKEN_SEPARATOR_STR, stream_url)) {
+        if let Some(ext) = extract_extension_from_url(stream_url) {
+            return Some(concat_string!(&cookie_value, &ext));
+        }
         return Some(cookie_value);
     }
     None
 }
 
+fn remove_any_ext(s: &str) -> &str {
+    match s.rsplit_once('.') {
+        Some((base, _)) => base,
+        None => s,
+    }
+}
 pub fn get_hls_session_token_and_url_from_token(secret: &[u8], token: &str) -> Option<(Option<String>, String)> {
-    if let Ok(decrypted) = deobfuscate_text(secret, token) {
+    if let Ok(decrypted) = deobfuscate_text(secret, remove_any_ext(token)) {
         let parts: Vec<&str> = decrypted.split(TOKEN_SEPARATOR).collect();
         if parts.len() == 2 {
             let session_token: String = parts[0].to_string();
