@@ -225,7 +225,16 @@ pub fn create_http_client_no_redirect(app_config: &AppConfig) -> Client {
         panic!("HTTP client (no redirect) creation failed with proxy configured");
     }
     error!("Failed to create HTTP client (no redirect), using unconfigured http client");
-    Client::new()
+    match reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    {
+        Ok(client) => client,
+        Err(err) => {
+            error!("Failed to create fallback HTTP client (no redirect): {err}");
+            Client::new()
+        }
+    }
 }
 
 pub fn create_cache(config: &Config) -> Option<Arc<Mutex<LRUResourceCache>>> {
