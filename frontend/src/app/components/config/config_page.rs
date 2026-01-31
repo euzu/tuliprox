@@ -1,5 +1,5 @@
 use shared::error::{TuliproxError, info_err_res};
-use shared::model::{ConfigApiDto, HdHomeRunConfigDto, IpCheckConfigDto, LibraryConfigDto, LogConfigDto, MainConfigDto, MessagingConfigDto, ProxyConfigDto, ReverseProxyConfigDto, SchedulesConfigDto, SourcesConfigDto, VideoConfigDto, WebUiConfigDto};
+use shared::model::{ApiProxyConfigDto, ConfigApiDto, HdHomeRunConfigDto, IpCheckConfigDto, LibraryConfigDto, LogConfigDto, MainConfigDto, MessagingConfigDto, ProxyConfigDto, ReverseProxyConfigDto, SchedulesConfigDto, SourcesConfigDto, VideoConfigDto, WebUiConfigDto};
 use std::fmt;
 use std::str::FromStr;
 
@@ -96,6 +96,7 @@ impl fmt::Display for ConfigPage {
 pub enum ConfigForm {
     Main(bool, MainConfigDto),
     Api(bool, ConfigApiDto),
+    ApiProxy(bool, ApiProxyConfigDto),
     Log(bool, LogConfigDto),
     Schedules(bool, SchedulesConfigDto),
     Video(bool, VideoConfigDto),
@@ -113,6 +114,7 @@ impl ConfigForm {
     pub(crate) fn is_modified(&self) -> bool {
         matches!(self, ConfigForm::Main(true, _)
               | ConfigForm::Api(true, _)
+              | ConfigForm::ApiProxy(true, _)
               | ConfigForm::Log(true, _)
               | ConfigForm::Schedules(true, _)
               | ConfigForm::Video(true, _)

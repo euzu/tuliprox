@@ -10,7 +10,7 @@ pub struct TargetUserDto {
     pub credentials: Vec<ProxyUserCredentialsDto>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ApiProxyServerInfoDto {
     pub name: String,
@@ -24,7 +24,7 @@ pub struct ApiProxyServerInfoDto {
     pub path: Option<String>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ApiProxyConfigDto {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

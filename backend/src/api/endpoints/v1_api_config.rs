@@ -1,15 +1,15 @@
 use crate::api::api_utils::{internal_server_error, try_unwrap_body};
 use crate::api::model::AppState;
 use crate::model::{ApiProxyConfig, InputSource};
-use crate::utils::request::{download_text_content};
-use crate::utils::{persist_messaging_templates, prepare_sources_batch, prepare_users};
 use crate::utils;
+use crate::utils::request::download_text_content;
+use crate::utils::{persist_messaging_templates, prepare_sources_batch, prepare_users, read_api_proxy_file};
 use axum::response::IntoResponse;
 use axum::Router;
 use log::error;
 use serde_json::json;
-use shared::error::{TuliproxError};
-use shared::model::{ApiProxyConfigDto, ApiProxyServerInfoDto, ConfigDto, SourcesConfigDto};
+use shared::error::TuliproxError;
+use shared::model::{ApiProxyConfigDto, ConfigDto, SourcesConfigDto};
 use std::sync::Arc;
 
 pub(in crate::api::endpoints) async fn intern_save_config_api_proxy(backup_dir: &str, api_proxy: &ApiProxyConfigDto, file_path: &str) -> Option<TuliproxError> {
@@ -86,11 +86,32 @@ async fn save_config_sources(
     }
 }
 
+
+async fn get_config_api_proxy_config(
+    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>
+) -> impl IntoResponse + Send {
+    let paths = app_state.app_config.paths.load();
+    let api_proxy_file_path = paths.api_proxy_file_path.as_str();
+    match read_api_proxy_file(api_proxy_file_path, true) {
+        Ok(Some(mut api_proxy_dto)) => {
+            api_proxy_dto.user = vec![];
+            return axum::response::Json(api_proxy_dto).into_response();
+        }
+        Ok(None) => {
+            error!("Failed to read api proxy config");
+        }
+        Err(err) => {
+            error!("Failed to read api proxy config: {err}");
+        }
+    }
+    internal_server_error!()
+}
+
 async fn save_config_api_proxy_config(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
-    axum::extract::Json(mut req_api_proxy): axum::extract::Json<Vec<ApiProxyServerInfoDto>>,
-) -> impl axum::response::IntoResponse + Send {
-    for server_info in &mut req_api_proxy {
+    axum::extract::Json(mut req_api_proxy): axum::extract::Json<ApiProxyConfigDto>,
+) -> impl IntoResponse + Send {
+    for server_info in &mut req_api_proxy.server {
         if !server_info.validate() {
             return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": "Invalid content"}))).into_response();
         }
@@ -101,7 +122,8 @@ async fn save_config_api_proxy_config(
     let base = app_state.app_config.api_proxy.load()
         .as_deref().cloned().unwrap_or_default();
     let updated_api_proxy = ApiProxyConfig {
-        server: req_api_proxy.iter().map(Into::into).collect(),
+        use_user_db: req_api_proxy.use_user_db,
+        server: req_api_proxy.server.iter().map(Into::into).collect(),
         ..base
     };
 
@@ -123,7 +145,7 @@ async fn save_config_api_proxy_config(
 
 async fn config(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
-) -> impl axum::response::IntoResponse + Send {
+) -> impl IntoResponse + Send {
     let paths = app_state.app_config.paths.load();
     match utils::read_app_config_dto(&paths, true, false) {
         Ok(mut app_config) => {
@@ -147,7 +169,7 @@ async fn config(
 async fn config_batch_content(
     axum::extract::Path(input_id): axum::extract::Path<u16>,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
-) -> impl axum::response::IntoResponse + Send {
+) -> impl IntoResponse + Send {
     if let Some(config_input) = app_state.app_config.get_input_by_id(input_id) {
         // The url is changed at this point, we need the raw url for the batch file
         if let Some(batch_url) = config_input.t_batch_url.as_ref() {
@@ -186,5 +208,6 @@ pub fn v1_api_config_register(router: Router<Arc<AppState>>) -> axum::Router<Arc
         .route("/config/batchContent/{input_id}", axum::routing::get(config_batch_content))
         .route("/config/main", axum::routing::post(save_config_main))
         .route("/config/sources", axum::routing::post(save_config_sources))
-        .route("/config/apiproxy", axum::routing::post(save_config_api_proxy_config))
+        .route("/config/apiproxy", axum::routing::get(get_config_api_proxy_config))
+        .route("/config/apiproxy", axum::routing::put(save_config_api_proxy_config))
 }

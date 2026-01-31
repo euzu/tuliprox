@@ -1,6 +1,6 @@
 use std::rc::Rc;
 use yew::UseStateHandle;
-use shared::model::{AppConfigDto, ConfigTargetDto, PlaylistRequest, ProxyUserCredentialsDto, SearchRequest, StatusCheck, SystemInfo, UiPlaylistCategories};
+use shared::model::{ApiProxyConfigDto, AppConfigDto, ConfigTargetDto, PlaylistRequest, ProxyUserCredentialsDto, SearchRequest, StatusCheck, SystemInfo, UiPlaylistCategories};
 use crate::app::components::{InputRow, PlaylistEditorPage, PlaylistExplorerPage, UserlistPage};
 
 type SingleSource = (Vec<Rc<InputRow>>, Vec<Rc<ConfigTargetDto>>);
@@ -111,6 +111,7 @@ impl UserlistContext {
 #[derive(Clone, PartialEq)]
 pub struct ConfigContext {
     pub config: Option<Rc<AppConfigDto>>,
+    pub api_proxy: Option<Rc<ApiProxyConfigDto>>,
 }
 
 #[derive(Clone, PartialEq)]

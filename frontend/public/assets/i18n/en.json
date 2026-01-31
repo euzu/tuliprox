@@ -414,7 +414,10 @@
     "MSG_KIND_INFO": "Info",
     "MSG_KIND_STATS": "Stats",
     "MSG_KIND_ERROR": "Error",
-    "MSG_KIND_WATCH": "Watch"
+    "MSG_KIND_WATCH": "Watch",
+    "API_PROXY_CONFIG": "Api Proxy Config",
+    "USE_USER_DB": "Use User DB",
+    "ADD_SERVER":  "Add Server"
   },
   "TITLE": {
     "USER_BOUQUET_EDITOR": "Playlist Category Selection"
@@ -459,6 +462,10 @@
       "MAIN_CONFIG": {
         "SUCCESS": "Main config saved!",
         "FAIL": "Failed to save the main config!"
+      },
+      "API_PROXY_CONFIG": {
+        "SUCCESS": "ApiProxy config saved!",
+        "FAIL": "Failed to save the ApiProxy config!"
       },
       "SOURCES_CONFIG": {
         "SUCCESS": "Sources config saved!",

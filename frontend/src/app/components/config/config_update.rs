@@ -1,4 +1,4 @@
-use shared::model::ConfigDto;
+use shared::model::{ConfigDto};
 use crate::app::components::config::config_page::ConfigForm;
 
 macro_rules! set_config_field {
@@ -33,7 +33,8 @@ pub fn update_config(config: &mut ConfigDto, forms: Vec<ConfigForm>) {
             ConfigForm::Proxy(_, mut proxy_cfg) => set_config_field!(config, proxy_cfg, proxy),
             ConfigForm::IpCheck(_, mut ipcheck_cfg) => set_config_field!(config, ipcheck_cfg, ipcheck),
             ConfigForm::Library(_, mut library_cfg) => set_config_field!(config, library_cfg, library),
-            ConfigForm::Panel(_, _) => {}
+            ConfigForm::Panel(_, _) => {},
+            ConfigForm::ApiProxy(_, _) => {},
         }
     }
 }
