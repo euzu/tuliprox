@@ -14,7 +14,7 @@ use log::{error, info, log_enabled, warn, Level, debug};
 use shared::error::TuliproxError;
 use shared::model::{InputType, PlaylistEntry, SeriesStreamProperties, StreamProperties, XtreamSeriesInfo};
 use shared::model::{PlaylistGroup, PlaylistItemType, XtreamCluster};
-use std::collections::HashMap;
+use indexmap::IndexMap;
 use std::sync::Arc;
 use std::time::Instant;
 use crate::model::MediaQuality;
@@ -77,7 +77,7 @@ async fn playlist_resolve_series_info(
 
     let mut last_log_time = Instant::now();
     let mut processed_series_info_count = 0;
-    let mut group_series: HashMap<u32, PlaylistGroup> = HashMap::new();
+    let mut group_series: IndexMap<u32, PlaylistGroup> = IndexMap::new();
     let mut batch = Vec::with_capacity(BATCH_SIZE);
 
     // Track Series Properties and Episode-to-Series mapping for updates during probing
