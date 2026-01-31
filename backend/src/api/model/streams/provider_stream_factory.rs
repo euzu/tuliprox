@@ -318,15 +318,13 @@ fn collect_debug_headers(headers: &HeaderMap) -> Vec<(String, String)> {
 }
 
 fn proxy_env_present() -> bool {
-    const ENV_KEYS: [&str; 8] = [
+    const ENV_KEYS: [&str; 6] = [
         "HTTP_PROXY",
         "HTTPS_PROXY",
         "ALL_PROXY",
-        "NO_PROXY",
         "http_proxy",
         "https_proxy",
         "all_proxy",
-        "no_proxy",
     ];
     ENV_KEYS.iter().any(|key| {
         std::env::var(key)
