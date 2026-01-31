@@ -1,6 +1,6 @@
 use crate::api::model::persist_pipe_stream::tee_dyn_reader;
 use crate::api::model::{AppState, STREAM_IDLE_TIMEOUT};
-use crate::model::{format_elapsed_time, AppConfig, InputSource, ReverseProxyDisabledHeaderConfig};
+use crate::model::{format_elapsed_time, AppConfig, Config, InputSource, ReverseProxyDisabledHeaderConfig};
 use crate::model::{ConfigInput, ResourceRetryConfig};
 use crate::utils::compression::compression_utils::{is_deflate, is_gzip};
 use crate::utils::{async_file_reader, async_file_writer, debug_if_enabled};
@@ -9,6 +9,7 @@ use axum::http::header::RETRY_AFTER;
 use futures::{StreamExt, TryStreamExt};
 use log::{debug, error, log_enabled, trace, warn, Level};
 use reqwest::header::CONTENT_ENCODING;
+use reqwest::redirect::Policy;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{StatusCode};
 use shared::error::{notify_err_res, string_to_io_error, TuliproxError};
@@ -21,13 +22,63 @@ use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 use std::time::Duration;
 use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::time::sleep;
 use tokio_util::io::StreamReader;
 use url::Url;
+
+static PROXY_DIAGNOSTICS_ONCE: Once = Once::new();
+
+fn log_proxy_diagnostics(config: &Config) {
+    PROXY_DIAGNOSTICS_ONCE.call_once(|| {
+        if let Some(proxy_cfg) = config.proxy.as_ref() {
+            let sanitized_url = sanitize_sensitive_info(proxy_cfg.url.as_str());
+            let has_inline_credentials = proxy_cfg
+                .url
+                .contains('@')
+                || proxy_cfg.url.contains("://")
+                    && proxy_cfg
+                        .url
+                        .split("://")
+                        .nth(1)
+                        .is_some_and(|part| part.contains('@'));
+            let has_explicit_credentials =
+                proxy_cfg.username.as_ref().is_some() || proxy_cfg.password.as_ref().is_some();
+            debug!(
+                "Proxy config enabled: url={sanitized_url}, credentials_inline={has_inline_credentials}, credentials_fields={has_explicit_credentials}"
+            );
+        } else {
+            debug!("Proxy config disabled (config.yml)");
+        }
+
+        let env_keys = [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "NO_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+            "no_proxy",
+        ];
+        let mut env_values = Vec::new();
+        for key in env_keys {
+            if let Ok(value) = std::env::var(key) {
+                if !value.trim().is_empty() {
+                    env_values.push((key, sanitize_sensitive_info(value.as_str()).to_string()));
+                }
+            }
+        }
+        if env_values.is_empty() {
+            debug!("Proxy env vars not set");
+        } else {
+            debug!("Proxy env vars present: {env_values:?}");
+        }
+    });
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MimeCategory {
@@ -1061,10 +1112,11 @@ pub async fn get_input_json_content_as_stream(
     }
 }
 
-pub fn create_client(cfg: &AppConfig) -> reqwest::ClientBuilder {
+pub fn create_client_with_redirect(cfg: &AppConfig, redirect_policy: Policy) -> reqwest::ClientBuilder {
     let config = cfg.config.load();
+    log_proxy_diagnostics(&config);
     let mut client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::limited(10))
+        .redirect(redirect_policy)
         .pool_idle_timeout(Duration::from_secs(30))
         .pool_max_idle_per_host(10)
         .danger_accept_invalid_certs(config.accept_insecure_ssl_certificates);
@@ -1123,6 +1175,10 @@ pub fn create_client(cfg: &AppConfig) -> reqwest::ClientBuilder {
     }
 
     client
+}
+
+pub fn create_client(cfg: &AppConfig) -> reqwest::ClientBuilder {
+    create_client_with_redirect(cfg, Policy::limited(10))
 }
 
 pub fn parse_range(range: &str) -> Option<(u64, Option<u64>)> {

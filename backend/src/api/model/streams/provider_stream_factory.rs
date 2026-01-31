@@ -213,8 +213,9 @@ fn get_request_range_start_bytes(req_headers: &HashMap<String, Vec<u8>>) -> Opti
 fn prepare_client(
     request_client: &reqwest::Client,
     stream_options: &ProviderStreamFactoryOptions,
+    url_override: Option<&Url>,
 ) -> (reqwest::RequestBuilder, bool) {
-    let url = stream_options.get_url();
+    let url = url_override.unwrap_or_else(|| stream_options.get_url());
     let range_start = stream_options.get_total_bytes_send();
     let original_headers = stream_options.get_headers();
 
@@ -278,15 +279,117 @@ fn prepare_client(
     (request_builder, partial)
 }
 
+fn collect_debug_headers(headers: &HeaderMap) -> Vec<(String, String)> {
+    const HEADER_NAMES: [&str; 8] = [
+        "proxy-authenticate",
+        "via",
+        "server",
+        "location",
+        "x-cache",
+        "x-cache-status",
+        "x-served-by",
+        "x-proxy-id",
+    ];
+
+    HEADER_NAMES
+        .iter()
+        .filter_map(|name| {
+            headers.get_all(*name).iter().next().map(|value| {
+                let value = value
+                    .to_str()
+                    .unwrap_or("<binary>")
+                    .to_string();
+                ((*name).to_string(), value)
+            })
+        })
+        .collect()
+}
+
+fn proxy_env_present() -> bool {
+    const ENV_KEYS: [&str; 8] = [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+    ];
+    ENV_KEYS.iter().any(|key| {
+        std::env::var(key)
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+    })
+}
+
+fn should_use_manual_redirects(app_state: &Arc<AppState>) -> bool {
+    let config = app_state.app_config.config.load();
+    config.proxy.is_some() || proxy_env_present()
+}
+
+async fn send_with_manual_redirects(
+    request_client: &reqwest::Client,
+    stream_options: &ProviderStreamFactoryOptions,
+) -> Result<reqwest::Response, reqwest::Error> {
+    let mut current_url = stream_options.get_url().clone();
+    let mut remaining = 10u8;
+
+    loop {
+        let (client, _partial_content) =
+            prepare_client(request_client, stream_options, Some(&current_url));
+        let response = client.send().await?;
+        let status = response.status();
+
+        if status.is_redirection() {
+            if remaining == 0 {
+                return Ok(response);
+            }
+            let location = response.headers().get(reqwest::header::LOCATION);
+            let Some(location) = location else {
+                return Ok(response);
+            };
+            let Ok(location_str) = location.to_str() else {
+                return Ok(response);
+            };
+            let next_url = current_url
+                .join(location_str)
+                .or_else(|_| Url::parse(location_str));
+            let Ok(next_url) = next_url else {
+                return Ok(response);
+            };
+            current_url = next_url;
+            remaining = remaining.saturating_sub(1);
+            continue;
+        }
+        return Ok(response);
+    }
+}
+
 async fn provider_stream_request(
     app_state: &Arc<AppState>,
     request_client: &reqwest::Client,
     stream_options: &ProviderStreamFactoryOptions,
 ) -> Result<Option<ProviderStreamFactoryResponse>, StatusCode> {
-    let (client, _partial_content) = prepare_client(request_client, stream_options);
-    match client.send().await {
+    let use_manual_redirects = should_use_manual_redirects(app_state);
+    let response_result = if use_manual_redirects {
+        let client_no_redirect = app_state.http_client_no_redirect.load();
+        send_with_manual_redirects(&client_no_redirect, stream_options).await
+    } else {
+        let (client, _partial_content) = prepare_client(request_client, stream_options, None);
+        client.send().await
+    };
+    match response_result {
         Ok(mut response) => {
             let status = response.status();
+            let response_url = response.url().clone();
+            if log_enabled!(log::Level::Debug) && !status.is_success() {
+                let debug_headers = collect_debug_headers(response.headers());
+                let message = format!(
+                    "Provider response error: status={status}, url={response_url}, headers={debug_headers:?}"
+                );
+                debug!("{}", sanitize_sensitive_info(&message));
+            }
             if status.is_success() {
                 let response_info = {
                     // Unfortunately, the HEAD request does not work, so we need this workaround.
@@ -324,6 +427,17 @@ async fn provider_stream_request(
 
             if status.is_client_error() {
                 debug!("Client error status response : {status}");
+                if status == StatusCode::PROXY_AUTHENTICATION_REQUIRED {
+                    debug!(
+                        "Proxy authentication required (407) for {}",
+                        sanitize_sensitive_info(response_url.as_str())
+                    );
+                } else if status == StatusCode::UNAUTHORIZED {
+                    debug!(
+                        "Origin authentication required (401) for {}",
+                        sanitize_sensitive_info(response_url.as_str())
+                    );
+                }
                 return match status {
                     StatusCode::NOT_FOUND
                     | StatusCode::FORBIDDEN
@@ -349,7 +463,11 @@ async fn provider_stream_request(
             }
             Err(status)
         }
-        Err(_err) => {
+        Err(err) => {
+            debug!(
+                "Provider request failed: {}",
+                sanitize_sensitive_info(err.to_string().as_str())
+            );
             handle_channel_unavailable_stream(app_state, stream_options).await
         }
     }
