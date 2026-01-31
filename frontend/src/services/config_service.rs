@@ -79,7 +79,13 @@ impl ConfigService {
         if self.is_fetching.swap(true, Ordering::AcqRel) {
             return;
         }
-        let config_result = match request_get::<AppConfigDto>(&self.config_path, None, None).await {
+
+        let (config_response, api_proxy_response) = futures::join!(
+            request_get::<AppConfigDto>(&self.config_path, None, None),
+            request_get::<ApiProxyConfigDto>(&self.api_proxy_config_path, None, None)
+        );
+
+        let config_result = match config_response {
             Ok(Some(mut app_config)) => {
                 let templates = {
                     if let Some(templ) = app_config.sources.templates.as_mut() {
@@ -133,7 +139,7 @@ impl ConfigService {
             }
         };
 
-        let api_proxy_result = match request_get::<ApiProxyConfigDto>(&self.api_proxy_config_path, None, None).await {
+        let api_proxy_result = match api_proxy_response {
             Ok(Some(api_proxy_config)) => Some(Rc::new(api_proxy_config)),
             Ok(None) => Some(Rc::new(ApiProxyConfigDto::default())),
             Err(err) => {
