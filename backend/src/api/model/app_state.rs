@@ -181,30 +181,48 @@ fn start_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
     }
 }
 
+/// Creates the default HTTP client.
+///
+/// # Panics
+/// Panics if proxy configuration is present but the client cannot be built.
 pub fn create_http_client(app_config: &AppConfig) -> Client {
     let mut builder = create_client(app_config).http1_only();
     let config = app_config.config.load(); // because of RAII connection dropping
+    let proxy_configured = config.proxy.is_some();
     if config.connect_timeout_secs > 0 {
         builder =
             builder.connect_timeout(Duration::from_secs(u64::from(config.connect_timeout_secs)));
     }
     if let Ok(client) = builder.build() {
         return client;
+    }
+    if proxy_configured {
+        error!("Failed to create HTTP client with proxy configuration; refusing to fall back to unconfigured client");
+        panic!("HTTP client creation failed with proxy configured");
     }
     error!("Failed to create HTTP client, using unconfigured http client");
     Client::new()
 }
 
+/// Creates a no-redirect HTTP client.
+///
+/// # Panics
+/// Panics if proxy configuration is present but the client cannot be built.
 pub fn create_http_client_no_redirect(app_config: &AppConfig) -> Client {
     let mut builder = create_client_with_redirect(app_config, reqwest::redirect::Policy::none())
         .http1_only();
     let config = app_config.config.load(); // because of RAII connection dropping
+    let proxy_configured = config.proxy.is_some();
     if config.connect_timeout_secs > 0 {
         builder =
             builder.connect_timeout(Duration::from_secs(u64::from(config.connect_timeout_secs)));
     }
     if let Ok(client) = builder.build() {
         return client;
+    }
+    if proxy_configured {
+        error!("Failed to create HTTP client (no redirect) with proxy configuration; refusing to fall back to unconfigured client");
+        panic!("HTTP client (no redirect) creation failed with proxy configured");
     }
     error!("Failed to create HTTP client (no redirect), using unconfigured http client");
     Client::new()
