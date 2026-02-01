@@ -387,11 +387,10 @@ mod tests {
             let file_content = fs::read_to_string("/tmp/series-info.json").expect("Unable to read file");
             match serde_json::from_str::<XtreamSeriesInfo>(&file_content) {
                 Ok(series_info) => {
-                    println!("{:#?}", series_info);
-                    assert!(true);
+                    println!("{series_info:#?}");
                 }
                 Err(err) => {
-                    assert!(false, "Failed to parse json file: {err}");
+                    panic!("Failed to parse json file: {err}");
                 }
             }
         }
@@ -402,14 +401,13 @@ mod tests {
         if fs::exists("/tmp/vod_streams.json").unwrap_or(false) {
             let reader = Box::pin(async_file_reader(tokio::fs::File::open("/tmp/vod_streams.json").await?));
             match map_to_xtream_streams(XtreamCluster::Video, reader, &"test".intern()).await {
-                Ok(_streams) => {
-                    println!("{:?}", _streams.get(1));
-                    println!("{:?}", _streams.get(100));
-                    println!("{:?}", _streams.get(200));
-                    assert!(true);
+                Ok(streams) => {
+                    println!("{:?}", streams.get(1));
+                    println!("{:?}", streams.get(100));
+                    println!("{:?}", streams.get(200));
                 }
                 Err(err) => {
-                    assert!(false, "Failed to parse json file: {err}");
+                    panic!("Failed to parse json file: {err}");
                 }
             };
         }

@@ -288,7 +288,7 @@ mod tests {
             .map(|(i, (name, quality))| PlaylistItem {
                 header: PlaylistItemHeader {
                     title: format!("Chanel {name} [{quality}]").into(),
-                    source_ordinal: i as u32,
+                    source_ordinal: u32::try_from(i).unwrap(),
                     ..Default::default()
                 },
             })
@@ -313,10 +313,10 @@ mod tests {
             let ord =
                 playlist_comparator(channel_sort.sequence.as_ref(), channel_sort.order, va, vb);
 
-            if ord != Ordering::Equal {
-                ord
-            } else {
+            if ord == Ordering::Equal {
                 a.header.source_ordinal.cmp(&b.header.source_ordinal)
+            } else {
+                ord
             }
         });
 
@@ -376,7 +376,7 @@ mod tests {
             .map(|(i, name)| PlaylistItem {
                 header: PlaylistItemHeader {
                     title: name.to_string().into(),
-                    source_ordinal: i as u32,
+                    source_ordinal: u32::try_from(i).unwrap(),
                     ..Default::default()
                 },
             })
@@ -407,10 +407,10 @@ mod tests {
                 &b.header.title,
             );
 
-            if ord != Ordering::Equal {
-                ord
-            } else {
+            if ord == Ordering::Equal {
                 a.header.source_ordinal.cmp(&b.header.source_ordinal)
+            } else {
+                ord
             }
         });
 
