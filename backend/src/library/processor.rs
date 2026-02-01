@@ -28,7 +28,10 @@ pub struct LibraryProcessor {
 impl LibraryProcessor {
     // Creates a new Library processor from application config
     pub fn from_app_config(app_config: &AppConfig) -> Option<Self> {
-        let client = create_http_client(app_config);
+        let Ok(client) = create_http_client(app_config) else {
+            error!("Failed to create HTTP client for LibraryProcessor, skipping library scan. Please check your configuration.");
+            return None;
+        };
         app_config.config.load().library.as_ref().map(|lib_cfg| Self::new(lib_cfg.clone(), client))
     }
 

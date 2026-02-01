@@ -233,17 +233,50 @@ fn prepare_client(
         }
     }
 
-    if let Some(override_url) = url_override {
-        let cross_origin =
-            override_url.scheme() != original_url.scheme()
-                || override_url.host_str() != original_url.host_str()
-                || override_url.port_or_known_default() != original_url.port_or_known_default();
-        if cross_origin {
-            headers.remove(axum::http::header::AUTHORIZATION);
-            headers.remove(axum::http::header::COOKIE);
-        }
+    remove_sensitive_headers_on_cross_origin(&mut headers, original_url, url_override);
+    prepare_default_headers(&mut headers, stream_options);
+    let partial = prepare_partial_request_headers(&mut headers, stream_options,  range_start);
+
+    if log_enabled!(log::Level::Debug) {
+        let message = format!(
+            "Stream requested with headers: {:?}",
+            headers
+                .iter()
+                .map(|header| (header.0, String::from_utf8_lossy(header.1.as_ref())))
+                .collect::<Vec<_>>()
+        );
+        debug!("{}", sanitize_sensitive_info(&message));
     }
 
+    let request_builder = request_client.get(url.clone()).headers(headers);
+
+    (request_builder, partial)
+}
+
+fn remove_sensitive_headers_on_cross_origin(
+    headers: &mut axum::http::HeaderMap,
+    original_url: &reqwest::Url,
+    url_override: Option<&reqwest::Url>,
+) {
+    let Some(override_url) = url_override else {
+        return;
+    };
+
+    let cross_origin =
+        override_url.scheme() != original_url.scheme()
+            || override_url.host_str() != original_url.host_str()
+            || override_url.port_or_known_default()
+            != original_url.port_or_known_default();
+
+    if !cross_origin {
+        return;
+    }
+
+    headers.remove(axum::http::header::AUTHORIZATION);
+    headers.remove(axum::http::header::COOKIE);
+}
+
+fn prepare_default_headers(headers: &mut axum::http::HeaderMap, stream_options: &ProviderStreamFactoryOptions) {
     // Force Connection: close so the provider releases its slot immediately when the stream ends.
     // This prevents 509 errors from providers counting idle pooled connections against limits.
     headers.insert(
@@ -260,8 +293,10 @@ fn prepare_client(
                 .unwrap_or_else(|| axum::http::header::HeaderValue::from_static(DEFAULT_USER_AGENT)),
         );
     }
+}
 
-    let partial = if let Some(range) = range_start {
+fn prepare_partial_request_headers(headers: &mut HeaderMap, stream_options: &ProviderStreamFactoryOptions, range_start: Option<usize>) -> bool {
+    if let Some(range) = range_start {
         if range > 0 || stream_options.was_range_requested() {
             let range_header = format!("bytes={range}-");
             if let Ok(header_value) = axum::http::header::HeaderValue::from_str(&range_header) {
@@ -273,22 +308,7 @@ fn prepare_client(
         }
     } else {
         false
-    };
-
-    if log_enabled!(log::Level::Debug) {
-        let message = format!(
-            "Stream requested with headers: {:?}",
-            headers
-                .iter()
-                .map(|header| (header.0, String::from_utf8_lossy(header.1.as_ref())))
-                .collect::<Vec<_>>()
-        );
-        debug!("{}", sanitize_sensitive_info(&message));
     }
-
-    let request_builder = request_client.get(url.clone()).headers(headers);
-
-    (request_builder, partial)
 }
 
 fn collect_debug_headers(headers: &HeaderMap) -> Vec<(String, String)> {
@@ -318,18 +338,15 @@ fn collect_debug_headers(headers: &HeaderMap) -> Vec<(String, String)> {
 }
 
 fn proxy_env_present() -> bool {
-    const ENV_KEYS: [&str; 6] = [
+    const ENV_KEYS: [&str; 3] = [
         "HTTP_PROXY",
         "HTTPS_PROXY",
         "ALL_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "all_proxy",
     ];
-    ENV_KEYS.iter().any(|key| {
-        std::env::var(key)
-            .map(|value| !value.trim().is_empty())
-            .unwrap_or(false)
+
+    std::env::vars().any(|(key, value)| {
+        ENV_KEYS.iter().any(|k| k.eq_ignore_ascii_case(&key))
+            && !value.trim().is_empty()
     })
 }
 
@@ -346,8 +363,7 @@ async fn send_with_manual_redirects(
     let mut remaining = 10u8;
 
     loop {
-        let (client, _partial_content) =
-            prepare_client(request_client, stream_options, Some(&current_url));
+        let (client, _partial_content) = prepare_client(request_client, stream_options, Some(&current_url));
         let response = client.send().await?;
         let status = response.status();
 
@@ -381,8 +397,7 @@ async fn provider_stream_request(
     request_client: &reqwest::Client,
     stream_options: &ProviderStreamFactoryOptions,
 ) -> Result<Option<ProviderStreamFactoryResponse>, StatusCode> {
-    let use_manual_redirects = should_use_manual_redirects(app_state);
-    let response_result = if use_manual_redirects {
+    let response_result = if should_use_manual_redirects(app_state) {
         let client_no_redirect = app_state.http_client_no_redirect.load();
         send_with_manual_redirects(&client_no_redirect, stream_options).await
     } else {
@@ -438,15 +453,9 @@ async fn provider_stream_request(
             if status.is_client_error() {
                 debug!("Client error status response : {status}");
                 if status == StatusCode::PROXY_AUTHENTICATION_REQUIRED {
-                    debug!(
-                        "Proxy authentication required (407) for {}",
-                        sanitize_sensitive_info(response_url.as_str())
-                    );
+                    debug!("Proxy authentication required (407) for {}", sanitize_sensitive_info(response_url.as_str()));
                 } else if status == StatusCode::UNAUTHORIZED {
-                    debug!(
-                        "Origin authentication required (401) for {}",
-                        sanitize_sensitive_info(response_url.as_str())
-                    );
+                    debug!("Origin authentication required (401) for {}", sanitize_sensitive_info(response_url.as_str()));
                 }
                 return match status {
                     StatusCode::NOT_FOUND
@@ -474,10 +483,7 @@ async fn provider_stream_request(
             Err(status)
         }
         Err(err) => {
-            debug!(
-                "Provider request failed: {}",
-                sanitize_sensitive_info(err.to_string().as_str())
-            );
+            debug!("Provider request failed: {}", sanitize_sensitive_info(err.to_string().as_str()));
             handle_channel_unavailable_stream(app_state, stream_options).await
         }
     }

@@ -24,7 +24,6 @@ use axum::{middleware::Next, extract::Request};
 use axum::extract::connect_info::ConnectInfo;
 use log::{debug, error, info};
 use shared::utils::{concat_path_leading_slash, sanitize_sensitive_info};
-use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicI8;
@@ -32,22 +31,18 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tower_governor::key_extractor::SmartIpKeyExtractor;
 use tower_http::services::ServeDir;
+use shared::error::TuliproxError;
+use shared::{info_err, info_err_res};
 use crate::api::panel_api::sync_panel_api_exp_dates_on_boot;
 use crate::api::sys_usage::exec_system_usage;
 use crate::repository::get_geoip_path;
 use crate::utils::{exec_file_lock_prune, GeoIp};
 
-fn get_web_dir_path(web_ui_enabled: bool, web_root: &str) -> Result<PathBuf, std::io::Error> {
+fn get_web_dir_path(web_ui_enabled: bool, web_root: &str) -> Result<PathBuf, TuliproxError> {
     let web_dir = web_root.to_string();
     let web_dir_path = PathBuf::from(&web_dir);
     if web_ui_enabled && (!&web_dir_path.exists() || !&web_dir_path.is_dir()) {
-        return Err(std::io::Error::new(
-            ErrorKind::NotFound,
-            format!(
-                "web_root does not exists or is not an directory: {}",
-                web_dir_path.display()
-            ),
-        ));
+        return info_err_res!("web_root does not exists or is not an directory: {}", web_dir_path.display());
     }
     Ok(web_dir_path)
 }
@@ -68,7 +63,7 @@ async fn healthcheck() -> impl axum::response::IntoResponse {
 async fn create_shared_data(
     app_config: &Arc<AppConfig>,
     forced_targets: &Arc<ProcessTargets>,
-) -> AppState {
+) -> Result<AppState, TuliproxError> {
     let config = app_config.config.load();
 
     let use_geoip = config.is_geoip_enabled();
@@ -96,10 +91,10 @@ async fn create_shared_data(
     let active_users = Arc::new(ActiveUserManager::new(&config,&geoip, &event_manager));
     let connection_manager = Arc::new(ConnectionManager::new(&active_users, &active_provider, &shared_stream_manager, &event_manager));
 
-    let client = create_http_client(app_config);
-    let client_no_redirect = create_http_client_no_redirect(app_config);
+    let client = create_http_client(app_config)?;
+    let client_no_redirect = create_http_client_no_redirect(app_config)?;
 
-    AppState {
+    Ok(AppState {
         forced_targets: Arc::new(ArcSwap::new(Arc::clone(forced_targets))),
         app_config: Arc::clone(app_config),
         http_client: Arc::new(ArcSwap::from_pointee(client)),
@@ -115,7 +110,7 @@ async fn create_shared_data(
         playlists: Arc::new(PlaylistStorageState::new()),
         geoip,
         update_guard: UpdateGuard::new(),
-    }
+    })
 }
 
 fn exec_update_on_boot(
@@ -248,7 +243,7 @@ pub(in crate::api) fn start_hdhomerun(
 pub async fn start_server(
     app_config: Arc<AppConfig>,
     targets: Arc<ProcessTargets>,
-) -> futures::io::Result<()> {
+) -> Result<(), TuliproxError> {
     let mut infos = Vec::new();
     let cfg = app_config.config.load();
     let host = cfg.api.host.clone();
@@ -261,7 +256,7 @@ pub async fn start_server(
     if web_ui_enabled {
         infos.push(format!("Web root: {}", web_dir_path.display()));
     }
-    let app_shared_data = create_shared_data(&app_config, &targets).await;
+    let app_shared_data = create_shared_data(&app_config, &targets).await?;
     let app_state = Arc::new(app_shared_data);
     let shared_data = Arc::clone(&app_state);
 
@@ -377,7 +372,7 @@ pub async fn start_server(
         .layer(create_compression_layer());
 
     let router: axum::Router<()> = router.with_state(shared_data.clone());
-    let listener = tokio::net::TcpListener::bind(format!("{host}:{port}")).await?;
+    let listener = tokio::net::TcpListener::bind(format!("{host}:{port}")).await.map_err(|err| info_err!("Failed to bind to {host}:{port}, {err}"))?;
     serve(listener, router, None, &shared_data.connection_manager).await;
     Ok(())
 }
