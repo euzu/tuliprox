@@ -969,15 +969,18 @@ async fn xtream_get_catchup_response(
     } else {
         return axum::Json(json!(ShortEpgResultDto::default())).into_response();
     };
+
     let pli = try_result_bad_request!(xtream_get_item_for_stream_id(
         req_virtual_id,
         app_state,
         target,
         Some(XtreamCluster::Live)
     ).await);
+
     let input = try_option_bad_request!(app_state
         .app_config
         .get_input_by_name(&pli.input_name));
+
     let info_url = try_option_bad_request!(xtream::get_xtream_player_api_action_url(
         &input,
         crate::model::XC_ACTION_GET_CATCHUP_TABLE
@@ -987,6 +990,7 @@ async fn xtream_get_catchup_response(
         crate::model::XC_TAG_STREAM_ID,
         pli.provider_id
     )));
+
     let input_source = InputSource::from(&*input).with_url(info_url);
     let content = try_result_bad_request!(
         xtream::get_xtream_stream_info_content(
@@ -997,40 +1001,61 @@ async fn xtream_get_catchup_response(
         )
         .await
     );
+
     let mut doc: Map<String, Value> = try_result_bad_request!(serde_json::from_str(&content));
     let epg_listings = try_option_bad_request!(doc
         .get_mut(crate::model::XC_TAG_EPG_LISTINGS)
         .and_then(Value::as_array_mut));
-    let config = &app_state.app_config.config.load();
-    let target_path = try_option_bad_request!(get_target_storage_path(config, target.name.as_str()));
-    let Ok((mut target_id_mapping, file_lock)) = get_target_id_mapping(&app_state.app_config, &target_path, target.use_memory_cache).await else {
-        return internal_server_error!()
-    };
-    let mut in_memory_updates = Vec::new();
-    for epg_list_item in epg_listings.iter_mut().filter_map(Value::as_object_mut) {
-        // TODO epg_id
-        if let Some(catchup_provider_id) = epg_list_item
+
+    // Collect data and generate UUIDs without holding the lock.
+    let mut tasks = Vec::new();
+    let pli_uuid_str = pli.get_uuid().to_string();
+
+    for (idx, epg_list_item) in epg_listings.iter().enumerate() {
+        if let Some(cp_id) = epg_list_item
             .get(crate::model::XC_TAG_ID)
             .and_then(Value::as_str)
             .and_then(|id| id.parse::<u32>().ok())
         {
             let uuid = generate_playlist_uuid(
-                &pli.get_uuid().to_string(),
-                &catchup_provider_id.to_string(),
+                &pli_uuid_str,
+                &cp_id.to_string(),
                 pli.item_type,
                 &pli.input_name,
             );
+            tasks.push((idx, uuid, cp_id));
+        }
+    }
+
+    let config = &app_state.app_config.config.load();
+    let target_path = try_option_bad_request!(get_target_storage_path(config, target.name.as_str()));
+
+    let mut mapping_results = Vec::with_capacity(tasks.len());
+    let mut in_memory_updates = Vec::new();
+
+    {
+        let Ok((mut target_id_mapping, file_lock)) = get_target_id_mapping(
+            &app_state.app_config,
+            &target_path,
+            target.use_memory_cache
+        ).await else {
+            return internal_server_error!();
+        };
+
+        for (idx, uuid, cp_id) in tasks {
             let virtual_id = target_id_mapping.get_and_update_virtual_id(
                 &uuid,
-                catchup_provider_id,
+                cp_id,
                 PlaylistItemType::Catchup,
                 pli.provider_id,
             );
 
+            mapping_results.push((idx, virtual_id));
+
             if target.use_memory_cache {
                 in_memory_updates.push(
                     VirtualIdRecord::new(
-                        catchup_provider_id,
+                        cp_id,
                         virtual_id,
                         PlaylistItemType::Catchup,
                         pli.provider_id,
@@ -1038,18 +1063,26 @@ async fn xtream_get_catchup_response(
                     ),
                 );
             }
+        }
 
-            epg_list_item.insert(
+        if let Err(err) = target_id_mapping.persist() {
+            error!("Failed to write catchup id mapping {err}");
+            return axum::http::StatusCode::BAD_REQUEST.into_response();
+        }
+
+        // Lock is released here immediately after persist()
+        drop(file_lock);
+    }
+
+    // Apply the new virtual IDs back to the JSON document
+    for (idx, v_id) in mapping_results {
+        if let Some(item) = epg_listings.get_mut(idx).and_then(Value::as_object_mut) {
+            item.insert(
                 crate::model::XC_TAG_ID.to_string(),
-                Value::String(virtual_id.to_string()),
+                Value::String(v_id.to_string()),
             );
         }
     }
-    if let Err(err) = target_id_mapping.persist() {
-        error!("Failed to write catchup id mapping {err}");
-        return axum::http::StatusCode::BAD_REQUEST.into_response();
-    }
-    drop(file_lock);
 
     if target.use_memory_cache && !in_memory_updates.is_empty() {
         app_state.playlists.update_target_id_mapping(target, in_memory_updates).await;
