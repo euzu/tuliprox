@@ -42,7 +42,7 @@ fn get_web_dir_path(web_ui_enabled: bool, web_root: &str) -> Result<PathBuf, Tul
     let web_dir = web_root.to_string();
     let web_dir_path = PathBuf::from(&web_dir);
     if web_ui_enabled && (!&web_dir_path.exists() || !&web_dir_path.is_dir()) {
-        return info_err_res!("web_root does not exists or is not an directory: {}", web_dir_path.display());
+        return info_err_res!("web_root does not exist or is not a directory: {}", web_dir_path.display());
     }
     Ok(web_dir_path)
 }
