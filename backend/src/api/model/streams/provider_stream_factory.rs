@@ -213,8 +213,10 @@ fn get_request_range_start_bytes(req_headers: &HashMap<String, Vec<u8>>) -> Opti
 fn prepare_client(
     request_client: &reqwest::Client,
     stream_options: &ProviderStreamFactoryOptions,
+    url_override: Option<&Url>,
 ) -> (reqwest::RequestBuilder, bool) {
-    let url = stream_options.get_url();
+    let original_url = stream_options.get_url();
+    let url = url_override.unwrap_or(original_url);
     let range_start = stream_options.get_total_bytes_send();
     let original_headers = stream_options.get_headers();
 
@@ -231,36 +233,9 @@ fn prepare_client(
         }
     }
 
-    // Force Connection: close so the provider releases its slot immediately when the stream ends.
-    // This prevents 509 errors from providers counting idle pooled connections against limits.
-    headers.insert(
-        axum::http::header::CONNECTION,
-        axum::http::header::HeaderValue::from_static("close"),
-    );
-
-    if !headers.contains_key(axum::http::header::USER_AGENT) {
-        headers.insert(
-            axum::http::header::USER_AGENT,
-            stream_options
-                .default_user_agent
-                .clone()
-                .unwrap_or_else(|| axum::http::header::HeaderValue::from_static(DEFAULT_USER_AGENT)),
-        );
-    }
-
-    let partial = if let Some(range) = range_start {
-        if range > 0 || stream_options.was_range_requested() {
-            let range_header = format!("bytes={range}-");
-            if let Ok(header_value) = axum::http::header::HeaderValue::from_str(&range_header) {
-                headers.insert(RANGE, header_value);
-            }
-            true
-        } else {
-            false
-        }
-    } else {
-        false
-    };
+    remove_sensitive_headers_on_cross_origin(&mut headers, original_url, url_override);
+    prepare_default_headers(&mut headers, stream_options);
+    let partial = prepare_partial_request_headers(&mut headers, stream_options,  range_start);
 
     if log_enabled!(log::Level::Debug) {
         let message = format!(
@@ -278,15 +253,168 @@ fn prepare_client(
     (request_builder, partial)
 }
 
+fn remove_sensitive_headers_on_cross_origin(
+    headers: &mut axum::http::HeaderMap,
+    original_url: &reqwest::Url,
+    url_override: Option<&reqwest::Url>,
+) {
+    let Some(override_url) = url_override else {
+        return;
+    };
+
+    let cross_origin =
+        override_url.scheme() != original_url.scheme()
+            || override_url.host_str() != original_url.host_str()
+            || override_url.port_or_known_default()
+            != original_url.port_or_known_default();
+
+    if !cross_origin {
+        return;
+    }
+
+    headers.remove(axum::http::header::AUTHORIZATION);
+    headers.remove(axum::http::header::COOKIE);
+}
+
+fn prepare_default_headers(headers: &mut axum::http::HeaderMap, stream_options: &ProviderStreamFactoryOptions) {
+    // Force Connection: close so the provider releases its slot immediately when the stream ends.
+    // This prevents 509 errors from providers counting idle pooled connections against limits.
+    headers.insert(
+        axum::http::header::CONNECTION,
+        axum::http::header::HeaderValue::from_static("close"),
+    );
+
+    if !headers.contains_key(axum::http::header::USER_AGENT) {
+        headers.insert(
+            axum::http::header::USER_AGENT,
+            stream_options
+                .default_user_agent
+                .clone()
+                .unwrap_or_else(|| axum::http::header::HeaderValue::from_static(DEFAULT_USER_AGENT)),
+        );
+    }
+}
+
+fn prepare_partial_request_headers(headers: &mut HeaderMap, stream_options: &ProviderStreamFactoryOptions, range_start: Option<usize>) -> bool {
+    if let Some(range) = range_start {
+        if range > 0 || stream_options.was_range_requested() {
+            let range_header = format!("bytes={range}-");
+            if let Ok(header_value) = axum::http::header::HeaderValue::from_str(&range_header) {
+                headers.insert(RANGE, header_value);
+            }
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    }
+}
+
+fn collect_debug_headers(headers: &HeaderMap) -> Vec<(String, String)> {
+    const HEADER_NAMES: [&str; 8] = [
+        "proxy-authenticate",
+        "via",
+        "server",
+        "location",
+        "x-cache",
+        "x-cache-status",
+        "x-served-by",
+        "x-proxy-id",
+    ];
+
+    HEADER_NAMES
+        .iter()
+        .filter_map(|name| {
+            headers.get_all(*name).iter().next().map(|value| {
+                let value = value
+                    .to_str()
+                    .unwrap_or("<binary>")
+                    .to_string();
+                ((*name).to_string(), value)
+            })
+        })
+        .collect()
+}
+
+fn proxy_env_present() -> bool {
+    const ENV_KEYS: [&str; 3] = [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+    ];
+
+    std::env::vars().any(|(key, value)| {
+        ENV_KEYS.iter().any(|k| k.eq_ignore_ascii_case(&key))
+            && !value.trim().is_empty()
+    })
+}
+
+fn should_use_manual_redirects(app_state: &Arc<AppState>) -> bool {
+    let config = app_state.app_config.config.load();
+    config.proxy.is_some() || proxy_env_present()
+}
+
+async fn send_with_manual_redirects(
+    request_client: &reqwest::Client,
+    stream_options: &ProviderStreamFactoryOptions,
+) -> Result<reqwest::Response, reqwest::Error> {
+    let mut current_url = stream_options.get_url().clone();
+    let mut remaining = 10u8;
+
+    loop {
+        let (client, _partial_content) = prepare_client(request_client, stream_options, Some(&current_url));
+        let response = client.send().await?;
+        let status = response.status();
+
+        if status.is_redirection() {
+            if remaining == 0 {
+                return Ok(response);
+            }
+            let location = response.headers().get(reqwest::header::LOCATION);
+            let Some(location) = location else {
+                return Ok(response);
+            };
+            let Ok(location_str) = location.to_str() else {
+                return Ok(response);
+            };
+            let next_url = current_url
+                .join(location_str)
+                .or_else(|_| Url::parse(location_str));
+            let Ok(next_url) = next_url else {
+                return Ok(response);
+            };
+            current_url = next_url;
+            remaining = remaining.saturating_sub(1);
+            continue;
+        }
+        return Ok(response);
+    }
+}
+
 async fn provider_stream_request(
     app_state: &Arc<AppState>,
     request_client: &reqwest::Client,
     stream_options: &ProviderStreamFactoryOptions,
 ) -> Result<Option<ProviderStreamFactoryResponse>, StatusCode> {
-    let (client, _partial_content) = prepare_client(request_client, stream_options);
-    match client.send().await {
+    let response_result = if should_use_manual_redirects(app_state) {
+        let client_no_redirect = app_state.http_client_no_redirect.load();
+        send_with_manual_redirects(&client_no_redirect, stream_options).await
+    } else {
+        let (client, _partial_content) = prepare_client(request_client, stream_options, None);
+        client.send().await
+    };
+    match response_result {
         Ok(mut response) => {
             let status = response.status();
+            let response_url = response.url().clone();
+            if log_enabled!(log::Level::Debug) && !status.is_success() {
+                let debug_headers = collect_debug_headers(response.headers());
+                let message = format!(
+                    "Provider response error: status={status}, url={response_url}, headers={debug_headers:?}"
+                );
+                debug!("{}", sanitize_sensitive_info(&message));
+            }
             if status.is_success() {
                 let response_info = {
                     // Unfortunately, the HEAD request does not work, so we need this workaround.
@@ -324,6 +452,11 @@ async fn provider_stream_request(
 
             if status.is_client_error() {
                 debug!("Client error status response : {status}");
+                if status == StatusCode::PROXY_AUTHENTICATION_REQUIRED {
+                    debug!("Proxy authentication required (407) for {}", sanitize_sensitive_info(response_url.as_str()));
+                } else if status == StatusCode::UNAUTHORIZED {
+                    debug!("Origin authentication required (401) for {}", sanitize_sensitive_info(response_url.as_str()));
+                }
                 return match status {
                     StatusCode::NOT_FOUND
                     | StatusCode::FORBIDDEN
@@ -349,7 +482,8 @@ async fn provider_stream_request(
             }
             Err(status)
         }
-        Err(_err) => {
+        Err(err) => {
+            debug!("Provider request failed: {}", sanitize_sensitive_info(err.to_string().as_str()));
             handle_channel_unavailable_stream(app_state, stream_options).await
         }
     }

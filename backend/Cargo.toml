@@ -89,3 +89,9 @@ winapi = { version = "0.3", features = ["psapi", "minwindef", "processthreadsapi
 
 [build-dependencies]
 vergen = { version = "9.0", features = ["build"] }
+
+[dev-dependencies]
+http-body-util = "0.1"
+
+[features]
+proxy-auth-regression = []
