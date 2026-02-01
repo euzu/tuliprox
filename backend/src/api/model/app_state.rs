@@ -186,52 +186,73 @@ fn start_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
 ///
 /// Fails if proxy configuration is present but the client cannot be built.
 pub fn create_http_client(app_config: &AppConfig) -> Result<Client, TuliproxError> {
-    let mut builder = create_client(app_config).http1_only();
-    let config = app_config.config.load(); // because of RAII connection dropping
-    let proxy_configured = config.proxy.is_some();
-    if config.connect_timeout_secs > 0 {
-        builder =
-            builder.connect_timeout(Duration::from_secs(u64::from(config.connect_timeout_secs)));
-    }
-    if let Ok(client) = builder.build() {
-        return Ok(client);
-    }
-    if proxy_configured {
-        error!("Failed to create HTTP client with proxy configuration; refusing to fall back to unconfigured client");
-        return info_err_res!("HTTP client creation failed with proxy configured");
-    }
-    error!("Failed to create HTTP client, using unconfigured http client");
-    Ok(Client::new())
+    let builder = create_client(app_config).http1_only();
+    let config = app_config.config.load();
+    build_http_client_with_fallback(
+        builder,
+        &config,
+        "Failed to create HTTP client with proxy configuration; refusing to fall back to unconfigured client",
+        "HTTP client creation failed with proxy configured",
+        "Failed to create HTTP client, using unconfigured http client",
+        Client::new,
+    )
 }
 
 /// Creates a no-redirect HTTP client.
 ///
-/// # Panics
-/// Panics if proxy configuration is present but the client cannot be built.
-pub fn create_http_client_no_redirect(app_config: &AppConfig) -> Result<Client, TuliproxError> {
-    let mut builder = create_client_with_redirect(app_config, reqwest::redirect::Policy::none())
-        .http1_only();
-    let config = app_config.config.load(); // because of RAII connection dropping
+/// Fails if proxy configuration is present but the client cannot be built.
+///
+/// Handling Streaming and Proxy with http/2 is hard, so we strictly use only http/1.1
+pub fn create_http_client_no_redirect(
+    app_config: &AppConfig,
+) -> Result<Client, TuliproxError> {
+    let builder = create_client_with_redirect(app_config, reqwest::redirect::Policy::none()).http1_only();
+    let config = app_config.config.load();
+    build_http_client_with_fallback(
+        builder,
+        &config,
+        "Failed to create HTTP client (no redirect) with proxy configuration; refusing to fall back to unconfigured client",
+        "HTTP client (no redirect) creation failed with proxy configured",
+        "Failed to create HTTP client (no redirect), using unconfigured http client",
+        || {
+            Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap_or_else(|err| {
+                    error!("Failed to create fallback HTTP client (no redirect): {err}");
+                    Client::new()
+                })
+        },
+    )
+}
+
+fn build_http_client_with_fallback(
+    mut builder: reqwest::ClientBuilder,
+    config: &Arc<Config>,
+    proxy_error_log: &str,
+    proxy_error_msg: &str,
+    fallback_log: &str,
+    fallback_client: impl FnOnce() -> Client,
+) -> Result<Client, TuliproxError> {
     let proxy_configured = config.proxy.is_some();
+
     if config.connect_timeout_secs > 0 {
-        builder = builder.connect_timeout(Duration::from_secs(u64::from(config.connect_timeout_secs)));
+        builder = builder.connect_timeout(Duration::from_secs(
+            u64::from(config.connect_timeout_secs),
+        ));
     }
+
     if let Ok(client) = builder.build() {
         return Ok(client);
     }
-    if proxy_configured {
-        error!("Failed to create HTTP client (no redirect) with proxy configuration; refusing to fall back to unconfigured client");
-        return info_err_res!("HTTP client (no redirect) creation failed with proxy configured");
-    }
-    error!("Failed to create HTTP client (no redirect), using unconfigured http client");
 
-    let client = Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build().unwrap_or_else(|err| {
-        error!("Failed to create fallback HTTP client (no redirect): {err}");
-        Client::new()
-    });
-    Ok(client)
+    if proxy_configured {
+        error!("{proxy_error_log}");
+        return info_err_res!("{proxy_error_msg}");
+    }
+
+    error!("{fallback_log}");
+    Ok(fallback_client())
 }
 
 pub fn create_cache(config: &Config) -> Option<Arc<Mutex<LRUResourceCache>>> {
