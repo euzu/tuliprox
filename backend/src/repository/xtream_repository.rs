@@ -92,8 +92,15 @@ async fn write_playlists_to_file(
             continue;
         }
         let xtream_path = xtream_get_file_path(storage_path, cluster);
-        {
-            let _file_lock = app_config.file_locks.write_lock(&xtream_path).await;
+        
+        // Acquire FileLockManager lock (async, in-process coordination)
+        let file_lock = app_config.file_locks.write_lock(&xtream_path).await;
+        
+        // Move all B+Tree building and I/O to spawn_blocking
+        // We take ownership of `playlist` here (no cloning needed)
+        let path_clone = xtream_path.clone();
+        tokio::task::spawn_blocking(move || -> Result<(), std::io::Error> {
+            let _guard = file_lock;
             let mut tree = BPlusTree::new();
             for item in playlist {
                 tree.insert(match storage_key {
@@ -102,11 +109,15 @@ async fn write_playlists_to_file(
                 }, item);
             }
             if with_index {
-                tree.store_with_index(&xtream_path, |pli| pli.source_ordinal).map_err(|err| cant_write_result!(&xtream_path, err))?;
+                tree.store_with_index(&path_clone, |pli| pli.source_ordinal)?;
             } else {
-                tree.store(&xtream_path).map_err(|err| cant_write_result!(&xtream_path, err))?;
+                tree.store(&path_clone)?;
             }
-        }
+            Ok(())
+        })
+        .await
+        .map_err(|e| notify_err!("Blocking task failed: {e}"))?
+        .map_err(|err| cant_write_result!(&xtream_path, err))?;
     }
     Ok(())
 }
@@ -121,17 +132,32 @@ pub async fn write_playlist_item_update(
         ensure_xtream_storage_path(&config, target_name).await?
     };
     let xtream_path = xtream_get_file_path(&storage_path, pli.xtream_cluster);
-    {
-        let _file_lock = app_config.file_locks.write_lock(&xtream_path).await;
-        let mut tree = if xtream_path.exists() {
-            BPlusTreeUpdate::try_new(&xtream_path).map_err(|err| cant_write_result!(&xtream_path, err))?
-        } else {
-            // This case should rarely happen as the file is usually pre-created, but for safety:
-            return Err(cant_write_result!(&xtream_path, "BPlusTree file not found for append"));
-        };
-
-        tree.update(&pli.virtual_id, pli.clone()).map_err(|err| cant_write_result!(&xtream_path, err))?;
-    }
+    
+    // Phase 1: Pre-serialize the item in async context (before spawn_blocking)
+    let value_bytes = crate::utils::binary_serialize(pli)
+        .map_err(|e| notify_err!("Failed to serialize value: {e}"))?;
+    let serialized_items = vec![(pli.virtual_id, value_bytes)];
+    
+    // Phase 2: Acquire FileLockManager lock (async, in-process coordination)
+    let _file_lock = app_config.file_locks.write_lock(&xtream_path).await;
+    
+    // Phase 3: Execute all I/O in a single spawn_blocking call
+    let xtream_path_clone = xtream_path.clone();
+    tokio::task::spawn_blocking(move || -> Result<(), std::io::Error> {
+        if !xtream_path_clone.exists() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "BPlusTree file not found for update",
+            ));
+        }
+        let mut tree = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::try_new(&xtream_path_clone)?;
+        tree.upsert_batch_preserialized(serialized_items)?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| notify_err!("Blocking task failed: {e}"))?
+    .map_err(|err| cant_write_result!(&xtream_path, err))?;
+    
     Ok(())
 }
 
@@ -141,23 +167,43 @@ pub async fn write_playlist_batch_item_upsert(
     xtream_cluster: XtreamCluster,
     pli_list: &[XtreamPlaylistItem],
 ) -> Result<(), TuliproxError> {
+    if pli_list.is_empty() {
+        return Ok(());
+    }
+    
     let storage_path = {
         let config = app_config.config.load();
         ensure_xtream_storage_path(&config, target_name).await?
     };
     let xtream_path = xtream_get_file_path(&storage_path, xtream_cluster);
-    {
-        let _file_lock = app_config.file_locks.write_lock(&xtream_path).await;
-        let mut tree = if xtream_path.exists() {
-            BPlusTreeUpdate::try_new(&xtream_path).map_err(|err| cant_write_result!(&xtream_path, err))?
-        } else {
-            // This case should rarely happen as the file is usually pre-created, but for safety:
-            return Err(cant_write_result!(&xtream_path, "BPlusTree file not found for append"));
-        };
-
-        let batch: Vec<(&u32, &XtreamPlaylistItem)> = pli_list.iter().map(|pli| (&pli.virtual_id, pli)).collect();
-        tree.upsert_batch(&batch).map_err(|err| cant_write_result!(&xtream_path, err))?;
+    
+    // Phase 1: Pre-serialize all items in async context (before spawn_blocking)
+    // This converts references to owned bytes, avoiding clones of the full struct
+    let mut serialized_items: Vec<(u32, Vec<u8>)> = Vec::with_capacity(pli_list.len());
+    for pli in pli_list {
+        let value_bytes = crate::utils::binary_serialize(pli)
+            .map_err(|e| notify_err!("Failed to serialize value: {e}"))?;
+        serialized_items.push((pli.virtual_id, value_bytes));
     }
+    
+    // Phase 2: Acquire FileLockManager lock (async, in-process coordination)
+    let file_lock = app_config.file_locks.write_lock(&xtream_path).await;
+    
+    // Phase 3: Execute all I/O in a single spawn_blocking call
+    if !file_exists_async(&xtream_path).await {
+        return info_err_res!("BPlusTree file not found for upsert {}", xtream_path.display());
+    }
+    let xtream_path_clone = xtream_path.clone();
+    tokio::task::spawn_blocking(move || -> Result<(), std::io::Error> {
+        let _guard = file_lock;
+        let mut tree = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::try_new(&xtream_path_clone)?;
+        tree.upsert_batch_preserialized(serialized_items)?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| notify_err!("Blocking task failed: {e}"))?
+    .map_err(|err| cant_write_result!(&xtream_path, err))?;
+    
     Ok(())
 }
 

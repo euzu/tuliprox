@@ -257,20 +257,36 @@ pub async fn get_target_id_mapping(cfg: &AppConfig, target_path: &Path, use_memo
 async fn load_target_id_mapping_as_tree(app_config: &AppConfig, target_path: &Path, target: &ConfigTarget) -> Result<BPlusTree<u32, VirtualIdRecord>, TuliproxError> {
     let target_id_mapping_file = get_target_id_mapping_file(target_path);
     let _file_lock = app_config.file_locks.read_lock(&target_id_mapping_file).await;
-    BPlusTree::<u32, VirtualIdRecord>::load(&target_id_mapping_file).map_err(|err|
-        info_err!("Could not find path for target {} err:{err}", &target.name))
+    
+    // Move B+Tree load to spawn_blocking to avoid blocking tokio runtime
+    let path_clone = target_id_mapping_file.clone();
+    let target_name = target.name.clone();
+    tokio::task::spawn_blocking(move || {
+        BPlusTree::<u32, VirtualIdRecord>::load(&path_clone)
+    })
+    .await
+    .map_err(|e| info_err!("Blocking task failed: {e}"))?
+    .map_err(|err| info_err!("Could not find path for target {} err:{err}", &target_name))
 }
 
 async fn load_xtream_playlist_as_tree(app_config: &AppConfig, storage_path: &Path, cluster: XtreamCluster) -> BPlusTree<u32, XtreamPlaylistItem> {
     let xtream_path = xtream_get_file_path(storage_path, cluster);
-    let _file_lock = app_config.file_locks.read_lock(&xtream_path).await;
-    let mut tree = BPlusTree::<u32, XtreamPlaylistItem>::new();
-    if let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) {
-        for (_, doc) in query.iter() {
-            tree.insert(doc.virtual_id, doc);
+    let file_lock = app_config.file_locks.read_lock(&xtream_path).await;
+    
+    // Move B+Tree query and iteration to spawn_blocking to avoid blocking tokio runtime
+    let path_clone = xtream_path.clone();
+    tokio::task::spawn_blocking(move || {
+        let _guard = file_lock;
+        let mut tree = BPlusTree::<u32, XtreamPlaylistItem>::new();
+        if let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&path_clone) {
+            for (_, doc) in query.iter() {
+                tree.insert(doc.virtual_id, doc);
+            }
         }
-    }
-    tree
+        tree
+    })
+    .await
+    .unwrap_or_else(|_| BPlusTree::new())
 }
 
 async fn load_id_mapping_target_storage(app_config: &AppConfig, target: &ConfigTarget) -> Result<BPlusTree<VirtualId, VirtualIdRecord>, TuliproxError> {
@@ -305,12 +321,21 @@ async fn load_m3u_target_storage(app_config: &AppConfig, target: &ConfigTarget) 
 
     let m3u_path = m3u_get_file_path_for_db(&target_path);
     let _file_lock = app_config.file_locks.read_lock(&m3u_path).await;
-    let mut tree = BPlusTree::<u32, M3uPlaylistItem>::new();
-    if let Ok(mut query) = BPlusTreeQuery::<u32, M3uPlaylistItem>::try_new(&m3u_path) {
-        for (_, doc) in query.iter() {
-            tree.insert(doc.virtual_id, doc);
+    
+    // Move B+Tree query and iteration to spawn_blocking to avoid blocking tokio runtime
+    let path_clone = m3u_path.clone();
+    let tree = tokio::task::spawn_blocking(move || {
+        let mut tree = BPlusTree::<u32, M3uPlaylistItem>::new();
+        if let Ok(mut query) = BPlusTreeQuery::<u32, M3uPlaylistItem>::try_new(&path_clone) {
+            for (_, doc) in query.iter() {
+                tree.insert(doc.virtual_id, doc);
+            }
         }
-    }
+        tree
+    })
+    .await
+    .unwrap_or_else(|_| BPlusTree::new());
+    
     Ok(tree)
 }
 
