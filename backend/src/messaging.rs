@@ -281,28 +281,29 @@ async fn resolve_template<'a>(app_config: &'a Arc<AppConfig>, http_client: &'a r
 
 #[cfg(test)]
 mod tests {
-    use arc_swap::ArcSwap;
+    use arc_swap::{ArcSwap, ArcSwapOption};
     use crate::model::ProcessingStats;
     use super::*;
     use shared::model::{ConfigPaths};
+    use crate::utils::FileLockManager;
 
     fn create_app_config() -> Arc<AppConfig> {
         Arc::new(AppConfig {
-            config: Arc::new(Default::default()),
-            sources: Arc::new(Default::default()),
-            hdhomerun: Arc::new(Default::default()),
-            api_proxy: Arc::new(Default::default()),
-            file_locks: Arc::new(Default::default()),
+            config: Arc::new(ArcSwap::default()),
+            sources: Arc::new(ArcSwap::default()),
+            hdhomerun: Arc::new(ArcSwapOption::default()),
+            api_proxy: Arc::new(ArcSwapOption::default()),
+            file_locks: Arc::new(FileLockManager::default()),
             paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
-                config_path: "".to_string(),
-                config_file_path: "".to_string(),
-                sources_file_path: "".to_string(),
+                config_path: String::new(),
+                config_file_path: String::new(),
+                sources_file_path: String::new(),
                 mapping_file_path: None,
                 mapping_files_used: None,
-                api_proxy_file_path: "".to_string(),
+                api_proxy_file_path: String::new(),
                 custom_stream_response_path: None,
             })),
-            custom_stream_response: Arc::new(Default::default()),
+            custom_stream_response: Arc::new(ArcSwapOption::default()),
             access_token_secret: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32],
             encrypt_secret: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16],
         })
@@ -459,7 +460,7 @@ mod tests {
         let app_cfg = create_app_config();
         let client = reqwest::Client::new();
 
-        let template = r#"
+        let template = r"
             *🔄 Playlist Update Report*
 
             {{#each stats}}
@@ -484,10 +485,10 @@ mod tests {
             {{/if}}
 
             _Timestamp: {{timestamp}}_
-        "#;
+        ";
         let output = render_template(&app_cfg, &client, Some(template), &content).await;
         
-        println!("Telegram Output:\n{}", output);
+        println!("Telegram Output:\n{output}");
 
         assert!(output.contains("🔄 Playlist Update Report"));
         assert!(output.contains("Telegram Input"));

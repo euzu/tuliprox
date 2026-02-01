@@ -3,6 +3,7 @@ use std::str::FromStr;
 use yew::prelude::*;
 use crate::app::components::{NameStep, Panel, PlaylistAssistantContext, TypeStep};
 
+#[allow(dead_code)]
 enum PlaylistAssistantStep {
     Name,
     Type,

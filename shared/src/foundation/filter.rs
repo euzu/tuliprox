@@ -718,7 +718,7 @@ mod tests {
         match get_filter(flt, None) {
             Ok(filter) => {
                 assert_eq!(format!("{filter}"), flt);
-                let channels = vec![
+                let channels = [
                     create_mock_pli("24/7: Cars", "FR Channels"),
                     create_mock_pli("24/7: Cars", "US Channels"),
                     create_mock_pli("Entertainment", "US Channels"),
@@ -768,7 +768,7 @@ mod tests {
         match get_filter(flt, None) {
             Ok(filter) => {
                 assert_eq!(format!("{filter}"), flt);
-                let channels = vec![
+                let channels = [
                     create_mock_pli("NA", "GA"),
                     create_mock_pli("NB", "GB"),
                     create_mock_pli("NA", "GB"),
@@ -833,7 +833,7 @@ mod tests {
         match get_filter(flt, None) {
             Ok(filter) => {
                 assert_eq!(format!("{filter}"), flt);
-                let channels = vec![
+                let channels = [
                     create_mock_pli("24/7: Cars", "FR Channels"),
                     create_mock_pli("24/7: Cars", "US Channels"),
                     create_mock_pli("Entertainment", "US Channels"),

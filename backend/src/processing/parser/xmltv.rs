@@ -617,7 +617,6 @@ mod tests {
     use crate::model::{EpgSmartMatchConfig, PersistedEpgSource, TVGuide};
     use crate::processing::parser::xmltv::normalize_channel_name;
     use std::collections::HashSet;
-    use std::io;
     use std::path::PathBuf;
 
     #[test]
@@ -636,9 +635,9 @@ mod tests {
     }
 
 
-    #[ignore]
+    #[ignore = "requires a local XMLTV fixture under /tmp"]
     #[test]
-    fn parse_test() -> io::Result<()> {
+    fn parse_test() {
         let run_test = async move || {
             //let file_path = PathBuf::from("/tmp/epg.xml.gz");
             let file_path = PathBuf::from("/tmp/invalid_epg.xml");
@@ -652,19 +651,18 @@ mod tests {
 
                 let channel_ids = HashSet::from([342u32.intern()]);
                 match tv_guide.filter(&mut id_cache).await {
-                    None => assert!(false, "No epg filtered"),
+                    None => panic!("No epg filtered"),
                     Some(epgs) => {
                         for epg in epgs {
-                            assert_eq!(epg.children.len(), channel_ids.len() * 2, "Epg size does not match")
+                            assert_eq!(epg.children.len(), channel_ids.len() * 2, "Epg size does not match");
                         }
                     }
                 }
             }
         };
-        let _result = tokio::runtime::Runtime::new()
+        tokio::runtime::Runtime::new()
             .unwrap()
             .block_on(run_test());
-        Ok(())
     }
 
     #[test]
