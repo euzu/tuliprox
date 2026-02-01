@@ -1002,8 +1002,7 @@ async fn xtream_get_catchup_response(
         .get_mut(crate::model::XC_TAG_EPG_LISTINGS)
         .and_then(Value::as_array_mut));
     let config = &app_state.app_config.config.load();
-    let target_path =
-        try_option_bad_request!(get_target_storage_path(config, target.name.as_str()));
+    let target_path = try_option_bad_request!(get_target_storage_path(config, target.name.as_str()));
     let Ok((mut target_id_mapping, file_lock)) = get_target_id_mapping(&app_state.app_config, &target_path, target.use_memory_cache).await else {
         return internal_server_error!()
     };
