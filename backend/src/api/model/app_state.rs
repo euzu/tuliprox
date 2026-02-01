@@ -343,7 +343,7 @@ impl AppState {
         self.active_users.update_config(&config);
         self.app_config.set_config(config)?;
         self.active_provider.update_config(&self.app_config).await;
-        self.update_config().await;
+        self.update_config().await?;
 
         if changes.geoip {
             let new_geoip = if use_geoip {
@@ -361,18 +361,12 @@ impl AppState {
         Ok(changes)
     }
 
-    async fn update_config(&self) {
+    async fn update_config(&self) -> Result<(), TuliproxError> {
         // client
-        if let Ok(client) = create_http_client(&self.app_config) {
-            self.http_client.store(Arc::new(client));
-        } else {
-            error!("Config invalid, failed to create HTTP client");
-        }
-        if let Ok(client_no_redirect) = create_http_client_no_redirect(&self.app_config) {
-            self.http_client_no_redirect.store(Arc::new(client_no_redirect));
-        } else {
-            error!("Config invalid, failed to create HTTP no redirect client");
-        }
+        let client = create_http_client(&self.app_config)?;
+        self.http_client.store(Arc::new(client));
+        let client_no_redirect = create_http_client_no_redirect(&self.app_config)?;
+        self.http_client_no_redirect.store(Arc::new(client_no_redirect));
 
         // cache
         let config = self.app_config.config.load();
@@ -392,6 +386,7 @@ impl AppState {
             let cache = create_cache(&config);
             self.cache.store(cache);
         }
+        Ok(())
     }
 
     pub(in crate::api::model) async fn set_sources(&self, sources: SourcesConfig) -> Result<UpdateChanges, TuliproxError> {
