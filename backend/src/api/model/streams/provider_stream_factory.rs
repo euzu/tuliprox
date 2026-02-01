@@ -452,15 +452,11 @@ async fn provider_stream_request(
 
             if status.is_client_error() {
                 debug!("Client error status response : {status}");
-                if status == StatusCode::PROXY_AUTHENTICATION_REQUIRED {
-                    debug!("Proxy authentication required (407) for {}", sanitize_sensitive_info(response_url.as_str()));
-                } else if status == StatusCode::UNAUTHORIZED {
-                    debug!("Origin authentication required (401) for {}", sanitize_sensitive_info(response_url.as_str()));
-                }
                 return match status {
                     StatusCode::NOT_FOUND
                     | StatusCode::FORBIDDEN
                     | StatusCode::UNAUTHORIZED
+                    | StatusCode::PROXY_AUTHENTICATION_REQUIRED
                     | StatusCode::METHOD_NOT_ALLOWED
                     | StatusCode::BAD_REQUEST => {
                         handle_channel_unavailable_stream(app_state, stream_options).await
@@ -528,7 +524,7 @@ async fn get_provider_stream(
             }
             Err(status) => {
                 debug!("Provider stream response error status response : {status}");
-                if matches!(status, StatusCode::FORBIDDEN | StatusCode::SERVICE_UNAVAILABLE | StatusCode::UNAUTHORIZED | StatusCode::RANGE_NOT_SATISFIABLE) {
+                if matches!(status, StatusCode::FORBIDDEN | StatusCode::SERVICE_UNAVAILABLE | StatusCode::UNAUTHORIZED | StatusCode::PROXY_AUTHENTICATION_REQUIRED | StatusCode::RANGE_NOT_SATISFIABLE) {
                     warn!("The stream could be unavailable. ({status}) {}",sanitize_sensitive_info(stream_options.get_url().as_str()));
                     break;
                 }
