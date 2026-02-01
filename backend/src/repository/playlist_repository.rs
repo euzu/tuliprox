@@ -2,17 +2,18 @@ use crate::api::model::{AppState, PlaylistM3uStorage, PlaylistStorage, PlaylistS
 use crate::model::Epg;
 use crate::model::{AppConfig, ConfigInput, ConfigTarget, TargetOutput};
 use crate::processing::processor::playlist::{apply_filter_to_playlist, PlaylistProcessingContext};
-use crate::repository::{BPlusTree, BPlusTreeQuery};
 use crate::repository::epg_write_for_target;
-use crate::repository::{load_input_m3u_playlist, m3u_get_file_path_for_db, m3u_write_playlist, persist_input_m3u_playlist};
-use crate::repository::{ensure_target_storage_path, get_input_storage_path, get_target_id_mapping_file, get_target_storage_path};
-use crate::repository::FILE_SUFFIX_DB;
 use crate::repository::write_strm_playlist;
-use crate::repository::{TargetIdMapping, VirtualIdRecord};
+use crate::repository::FILE_SUFFIX_DB;
+use crate::repository::{ensure_target_storage_path, get_input_storage_path, get_target_id_mapping_file, get_target_storage_path};
+use crate::repository::{load_input_local_library_playlist, persist_input_library_playlist};
+use crate::repository::{load_input_m3u_playlist, m3u_get_file_path_for_db, m3u_write_playlist, persist_input_m3u_playlist};
 use crate::repository::{load_input_xtream_playlist, persist_input_xtream_playlist, xtream_get_file_path, xtream_get_storage_path, xtream_write_playlist};
+use crate::repository::BPlusTree;
+use crate::repository::{LocalLibraryDiskPlaylistSource, M3uDiskPlaylistSource, MemoryPlaylistSource, PlaylistSource, XtreamDiskPlaylistSource};
+use crate::repository::{TargetIdMapping, VirtualIdRecord};
 use crate::utils;
 use log::{info, warn};
-use crate::repository::{LocalLibraryDiskPlaylistSource, M3uDiskPlaylistSource, MemoryPlaylistSource, PlaylistSource, XtreamDiskPlaylistSource};
 use shared::error::{info_err, TuliproxError};
 use shared::model::xtream_const::XTREAM_CLUSTER;
 use shared::model::{InputType, M3uPlaylistItem, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, StreamProperties, VirtualId, XtreamCluster, XtreamPlaylistItem};
@@ -20,7 +21,6 @@ use shared::utils::{is_dash_url, is_hls_url, Internable};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use crate::repository::{load_input_local_library_playlist, persist_input_library_playlist};
 
 struct LocalEpisodeKey {
     path: Arc<str>,
@@ -249,7 +249,13 @@ fn rewrite_series_info_episode_virtual_id(playlist: &mut [PlaylistGroup],
 pub async fn get_target_id_mapping(cfg: &AppConfig, target_path: &Path, use_memory_cache: bool) -> Result<(TargetIdMapping, utils::FileWriteGuard), TuliproxError> {
     let target_id_mapping_file = get_target_id_mapping_file(target_path);
     let file_lock = cfg.file_locks.write_lock(&target_id_mapping_file).await;
-    let mapping = TargetIdMapping::new(&target_id_mapping_file, use_memory_cache)?;
+    let mapping_path = target_id_mapping_file.clone();
+    let mapping = tokio::task::spawn_blocking(move || {
+        TargetIdMapping::new(&mapping_path, use_memory_cache)
+    })
+        .await
+        .map_err(|err| info_err!("spawn_blocking failed while creating TargetIdMapping: {err}"))??;
+
     Ok((mapping, file_lock))
 }
 
@@ -257,20 +263,30 @@ pub async fn get_target_id_mapping(cfg: &AppConfig, target_path: &Path, use_memo
 async fn load_target_id_mapping_as_tree(app_config: &AppConfig, target_path: &Path, target: &ConfigTarget) -> Result<BPlusTree<u32, VirtualIdRecord>, TuliproxError> {
     let target_id_mapping_file = get_target_id_mapping_file(target_path);
     let _file_lock = app_config.file_locks.read_lock(&target_id_mapping_file).await;
-    BPlusTree::<u32, VirtualIdRecord>::load(&target_id_mapping_file).map_err(|err|
-        info_err!("Could not find path for target {} err:{err}", &target.name))
+
+    // Move B+Tree load to spawn_blocking to avoid blocking tokio runtime
+    let path_clone = target_id_mapping_file.clone();
+    let target_name = target.name.clone();
+    tokio::task::spawn_blocking(move || {
+        BPlusTree::<u32, VirtualIdRecord>::load(&path_clone)
+    })
+        .await
+        .map_err(|e| info_err!("Blocking task failed: {e}"))?
+        .map_err(|err| info_err!("Could not find path for target {} err:{err}", &target_name))
 }
 
 async fn load_xtream_playlist_as_tree(app_config: &AppConfig, storage_path: &Path, cluster: XtreamCluster) -> BPlusTree<u32, XtreamPlaylistItem> {
     let xtream_path = xtream_get_file_path(storage_path, cluster);
-    let _file_lock = app_config.file_locks.read_lock(&xtream_path).await;
-    let mut tree = BPlusTree::<u32, XtreamPlaylistItem>::new();
-    if let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) {
-        for (_, doc) in query.iter() {
-            tree.insert(doc.virtual_id, doc);
-        }
+    let file_lock = app_config.file_locks.read_lock(&xtream_path).await;
+    // Move B+Tree query and iteration to spawn_blocking to avoid blocking tokio runtime
+    let path_clone = xtream_path.clone();
+    match tokio::task::spawn_blocking(move || {
+        let _guard = file_lock;
+        BPlusTree::<u32, XtreamPlaylistItem>::load(&path_clone)
+    }).await {
+        Ok(Ok(tree)) => tree,
+        _ => BPlusTree::new(),
     }
-    tree
 }
 
 async fn load_id_mapping_target_storage(app_config: &AppConfig, target: &ConfigTarget) -> Result<BPlusTree<VirtualId, VirtualIdRecord>, TuliproxError> {
@@ -304,16 +320,17 @@ async fn load_m3u_target_storage(app_config: &AppConfig, target: &ConfigTarget) 
         info_err!("Could not find path for target {}", &target.name))?;
 
     let m3u_path = m3u_get_file_path_for_db(&target_path);
-    let _file_lock = app_config.file_locks.read_lock(&m3u_path).await;
-    let mut tree = BPlusTree::<u32, M3uPlaylistItem>::new();
-    if let Ok(mut query) = BPlusTreeQuery::<u32, M3uPlaylistItem>::try_new(&m3u_path) {
-        for (_, doc) in query.iter() {
-            tree.insert(doc.virtual_id, doc);
-        }
-    }
-    Ok(tree)
-}
+    let file_lock = app_config.file_locks.read_lock(&m3u_path).await;
 
+    let path_clone = m3u_path.clone();
+    match tokio::task::spawn_blocking(move || {
+        let _guard = file_lock;
+        BPlusTree::<u32, M3uPlaylistItem>::load(&path_clone)
+    }).await {
+        Ok(Ok(tree)) => Ok(tree),
+        _ => Ok(BPlusTree::new()),
+    }
+}
 
 pub async fn load_playlists_into_memory_cache(app_state: &AppState) -> Result<(), TuliproxError> {
     for sources in &app_state.app_config.sources.load().sources {
@@ -378,7 +395,7 @@ pub async fn persist_input_playlist(app_config: &Arc<AppConfig>, input: &ConfigI
                 return (playlist, Some(err));
             }
             (playlist, None)
-        },
+        }
         InputType::Library => {
             // Persist local library playlist
             let working_dir = &app_config.config.load().working_dir;
