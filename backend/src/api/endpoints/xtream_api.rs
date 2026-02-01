@@ -1033,45 +1033,47 @@ async fn xtream_get_catchup_response(
     let mut mapping_results = Vec::with_capacity(tasks.len());
     let mut in_memory_updates = Vec::new();
 
-    {
-        let Ok((mut target_id_mapping, file_lock)) = get_target_id_mapping(
-            &app_state.app_config,
-            &target_path,
-            target.use_memory_cache
-        ).await else {
-            return internal_server_error!();
-        };
+    if !tasks.is_empty() {
+        {
+            let Ok((mut target_id_mapping, file_lock)) = get_target_id_mapping(
+                &app_state.app_config,
+                &target_path,
+                target.use_memory_cache
+            ).await else {
+                return internal_server_error!();
+            };
 
-        for (idx, uuid, cp_id) in tasks {
-            let virtual_id = target_id_mapping.get_and_update_virtual_id(
-                &uuid,
-                cp_id,
-                PlaylistItemType::Catchup,
-                pli.provider_id,
-            );
-
-            mapping_results.push((idx, virtual_id));
-
-            if target.use_memory_cache {
-                in_memory_updates.push(
-                    VirtualIdRecord::new(
-                        cp_id,
-                        virtual_id,
-                        PlaylistItemType::Catchup,
-                        pli.provider_id,
-                        uuid,
-                    ),
+            for (idx, uuid, cp_id) in tasks {
+                let virtual_id = target_id_mapping.get_and_update_virtual_id(
+                    &uuid,
+                    cp_id,
+                    PlaylistItemType::Catchup,
+                    pli.provider_id,
                 );
+
+                mapping_results.push((idx, virtual_id));
+
+                if target.use_memory_cache {
+                    in_memory_updates.push(
+                        VirtualIdRecord::new(
+                            cp_id,
+                            virtual_id,
+                            PlaylistItemType::Catchup,
+                            pli.provider_id,
+                            uuid,
+                        ),
+                    );
+                }
             }
-        }
 
-        if let Err(err) = target_id_mapping.persist() {
-            error!("Failed to write catchup id mapping {err}");
-            return axum::http::StatusCode::BAD_REQUEST.into_response();
-        }
+            if let Err(err) = target_id_mapping.persist() {
+                error!("Failed to write catchup id mapping {err}");
+                return axum::http::StatusCode::BAD_REQUEST.into_response();
+            }
 
-        // Lock is released here immediately after persist()
-        drop(file_lock);
+            // Lock is released here immediately after persist()
+            drop(file_lock);
+        }
     }
 
     // Apply the new virtual IDs back to the JSON document

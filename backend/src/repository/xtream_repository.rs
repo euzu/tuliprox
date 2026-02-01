@@ -137,19 +137,19 @@ pub async fn write_playlist_item_update(
     let value_bytes = crate::utils::binary_serialize(pli)
         .map_err(|e| notify_err!("Failed to serialize value: {e}"))?;
     let serialized_items = vec![(pli.virtual_id, value_bytes)];
-    
+
+    if !file_exists_async(&xtream_path).await {
+        return info_err_res!("BPlusTree file not found for update {}", xtream_path.display());
+    }
+
+
     // Phase 2: Acquire FileLockManager lock (async, in-process coordination)
-    let _file_lock = app_config.file_locks.write_lock(&xtream_path).await;
+    let file_lock = app_config.file_locks.write_lock(&xtream_path).await;
     
     // Phase 3: Execute all I/O in a single spawn_blocking call
     let xtream_path_clone = xtream_path.clone();
     tokio::task::spawn_blocking(move || -> Result<(), std::io::Error> {
-        if !xtream_path_clone.exists() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "BPlusTree file not found for update",
-            ));
-        }
+        let _guard = file_lock;
         let mut tree = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::try_new(&xtream_path_clone)?;
         tree.upsert_batch_preserialized(serialized_items)?;
         Ok(())

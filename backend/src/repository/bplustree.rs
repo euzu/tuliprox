@@ -3871,12 +3871,12 @@ where
     /// 2. Pass only `Vec<u8>` bytes into the blocking context (avoiding clones)
     /// 3. Perform all I/O in a single blocking call
     ///
-    /// The key type K must still be deserializable as we need to find positions
-    /// in the tree, but values are written as raw bytes without re-serialization.
+    /// The key type K still follows the tree bounds (Ord + Serialize + Deserialize),
+    /// but values are written as raw bytes without re-serialization.
     ///
     /// # Arguments
-    /// * `items` - Pre-serialized (`key_bytes`, `value_bytes`) pairs. Keys will be
-    ///   deserialized to find their position; values are written as-is.
+    /// * `items` - (`key`, `value_bytes`) pairs where `value_bytes` is MessagePack-encoded.
+    ///   Keys are already typed and used directly for tree traversal.
     ///
     /// # Returns
     /// The final root offset after all upserts, or an error if any operation fails
