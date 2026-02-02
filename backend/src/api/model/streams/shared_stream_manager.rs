@@ -1,4 +1,4 @@
-use crate::api::model::AppState;
+use crate::api::model::{AppState, STREAM_IDLE_TIMEOUT};
 use crate::api::model::{ActiveProviderManager, ProviderHandle, StreamError};
 use crate::model::Config;
 use crate::utils::debug_if_enabled;
@@ -280,6 +280,10 @@ impl SharedStreamState {
 
         tokio::spawn(async move {
             let mut counter = 0usize;
+            let idle_timeout = Duration::from_secs(STREAM_IDLE_TIMEOUT);
+            let idle = sleep(idle_timeout);
+            tokio::pin!(idle);
+
             loop {
                 tokio::select! {
                   biased;
@@ -289,8 +293,15 @@ impl SharedStreamState {
                         break;
                   },
 
-                  item = source_stream.next() => {
-                     match item {
+                  () = &mut idle => {
+                       debug!("shared stream idle for too long, closing");
+                        stop_token.cancel();
+                       break;
+                  }
+
+                  chunk = source_stream.next() => {
+                     idle.as_mut().reset(Instant::now() + idle_timeout);
+                     match chunk {
                         Some(Ok(data)) => {
                           let arc_data = Arc::new(data);
                           {

@@ -12,13 +12,15 @@ dist
 /dataSources/
 /dataSources.local.xml
 /dev/
+/debug/
 
 docker/binaries
 .DS_Store
 
 # Ignore documentation files
 AGENTS.md
-PLAN.md
+PLANS.md
+STEPS.md
 
 *.m3u
 

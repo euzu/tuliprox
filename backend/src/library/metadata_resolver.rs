@@ -230,8 +230,8 @@ mod tests {
 
     fn create_test_file(name: &str) -> ScannedMediaFile {
         ScannedMediaFile {
-            path: PathBuf::from(format!("/test/{}", name)),
-            file_path: format!("/test/{}", name),
+            path: PathBuf::from(format!("/test/{name}")),
+            file_path: format!("/test/{name}"),
             file_name: name.to_string(),
             extension: "mkv".to_string(),
             size_bytes: 1024,
@@ -250,8 +250,7 @@ mod tests {
         let resolver = MetadataResolver::from_config(&config, client, MetadataStorage::new(PathBuf::from("/tmp")));
         let file = create_test_file("The.Matrix.1999.1080p.mkv");
         let metadata = match MediaClassifier::classify(&file) {
-            MediaClassification::Movie { metadata, .. } => metadata,
-            MediaClassification::Series { metadata, .. } => metadata,
+            MediaClassification::Movie { metadata, .. } | MediaClassification::Series { metadata, .. } => metadata,
         };
         let group = MediaGroup::Movie { file, metadata: Box::new(metadata) };
 
@@ -301,8 +300,7 @@ mod tests {
         let resolver = MetadataResolver::from_config(&config, client, MetadataStorage::new(PathBuf::from("/tmp")));
         let file = create_test_file("343jfkjh4789dkjfh934z3.Movie.mkv");
         let metadata = match MediaClassifier::classify(&file) {
-            MediaClassification::Movie { metadata, .. } => metadata,
-            MediaClassification::Series { metadata, .. } => metadata,
+            MediaClassification::Movie { metadata, .. } | MediaClassification::Series { metadata, .. } => metadata,
         };
         let group = MediaGroup::Movie { file, metadata: Box::new(metadata) };
 

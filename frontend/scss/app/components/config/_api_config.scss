@@ -1,0 +1,39 @@
+@use "../../../size" as size;
+
+.tp__api-config-view {
+  &__body {
+    display: flex;
+    flex-flow: column;
+  }
+
+  &__section {
+    display: flex;
+    flex-flow: column;
+    width: 100%;
+    gap: var(--gap-default);
+    box-sizing: border-box;
+    overflow: auto;
+
+    &-title {
+      font-size: 1.5rem;
+      color: var(--modest-text-color);
+    }
+  }
+
+  &__server {
+    display: flex;
+    flex-flow: column;
+    width: 100%;
+    gap: var(--gap-default);
+    padding: var(--padding-default) 0;
+    box-sizing: border-box;
+  }
+
+  &__proxy-server {
+    &__view {
+      .tp__icon-button {
+        display: none;
+      }
+    }
+  }
+}

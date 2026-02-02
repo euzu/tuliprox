@@ -1486,12 +1486,11 @@ pub fn get_username_from_auth_header(token: &str, app_state: &Arc<AppState>) -> 
     None
 }
 
-/// # Panics
 pub fn redirect(url: &str) -> impl IntoResponse {
     try_unwrap_body!(axum::response::Response::builder()
         .status(StatusCode::FOUND)
         .header(header::LOCATION, url)
-        .body(axum::body::Body::empty()))
+        .body(Body::empty()))
 }
 
 pub async fn is_seek_request(cluster: XtreamCluster, req_headers: &HeaderMap) -> bool {

@@ -138,6 +138,7 @@
 - **Optimization**: Significant EPG memory reduction.
 - **Optimization**: Improved EPG parsing performance.
 - **EPG**: Fixed XMLTV timeshift to correctly apply user-defined timezone offsets in the generated XML output.
+- **407 Proxy Authentication Required** fix.
 
 ## ⚙️ Messaging Refactoring
 - **Structured Messaging**: Transitioned from JSON-string-based notifications to a strictly typed messaging pipeline.

@@ -3864,6 +3864,171 @@ where
         Ok(current_root)
     }
 
+    /// Upsert multiple items using pre-serialized key-value data.
+    ///
+    /// This method is designed for use with `spawn_blocking` where you want to:
+    /// 1. Serialize values in the async context (before `spawn_blocking`)
+    /// 2. Pass only `Vec<u8>` bytes into the blocking context (avoiding clones)
+    /// 3. Perform all I/O in a single blocking call
+    ///
+    /// The key type K still follows the tree bounds (Ord + Serialize + Deserialize),
+    /// but values are written as raw bytes without re-serialization.
+    ///
+    /// # Arguments
+    /// * `items` - (`key`, `value_bytes`) pairs where `value_bytes` is MessagePack-encoded.
+    ///   Keys are already typed and used directly for tree traversal.
+    ///
+    /// # Returns
+    /// The final root offset after all upserts, or an error if any operation fails
+    pub fn upsert_batch_preserialized(
+        &mut self,
+        items: Vec<(K, Vec<u8>)>,
+    ) -> io::Result<u64> {
+        if items.is_empty() {
+            return Ok(self.root_offset);
+        }
+
+        // Deserialize keys for sorting and tree traversal, keep values as bytes
+        let mut typed_items: Vec<(K, Vec<u8>)> = Vec::with_capacity(items.len());
+        for (key, value_bytes) in items {
+            typed_items.push((key, value_bytes));
+        }
+
+        // Sort by key for efficient batch insertion
+        typed_items.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let (mut current_root, promotions) = self.upsert_batch_preserialized_recursive(
+            self.root_offset,
+            &typed_items,
+        )?;
+
+        // Handle promotions (splits) using balanced approach
+        current_root = self.build_higher_levels(current_root, promotions)?;
+
+        self.file.get_mut().seek(SeekFrom::Start(ROOT_OFFSET_POS))?;
+        self.file.get_mut().write_all(&current_root.to_le_bytes())?;
+        self.file.get_mut().flush()?;
+        if self.flush_policy != FlushPolicy::None {
+            self.file.get_mut().sync_all()?;
+        }
+
+        self.root_offset = current_root;
+        Ok(current_root)
+    }
+
+    /// Recursive helper for `upsert_batch_preserialized`.
+    /// Items is a slice of (key, pre-serialized value bytes).
+    fn upsert_batch_preserialized_recursive(
+        &mut self,
+        offset: u64,
+        items: &[(K, Vec<u8>)],
+    ) -> io::Result<(u64, Vec<(K, u64)>)> {
+        let (mut node, pointers_opt) = BPlusTreeNode::<K, V>::deserialize_from_block(
+            &mut self.file,
+            &mut self.read_buffer,
+            offset,
+            false, // shallow
+        )?;
+
+        if node.is_leaf {
+            for (key, value_bytes) in items {
+                // Write pre-serialized value to disk with compression
+                let (val_off, val_len) = self.insert_preserialized_value_to_disk(value_bytes)?;
+                let new_info = ValueInfo {
+                    mode: ValueStorageMode::Single(val_off),
+                    length: val_len,
+                    cache: Mutex::new(None),
+                };
+
+                match node.keys.binary_search(key) {
+                    Ok(idx) => {
+                        node.value_info[idx] = new_info;
+                    }
+                    Err(idx) => {
+                        node.keys.insert(idx, key.clone());
+                        node.value_info.insert(idx, new_info);
+                    }
+                }
+            }
+
+            let mut leaf_promotions = Vec::new();
+            while node.keys.len() > self.leaf_order {
+                let median_idx = node.keys.len() / 2;
+                let mut right_node = BPlusTreeNode::new(true);
+                right_node.keys = node.keys.split_off(median_idx);
+                right_node.value_info = node.value_info.split_off(median_idx);
+
+                let promoted_key = right_node.keys[0].clone();
+                let right_offset = self.write_node(&right_node)?;
+                leaf_promotions.push((promoted_key, right_offset));
+            }
+
+            let new_leaf_offset = self.write_node(&node)?;
+            Ok((new_leaf_offset, leaf_promotions))
+        } else {
+            let mut pointers = pointers_opt.ok_or_else(|| io::Error::other("Internal node missing pointers"))?;
+            let mut current_idx = 0;
+
+            while current_idx < items.len() {
+                let first_key_in_group = &items[current_idx].0;
+                let child_idx = get_entry_index_upper_bound::<K>(&node.keys, first_key_in_group);
+
+                let mut group_end = current_idx + 1;
+                while group_end < items.len()
+                    && get_entry_index_upper_bound::<K>(&node.keys, &items[group_end].0) == child_idx
+                {
+                    group_end += 1;
+                }
+
+                let sub_items = &items[current_idx..group_end];
+                let (new_child_offset, child_promotions) =
+                    self.upsert_batch_preserialized_recursive(pointers[child_idx], sub_items)?;
+                pointers[child_idx] = new_child_offset;
+
+                for (median_key, right_child_offset) in child_promotions {
+                    let insert_idx = get_entry_index_upper_bound::<K>(&node.keys, &median_key);
+                    node.keys.insert(insert_idx, median_key);
+                    pointers.insert(insert_idx + 1, right_child_offset);
+                }
+
+                current_idx = group_end;
+            }
+
+            let mut node_promotions = Vec::new();
+            while node.keys.len() > self.inner_order {
+                let median_idx = node.keys.len() / 2;
+                let mut right_node = BPlusTreeNode::new(false);
+
+                let promoted_key = node.keys.remove(median_idx);
+                right_node.keys = node.keys.split_off(median_idx);
+                let right_pointers = pointers.split_off(median_idx + 1);
+
+                let right_offset = self.write_internal_node(&right_node, &right_pointers)?;
+                node_promotions.push((promoted_key, right_offset));
+            }
+
+            let new_offset = self.write_internal_node(&node, &pointers)?;
+            Ok((new_offset, node_promotions))
+        }
+    }
+
+    /// Insert a pre-serialized value (already `MessagePack` encoded) to disk.
+    /// Applies compression if beneficial.
+    fn insert_preserialized_value_to_disk(&mut self, value_bytes: &[u8]) -> io::Result<(u64, u32)> {
+        // Apply compression if beneficial
+        let (flag, payload) = compress_if_beneficial(value_bytes);
+
+        self.file.get_mut().seek(SeekFrom::End(0))?;
+        let offset = self.file.get_mut().stream_position()?;
+
+        // Write: [flag:1][payload]
+        self.file.get_mut().write_all(&[flag])?;
+        self.file.get_mut().write_all(&payload)?;
+
+        let stored_len = 1 + payload.len();
+        Ok((offset, u32::try_from(stored_len).map_err(to_io_error)?))
+    }
+
     /// Garbage Collection: Compacts the file by rewriting only live blocks sequentially.
     pub fn compact(&mut self, filepath: &Path) -> io::Result<()> {
         let mut temp_file = NamedTempFile::new_in(filepath.parent().unwrap_or(Path::new(".")))?;
@@ -4146,7 +4311,7 @@ mod tests {
                     id: record.id,
                     data: format!("{content} {}", record.id + 9000),
                 };
-                tree_update.update(&i, new_record).map_err(|e| e.to_io())?;
+                tree_update.update(&i, new_record).map_err(BPlusTreeError::to_io)?;
             } else {
                 panic!("{content} {i} not found");
             }
@@ -4256,7 +4421,7 @@ mod tests {
         assert_eq!(update.len().expect("Update len failed"), test_size as usize);
 
         // Update existing key - length should stay same
-        update.update(&1, Record { id: 1, data: "updated".to_string() }).map_err(|e| e.to_io())?;
+        update.update(&1, Record { id: 1, data: "updated".to_string() }).map_err(BPlusTreeError::to_io)?;
         assert_eq!(update.len().expect("Update len failed after update"), test_size as usize);
 
         // Insert new key - length should increase
@@ -4313,7 +4478,7 @@ mod tests {
         let mut tree_update = BPlusTreeUpdate::<u32, Record>::try_new(&filepath)?;
         for i in 0u32..100 {
             if i % 2 == 0 {
-                tree_update.update(&i, Record { id: i, data: format!("UpdatedContent {i}") }).map_err(|e| e.to_io())?;
+                tree_update.update(&i, Record { id: i, data: format!("UpdatedContent {i}") }).map_err(BPlusTreeError::to_io)?;
             }
         }
 
@@ -4357,7 +4522,7 @@ mod tests {
         let padding: String = generate_random_string(400);
         for i in 0u32..10 {
             // Each record has unique data to prevent compression
-            tree.insert(i, Record { id: i, data: format!("{}{}", padding, i) });
+            tree.insert(i, Record { id: i, data: format!("{padding}{i}") });
         }
         tree.store(&filepath)?;
 
@@ -4367,7 +4532,7 @@ mod tests {
         let mut tree_update = BPlusTreeUpdate::<u32, Record>::try_new(&filepath)?;
         let same_size_padding: String = generate_random_string(400);
         for i in 0u32..10 {
-            tree_update.update(&i, Record { id: i, data: format!("{}{}", same_size_padding, i) }).map_err(|e| e.to_io())?;
+            tree_update.update(&i, Record { id: i, data: format!("{same_size_padding}{i}") }).map_err(BPlusTreeError::to_io)?;
         }
 
         let size_after_same_update = std::fs::metadata(&filepath)?.len();
@@ -4388,7 +4553,7 @@ mod tests {
         let mut tree_update = BPlusTreeUpdate::<u32, Record>::try_new(&filepath)?;
         let smaller_padding: String = generate_random_string(200);
         for i in 0u32..10 {
-            tree_update.update(&i, Record { id: i, data: format!("{}{}", smaller_padding, i) }).map_err(|e| e.to_io())?;
+            tree_update.update(&i, Record { id: i, data: format!("{smaller_padding}{i}") }).map_err(BPlusTreeError::to_io)?;
         }
 
         let size_after_smaller_update = std::fs::metadata(&filepath)?.len();
@@ -4398,7 +4563,7 @@ mod tests {
         // 5000 chars is much larger than the original ~400 byte allocation
         let larger_padding: String = generate_random_string(5000);
         for i in 0u32..1 {
-            tree_update.update(&i, Record { id: i, data: format!("{}{}", larger_padding, i) }).map_err(|e| e.to_io())?;
+            tree_update.update(&i, Record { id: i, data: format!("{larger_padding}{i}") }).map_err(BPlusTreeError::to_io)?;
         }
 
         let size_after_larger_update = std::fs::metadata(&filepath)?.len();
@@ -4444,7 +4609,7 @@ mod tests {
 
         // 2. Multiple Updates (COW)
         for i in (0..test_size).step_by(10) {
-            tree_update.update(&i, Record { id: i, data: format!("UpdatedContent {i}") }).map_err(|e| e.to_io())?;
+            tree_update.update(&i, Record { id: i, data: format!("UpdatedContent {i}") }).map_err(BPlusTreeError::to_io)?;
         }
 
         // 3. Verify Query Integrity (Must return NEW values)
@@ -4497,7 +4662,7 @@ mod tests {
         assert_eq!(tree_update.query_le(&5).unwrap().unwrap().id, 0);
 
         // 2. COW Update
-        tree_update.update(&10, Record { id: 10, data: "NewVal".to_string() }).map_err(|e| e.to_io())?;
+        tree_update.update(&10, Record { id: 10, data: "NewVal".to_string() }).map_err(BPlusTreeError::to_io)?;
 
         // 3. Verify LE returns the LATEST value
         let val = tree_update.query_le(&15).expect("Query failed").expect("Should find LE key after COW update");
@@ -4574,7 +4739,7 @@ mod tests {
             .map(|(k, v)| (k, v))
             .collect();
 
-        tree_update.update_batch(&update_refs).map_err(|e| e.to_io())?;
+        tree_update.update_batch(&update_refs).map_err(BPlusTreeError::to_io)?;
         drop(tree_update);
 
         // Verify all updates
@@ -4612,7 +4777,7 @@ mod tests {
 
         // Test empty batch - should be no-op
         let empty_batch: Vec<(&u32, &Record)> = vec![];
-        let result = tree_update.update_batch(&empty_batch).map_err(|e| e.to_io())?;
+        let result = tree_update.update_batch(&empty_batch).map_err(BPlusTreeError::to_io)?;
 
         assert_eq!(result, initial_root, "Empty batch should not change root offset");
 
@@ -4656,7 +4821,7 @@ mod tests {
             .collect();
 
         // Perform batch update
-        tree_update.update_batch(&update_refs).map_err(|e| e.to_io())?;
+        tree_update.update_batch(&update_refs).map_err(BPlusTreeError::to_io)?;
         drop(tree_update);
 
         // Verify all updates via iterator
@@ -4704,7 +4869,7 @@ mod tests {
             .map(|(k, v)| (k, v))
             .collect();
 
-        tree_update.update_batch(&update_refs).map_err(|e| e.to_io())?;
+        tree_update.update_batch(&update_refs).map_err(BPlusTreeError::to_io)?;
 
         let size_before_compact = std::fs::metadata(&filepath)?.len();
 
@@ -4756,9 +4921,9 @@ mod tests {
         // Verify all data is present in the NEW file
         let mut tree_check = BPlusTreeQuery::<u32, Record>::try_new(&filepath)?;
 
-        assert!(tree_check.query(&1).map_err(|e| e.to_io())?.is_some(), "Should have key 1");
-        assert!(tree_check.query(&2).map_err(|e| e.to_io())?.is_some(), "Should have key 2");
-        assert!(tree_check.query(&3).map_err(|e| e.to_io())?.is_some(), "Should have key 3 - if missing, file handle wasn't updated");
+        assert!(tree_check.query(&1).map_err(BPlusTreeError::to_io)?.is_some(), "Should have key 1");
+        assert!(tree_check.query(&2).map_err(BPlusTreeError::to_io)?.is_some(), "Should have key 2");
+        assert!(tree_check.query(&3).map_err(BPlusTreeError::to_io)?.is_some(), "Should have key 3 - if missing, file handle wasn't updated");
 
         Ok(())
     }
@@ -4935,10 +5100,11 @@ mod tests {
         // Expected size without packing:
         // 1000 items * 4096 bytes/block = 4,096,000 bytes (~4MB)
         // Plus internal nodes
-        let unpacked_size_estimate = count as u64 * super::PAGE_SIZE_USIZE as u64;
+        let unpacked_size_estimate =
+            u64::from(count) * u64::try_from(super::PAGE_SIZE_USIZE).unwrap();
 
-        println!("File size with packing: {} bytes", file_size);
-        println!("Estimated unpacked size: {} bytes", unpacked_size_estimate);
+        println!("File size with packing: {file_size} bytes");
+        println!("Estimated unpacked size: {unpacked_size_estimate} bytes");
 
         // We expect significant savings.
         // 1000 items * ~60 bytes / 4096 bytes/block ~= 15 blocks
@@ -5008,7 +5174,7 @@ mod tests {
         let val1 = "A".repeat(10000);
         let val2 = "B".repeat(10000);
 
-        let updates = vec![
+        let updates = [
             (1, val1.clone()),
             (2, val2.clone()),
         ];
@@ -5072,7 +5238,7 @@ mod tests {
         let mut tree_update = BPlusTreeUpdate::<u32, String>::try_new(&filepath)?;
 
         // Batch contains same key multiple times
-        let updates = vec![
+        let updates = [
             (1, "First".to_string()),
             (1, "Second".to_string()),
             (2, "Two".to_string()),
@@ -5117,7 +5283,7 @@ mod tests {
 
         let size_before = std::fs::metadata(&filepath)?.len();
         // Each individual update writes a full path, increasing file size significantly.
-        assert!(size_before > count as u64 * 4000);
+        assert!(size_before > u64::from(count) * 4000);
 
         // Now Compact
         tree_update.compact(&filepath)?;
@@ -5127,7 +5293,7 @@ mod tests {
         // 200 items * 100 bytes = 20KB payload.
         // Should pack into ~5-6 blocks (4KB each).
 
-        println!("Size before: {}, Size after: {}", size_before, size_after);
+        println!("Size before: {size_before}, Size after: {size_after}");
         assert!(size_after < size_before / 10, "Compaction should pack values");
         assert!(size_after < 100 * 1024, "File should be small"); // < 100KB
 
@@ -5208,7 +5374,7 @@ mod tests {
             let keys: Vec<u32> = (0..count).collect();
             let value_info: Vec<ValueInfo> = (0..count)
                 .map(|i| ValueInfo {
-                    mode: ValueStorageMode::Packed(i as u64 * 4096, (i % 16) as u16),
+                    mode: ValueStorageMode::Packed(u64::from(i) * 4096, (i % 16) as u16),
                     length: 100,
                     cache: Mutex::new(None),
                 })
@@ -5277,7 +5443,7 @@ mod tests {
 
         // File size should have grown slightly (promoted values written at EOF)
         // but not dramatically since most values are still packed
-        println!("Size initial: {}, Size after: {}", size_initial, size_after);
+        println!("Size initial: {size_initial}, Size after: {size_after}");
         assert!(size_after >= size_initial, "File should not shrink");
 
         // Verify all data is correct
@@ -5303,7 +5469,7 @@ mod tests {
 
         let mut tree = BPlusTree::<u32, String>::new();
         for i in 0..10 {
-            tree.insert(i, format!("value_{}", i));
+            tree.insert(i, format!("value_{i}"));
         }
         tree.store(&filepath)?;
 
@@ -5312,12 +5478,12 @@ mod tests {
         // Test None policy - should not error
         update.flush_policy = super::FlushPolicy::None;
         for i in 0..5 {
-            update.update(&i, format!("new_{}", i)).map_err(super::BPlusTreeError::to_io)?;
+            update.update(&i, format!("new_{i}")).map_err(super::BPlusTreeError::to_io)?;
         }
 
         // Verify values within same session
         for i in 0..5 {
-            assert_eq!(update.query(&i).map_err(super::BPlusTreeError::to_io)?.unwrap(), format!("new_{}", i));
+            assert_eq!(update.query(&i).map_err(super::BPlusTreeError::to_io)?.unwrap(), format!("new_{i}"));
         }
 
         // Test Batch policy
@@ -5424,8 +5590,8 @@ mod tests {
         let page = SlottedPage::new(&mut data, PageType::Leaf).expect("Init failed");
         assert_eq!(page.header.page_type, PageType::Leaf);
         assert_eq!(page.header.cell_count, 0);
-        assert_eq!(page.header.free_start, PAGE_HEADER_SIZE as u16);
-        assert_eq!(page.header.free_end, PAGE_SIZE as u16);
+        assert_eq!(page.header.free_start, PAGE_HEADER_SIZE);
+        assert_eq!(page.header.free_end, PAGE_SIZE);
         assert_eq!(page.free_space(), PAGE_SIZE_USIZE - PAGE_HEADER_SIZE_USIZE);
     }
 
@@ -5439,11 +5605,11 @@ mod tests {
 
         // Insert length-prefixed for test realism
         let mut cell1 = Vec::new();
-        cell1.extend_from_slice(&(val1.len() as u32).to_le_bytes());
+        cell1.extend_from_slice(&u32::try_from(val1.len()).unwrap().to_le_bytes());
         cell1.extend_from_slice(val1);
 
         let mut cell2 = Vec::new();
-        cell2.extend_from_slice(&(val2.len() as u32).to_le_bytes());
+        cell2.extend_from_slice(&u32::try_from(val2.len()).unwrap().to_le_bytes());
         cell2.extend_from_slice(val2);
 
         page.insert_at_index(0, &cell1).unwrap();
@@ -5465,7 +5631,7 @@ mod tests {
 
         let payload = vec![0xAAu8; 500];
         let mut cell = Vec::new();
-        cell.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        cell.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_le_bytes());
         cell.extend_from_slice(&payload);
 
         for i in 0..6 {
@@ -5496,7 +5662,7 @@ mod tests {
         // Case 1: Split single item page -> Should return None (no-op)
         let val = b"item";
         let mut cell = Vec::new();
-        cell.extend_from_slice(&(val.len() as u32).to_le_bytes());
+        cell.extend_from_slice(&u32::try_from(val.len()).unwrap().to_le_bytes());
         cell.extend_from_slice(val);
         page.insert_at_index(0, &cell).unwrap();
 
@@ -5506,7 +5672,7 @@ mod tests {
                 assert_eq!(page.header.cell_count, 1); // Original page untouched
             }
             Ok(Some(_)) => panic!("Split of single item should result in None"),
-            Err(e) => panic!("Split of single item should result in no-op, not error: {:?}", e),
+            Err(e) => panic!("Split of single item should result in no-op, not error: {e:?}"),
         }
     }
 
@@ -5534,5 +5700,247 @@ mod tests {
 
         Ok(())
     }
-}
 
+    #[test]
+    fn test_metadata() -> io::Result<()> {
+        let tempdir = tempdir()?;
+        let filepath = tempdir.path().join("metadata_test.bin");
+
+        // 1. Test in-memory BPlusTree metadata
+        let mut tree = BPlusTree::<u32, String>::new();
+        assert!(matches!(tree.get_metadata(), BPlusTreeMetadata::Empty));
+
+        let meta = BPlusTreeMetadata::TargetIdMapping(12345);
+        tree.set_metadata(meta.clone());
+        assert_eq!(tree.get_metadata(), &meta);
+
+        // 2. Persist and check reloaded metadata
+        tree.store(&filepath)?;
+        let loaded = BPlusTree::<u32, String>::load(&filepath)?;
+        assert_eq!(loaded.get_metadata(), &meta);
+        drop(loaded);
+
+        // 3. Test BPlusTreeUpdate metadata
+        let mut update = BPlusTreeUpdate::<u32, String>::try_new(&filepath)?;
+        assert_eq!(update.get_metadata()?, meta);
+
+        let new_meta = BPlusTreeMetadata::TargetIdMapping(67890);
+        update.set_metadata(&new_meta)?;
+        assert_eq!(update.get_metadata()?, new_meta);
+        drop(update);
+
+        // Reload and verify again
+        let loaded2 = BPlusTree::<u32, String>::load(&filepath)?;
+        assert_eq!(loaded2.get_metadata(), &new_meta);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_query_zero_copy() -> io::Result<()> {
+        let tempdir = tempdir()?;
+        let filepath = tempdir.path().join("zero_copy_test.bin");
+
+        let mut tree = BPlusTree::<u32, String>::new();
+        for i in 0..100 {
+            tree.insert(i, format!("value_{i}"));
+        }
+        tree.store(&filepath)?;
+
+        let mut query = BPlusTreeQuery::<u32, String>::try_new(&filepath)?;
+        for i in 0..100 {
+            let res = query.query_zero_copy(&i).expect("Zero copy query failed");
+            assert_eq!(res, Some(format!("value_{i}")));
+        }
+
+        // Test key not found
+        assert_eq!(query.query_zero_copy(&101).unwrap(), None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_query_le_query_struct() -> io::Result<()> {
+        let tempdir = tempdir()?;
+        let filepath = tempdir.path().join("query_le_test.bin");
+
+        let mut tree = BPlusTree::<u32, String>::new();
+        for i in (0..100).step_by(10) {
+            tree.insert(i, format!("val_{i}"));
+        }
+        tree.store(&filepath)?;
+
+        let mut query = BPlusTreeQuery::<u32, String>::try_new(&filepath)?;
+
+        // Exact match
+        assert_eq!(query.query_le(&20).unwrap().unwrap(), "val_20");
+
+        // In gap
+        assert_eq!(query.query_le(&25).unwrap().unwrap(), "val_20");
+
+        // Before all
+        assert_eq!(query.query_le(&0).unwrap().unwrap(), "val_0");
+
+        // After all
+        assert_eq!(query.query_le(&1000).unwrap().unwrap(), "val_90");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_non_existent_errors() {
+        let tempdir = tempdir().unwrap();
+        let filepath = tempdir.path().join("non_existent_file.bin");
+
+        // Load non-existent
+        let res_load = BPlusTree::<u32, String>::load(&filepath);
+        assert!(res_load.is_err());
+
+        // Update try_new non-existent
+        let res_update = BPlusTreeUpdate::<u32, String>::try_new(&filepath);
+        assert!(res_update.is_err());
+
+        // Query try_new non-existent
+        let res_query = BPlusTreeQuery::<u32, String>::try_new(&filepath);
+        assert!(res_query.is_err());
+    }
+
+    #[test]
+    fn test_update_key_not_found_error() -> io::Result<()> {
+        let tempdir = tempdir()?;
+        let filepath = tempdir.path().join("not_found_err.bin");
+
+        let mut tree = BPlusTree::<u32, String>::new();
+        tree.insert(1, "one".into());
+        tree.store(&filepath)?;
+
+        let mut update = BPlusTreeUpdate::<u32, String>::try_new(&filepath)?;
+        let res = update.update(&2, "two".into());
+        assert!(matches!(res, Err(BPlusTreeError::KeyNotFound)));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_empty_tree_operations() -> io::Result<()> {
+        let tempdir = tempdir()?;
+        let filepath = tempdir.path().join("empty_tree_ops.bin");
+
+        let mut tree = BPlusTree::<u32, String>::new();
+        tree.store(&filepath)?;
+
+        let mut query = BPlusTreeQuery::<u32, String>::try_new(&filepath)?;
+        assert!(query.is_empty().unwrap());
+        assert_eq!(query.len().unwrap(), 0);
+        assert_eq!(query.query(&1).unwrap(), None);
+
+        let mut update = BPlusTreeUpdate::<u32, String>::try_new(&filepath)?;
+        assert!(update.is_empty().unwrap());
+        assert_eq!(update.len().unwrap(), 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_query_zero_copy_string() -> io::Result<()> {
+        let tempdir = tempdir()?;
+        let filepath = tempdir.path().join("zero_copy_string.bin");
+
+        let mut tree = BPlusTree::<String, u32>::new();
+        for i in 0..50 {
+            tree.insert(format!("key_{i:03}"), i);
+        }
+        tree.store(&filepath)?;
+
+        let mut query = BPlusTreeQuery::<String, u32>::try_new(&filepath)?;
+        for i in 0..50 {
+            let k = format!("key_{i:03}");
+            let res = query.query_zero_copy(&k).expect("Zero copy query failed");
+            assert_eq!(res, Some(i));
+        }
+
+        assert_eq!(query.query_zero_copy(&"key_051".to_string()).unwrap(), None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_slotted_page_compact_manual() {
+        let mut data = [0u8; PAGE_SIZE_USIZE];
+        let mut page = SlottedPage::new(&mut data, PageType::Leaf).expect("Init failed");
+
+        let cell1 = vec![0x01; 100];
+        let cell2 = vec![0x02; 100];
+        let cell3 = vec![0x03; 100];
+
+        let mut c1 = Vec::new();
+        c1.extend_from_slice(&100u32.to_le_bytes());
+        c1.extend_from_slice(&cell1);
+
+        let mut c2 = Vec::new();
+        c2.extend_from_slice(&100u32.to_le_bytes());
+        c2.extend_from_slice(&cell2);
+
+        let mut c3 = Vec::new();
+        c3.extend_from_slice(&100u32.to_le_bytes());
+        c3.extend_from_slice(&cell3);
+
+        page.insert_at_index(0, &c1).unwrap();
+        page.insert_at_index(1, &c2).unwrap();
+        page.insert_at_index(2, &c3).unwrap();
+
+        // Compacting a non-fragmented page should be fine
+        page.compact().expect("Compact failed");
+        assert_eq!(page.header.cell_count, 3);
+        assert_eq!(&page.get_cell(0).unwrap()[4..], &cell1);
+        assert_eq!(&page.get_cell(1).unwrap()[4..], &cell2);
+        assert_eq!(&page.get_cell(2).unwrap()[4..], &cell3);
+    }
+
+    #[test]
+    fn test_upsert_batch_preserialized() -> io::Result<()> {
+        let tempdir = tempdir()?;
+        let filepath = tempdir.path().join("preserialized_test.bin");
+
+        let mut tree = BPlusTree::<u32, Record>::new();
+        tree.store(&filepath)?;
+
+        let mut update = BPlusTreeUpdate::<u32, Record>::try_new(&filepath)?;
+
+        // Manually serialize records
+        let r1 = Record { id: 1, data: "preserialized_1".to_string() };
+        let r2 = Record { id: 2, data: "preserialized_2".to_string() };
+        
+        let r1_bytes = binary_serialize(&r1)?;
+        let r2_bytes = binary_serialize(&r2)?;
+
+        update.upsert_batch_preserialized(vec![
+            (1, r1_bytes),
+            (2, r2_bytes),
+        ])?;
+
+        // Verify with query
+        let mut query = BPlusTreeQuery::<u32, Record>::try_new(&filepath)?;
+        assert_eq!(query.query(&1).unwrap(), Some(r1));
+        assert_eq!(query.query(&2).unwrap(), Some(r2));
+
+        // Test mixed: existing and new
+        let r1_new = Record { id: 1, data: "updated_preserialized_1".to_string() };
+        let r3 = Record { id: 3, data: "new_preserialized_3".to_string() };
+        
+        let r1_new_bytes = binary_serialize(&r1_new)?;
+        let r3_bytes = binary_serialize(&r3)?;
+
+        update.upsert_batch_preserialized(vec![
+            (1, r1_new_bytes),
+            (3, r3_bytes),
+        ])?;
+
+        let mut query2 = BPlusTreeQuery::<u32, Record>::try_new(&filepath)?;
+        assert_eq!(query2.query(&1).unwrap(), Some(r1_new));
+        assert_eq!(query2.query(&2).unwrap(), Some(Record { id: 2, data: "preserialized_2".to_string() }));
+        assert_eq!(query2.query(&3).unwrap(), Some(r3));
+
+        Ok(())
+    }
+}

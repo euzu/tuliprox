@@ -1,27 +1,28 @@
 use crate::api::config_watch::exec_config_watch;
+use crate::api::model::UpdateGuard;
 use crate::api::model::{ActiveProviderManager, ConnectionManager, EventManager, PlaylistStorage, PlaylistStorageState, SharedStreamManager};
 use crate::api::model::{ActiveUserManager, DownloadQueue};
 use crate::api::scheduler::exec_scheduler;
 use crate::model::{AppConfig, Config, ConfigTarget, GracePeriodOptions, HdHomeRunConfig, HdHomeRunDeviceConfig, ProcessTargets, ReverseProxyDisabledHeaderConfig, ScheduleConfig, SourcesConfig};
+use crate::repository::get_geoip_path;
 use crate::repository::load_target_into_memory_cache;
 use crate::tools::lru_cache::LRUResourceCache;
-use crate::utils::request::create_client;
+use crate::utils::request::{create_client, create_client_with_redirect};
+use crate::utils::GeoIp;
 use arc_swap::{ArcSwap, ArcSwapOption};
 use log::{error, info};
 use reqwest::Client;
 use shared::error::TuliproxError;
-use shared::model::{UserConnectionPermission};
-use shared::utils::{small_vecs_equal_unordered};
+use shared::info_err_res;
+use shared::model::UserConnectionPermission;
+use shared::utils::small_vecs_equal_unordered;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicI8;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Mutex};
+use tokio::sync::Mutex;
 use tokio::task;
 use tokio_util::sync::CancellationToken;
-use crate::api::model::UpdateGuard;
-use crate::repository::get_geoip_path;
-use crate::utils::GeoIp;
 use crate::api::model::metadata_update_manager::MetadataUpdateManager;
 
 macro_rules! cancel_service {
@@ -77,7 +78,7 @@ async fn update_target_caches(
     target_changes: Option<&HashMap<String, TargetChanges>>,
 ) {
     if let Some(target_changes) = target_changes {
-       let mut to_remove = Vec::new();
+        let mut to_remove = Vec::new();
         for target in target_changes.values() {
             match target.status {
                 TargetStatus::Old => {
@@ -182,14 +183,77 @@ fn start_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
     }
 }
 
-pub fn create_http_client(app_config: &AppConfig) -> Client {
-    let mut builder = create_client(app_config).http1_only();
-    let config = app_config.config.load(); // because of RAII connection dropping
+/// Creates the default HTTP client.
+///
+/// Fails if proxy configuration is present but the client cannot be built.
+pub fn create_http_client(app_config: &AppConfig) -> Result<Client, TuliproxError> {
+    let builder = create_client(app_config).http1_only();
+    let config = app_config.config.load();
+    build_http_client_with_fallback(
+        builder,
+        &config,
+        "Failed to create HTTP client with proxy configuration; refusing to fall back to unconfigured client",
+        "HTTP client creation failed with proxy configured",
+        "Failed to create HTTP client, using unconfigured http client",
+        Client::new,
+    )
+}
+
+/// Creates a no-redirect HTTP client.
+///
+/// Fails if proxy configuration is present but the client cannot be built.
+///
+/// Handling Streaming and Proxy with http/2 is hard, so we strictly use only http/1.1
+pub fn create_http_client_no_redirect(
+    app_config: &AppConfig,
+) -> Result<Client, TuliproxError> {
+    let builder = create_client_with_redirect(app_config, reqwest::redirect::Policy::none()).http1_only();
+    let config = app_config.config.load();
+    build_http_client_with_fallback(
+        builder,
+        &config,
+        "Failed to create HTTP client (no redirect) with proxy configuration; refusing to fall back to unconfigured client",
+        "HTTP client (no redirect) creation failed with proxy configured",
+        "Failed to create HTTP client (no redirect), using unconfigured http client",
+        || {
+            Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap_or_else(|err| {
+                    error!("Failed to create fallback HTTP client (no redirect): {err}");
+                    Client::new()
+                })
+        },
+    )
+}
+
+fn build_http_client_with_fallback(
+    mut builder: reqwest::ClientBuilder,
+    config: &Arc<Config>,
+    proxy_error_log: &str,
+    proxy_error_msg: &str,
+    fallback_log: &str,
+    fallback_client: impl FnOnce() -> Client,
+) -> Result<Client, TuliproxError> {
+    let proxy_configured = config.proxy.is_some();
+
     if config.connect_timeout_secs > 0 {
-        builder =
-            builder.connect_timeout(Duration::from_secs(u64::from(config.connect_timeout_secs)));
+        builder = builder.connect_timeout(Duration::from_secs(
+            u64::from(config.connect_timeout_secs),
+        ));
     }
-    builder.build().unwrap_or_else(|_| Client::new())
+
+    if let Ok(client) = builder.build() {
+        return Ok(client);
+    }
+
+    if proxy_configured {
+        error!("{proxy_error_log}");
+        return info_err_res!("{proxy_error_msg}");
+    }
+
+    error!("{fallback_log}");
+    Ok(fallback_client())
 }
 
 pub fn create_cache(config: &Config) -> Option<Arc<Mutex<LRUResourceCache>>> {
@@ -255,6 +319,7 @@ pub struct AppState {
     pub forced_targets: Arc<ArcSwap<ProcessTargets>>, // as program arguments
     pub app_config: Arc<AppConfig>,
     pub http_client: Arc<ArcSwap<Client>>,
+    pub http_client_no_redirect: Arc<ArcSwap<Client>>,
     pub downloads: Arc<DownloadQueue>,
     pub cache: Arc<ArcSwapOption<Mutex<LRUResourceCache>>>,
     pub shared_stream_manager: Arc<SharedStreamManager>,
@@ -270,8 +335,7 @@ pub struct AppState {
 }
 
 impl AppState {
-
-    pub(in crate::api::model) async fn set_config(&self,config: Config) -> Result<UpdateChanges, TuliproxError> {
+    pub(in crate::api::model) async fn set_config(&self, config: Config) -> Result<UpdateChanges, TuliproxError> {
         let changes = self.detect_changes_for_config(&config);
         config.update_runtime();
 
@@ -281,7 +345,7 @@ impl AppState {
         self.active_users.update_config(&config);
         self.app_config.set_config(config)?;
         self.active_provider.update_config(&self.app_config).await;
-        self.update_config().await;
+        self.update_config().await?;
 
         if changes.geoip {
             let new_geoip = if use_geoip {
@@ -299,10 +363,12 @@ impl AppState {
         Ok(changes)
     }
 
-    async fn update_config(&self) {
+    async fn update_config(&self) -> Result<(), TuliproxError> {
         // client
-        let client = create_http_client(&self.app_config);
+        let client = create_http_client(&self.app_config)?;
         self.http_client.store(Arc::new(client));
+        let client_no_redirect = create_http_client_no_redirect(&self.app_config)?;
+        self.http_client_no_redirect.store(Arc::new(client_no_redirect));
 
         // cache
         let config = self.app_config.config.load();
@@ -322,9 +388,10 @@ impl AppState {
             let cache = create_cache(&config);
             self.cache.store(cache);
         }
+        Ok(())
     }
 
-    pub(in crate::api::model) async fn set_sources(&self,sources: SourcesConfig) -> Result<UpdateChanges, TuliproxError> {
+    pub(in crate::api::model) async fn set_sources(&self, sources: SourcesConfig) -> Result<UpdateChanges, TuliproxError> {
         let changes = self.detect_changes_for_sources(&sources);
         self.app_config.set_sources(sources)?;
         self.active_provider.update_config(&self.app_config).await;
@@ -454,24 +521,24 @@ impl AppState {
 }
 
 fn schedules_changed(a: &[ScheduleConfig], b: &[ScheduleConfig]) -> bool {
-   if a.len() != b.len() {
-       return true;
-   }
-   for schedule in a {
-       let Some(found) = b.iter().find(|&s| s.schedule == schedule.schedule) else {
-           return true;
-       };
-       match (schedule.targets.as_ref(), found.targets.as_ref()) {
-           (None, None) => {}
-           (Some(_), None) | (None, Some(_)) => return true,
-           (Some(a_targets), Some(b_targets)) => {
-               if !small_vecs_equal_unordered(a_targets, b_targets) {
-                   return true;
-               }
-           }
-       }
-   }
-   false
+    if a.len() != b.len() {
+        return true;
+    }
+    for schedule in a {
+        let Some(found) = b.iter().find(|&s| s.schedule == schedule.schedule) else {
+            return true;
+        };
+        match (schedule.targets.as_ref(), found.targets.as_ref()) {
+            (None, None) => {}
+            (Some(_), None) | (None, Some(_)) => return true,
+            (Some(a_targets), Some(b_targets)) => {
+                if !small_vecs_equal_unordered(a_targets, b_targets) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 fn hdhomerun_changed(a: &HdHomeRunConfig, b: &HdHomeRunConfig) -> bool {

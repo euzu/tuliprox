@@ -1,14 +1,15 @@
 use crate::api::model::persist_pipe_stream::tee_dyn_reader;
-use crate::api::model::AppState;
-use crate::model::{format_elapsed_time, AppConfig, InputSource, ReverseProxyDisabledHeaderConfig};
+use crate::api::model::{AppState, STREAM_IDLE_TIMEOUT};
+use crate::model::{format_elapsed_time, AppConfig, Config, InputSource, ReverseProxyDisabledHeaderConfig};
 use crate::model::{ConfigInput, ResourceRetryConfig};
 use crate::utils::compression::compression_utils::{is_deflate, is_gzip};
 use crate::utils::{async_file_reader, async_file_writer, debug_if_enabled};
 use crate::utils::{get_file_path, persist_file};
 use axum::http::header::RETRY_AFTER;
 use futures::{StreamExt, TryStreamExt};
-use log::{debug, error, log_enabled, trace, Level};
+use log::{debug, error, log_enabled, trace, warn, Level};
 use reqwest::header::CONTENT_ENCODING;
+use reqwest::redirect::Policy;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{StatusCode};
 use shared::error::{notify_err_res, string_to_io_error, TuliproxError};
@@ -21,12 +22,63 @@ use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Once};
+use std::time::Duration;
 use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::time::sleep;
 use tokio_util::io::StreamReader;
 use url::Url;
+
+static PROXY_DIAGNOSTICS_ONCE: Once = Once::new();
+
+fn log_proxy_diagnostics(config: &Config) {
+    PROXY_DIAGNOSTICS_ONCE.call_once(|| {
+        if let Some(proxy_cfg) = config.proxy.as_ref() {
+            let sanitized_url = sanitize_sensitive_info(proxy_cfg.url.as_str());
+            let has_inline_credentials = proxy_cfg
+                .url
+                .contains('@')
+                || proxy_cfg.url.contains("://")
+                    && proxy_cfg
+                        .url
+                        .split("://")
+                        .nth(1)
+                        .is_some_and(|part| part.contains('@'));
+            let has_explicit_credentials =
+                proxy_cfg.username.as_ref().is_some() || proxy_cfg.password.as_ref().is_some();
+            debug!(
+                "Proxy config enabled: url={sanitized_url}, credentials_inline={has_inline_credentials}, credentials_fields={has_explicit_credentials}"
+            );
+        } else {
+            debug!("Proxy config disabled (config.yml)");
+        }
+
+        let env_keys = [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "NO_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+            "no_proxy",
+        ];
+        let mut env_values = Vec::new();
+        for key in env_keys {
+            if let Ok(value) = std::env::var(key) {
+                if !value.trim().is_empty() {
+                    env_values.push((key, sanitize_sensitive_info(value.as_str()).to_string()));
+                }
+            }
+        }
+        if env_values.is_empty() {
+            debug!("Proxy env vars not set");
+        } else {
+            debug!("Proxy env vars present: {env_values:?}");
+        }
+    });
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MimeCategory {
@@ -108,74 +160,91 @@ pub async fn send_with_retry(
         );
     drop(config);
 
-    for attempt in 0..max_attempts {
-        match send().send().await {
-            Ok(response) => {
-                let status = response.status();
+    let idle_timeout = Duration::from_secs(STREAM_IDLE_TIMEOUT);
+    let idle = sleep(idle_timeout);
+    tokio::pin!(idle);
 
-                if status.is_success() {
-                    return Ok(response);
+    for attempt in 0..max_attempts {
+        loop {
+            tokio::select! {
+                () = &mut idle => {
+                    warn!("Request idle for too long: {}", sanitize_sensitive_info(url.as_str()));
+                    break;
                 }
 
-                let should_retry = status.is_server_error()
-                    || matches!(
-                        status,
-                        StatusCode::REQUEST_TIMEOUT
-                            | StatusCode::TOO_EARLY
-                            | StatusCode::TOO_MANY_REQUESTS
-                    );
+                result = send().send() => {
+                    idle.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
 
-                if attempt < max_attempts - 1 && should_retry {
-                    let wait_dur = response
-                        .headers()
-                        .get(RETRY_AFTER)
-                        .and_then(|h| h.to_str().ok())
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .map_or_else(
-                            || {
+                    match result {
+                        Ok(response) => {
+                            let status = response.status();
+
+                            if status.is_success() {
+                                return Ok(response);
+                            }
+
+                            let should_retry = status.is_server_error()
+                                || matches!(
+                                    status,
+                                    StatusCode::REQUEST_TIMEOUT
+                                        | StatusCode::TOO_EARLY
+                                        | StatusCode::TOO_MANY_REQUESTS
+                                );
+
+                            if attempt < max_attempts - 1 && should_retry {
+                                let wait_dur = response
+                                    .headers()
+                                    .get(RETRY_AFTER)
+                                    .and_then(|h| h.to_str().ok())
+                                    .and_then(|s| s.parse::<u64>().ok())
+                                    .map_or_else(
+                                        || {
+                                            let delay = calculate_retry_backoff(
+                                                backoff_ms,
+                                                backoff_multiplier,
+                                                attempt,
+                                            );
+                                            tokio::time::Duration::from_millis(delay)
+                                        },
+                                        tokio::time::Duration::from_secs,
+                                    );
+
+                                tokio::time::sleep(wait_dur).await;
+                                continue;
+                            }
+
+                            return Err(string_to_io_error(format!(
+                                "Request failed with status {} {}",
+                                format_http_status(status),
+                                sanitize_sensitive_info(url.as_str())
+                            )));
+                        }
+
+                        Err(err) => {
+                            if (err.is_timeout() || err.is_connect()) && attempt < max_attempts - 1 {
                                 let delay = calculate_retry_backoff(
                                     backoff_ms,
                                     backoff_multiplier,
                                     attempt,
                                 );
-                                Duration::from_millis(delay)
-                            },
-                            Duration::from_secs,
-                        );
+                                tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
+                                continue;
+                            }
 
-                    tokio::time::sleep(wait_dur).await;
-                    continue;
+                            error!(
+                                "Received failure from server {}: {}",
+                                sanitize_sensitive_info(url.as_str()),
+                                sanitize_sensitive_info(err.to_string().as_str())
+                            );
+
+                            return Err(string_to_io_error(format!(
+                                "Request failed: {} {}",
+                                sanitize_sensitive_info(url.as_str()),
+                                sanitize_sensitive_info(err.to_string().as_str())
+                            )));
+                        }
+                    }
                 }
-
-                return Err(string_to_io_error(format!(
-                    "Request failed with status {} {}",
-                    format_http_status(status),
-                    sanitize_sensitive_info(url.as_str())
-                )));
-            }
-
-            Err(err) => {
-                if (err.is_timeout() || err.is_connect()) && attempt < max_attempts - 1 {
-                    let delay = calculate_retry_backoff(
-                        backoff_ms,
-                        backoff_multiplier,
-                        attempt,
-                    );
-                    tokio::time::sleep(Duration::from_millis(delay)).await;
-                    continue;
-                }
-
-                error!(
-                    "Received failure from server {}: {}",
-                    sanitize_sensitive_info(url.as_str()),
-                    sanitize_sensitive_info(err.to_string().as_str())
-                );
-
-                return Err(string_to_io_error(format!(
-                    "Request failed: {} {}",
-                    sanitize_sensitive_info(url.as_str()),
-                    sanitize_sensitive_info(err.to_string().as_str())
-                )));
             }
         }
     }
@@ -603,7 +672,7 @@ pub async fn get_remote_content_as_file(
     )
         .await?;
 
-    let start_time = Instant::now();
+    let start_time = tokio::time::Instant::now();
     let mut writer = async_file_writer(File::create(file_path).await?);
 
     let mut stream = response.bytes_stream();
@@ -612,6 +681,35 @@ pub async fn get_remote_content_as_file(
             string_to_io_error(format!("Failed to read chunk: {e}"))
         })?;
         writer.write_all(&bytes).await?;
+    }
+
+    let idle_timeout = tokio::time::Duration::from_secs(STREAM_IDLE_TIMEOUT);
+    let idle = sleep(idle_timeout);
+    tokio::pin!(idle);
+
+    loop {
+        tokio::select! {
+        () = &mut idle => {
+            warn!("Stream idle for request, closing {}", sanitize_sensitive_info(url.as_ref()));
+            break;
+        }
+
+        chunk = stream.next() => {
+                idle.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
+
+                match chunk {
+                    Some(Ok(bytes)) => {
+                        writer.write_all(&bytes).await?;
+                    }
+                    Some(Err(e)) => {
+                        return Err(string_to_io_error(format!("Failed to read chunk: {e}")));
+                    }
+                    None => {
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     writer.flush().await?;
@@ -804,7 +902,7 @@ pub async fn download_text_content(
     persist_filepath: Option<PathBuf>,
     trace_log: bool,
 ) -> Result<(String, String), Error> {
-    let start_time = Instant::now();
+    let start_time = tokio::time::Instant::now();
     let result = if let Ok(url) = input.url.parse::<url::Url>() {
         let result = if url.scheme() == "file" {
             match url.to_file_path() {
@@ -1014,10 +1112,11 @@ pub async fn get_input_json_content_as_stream(
     }
 }
 
-pub fn create_client(cfg: &AppConfig) -> reqwest::ClientBuilder {
+pub fn create_client_with_redirect(cfg: &AppConfig, redirect_policy: Policy) -> reqwest::ClientBuilder {
     let config = cfg.config.load();
+    log_proxy_diagnostics(&config);
     let mut client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::limited(10))
+        .redirect(redirect_policy)
         .pool_idle_timeout(Duration::from_secs(30))
         .pool_max_idle_per_host(10)
         .danger_accept_invalid_certs(config.accept_insecure_ssl_certificates);
@@ -1076,6 +1175,10 @@ pub fn create_client(cfg: &AppConfig) -> reqwest::ClientBuilder {
     }
 
     client
+}
+
+pub fn create_client(cfg: &AppConfig) -> reqwest::ClientBuilder {
+    create_client_with_redirect(cfg, Policy::limited(10))
 }
 
 pub fn parse_range(range: &str) -> Option<(u64, Option<u64>)> {

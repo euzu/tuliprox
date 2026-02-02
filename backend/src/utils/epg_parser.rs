@@ -117,47 +117,47 @@ mod tests {
     #[test]
     fn test_parse_timeshift() {
         assert!(matches!(parse_timeshift(Some(&String::from("2"))), EpgTimeShift::Fixed(120)));
-        assert!(matches!(parse_timeshift(Some(&String::from("-1:30"))), EpgTimeShift::Fixed(-90)));
-        assert!(matches!(parse_timeshift(Some(&String::from("+0:15"))), EpgTimeShift::Fixed(15)));
-        assert!(matches!(parse_timeshift(Some(&String::from("1:45"))), EpgTimeShift::Fixed(105)));
-        assert!(matches!(parse_timeshift(Some(&String::from(":45"))), EpgTimeShift::Fixed(45)));
-        assert!(matches!(parse_timeshift(Some(&String::from("-:45"))), EpgTimeShift::Fixed(-45)));
-        assert!(matches!(parse_timeshift(Some(&String::from("0:30"))), EpgTimeShift::Fixed(30)));
-        assert!(matches!(parse_timeshift(Some(&String::from(":3"))), EpgTimeShift::Fixed(3)));
-        assert!(matches!(parse_timeshift(Some(&String::from("2:"))), EpgTimeShift::Fixed(120)));
-        assert!(matches!(parse_timeshift(Some(&String::from("+2:00"))), EpgTimeShift::Fixed(120)));
-        assert!(matches!(parse_timeshift(Some(&String::from("-0:10"))), EpgTimeShift::Fixed(-10)));
-        assert!(matches!(parse_timeshift(Some(&String::from("invalid"))), EpgTimeShift::None));
-        assert!(matches!(parse_timeshift(Some(&String::from("+abc"))), EpgTimeShift::None));
-        assert!(matches!(parse_timeshift(Some(&String::new())), EpgTimeShift::None));
+        assert!(matches!(parse_timeshift(Some("-1:30")), EpgTimeShift::Fixed(-90)));
+        assert!(matches!(parse_timeshift(Some("+0:15")), EpgTimeShift::Fixed(15)));
+        assert!(matches!(parse_timeshift(Some("1:45")), EpgTimeShift::Fixed(105)));
+        assert!(matches!(parse_timeshift(Some(":45")), EpgTimeShift::Fixed(45)));
+        assert!(matches!(parse_timeshift(Some("-:45")), EpgTimeShift::Fixed(-45)));
+        assert!(matches!(parse_timeshift(Some("0:30")), EpgTimeShift::Fixed(30)));
+        assert!(matches!(parse_timeshift(Some(":3")), EpgTimeShift::Fixed(3)));
+        assert!(matches!(parse_timeshift(Some("2:")), EpgTimeShift::Fixed(120)));
+        assert!(matches!(parse_timeshift(Some("+2:00")), EpgTimeShift::Fixed(120)));
+        assert!(matches!(parse_timeshift(Some("-0:10")), EpgTimeShift::Fixed(-10)));
+        assert!(matches!(parse_timeshift(Some("invalid")), EpgTimeShift::None));
+        assert!(matches!(parse_timeshift(Some("+abc")), EpgTimeShift::None));
+        assert!(matches!(parse_timeshift(Some("")), EpgTimeShift::None));
         assert!(matches!(parse_timeshift(None), EpgTimeShift::None));
     }
 
     #[test]
     fn test_parse_timezone() {
         // Check timezone parsing creates the correct variant
-        let amterdam = parse_timeshift(Some(&"Europe/Amsterdam".to_string()));
+        let amterdam = parse_timeshift(Some("Europe/Amsterdam"));
          if let EpgTimeShift::TimeZone(tz) = amterdam {
             assert_eq!(tz.name(), "Europe/Amsterdam");
         } else {
             panic!("Expected TimeZone for Europe/Amsterdam");
         }
 
-        let new_york = parse_timeshift(Some(&"America/New_York".to_string()));
+        let new_york = parse_timeshift(Some("America/New_York"));
         if let EpgTimeShift::TimeZone(tz) = new_york {
             assert_eq!(tz.name(), "America/New_York");
         } else {
             panic!("Expected TimeZone for America/New_York");
         }
 
-        let tokyo = parse_timeshift(Some(&"Asia/Tokyo".to_string()));
+        let tokyo = parse_timeshift(Some("Asia/Tokyo"));
         if let EpgTimeShift::TimeZone(tz) = tokyo {
             assert_eq!(tz.name(), "Asia/Tokyo");
         } else {
              panic!("Expected TimeZone for Asia/Tokyo");
         }
 
-        let utc = parse_timeshift(Some(&"UTC".to_string()));
+        let utc = parse_timeshift(Some("UTC"));
         if let EpgTimeShift::TimeZone(tz) = utc {
             assert_eq!(tz.name(), "UTC");
         } else {

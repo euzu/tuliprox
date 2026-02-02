@@ -281,8 +281,8 @@ mod tests {
             assert_eq!(movie.year, Some(1999));
             assert_eq!(movie.imdb_id, Some("tt0133093".to_string()));
             assert_eq!(movie.tmdb_id, Some(603));
-            assert_eq!(movie.genres.as_ref().map(|g| g.len()).unwrap_or_default(), 2);
-            assert_eq!(movie.directors.as_ref().map(|g| g.len()).unwrap_or_default(), 2);
+            assert_eq!(movie.genres.as_ref().map(Vec::len).unwrap_or_default(), 2);
+            assert_eq!(movie.directors.as_ref().map(Vec::len).unwrap_or_default(), 2);
         } else {
             panic!("Expected movie metadata");
         }
@@ -316,7 +316,7 @@ mod tests {
             assert_eq!(series.imdb_id, Some("tt0903747".to_string()));
             assert_eq!(series.tmdb_id, Some(1396));
             assert_eq!(series.tvdb_id, Some(81189));
-            assert_eq!(series.genres.as_ref().map(|g| g.len()).unwrap_or_default(), 3);
+            assert_eq!(series.genres.as_ref().map(Vec::len).unwrap_or_default(), 3);
             assert_eq!(series.status, Some("Ended".to_string()));
         } else {
             panic!("Expected series metadata");

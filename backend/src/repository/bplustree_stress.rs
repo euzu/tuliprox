@@ -1,6 +1,7 @@
 use super::bplustree::{BPlusTree, BPlusTreeUpdate, BPlusTreeQuery};
 use rand::prelude::*;
 use rand::distr::Alphanumeric;
+use std::io::Write;
 use std::time::Instant;
 use tempfile::NamedTempFile;
 
@@ -15,12 +16,17 @@ fn random_string(len: usize) -> String {
 }
 
 #[test]
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::too_many_lines
+)]
 fn stress_test_bplustree() {
     let temp_file = NamedTempFile::new().unwrap();
     let filepath = temp_file.path().to_path_buf();
     let log_path = std::path::Path::new("/tmp/stress_results.txt");
     let mut log_file = std::fs::File::create(log_path).unwrap();
-    use std::io::Write;
 
     // Config
     let num_items = 500_000;
@@ -29,7 +35,7 @@ fn stress_test_bplustree() {
     let large_val_len = 500; // Larger than packed limit (256)
     
     writeln!(log_file, "=== B+Tree Stress Test & Performance Analysis ===").unwrap();
-    writeln!(log_file, "Dataset: {} items", num_items).unwrap();
+    writeln!(log_file, "Dataset: {num_items} items").unwrap();
     
     // ----------------------------------------------------------------
     // Phase 1: Batch Insert (Sequential Keys)
@@ -50,7 +56,7 @@ fn stress_test_bplustree() {
         tree.insert(k, v);
     }
     let insert_duration = start.elapsed();
-    writeln!(log_file, "Insert Time: {:.2?}", insert_duration).unwrap();
+    writeln!(log_file, "Insert Time: {insert_duration:.2?}").unwrap();
     writeln!(log_file, "Throughput: {:.0} ops/sec", num_items as f64 / insert_duration.as_secs_f64()).unwrap();
 
     // Prepare query keys
@@ -61,13 +67,13 @@ fn stress_test_bplustree() {
     // ----------------------------------------------------------------
     // Phase 1b: Memory-Only Random Query (Before storing)
     // ----------------------------------------------------------------
-    writeln!(log_file, "\n[Phase 1b] Memory-Only Random Query ({} items)...", query_count).unwrap();
+    writeln!(log_file, "\n[Phase 1b] Memory-Only Random Query ({query_count} items)...").unwrap();
     let start = Instant::now();
     for k in query_subset_mem {
         let _ = tree.query(k);
     }
     let duration = start.elapsed();
-    writeln!(log_file, "Time: {:.2?}", duration).unwrap();
+    writeln!(log_file, "Time: {duration:.2?}").unwrap();
     writeln!(log_file, "Throughput: {:.0} ops/sec", query_count as f64 / duration.as_secs_f64()).unwrap();
 
     // ----------------------------------------------------------------
@@ -78,21 +84,21 @@ fn stress_test_bplustree() {
     tree.store(&filepath).unwrap();
     drop(tree);
     let duration = start.elapsed();
-    writeln!(log_file, "Write Time: {:.2?}", duration).unwrap();
+    writeln!(log_file, "Write Time: {duration:.2?}").unwrap();
     let size_phase1 = std::fs::metadata(&filepath).unwrap().len();
     writeln!(log_file, "File Size: {:.2} MB", size_phase1 as f64 / 1024.0 / 1024.0).unwrap();
 
     // ----------------------------------------------------------------
     // Phase 2: Random Query (Disk-based)
     // ----------------------------------------------------------------
-    writeln!(log_file, "\n[Phase 2] Random Query Disk-based ({} items)...", query_count).unwrap();
+    writeln!(log_file, "\n[Phase 2] Random Query Disk-based ({query_count} items)...").unwrap();
     let mut query = BPlusTreeQuery::<u32, String>::try_new(&filepath).unwrap();
     let start = Instant::now();
     for k in query_subset_mem {
         let _ = query.query_zero_copy(k).unwrap();
     }
     let duration = start.elapsed();
-    writeln!(log_file, "Time: {:.2?}", duration).unwrap();
+    writeln!(log_file, "Time: {duration:.2?}").unwrap();
     writeln!(log_file, "Throughput: {:.0} ops/sec", query_count as f64 / duration.as_secs_f64()).unwrap();
     
     // ----------------------------------------------------------------
@@ -105,11 +111,11 @@ fn stress_test_bplustree() {
         .map(|&k| (k, random_string(small_val_len)))
         .collect();
     let update_refs: Vec<(&u32, &String)> = updates.iter().map(|(k,v)| (k,v)).collect();
-    let mut updater = BPlusTreeUpdate::<u32, String>::try_new(&filepath).unwrap();
+    let mut tree_updater = BPlusTreeUpdate::<u32, String>::try_new(&filepath).unwrap();
     let start = Instant::now();
-    updater.update_batch(&update_refs).unwrap();
+    tree_updater.update_batch(&update_refs).unwrap();
     let duration = start.elapsed();
-    writeln!(log_file, "Time: {:.2?}", duration).unwrap();
+    writeln!(log_file, "Time: {duration:.2?}").unwrap();
     writeln!(log_file, "Throughput: {:.0} ops/sec", update_count as f64 / duration.as_secs_f64()).unwrap();
     let size_phase3 = std::fs::metadata(&filepath).unwrap().len();
     writeln!(log_file, "File Size: {:.2} MB", size_phase3 as f64 / 1024.0 / 1024.0).unwrap();
@@ -123,26 +129,32 @@ fn stress_test_bplustree() {
         .collect();
     let update_refs_prom: Vec<(&u32, &String)> = updates_prom.iter().map(|(k,v)| (k,v)).collect();
     let start = Instant::now();
-    updater.update_batch(&update_refs_prom).unwrap();
+    tree_updater.update_batch(&update_refs_prom).unwrap();
     let duration = start.elapsed();
-    writeln!(log_file, "Time: {:.2?}", duration).unwrap();
+    writeln!(log_file, "Time: {duration:.2?}").unwrap();
     writeln!(log_file, "Throughput: {:.0} ops/sec", update_count as f64 / duration.as_secs_f64()).unwrap();
     let size_phase4 = std::fs::metadata(&filepath).unwrap().len();
     writeln!(log_file, "File Size: {:.2} MB", size_phase4 as f64 / 1024.0 / 1024.0).unwrap();
-    drop(updater);
+    drop(tree_updater);
 
     // ----------------------------------------------------------------
     // Phase 5: Compaction
     // ----------------------------------------------------------------
     writeln!(log_file, "\n[Phase 5] Compaction...").unwrap();
-    let mut updater = BPlusTreeUpdate::<u32, String>::try_new(&filepath).unwrap();
+    let mut tree_updater = BPlusTreeUpdate::<u32, String>::try_new(&filepath).unwrap();
     let start = Instant::now();
-    updater.compact(&filepath).unwrap();
+    tree_updater.compact(&filepath).unwrap();
     let duration = start.elapsed();
-    writeln!(log_file, "Time: {:.2?}", duration).unwrap();
+    writeln!(log_file, "Time: {duration:.2?}").unwrap();
     let size_phase5 = std::fs::metadata(&filepath).unwrap().len();
-    writeln!(log_file, "File Size: {:.2} MB (Reduction: {:.2} MB)", size_phase5 as f64 / 1024.0 / 1024.0, (size_phase4 as i64 - size_phase5 as i64) as f64 / 1024.0 / 1024.0).unwrap();
-    drop(updater);
+    writeln!(
+        log_file,
+        "File Size: {:.2} MB (Reduction: {:.2} MB)",
+        size_phase5 as f64 / 1024.0 / 1024.0,
+        (size_phase4 as i64 - size_phase5 as i64) as f64 / 1024.0 / 1024.0
+    )
+    .unwrap();
+    drop(tree_updater);
 
     // ----------------------------------------------------------------
     // Phase 6: Full Tree Load and In-Memory Query
@@ -151,13 +163,13 @@ fn stress_test_bplustree() {
     let start = Instant::now();
     let tree_mem = BPlusTree::<u32, String>::load(&filepath).unwrap();
     let load_duration = start.elapsed();
-    writeln!(log_file, "Load Time: {:.2?}", load_duration).unwrap();
+    writeln!(log_file, "Load Time: {load_duration:.2?}").unwrap();
 
     let start = Instant::now();
     for k in query_subset_mem {
         let _ = tree_mem.query(k);
     }
     let query_duration = start.elapsed();
-    writeln!(log_file, "In-Memory Query Time: {:.2?}", query_duration).unwrap();
+    writeln!(log_file, "In-Memory Query Time: {query_duration:.2?}").unwrap();
     writeln!(log_file, "Throughput: {:.0} ops/sec", query_count as f64 / query_duration.as_secs_f64()).unwrap();
 }

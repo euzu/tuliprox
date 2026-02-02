@@ -132,6 +132,8 @@ pub async fn m3u_write_playlist(
     let playlist = Arc::clone(&m3u_playlist);
     let m3u_path_clone = m3u_path.clone();
 
+    // Move all B+Tree building and I/O to spawn_blocking
+    // We take ownership of `playlist` here (no cloning needed)
     task::spawn_blocking(move || -> Result<(), TuliproxError> {
         let _guard = file_lock;
         let mut tree = BPlusTree::new();
