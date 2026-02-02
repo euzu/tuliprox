@@ -13,7 +13,7 @@ use log::{error, info, log_enabled, warn, Level, debug};
 use shared::error::TuliproxError;
 use shared::model::{InputType, PlaylistEntry, SeriesStreamProperties, StreamProperties, XtreamSeriesInfo, UpdateOutputStrategy};
 use shared::model::{PlaylistGroup, PlaylistItemType, XtreamCluster};
-use indexmap::IndexMap;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use crate::model::{ConfigInput, MediaQuality, InputSource};
