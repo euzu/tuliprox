@@ -3,6 +3,8 @@ use log::{debug, error};
 use url::Url;
 use crate::model::AppConfig;
 
+const MAX_MESSAGE_LENGTH: usize = 4000;
+
 /// Requests will be sent according to bot instance.
 #[derive(Clone)]
 pub struct BotInstance {
@@ -80,34 +82,45 @@ pub async fn telegram_send_message(
         }
     };
 
-    let request_json_obj = RequestObj {
-        chat_id: instance.chat_id.clone(),
-        message_thread_id: instance.message_thread_id.clone(),
-        text: msg.to_string(),
-        parse_mode: options
-            .map(|o| get_send_message_parse_mode_str(&o.parse_mode))
-            .map(ToString::to_string),
-    };
+    // Split message into chunks if it exceeds MAX_MESSAGE_LENGTH
+    let chars: Vec<char> = msg.chars().collect();
+    let chunks = chars.chunks(MAX_MESSAGE_LENGTH)
+        .map(|chunk| chunk.iter().collect::<String>())
+        .collect::<Vec<String>>();
 
-    let result = client
-    .post(url)
-    .json(&request_json_obj)
-    .send()
-    .await;
+    for (i, chunk_text) in chunks.iter().enumerate() {
+        let request_json_obj = RequestObj {
+            chat_id: instance.chat_id.clone(),
+            message_thread_id: instance.message_thread_id.clone(),
+            text: chunk_text.clone(),
+            parse_mode: options
+                .map(|o| get_send_message_parse_mode_str(&o.parse_mode))
+                .map(ToString::to_string),
+        };
 
-    match result {
-        Ok(response) => {
-            if response.status().is_success() {
-                debug!("Message sent successfully to {chat_id} telegram api");
-            } else {
-                match response.json::<TelegramErrorResult>().await {
-                    Ok(json) => error!("Message wasn't sent to {chat_id} telegram api because of: {}", json.description),
-                    Err(_) => error!("Message wasn't sent to {chat_id} telegram api. Telegram response could not be parsed!"),
+        let result = client
+        .post(url.clone())
+        .json(&request_json_obj)
+        .send()
+        .await;
+
+        match result {
+            Ok(response) => {
+                if response.status().is_success() {
+                    debug!("Message chunk {}/{} sent successfully to {chat_id} telegram api", i + 1, chunks.len());
+                } else {
+                    match response.json::<TelegramErrorResult>().await {
+                        Ok(json) => error!("Message chunk {}/{} wasn't sent to {chat_id} telegram api because of: {}", i + 1, chunks.len(), json.description),
+                        Err(_) => error!("Message chunk {}/{} wasn't sent to {chat_id} telegram api. Telegram response could not be parsed!", i + 1, chunks.len()),
+                    }
                 }
-            }
-        },
-        Err(e) => error!("Message wasn't sent to {chat_id} telegram api because of: {e}"),
+            },
+            Err(e) => error!("Message chunk {}/{} wasn't sent to {chat_id} telegram api because of: {e}", i + 1, chunks.len()),
+        }
+        
+        // Small delay between chunks to be polite to the API
+        if i < chunks.len() - 1 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
     }
 }
-
-

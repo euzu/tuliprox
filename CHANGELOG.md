@@ -39,6 +39,9 @@
   - Trakt api config field `key` is now `api_key`. Added `user_agent` field to Trakt api config
 
 ## 🌟 New Features
+- **Smart Connection Priority**: Introduced a priority system for connections. Users with higher priority can preempt (kick) lower priority connections (e.g., background tasks or standard users) when provider slots are full.
+- **Background Metadata Queue**: Metadata resolution (VOD/Series) and stream analysis are now queued per input and processed in the background when provider connections are idle. This prevents "No Connections" errors for active users during playlist updates.
+- **Live TV Probing**: Added support for probing Live TV streams (`resolve_livetv`) to determine codecs and resolution. This runs as a low-priority background task.
 - **Discord Notifications**: Support for Discord notifications via webhooks with optional Handlebars templates.
 - **Enhanced REST Messaging**: Support for custom HTTP methods, headers, and Handlebars templating.
 - **Local Library Module**: Comprehensive local video file scanning and metadata management.
@@ -59,6 +62,12 @@
 - **source.yml (input options)**:
   - Added `resolve_tmdb`: Triggers TMDB lookup if ID is missing.
   - Added `analyze_stream`: Triggers ffprobe if technical info is missing.
+- **source.yml (target output)**:
+  - Added `resolve_livetv`: Enables background probing for Live TV streams (default disabled).
+  - Added `resolve_livetv_interval_hours`: Sets the frequency for re-probing Live TV streams.
+  - Added `update_strategy`: Defines how outputs are written (`instant` or `bundled`).
+- **api-proxy.yml**:
+  - Added `priority` to user credentials (default: 10). Lower numbers mean lower priority (0 is background task).
 
 ## 🛠 Optimizations
 - **Quality Tagging**: Generates enhanced filename tags (e.g., `[2160p 4K HEVC HDR TrueHD 7.1]`) for STRM files based on analysis results.

@@ -22,6 +22,7 @@ use tokio_util::sync::CancellationToken;
 use crate::api::model::UpdateGuard;
 use crate::repository::get_geoip_path;
 use crate::utils::GeoIp;
+use crate::api::model::metadata_update_manager::MetadataUpdateManager;
 
 macro_rules! cancel_service {
     ($field: ident, $changes:expr, $cancel_tokens:expr) => {
@@ -265,6 +266,7 @@ pub struct AppState {
     pub playlists: Arc<PlaylistStorageState>,
     pub geoip: Arc<ArcSwapOption<GeoIp>>,
     pub update_guard: UpdateGuard,
+    pub metadata_manager: Arc<MetadataUpdateManager>,
 }
 
 impl AppState {

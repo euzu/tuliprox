@@ -4,7 +4,7 @@ use crate::model::mapping::Mapping;
 use crate::model::{macros, ConfigRename, ConfigSort};
 use arc_swap::ArcSwapOption;
 use shared::model::{ConfigTargetDto, ConfigTargetOptions, HdHomeRunTargetOutputDto, M3uTargetOutputDto,
-                    ProcessingOrder, StrmExportStyle, StrmTargetOutputDto, TargetOutputDto, TargetType, TraktConfigDto, XtreamTargetOutputDto};
+                    ProcessingOrder, StrmExportStyle, StrmTargetOutputDto, TargetOutputDto, TargetType, TraktConfigDto, XtreamTargetOutputDto, UpdateOutputStrategy};
 use shared::model::PlaylistItemType;
 use std::sync::Arc;
 use shared::foundation::Filter;
@@ -38,6 +38,9 @@ pub struct XtreamTargetOutput {
     pub resolve_series_delay: u16,
     pub resolve_vod: bool,
     pub resolve_vod_delay: u16,
+    pub resolve_livetv: bool,
+    pub resolve_livetv_interval_hours: u32,
+    pub update_strategy: UpdateOutputStrategy,
     pub trakt: Option<TraktConfig>,
     pub filter: Option<Filter>,
 }
@@ -53,6 +56,9 @@ impl From<&XtreamTargetOutputDto> for XtreamTargetOutput {
             resolve_series_delay: dto.resolve_series_delay,
             resolve_vod: dto.resolve_vod,
             resolve_vod_delay: dto.resolve_vod_delay,
+            resolve_livetv: dto.resolve_livetv,
+            resolve_livetv_interval_hours: dto.resolve_livetv_interval_hours,
+            update_strategy: dto.update_strategy,
             trakt: dto.trakt.as_ref().map(Into::into),
             filter: dto.t_filter.clone(),
         }
@@ -69,6 +75,9 @@ impl From<&XtreamTargetOutput> for XtreamTargetOutputDto {
             resolve_series_delay: instance.resolve_series_delay,
             resolve_vod: instance.resolve_vod,
             resolve_vod_delay: instance.resolve_vod_delay,
+            resolve_livetv: instance.resolve_livetv,
+            resolve_livetv_interval_hours: instance.resolve_livetv_interval_hours,
+            update_strategy: instance.update_strategy,
             trakt: instance.trakt.as_ref().map(TraktConfigDto::from),
             filter: instance.filter.as_ref().map(ToString::to_string),
             t_filter: instance.filter.clone(),
@@ -81,6 +90,7 @@ pub struct M3uTargetOutput {
     pub filename: Option<String>,
     pub include_type_in_url: bool,
     pub mask_redirect_url: bool,
+    pub update_strategy: UpdateOutputStrategy,
     pub filter: Option<Filter>,
 }
 
@@ -91,6 +101,7 @@ impl From<&M3uTargetOutputDto> for M3uTargetOutput {
             filename: dto.filename.clone(),
             include_type_in_url: dto.include_type_in_url,
             mask_redirect_url: dto.mask_redirect_url,
+            update_strategy: dto.update_strategy,
             filter: dto.t_filter.clone(),
         }
     }
@@ -101,6 +112,7 @@ impl From<&M3uTargetOutput> for M3uTargetOutputDto {
             filename: instance.filename.clone(),
             include_type_in_url: instance.include_type_in_url,
             mask_redirect_url: instance.mask_redirect_url,
+            update_strategy: instance.update_strategy,
             filter: instance.filter.as_ref().map(ToString::to_string),
             t_filter: instance.filter.clone(),
         }
@@ -122,6 +134,7 @@ pub struct StrmTargetOutput {
     pub add_quality_to_filename: bool,
     pub probe_probe_size_bytes: Option<u64>,
     pub probe_analyze_duration: Option<u64>,
+    pub update_strategy: UpdateOutputStrategy,
 }
 
 macros::from_impl!(StrmTargetOutput);
@@ -139,6 +152,7 @@ impl From<&StrmTargetOutputDto> for StrmTargetOutput {
             add_quality_to_filename: dto.add_quality_to_filename,
             probe_probe_size_bytes: dto.probe_probe_size_bytes,
             probe_analyze_duration: dto.probe_analyze_duration,
+            update_strategy: dto.update_strategy,
         }
     }
 }
@@ -157,6 +171,7 @@ impl From<&StrmTargetOutput> for StrmTargetOutputDto {
             add_quality_to_filename: instance.add_quality_to_filename,
             probe_probe_size_bytes: instance.probe_probe_size_bytes,
             probe_analyze_duration: instance.probe_analyze_duration,
+            update_strategy: instance.update_strategy,
         }
     }
 }

@@ -1351,13 +1351,16 @@ Each format has different properties.
 #### 'Target types':
 `xtream`
 - type: xtream
-- skip_live_direct_source: true|false,
-- skip_video_direct_source: true|false,
-- skip_series_direct_source: true|false,
-- resolve_series: true|false,
-- resolve_series_delay: seconds,
-- resolve_vod: true|false,
-- resolve_vod_delay: true|false,
+- skip_live_direct_source: true|false (default true),
+- skip_video_direct_source: true|false (default true),
+- skip_series_direct_source: true|false (default true),
+- resolve_series: true|false (default false),
+- resolve_series_delay: seconds (default 2s),
+- resolve_vod: true|false (default false),
+- resolve_vod_delay: true|false (default 2s),
+- resolve_livetv: true|false (default false),
+- resolve_livetv_interval_hours: number (default 120),
+- update_strategy: instant|bundled (default instant),
 - trakt: Trakt Configuration
 - filter: optional filter
 
@@ -1475,6 +1478,11 @@ There is a difference for `resolve_vod` and `resolve_series`.
 `resolve_series` works only when input: `xtream` and output: `m3u`.
 `resolve_vod` works only when input: `xtream`.
 
+- `resolve_livetv`: If set to `true`, live streams are analyzed (probed) in the background during idle times to determine codecs and resolution.
+- `resolve_livetv_interval_hours`: Defines how often (in hours) a live stream should be re-probed (default: 24h).
+- `update_strategy`:
+  - `instant` (default): Writes changes to the output files immediately after a stream is resolved/probed.
+  - `bundled`: Queues updates and writes them in batches to reduce disk I/O operations.
 
 - `xtream` `trakt`:
 Trakt.tv is an online platform that helps you track, manage, and discover TV shows and movies. Think of it like Goodreads for TV and film.
@@ -1991,13 +1999,14 @@ User definitions are made for the targets. Each target can have multiple users. 
 user:
 - target: xc_m3u
   credentials:
-  - username: test1
+  - username: NewHighPrioUser
     password: secret1
     token: 'token1'
     proxy: reverse
     server: default
     exp_date: 1672705545
     max_connections: 1
+    priority: 20
     status: Active
 ```
 
@@ -2019,6 +2028,9 @@ Reverse Proxy mode for user can be a subset
 - `max_connections`, `status` and `exp_date` are only used when `user_access_control` ist ste to true.
 - `user_ui_enabled` is _optional_. If defined it can be `true` or `false`. Default is `true`. Disable/enable web_ui for user
 - `user_access_control` is _optional_. If defined it can be `true` or `false`. Default is `false`. 
+- `priority` is _optional_ (default `10`). Higher numbers indicate higher priority.
+  - Users with higher priority can preempt (kick) connections of users with lower priority if the provider's `max_connections` limit is reached.
+  - Background tasks (like stream probing) run with priority `0`.
 
 If you have a lot of users and dont want to keep them in `api-proxy.yml`, you can set the option
 - `use_user_db` to true to store the user information inside a db-file.

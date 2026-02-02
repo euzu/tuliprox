@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use shared::error::{info_err_res, notify_err, string_to_io_error, TuliproxError};
 use shared::model::xtream_const::XTREAM_CLUSTER;
-use shared::model::{PlaylistGroup, PlaylistItem, PlaylistItemType, SeriesStreamProperties, StreamProperties, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem};
+use shared::model::{PlaylistGroup, PlaylistItem, PlaylistItemType, SeriesStreamProperties, StreamProperties, VideoStreamProperties, LiveStreamProperties, XtreamCluster, XtreamPlaylistItem};
 use shared::utils::{arc_str_serde, get_u32_from_serde_value, Internable};
 use std::collections::HashMap;
 use std::fs::File;
@@ -754,7 +754,9 @@ pub async fn persist_input_xtream_playlist(app_config: &Arc<AppConfig>, storage_
             storage_path,
             false,
             StorageKey::ProviderId,
-            vec![(cluster, col.iter().map(Into::into).collect::<Vec<XtreamPlaylistItem>>())],
+            vec![
+                (cluster, col.iter().map(Into::into).collect::<Vec<XtreamPlaylistItem>>())
+            ],
         ).await {
             errors.push(format!("Persisting collection failed:{err}"));
         }
@@ -863,6 +865,12 @@ pub async fn persist_input_vod_info(app_config: &Arc<AppConfig>, storage_path: &
                                     cluster: XtreamCluster, input_name: &str, provider_id: u32,
                                     props: &VideoStreamProperties) -> Result<(), Error> {
     persist_input_info(app_config, storage_path, cluster, input_name, provider_id, StreamProperties::Video(Box::new(props.clone()))).await
+}
+
+pub async fn persist_input_live_info(app_config: &Arc<AppConfig>, storage_path: &Path,
+                                    cluster: XtreamCluster, input_name: &str, provider_id: u32,
+                                    props: &LiveStreamProperties) -> Result<(), Error> {
+    persist_input_info(app_config, storage_path, cluster, input_name, provider_id, StreamProperties::Live(Box::new(props.clone()))).await
 }
 
 pub async fn persist_input_vod_info_batch(app_config: &Arc<AppConfig>, storage_path: &Path,

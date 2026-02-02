@@ -1,4 +1,4 @@
-use crate::utils::{is_blank_optional_string, is_true, default_as_true, deserialize_timestamp};
+use crate::utils::{is_blank_optional_string, is_true, default_as_true, deserialize_timestamp, default_priority, is_default_priority};
 use crate::error::{TuliproxError, TuliproxErrorKind};
 use crate::model::{ProxyType, ProxyUserStatus};
 
@@ -34,6 +34,8 @@ pub struct ProxyUserCredentialsDto {
     pub ui_enabled: bool,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub comment: Option<String>,
+    #[serde(default = "default_priority", skip_serializing_if = "is_default_priority")]
+    pub priority: u8,
 }
 
 impl ProxyUserCredentialsDto {
@@ -80,5 +82,3 @@ impl ProxyUserCredentialsDto {
         true
     }
 }
-
-

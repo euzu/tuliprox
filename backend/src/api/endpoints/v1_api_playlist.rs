@@ -74,10 +74,11 @@ async fn playlist_update(
             let valid_targets = Arc::new(valid_targets);
             let provider_manager = Arc::clone(&app_state.active_provider);
             let disabled_headers = app_state.get_disabled_headers();
+            let metadata_manager = Arc::clone(&app_state.metadata_manager);
             tokio::spawn({
                 async move {
                     playlist::exec_processing(&http_client, app_config, valid_targets, Some(event_manager),
-                                              Some(playlist_state), Some(app_state.update_guard.clone()), disabled_headers, Some(provider_manager)).await;
+                                              Some(playlist_state), Some(app_state.update_guard.clone()), disabled_headers, Some(provider_manager), Some(metadata_manager)).await;
                 }
             });
             axum::http::StatusCode::ACCEPTED.into_response()

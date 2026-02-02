@@ -285,6 +285,9 @@ async fn handle_event_message(socket: &mut WebSocket, event: EventMessage, handl
                             .await
                             .map_err(|e| format!("Library scan progress event: {e} "))?;
                     }
+                    EventMessage::InputMetadataUpdatesCompleted(_) => {
+                        // Internal event, ignore for websocket clients
+                    }
                 }
             }
         }

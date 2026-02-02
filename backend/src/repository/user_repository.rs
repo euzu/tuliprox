@@ -45,6 +45,7 @@ impl StoredProxyUserCredentialsDeprecated {
             status: stored.status,
             ui_enabled: stored.ui_enabled,
             comment: None,
+            priority: 10, // Default priority
         }
     }
 }
@@ -68,6 +69,7 @@ struct StoredProxyUserCredentials {
     pub status: Option<ProxyUserStatus>,
     pub ui_enabled: bool,
     pub comment: Option<String>,
+    pub priority: u8,
 }
 
 impl StoredProxyUserCredentials {
@@ -86,6 +88,7 @@ impl StoredProxyUserCredentials {
             status: proxy.status,
             ui_enabled: proxy.ui_enabled,
             comment: proxy.comment.clone(),
+            priority: proxy.priority,
         }
     }
 
@@ -103,6 +106,7 @@ impl StoredProxyUserCredentials {
             status: stored.status,
             ui_enabled: stored.ui_enabled,
             comment: stored.comment.clone(),
+            priority: stored.priority,
         }
     }
 }
@@ -450,6 +454,7 @@ mod tests {
                         status: Some(ProxyUserStatus::Active),
                         ui_enabled: true,
                         comment: None,
+                        priority: 10,
                     },
                     ProxyUserCredentials {
                         username: "Test2".to_string(),
@@ -464,6 +469,7 @@ mod tests {
                         status: Some(ProxyUserStatus::Expired),
                         ui_enabled: true,
                         comment: None,
+                        priority: 10,
                     },
                     ProxyUserCredentials {
                         username: "Test3".to_string(),
@@ -478,6 +484,7 @@ mod tests {
                         status: Some(ProxyUserStatus::Expired),
                         ui_enabled: true,
                         comment: None,
+                        priority: 10,
                     },
                     ProxyUserCredentials {
                         username: "Test4".to_string(),
@@ -492,6 +499,7 @@ mod tests {
                         status: Some(ProxyUserStatus::Expired),
                         ui_enabled: true,
                         comment: None,
+                        priority: 10,
                     }
                 ],
             };

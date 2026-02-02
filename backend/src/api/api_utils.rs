@@ -353,11 +353,12 @@ async fn resolve_streaming_strategy(
     fingerprint: &Fingerprint,
     input: &ConfigInput,
     force_provider: Option<&Arc<str>>,
+    priority: u8,
 ) -> StreamingStrategy {
     // allocate a provider connection
     let provider_connection_handle = match force_provider {
         Some(provider) => app_state.active_provider.force_exact_acquire_connection(provider, &fingerprint.addr).await,
-        None => app_state.active_provider.acquire_connection(&input.name, &fingerprint.addr).await,
+        None => app_state.active_provider.acquire_connection(&input.name, &fingerprint.addr, priority).await,
     };
 
     // panel_api provisioning/loading is handled later in the stream creation flow
@@ -444,8 +445,9 @@ async fn create_stream_response_details(
     connection_permission: UserConnectionPermission,
     force_provider: Option<&Arc<str>>,
     virtual_id: VirtualId,
+    priority: u8,
 ) -> StreamDetails {
-    let mut streaming_strategy = resolve_streaming_strategy(app_state, stream_url, fingerprint, input, force_provider).await;
+    let mut streaming_strategy = resolve_streaming_strategy(app_state, stream_url, fingerprint, input, force_provider, priority).await;
     let mut grace_period_options = app_state.get_grace_options();
     grace_period_options.period_millis = get_grace_period_millis(
         connection_permission,
@@ -773,6 +775,7 @@ pub async fn force_provider_stream_response(
         connection_permission,
         Some(&user_session.provider),
         stream_channel.virtual_id,
+        user.priority,
     )
         .await;
 
@@ -878,6 +881,7 @@ pub async fn stream_response(
         connection_permission,
         None,
         stream_channel.virtual_id,
+        user.priority,
     ).await;
 
     if stream_details.has_stream() {
@@ -1641,6 +1645,7 @@ pub fn create_api_proxy_user(app_state: &Arc<AppState>) -> ProxyUserCredentials 
         status: None,
         ui_enabled: false,
         comment: None,
+        priority: 10,
     }
 }
 

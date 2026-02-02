@@ -415,7 +415,7 @@ pub async fn load_input_playlist(ctx: &PlaylistProcessingContext, input: &Config
     match input.input_type {
         InputType::Xtream | InputType::XtreamBatch => {
             if disk_based_processing {
-                Ok(Box::new(XtreamDiskPlaylistSource::new(app_config, &storage_path).await))
+                Ok(Box::new(XtreamDiskPlaylistSource::new(app_config, &storage_path).await) as Box<dyn PlaylistSource>)
             } else {
                 let clusters_to_load = if let Some(c) = clusters {
                     c
@@ -423,26 +423,26 @@ pub async fn load_input_playlist(ctx: &PlaylistProcessingContext, input: &Config
                     &XTREAM_CLUSTER
                 };
                 let groups = load_input_xtream_playlist(app_config, &storage_path, clusters_to_load).await?;
-                Ok(Box::new(MemoryPlaylistSource::new(groups)))
+                Ok(Box::new(MemoryPlaylistSource::new(groups)) as Box<dyn PlaylistSource>)
             }
         }
         InputType::M3u | InputType::M3uBatch => {
             // Load M3U
             let file_path = get_input_m3u_playlist_file_path(&storage_path, &input.name);
             if disk_based_processing && file_path.exists() {
-                Ok(Box::new(M3uDiskPlaylistSource::new(app_config, &file_path).await))
+                Ok(Box::new(M3uDiskPlaylistSource::new(app_config, &file_path).await) as Box<dyn PlaylistSource>)
             } else {
                 let groups = load_input_m3u_playlist(app_config, &file_path).await?;
-                Ok(Box::new(MemoryPlaylistSource::new(groups)))
+                Ok(Box::new(MemoryPlaylistSource::new(groups)) as Box<dyn PlaylistSource>)
             }
         }
         InputType::Library => {
             let file_path = get_input_local_library_playlist_file_path(&storage_path, &input.name);
             if disk_based_processing && file_path.exists() {
-                Ok(Box::new(LocalLibraryDiskPlaylistSource::new(app_config, &file_path).await))
+                Ok(Box::new(LocalLibraryDiskPlaylistSource::new(app_config, &file_path).await) as Box<dyn PlaylistSource>)
             } else {
                 let groups = load_input_local_library_playlist(app_config, &file_path).await?;
-                Ok(Box::new(MemoryPlaylistSource::new(groups)))
+                Ok(Box::new(MemoryPlaylistSource::new(groups)) as Box<dyn PlaylistSource>)
             }
         }
     }
@@ -455,7 +455,7 @@ pub fn get_input_m3u_playlist_file_path(storage_path: &Path, input_name: &Arc<st
     storage_path.join(format!("m3u_{sanitized_input_name}.{FILE_SUFFIX_DB}"))
 }
 
-fn get_input_local_library_playlist_file_path(storage_path: &Path, input_name: &Arc<str>) -> PathBuf {
+pub fn get_input_local_library_playlist_file_path(storage_path: &Path, input_name: &Arc<str>) -> PathBuf {
     let sanitized_input_name: String = input_name.chars()
         .map(|c| if c.is_alphanumeric() { c } else { '_' })
         .collect();

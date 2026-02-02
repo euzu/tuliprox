@@ -1,5 +1,5 @@
 use log::{debug, error, info, warn};
-use shared::utils::TMDB_API_KEY;
+use shared::utils::{clean_playlist_title, TMDB_API_KEY};
 use crate::library::metadata::{MediaMetadata, MetadataSource, MovieMetadata, SeriesMetadata};
 use crate::library::scanner::ScannedMediaFile;
 use crate::library::tmdb_client::TmdbClient;
@@ -57,7 +57,21 @@ impl MetadataResolver {
         if title.trim().is_empty() {
              return None;
         }
-        let mut metadata = ptt_parse_title(title);
+
+        // Clean common IPTV prefixes before parsing
+        let cleaned_title = clean_playlist_title(title);
+        
+        let mut metadata = ptt_parse_title(&cleaned_title);
+        
+        // Fallback: If PTT parser stripped everything (e.g. unusual formatting), use original title
+        if metadata.title.is_empty() {
+            metadata.title = if cleaned_title.trim().is_empty() { 
+                title.to_string() 
+            } else { 
+                cleaned_title 
+            };
+        }
+
         // Inject the known ID if available to prevent unnecessary name search
         if known_tmdb_id.is_some() {
             metadata.tmdb = known_tmdb_id;
@@ -172,7 +186,6 @@ impl MetadataResolver {
         }
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

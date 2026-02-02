@@ -217,6 +217,23 @@ pub fn is_default_processing_order(p: &ProcessingOrder) -> bool {
     *p == ProcessingOrder::default()
 }
 
+// New defaults for priority and livetv
+pub const fn default_priority() -> u8 {
+    10
+}
+
+pub const fn is_default_priority(v: &u8) -> bool {
+    *v == default_priority()
+}
+
+pub const fn default_resolve_livetv_interval() -> u32 {
+    120
+}
+
+pub const fn is_default_resolve_livetv_interval(v: &u32) -> bool {
+    *v == default_resolve_livetv_interval()
+}
+
 //////////////////////////////
 // HDHomerun Device Defaults
 //////////////////////////////

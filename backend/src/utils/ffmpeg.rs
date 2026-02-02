@@ -3,6 +3,7 @@ use tokio::process::Command;
 use std::time::Duration;
 use crate::model::{MediaQuality};
 use serde_json::Value;
+use shared::utils::sanitize_sensitive_info;
 
 // Checks if ffprobe is available in the system path
 pub async fn check_ffprobe_availability() -> bool {
@@ -40,7 +41,8 @@ pub async fn probe_url(url: &str, user_agent: Option<&str>, analyze_duration: u6
     match output_result {
         Ok(Ok(output)) => {
             if !output.status.success() {
-                debug!("ffprobe failed for {}: {}", url, String::from_utf8_lossy(&output.stderr));
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                debug!("ffprobe failed for {}: {}", sanitize_sensitive_info(url), sanitize_sensitive_info(&stderr));
                 return None;
             }
 
@@ -94,14 +96,14 @@ pub async fn probe_url(url: &str, user_agent: Option<&str>, analyze_duration: u6
                      }
                  }
             } else {
-                warn!("Failed to parse ffprobe json output for {}", url);
+                warn!("Failed to parse ffprobe json output for {}", sanitize_sensitive_info(url));
             }
         }
         Ok(Err(e)) => {
-            warn!("ffprobe execution failed for {}: {}", url, e);
+            warn!("ffprobe execution failed for {}: {}", sanitize_sensitive_info(url), e);
         }
         Err(_) => {
-            warn!("ffprobe timed out after {:?} for {}", timeout_val, url);
+            warn!("ffprobe timed out after {:?} for {}", timeout_val, sanitize_sensitive_info(url));
         }
     }
 

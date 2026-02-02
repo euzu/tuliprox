@@ -22,6 +22,7 @@ pub struct ProxyUserCredentials {
     pub status: Option<ProxyUserStatus>,
     pub ui_enabled: bool,
     pub comment: Option<String>,
+    pub priority: u8,
 }
 
 macros::from_impl!(ProxyUserCredentials);
@@ -40,6 +41,7 @@ impl From<&ProxyUserCredentialsDto> for ProxyUserCredentials {
             status: dto.status,
             ui_enabled: dto.ui_enabled,
             comment: dto.comment.clone(),
+            priority: dto.priority,
         }
     }
 }
@@ -59,6 +61,7 @@ impl From<&ProxyUserCredentials> for ProxyUserCredentialsDto {
             status: instance.status,
             ui_enabled: instance.ui_enabled,
             comment: instance.comment.clone(),
+            priority: instance.priority,
         }
     }
 }

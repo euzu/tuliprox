@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use log::{warn};
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Default, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct LiveStreamProperties {
     #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
     pub name: Arc<str>,
@@ -35,6 +35,15 @@ pub struct LiveStreamProperties {
     pub tv_archive_duration: Option<i32>,
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
     pub is_adult: i32,
+    // New fields for probing
+    #[serde(default, serialize_with = "serialize_json_as_opt_string", deserialize_with = "deserialize_json_as_opt_string")]
+    pub video: Option<Arc<str>>,
+    #[serde(default, serialize_with = "serialize_json_as_opt_string", deserialize_with = "deserialize_json_as_opt_string")]
+    pub audio: Option<Arc<str>>,
+    #[serde(default, deserialize_with = "deserialize_number_from_string")]
+    pub last_probed_timestamp: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_number_from_string")]
+    pub last_success_timestamp: Option<i64>,
 }
 
 #[derive(Default, Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -170,7 +179,7 @@ pub struct SeriesStreamDetailEpisodeProperties {
     #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
     pub release_date: Arc<str>,
     #[serde(default, deserialize_with = "deserialize_as_option_arc_str")]
-    pub series_release_date: Option<Arc<str>>,
+    pub series_release_date: Option<Arc<str>>, // Global series release date
     #[serde(default, deserialize_with = "deserialize_as_option_arc_str")]
     pub plot: Option<Arc<str>>,
     #[serde(default, deserialize_with = "deserialize_as_option_arc_str")]
