@@ -5,6 +5,12 @@
 # =================================================================
 
 # -----------------------------------------------------------------
+# Stage 0: Fetch static FFmpeg binaries
+# -----------------------------------------------------------------
+# We use a static build to ensure it works in the scratch image without libraries
+FROM mwader/static-ffmpeg:7.1 AS ffmpeg-static
+
+# -----------------------------------------------------------------
 # Stage 1: Build the Rust binary for production
 # -----------------------------------------------------------------
 FROM rust:bookworm AS rust-build
@@ -85,7 +91,7 @@ WORKDIR /src/frontend
 RUN trunk build --release
 
 # -----------------------------------------------------------------
-# Stage 3: Build video resources with ffmpeg
+# Stage 3: Build video resources with ffmpeg (from linuxserver used for build time only)
 # -----------------------------------------------------------------
 FROM linuxserver/ffmpeg:latest AS resource-build
 
@@ -136,10 +142,11 @@ ARG TZ=UTC
 ENV RUST_TARGET=${RUST_TARGET}
 ENV TZ=${TZ}
 
-# Install build dependencies and debugger for Alpine.
+# Install build dependencies, debugger and ffmpeg for Alpine.
 # 'build-base' contains gcc, make, etc.
 # 'gdb' is required for the debugger (lldb is often more complicated in Alpine repos)
-RUN apk add --no-cache bash build-base openssl-dev perl lldb gdb
+# 'ffmpeg' is required for the probe feature
+RUN apk add --no-cache bash build-base openssl-dev perl lldb gdb ffmpeg
 
 # Update Rust toolchain and add the necessary target
 RUN rustup update && rustup target add $RUST_TARGET
@@ -178,6 +185,10 @@ COPY --from=tz-prep /output/etc/localtime /etc/localtime
 # Copy SSL certificates from a builder stage that has them
 COPY --from=rust-build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 
+# Copy static ffmpeg/ffprobe binaries
+COPY --from=ffmpeg-static /ffmpeg /usr/local/bin/
+COPY --from=ffmpeg-static /ffprobe /usr/local/bin/
+
 # App
 WORKDIR /app
 COPY --from=rust-build /src/target/${RUST_TARGET}/release/tuliprox ./tuliprox
@@ -196,7 +207,8 @@ ARG RUST_TARGET=x86_64-unknown-linux-musl
 ARG TZ=UTC
 ENV TZ=${TZ}
 
-RUN apk add --no-cache bash curl ca-certificates tini
+# Install dependencies including ffmpeg
+RUN apk add --no-cache bash curl ca-certificates tini ffmpeg
 
 # Copy timezone data and localtime from tz-prep
 COPY --from=tz-prep /output/usr/share/zoneinfo /usr/share/zoneinfo

@@ -1,7 +1,7 @@
 use crate::api::model::AppState;
 use crate::api::panel_api::sync_panel_api_exp_dates_on_boot;
 use crate::model::{AppConfig, ProcessTargets, ScheduleConfig};
-use crate::processing::processor::playlist::exec_processing;
+use crate::processing::processor::exec_processing;
 use crate::utils::exit;
 use chrono::{DateTime, FixedOffset, Local};
 use cron::Schedule;

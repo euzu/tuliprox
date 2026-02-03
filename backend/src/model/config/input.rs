@@ -21,6 +21,8 @@ pub struct ConfigInputOptions {
     pub xtream_skip_series: bool,
     pub xtream_live_stream_use_prefix: bool,
     pub xtream_live_stream_without_extension: bool,
+    pub resolve_tmdb: bool,
+    pub analyze_stream: bool,
 }
 
 macros::from_impl!(ConfigInputOptions);
@@ -32,6 +34,8 @@ impl From<&ConfigInputOptionsDto> for ConfigInputOptions {
             xtream_skip_series: dto.xtream_skip_series,
             xtream_live_stream_use_prefix: dto.xtream_live_stream_use_prefix,
             xtream_live_stream_without_extension: dto.xtream_live_stream_without_extension,
+            resolve_tmdb: dto.resolve_tmdb,
+            analyze_stream: dto.analyze_stream,
         }
     }
 }

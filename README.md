@@ -237,7 +237,7 @@ It has 2 entries `extensions` and `download`.
     Example: `.*(?P<episode>[Ss]\\d{1,2}(.*?)[Ee]\\d{1,2}).*`
 - `web_search` is _optional_, example: `https://www.imdb.com/search/title/?title={}`,
   define `download.episode_pattern` to remove episode suffix from titles.
-- `ffprobe_enabled`: _optional_ (default `true`). Enable or disable FFprobe analysis for streams globally.
+- `ffprobe_enabled`: _optional_ (default `false`). Enable or disable FFprobe analysis for streams globally.
 - `ffprobe_timeout`: _optional_ (default `60`). Timeout in seconds for FFprobe analysis.
 
 ```yaml

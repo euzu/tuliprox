@@ -330,7 +330,6 @@ async fn get_redirect_alternative_url(
     redirect_url.clone()
 }
 
-
 /// Determines the appropriate streaming strategy for the given input and stream URL.
 ///
 /// This function attempts to acquire a connection to a streaming provider, either using a forced provider

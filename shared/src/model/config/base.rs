@@ -224,6 +224,8 @@ impl ConfigDto {
                     extensions: default_supported_video_extensions(),
                     download: None,
                     web_search: None,
+                    ffprobe_enabled: false,
+                    ffprobe_timeout: None,
                 });
             }
             Some(video) => {

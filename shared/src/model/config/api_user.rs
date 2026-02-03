@@ -80,5 +80,3 @@ impl ProxyUserCredentialsDto {
         true
     }
 }
-
-

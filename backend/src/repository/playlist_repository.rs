@@ -1,7 +1,7 @@
 use crate::api::model::{AppState, PlaylistM3uStorage, PlaylistStorage, PlaylistStorageState, PlaylistXtreamStorage};
 use crate::model::Epg;
 use crate::model::{AppConfig, ConfigInput, ConfigTarget, TargetOutput};
-use crate::processing::processor::playlist::{apply_filter_to_playlist, PlaylistProcessingContext};
+use crate::processing::processor::{apply_filter_to_playlist, PlaylistProcessingContext};
 use crate::repository::epg_write_for_target;
 use crate::repository::write_strm_playlist;
 use crate::repository::FILE_SUFFIX_DB;
@@ -21,7 +21,6 @@ use shared::utils::{is_dash_url, is_hls_url, Internable};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use crate::api::model::ActiveProviderManager;
 
 struct LocalEpisodeKey {
     path: Arc<str>,

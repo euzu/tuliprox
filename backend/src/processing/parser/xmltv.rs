@@ -1,6 +1,6 @@
 use crate::model::{Epg, TVGuide, XmlTag, XmlTagIcon, EPG_ATTRIB_CHANNEL, EPG_ATTRIB_ID, EPG_TAG_CHANNEL, EPG_TAG_DISPLAY_NAME, EPG_TAG_ICON, EPG_TAG_PROGRAMME, EPG_TAG_TV};
 use crate::model::{EpgSmartMatchConfig, PersistedEpgSource};
-use crate::processing::processor::epg::EpgIdCache;
+use crate::processing::processor::EpgIdCache;
 use crate::utils::compressed_file_reader_async::CompressedFileReaderAsync;
 use crate::utils::{async_file_reader, parse_xmltv_time};
 use log::error;
@@ -687,7 +687,7 @@ mod tests {
         assert_eq!("odisea.bg", normalize_channel_name("BG | ODISEA ᵁᴴᴰ ³⁸⁴⁰ᴾ", &epg_smart_cfg));
     }
 
-    use crate::processing::processor::epg::EpgIdCache;
+    use crate::processing::processor::EpgIdCache;
     use rphonetic::{Encoder, Metaphone};
     use shared::model::{EpgNamePrefix, EpgSmartMatchConfigDto};
     use shared::utils::Internable;

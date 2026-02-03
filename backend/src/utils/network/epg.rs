@@ -1,6 +1,6 @@
 use crate::model::{ConfigInput, PersistedEpgSource};
 use crate::model::{TVGuide};
-use crate::processing::processor::playlist::PlaylistProcessingContext;
+use crate::processing::processor::PlaylistProcessingContext;
 use crate::repository::get_input_storage_path;
 use crate::repository::storage_const;
 use crate::utils::{add_prefix_to_filename, prepare_file_path, request};

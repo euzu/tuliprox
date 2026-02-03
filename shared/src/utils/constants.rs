@@ -104,6 +104,7 @@ pub struct Constants {
     pub re_classifier_moviedb_id: Regex,
     pub re_classifier_camel_case: Regex,
     pub re_classifier_brackets_info: Regex,
+    pub re_clean_title: Regex,
 }
 
 pub static CONSTANTS: LazyLock<Constants> = LazyLock::new(||
@@ -162,5 +163,7 @@ pub static CONSTANTS: LazyLock<Constants> = LazyLock::new(||
         re_classifier_moviedb_id: Regex::new(r"(?i)\b(tmdb|tvdb|imdb)[\s._=-]?(\d+)\b").unwrap(),
         re_classifier_camel_case: Regex::new(r"([a-z])([A-Z])").unwrap(),
         re_classifier_brackets_info: Regex::new(r"[\[\{\(].*?[\]\}\)]").unwrap(),
+
+        re_clean_title: Regex::new(r"^(?:\s*[\[\(┃|].*?[\]\)┃|]\s*)+").unwrap()      // Matches patterns like "┃DE┃", "[US]", "(FR)", "|EN|" at the start of the string
     }
 );

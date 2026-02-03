@@ -21,7 +21,7 @@ use crate::library::LibraryProcessor;
 use crate::model::{
     AppConfig, Config, Healthcheck, HealthcheckConfig, ProcessTargets, SourcesConfig,
 };
-use crate::processing::processor::playlist;
+use crate::processing::processor::{exec_processing};
 use crate::utils::request::create_client;
 use crate::utils::{config_file_reader, resolve_env_var};
 use crate::utils::{db_viewer, init_logger};
@@ -149,7 +149,7 @@ async fn main() {
     // Handle Library scan before starting main application
     if args.scan_library || args.force_library_rescan {
         info!("Library scan mode requested");
-        let app_config = utils::read_initial_app_config(&mut config_paths, true, true, false).await.unwrap_or_else(|err| exit!("{}", err));
+        let app_config = Arc::new(utils::read_initial_app_config(&mut config_paths, true, true, false).await.unwrap_or_else(|err| exit!("{}", err)));
         scan_library_cli(&app_config, args.force_library_rescan).await;
         return;
     }
@@ -206,6 +206,11 @@ fn print_info(app_config: &AppConfig) {
             info!("Cache dir: {}", cache.dir);
         }
     }
+    if let Some(lib_config) = config.library.as_ref() {
+        if lib_config.enabled {
+            info!("Library Metadata path: {}", lib_config.metadata.path);
+        }
+    }
     if let Some(resource_path) = paths.custom_stream_response_path.as_ref() {
         info!("Resource path: {resource_path}");
     }
@@ -234,7 +239,8 @@ async fn start_in_cli_mode(cfg: Arc<AppConfig>, targets: Arc<ProcessTargets>) {
         error!("Failed to build client {err}");
         reqwest::Client::new()
     });
-    playlist::exec_processing(&client, cfg, targets, None, None, None, None).await;
+    // In CLI mode, we don't start background managers for events or providers
+    exec_processing(&client, cfg, targets, None, None, None, None, None, None).await;
 }
 
 async fn start_in_server_mode(cfg: Arc<AppConfig>, targets: Arc<ProcessTargets>) {
@@ -243,7 +249,7 @@ async fn start_in_server_mode(cfg: Arc<AppConfig>, targets: Arc<ProcessTargets>)
     }
 }
 
-async fn scan_library_cli(app_config: &AppConfig, force_rescan: bool) {
+async fn scan_library_cli(app_config: &Arc<AppConfig>, force_rescan: bool) {
     info!("Starting Library scan from CLI (force_rescan: {force_rescan})");
 
     let Some(processor) = LibraryProcessor::from_app_config(app_config) else {

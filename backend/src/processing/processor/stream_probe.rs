@@ -47,10 +47,6 @@ pub async fn update_generic_stream_metadata(
     // Acquire lock and open tree for update
     let _file_lock = app_config.file_locks.write_lock(&db_path).await;
 
-    // We need to fetch probe data first.
-    let dummy_addr = "127.0.0.1:0".parse().unwrap();
-    let prio = 0;
-
     let probe_data = if let Some(handle) = active_handle {
          // Use existing connection handle logic
          let probe_url = stream_url.to_string();
@@ -69,7 +65,7 @@ pub async fn update_generic_stream_metadata(
             probe_size,
             ffprobe_timeout,
          ).await
-    } else if let Some(handle) = active_provider.acquire_connection_with_grace_override(&input.name, &dummy_addr, false, prio).await {
+    } else if let Some(handle) = active_provider.acquire_connection_for_probe(&input.name).await {
          let probe_url = stream_url.to_string();
          let ffprobe_timeout = app_config.config.load().video.as_ref().and_then(|v| v.ffprobe_timeout).unwrap_or(60);
          let user_agent = app_config.config.load().default_user_agent.clone();

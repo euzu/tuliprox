@@ -58,7 +58,7 @@
 
 ### ⚙️ New Settings
 - **config.yml**:
-  - Added `video.ffprobe_enabled` (default: true) and `video.ffprobe_timeout`.
+  - Added `video.ffprobe_enabled` (default: false) and `video.ffprobe_timeout`.
 - **source.yml (input options)**:
   - Added `resolve_tmdb`: Triggers TMDB lookup if ID is missing.
   - Added `analyze_stream`: Triggers ffprobe if technical info is missing.

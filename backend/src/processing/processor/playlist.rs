@@ -813,7 +813,7 @@ fn probing(ctx: &PlaylistProcessingContext, provider_fpl: &mut FetchedPlaylist) 
                                     item.header.id.to_string()
                                 };
 
-                                let task = crate::api::model::metadata_update_manager::UpdateTask::ProbeStream {
+                                let task = crate::api::model::UpdateTask::ProbeStream {
                                     unique_id,
                                     url: item.header.url.to_string(),
                                     item_type: item.header.item_type,

@@ -4,7 +4,6 @@ use crate::api::endpoints::extract_accept_header::ExtractAcceptHeader;
 use crate::api::model::AppState;
 use crate::auth::create_access_token;
 use crate::model::{parse_xmltv_for_web_ui_from_url, ConfigInput, ConfigInputOptions};
-use crate::processing::processor::playlist;
 use axum::response::IntoResponse;
 use axum::{Router};
 use log::{debug, error};
@@ -15,6 +14,7 @@ use std::sync::Arc;
 use url::Url;
 use crate::api::endpoints::xmltv_api::{serve_epg_web_ui};
 use crate::api::endpoints::xtream_api::xtream_get_stream_info_response;
+use crate::processing::processor::exec_processing;
 use crate::repository::xtream_get_item_for_stream_id;
 
 fn create_config_input_for_m3u(url: &str) -> ConfigInput {
@@ -77,7 +77,7 @@ async fn playlist_update(
             let metadata_manager = Arc::clone(&app_state.metadata_manager);
             tokio::spawn({
                 async move {
-                    playlist::exec_processing(&http_client, app_config, valid_targets, Some(event_manager),
+                    exec_processing(&http_client, app_config, valid_targets, Some(event_manager),
                                               Some(playlist_state), Some(app_state.update_guard.clone()), disabled_headers, Some(provider_manager), Some(metadata_manager)).await;
                 }
             });

@@ -78,7 +78,7 @@ pub fn parse_xtream_series_info(parent_uuid: &UUIDType, series_info: &SeriesStre
             // Create properties and inject global release date if available
             let mut episode_info = EpisodeStreamProperties::from_series(series_info, episode);
             if series_release_date.is_some() {
-                episode_info.series_release_date = series_release_date;
+                episode_info.series_release_date = series_release_date.clone();
             }
 
             PlaylistItem {

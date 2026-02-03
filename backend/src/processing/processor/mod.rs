@@ -15,7 +15,6 @@ pub use self::xtream::*;
 pub use self::xtream_vod::*;
 pub use self::xtream_series::*;
 pub use self::stream_probe::*;
-pub use self::trakt::*;
 
 
 //

@@ -120,7 +120,7 @@ pub struct XtreamSeriesInfoSeason {
 #[allow(non_snake_case)]
 pub struct XtreamSeriesInfoInfo {
     #[serde(default, with = "arc_str_serde")]
-    pub(crate) name: Arc<str>,
+    pub name: Arc<str>,
     #[serde(default, with = "arc_str_serde")]
     pub cover: Arc<str>,
     #[serde(default, with = "arc_str_serde")]

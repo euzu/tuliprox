@@ -16,7 +16,7 @@ mod connection_manager;
 mod update_guard;
 mod metadata_update_manager;
 
-pub(in crate::api) use self::active_provider_manager::*;
+pub use self::active_provider_manager::*;
 pub(in crate::api) use self::active_user_manager::*;
 pub use self::app_state::*;
 pub use self::connection_manager::*;
