@@ -15,10 +15,10 @@ pub struct MetadataResolver {
 
 impl MetadataResolver {
     // Creates a new metadata resolver from configuration
-    pub fn new(config: LibraryConfig, client: reqwest::Client) -> Self {
+    pub fn new(config: &LibraryConfig, client: reqwest::Client) -> Self {
         let storage_path = std::path::PathBuf::from(&config.metadata.path);
         let storage = MetadataStorage::new(storage_path);
-        Self::from_config(&config, client, storage)
+        Self::from_config(config, client, storage)
     }
 
     pub fn from_config(config: &LibraryConfig, client: reqwest::Client, storage: MetadataStorage) -> Self {

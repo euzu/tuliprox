@@ -1,8 +1,9 @@
+use crate::model::macros;
+use crate::utils::ffmpeg::check_ffprobe_availability;
 use regex::Regex;
+use shared::model::{VideoConfigDto, VideoDownloadConfigDto};
 use std::collections::HashMap;
 use std::sync::Arc;
-use shared::model::{VideoConfigDto, VideoDownloadConfigDto};
-use crate::model::macros;
 
 #[derive(Debug, Clone)]
 pub struct VideoDownloadConfig {
@@ -20,8 +21,8 @@ impl From<&VideoDownloadConfigDto> for VideoDownloadConfig {
             directory: dto.directory.as_ref().map_or_else(|| "downloads".to_string(), ToString::to_string),
             organize_into_directories: dto.organize_into_directories,
             episode_pattern: dto.episode_pattern.as_ref().and_then(|s| shared::model::REGEX_CACHE.get_or_compile(s)
-                                    .map_err(|e| log::warn!("Invalid episode_pattern regex '{s}': {e}"))
-                                    .ok()),
+                .map_err(|e| log::warn!("Invalid episode_pattern regex '{s}': {e}"))
+                .ok()),
         }
     }
 }
@@ -45,6 +46,20 @@ pub struct VideoConfig {
     pub ffprobe_enabled: bool,
     pub ffprobe_timeout: Option<u64>,
 }
+
+impl VideoConfig {
+    pub async fn prepare(&mut self) {
+        if self.ffprobe_enabled {
+            let is_available = check_ffprobe_availability().await;
+
+            if !is_available {
+                log::warn!("FFprobe is not available. Disabling video processing.");
+                self.ffprobe_enabled = false;
+            }
+        }
+    }
+}
+
 macros::from_impl!(VideoConfig);
 impl From<&VideoConfigDto> for VideoConfig {
     fn from(dto: &VideoConfigDto) -> Self {

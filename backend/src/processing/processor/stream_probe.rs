@@ -14,7 +14,6 @@ use shared::model::UUIDType;
 #[allow(clippy::too_many_arguments)]
 pub async fn update_generic_stream_metadata(
     app_config: &Arc<AppConfig>,
-    _client: &reqwest::Client,
     input: &ConfigInput,
     unique_id: &str,
     stream_url: &str,
@@ -25,7 +24,7 @@ pub async fn update_generic_stream_metadata(
     let working_dir = &app_config.config.load().working_dir;
 
     // Check if probing is enabled globally
-    let ffprobe_enabled = app_config.config.load().video.as_ref().is_some_and(|v| v.ffprobe_enabled);
+    let ffprobe_enabled = app_config.is_ffprobe_enabled().await;
     if !ffprobe_enabled {
         return Ok(());
     }
@@ -85,12 +84,12 @@ pub async fn update_generic_stream_metadata(
          active_provider.release_handle(&handle).await;
          result
     } else {
-        warn!("Skipping probe for generic stream {} due to connection limits", unique_id);
+        warn!("Skipping probe for generic stream {unique_id} due to connection limits");
         return Err(shared::error::info_err!("No connection available"));
     };
 
     let Some((_quality, raw_video, raw_audio)) = probe_data else {
-         warn!("Probe failed or timed out for generic stream: {}", unique_id);
+         warn!("Probe failed or timed out for generic stream: {unique_id}");
          return Ok(());
     };
     
@@ -104,9 +103,9 @@ pub async fn update_generic_stream_metadata(
          if let Some(mut item) = tree_update.query(&key).map_err(|e| shared::error::info_err!("Tree query error: {e}"))? {
               update_properties(&mut item.additional_properties, item_type, &item.name, 0, raw_video, raw_audio);
               tree_update.update(&key, item).map_err(|e| shared::error::info_err!("Tree update error: {e}"))?;
-              info!("Successfully updated M3U metadata for: {}", unique_id);
+              info!("Successfully updated M3U metadata for: {unique_id}");
          } else {
-             warn!("Item not found in M3U DB: {}", unique_id);
+             warn!("Item not found in M3U DB: {unique_id}");
          }
     } else {
          // Library
@@ -119,9 +118,9 @@ pub async fn update_generic_stream_metadata(
          if let Some(mut item) = tree_update.query(&uuid).map_err(|e| shared::error::info_err!("Tree query error: {e}"))? {
               update_properties(&mut item.additional_properties, item_type, &item.name, item.virtual_id, raw_video, raw_audio);
               tree_update.update(&uuid, item).map_err(|e| shared::error::info_err!("Tree update error: {e}"))?;
-              info!("Successfully updated Library metadata for: {}", unique_id);
+              info!("Successfully updated Library metadata for: {unique_id}");
          } else {
-             warn!("Item not found in Library DB: {}", unique_id);
+             warn!("Item not found in Library DB: {unique_id}");
          }
     }
 

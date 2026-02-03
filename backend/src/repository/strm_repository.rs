@@ -1,4 +1,3 @@
-use crate::model::MediaQuality;
 use crate::model::{ApiProxyServerInfo, AppConfig, ProxyUserCredentials};
 use crate::model::{ConfigTarget, StrmTargetOutput};
 use crate::repository::storage::ensure_target_storage_path;
@@ -10,7 +9,7 @@ use filetime::{set_file_times, FileTime};
 use log::{error, trace};
 use serde::Serialize;
 use shared::error::{info_err_res, TuliproxError};
-use shared::model::{ClusterFlags, PlaylistGroup, PlaylistItem, PlaylistItemType, StreamProperties, StrmExportStyle};
+use shared::model::{ClusterFlags, MediaQuality, PlaylistGroup, PlaylistItem, PlaylistItemType, StreamProperties, StrmExportStyle};
 use shared::utils::{arc_str_option_serde, arc_str_serde, clean_playlist_title, extract_extension_from_url, hash_bytes,
                     hash_string_as_hex, is_blank_optional_arc_str, truncate_string, ExportStyleConfig, CONSTANTS};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -195,7 +194,7 @@ fn extract_item_info(pli: &mut PlaylistItem) -> StrmItemInfo {
                 Some(props) => (
                     // If series props are available, check if we have a valid name there
                     if let StreamProperties::Series(s) = props { 
-                        if !s.name.is_empty() { Some(s.name.clone()) } else { None } 
+                        if s.name.is_empty() { None } else { Some(s.name.clone()) } 
                     } else { None },
                     
                     props.get_release_date(),
@@ -210,7 +209,7 @@ fn extract_item_info(pli: &mut PlaylistItem) -> StrmItemInfo {
             
             // For series title, we prefer the one from metadata (prop_name), then header.name, then header.title
             let final_series_name = prop_name.unwrap_or_else(|| {
-                if !header.name.is_empty() { header.name.clone() } else { header.title.clone() }
+                if header.name.is_empty() { header.title.clone() } else { header.name.clone() }
             });
             
             // Episode title relies on header.title unless we want to look deeper into props
@@ -224,7 +223,7 @@ fn extract_item_info(pli: &mut PlaylistItem) -> StrmItemInfo {
                 None => (None, None, None, None),
                 Some(props) => (
                     if let StreamProperties::Video(v) = props {
-                         if !v.name.is_empty() { Some(v.name.clone()) } else { None }
+                         if v.name.is_empty() { None } else { Some(v.name.clone()) }
                     } else { None },
                     props.get_release_date(),
                     props.get_added(),
@@ -424,7 +423,7 @@ fn format_for_kodi(
             if flat {
                 if tmdb_id > 0 {
                      if let Some(path) = flat_dedup_paths.get(&tmdb_id) {
-                        dir_path = path.clone();
+                         dir_path.clone_from(path);
                     } else {
                         dir_path.push(&folder_name);
                         flat_dedup_paths.insert(tmdb_id, dir_path.clone());
@@ -482,7 +481,7 @@ fn format_for_plex(
             if flat {
                if tmdb_id > 0 {
                     if let Some(path) = flat_dedup_paths.get(&tmdb_id) {
-                        dir_path = path.clone();
+                        dir_path.clone_from(path);
                     } else {
                         dir_path.push(&folder_name);
                         flat_dedup_paths.insert(tmdb_id, dir_path.clone());
@@ -542,7 +541,7 @@ fn format_for_emby(
             if flat {
                if tmdb_id > 0 {
                     if let Some(path) = flat_dedup_paths.get(&tmdb_id) {
-                        dir_path = path.clone();
+                        dir_path.clone_from(path);
                     } else {
                         dir_path.push(&folder_name);
                         flat_dedup_paths.insert(tmdb_id, dir_path.clone());
@@ -603,7 +602,7 @@ fn format_for_jellyfin(
             if flat {
                if tmdb_id > 0 {
                     if let Some(path) = flat_dedup_paths.get(&tmdb_id) {
-                        dir_path = path.clone();
+                        dir_path.clone_from(path);
                     } else {
                         dir_path.push(&folder_name);
                         flat_dedup_paths.insert(tmdb_id, dir_path.clone());
@@ -663,7 +662,7 @@ fn style_based_rename(
     }
 }
 
-async fn prepare_strm_files(
+fn prepare_strm_files(
     new_playlist: &mut [PlaylistGroup],
     strm_target_output: &StrmTargetOutput,
 ) -> Vec<StrmFile> {
@@ -728,10 +727,9 @@ async fn prepare_strm_files(
         // This separator is specifically for the multi-version naming convention.
         let version_separator = " ";
         let separator = if strm_target_output.underscore_whitespace { "_" } else { " " };
-        
-        result
-            .iter_mut()
-            .for_each(|s| {
+
+        for s in &mut result {
+            {
                 let full_relative_path = s.dir_path.join(s.file_name.as_str());
                 if collisions.contains(&full_relative_path) {
                     // Create a descriptive and unique identifier for this version.
@@ -745,7 +743,8 @@ async fn prepare_strm_files(
 
                     s.file_name = Arc::new(new_filename);
                 }
-            });
+            }
+        }
     }
     result
 }
@@ -819,7 +818,7 @@ pub async fn write_strm_playlist(
     let strm_files = prepare_strm_files(
         new_playlist,
         target_output,
-    ).await;
+    );
     
     for strm_file in strm_files {
         // file paths

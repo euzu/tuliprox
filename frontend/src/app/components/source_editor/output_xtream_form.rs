@@ -88,9 +88,8 @@ generate_form_reducer!(
         SkipVideoDirectSource => skip_video_direct_source: bool,
         SkipSeriesDirectSource =>  skip_series_direct_source: bool,
         ResolveSeries =>  resolve_series: bool,
-        ResolveSeriesDelay =>  resolve_series_delay: u16,
         ResolveVod =>  resolve_vod: bool,
-        ResolveVodDelay =>  resolve_vod_delay: u16,
+        ResolveDelay =>  resolve_delay: u16,
         Filter => filter: Option<String>,
     }
 );
@@ -231,8 +230,7 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
                 </TitledCard>
                 <TitledCard title={translate.t(LABEL_RESOLVE_DELAY_SEC)}>
                     <div class="tp__config-view__cols-2">
-                    { edit_field_number_u16!(output_form_state, translate.t(LABEL_VOD), resolve_vod_delay,  XtreamTargetOutputFormAction::ResolveVodDelay) }
-                    { edit_field_number_u16!(output_form_state, translate.t(LABEL_SERIES), resolve_series_delay,  XtreamTargetOutputFormAction::ResolveSeriesDelay) }
+                    { edit_field_number_u16!(output_form_state, translate.t("LABEL.DELAY_MS"), resolve_delay,  XtreamTargetOutputFormAction::ResolveDelay) }
                     </div>
                 </TitledCard>
                 { config_field_child!(translate.t(LABEL_FILTER), {

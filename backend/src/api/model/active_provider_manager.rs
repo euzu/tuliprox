@@ -1,16 +1,17 @@
 use crate::api::model::provider_lineup_manager::{ProviderAllocation, ProviderLineupManager};
 use crate::api::model::{EventManager, ProviderConfig};
 use crate::model::{AppConfig, ConfigInput, GracePeriodOptions};
-use shared::utils::{sanitize_sensitive_info};
-use log::{error};
-use crate::utils::{debug_if_enabled}; // trace_if_enabled removed
+use crate::utils::debug_if_enabled;
+use log::error;
+use shared::utils::sanitize_sensitive_info;
+// trace_if_enabled removed
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
+use std::time::Instant;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
-use std::time::Instant;
 
 const DEFAULT_FORCE_PRIORITY: i8 = -128;
 const DEFAULT_USER_PRIORITY: i8 = -1;
@@ -34,7 +35,7 @@ impl ProviderHandle {
         client_id: ClientConnectionId,
         allocation_id: AllocationId,
         allocation: ProviderAllocation,
-        cancel_token: Option<CancellationToken>
+        cancel_token: Option<CancellationToken>,
     ) -> Self {
         Self {
             client_id,
@@ -158,14 +159,14 @@ impl ActiveProviderManager {
         };
 
         if !matches!(allocation, ProviderAllocation::Exhausted) {
-             return self.register_allocation(allocation, addr, priority).await;
+            return self.register_allocation(allocation, addr, priority).await;
         }
 
         // 2. If exhausted, try preemption (kick lower priority connection)
         if !force {
-             if let Some(preempted_alloc) = self.try_preempt_connection(provider_or_input_name, priority).await {
-                 return self.register_allocation(preempted_alloc, addr, priority).await;
-             }
+            if let Some(preempted_alloc) = self.try_preempt_connection(provider_or_input_name, priority).await {
+                return self.register_allocation(preempted_alloc, addr, priority).await;
+            }
         }
 
         None
@@ -224,9 +225,9 @@ impl ActiveProviderManager {
                         // Check shared connections (only if exactly 1 listener)
                         if let Some(key) = connections.shared.key_by_addr.get(addr) {
                             if let Some(shared) = connections.shared.by_key.get(key) {
-                                if shared.allocation_id == *alloc_id 
-                                    && shared.connections.len() == 1 
-                                    && shared.priority > new_priority 
+                                if shared.allocation_id == *alloc_id
+                                    && shared.connections.len() == 1
+                                    && shared.priority > new_priority
                                 {
                                     let is_better = match victim {
                                         None => true,
@@ -249,13 +250,13 @@ impl ActiveProviderManager {
                 sanitize_sensitive_info(&addr.to_string()), v_prio, new_priority);
 
             // Get cancel token (only for single connections)
-            let cancel_token = if !is_shared {
+            let cancel_token = if is_shared {
+                None
+            } else {
                 let connections = self.connections.read().await;
                 connections.single.get(&addr)
                     .and_then(|map| map.get(&alloc_id))
                     .map(|info| info.cancel_token.clone())
-            } else {
-                None
             };
 
             if let Some(token) = cancel_token {
@@ -267,7 +268,7 @@ impl ActiveProviderManager {
                 client_id: addr,
                 allocation_id: alloc_id,
                 allocation: ProviderAllocation::Exhausted,
-                cancel_token: None
+                cancel_token: None,
             };
             self.release_handle(&handle).await;
 
@@ -402,11 +403,11 @@ impl ActiveProviderManager {
                     }
 
                     // Remove from by_provider index
-                    if let Some(name) = released.as_ref().and_then(|a| a.get_provider_name()) {
+                    if let Some(name) = released.as_ref().and_then(ProviderAllocation::get_provider_name) {
                         if let Some(list) = connections.by_provider.get_mut(&name) {
-                             if let Some(idx) = list.iter().position(|(a, i)| *a == handle.client_id && *i == handle.allocation_id) {
-                                 list.remove(idx);
-                             }
+                            if let Some(idx) = list.iter().position(|(a, i)| *a == handle.client_id && *i == handle.allocation_id) {
+                                list.remove(idx);
+                            }
                         }
                     }
                 }
@@ -448,25 +449,30 @@ impl ActiveProviderManager {
             // Logic change: we must find the specific allocation if multiple exist, but usually per client only 1 active?
             // Existing logic assumes one.
             let handle = if let Some(m) = connections.single.get_mut(addr) {
-                if m.is_empty() { None } else {
+                if m.is_empty() {
+                    None
+                } else {
                     let mut iter = m.drain();
-                    let (id, info) = iter.next().expect("non-empty map");
+                    if let Some((id, info)) = iter.next() {
 
-                    // Collect others as extras to release
-                    for (_, extra_info) in iter {
-                        extras.push(extra_info.allocation);
-                    }
-
-                    // Cleanup indices
-                    if let Some(name) = info.allocation.get_provider_name() {
-                        if let Some(list) = connections.by_provider.get_mut(&name) {
-                             list.retain(|(a, _)| *a != *addr);
+                        // Collect others as extras to release
+                        for (_, extra_info) in iter {
+                            extras.push(extra_info.allocation);
                         }
+
+                        // Cleanup indices
+                        if let Some(name) = info.allocation.get_provider_name() {
+                            if let Some(list) = connections.by_provider.get_mut(&name) {
+                                list.retain(|(a, _)| *a != *addr);
+                            }
+                        }
+
+                        connections.single.remove(addr); // Map is drained/empty now
+
+                        Some(ProviderHandle::new(*addr, id, info.allocation, Some(info.cancel_token)))
+                    } else {
+                        None
                     }
-
-                    connections.single.remove(addr); // Map is drained/empty now
-
-                    Some(ProviderHandle::new(*addr, id, info.allocation, Some(info.cancel_token)))
                 }
             } else { None };
 
@@ -481,9 +487,8 @@ impl ActiveProviderManager {
                 // Get priority from the original single connection info
                 let priority = connections.single.get(addr)
                     .and_then(|m| m.values().next())
-                    .map(|info| info.priority)
-                    .unwrap_or(DEFAULT_USER_PRIORITY);
-                    
+                    .map_or(DEFAULT_USER_PRIORITY, |info| info.priority);
+
                 connections.shared.by_key.insert(
                     key.to_string(),
                     SharedAllocation {

@@ -284,7 +284,7 @@ pub async fn read_initial_app_config(
     prepare_sources_batch(&mut sources_dto, include_computed).await?;
     let sources: SourcesConfig = SourcesConfig::try_from(sources_dto)?;
     let mut config: Config = Config::from(config_dto);
-    config.prepare(config_path)?;
+    config.prepare(config_path).await?;
     config.update_runtime();
 
     if paths.mapping_file_path.is_none() {

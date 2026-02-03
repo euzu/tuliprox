@@ -95,7 +95,8 @@ async fn create_shared_data(
     let client = create_http_client(app_config)?;
     let client_no_redirect = create_http_client_no_redirect(app_config)?;
 
-    let metadata_manager = Arc::new(MetadataUpdateManager::new());
+    let cancel_tokens = Arc::new(ArcSwap::from_pointee(CancelTokens::default()));
+    let metadata_manager = Arc::new(MetadataUpdateManager::new(cancel_tokens.load().scheduler.clone()));
 
     Ok(AppState {
         forced_targets: Arc::new(ArcSwap::new(Arc::clone(forced_targets))),
@@ -109,7 +110,7 @@ async fn create_shared_data(
         active_provider,
         connection_manager,
         event_manager,
-        cancel_tokens: Arc::new(ArcSwap::from_pointee(CancelTokens::default())),
+        cancel_tokens,
         playlists: Arc::new(PlaylistStorageState::new()),
         geoip,
         update_guard: UpdateGuard::new(),
@@ -136,7 +137,7 @@ fn exec_update_on_boot(
         let disabled_headers = app_state.get_disabled_headers();
         let provider_manager = Arc::clone(&app_state.active_provider);
         let metadata_manager = Arc::clone(&app_state.metadata_manager);
-        
+
         tokio::spawn(async move {
             exec_processing(&client, app_config_clone, targets_clone, None, Some(playlist_state), update_guard, disabled_headers, Some(provider_manager), Some(metadata_manager)).await;
         });
@@ -268,8 +269,7 @@ pub async fn start_server(
     
     // Initialize metadata manager with weak ref to app_state
     // IMPORTANT: clone app_state here to keep it alive for the weak ref, but avoid moving it
-    app_state.metadata_manager.set_app_state(Arc::downgrade(&app_state));
-    app_state.metadata_manager.clone().start_workers(app_state.cancel_tokens.load().scheduler.clone()).await;
+    app_state.metadata_manager.set_app_state(Arc::downgrade(&app_state)).await;
 
     // Start event listener for input metadata updates
     // Clone app_state first to ensure it lives in the closure
@@ -463,6 +463,7 @@ fn exec_input_update_listener(app_state: &Arc<AppState>, targets: &Arc<ProcessTa
     
     tokio::spawn(async move {
         let mut rx = app_state.event_manager.get_event_channel();
+        let app_state = Arc::clone(&app_state);
         loop {
             if let Ok(EventMessage::InputMetadataUpdatesCompleted(input_name)) = rx.recv().await {
                 // Find all targets that use this input
@@ -491,26 +492,26 @@ fn exec_input_update_listener(app_state: &Arc<AppState>, targets: &Arc<ProcessTa
                     // Small delay to ensure any lingering updates or file locks from the background thread are fully released
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-                    info!("Triggering playlist update for targets due to metadata change completion: {:?}", targets_to_update);
+                    info!("Triggering playlist update for targets due to metadata change completion: {targets_to_update:?}");
                     
                     let client = app_state.http_client.load().as_ref().clone();
                     let app_config = Arc::clone(&app_state.app_config);
                     let event_manager = Arc::clone(&app_state.event_manager);
                     let playlist_state = Arc::clone(&app_state.playlists);
-                    let provider_manager = Arc::clone(&app_state.active_provider);
                     let disabled_headers = app_state.get_disabled_headers();
-                    let metadata_manager = Arc::clone(&app_state.metadata_manager);
-                    
+
                     if let Ok(process_targets) = sources.validate_targets(Some(&targets_to_update)) {
                         let proc_targets = Arc::new(process_targets);
                         
                         let update_guard = app_state.update_guard.clone();
                         
+                        let app_state_clone = app_state.clone();
                         tokio::spawn(async move {
                             exec_processing(
                                 &client, app_config, proc_targets, Some(event_manager),
-                                Some(playlist_state), Some(update_guard), 
-                                disabled_headers, Some(provider_manager), Some(metadata_manager)
+                                Some(playlist_state), Some(update_guard),
+                                disabled_headers,
+                                Some(app_state_clone.active_provider.clone()), Some(app_state_clone.metadata_manager.clone())
                             ).await;
                         });
                     }

@@ -64,7 +64,7 @@ pub fn create_xtream_series_episode_url(url: &str, username: &str, password: &st
 
 pub fn parse_xtream_series_info(parent_uuid: &UUIDType, series_info: &SeriesStreamProperties, group_title: &str, series_name: &Arc<str>, input: &ConfigInput,
                                 // Add series_release_date parameter
-                                series_release_date: Option<Arc<str>>,
+                                series_release_date: Option<&Arc<str>>,
 ) -> Option<Vec<PlaylistItem>> {
     let url = input.url.as_str();
     let username = input.username.as_ref().map_or("", |v| v);
@@ -78,7 +78,7 @@ pub fn parse_xtream_series_info(parent_uuid: &UUIDType, series_info: &SeriesStre
             // Create properties and inject global release date if available
             let mut episode_info = EpisodeStreamProperties::from_series(series_info, episode);
             if series_release_date.is_some() {
-                episode_info.series_release_date = series_release_date.clone();
+                episode_info.series_release_date.clone_from(&series_release_date.cloned());
             }
 
             PlaylistItem {

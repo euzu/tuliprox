@@ -1,6 +1,6 @@
 use crate::api::model::persist_pipe_stream::tee_dyn_reader;
 use crate::api::model::{AppState, STREAM_IDLE_TIMEOUT};
-use crate::model::{format_elapsed_time, AppConfig, Config, InputSource, ReverseProxyDisabledHeaderConfig};
+use crate::model::{AppConfig, Config, InputSource, ReverseProxyDisabledHeaderConfig};
 use crate::model::{ConfigInput, ResourceRetryConfig};
 use crate::utils::compression::compression_utils::{is_deflate, is_gzip};
 use crate::utils::{async_file_reader, async_file_writer, debug_if_enabled};
@@ -13,7 +13,7 @@ use reqwest::redirect::Policy;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{StatusCode};
 use shared::error::{notify_err_res, string_to_io_error, TuliproxError};
-use shared::model::{InputFetchMethod, DEFAULT_USER_AGENT};
+use shared::model::{format_elapsed_time, InputFetchMethod, DEFAULT_USER_AGENT};
 use shared::utils::{
     filter_request_header, human_readable_byte_size, sanitize_sensitive_info, ENCODING_DEFLATE,
     ENCODING_GZIP,

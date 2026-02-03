@@ -6,16 +6,7 @@ use crate::model::{ClusterFlags, ConfigFavouritesDto, ConfigRenameDto, ConfigSor
 use crate::utils::{is_true, is_false, default_as_true, default_resolve_delay_secs, default_as_default,
                    is_blank_optional_string,
                    is_default_resolve_delay_secs, is_zero_u16, is_config_target_options_empty, is_default_processing_order,
-                   default_resolve_livetv_interval, is_default_resolve_livetv_interval};
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum UpdateOutputStrategy {
-    #[default]
-    Instant,
-    Bundled,
-}
+                   default_resolve_live_interval, is_default_resolve_live_interval};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -51,22 +42,20 @@ pub struct XtreamTargetOutputDto {
     pub skip_series_direct_source: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub resolve_series: bool,
-    #[serde(default = "default_resolve_delay_secs", skip_serializing_if = "is_default_resolve_delay_secs")]
-    pub resolve_series_delay: u16,
     #[serde(default, skip_serializing_if = "is_false")]
     pub resolve_vod: bool,
+    /// Consolidated delay in milliseconds applied after each resolution task.
+    /// Replaces the deprecated resolve_series_delay and resolve_vod_delay fields.
     #[serde(default = "default_resolve_delay_secs", skip_serializing_if = "is_default_resolve_delay_secs")]
-    pub resolve_vod_delay: u16,
+    pub resolve_delay: u16,
     #[serde(default, skip_serializing_if = "is_false")]
-    pub resolve_livetv: bool,
-    #[serde(default = "default_resolve_livetv_interval", skip_serializing_if = "is_default_resolve_livetv_interval")]
-    pub resolve_livetv_interval_hours: u32,
+    pub resolve_live: bool,
+    #[serde(default = "default_resolve_live_interval", skip_serializing_if = "is_default_resolve_live_interval")]
+    pub resolve_live_interval_hours: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trakt: Option<TraktConfigDto>,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub filter: Option<String>,
-    #[serde(default)]
-    pub update_strategy: UpdateOutputStrategy,
     #[serde(skip)]
     pub t_filter: Option<Filter>,
 }
@@ -78,14 +67,12 @@ impl Default for XtreamTargetOutputDto {
             skip_video_direct_source: default_as_true(),
             skip_series_direct_source: default_as_true(),
             resolve_series: false,
-            resolve_series_delay: default_resolve_delay_secs(),
             resolve_vod: false,
-            resolve_vod_delay: default_resolve_delay_secs(),
-            resolve_livetv: false,
-            resolve_livetv_interval_hours: default_resolve_livetv_interval(),
+            resolve_delay: default_resolve_delay_secs(),
+            resolve_live: false,
+            resolve_live_interval_hours: default_resolve_live_interval(),
             trakt: None,
             filter: None,
-            update_strategy: UpdateOutputStrategy::default(),
             t_filter: None,
         }
     }
@@ -108,7 +95,7 @@ impl XtreamTargetOutputDto {
             || self.skip_series_direct_source
             || self.resolve_series
             || self.resolve_vod
-            || self.resolve_livetv
+            || self.resolve_live
             || self.trakt.is_some()
             || self.filter.is_some()
     }
@@ -125,8 +112,6 @@ pub struct M3uTargetOutputDto {
     pub mask_redirect_url: bool,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub filter: Option<String>,
-    #[serde(default)]
-    pub update_strategy: UpdateOutputStrategy,
     #[serde(skip)]
     pub t_filter: Option<Filter>,
 }
@@ -174,9 +159,6 @@ pub struct StrmTargetOutputDto {
     pub probe_probe_size_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub probe_analyze_duration: Option<u64>,
-    
-    #[serde(default)]
-    pub update_strategy: UpdateOutputStrategy,
 
     #[serde(skip)]
     pub t_filter: Option<Filter>,

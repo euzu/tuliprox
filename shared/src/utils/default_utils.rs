@@ -217,12 +217,12 @@ pub fn is_default_processing_order(p: &ProcessingOrder) -> bool {
     *p == ProcessingOrder::default()
 }
 
-pub const fn default_resolve_livetv_interval() -> u32 {
+pub const fn default_resolve_live_interval() -> u32 {
     120
 }
 
-pub const fn is_default_resolve_livetv_interval(v: &u32) -> bool {
-    *v == default_resolve_livetv_interval()
+pub const fn is_default_resolve_live_interval(v: &u32) -> bool {
+    *v == default_resolve_live_interval()
 }
 
 //////////////////////////////

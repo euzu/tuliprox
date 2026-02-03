@@ -1,14 +1,14 @@
-use crate::utils::{arc_str_option_serde, arc_str_serde, extract_extension_from_url, generate_playlist_uuid,
-                   get_provider_id, Internable};
+use crate::model::UUIDType;
 use crate::model::{xtream_const, ClusterFlags, CommonPlaylistItem, ConfigTargetOptions, EpisodeStreamProperties,
                    SeriesStreamProperties, StreamProperties, VideoStreamProperties, XtreamInfoDocument};
+use crate::utils::{arc_str_option_serde, arc_str_serde, extract_extension_from_url, generate_playlist_uuid,
+                   get_provider_id, Internable};
 use enum_iterator::Sequence;
 use serde::{Deserialize, Serialize};
 use std::fmt::Write;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 use std::sync::Arc;
-use crate::model::UUIDType;
 // https://de.wikipedia.org/wiki/M3U
 // https://siptv.eu/howto/playlist.html
 
@@ -298,9 +298,12 @@ impl Default for PlaylistItemHeader {
 }
 
 impl PlaylistItemHeader {
+    #[inline]
     pub fn gen_uuid(&mut self) {
         self.uuid = generate_playlist_uuid(&self.input_name, &self.id, self.item_type, &self.url);
     }
+
+    #[inline]
     pub const fn get_uuid(&self) -> &UUIDType {
         &self.uuid
     }
@@ -315,6 +318,16 @@ impl PlaylistItemHeader {
         }
     }
 
+    #[inline]
+    pub fn get_name(&self) -> Arc<str> {
+        if self.title.is_empty() {
+            Arc::clone(&self.name)
+        } else {
+            Arc::clone(&self.title)
+        }
+    }
+
+    #[inline]
     pub fn get_container_extension(&self) -> Option<Arc<str>> {
         self.additional_properties.as_ref().and_then(|a| a.get_container_extension())
     }
@@ -534,7 +547,7 @@ impl PlaylistEntry for M3uPlaylistItem {
         None
     }
     #[inline]
-    fn get_provider_url(&self) ->  Arc<str> {
+    fn get_provider_url(&self) -> Arc<str> {
         Arc::clone(&self.url)
     }
 
@@ -573,7 +586,6 @@ impl PlaylistEntry for M3uPlaylistItem {
     fn get_additional_properties_mut(&mut self) -> Option<&mut StreamProperties> {
         self.additional_properties.as_mut()
     }
-
 }
 
 macro_rules! generate_field_accessor_impl_for_m3u_playlist_item {
@@ -686,7 +698,6 @@ pub struct XtreamPlaylistItem {
 }
 
 impl XtreamPlaylistItem {
-
     pub fn to_common(&self) -> CommonPlaylistItem {
         CommonPlaylistItem {
             virtual_id: self.virtual_id,
@@ -756,7 +767,7 @@ impl PlaylistEntry for XtreamPlaylistItem {
         Some(self.category_id)
     }
     #[inline]
-    fn get_provider_url(&self) ->  Arc<str> {
+    fn get_provider_url(&self) -> Arc<str> {
         Arc::clone(&self.url)
     }
 
@@ -897,7 +908,6 @@ pub struct PlaylistItem {
 generate_field_accessor_impl_for_xtream_playlist_item!(group, title, name, logo, logo_small, parent_code, rec, url;);
 
 impl PlaylistItem {
-
     fn get_additional_properties(header: &PlaylistItemHeader) -> Option<StreamProperties> {
         match &header.additional_properties {
             Some(props) => Some(props.clone()),
@@ -1148,7 +1158,7 @@ impl PlaylistEntry for PlaylistItem {
     }
 
     #[inline]
-    fn get_provider_url(&self) ->  Arc<str> {
+    fn get_provider_url(&self) -> Arc<str> {
         Arc::clone(&self.header.url)
     }
 
@@ -1170,11 +1180,7 @@ impl PlaylistEntry for PlaylistItem {
 
     #[inline]
     fn get_name(&self) -> Arc<str> {
-        if self.header.title.is_empty() {
-            Arc::clone(&self.header.name)
-        } else {
-            Arc::clone(&self.header.title)
-        }
+        self.header.get_name()
     }
 
     fn get_resolved_info_document(&self, options: &XtreamMappingOptions) -> Option<XtreamInfoDocument> {

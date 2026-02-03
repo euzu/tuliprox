@@ -6,7 +6,7 @@ use shared::error::TuliproxError;
 use std::path::{Path, PathBuf};
 use shared::{concat_string, notify_err_res};
 
-pub(in crate::repository) fn get_target_id_mapping_file(target_path: &Path) -> PathBuf {
+pub fn get_target_id_mapping_file(target_path: &Path) -> PathBuf {
     // Join directly with &str to avoid an intermediate PathBuf allocation
     target_path.join(storage_const::FILE_ID_MAPPING)
 }

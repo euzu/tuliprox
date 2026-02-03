@@ -78,7 +78,8 @@ async fn playlist_update(
             tokio::spawn({
                 async move {
                     exec_processing(&http_client, app_config, valid_targets, Some(event_manager),
-                                              Some(playlist_state), Some(app_state.update_guard.clone()), disabled_headers, Some(provider_manager), Some(metadata_manager)).await;
+                                    Some(playlist_state), Some(app_state.update_guard.clone()),
+                                    disabled_headers, Some(provider_manager), Some(metadata_manager)).await;
                 }
             });
             axum::http::StatusCode::ACCEPTED.into_response()

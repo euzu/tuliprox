@@ -917,6 +917,15 @@ pub async fn persist_input_live_info(app_config: &Arc<AppConfig>, storage_path: 
     persist_input_info(app_config, storage_path, cluster, input_name, provider_id, StreamProperties::Live(Box::new(props.clone()))).await
 }
 
+pub async fn persist_input_live_info_batch(app_config: &Arc<AppConfig>, storage_path: &Path,
+                                           cluster: XtreamCluster, input_name: &str,
+                                           updates: Vec<(u32, LiveStreamProperties)>) -> Result<(), Error> {
+    let batch = updates.into_iter()
+        .map(|(id, props)| (id, StreamProperties::Live(Box::new(props))))
+        .collect();
+    persist_input_info_batch(app_config, storage_path, cluster, input_name, batch).await
+}
+
 pub async fn persist_input_vod_info_batch(app_config: &Arc<AppConfig>, storage_path: &Path,
                                           cluster: XtreamCluster, input_name: &str,
                                           updates: Vec<(u32, VideoStreamProperties)>) -> Result<(), Error> {

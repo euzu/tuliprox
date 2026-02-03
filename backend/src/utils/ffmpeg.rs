@@ -1,8 +1,8 @@
 use log::{debug, warn};
 use tokio::process::Command;
 use std::time::Duration;
-use crate::model::{MediaQuality};
 use serde_json::Value;
+use shared::model::MediaQuality;
 use shared::utils::sanitize_sensitive_info;
 
 // Checks if ffprobe is available in the system path

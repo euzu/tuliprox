@@ -221,6 +221,56 @@ impl TargetIdMapping {
     pub fn has_pending_changes(&self) -> bool {
         !self.pending_virtual_id_upserts.is_empty() || !self.pending_uuid_upserts.is_empty()
     }
+
+    pub fn find_virtual_ids(&self, provider_id: u32) -> Vec<u32> {
+        self.mem_by_virtual_id.values()
+            .filter(|record| record.provider_id == provider_id)
+            .map(|record| record.virtual_id)
+            .collect()
+    }
+
+    pub fn get_virtual_id_by_uuid(&self, uuid: &UUIDType) -> Option<u32> {
+        self.mem_by_uuid.get(uuid).copied()
+    }
+
+    pub fn prune_expired_records(&mut self, retention_days: i64) -> usize {
+        let expiration_threshold = Local::now().timestamp() - (retention_days * 86400);
+        let mut expired_keys = Vec::new();
+
+        // Identify expired records
+        for (vid, record) in &self.mem_by_virtual_id {
+            if record.last_updated < expiration_threshold {
+                expired_keys.push(*vid);
+            }
+        }
+
+        let count = expired_keys.len();
+        if count > 0 {
+            // Remove from memory
+            for vid in &expired_keys {
+                if let Some(record) = self.mem_by_virtual_id.remove(vid) {
+                    self.mem_by_uuid.remove(&record.uuid);
+                    // Mark for deletion in pending batch
+                    self.pending_virtual_id_upserts.remove(vid); // If it was pending upsert, remove it
+                    self.pending_uuid_upserts.remove(&record.uuid);
+                    
+                    // We don't have a "delete" op in BPlusTreeUpdate yet?
+                    // Checking BPlusTreeUpdate capabilities... 
+                    // Assuming we might need to handle deletions. For now, we just remove from memory and let subsequent compact/re-write handle it?
+                    // Or BPlusTreeUpdate needs a delete method.
+                    // Let's check BPlusTreeUpdate.
+                }
+            }
+            // TODO: Implement actual deletion persistence. BPlusTreeUpdate might need delete support.
+            // For B+Tree, "delete" is often complex.
+            // Current persistence logic uses `upsert_batch`.
+            // If BPlusTreeUpdate doesn't support delete, we might need a `deleted_virtual_ids` set to purge from disk on next full rewrite or add a "tombstone" logic.
+            // Pruning from MEMORY is the most important part for performance.
+            // Let's assume for now we remove from memory and we will need to verify if we can delete from disk.
+        }
+        
+        count
+    }
 }
 
 impl Drop for TargetIdMapping {

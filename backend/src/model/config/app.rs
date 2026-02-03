@@ -13,6 +13,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use crate::utils::ffmpeg::check_ffprobe_availability;
 
 const CHANNEL_UNAVAILABLE: &str = "channel_unavailable.ts";
 const USER_CONNECTIONS_EXHAUSTED: &str = "user_connections_exhausted.ts";
@@ -421,6 +422,15 @@ impl AppConfig {
 
     pub fn get_grace_options(&self) -> GracePeriodOptions {
         self.config.load().get_grace_options()
+    }
+
+    pub async fn is_ffprobe_enabled(&self) -> bool {
+        let ffprobe_enabled = self.config.load().video.as_ref().is_some_and(|v| v.ffprobe_enabled);
+        if ffprobe_enabled {
+            check_ffprobe_availability().await
+        } else {
+            false
+        }
     }
 }
 

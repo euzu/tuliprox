@@ -89,7 +89,7 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn prepare(&mut self, config_path: &str) -> Result<(), TuliproxError> {
+    pub async fn prepare(&mut self, config_path: &str) -> Result<(), TuliproxError> {
         let work_dir = &self.working_dir;
         self.working_dir = utils::resolve_directory_path(work_dir);
 
@@ -105,6 +105,10 @@ impl Config {
 
         if let Some(messaging) = self.messaging.as_mut() {
             messaging.prepare(config_path);
+        }
+
+        if let Some(video) = self.video.as_mut() {
+            video.prepare().await;
         }
 
         Ok(())

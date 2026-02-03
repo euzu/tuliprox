@@ -184,7 +184,7 @@ impl MediaQuality {
         }
         
         // Filter empty strings from Display impls
-        let valid_parts: Vec<&str> = parts.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect();
+        let valid_parts: Vec<&str> = parts.iter().map(std::string::String::as_str).filter(|s| !s.is_empty()).collect();
 
         valid_parts.join(separator)
     }

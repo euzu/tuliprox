@@ -33,9 +33,9 @@ pub fn XtreamOutput(props: &XtreamOutputProps) -> Html {
         use_memo(output, move |output| {
             vec![
                 Rc::new(Tag { class: convert_bool_to_chip_style(output.resolve_series),
-                    label: format!("{} / {}s", translate.t("LABEL.SERIES"), output.resolve_series_delay) }),
+                    label: format!("{} / {}ms", translate.t("LABEL.SERIES"), output.resolve_delay) }),
                 Rc::new(Tag { class: convert_bool_to_chip_style(output.resolve_vod),
-                    label: format!("{} / {}s", translate.t("LABEL.VOD"), output.resolve_vod_delay)}),
+                    label: format!("{} / {}ms", translate.t("LABEL.VOD"), output.resolve_delay)}),
             ]
         })
     };

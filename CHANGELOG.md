@@ -17,27 +17,44 @@
   - Removed `forced_retry_interval_secs`.
 - **Input Batch Changes**: `name` attribute is now mandatory for input type batch to ensure stable playlist UUIDs.
 - **Favorites Redesign**: Replaced implicit `create_alias` with explicit `add_favourite(group_name)` script function.
-- **EpgSmartMatch**: Field `name_prefix` syntax needs to be changed from  `name_prefix: !suffix "."` to `name_prefix: { suffix: "." }`.
-- **Sort**: Sort can now use filter to sort specific entries.
-  ```yaml
-    sort:
-      match_as_ascii: true
-      rules:
-        - target: group
-          field: group
-          filter: Input ~ "provider_1"
-          order: asc
-        - target: channel  
-          field: caption
-          filter: Group ~ "!US_TNT_ENTERTAIN!"
-          order: asc
-          sequence:
-            - "!CHAN_SEQ!"
-            - '(?i)\bHD\b'
-            - '(?i)\bSD\b'
-  ```
+  - **EpgSmartMatch**: Field `name_prefix` syntax needs to be changed from  `name_prefix: !suffix "."` to `name_prefix: { suffix: "." }`.
+  - **Sort**: Sort can now use filter to sort specific entries.
+    ```yaml
+      sort:
+        match_as_ascii: true
+        rules:
+          - target: group
+            field: group
+            filter: Input ~ "provider_1"
+            order: asc
+          - target: channel  
+            field: caption
+            filter: Group ~ "!US_TNT_ENTERTAIN!"
+            order: asc
+            sequence:
+              - "!CHAN_SEQ!"
+              - '(?i)\bHD\b'
+              - '(?i)\bSD\b'
+    ```
   - Trakt api config field `key` is now `api_key`. Added `user_agent` field to Trakt api config
-
+  - resolve_vod_delay and resolve_series_delay are now merged as resolve_delay 
+      ```yaml
+       # Before (deprecated)
+       output:
+       - type: xtream
+         resolve_vod: true
+         resolve_vod_delay: 500
+         resolve_series: true  
+         resolve_series_delay: 1000
+      ```
+      ```yaml
+       # After (new consolidated)
+       output:
+       - type: xtream
+         resolve_vod: true
+         resolve_series: true
+         resolve_delay: 500  # Single delay for all resolution types
+       ```
 ## 🌟 New Features
 - **Smart Connection Priority**: Introduced a priority system for connections. Users with higher priority can preempt (kick) lower priority connections (e.g., background tasks or standard users) when provider slots are full.
 - **Background Metadata Queue**: Metadata resolution (VOD/Series) and stream analysis are now queued per input and processed in the background when provider connections are idle. This prevents "No Connections" errors for active users during playlist updates.

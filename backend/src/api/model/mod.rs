@@ -33,3 +33,5 @@ pub(crate) use self::streams::*;
 pub(in crate::api) use self::xtream::*;
 pub use self::update_guard::*;
 pub use self::metadata_update_manager::*;
+mod batch_result_collector;
+pub use self::batch_result_collector::*;

@@ -33,6 +33,8 @@ mod uuidtype;
 mod short_epg;
 mod stats;
 mod ui_playlist_item;
+mod media_properties;
+
 pub use self::cluster_flags::*;
 pub use self::playlist::*;
 pub use self::messaging::*;
@@ -65,3 +67,4 @@ pub use self::playlist_info_document::*;
 pub use self::regex_cache::*;
 pub use self::uuidtype::*;
 pub use self::ui_playlist_item::*;
+pub use self::media_properties::*;

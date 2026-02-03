@@ -12,6 +12,7 @@ mod hdhomerun_utils;
 mod net_utils;
 mod number_utils;
 mod string_interner;
+mod bitset;
 
 use std::fmt::Display;
 pub use self::default_utils::*;

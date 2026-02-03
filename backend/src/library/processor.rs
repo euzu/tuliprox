@@ -85,19 +85,14 @@ impl LibraryProcessor {
 
         // Check global ffprobe config
         let ffprobe_enabled = if let Some(app_cfg) = &self.app_config {
-             app_cfg.config.load().video.as_ref().is_some_and(|v| v.ffprobe_enabled)
-        } else { false };
-
-        let can_probe = if ffprobe_enabled {
-            crate::utils::ffmpeg::check_ffprobe_availability().await
+            app_cfg.is_ffprobe_enabled().await
         } else {
             false
         };
 
-
         // Process each scanned file
         for group in &media_groups {
-            match self.process_group(group, &existing_map, force_rescan, can_probe).await {
+            match self.process_group(group, &existing_map, force_rescan, ffprobe_enabled).await {
                 Ok(action) => match action {
                     ProcessAction::Added => result.files_added += 1,
                     ProcessAction::Updated => result.files_updated += 1,
@@ -145,8 +140,8 @@ impl LibraryProcessor {
         }
     }
 
-    async fn enrich_metadata_with_ffprobe(&self, _metadata: &mut MediaMetadata, _file_path: &str, can_probe: bool) {
-        if !can_probe { return; }
+    //fn enrich_metadata_with_ffprobe(&self, _metadata: &mut MediaMetadata, _file_path: &str, _can_probe: bool) {
+        //if !can_probe { return; }
 
         // let _url = format!("file://{file_path}"); // Simple file URL for ffmpeg
         //
@@ -162,11 +157,10 @@ impl LibraryProcessor {
         //          // Series handle episodes separately
         //      }
         //  }
-    }
-
+    //}
 
     // Processes a single video file
-    async fn process_movie(&self, group: &MediaGroup, existing_map: &HashMap<String, MetadataCacheEntry>, force_rescan: bool, can_probe: bool) -> Result<ProcessAction, String> {
+    async fn process_movie(&self, group: &MediaGroup, existing_map: &HashMap<String, MetadataCacheEntry>, force_rescan: bool, _can_probe: bool) -> Result<ProcessAction, String> {
         let MediaGroup::Movie { file, .. } = group else { return Err(format!("Expected movie to resolve but got {group}")) };
         // Check if file already exists in cache
         let (cache_entry, status) = if let Some(existing_entry) = existing_map.get(&file.file_path) {
@@ -178,8 +172,8 @@ impl LibraryProcessor {
 
             debug!("File modified, updating metadata: {}", file.file_path);
             // Reuse existing UUID
-            let mut metadata = self.resolve_metadata(group).await?;
-            self.enrich_metadata_with_ffprobe(&mut metadata, &file.file_path, can_probe).await;
+            let metadata = self.resolve_metadata(group).await?;
+            //self.enrich_metadata_with_ffprobe(&mut metadata, &file.file_path, can_probe);
             
             let entry = MetadataCacheEntry {
                 uuid: existing_entry.uuid.clone(),
@@ -192,8 +186,8 @@ impl LibraryProcessor {
             (entry, ProcessAction::Updated)
         } else {
             debug!("New file, resolving metadata: {}", file.file_path);
-            let mut metadata = self.resolve_metadata(group).await?;
-            self.enrich_metadata_with_ffprobe(&mut metadata, &file.file_path, can_probe).await;
+            let metadata = self.resolve_metadata(group).await?;
+            //self.enrich_metadata_with_ffprobe(&mut metadata, &file.file_path, can_probe);
 
             let entry = MetadataCacheEntry::new(
                 file.file_path.clone(),
