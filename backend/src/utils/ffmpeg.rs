@@ -22,6 +22,9 @@ pub async fn probe_url(url: &str, user_agent: Option<&str>, analyze_duration: u6
 
     let mut command = Command::new("ffprobe");
     
+    // Ensure the child process is killed if this future is dropped (e.g. by connection preemption)
+    command.kill_on_drop(true);
+    
     command
         .arg("-v").arg("error")
         .arg("-show_streams") // Get all streams info

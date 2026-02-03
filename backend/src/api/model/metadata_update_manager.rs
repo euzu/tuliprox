@@ -261,7 +261,8 @@ impl MetadataUpdateManager {
             };
 
             // Attempt to acquire connection with low priority
-            if let Some(handle) = app_state.active_provider.acquire_connection(&input_name, &dummy_addr, prio).await {
+            // IMPORTANT: use acquire_connection_with_grace_override with `false` to strictly enforce max_connections limits for background tasks.
+            if let Some(handle) = app_state.active_provider.acquire_connection_with_grace_override(&input_name, &dummy_addr, false, prio).await {
                 
                 // Identify the specific config used (e.g. alias vs main input) to use correct credentials
                 let config_to_use = handle.allocation.get_provider_config();
@@ -273,7 +274,24 @@ impl MetadataUpdateManager {
                     current_progress + 1, total, sanitize_sensitive_info(&input_name), task, name_display);
 
                 // Execute Task - PASS THE HANDLE so inner logic doesn't try to acquire again (deadlock prevention)
-                let result = self.execute_task(app_state, &input_name, &task, config_to_use, Some(&handle), item_title).await;
+                // Wrap in select to handle preemption cancellation immediately
+                let execution = self.execute_task(app_state, &input_name, &task, config_to_use, Some(&handle), item_title);
+                let result = if let Some(token) = &handle.cancel_token {
+                    tokio::select! {
+                        res = execution => res,
+                        _ = token.cancelled() => {
+                            debug_if_enabled!("Metadata update task preempted by user request for input {}", sanitize_sensitive_info(&input_name));
+                            // Put task back at front using CLONE to satisfy borrow checker
+                            let mut queues = self.queues.lock().await;
+                            if let Some(state) = queues.get_mut(&input_name) {
+                                state.tasks.push_front(task.clone());
+                            }
+                             Err(shared::error::info_err!("Task preempted"))
+                        }
+                    }
+                } else {
+                    execution.await
+                };
                 
                 app_state.connection_manager.release_provider_handle(Some(handle)).await;
                 
@@ -295,7 +313,13 @@ impl MetadataUpdateManager {
                             }
                         }
                         Err(e) => {
-                             error!("Task {:?} failed for input {}: {}", task, sanitize_sensitive_info(&input_name), e);
+                            // Only log error if it wasn't a preemption (preemption already logged and requeued)
+                            if e.message != "Task preempted" {
+                                error!("Task {:?} failed for input {}: {}", task, sanitize_sensitive_info(&input_name), e);
+                            } else {
+                                 // Break the loop so we release the connection properly and don't tight loop
+                                 break;
+                            }
                         }
                     }
                 }
