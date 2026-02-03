@@ -257,6 +257,7 @@ pub struct PlaylistItemHeader {
     #[serde(default, with = "arc_str_option_serde")]
     pub epg_channel_id: Option<Arc<str>>,
     pub xtream_cluster: XtreamCluster,
+    #[serde(default)]
     pub additional_properties: Option<StreamProperties>,
     #[serde(default)]
     pub item_type: PlaylistItemType,
@@ -458,6 +459,8 @@ pub struct M3uPlaylistItem {
     pub t_resource_url: Option<String>,
     #[serde(default)]
     pub source_ordinal: u32,
+    #[serde(default)]
+    pub additional_properties: Option<StreamProperties>,
 }
 
 impl M3uPlaylistItem {
@@ -511,7 +514,7 @@ impl M3uPlaylistItem {
             item_type: self.item_type,
             epg_channel_id: self.epg_channel_id.clone(),
             xtream_cluster: XtreamCluster::try_from(self.item_type).ok(),
-            additional_properties: None,
+            additional_properties: self.additional_properties.clone(),
             category_id: None,
         }
     }
@@ -564,11 +567,11 @@ impl PlaylistEntry for M3uPlaylistItem {
     }
     #[inline]
     fn get_additional_properties(&self) -> Option<&StreamProperties> {
-        None
+        self.additional_properties.as_ref()
     }
     #[inline]
     fn get_additional_properties_mut(&mut self) -> Option<&mut StreamProperties> {
-        None
+        self.additional_properties.as_mut()
     }
 
 }
@@ -671,6 +674,7 @@ pub struct XtreamPlaylistItem {
     #[serde(default, with = "arc_str_option_serde")]
     pub epg_channel_id: Option<Arc<str>>,
     pub xtream_cluster: XtreamCluster,
+    #[serde(default)]
     pub additional_properties: Option<StreamProperties>,
     pub item_type: PlaylistItemType,
     pub category_id: u32,
@@ -930,6 +934,7 @@ impl PlaylistItem {
                                 season: 0,
                                 added: None,
                                 release_date: None,
+                                series_release_date: None,
                                 tmdb: None,
                                 movie_image: "".intern(),
                                 container_extension: container_extension.intern(),
@@ -1026,6 +1031,7 @@ impl From<&PlaylistItem> for M3uPlaylistItem {
             t_stream_url: Arc::clone(&header.url),
             t_resource_url: None,
             source_ordinal: header.source_ordinal,
+            additional_properties: header.additional_properties.clone(),
         }
     }
 }
@@ -1114,7 +1120,7 @@ impl From<&M3uPlaylistItem> for PlaylistItem {
             chno: item.chno,
             audio_track: item.audio_track.clone(),
             time_shift: item.time_shift.clone(),
-            additional_properties: None,
+            additional_properties: item.additional_properties.clone(),
             source_ordinal: item.source_ordinal,
         };
 

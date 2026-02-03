@@ -12,6 +12,7 @@ mod telegram;
 mod geoip;
 mod db_viewer;
 mod epg_parser;
+pub mod ffmpeg;
 
 pub use self::binary_utils::*;
 pub use self::logging::*;

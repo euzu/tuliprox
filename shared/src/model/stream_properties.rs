@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use log::{warn};
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Default, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct LiveStreamProperties {
     #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
     pub name: Arc<str>,
@@ -35,6 +35,15 @@ pub struct LiveStreamProperties {
     pub tv_archive_duration: Option<i32>,
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
     pub is_adult: i32,
+    // New fields for probing
+    #[serde(default, serialize_with = "serialize_json_as_opt_string", deserialize_with = "deserialize_json_as_opt_string")]
+    pub video: Option<Arc<str>>,
+    #[serde(default, serialize_with = "serialize_json_as_opt_string", deserialize_with = "deserialize_json_as_opt_string")]
+    pub audio: Option<Arc<str>>,
+    #[serde(default, deserialize_with = "deserialize_number_from_string")]
+    pub last_probed_timestamp: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_number_from_string")]
+    pub last_success_timestamp: Option<i64>,
 }
 
 #[derive(Default, Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -170,6 +179,8 @@ pub struct SeriesStreamDetailEpisodeProperties {
     #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
     pub release_date: Arc<str>,
     #[serde(default, deserialize_with = "deserialize_as_option_arc_str")]
+    pub series_release_date: Option<Arc<str>>, // Global series release date
+    #[serde(default, deserialize_with = "deserialize_as_option_arc_str")]
     pub plot: Option<Arc<str>>,
     #[serde(default, deserialize_with = "deserialize_as_option_arc_str")]
     pub crew: Option<Arc<str>>,
@@ -257,6 +268,8 @@ pub struct EpisodeStreamProperties {
     pub added: Option<Arc<str>>,
     #[serde(default, deserialize_with = "deserialize_as_option_arc_str")]
     pub release_date: Option<Arc<str>>,
+    #[serde(default, deserialize_with = "deserialize_as_option_arc_str")]
+    pub series_release_date: Option<Arc<str>>, // Global series release date
     #[serde(default, deserialize_with = "deserialize_number_from_string")]
     pub tmdb: Option<u32>,
     #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
@@ -711,6 +724,7 @@ impl SeriesStreamProperties {
                             direct_source: e.direct_source.clone(),
                             tmdb: info.info.tmdb,
                             release_date: e.info.as_ref().map(|i| i.air_date.clone()).unwrap_or_default(),
+                            series_release_date: None,
                             plot: None,
                             crew: e.info.as_ref().map(|i| i.crew.clone()),
                             duration_secs: e.info.as_ref().map(|i| i.duration_secs).unwrap_or_default(),
@@ -794,6 +808,7 @@ impl SeriesStreamProperties {
                             direct_source: e.direct_source.clone(),
                             tmdb,
                             release_date: e.info.air_date.clone(),
+                            series_release_date: None,
                             plot: None,
                             crew: e.info.crew.clone(),
                             duration_secs: e.info.duration_secs,
@@ -820,6 +835,8 @@ impl EpisodeStreamProperties {
             season: episode.season,
             added: Some(episode.added.clone()),
             release_date: Some(episode.release_date.clone()),
+            // Inherit global release date from the Series object if available
+            series_release_date: series.release_date.clone(),
             tmdb: episode.tmdb.or(series.tmdb),
             movie_image: episode.movie_image.clone(),
             container_extension: episode.container_extension.clone(),

@@ -1,12 +1,22 @@
-use crate::utils::is_blank_optional_string;
-use log::warn;
 use crate::error::{TuliproxError, TuliproxErrorKind};
 use crate::{info_err_res, handle_tuliprox_error_result_list};
 use crate::foundation::{get_filter, Filter};
 use crate::model::{ClusterFlags, ConfigFavouritesDto, ConfigRenameDto, ConfigSortDto, HdHomeRunDeviceOverview,
                    PatternTemplate, ProcessingOrder, StrmExportStyle, TargetType, TraktConfigDto};
 use crate::utils::{is_true, is_false, default_as_true, default_resolve_delay_secs, default_as_default,
-                   is_default_resolve_delay_secs, is_zero_u16, is_config_target_options_empty, is_default_processing_order};
+                   is_blank_optional_string,
+                   is_default_resolve_delay_secs, is_zero_u16, is_config_target_options_empty, is_default_processing_order,
+                   default_resolve_livetv_interval, is_default_resolve_livetv_interval};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateOutputStrategy {
+    #[default]
+    Instant,
+    Bundled,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigTargetOptions {
@@ -47,10 +57,16 @@ pub struct XtreamTargetOutputDto {
     pub resolve_vod: bool,
     #[serde(default = "default_resolve_delay_secs", skip_serializing_if = "is_default_resolve_delay_secs")]
     pub resolve_vod_delay: u16,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub resolve_livetv: bool,
+    #[serde(default = "default_resolve_livetv_interval", skip_serializing_if = "is_default_resolve_livetv_interval")]
+    pub resolve_livetv_interval_hours: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trakt: Option<TraktConfigDto>,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub filter: Option<String>,
+    #[serde(default)]
+    pub update_strategy: UpdateOutputStrategy,
     #[serde(skip)]
     pub t_filter: Option<Filter>,
 }
@@ -65,8 +81,11 @@ impl Default for XtreamTargetOutputDto {
             resolve_series_delay: default_resolve_delay_secs(),
             resolve_vod: false,
             resolve_vod_delay: default_resolve_delay_secs(),
+            resolve_livetv: false,
+            resolve_livetv_interval_hours: default_resolve_livetv_interval(),
             trakt: None,
             filter: None,
+            update_strategy: UpdateOutputStrategy::default(),
             t_filter: None,
         }
     }
@@ -89,6 +108,7 @@ impl XtreamTargetOutputDto {
             || self.skip_series_direct_source
             || self.resolve_series
             || self.resolve_vod
+            || self.resolve_livetv
             || self.trakt.is_some()
             || self.filter.is_some()
     }
@@ -105,6 +125,8 @@ pub struct M3uTargetOutputDto {
     pub mask_redirect_url: bool,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub filter: Option<String>,
+    #[serde(default)]
+    pub update_strategy: UpdateOutputStrategy,
     #[serde(skip)]
     pub t_filter: Option<Filter>,
 }
@@ -146,6 +168,16 @@ pub struct StrmTargetOutputDto {
     pub filter: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub add_quality_to_filename: bool,
+    
+    // New Fields for Metadata and Probe
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_probe_size_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_analyze_duration: Option<u64>,
+    
+    #[serde(default)]
+    pub update_strategy: UpdateOutputStrategy,
+
     #[serde(skip)]
     pub t_filter: Option<Filter>,
 }
@@ -366,7 +398,7 @@ impl ConfigTargetDto {
 
             if let Some(hdhr_devices) = hdhr_config {
                 if !hdhr_devices.enabled {
-                    warn!("You have defined an HDHomeRun output, but HDHomeRun devices are disabled.");
+                    log::warn!("You have defined an HDHomeRun output, but HDHomeRun devices are disabled.");
                 }
             }
         }

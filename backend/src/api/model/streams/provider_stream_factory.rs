@@ -337,24 +337,6 @@ fn collect_debug_headers(headers: &HeaderMap) -> Vec<(String, String)> {
         .collect()
 }
 
-fn proxy_env_present() -> bool {
-    const ENV_KEYS: [&str; 3] = [
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-    ];
-
-    std::env::vars().any(|(key, value)| {
-        ENV_KEYS.iter().any(|k| k.eq_ignore_ascii_case(&key))
-            && !value.trim().is_empty()
-    })
-}
-
-fn should_use_manual_redirects(app_state: &Arc<AppState>) -> bool {
-    let config = app_state.app_config.config.load();
-    config.proxy.is_some() || proxy_env_present()
-}
-
 async fn send_with_manual_redirects(
     request_client: &reqwest::Client,
     stream_options: &ProviderStreamFactoryOptions,
@@ -397,7 +379,7 @@ async fn provider_stream_request(
     request_client: &reqwest::Client,
     stream_options: &ProviderStreamFactoryOptions,
 ) -> Result<Option<ProviderStreamFactoryResponse>, StatusCode> {
-    let response_result = if should_use_manual_redirects(app_state) {
+    let response_result = if app_state.should_use_manual_redirects() {
         let client_no_redirect = app_state.http_client_no_redirect.load();
         send_with_manual_redirects(&client_no_redirect, stream_options).await
     } else {

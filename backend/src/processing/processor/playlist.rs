@@ -1,4 +1,4 @@
-use crate::model::{AppConfig, ConfigFavourites, ConfigInput, ConfigRename, ReverseProxyDisabledHeaderConfig, TVGuide};
+use crate::model::{AppConfig, ConfigFavourites, ConfigInput, ConfigRename, MessageContent, ReverseProxyDisabledHeaderConfig, TVGuide};
 use crate::utils::m3u;
 use crate::utils::xtream;
 use crate::utils::{epg, StepMeasureCallback};
@@ -8,9 +8,8 @@ use std::sync::{Arc, Weak};
 use tokio::sync::{Mutex, OwnedRwLockWriteGuard, RwLock};
 use tokio::task::JoinSet;
 
-use crate::api::model::{EventManager, EventMessage, PlaylistStorageState, UpdateGuard};
-use crate::messaging::send_message;
-use crate::model::messaging::MessageContent;
+use crate::api::model::{ActiveProviderManager, EventManager, EventMessage, PlaylistStorageState, UpdateGuard, MetadataUpdateManager};
+use crate::messaging::{send_message};
 use crate::model::Epg;
 
 
@@ -26,6 +25,7 @@ use crate::processing::processor::epg::process_playlist_epg;
 use crate::processing::processor::library;
 use crate::processing::processor::sort::sort_playlist;
 use crate::processing::processor::trakt::process_trakt_categories_for_target;
+use crate::processing::processor::xtream::playlist_resolve_livetv;
 use crate::processing::processor::xtream_series::playlist_resolve_series;
 use crate::processing::processor::xtream_vod::playlist_resolve_vod;
 use crate::repository::{load_input_playlist, persist_input_playlist, persist_playlist};
@@ -547,9 +547,13 @@ pub struct PlaylistProcessingContext {
     pub disabled_headers: Option<ReverseProxyDisabledHeaderConfig>,
 
     // Coordination
-    processed_inputs: Arc<Mutex<HashSet<Arc<str>>>>,
+    pub processed_inputs: Arc<Mutex<HashSet<Arc<str>>>>,
     #[allow(clippy::type_complexity)]
-    input_locks: Arc<Mutex<HashMap<Arc<str>, Weak<RwLock<()>>>>>,
+    pub input_locks: Arc<Mutex<HashMap<Arc<str>, Weak<RwLock<()>>>>>,
+    
+    // New field for STRM probes & background updates
+    pub provider_manager: Option<Arc<ActiveProviderManager>>,
+    pub metadata_manager: Option<Arc<MetadataUpdateManager>>,
 }
 
 impl PlaylistProcessingContext {
@@ -722,10 +726,15 @@ async fn process_playlist_for_target(ctx: &PlaylistProcessingContext,
     let mut step = StepMeasure::new(&target.name, broadcast_step);
     for provider_fpl in playlists.iter_mut() {
         step.broadcast("Executing transformations on '{}' playlist", &target.name);
+
+        probing(ctx, provider_fpl);
+
         let mut processed_fpl = execute_pipe(target, &pipe, provider_fpl, &mut duplicates);
         processed_fpl.sort_by_provider_ordinal();
-        playlist_resolve_series(&ctx.config, &ctx.client, target, errors, &pipe, provider_fpl, &mut processed_fpl).await;
-        playlist_resolve_vod(&ctx.config, &ctx.client, target, errors, provider_fpl, &mut processed_fpl).await;
+        
+        playlist_resolve_series(&ctx, target, errors, &pipe, provider_fpl, &mut processed_fpl).await;
+        playlist_resolve_vod(&ctx, target, errors, provider_fpl, &mut processed_fpl).await;
+        playlist_resolve_livetv(&ctx, target, errors, &mut processed_fpl).await;
         // stats
         let input_entry_name = processed_fpl.input.name.clone();
         let group_count = processed_fpl.get_group_count();
@@ -772,6 +781,55 @@ async fn process_playlist_for_target(ctx: &PlaylistProcessingContext,
         let result = persist_playlist(&ctx.config, &mut flat_new_playlist, flatten_tvguide(new_epg).as_ref(), target, ctx.playlist_state.as_ref()).await;
         step.stop("Persisting playlists");
         result
+    }
+}
+
+fn probing(ctx: &PlaylistProcessingContext, provider_fpl: &mut FetchedPlaylist) {
+    // Queue generic probing if requested
+    if let Some(mgr) = ctx.metadata_manager.as_ref() {
+        if let Some(opts) = provider_fpl.input.options.as_ref() {
+            if opts.analyze_stream {
+                // Check if ffprobe enabled globally
+                if ctx.config.config.load().video.as_ref().is_some_and(|v| v.ffprobe_enabled) {
+                    let input_name = provider_fpl.input.name.clone();
+                    // We need an input type to decide what ID to use
+                    let input_type = provider_fpl.input.input_type;
+
+                    for item in provider_fpl.items() {
+                        // Only probe if generic types (M3U, Library). Xtream types handled in their processors.
+                        if !matches!(input_type, shared::model::InputType::Xtream | shared::model::InputType::XtreamBatch) {
+                            let has_details = item.header.additional_properties.as_ref()
+                                .and_then(|p| match p {
+                                    shared::model::StreamProperties::Video(v) => v.details.as_ref().and_then(|d| d.video.as_ref()),
+                                    shared::model::StreamProperties::Live(l) => l.video.as_ref(),
+                                    _ => None
+                                }).is_some();
+
+                            if !has_details {
+                                // For M3U, ID is the provider_id string. For Library, it is UUID.
+                                let unique_id = if input_type == shared::model::InputType::Library {
+                                    item.header.uuid.to_valid_uuid()
+                                } else {
+                                    item.header.id.to_string()
+                                };
+
+                                let task = crate::api::model::metadata_update_manager::UpdateTask::ProbeStream {
+                                    unique_id,
+                                    url: item.header.url.to_string(),
+                                    item_type: item.header.item_type,
+                                    reason: "missing_details".to_string(),
+                                };
+                                let mgr_clone = mgr.clone();
+                                let name_clone = input_name.clone();
+                                tokio::spawn(async move {
+                                    mgr_clone.queue_task(name_clone, task).await;
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -867,9 +925,10 @@ async fn process_watch(app_config: &Arc<AppConfig>, client: &reqwest::Client, ta
 
 pub async fn exec_processing(client: &reqwest::Client, app_config: Arc<AppConfig>, targets: Arc<ProcessTargets>,
                              event_manager: Option<Arc<EventManager>>, playlist_state: Option<Arc<PlaylistStorageState>>,
-                             update_guard: Option<UpdateGuard>,
-                             disabled_headers: Option<ReverseProxyDisabledHeaderConfig>) {
-    let _guard = if let Some(guard) = update_guard {
+                             update_guard: Option<UpdateGuard>, disabled_headers: Option<ReverseProxyDisabledHeaderConfig>,
+                             provider_manager: Option<Arc<ActiveProviderManager>>,
+                             metadata_manager: Option<Arc<MetadataUpdateManager>>) {
+        let _guard = if let Some(guard) = update_guard {
         if let Some(permit) = guard.try_playlist() {
             Some(permit)
         } else {
@@ -893,6 +952,8 @@ pub async fn exec_processing(client: &reqwest::Client, app_config: Arc<AppConfig
         processed_inputs: Arc::new(Mutex::new(HashSet::new())),
         input_locks: Arc::new(Mutex::new(HashMap::new())),
         disabled_headers,
+        provider_manager, 
+        metadata_manager, // Pass metadata manager
     };
 
     let start_time = Instant::now();
@@ -931,20 +992,3 @@ pub async fn exec_processing(client: &reqwest::Client, app_config: Arc<AppConfig
 
     info!("{update_finished_message}");
 }
-
-// #[cfg(test)]
-// mod tests {
-// #[test]
-// fn test_jaro_winkeler() {
-//     let data = [("yessport5", "heyessport5gold"), ("yessport5", "heyesport5gold")];
-//
-//     data.iter().for_each(|(first, second)|
-//     println!("jaro_winkler {} = {} => {}", first, second, strsim::jaro_winkler(first, second)));
-//     // println!("jaro {}", strsim::jaro(data.0, data.1));
-//     // println!("levenhstein {}", strsim::levenshtein(data.0, data.1));
-//     // println!("damerau_levenshtein {:?}", strsim::damerau_levenshtein(data.0, data.1));
-//     // println!("osa distance {:?}", strsim::osa_distance(data.0, data.1));
-//     // println!("sorensen dice {:?}", strsim::sorensen_dice(data.0, data.1));
-// }
-
-// }

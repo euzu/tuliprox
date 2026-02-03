@@ -21,6 +21,7 @@ use shared::utils::{is_dash_url, is_hls_url, Internable};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use crate::api::model::ActiveProviderManager;
 
 struct LocalEpisodeKey {
     path: Arc<str>,
@@ -465,7 +466,7 @@ pub fn get_input_m3u_playlist_file_path(storage_path: &Path, input_name: &Arc<st
     storage_path.join(format!("m3u_{sanitized_input_name}.{FILE_SUFFIX_DB}"))
 }
 
-fn get_input_local_library_playlist_file_path(storage_path: &Path, input_name: &Arc<str>) -> PathBuf {
+pub fn get_input_local_library_playlist_file_path(storage_path: &Path, input_name: &Arc<str>) -> PathBuf {
     let sanitized_input_name: String = input_name.chars()
         .map(|c| if c.is_alphanumeric() { c } else { '_' })
         .collect();

@@ -147,7 +147,11 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
                                     error!("Failed to persist series info for input {}: {err}", &input.name);
                                 }
                             }
-                            if let Some(mut episodes) = parse_xtream_series_info(&pli.get_uuid(), &series_stream_props, &group, &series_name, input) {
+
+                            // Capture release date for children
+                            let series_release_date = series_stream_props.release_date.clone();
+
+                            if let Some(mut episodes) = parse_xtream_series_info(&pli.get_uuid(), &series_stream_props, &group, &series_name, input, series_release_date) {
                                 let config = &app_state.app_config.config.load();
                                 match get_target_storage_path(config, target.name.as_str()) {
                                     None => {
