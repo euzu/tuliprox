@@ -40,6 +40,8 @@ pub struct XtreamTargetOutputDto {
     pub skip_video_direct_source: bool,
     #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
     pub skip_series_direct_source: bool,
+    #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
+    pub resolve_background: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub resolve_series: bool,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -64,6 +66,7 @@ impl Default for XtreamTargetOutputDto {
             skip_live_direct_source: default_as_true(),
             skip_video_direct_source: default_as_true(),
             skip_series_direct_source: default_as_true(),
+            resolve_background: default_as_true(),
             resolve_series: false,
             resolve_vod: false,
             resolve_delay: default_resolve_delay_secs(),
@@ -91,6 +94,7 @@ impl XtreamTargetOutputDto {
         self.skip_live_direct_source
             || self.skip_video_direct_source
             || self.skip_series_direct_source
+            || self.resolve_background
             || self.resolve_series
             || self.resolve_vod
             || self.resolve_live

@@ -2,12 +2,14 @@
 macro_rules! create_bit_set {
     ($storage:ty, $enum_name:ident, $($variant:ident),*) => {
         paste::paste! {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
         #[repr($storage)]
         pub enum $enum_name {
             $($variant),*
         }
-        #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+        #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+        #[repr(transparent)]
+        #[serde(transparent)]
         pub struct [<$enum_name Set>](pub $storage);
 
         impl [<$enum_name Set>] {
@@ -15,6 +17,14 @@ macro_rules! create_bit_set {
             #[inline]
             pub fn new() -> Self {
                 Self(0)
+            }
+
+            #[inline(always)]
+            fn checked_shift(shift: $storage) -> $storage {
+                if (shift as usize) >= <$storage>::BITS as usize {
+                    log::error!("Enum variant value {shift} exceeds storage bit width {}", <$storage>::BITS);
+                }
+                shift
             }
 
             // New: Constructor for multiple variants
@@ -29,12 +39,12 @@ macro_rules! create_bit_set {
 
             #[inline]
             pub fn add(&mut self, variant: $enum_name) {
-                self.0 |= 1 << (variant as $storage);
+                self.0 |= 1 << Self::checked_shift(variant as $storage);
             }
 
             #[inline]
             pub fn remove(&mut self, variant: $enum_name) {
-                self.0 &= !(1 << (variant as $storage));
+                self.0 &= !(1 << Self::checked_shift(variant as $storage));
             }
 
             #[inline]
@@ -49,7 +59,7 @@ macro_rules! create_bit_set {
 
             #[inline]
             pub fn contains(&self, variant: $enum_name) -> bool {
-                (self.0 & (1 << (variant as $storage))) != 0
+                (self.0 & (1 << Self::checked_shift(variant as $storage))) != 0
             }
 
             #[inline]

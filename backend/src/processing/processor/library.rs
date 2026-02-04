@@ -103,7 +103,7 @@ fn to_playlist_item(entry: &MetadataCacheEntry, input_name: &Arc<str>, group_nam
                                         item_type: PlaylistItemType::LocalSeries,
                                         category_id: 0,
                                         input_name: Arc::clone(input_name),
-                                        additional_properties: Some(StreamProperties::Episode(EpisodeStreamProperties {
+                                        additional_properties: Some(StreamProperties::Episode(Box::new(EpisodeStreamProperties {
                                             episode_id: episode.id,
                                             episode: episode.episode_num,
                                             season: episode.season,
@@ -115,7 +115,7 @@ fn to_playlist_item(entry: &MetadataCacheEntry, input_name: &Arc<str>, group_nam
                                             container_extension: container_extension.intern(),
                                             audio: None,
                                             video: None,
-                                        })),
+                                        }))),
                                         ..Default::default()
                                     }
                                 });

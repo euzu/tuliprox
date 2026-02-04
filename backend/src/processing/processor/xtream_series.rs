@@ -6,7 +6,7 @@ use crate::model::{AppConfig, ConfigTarget};
 use crate::model::{ConfigInput, InputSource};
 use crate::processing::parser::xtream::create_xtream_series_episode_url;
 use crate::processing::parser::xtream::parse_xtream_series_info;
-use crate::processing::processor::{create_resolve_options_function_for_xtream_target, ResolveOptions};
+use crate::processing::processor::{create_resolve_options_function_for_xtream_target, ResolveOptions, ResolveOptionsFlags};
 use crate::processing::processor::playlist::{PlaylistProcessingContext, ProcessingPipe};
 use crate::ptt::ptt_parse_title;
 use crate::repository::persists_input_series_info;
@@ -38,7 +38,7 @@ pub async fn playlist_resolve_series(
 ) {
     let resolve_options = get_resolve_series_options(target, processed_fpl);
 
-    let do_probe = resolve_options.probe_requested && ctx.config.is_ffprobe_enabled().await;
+    let do_probe = resolve_options.flags.contains(ResolveOptionsFlags::Probe) && ctx.config.is_ffprobe_enabled().await;
 
     provider_fpl.source.release_resources(XtreamCluster::Series);
 
@@ -77,9 +77,9 @@ async fn playlist_resolve_series_info(ctx: &PlaylistProcessingContext,
     };
 
     // Skip if nothing to do
-    let skip_resolve = !resolve_options.resolve && !do_probe && !resolve_options.resolve_tmdb_missing;
+    let skip_resolve = !resolve_options.flags.contains(ResolveOptionsFlags::Resolve) && !do_probe && !resolve_options.flags.contains(ResolveOptionsFlags::TmdbMissing);
 
-    let groups_to_add = if ctx.metadata_manager.is_some() {
+    let groups_to_add = if resolve_options.flags.contains(ResolveOptionsFlags::Background) && ctx.metadata_manager.is_some() {
         queue_background_series_info(ctx, fpl, filter, &resolve_options, do_probe, skip_resolve)
     } else {
         process_immediate_series_info(ctx, fpl, filter, &resolve_options, do_probe, skip_resolve).await
@@ -344,6 +344,7 @@ async fn update_series_info_immediate(
         Some(&pli.header.title),
         false, // save (we batch in caller)
         fetch_info,
+        reasons.contains(ResolveReason::Probe),
         db_query,
     ).await
 }
@@ -361,7 +362,7 @@ fn check_resolve_reasons(resolve_options: &ResolveOptions, do_probe: bool, pli: 
 }
 
 fn check_needs_info(resolve_options: &ResolveOptions, pli: &mut PlaylistItem, reasons: &mut ResolveReasonSet) -> bool {
-    let needs_info = resolve_options.resolve && !pli.has_details();
+    let needs_info = resolve_options.flags.contains(ResolveOptionsFlags::Resolve) && !pli.has_details();
     if needs_info {
         reasons.add(ResolveReason::Info);
     }
@@ -369,7 +370,7 @@ fn check_needs_info(resolve_options: &ResolveOptions, pli: &mut PlaylistItem, re
 }
 
 fn check_resolve_tmdb(resolve_options: &ResolveOptions, pli: &mut PlaylistItem, needs_info: bool, reasons: &mut ResolveReasonSet) {
-    if resolve_options.resolve_tmdb_missing {
+    if resolve_options.flags.contains(ResolveOptionsFlags::TmdbMissing) {
         if let Some(StreamProperties::Series(series_stream_props)) = pli.header.additional_properties.as_ref() {
             let has_tmdb = series_stream_props.tmdb.is_some();
             let has_date = series_stream_props.release_date.is_some();
@@ -422,6 +423,7 @@ pub async fn update_series_metadata(
     playlist_title: Option<&str>,
     save: bool,
     fetch_info: bool,
+    do_probe: bool,
     db_query: Option<&mut BPlusTreeQuery<u32, XtreamPlaylistItem>>,
 ) -> Result<Option<SeriesStreamProperties>, TuliproxError> {
     let working_dir = &app_config.config.load().working_dir;
@@ -571,7 +573,7 @@ pub async fn update_series_metadata(
 
     // 3. Probe Episodes (if enabled)
     let ffprobe_enabled = app_config.is_ffprobe_enabled().await;
-    if ffprobe_enabled {
+    if ffprobe_enabled && do_probe {
         if let Some(details) = properties.details.as_mut() {
             if let Some(episodes) = details.episodes.as_mut() {
                 let ffprobe_timeout = app_config.config.load().video.as_ref().and_then(|v| v.ffprobe_timeout).unwrap_or(60);

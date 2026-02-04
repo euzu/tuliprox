@@ -1,11 +1,12 @@
 use crate::api::model::TransportStreamBuffer;
 use crate::model::{ApiProxyConfig, ApiProxyServerInfo, Config, ConfigInput, ConfigInputOptions, ConfigTarget, CustomStreamResponse, GracePeriodOptions, HdHomeRunConfig, Mappings, ProxyUserCredentials, ReverseProxyDisabledHeaderConfig, SourcesConfig, TargetOutput};
 use crate::utils;
+use crate::utils::ffmpeg::check_ffprobe_availability;
 use arc_swap::{ArcSwap, ArcSwapOption};
 use log::{error, warn};
 use rand::Rng;
-use shared::info_err_res;
 use shared::error::{TuliproxError, TuliproxErrorKind};
+use shared::info_err_res;
 use shared::model::ConfigPaths;
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -13,7 +14,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use crate::utils::ffmpeg::check_ffprobe_availability;
+use tokio::sync::OnceCell;
 
 const CHANNEL_UNAVAILABLE: &str = "channel_unavailable.ts";
 const USER_CONNECTIONS_EXHAUSTED: &str = "user_connections_exhausted.ts";
@@ -39,6 +40,7 @@ pub struct AppConfig {
     pub custom_stream_response: Arc<ArcSwapOption<CustomStreamResponse>>,
     pub access_token_secret: [u8; 32],
     pub encrypt_secret: [u8; 16],
+    pub(crate) ffprobe_available: Arc<OnceCell<bool>>,
 }
 
 impl AppConfig {
@@ -176,7 +178,7 @@ impl AppConfig {
                 .map(Arc::clone)
                 .collect();
             if !result.is_empty() {
-                return Some(result)
+                return Some(result);
             }
         }
         None
@@ -224,17 +226,17 @@ impl AppConfig {
 
     pub fn get_input_by_id(&self, input_id: u16) -> Option<Arc<ConfigInput>> {
         let sources = self.sources.load();
-            for input in &sources.inputs {
-                if input.id == input_id {
-                    return Some(Arc::clone(input));
-                }
-                if let Some(aliases) = input.aliases.as_ref() {
-                    for alias in aliases {
-                        if alias.id == input_id {
-                            return Some(Arc::new(input.as_input(alias)));
-                        }
+        for input in &sources.inputs {
+            if input.id == input_id {
+                return Some(Arc::clone(input));
+            }
+            if let Some(aliases) = input.aliases.as_ref() {
+                for alias in aliases {
+                    if alias.id == input_id {
+                        return Some(Arc::new(input.as_input(alias)));
                     }
                 }
+            }
         }
         None
     }
@@ -425,12 +427,14 @@ impl AppConfig {
     }
 
     pub async fn is_ffprobe_enabled(&self) -> bool {
-        let ffprobe_enabled = self.config.load().video.as_ref().is_some_and(|v| v.ffprobe_enabled);
-        if ffprobe_enabled {
-            check_ffprobe_availability().await
-        } else {
-            false
+        let ffprobe_enabled_in_config = self.config.load().video.as_ref().is_some_and(|v| v.ffprobe_enabled);
+        if !ffprobe_enabled_in_config {
+            return false;
         }
+
+        *self.ffprobe_available.get_or_init(|| async {
+            check_ffprobe_availability().await
+        }).await
     }
 }
 

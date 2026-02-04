@@ -232,10 +232,8 @@ pub struct PlaylistItemHeader {
     pub uuid: UUIDType, // calculated
     #[serde(with = "arc_str_serde")]
     pub id: Arc<str>, // provider id
-    pub virtual_id: VirtualId, // virtual id
     #[serde(with = "arc_str_serde")]
     pub name: Arc<str>,
-    pub chno: u32,
     #[serde(with = "arc_str_serde")]
     pub logo: Arc<str>,
     #[serde(with = "arc_str_serde")]
@@ -256,17 +254,23 @@ pub struct PlaylistItemHeader {
     pub url: Arc<str>,
     #[serde(default, with = "arc_str_option_serde")]
     pub epg_channel_id: Option<Arc<str>>,
-    pub xtream_cluster: XtreamCluster,
-    #[serde(default)]
-    pub additional_properties: Option<StreamProperties>,
-    #[serde(default)]
-    pub item_type: PlaylistItemType,
-    #[serde(default)]
-    pub category_id: u32,
     #[serde(with = "arc_str_serde")]
     pub input_name: Arc<str>,
     #[serde(default)]
+    pub additional_properties: Option<StreamProperties>,
+    
+    // 4-byte aligned
+    pub virtual_id: VirtualId, // virtual id
+    pub chno: u32,
+    #[serde(default)]
+    pub category_id: u32,
+    #[serde(default)]
     pub source_ordinal: u32,
+
+    // 1-byte aligned
+    pub xtream_cluster: XtreamCluster,
+    #[serde(default)]
+    pub item_type: PlaylistItemType,
 }
 
 impl Default for PlaylistItemHeader {
@@ -938,7 +942,7 @@ impl PlaylistItem {
                         if header.item_type == PlaylistItemType::Series {
                             let container_extension = extract_extension_from_url(&header.url).map(|e| e.strip_prefix('.').unwrap_or(&e).to_string()).unwrap_or_default();
                             // TODO maybe from link ? like s01e02 or something like this
-                            Some(StreamProperties::Episode(EpisodeStreamProperties {
+                            Some(StreamProperties::Episode(Box::new(EpisodeStreamProperties {
                                 episode_id: 0,
                                 episode: 0,
                                 season: 0,
@@ -950,7 +954,7 @@ impl PlaylistItem {
                                 container_extension: container_extension.intern(),
                                 audio: None,
                                 video: None,
-                            }))
+                            })))
                         } else if header.item_type == PlaylistItemType::SeriesInfo {
                             Some(StreamProperties::Series(Box::new(SeriesStreamProperties {
                                 name: header.name.clone(),

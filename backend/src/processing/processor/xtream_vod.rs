@@ -6,7 +6,7 @@ use crate::model::FetchedPlaylist;
 use crate::model::InputSource;
 use crate::model::{AppConfig, ConfigTarget};
 use crate::processing::processor::playlist::PlaylistProcessingContext;
-use crate::processing::processor::{create_resolve_options_function_for_xtream_target, ResolveOptions};
+use crate::processing::processor::{create_resolve_options_function_for_xtream_target, ResolveOptions, ResolveOptionsFlags};
 use crate::ptt::ptt_parse_title;
 use crate::repository::get_input_storage_path;
 use crate::repository::persist_input_vod_info;
@@ -37,10 +37,10 @@ pub async fn playlist_resolve_vod(
 
     let app_config: &Arc<AppConfig> = &ctx.config;
     let ffprobe_enabled = app_config.is_ffprobe_enabled().await;
-    let do_probe = resolve_options.probe_requested && ffprobe_enabled;
+    let do_probe = resolve_options.flags.contains(ResolveOptionsFlags::Probe) && ffprobe_enabled;
 
     // Determine if we need to do anything
-    if !resolve_options.resolve && !do_probe && !resolve_options.resolve_tmdb_missing {
+    if !resolve_options.flags.contains(ResolveOptionsFlags::Resolve) && !do_probe && !resolve_options.flags.contains(ResolveOptionsFlags::TmdbMissing) {
         return;
     }
 
@@ -75,7 +75,7 @@ async fn playlist_resolve_vod_info(
         true
     };
 
-    if ctx.metadata_manager.is_some() {
+    if resolve_options.flags.contains(ResolveOptionsFlags::Background) && ctx.metadata_manager.is_some() {
         queue_background_vod_info(ctx, fpl, filter, &resolve_options, do_probe);
     } else {
         process_immediate_vod_info(ctx, fpl, filter, resolve_options, do_probe).await;
@@ -259,7 +259,7 @@ fn check_needs_probe(pli: &mut PlaylistItem, reasons: &mut ResolveReasonSet) {
 }
 
 fn check_needs_info(resolve_options: &ResolveOptions, pli: &mut PlaylistItem, reasons: &mut ResolveReasonSet) -> bool {
-    let needs_info = !pli.has_details() && resolve_options.resolve;
+    let needs_info = !pli.has_details() && resolve_options.flags.contains(ResolveOptionsFlags::Resolve);
 
     if needs_info {
         reasons.add(ResolveReason::Info);
@@ -268,7 +268,7 @@ fn check_needs_info(resolve_options: &ResolveOptions, pli: &mut PlaylistItem, re
 }
 
 fn check_resolve_tmdb(resolve_options: &ResolveOptions, pli: &mut PlaylistItem, needs_info: bool, reasons: &mut ResolveReasonSet) {
-    if resolve_options.resolve_tmdb_missing {
+    if resolve_options.flags.contains(ResolveOptionsFlags::TmdbMissing) {
         if let Some(StreamProperties::Video(video_stream_props)) = pli.header.additional_properties.as_ref() {
             let has_tmdb = video_stream_props.tmdb.is_some();
             let has_date = video_stream_props.details.as_ref().and_then(|d| d.release_date.as_ref()).is_some();

@@ -94,7 +94,7 @@ pub fn parse_xtream_series_info(parent_uuid: &UUIDType, series_info: &SeriesStre
                     url: episode_url,
                     item_type: PlaylistItemType::Series,
                     xtream_cluster: XtreamCluster::Series,
-                    additional_properties: Some(StreamProperties::Episode(episode_info)),
+                    additional_properties: Some(StreamProperties::Episode(Box::new(episode_info))),
                     category_id: 0,
                     input_name: input.name.intern(),
                     ..Default::default()

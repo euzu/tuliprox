@@ -1,7 +1,7 @@
-use std::sync::Arc;
-use log::{debug, error};
-use url::Url;
 use crate::model::AppConfig;
+use log::{debug, error};
+use std::sync::Arc;
+use url::Url;
 
 const MAX_MESSAGE_LENGTH: usize = 4000;
 
@@ -99,10 +99,10 @@ pub async fn telegram_send_message(
         };
 
         let result = client
-        .post(url.clone())
-        .json(&request_json_obj)
-        .send()
-        .await;
+            .post(url.clone())
+            .json(&request_json_obj)
+            .send()
+            .await;
 
         match result {
             Ok(response) => {
@@ -114,10 +114,10 @@ pub async fn telegram_send_message(
                         Err(_) => error!("Message chunk {}/{} wasn't sent to {chat_id} telegram api. Telegram response could not be parsed!", i + 1, chunks.len()),
                     }
                 }
-            },
+            }
             Err(e) => error!("Message chunk {}/{} wasn't sent to {chat_id} telegram api because of: {e}", i + 1, chunks.len()),
         }
-        
+
         // Small delay between chunks to be polite to the API
         if i < chunks.len() - 1 {
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;

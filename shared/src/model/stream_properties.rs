@@ -295,7 +295,7 @@ pub enum StreamProperties {
     Live(Box<LiveStreamProperties>),
     Video(Box<VideoStreamProperties>),
     Series(Box<SeriesStreamProperties>),
-    Episode(EpisodeStreamProperties),
+    Episode(Box<EpisodeStreamProperties>),
 }
 
 impl StreamProperties {

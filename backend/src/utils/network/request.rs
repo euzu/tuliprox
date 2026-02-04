@@ -9,9 +9,9 @@ use axum::http::header::RETRY_AFTER;
 use futures::{StreamExt, TryStreamExt};
 use log::{debug, error, log_enabled, trace, warn, Level};
 use reqwest::header::CONTENT_ENCODING;
-use reqwest::redirect::Policy;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-use reqwest::{StatusCode};
+use reqwest::redirect::Policy;
+use reqwest::StatusCode;
 use shared::error::{notify_err_res, string_to_io_error, TuliproxError};
 use shared::model::{format_elapsed_time, InputFetchMethod, DEFAULT_USER_AGENT};
 use shared::utils::{

@@ -6,6 +6,7 @@ use serde_json::Value;
 use shared::model::{PlaylistItem, PlaylistItemType, PlaylistItemTypeSet, ProxyUserStatus, XtreamMappingOptions};
 use shared::utils::{arc_str_serde, deserialize_number_from_string_or_zero};
 use enum_iterator::all;
+use crate::model::XtreamTargetFlags;
 
 #[derive(Debug, Default)]
 pub struct XtreamLoginInfo {
@@ -45,9 +46,9 @@ pub fn xtream_mapping_option_from_target_options(target: &ConfigTarget, target_o
     }
 
     XtreamMappingOptions {
-        skip_live_direct_source: target_output.skip_live_direct_source,
-        skip_video_direct_source: target_output.skip_video_direct_source,
-        skip_series_direct_source: target_output.skip_series_direct_source,
+        skip_live_direct_source: target_output.flags.contains(XtreamTargetFlags::SkipLiveDirectSource),
+        skip_video_direct_source: target_output.flags.contains(XtreamTargetFlags::SkipVideoDirectSource),
+        skip_series_direct_source: target_output.flags.contains(XtreamTargetFlags::SkipSeriesDirectSource),
         rewrite_resource_url: cfg.is_reverse_proxy_resource_rewrite_enabled(),
         force_redirect,
         reverse_item_types,

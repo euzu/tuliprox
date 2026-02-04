@@ -71,7 +71,7 @@ pub async fn update_generic_stream_metadata(
          let analyze_duration = 10_000_000;
          let probe_size = 10_000_000;
 
-         debug_if_enabled!("Probing Generic Stream '{}'", unique_id);
+         debug_if_enabled!("Probing Generic Stream '{unique_id}'");
 
          let result = ffmpeg::probe_url(
             &probe_url,
@@ -101,7 +101,7 @@ pub async fn update_generic_stream_metadata(
             .map_err(|e| shared::error::info_err!("Failed to open M3U tree update: {e}"))?;
 
          if let Some(mut item) = tree_update.query(&key).map_err(|e| shared::error::info_err!("Tree query error: {e}"))? {
-              update_properties(&mut item.additional_properties, item_type, &item.name, 0, raw_video, raw_audio);
+              update_properties(&mut item.additional_properties, item_type, &item.name, item.virtual_id, raw_video, raw_audio);
               tree_update.update(&key, item).map_err(|e| shared::error::info_err!("Tree update error: {e}"))?;
               info!("Successfully updated M3U metadata for: {unique_id}");
          } else {
@@ -177,7 +177,10 @@ fn update_properties(
        if let Some(a) = raw_audio {
            props.audio = Some(a.to_string().into());
        }
-       props.last_probed_timestamp = Some(chrono::Utc::now().timestamp());
+
+       let now = chrono::Utc::now().timestamp();
+       props.last_probed_timestamp = Some(now);
+       props.last_success_timestamp = Some(now);
        
        *props_opt = Some(StreamProperties::Live(Box::new(props)));
     }

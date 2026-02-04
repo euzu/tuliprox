@@ -47,7 +47,7 @@ impl VideoConfigDto {
     pub fn is_empty(&self) -> bool {
         self.extensions.is_empty() && is_blank_optional_str(self.web_search.as_deref())
         && (self.download.is_none() || self.download.as_ref().is_some_and(|d| d.is_empty()))
-        && self.ffprobe_enabled
+        && !self.ffprobe_enabled
         && self.ffprobe_timeout.is_none()
     }
 

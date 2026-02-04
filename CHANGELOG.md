@@ -82,7 +82,7 @@
 - **source.yml (target output)**:
   - Added `resolve_livetv`: Enables background probing for Live TV streams (default disabled).
   - Added `resolve_livetv_interval_hours`: Sets the frequency for re-probing Live TV streams.
-  - Added `update_strategy`: Defines how outputs are written (`instant` or `bundled`).
+  - Added `resolve_background`: Toggles background metadata resolution (default `true`). Set to `false` for blocking, immediate resolution.
 
 ## 🛠 Optimizations
 - **Quality Tagging**: Generates enhanced filename tags (e.g., `[2160p 4K HEVC HDR TrueHD 7.1]`) for STRM files based on analysis results.

@@ -9,6 +9,9 @@ use shared::model::PlaylistItemType;
 use std::sync::Arc;
 use shared::foundation::Filter;
 use shared::foundation::ValueProvider;
+use shared::create_bit_set;
+
+create_bit_set!(u16, XtreamTargetFlags, SkipLiveDirectSource, SkipVideoDirectSource, SkipSeriesDirectSource, ResolveBackground, ResolveSeries, ResolveVod, ResolveLive);
 
 #[derive(Clone, Debug)]
 pub struct ProcessTargets {
@@ -31,12 +34,7 @@ impl ProcessTargets {
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
 pub struct XtreamTargetOutput {
-    pub skip_live_direct_source: bool,
-    pub skip_video_direct_source: bool,
-    pub skip_series_direct_source: bool,
-    pub resolve_series: bool,
-    pub resolve_vod: bool,
-    pub resolve_live: bool,
+    pub flags: XtreamTargetFlagsSet,
     pub resolve_live_interval_hours: u32,
     pub resolve_delay: u16,
     pub trakt: Option<TraktConfig>,
@@ -46,14 +44,18 @@ pub struct XtreamTargetOutput {
 macros::from_impl!(XtreamTargetOutput);
 impl From<&XtreamTargetOutputDto> for XtreamTargetOutput {
     fn from(dto: &XtreamTargetOutputDto) -> Self {
+        let mut flags = XtreamTargetFlagsSet::new();
+        if dto.skip_live_direct_source { flags.add(XtreamTargetFlags::SkipLiveDirectSource); }
+        if dto.skip_video_direct_source { flags.add(XtreamTargetFlags::SkipVideoDirectSource); }
+        if dto.skip_series_direct_source { flags.add(XtreamTargetFlags::SkipSeriesDirectSource); }
+        if dto.resolve_background { flags.add(XtreamTargetFlags::ResolveBackground); }
+        if dto.resolve_series { flags.add(XtreamTargetFlags::ResolveSeries); }
+        if dto.resolve_vod { flags.add(XtreamTargetFlags::ResolveVod); }
+        if dto.resolve_live { flags.add(XtreamTargetFlags::ResolveLive); }
+
         Self {
-            skip_live_direct_source: dto.skip_live_direct_source,
-            skip_video_direct_source: dto.skip_video_direct_source,
-            skip_series_direct_source: dto.skip_series_direct_source,
-            resolve_series: dto.resolve_series,
-            resolve_vod: dto.resolve_vod,
+            flags,
             resolve_delay: dto.resolve_delay,
-            resolve_live: dto.resolve_live,
             resolve_live_interval_hours: dto.resolve_live_interval_hours,
             trakt: dto.trakt.as_ref().map(Into::into),
             filter: dto.t_filter.clone(),
@@ -64,13 +66,14 @@ impl From<&XtreamTargetOutputDto> for XtreamTargetOutput {
 impl From<&XtreamTargetOutput> for XtreamTargetOutputDto {
     fn from(instance: &XtreamTargetOutput) -> Self {
         Self {
-            skip_live_direct_source: instance.skip_live_direct_source,
-            skip_video_direct_source: instance.skip_video_direct_source,
-            skip_series_direct_source: instance.skip_series_direct_source,
-            resolve_series: instance.resolve_series,
-            resolve_vod: instance.resolve_vod,
+            skip_live_direct_source: instance.flags.contains(XtreamTargetFlags::SkipLiveDirectSource),
+            skip_video_direct_source: instance.flags.contains(XtreamTargetFlags::SkipVideoDirectSource),
+            skip_series_direct_source: instance.flags.contains(XtreamTargetFlags::SkipSeriesDirectSource),
+            resolve_background: instance.flags.contains(XtreamTargetFlags::ResolveBackground),
+            resolve_series: instance.flags.contains(XtreamTargetFlags::ResolveSeries),
+            resolve_vod: instance.flags.contains(XtreamTargetFlags::ResolveVod),
+            resolve_live: instance.flags.contains(XtreamTargetFlags::ResolveLive),
             resolve_delay: instance.resolve_delay,
-            resolve_live: instance.resolve_live,
             resolve_live_interval_hours: instance.resolve_live_interval_hours,
             trakt: instance.trakt.as_ref().map(TraktConfigDto::from),
             filter: instance.filter.as_ref().map(ToString::to_string),

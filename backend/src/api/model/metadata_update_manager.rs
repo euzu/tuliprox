@@ -81,10 +81,10 @@ impl UpdateTask {
 impl std::fmt::Display for UpdateTask {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            UpdateTask::ResolveVod { id, reason, delay } => write!(f, "Resolve VOD {id} (Reason: {reason}, Delay: {delay}ms)"),
-            UpdateTask::ResolveSeries { id, reason, delay } => write!(f, "Resolve Series {id} (Reason: {reason}, Delay: {delay}ms)"),
-            UpdateTask::ProbeLive { id, reason, delay, interval } => write!(f, "Probe Live {id} (Reason: {reason}, Delay: {delay}ms, Interval: {interval}secs )"),
-            UpdateTask::ProbeStream { unique_id, reason, delay, .. } => write!(f, "Probe Stream {unique_id} (Reason: {reason}, Delay: {delay}ms)"),
+            UpdateTask::ResolveVod { id, reason, delay } => write!(f, "Resolve VOD {id} (Reason: {reason}, Delay: {delay}sec)"),
+            UpdateTask::ResolveSeries { id, reason, delay } => write!(f, "Resolve Series {id} (Reason: {reason}, Delay: {delay}sec)"),
+            UpdateTask::ProbeLive { id, reason, delay, interval } => write!(f, "Probe Live {id} (Reason: {reason}, Delay: {delay}sec, Interval: {interval}secs )"),
+            UpdateTask::ProbeStream { unique_id, reason, delay, .. } => write!(f, "Probe Stream {unique_id} (Reason: {reason}, Delay: {delay}sec)"),
         }
     }
 }
@@ -845,6 +845,7 @@ impl InputWorker {
                     item_title,
                     false, // Batch collect
                     fetch_info,
+                    reason.contains(ResolveReason::Probe),
                     query_opt, 
                 ).await {
                      Ok(Some(props)) => {

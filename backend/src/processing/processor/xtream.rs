@@ -11,7 +11,7 @@ use crate::processing::parser::xtream::create_xtream_url;
 use crate::model::{ConfigTarget, FetchedPlaylist};
 use shared::model::{InputType};
 use crate::api::model::{MetadataUpdateManager, ResolveReason, ResolveReasonSet, UpdateTask, ProviderIdType};
-use crate::processing::processor::create_resolve_options_function_for_xtream_target;
+use crate::processing::processor::{create_resolve_options_function_for_xtream_target, ResolveOptionsFlags};
 use crate::processing::processor::playlist::PlaylistProcessingContext;
 
 /// Updates metadata for a single Live stream (primarily probing)
@@ -152,12 +152,12 @@ create_resolve_options_function_for_xtream_target!(live);
 fn get_resolve_livetv_options(target: &ConfigTarget, fpl: &FetchedPlaylist) -> (bool, u16, u32, bool) {
 
     let resolve_options = get_resolve_live_options(target, fpl);
-    if resolve_options.resolve {
+    if resolve_options.flags.contains(ResolveOptionsFlags::Resolve) {
         let interval = match target.get_xtream_output() {
             Some(xtream_output) => xtream_output.resolve_live_interval_hours,
             None => 0
         };
-        return (true, resolve_options.resolve_delay, interval, resolve_options.probe_requested);
+        return (true, resolve_options.resolve_delay, interval, resolve_options.flags.contains(ResolveOptionsFlags::Probe));
     }
     (false, 0, 0, false)
 
