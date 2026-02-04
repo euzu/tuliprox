@@ -1355,11 +1355,10 @@ Each format has different properties.
 - skip_video_direct_source: true|false (default true),
 - skip_series_direct_source: true|false (default true),
 - resolve_series: true|false (default false),
-- resolve_series_delay: seconds (default 2s),
 - resolve_vod: true|false (default false),
-- resolve_vod_delay: true|false (default 2s),
-- resolve_livetv: true|false (default false),
-- resolve_livetv_interval_hours: number (default 120),
+- resolve_live: true|false (default false),
+- resolve_live_interval_hours: number (default 120),
+- resolve_delay: seconds (default 2s),
 - update_strategy: instant|bundled (default instant),
 - trakt: Trakt Configuration
 - filter: optional filter

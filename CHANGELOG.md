@@ -37,7 +37,7 @@
               - '(?i)\bSD\b'
     ```
   - Trakt api config field `key` is now `api_key`. Added `user_agent` field to Trakt api config
-  - resolve_vod_delay and resolve_series_delay are now merged as resolve_delay 
+  - resolve_vod_delay and resolve_series_delay are now merged as resolve_delay, added `resolve_live` and `resolve_live_interval_hours` to resolve live streams.
       ```yaml
        # Before (deprecated)
        output:
@@ -45,7 +45,7 @@
          resolve_vod: true
          resolve_vod_delay: 500
          resolve_series: true  
-         resolve_series_delay: 1000
+         resolve_series_delay: 2
       ```
       ```yaml
        # After (new consolidated)
@@ -53,7 +53,7 @@
        - type: xtream
          resolve_vod: true
          resolve_series: true
-         resolve_delay: 500  # Single delay for all resolution types
+         resolve_delay: 2  # Single delay for all resolution types
        ```
 ## 🌟 New Features
 - **Smart Connection Priority**: Introduced a priority system for connections. Users with higher priority can preempt (kick) lower priority connections (e.g., background tasks or standard users) when provider slots are full.

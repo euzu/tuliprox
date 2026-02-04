@@ -1,5 +1,5 @@
 use crate::api::model::{ActiveProviderManager, ProviderHandle};
-use crate::api::model::{ResolveReason, ResolveReasonSet, UpdateTask, PlaylistItemIdType};
+use crate::api::model::{ResolveReason, ResolveReasonSet, UpdateTask, ProviderIdType};
 use crate::library::MetadataResolver;
 use crate::model::ConfigInput;
 use crate::model::FetchedPlaylist;
@@ -113,7 +113,7 @@ async fn process_immediate_vod_info(ctx: &PlaylistProcessingContext, fpl: &mut F
         None
     };
 
-    let mut batch: Vec<(PlaylistItemIdType, VideoStreamProperties)> = Vec::with_capacity(BATCH_SIZE);
+    let mut batch: Vec<(ProviderIdType, VideoStreamProperties)> = Vec::with_capacity(BATCH_SIZE);
     let mut processed_count = 0;
     let mut last_log_time = Instant::now();
 
@@ -123,9 +123,9 @@ async fn process_immediate_vod_info(ctx: &PlaylistProcessingContext, fpl: &mut F
         }
 
         let provider_id = if let Ok(uid) = pli.header.id.parse::<u32>() {
-            PlaylistItemIdType::Id(uid)
+            ProviderIdType::Id(uid)
         } else {
-            PlaylistItemIdType::from(&*pli.header.id)
+            ProviderIdType::from(&*pli.header.id)
         };
 
         let reasons = check_resolve_reasons(&resolve_options, do_probe, pli);
@@ -149,7 +149,7 @@ async fn process_immediate_vod_info(ctx: &PlaylistProcessingContext, fpl: &mut F
                             // Filter for u32 IDs for persistence
                             let updates: Vec<(u32, VideoStreamProperties)> = batch.iter()
                                 .filter_map(|(id, props)| {
-                                    if let PlaylistItemIdType::Id(vid) = id {
+                                    if let ProviderIdType::Id(vid) = id {
                                         Some((*vid, props.clone()))
                                     } else {
                                         None
@@ -187,7 +187,7 @@ async fn process_immediate_vod_info(ctx: &PlaylistProcessingContext, fpl: &mut F
                         // Resolve delay for inline execution to prevent flooding provider
                         // Only delay if we actually did something (reason is not empty) - logic implies we did
                         if resolve_options.resolve_delay > 0 {
-                            tokio::time::sleep(Duration::from_millis(u64::from(resolve_options.resolve_delay))).await;
+                            tokio::time::sleep(Duration::from_secs(u64::from(resolve_options.resolve_delay))).await;
                         }
                     }
                     Ok(None) => {}
@@ -210,7 +210,7 @@ async fn process_immediate_vod_info(ctx: &PlaylistProcessingContext, fpl: &mut F
         _db_lock_holder = None;
 
         let updates: Vec<(u32, VideoStreamProperties)> = batch.into_iter()
-            .filter_map(|(id, props)| if let PlaylistItemIdType::Id(vid) = id { Some((vid, props)) } else { None })
+            .filter_map(|(id, props)| if let ProviderIdType::Id(vid) = id { Some((vid, props)) } else { None })
             .collect();
 
         if !updates.is_empty() {
@@ -300,9 +300,9 @@ fn queue_background_vod_info(ctx: &PlaylistProcessingContext, fpl: &mut FetchedP
         }
 
         let provider_id = if let Ok(uid) = pli.header.id.parse::<u32>() {
-            PlaylistItemIdType::Id(uid)
+            ProviderIdType::Id(uid)
         } else {
-            PlaylistItemIdType::from(&*pli.header.id)
+            ProviderIdType::from(&*pli.header.id)
         };
 
         let reasons = check_resolve_reasons(resolve_options, do_probe, pli);
@@ -323,7 +323,7 @@ async fn update_vod_info_immediate(
     active_provider: &Arc<ActiveProviderManager>,
     input: &ConfigInput,
     pli: &PlaylistItem,
-    id: PlaylistItemIdType,
+    id: ProviderIdType,
     reasons: &ResolveReasonSet,
     db_query: Option<&mut BPlusTreeQuery<u32, XtreamPlaylistItem>>,
 ) -> Result<Option<VideoStreamProperties>, TuliproxError> {
@@ -356,7 +356,7 @@ pub async fn update_vod_metadata(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
     input: &ConfigInput,
-    id: PlaylistItemIdType,
+    id: ProviderIdType,
     active_handle: Option<&ProviderHandle>,
     active_provider: &Arc<ActiveProviderManager>,
     playlist_title: Option<&str>,
@@ -378,7 +378,7 @@ pub async fn update_vod_metadata(
     let mut props: Option<VideoStreamProperties> = None;
     let mut existing_item: Option<XtreamPlaylistItem> = None;
 
-    let stream_id_opt = if let PlaylistItemIdType::Id(vid) = id { Some(vid) } else { None };
+    let stream_id_opt = if let ProviderIdType::Id(vid) = id { Some(vid) } else { None };
 
     if let Some(stream_id) = stream_id_opt {
         // Use provided query or open new one

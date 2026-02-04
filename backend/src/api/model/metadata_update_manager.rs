@@ -26,43 +26,43 @@ create_bit_set!(u32, ResolveReason, Info, Tmdb, Date, Probe, MissingDetails);
 
 /// `PlaylistItemIdType` ID can be either a String (M3U) or u32 (Xtream/TargetDB)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum PlaylistItemIdType {
+pub enum ProviderIdType {
     Text(Arc<str>),
     Id(u32),
 }
 
-impl std::fmt::Display for PlaylistItemIdType {
+impl std::fmt::Display for ProviderIdType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PlaylistItemIdType::Text(s) => write!(f, "{s}"),
-            PlaylistItemIdType::Id(id) => write!(f, "{id}"),
+            ProviderIdType::Text(s) => write!(f, "{s}"),
+            ProviderIdType::Id(id) => write!(f, "{id}"),
         }
     }
 }
 
-impl From<u32> for PlaylistItemIdType {
+impl From<u32> for ProviderIdType {
     fn from(id: u32) -> Self {
-        PlaylistItemIdType::Id(id)
+        ProviderIdType::Id(id)
     }
 }
 
-impl From<&str> for PlaylistItemIdType {
+impl From<&str> for ProviderIdType {
     fn from(s: &str) -> Self {
-        PlaylistItemIdType::Text(Arc::from(s))
+        ProviderIdType::Text(Arc::from(s))
     }
 }
 
-impl From<String> for PlaylistItemIdType {
+impl From<String> for ProviderIdType {
     fn from(s: String) -> Self {
-        PlaylistItemIdType::Text(Arc::from(s.as_str()))
+        ProviderIdType::Text(Arc::from(s.as_str()))
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum UpdateTask {
-    ResolveVod { id: PlaylistItemIdType, reason: ResolveReasonSet, delay: u16 },
-    ResolveSeries { id: PlaylistItemIdType, reason: ResolveReasonSet, delay: u16 },
-    ProbeLive { id: PlaylistItemIdType, reason: ResolveReasonSet, delay: u16, interval: u64 },
+    ResolveVod { id: ProviderIdType, reason: ResolveReasonSet, delay: u16 },
+    ResolveSeries { id: ProviderIdType, reason: ResolveReasonSet, delay: u16 },
+    ProbeLive { id: ProviderIdType, reason: ResolveReasonSet, delay: u16, interval: u64 },
     // Generic probe for M3U/Library/etc.
     ProbeStream { unique_id: String, url: String, item_type: PlaylistItemType, reason: ResolveReasonSet, delay: u16 },
 }
@@ -104,18 +104,24 @@ impl TaskKey {
     pub fn from_task(task: &UpdateTask) -> Self {
         match task {
             UpdateTask::ResolveVod { id, .. } => match id {
-                PlaylistItemIdType::Id(val) => TaskKey::Vod(*val),
-                PlaylistItemIdType::Text(val) => TaskKey::VodStr(val.clone()),
+                ProviderIdType::Id(val) => TaskKey::Vod(*val),
+                ProviderIdType::Text(val) => TaskKey::VodStr(val.clone()),
             },
             UpdateTask::ResolveSeries { id, .. } => match id {
-                PlaylistItemIdType::Id(val) => TaskKey::Series(*val),
-                PlaylistItemIdType::Text(val) => TaskKey::SeriesStr(val.clone()),
+                ProviderIdType::Id(val) => TaskKey::Series(*val),
+                ProviderIdType::Text(val) => TaskKey::SeriesStr(val.clone()),
             },
             UpdateTask::ProbeLive { id, .. } => match id {
-                PlaylistItemIdType::Id(val) => TaskKey::Live(*val),
-                PlaylistItemIdType::Text(val) => TaskKey::LiveStr(val.clone()),
+                ProviderIdType::Id(val) => TaskKey::Live(*val),
+                ProviderIdType::Text(val) => TaskKey::LiveStr(val.clone()),
             },
-            UpdateTask::ProbeStream { unique_id, .. } => TaskKey::Stream(unique_id.clone()),
+            UpdateTask::ProbeStream { unique_id, url, .. } => {
+                if unique_id.trim().is_empty() {
+                    TaskKey::Stream(url.clone())
+                } else {
+                    TaskKey::Stream(unique_id.clone())
+                }
+            },
         }
     }
 }
@@ -346,7 +352,7 @@ impl InputWorker {
                  info!("Starting background metadata updates for input {}", sanitize_sensitive_info(&input_name));
             }
 
-            let delay_ms = current_task.delay();
+            let delay_secs = current_task.delay();
 
             if let Err(e) = Self::process_task_static(
                 &input_name, 
@@ -377,14 +383,14 @@ impl InputWorker {
             }
 
             // Rate limiting
-            if delay_ms > 0 {
-                tokio::time::sleep(Duration::from_millis(u64::from(delay_ms))).await;
+            if delay_secs > 0 {
+                tokio::time::sleep(Duration::from_secs(u64::from(delay_secs))).await;
             }
             
-            // Cleanup from map (Allowing new tasks for this ID to be queued)
+            // Cleanup from a map (Allowing new tasks for this ID to be queued)
             self.pending_tasks.remove(&current_key);
 
-            // Try to get next task immediately to keep locks open
+            // Try to get the next task immediately to keep locks open
             if let Ok(key) = self.receiver.try_recv() {
                  if let Some(entry) = self.pending_tasks.get(&key) {
                     next_task = Some((key, entry.lock().await.clone()));
@@ -425,7 +431,7 @@ impl InputWorker {
             let vod_updates = batch_buffer.take_vod_updates();
             if !vod_updates.is_empty() {
                 let updates: Vec<(u32, VideoStreamProperties)> = vod_updates.into_iter()
-                    .filter_map(|(id, props)| if let PlaylistItemIdType::Id(vid) = id { Some((vid, props)) } else { None })
+                    .filter_map(|(id, props)| if let ProviderIdType::Id(vid) = id { Some((vid, props)) } else { None })
                     .collect();
                 
                 if !updates.is_empty() {
@@ -438,7 +444,7 @@ impl InputWorker {
             let series_updates = batch_buffer.take_series_updates();
             if !series_updates.is_empty() {
                 let updates: Vec<(u32, SeriesStreamProperties)> = series_updates.into_iter()
-                    .filter_map(|(id, props)| if let PlaylistItemIdType::Id(vid) = id { Some((vid, props)) } else { None })
+                    .filter_map(|(id, props)| if let ProviderIdType::Id(vid) = id { Some((vid, props)) } else { None })
                     .collect();
 
                 if !updates.is_empty() {
@@ -451,7 +457,7 @@ impl InputWorker {
             let live_updates = batch_buffer.take_live_updates();
             if !live_updates.is_empty() {
                 let updates: Vec<(u32, LiveStreamProperties)> = live_updates.into_iter()
-                    .filter_map(|(id, props)| if let PlaylistItemIdType::Id(vid) = id { Some((vid, props)) } else { None })
+                    .filter_map(|(id, props)| if let ProviderIdType::Id(vid) = id { Some((vid, props)) } else { None })
                     .collect();
 
                 if !updates.is_empty() {
@@ -520,8 +526,8 @@ impl InputWorker {
                     let mut updates = Vec::with_capacity(batch.vod.len());
                     for (pid, props) in &batch.vod {
                         let vids = match pid {
-                            PlaylistItemIdType::Id(vid) => mapping.find_virtual_ids(*vid),
-                            PlaylistItemIdType::Text(sid) => {
+                            ProviderIdType::Id(vid) => mapping.find_virtual_ids(*vid),
+                            ProviderIdType::Text(sid) => {
                                 let url = props.direct_source.as_ref();
                                 let uuid = generate_playlist_uuid(input_name, sid, PlaylistItemType::Video, url);
                                 mapping.get_virtual_id_by_uuid(&uuid).into_iter().collect()
@@ -558,8 +564,8 @@ impl InputWorker {
                     let mut updates = Vec::with_capacity(batch.series.len());
                     for (pid, props) in &batch.series {
                         let vids = match pid {
-                            PlaylistItemIdType::Id(vid) => mapping.find_virtual_ids(*vid),
-                            PlaylistItemIdType::Text(sid) => {
+                            ProviderIdType::Id(vid) => mapping.find_virtual_ids(*vid),
+                            ProviderIdType::Text(sid) => {
                                 // Series usually don't have a direct URL in properties, relying on ID
                                 let uuid = generate_playlist_uuid(input_name, sid, PlaylistItemType::Series, "");
                                 mapping.get_virtual_id_by_uuid(&uuid).into_iter().collect()
@@ -594,8 +600,8 @@ impl InputWorker {
                     let mut updates = Vec::with_capacity(batch.live.len());
                     for (pid, props) in &batch.live {
                         let vids = match pid {
-                            PlaylistItemIdType::Id(vid) => mapping.find_virtual_ids(*vid),
-                            PlaylistItemIdType::Text(sid) => {
+                            ProviderIdType::Id(vid) => mapping.find_virtual_ids(*vid),
+                            ProviderIdType::Text(sid) => {
                                 let url = props.direct_source.as_ref();
                                 let uuid = generate_playlist_uuid(input_name, sid, PlaylistItemType::Live, url);
                                 mapping.get_virtual_id_by_uuid(&uuid).into_iter().collect()
@@ -694,7 +700,7 @@ impl InputWorker {
             UpdateTask::ProbeStream { .. } => return None,
         };
 
-        if let PlaylistItemIdType::Id(vid) = id {
+        if let ProviderIdType::Id(vid) = id {
             if let Some(query) = Self::get_or_open_query(input_name, app_state, cluster, db_handles, failed_clusters).await {
                 if let Ok(Some(item)) = query.query_zero_copy(vid) {
                      return Some(if item.title.is_empty() { item.name.to_string() } else { item.title.to_string() });

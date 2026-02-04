@@ -44,8 +44,6 @@ pub struct XtreamTargetOutputDto {
     pub resolve_series: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub resolve_vod: bool,
-    /// Consolidated delay in milliseconds applied after each resolution task.
-    /// Replaces the deprecated resolve_series_delay and resolve_vod_delay fields.
     #[serde(default = "default_resolve_delay_secs", skip_serializing_if = "is_default_resolve_delay_secs")]
     pub resolve_delay: u16,
     #[serde(default, skip_serializing_if = "is_false")]

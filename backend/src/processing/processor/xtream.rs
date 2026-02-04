@@ -10,7 +10,7 @@ use crate::processing::parser::xtream::create_xtream_url;
 // Imports for playlist resolution logic
 use crate::model::{ConfigTarget, FetchedPlaylist};
 use shared::model::{InputType};
-use crate::api::model::{MetadataUpdateManager, ResolveReason, ResolveReasonSet, UpdateTask, PlaylistItemIdType};
+use crate::api::model::{MetadataUpdateManager, ResolveReason, ResolveReasonSet, UpdateTask, ProviderIdType};
 use crate::processing::processor::create_resolve_options_function_for_xtream_target;
 use crate::processing::processor::playlist::PlaylistProcessingContext;
 
@@ -19,7 +19,7 @@ pub async fn update_live_stream_metadata(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
     input: &ConfigInput,
-    id: PlaylistItemIdType,
+    id: ProviderIdType,
     save: bool,
     db_query: Option<&mut BPlusTreeQuery<u32, XtreamPlaylistItem>>,
 ) -> Result<Option<LiveStreamProperties>, TuliproxError> {
@@ -31,7 +31,7 @@ pub async fn update_live_stream_metadata(
     let mut props: Option<LiveStreamProperties> = None;
     let mut existing_item: Option<XtreamPlaylistItem> = None;
     
-    let stream_id_opt = if let PlaylistItemIdType::Id(vid) = id { Some(vid) } else { None };
+    let stream_id_opt = if let ProviderIdType::Id(vid) = id { Some(vid) } else { None };
 
     if let Some(stream_id) = stream_id_opt {
         // Use provided query or open new one
@@ -205,9 +205,9 @@ pub async fn playlist_resolve_livetv(
 
         let provider_id = if let Ok(uid) = pli.header.id.parse::<u32>() {
             if uid == 0 { continue; }
-            PlaylistItemIdType::Id(uid)
+            ProviderIdType::Id(uid)
         } else {
-            PlaylistItemIdType::from(&*pli.header.id)
+            ProviderIdType::from(&*pli.header.id)
         };
 
         let mut needs_probe = false;

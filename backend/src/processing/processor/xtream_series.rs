@@ -1,4 +1,4 @@
-use crate::api::model::{ActiveProviderManager, ProviderHandle, PlaylistItemIdType, ResolveReason, ResolveReasonSet};
+use crate::api::model::{ActiveProviderManager, ProviderHandle, ProviderIdType, ResolveReason, ResolveReasonSet};
 use crate::api::model::UpdateTask;
 use crate::library::MetadataResolver;
 use crate::model::FetchedPlaylist;
@@ -124,9 +124,9 @@ fn queue_background_series_info(
         }
 
         let provider_id = if let Ok(uid) = pli.header.id.parse::<u32>() {
-            PlaylistItemIdType::Id(uid)
+            ProviderIdType::Id(uid)
         } else {
-            PlaylistItemIdType::from(pli.header.id.to_string())
+            ProviderIdType::from(pli.header.id.to_string())
         };
 
         if !skip_resolve {
@@ -184,7 +184,7 @@ async fn process_immediate_series_info(
     };
 
     let mut groups_to_add = Vec::new();
-    let mut batch: Vec<(PlaylistItemIdType, SeriesStreamProperties)> = Vec::with_capacity(BATCH_SIZE);
+    let mut batch: Vec<(ProviderIdType, SeriesStreamProperties)> = Vec::with_capacity(BATCH_SIZE);
     let mut processed_count = 0;
     let mut last_log_time = Instant::now();
 
@@ -194,9 +194,9 @@ async fn process_immediate_series_info(
         }
 
         let provider_id = if let Ok(uid) = pli.header.id.parse::<u32>() {
-            PlaylistItemIdType::Id(uid)
+            ProviderIdType::Id(uid)
         } else {
-            PlaylistItemIdType::from(&*pli.header.id)
+            ProviderIdType::from(&*pli.header.id)
         };
 
         if !skip_resolve {
@@ -219,7 +219,7 @@ async fn process_immediate_series_info(
 
                                 let updates: Vec<(u32, SeriesStreamProperties)> = batch.iter()
                                     .filter_map(|(id, props)| {
-                                        if let PlaylistItemIdType::Id(vid) = id {
+                                        if let ProviderIdType::Id(vid) = id {
                                             Some((*vid, props.clone()))
                                         } else {
                                             None
@@ -253,7 +253,7 @@ async fn process_immediate_series_info(
 
                             processed_count += 1;
                             if resolve_options.resolve_delay > 0 {
-                                tokio::time::sleep(Duration::from_millis(u64::from(resolve_options.resolve_delay))).await;
+                                tokio::time::sleep(Duration::from_secs(u64::from(resolve_options.resolve_delay))).await;
                             }
                         }
                         Ok(None) => {},
@@ -280,7 +280,7 @@ async fn process_immediate_series_info(
         _db_lock_holder = None;
 
         let updates: Vec<(u32, SeriesStreamProperties)> = batch.into_iter()
-            .filter_map(|(id, props)| if let PlaylistItemIdType::Id(vid) = id { Some((vid, props)) } else { None })
+            .filter_map(|(id, props)| if let ProviderIdType::Id(vid) = id { Some((vid, props)) } else { None })
             .collect();
 
         if !updates.is_empty() {
@@ -328,7 +328,7 @@ async fn update_series_info_immediate(
     active_provider: &Arc<ActiveProviderManager>,
     input: &ConfigInput,
     pli: &PlaylistItem,
-    id: PlaylistItemIdType,
+    id: ProviderIdType,
     reasons: &ResolveReasonSet,
     db_query: Option<&mut BPlusTreeQuery<u32, XtreamPlaylistItem>>,
 ) -> Result<Option<SeriesStreamProperties>, TuliproxError> {
@@ -416,7 +416,7 @@ pub async fn update_series_metadata(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
     input: &ConfigInput,
-    id: PlaylistItemIdType,
+    id: ProviderIdType,
     active_provider: &Arc<ActiveProviderManager>,
     active_handle: Option<&ProviderHandle>,
     playlist_title: Option<&str>,
@@ -437,7 +437,7 @@ pub async fn update_series_metadata(
     let mut props: Option<SeriesStreamProperties> = None;
     let mut existing_item: Option<XtreamPlaylistItem> = None;
 
-    let series_id_opt = if let PlaylistItemIdType::Id(vid) = id { Some(vid) } else { None };
+    let series_id_opt = if let ProviderIdType::Id(vid) = id { Some(vid) } else { None };
 
     if let Some(series_id) = series_id_opt {
         // Use provided query or open new one

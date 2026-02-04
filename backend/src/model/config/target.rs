@@ -36,10 +36,9 @@ pub struct XtreamTargetOutput {
     pub skip_series_direct_source: bool,
     pub resolve_series: bool,
     pub resolve_vod: bool,
-    /// Consolidated delay in milliseconds for all resolution tasks.
-    pub resolve_delay: u16,
     pub resolve_live: bool,
     pub resolve_live_interval_hours: u32,
+    pub resolve_delay: u16,
     pub trakt: Option<TraktConfig>,
     pub filter: Option<Filter>,
 }
