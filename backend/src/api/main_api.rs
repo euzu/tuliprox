@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use crate::api::api_utils::{get_build_time, get_server_time};
 use crate::api::config_watch::exec_config_watch;
 use crate::api::endpoints::custom_video_stream_api::cvs_api_register;
@@ -467,7 +468,7 @@ fn exec_input_update_listener(app_state: &Arc<AppState>, targets: &Arc<ProcessTa
         loop {
             if let Ok(EventMessage::InputMetadataUpdatesCompleted(input_name)) = rx.recv().await {
                 // Find all targets that use this input
-                let mut targets_to_update = Vec::new();
+                let mut targets_to_update = HashSet::new();
                 let sources = app_state.app_config.sources.load();
                 
                 for source in &sources.sources {
@@ -481,7 +482,7 @@ fn exec_input_update_listener(app_state: &Arc<AppState>, targets: &Arc<ProcessTa
                             // Check if target matches process targets (CLI args or schedule)
                             if let Some(valid_targets) = crate::api::scheduler::get_process_targets(&app_state.app_config, &targets, Some(&vec![target.name.clone()])).as_ref().into() {
                                  if valid_targets.enabled && !valid_targets.targets.is_empty() {
-                                      targets_to_update.push(target.name.clone());
+                                      targets_to_update.insert(target.name.clone());
                                  }
                             }
                         }
@@ -489,6 +490,7 @@ fn exec_input_update_listener(app_state: &Arc<AppState>, targets: &Arc<ProcessTa
                 }
                 
                 if !targets_to_update.is_empty() {
+                    let targets_to_update: Vec<_> = targets_to_update.into_iter().collect();
                     // Small delay to ensure any lingering updates or file locks from the background thread are fully released
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 

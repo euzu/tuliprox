@@ -264,7 +264,8 @@ impl MetadataUpdateManager {
         }
 
         pending_tasks.insert(key.clone(), Mutex::new(task));
-        if sender.send(key).await.is_err() {
+        if sender.send(key.clone()).await.is_err() {
+            pending_tasks.remove(&key);
             warn!("Failed to send task signal for input {}", sanitize_sensitive_info(input_name));
         }
     }
