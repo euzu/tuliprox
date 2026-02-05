@@ -255,7 +255,7 @@ video:
       Accept: "video/*"
     directory: /tmp/
     organize_into_directories: true
-    episode_pattern: '.*(?P<episode>[Ss]\\d{1,2}(.*?)[Ee]\\d{1,2}).*'`
+    episode_pattern: '.*(?P<episode>[Ss]\\d{1,2}(.*?)[Ee]\\d{1,2}).*'
 ```
 
 ### 1.5a Video Analysis & Metadata Fallback

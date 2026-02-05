@@ -569,14 +569,10 @@ pub async fn update_vod_metadata(
             let input_url = input.url.as_str();
             let username = input.username.as_deref().unwrap_or("");
             let password = input.password.as_deref().unwrap_or("");
-            let opts = input.options.as_ref();
-            let use_prefix = opts.is_none_or(|o| o.xtream_live_stream_use_prefix);
-            let no_ext = opts.is_some_and(|o| o.xtream_live_stream_without_extension);
-
             let stream_url = crate::processing::parser::xtream::create_xtream_url(
                 XtreamCluster::Video, input_url, username, password,
                 &StreamProperties::Video(Box::new(properties.clone())),
-                use_prefix, no_ext,
+                true, true,
             );
 
             let ffprobe_timeout = app_config.config.load().video.as_ref().and_then(|v| v.ffprobe_timeout).unwrap_or(60);

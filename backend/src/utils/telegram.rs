@@ -101,6 +101,7 @@ pub async fn telegram_send_message(
         let result = client
             .post(url.clone())
             .json(&request_json_obj)
+            .timeout(std::time::Duration::from_secs(30))
             .send()
             .await;
 

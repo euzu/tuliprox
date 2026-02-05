@@ -19,7 +19,7 @@ pub async fn update_generic_stream_metadata(
     stream_url: &str,
     item_type: PlaylistItemType,
     active_provider: &Arc<ActiveProviderManager>,
-    active_handle: Option<&crate::api::model::ProviderHandle>,
+    _active_handle: Option<&crate::api::model::ProviderHandle>,
 ) -> Result<(), TuliproxError> {
     let working_dir = &app_config.config.load().working_dir;
 
@@ -46,25 +46,7 @@ pub async fn update_generic_stream_metadata(
     // Acquire lock and open tree for update
     let _file_lock = app_config.file_locks.write_lock(&db_path).await;
 
-    let probe_data = if let Some(handle) = active_handle {
-         // Use existing connection handle logic
-         let probe_url = stream_url.to_string();
-         let ffprobe_timeout = app_config.config.load().video.as_ref().and_then(|v| v.ffprobe_timeout).unwrap_or(60);
-         let user_agent = app_config.config.load().default_user_agent.clone();
-         let analyze_duration = 10_000_000;
-         let probe_size = 10_000_000;
-
-         debug_if_enabled!("Probing Generic Stream '{}' (Background)", unique_id);
-         let _ = handle; // Not used but keeps logic consistent
-
-         ffmpeg::probe_url(
-            &probe_url,
-            user_agent.as_deref(),
-            analyze_duration,
-            probe_size,
-            ffprobe_timeout,
-         ).await
-    } else if let Some(handle) = active_provider.acquire_connection_for_probe(&input.name).await {
+    let probe_data = if let Some(handle) = active_provider.acquire_connection_for_probe(&input.name).await {
          let probe_url = stream_url.to_string();
          let ffprobe_timeout = app_config.config.load().video.as_ref().and_then(|v| v.ffprobe_timeout).unwrap_or(60);
          let user_agent = app_config.config.load().default_user_agent.clone();
