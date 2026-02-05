@@ -178,7 +178,7 @@ async fn serve_epg_with_rewrites(
                 if let Some(icon_url) = &channel.icon {
                     let icon = match (epg_processing_options.rewrite_urls, base_url.as_ref(),
                                       obscure_text(&epg_processing_options.encrypt_secret, icon_url)) {
-                        (true, Some(base), Ok(enc)) => concat_string!(base, &enc),
+                        (true, Some(base), Ok(enc)) => concat_string!(base, "/", &enc),
                         _ => icon_url.to_string(),
                     };
 
