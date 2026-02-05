@@ -43,9 +43,6 @@ pub async fn update_generic_stream_metadata(
         return Err(shared::error::info_err!("Playlist DB file not found for input {}: {}", input.name, db_path.display()));
     }
 
-    // Acquire lock and open tree for update
-    let _file_lock = app_config.file_locks.write_lock(&db_path).await;
-
     let probe_data = if let Some(handle) = active_provider.acquire_connection_for_probe(&input.name).await {
          let probe_url = stream_url.to_string();
          let ffprobe_timeout = app_config.config.load().video.as_ref().and_then(|v| v.ffprobe_timeout).unwrap_or(60);
@@ -74,7 +71,10 @@ pub async fn update_generic_stream_metadata(
          warn!("Probe failed or timed out for generic stream: {unique_id}");
          return Ok(());
     };
-    
+
+    // Acquire lock and open a tree for update
+    let _file_lock = app_config.file_locks.write_lock(&db_path).await;
+
     // Update the record in BPlusTree
     if is_m3u {
          let key: Arc<str> = unique_id.into();

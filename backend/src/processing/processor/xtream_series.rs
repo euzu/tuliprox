@@ -519,8 +519,9 @@ pub async fn update_series_metadata(
 
     // 2. Resolve TMDB/Date if missing
     if (properties.tmdb.is_none() || properties.release_date.is_none()) && !properties.name.is_empty() {
-        let library_config = app_config.config.load().library.clone().unwrap_or_default();
-        let meta_resolver = MetadataResolver::new(&library_config, client.clone());
+        let config = app_config.config.load();
+        let library_config = config.library.as_ref();
+        let meta_resolver = MetadataResolver::new(library_config, client.clone());
 
         let mut meta = None;
         let mut tried_title = false;

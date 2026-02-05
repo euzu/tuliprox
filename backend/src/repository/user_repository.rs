@@ -514,6 +514,7 @@ mod tests {
             custom_stream_response: Arc::new(ArcSwapAny::default()),
             access_token_secret: Default::default(),
             encrypt_secret: Default::default(),
+            ffprobe_available: Default::default(),
         };
         let target_user = vec![user];
         let _ = store_api_user(&cfg, &target_user).await;

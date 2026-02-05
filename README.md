@@ -1478,8 +1478,8 @@ There is a difference for `resolve_vod` and `resolve_series`.
 `resolve_series` works only when input: `xtream` and output: `m3u`.
 `resolve_vod` works only when input: `xtream`.
 
-- `resolve_livetv`: If set to `true`, live streams are analyzed (probed) in the background during idle times to determine codecs and resolution.
-- `resolve_livetv_interval_hours`: Defines how often (in hours) a live stream should be re-probed (default: 24h).
+- `resolve_live`: If set to `true`, live streams are analyzed (probed) in the background during idle times to determine codecs and resolution.
+- `resolve_live_interval_hours`: Defines how often (in hours) a live stream should be re-probed (default: 24h).
 - `update_strategy`:
   - `instant` (default): Writes changes to the output files immediately after a stream is resolved/probed.
   - `bundled`: Queues updates and writes them in batches to reduce disk I/O operations.

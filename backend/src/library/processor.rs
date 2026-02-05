@@ -42,7 +42,7 @@ impl LibraryProcessor {
         let storage_path = std::path::PathBuf::from(&config.metadata.path);
         let scanner = LibraryScanner::new(config.clone());
         let storage = MetadataStorage::new(storage_path);
-        let resolver = MetadataResolver::from_config(&config, client, storage.clone());
+        let resolver = MetadataResolver::from_config(Some(&config), client, Some(storage.clone()));
 
         Self {
             config,

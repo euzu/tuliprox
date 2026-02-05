@@ -276,9 +276,7 @@ fn check_resolve_tmdb(resolve_options: &ResolveOptions, pli: &mut PlaylistItem, 
                 if !has_tmdb { reasons.add(ResolveReason::Tmdb); }
                 if !has_date { reasons.add(ResolveReason::Date); }
             }
-        } else if needs_info {
-            // Already covered by needs_info
-        } else {
+        } else if !needs_info {
             // No properties but no download requested? Should be rare
             reasons.add(ResolveReason::MissingDetails);
         }
@@ -497,8 +495,9 @@ pub async fn update_vod_metadata(
         let still_missing_date = properties.details.as_ref().and_then(|d| d.release_date.as_ref()).is_none();
 
         if missing_tmdb || still_missing_date {
-            let library_config = app_config.config.load().library.clone().unwrap_or_default();
-            let meta_resolver = MetadataResolver::new(&library_config, client.clone());
+            let config = app_config.config.load();
+            let library_config = config.library.as_ref();
+            let meta_resolver = MetadataResolver::new(library_config, client.clone());
 
             let mut meta = None;
             let mut tried_title = false;

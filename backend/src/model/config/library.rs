@@ -85,11 +85,11 @@ impl LibraryConfig {
     }
 }
 
-impl Default for LibraryConfig {
-    fn default() -> Self {
-        Self::from(&LibraryConfigDto::default())
-    }
-}
+// impl Default for LibraryConfig {
+//     fn default() -> Self {
+//         Self::from(&LibraryConfigDto::default())
+//     }
+// }
 
 macros::from_impl!(LibraryConfig);
 
