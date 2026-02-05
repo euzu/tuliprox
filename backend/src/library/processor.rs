@@ -140,6 +140,7 @@ impl LibraryProcessor {
         }
     }
 
+    // TODO: Implement enrich_metadata_with_ffprobe to add technical info (resolution, codecs) from local files
     //fn enrich_metadata_with_ffprobe(&self, _metadata: &mut MediaMetadata, _file_path: &str, _can_probe: bool) {
         //if !can_probe { return; }
 

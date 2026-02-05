@@ -300,7 +300,7 @@ mod tests {
             .timeout(Duration::from_secs(30))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
-        let mut config = create_test_config(false, false);
+        let config = create_test_config(false, false);
         let resolver = MetadataResolver::from_config(config.as_ref(), client, Some(MetadataStorage::new(PathBuf::from("/tmp"))));
         let file = create_test_file("343jfkjh4789dkjfh934z3.Movie.mkv");
         let metadata = match MediaClassifier::classify(&file) {

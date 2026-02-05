@@ -363,6 +363,7 @@
     "ADD_WATCH": "Add Watch",
     "ADD_MAPPING": "Add Mapping",
     "RESOLVE_DELAY_SEC": "Resolve Delay (sec)",
+    "RESOLVE_LIVE_INTERVAL_HOURS": "Live Interval (hour)",
     "COPY_CREDENTIALS": "Copy Credentials",
     "EXPORT_STYLE": "Export Style",
     "STRM_PROPS": "Properties",
@@ -417,7 +418,9 @@
     "MSG_KIND_WATCH": "Watch",
     "API_PROXY_CONFIG": "Api Proxy Config",
     "USE_USER_DB": "Use User DB",
-    "ADD_SERVER":  "Add Server"
+    "ADD_SERVER":  "Add Server",
+    "FFPROBE_ENABLED": "FFprobe Enabled",
+    "FFPROBE_TIMEOUT": "FFprobe Timeout (sec)"
   },
   "TITLE": {
     "USER_BOUQUET_EDITOR": "Playlist Category Selection"

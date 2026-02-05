@@ -5,7 +5,7 @@ use crate::app::context::ConfigContext;
 use crate::app::components::config::config_view_context::ConfigViewContext;
 use crate::app::components::config::config_page::{ConfigForm, LABEL_MAIN_CONFIG};
 use crate::{config_field_optional, config_field_bool, config_field, edit_field_text_option, edit_field_bool,
-            generate_form_reducer, edit_field_number, edit_field_number_option, edit_field_text};
+            generate_form_reducer, edit_field_number, edit_field_number_option_u32, edit_field_text};
 
 const LABEL_UPDATE_ON_BOOT: &str = "LABEL.UPDATE_ON_BOOT";
 const LABEL_CONFIG_HOT_RELOAD: &str = "LABEL.CONFIG_HOT_RELOAD";
@@ -109,7 +109,7 @@ pub fn MainConfigView() -> Html {
             { edit_field_text_option!(form_state, translate.t(LABEL_MAPPING_PATH), mapping_path, MainConfigFormAction::MappingPath) }
             { edit_field_text_option!(form_state, translate.t(LABEL_BACKUP_DIR), backup_dir, MainConfigFormAction::BackupDir) }
             { edit_field_text_option!(form_state, translate.t(LABEL_USER_CONFIG_DIR), user_config_dir, MainConfigFormAction::UserConfigDir) }
-            { edit_field_number_option!(form_state, translate.t(LABEL_SLEEP_TIMER_MINS), sleep_timer_mins, MainConfigFormAction::SleepTimerMins) }
+            { edit_field_number_option_u32!(form_state, translate.t(LABEL_SLEEP_TIMER_MINS), sleep_timer_mins, MainConfigFormAction::SleepTimerMins) }
             { edit_field_number!(form_state, translate.t(LABEL_CONNECT_TIMEOUT_SECS), connect_timeout_secs, MainConfigFormAction::ConnectTimeoutSecs) }
             { edit_field_text_option!(form_state, translate.t(LABEL_CUSTOM_STREAM_RESPONSE_PATH), custom_stream_response_path, MainConfigFormAction::CustomStreamResponsePath) }
         </>

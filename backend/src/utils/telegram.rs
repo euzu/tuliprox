@@ -170,7 +170,10 @@ fn chunk_html(text: &str, limit: usize) -> Vec<String> {
         // Check if adding this tag would exceed limit (with theoretical closing tags)
         // This is a simplification; strict checking would require computing current closers size.
         // For HTML tags, we generally assume they fit or trigger a split if very massive.
-        let closing_overhead = calculate_html_closing_overhead(&open_tags);
+        let mut closing_overhead = calculate_html_closing_overhead(&open_tags);
+        if !is_void && !is_closing {
+           closing_overhead += tag_name.len() + 3; // </tag>
+        }
         if current_chunk.len() + full_tag.len() + closing_overhead > limit {
             // Force split before tag
             chunks.push(finalize_chunk(&mut current_chunk, &open_tags, close_html_tags));
@@ -256,26 +259,25 @@ fn chunk_markdown_v2(text: &str, limit: usize) -> Vec<String> {
             // Actually, splitting inside valid Markdown structure is dangerous.
             // We mainly care about style markers: *, _, ~, ||, `
 
-            // Handle double chars
+            // Handle multi-char markers
             let mut handled = false;
-            if let Some(&next_c) = chars.peek() {
-                let double = format!("{c}{next_c}");
-                if double == "__" || double == "||" {
-                    chars.next(); // consume next
-                    token = double;
+            if c == '`' {
+                let mut lookahead = chars.clone();
+                if lookahead.next() == Some('`') && lookahead.next() == Some('`') {
+                    chars.next();
+                    chars.next();
+                    token = "```".to_string();
                     handled = true;
-                } else if double == "``" {
-                    // Check for triple backtick
-                    // peek again not easy with peekable iterator after simple peek.
-                    // Actually ``` is 3 chars.
-                    // Let's simplified parsing.
                 }
             }
-
-            if !handled && c == '`' {
-                // Check for ```
-                // Implementation detail: check if we can consume 2 more `
-                // For now, let's treat ` and ``` just as markers.
+            if !handled {
+                if let Some(&next_c) = chars.peek() {
+                    let double = format!("{c}{next_c}");
+                    if double == "__" || double == "||" {
+                        chars.next(); // consume next
+                        token = double;
+                    }
+                }
             }
 
             // Logic to update `open_markers`

@@ -1,13 +1,13 @@
-use crate::api::model::{ActiveProviderManager, ProviderHandle, ProviderIdType, ResolveReason, ResolveReasonSet};
 use crate::api::model::UpdateTask;
+use crate::api::model::{ActiveProviderManager, ProviderHandle, ProviderIdType, ResolveReason, ResolveReasonSet};
 use crate::library::MetadataResolver;
 use crate::model::FetchedPlaylist;
 use crate::model::{AppConfig, ConfigTarget};
 use crate::model::{ConfigInput, InputSource};
 use crate::processing::parser::xtream::create_xtream_series_episode_url;
 use crate::processing::parser::xtream::parse_xtream_series_info;
-use crate::processing::processor::{create_resolve_options_function_for_xtream_target, ResolveOptions, ResolveOptionsFlags};
 use crate::processing::processor::playlist::{PlaylistProcessingContext, ProcessingPipe};
+use crate::processing::processor::{create_resolve_options_function_for_xtream_target, ResolveOptions, ResolveOptionsFlags};
 use crate::ptt::ptt_parse_title;
 use crate::repository::persists_input_series_info;
 use crate::repository::{
@@ -45,7 +45,7 @@ pub async fn playlist_resolve_series(
     playlist_resolve_series_info(
         ctx,
         errors,
-        provider_fpl, 
+        provider_fpl,
         processed_fpl,
         resolve_options,
         do_probe,
@@ -66,7 +66,6 @@ async fn playlist_resolve_series_info(ctx: &PlaylistProcessingContext,
                                       do_probe: bool,
                                       pipe: &ProcessingPipe,
                                       target: &ConfigTarget) {
-    
     let filter = |pli: &PlaylistItem| {
         if pli.header.xtream_cluster != XtreamCluster::Series
             || pli.header.item_type != PlaylistItemType::SeriesInfo
@@ -98,7 +97,7 @@ async fn playlist_resolve_series_info(ctx: &PlaylistProcessingContext,
 
     // Apply resolved episodes to processed_fpl
     for group in new_playlist {
-         processed_fpl.update_playlist(&group).await;
+        processed_fpl.update_playlist(&group).await;
     }
 }
 
@@ -171,7 +170,7 @@ async fn process_immediate_series_info(
     // Open DB Once Strategy
     let xtream_path = xtream_get_file_path(&storage_path, XtreamCluster::Series);
     let mut db_query_holder = None;
-    
+
     // Acquire lock and open DB if file exists  
     let mut _db_lock_holder = if xtream_path.exists() {
         let lock = ctx.config.file_locks.read_lock(&xtream_path).await;
@@ -227,20 +226,26 @@ async fn process_immediate_series_info(
                                     })
                                     .collect();
 
-                                if !updates.is_empty() {
-                                    if let Err(err) = persist_input_series_info_batch(
+                                if updates.is_empty() {
+                                    batch.clear();
+                                } else {
+                                    match persist_input_series_info_batch(
                                         &ctx.config,
                                         &storage_path,
                                         XtreamCluster::Series,
                                         &input.name,
                                         updates,
                                     ).await {
-                                        error!("Failed to persist batch Series info: {err}");
+                                        Ok(()) => batch.clear(),
+                                        Err(err) => {
+                                            error!(
+                                                "persist_input_series_info_batch failed for XtreamCluster::Series on input '{}'. batch.clear() skipped. Error: {}",
+                                                input.name, err
+                                            );
+                                        }
                                     }
                                 }
-                                
-                                batch.clear();
-                                
+
                                 // Re-acquire lock
                                 if xtream_path.exists() {
                                     let lock = ctx.config.file_locks.read_lock(&xtream_path).await;
@@ -256,7 +261,7 @@ async fn process_immediate_series_info(
                                 tokio::time::sleep(Duration::from_secs(u64::from(resolve_options.resolve_delay))).await;
                             }
                         }
-                        Ok(None) => {},
+                        Ok(None) => {}
                         Err(e) => {
                             error!("Failed to update Series metadata for {}: {e}", pli.header.title);
                         }
@@ -285,11 +290,11 @@ async fn process_immediate_series_info(
 
         if !updates.is_empty() {
             if let Err(err) = persist_input_series_info_batch(
-                &ctx.config, 
-                &storage_path, 
-                XtreamCluster::Series, 
-                &input.name, 
-                updates
+                &ctx.config,
+                &storage_path,
+                XtreamCluster::Series,
+                &input.name,
+                updates,
             ).await {
                 error!("Failed to persist final batch series info: {err}");
             }
@@ -310,13 +315,13 @@ fn expand_series_item(pli: &PlaylistItem, input: &ConfigInput) -> Option<Playlis
             let header = &pli.header;
             (header.group.clone(), header.get_name())
         };
-        
+
         if let Some(episodes) = parse_xtream_series_info(&pli.get_uuid(), properties, &group, &series_name, input, global_release_date.as_ref()) {
-             return Some(PlaylistGroup {
-                    id: pli.header.category_id,
-                    title: pli.header.group.clone(),
-                    channels: episodes,
-                    xtream_cluster: XtreamCluster::Series,
+            return Some(PlaylistGroup {
+                id: pli.header.category_id,
+                title: pli.header.group.clone(),
+                channels: episodes,
+                xtream_cluster: XtreamCluster::Series,
             });
         }
     }
@@ -333,7 +338,7 @@ async fn update_series_info_immediate(
     db_query: Option<&mut BPlusTreeQuery<u32, XtreamPlaylistItem>>,
 ) -> Result<Option<SeriesStreamProperties>, TuliproxError> {
     let fetch_info = reasons.contains(ResolveReason::Info);
-    
+
     update_series_metadata(
         &ctx.config,
         &ctx.client,
@@ -397,7 +402,7 @@ fn check_needs_probe(pli: &mut PlaylistItem, reasons: &mut ResolveReasonSet) {
                     let missing_audio = !MediaQuality::is_valid_media_info(ep.audio.as_deref());
                     if missing_video || missing_audio {
                         reasons.add(ResolveReason::Probe);
-                        break; 
+                        break;
                     }
                 }
             }
@@ -549,11 +554,11 @@ pub async fn update_series_metadata(
         // 3. API Name (fallback)
         if (meta.is_none() || (meta.as_ref().is_some_and(|m| m.tmdb_id().is_none())))
             && !properties.name.is_empty() {
-                let title_already_tried = if let Some(t) = title_candidate { t == properties.name.as_ref() } else { false };
-                if !tried_title || !title_already_tried {
-                    debug!("Fallback to API Name '{}'...", properties.name);
-                    meta = meta_resolver.resolve_from_title(&properties.name, properties.tmdb, false).await;
-                }
+            let title_already_tried = if let Some(t) = title_candidate { t == properties.name.as_ref() } else { false };
+            if !tried_title || !title_already_tried {
+                debug!("Fallback to API Name '{}'...", properties.name);
+                meta = meta_resolver.resolve_from_title(&properties.name, properties.tmdb, false).await;
+            }
         }
 
         if let Some(m) = meta {
