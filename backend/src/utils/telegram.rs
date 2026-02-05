@@ -1,8 +1,8 @@
 use crate::model::AppConfig;
 use log::{debug, error};
-use regex::Regex;
 use std::sync::Arc;
 use url::Url;
+use shared::utils::CONSTANTS;
 
 const MAX_MESSAGE_LENGTH: usize = 4000;
 
@@ -145,14 +145,13 @@ fn chunk_plain_text(text: &str, limit: usize) -> Vec<String> {
 const HTML_VOID_TAGS: &[&str] = &["br", "hr", "img", "input", "meta", "area", "base", "col", "embed", "link", "param", "source", "track", "wbr"];
 
 fn chunk_html(text: &str, limit: usize) -> Vec<String> {
-    let tag_regex = Regex::new(r"</?([a-zA-Z0-9]+)[^>]*>").unwrap();
     let mut chunks = Vec::new();
     let mut current_chunk = String::new();
     let mut open_tags: Vec<(String, String)> = Vec::new(); // (tag_name, full_opening_tag)
 
     let mut last_pos = 0;
 
-    for cap in tag_regex.captures_iter(text) {
+    for cap in CONSTANTS.re_html_tag.captures_iter(text) {
         let m = cap.get(0).unwrap();
         let tag_name = cap.get(1).unwrap().as_str().to_lowercase();
         let full_tag = m.as_str();
@@ -202,8 +201,8 @@ fn chunk_html(text: &str, limit: usize) -> Vec<String> {
     append_text_checking_limit(&mut chunks, &mut current_chunk, remaining_text, limit, &mut open_tags, close_html_tags, open_html_tags);
 
     if !current_chunk.is_empty() {
-        // No need to close tags for the final global chunk if the input was valid HTML
-        chunks.push(current_chunk);
+        // Close any remaining open tags for robustness (empty if input was valid)
+        chunks.push(finalize_chunk(&mut current_chunk, &open_tags, close_html_tags));
     }
 
     chunks

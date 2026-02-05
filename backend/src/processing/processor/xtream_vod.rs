@@ -36,8 +36,7 @@ pub async fn playlist_resolve_vod(
     let resolve_options = get_resolve_vod_options(target, fpl);
 
     let app_config: &Arc<AppConfig> = &ctx.config;
-    let ffprobe_enabled = app_config.is_ffprobe_enabled().await;
-    let do_probe = resolve_options.flags.contains(ResolveOptionsFlags::Probe) && ffprobe_enabled;
+    let do_probe = resolve_options.flags.contains(ResolveOptionsFlags::Probe) && app_config.is_ffprobe_enabled().await;
 
     // Determine if we need to do anything
     if !resolve_options.flags.contains(ResolveOptionsFlags::Resolve) && !do_probe && !resolve_options.flags.contains(ResolveOptionsFlags::TmdbMissing) {

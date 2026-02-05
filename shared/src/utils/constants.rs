@@ -105,6 +105,7 @@ pub struct Constants {
     pub re_classifier_camel_case: Regex,
     pub re_classifier_brackets_info: Regex,
     pub re_clean_title: Regex,
+    pub re_html_tag: Regex,
 }
 
 pub static CONSTANTS: LazyLock<Constants> = LazyLock::new(||
@@ -164,6 +165,7 @@ pub static CONSTANTS: LazyLock<Constants> = LazyLock::new(||
         re_classifier_camel_case: Regex::new(r"([a-z])([A-Z])").unwrap(),
         re_classifier_brackets_info: Regex::new(r"[\[\{\(].*?[\]\}\)]").unwrap(),
 
-        re_clean_title: Regex::new(r"^(?:\s*[\[\(┃|].*?[\]\)┃|]\s*)+").unwrap()      // Matches patterns like "┃DE┃", "[US]", "(FR)", "|EN|" at the start of the string
+        re_clean_title: Regex::new(r"^(?:\s*[\[\(┃|].*?[\]\)┃|]\s*)+").unwrap(),      // Matches patterns like "┃DE┃", "[US]", "(FR)", "|EN|" at the start of the string
+        re_html_tag: Regex::new(r"</?([a-zA-Z0-9]+)[^>]*>").unwrap()
     }
 );

@@ -578,8 +578,7 @@ pub async fn update_series_metadata(
     }
 
     // 3. Probe Episodes (if enabled)
-    let ffprobe_enabled = app_config.is_ffprobe_enabled().await;
-    if ffprobe_enabled && do_probe {
+    if do_probe && app_config.is_ffprobe_enabled().await {
         if let Some(details) = properties.details.as_mut() {
             if let Some(episodes) = details.episodes.as_mut() {
                 let ffprobe_timeout = app_config.config.load().video.as_ref().and_then(|v| v.ffprobe_timeout).unwrap_or(60);

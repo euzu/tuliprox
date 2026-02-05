@@ -178,8 +178,7 @@ pub async fn playlist_resolve_livetv(
     let metadata_manager: Option<&Arc<MetadataUpdateManager>> = ctx.metadata_manager.as_ref();
 
     // Check if ffprobe is enabled globally
-    let ffprobe_enabled = app_config.is_ffprobe_enabled().await;
-    let do_probe = probe_requested && ffprobe_enabled;
+    let do_probe = probe_requested && app_config.is_ffprobe_enabled().await;
     // We only proceed if both the target requests it AND global ffprobe is enabled
     if !resolve_livetv || !do_probe {
         return;
