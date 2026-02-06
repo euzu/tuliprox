@@ -176,8 +176,8 @@ fn process_header(input_name: &Arc<str>, video_suffixes: &[String], content: &st
             plih.epg_channel_id = None;
             if let Some(pid) = provider_id {
                 plih.id = pid.intern();
-            } else if let Some(chanid) = url_id {
-                plih.id = chanid.intern();
+            } else if !url_id.is_empty() {
+                plih.id = url_id.intern();
             }
         } else {
             plih.epg_channel_id = Some(Arc::clone(&plih.id));

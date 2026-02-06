@@ -1,8 +1,8 @@
-use base64::Engine;
-use base64::engine::general_purpose;
-use url::Url;
 use crate::model::PlaylistItemType;
 use crate::model::UUIDType;
+use base64::engine::general_purpose;
+use base64::Engine;
+use url::Url;
 
 #[inline]
 pub fn hash_bytes(bytes: &[u8]) -> UUIDType {
@@ -32,7 +32,7 @@ pub fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
     (0..hex.len())
         .step_by(2)
         .map(|i| {
-            u8::from_str_radix(&hex[i..i+2], 16)
+            u8::from_str_radix(&hex[i..i + 2], 16)
                 .map_err(|e| format!("invalid hex at position {i}: {e}"))
         })
         .collect()
@@ -42,16 +42,29 @@ pub fn hash_string_as_hex(url: &str) -> String {
     hex_encode(hash_string(url).as_ref())
 }
 
-pub fn extract_id_from_url(url: &str) -> Option<String> {
-    if let Some(possible_id_and_ext) = url.split('/').next_back() {
-        return possible_id_and_ext.rfind('.').map_or_else(|| Some(possible_id_and_ext.to_string()), |index| Some(possible_id_and_ext[..index].to_string()));
+pub fn extract_id_from_url(url: &str) -> String {
+    let url_no_trailing = url.trim_end_matches('/');
+
+    let mut segments = url_no_trailing.split('/');
+
+    if let Some(last_segment) = segments.next_back() {
+        let name_part = last_segment.split('.').next().unwrap_or("");
+
+        if !name_part.is_empty() && name_part.chars().all(|c| c.is_ascii_digit()) {
+            return name_part.to_string();
+        }
     }
-    None
+
+    let cleaned_for_hash = url_no_trailing
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+
+    short_hash(cleaned_for_hash)
 }
 
 pub fn get_provider_id(provider_id: &str, url: &str) -> Option<u32> {
     provider_id.parse::<u32>().ok().or_else(|| {
-        extract_id_from_url(url)?.parse::<u32>().ok()
+        extract_id_from_url(url).parse::<u32>().ok()
     })
 }
 
