@@ -4,7 +4,7 @@ use crate::model::EpgConfigDto;
 use crate::utils::{arc_str_serde, default_as_true, deserialize_timestamp, get_credentials_from_url_str, get_trimmed_string,
                    is_false, is_true, is_zero_u16, sanitize_sensitive_info,
                    serialize_option_vec_flow_map_items, trim_last_slash};
-use crate::utils::{is_blank_optional_string, Internable};
+use crate::utils::{is_blank_optional_string, Internable, arc_str_vec_serde};
 use crate::{check_input_connections, check_input_credentials, info_err_res};
 
 use enum_iterator::Sequence;
@@ -528,5 +528,28 @@ impl ConfigInputDto {
         }
 
         Err(TuliproxError::new(TuliproxErrorKind::Info, format!("No matching input or alias found for input '{input_name}' with username '{username}'")))
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigProviderDto {
+    #[serde(with = "arc_str_serde")]
+    pub name: Arc<str>,
+    #[serde(with = "arc_str_vec_serde")]
+    pub urls: Vec<Arc<str>>,
+}
+
+impl ConfigProviderDto {
+    pub fn prepare(&mut self) -> Result<(), TuliproxError> {
+        self.name = self.name.trim().intern();
+        if self.name.is_empty() {
+            return info_err_res!("Name for provider is mandatory");
+        }
+        self.urls = self.urls.drain(..).filter(|url| !url.trim().is_empty()).map(|u| u.trim().intern()).collect();
+        if self.urls.is_empty() {
+            return info_err_res!("Urls for provider is mandatory");
+        }
+        Ok(())
     }
 }

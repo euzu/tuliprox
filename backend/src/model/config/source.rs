@@ -1,10 +1,24 @@
 use crate::model::{macros, ConfigInput, ConfigTarget, ProcessTargets};
 use shared::error::{info_err_res, TuliproxError};
-use shared::model::{ConfigSourceDto, PatternTemplate, SourcesConfigDto};
+use shared::model::{ConfigProviderDto, ConfigSourceDto, PatternTemplate, SourcesConfigDto};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+
+#[derive(Debug, Clone)]
+pub struct ConfigProvider {
+    pub name: Arc<str>,
+    pub urls: Vec<Arc<str>>,
+}
+
+
+macros::from_impl!(ConfigProvider);
+impl From<&ConfigProviderDto> for ConfigProvider {
+    fn from(dto: &ConfigProviderDto) -> Self {
+        Self { name: dto.name.clone(), urls: dto.urls.clone() }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ConfigSource {
@@ -40,6 +54,7 @@ impl ConfigSource {
 pub struct SourcesConfig {
     pub batch_files: Vec<PathBuf>,
     pub templates: Option<Vec<PatternTemplate>>,
+    pub provider: Vec<Arc<ConfigProvider>>,
     pub inputs: Vec<Arc<ConfigInput>>,
     pub sources: Vec<ConfigSource>,
 }
@@ -51,6 +66,8 @@ impl TryFrom<&SourcesConfigDto> for SourcesConfig {
         let mut inputs = Vec::<Arc<ConfigInput>>::new();
         let mut batch_files = Vec::<PathBuf>::new();
         let mut input_names = HashSet::new();
+        let provider = dto.provider.iter().map(ConfigProvider::from).map(Arc::new).collect::<Vec<_>>();
+
 
         for input_dto in &dto.inputs {
             let mut input = ConfigInput::from(input_dto);
@@ -76,6 +93,7 @@ impl TryFrom<&SourcesConfigDto> for SourcesConfig {
         Ok(Self {
             batch_files,
             templates: dto.templates.clone(),
+            provider,
             inputs,
             sources,
         })

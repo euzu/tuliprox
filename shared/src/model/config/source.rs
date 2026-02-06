@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::info_err_res;
 use crate::error::{TuliproxError};
 use crate::foundation::prepare_templates;
-use crate::model::{ConfigInputDto, HdHomeRunDeviceOverview, PatternTemplate};
+use crate::model::{ConfigInputDto, ConfigProviderDto, HdHomeRunDeviceOverview, PatternTemplate};
 use crate::model::config::target::ConfigTargetDto;
 use crate::utils::{arc_str_vec_serde, default_as_default, Internable};
 
@@ -35,6 +35,7 @@ impl ConfigSourceDto {
 pub struct SourcesConfigDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub templates: Option<Vec<PatternTemplate>>,
+    pub provider: Vec<ConfigProviderDto>,
     pub inputs: Vec<ConfigInputDto>,
     pub sources: Vec<ConfigSourceDto>,
 }
@@ -42,8 +43,21 @@ pub struct SourcesConfigDto {
 impl SourcesConfigDto {
     pub fn prepare(&mut self, include_computed: bool, hdhr_config: Option<&HdHomeRunDeviceOverview>) -> Result<(), TuliproxError> {
         self.prepare_templates()?;
+        self.prepare_providers()?;
         self.prepare_sources(include_computed, hdhr_config)?;
         self.check_unique_target_names()?;
+        Ok(())
+    }
+
+    fn prepare_providers(&mut self) -> Result<(), TuliproxError> {
+        let mut names = HashSet::new();
+        for provider in &mut self.provider {
+            provider.prepare()?;
+            if names.contains(&provider.name) {
+                return info_err_res!("Provider names should be unique: {}", provider.name);
+            }
+            names.insert(provider.name.clone());
+        }
         Ok(())
     }
 
