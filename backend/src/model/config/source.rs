@@ -4,19 +4,61 @@ use shared::model::{ConfigProviderDto, ConfigSourceDto, PatternTemplate, Sources
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ConfigProvider {
     pub name: Arc<str>,
     pub urls: Vec<Arc<str>>,
+    pub current_url_index: AtomicUsize,
+}
+
+impl Clone for ConfigProvider {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            urls: self.urls.clone(),
+            current_url_index: AtomicUsize::new(self.current_url_index.load(Ordering::Relaxed)),
+        }
+    }
 }
 
 
 macros::from_impl!(ConfigProvider);
 impl From<&ConfigProviderDto> for ConfigProvider {
     fn from(dto: &ConfigProviderDto) -> Self {
-        Self { name: dto.name.clone(), urls: dto.urls.clone() }
+        Self {
+            name: dto.name.clone(),
+            urls: dto.urls.clone(),
+            current_url_index: AtomicUsize::new(0)
+        }
+    }
+}
+
+impl ConfigProvider {
+    /// Gets the current URL from the provider
+    pub fn get_current_url(&self) -> Option<&Arc<str>> {
+        let index = self.current_url_index.load(Ordering::Relaxed);
+        self.urls.get(index)
+    }
+
+    /// Rotates to the next URL in the provider and returns it
+    pub fn rotate_to_next_url(&self) -> Option<&Arc<str>> {
+        if self.urls.is_empty() {
+            return None;
+        }
+
+        let current = self.current_url_index.load(Ordering::Relaxed);
+        let next = (current + 1) % self.urls.len();
+        self.current_url_index.store(next, Ordering::Relaxed);
+
+        self.urls.get(next)
+    }
+
+    /// Resets the current URL index to 0
+    pub fn reset_index(&self) {
+        self.current_url_index.store(0, Ordering::Relaxed);
     }
 }
 
@@ -196,5 +238,9 @@ impl SourcesConfig {
 
     pub fn get_input_by_name(&self, name: &Arc<str>) -> Option<&Arc<ConfigInput>> {
         self.inputs.iter().find(|i| &i.name == name)
+    }
+
+    pub fn get_provider_by_name(&self, name: &str) -> Option<&Arc<ConfigProvider>> {
+        self.provider.iter().find(|p| p.name.as_ref() == name)
     }
 }

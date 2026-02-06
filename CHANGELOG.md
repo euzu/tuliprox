@@ -50,6 +50,11 @@
 - **Added `disk_based_processing`**: (boolean, default `false`) to `config.yml`. When enabled, input playlists are processed from disk instead of memory.
 - **User-Agent `default_user_agent`**: Ensures that outgoing requests always pass a default user agent.
 - **Streaming**: Added `grace_period_hold_stream` configuration option to delay stream output until grace period connection checks are completed.
+- **Provider Failover & Rotation** Tuliprox supports robust failover mechanisms for streaming providers. If a provider has multiple URLs defined (or aliases), Tuliprox can automatically rotate between them in case of failures.
+  You can use the special `provider://<provider_name>/...` URL scheme in your configurations. Tuliprox will automatically resolve this to the current active URL of the specified provider.
+  If the current URL fails (e.g., 5xx error, timeout), Tuliprox automatically rotates to the next available URL for that provider.
+  It tracks failures and prevents infinite loops by limiting attempts to the number of available URLs.
+
 
 ## ⚙️ Engine & Storage Optimizations
 - **Slotted Page Architecture**: Improved space utilization and support for variable-length keys.

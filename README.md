@@ -121,7 +121,25 @@ With this configuration, you should create a `data` directory where you execute 
 
 Be aware that different configurations (e.g. user bouquets) along the playlists are stored in this directory.
 
-### 1.4 `messaging`
+## 1.4 Provider Failover & Rotation
+Tuliprox supports robust failover mechanisms for streaming providers. If a provider has multiple URLs defined (or aliases), Tuliprox can automatically rotate between them in case of failures.
+
+### 1.4.1 `provider://` Scheme
+You can use the special `provider://<provider_name>/...` URL scheme in your configurations. Tuliprox will automatically resolve this to the current active URL of the specified provider.
+- If the current URL fails (e.g., 5xx error, timeout), Tuliprox automatically rotates to the next available URL for that provider.
+- It tracks failures and prevents infinite loops by limiting attempts to the number of available URLs.
+
+### 1.4.2 Automatic Failover triggers
+Failover is triggered automatically on:
+- Network Timeouts
+- Server Errors (500, 502, 503, 504)
+- Specific Client Errors (404 Not Found, 410 Gone, 429 Too Many Requests)
+
+It does **not** trigger on Authentication errors (401, 403), as those usually indicate invalid credentials rather than a server issue.
+
+---
+
+### 1.5 `messaging`
 `messaging` is an optional configuration for receiving messages.
 Currently `telegram`, `discord`, `rest` and `pushover.net` is supported.
 

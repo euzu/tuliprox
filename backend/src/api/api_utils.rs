@@ -445,7 +445,20 @@ async fn create_stream_response_details(
     force_provider: Option<&Arc<str>>,
     virtual_id: VirtualId,
 ) -> StreamDetails {
-    let mut streaming_strategy = resolve_streaming_strategy(app_state, stream_url, fingerprint, input, force_provider).await;
+    // Resolve provider:// URLs before processing
+    let config_provider = stream_url.strip_prefix("provider://")
+    .and_then(|_| url::Url::parse(stream_url).ok())
+    .and_then(|url| {
+        let host = url.host_str()?;
+        let p = app_state.app_config.sources.load().get_provider_by_name(host).cloned();
+        if p.is_none() { warn!("Provider '{host}' not found"); }
+        p
+    });
+
+	let resolved_stream_url = config_provider.as_ref()
+    .and_then(|p| p.get_current_url()).map_or_else(|| stream_url.to_string(), std::string::ToString::to_string);
+
+    let mut streaming_strategy = resolve_streaming_strategy(app_state, &resolved_stream_url, fingerprint, input, force_provider).await;
     let mut grace_period_options = app_state.get_grace_options();
     grace_period_options.period_millis = get_grace_period_millis(
         connection_permission,
@@ -501,7 +514,7 @@ async fn create_stream_response_details(
             let ((stream, stream_info), reconnect_flag) = if let Ok(url) = parsed_url {
                 let default_user_agent = app_state.app_config.config.load().default_user_agent.clone();
                 let disabled_headers = app_state.get_disabled_headers();
-                let provider_stream_factory_options = ProviderStreamFactoryOptions::new(
+                let mut provider_stream_factory_options = ProviderStreamFactoryOptions::new(
                     fingerprint.addr,
                     item_type,
                     share_stream,
@@ -512,6 +525,9 @@ async fn create_stream_response_details(
                     disabled_headers.as_ref(),
                     default_user_agent.as_deref(),
                 );
+                // Set provider for failover support
+                provider_stream_factory_options.set_provider(config_provider.clone());
+
                 let reconnect_flag = provider_stream_factory_options.get_reconnect_flag_clone();
                 let provider_stream = match create_provider_stream(
                     app_state,

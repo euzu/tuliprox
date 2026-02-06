@@ -3,13 +3,13 @@ use crate::api::model::{get_response_headers, AppState, CustomVideoStreamType};
 use crate::api::model::StreamError;
 use crate::api::model::{create_channel_unavailable_stream, get_header_filter_for_item_type};
 use crate::api::model::{BoxedProviderStream, ProviderStreamFactoryResponse};
-use crate::model::{ReverseProxyDisabledHeaderConfig};
+use crate::model::{ConfigProvider, ReverseProxyDisabledHeaderConfig};
 use crate::tools::atomic_once_flag::AtomicOnceFlag;
 use crate::utils::debug_if_enabled;
-use crate::utils::request::{classify_content_type, get_request_headers, MimeCategory};
+use crate::utils::request::{classify_content_type, get_request_headers, MimeCategory, send_with_retry_and_provider, should_trigger_failover};
 use futures::stream::{self};
 use futures::{StreamExt, TryStreamExt};
-use log::{debug, log_enabled, warn};
+use log::{debug, info, log_enabled, warn};
 use reqwest::header::{HeaderMap, RANGE};
 use reqwest::StatusCode;
 use shared::model::{PlaylistItemType, DEFAULT_USER_AGENT};
@@ -42,6 +42,7 @@ pub struct ProviderStreamFactoryOptions {
     range_bytes: Arc<Option<AtomicUsize>>,
     range_requested: bool,
     reconnect_flag: Arc<AtomicOnceFlag>,
+    provider: Option<Arc<ConfigProvider>>,
 }
 
 impl ProviderStreamFactoryOptions {
@@ -103,7 +104,16 @@ impl ProviderStreamFactoryOptions {
             default_user_agent,
             range_bytes,
             range_requested: requested_range.is_some(),
+            provider: None,
         }
+    }
+
+    pub fn set_provider(&mut self, provider: Option<Arc<ConfigProvider>>) {
+        self.provider = provider;
+    }
+
+    pub fn get_provider(&self) -> Option<&Arc<ConfigProvider>> {
+        self.provider.as_ref()
     }
 
     #[inline]
@@ -358,17 +368,80 @@ fn should_use_manual_redirects(app_state: &Arc<AppState>) -> bool {
 async fn send_with_manual_redirects(
     request_client: &reqwest::Client,
     stream_options: &ProviderStreamFactoryOptions,
+    app_state: &Arc<AppState>,
 ) -> Result<reqwest::Response, reqwest::Error> {
     let mut current_url = stream_options.get_url().clone();
-    let mut remaining = 10u8;
+    let mut remaining_redirects = 10u8;
+    let provider = stream_options.get_provider().cloned();
+    
+    // Safety against infinite provider rotation
+    let mut provider_attempts = 0;
+    let max_provider_attempts = provider.as_ref().map_or(1, |p| p.urls.len());
 
-    loop {
-        let (client, _partial_content) = prepare_client(request_client, stream_options, Some(&current_url));
-        let response = client.send().await?;
+    'redirect_loop: loop {
+        let result = send_with_retry_and_provider(
+            &app_state.app_config,
+            &current_url,
+            provider.as_ref(), // Pass provider to use internal retry logic if implemented there
+            || {
+                 let target_url = if let Some(p) = provider.as_ref() {
+                     p.get_current_url().map_or_else(|| current_url.clone(), |u| Url::parse(u).unwrap_or_else(|_| current_url.clone()))
+                } else {
+                    current_url.clone()
+                };
+                prepare_client(request_client, stream_options, Some(&target_url)).0
+            }
+        ).await;
+
+        let response = match result {
+            Ok(resp) => resp,
+            Err(e) => {
+                // Check if we should trigger provider failover on connection error
+                if let Some(p) = provider.as_ref() {
+                     if provider_attempts < max_provider_attempts {
+                        if let Some(_next_url) = p.rotate_to_next_url() {
+                            let current_index = p.current_url_index.load(std::sync::atomic::Ordering::Relaxed);
+                            info!("Provider '{}' switched to URL index {} due to connection error in manual redirects", p.name, current_index);
+                            
+                            provider_attempts += 1;
+                            // Retry with new provider URL
+                            continue 'redirect_loop;
+                        }
+                    }
+                }
+                
+                // Re-throw as IO error which will be handled by caller
+                 debug!("Manual redirect failed: {}", sanitize_sensitive_info(e.to_string().as_str()));
+                // Create a new request client error
+                let target_url = if let Some(p) = provider.as_ref() {
+                     p.get_current_url().map_or_else(|| current_url.clone(), |u| Url::parse(u).unwrap_or_else(|_| current_url.clone()))
+                } else {
+                    current_url.clone()
+                };
+                let (client, _) = prepare_client(request_client, stream_options, Some(&target_url));
+                return client.send().await;
+            }
+        };
+
         let status = response.status();
 
+        // Check if we should trigger provider failover due to error status
+        if should_trigger_failover(status) {
+            if let Some(p) = provider.as_ref() {
+                if provider_attempts < max_provider_attempts {
+                    if let Some(_next_url) = p.rotate_to_next_url() {
+                        let current_index = p.current_url_index.load(std::sync::atomic::Ordering::Relaxed);
+                        warn!("Provider '{}' switched to URL index {} due to status {} in manual redirects", p.name, current_index, status);
+                        
+                        provider_attempts += 1;
+                        continue 'redirect_loop;
+                    }
+                }
+            }
+        }
+
         if status.is_redirection() {
-            if remaining == 0 {
+            if remaining_redirects == 0 {
                 return Ok(response);
             }
             let location = response.headers().get(reqwest::header::LOCATION);
@@ -385,7 +458,7 @@ async fn send_with_manual_redirects(
                 return Ok(response);
             };
             current_url = next_url;
-            remaining = remaining.saturating_sub(1);
+            remaining_redirects = remaining_redirects.saturating_sub(1);
             continue;
         }
         return Ok(response);
@@ -399,10 +472,39 @@ async fn provider_stream_request(
 ) -> Result<Option<ProviderStreamFactoryResponse>, StatusCode> {
     let response_result = if should_use_manual_redirects(app_state) {
         let client_no_redirect = app_state.http_client_no_redirect.load();
-        send_with_manual_redirects(&client_no_redirect, stream_options).await
+        send_with_manual_redirects(&client_no_redirect, stream_options, app_state).await
     } else {
-        let (client, _partial_content) = prepare_client(request_client, stream_options, None);
-        client.send().await
+        // Use send_with_retry_and_provider for automatic failover support
+        let url = stream_options.get_url();
+        let provider = stream_options.get_provider().cloned();
+
+        match send_with_retry_and_provider(
+            &app_state.app_config,
+            url,
+            provider.as_ref(),
+            || {
+                let current_url = if let Some(p) = provider.as_ref() {
+                     p.get_current_url().map_or_else(|| url.clone(), |u| Url::parse(u).unwrap_or_else(|_| url.clone()))
+                } else {
+                    url.clone()
+                };
+                let (client, _partial_content) = prepare_client(request_client, stream_options, Some(&current_url));
+                client
+            }
+        ).await {
+            Ok(response) => Ok(response),
+            Err(e) => {
+                debug!("Stream request failed: {}", sanitize_sensitive_info(e.to_string().as_str()));
+                // Fallback: Try one last time with standard client and current url logic
+                let current_url = if let Some(p) = provider.as_ref() {
+                     p.get_current_url().map_or_else(|| url.clone(), |u| Url::parse(u).unwrap_or_else(|_| url.clone()))
+                } else {
+                    url.clone()
+                };
+                let (client, _partial_content) = prepare_client(request_client, stream_options, Some(&current_url));
+                client.send().await
+            }
+        }
     };
     match response_result {
         Ok(mut response) => {
