@@ -17,7 +17,7 @@ use crate::repository::storage_const;
 use crate::repository::VirtualIdRecord;
 use crate::repository::{get_target_id_mapping, user_get_bouquet_filter, xtream_get_collection_path, xtream_get_item_for_stream_id, xtream_load_rewrite_playlist};
 use crate::utils::xtream::create_vod_info_from_item;
-use crate::utils::{debug_if_enabled, file_exists_async, trace_if_enabled};
+use crate::utils::{apply_timeshift, debug_if_enabled, file_exists_async, parse_timeshift, trace_if_enabled};
 use crate::utils::{request, xtream};
 use axum::http::HeaderMap;
 use axum::response::IntoResponse;
@@ -34,6 +34,7 @@ use shared::utils::{deserialize_as_string, extract_extension_from_url, generate_
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::fmt::Write;
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, Eq, PartialEq)]
 pub enum ApiStreamContext {
@@ -959,10 +960,11 @@ async fn xtream_player_api_handle_content_action(
 #[allow(clippy::too_many_lines)]
 async fn xtream_get_catchup_response(
     app_state: &Arc<AppState>,
+    user: &ProxyUserCredentials,
     target: &Arc<ConfigTarget>,
     stream_id: &str,
-    start: &str,
-    end: &str,
+    start_time: &str,
+    end_time: &str,
 ) -> impl IntoResponse + Send {
     let req_virtual_id: u32 = if let Ok(id) = stream_id.parse::<u32>() {
         id
@@ -981,15 +983,20 @@ async fn xtream_get_catchup_response(
         .app_config
         .get_input_by_name(&pli.input_name));
 
-    let info_url = try_option_bad_request!(xtream::get_xtream_player_api_action_url(
+    let mut info_url = try_option_bad_request!(xtream::get_xtream_player_api_action_url(
         &input,
         crate::model::XC_ACTION_GET_CATCHUP_TABLE
     )
-    .map(|action_url| format!(
-        "{action_url}&{}={}&start={start}&end={end}",
-        crate::model::XC_TAG_STREAM_ID,
-        pli.provider_id
-    )));
+    .map(|action_url| format!("{action_url}&{}={}", crate::model::XC_TAG_STREAM_ID, pli.provider_id)));
+
+    if !start_time.is_empty() && end_time.is_empty() {
+        let epg_timeshift = parse_timeshift(user.epg_request_timeshift.as_deref());
+        let start = apply_timeshift(start_time, &epg_timeshift);
+        let end = apply_timeshift(end_time, &epg_timeshift);
+        if !start.is_empty() && !end.is_empty() {
+            let _ = write!(info_url, "&start={start}&end={end}");
+        }
+    }
 
     let input_source = InputSource::from(&*input).with_url(info_url);
     let content = try_result_bad_request!(
@@ -1206,6 +1213,7 @@ async fn xtream_player_api(
                     skip_live,
                     xtream_get_catchup_response(
                         app_state,
+                        &user,
                         &target,
                         api_req.stream_id.trim(),
                         api_req.start.trim(),

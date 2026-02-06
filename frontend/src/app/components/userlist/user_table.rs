@@ -21,7 +21,7 @@ use yew_i18n::use_translation;
 use crate::app::{ConfigContext, TargetUserList};
 use crate::hooks::use_service_context;
 
-const HEADERS: [&str; 15] = [
+const HEADERS: [&str; 16] = [
     "LABEL.EMPTY",
     "LABEL.ENABLED",
     "LABEL.STATUS",
@@ -34,6 +34,7 @@ const HEADERS: [&str; 15] = [
     "LABEL.MAX_CON",
     "LABEL.UI_ENABLED",
     "LABEL.EPG_TIMESHIFT",
+    "LABEL.EPG_REQUEST_TIMESHIFT",
     "LABEL.CREATED_AT",
     "LABEL.EXP_DATE",
     "LABEL.COMMENT",
@@ -198,12 +199,13 @@ pub fn UserTable(props: &UserTableProps) -> Html {
                                    label={if dto.credentials.ui_enabled {translator.t("LABEL.ENABLED")} else { translator.t("LABEL.DISABLED")} }
                                     />  },
                     11 => dto.credentials.epg_timeshift.as_ref().map_or_else(|| html! {}, |s| html! { s }),
-                    12 => dto.credentials.created_at.as_ref().and_then(|ts| unix_ts_to_str(*ts))
+                    12 => dto.credentials.epg_request_timeshift.as_ref().map_or_else(|| html! {}, |s| html! { s }),
+                    13 => dto.credentials.created_at.as_ref().and_then(|ts| unix_ts_to_str(*ts))
                         .map(|s| html! { { s } }).unwrap_or_else(|| html! { <AppIcon name="Unlimited" /> }),
-                    13 => dto.credentials.exp_date.as_ref().and_then(|ts| unix_ts_to_str(*ts))
+                    14 => dto.credentials.exp_date.as_ref().and_then(|ts| unix_ts_to_str(*ts))
                         .map(|s| html! { <span class="tp__table__nowrap">{ s }</span> })
                         .unwrap_or_else(|| html! { <AppIcon name="Unlimited" /> }),
-                    14 => dto.credentials.comment.as_ref()
+                    15 => dto.credentials.comment.as_ref()
                         .map_or_else(|| html! {},
                                      |comment| html! { <RevealContent preview={Some(html! {comment.substring(0, 50)})}>{comment}</RevealContent> }),
                     _ => html! {""},

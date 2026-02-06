@@ -1634,6 +1634,7 @@ pub fn create_api_proxy_user(app_state: &Arc<AppState>) -> ProxyUserCredentials 
         proxy: ProxyType::Reverse(None),
         server: Some(server.to_string()),
         epg_timeshift: None,
+        epg_request_timeshift: None,
         created_at: None,
         exp_date: None,
         max_connections: 0,

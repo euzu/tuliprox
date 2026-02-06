@@ -29,6 +29,7 @@ generate_form_reducer!(
         ExpDate => exp_date: Option<i64>,
         UiEnabled => ui_enabled: bool,
         EpgTimeshift => epg_timeshift: Option<String>,
+        EpgRequestTimeshift => epg_request_timeshift: Option<String>,
         Comment => comment: Option<String>,
     }
 );
@@ -241,6 +242,7 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
             { edit_field_number!(form_state,  translate.t("LABEL.MAX_CONNECTIONS"), max_connections, UserFormAction::MaxConnections) }
             { edit_field_date!(form_state,  translate.t("LABEL.EXP_DATE"), exp_date, UserFormAction::ExpDate) }
             { edit_field_text_option!(form_state,  translate.t("LABEL.EPG_TIMESHIFT"), epg_timeshift, UserFormAction::EpgTimeshift) }
+            { edit_field_text_option!(form_state,  translate.t("LABEL.EPG_REQUEST:TIMESHIFT"), epg_request_timeshift, UserFormAction::EpgRequestTimeshift) }
             { edit_field_bool!(form_state,  translate.t("LABEL.USER_UI_ENABLED"), ui_enabled, UserFormAction::UiEnabled) }
             { edit_field_text_option!(form_state,  translate.t("LABEL.COMMENT"), comment, UserFormAction::Comment) }
 
