@@ -1,9 +1,7 @@
 use super::PanelApiConfigDto;
 use crate::error::{TuliproxError, TuliproxErrorKind};
 use crate::model::EpgConfigDto;
-use crate::utils::{arc_str_serde, default_as_true, deserialize_timestamp, get_credentials_from_url_str, get_trimmed_string,
-                   is_false, is_true, is_zero_u16, sanitize_sensitive_info,
-                   serialize_option_vec_flow_map_items, trim_last_slash};
+use crate::utils::{arc_str_serde, default_as_true, deserialize_timestamp, get_credentials_from_url_str, get_trimmed_string, is_false, is_true, is_zero_u16, parse_provider_scheme_url_parts, sanitize_sensitive_info, serialize_option_vec_flow_map_items, trim_last_slash};
 use crate::utils::{is_blank_optional_string, Internable, arc_str_vec_serde};
 use crate::{check_input_connections, check_input_credentials, info_err_res};
 
@@ -361,7 +359,7 @@ impl Default for ConfigInputDto {
 
 impl ConfigInputDto {
     #[allow(clippy::cast_possible_truncation)]
-    pub fn prepare(&mut self, index: u16, _include_computed: bool) -> Result<u16, TuliproxError> {
+    pub fn prepare(&mut self, index: u16, _include_computed: bool, provider_names: &HashSet<String>) -> Result<u16, TuliproxError> {
         self.name = self.name.trim().intern();
         if self.name.is_empty() {
             return info_err_res!("name for input is mandatory");
@@ -384,12 +382,23 @@ impl ConfigInputDto {
 
         self.persist = get_trimmed_string(self.persist.as_deref());
 
+        if let Ok((host, _path)) = parse_provider_scheme_url_parts(&self.url) {
+            if !provider_names.contains(host) {
+                return info_err_res!("Provider name {host} is not defined");
+            }
+        }
+
         let mut current_index = index + 1;
         self.id = current_index;
         if let Some(aliases) = self.aliases.as_mut() {
             let input_type = &self.input_type;
             for alias in aliases {
                 current_index = alias.prepare(current_index, input_type)?;
+                if let Ok((host, _path)) = parse_provider_scheme_url_parts(&alias.url) {
+                    if !provider_names.contains(host) {
+                        return info_err_res!("Provider name {host} is not defined");
+                    }
+                }
             }
         }
 

@@ -481,14 +481,16 @@ fn stream_grace_period(
                             let stop_signal = provisioning_info.stop_signal;
                             let addr = fingerprint.addr;
                             tokio::spawn(async move {
-                                run_panel_api_provisioning_probe(
+                                if let Err(err) = run_panel_api_provisioning_probe(
                                     app_state,
                                     input,
                                     stop_signal,
                                     addr,
                                     virtual_id,
                                 )
-                                    .await;
+                                    .await {
+                                    error!("Error running Probe: {err:?}");
+                                }
                             });
                         } else {
                             stream_strategy_flag_copy

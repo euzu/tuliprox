@@ -465,6 +465,7 @@ async fn send_with_manual_redirects(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn provider_stream_request(
     app_state: &Arc<AppState>,
     request_client: &reqwest::Client,

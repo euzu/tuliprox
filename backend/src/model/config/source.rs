@@ -114,7 +114,7 @@ impl TryFrom<&SourcesConfigDto> for SourcesConfig {
         for input_dto in &dto.inputs {
             let mut input = ConfigInput::from(input_dto);
             // Prepare input
-            if let Some(path) = input.prepare()? {
+            if let Some(path) = input.prepare(&provider)? {
                 batch_files.push(path);
             }
             input_names.insert(input.name.clone());

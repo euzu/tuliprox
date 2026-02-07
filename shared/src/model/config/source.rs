@@ -43,32 +43,32 @@ pub struct SourcesConfigDto {
 impl SourcesConfigDto {
     pub fn prepare(&mut self, include_computed: bool, hdhr_config: Option<&HdHomeRunDeviceOverview>) -> Result<(), TuliproxError> {
         self.prepare_templates()?;
-        self.prepare_providers()?;
-        self.prepare_sources(include_computed, hdhr_config)?;
+        let provider_names =self.prepare_providers()?;
+        self.prepare_sources(include_computed, hdhr_config, &provider_names)?;
         self.check_unique_target_names()?;
         Ok(())
     }
 
-    fn prepare_providers(&mut self) -> Result<(), TuliproxError> {
+    fn prepare_providers(&mut self) -> Result<HashSet<String>, TuliproxError> {
         let mut names = HashSet::new();
         for provider in &mut self.provider {
             provider.prepare()?;
-            if names.contains(&provider.name) {
+            if names.contains(provider.name.as_ref()) {
                 return info_err_res!("Provider names should be unique: {}", provider.name);
             }
-            names.insert(provider.name.clone());
+            names.insert(provider.name.to_string());
         }
-        Ok(())
+        Ok(names)
     }
 
-    fn prepare_sources(&mut self, include_computed: bool, hdhr_config: Option<&HdHomeRunDeviceOverview>) -> Result<(), TuliproxError> {
+    fn prepare_sources(&mut self, include_computed: bool, hdhr_config: Option<&HdHomeRunDeviceOverview>, provider_names: &HashSet<String>) -> Result<(), TuliproxError> {
         // prepare sources and set id's
         let mut source_index: u16 = 0;
         let mut input_index: u16 = 0;
         let mut target_index: u16 = 1;
         // Prepare global inputs
         for input in &mut self.inputs {
-            input_index = input.prepare(input_index, include_computed)?;
+            input_index = input.prepare(input_index, include_computed, provider_names)?;
         }
 
         for source in &mut self.sources {

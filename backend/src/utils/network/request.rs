@@ -13,10 +13,8 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{StatusCode};
 use shared::error::{notify_err_res, string_to_io_error, TuliproxError};
 use shared::model::{InputFetchMethod, DEFAULT_USER_AGENT};
-use shared::utils::{
-    filter_request_header, human_readable_byte_size, sanitize_sensitive_info, ENCODING_DEFLATE,
-    ENCODING_GZIP,
-};
+use shared::utils::{filter_request_header, human_readable_byte_size,
+                    sanitize_sensitive_info, ENCODING_DEFLATE, ENCODING_GZIP};
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};
@@ -28,7 +26,6 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::time::sleep;
 use tokio_util::io::StreamReader;
 use url::Url;
-use shared::info_err;
 
 static PROXY_DIAGNOSTICS_ONCE: Once = Once::new();
 
@@ -154,6 +151,7 @@ pub async fn send_with_retry(
 }
 
 /// Sends a request with retry logic and optional provider failover support.
+#[allow(clippy::too_many_lines)]
 pub async fn send_with_retry_and_provider(
     app_config: &Arc<AppConfig>,
     url: &Url, // Used primarily for logging/context
@@ -1250,40 +1248,6 @@ pub fn is_file_url(url: &str) -> bool {
 pub fn is_uri(url: &str) -> bool {
     Url::parse(url)
         .is_ok_and(|u| u.scheme().eq_ignore_ascii_case("file") || u.scheme().eq_ignore_ascii_case("http") || u.scheme().eq_ignore_ascii_case("https"))
-}
-
-/// Resolves a URL that may be a provider:// reference to the actual HTTP(S) URL
-/// Returns the resolved URL and optionally the provider that was used
-pub fn resolve_url(
-    url_str: &str, 
-    provider: Option<&Arc<ConfigProvider>>
-) -> Result<(String, Option<Arc<ConfigProvider>>), TuliproxError> {
-
-    // fast check
-    if !url_str.starts_with("provider://") {
-        return Ok((url_str.to_string(), None));
-    }
-
-    // it is a provider:// url
-    let parsed_url = Url::parse(url_str).map_err(|_| {
-        info_err!("Invalid URL format: {}", sanitize_sensitive_info(url_str))
-    })?;
-
-    let provider_name = parsed_url.host_str().ok_or_else(|| {
-        info_err!("Missing provider name in: {}", sanitize_sensitive_info(url_str))
-    })?;
-
-    // Provider validaton
-    let p = provider.ok_or_else(|| {
-        info_err!("Provider '{provider_name}' reference missing for resolution")
-    })?;
-
-    // get current active url for provider
-    let resolved_url = p.get_current_url().ok_or_else(|| {
-        info_err!("Provider '{provider_name}' has no active URLs")
-    })?;
-
-    Ok((resolved_url.to_string(), Some(Arc::clone(p))))
 }
 
 /// Checks if a status code or error indicates a need for failover
