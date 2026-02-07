@@ -60,6 +60,7 @@ impl ConfigProvider {
     pub fn reset_index(&self) {
         self.current_url_index.store(0, Ordering::Relaxed);
     }
+
 }
 
 #[derive(Debug, Clone)]

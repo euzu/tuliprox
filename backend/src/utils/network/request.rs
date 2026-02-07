@@ -8,9 +8,9 @@ use crate::utils::{get_file_path, persist_file};
 use futures::{StreamExt, TryStreamExt};
 use log::{debug, error, log_enabled, trace, warn, Level};
 use reqwest::header::CONTENT_ENCODING;
-use reqwest::redirect::Policy;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-use reqwest::{StatusCode};
+use reqwest::redirect::Policy;
+use reqwest::StatusCode;
 use shared::error::{notify_err_res, string_to_io_error, TuliproxError};
 use shared::model::{InputFetchMethod, DEFAULT_USER_AGENT};
 use shared::utils::{filter_request_header, human_readable_byte_size,
@@ -37,11 +37,11 @@ fn log_proxy_diagnostics(config: &Config) {
                 .url
                 .contains('@')
                 || proxy_cfg.url.contains("://")
-                    && proxy_cfg
-                        .url
-                        .split("://")
-                        .nth(1)
-                        .is_some_and(|part| part.contains('@'));
+                && proxy_cfg
+                .url
+                .split("://")
+                .nth(1)
+                .is_some_and(|part| part.contains('@'));
             let has_explicit_credentials =
                 proxy_cfg.username.as_ref().is_some() || proxy_cfg.password.as_ref().is_some();
             debug!(
@@ -216,19 +216,19 @@ pub async fn send_with_retry_and_provider(
                 result = send().send() => {
                     match result {
                         Ok(response) => {
-                            let status = response.status();
-
-                            if status.is_success() {
+                                let status = response.status();
+                            let is_failover = is_failover_redirect(response.url());
+                            if !is_failover && status.is_success() {
                                 return Ok(response);
                             }
 
                             // Failover check: Should we switch to the next provider URL?
-                            if should_trigger_failover(status) {
+                            if is_failover || should_trigger_failover(status) {
                                 if let Some(p) = provider {
                                     if p.rotate_to_next_url().is_some() {
                                         let current_index = p.current_url_index.load(std::sync::atomic::Ordering::Relaxed);
-                                        warn!("Provider '{}' failover: status {} -> switching to URL index {}",
-                                            p.name, format_http_status(status), current_index);
+                                        warn!("Provider '{}' failover: status {} -> switching to URL index {current_index}",
+                                            p.name, format_http_status(status));
                                         provider_attempts += 1;
                                         continue 'provider_loop;
                                     }
@@ -287,6 +287,11 @@ pub async fn send_with_retry_and_provider(
     }
 
     Err(string_to_io_error("All attempts and providers exhausted".to_string()))
+}
+
+fn is_failover_redirect(url: &Url) -> bool {
+    let redirect_url = url.to_string();
+    redirect_url.contains("service-abuse")
 }
 
 /// Helper to handle sleep duration for retries, respecting Retry-After headers
@@ -699,9 +704,12 @@ pub async fn get_remote_content_as_file(
     let default_user_agent = config.default_user_agent.clone();
     drop(config);
 
-    let response = send_with_retry(
+    let provider_config = input.get_resolve_provider(url.as_str());
+
+    let response = send_with_retry_and_provider(
         app_config,
         url,
+        provider_config.as_ref(),
         || {
             get_client_request(
                 client,

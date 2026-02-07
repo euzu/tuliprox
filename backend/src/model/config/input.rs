@@ -169,6 +169,14 @@ impl ConfigInput {
             check_input_credentials!(self, self.input_type, false, false);
             check_input_connections!(self, self.input_type, false);
             if let Some(staged_input) = &mut self.staged {
+                if let Ok((host, _path)) = parse_provider_scheme_url_parts(&staged_input.url) {
+                    if let Some(provider_cfg) = provider_configs.iter().find(|p| p.name.as_ref() == host) {
+                        used_provider_configs.push(provider_cfg.clone());
+                    } else {
+                        return info_err_res!("Failed to resolve provider config for {}", sanitize_sensitive_info(&staged_input.url));
+                    }
+                }
+
                 check_input_credentials!(staged_input, staged_input.input_type, false, true);
                 if !matches!(staged_input.input_type, InputType::M3u | InputType::Xtream) {
                     return info_err_res!("Staged input can only be from type m3u or xtream");

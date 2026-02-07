@@ -13,7 +13,7 @@ use log::{debug, info, log_enabled, warn};
 use reqwest::header::{HeaderMap, RANGE};
 use reqwest::StatusCode;
 use shared::model::{PlaylistItemType, DEFAULT_USER_AGENT};
-use shared::utils::{filter_request_header, sanitize_sensitive_info};
+use shared::utils::{filter_request_header, sanitize_sensitive_info, PROVIDER_SCHEME_PREFIX};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -478,10 +478,15 @@ async fn provider_stream_request(
         // Use send_with_retry_and_provider for automatic failover support
         let url = stream_options.get_url();
         let provider = stream_options.get_provider().cloned();
+        let resolved_url = if url.as_ref().starts_with(PROVIDER_SCHEME_PREFIX) {
+            provider.as_ref().and_then(|p| p.get_current_url().as_ref().map(|u| Url::parse(u).unwrap_or_else(|_| url.clone()))).unwrap_or_else(|| url.clone())
+        } else {
+            url.clone()
+        };
 
         match send_with_retry_and_provider(
             &app_state.app_config,
-            url,
+            &resolved_url,
             provider.as_ref(),
             || {
                 let current_url = if let Some(p) = provider.as_ref() {

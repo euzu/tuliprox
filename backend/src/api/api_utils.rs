@@ -10,7 +10,7 @@ use crate::auth::Fingerprint;
 use crate::model::{ConfigInput};
 use crate::model::{ConfigTarget, ProxyUserCredentials};
 use crate::tools::lru_cache::LRUResourceCache;
-use crate::utils::request::{content_type_from_ext, parse_range, send_with_retry};
+use crate::utils::request::{content_type_from_ext, parse_range, send_with_retry_and_provider};
 use crate::utils::{async_file_reader, async_file_writer, create_new_file_for_write, get_file_extension};
 use crate::utils::{debug_if_enabled, trace_if_enabled};
 use crate::utils::request;
@@ -447,9 +447,7 @@ async fn create_stream_response_details(
     virtual_id: VirtualId,
 ) -> Result<StreamDetails, TuliproxError> {
 
-    let resolved_stream_url = input.resolve_url(stream_url)?;
-
-    let mut streaming_strategy = resolve_streaming_strategy(app_state, &resolved_stream_url, fingerprint, input, force_provider).await;
+    let mut streaming_strategy = resolve_streaming_strategy(app_state, &stream_url, fingerprint, input, force_provider).await;
     let mut grace_period_options = app_state.get_grace_options();
     grace_period_options.period_millis = get_grace_period_millis(
         connection_permission,
@@ -518,7 +516,6 @@ async fn create_stream_response_details(
                 );
 
                 let provider_config = input.get_resolve_provider(url.as_ref());
-                // Set provider for failover support
                 provider_stream_factory_options.set_provider(provider_config);
 
                 let reconnect_flag = provider_stream_factory_options.get_reconnect_flag_clone();
@@ -1379,9 +1376,11 @@ async fn fetch_resource_with_retry(
 
     let disabled_headers = app_state.get_disabled_headers();
 
-    let Ok(response) = send_with_retry(
+    let provider_config = input?.get_resolve_provider(url.as_str());
+    let Ok(response) = send_with_retry_and_provider(
         &app_state.app_config,
         url,
+        provider_config.as_ref(),
         || {
             request::get_client_request(
                 &app_state.http_client.load(),

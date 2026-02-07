@@ -7,7 +7,7 @@ use log::{error, warn};
 use shared::error::{string_to_io_error, to_io_error, TuliproxError};
 use shared::info_err;
 use shared::model::{ConfigInputAliasDto, InputType};
-use shared::utils::{get_credentials_from_url, get_credentials_from_url_str, parse_timestamp, sanitize_sensitive_info, Internable};
+use shared::utils::{get_credentials_from_url, get_credentials_from_url_str, parse_timestamp, sanitize_sensitive_info, Internable, PROVIDER_SCHEME_PREFIX};
 use std::io;
 use std::io::{BufRead, Cursor, Error};
 use std::path::{Path, PathBuf};
@@ -61,6 +61,11 @@ fn build_m3u_url(
 
 fn csv_assign_mandatory_fields(alias: &mut ConfigInputAliasDto, input_type: InputType) {
     if !alias.url.is_empty() {
+        let mut provider_scheme = false;
+        if alias.url.starts_with(PROVIDER_SCHEME_PREFIX) {
+            provider_scheme = true;
+            alias.url = alias.url.replace(PROVIDER_SCHEME_PREFIX, "http://");
+        }
         match Url::parse(alias.url.as_str()) {
             Ok(url) => {
                 let (username, password) = get_credentials_from_url(&url);
@@ -106,6 +111,9 @@ fn csv_assign_mandatory_fields(alias: &mut ConfigInputAliasDto, input_type: Inpu
             Err(err) => {
                 warn!("Could not parse URL '{}' for alias: {err}", sanitize_sensitive_info(&alias.url));
             }
+        }
+        if provider_scheme {
+            alias.url = alias.url.replace("http://", PROVIDER_SCHEME_PREFIX);
         }
     }
 }
