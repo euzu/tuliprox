@@ -322,6 +322,7 @@
     "MAX_CONNECTIONS": "Max Connections",
     "METHOD": "Method",
     "EPG_TIMESHIFT": "Epg Timeshift",
+    "EPG_REQUEST_TIMESHIFT": "Epg Request Timeshift",
     "CREATED_AT": "Created at",
     "EXP_DATE": "Exp. date",
     "UI_ENABLED": "Ui",

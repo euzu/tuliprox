@@ -619,19 +619,19 @@ async fn process_xtream_cluster_to_disk(
     // Optional compaction to optimize the newly created database file
     if let Ok(mut tree_update) = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::try_new(&tmp_xtream_path) {
         if let Err(e) = tree_update.compact(&tmp_xtream_path) {
-            error!("Failed to compact temporary database for {cluster} at {:?}: {e}", tmp_xtream_path);
+            error!("Failed to compact temporary database for {cluster} at {:?}: {e}", tmp_xtream_path.display());
         }
     }
 
     // Atomic Swap: Replace old database with new one
     if let Err(e) = crate::utils::rename_or_copy(&tmp_xtream_path, &xtream_path, false) {
-        error!("Failed to swap xtream database for {cluster} (from {:?} to {:?}): {e}", tmp_xtream_path, xtream_path);
+        error!("Failed to swap xtream database for {cluster} (from {:?} to {:?}): {e}", tmp_xtream_path.display(), xtream_path.display());
         return notify_err_res!("Failed to swap database: {e}");
     }
 
     // Atomic Swap: Replace old categories with new ones
     if let Err(e) = crate::utils::rename_or_copy(&tmp_col_path, &col_path, false) {
-        error!("Failed to swap xtream categories for {cluster} (from {:?} to {:?}): {e}", tmp_col_path, col_path);
+        error!("Failed to swap xtream categories for {cluster} (from {:?} to {:?}): {e}", tmp_col_path.display(), col_path.display());
         return notify_err_res!("Failed to swap categories: {e}");
     }
 

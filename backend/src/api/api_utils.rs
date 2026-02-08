@@ -447,7 +447,7 @@ async fn create_stream_response_details(
     virtual_id: VirtualId,
 ) -> Result<StreamDetails, TuliproxError> {
 
-    let mut streaming_strategy = resolve_streaming_strategy(app_state, &stream_url, fingerprint, input, force_provider).await;
+    let mut streaming_strategy = resolve_streaming_strategy(app_state, stream_url, fingerprint, input, force_provider).await;
     let mut grace_period_options = app_state.get_grace_options();
     grace_period_options.period_millis = get_grace_period_millis(
         connection_permission,
@@ -1654,6 +1654,7 @@ pub fn create_api_proxy_user(app_state: &Arc<AppState>) -> ProxyUserCredentials 
         proxy: ProxyType::Reverse(None),
         server: Some(server.to_string()),
         epg_timeshift: None,
+        epg_request_timeshift: None,
         created_at: None,
         exp_date: None,
         max_connections: 0,

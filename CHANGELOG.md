@@ -54,7 +54,7 @@
   You can use the special `provider://<provider_name>/...` URL scheme in your configurations. Tuliprox will automatically resolve this to the current active URL of the specified provider.
   If the current URL fails (e.g., 5xx error, timeout), Tuliprox automatically rotates to the next available URL for that provider.
   It tracks failures and prevents infinite loops by limiting attempts to the number of available URLs.
-
+- Added `epg_request_timeshift: [-+]hh:mm or TimeZone`, example `Europe/Paris`, `America/New_York`, `-2:30`(-2h30m), `+0:15` (15m), `2` (2h), `:30` (30m), `:3` (3m)
 
 ## ⚙️ Engine & Storage Optimizations
 - **Slotted Page Architecture**: Improved space utilization and support for variable-length keys.
