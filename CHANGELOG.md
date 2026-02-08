@@ -50,6 +50,7 @@
 - **Added `disk_based_processing`**: (boolean, default `false`) to `config.yml`. When enabled, input playlists are processed from disk instead of memory.
 - **User-Agent `default_user_agent`**: Ensures that outgoing requests always pass a default user agent.
 - **Streaming**: Added `grace_period_hold_stream` configuration option to delay stream output until grace period connection checks are completed.
+- Added `epg_request_timeshift: [-+]hh:mm or TimeZone`, example `Europe/Paris`, `America/New_York`, `-2:30`(-2h30m), `+0:15` (15m), `2` (2h), `:30` (30m), `:3` (3m)
 
 ## ⚙️ Engine & Storage Optimizations
 - **Slotted Page Architecture**: Improved space utilization and support for variable-length keys.

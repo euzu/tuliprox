@@ -1,18 +1,17 @@
-use std::sync::Arc;
-use chrono::{DateTime, TimeZone, Utc};
-use chrono_tz::Tz;
-use crate::model::{ConfigTarget, ProxyUserCredentials};
-use shared::model::PlaylistItemType;
 use crate::api::model::AppState;
-
+use crate::model::{ConfigTarget, ProxyUserCredentials};
+use chrono::{DateTime, Duration, NaiveDateTime, TimeZone, Utc};
+use chrono_tz::Tz;
+use shared::model::PlaylistItemType;
+use std::sync::Arc;
 
 /// Parses user-defined EPG timeshift configuration.
 /// Supports either a numeric offset (e.g. "+2:30", "-1:15")
 /// or a timezone name (e.g. "`Europe/Berlin`", "`UTC`", "`America/New_York`").
-fn parse_timeshift(time_shift: Option<&str>) -> EpgTimeShift {
+pub fn parse_timeshift(time_shift: Option<&str>) -> EpgTimeShift {
     if let Some(offset) = time_shift {
         if offset.is_empty() {
-             return EpgTimeShift::None;
+            return EpgTimeShift::None;
         }
 
         // Try to parse as timezone name first
@@ -30,9 +29,9 @@ fn parse_timeshift(time_shift: Option<&str>) -> EpgTimeShift {
 
         let total_minutes = hours * 60 + minutes;
         if total_minutes > 0 {
-             EpgTimeShift::Fixed(sign_factor * total_minutes)
+            EpgTimeShift::Fixed(sign_factor * total_minutes)
         } else {
-             EpgTimeShift::None
+            EpgTimeShift::None
         }
     } else {
         EpgTimeShift::None
@@ -110,6 +109,51 @@ pub fn format_xmltv_time_utc(ts: i64, time_shift: &EpgTimeShift) -> String {
     }
 }
 
+pub fn apply_timeshift(date_str: &str, shift: &EpgTimeShift) -> String {
+    if let EpgTimeShift::None = shift {
+        return date_str.to_string();
+    }
+
+    // 1. Try to parse date
+    // "YYYY-MM-DD:HH-mm" or Unix Timestamps?
+    // "YYYY-MM-DD:HH-mm" format:
+    let format = "%Y-%m-%d:%H-%M";
+
+    let mut is_ts = false;
+
+    let dt = if let Ok(parsed_dt) = NaiveDateTime::parse_from_str(date_str, format) {
+        parsed_dt
+    } else if let Ok(ts) = date_str.parse::<i64>() {
+        is_ts = true;
+        match DateTime::from_timestamp(ts, 0) {
+            Some(d) => d.naive_utc(),
+            None => return date_str.to_string(),
+        }
+    } else {
+        return date_str.to_string();
+    };
+
+    // 2. Calculate offset
+    let shifted_dt = match shift {
+        EpgTimeShift::Fixed(minutes) => {
+            dt + Duration::minutes(i64::from(*minutes))
+        }
+        EpgTimeShift::TimeZone(tz) => {
+            // We assume it is UTC and want to know the target TZ
+            let utc_dt = Utc.from_utc_datetime(&dt);
+            utc_dt.with_timezone(tz).naive_local()
+        }
+        EpgTimeShift::None => dt,
+    };
+
+    if is_ts {
+        let utc_shifted = Utc.from_utc_datetime(&shifted_dt);
+        utc_shifted.timestamp().to_string()
+    } else {
+        shifted_dt.format(format).to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,7 +181,7 @@ mod tests {
     fn test_parse_timezone() {
         // Check timezone parsing creates the correct variant
         let amterdam = parse_timeshift(Some("Europe/Amsterdam"));
-         if let EpgTimeShift::TimeZone(tz) = amterdam {
+        if let EpgTimeShift::TimeZone(tz) = amterdam {
             assert_eq!(tz.name(), "Europe/Amsterdam");
         } else {
             panic!("Expected TimeZone for Europe/Amsterdam");
@@ -154,7 +198,7 @@ mod tests {
         if let EpgTimeShift::TimeZone(tz) = tokyo {
             assert_eq!(tz.name(), "Asia/Tokyo");
         } else {
-             panic!("Expected TimeZone for Asia/Tokyo");
+            panic!("Expected TimeZone for Asia/Tokyo");
         }
 
         let utc = parse_timeshift(Some("UTC"));
