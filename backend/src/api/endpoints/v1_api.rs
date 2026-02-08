@@ -85,6 +85,7 @@ async fn geoip_update(axum::extract::State(app_state): axum::extract::State<Arc<
             let input_source =  InputSource {
                 name: "GeoIP".intern(),
                 url,
+                provider: None,
                 username: None,
                 password: None,
                 method: InputFetchMethod::GET,

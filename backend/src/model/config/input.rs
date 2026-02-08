@@ -2,7 +2,7 @@ use crate::model::{macros, ConfigProvider, EpgConfig, PanelApiConfig};
 use crate::repository::get_csv_file_path;
 use chrono::Utc;
 use log::warn;
-use shared::{check_input_credentials, info_err};
+use shared::{check_input_credentials, concat_string, info_err};
 use shared::error::TuliproxError;
 use shared::model::{ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, InputFetchMethod, InputType, StagedInputDto};
 use shared::utils::{get_credentials_from_url, parse_provider_scheme_url_parts, sanitize_sensitive_info, Internable, PROVIDER_SCHEME_PREFIX};
@@ -452,13 +452,19 @@ fn assemble_provider_url(provider: &ConfigProvider, path_and_query: &str) -> Res
     let base = provider.get_current_url()
         .ok_or_else(|| info_err!("Provider '{}' has no URLs available", provider.name))?;
 
-    let mut final_url = base.trim_end_matches('/').to_string();
+    // Add http:// scheme if no scheme is present
+    let base_with_scheme = if base.contains("://") {
+        base.to_string()
+    } else {
+        concat_string!("http://", base)
+    };
+
+    let mut final_url = base_with_scheme.trim_end_matches('/').to_string();
     if !path_and_query.is_empty() {
         final_url.push_str(path_and_query);
     }
     Ok(final_url)
 }
-
 
 #[cfg(test)]
 mod tests {

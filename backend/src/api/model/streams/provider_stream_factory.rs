@@ -3,7 +3,7 @@ use crate::api::model::{get_response_headers, AppState, CustomVideoStreamType};
 use crate::api::model::StreamError;
 use crate::api::model::{create_channel_unavailable_stream, get_header_filter_for_item_type};
 use crate::api::model::{BoxedProviderStream, ProviderStreamFactoryResponse};
-use crate::model::{ConfigProvider, ReverseProxyDisabledHeaderConfig};
+use crate::model::{resolve_provider_scheme_url_with_provider, ConfigProvider, ReverseProxyDisabledHeaderConfig};
 use crate::tools::atomic_once_flag::AtomicOnceFlag;
 use crate::utils::debug_if_enabled;
 use crate::utils::request::{classify_content_type, get_request_headers, MimeCategory, send_with_retry_and_provider, should_trigger_failover};
@@ -365,6 +365,25 @@ fn should_use_manual_redirects(app_state: &Arc<AppState>) -> bool {
     config.proxy.is_some() || proxy_env_present()
 }
 
+/// Resolves a provider:// URL to an actual HTTP URL using the provider's current base URL
+/// and the path from the scheme URL.
+fn resolve_provider_url(url_str: &str, provider: Option<&Arc<ConfigProvider>>) -> Option<Url> {
+    if !url_str.starts_with(PROVIDER_SCHEME_PREFIX) {
+        return None;
+    }
+    
+    let provider = provider?;
+    
+    match resolve_provider_scheme_url_with_provider(url_str, Some(provider.clone())) {
+        Ok((_provider, resolved)) => Url::parse(&resolved).ok(),
+        Err(e) => {
+            debug!("Failed to resolve provider URL: {e}");
+            None
+        }
+    }
+}
+
+
 async fn send_with_manual_redirects(
     request_client: &reqwest::Client,
     stream_options: &ProviderStreamFactoryOptions,
@@ -379,18 +398,15 @@ async fn send_with_manual_redirects(
     let max_provider_attempts = provider.as_ref().map_or(1, |p| p.urls.len());
 
     'redirect_loop: loop {
+        // Resolve provider:// URL if applicable
+        let resolved_url = resolve_provider_url(current_url.as_str(), provider.as_ref())
+            .unwrap_or_else(|| current_url.clone());
+        
         let result = send_with_retry_and_provider(
             &app_state.app_config,
-            &current_url,
-            provider.as_ref(), // Pass provider to use internal retry logic if implemented there
-            || {
-                 let target_url = if let Some(p) = provider.as_ref() {
-                     p.get_current_url().map_or_else(|| current_url.clone(), |u| Url::parse(u).unwrap_or_else(|_| current_url.clone()))
-                } else {
-                    current_url.clone()
-                };
-                prepare_client(request_client, stream_options, Some(&target_url)).0
-            }
+            &resolved_url,
+            provider.as_ref(),
+            || prepare_client(request_client, stream_options, Some(&resolved_url)).0
         ).await;
 
         let response = match result {
@@ -412,13 +428,10 @@ async fn send_with_manual_redirects(
                 
                 // Re-throw as IO error which will be handled by caller
                  debug!("Manual redirect failed: {}", sanitize_sensitive_info(e.to_string().as_str()));
-                // Create a new request client error
-                let target_url = if let Some(p) = provider.as_ref() {
-                     p.get_current_url().map_or_else(|| current_url.clone(), |u| Url::parse(u).unwrap_or_else(|_| current_url.clone()))
-                } else {
-                    current_url.clone()
-                };
-                let (client, _) = prepare_client(request_client, stream_options, Some(&target_url));
+                // Create a new request client error with resolved URL
+                let fallback_url = resolve_provider_url(current_url.as_str(), provider.as_ref())
+                    .unwrap_or_else(|| current_url.clone());
+                let (client, _) = prepare_client(request_client, stream_options, Some(&fallback_url));
                 return client.send().await;
             }
         };
@@ -478,22 +491,19 @@ async fn provider_stream_request(
         // Use send_with_retry_and_provider for automatic failover support
         let url = stream_options.get_url();
         let provider = stream_options.get_provider().cloned();
-        let resolved_url = if url.as_ref().starts_with(PROVIDER_SCHEME_PREFIX) {
-            provider.as_ref().and_then(|p| p.get_current_url().as_ref().map(|u| Url::parse(u).unwrap_or_else(|_| url.clone()))).unwrap_or_else(|| url.clone())
-        } else {
-            url.clone()
-        };
+        
+        // Resolve provider:// URL using the helper function
+        let resolved_url = resolve_provider_url(url.as_str(), provider.as_ref())
+            .unwrap_or_else(|| url.clone());
 
         match send_with_retry_and_provider(
             &app_state.app_config,
             &resolved_url,
             provider.as_ref(),
             || {
-                let current_url = if let Some(p) = provider.as_ref() {
-                     p.get_current_url().map_or_else(|| url.clone(), |u| Url::parse(u).unwrap_or_else(|_| url.clone()))
-                } else {
-                    url.clone()
-                };
+                // Re-resolve in case provider URL index changed during retry
+                let current_url = resolve_provider_url(url.as_str(), provider.as_ref())
+                    .unwrap_or_else(|| url.clone());
                 let (client, _partial_content) = prepare_client(request_client, stream_options, Some(&current_url));
                 client
             }
@@ -501,13 +511,10 @@ async fn provider_stream_request(
             Ok(response) => Ok(response),
             Err(e) => {
                 debug!("Stream request failed: {}", sanitize_sensitive_info(e.to_string().as_str()));
-                // Fallback: Try one last time with standard client and current url logic
-                let current_url = if let Some(p) = provider.as_ref() {
-                     p.get_current_url().map_or_else(|| url.clone(), |u| Url::parse(u).unwrap_or_else(|_| url.clone()))
-                } else {
-                    url.clone()
-                };
-                let (client, _partial_content) = prepare_client(request_client, stream_options, Some(&current_url));
+                // Fallback: Try one last time with current resolved URL
+                let fallback_url = resolve_provider_url(url.as_str(), provider.as_ref())
+                    .unwrap_or_else(|| url.clone());
+                let (client, _partial_content) = prepare_client(request_client, stream_options, Some(&fallback_url));
                 client.send().await
             }
         }

@@ -1,6 +1,6 @@
 use crate::error::{TuliproxError, TuliproxErrorKind};
 use crate::model::{CacheConfigDto, GeoIpConfigDto, RateLimitConfigDto, StreamConfigDto};
-use crate::utils::{is_false, default_resource_retry_attempts,
+use crate::utils::{is_false, is_empty_optional_vec, default_resource_retry_attempts,
                    default_resource_retry_backoff_ms,
                    default_resource_retry_backoff_multiplier,
                    is_default_resource_retry_attempts,
@@ -8,6 +8,7 @@ use crate::utils::{is_false, default_resource_retry_attempts,
                    is_default_resource_retry_backoff_multiplier,
                    hex_to_u8_16};
 use log::warn;
+use crate::info_err_res;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -117,6 +118,11 @@ impl ReverseProxyConfigDto {
                 rate_limit.prepare()?;
             }
         }
+
+        if let Some(resource_retry) = self.resource_retry.as_mut() {
+            resource_retry.prepare()?;
+        }
+
         Ok(())
     }
 }
@@ -130,6 +136,8 @@ pub struct ResourceRetryConfigDto {
     pub backoff_millis: u64,
     #[serde(default = "default_resource_retry_backoff_multiplier", skip_serializing_if = "is_default_resource_retry_backoff_multiplier")]
     pub backoff_multiplier: f64,
+    #[serde(default, skip_serializing_if = "is_empty_optional_vec")]
+    pub failover_redirect_patterns: Option<Vec<String>>,
 }
 
 impl Default for ResourceRetryConfigDto {
@@ -138,6 +146,7 @@ impl Default for ResourceRetryConfigDto {
             max_attempts: default_resource_retry_attempts(),
             backoff_millis: default_resource_retry_backoff_ms(),
             backoff_multiplier: default_resource_retry_backoff_multiplier(),
+            failover_redirect_patterns: None,
         }
     }
 }
@@ -147,5 +156,17 @@ impl ResourceRetryConfigDto {
         self.max_attempts == default_resource_retry_attempts()
             && self.backoff_millis == default_resource_retry_backoff_ms()
             && (self.backoff_multiplier - default_resource_retry_backoff_multiplier()).abs() < f64::EPSILON
+            && self.failover_redirect_patterns.as_ref().is_none_or(|v| v.is_empty())
+    }
+
+    pub fn prepare(&mut self) -> Result<(), TuliproxError> {
+        if let Some(failover_redirect_patterns) = self.failover_redirect_patterns.as_mut() {
+            for pattern in failover_redirect_patterns {
+                if let Err(err) = crate::model::REGEX_CACHE.get_or_compile(&pattern) {
+                    return info_err_res!("Can't parse regex: {pattern} {err}");
+                }
+            }
+        }
+        Ok(())
     }
 }

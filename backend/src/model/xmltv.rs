@@ -128,6 +128,7 @@ pub async fn parse_xmltv_for_web_ui_from_url(app_state: &Arc<AppState>, url: &st
         let input_source: InputSource = InputSource {
             name: "xmltv".intern(),
             url: request_url.to_string(),
+            provider: None,
             username: None,
             password: None,
             method: InputFetchMethod::GET,

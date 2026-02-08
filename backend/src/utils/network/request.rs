@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Once};
 use std::time::Duration;
+use regex::Regex;
 use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::time::sleep;
@@ -142,14 +143,6 @@ pub fn calculate_retry_backoff(base_delay_ms: u64, multiplier: f64, attempt: u32
     }
 }
 
-pub async fn send_with_retry(
-    app_config: &Arc<AppConfig>,
-    url: &Url,
-    send: impl FnMut() -> reqwest::RequestBuilder,
-) -> Result<reqwest::Response, std::io::Error> {
-    send_with_retry_and_provider(app_config, url, None, send).await
-}
-
 /// Sends a request with retry logic and optional provider failover support.
 #[allow(clippy::too_many_lines)]
 pub async fn send_with_retry_and_provider(
@@ -159,12 +152,18 @@ pub async fn send_with_retry_and_provider(
     mut send: impl FnMut() -> reqwest::RequestBuilder,
 ) -> Result<reqwest::Response, std::io::Error> {
     let config = app_config.config.load();
-    let (max_attempts, backoff_ms, backoff_multiplier) = config
+    let (max_attempts, backoff_ms, backoff_multiplier, failover_patterns) = config
         .reverse_proxy
         .as_ref()
         .map_or_else(
-            ResourceRetryConfig::get_default_retry_values,
-            |rp| rp.resource_retry.get_retry_values(),
+            || {
+                let (a, b, c) = ResourceRetryConfig::get_default_retry_values();
+                (a, b, c, ResourceRetryConfig::default().failover_redirect_patterns)
+            },
+            |rp| {
+                let (a, b, c) = rp.resource_retry.get_retry_values();
+                (a, b, c, rp.resource_retry.failover_redirect_patterns.clone())
+            },
         );
     drop(config);
 
@@ -216,8 +215,8 @@ pub async fn send_with_retry_and_provider(
                 result = send().send() => {
                     match result {
                         Ok(response) => {
-                                let status = response.status();
-                            let is_failover = is_failover_redirect(response.url());
+                            let status = response.status();
+                            let is_failover = is_failover_redirect(response.url(), &failover_patterns);
                             if !is_failover && status.is_success() {
                                 return Ok(response);
                             }
@@ -289,9 +288,9 @@ pub async fn send_with_retry_and_provider(
     Err(string_to_io_error("All attempts and providers exhausted".to_string()))
 }
 
-fn is_failover_redirect(url: &Url) -> bool {
-    let redirect_url = url.to_string();
-    redirect_url.contains("service-abuse")
+fn is_failover_redirect(url: &Url, patterns: &[Arc<Regex>]) -> bool {
+    let redirect_url = url.as_str();
+    patterns.iter().any(|pattern| pattern.is_match(redirect_url))
 }
 
 /// Helper to handle sleep duration for retries, respecting Retry-After headers
@@ -859,9 +858,10 @@ pub async fn get_remote_content_as_stream(
         })
         .collect();
 
-    let response = send_with_retry(
+    let response = send_with_retry_and_provider(
         app_config,
         url,
+        input.get_provider(),
         || {
             get_client_request(
                 client,

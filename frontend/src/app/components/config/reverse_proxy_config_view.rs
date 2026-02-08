@@ -8,9 +8,10 @@ use crate::app::context::ConfigContext;
 use crate::app::components::config::config_view_context::ConfigViewContext;
 use crate::app::components::config::config_page::{ConfigForm, LABEL_REVERSE_PROXY_CONFIG};
 use crate::app::components::{Card};
-use crate::{config_field, config_field_bool, config_field_custom, config_field_hide, config_field_optional,
+use crate::{config_field, config_field_bool, config_field_child, config_field_custom, config_field_hide, config_field_optional,
             edit_field_bool, edit_field_list, edit_field_number, edit_field_number_f64,
             edit_field_number_u64, edit_field_number_usize, edit_field_text, edit_field_text_option, generate_form_reducer};
+use crate::app::components::Chip;
 
 const LABEL_CACHE: &str = "LABEL.CACHE";
 const LABEL_ENABLED: &str = "LABEL.ENABLED";
@@ -40,6 +41,8 @@ const LABEL_RESOURCE_RETRY: &str = "LABEL.RESOURCE_RETRY";
 const LABEL_MAX_ATTEMPTS: &str = "LABEL.MAX_ATTEMPTS";
 const LABEL_BACKOFF_MILLIS: &str = "LABEL.BACKOFF_MILLIS";
 const LABEL_BACKOFF_MULTIPLIER: &str = "LABEL.BACKOFF_MULTIPLIER";
+const LABEL_FAILOVER_REDIRECT_PATTERNS: &str = "LABEL.FAILOVER_REDIRECT_PATTERNS";
+const LABEL_ADD_PATTERN: &str = "LABEL.ADD_PATTERN";
 const LABEL_DISABLED_HEADER: &str = "LABEL.DISABLED_HEADER";
 const LABEL_REFERER_HEADER: &str = "LABEL.REFERER_HEADER";
 const LABEL_X_HEADER: &str = "LABEL.X_HEADER";
@@ -76,6 +79,26 @@ generate_form_reducer!(
         MaxAttempts => max_attempts: u32,
         BackoffMillis => backoff_millis: u64,
         BackoffMultiplier => backoff_multiplier: f64,
+    }
+);
+
+/// Simple wrapper for failover patterns to use Vec<String> directly with edit_field_list
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FailoverPatternsDto {
+    pub patterns: Vec<String>,
+}
+
+impl FailoverPatternsDto {
+    pub fn is_empty(&self) -> bool {
+        self.patterns.is_empty()
+    }
+}
+
+generate_form_reducer!(
+    state: FailoverPatternsFormState { form: FailoverPatternsDto },
+    action_name: FailoverPatternsFormAction,
+    fields {
+        Patterns => patterns: Vec<String>,
     }
 );
 
@@ -164,6 +187,10 @@ pub fn ReverseProxyConfigView() -> Html {
         StreamBufferConfigFormState { form: StreamBufferConfigDto::default(), modified: false }
     });
 
+    let failover_patterns_state: UseReducerHandle<FailoverPatternsFormState> = use_reducer(|| {
+        FailoverPatternsFormState { form: FailoverPatternsDto::default(), modified: false }
+    });
+
     {
         let on_form_change = config_view_ctx.on_form_change.clone();
         let reverse_proxy_state = reverse_proxy_state.clone();
@@ -174,6 +201,7 @@ pub fn ReverseProxyConfigView() -> Html {
         let stream_state = stream_state.clone();
         let geoip_state = geoip_state.clone();
         let stream_buffer_state = stream_buffer_state.clone();
+        let failover_patterns_state = failover_patterns_state.clone();
 
         use_effect_with(
             (
@@ -185,8 +213,9 @@ pub fn ReverseProxyConfigView() -> Html {
                 stream_state,
                 geoip_state,
                 stream_buffer_state,
+                failover_patterns_state,
             ),
-            move |(rp, disabled_header, cache, rl, resource_retry, stream, geoip, stream_buffer)| {
+            move |(rp, disabled_header, cache, rl, resource_retry, stream, geoip, stream_buffer, failover_patterns)| {
                 let mut form = rp.form.clone();
                 let mut stream_form = stream.form.clone();
                 stream_form.buffer = if stream_buffer.form.is_empty() {
@@ -197,7 +226,13 @@ pub fn ReverseProxyConfigView() -> Html {
 
                 form.cache = Some(cache.form.clone());
                 form.rate_limit = Some(rl.form.clone());
-                form.resource_retry = Some(resource_retry.form.clone());
+                let mut resource_retry_form = resource_retry.form.clone();
+                resource_retry_form.failover_redirect_patterns = if failover_patterns.form.is_empty() {
+                    None
+                } else {
+                    Some(failover_patterns.form.patterns.clone())
+                };
+                form.resource_retry = Some(resource_retry_form);
                 form.stream = Some(stream_form);
                 form.geoip = Some(geoip.form.clone());
                 form.disabled_header = if disabled_header.form.is_empty() {
@@ -213,7 +248,8 @@ pub fn ReverseProxyConfigView() -> Html {
                     || resource_retry.modified
                     || stream.modified
                     || geoip.modified
-                    || stream_buffer.modified;
+                    || stream_buffer.modified
+                    || failover_patterns.modified;
                 on_form_change.emit(ConfigForm::ReverseProxy(modified, form));
             },
         );
@@ -228,6 +264,7 @@ pub fn ReverseProxyConfigView() -> Html {
         let stream_state = stream_state.clone();
         let geoip_state = geoip_state.clone();
         let stream_buffer_state = stream_buffer_state.clone();
+        let failover_patterns_state = failover_patterns_state.clone();
 
         let reverse_proxy_cfg = config_ctx.config.as_ref().and_then(|c| c.config.reverse_proxy.clone());
         use_effect_with((reverse_proxy_cfg, config_view_ctx.edit_mode.clone()), move |(cfg, _mode)| {
@@ -240,6 +277,9 @@ pub fn ReverseProxyConfigView() -> Html {
                 stream_state.dispatch(StreamConfigFormAction::SetAll(rp.stream.as_ref().map_or_else(StreamConfigDto::default, |s| s.clone())));
                 geoip_state.dispatch(GeoIpConfigFormAction::SetAll(rp.geoip.as_ref().map_or_else(GeoIpConfigDto::default, |s| s.clone())));
                 stream_buffer_state.dispatch(StreamBufferConfigFormAction::SetAll(rp.stream.as_ref().and_then(|s| s.buffer.clone()).unwrap_or_default()));
+                failover_patterns_state.dispatch(FailoverPatternsFormAction::SetAll(FailoverPatternsDto {
+                    patterns: rp.resource_retry.as_ref().and_then(|rr| rr.failover_redirect_patterns.clone()).unwrap_or_default()
+                }));
             } else {
                 reverse_proxy_state.dispatch(ReverseProxyConfigFormAction::SetAll(ReverseProxyConfigDto::default()));
                 disabled_header_state.dispatch(ReverseProxyDisabledHeaderConfigFormAction::SetAll(ReverseProxyDisabledHeaderConfigDto::default()));
@@ -249,6 +289,7 @@ pub fn ReverseProxyConfigView() -> Html {
                 stream_state.dispatch(StreamConfigFormAction::SetAll(StreamConfigDto::default()));
                 geoip_state.dispatch(GeoIpConfigFormAction::SetAll(GeoIpConfigDto::default()));
                 stream_buffer_state.dispatch(StreamBufferConfigFormAction::SetAll(StreamBufferConfigDto::default()));
+                failover_patterns_state.dispatch(FailoverPatternsFormAction::SetAll(FailoverPatternsDto::default()));
             }
             || ()
         });
@@ -330,6 +371,7 @@ pub fn ReverseProxyConfigView() -> Html {
     };
 
     let render_resource_retry_view = || {
+        let patterns = &failover_patterns_state.form.patterns;
         html! {
             <Card class="tp__config-view__card">
                 <h1>{translate.t(LABEL_RESOURCE_RETRY)}</h1>
@@ -341,6 +383,17 @@ pub fn ReverseProxyConfigView() -> Html {
                         format_float_localized(resource_retry_state.form.backoff_multiplier, 4, true)
                     )
                 }
+                { config_field_child!(translate.t(LABEL_FAILOVER_REDIRECT_PATTERNS), {
+                    html! {
+                        <div class="tp__config-view__tags">
+                        if patterns.is_empty() {
+                            <Chip label="service-abuse (default)" />
+                        } else {
+                            { for patterns.iter().map(|p| html! { <Chip label={p.clone()} /> }) }
+                        }
+                        </div>
+                    }
+                })}
             </Card>
         }
     };
@@ -352,6 +405,7 @@ pub fn ReverseProxyConfigView() -> Html {
                 { edit_field_number!(resource_retry_state, translate.t(LABEL_MAX_ATTEMPTS), max_attempts, ResourceRetryConfigFormAction::MaxAttempts) }
                 { edit_field_number_u64!(resource_retry_state, translate.t(LABEL_BACKOFF_MILLIS), backoff_millis, ResourceRetryConfigFormAction::BackoffMillis) }
                 { edit_field_number_f64!(resource_retry_state, translate.t(LABEL_BACKOFF_MULTIPLIER), backoff_multiplier, ResourceRetryConfigFormAction::BackoffMultiplier) }
+                { edit_field_list!(failover_patterns_state, translate.t(LABEL_FAILOVER_REDIRECT_PATTERNS), patterns, FailoverPatternsFormAction::Patterns, translate.t(LABEL_ADD_PATTERN)) }
             </Card>
         }
     };
