@@ -989,7 +989,7 @@ async fn xtream_get_catchup_response(
     )
     .map(|action_url| format!("{action_url}&{}={}", crate::model::XC_TAG_STREAM_ID, pli.provider_id)));
 
-    if !start_time.is_empty() && end_time.is_empty() {
+    if !start_time.is_empty() && !end_time.is_empty() {
         let epg_timeshift = parse_timeshift(user.epg_request_timeshift.as_deref());
         let start = apply_timeshift(start_time, &epg_timeshift);
         let end = apply_timeshift(end_time, &epg_timeshift);

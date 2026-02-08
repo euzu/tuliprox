@@ -48,14 +48,14 @@ fn get_cell_value(user: &TargetUser, col: usize) -> CellValue<'_> {
         4 => CellValue::Text(user.credentials.username.as_str()),
         7 => CellValue::Proxy(user.credentials.proxy),
         8 => user.credentials.server.as_ref().map_or(CellValue::Empty, |s|CellValue::Text(s)),
-        12 => user.credentials.created_at.as_ref().map_or(CellValue::Empty, |d| CellValue::Date(*d)),
-        13 => user.credentials.exp_date.as_ref().map_or(CellValue::Empty, |d| CellValue::Date(*d)),
+        13 => user.credentials.created_at.as_ref().map_or(CellValue::Empty, |d| CellValue::Date(*d)),
+        14 => user.credentials.exp_date.as_ref().map_or(CellValue::Empty, |d| CellValue::Date(*d)),
         _ => CellValue::Empty,
     }
 }
 
 fn is_col_sortable(col: usize) -> bool {
-    matches!(col, 1 | 2 | 3 | 4 | 7 | 8 | 12  | 13)
+    matches!(col, 1 | 2 | 3 | 4 | 7 | 8 | 13  | 14)
 }
 
 
