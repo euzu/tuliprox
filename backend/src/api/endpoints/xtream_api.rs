@@ -31,10 +31,10 @@ use shared::concat_string;
 use shared::error::{info_err, info_err_res, TuliproxError};
 use shared::model::{create_stream_channel_with_type, PlaylistEntry, PlaylistItemType, ProxyType, ShortEpgResultDto, TargetType, UserConnectionPermission, XtreamCluster, XtreamPlaylistItem};
 use shared::utils::{deserialize_as_string, extract_extension_from_url, generate_playlist_uuid, sanitize_sensitive_info, trim_slash, Internable, HLS_EXT};
+use std::fmt::Write;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::fmt::Write;
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, Eq, PartialEq)]
 pub enum ApiStreamContext {
@@ -692,9 +692,22 @@ async fn xtream_player_api_timeshift_stream(
     let password = get_non_empty(&timeshift_request.password, &api_req.password, &api_form_req.password).to_string();
     let stream_id = get_non_empty(&timeshift_request.stream_id, &api_req.stream_id, &api_form_req.stream_id).to_string();
     let duration = get_non_empty(&timeshift_request.duration, &api_req.duration, &api_form_req.duration);
-    let start = get_non_empty(&timeshift_request.start, &api_req.start, &api_form_req.start);
+    let start_time = get_non_empty(&timeshift_request.start, &api_req.start, &api_form_req.start);
 
-    let action_path = format!("{duration}/{start}");
+    let (user, _target) = try_option_bad_request!(
+            get_user_target_by_credentials( &username, &password, &api_form_req, &app_state),
+            false,
+            format!("Could not find any user {username}")
+        );
+
+    let epg_timeshift = parse_timeshift(user.epg_request_timeshift.as_deref());
+    let start = apply_timeshift(start_time, &epg_timeshift);
+    let action_path = if start.is_empty() {
+        format!("{duration}/{start_time}")
+    } else {
+        format!("{duration}/{start}")
+    };
+
     api_req.username.clone_from(&username);
     api_req.password.clone_from(&password);
     api_req.stream_id.clone_from(&stream_id);
@@ -710,7 +723,7 @@ async fn xtream_player_api_timeshift_stream(
             &password,
             &stream_id,
             &action_path,
-        ), /*&addr*/
+        ),
     )
         .await
         .into_response()
@@ -727,19 +740,31 @@ async fn xtream_player_api_timeshift_query_stream(
     let password = get_non_empty(&api_query_req.password, &api_form_req.password, "");
     let stream_id = get_non_empty(&api_query_req.stream, &api_form_req.stream, "");
     let duration = get_non_empty(&api_query_req.duration, &api_form_req.duration, "");
-    let start = get_non_empty(&api_query_req.start, &api_form_req.start, "");
-    let action_path = format!("{duration}/{start}");
+    let start_time = get_non_empty(&api_query_req.start, &api_form_req.start, "");
+
     if username.is_empty()
         || password.is_empty()
         || stream_id.is_empty()
         || duration.is_empty()
-        || start.is_empty()
+        || start_time.is_empty()
     {
-        // if token.is_empty() {
         return axum::http::StatusCode::BAD_REQUEST.into_response();
-        // }
-        // xtream_player_api_stream(&req_headers, &api_query_req, &app_state, ApiStreamRequest::from_access_token(ApiStreamContext::Timeshift, token, stream_id, &action_path)/*, &addr*/).await.into_response()
     }
+
+    let (user, _target) = try_option_bad_request!(
+            get_user_target_by_credentials( username, password, &api_query_req, &app_state),
+            false,
+            format!("Could not find any user {username}")
+        );
+
+    let epg_timeshift = parse_timeshift(user.epg_request_timeshift.as_deref());
+    let start = apply_timeshift(start_time, &epg_timeshift);
+    let action_path = if start.is_empty() {
+        format!("{duration}/{start_time}")
+    } else {
+        format!("{duration}/{start}")
+    };
+
     xtream_player_api_stream(
         &fingerprint,
         &req_headers,
@@ -1045,7 +1070,7 @@ async fn xtream_get_catchup_response(
             let Ok((mut target_id_mapping, file_lock)) = get_target_id_mapping(
                 &app_state.app_config,
                 &target_path,
-                target.use_memory_cache
+                target.use_memory_cache,
             ).await else {
                 return internal_server_error!();
             };
