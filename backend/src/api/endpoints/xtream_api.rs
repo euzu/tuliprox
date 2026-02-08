@@ -694,7 +694,7 @@ async fn xtream_player_api_timeshift_stream(
     let duration = get_non_empty(&timeshift_request.duration, &api_req.duration, &api_form_req.duration);
     let start_time = get_non_empty(&timeshift_request.start, &api_req.start, &api_form_req.start);
 
-    let (user, target) = try_option_bad_request!(
+    let (user, _target) = try_option_bad_request!(
             get_user_target_by_credentials( &username, &password, &api_form_req, &app_state),
             false,
             format!("Could not find any user {username}")
@@ -702,10 +702,10 @@ async fn xtream_player_api_timeshift_stream(
 
     let epg_timeshift = parse_timeshift(user.epg_request_timeshift.as_deref());
     let start = apply_timeshift(start_time, &epg_timeshift);
-    let action_path = if !start.is_empty() {
-        format!("{duration}/{start}")
-    } else {
+    let action_path = if start.is_empty() {
         format!("{duration}/{start_time}")
+    } else {
+        format!("{duration}/{start}")
     };
 
     api_req.username.clone_from(&username);
@@ -751,7 +751,7 @@ async fn xtream_player_api_timeshift_query_stream(
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     }
 
-    let (user, target) = try_option_bad_request!(
+    let (user, _target) = try_option_bad_request!(
             get_user_target_by_credentials( username, password, &api_query_req, &app_state),
             false,
             format!("Could not find any user {username}")
@@ -759,10 +759,10 @@ async fn xtream_player_api_timeshift_query_stream(
 
     let epg_timeshift = parse_timeshift(user.epg_request_timeshift.as_deref());
     let start = apply_timeshift(start_time, &epg_timeshift);
-    let action_path = if !start.is_empty() {
-        format!("{duration}/{start}")
-    } else {
+    let action_path = if start.is_empty() {
         format!("{duration}/{start_time}")
+    } else {
+        format!("{duration}/{start}")
     };
 
     xtream_player_api_stream(
