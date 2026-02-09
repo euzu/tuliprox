@@ -5,7 +5,7 @@ use crate::model::{is_input_expired, xtream_mapping_option_from_target_options, 
 use crate::model::{InputSource, ProxyUserCredentials};
 use crate::processing::parser::xtream;
 use crate::processing::parser::xtream::parse_xtream_series_info;
-use crate::repository::BPlusTreeUpdate;
+use crate::repository::{BPlusTreeUpdate, FlushPolicy};
 use crate::repository::VirtualIdRecord;
 use crate::repository::{ensure_input_storage_path, get_input_storage_path, get_target_storage_path};
 use crate::repository::{get_live_cat_collection_path, get_series_cat_collection_path, get_vod_cat_collection_path, xtream_get_file_path, CategoryEntry};
@@ -551,11 +551,12 @@ async fn process_xtream_cluster_to_disk(
                 notify_err!("Init tree error {e}")
             })?;
 
-        let mut tree = BPlusTreeUpdate::try_new(&tmp_xtream_path)
+        let mut tree: BPlusTreeUpdate<u32, XtreamPlaylistItem> = BPlusTreeUpdate::try_new_with_backoff(&tmp_xtream_path)
             .map_err(|e| {
                 error!("Failed to open ghost tree at {}: {e}", tmp_xtream_path.display());
                 notify_err!("Failed to open tree {e}")
             })?;
+        tree.set_flush_policy(FlushPolicy::Batch);
 
         let mut buffer = Vec::with_capacity(BATCH_SIZE);
 
@@ -564,7 +565,11 @@ async fn process_xtream_cluster_to_disk(
             buffer.push(item);
             if buffer.len() >= BATCH_SIZE {
                 let batch: Vec<(&u32, &XtreamPlaylistItem)> = buffer.iter().map(|i| (&i.provider_id, i)).collect();
-                tree.upsert_batch(&batch).map_err(|e| {
+                let prepared = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::prepare_upsert_batch(&batch).map_err(|e| {
+                    error!("Batch prepare failed for cluster {cluster}: {e}");
+                    notify_err!("Prepare failed {e}")
+                })?;
+                tree.upsert_batch_encoded(prepared).map_err(|e| {
                     error!("Batch upsert failed for cluster {cluster}: {e}");
                     notify_err!("Upsert failed {e}")
                 })?;
@@ -575,11 +580,20 @@ async fn process_xtream_cluster_to_disk(
         // Final batch processing
         if !buffer.is_empty() {
             let batch: Vec<(&u32, &XtreamPlaylistItem)> = buffer.iter().map(|i| (&i.provider_id, i)).collect();
-            tree.upsert_batch(&batch).map_err(|e| {
+            let prepared = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::prepare_upsert_batch(&batch).map_err(|e| {
+                error!("Final batch prepare failed for cluster {cluster}: {e}");
+                notify_err!("Prepare failed {e}")
+            })?;
+            tree.upsert_batch_encoded(prepared).map_err(|e| {
                 error!("Final batch upsert failed for cluster {cluster}: {e}");
                 notify_err!("Upsert failed {e}")
             })?;
         }
+
+        tree.commit().map_err(|e| {
+            error!("Commit failed for cluster {cluster}: {e}");
+            notify_err!("Commit failed {e}")
+        })?;
         Ok::<(), TuliproxError>(())
     });
 
@@ -611,7 +625,7 @@ async fn process_xtream_cluster_to_disk(
     let swap_lock = app_config.file_locks.write_lock(&xtream_path).await;
 
     // Optional compaction to optimize the newly created database file
-    if let Ok(mut tree_update) = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::try_new(&tmp_xtream_path) {
+    if let Ok(mut tree_update) = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::try_new_with_backoff(&tmp_xtream_path) {
         if let Err(e) = tree_update.compact(&tmp_xtream_path) {
             error!("Failed to compact temporary database for {cluster} at {:?}: {e}", tmp_xtream_path.display());
         }

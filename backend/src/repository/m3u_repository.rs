@@ -202,7 +202,7 @@ pub async fn iter_raw_m3u_input_playlist(app_config: &AppConfig, input: &ConfigI
 
 async fn iter_raw_m3u_playlist<SortKey, ItemKey>(app_config: &AppConfig, m3u_path: &Path, cluster: Option<XtreamCluster>) -> Option<(FileReadGuard, Box<dyn Iterator<Item=M3uPlaylistItem> + Send>)>
 where
-    ItemKey: Ord + Serialize + for<'de> Deserialize<'de> + Clone + Send + 'static,
+    ItemKey: Ord + Serialize + for<'de> Deserialize<'de> + Clone + Send + Sync + 'static,
     SortKey: for<'de> Deserialize<'de> + Send + 'static,
 {
     let file_lock = app_config.file_locks.read_lock(m3u_path).await;
