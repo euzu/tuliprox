@@ -1,7 +1,7 @@
 use crate::api::model::persist_pipe_stream::tee_dyn_reader;
 use crate::api::model::{AppState, STREAM_IDLE_TIMEOUT};
 use crate::model::{format_elapsed_time, AppConfig, Config, ConfigProvider, InputSource, ReverseProxyDisabledHeaderConfig};
-use crate::model::{ConfigInput, ResourceRetryConfig};
+use crate::model::{resolve_provider_scheme_url_with_provider, ConfigInput, ResourceRetryConfig};
 use crate::utils::compression::compression_utils::{is_deflate, is_gzip};
 use crate::utils::{async_file_reader, async_file_writer, debug_if_enabled};
 use crate::utils::{get_file_path, persist_file};
@@ -126,6 +126,28 @@ pub fn content_type_from_ext(ext: &str) -> &'static str {
     }
 }
 
+fn resolve_provider_url_for_attempt(
+    url: &Url,
+    provider: Option<&Arc<ConfigProvider>>,
+) -> Url {
+    let Some(provider) = provider else {
+        return url.clone();
+    };
+
+    match resolve_provider_scheme_url_with_provider(url.as_str(), Some(provider.clone())) {
+        Ok((_provider, resolved)) => {
+            if resolved.as_ref() == url.as_str() {
+                return url.clone();
+            }
+            Url::parse(resolved.as_ref()).unwrap_or_else(|_| url.clone())
+        }
+        Err(err) => {
+            debug!("Failed to resolve provider URL: {err}");
+            url.clone()
+        }
+    }
+}
+
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
 pub fn calculate_retry_backoff(base_delay_ms: u64, multiplier: f64, attempt: u32) -> u64 {
@@ -149,7 +171,8 @@ pub async fn send_with_retry_and_provider(
     app_config: &Arc<AppConfig>,
     url: &Url, // Used primarily for logging/context
     provider: Option<&Arc<ConfigProvider>>,
-    mut send: impl FnMut() -> reqwest::RequestBuilder,
+    allow_redirects: bool,
+    mut send: impl FnMut(&Url) -> reqwest::RequestBuilder,
 ) -> Result<reqwest::Response, std::io::Error> {
     let config = app_config.config.load();
     let (max_attempts, backoff_ms, backoff_multiplier, failover_patterns) = config
@@ -171,20 +194,17 @@ pub async fn send_with_retry_and_provider(
     let idle = sleep(idle_timeout);
     tokio::pin!(idle);
 
-    let mut provider_attempts = 0;
-    // If no provider is present, we only have 1 "virtual" provider attempt (the static URL)
-    let max_provider_attempts = provider.as_ref().map_or(1, |p| p.urls.len());
+    // Record the starting URL index for full-cycle detection.
+    // This allows us to try all URLs even when starting from a non-zero index.
+    let start_index = provider.as_ref().map_or(0, |p| p.get_current_index());
+    let max_provider_attempts = provider.as_ref().map_or(0, |p| p.urls.len());
+    let mut provider_attempts = usize::from(max_provider_attempts > 0);
 
     'provider_loop: loop {
-        // 1. Check if we have exhausted all available URLs in the provider
-        if provider_attempts >= max_provider_attempts {
-            return Err(string_to_io_error(format!(
-                "Failed after trying all {max_provider_attempts} provider URLs"
-            )));
-        }
 
         // 2. Retry loop for the current URL
         for attempt in 0..max_attempts {
+            let resolved_url = resolve_provider_url_for_attempt(url, provider);
             // Reset the idle timer for a new attempt
             idle.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
 
@@ -192,12 +212,14 @@ pub async fn send_with_retry_and_provider(
                 () = &mut idle => {
                     warn!("Request idle for too long: {}", sanitize_sensitive_info(url.as_str()));
                     // 1. Try Provider Failover first
-                    if let Some(p) = provider {
-                        if p.rotate_to_next_url().is_some() {
-                            let current_index = p.current_url_index.load(std::sync::atomic::Ordering::Relaxed);
-                            warn!("Provider '{}' idle timeout -> switching to index {}", p.name, current_index);
-                            provider_attempts += 1;
-                            continue 'provider_loop;
+                    if max_provider_attempts > 1 && provider_attempts < max_provider_attempts {
+                        if let Some(p) = provider {
+                            if p.rotate_to_next_url_with_cycle_check(start_index).is_some() {
+                                provider_attempts += 1;
+                                let current_index = p.get_current_index();
+                                warn!("Provider '{}' idle timeout -> switching to index {}", p.name, current_index);
+                                continue 'provider_loop;
+                            }
                         }
                     }
 
@@ -212,23 +234,29 @@ pub async fn send_with_retry_and_provider(
                     return Err(string_to_io_error(format!("Request timed out and no retries left: {}", sanitize_sensitive_info(url.as_str()))));
                 }
 
-                result = send().send() => {
+                result = send(&resolved_url).send() => {
                     match result {
                         Ok(response) => {
                             let status = response.status();
+                            if allow_redirects && status.is_redirection() {
+                                return Ok(response);
+                            }
                             let is_failover = is_failover_redirect(response.url(), &failover_patterns);
                             if !is_failover && status.is_success() {
                                 return Ok(response);
                             }
 
                             // Failover check: Should we switch to the next provider URL?
-                            if is_failover || should_trigger_failover(status) {
+                            if (is_failover || should_trigger_failover(status))
+                                && max_provider_attempts > 1
+                                && provider_attempts < max_provider_attempts
+                            {
                                 if let Some(p) = provider {
-                                    if p.rotate_to_next_url().is_some() {
-                                        let current_index = p.current_url_index.load(std::sync::atomic::Ordering::Relaxed);
+                                    if p.rotate_to_next_url_with_cycle_check(start_index).is_some() {
+                                        provider_attempts += 1;
+                                        let current_index = p.get_current_index();
                                         warn!("Provider '{}' failover: status {} -> switching to URL index {current_index}",
                                             p.name, format_http_status(status));
-                                        provider_attempts += 1;
                                         continue 'provider_loop;
                                     }
                                 }
@@ -249,12 +277,15 @@ pub async fn send_with_retry_and_provider(
 
                         Err(err) => {
                             // Connection errors (Timeout/Connect) trigger failover if provider exists
-                            if err.is_timeout() || err.is_connect() {
+                            if (err.is_timeout() || err.is_connect())
+                                && max_provider_attempts > 1
+                                && provider_attempts < max_provider_attempts
+                            {
                                 if let Some(p) = provider {
-                                    if p.rotate_to_next_url().is_some() {
-                                        let current_index = p.current_url_index.load(std::sync::atomic::Ordering::Relaxed);
-                                        warn!("Provider '{}' failover: connection error -> switching to index {}", p.name, current_index);
+                                    if p.rotate_to_next_url_with_cycle_check(start_index).is_some() {
                                         provider_attempts += 1;
+                                        let current_index = p.get_current_index();
+                                        warn!("Provider '{}' failover: connection error -> switching to index {}", p.name, current_index);
                                         continue 'provider_loop;
                                     }
                                 }
@@ -274,11 +305,13 @@ pub async fn send_with_retry_and_provider(
             }
         }
 
-        // 3. If per-URL retries are exhausted, try next provider URL as a last resort
-        if let Some(p) = provider {
-            if p.rotate_to_next_url().is_some() {
-                provider_attempts += 1;
-                continue 'provider_loop;
+        // 2. If per-URL retries are exhausted, try next provider URL as a last resort
+        if max_provider_attempts > 1 && provider_attempts < max_provider_attempts {
+            if let Some(p) = provider {
+                if p.rotate_to_next_url_with_cycle_check(start_index).is_some() {
+                    provider_attempts += 1;
+                    continue 'provider_loop;
+                }
             }
         }
 
@@ -709,12 +742,13 @@ pub async fn get_remote_content_as_file(
         app_config,
         url,
         provider_config.as_ref(),
-        || {
+        false,
+        |resolved_url| {
             get_client_request(
                 client,
                 input.method,
                 Some(&input.headers),
-                url,
+                resolved_url,
                 custom_headers.as_ref(),
                 None,
                 default_user_agent.as_deref(),
@@ -862,12 +896,13 @@ pub async fn get_remote_content_as_stream(
         app_config,
         url,
         input.get_provider(),
-        || {
+        false,
+        |resolved_url| {
             get_client_request(
                 client,
                 input.method,
                 Some(&headers),
-                url,
+                resolved_url,
                 None,
                 None,
                 default_user_agent.as_deref(),

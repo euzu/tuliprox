@@ -64,7 +64,7 @@ fn csv_assign_mandatory_fields(alias: &mut ConfigInputAliasDto, input_type: Inpu
         let mut provider_scheme = false;
         if alias.url.starts_with(PROVIDER_SCHEME_PREFIX) {
             provider_scheme = true;
-            alias.url = alias.url.replace(PROVIDER_SCHEME_PREFIX, "http://");
+            alias.url = alias.url.replacen(PROVIDER_SCHEME_PREFIX, "http://", 1);
         }
         match Url::parse(alias.url.as_str()) {
             Ok(url) => {
@@ -113,7 +113,7 @@ fn csv_assign_mandatory_fields(alias: &mut ConfigInputAliasDto, input_type: Inpu
             }
         }
         if provider_scheme {
-            alias.url = alias.url.replace("http://", PROVIDER_SCHEME_PREFIX);
+            alias.url = alias.url.replacen("http://", PROVIDER_SCHEME_PREFIX, 1);
         }
     }
 }

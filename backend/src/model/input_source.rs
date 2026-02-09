@@ -51,8 +51,7 @@ impl From<&ConfigInput> for InputSource {
         Self {
             name: input.name.clone(),
             url: input.url.clone(),
-            provider: input.provider_configs.as_ref()
-                .and_then(|configs| configs.first().cloned()),
+            provider: input.get_resolve_provider(&input.url),
             username: input.username.clone(),
             password: input.password.clone(),
             method: input.method,
@@ -66,7 +65,7 @@ impl From<&StagedInput> for InputSource {
         Self {
             name: input.name.clone(),
             url: input.url.clone(),
-            provider: None, // StagedInput doesn't carry provider context
+            provider: input.provider_config.clone(),
             username: input.username.clone(),
             password: input.password.clone(),
             method: input.method,

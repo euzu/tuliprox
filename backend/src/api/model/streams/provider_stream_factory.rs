@@ -6,7 +6,7 @@ use crate::api::model::{BoxedProviderStream, ProviderStreamFactoryResponse};
 use crate::model::{resolve_provider_scheme_url_with_provider, ConfigProvider, ReverseProxyDisabledHeaderConfig};
 use crate::tools::atomic_once_flag::AtomicOnceFlag;
 use crate::utils::debug_if_enabled;
-use crate::utils::request::{classify_content_type, get_request_headers, MimeCategory, send_with_retry_and_provider, should_trigger_failover};
+use crate::utils::request::{classify_content_type, get_request_headers, MimeCategory, send_with_retry_and_provider};
 use futures::stream::{self};
 use futures::{StreamExt, TryStreamExt};
 use log::{debug, info, log_enabled, warn};
@@ -393,20 +393,16 @@ async fn send_with_manual_redirects(
     let mut remaining_redirects = 10u8;
     let provider = stream_options.get_provider().cloned();
     
-    // Safety against infinite provider rotation
-    let mut provider_attempts = 0;
-    let max_provider_attempts = provider.as_ref().map_or(1, |p| p.urls.len());
+    // Record the starting URL index for full-cycle detection
+    let start_index = provider.as_ref().map_or(0, |p| p.get_current_index());
 
     'redirect_loop: loop {
-        // Resolve provider:// URL if applicable
-        let resolved_url = resolve_provider_url(current_url.as_str(), provider.as_ref())
-            .unwrap_or_else(|| current_url.clone());
-        
         let result = send_with_retry_and_provider(
             &app_state.app_config,
-            &resolved_url,
+            &current_url,
             provider.as_ref(),
-            || prepare_client(request_client, stream_options, Some(&resolved_url)).0
+            true,
+            |resolved_url| prepare_client(request_client, stream_options, Some(resolved_url)).0
         ).await;
 
         let response = match result {
@@ -414,15 +410,11 @@ async fn send_with_manual_redirects(
             Err(e) => {
                 // Check if we should trigger provider failover on connection error
                 if let Some(p) = provider.as_ref() {
-                     if provider_attempts < max_provider_attempts {
-                        if let Some(_next_url) = p.rotate_to_next_url() {
-                            let current_index = p.current_url_index.load(std::sync::atomic::Ordering::Relaxed);
-                            info!("Provider '{}' switched to URL index {} due to connection error in manual redirects", p.name, current_index);
-                            
-                            provider_attempts += 1;
-                            // Retry with new provider URL
-                            continue 'redirect_loop;
-                        }
+                    if p.rotate_to_next_url_with_cycle_check(start_index).is_some() {
+                        let current_index = p.get_current_index();
+                        info!("Provider '{}' switched to URL index {} due to connection error in manual redirects", p.name, current_index);
+                        // Retry with new provider URL
+                        continue 'redirect_loop;
                     }
                 }
                 
@@ -437,21 +429,6 @@ async fn send_with_manual_redirects(
         };
 
         let status = response.status();
-
-        // Check if we should trigger provider failover due to error status
-        if should_trigger_failover(status) {
-            if let Some(p) = provider.as_ref() {
-                if provider_attempts < max_provider_attempts {
-                    if let Some(_next_url) = p.rotate_to_next_url() {
-                        let current_index = p.current_url_index.load(std::sync::atomic::Ordering::Relaxed);
-                        warn!("Provider '{}' switched to URL index {} due to status {} in manual redirects", p.name, current_index, status);
-                        
-                        provider_attempts += 1;
-                        continue 'redirect_loop;
-                    }
-                }
-            }
-        }
 
         if status.is_redirection() {
             if remaining_redirects == 0 {
@@ -491,20 +468,14 @@ async fn provider_stream_request(
         // Use send_with_retry_and_provider for automatic failover support
         let url = stream_options.get_url();
         let provider = stream_options.get_provider().cloned();
-        
-        // Resolve provider:// URL using the helper function
-        let resolved_url = resolve_provider_url(url.as_str(), provider.as_ref())
-            .unwrap_or_else(|| url.clone());
 
         match send_with_retry_and_provider(
             &app_state.app_config,
-            &resolved_url,
+            url,
             provider.as_ref(),
-            || {
-                // Re-resolve in case provider URL index changed during retry
-                let current_url = resolve_provider_url(url.as_str(), provider.as_ref())
-                    .unwrap_or_else(|| url.clone());
-                let (client, _partial_content) = prepare_client(request_client, stream_options, Some(&current_url));
+            false,
+            |resolved_url| {
+                let (client, _partial_content) = prepare_client(request_client, stream_options, Some(resolved_url));
                 client
             }
         ).await {

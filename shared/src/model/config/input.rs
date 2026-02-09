@@ -1,7 +1,9 @@
 use super::PanelApiConfigDto;
 use crate::error::{TuliproxError, TuliproxErrorKind};
 use crate::model::EpgConfigDto;
-use crate::utils::{arc_str_serde, default_as_true, deserialize_timestamp, get_credentials_from_url_str, get_trimmed_string, is_false, is_true, is_zero_u16, parse_provider_scheme_url_parts, sanitize_sensitive_info, serialize_option_vec_flow_map_items, trim_last_slash};
+use crate::utils::{arc_str_serde, default_as_true, deserialize_timestamp, get_credentials_from_url_str,
+                   get_trimmed_string, is_false, is_true, is_zero_u16, parse_provider_scheme_url_parts,
+                   sanitize_sensitive_info, serialize_option_vec_flow_map_items, trim_last_slash, PROVIDER_SCHEME_PREFIX};
 use crate::utils::{is_blank_optional_string, Internable, arc_str_vec_serde};
 use crate::{check_input_connections, check_input_credentials, info_err_res};
 
@@ -382,9 +384,11 @@ impl ConfigInputDto {
 
         self.persist = get_trimmed_string(self.persist.as_deref());
 
-        if let Ok((host, _path)) = parse_provider_scheme_url_parts(&self.url) {
-            if !provider_names.contains(host) {
-                return info_err_res!("Provider name {host} is not defined");
+        if self.url.starts_with(PROVIDER_SCHEME_PREFIX) {
+            if let Ok((host, _path)) = parse_provider_scheme_url_parts(&self.url) {
+                if !provider_names.contains(host) {
+                    return info_err_res!("Provider name {host} is not defined");
+                }
             }
         }
 
@@ -394,9 +398,11 @@ impl ConfigInputDto {
             let input_type = &self.input_type;
             for alias in aliases {
                 current_index = alias.prepare(current_index, input_type)?;
-                if let Ok((host, _path)) = parse_provider_scheme_url_parts(&alias.url) {
-                    if !provider_names.contains(host) {
-                        return info_err_res!("Provider name {host} is not defined");
+                if alias.url.starts_with(PROVIDER_SCHEME_PREFIX) {
+                    if let Ok((host, _path)) = parse_provider_scheme_url_parts(&alias.url) {
+                        if !provider_names.contains(host) {
+                            return info_err_res!("Provider name {host} is not defined");
+                        }
                     }
                 }
             }

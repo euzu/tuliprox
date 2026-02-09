@@ -1381,12 +1381,13 @@ async fn fetch_resource_with_retry(
         &app_state.app_config,
         url,
         provider_config.as_ref(),
-        || {
+        false,
+        |resolved_url| {
             request::get_client_request(
                 &app_state.http_client.load(),
                 input.map_or(InputFetchMethod::GET, |i| i.method),
                 input.map(|i| &i.headers),
-                url,
+                resolved_url,
                 Some(req_headers),
                 disabled_headers.as_ref(),
                 default_user_agent.as_deref(),

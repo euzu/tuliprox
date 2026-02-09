@@ -114,19 +114,31 @@ pub fn apply_timeshift(date_str: &str, shift: &EpgTimeShift) -> String {
         return date_str.to_string();
     }
 
-    // 1. Try to parse date
-    // "YYYY-MM-DD:HH-mm" or Unix Timestamps?
-    // "YYYY-MM-DD:HH-mm" format:
-    let format = "%Y-%m-%d:%H-%M";
+    // List of supported formats
+    let formats = [
+        "%Y-%m-%d:%H-%M", // 2026-02-08:11-30
+        "%Y-%m-%d:%H:%M", // 2026-02-08:11:30
+        "%Y-%m-%d %H:%M", // 2026-02-08 11:30
+        "%Y-%m-%d-%H-%M", // 2026-02-08-11-30
+    ];
 
-    let mut is_ts = false;
+    let mut parsed_dt = None;
+    let mut matching_format = "";
 
-    let dt = if let Ok(parsed_dt) = NaiveDateTime::parse_from_str(date_str, format) {
-        parsed_dt
+    // 1. Try to parse date with supported formats
+    for format in formats {
+        if let Ok(dt) = NaiveDateTime::parse_from_str(date_str, format) {
+            parsed_dt = Some(dt);
+            matching_format = format;
+            break;
+        }
+    }
+
+    let (dt, is_ts) = if let Some(dt) = parsed_dt {
+        (dt, false)
     } else if let Ok(ts) = date_str.parse::<i64>() {
-        is_ts = true;
         match DateTime::from_timestamp(ts, 0) {
-            Some(d) => d.naive_utc(),
+            Some(d) => (d.naive_utc(), true),
             None => return date_str.to_string(),
         }
     } else {
@@ -150,7 +162,7 @@ pub fn apply_timeshift(date_str: &str, shift: &EpgTimeShift) -> String {
         let utc_shifted = Utc.from_utc_datetime(&shifted_dt);
         utc_shifted.timestamp().to_string()
     } else {
-        shifted_dt.format(format).to_string()
+        shifted_dt.format(matching_format).to_string()
     }
 }
 
@@ -207,5 +219,37 @@ mod tests {
         } else {
             panic!("Expected TimeZone for UTC");
         }
+    }
+
+    #[test]
+    fn test_apply_timeshift_formats() {
+        let shift = EpgTimeShift::Fixed(60); // +1 hour
+
+        // Original format: 2026-02-08:11-30
+        let date_str = "2026-02-08:11-30";
+        let shifted = apply_timeshift(date_str, &shift);
+        assert_eq!(shifted, "2026-02-08:12-30");
+
+        // Format with colons: 2026-02-08:11:30
+        let date_str = "2026-02-08:11:30";
+        let shifted = apply_timeshift(date_str, &shift);
+        assert_eq!(shifted, "2026-02-08:12:30");
+
+        // Format with space: 2026-02-08 11:30
+        let date_str = "2026-02-08 11:30";
+        let shifted = apply_timeshift(date_str, &shift);
+        assert_eq!(shifted, "2026-02-08 12:30");
+
+         // Format with dashes: 2026-02-08-11-30
+        let date_str = "2026-02-08-11-30";
+        let shifted = apply_timeshift(date_str, &shift);
+        assert_eq!(shifted, "2026-02-08-12-30");
+
+        // Timestamp
+        let ts = 1770550200; // 2026-02-08 11:30:00 UTC
+        let date_str = ts.to_string();
+        let shifted = apply_timeshift(&date_str, &shift);
+        // +1 hour = +3600 seconds
+        assert_eq!(shifted, (ts + 3600).to_string());
     }
 }

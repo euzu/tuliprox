@@ -31,7 +31,7 @@ impl From<&ConfigProviderDto> for ConfigProvider {
         Self {
             name: dto.name.clone(),
             urls: dto.urls.clone(),
-            current_url_index: AtomicUsize::new(0)
+            current_url_index: AtomicUsize::new(0),
         }
     }
 }
@@ -43,24 +43,38 @@ impl ConfigProvider {
         self.urls.get(index)
     }
 
-    /// Rotates to the next URL in the provider and returns it
-    pub fn rotate_to_next_url(&self) -> Option<&Arc<str>> {
+    /// Resets the current URL index to 0
+    pub fn reset_index(&self) {
+        self.current_url_index.store(0, Ordering::Relaxed);
+    }
+
+    /// Gets the current URL index
+    #[inline]
+    pub fn get_current_index(&self) -> usize {
+        self.current_url_index.load(Ordering::Relaxed)
+    }
+
+    /// Rotates to next URL, checking if a full cycle has been completed.
+    /// Returns None if we've cycled back to the `start_index`, indicating all URLs were tried.
+    ///
+    /// Use this method when you need to try all URLs exactly once before failing.
+    /// Call `get_current_index()` at the start of a failover session to get the `start_index`.
+    pub fn rotate_to_next_url_with_cycle_check(&self, start_index: usize) -> Option<&Arc<str>> {
         if self.urls.is_empty() {
             return None;
         }
 
         let current = self.current_url_index.load(Ordering::Relaxed);
         let next = (current + 1) % self.urls.len();
-        self.current_url_index.store(next, Ordering::Relaxed);
 
+        // If we've cycled back to start, we've tried all URLs
+        if next == start_index {
+            return None;
+        }
+
+        self.current_url_index.store(next, Ordering::Relaxed);
         self.urls.get(next)
     }
-
-    /// Resets the current URL index to 0
-    pub fn reset_index(&self) {
-        self.current_url_index.store(0, Ordering::Relaxed);
-    }
-
 }
 
 #[derive(Debug, Clone)]
@@ -109,8 +123,9 @@ impl TryFrom<&SourcesConfigDto> for SourcesConfig {
         let mut inputs = Vec::<Arc<ConfigInput>>::new();
         let mut batch_files = Vec::<PathBuf>::new();
         let mut input_names = HashSet::new();
-        let provider = dto.provider.iter().map(ConfigProvider::from).map(Arc::new).collect::<Vec<_>>();
-
+        let provider: Vec<_> = dto.provider.as_ref()
+            .map(|list| list.iter().map(ConfigProvider::from).map(Arc::new).collect())
+            .unwrap_or_default();
 
         for input_dto in &dto.inputs {
             let mut input = ConfigInput::from(input_dto);

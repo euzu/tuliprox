@@ -35,7 +35,8 @@ impl ConfigSourceDto {
 pub struct SourcesConfigDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub templates: Option<Vec<PatternTemplate>>,
-    pub provider: Vec<ConfigProviderDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<Vec<ConfigProviderDto>>,
     pub inputs: Vec<ConfigInputDto>,
     pub sources: Vec<ConfigSourceDto>,
 }
@@ -51,12 +52,14 @@ impl SourcesConfigDto {
 
     fn prepare_providers(&mut self) -> Result<HashSet<String>, TuliproxError> {
         let mut names = HashSet::new();
-        for provider in &mut self.provider {
-            provider.prepare()?;
-            if names.contains(provider.name.as_ref()) {
-                return info_err_res!("Provider names should be unique: {}", provider.name);
+        if let Some(providers) = &mut self.provider {
+            for provider in providers {
+                provider.prepare()?;
+                if names.contains(provider.name.as_ref()) {
+                    return info_err_res!("Provider names should be unique: {}", provider.name);
+                }
+                names.insert(provider.name.to_string());
             }
-            names.insert(provider.name.to_string());
         }
         Ok(names)
     }

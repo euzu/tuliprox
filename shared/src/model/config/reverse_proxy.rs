@@ -156,13 +156,13 @@ impl ResourceRetryConfigDto {
         self.max_attempts == default_resource_retry_attempts()
             && self.backoff_millis == default_resource_retry_backoff_ms()
             && (self.backoff_multiplier - default_resource_retry_backoff_multiplier()).abs() < f64::EPSILON
-            && self.failover_redirect_patterns.as_ref().is_none_or(|v| v.is_empty())
+            && is_empty_optional_vec(&self.failover_redirect_patterns)
     }
 
     pub fn prepare(&mut self) -> Result<(), TuliproxError> {
         if let Some(failover_redirect_patterns) = self.failover_redirect_patterns.as_mut() {
             for pattern in failover_redirect_patterns {
-                if let Err(err) = crate::model::REGEX_CACHE.get_or_compile(&pattern) {
+                if let Err(err) = crate::model::REGEX_CACHE.get_or_compile(pattern) {
                     return info_err_res!("Can't parse regex: {pattern} {err}");
                 }
             }

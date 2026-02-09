@@ -79,6 +79,8 @@ pub struct StagedInput {
     pub method: InputFetchMethod,
     pub input_type: InputType,
     pub headers: HashMap<String, String>,
+    /// Provider configuration for failover support when using `provider://` scheme.
+    pub provider_config: Option<Arc<ConfigProvider>>,
 }
 
 macros::from_impl!(StagedInput);
@@ -92,6 +94,7 @@ impl From<&StagedInputDto> for StagedInput {
             password: dto.password.clone(),
             method: dto.method,
             headers: dto.headers.clone(),
+            provider_config: None, // Resolved later in ConfigInput::prepare()
         }
     }
 }
@@ -157,11 +160,13 @@ impl ConfigInput {
         let batch_file_path = self.prepare_batch();
         self.name = self.name.trim().intern();
 
-        if let Ok((host, _path)) = parse_provider_scheme_url_parts(&self.url) {
-            if let Some(provider_cfg) = provider_configs.iter().find(|p| p.name.as_ref() == host) {
-                used_provider_configs.push(provider_cfg.clone());
-            } else {
-                return info_err_res!("Failed to resolve provider config for {}", sanitize_sensitive_info(&self.url));
+        if self.url.starts_with(PROVIDER_SCHEME_PREFIX) {
+            if let Ok((host, _path)) = parse_provider_scheme_url_parts(&self.url) {
+                if let Some(provider_cfg) = provider_configs.iter().find(|p| p.name.as_ref() == host) {
+                    used_provider_configs.push(provider_cfg.clone());
+                } else {
+                    return info_err_res!("Failed to resolve provider config for {}", sanitize_sensitive_info(&self.url));
+                }
             }
         }
 
@@ -169,11 +174,15 @@ impl ConfigInput {
             check_input_credentials!(self, self.input_type, false, false);
             check_input_connections!(self, self.input_type, false);
             if let Some(staged_input) = &mut self.staged {
-                if let Ok((host, _path)) = parse_provider_scheme_url_parts(&staged_input.url) {
-                    if let Some(provider_cfg) = provider_configs.iter().find(|p| p.name.as_ref() == host) {
-                        used_provider_configs.push(provider_cfg.clone());
-                    } else {
-                        return info_err_res!("Failed to resolve provider config for {}", sanitize_sensitive_info(&staged_input.url));
+
+                if staged_input.url.starts_with(PROVIDER_SCHEME_PREFIX) {
+                    if let Ok((host, _path)) = parse_provider_scheme_url_parts(&staged_input.url) {
+                        if let Some(provider_cfg) = provider_configs.iter().find(|p| p.name.as_ref() == host) {
+                            staged_input.provider_config = Some(provider_cfg.clone());
+                            used_provider_configs.push(provider_cfg.clone());
+                        } else {
+                            return info_err_res!("Failed to resolve provider config for {}", sanitize_sensitive_info(&staged_input.url));
+                        }
                     }
                 }
 
@@ -195,12 +204,14 @@ impl ConfigInput {
                         alias.enabled = false;
                     }
 
-                    if let Ok((host, _path)) = parse_provider_scheme_url_parts(&alias.url) {
-                        if !used_provider_configs.iter().any(|p| p.name.as_ref() == host) {
-                            if let Some(provider_cfg) = provider_configs.iter().find(|p| p.name.as_ref() == host) {
-                                used_provider_configs.push(provider_cfg.clone());
-                            } else {
-                                return info_err_res!("Failed to resolve provider config for {}", sanitize_sensitive_info(&self.url));
+                    if alias.url.starts_with(PROVIDER_SCHEME_PREFIX) {
+                        if let Ok((host, _path)) = parse_provider_scheme_url_parts(&alias.url) {
+                            if !used_provider_configs.iter().any(|p| p.name.as_ref() == host) {
+                                if let Some(provider_cfg) = provider_configs.iter().find(|p| p.name.as_ref() == host) {
+                                    used_provider_configs.push(provider_cfg.clone());
+                                } else {
+                                    return info_err_res!("Failed to resolve provider config for {}", sanitize_sensitive_info(&alias.url));
+                                }
                             }
                         }
                     }
