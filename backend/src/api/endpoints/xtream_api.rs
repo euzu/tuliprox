@@ -198,6 +198,7 @@ async fn xtream_player_api_stream(
     app_state: &Arc<AppState>,
     api_req: &UserApiRequest,
     stream_req: ApiStreamRequest<'_>,
+    user_target: Option<(ProxyUserCredentials, Arc<ConfigTarget>)>
 ) -> impl IntoResponse + Send {
 
     // if log::log_enabled!(log::Level::Debug) {
@@ -214,11 +215,13 @@ async fn xtream_player_api_stream(
     //     debug!("{}", sanitize_sensitive_info(&message));
     // }
 
-    let (user, target) = try_option_bad_request!(
+    let (user, target) = match user_target {
+        None => try_option_bad_request!(
         get_user_target_by_credentials( stream_req.username, stream_req.password, api_req, app_state),
         false,
-        format!("Could not find any user for xc stream {}", stream_req.username)
-    );
+        format!("Could not find any user for xc stream {}", stream_req.username)),
+        Some((user, target)) => (user, target)
+    };
 
     let _guard = app_state.app_config.file_locks.write_lock_str(&user.username).await;
 
@@ -620,6 +623,7 @@ macro_rules! create_xtream_player_api_stream {
                 &app_state,
                 &api_req,
                 ApiStreamRequest::from($context, &username, &password, &stream_id, ""),
+                None,
             )
             .await
             .into_response()
@@ -694,7 +698,7 @@ async fn xtream_player_api_timeshift_stream(
     let duration = get_non_empty(&timeshift_request.duration, &api_req.duration, &api_form_req.duration);
     let start_time = get_non_empty(&timeshift_request.start, &api_req.start, &api_form_req.start);
 
-    let (user, _target) = try_option_bad_request!(
+    let (user, target) = try_option_bad_request!(
             get_user_target_by_credentials( &username, &password, &api_form_req, &app_state),
             false,
             format!("Could not find any user {username}")
@@ -724,6 +728,7 @@ async fn xtream_player_api_timeshift_stream(
             &stream_id,
             &action_path,
         ),
+        Some((user, target)),
     )
         .await
         .into_response()
@@ -751,7 +756,7 @@ async fn xtream_player_api_timeshift_query_stream(
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     }
 
-    let (user, _target) = try_option_bad_request!(
+    let (user, target) = try_option_bad_request!(
             get_user_target_by_credentials( username, password, &api_query_req, &app_state),
             false,
             format!("Could not find any user {username}")
@@ -777,6 +782,7 @@ async fn xtream_player_api_timeshift_query_stream(
             stream_id,
             &action_path,
         ),
+        Some((user, target)),
     )
         .await
         .into_response()
