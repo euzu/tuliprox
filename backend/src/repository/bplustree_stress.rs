@@ -1,4 +1,4 @@
-use super::bplustree::{BPlusTree, BPlusTreeQuery, BPlusTreeUpdate, BPlusTreeWalWriter, FlushPolicy};
+use super::bplustree::{BPlusTree, BPlusTreeQuery, BPlusTreeSerialWriter, BPlusTreeUpdate, FlushPolicy};
 use rand::prelude::*;
 use rand::distr::Alphanumeric;
 use std::io::Write;
@@ -256,7 +256,7 @@ fn stress_test_bplustree() {
     let start_barrier = Arc::new(Barrier::new(reader_threads + writer_threads + 1));
     let shared_path = Arc::new(filepath.clone());
     let wal_writer = Arc::new(
-        BPlusTreeWalWriter::<u32, String>::new(filepath.clone(), FlushPolicy::Batch).unwrap(),
+        BPlusTreeSerialWriter::<u32, String>::new(filepath.clone(), FlushPolicy::Batch).unwrap(),
     );
     let small_payload = "s".repeat(small_val_len.saturating_sub(24));
     let large_payload = "L".repeat(large_val_len.saturating_sub(24));
