@@ -5,7 +5,7 @@ use crate::model::{is_input_expired, xtream_mapping_option_from_target_options, 
 use crate::model::{InputSource, ProxyUserCredentials};
 use crate::processing::parser::xtream;
 use crate::processing::parser::xtream::parse_xtream_series_info;
-use crate::repository::BPlusTreeUpdate;
+use crate::repository::{BPlusTreeUpdate, FlushPolicy};
 use crate::repository::VirtualIdRecord;
 use crate::repository::{ensure_input_storage_path, get_input_storage_path, get_target_storage_path};
 use crate::repository::{get_live_cat_collection_path, get_series_cat_collection_path, get_vod_cat_collection_path, xtream_get_file_path, CategoryEntry};
@@ -364,11 +364,9 @@ pub async fn download_xtream_playlist(app_config: &Arc<AppConfig>, client: &reqw
         }
     };
 
-    let base_url = if is_provider_url {
-        base_input_url.clone()
-    } else {
-        get_xtream_stream_url_base(&base_input_url, username, password)
-    };
+    // Build a canonical Xtream player_api URL for both plain URLs and provider:// URLs.
+    // For provider URLs, this keeps the scheme unresolved while still adding the required path/query.
+    let base_url = get_xtream_stream_url_base(&base_input_url, username, password);
     let input_source_login = input_source.with_url(base_url.clone());
 
     check_alias_user_state(app_config, client, input).await;
@@ -518,6 +516,7 @@ pub fn create_vod_info_from_item(target: &ConfigTarget, user: &ProxyUserCredenti
 
 const BATCH_SIZE: usize = 1000;
 
+#[allow(clippy::too_many_lines)]
 async fn process_xtream_cluster_to_disk(
     app_config: &Arc<AppConfig>,
     input: &ConfigInput,
@@ -568,11 +567,12 @@ async fn process_xtream_cluster_to_disk(
                 notify_err!("Init tree error {e}")
             })?;
 
-        let mut tree = BPlusTreeUpdate::try_new(&tmp_xtream_path)
+        let mut tree: BPlusTreeUpdate<u32, XtreamPlaylistItem> = BPlusTreeUpdate::try_new_with_backoff(&tmp_xtream_path)
             .map_err(|e| {
                 error!("Failed to open ghost tree at {}: {e}", tmp_xtream_path.display());
                 notify_err!("Failed to open tree {e}")
             })?;
+        tree.set_flush_policy(FlushPolicy::Batch);
 
         let mut buffer = Vec::with_capacity(BATCH_SIZE);
 
@@ -581,7 +581,11 @@ async fn process_xtream_cluster_to_disk(
             buffer.push(item);
             if buffer.len() >= BATCH_SIZE {
                 let batch: Vec<(&u32, &XtreamPlaylistItem)> = buffer.iter().map(|i| (&i.provider_id, i)).collect();
-                tree.upsert_batch(&batch).map_err(|e| {
+                let prepared = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::prepare_upsert_batch(&batch).map_err(|e| {
+                    error!("Batch prepare failed for cluster {cluster}: {e}");
+                    notify_err!("Prepare failed {e}")
+                })?;
+                tree.upsert_batch_encoded(prepared).map_err(|e| {
                     error!("Batch upsert failed for cluster {cluster}: {e}");
                     notify_err!("Upsert failed {e}")
                 })?;
@@ -592,11 +596,20 @@ async fn process_xtream_cluster_to_disk(
         // Final batch processing
         if !buffer.is_empty() {
             let batch: Vec<(&u32, &XtreamPlaylistItem)> = buffer.iter().map(|i| (&i.provider_id, i)).collect();
-            tree.upsert_batch(&batch).map_err(|e| {
+            let prepared = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::prepare_upsert_batch(&batch).map_err(|e| {
+                error!("Final batch prepare failed for cluster {cluster}: {e}");
+                notify_err!("Prepare failed {e}")
+            })?;
+            tree.upsert_batch_encoded(prepared).map_err(|e| {
                 error!("Final batch upsert failed for cluster {cluster}: {e}");
                 notify_err!("Upsert failed {e}")
             })?;
         }
+
+        tree.commit().map_err(|e| {
+            error!("Commit failed for cluster {cluster}: {e}");
+            notify_err!("Commit failed {e}")
+        })?;
         Ok::<(), TuliproxError>(())
     });
 
@@ -627,10 +640,21 @@ async fn process_xtream_cluster_to_disk(
     // Acquire file lock to ensure atomic operations
     let swap_lock = app_config.file_locks.write_lock(&xtream_path).await;
 
-    // Optional compaction to optimize the newly created database file
-    if let Ok(mut tree_update) = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::try_new(&tmp_xtream_path) {
-        if let Err(e) = tree_update.compact(&tmp_xtream_path) {
+    // Optional compaction to optimize the newly created database file.
+    // Run on blocking pool because B+Tree lock backoff uses std::thread::sleep.
+    let compact_path = tmp_xtream_path.clone();
+    match tokio::task::spawn_blocking(move || -> Result<(), std::io::Error> {
+        if let Ok(mut tree_update) = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::try_new_with_backoff(&compact_path) {
+            tree_update.compact(&compact_path)?;
+        }
+        Ok(())
+    }).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
             error!("Failed to compact temporary database for {cluster} at {:?}: {e}", tmp_xtream_path.display());
+        }
+        Err(e) => {
+            error!("Compaction task join failed for {cluster} at {:?}: {e}", tmp_xtream_path.display());
         }
     }
 

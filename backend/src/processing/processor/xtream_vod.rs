@@ -8,6 +8,7 @@ use log::{error, info, log_enabled, Level};
 use shared::error::TuliproxError;
 use shared::model::{InputType, PlaylistEntry, StreamProperties, VideoStreamProperties, XtreamVideoInfo};
 use shared::model::{PlaylistItemType, XtreamCluster};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -41,6 +42,9 @@ pub async fn playlist_resolve_vod(app_config: &Arc<AppConfig>,
     let mut last_log_time = Instant::now();
     let mut processed_vod_info_count = 0;
     let mut batch = Vec::with_capacity(BATCH_SIZE);
+    let sync_canonical_in_memory = provider_fpl.is_memory();
+    let mut resolved_vod_by_provider_id: Option<HashMap<u32, VideoStreamProperties>> =
+        sync_canonical_in_memory.then(HashMap::new);
 
     provider_fpl.source.release_resources(XtreamCluster::Video);
 
@@ -72,6 +76,9 @@ pub async fn playlist_resolve_vod(app_config: &Arc<AppConfig>,
                         let video_stream_props = VideoStreamProperties::from_info(&info, pli);
 
                         batch.push((provider_id, video_stream_props.clone()));
+                        if let Some(resolved) = resolved_vod_by_provider_id.as_mut() {
+                            resolved.insert(provider_id, video_stream_props.clone());
+                        }
                         if batch.len() >= BATCH_SIZE {
                             if let Err(err) = persist_input_vod_info_batch(app_config, &storage_path, XtreamCluster::Video, &input.name, std::mem::take(&mut batch)).await {
                                 error!("Failed to persist batch VOD info: {err}");
@@ -96,6 +103,24 @@ pub async fn playlist_resolve_vod(app_config: &Arc<AppConfig>,
     if !batch.is_empty() {
         if let Err(err) = persist_input_vod_info_batch(app_config, &storage_path, XtreamCluster::Video, &input.name, batch).await {
             error!("Failed to persist final batch VOD info: {err}");
+        }
+    }
+
+    // Keep canonical input playlist updated for subsequent target processing in memory mode.
+    if let Some(resolved_vod_by_provider_id) = resolved_vod_by_provider_id {
+        for source_pli in provider_fpl.items_mut() {
+            if source_pli.header.xtream_cluster != XtreamCluster::Video
+                || source_pli.header.item_type != PlaylistItemType::Video
+            {
+                continue;
+            }
+            let Some(provider_id) = source_pli.get_provider_id() else { continue; };
+            if provider_id == 0 {
+                continue;
+            }
+            if let Some(resolved) = resolved_vod_by_provider_id.get(&provider_id) {
+                source_pli.header.additional_properties = Some(StreamProperties::Video(Box::new(resolved.clone())));
+            }
         }
     }
 

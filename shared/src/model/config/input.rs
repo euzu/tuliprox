@@ -385,7 +385,33 @@ impl ConfigInputDto {
         self.persist = get_trimmed_string(self.persist.as_deref());
 
         if self.url.starts_with(PROVIDER_SCHEME_PREFIX) {
-            if let Ok((host, _path)) = parse_provider_scheme_url_parts(&self.url) {
+            let (host, _path) = match parse_provider_scheme_url_parts(&self.url) {
+                Ok(parts) => parts,
+                Err(err) => {
+                    return info_err_res!(
+                        "Malformed provider URL {}: {}",
+                        sanitize_sensitive_info(&self.url),
+                        sanitize_sensitive_info(err.to_string().as_str())
+                    );
+                }
+            };
+            if !provider_names.contains(host) {
+                return info_err_res!("Provider name {host} is not defined");
+            }
+        }
+
+        if let Some(staged_input) = self.staged.as_ref() {
+            if staged_input.url.starts_with(PROVIDER_SCHEME_PREFIX) {
+                let (host, _path) = match parse_provider_scheme_url_parts(&staged_input.url) {
+                    Ok(parts) => parts,
+                    Err(err) => {
+                        return info_err_res!(
+                            "Malformed provider URL {}: {}",
+                            sanitize_sensitive_info(&staged_input.url),
+                            sanitize_sensitive_info(err.to_string().as_str())
+                        );
+                    }
+                };
                 if !provider_names.contains(host) {
                     return info_err_res!("Provider name {host} is not defined");
                 }
@@ -399,10 +425,18 @@ impl ConfigInputDto {
             for alias in aliases {
                 current_index = alias.prepare(current_index, input_type)?;
                 if alias.url.starts_with(PROVIDER_SCHEME_PREFIX) {
-                    if let Ok((host, _path)) = parse_provider_scheme_url_parts(&alias.url) {
-                        if !provider_names.contains(host) {
-                            return info_err_res!("Provider name {host} is not defined");
+                    let (host, _path) = match parse_provider_scheme_url_parts(&alias.url) {
+                        Ok(parts) => parts,
+                        Err(err) => {
+                            return info_err_res!(
+                                "Malformed provider URL {}: {}",
+                                sanitize_sensitive_info(&alias.url),
+                                sanitize_sensitive_info(err.to_string().as_str())
+                            );
                         }
+                    };
+                    if !provider_names.contains(host) {
+                        return info_err_res!("Provider name {host} is not defined");
                     }
                 }
             }

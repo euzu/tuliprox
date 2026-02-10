@@ -10,14 +10,19 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use shared::error::{string_to_io_error, to_io_error};
 use std::ffi::OsString;
-use std::fs::{File, OpenOptions};
+use std::fs::{File, Metadata, OpenOptions};
 use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::marker::PhantomData;
 use std::mem::size_of;
 #[cfg(unix)]
-use std::os::unix::fs::FileExt;
+use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 use tempfile::NamedTempFile;
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::CloseHandle;
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
 // Constants (Restored)
 const PAGE_SIZE: u16 = 4096;
@@ -2721,10 +2726,41 @@ where
 /// at the cost of higher memory usage.
 type NodeCache<K, V> = IndexMap<u64, (BPlusTreeNode<K, V>, Option<Vec<u64>>)>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileIdentity {
+    len: u64,
+    modified_ns: u128,
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+}
+
+impl FileIdentity {
+    fn from_metadata(metadata: &Metadata) -> Self {
+        let modified_ns = metadata
+            .modified()
+            .or_else(|_| metadata.created())
+            .ok()
+            .and_then(|timestamp| timestamp.duration_since(UNIX_EPOCH).ok())
+            .map_or(0, |duration| duration.as_nanos());
+
+        Self {
+            len: metadata.len(),
+            modified_ns,
+            #[cfg(unix)]
+            dev: metadata.dev(),
+            #[cfg(unix)]
+            ino: metadata.ino(),
+        }
+    }
+}
+
 pub struct BPlusTreeQuery<K, V> {
     file: Option<BufReader<File>>,
     mmap: Option<Mmap>,
     filepath: PathBuf,
+    file_identity: Option<FileIdentity>,
     buffer: Vec<u8>,
     cache: IndexMap<u64, Vec<u8>>,
     node_cache: NodeCache<K, V>,
@@ -2741,6 +2777,7 @@ where
     pub fn try_from_file(file: File) -> io::Result<Self> {
         let metadata = file.metadata()?;
         let file_len = metadata.len();
+        let file_identity = Some(FileIdentity::from_metadata(&metadata));
 
         if file_len < HEADER_SIZE {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "File too small"));
@@ -2773,6 +2810,7 @@ where
             file: if mmap.is_some() { None } else { Some(utils::file_reader(file)) },
             mmap,
             filepath: PathBuf::new(),
+            file_identity,
             buffer: vec![0u8; PAGE_SIZE_USIZE],
             cache: IndexMap::with_capacity(CACHE_CAPACITY),
             node_cache: IndexMap::with_capacity(CACHE_CAPACITY),
@@ -2794,7 +2832,73 @@ where
         &self.filepath
     }
 
+    fn read_root_offset_from_file(file: &File) -> io::Result<u64> {
+        let mut root_buf = [0u8; size_of::<u64>()];
+        #[cfg(unix)]
+        file.read_exact_at(&mut root_buf, ROOT_OFFSET_POS)?;
+        #[cfg(not(unix))]
+        {
+            let mut f = file;
+            let current_pos = f.stream_position()?;
+            f.seek(SeekFrom::Start(ROOT_OFFSET_POS))?;
+            f.read_exact(&mut root_buf)?;
+            f.seek(SeekFrom::Start(current_pos))?;
+        }
+        Ok(u64::from_le_bytes(root_buf))
+    }
+
+    fn refresh_root_offset(&mut self) -> io::Result<()> {
+        let new_root_offset = if self.mmap.is_some() && !self.filepath.as_os_str().is_empty() {
+            let file = File::open(&self.filepath)?;
+            let metadata = file.metadata()?;
+            let current_identity = FileIdentity::from_metadata(&metadata);
+            let remap_required = self.file_identity != Some(current_identity);
+            let root_offset = Self::read_root_offset_from_file(&file)?;
+
+            if remap_required {
+                if let Some(remapped) = unsafe { Mmap::map(&file).ok() } {
+                    self.file = None;
+                    self.mmap = Some(remapped);
+                } else {
+                    self.mmap = None;
+                    self.file = Some(utils::file_reader(file));
+                }
+                self.cache.clear();
+                self.node_cache.clear();
+            }
+
+            self.file_identity = Some(current_identity);
+            root_offset
+        } else if let Some(mmap) = &self.mmap {
+            let start = usize::try_from(ROOT_OFFSET_POS)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Invalid root offset position: {e}")))?;
+            let end = start
+                .checked_add(size_of::<u64>())
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid root offset range"))?;
+            let root_bytes = mmap
+                .get(start..end)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Header too small"))?;
+            let bytes: [u8; size_of::<u64>()] = root_bytes
+                .try_into()
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid root offset bytes"))?;
+            u64::from_le_bytes(bytes)
+        } else if let Some(file) = &mut self.file {
+            Self::read_root_offset_from_file(file.get_ref())?
+        } else {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "No data source available"));
+        };
+
+        if new_root_offset != self.root_offset {
+            self.root_offset = new_root_offset;
+            self.cache.clear();
+            self.node_cache.clear();
+        }
+
+        Ok(())
+    }
+
     pub fn query(&mut self, key: &K) -> Result<Option<V>, BPlusTreeError> {
+        self.refresh_root_offset().map_err(BPlusTreeError::Io)?;
         if let Some(mmap) = &self.mmap {
             let mut cursor = io::Cursor::new(mmap.as_ref());
             query_tree_mmap(mmap, &mut cursor, &mut self.node_cache, key, self.root_offset)
@@ -2828,6 +2932,7 @@ where
     /// let value = query.query_zero_copy(&42)?;
     /// ```
     pub fn query_zero_copy(&mut self, key: &K) -> Result<Option<V>, BPlusTreeError> {
+        self.refresh_root_offset().map_err(BPlusTreeError::Io)?;
         if let Some(mmap) = &self.mmap {
             let mut cursor = io::Cursor::new(mmap.as_ref());
             query_tree_mmap_zero_copy(mmap, &mut cursor, key, self.root_offset)
@@ -2847,6 +2952,7 @@ where
     V: Serialize + for<'de> Deserialize<'de> + Clone,
 {
     pub fn query_le(&mut self, key: &K) -> Result<Option<V>, BPlusTreeError> {
+        self.refresh_root_offset().map_err(BPlusTreeError::Io)?;
         if let Some(mmap) = &self.mmap {
             let mut cursor = io::Cursor::new(mmap.as_ref());
             query_tree_le_mmap(mmap, &mut cursor, key, self.root_offset)
@@ -2858,6 +2964,7 @@ where
     }
 
     pub fn len(&mut self) -> Result<usize, BPlusTreeError> {
+        self.refresh_root_offset().map_err(BPlusTreeError::Io)?;
         if let Some(mmap) = &self.mmap {
             count_items_mmap::<K, V>(mmap, self.root_offset)
         } else if let Some(file) = &mut self.file {
@@ -2868,6 +2975,7 @@ where
     }
 
     pub fn is_empty(&mut self) -> Result<bool, BPlusTreeError> {
+        self.refresh_root_offset().map_err(BPlusTreeError::Io)?;
         let (node, _) = if let Some(mmap) = &self.mmap {
             let mut cursor = io::Cursor::new(mmap.as_ref());
             BPlusTreeNode::<K, V>::deserialize_from_mmap(mmap, &mut cursor, self.root_offset, false)?
@@ -3201,6 +3309,12 @@ pub enum FlushPolicy {
     None,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct BatchRollbackState {
+    file_len: u64,
+    root_offset: u64,
+}
+
 pub struct BPlusTreeUpdate<K, V> {
     file: BufReader<File>,
     read_buffer: Vec<u8>,
@@ -3312,6 +3426,98 @@ where
         })
     }
 
+    /// Opens an update handle with lock-acquisition backoff.
+    ///
+    /// This function is **blocking** and should not run directly on a Tokio worker
+    /// thread. Internally it delegates to [`Self::try_new_with_backoff_stats`],
+    /// which uses `std::thread::sleep` while waiting for the file lock.
+    ///
+    /// In async contexts (Axum/Tokio), call this inside
+    /// `tokio::task::spawn_blocking(...)`.
+    pub fn try_new_with_backoff(filepath: &Path) -> io::Result<Self> {
+        Self::try_new_with_backoff_stats(filepath).map(|(tree, _)| tree)
+    }
+
+    /// Opens an update handle with lock-acquisition backoff and returns
+    /// `(tree, retry_attempts)`.
+    ///
+    /// This function is **blocking**. It performs lock retries with
+    /// `std::thread::sleep`, so running it on a Tokio worker thread can stall
+    /// other async tasks scheduled on that thread.
+    ///
+    /// Use `tokio::task::spawn_blocking(...)` when calling from async code.
+    pub fn try_new_with_backoff_stats(filepath: &Path) -> io::Result<(Self, u64)> {
+        let mut attempts = 0u64;
+        let mut backoff = Duration::from_micros(10);
+        let max_backoff = Duration::from_millis(10);
+        let started_at = Instant::now();
+        let timeout = Duration::from_secs(30);
+
+        loop {
+            match Self::try_new(filepath) {
+                Ok(tree) => return Ok((tree, attempts)),
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                    if started_at.elapsed() >= timeout {
+                        return Err(io::Error::new(io::ErrorKind::TimedOut, "timeout acquiring lock"));
+                    }
+                    attempts = attempts.saturating_add(1);
+                    std::thread::sleep(backoff);
+                    backoff = (backoff * 2).min(max_backoff);
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    pub fn set_flush_policy(&mut self, policy: FlushPolicy) {
+        self.flush_policy = policy;
+    }
+
+    /// Prepares a batch by cloning keys and serializing values eagerly.
+    ///
+    /// Keys are cloned because the returned prepared payload must outlive the
+    /// borrowed input slice. For large batches or expensive key types, this
+    /// can be a notable allocation/cloning cost.
+    pub fn prepare_upsert_batch(items: &[(&K, &V)]) -> io::Result<Vec<(K, Vec<u8>)>> {
+        let mut prepared = Vec::with_capacity(items.len());
+        for (key, value) in items {
+            prepared.push(((*key).clone(), binary_serialize(*value)?));
+        }
+        Ok(prepared)
+    }
+
+    pub fn upsert_batch_prepared_with_backoff(filepath: &Path, items: &[(&K, &V)]) -> io::Result<u64> {
+        let prepared = Self::prepare_upsert_batch(items)?;
+        let mut updater = Self::try_new_with_backoff(filepath)?;
+        updater.upsert_batch_encoded(prepared)
+    }
+
+    fn capture_batch_rollback_state(&self) -> io::Result<BatchRollbackState> {
+        Ok(BatchRollbackState {
+            file_len: self.file.get_ref().metadata()?.len(),
+            root_offset: self.root_offset,
+        })
+    }
+
+    fn rollback_batch_state(&mut self, state: BatchRollbackState) -> io::Result<()> {
+        {
+            let file = self.file.get_mut();
+            file.seek(SeekFrom::Start(ROOT_OFFSET_POS))?;
+            file.write_all(&state.root_offset.to_le_bytes())?;
+            file.flush()?;
+            file.set_len(state.file_len)?;
+            if self.flush_policy != FlushPolicy::None {
+                file.sync_all()?;
+            }
+        }
+
+        // Seek via BufReader to invalidate any buffered state.
+        self.file.seek(SeekFrom::Start(state.file_len))?;
+        self.cache.clear();
+        self.root_offset = state.root_offset;
+        Ok(())
+    }
+
     /// Helper to access metadata
     pub fn get_metadata(&mut self) -> io::Result<BPlusTreeMetadata> {
         self.file.seek(SeekFrom::Start(METADATA_OFFSET_POS))?;
@@ -3376,7 +3582,7 @@ where
 
     pub fn update(&mut self, key: &K, value: V) -> Result<u64, BPlusTreeError> {
         let refs = [(key, &value)];
-        let new_root_offset = self.update_batch_recursive(self.root_offset, &refs)?;
+        let new_root_offset = self.update_batch_recursive(self.root_offset, &refs, true)?;
 
         // Only update header if root offset actually changed
         // (if in-place update succeeded, offset stays the same)
@@ -3398,10 +3604,8 @@ where
     /// Update multiple items in batch. This is more efficient than calling `update()` multiple times
     /// as it performs all updates and then commits the final root offset once.
     ///
-    /// **Optimization**: This method first attempts in-place value updates for values stored in
-    /// Single mode. If all values fit in their existing allocated space, no node rewrites are
-    /// needed at all - only the value data is updated. This eliminates the cascading rewrite
-    /// problem for same-size or smaller value updates.
+    /// For rollback safety in `update_batch`, callers may disable in-place updates and force
+    /// copy-on-write mode for all touched values.
     ///
     /// returns The final root offset after all updates, or an error if any update fails.
     /// Returns the original offset if all updates were performed in-place.
@@ -3409,6 +3613,7 @@ where
         &mut self,
         offset: u64,
         items: &[(&K, &V)],
+        allow_in_place: bool,
     ) -> Result<u64, BPlusTreeError> {
         let (mut node, pointers_opt) = BPlusTreeNode::<K, V>::deserialize_from_block(&mut self.file, &mut self.read_buffer, offset, false)?;
 
@@ -3421,22 +3626,27 @@ where
             for (key, value) in items {
                 match node.keys.binary_search(key) {
                     Ok(idx) => {
-                        // Try in-place update first
-                        let result = self.try_update_value_in_place(value, &node.value_info[idx])
-                            .map_err(BPlusTreeError::Io)?;
+                        if allow_in_place {
+                            // Try in-place update first
+                            let result = self.try_update_value_in_place(value, &node.value_info[idx])
+                                .map_err(BPlusTreeError::Io)?;
 
-                        match result {
-                            InPlaceUpdateResult::Success => {
-                                // In-place succeeded, value_info stays the same
+                            match result {
+                                InPlaceUpdateResult::Success => {
+                                    // In-place succeeded, value_info stays the same
+                                }
+                                InPlaceUpdateResult::PromotedToSingle(new_info) => {
+                                    // Packed value promoted to Single, need to update node
+                                    promoted.push((idx, new_info));
+                                }
+                                InPlaceUpdateResult::NeedsCow => {
+                                    // Value doesn't fit in existing space, need full COW
+                                    needs_cow.push((idx, *key, *value));
+                                }
                             }
-                            InPlaceUpdateResult::PromotedToSingle(new_info) => {
-                                // Packed value promoted to Single, need to update node
-                                promoted.push((idx, new_info));
-                            }
-                            InPlaceUpdateResult::NeedsCow => {
-                                // Value doesn't fit in existing space, need full COW
-                                needs_cow.push((idx, *key, *value));
-                            }
+                        } else {
+                            // Batch mode uses pure COW so rollback can safely truncate/revert root.
+                            needs_cow.push((idx, *key, *value));
                         }
                     }
                     Err(_) => return Err(BPlusTreeError::KeyNotFound),
@@ -3483,7 +3693,7 @@ where
 
                 let sub_items = &items[current_idx..group_end];
                 let original_child_offset = pointers[child_idx];
-                let new_child_offset = self.update_batch_recursive(original_child_offset, sub_items)?;
+                let new_child_offset = self.update_batch_recursive(original_child_offset, sub_items, allow_in_place)?;
 
                 if new_child_offset != original_child_offset {
                     pointers[child_idx] = new_child_offset;
@@ -3511,24 +3721,41 @@ where
             return Ok(self.root_offset);
         }
 
-        let mut sorted_items = items.to_vec();
-        sorted_items.sort_by(|a, b| a.0.cmp(b.0));
+        let rollback_state = self.capture_batch_rollback_state().map_err(BPlusTreeError::Io)?;
+        let result = (|| -> Result<u64, BPlusTreeError> {
+            let mut sorted_items = items.to_vec();
+            sorted_items.sort_by(|a, b| a.0.cmp(b.0));
 
-        let new_root_offset = self.update_batch_recursive(self.root_offset, &sorted_items)?;
+            // Disable in-place updates for batch rollback safety.
+            let new_root_offset = self.update_batch_recursive(self.root_offset, &sorted_items, false)?;
 
-        // Only update header if root offset actually changed
-        // (if all in-place updates succeeded, offset stays the same)
-        if new_root_offset != self.root_offset {
-            // Atomic Header Swap - only once at the end
-            self.file.get_mut().seek(SeekFrom::Start(ROOT_OFFSET_POS)).map_err(BPlusTreeError::Io)?;
-            self.file.get_mut().write_all(&new_root_offset.to_le_bytes()).map_err(BPlusTreeError::Io)?;
-            self.root_offset = new_root_offset;
+            // Only update header if root offset actually changed
+            // (if all in-place updates succeeded, offset stays the same)
+            if new_root_offset != self.root_offset {
+                // Atomic Header Swap - only once at the end
+                self.file.get_mut().seek(SeekFrom::Start(ROOT_OFFSET_POS)).map_err(BPlusTreeError::Io)?;
+                self.file.get_mut().write_all(&new_root_offset.to_le_bytes()).map_err(BPlusTreeError::Io)?;
+                self.root_offset = new_root_offset;
+            }
+
+            self.file.get_mut().flush().map_err(BPlusTreeError::Io)?;
+            if self.flush_policy != FlushPolicy::None {
+                self.file.get_mut().sync_all().map_err(BPlusTreeError::Io)?;
+            }
+            Ok(new_root_offset)
+        })();
+
+        match result {
+            Ok(value) => Ok(value),
+            Err(err) => {
+                if let Err(rollback_err) = self.rollback_batch_state(rollback_state) {
+                    return Err(BPlusTreeError::Io(io::Error::other(format!(
+                        "update_batch failed: {err}; rollback failed: {rollback_err}"
+                    ))));
+                }
+                Err(err)
+            }
         }
-
-        self.file.get_mut().flush().map_err(BPlusTreeError::Io)?;
-        self.file.get_mut().sync_all().map_err(BPlusTreeError::Io)?;
-
-        Ok(new_root_offset)
     }
 
 
@@ -3845,23 +4072,42 @@ where
             return Ok(self.root_offset);
         }
 
-        let mut sorted_items = items.to_vec();
-        sorted_items.sort_by(|a, b| a.0.cmp(b.0));
+        let rollback_state = self.capture_batch_rollback_state()?;
+        let result = (|| -> io::Result<u64> {
+            let mut sorted_items = items.to_vec();
+            sorted_items.sort_by(|a, b| a.0.cmp(b.0));
 
-        let (mut current_root, promotions) = self.upsert_batch_recursive(self.root_offset, &sorted_items)?;
+            let (mut current_root, promotions) = self.upsert_batch_recursive(self.root_offset, &sorted_items)?;
 
-        // Handle promotions (splits) using balanced approach
-        current_root = self.build_higher_levels(current_root, promotions)?;
+            // Handle promotions (splits) using balanced approach
+            current_root = self.build_higher_levels(current_root, promotions)?;
 
-        self.file.get_mut().seek(SeekFrom::Start(ROOT_OFFSET_POS))?;
-        self.file.get_mut().write_all(&current_root.to_le_bytes())?;
-        self.file.get_mut().flush()?;
-        if self.flush_policy != FlushPolicy::None {
-            self.file.get_mut().sync_all()?;
+            self.file.get_mut().seek(SeekFrom::Start(ROOT_OFFSET_POS))?;
+            self.file.get_mut().write_all(&current_root.to_le_bytes())?;
+            self.file.get_mut().flush()?;
+            if self.flush_policy != FlushPolicy::None {
+                self.file.get_mut().sync_all()?;
+            }
+
+            self.root_offset = current_root;
+            Ok(current_root)
+        })();
+
+        match result {
+            Ok(value) => Ok(value),
+            Err(err) => {
+                if let Err(rollback_err) = self.rollback_batch_state(rollback_state) {
+                    return Err(io::Error::other(format!(
+                        "upsert_batch failed: {err}; rollback failed: {rollback_err}"
+                    )));
+                }
+                Err(err)
+            }
         }
+    }
 
-        self.root_offset = current_root;
-        Ok(current_root)
+    pub fn upsert_batch_encoded(&mut self, items: Vec<(K, Vec<u8>)>) -> io::Result<u64> {
+        self.upsert_batch_preserialized(items)
     }
 
     /// Upsert multiple items using pre-serialized key-value data.
@@ -3888,32 +4134,50 @@ where
             return Ok(self.root_offset);
         }
 
-        // Deserialize keys for sorting and tree traversal, keep values as bytes
-        let mut typed_items: Vec<(K, Vec<u8>)> = Vec::with_capacity(items.len());
-        for (key, value_bytes) in items {
-            typed_items.push((key, value_bytes));
+        let rollback_state = self.capture_batch_rollback_state()?;
+        let result = (|| -> io::Result<u64> {
+            // // Sort by key for efficient batch insertion
+            let mut sorted_items = items;
+         sorted_items.sort_by(|a, b| a.0.cmp(&b.0));
+
+            let (mut current_root, promotions) = self.upsert_batch_preserialized_recursive(
+                self.root_offset,
+                &sorted_items,
+            )?;
+
+            // Handle promotions (splits) using a balanced approach
+            current_root = self.build_higher_levels(current_root, promotions)?;
+
+            self.file.get_mut().seek(SeekFrom::Start(ROOT_OFFSET_POS))?;
+            self.file.get_mut().write_all(&current_root.to_le_bytes())?;
+            self.file.get_mut().flush()?;
+            if self.flush_policy != FlushPolicy::None {
+                self.file.get_mut().sync_all()?;
+            }
+
+            self.root_offset = current_root;
+            Ok(current_root)
+        })();
+
+        match result {
+            Ok(value) => Ok(value),
+            Err(err) => {
+                if let Err(rollback_err) = self.rollback_batch_state(rollback_state) {
+                    return Err(io::Error::other(format!(
+                        "upsert_batch_preserialized failed: {err}; rollback failed: {rollback_err}"
+                    )));
+                }
+                Err(err)
+            }
         }
+    }
 
-        // Sort by key for efficient batch insertion
-        typed_items.sort_by(|a, b| a.0.cmp(&b.0));
-
-        let (mut current_root, promotions) = self.upsert_batch_preserialized_recursive(
-            self.root_offset,
-            &typed_items,
-        )?;
-
-        // Handle promotions (splits) using balanced approach
-        current_root = self.build_higher_levels(current_root, promotions)?;
-
-        self.file.get_mut().seek(SeekFrom::Start(ROOT_OFFSET_POS))?;
-        self.file.get_mut().write_all(&current_root.to_le_bytes())?;
+    pub fn commit(&mut self) -> io::Result<()> {
         self.file.get_mut().flush()?;
         if self.flush_policy != FlushPolicy::None {
             self.file.get_mut().sync_all()?;
         }
-
-        self.root_offset = current_root;
-        Ok(current_root)
+        Ok(())
     }
 
     /// Recursive helper for `upsert_batch_preserialized`.
@@ -4135,7 +4399,7 @@ where
         temp_file.write_all(&root_offset.to_le_bytes())?;
 
         temp_file.flush()?;
-        // temp_file.as_file().sync_all()?; // Removed as requested; relying on persist or OS flush policy
+        // temp_file.as_file().sync_all()?; // Removed as requested; relying on persisted or OS flush policy
 
         // 5. Atomic Replace
         temp_file.persist(filepath).map_err(to_io_error)?;
@@ -4149,6 +4413,49 @@ where
         Ok(())
     }
 }
+
+/// Single-writer wrapper that serializes prepared batch writes through one updater instance.
+///
+/// This wrapper does not implement write-ahead logging (WAL) semantics or
+/// crash-recovery replay. It only serializes access through a shared updater.
+pub struct BPlusTreeSerialWriter<K, V> {
+    updater: Mutex<BPlusTreeUpdate<K, V>>,
+}
+
+impl<K, V> BPlusTreeSerialWriter<K, V>
+where
+    K: Ord + Serialize + for<'de> Deserialize<'de> + Clone + Send + 'static,
+    V: Serialize + for<'de> Deserialize<'de> + Clone + Send + 'static,
+{
+    pub fn new(filepath: &Path, flush_policy: FlushPolicy) -> io::Result<Self> {
+        let mut updater = BPlusTreeUpdate::<K, V>::try_new_with_backoff(filepath)?;
+        updater.set_flush_policy(flush_policy);
+        Ok(Self {
+            updater: Mutex::new(updater),
+        })
+    }
+
+    pub fn upsert_prepared(&self, items: Vec<(K, Vec<u8>)>) -> io::Result<u64> {
+        self.updater.lock().upsert_batch_encoded(items)
+    }
+
+    pub fn upsert(&self, items: &[(&K, &V)]) -> io::Result<u64> {
+        let prepared = BPlusTreeUpdate::<K, V>::prepare_upsert_batch(items)?;
+        self.upsert_prepared(prepared)
+    }
+
+    pub fn commit(&self) -> io::Result<()> {
+        self.updater.lock().commit()
+    }
+
+    /// Alias for `commit()`.
+    pub fn shutdown(&self) -> io::Result<()> {
+        self.commit()
+    }
+}
+
+#[deprecated(note = "Not a real WAL implementation; use BPlusTreeSerialWriter instead")]
+pub type BPlusTreeWalWriter<K, V> = BPlusTreeSerialWriter<K, V>;
 
 pub struct BPlusTreeIterator<'a, K, V> {
     stack: Vec<&'a BPlusTreeNode<K, V>>,
@@ -4240,6 +4547,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::de::Deserializer;
+    use serde::ser::Error as SerError;
+    use serde::Serializer;
     use tempfile::tempdir;
 
     use parking_lot::Mutex;
@@ -4250,11 +4560,115 @@ mod tests {
     use serde::{Deserialize, Serialize};
     use shared::utils::generate_random_string;
 
+
+    #[cfg(unix)]
+    #[allow(dead_code)]
+    fn process_is_alive(pid: u32) -> bool {
+        if pid == 0 {
+            return false;
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            // Fast path for Linux/musl.
+            if Path::new("/proc").join(pid.to_string()).exists() {
+                return true;
+            }
+        }
+
+        let pid_raw: libc::pid_t = match pid.try_into() {
+            Ok(value) => value,
+            Err(_) => return false,
+        };
+
+        // kill(pid, 0) probes process existence without sending a signal.
+        let rc = unsafe { libc::kill(pid_raw, 0) };
+        if rc == 0 {
+            return true;
+        }
+
+        match io::Error::last_os_error().raw_os_error() {
+            Some(code) if code == libc::ESRCH => false,
+            Some(code) if code == libc::EPERM => true,
+            _ => false,
+        }
+    }
+
+    #[cfg(windows)]
+    #[allow(dead_code)]
+    fn process_is_alive(pid: u32) -> bool {
+        if pid == 0 {
+            return false;
+        }
+
+        // PROCESS_QUERY_LIMITED_INFORMATION is sufficient to check process existence.
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle == 0 {
+            return false;
+        }
+
+        unsafe {
+            CloseHandle(handle);
+        }
+        true
+    }
+
     // Example usage with a simple struct
     #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
     struct Record {
         id: u32,
         data: String,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct FailingValue {
+        payload: String,
+        fail_serialize: bool,
+    }
+
+    impl FailingValue {
+        fn ok(payload: impl Into<String>) -> Self {
+            Self {
+                payload: payload.into(),
+                fail_serialize: false,
+            }
+        }
+
+        fn failing(payload: impl Into<String>) -> Self {
+            Self {
+                payload: payload.into(),
+                fail_serialize: true,
+            }
+        }
+    }
+
+    impl Serialize for FailingValue {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            if self.fail_serialize {
+                return Err(S::Error::custom("intentional serialize failure"));
+            }
+            self.payload.serialize(serializer)
+        }
+    }
+
+    impl<'de> Deserialize<'de> for FailingValue {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            let payload = String::deserialize(deserializer)?;
+            Ok(Self::ok(payload))
+        }
+    }
+
+    #[test]
+    fn test_process_is_alive_current_process() {
+        let current_pid = std::process::id();
+        assert!(process_is_alive(current_pid));
+        assert!(!process_is_alive(u32::MAX));
     }
 
 
@@ -4791,6 +5205,107 @@ mod tests {
     }
 
     #[test]
+    fn update_batch_error_rolls_back_file_and_data() -> io::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let filepath = tempdir.path().join("tree_update_batch_rollback.bin");
+        let mut tree = BPlusTree::<u32, String>::new();
+        let count = 2_000u32;
+        for i in 0..count {
+            tree.insert(i, format!("v{i}"));
+        }
+        tree.store(&filepath)?;
+        drop(tree);
+
+        let size_before = std::fs::metadata(&filepath)?.len();
+        let mut updater = BPlusTreeUpdate::<u32, String>::try_new(&filepath)?;
+        let updates = [
+            (0u32, "X".repeat(6_000)),
+            (u32::MAX, "missing".to_string()),
+        ];
+        let refs: Vec<(&u32, &String)> = updates.iter().map(|(k, v)| (k, v)).collect();
+        let result = updater.update_batch(&refs);
+        assert!(matches!(result, Err(BPlusTreeError::KeyNotFound)));
+        drop(updater);
+
+        let size_after = std::fs::metadata(&filepath)?.len();
+        assert_eq!(size_after, size_before, "failed batch must roll back file growth");
+
+        // Ensure header/root offset remains valid for update/load paths.
+        let mut reopened_updater = BPlusTreeUpdate::<u32, String>::try_new(&filepath)?;
+        assert_eq!(reopened_updater.query(&0).map_err(BPlusTreeError::to_io)?, Some("v0".to_string()));
+        drop(reopened_updater);
+        let loaded_tree = BPlusTree::<u32, String>::load(&filepath)?;
+        assert_eq!(loaded_tree.query(&0).cloned(), Some("v0".to_string()));
+
+        let mut query = BPlusTreeQuery::<u32, String>::try_new(&filepath)?;
+        assert_eq!(query.query(&0).map_err(BPlusTreeError::to_io)?, Some("v0".to_string()));
+        assert!(query.query(&u32::MAX).map_err(BPlusTreeError::to_io)?.is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn update_batch_error_rolls_back_in_place_candidate_write() -> io::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let filepath = tempdir.path().join("tree_update_batch_in_place_rollback.bin");
+        let original = "A".repeat(500);
+        let updated = "B".repeat(500);
+
+        let mut tree = BPlusTree::<u32, String>::new();
+        tree.insert(1, original.clone());
+        tree.store(&filepath)?;
+        drop(tree);
+
+        let mut updater = BPlusTreeUpdate::<u32, String>::try_new(&filepath)?;
+        let updates = [
+            (1u32, updated.clone()),
+            (u32::MAX, "missing".to_string()),
+        ];
+        let refs: Vec<(&u32, &String)> = updates.iter().map(|(k, v)| (k, v)).collect();
+
+        let result = updater.update_batch(&refs);
+        assert!(matches!(result, Err(BPlusTreeError::KeyNotFound)));
+        drop(updater);
+
+        // On failed batch, key 1 must still have original value.
+        let mut query = BPlusTreeQuery::<u32, String>::try_new(&filepath)?;
+        assert_eq!(query.query(&1).map_err(BPlusTreeError::to_io)?, Some(original));
+        assert_ne!(query.query(&1).map_err(BPlusTreeError::to_io)?, Some(updated));
+
+        Ok(())
+    }
+
+    #[test]
+    fn upsert_batch_error_rolls_back_file_and_data() -> io::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let filepath = tempdir.path().join("tree_upsert_batch_rollback.bin");
+        let mut tree = BPlusTree::<u32, FailingValue>::new();
+        tree.insert(1, FailingValue::ok("initial"));
+        tree.store(&filepath)?;
+        drop(tree);
+
+        let size_before = std::fs::metadata(&filepath)?.len();
+        let mut updater = BPlusTreeUpdate::<u32, FailingValue>::try_new(&filepath)?;
+        let batch = [
+            (1u32, FailingValue::ok("updated")),
+            (2u32, FailingValue::failing("boom")),
+        ];
+        let refs: Vec<(&u32, &FailingValue)> = batch.iter().map(|(k, v)| (k, v)).collect();
+        assert!(updater.upsert_batch(&refs).is_err());
+        drop(updater);
+
+        let size_after = std::fs::metadata(&filepath)?.len();
+        assert_eq!(size_after, size_before, "failed upsert batch must roll back file growth");
+
+        let mut query = BPlusTreeQuery::<u32, FailingValue>::try_new(&filepath)?;
+        let existing = query.query(&1).map_err(BPlusTreeError::to_io)?;
+        assert_eq!(existing.map(|v| v.payload), Some("initial".to_string()));
+        assert!(query.query(&2).map_err(BPlusTreeError::to_io)?.is_none());
+
+        Ok(())
+    }
+
+    #[test]
     fn update_batch_large_test() -> io::Result<()> {
         let tempdir = tempfile::tempdir()?;
         let filepath = tempdir.path().join("tree_update_batch_large.bin");
@@ -4924,6 +5439,40 @@ mod tests {
         assert!(tree_check.query(&1).map_err(BPlusTreeError::to_io)?.is_some(), "Should have key 1");
         assert!(tree_check.query(&2).map_err(BPlusTreeError::to_io)?.is_some(), "Should have key 2");
         assert!(tree_check.query(&3).map_err(BPlusTreeError::to_io)?.is_some(), "Should have key 3 - if missing, file handle wasn't updated");
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn query_remaps_after_atomic_replace_with_same_length() -> io::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let filepath = tempdir.path().join("tree_query_replace_target.bin");
+        let replacement_path = tempdir.path().join("tree_query_replace_source.bin");
+
+        let mut tree = BPlusTree::<u32, Record>::new();
+        tree.insert(1, Record { id: 1, data: "aaaa".to_string() });
+        tree.insert(2, Record { id: 2, data: "bbbb".to_string() });
+        tree.store(&filepath)?;
+
+        let mut query = BPlusTreeQuery::<u32, Record>::try_new(&filepath)?;
+        assert!(query.mmap.is_some(), "Test requires mmap-backed query");
+        let initial = query.query(&1).map_err(BPlusTreeError::to_io)?.expect("missing initial key");
+        assert_eq!(initial.data, "aaaa");
+
+        let mut replacement = BPlusTree::<u32, Record>::new();
+        replacement.insert(1, Record { id: 1, data: "cccc".to_string() });
+        replacement.insert(2, Record { id: 2, data: "dddd".to_string() });
+        replacement.store(&replacement_path)?;
+
+        let old_len = std::fs::metadata(&filepath)?.len();
+        let replacement_len = std::fs::metadata(&replacement_path)?.len();
+        assert_eq!(old_len, replacement_len, "test requires same-length replacement file");
+
+        std::fs::rename(&replacement_path, &filepath)?;
+
+        let refreshed = query.query(&1).map_err(BPlusTreeError::to_io)?.expect("missing replaced key");
+        assert_eq!(refreshed.data, "cccc");
 
         Ok(())
     }
@@ -5755,6 +6304,33 @@ mod tests {
 
         // Test key not found
         assert_eq!(query.query_zero_copy(&101).unwrap(), None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_query_refreshes_root_offset_after_external_upsert() -> io::Result<()> {
+        let tempdir = tempdir()?;
+        let filepath = tempdir.path().join("query_refresh_root.bin");
+
+        let mut tree = BPlusTree::<u32, String>::new();
+        for i in 0..64 {
+            tree.insert(i, format!("value_{i}"));
+        }
+        tree.store(&filepath)?;
+        drop(tree);
+
+        let mut query = BPlusTreeQuery::<u32, String>::try_new(&filepath)?;
+        assert_eq!(query.query(&999).map_err(BPlusTreeError::to_io)?, None);
+
+        let mut updater = BPlusTreeUpdate::<u32, String>::try_new(&filepath)?;
+        let inserted = "fresh_value".to_string();
+        updater.upsert_batch(&[(&999u32, &inserted)])?;
+        drop(updater);
+
+        // Same query instance should observe the updated root/header.
+        assert_eq!(query.query(&999).map_err(BPlusTreeError::to_io)?, Some(inserted.clone()));
+        assert_eq!(query.query_zero_copy(&999).map_err(BPlusTreeError::to_io)?, Some(inserted));
 
         Ok(())
     }
