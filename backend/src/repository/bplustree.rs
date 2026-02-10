@@ -10,14 +10,14 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use shared::error::{string_to_io_error, to_io_error};
 use std::ffi::OsString;
-use std::fs::{File, OpenOptions};
+use std::fs::{File, Metadata, OpenOptions};
 use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::marker::PhantomData;
 use std::mem::size_of;
 #[cfg(unix)]
-use std::os::unix::fs::FileExt;
+use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 use tempfile::NamedTempFile;
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::CloseHandle;
@@ -2726,10 +2726,41 @@ where
 /// at the cost of higher memory usage.
 type NodeCache<K, V> = IndexMap<u64, (BPlusTreeNode<K, V>, Option<Vec<u64>>)>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileIdentity {
+    len: u64,
+    modified_ns: u128,
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+}
+
+impl FileIdentity {
+    fn from_metadata(metadata: &Metadata) -> Self {
+        let modified_ns = metadata
+            .modified()
+            .or_else(|_| metadata.created())
+            .ok()
+            .and_then(|timestamp| timestamp.duration_since(UNIX_EPOCH).ok())
+            .map_or(0, |duration| duration.as_nanos());
+
+        Self {
+            len: metadata.len(),
+            modified_ns,
+            #[cfg(unix)]
+            dev: metadata.dev(),
+            #[cfg(unix)]
+            ino: metadata.ino(),
+        }
+    }
+}
+
 pub struct BPlusTreeQuery<K, V> {
     file: Option<BufReader<File>>,
     mmap: Option<Mmap>,
     filepath: PathBuf,
+    file_identity: Option<FileIdentity>,
     buffer: Vec<u8>,
     cache: IndexMap<u64, Vec<u8>>,
     node_cache: NodeCache<K, V>,
@@ -2746,6 +2777,7 @@ where
     pub fn try_from_file(file: File) -> io::Result<Self> {
         let metadata = file.metadata()?;
         let file_len = metadata.len();
+        let file_identity = Some(FileIdentity::from_metadata(&metadata));
 
         if file_len < HEADER_SIZE {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "File too small"));
@@ -2778,6 +2810,7 @@ where
             file: if mmap.is_some() { None } else { Some(utils::file_reader(file)) },
             mmap,
             filepath: PathBuf::new(),
+            file_identity,
             buffer: vec![0u8; PAGE_SIZE_USIZE],
             cache: IndexMap::with_capacity(CACHE_CAPACITY),
             node_cache: IndexMap::with_capacity(CACHE_CAPACITY),
@@ -2817,11 +2850,12 @@ where
     fn refresh_root_offset(&mut self) -> io::Result<()> {
         let new_root_offset = if self.mmap.is_some() && !self.filepath.as_os_str().is_empty() {
             let file = File::open(&self.filepath)?;
-            let file_len = file.metadata()?.len();
-            let mapped_len = self.mmap.as_ref().map_or(0, |mmap| mmap.len() as u64);
+            let metadata = file.metadata()?;
+            let current_identity = FileIdentity::from_metadata(&metadata);
+            let remap_required = self.file_identity != Some(current_identity);
             let root_offset = Self::read_root_offset_from_file(&file)?;
 
-            if file_len != mapped_len {
+            if remap_required {
                 if let Some(remapped) = unsafe { Mmap::map(&file).ok() } {
                     self.file = None;
                     self.mmap = Some(remapped);
@@ -2833,6 +2867,7 @@ where
                 self.node_cache.clear();
             }
 
+            self.file_identity = Some(current_identity);
             root_offset
         } else if let Some(mmap) = &self.mmap {
             let start = usize::try_from(ROOT_OFFSET_POS)
@@ -5401,6 +5436,40 @@ mod tests {
         assert!(tree_check.query(&1).map_err(BPlusTreeError::to_io)?.is_some(), "Should have key 1");
         assert!(tree_check.query(&2).map_err(BPlusTreeError::to_io)?.is_some(), "Should have key 2");
         assert!(tree_check.query(&3).map_err(BPlusTreeError::to_io)?.is_some(), "Should have key 3 - if missing, file handle wasn't updated");
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn query_remaps_after_atomic_replace_with_same_length() -> io::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let filepath = tempdir.path().join("tree_query_replace_target.bin");
+        let replacement_path = tempdir.path().join("tree_query_replace_source.bin");
+
+        let mut tree = BPlusTree::<u32, Record>::new();
+        tree.insert(1, Record { id: 1, data: "aaaa".to_string() });
+        tree.insert(2, Record { id: 2, data: "bbbb".to_string() });
+        tree.store(&filepath)?;
+
+        let mut query = BPlusTreeQuery::<u32, Record>::try_new(&filepath)?;
+        assert!(query.mmap.is_some(), "Test requires mmap-backed query");
+        let initial = query.query(&1).map_err(BPlusTreeError::to_io)?.expect("missing initial key");
+        assert_eq!(initial.data, "aaaa");
+
+        let mut replacement = BPlusTree::<u32, Record>::new();
+        replacement.insert(1, Record { id: 1, data: "cccc".to_string() });
+        replacement.insert(2, Record { id: 2, data: "dddd".to_string() });
+        replacement.store(&replacement_path)?;
+
+        let old_len = std::fs::metadata(&filepath)?.len();
+        let replacement_len = std::fs::metadata(&replacement_path)?.len();
+        assert_eq!(old_len, replacement_len, "test requires same-length replacement file");
+
+        std::fs::rename(&replacement_path, &filepath)?;
+
+        let refreshed = query.query(&1).map_err(BPlusTreeError::to_io)?.expect("missing replaced key");
+        assert_eq!(refreshed.data, "cccc");
 
         Ok(())
     }
