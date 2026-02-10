@@ -8,8 +8,9 @@ use crate::repository::{get_input_storage_path, persist_input_series_info_batch,
 use log::{error, info, log_enabled, Level};
 use shared::error::TuliproxError;
 use shared::model::{InputType, PlaylistEntry, SeriesStreamProperties, StreamProperties, XtreamSeriesInfo};
-use shared::model::{PlaylistGroup, PlaylistItemType, XtreamCluster};
+use shared::model::{PlaylistGroup, PlaylistItemType, UUIDType, XtreamCluster};
 use indexmap::IndexMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -138,7 +139,7 @@ async fn playlist_resolve_series_info(app_config: &Arc<AppConfig>, client: &reqw
     group_series.into_values().collect()
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub async fn playlist_resolve_series(cfg: &Arc<AppConfig>,
                                      client: &reqwest::Client,
                                      target: &ConfigTarget,
@@ -152,14 +153,106 @@ pub async fn playlist_resolve_series(cfg: &Arc<AppConfig>,
     provider_fpl.source.release_resources(XtreamCluster::Series);
     let series_playlist = playlist_resolve_series_info(cfg, client, errors, processed_fpl, resolve_series, resolve_delay).await;
     provider_fpl.source.obtain_resources().await;
-    if series_playlist.is_empty() { return; }
 
+    // Keep input playlist as canonical source:
+    // - Store resolved series details back into provider_fpl items
+    // - Rebuild base (unmodified) episodes from provider_fpl metadata only
     if provider_fpl.is_memory() {
-        // original content saved into original list
-        for plg in &series_playlist {
-            provider_fpl.update_playlist(plg).await;
+        let mut resolved_series_by_provider_id: HashMap<u32, SeriesStreamProperties> = HashMap::new();
+        for pli in processed_fpl.items() {
+            if pli.header.xtream_cluster != XtreamCluster::Series
+                || pli.header.item_type != PlaylistItemType::SeriesInfo
+            {
+                continue;
+            }
+            let Some(provider_id) = pli.get_provider_id() else { continue; };
+            if provider_id == 0 {
+                continue;
+            }
+            if let Some(StreamProperties::Series(properties)) = pli.header.additional_properties.as_ref() {
+                resolved_series_by_provider_id
+                    .entry(provider_id)
+                    .or_insert_with(|| properties.as_ref().clone());
+            }
+        }
+
+        if !resolved_series_by_provider_id.is_empty() {
+            let mut existing_uuids: HashSet<UUIDType> = provider_fpl
+                .items()
+                .filter(|pli| {
+                    pli.header.xtream_cluster == XtreamCluster::Series
+                        && pli.header.item_type == PlaylistItemType::Series
+                })
+                .map(|pli| pli.get_uuid())
+                .collect();
+
+            let mut base_series_groups: IndexMap<u32, PlaylistGroup> = IndexMap::new();
+            let input = provider_fpl.input;
+            for pli in provider_fpl.items_mut() {
+                if pli.header.xtream_cluster != XtreamCluster::Series
+                    || pli.header.item_type != PlaylistItemType::SeriesInfo
+                {
+                    continue;
+                }
+
+                let Some(provider_id) = pli.get_provider_id() else { continue; };
+                if provider_id == 0 {
+                    continue;
+                }
+
+                if let Some(resolved) = resolved_series_by_provider_id.get(&provider_id) {
+                    pli.header.additional_properties = Some(StreamProperties::Series(Box::new(resolved.clone())));
+                }
+
+                let Some(StreamProperties::Series(series_props)) = pli.header.additional_properties.as_ref() else {
+                    continue;
+                };
+
+                let (category_id, group_title, series_name) = {
+                    let header = &pli.header;
+                    (
+                        header.category_id,
+                        header.group.clone(),
+                        if header.name.is_empty() {
+                            header.title.clone()
+                        } else {
+                            header.name.clone()
+                        },
+                    )
+                };
+
+                if let Some(episodes) = parse_xtream_series_info(
+                    &pli.get_uuid(),
+                    series_props,
+                    &group_title,
+                    &series_name,
+                    input,
+                ) {
+                    let group = base_series_groups.entry(category_id).or_insert_with(|| PlaylistGroup {
+                        id: category_id,
+                        title: group_title,
+                        channels: Vec::new(),
+                        xtream_cluster: XtreamCluster::Series,
+                    });
+                    for episode in episodes {
+                        if existing_uuids.insert(episode.get_uuid()) {
+                            group.channels.push(episode);
+                        }
+                    }
+                }
+            }
+
+            for group in base_series_groups.values().filter(|g| !g.channels.is_empty()) {
+                provider_fpl.update_playlist(group).await;
+            }
         }
     }
+
+    if series_playlist.is_empty() {
+        return;
+    }
+
+    // run the target processing pipe over newly derived episodes
     // run the processing pipe over new items
     let mut new_playlist = series_playlist;
     for f in pipe {

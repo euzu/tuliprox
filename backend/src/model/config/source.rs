@@ -1,10 +1,81 @@
 use crate::model::{macros, ConfigInput, ConfigTarget, ProcessTargets};
 use shared::error::{info_err_res, TuliproxError};
-use shared::model::{ConfigSourceDto, PatternTemplate, SourcesConfigDto};
+use shared::model::{ConfigProviderDto, ConfigSourceDto, PatternTemplate, SourcesConfigDto};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+
+#[derive(Debug)]
+pub struct ConfigProvider {
+    pub name: Arc<str>,
+    pub urls: Vec<Arc<str>>,
+    pub current_url_index: AtomicUsize,
+}
+
+impl Clone for ConfigProvider {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            urls: self.urls.clone(),
+            current_url_index: AtomicUsize::new(self.current_url_index.load(Ordering::Relaxed)),
+        }
+    }
+}
+
+
+macros::from_impl!(ConfigProvider);
+impl From<&ConfigProviderDto> for ConfigProvider {
+    fn from(dto: &ConfigProviderDto) -> Self {
+        Self {
+            name: dto.name.clone(),
+            urls: dto.urls.clone(),
+            current_url_index: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl ConfigProvider {
+    /// Gets the current URL from the provider
+    pub fn get_current_url(&self) -> Option<&Arc<str>> {
+        let index = self.current_url_index.load(Ordering::Relaxed);
+        self.urls.get(index)
+    }
+
+    /// Resets the current URL index to 0
+    pub fn reset_index(&self) {
+        self.current_url_index.store(0, Ordering::Relaxed);
+    }
+
+    /// Gets the current URL index
+    #[inline]
+    pub fn get_current_index(&self) -> usize {
+        self.current_url_index.load(Ordering::Relaxed)
+    }
+
+    /// Rotates to next URL, checking if a full cycle has been completed.
+    /// Returns None if we've cycled back to the `start_index`, indicating all URLs were tried.
+    ///
+    /// Use this method when you need to try all URLs exactly once before failing.
+    /// Call `get_current_index()` at the start of a failover session to get the `start_index`.
+    pub fn rotate_to_next_url_with_cycle_check(&self, start_index: usize) -> Option<&Arc<str>> {
+        let len = self.urls.len();
+        if len == 0 {
+            return None;
+        }
+
+        let previous = self.current_url_index
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                let next = (current + 1) % len;
+                // If we've cycled back to start, we've tried all URLs.
+                (next != start_index).then_some(next)
+            })
+            .ok()?;
+        let next = (previous + 1) % len;
+        self.urls.get(next)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ConfigSource {
@@ -40,6 +111,7 @@ impl ConfigSource {
 pub struct SourcesConfig {
     pub batch_files: Vec<PathBuf>,
     pub templates: Option<Vec<PatternTemplate>>,
+    pub provider: Vec<Arc<ConfigProvider>>,
     pub inputs: Vec<Arc<ConfigInput>>,
     pub sources: Vec<ConfigSource>,
 }
@@ -51,11 +123,14 @@ impl TryFrom<&SourcesConfigDto> for SourcesConfig {
         let mut inputs = Vec::<Arc<ConfigInput>>::new();
         let mut batch_files = Vec::<PathBuf>::new();
         let mut input_names = HashSet::new();
+        let provider: Vec<_> = dto.provider.as_ref()
+            .map(|list| list.iter().map(ConfigProvider::from).map(Arc::new).collect())
+            .unwrap_or_default();
 
         for input_dto in &dto.inputs {
             let mut input = ConfigInput::from(input_dto);
             // Prepare input
-            if let Some(path) = input.prepare()? {
+            if let Some(path) = input.prepare(&provider)? {
                 batch_files.push(path);
             }
             input_names.insert(input.name.clone());
@@ -76,6 +151,7 @@ impl TryFrom<&SourcesConfigDto> for SourcesConfig {
         Ok(Self {
             batch_files,
             templates: dto.templates.clone(),
+            provider,
             inputs,
             sources,
         })
@@ -178,5 +254,9 @@ impl SourcesConfig {
 
     pub fn get_input_by_name(&self, name: &Arc<str>) -> Option<&Arc<ConfigInput>> {
         self.inputs.iter().find(|i| &i.name == name)
+    }
+
+    pub fn get_provider_by_name(&self, name: &str) -> Option<&Arc<ConfigProvider>> {
+        self.provider.iter().find(|p| p.name.as_ref() == name)
     }
 }

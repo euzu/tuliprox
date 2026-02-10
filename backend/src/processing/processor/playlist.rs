@@ -11,7 +11,6 @@ use tokio::task::JoinSet;
 use crate::api::model::{EventManager, EventMessage, PlaylistStorageState, UpdateGuard};
 use crate::messaging::send_message;
 use crate::model::messaging::MessageContent;
-use crate::model::Epg;
 
 
 use crate::model::FetchedPlaylist;
@@ -375,7 +374,7 @@ async fn process_source(source_idx: usize, ctx: &PlaylistProcessingContext) -> (
     let mut input_stats = HashMap::<Arc<str>, InputStats>::new();
     let mut target_stats = Vec::<TargetStats>::new();
     if let Some(source) = sources.get_source_at(source_idx) {
-        let mut source_playlists = Vec::with_capacity(128);
+        let mut source_playlists = Vec::with_capacity(source.inputs.len());
         let broadcast_step = create_broadcast_callback(ctx.event_manager.as_ref());
         // Download the sources
         let mut source_downloaded = false;
@@ -713,7 +712,8 @@ async fn process_playlist_for_target(ctx: &PlaylistProcessingContext,
     debug_if_enabled!("Processing order is {}", &target.processing_order);
 
     let mut duplicates: HashSet<UUIDType> = HashSet::new();
-    let mut processed_fetched_playlists: Vec<FetchedPlaylist> = vec![];
+    let mut new_epg = vec![];
+    let mut new_playlist: Vec<PlaylistGroup> = vec![];
 
     debug!("Executing processing pipes");
     let broadcast_step = create_broadcast_callback(ctx.event_manager.as_ref());
@@ -734,11 +734,11 @@ async fn process_playlist_for_target(ctx: &PlaylistProcessingContext,
             stat.processed_stats.group_count = group_count;
             stat.processed_stats.channel_count = channel_count;
         }
-        processed_fetched_playlists.push(processed_fpl);
+        process_playlist_epg(&mut processed_fpl, &mut new_epg).await;
+        new_playlist.extend(processed_fpl.source.take_groups());
+        tokio::task::yield_now().await;
     }
-    step.tick("filter rename map");
-    let (new_epg, mut new_playlist) = process_epg(&mut processed_fetched_playlists).await;
-    step.tick("epg");
+    step.tick("filter rename map + epg");
 
     if target.favourites.is_some() {
         step.broadcast("Processing favourites for '{}' playlist", &target.name);
@@ -830,19 +830,6 @@ async fn trakt_playlist(client: &reqwest::Client, target: &ConfigTarget, errors:
         }
     }
     true
-}
-
-async fn process_epg(processed_fetched_playlists: &mut Vec<FetchedPlaylist<'_>>) -> (Vec<Epg>, Vec<PlaylistGroup>) {
-    let mut new_playlist: Vec<PlaylistGroup> = vec![];
-    let mut new_epg = vec![];
-
-    // each fetched playlist can have its own epgl url.
-    // we need to process each input epg.
-    for fp in processed_fetched_playlists {
-        process_playlist_epg(fp, &mut new_epg).await;
-        new_playlist.extend(fp.source.take_groups());
-    }
-    (new_epg, new_playlist)
 }
 
 async fn process_watch(app_config: &Arc<AppConfig>, client: &reqwest::Client, target: &ConfigTarget, new_playlist: &[PlaylistGroup]) -> bool {

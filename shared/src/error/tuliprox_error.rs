@@ -14,8 +14,15 @@ macro_rules! get_errors_notify_message {
                 .map(|err| err.message.as_str())
                 .collect::<Vec<&str>>()
                 .join("\r\n");
-            if $size > 0 && text.len() > std::cmp::max($size - 3, 3) {
-                Some(format!("{}...", text.get(0..$size).unwrap()))
+
+            let max_size = $size;
+            // Check if we actually need to truncate
+            if max_size > 0 && text.chars().count() > max_size {
+                // Safely take 'max_size' characters and add ellipsis
+                let truncated: String = text.chars().take(max_size).collect();
+                Some(format!("{}...", truncated))
+            } else if text.is_empty() {
+                None
             } else {
                 Some(text)
             }

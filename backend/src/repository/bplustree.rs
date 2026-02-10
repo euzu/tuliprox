@@ -3506,6 +3506,9 @@ where
             file.write_all(&state.root_offset.to_le_bytes())?;
             file.flush()?;
             file.set_len(state.file_len)?;
+            if self.flush_policy != FlushPolicy::None {
+                file.sync_all()?;
+            }
         }
 
         // Seek via BufReader to invalidate any buffered state.

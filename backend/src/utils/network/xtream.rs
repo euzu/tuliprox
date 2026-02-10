@@ -11,14 +11,14 @@ use crate::repository::{ensure_input_storage_path, get_input_storage_path, get_t
 use crate::repository::{get_live_cat_collection_path, get_series_cat_collection_path, get_vod_cat_collection_path, xtream_get_file_path, CategoryEntry};
 use crate::repository::{get_target_id_mapping, rewrite_provider_series_info_episode_virtual_id, ProviderEpisodeKey};
 use crate::repository::{persist_input_vod_info, persists_input_series_info, write_playlist_batch_item_upsert, write_playlist_item_update};
-use crate::utils::{request};
+use crate::utils::request;
 use chrono::{DateTime, Utc};
 use log::{debug, error, info, warn};
 use shared::error::TuliproxError;
 use shared::model::{PlaylistEntry, PlaylistGroup, ProxyUserStatus, SeriesStreamProperties,
                     StreamProperties, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem,
                     XtreamSeriesInfo, XtreamVideoInfo, XtreamVideoInfoDoc};
-use shared::utils::{extract_extension_from_url, get_i64_from_serde_value, get_string_from_serde_value, sanitize_sensitive_info, Internable};
+use shared::utils::{extract_extension_from_url, get_i64_from_serde_value, get_string_from_serde_value, sanitize_sensitive_info, Internable, PROVIDER_SCHEME_PREFIX};
 use std::collections::HashMap;
 use std::io::Error;
 use std::path::Path;
@@ -89,7 +89,8 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
         return serde_json::to_string(&content).map_err(|err| info_err!("{err}"));
     }
 
-    let input_source = InputSource::from(input).with_url(info_url.to_owned());
+    let resolved_url = input.resolve_url(info_url)?;
+    let input_source = InputSource::from(input).with_url(resolved_url.to_string());
     if let Ok(content) = get_xtream_stream_info_content(app_config, client, &input_source, false).await {
         if content.is_empty() {
             return Err(info_err!("Provider returned no response for stream with id: {}/{}/{}",
@@ -351,7 +352,21 @@ pub async fn download_xtream_playlist(app_config: &Arc<AppConfig>, client: &reqw
     let username = input_source.username.as_ref().map_or("", |v| v);
     let password = input_source.password.as_ref().map_or("", |v| v);
 
-    let base_url = get_xtream_stream_url_base(&input_source.url, username, password);
+    let is_provider_url = input_source.url.starts_with(PROVIDER_SCHEME_PREFIX);
+    let base_input_url = if is_provider_url {
+        // Keep provider:// unresolved; send_with_retry_and_provider resolves per attempt
+        // so failover can switch provider hosts.
+        input_source.url.clone()
+    } else {
+        match input.resolve_url(&input_source.url) {
+            Ok(url) => url.into_owned(),
+            Err(err) => return (Vec::with_capacity(0), vec![err], false),
+        }
+    };
+
+    // Build a canonical Xtream player_api URL for both plain URLs and provider:// URLs.
+    // For provider URLs, this keeps the scheme unresolved while still adding the required path/query.
+    let base_url = get_xtream_stream_url_base(&base_input_url, username, password);
     let input_source_login = input_source.with_url(base_url.clone());
 
     check_alias_user_state(app_config, client, input).await;
@@ -501,6 +516,7 @@ pub fn create_vod_info_from_item(target: &ConfigTarget, user: &ProxyUserCredenti
 
 const BATCH_SIZE: usize = 1000;
 
+#[allow(clippy::too_many_lines)]
 async fn process_xtream_cluster_to_disk(
     app_config: &Arc<AppConfig>,
     input: &ConfigInput,
@@ -624,10 +640,21 @@ async fn process_xtream_cluster_to_disk(
     // Acquire file lock to ensure atomic operations
     let swap_lock = app_config.file_locks.write_lock(&xtream_path).await;
 
-    // Optional compaction to optimize the newly created database file
-    if let Ok(mut tree_update) = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::try_new_with_backoff(&tmp_xtream_path) {
-        if let Err(e) = tree_update.compact(&tmp_xtream_path) {
+    // Optional compaction to optimize the newly created database file.
+    // Run on blocking pool because B+Tree lock backoff uses std::thread::sleep.
+    let compact_path = tmp_xtream_path.clone();
+    match tokio::task::spawn_blocking(move || -> Result<(), std::io::Error> {
+        if let Ok(mut tree_update) = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::try_new_with_backoff(&compact_path) {
+            tree_update.compact(&compact_path)?;
+        }
+        Ok(())
+    }).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
             error!("Failed to compact temporary database for {cluster} at {:?}: {e}", tmp_xtream_path.display());
+        }
+        Err(e) => {
+            error!("Compaction task join failed for {cluster} at {:?}: {e}", tmp_xtream_path.display());
         }
     }
 

@@ -1,29 +1,27 @@
 use crate::api::model::persist_pipe_stream::tee_dyn_reader;
 use crate::api::model::{AppState, STREAM_IDLE_TIMEOUT};
-use crate::model::{format_elapsed_time, AppConfig, Config, InputSource, ReverseProxyDisabledHeaderConfig};
-use crate::model::{ConfigInput, ResourceRetryConfig};
+use crate::model::{format_elapsed_time, AppConfig, Config, ConfigProvider, InputSource, ReverseProxyDisabledHeaderConfig};
+use crate::model::{resolve_provider_scheme_url_with_provider, ConfigInput, ResourceRetryConfig};
 use crate::utils::compression::compression_utils::{is_deflate, is_gzip};
 use crate::utils::{async_file_reader, async_file_writer, debug_if_enabled};
 use crate::utils::{get_file_path, persist_file};
-use axum::http::header::RETRY_AFTER;
 use futures::{StreamExt, TryStreamExt};
 use log::{debug, error, log_enabled, trace, warn, Level};
 use reqwest::header::CONTENT_ENCODING;
-use reqwest::redirect::Policy;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-use reqwest::{StatusCode};
+use reqwest::redirect::Policy;
+use reqwest::StatusCode;
 use shared::error::{notify_err_res, string_to_io_error, TuliproxError};
 use shared::model::{InputFetchMethod, DEFAULT_USER_AGENT};
-use shared::utils::{
-    filter_request_header, human_readable_byte_size, sanitize_sensitive_info, ENCODING_DEFLATE,
-    ENCODING_GZIP,
-};
+use shared::utils::{filter_request_header, human_readable_byte_size,
+                    sanitize_sensitive_info, ENCODING_DEFLATE, ENCODING_GZIP};
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Once};
 use std::time::Duration;
+use regex::Regex;
 use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::time::sleep;
@@ -40,11 +38,11 @@ fn log_proxy_diagnostics(config: &Config) {
                 .url
                 .contains('@')
                 || proxy_cfg.url.contains("://")
-                    && proxy_cfg
-                        .url
-                        .split("://")
-                        .nth(1)
-                        .is_some_and(|part| part.contains('@'));
+                && proxy_cfg
+                .url
+                .split("://")
+                .nth(1)
+                .is_some_and(|part| part.contains('@'));
             let has_explicit_credentials =
                 proxy_cfg.username.as_ref().is_some() || proxy_cfg.password.as_ref().is_some();
             debug!(
@@ -128,6 +126,28 @@ pub fn content_type_from_ext(ext: &str) -> &'static str {
     }
 }
 
+fn resolve_provider_url_for_attempt(
+    url: &Url,
+    provider: Option<&Arc<ConfigProvider>>,
+) -> Url {
+    let Some(provider) = provider else {
+        return url.clone();
+    };
+
+    match resolve_provider_scheme_url_with_provider(url.as_str(), Some(provider.clone())) {
+        Ok((_provider, resolved)) => {
+            if resolved.as_ref() == url.as_str() {
+                return url.clone();
+            }
+            Url::parse(resolved.as_ref()).unwrap_or_else(|_| url.clone())
+        }
+        Err(err) => {
+            debug!("Failed to resolve provider URL: {err}");
+            url.clone()
+        }
+    }
+}
+
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
 pub fn calculate_retry_backoff(base_delay_ms: u64, multiplier: f64, attempt: u32) -> u64 {
@@ -145,116 +165,175 @@ pub fn calculate_retry_backoff(base_delay_ms: u64, multiplier: f64, attempt: u32
     }
 }
 
-pub async fn send_with_retry(
+/// Sends a request with retry logic and optional provider failover support.
+#[allow(clippy::too_many_lines)]
+pub async fn send_with_retry_and_provider(
     app_config: &Arc<AppConfig>,
-    url: &Url,
-    mut send: impl FnMut() -> reqwest::RequestBuilder,
+    url: &Url, // Used primarily for logging/context
+    provider: Option<&Arc<ConfigProvider>>,
+    allow_redirects: bool,
+    mut send: impl FnMut(&Url) -> reqwest::RequestBuilder,
 ) -> Result<reqwest::Response, std::io::Error> {
     let config = app_config.config.load();
-    let (max_attempts, backoff_ms, backoff_multiplier) = config
+    let (max_attempts, backoff_ms, backoff_multiplier, failover_patterns) = config
         .reverse_proxy
         .as_ref()
         .map_or_else(
-            ResourceRetryConfig::get_default_retry_values,
-            |rp| rp.resource_retry.get_retry_values(),
+            || {
+                let (a, b, c) = ResourceRetryConfig::get_default_retry_values();
+                (a, b, c, ResourceRetryConfig::default().failover_redirect_patterns)
+            },
+            |rp| {
+                let (a, b, c) = rp.resource_retry.get_retry_values();
+                (a, b, c, rp.resource_retry.failover_redirect_patterns.clone())
+            },
         );
     drop(config);
 
-    let max_attempts = max_attempts.max(1);
     let idle_timeout = Duration::from_secs(STREAM_IDLE_TIMEOUT);
+    let idle = sleep(idle_timeout);
+    tokio::pin!(idle);
 
-    for attempt in 0..max_attempts {
-        match tokio::time::timeout(idle_timeout, send().send()).await {
-            Ok(Ok(response)) => {
-                let status = response.status();
+    // Record the starting URL index for full-cycle detection.
+    // This allows us to try all URLs even when starting from a non-zero index.
+    let start_index = provider.as_ref().map_or(0, |p| p.get_current_index());
+    let max_provider_attempts = provider.as_ref().map_or(0, |p| p.urls.len());
+    let mut provider_attempts = usize::from(max_provider_attempts > 0);
 
-                if status.is_success() {
-                    return Ok(response);
+    'provider_loop: loop {
+
+        // 2. Retry loop for the current URL
+        for attempt in 0..max_attempts {
+            let resolved_url = resolve_provider_url_for_attempt(url, provider);
+            // Reset the idle timer for a new attempt
+            idle.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
+
+            tokio::select! {
+                () = &mut idle => {
+                    warn!("Request idle for too long: {}", sanitize_sensitive_info(url.as_str()));
+                    // 1. Try Provider Failover first
+                    if max_provider_attempts > 1 && provider_attempts < max_provider_attempts {
+                        if let Some(p) = provider {
+                            if p.rotate_to_next_url_with_cycle_check(start_index).is_some() {
+                                provider_attempts += 1;
+                                let current_index = p.get_current_index();
+                                warn!("Provider '{}' idle timeout -> switching to index {}", p.name, current_index);
+                                continue 'provider_loop;
+                            }
+                        }
+                    }
+
+                    // 2. If no provider or rotation failed, check if we can retry the same URL
+                    if attempt < max_attempts - 1 {
+                        let delay = calculate_retry_backoff(backoff_ms, backoff_multiplier, attempt);
+                        warn!("Idle timeout, retrying same URL in {}ms (attempt {})", delay, attempt + 1);
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
+                        continue; // This will restart the 'for attempt' loop
+                    }
+
+                    return Err(string_to_io_error(format!("Request timed out and no retries left: {}", sanitize_sensitive_info(url.as_str()))));
                 }
 
-                let should_retry = status.is_server_error()
-                    || matches!(
-                        status,
-                        StatusCode::REQUEST_TIMEOUT
-                            | StatusCode::TOO_EARLY
-                            | StatusCode::TOO_MANY_REQUESTS
-                    );
+                result = send(&resolved_url).send() => {
+                    match result {
+                        Ok(response) => {
+                            let status = response.status();
+                            if allow_redirects && status.is_redirection() {
+                                return Ok(response);
+                            }
+                            let is_failover = is_failover_redirect(response.url(), &failover_patterns);
+                            if !is_failover && status.is_success() {
+                                return Ok(response);
+                            }
 
-                if should_retry && attempt + 1 < max_attempts {
-                    let wait_dur = response
-                        .headers()
-                        .get(RETRY_AFTER)
-                        .and_then(|h| h.to_str().ok())
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .map_or_else(
-                            || {
-                                let delay = calculate_retry_backoff(
-                                    backoff_ms,
-                                    backoff_multiplier,
-                                    attempt,
-                                );
-                                tokio::time::Duration::from_millis(delay)
-                            },
-                            tokio::time::Duration::from_secs,
-                        );
-                    tokio::time::sleep(wait_dur).await;
-                    continue;
+                            // Failover check: Should we switch to the next provider URL?
+                            if (is_failover || should_trigger_failover(status))
+                                && max_provider_attempts > 1
+                                && provider_attempts < max_provider_attempts
+                            {
+                                if let Some(p) = provider {
+                                    if p.rotate_to_next_url_with_cycle_check(start_index).is_some() {
+                                        provider_attempts += 1;
+                                        let current_index = p.get_current_index();
+                                        warn!("Provider '{}' failover: status {} -> switching to URL index {current_index}",
+                                            p.name, format_http_status(status));
+                                        continue 'provider_loop;
+                                    }
+                                }
+                            }
+
+                            // Standard retry check for the same URL
+                            let is_retryable = status.is_server_error()
+                                || matches!(status, StatusCode::TOO_MANY_REQUESTS | StatusCode::REQUEST_TIMEOUT);
+
+                            if attempt < max_attempts - 1 && is_retryable {
+                                perform_backoff(attempt, backoff_ms, backoff_multiplier, &response).await;
+                                continue;
+                            }
+
+                            return Err(string_to_io_error(format!("Request failed ({}): {}",
+                                format_http_status(status), sanitize_sensitive_info(url.as_str()))));
+                        }
+
+                        Err(err) => {
+                            // Connection errors (Timeout/Connect) trigger failover if provider exists
+                            if (err.is_timeout() || err.is_connect())
+                                && max_provider_attempts > 1
+                                && provider_attempts < max_provider_attempts
+                            {
+                                if let Some(p) = provider {
+                                    if p.rotate_to_next_url_with_cycle_check(start_index).is_some() {
+                                        provider_attempts += 1;
+                                        let current_index = p.get_current_index();
+                                        warn!("Provider '{}' failover: connection error -> switching to index {}", p.name, current_index);
+                                        continue 'provider_loop;
+                                    }
+                                }
+                            }
+
+                            // If not a provider or rotation failed, try standard retry
+                            if (err.is_timeout() || err.is_connect()) && attempt < max_attempts - 1 {
+                                let delay = calculate_retry_backoff(backoff_ms, backoff_multiplier, attempt);
+                                tokio::time::sleep(Duration::from_millis(delay)).await;
+                                continue;
+                            }
+
+                            return Err(string_to_io_error(format!("Request error: {}", sanitize_sensitive_info(err.to_string().as_str()))));
+                        }
+                    }
                 }
-
-                return Err(string_to_io_error(format!(
-                    "Request failed with status {} {}",
-                    format_http_status(status),
-                    sanitize_sensitive_info(url.as_str())
-                )));
-            }
-            Ok(Err(err)) => {
-                if (err.is_timeout() || err.is_connect()) && attempt + 1 < max_attempts {
-                    let delay = calculate_retry_backoff(
-                        backoff_ms,
-                        backoff_multiplier,
-                        attempt,
-                    );
-                    tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
-                    continue;
-                }
-
-                error!(
-                    "Received failure from server {}: {}",
-                    sanitize_sensitive_info(url.as_str()),
-                    sanitize_sensitive_info(err.to_string().as_str())
-                );
-
-                return Err(string_to_io_error(format!(
-                    "Request failed: {} {}",
-                    sanitize_sensitive_info(url.as_str()),
-                    sanitize_sensitive_info(err.to_string().as_str())
-                )));
-            }
-            Err(_) => {
-                warn!("Request idle for too long: {}", sanitize_sensitive_info(url.as_str()));
-
-                if attempt + 1 < max_attempts {
-                    let delay = calculate_retry_backoff(
-                        backoff_ms,
-                        backoff_multiplier,
-                        attempt,
-                    );
-                    tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
-                    continue;
-                }
-
-                return Err(string_to_io_error(format!(
-                    "Request timed out while waiting for response {}",
-                    sanitize_sensitive_info(url.as_str())
-                )));
             }
         }
+
+        // 2. If per-URL retries are exhausted, try next provider URL as a last resort
+        if max_provider_attempts > 1 && provider_attempts < max_provider_attempts {
+            if let Some(p) = provider {
+                if p.rotate_to_next_url_with_cycle_check(start_index).is_some() {
+                    provider_attempts += 1;
+                    continue 'provider_loop;
+                }
+            }
+        }
+
+        break;
     }
 
-    Err(string_to_io_error(format!(
-        "Failed to download file from {} after all retry attempts",
-        sanitize_sensitive_info(url.as_str())
-    )))
+    Err(string_to_io_error("All attempts and providers exhausted".to_string()))
+}
+
+fn is_failover_redirect(url: &Url, patterns: &[Arc<Regex>]) -> bool {
+    let redirect_url = url.as_str();
+    patterns.iter().any(|pattern| pattern.is_match(redirect_url))
+}
+
+/// Helper to handle sleep duration for retries, respecting Retry-After headers
+async fn perform_backoff(attempt: u32, ms: u64, mult: f64, response: &reqwest::Response) {
+    let wait_dur = response.headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok()).map_or_else(|| Duration::from_millis(calculate_retry_backoff(ms, mult, attempt)), Duration::from_secs);
+
+    tokio::time::sleep(wait_dur).await;
 }
 
 pub async fn get_input_epg_content_as_file(
@@ -657,15 +736,19 @@ pub async fn get_remote_content_as_file(
     let default_user_agent = config.default_user_agent.clone();
     drop(config);
 
-    let response = send_with_retry(
+    let provider_config = input.get_resolve_provider(url.as_str());
+
+    let response = send_with_retry_and_provider(
         app_config,
         url,
-        || {
+        provider_config.as_ref(),
+        false,
+        |resolved_url| {
             get_client_request(
                 client,
                 input.method,
                 Some(&input.headers),
-                url,
+                resolved_url,
                 custom_headers.as_ref(),
                 None,
                 default_user_agent.as_deref(),
@@ -809,15 +892,17 @@ pub async fn get_remote_content_as_stream(
         })
         .collect();
 
-    let response = send_with_retry(
+    let response = send_with_retry_and_provider(
         app_config,
         url,
-        || {
+        input.get_provider(),
+        false,
+        |resolved_url| {
             get_client_request(
                 client,
                 input.method,
                 Some(&headers),
-                url,
+                resolved_url,
                 None,
                 None,
                 default_user_agent.as_deref(),
@@ -1208,93 +1293,36 @@ pub fn is_uri(url: &str) -> bool {
         .is_ok_and(|u| u.scheme().eq_ignore_ascii_case("file") || u.scheme().eq_ignore_ascii_case("http") || u.scheme().eq_ignore_ascii_case("https"))
 }
 
+/// Checks if a status code or error indicates a need for failover
+///
+/// Returns true for server-side errors that might be resolved by trying another URL.
+/// Returns false for client-side errors (401, 403, etc.) where the problem is with
+/// credentials or permissions, not the server availability.
+pub fn should_trigger_failover(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::NOT_FOUND
+            | StatusCode::GONE
+            | StatusCode::SERVICE_UNAVAILABLE
+            | StatusCode::BAD_GATEWAY
+            | StatusCode::GATEWAY_TIMEOUT
+            | StatusCode::INTERNAL_SERVER_ERROR
+            | StatusCode::TOO_MANY_REQUESTS
+            | StatusCode::REQUEST_TIMEOUT
+    )
+    // Explicitly NOT triggering failover for:
+    // - 401 Unauthorized (wrong credentials)
+    // - 403 Forbidden (permission issue)
+    // - 402 Payment Required (subscription issue)
+    // - 407 Proxy Authentication Required (proxy credentials issue)
+    // - 451 Unavailable For Legal Reasons (geo-blocking)
+    // - 429 To many requests block
+    // - 408 Request takes too long
+}
+
 #[cfg(test)]
 mod tests {
-    use super::send_with_retry;
-    use crate::model::{AppConfig, Config, ResourceRetryConfig, ReverseProxyConfig};
-    use crate::utils::FileLockManager;
-    use arc_swap::{ArcSwap, ArcSwapOption};
     use shared::utils::{get_base_url_from_str, replace_url_extension, sanitize_sensitive_info};
-    use shared::model::ConfigPaths;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
-    use std::time::Duration;
-    use url::Url;
-
-    fn create_test_app_config(max_attempts: u32, backoff_millis: u64, backoff_multiplier: f64) -> Arc<AppConfig> {
-        let cfg = Config {
-            reverse_proxy: Some(ReverseProxyConfig {
-                resource_rewrite_disabled: false,
-                rewrite_secret: [0; 16],
-                resource_retry: ResourceRetryConfig {
-                    max_attempts,
-                    backoff_millis,
-                    backoff_multiplier,
-                },
-                disabled_header: None,
-                stream: None,
-                cache: None,
-                rate_limit: None,
-                geoip: None,
-            }),
-            ..Config::default()
-        };
-
-        Arc::new(AppConfig {
-            config: Arc::new(ArcSwap::from_pointee(cfg)),
-            sources: Arc::new(ArcSwap::default()),
-            hdhomerun: Arc::new(ArcSwapOption::default()),
-            api_proxy: Arc::new(ArcSwapOption::default()),
-            file_locks: Arc::new(FileLockManager::default()),
-            paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
-                config_path: String::new(),
-                config_file_path: String::new(),
-                sources_file_path: String::new(),
-                mapping_file_path: None,
-                mapping_files_used: None,
-                api_proxy_file_path: String::new(),
-                custom_stream_response_path: None,
-            })),
-            custom_stream_response: Arc::new(ArcSwapOption::default()),
-            access_token_secret: [1; 32],
-            encrypt_secret: [2; 16],
-        })
-    }
-
-    #[tokio::test]
-    async fn test_send_with_retry_respects_max_attempts_on_retryable_status() {
-        let request_count = Arc::new(AtomicUsize::new(0));
-        let request_count_for_send = Arc::clone(&request_count);
-        let app_config = create_test_app_config(3, 1, 1.0);
-        let client = reqwest::Client::builder()
-            .connect_timeout(Duration::from_millis(100))
-            .build()
-            .unwrap();
-        let url = Url::parse("http://127.0.0.1:1/retry").unwrap();
-
-        let result = tokio::time::timeout(
-            Duration::from_secs(2),
-            send_with_retry(&app_config, &url, || {
-                request_count_for_send.fetch_add(1, Ordering::SeqCst);
-                client.get(url.clone())
-            }),
-        )
-        .await;
-
-        assert!(
-            result.is_ok(),
-            "send_with_retry did not return in time; possible retry loop/deadlock"
-        );
-        assert!(
-            result.unwrap().is_err(),
-            "expected error after exhausting retry attempts"
-        );
-        assert_eq!(
-            request_count.load(Ordering::SeqCst),
-            3,
-            "expected one request per retry attempt"
-        );
-    }
 
     #[test]
     fn test_url_mask() {

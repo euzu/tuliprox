@@ -1,10 +1,10 @@
 use super::PanelApiConfigDto;
 use crate::error::{TuliproxError, TuliproxErrorKind};
 use crate::model::EpgConfigDto;
-use crate::utils::{arc_str_serde, default_as_true, deserialize_timestamp, get_credentials_from_url_str, get_trimmed_string,
-                   is_false, is_true, is_zero_u16, sanitize_sensitive_info,
-                   serialize_option_vec_flow_map_items, trim_last_slash};
-use crate::utils::{is_blank_optional_string, Internable};
+use crate::utils::{arc_str_serde, default_as_true, deserialize_timestamp, get_credentials_from_url_str,
+                   get_trimmed_string, is_false, is_true, is_zero_u16, parse_provider_scheme_url_parts,
+                   sanitize_sensitive_info, serialize_option_vec_flow_map_items, trim_last_slash, PROVIDER_SCHEME_PREFIX};
+use crate::utils::{is_blank_optional_string, Internable, arc_str_vec_serde};
 use crate::{check_input_connections, check_input_credentials, info_err_res};
 
 use enum_iterator::Sequence;
@@ -361,7 +361,7 @@ impl Default for ConfigInputDto {
 
 impl ConfigInputDto {
     #[allow(clippy::cast_possible_truncation)]
-    pub fn prepare(&mut self, index: u16, _include_computed: bool) -> Result<u16, TuliproxError> {
+    pub fn prepare(&mut self, index: u16, _include_computed: bool, provider_names: &HashSet<String>) -> Result<u16, TuliproxError> {
         self.name = self.name.trim().intern();
         if self.name.is_empty() {
             return info_err_res!("name for input is mandatory");
@@ -384,12 +384,61 @@ impl ConfigInputDto {
 
         self.persist = get_trimmed_string(self.persist.as_deref());
 
+        if self.url.starts_with(PROVIDER_SCHEME_PREFIX) {
+            let (host, _path) = match parse_provider_scheme_url_parts(&self.url) {
+                Ok(parts) => parts,
+                Err(err) => {
+                    return info_err_res!(
+                        "Malformed provider URL {}: {}",
+                        sanitize_sensitive_info(&self.url),
+                        sanitize_sensitive_info(err.to_string().as_str())
+                    );
+                }
+            };
+            if !provider_names.contains(host) {
+                return info_err_res!("Provider name {host} is not defined");
+            }
+        }
+
+        if let Some(staged_input) = self.staged.as_ref() {
+            if staged_input.url.starts_with(PROVIDER_SCHEME_PREFIX) {
+                let (host, _path) = match parse_provider_scheme_url_parts(&staged_input.url) {
+                    Ok(parts) => parts,
+                    Err(err) => {
+                        return info_err_res!(
+                            "Malformed provider URL {}: {}",
+                            sanitize_sensitive_info(&staged_input.url),
+                            sanitize_sensitive_info(err.to_string().as_str())
+                        );
+                    }
+                };
+                if !provider_names.contains(host) {
+                    return info_err_res!("Provider name {host} is not defined");
+                }
+            }
+        }
+
         let mut current_index = index + 1;
         self.id = current_index;
         if let Some(aliases) = self.aliases.as_mut() {
             let input_type = &self.input_type;
             for alias in aliases {
                 current_index = alias.prepare(current_index, input_type)?;
+                if alias.url.starts_with(PROVIDER_SCHEME_PREFIX) {
+                    let (host, _path) = match parse_provider_scheme_url_parts(&alias.url) {
+                        Ok(parts) => parts,
+                        Err(err) => {
+                            return info_err_res!(
+                                "Malformed provider URL {}: {}",
+                                sanitize_sensitive_info(&alias.url),
+                                sanitize_sensitive_info(err.to_string().as_str())
+                            );
+                        }
+                    };
+                    if !provider_names.contains(host) {
+                        return info_err_res!("Provider name {host} is not defined");
+                    }
+                }
             }
         }
 
@@ -528,5 +577,28 @@ impl ConfigInputDto {
         }
 
         Err(TuliproxError::new(TuliproxErrorKind::Info, format!("No matching input or alias found for input '{input_name}' with username '{username}'")))
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigProviderDto {
+    #[serde(with = "arc_str_serde")]
+    pub name: Arc<str>,
+    #[serde(with = "arc_str_vec_serde")]
+    pub urls: Vec<Arc<str>>,
+}
+
+impl ConfigProviderDto {
+    pub fn prepare(&mut self) -> Result<(), TuliproxError> {
+        self.name = self.name.trim().intern();
+        if self.name.is_empty() {
+            return info_err_res!("Name for provider is mandatory");
+        }
+        self.urls = self.urls.drain(..).filter(|url| !url.trim().is_empty()).map(|u| u.trim().intern()).collect();
+        if self.urls.is_empty() {
+            return info_err_res!("Urls for provider is mandatory");
+        }
+        Ok(())
     }
 }

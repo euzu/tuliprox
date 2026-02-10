@@ -121,7 +121,60 @@ With this configuration, you should create a `data` directory where you execute 
 
 Be aware that different configurations (e.g. user bouquets) along the playlists are stored in this directory.
 
-### 1.4 `messaging`
+## 1.4 Provider Failover & Rotation
+Tuliprox supports robust failover mechanisms for streaming providers. If a provider has multiple URLs defined (or aliases), Tuliprox can automatically rotate between them in case of failures.
+
+### 1.4.1 `provider://` Scheme
+You can use the special `provider://<provider_name>/...` URL scheme in your configurations. Tuliprox will automatically resolve this to the current active URL of the specified provider.
+- If the current URL fails (e.g., 5xx error, timeout), Tuliprox automatically rotates to the next available URL for that provider.
+- It tracks failures and prevents infinite loops by limiting attempts to the number of available URLs.
+
+### 1.4.2 Automatic Failover triggers
+Failover is triggered automatically on:
+- Network Timeouts
+- Request Timeout (408)
+- Server Errors (500, 502, 503, 504)
+- Specific Client Errors (404 Not Found, 410 Gone, 429 Too Many Requests)
+
+It does **not** trigger on Authentication errors (401, 403), as those usually indicate invalid credentials rather than a server issue.
+
+### 1.4.3 Provider Failover Configuration Example
+Define a provider with multiple URLs and reference it from your inputs/sources. Tuliprox will resolve the active URL and rotate to the next entry on failover conditions.
+
+```yaml
+templates:
+  - name: ALL_CHANNELS
+    value: Group ~ ".*"
+provider:
+  - name: my_provider
+    urls:
+      - http://hello.provider.me
+      - http://stable.golden-bridge.con
+      - http://sleep.time.now.net
+inputs:
+  - name: my_input
+    type: xtream_batch
+    headers:
+      User-Agent: TiviMate/5.1.6 (Android 12)
+    url: provider://my_provider  # the name is the same as defined in provider: section
+    cache_duration: 1d
+    priority: 0
+    max_connections: 0
+    method: GET
+sources:
+  - inputs:
+      - my_input
+    targets:
+      - name: my_channels
+        filter: "!ALL_CHANNELS!"
+        output:
+          - type: xtream
+          - type: m3u
+```
+
+---
+
+### 1.5 `messaging`
 `messaging` is an optional configuration for receiving messages.
 Currently `telegram`, `discord`, `rest` and `pushover.net` is supported.
 
@@ -167,7 +220,7 @@ messaging:
     url: `optional`, default is `https://api.pushover.net/1/messages.json`
 ```
 
-### 1.4.1 Messaging Templating
+### 1.5.1 Messaging Templating
 For `discord`, `telegram` and `rest` messaging, you can use [Handlebars](https://handlebarsjs.com/) templates to format the message body.
 
 **Loading Templates:**
