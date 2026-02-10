@@ -160,91 +160,93 @@ pub async fn send_with_retry(
         );
     drop(config);
 
+    let max_attempts = max_attempts.max(1);
     let idle_timeout = Duration::from_secs(STREAM_IDLE_TIMEOUT);
-    let idle = sleep(idle_timeout);
-    tokio::pin!(idle);
 
     for attempt in 0..max_attempts {
-        loop {
-            tokio::select! {
-                () = &mut idle => {
-                    warn!("Request idle for too long: {}", sanitize_sensitive_info(url.as_str()));
-                    break;
+        match tokio::time::timeout(idle_timeout, send().send()).await {
+            Ok(Ok(response)) => {
+                let status = response.status();
+
+                if status.is_success() {
+                    return Ok(response);
                 }
 
-                result = send().send() => {
-                    idle.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
+                let should_retry = status.is_server_error()
+                    || matches!(
+                        status,
+                        StatusCode::REQUEST_TIMEOUT
+                            | StatusCode::TOO_EARLY
+                            | StatusCode::TOO_MANY_REQUESTS
+                    );
 
-                    match result {
-                        Ok(response) => {
-                            let status = response.status();
-
-                            if status.is_success() {
-                                return Ok(response);
-                            }
-
-                            let should_retry = status.is_server_error()
-                                || matches!(
-                                    status,
-                                    StatusCode::REQUEST_TIMEOUT
-                                        | StatusCode::TOO_EARLY
-                                        | StatusCode::TOO_MANY_REQUESTS
-                                );
-
-                            if attempt < max_attempts - 1 && should_retry {
-                                let wait_dur = response
-                                    .headers()
-                                    .get(RETRY_AFTER)
-                                    .and_then(|h| h.to_str().ok())
-                                    .and_then(|s| s.parse::<u64>().ok())
-                                    .map_or_else(
-                                        || {
-                                            let delay = calculate_retry_backoff(
-                                                backoff_ms,
-                                                backoff_multiplier,
-                                                attempt,
-                                            );
-                                            tokio::time::Duration::from_millis(delay)
-                                        },
-                                        tokio::time::Duration::from_secs,
-                                    );
-
-                                tokio::time::sleep(wait_dur).await;
-                                continue;
-                            }
-
-                            return Err(string_to_io_error(format!(
-                                "Request failed with status {} {}",
-                                format_http_status(status),
-                                sanitize_sensitive_info(url.as_str())
-                            )));
-                        }
-
-                        Err(err) => {
-                            if (err.is_timeout() || err.is_connect()) && attempt < max_attempts - 1 {
+                if should_retry && attempt + 1 < max_attempts {
+                    let wait_dur = response
+                        .headers()
+                        .get(RETRY_AFTER)
+                        .and_then(|h| h.to_str().ok())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .map_or_else(
+                            || {
                                 let delay = calculate_retry_backoff(
                                     backoff_ms,
                                     backoff_multiplier,
                                     attempt,
                                 );
-                                tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
-                                continue;
-                            }
-
-                            error!(
-                                "Received failure from server {}: {}",
-                                sanitize_sensitive_info(url.as_str()),
-                                sanitize_sensitive_info(err.to_string().as_str())
-                            );
-
-                            return Err(string_to_io_error(format!(
-                                "Request failed: {} {}",
-                                sanitize_sensitive_info(url.as_str()),
-                                sanitize_sensitive_info(err.to_string().as_str())
-                            )));
-                        }
-                    }
+                                tokio::time::Duration::from_millis(delay)
+                            },
+                            tokio::time::Duration::from_secs,
+                        );
+                    tokio::time::sleep(wait_dur).await;
+                    continue;
                 }
+
+                return Err(string_to_io_error(format!(
+                    "Request failed with status {} {}",
+                    format_http_status(status),
+                    sanitize_sensitive_info(url.as_str())
+                )));
+            }
+            Ok(Err(err)) => {
+                if (err.is_timeout() || err.is_connect()) && attempt + 1 < max_attempts {
+                    let delay = calculate_retry_backoff(
+                        backoff_ms,
+                        backoff_multiplier,
+                        attempt,
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
+                    continue;
+                }
+
+                error!(
+                    "Received failure from server {}: {}",
+                    sanitize_sensitive_info(url.as_str()),
+                    sanitize_sensitive_info(err.to_string().as_str())
+                );
+
+                return Err(string_to_io_error(format!(
+                    "Request failed: {} {}",
+                    sanitize_sensitive_info(url.as_str()),
+                    sanitize_sensitive_info(err.to_string().as_str())
+                )));
+            }
+            Err(_) => {
+                warn!("Request idle for too long: {}", sanitize_sensitive_info(url.as_str()));
+
+                if attempt + 1 < max_attempts {
+                    let delay = calculate_retry_backoff(
+                        backoff_ms,
+                        backoff_multiplier,
+                        attempt,
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
+                    continue;
+                }
+
+                return Err(string_to_io_error(format!(
+                    "Request timed out while waiting for response {}",
+                    sanitize_sensitive_info(url.as_str())
+                )));
             }
         }
     }
@@ -1208,7 +1210,91 @@ pub fn is_uri(url: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::send_with_retry;
+    use crate::model::{AppConfig, Config, ResourceRetryConfig, ReverseProxyConfig};
+    use crate::utils::FileLockManager;
+    use arc_swap::{ArcSwap, ArcSwapOption};
     use shared::utils::{get_base_url_from_str, replace_url_extension, sanitize_sensitive_info};
+    use shared::model::ConfigPaths;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use url::Url;
+
+    fn create_test_app_config(max_attempts: u32, backoff_millis: u64, backoff_multiplier: f64) -> Arc<AppConfig> {
+        let cfg = Config {
+            reverse_proxy: Some(ReverseProxyConfig {
+                resource_rewrite_disabled: false,
+                rewrite_secret: [0; 16],
+                resource_retry: ResourceRetryConfig {
+                    max_attempts,
+                    backoff_millis,
+                    backoff_multiplier,
+                },
+                disabled_header: None,
+                stream: None,
+                cache: None,
+                rate_limit: None,
+                geoip: None,
+            }),
+            ..Config::default()
+        };
+
+        Arc::new(AppConfig {
+            config: Arc::new(ArcSwap::from_pointee(cfg)),
+            sources: Arc::new(ArcSwap::default()),
+            hdhomerun: Arc::new(ArcSwapOption::default()),
+            api_proxy: Arc::new(ArcSwapOption::default()),
+            file_locks: Arc::new(FileLockManager::default()),
+            paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
+                config_path: String::new(),
+                config_file_path: String::new(),
+                sources_file_path: String::new(),
+                mapping_file_path: None,
+                mapping_files_used: None,
+                api_proxy_file_path: String::new(),
+                custom_stream_response_path: None,
+            })),
+            custom_stream_response: Arc::new(ArcSwapOption::default()),
+            access_token_secret: [1; 32],
+            encrypt_secret: [2; 16],
+        })
+    }
+
+    #[tokio::test]
+    async fn test_send_with_retry_respects_max_attempts_on_retryable_status() {
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let request_count_for_send = Arc::clone(&request_count);
+        let app_config = create_test_app_config(3, 1, 1.0);
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_millis(100))
+            .build()
+            .unwrap();
+        let url = Url::parse("http://127.0.0.1:1/retry").unwrap();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            send_with_retry(&app_config, &url, || {
+                request_count_for_send.fetch_add(1, Ordering::SeqCst);
+                client.get(url.clone())
+            }),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "send_with_retry did not return in time; possible retry loop/deadlock"
+        );
+        assert!(
+            result.unwrap().is_err(),
+            "expected error after exhausting retry attempts"
+        );
+        assert_eq!(
+            request_count.load(Ordering::SeqCst),
+            3,
+            "expected one request per retry attempt"
+        );
+    }
 
     #[test]
     fn test_url_mask() {

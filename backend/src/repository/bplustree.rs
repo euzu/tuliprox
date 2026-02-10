@@ -3296,58 +3296,6 @@ pub struct BPlusTreeUpdate<K, V> {
     _marker_v: PhantomData<V>,
 }
 
-#[cfg(unix)]
-#[allow(dead_code)]
-fn process_is_alive(pid: u32) -> bool {
-    if pid == 0 {
-        return false;
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        // Fast path for Linux/musl.
-        if Path::new("/proc").join(pid.to_string()).exists() {
-            return true;
-        }
-    }
-
-    let pid_raw: libc::pid_t = match pid.try_into() {
-        Ok(value) => value,
-        Err(_) => return false,
-    };
-
-    // kill(pid, 0) probes process existence without sending a signal.
-    let rc = unsafe { libc::kill(pid_raw, 0) };
-    if rc == 0 {
-        return true;
-    }
-
-    match io::Error::last_os_error().raw_os_error() {
-        Some(code) if code == libc::ESRCH => false,
-        Some(code) if code == libc::EPERM => true,
-        _ => false,
-    }
-}
-
-#[cfg(windows)]
-#[allow(dead_code)]
-fn process_is_alive(pid: u32) -> bool {
-    if pid == 0 {
-        return false;
-    }
-
-    // PROCESS_QUERY_LIMITED_INFORMATION is sufficient to check process existence.
-    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-    if handle == 0 {
-        return false;
-    }
-
-    unsafe {
-        CloseHandle(handle);
-    }
-    true
-}
-
 fn lock_path(filepath: &Path) -> PathBuf {
     if let Some(stem) = filepath.file_stem() {
         // filename with dot to hide
@@ -3443,10 +3391,26 @@ where
         })
     }
 
+    /// Opens an update handle with lock-acquisition backoff.
+    ///
+    /// This function is **blocking** and should not run directly on a Tokio worker
+    /// thread. Internally it delegates to [`Self::try_new_with_backoff_stats`],
+    /// which uses `std::thread::sleep` while waiting for the file lock.
+    ///
+    /// In async contexts (Axum/Tokio), call this inside
+    /// `tokio::task::spawn_blocking(...)`.
     pub fn try_new_with_backoff(filepath: &Path) -> io::Result<Self> {
         Self::try_new_with_backoff_stats(filepath).map(|(tree, _)| tree)
     }
 
+    /// Opens an update handle with lock-acquisition backoff and returns
+    /// `(tree, retry_attempts)`.
+    ///
+    /// This function is **blocking**. It performs lock retries with
+    /// `std::thread::sleep`, so running it on a Tokio worker thread can stall
+    /// other async tasks scheduled on that thread.
+    ///
+    /// Use `tokio::task::spawn_blocking(...)` when calling from async code.
     pub fn try_new_with_backoff_stats(filepath: &Path) -> io::Result<(Self, u64)> {
         let mut attempts = 0u64;
         let mut backoff = Duration::from_micros(10);
@@ -3580,7 +3544,7 @@ where
 
     pub fn update(&mut self, key: &K, value: V) -> Result<u64, BPlusTreeError> {
         let refs = [(key, &value)];
-        let new_root_offset = self.update_batch_recursive(self.root_offset, &refs)?;
+        let new_root_offset = self.update_batch_recursive(self.root_offset, &refs, true)?;
 
         // Only update header if root offset actually changed
         // (if in-place update succeeded, offset stays the same)
@@ -3602,10 +3566,8 @@ where
     /// Update multiple items in batch. This is more efficient than calling `update()` multiple times
     /// as it performs all updates and then commits the final root offset once.
     ///
-    /// **Optimization**: This method first attempts in-place value updates for values stored in
-    /// Single mode. If all values fit in their existing allocated space, no node rewrites are
-    /// needed at all - only the value data is updated. This eliminates the cascading rewrite
-    /// problem for same-size or smaller value updates.
+    /// For rollback safety in `update_batch`, callers may disable in-place updates and force
+    /// copy-on-write mode for all touched values.
     ///
     /// returns The final root offset after all updates, or an error if any update fails.
     /// Returns the original offset if all updates were performed in-place.
@@ -3613,6 +3575,7 @@ where
         &mut self,
         offset: u64,
         items: &[(&K, &V)],
+        allow_in_place: bool,
     ) -> Result<u64, BPlusTreeError> {
         let (mut node, pointers_opt) = BPlusTreeNode::<K, V>::deserialize_from_block(&mut self.file, &mut self.read_buffer, offset, false)?;
 
@@ -3625,22 +3588,27 @@ where
             for (key, value) in items {
                 match node.keys.binary_search(key) {
                     Ok(idx) => {
-                        // Try in-place update first
-                        let result = self.try_update_value_in_place(value, &node.value_info[idx])
-                            .map_err(BPlusTreeError::Io)?;
+                        if allow_in_place {
+                            // Try in-place update first
+                            let result = self.try_update_value_in_place(value, &node.value_info[idx])
+                                .map_err(BPlusTreeError::Io)?;
 
-                        match result {
-                            InPlaceUpdateResult::Success => {
-                                // In-place succeeded, value_info stays the same
+                            match result {
+                                InPlaceUpdateResult::Success => {
+                                    // In-place succeeded, value_info stays the same
+                                }
+                                InPlaceUpdateResult::PromotedToSingle(new_info) => {
+                                    // Packed value promoted to Single, need to update node
+                                    promoted.push((idx, new_info));
+                                }
+                                InPlaceUpdateResult::NeedsCow => {
+                                    // Value doesn't fit in existing space, need full COW
+                                    needs_cow.push((idx, *key, *value));
+                                }
                             }
-                            InPlaceUpdateResult::PromotedToSingle(new_info) => {
-                                // Packed value promoted to Single, need to update node
-                                promoted.push((idx, new_info));
-                            }
-                            InPlaceUpdateResult::NeedsCow => {
-                                // Value doesn't fit in existing space, need full COW
-                                needs_cow.push((idx, *key, *value));
-                            }
+                        } else {
+                            // Batch mode uses pure COW so rollback can safely truncate/revert root.
+                            needs_cow.push((idx, *key, *value));
                         }
                     }
                     Err(_) => return Err(BPlusTreeError::KeyNotFound),
@@ -3687,7 +3655,7 @@ where
 
                 let sub_items = &items[current_idx..group_end];
                 let original_child_offset = pointers[child_idx];
-                let new_child_offset = self.update_batch_recursive(original_child_offset, sub_items)?;
+                let new_child_offset = self.update_batch_recursive(original_child_offset, sub_items, allow_in_place)?;
 
                 if new_child_offset != original_child_offset {
                     pointers[child_idx] = new_child_offset;
@@ -3720,7 +3688,8 @@ where
             let mut sorted_items = items.to_vec();
             sorted_items.sort_by(|a, b| a.0.cmp(b.0));
 
-            let new_root_offset = self.update_batch_recursive(self.root_offset, &sorted_items)?;
+            // Disable in-place updates for batch rollback safety.
+            let new_root_offset = self.update_batch_recursive(self.root_offset, &sorted_items, false)?;
 
             // Only update header if root offset actually changed
             // (if all in-place updates succeeded, offset stays the same)
@@ -4392,7 +4361,7 @@ where
         temp_file.write_all(&root_offset.to_le_bytes())?;
 
         temp_file.flush()?;
-        // temp_file.as_file().sync_all()?; // Removed as requested; relying on persist or OS flush policy
+        // temp_file.as_file().sync_all()?; // Removed as requested; relying on persisted or OS flush policy
 
         // 5. Atomic Replace
         temp_file.persist(filepath).map_err(to_io_error)?;
@@ -4552,6 +4521,59 @@ mod tests {
     use crate::repository::bplustree::{BPlusTree, BPlusTreeQuery, BPlusTreeUpdate};
     use serde::{Deserialize, Serialize};
     use shared::utils::generate_random_string;
+
+
+    #[cfg(unix)]
+    #[allow(dead_code)]
+    fn process_is_alive(pid: u32) -> bool {
+        if pid == 0 {
+            return false;
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            // Fast path for Linux/musl.
+            if Path::new("/proc").join(pid.to_string()).exists() {
+                return true;
+            }
+        }
+
+        let pid_raw: libc::pid_t = match pid.try_into() {
+            Ok(value) => value,
+            Err(_) => return false,
+        };
+
+        // kill(pid, 0) probes process existence without sending a signal.
+        let rc = unsafe { libc::kill(pid_raw, 0) };
+        if rc == 0 {
+            return true;
+        }
+
+        match io::Error::last_os_error().raw_os_error() {
+            Some(code) if code == libc::ESRCH => false,
+            Some(code) if code == libc::EPERM => true,
+            _ => false,
+        }
+    }
+
+    #[cfg(windows)]
+    #[allow(dead_code)]
+    fn process_is_alive(pid: u32) -> bool {
+        if pid == 0 {
+            return false;
+        }
+
+        // PROCESS_QUERY_LIMITED_INFORMATION is sufficient to check process existence.
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle == 0 {
+            return false;
+        }
+
+        unsafe {
+            CloseHandle(handle);
+        }
+        true
+    }
 
     // Example usage with a simple struct
     #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -5180,6 +5202,37 @@ mod tests {
         let mut query = BPlusTreeQuery::<u32, String>::try_new(&filepath)?;
         assert_eq!(query.query(&0).map_err(BPlusTreeError::to_io)?, Some("v0".to_string()));
         assert!(query.query(&u32::MAX).map_err(BPlusTreeError::to_io)?.is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn update_batch_error_rolls_back_in_place_candidate_write() -> io::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let filepath = tempdir.path().join("tree_update_batch_in_place_rollback.bin");
+        let original = "A".repeat(500);
+        let updated = "B".repeat(500);
+
+        let mut tree = BPlusTree::<u32, String>::new();
+        tree.insert(1, original.clone());
+        tree.store(&filepath)?;
+        drop(tree);
+
+        let mut updater = BPlusTreeUpdate::<u32, String>::try_new(&filepath)?;
+        let updates = [
+            (1u32, updated.clone()),
+            (u32::MAX, "missing".to_string()),
+        ];
+        let refs: Vec<(&u32, &String)> = updates.iter().map(|(k, v)| (k, v)).collect();
+
+        let result = updater.update_batch(&refs);
+        assert!(matches!(result, Err(BPlusTreeError::KeyNotFound)));
+        drop(updater);
+
+        // On failed batch, key 1 must still have original value.
+        let mut query = BPlusTreeQuery::<u32, String>::try_new(&filepath)?;
+        assert_eq!(query.query(&1).map_err(BPlusTreeError::to_io)?, Some(original));
+        assert_ne!(query.query(&1).map_err(BPlusTreeError::to_io)?, Some(updated));
 
         Ok(())
     }
