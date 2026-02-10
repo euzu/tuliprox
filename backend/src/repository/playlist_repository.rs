@@ -86,6 +86,17 @@ pub async fn persist_playlist(app_config: &Arc<AppConfig>, playlist: &mut [Playl
 
     rewrite_series_info_episode_virtual_id(playlist, &local_library_series, &provider_series);
 
+    // Mapping updates are complete after virtual IDs have been assigned and
+    // series metadata has been rewritten. Persist and drop early to reduce
+    // peak memory before output serialization starts.
+    if let Err(err) = target_id_mapping.persist() {
+        errors.push(info_err!("{err}"));
+    }
+    drop(target_id_mapping);
+    drop(file_lock);
+    drop(local_library_series);
+    drop(provider_series);
+
     for output in &target.output {
         let mut filtered: Option<Vec<PlaylistGroup>> = match output {
             TargetOutput::Xtream(out) => out.filter.as_ref().and_then(|flt| apply_filter_to_playlist(playlist, flt)),
@@ -119,14 +130,6 @@ pub async fn persist_playlist(app_config: &Arc<AppConfig>, playlist: &mut [Playl
             Err(err) => errors.push(err)
         }
     }
-
-    if let Err(err) = target_id_mapping.persist() {
-        errors.push(info_err!("{err}"));
-    }
-    // We must drop target_id_mapping here to release the exclusive B+Tree lock
-    // otherwise the subsequent load_xtream_target_storage will deadlock waiting for a shared lock.
-    drop(target_id_mapping);
-    drop(file_lock);
 
     if target.use_memory_cache {
         if let Some(playlist_storage) = playlist_state {

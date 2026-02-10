@@ -340,18 +340,31 @@ pub async fn xtream_write_playlist(
         drop(lock);
     }
 
-    if let Err(err) = write_playlists_to_file(
-        app_cfg,
-        &path,
-        true,
-        StorageKey::VirtualId,
-        vec![
-            (XtreamCluster::Live, live_col.iter().map(|item| XtreamPlaylistItem::from(&**item)).collect::<Vec<XtreamPlaylistItem>>()),
-            (XtreamCluster::Video, vod_col.iter().map(|item| XtreamPlaylistItem::from(&**item)).collect::<Vec<XtreamPlaylistItem>>()),
-            (XtreamCluster::Series, series_col.iter().map(|item| XtreamPlaylistItem::from(&**item)).collect::<Vec<XtreamPlaylistItem>>()),
-        ],
-    ).await {
-        errors.push(format!("Persisting collection failed:{err}"));
+    // Process each cluster sequentially to avoid holding multiple fully
+    // materialized Xtream collections in memory at the same time.
+    for (cluster, col) in [
+        (XtreamCluster::Live, &live_col),
+        (XtreamCluster::Video, &vod_col),
+        (XtreamCluster::Series, &series_col),
+    ] {
+        if col.is_empty() {
+            continue;
+        }
+        let data = col
+            .iter()
+            .map(|item| XtreamPlaylistItem::from(&**item))
+            .collect::<Vec<XtreamPlaylistItem>>();
+        if let Err(err) = write_playlists_to_file(
+            app_cfg,
+            &path,
+            true,
+            StorageKey::VirtualId,
+            vec![(cluster, data)],
+        )
+        .await
+        {
+            errors.push(format!("Persisting collection failed:{err}"));
+        }
     }
 
     if !errors.is_empty() {

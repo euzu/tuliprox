@@ -1,5 +1,5 @@
 use crate::model::{AppConfig, ConfigFavourites, ConfigInput, ConfigRename, ReverseProxyDisabledHeaderConfig, TVGuide};
-use crate::utils::m3u;
+use crate::utils::{log_memory_snapshot, m3u};
 use crate::utils::xtream;
 use crate::utils::{epg, StepMeasureCallback};
 use std::collections::{HashMap, HashSet};
@@ -369,6 +369,7 @@ async fn playlist_download_from_input(client: &reqwest::Client, app_config: &Arc
 }
 
 async fn process_source(source_idx: usize, ctx: &PlaylistProcessingContext) -> (Vec<InputStats>, Vec<TargetStats>, Vec<TuliproxError>) {
+    log_memory_snapshot(format!("source[{source_idx}] start").as_str());
     let sources = ctx.config.sources.load();
     let mut errors = vec![];
     let mut input_stats = HashMap::<Arc<str>, InputStats>::new();
@@ -385,6 +386,7 @@ async fn process_source(source_idx: usize, ctx: &PlaylistProcessingContext) -> (
             };
             if is_input_enabled(input, &ctx.user_targets) {
                 source_downloaded = true;
+                log_memory_snapshot(format!("source[{source_idx}] input '{}' before_download", input.name).as_str());
 
                 let start_time = Instant::now();
                 // Download the playlist for input
@@ -400,12 +402,14 @@ async fn process_source(source_idx: usize, ctx: &PlaylistProcessingContext) -> (
                     }
                     (playlist, download_err)
                 };
+                log_memory_snapshot(format!("source[{source_idx}] input '{}' after_download", input.name).as_str());
 
                 let tvguide = if input.input_type == InputType::Library {
                     None
                 } else {
                     download_input_epg(ctx, input, &mut error_list).await
                 };
+                log_memory_snapshot(format!("source[{source_idx}] input '{}' after_epg_download", input.name).as_str());
 
                 errors.append(&mut error_list);
                 let group_count = playlist_groups.get_group_count();
@@ -423,6 +427,7 @@ async fn process_source(source_idx: usize, ctx: &PlaylistProcessingContext) -> (
                             epg: tvguide,
                         }
                     );
+                    log_memory_snapshot(format!("source[{source_idx}] input '{}' after_source_push", input.name).as_str());
                 }
                 let elapsed = start_time.elapsed().as_secs();
                 input_stats.insert(input_name.clone(), create_input_stat(group_count, channel_count, errors.len(),
@@ -435,23 +440,34 @@ async fn process_source(source_idx: usize, ctx: &PlaylistProcessingContext) -> (
                 errors.push(notify_err!("Source at index {source_idx} is empty: {}", source.inputs.iter().map(Clone::clone).collect::<Vec<Arc<str>>>().join(", ")));
             } else {
                 debug_if_enabled!("Source has {} groups", source_playlists.iter_mut().map(FetchedPlaylist::get_channel_count).sum::<usize>());
-                for target in &source.targets {
-                    if is_target_enabled(target, &ctx.user_targets) {
-                        match process_playlist_for_target(ctx, &mut source_playlists, target,
-                                                          &mut input_stats, &mut errors).await {
-                            Ok(()) => {
-                                target_stats.push(TargetStats::success(&target.name));
-                            }
-                            Err(mut err) => {
-                                target_stats.push(TargetStats::failure(&target.name));
-                                errors.append(&mut err);
-                            }
+                let enabled_targets: Vec<_> = source.targets
+                    .iter()
+                    .filter(|target| is_target_enabled(target, &ctx.user_targets))
+                    .collect();
+
+                for (idx, target) in enabled_targets.iter().enumerate() {
+                    let consume_input_source = idx + 1 == enabled_targets.len();
+                    debug!(
+                        "Processing target '{}' (use_memory_cache={}, consume_input_source={})",
+                        target.name, target.use_memory_cache, consume_input_source
+                    );
+                    log_memory_snapshot(format!("source[{source_idx}] target '{}' before_process", target.name).as_str());
+                    match process_playlist_for_target(ctx, &mut source_playlists, target,
+                                                      &mut input_stats, &mut errors, consume_input_source).await {
+                        Ok(()) => {
+                            target_stats.push(TargetStats::success(&target.name));
+                        }
+                        Err(mut err) => {
+                            target_stats.push(TargetStats::failure(&target.name));
+                            errors.append(&mut err);
                         }
                     }
+                    log_memory_snapshot(format!("source[{source_idx}] target '{}' after_process", target.name).as_str());
                 }
             }
         }
     }
+    log_memory_snapshot(format!("source[{source_idx}] end").as_str());
     (input_stats.into_values().collect(), target_stats, errors)
 }
 
@@ -654,11 +670,21 @@ fn get_processing_pipe(target: &ConfigTarget) -> ProcessingPipe {
     }
 }
 
-fn execute_pipe<'a>(target: &ConfigTarget, pipe: &ProcessingPipe, fpl: &FetchedPlaylist<'a>,
-                    duplicates: &mut HashSet<UUIDType>) -> FetchedPlaylist<'a> {
+fn execute_pipe<'a>(target: &ConfigTarget, pipe: &ProcessingPipe, fpl: &mut FetchedPlaylist<'a>,
+                    duplicates: &mut HashSet<UUIDType>, consume_source: bool) -> FetchedPlaylist<'a> {
+    let source = if consume_source {
+        if fpl.is_memory() {
+            MemoryPlaylistSource::new(fpl.source.take_groups()).boxed()
+        } else {
+            std::mem::replace(&mut fpl.source, MemoryPlaylistSource::default().boxed())
+        }
+    } else {
+        fpl.clone_source()
+    };
+
     let mut new_fpl = FetchedPlaylist {
         input: fpl.input,
-        source: fpl.clone_source(),
+        source,
         epg: fpl.epg.clone(),
     };
     if target.options.as_ref().is_some_and(|opt| opt.remove_duplicates) {
@@ -708,8 +734,10 @@ async fn process_playlist_for_target(ctx: &PlaylistProcessingContext,
                                      target: &ConfigTarget,
                                      stats: &mut HashMap<Arc<str>, InputStats>,
                                      errors: &mut Vec<TuliproxError>,
+                                     consume_input_source: bool,
 ) -> Result<(), Vec<TuliproxError>> {
     debug_if_enabled!("Processing order is {}", &target.processing_order);
+    log_memory_snapshot(format!("target '{}' start", target.name).as_str());
 
     let mut duplicates: HashSet<UUIDType> = HashSet::new();
     let mut new_epg = vec![];
@@ -721,11 +749,15 @@ async fn process_playlist_for_target(ctx: &PlaylistProcessingContext,
     let pipe = get_processing_pipe(target);
     let mut step = StepMeasure::new(&target.name, broadcast_step);
     for provider_fpl in playlists.iter_mut() {
+        log_memory_snapshot(format!("target '{}' input '{}' before_pipe", target.name, provider_fpl.input.name).as_str());
         step.broadcast("Executing transformations on '{}' playlist", &target.name);
-        let mut processed_fpl = execute_pipe(target, &pipe, provider_fpl, &mut duplicates);
+        let mut processed_fpl = execute_pipe(target, &pipe, provider_fpl, &mut duplicates, consume_input_source);
+        log_memory_snapshot(format!("target '{}' input '{}' after_pipe", target.name, provider_fpl.input.name).as_str());
         processed_fpl.sort_by_provider_ordinal();
         playlist_resolve_series(&ctx.config, &ctx.client, target, errors, &pipe, provider_fpl, &mut processed_fpl).await;
+        log_memory_snapshot(format!("target '{}' input '{}' after_series_resolve", target.name, provider_fpl.input.name).as_str());
         playlist_resolve_vod(&ctx.config, &ctx.client, target, errors, provider_fpl, &mut processed_fpl).await;
+        log_memory_snapshot(format!("target '{}' input '{}' after_vod_resolve", target.name, provider_fpl.input.name).as_str());
         // stats
         let input_entry_name = processed_fpl.input.name.clone();
         let group_count = processed_fpl.get_group_count();
@@ -735,14 +767,18 @@ async fn process_playlist_for_target(ctx: &PlaylistProcessingContext,
             stat.processed_stats.channel_count = channel_count;
         }
         process_playlist_epg(&mut processed_fpl, &mut new_epg).await;
+        log_memory_snapshot(format!("target '{}' input '{}' after_epg_apply", target.name, processed_fpl.input.name).as_str());
         new_playlist.extend(processed_fpl.source.take_groups());
+        log_memory_snapshot(format!("target '{}' input '{}' after_take_groups", target.name, processed_fpl.input.name).as_str());
         tokio::task::yield_now().await;
     }
     step.tick("filter rename map + epg");
+    log_memory_snapshot(format!("target '{}' after_filter_rename_map_epg", target.name).as_str());
 
     if target.favourites.is_some() {
         step.broadcast("Processing favourites for '{}' playlist", &target.name);
         process_favourites(&mut new_playlist, target.favourites.as_deref());
+        log_memory_snapshot(format!("target '{}' after_favourites", target.name).as_str());
     }
 
     if new_playlist.is_empty() {
@@ -753,24 +789,31 @@ async fn process_playlist_for_target(ctx: &PlaylistProcessingContext,
         // Process Trakt categories
         if trakt_playlist(&ctx.client, target, errors, &mut new_playlist).await {
             step.tick("trakt categories");
+            log_memory_snapshot(format!("target '{}' after_trakt", target.name).as_str());
         }
 
         let mut flat_new_playlist = flatten_groups(new_playlist);
         step.tick("playlist merge");
+        log_memory_snapshot(format!("target '{}' after_playlist_merge", target.name).as_str());
 
         if sort_playlist(target, &mut flat_new_playlist) {
             step.tick("playlist sort");
+            log_memory_snapshot(format!("target '{}' after_playlist_sort", target.name).as_str());
         }
         assign_channel_no_playlist(&mut flat_new_playlist);
         step.tick("assigning channel numbers");
+        log_memory_snapshot(format!("target '{}' after_assign_channel_numbers", target.name).as_str());
         map_playlist_counter(target, &mut flat_new_playlist);
         step.tick("assigning channel counter");
+        log_memory_snapshot(format!("target '{}' after_assign_channel_counter", target.name).as_str());
 
         if process_watch(&ctx.config, &ctx.client, target, &flat_new_playlist).await {
             step.tick("group watches");
+            log_memory_snapshot(format!("target '{}' after_group_watches", target.name).as_str());
         }
         let result = persist_playlist(&ctx.config, &mut flat_new_playlist, flatten_tvguide(new_epg).as_ref(), target, ctx.playlist_state.as_ref()).await;
         step.stop("Persisting playlists");
+        log_memory_snapshot(format!("target '{}' after_persist", target.name).as_str());
         result
     }
 }
@@ -870,6 +913,8 @@ pub async fn exec_processing(client: &reqwest::Client, app_config: Arc<AppConfig
         None
     };
 
+    log_memory_snapshot("exec_processing start");
+
     // Initialize Context
     let ctx = PlaylistProcessingContext {
         client: client.clone(),
@@ -884,6 +929,7 @@ pub async fn exec_processing(client: &reqwest::Client, app_config: Arc<AppConfig
 
     let start_time = Instant::now();
     let (stats, errors) = process_sources(&ctx).await;
+    log_memory_snapshot("exec_processing after_process_sources");
     // log errors
     for err in &errors {
         error!("{}", err.message);
@@ -914,7 +960,10 @@ pub async fn exec_processing(client: &reqwest::Client, app_config: Arc<AppConfig
     if let Some(events) = &event_manager {
         events.send_event(EventMessage::PlaylistUpdateProgress("Playlist Update".to_string(), update_finished_message.clone()));
     }
+    log_memory_snapshot("exec_processing before_interner_gc");
     debug!("StringInterner GC removed {} strings", interner_gc());
+    log_memory_snapshot("exec_processing after_interner_gc");
+    //trim_allocator_after_update();
 
     info!("{update_finished_message}");
 }

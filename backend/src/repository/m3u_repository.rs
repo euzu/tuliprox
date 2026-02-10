@@ -70,7 +70,7 @@ async fn persist_m3u_playlist_as_text(
     cfg: &Config,
     target: &ConfigTarget,
     target_output: &M3uTargetOutput,
-    m3u_playlist: Arc<Vec<M3uPlaylistItem>>,
+    m3u_playlist: &[M3uPlaylistItem],
 ) -> Result<(), TuliproxError> {
     let Some(filename) = target_output.filename.as_ref() else { return Ok(()); };
     let Some(m3u_filename) = utils::get_file_path(&cfg.working_dir, Some(PathBuf::from(filename))) else { return Ok(()); };
@@ -82,7 +82,7 @@ async fn persist_m3u_playlist_as_text(
 
     let mut write_counter = 0usize;
 
-    for m3u in m3u_playlist.iter() {
+    for m3u in m3u_playlist {
         let line = m3u.to_m3u(target.options.as_ref(), false);
         let bytes = line.as_bytes();
         await_playlist_write!(writer.write_all(bytes), "Failed to write entry to {} - {}", m3u_filename.display());
@@ -114,31 +114,27 @@ pub async fn m3u_write_playlist(
     let _m3u_path = ensure_m3u_storage_path(&config, target.name.as_str()).await?;
 
     let m3u_path = m3u_get_file_path_for_db(target_path);
-    let m3u_playlist = Arc::new(
-        new_playlist
-            .iter()
-            .flat_map(|pg| &pg.channels)
-            .filter(|&pli| !matches!(pli.header.item_type, PlaylistItemType::SeriesInfo | PlaylistItemType::LocalSeriesInfo))
-            .map(M3uPlaylistItem::from)
-            .collect::<Vec<M3uPlaylistItem>>(),
-    );
+    let m3u_playlist = new_playlist
+        .iter()
+        .flat_map(|pg| &pg.channels)
+        .filter(|&pli| !matches!(pli.header.item_type, PlaylistItemType::SeriesInfo | PlaylistItemType::LocalSeriesInfo))
+        .map(M3uPlaylistItem::from)
+        .collect::<Vec<M3uPlaylistItem>>();
 
     let file_lock = cfg.file_locks.write_lock(&m3u_path).await;
 
-    if let Err(err) = persist_m3u_playlist_as_text(&cfg.config.load(), target, target_output, Arc::clone(&m3u_playlist)).await {
+    if let Err(err) = persist_m3u_playlist_as_text(&cfg.config.load(), target, target_output, &m3u_playlist).await {
         error!("Persisting m3u playlist failed: {err}");
     }
 
-    let playlist = Arc::clone(&m3u_playlist);
     let m3u_path_clone = m3u_path.clone();
 
     // Move all B+Tree building and I/O to spawn_blocking
-    // We take ownership of `playlist` here (no cloning needed)
     task::spawn_blocking(move || -> Result<(), TuliproxError> {
         let _guard = file_lock;
         let mut tree = BPlusTree::new();
-        for m3u in playlist.iter() {
-            tree.insert(m3u.virtual_id, m3u.clone());
+        for m3u in m3u_playlist {
+            tree.insert(m3u.virtual_id, m3u);
         }
         tree.store_with_index(&m3u_path_clone, |pli| pli.source_ordinal).map_err(|err| cant_write_result!(&m3u_path_clone, err))?;
         Ok(())
