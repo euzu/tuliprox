@@ -3,10 +3,10 @@ use crate::api::model::{get_response_headers, AppState, CustomVideoStreamType};
 use crate::api::model::StreamError;
 use crate::api::model::{create_channel_unavailable_stream, get_header_filter_for_item_type};
 use crate::api::model::{BoxedProviderStream, ProviderStreamFactoryResponse};
-use crate::model::{ReverseProxyDisabledHeaderConfig};
+use crate::model::{ConfigProvider, ReverseProxyDisabledHeaderConfig};
 use crate::tools::atomic_once_flag::AtomicOnceFlag;
 use crate::utils::debug_if_enabled;
-use crate::utils::request::{classify_content_type, get_request_headers, MimeCategory};
+use crate::utils::request::{classify_content_type, get_request_headers, MimeCategory, send_with_retry_and_provider};
 use futures::stream::{self};
 use futures::{StreamExt, TryStreamExt};
 use log::{debug, log_enabled, warn};
@@ -42,6 +42,7 @@ pub struct ProviderStreamFactoryOptions {
     range_bytes: Arc<Option<AtomicUsize>>,
     range_requested: bool,
     reconnect_flag: Arc<AtomicOnceFlag>,
+    provider: Option<Arc<ConfigProvider>>,
 }
 
 impl ProviderStreamFactoryOptions {
@@ -103,7 +104,16 @@ impl ProviderStreamFactoryOptions {
             default_user_agent,
             range_bytes,
             range_requested: requested_range.is_some(),
+            provider: None,
         }
+    }
+
+    pub fn set_provider(&mut self, provider: Option<Arc<ConfigProvider>>) {
+        self.provider = provider;
+    }
+
+    pub fn get_provider(&self) -> Option<&Arc<ConfigProvider>> {
+        self.provider.as_ref()
     }
 
     #[inline]
@@ -358,17 +368,36 @@ fn should_use_manual_redirects(app_state: &Arc<AppState>) -> bool {
 async fn send_with_manual_redirects(
     request_client: &reqwest::Client,
     stream_options: &ProviderStreamFactoryOptions,
-) -> Result<reqwest::Response, reqwest::Error> {
+    app_state: &Arc<AppState>,
+) -> Result<reqwest::Response, std::io::Error> {
     let mut current_url = stream_options.get_url().clone();
-    let mut remaining = 10u8;
+    let mut remaining_redirects = 10u8;
+    let provider = stream_options.get_provider().cloned();
 
     loop {
-        let (client, _partial_content) = prepare_client(request_client, stream_options, Some(&current_url));
-        let response = client.send().await?;
+        let result = send_with_retry_and_provider(
+            &app_state.app_config,
+            &current_url,
+            provider.as_ref(),
+            true,
+            |resolved_url| prepare_client(request_client, stream_options, Some(resolved_url)).0
+        ).await;
+
+        let response = match result {
+            Ok(resp) => resp,
+            Err(e) => {
+                // send_with_retry_and_provider already applies provider failover policy.
+                // Do not rotate again here, otherwise non-failover errors (e.g. auth) may
+                // incorrectly switch provider URLs.
+                debug!("Manual redirect failed: {}", sanitize_sensitive_info(e.to_string().as_str()));
+                return Err(e);
+            }
+        };
+
         let status = response.status();
 
         if status.is_redirection() {
-            if remaining == 0 {
+            if remaining_redirects == 0 {
                 return Ok(response);
             }
             let location = response.headers().get(reqwest::header::LOCATION);
@@ -385,13 +414,14 @@ async fn send_with_manual_redirects(
                 return Ok(response);
             };
             current_url = next_url;
-            remaining = remaining.saturating_sub(1);
+            remaining_redirects = remaining_redirects.saturating_sub(1);
             continue;
         }
         return Ok(response);
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn provider_stream_request(
     app_state: &Arc<AppState>,
     request_client: &reqwest::Client,
@@ -399,10 +429,22 @@ async fn provider_stream_request(
 ) -> Result<Option<ProviderStreamFactoryResponse>, StatusCode> {
     let response_result = if should_use_manual_redirects(app_state) {
         let client_no_redirect = app_state.http_client_no_redirect.load();
-        send_with_manual_redirects(&client_no_redirect, stream_options).await
+        send_with_manual_redirects(&client_no_redirect, stream_options, app_state).await
     } else {
-        let (client, _partial_content) = prepare_client(request_client, stream_options, None);
-        client.send().await
+        // Use send_with_retry_and_provider for automatic failover support
+        let url = stream_options.get_url();
+        let provider = stream_options.get_provider().cloned();
+
+        send_with_retry_and_provider(
+            &app_state.app_config,
+            url,
+            provider.as_ref(),
+            false,
+            |resolved_url| {
+                let (client, _partial_content) = prepare_client(request_client, stream_options, Some(resolved_url));
+                client
+            }
+        ).await
     };
     match response_result {
         Ok(mut response) => {

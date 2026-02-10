@@ -736,12 +736,21 @@ async fn panel_client_info(
 }
 
 async fn fetch_root_user_api_info(
-    app_state: &AppState,
+    app_state: &Arc<AppState>,
     input: &ConfigInput,
-) -> Option<UserApiAccountInfo> {
-    let (username, password) = extract_account_creds_from_input(input)?;
-    let base_url = get_base_url_from_str(input.url.as_str()).unwrap_or_else(|| input.url.clone());
-    let mut url = Url::parse(base_url.as_str()).ok()?;
+) -> Result<Option<UserApiAccountInfo>, TuliproxError> {
+
+
+    let Some((username, password)) = extract_account_creds_from_input(input) else {
+      return Ok(None);
+    };
+
+    let resolved_url =  input.resolve()?;
+    let base_url = get_base_url_from_str(&resolved_url).unwrap_or_else(|| resolved_url.to_string());
+
+    let Ok(mut url) = Url::parse(base_url.as_str()) else {
+        return info_err_res!("panel_api: invalid base_url: {}", sanitize_sensitive_info(&base_url));
+    };
     url.set_path("/player_api.php");
     {
         let mut pairs = url.query_pairs_mut();
@@ -758,7 +767,7 @@ async fn fetch_root_user_api_info(
                 sanitize_sensitive_info(&input.name),
                 sanitize_sensitive_info(err.to_string().as_str())
             );
-            return None;
+            return Ok(None);
         }
     };
 
@@ -776,11 +785,11 @@ async fn fetch_root_user_api_info(
         .and_then(get_string_from_serde_value)
         .and_then(|tz| tz.parse::<Tz>().ok());
 
-    Some(UserApiAccountInfo {
+    Ok(Some(UserApiAccountInfo {
         exp_date,
         server_now_ts,
         server_tz,
-    })
+    }))
 }
 
 fn resolve_panel_expire_mode(
@@ -2455,8 +2464,8 @@ async fn sync_panel_api_for_input_on_boot(
     }
 
     if let Some((root_username, root_password)) = extract_account_creds_from_input(input.as_ref()) {
-        let user_info = fetch_root_user_api_info(app_state.as_ref(), input.as_ref()).await;
-        let (root_exp_date, server_tz, skew_secs) = if let Some(info) = user_info {
+        let user_info = fetch_root_user_api_info(app_state, input.as_ref()).await;
+        let (root_exp_date, server_tz, skew_secs) = if let Ok(Some(info)) = user_info {
             let local_now = i64::try_from(get_current_timestamp()).unwrap_or(0);
             let skew_secs = info.server_now_ts.unwrap_or(local_now) - local_now;
             (info.exp_date, info.server_tz, Some(skew_secs))
@@ -3938,7 +3947,7 @@ pub(crate) async fn run_panel_api_provisioning_probe(
     stop_signal: Arc<AtomicOnceFlag>,
     addr: SocketAddr,
     virtual_id: VirtualId,
-) {
+) -> Result<(), TuliproxError> {
     let Some(panel_cfg) = input.panel_api.as_ref() else {
         debug_if_enabled!(
             "panel_api provisioning probe skipped (missing config) for input {}",
@@ -3949,7 +3958,7 @@ pub(crate) async fn run_panel_api_provisioning_probe(
             .connection_manager
             .kick_connection(&addr, virtual_id, 0)
             .await;
-        return;
+        return Ok(());
     };
     if !panel_cfg.enabled {
         debug_if_enabled!(
@@ -3961,7 +3970,7 @@ pub(crate) async fn run_panel_api_provisioning_probe(
             .connection_manager
             .kick_connection(&addr, virtual_id, 0)
             .await;
-        return;
+        return Ok(());
     }
     if panel_cfg.url.trim().is_empty() {
         debug_if_enabled!(
@@ -3973,7 +3982,7 @@ pub(crate) async fn run_panel_api_provisioning_probe(
             .connection_manager
             .kick_connection(&addr, virtual_id, 0)
             .await;
-        return;
+        return Ok(());
     }
 
     let max_wait_secs = panel_cfg.provisioning.timeout_sec;
@@ -4023,10 +4032,12 @@ pub(crate) async fn run_panel_api_provisioning_probe(
             .connection_manager
             .kick_connection(&addr, virtual_id, 0)
             .await;
-        return;
+        return Ok(());
     };
 
-    let Some(test_url) = build_panel_api_test_url(input.url.as_str(), username, password) else {
+    let resolved_url = input.resolve()?;
+
+    let Some(test_url) = build_panel_api_test_url(&resolved_url, username, password) else {
         if max_wait_secs > 0 {
             tokio::time::sleep(Duration::from_secs(max_wait_secs)).await;
         }
@@ -4039,7 +4050,7 @@ pub(crate) async fn run_panel_api_provisioning_probe(
             .connection_manager
             .kick_connection(&addr, virtual_id, 0)
             .await;
-        return;
+        return Ok(());
     };
 
     let probe_delay = Duration::from_secs(probe_interval_secs);
@@ -4111,6 +4122,7 @@ pub(crate) async fn run_panel_api_provisioning_probe(
         .connection_manager
         .kick_connection(&addr, virtual_id, 0)
         .await;
+    Ok(())
 }
 
 pub fn create_panel_api_provisioning_stream_details(
@@ -4151,14 +4163,16 @@ pub fn create_panel_api_provisioning_stream_details(
     let input_clone = input.clone();
     let stop_clone = Arc::clone(&stop_signal);
     tokio::spawn(async move {
-        run_panel_api_provisioning_probe(
+        if let Err(err) = run_panel_api_provisioning_probe(
             app_state_clone,
             input_clone,
             stop_clone,
             addr,
             virtual_id,
         )
-        .await;
+        .await {
+            error!("Error running Probe: {err:?}");
+        }
     });
 
     StreamDetails {

@@ -1,9 +1,11 @@
 use std::borrow::Cow;
 use std::sync::atomic::Ordering;
 use url::Url;
-use crate::concat_string;
+use crate::{concat_string, info_err, info_err_res};
+use crate::error::TuliproxError;
 use crate::utils::{CONSTANTS, DASH_EXT, DASH_EXT_FRAGMENT, DASH_EXT_QUERY, HLS_EXT, HLS_EXT_FRAGMENT, HLS_EXT_QUERY};
 
+pub const PROVIDER_SCHEME_PREFIX: &str = "provider://";
 
 pub const CONTENT_TYPE_JSON: &str = "application/json";
 pub const CONTENT_TYPE_CBOR: &str = "application/cbor";
@@ -148,4 +150,23 @@ pub fn concat_path_leading_slash(first: &str, second: &str) -> String {
     }
     let path = path.trim_start_matches('/');
     format!("/{path}")
+}
+
+/// Internal helper to parse the provider URL into (host, path_and_query)
+pub fn parse_provider_scheme_url_parts(stream_url: &str) -> Result<(&str, &str), TuliproxError> {
+
+    let rest = stream_url.strip_prefix(PROVIDER_SCHEME_PREFIX).ok_or_else(|| {
+        info_err!("Not a provider URL: '{}'", sanitize_sensitive_info(stream_url))
+    })?;
+
+    let (host, path) = match rest.find('/') {
+        Some(idx) => (&rest[..idx], &rest[idx..]),
+        None => (rest, ""),
+    };
+
+    if host.is_empty() {
+        return info_err_res!("Provider host is empty in URL: '{}'", sanitize_sensitive_info(stream_url));
+    }
+
+    Ok((host, path))
 }

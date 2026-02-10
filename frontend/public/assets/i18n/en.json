@@ -418,7 +418,10 @@
     "MSG_KIND_WATCH": "Watch",
     "API_PROXY_CONFIG": "Api Proxy Config",
     "USE_USER_DB": "Use User DB",
-    "ADD_SERVER":  "Add Server"
+    "ADD_SERVER":  "Add Server",
+    "FAILOVER_REDIRECT_PATTERNS": "Failover Redirect Patterns",
+    "ADD_PATTERN": "Add Pattern"
+
   },
   "TITLE": {
     "USER_BOUQUET_EDITOR": "Playlist Category Selection"
