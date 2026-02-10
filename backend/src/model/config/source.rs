@@ -60,19 +60,19 @@ impl ConfigProvider {
     /// Use this method when you need to try all URLs exactly once before failing.
     /// Call `get_current_index()` at the start of a failover session to get the `start_index`.
     pub fn rotate_to_next_url_with_cycle_check(&self, start_index: usize) -> Option<&Arc<str>> {
-        if self.urls.is_empty() {
+        let len = self.urls.len();
+        if len == 0 {
             return None;
         }
 
-        let current = self.current_url_index.load(Ordering::Relaxed);
-        let next = (current + 1) % self.urls.len();
-
-        // If we've cycled back to start, we've tried all URLs
-        if next == start_index {
-            return None;
-        }
-
-        self.current_url_index.store(next, Ordering::Relaxed);
+        let previous = self.current_url_index
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                let next = (current + 1) % len;
+                // If we've cycled back to start, we've tried all URLs.
+                (next != start_index).then_some(next)
+            })
+            .ok()?;
+        let next = (previous + 1) % len;
         self.urls.get(next)
     }
 }

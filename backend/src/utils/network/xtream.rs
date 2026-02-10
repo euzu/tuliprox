@@ -11,14 +11,14 @@ use crate::repository::{ensure_input_storage_path, get_input_storage_path, get_t
 use crate::repository::{get_live_cat_collection_path, get_series_cat_collection_path, get_vod_cat_collection_path, xtream_get_file_path, CategoryEntry};
 use crate::repository::{get_target_id_mapping, rewrite_provider_series_info_episode_virtual_id, ProviderEpisodeKey};
 use crate::repository::{persist_input_vod_info, persists_input_series_info, write_playlist_batch_item_upsert, write_playlist_item_update};
-use crate::utils::{request};
+use crate::utils::request;
 use chrono::{DateTime, Utc};
 use log::{debug, error, info, warn};
 use shared::error::TuliproxError;
 use shared::model::{PlaylistEntry, PlaylistGroup, ProxyUserStatus, SeriesStreamProperties,
                     StreamProperties, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem,
                     XtreamSeriesInfo, XtreamVideoInfo, XtreamVideoInfoDoc};
-use shared::utils::{extract_extension_from_url, get_i64_from_serde_value, get_string_from_serde_value, sanitize_sensitive_info, Internable};
+use shared::utils::{extract_extension_from_url, get_i64_from_serde_value, get_string_from_serde_value, sanitize_sensitive_info, Internable, PROVIDER_SCHEME_PREFIX};
 use std::collections::HashMap;
 use std::io::Error;
 use std::path::Path;
@@ -352,12 +352,18 @@ pub async fn download_xtream_playlist(app_config: &Arc<AppConfig>, client: &reqw
     let username = input_source.username.as_ref().map_or("", |v| v);
     let password = input_source.password.as_ref().map_or("", |v| v);
 
-    let resolved_url = match input.resolve_url(&input_source.url) {
-        Ok(url) => url,
-        Err(err) => return (Vec::with_capacity(0), vec![err], false)
+    let base_input_url = if input_source.url.starts_with(PROVIDER_SCHEME_PREFIX) {
+        // Keep provider:// unresolved; send_with_retry_and_provider resolves per attempt
+        // so failover can switch provider hosts.
+        input_source.url.clone()
+    } else {
+        match input.resolve_url(&input_source.url) {
+            Ok(url) => url.into_owned(),
+            Err(err) => return (Vec::with_capacity(0), vec![err], false),
+        }
     };
 
-    let base_url = get_xtream_stream_url_base(&resolved_url, username, password);
+    let base_url = get_xtream_stream_url_base(&base_input_url, username, password);
     let input_source_login = input_source.with_url(base_url.clone());
 
     check_alias_user_state(app_config, client, input).await;

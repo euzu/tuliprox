@@ -2,11 +2,11 @@ use crate::model::{macros, ConfigProvider, EpgConfig, PanelApiConfig};
 use crate::repository::get_csv_file_path;
 use chrono::Utc;
 use log::warn;
-use shared::{check_input_credentials, concat_string, info_err};
 use shared::error::TuliproxError;
 use shared::model::{ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, InputFetchMethod, InputType, StagedInputDto};
 use shared::utils::{get_credentials_from_url, parse_provider_scheme_url_parts, sanitize_sensitive_info, Internable, PROVIDER_SCHEME_PREFIX};
 use shared::{check_input_connections, info_err_res, write_if_some};
+use shared::{check_input_credentials, concat_string, info_err};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
@@ -174,7 +174,6 @@ impl ConfigInput {
             check_input_credentials!(self, self.input_type, false, false);
             check_input_connections!(self, self.input_type, false);
             if let Some(staged_input) = &mut self.staged {
-
                 if staged_input.url.starts_with(PROVIDER_SCHEME_PREFIX) {
                     if let Ok((host, _path)) = parse_provider_scheme_url_parts(&staged_input.url) {
                         if let Some(provider_cfg) = provider_configs.iter().find(|p| p.name.as_ref() == host) {
@@ -259,7 +258,6 @@ impl ConfigInput {
             self.t_batch_url = Some(self.url.clone());
             let file_path = get_csv_file_path(self.url.as_str()).ok();
             if self.enabled {
-
                 if let Some(aliases) = self.aliases.as_mut() {
                     if !aliases.is_empty() {
                         for alias in aliases.iter_mut() {
@@ -364,6 +362,9 @@ impl ConfigInput {
     }
 
     pub fn get_resolve_provider(&self, url: &str) -> Option<Arc<ConfigProvider>> {
+        if !url.starts_with(PROVIDER_SCHEME_PREFIX) {
+            return None;
+        }
         if let Some(provider) = self.provider_configs.as_ref() {
             if let Ok((host, _path)) = parse_provider_scheme_url_parts(url) {
                 return provider.iter().find(|pc| pc.name.as_ref() == host).cloned();
@@ -428,7 +429,7 @@ impl fmt::Display for ConfigInput {
 }
 
 
-    pub fn is_input_expired(exp_date: Option<i64>) -> bool {
+pub fn is_input_expired(exp_date: Option<i64>) -> bool {
     match exp_date {
         Some(ts) => {
             let now = Utc::now().timestamp();
@@ -442,7 +443,7 @@ impl fmt::Display for ConfigInput {
 /// If the URL does not use the custom scheme, it returns the original URL.
 pub fn resolve_provider_scheme_url_with_provider(
     stream_url: &str,
-    provider_config: Option<Arc<ConfigProvider>>
+    provider_config: Option<Arc<ConfigProvider>>,
 ) -> Result<(Option<Arc<ConfigProvider>>, Cow<'_, str>), TuliproxError> {
     if !stream_url.starts_with(PROVIDER_SCHEME_PREFIX) {
         return Ok((None, Cow::Borrowed(stream_url)));
@@ -480,10 +481,10 @@ fn assemble_provider_url(provider: &ConfigProvider, path_and_query: &str) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
-    use std::sync::Arc;
     use crate::model::ConfigProvider;
     use std::borrow::Cow;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc;
 
     #[test]
     fn test_resolve_url_normal() {

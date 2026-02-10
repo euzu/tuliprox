@@ -1376,7 +1376,7 @@ async fn fetch_resource_with_retry(
 
     let disabled_headers = app_state.get_disabled_headers();
 
-    let provider_config = input?.get_resolve_provider(url.as_str());
+    let provider_config = input.and_then(|i| i.get_resolve_provider(url.as_str()));
     let Ok(response) = send_with_retry_and_provider(
         &app_state.app_config,
         url,

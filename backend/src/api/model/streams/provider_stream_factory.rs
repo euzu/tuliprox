@@ -3,17 +3,17 @@ use crate::api::model::{get_response_headers, AppState, CustomVideoStreamType};
 use crate::api::model::StreamError;
 use crate::api::model::{create_channel_unavailable_stream, get_header_filter_for_item_type};
 use crate::api::model::{BoxedProviderStream, ProviderStreamFactoryResponse};
-use crate::model::{resolve_provider_scheme_url_with_provider, ConfigProvider, ReverseProxyDisabledHeaderConfig};
+use crate::model::{ConfigProvider, ReverseProxyDisabledHeaderConfig};
 use crate::tools::atomic_once_flag::AtomicOnceFlag;
 use crate::utils::debug_if_enabled;
 use crate::utils::request::{classify_content_type, get_request_headers, MimeCategory, send_with_retry_and_provider};
 use futures::stream::{self};
 use futures::{StreamExt, TryStreamExt};
-use log::{debug, info, log_enabled, warn};
+use log::{debug, log_enabled, warn};
 use reqwest::header::{HeaderMap, RANGE};
 use reqwest::StatusCode;
 use shared::model::{PlaylistItemType, DEFAULT_USER_AGENT};
-use shared::utils::{filter_request_header, sanitize_sensitive_info, PROVIDER_SCHEME_PREFIX};
+use shared::utils::{filter_request_header, sanitize_sensitive_info};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -365,38 +365,16 @@ fn should_use_manual_redirects(app_state: &Arc<AppState>) -> bool {
     config.proxy.is_some() || proxy_env_present()
 }
 
-/// Resolves a provider:// URL to an actual HTTP URL using the provider's current base URL
-/// and the path from the scheme URL.
-fn resolve_provider_url(url_str: &str, provider: Option<&Arc<ConfigProvider>>) -> Option<Url> {
-    if !url_str.starts_with(PROVIDER_SCHEME_PREFIX) {
-        return None;
-    }
-    
-    let provider = provider?;
-    
-    match resolve_provider_scheme_url_with_provider(url_str, Some(provider.clone())) {
-        Ok((_provider, resolved)) => Url::parse(&resolved).ok(),
-        Err(e) => {
-            debug!("Failed to resolve provider URL: {e}");
-            None
-        }
-    }
-}
-
-
 async fn send_with_manual_redirects(
     request_client: &reqwest::Client,
     stream_options: &ProviderStreamFactoryOptions,
     app_state: &Arc<AppState>,
-) -> Result<reqwest::Response, reqwest::Error> {
+) -> Result<reqwest::Response, std::io::Error> {
     let mut current_url = stream_options.get_url().clone();
     let mut remaining_redirects = 10u8;
     let provider = stream_options.get_provider().cloned();
-    
-    // Record the starting URL index for full-cycle detection
-    let start_index = provider.as_ref().map_or(0, |p| p.get_current_index());
 
-    'redirect_loop: loop {
+    loop {
         let result = send_with_retry_and_provider(
             &app_state.app_config,
             &current_url,
@@ -408,23 +386,11 @@ async fn send_with_manual_redirects(
         let response = match result {
             Ok(resp) => resp,
             Err(e) => {
-                // Check if we should trigger provider failover on connection error
-                if let Some(p) = provider.as_ref() {
-                    if p.rotate_to_next_url_with_cycle_check(start_index).is_some() {
-                        let current_index = p.get_current_index();
-                        info!("Provider '{}' switched to URL index {} due to connection error in manual redirects", p.name, current_index);
-                        // Retry with new provider URL
-                        continue 'redirect_loop;
-                    }
-                }
-                
-                // Re-throw as IO error which will be handled by caller
-                 debug!("Manual redirect failed: {}", sanitize_sensitive_info(e.to_string().as_str()));
-                // Create a new request client error with resolved URL
-                let fallback_url = resolve_provider_url(current_url.as_str(), provider.as_ref())
-                    .unwrap_or_else(|| current_url.clone());
-                let (client, _) = prepare_client(request_client, stream_options, Some(&fallback_url));
-                return client.send().await;
+                // send_with_retry_and_provider already applies provider failover policy.
+                // Do not rotate again here, otherwise non-failover errors (e.g. auth) may
+                // incorrectly switch provider URLs.
+                debug!("Manual redirect failed: {}", sanitize_sensitive_info(e.to_string().as_str()));
+                return Err(e);
             }
         };
 
@@ -469,7 +435,7 @@ async fn provider_stream_request(
         let url = stream_options.get_url();
         let provider = stream_options.get_provider().cloned();
 
-        match send_with_retry_and_provider(
+        send_with_retry_and_provider(
             &app_state.app_config,
             url,
             provider.as_ref(),
@@ -478,17 +444,7 @@ async fn provider_stream_request(
                 let (client, _partial_content) = prepare_client(request_client, stream_options, Some(resolved_url));
                 client
             }
-        ).await {
-            Ok(response) => Ok(response),
-            Err(e) => {
-                debug!("Stream request failed: {}", sanitize_sensitive_info(e.to_string().as_str()));
-                // Fallback: Try one last time with current resolved URL
-                let fallback_url = resolve_provider_url(url.as_str(), provider.as_ref())
-                    .unwrap_or_else(|| url.clone());
-                let (client, _partial_content) = prepare_client(request_client, stream_options, Some(&fallback_url));
-                client.send().await
-            }
-        }
+        ).await
     };
     match response_result {
         Ok(mut response) => {
