@@ -85,15 +85,6 @@ pub async fn persist_playlist(app_config: &Arc<AppConfig>, playlist: &mut [Playl
     }
 
     rewrite_series_info_episode_virtual_id(playlist, &local_library_series, &provider_series);
-
-    // Mapping updates are complete after virtual IDs have been assigned and
-    // series metadata has been rewritten. Persist and drop early to reduce
-    // peak memory before output serialization starts.
-    if let Err(err) = target_id_mapping.persist() {
-        errors.push(info_err!("{err}"));
-    }
-    drop(target_id_mapping);
-    drop(file_lock);
     drop(local_library_series);
     drop(provider_series);
 
@@ -130,6 +121,15 @@ pub async fn persist_playlist(app_config: &Arc<AppConfig>, playlist: &mut [Playl
             Err(err) => errors.push(err)
         }
     }
+
+    if let Err(err) = target_id_mapping.persist() {
+        errors.push(info_err!("{err}"));
+    }
+    // Keep lock until all outputs are persisted to prevent concurrent writers
+    // from interleaving mapping and output state for the same target.
+    // We must release it before loading caches below (which may acquire read locks).
+    drop(target_id_mapping);
+    drop(file_lock);
 
     if target.use_memory_cache {
         if let Some(playlist_storage) = playlist_state {
