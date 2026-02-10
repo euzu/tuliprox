@@ -160,14 +160,25 @@ impl ConfigInput {
         let batch_file_path = self.prepare_batch();
         self.name = self.name.trim().intern();
 
+        let resolve_provider_config = |url: &str| -> Result<Arc<ConfigProvider>, TuliproxError> {
+            let (host, _path) = parse_provider_scheme_url_parts(url).map_err(|err| {
+                info_err!(
+                    "Malformed provider URL {}: {}",
+                    sanitize_sensitive_info(url),
+                    sanitize_sensitive_info(err.to_string().as_str())
+                )
+            })?;
+
+            provider_configs
+                .iter()
+                .find(|p| p.name.as_ref() == host)
+                .cloned()
+                .ok_or_else(|| info_err!("Failed to resolve provider config for {}", sanitize_sensitive_info(url)))
+        };
+
         if self.url.starts_with(PROVIDER_SCHEME_PREFIX) {
-            if let Ok((host, _path)) = parse_provider_scheme_url_parts(&self.url) {
-                if let Some(provider_cfg) = provider_configs.iter().find(|p| p.name.as_ref() == host) {
-                    used_provider_configs.push(provider_cfg.clone());
-                } else {
-                    return info_err_res!("Failed to resolve provider config for {}", sanitize_sensitive_info(&self.url));
-                }
-            }
+            let provider_cfg = resolve_provider_config(&self.url)?;
+            used_provider_configs.push(provider_cfg);
         }
 
         if self.enabled {
@@ -175,14 +186,9 @@ impl ConfigInput {
             check_input_connections!(self, self.input_type, false);
             if let Some(staged_input) = &mut self.staged {
                 if staged_input.url.starts_with(PROVIDER_SCHEME_PREFIX) {
-                    if let Ok((host, _path)) = parse_provider_scheme_url_parts(&staged_input.url) {
-                        if let Some(provider_cfg) = provider_configs.iter().find(|p| p.name.as_ref() == host) {
-                            staged_input.provider_config = Some(provider_cfg.clone());
-                            used_provider_configs.push(provider_cfg.clone());
-                        } else {
-                            return info_err_res!("Failed to resolve provider config for {}", sanitize_sensitive_info(&staged_input.url));
-                        }
-                    }
+                    let provider_cfg = resolve_provider_config(&staged_input.url)?;
+                    staged_input.provider_config = Some(provider_cfg.clone());
+                    used_provider_configs.push(provider_cfg);
                 }
 
                 check_input_credentials!(staged_input, staged_input.input_type, false, true);
@@ -204,14 +210,9 @@ impl ConfigInput {
                     }
 
                     if alias.url.starts_with(PROVIDER_SCHEME_PREFIX) {
-                        if let Ok((host, _path)) = parse_provider_scheme_url_parts(&alias.url) {
-                            if !used_provider_configs.iter().any(|p| p.name.as_ref() == host) {
-                                if let Some(provider_cfg) = provider_configs.iter().find(|p| p.name.as_ref() == host) {
-                                    used_provider_configs.push(provider_cfg.clone());
-                                } else {
-                                    return info_err_res!("Failed to resolve provider config for {}", sanitize_sensitive_info(&alias.url));
-                                }
-                            }
+                        let provider_cfg = resolve_provider_config(&alias.url)?;
+                        if !used_provider_configs.iter().any(|p| p.name == provider_cfg.name) {
+                            used_provider_configs.push(provider_cfg);
                         }
                     }
                 }
@@ -535,5 +536,64 @@ mod tests {
         };
         let resolved = input.resolve().unwrap();
         assert_eq!(resolved, "http://example.com/stream");
+    }
+
+    #[test]
+    fn test_prepare_fails_on_malformed_provider_url_in_main_input() {
+        let mut input = ConfigInput {
+            name: "test_input".into(),
+            input_type: InputType::M3u,
+            url: "provider:///bad".to_string(),
+            enabled: false,
+            ..Default::default()
+        };
+
+        let err = input.prepare(&[]).unwrap_err();
+        assert!(err.to_string().contains("Malformed provider URL"));
+    }
+
+    #[test]
+    fn test_prepare_fails_on_malformed_provider_url_in_staged_input() {
+        let mut input = ConfigInput {
+            name: "test_input".into(),
+            input_type: InputType::M3u,
+            url: "http://example.com/playlist.m3u".to_string(),
+            enabled: true,
+            staged: Some(StagedInput {
+                name: "staged".into(),
+                input_type: InputType::M3u,
+                url: "provider:///bad".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let err = input.prepare(&[]).unwrap_err();
+        assert!(err.to_string().contains("Malformed provider URL"));
+    }
+
+    #[test]
+    fn test_prepare_fails_on_malformed_provider_url_in_alias() {
+        let mut input = ConfigInput {
+            name: "test_input".into(),
+            input_type: InputType::M3u,
+            url: "http://example.com/playlist.m3u".to_string(),
+            enabled: true,
+            aliases: Some(vec![ConfigInputAlias {
+                id: 1,
+                name: "alias".into(),
+                url: "provider:///bad".to_string(),
+                username: None,
+                password: None,
+                priority: 0,
+                max_connections: 0,
+                exp_date: None,
+                enabled: true,
+            }]),
+            ..Default::default()
+        };
+
+        let err = input.prepare(&[]).unwrap_err();
+        assert!(err.to_string().contains("Malformed provider URL"));
     }
 }

@@ -352,7 +352,8 @@ pub async fn download_xtream_playlist(app_config: &Arc<AppConfig>, client: &reqw
     let username = input_source.username.as_ref().map_or("", |v| v);
     let password = input_source.password.as_ref().map_or("", |v| v);
 
-    let base_input_url = if input_source.url.starts_with(PROVIDER_SCHEME_PREFIX) {
+    let is_provider_url = input_source.url.starts_with(PROVIDER_SCHEME_PREFIX);
+    let base_input_url = if is_provider_url {
         // Keep provider:// unresolved; send_with_retry_and_provider resolves per attempt
         // so failover can switch provider hosts.
         input_source.url.clone()
@@ -363,7 +364,11 @@ pub async fn download_xtream_playlist(app_config: &Arc<AppConfig>, client: &reqw
         }
     };
 
-    let base_url = get_xtream_stream_url_base(&base_input_url, username, password);
+    let base_url = if is_provider_url {
+        base_input_url.clone()
+    } else {
+        get_xtream_stream_url_base(&base_input_url, username, password)
+    };
     let input_source_login = input_source.with_url(base_url.clone());
 
     check_alias_user_state(app_config, client, input).await;
