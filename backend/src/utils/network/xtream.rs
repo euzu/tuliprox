@@ -5,7 +5,7 @@ use crate::model::{is_input_expired, xtream_mapping_option_from_target_options, 
 use crate::model::{InputSource, ProxyUserCredentials};
 use crate::processing::parser::xtream;
 use crate::processing::parser::xtream::parse_xtream_series_info;
-use crate::repository::{BPlusTreeUpdate, FlushPolicy};
+use crate::repository::{needs_update_info_details, BPlusTreeQuery, BPlusTreeUpdate, FlushPolicy};
 use crate::repository::VirtualIdRecord;
 use crate::repository::{ensure_input_storage_path, get_input_storage_path, get_target_storage_path};
 use crate::repository::{get_live_cat_collection_path, get_series_cat_collection_path, get_vod_cat_collection_path, xtream_get_file_path, CategoryEntry};
@@ -520,6 +520,117 @@ pub fn create_vod_info_from_item(target: &ConfigTarget, user: &ProxyUserCredenti
 
 const BATCH_SIZE: usize = 1000;
 
+fn preserve_details_for_disk_cluster(
+    old_path: &Path,
+    tmp_path: &Path,
+) -> Result<(), TuliproxError> {
+    let mut old_props_by_provider_id: HashMap<u32, StreamProperties> = HashMap::new();
+
+    if old_path.exists() {
+        if let Ok(mut old_query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(old_path) {
+            for (_, item) in old_query.iter() {
+                if let Some(props) = item.additional_properties.as_ref() {
+                    let should_preserve = props.has_details()
+                        || matches!(
+                            props,
+                            StreamProperties::Live(live)
+                                if live.video.is_some()
+                                    || live.audio.is_some()
+                                    || live.last_probed_timestamp.is_some()
+                                    || live.last_success_timestamp.is_some()
+                        );
+                    if should_preserve {
+                        old_props_by_provider_id.insert(item.provider_id, props.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    if old_props_by_provider_id.is_empty() {
+        return Ok(());
+    }
+
+    let mut updates: Vec<(u32, XtreamPlaylistItem)> = Vec::new();
+    if let Ok(mut new_query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(tmp_path) {
+        for (_, mut item) in new_query.iter() {
+            let Some(new_props) = item.additional_properties.as_mut() else {
+                continue;
+            };
+
+            let Some(old_props) = old_props_by_provider_id.get(&item.provider_id) else {
+                continue;
+            };
+
+            let preserve_info_details =
+                old_props.has_details() && !needs_update_info_details(new_props, old_props);
+
+            let mut changed = false;
+            match (new_props, old_props) {
+                (StreamProperties::Video(v_new), StreamProperties::Video(v_old))
+                    if preserve_info_details && v_old.details.is_some() =>
+                {
+                    if v_new.details != v_old.details {
+                        v_new.details.clone_from(&v_old.details);
+                        changed = true;
+                    }
+                }
+                (StreamProperties::Series(s_new), StreamProperties::Series(s_old))
+                    if preserve_info_details && s_old.details.is_some() =>
+                {
+                    if s_new.details != s_old.details {
+                        s_new.details.clone_from(&s_old.details);
+                        changed = true;
+                    }
+                }
+                (StreamProperties::Live(l_new), StreamProperties::Live(l_old)) => {
+                    // Preserve live probe state across rebuilds so periodic probe intervals remain stable.
+                    let prev_video = l_new.video.clone();
+                    let prev_audio = l_new.audio.clone();
+                    let prev_last_probed = l_new.last_probed_timestamp;
+                    let prev_last_success = l_new.last_success_timestamp;
+
+                    if l_new.video.is_none() {
+                        l_new.video.clone_from(&l_old.video);
+                    }
+                    if l_new.audio.is_none() {
+                        l_new.audio.clone_from(&l_old.audio);
+                    }
+                    if l_new.last_probed_timestamp.is_none() {
+                        l_new.last_probed_timestamp = l_old.last_probed_timestamp;
+                    }
+                    if l_new.last_success_timestamp.is_none() {
+                        l_new.last_success_timestamp = l_old.last_success_timestamp;
+                    }
+
+                    changed = l_new.video != prev_video
+                        || l_new.audio != prev_audio
+                        || l_new.last_probed_timestamp != prev_last_probed
+                        || l_new.last_success_timestamp != prev_last_success;
+                }
+                _ => {}
+            }
+
+            if changed {
+                updates.push((item.provider_id, item));
+            }
+        }
+    }
+
+    if !updates.is_empty() {
+        let mut tree = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::try_new_with_backoff(tmp_path)
+            .map_err(|e| notify_err!("Failed to open tmp tree for merge: {e}"))?;
+        let refs: Vec<(&u32, &XtreamPlaylistItem)> =
+            updates.iter().map(|(id, pli)| (id, pli)).collect();
+        tree.update_batch(&refs)
+            .map_err(|e| notify_err!("Failed to update tmp tree during merge: {e}"))?;
+        tree.commit()
+            .map_err(|e| notify_err!("Failed to commit tmp tree merge: {e}"))?;
+    }
+
+    Ok(())
+}
+
 #[allow(clippy::too_many_lines)]
 async fn process_xtream_cluster_to_disk(
     app_config: &Arc<AppConfig>,
@@ -644,6 +755,14 @@ async fn process_xtream_cluster_to_disk(
     // Acquire file lock to ensure atomic operations
     let swap_lock = app_config.file_locks.write_lock(&xtream_path).await;
 
+    {
+        let old_path = xtream_path.clone();
+        let new_tmp_path = tmp_xtream_path.clone();
+        tokio::task::spawn_blocking(move || preserve_details_for_disk_cluster(&old_path, &new_tmp_path))
+            .await
+            .map_err(|e| notify_err!("Merge task join error during cluster {cluster} update: {e}"))??;
+    }
+
     // Optional compaction to optimize the newly created database file.
     // Run on blocking pool because B+Tree lock backoff uses std::thread::sleep.
     let compact_path = tmp_xtream_path.clone();
@@ -708,4 +827,176 @@ async fn save_xtream_categories_to_file(col_path: &Path, categories: &[XtreamCat
         }
         Ok(())
     }).await.map_err(|e| notify_err!("Spawn error {e}"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shared::model::LiveStreamProperties;
+    use shared::utils::Internable;
+    use tempfile::tempdir;
+
+    fn make_live_item(
+        provider_id: u32,
+        video: Option<&str>,
+        audio: Option<&str>,
+        last_probed_timestamp: Option<i64>,
+        last_success_timestamp: Option<i64>,
+    ) -> XtreamPlaylistItem {
+        XtreamPlaylistItem {
+            virtual_id: provider_id,
+            provider_id,
+            name: "live".intern(),
+            logo: "".intern(),
+            logo_small: "".intern(),
+            group: "group".intern(),
+            title: "".intern(),
+            parent_code: "".intern(),
+            rec: "".intern(),
+            url: "http://example.com/live.ts".intern(),
+            epg_channel_id: None,
+            xtream_cluster: XtreamCluster::Live,
+            additional_properties: Some(StreamProperties::Live(Box::new(LiveStreamProperties {
+                video: video.map(Internable::intern),
+                audio: audio.map(Internable::intern),
+                last_probed_timestamp,
+                last_success_timestamp,
+                ..Default::default()
+            }))),
+            item_type: shared::model::PlaylistItemType::Live,
+            category_id: 1,
+            input_name: "input_a".intern(),
+            channel_no: 0,
+            source_ordinal: 0,
+        }
+    }
+
+    fn write_single_item(path: &Path, item: &XtreamPlaylistItem) {
+        crate::repository::BPlusTree::<u32, XtreamPlaylistItem>::new()
+            .store(path)
+            .expect("tree creation should succeed");
+        let mut tree = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::try_new_with_backoff(path)
+            .expect("tree open should succeed");
+        let batch: Vec<(&u32, &XtreamPlaylistItem)> = vec![(&item.provider_id, item)];
+        let prepared = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::prepare_upsert_batch(&batch)
+            .expect("batch preparation should succeed");
+        tree.upsert_batch_encoded(prepared)
+            .expect("batch upsert should succeed");
+        tree.commit().expect("tree commit should succeed");
+    }
+
+    fn read_live_props(path: &Path, provider_id: u32) -> LiveStreamProperties {
+        let mut query =
+            BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(path).expect("query open should succeed");
+        let item = query
+            .query_zero_copy(&provider_id)
+            .expect("query should succeed")
+            .expect("item should exist");
+        match item.additional_properties {
+            Some(StreamProperties::Live(live)) => *live,
+            other => panic!("expected live stream properties, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn preserve_details_for_disk_cluster_copies_missing_live_probe_fields() {
+        let dir = tempdir().expect("temp dir should be created");
+        let old_path = dir.path().join("old_live.db");
+        let tmp_path = dir.path().join("tmp_live.db");
+        let provider_id = 100_u32;
+
+        write_single_item(
+            &old_path,
+            &make_live_item(
+                provider_id,
+                Some("{\"codec_name\":\"h264\"}"),
+                Some("{\"codec_name\":\"aac\"}"),
+                Some(1_700_000_000),
+                Some(1_700_000_100),
+            ),
+        );
+        write_single_item(&tmp_path, &make_live_item(provider_id, None, None, None, None));
+
+        preserve_details_for_disk_cluster(&old_path, &tmp_path).expect("merge should succeed");
+
+        let merged = read_live_props(&tmp_path, provider_id);
+        assert_eq!(merged.video, Some("{\"codec_name\":\"h264\"}".intern()));
+        assert_eq!(merged.audio, Some("{\"codec_name\":\"aac\"}".intern()));
+        assert_eq!(merged.last_probed_timestamp, Some(1_700_000_000));
+        assert_eq!(merged.last_success_timestamp, Some(1_700_000_100));
+    }
+
+    #[test]
+    fn preserve_details_for_disk_cluster_does_not_override_existing_live_probe_fields() {
+        let dir = tempdir().expect("temp dir should be created");
+        let old_path = dir.path().join("old_live_existing.db");
+        let tmp_path = dir.path().join("tmp_live_existing.db");
+        let provider_id = 200_u32;
+
+        write_single_item(
+            &old_path,
+            &make_live_item(
+                provider_id,
+                Some("{\"codec_name\":\"h264\"}"),
+                Some("{\"codec_name\":\"aac\"}"),
+                Some(1_700_000_000),
+                Some(1_700_000_100),
+            ),
+        );
+        write_single_item(
+            &tmp_path,
+            &make_live_item(
+                provider_id,
+                Some("{\"codec_name\":\"hevc\"}"),
+                Some("{\"codec_name\":\"ac3\"}"),
+                Some(1_800_000_000),
+                Some(1_800_000_100),
+            ),
+        );
+
+        preserve_details_for_disk_cluster(&old_path, &tmp_path).expect("merge should succeed");
+
+        let merged = read_live_props(&tmp_path, provider_id);
+        assert_eq!(merged.video, Some("{\"codec_name\":\"hevc\"}".intern()));
+        assert_eq!(merged.audio, Some("{\"codec_name\":\"ac3\"}".intern()));
+        assert_eq!(merged.last_probed_timestamp, Some(1_800_000_000));
+        assert_eq!(merged.last_success_timestamp, Some(1_800_000_100));
+    }
+
+    #[test]
+    fn preserve_details_for_disk_cluster_fills_only_missing_live_probe_fields() {
+        let dir = tempdir().expect("temp dir should be created");
+        let old_path = dir.path().join("old_live_partial.db");
+        let tmp_path = dir.path().join("tmp_live_partial.db");
+        let provider_id = 300_u32;
+
+        write_single_item(
+            &old_path,
+            &make_live_item(
+                provider_id,
+                Some("{\"codec_name\":\"h264\"}"),
+                Some("{\"codec_name\":\"aac\"}"),
+                Some(1_700_000_000),
+                Some(1_700_000_100),
+            ),
+        );
+        write_single_item(
+            &tmp_path,
+            &make_live_item(
+                provider_id,
+                Some("{\"codec_name\":\"hevc\"}"),
+                None,
+                Some(1_800_000_000),
+                None,
+            ),
+        );
+
+        preserve_details_for_disk_cluster(&old_path, &tmp_path).expect("merge should succeed");
+
+        let merged = read_live_props(&tmp_path, provider_id);
+        assert_eq!(merged.video, Some("{\"codec_name\":\"hevc\"}".intern()));
+        assert_eq!(merged.audio, Some("{\"codec_name\":\"aac\"}".intern()));
+        assert_eq!(merged.last_probed_timestamp, Some(1_800_000_000));
+        assert_eq!(merged.last_success_timestamp, Some(1_700_000_100));
+    }
 }

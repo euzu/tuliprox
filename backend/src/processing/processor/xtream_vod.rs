@@ -130,10 +130,27 @@ async fn playlist_resolve_vod_info(
         true
     };
 
+    let resolve_tmdb_enabled = fpl.input.options.as_ref().is_some_and(|o| o.resolve_tmdb);
+
     if resolve_options.flags.contains(ResolveOptionsFlags::Background) && ctx.metadata_manager.is_some() {
-        queue_background_vod_info(ctx, fpl, filter, &resolve_options, do_probe);
+        queue_background_vod_info(
+            ctx,
+            fpl,
+            filter,
+            &resolve_options,
+            do_probe,
+            resolve_tmdb_enabled,
+        );
     } else {
-        process_immediate_vod_info(ctx, fpl, filter, resolve_options, do_probe).await;
+        process_immediate_vod_info(
+            ctx,
+            fpl,
+            filter,
+            resolve_options,
+            do_probe,
+            resolve_tmdb_enabled,
+        )
+        .await;
     }
 }
 
@@ -141,7 +158,8 @@ async fn playlist_resolve_vod_info(
 async fn process_immediate_vod_info(ctx: &PlaylistProcessingContext, fpl: &mut FetchedPlaylist<'_>,
                                     filter: impl Fn(&PlaylistItem) -> bool,
                                     resolve_options: ResolveOptions,
-                                    do_probe: bool, ) {
+                                    do_probe: bool,
+                                    resolve_tmdb_enabled: bool, ) {
     let input = fpl.input;
     let working_dir = &ctx.config.config.load().working_dir;
 
@@ -153,20 +171,10 @@ async fn process_immediate_vod_info(ctx: &PlaylistProcessingContext, fpl: &mut F
         }
     };
 
-    // Open DB Once Strategy
+    // Keep an optional read query open and reopen lazily only when needed.
     let xtream_path = xtream_get_file_path(&storage_path, XtreamCluster::Video);
     let mut db_query_holder = None;
-
-    // Acquire lock and open DB if file exists
-    let mut _db_lock_holder = if xtream_path.exists() {
-        let lock = ctx.config.file_locks.read_lock(&xtream_path).await;
-        if let Ok(query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) {
-            db_query_holder = Some(query);
-        }
-        Some(lock)
-    } else {
-        None
-    };
+    let mut _db_lock_holder = None;
 
     let mut batch: Vec<(ProviderIdType, VideoStreamProperties)> = Vec::with_capacity(BATCH_SIZE);
     let mut processed_count = 0;
@@ -183,11 +191,18 @@ async fn process_immediate_vod_info(ctx: &PlaylistProcessingContext, fpl: &mut F
             ProviderIdType::from(&*pli.header.id)
         };
 
-        let reasons = check_resolve_reasons(&resolve_options, do_probe, pli);
+        let reasons = check_resolve_reasons(&resolve_options, do_probe, resolve_tmdb_enabled, pli);
 
         if !reasons.is_empty() {
             // Path 2: Internal Update (Inline)
             if let Some(prov_mgr) = ctx.provider_manager.as_ref() {
+                if db_query_holder.is_none() && xtream_path.exists() {
+                    let lock = ctx.config.file_locks.read_lock(&xtream_path).await;
+                    if let Ok(query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) {
+                        db_query_holder = Some(query);
+                        _db_lock_holder = Some(lock);
+                    }
+                }
                 // Pass the optional reference to the query
                 let db_query_ref = db_query_holder.as_mut();
 
@@ -226,15 +241,6 @@ async fn process_immediate_vod_info(ctx: &PlaylistProcessingContext, fpl: &mut F
 
                             // Clear batch
                             batch.clear();
-
-                            // Re-acquire lock
-                            if xtream_path.exists() {
-                                let lock = ctx.config.file_locks.read_lock(&xtream_path).await;
-                                if let Ok(query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) {
-                                    db_query_holder = Some(query);
-                                }
-                                _db_lock_holder = Some(lock);
-                            }
                         }
 
                         processed_count += 1;
@@ -280,13 +286,18 @@ async fn process_immediate_vod_info(ctx: &PlaylistProcessingContext, fpl: &mut F
     }
 }
 
-fn check_resolve_reasons(resolve_options: &ResolveOptions, do_probe: bool, pli: &mut PlaylistItem) -> ResolveReasonSet {
+fn check_resolve_reasons(
+    resolve_options: &ResolveOptions,
+    do_probe: bool,
+    resolve_tmdb_enabled: bool,
+    pli: &mut PlaylistItem,
+) -> ResolveReasonSet {
     // Check if we need to do anything for this item
     let mut reasons = ResolveReasonSet::default();
 
     let needs_info = check_needs_info(resolve_options, pli, &mut reasons);
     // TMDB check
-    check_resolve_tmdb(resolve_options, pli, needs_info, &mut reasons);
+    check_resolve_tmdb(resolve_options, resolve_tmdb_enabled, pli, needs_info, &mut reasons);
 
     // Probe check
     if do_probe {
@@ -322,8 +333,14 @@ fn check_needs_info(resolve_options: &ResolveOptions, pli: &mut PlaylistItem, re
     needs_info
 }
 
-fn check_resolve_tmdb(resolve_options: &ResolveOptions, pli: &mut PlaylistItem, needs_info: bool, reasons: &mut ResolveReasonSet) {
-    if resolve_options.flags.contains(ResolveOptionsFlags::TmdbMissing) {
+fn check_resolve_tmdb(
+    resolve_options: &ResolveOptions,
+    resolve_tmdb_enabled: bool,
+    pli: &mut PlaylistItem,
+    needs_info: bool,
+    reasons: &mut ResolveReasonSet,
+) {
+    if resolve_tmdb_enabled && resolve_options.flags.contains(ResolveOptionsFlags::TmdbMissing) {
         if let Some(StreamProperties::Video(video_stream_props)) = pli.header.additional_properties.as_ref() {
             let has_tmdb = video_stream_props.tmdb.is_some();
             let has_date = video_stream_props.details.as_ref().and_then(|d| d.release_date.as_ref()).is_some();
@@ -341,7 +358,8 @@ fn check_resolve_tmdb(resolve_options: &ResolveOptions, pli: &mut PlaylistItem, 
 fn queue_background_vod_info(ctx: &PlaylistProcessingContext, fpl: &mut FetchedPlaylist<'_>,
                              filter: impl Fn(&PlaylistItem) -> bool,
                              resolve_options: &ResolveOptions,
-                             do_probe: bool, ) {
+                             do_probe: bool,
+                             resolve_tmdb_enabled: bool, ) {
     let Some(mgr) = ctx.metadata_manager.as_ref() else {
         return;
     };
@@ -358,7 +376,7 @@ fn queue_background_vod_info(ctx: &PlaylistProcessingContext, fpl: &mut FetchedP
             ProviderIdType::from(&*pli.header.id)
         };
 
-        let reasons = check_resolve_reasons(resolve_options, do_probe, pli);
+        let reasons = check_resolve_reasons(resolve_options, do_probe, resolve_tmdb_enabled, pli);
 
         if !reasons.is_empty() {
             let task = UpdateTask::ResolveVod {

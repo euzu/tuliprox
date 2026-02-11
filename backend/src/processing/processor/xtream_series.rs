@@ -81,10 +81,29 @@ async fn playlist_resolve_series_info(ctx: &PlaylistProcessingContext,
     // Skip if nothing to do
     let skip_resolve = !resolve_options.flags.contains(ResolveOptionsFlags::Resolve) && !do_probe && !resolve_options.flags.contains(ResolveOptionsFlags::TmdbMissing);
 
+    let resolve_tmdb_enabled = fpl.input.options.as_ref().is_some_and(|o| o.resolve_tmdb);
+
     let groups_to_add = if resolve_options.flags.contains(ResolveOptionsFlags::Background) && ctx.metadata_manager.is_some() {
-        queue_background_series_info(ctx, fpl, filter, &resolve_options, do_probe, skip_resolve)
+        queue_background_series_info(
+            ctx,
+            fpl,
+            filter,
+            &resolve_options,
+            do_probe,
+            skip_resolve,
+            resolve_tmdb_enabled,
+        )
     } else {
-        process_immediate_series_info(ctx, fpl, filter, &resolve_options, do_probe, skip_resolve).await
+        process_immediate_series_info(
+            ctx,
+            fpl,
+            filter,
+            &resolve_options,
+            do_probe,
+            skip_resolve,
+            resolve_tmdb_enabled,
+        )
+        .await
     };
 
     // Apply pipe transformations to new groups
@@ -163,6 +182,7 @@ fn queue_background_series_info(
     resolve_options: &ResolveOptions,
     do_probe: bool,
     skip_resolve: bool,
+    resolve_tmdb_enabled: bool,
 ) -> Vec<PlaylistGroup> {
     let mut groups_to_add = Vec::new();
     let Some(mgr) = ctx.metadata_manager.as_ref() else {
@@ -184,7 +204,7 @@ fn queue_background_series_info(
         };
 
         if !skip_resolve {
-            let reasons = check_resolve_reasons(resolve_options, do_probe, pli);
+            let reasons = check_resolve_reasons(resolve_options, do_probe, resolve_tmdb_enabled, pli);
 
             if !reasons.is_empty() {
                 let task = UpdateTask::ResolveSeries {
@@ -211,6 +231,7 @@ async fn process_immediate_series_info(
     resolve_options: &ResolveOptions,
     do_probe: bool,
     skip_resolve: bool,
+    resolve_tmdb_enabled: bool,
 ) -> Vec<PlaylistGroup> {
     let input = fpl.input;
     let working_dir = &ctx.config.config.load().working_dir;
@@ -222,20 +243,10 @@ async fn process_immediate_series_info(
         }
     };
 
-    // Open DB Once Strategy
+    // Keep an optional read query open and reopen lazily only when needed.
     let xtream_path = xtream_get_file_path(&storage_path, XtreamCluster::Series);
     let mut db_query_holder = None;
-
-    // Acquire lock and open DB if file exists  
-    let mut _db_lock_holder = if xtream_path.exists() {
-        let lock = ctx.config.file_locks.read_lock(&xtream_path).await;
-        if let Ok(query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) {
-            db_query_holder = Some(query);
-        }
-        Some(lock)
-    } else {
-        None
-    };
+    let mut _db_lock_holder = None;
 
     let mut groups_to_add = Vec::new();
     let mut batch: Vec<(ProviderIdType, SeriesStreamProperties)> = Vec::with_capacity(BATCH_SIZE);
@@ -254,10 +265,17 @@ async fn process_immediate_series_info(
         };
 
         if !skip_resolve {
-            let reasons = check_resolve_reasons(resolve_options, do_probe, pli);
+            let reasons = check_resolve_reasons(resolve_options, do_probe, resolve_tmdb_enabled, pli);
 
             if !reasons.is_empty() {
                 if let Some(active_provider) = ctx.provider_manager.as_ref() {
+                    if db_query_holder.is_none() && xtream_path.exists() {
+                        let lock = ctx.config.file_locks.read_lock(&xtream_path).await;
+                        if let Ok(query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) {
+                            db_query_holder = Some(query);
+                            _db_lock_holder = Some(lock);
+                        }
+                    }
                     // Pass the optional reference to the query
                     let db_query_ref = db_query_holder.as_mut();
 
@@ -299,15 +317,6 @@ async fn process_immediate_series_info(
                                             );
                                         }
                                     }
-                                }
-
-                                // Re-acquire lock
-                                if xtream_path.exists() {
-                                    let lock = ctx.config.file_locks.read_lock(&xtream_path).await;
-                                    if let Ok(query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) {
-                                        db_query_holder = Some(query);
-                                    }
-                                    _db_lock_holder = Some(lock);
                                 }
                             }
 
@@ -409,11 +418,16 @@ async fn update_series_info_immediate(
     ).await
 }
 
-fn check_resolve_reasons(resolve_options: &ResolveOptions, do_probe: bool, pli: &mut PlaylistItem) -> ResolveReasonSet {
+fn check_resolve_reasons(
+    resolve_options: &ResolveOptions,
+    do_probe: bool,
+    resolve_tmdb_enabled: bool,
+    pli: &mut PlaylistItem,
+) -> ResolveReasonSet {
     let mut reasons = ResolveReasonSet::new();
 
     let needs_info = check_needs_info(resolve_options, pli, &mut reasons);
-    check_resolve_tmdb(resolve_options, pli, needs_info, &mut reasons);
+    check_resolve_tmdb(resolve_options, resolve_tmdb_enabled, pli, needs_info, &mut reasons);
 
     if do_probe {
         check_needs_probe(pli, &mut reasons);
@@ -429,8 +443,14 @@ fn check_needs_info(resolve_options: &ResolveOptions, pli: &mut PlaylistItem, re
     needs_info
 }
 
-fn check_resolve_tmdb(resolve_options: &ResolveOptions, pli: &mut PlaylistItem, needs_info: bool, reasons: &mut ResolveReasonSet) {
-    if resolve_options.flags.contains(ResolveOptionsFlags::TmdbMissing) {
+fn check_resolve_tmdb(
+    resolve_options: &ResolveOptions,
+    resolve_tmdb_enabled: bool,
+    pli: &mut PlaylistItem,
+    needs_info: bool,
+    reasons: &mut ResolveReasonSet,
+) {
+    if resolve_tmdb_enabled && resolve_options.flags.contains(ResolveOptionsFlags::TmdbMissing) {
         if let Some(StreamProperties::Series(series_stream_props)) = pli.header.additional_properties.as_ref() {
             let has_tmdb = series_stream_props.tmdb.is_some();
             let has_date = series_stream_props.release_date.is_some();
@@ -583,7 +603,7 @@ pub async fn update_series_metadata(
     let resolve_tmdb_enabled = input.options.as_ref().is_some_and(|o| o.resolve_tmdb);
 
     // 2. Resolve TMDB/Date if missing
-    if (properties.tmdb.is_none() || properties.release_date.is_none()) && !properties.name.is_empty() {
+    if resolve_tmdb_enabled && (properties.tmdb.is_none() || properties.release_date.is_none()) && !properties.name.is_empty() {
         let config = app_config.config.load();
         let library_config = config.library.as_ref();
         let meta_resolver = MetadataResolver::new(library_config, client.clone());

@@ -840,16 +840,23 @@ pub async fn persist_input_xtream_playlist(app_config: &Arc<AppConfig>, storage_
 }
 
 // Checks if the info has changed after the last update
-fn needs_update_info_details(
+pub(crate) fn needs_update_info_details(
     new_stream_props: &StreamProperties,
     old_stream_props: &StreamProperties,
 ) -> bool {
+    // Provider stream lists often update timestamp-like fields (`added`/`last_modified`)
+    // without carrying full info details. If we dropped old details in that case, we'd
+    // re-queue massive background resolves on every update.
+    if old_stream_props.has_details() && !new_stream_props.has_details() {
+        return false;
+    }
+
     let new_modified = new_stream_props.get_last_modified();
     let old_modified = old_stream_props.get_last_modified();
 
     match (new_modified, old_modified) {
         (Some(new_ts), Some(old_ts)) => new_ts > old_ts,
-        (None, Some(_)) => true,
+        (Some(_), None) => true,
         _ => false,
     }
 }
@@ -896,8 +903,14 @@ pub async fn persist_input_info_batch(app_config: &Arc<AppConfig>, storage_path:
             let mut tree: BPlusTreeUpdate<u32, XtreamPlaylistItem> = BPlusTreeUpdate::try_new_with_backoff(&xtream_path_clone)
                 .map_err(|err| Error::other(format!("failed to open BPlusTree for input {input_name_owned}: {err}")))?;
 
-            let mut updated_plis = Vec::with_capacity(updates.len());
+            // Keep only the latest update per provider id to avoid duplicate reads/writes.
+            let mut deduped_updates: HashMap<u32, StreamProperties> = HashMap::with_capacity(updates.len());
             for (provider_id, props) in updates {
+                deduped_updates.insert(provider_id, props);
+            }
+
+            let mut updated_plis = Vec::with_capacity(deduped_updates.len());
+            for (provider_id, props) in deduped_updates {
                 match tree.query(&provider_id) {
                     Ok(Some(mut pli)) => {
                         pli.additional_properties = Some(props);
@@ -1017,4 +1030,68 @@ pub async fn load_input_xtream_playlist(app_config: &Arc<AppConfig>, storage_pat
     }
 
     Ok(groups.into_values().collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::needs_update_info_details;
+    use shared::model::{SeriesStreamProperties, StreamProperties, VideoStreamProperties};
+
+    #[test]
+    fn keeps_existing_details_when_new_timestamp_is_missing() {
+        let new_props = StreamProperties::Video(Box::new(VideoStreamProperties {
+            added: "".into(),
+            ..VideoStreamProperties::default()
+        }));
+        let old_props = StreamProperties::Video(Box::new(VideoStreamProperties {
+            added: "1700000000".into(),
+            ..VideoStreamProperties::default()
+        }));
+
+        assert!(!needs_update_info_details(&new_props, &old_props));
+    }
+
+    #[test]
+    fn updates_details_when_new_timestamp_is_newer() {
+        let new_props = StreamProperties::Series(Box::new(SeriesStreamProperties {
+            last_modified: Some("200".into()),
+            ..SeriesStreamProperties::default()
+        }));
+        let old_props = StreamProperties::Series(Box::new(SeriesStreamProperties {
+            last_modified: Some("100".into()),
+            ..SeriesStreamProperties::default()
+        }));
+
+        assert!(needs_update_info_details(&new_props, &old_props));
+    }
+
+    #[test]
+    fn does_not_update_details_when_new_timestamp_is_older() {
+        let new_props = StreamProperties::Series(Box::new(SeriesStreamProperties {
+            last_modified: Some("100".into()),
+            ..SeriesStreamProperties::default()
+        }));
+        let old_props = StreamProperties::Series(Box::new(SeriesStreamProperties {
+            last_modified: Some("200".into()),
+            ..SeriesStreamProperties::default()
+        }));
+
+        assert!(!needs_update_info_details(&new_props, &old_props));
+    }
+
+    #[test]
+    fn keeps_old_details_when_new_timestamp_is_newer_but_new_has_no_details() {
+        let new_props = StreamProperties::Video(Box::new(VideoStreamProperties {
+            added: "200".into(),
+            details: None,
+            ..VideoStreamProperties::default()
+        }));
+        let old_props = StreamProperties::Video(Box::new(VideoStreamProperties {
+            added: "100".into(),
+            details: Some(shared::model::VideoStreamDetailProperties::default()),
+            ..VideoStreamProperties::default()
+        }));
+
+        assert!(!needs_update_info_details(&new_props, &old_props));
+    }
 }

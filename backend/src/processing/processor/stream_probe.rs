@@ -15,6 +15,10 @@ enum ProbeStorageKind {
     Xtream,
 }
 
+fn requires_provider_connection_for_generic_probe(input_type: InputType) -> bool {
+    !matches!(input_type, InputType::Library)
+}
+
 /// Updates metadata (Probing) for a stream URL (M3U, Xtream, Library) and persists it.
 /// - `unique_id`: For M3U this is the `provider_id` (String). For Library this is the `UUID` string.
 ///   For Xtream this is the numeric provider id as string.
@@ -71,13 +75,15 @@ pub async fn update_generic_stream_metadata(
         return Err(shared::error::info_err!("Playlist DB file not found for input {}: {}", input.name, db_path.display()));
     }
 
-    let acquired_handle = if active_handle.is_some() {
+    let needs_provider_connection = requires_provider_connection_for_generic_probe(input.input_type);
+
+    let acquired_handle = if !needs_provider_connection || active_handle.is_some() {
         None
     } else {
         active_provider.acquire_connection_for_probe(&input.name).await
     };
 
-    if active_handle.is_none() && acquired_handle.is_none() {
+    if needs_provider_connection && active_handle.is_none() && acquired_handle.is_none() {
         warn!("Skipping probe for generic stream {unique_id} due to connection limits");
         return Err(shared::error::info_err!("No connection available"));
     }
@@ -279,5 +285,33 @@ fn update_properties(
        props.last_success_timestamp = Some(now);
        
        *props_opt = Some(StreamProperties::Live(Box::new(props)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn library_probe_does_not_require_provider_connection() {
+        assert!(!requires_provider_connection_for_generic_probe(InputType::Library));
+    }
+
+    #[test]
+    fn m3u_probe_requires_provider_connection() {
+        assert!(requires_provider_connection_for_generic_probe(InputType::M3u));
+        assert!(requires_provider_connection_for_generic_probe(
+            InputType::M3uBatch
+        ));
+    }
+
+    #[test]
+    fn xtream_probe_requires_provider_connection() {
+        assert!(requires_provider_connection_for_generic_probe(
+            InputType::Xtream
+        ));
+        assert!(requires_provider_connection_for_generic_probe(
+            InputType::XtreamBatch
+        ));
     }
 }

@@ -7,8 +7,9 @@ use dashmap::DashMap;
 use log::{debug, error, info, warn};
 use shared::create_bit_set;
 use shared::error::TuliproxError;
-use shared::model::{LiveStreamProperties, PlaylistItemType, SeriesStreamProperties, UUIDType, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem};
+use shared::model::{InputType, LiveStreamProperties, PlaylistItemType, SeriesStreamProperties, UUIDType, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem};
 use shared::utils::generate_playlist_uuid;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
@@ -139,7 +140,21 @@ impl TaskKey {
 #[derive(Clone)]
 struct InputWorkerContext {
     sender: mpsc::Sender<TaskKey>,
-    pending_tasks: Arc<DashMap<TaskKey, Mutex<UpdateTask>>>,
+    pending_tasks: Arc<DashMap<TaskKey, PendingTask>>,
+}
+
+struct PendingTask {
+    task: Mutex<UpdateTask>,
+    generation: AtomicU64,
+}
+
+impl PendingTask {
+    fn new(task: UpdateTask) -> Self {
+        Self {
+            task: Mutex::new(task),
+            generation: AtomicU64::new(0),
+        }
+    }
 }
 
 /// Manager for background metadata resolution tasks.
@@ -248,14 +263,15 @@ impl MetadataUpdateManager {
 
     async fn submit_task(
         sender: mpsc::Sender<TaskKey>,
-        pending_tasks: Arc<DashMap<TaskKey, Mutex<UpdateTask>>>,
+        pending_tasks: Arc<DashMap<TaskKey, PendingTask>>,
         input_name: &str,
         task: UpdateTask,
     ) {
         let key = TaskKey::from_task(&task);
 
         if let Some(entry) = pending_tasks.get(&key) {
-            let mut existing = entry.lock().await;
+            let mut existing = entry.task.lock().await;
+            let mut merged = false;
             // Merge logic
             match (&mut *existing, task) {
                 (UpdateTask::ResolveVod { reason: r1, delay: d1, .. }, UpdateTask::ResolveVod { reason: r2, delay: d2, .. })
@@ -263,13 +279,19 @@ impl MetadataUpdateManager {
                 | (UpdateTask::ProbeStream { reason: r1, delay: d1, .. }, UpdateTask::ProbeStream { reason: r2, delay: d2, .. }) => {
                     *r1 = *r1 | r2;
                     *d1 = min(*d1, d2);
+                    merged = true;
                 }
                 (UpdateTask::ProbeLive { reason: r1, delay: d1, interval: i1, .. }, UpdateTask::ProbeLive { reason: r2, delay: d2, interval: i2, .. }) => {
                     *r1 = *r1 | r2;
                     *d1 = min(*d1, d2);
                     *i1 = min(*i1, i2);
+                    merged = true;
                 }
                 _ => {} // Mismatched types, should not happen due to TaskKey
+            }
+
+            if merged {
+                entry.generation.fetch_add(1, Ordering::Relaxed);
             }
             return;
         }
@@ -279,7 +301,7 @@ impl MetadataUpdateManager {
             return;
         }
 
-        pending_tasks.insert(key.clone(), Mutex::new(task));
+        pending_tasks.insert(key.clone(), PendingTask::new(task));
         if sender.send(key.clone()).await.is_err() {
             pending_tasks.remove(&key);
             warn!("Failed to send task signal for input {input_name}");
@@ -307,7 +329,7 @@ struct InputWorker {
     input_name: Arc<str>,
     sender: mpsc::Sender<TaskKey>,
     receiver: mpsc::Receiver<TaskKey>,
-    pending_tasks: Arc<DashMap<TaskKey, Mutex<UpdateTask>>>,
+    pending_tasks: Arc<DashMap<TaskKey, PendingTask>>,
     app_state_weak: Option<Weak<AppState>>,
     cancel_token: CancellationToken,
     batch_buffer: BatchResultCollector,
@@ -321,6 +343,8 @@ impl InputWorker {
         debug!("Metadata worker started for input {}", &self.input_name);
 
         let mut processed_count: usize = 0;
+        let mut processed_vod_count: usize = 0;
+        let mut processed_series_count: usize = 0;
         let mut retry_attempts: HashMap<TaskKey, u8> = HashMap::new();
         let mut last_queue_log_at = Instant::now();
         let mut last_progress_log_at = Instant::now();
@@ -331,7 +355,7 @@ impl InputWorker {
         let app_state_weak = self.app_state_weak.clone();
 
         // Keep one prefetched task to minimize channel waits/lock churn.
-        let mut next_task: Option<(TaskKey, UpdateTask)> = None;
+        let mut next_task: Option<(TaskKey, UpdateTask, u64)> = None;
 
         loop {
             let task_data = if let Some(t) = next_task.take() {
@@ -340,7 +364,7 @@ impl InputWorker {
                 self.recv_task_fast_or_wait().await
             };
 
-            let Some((current_key, current_task)) = task_data else { break };
+            let Some((current_key, current_task, current_generation)) = task_data else { break };
 
             if !started_updates_logged {
                 info!("Starting background metadata updates for input {input_name}");
@@ -364,13 +388,31 @@ impl InputWorker {
             {
                 Ok(()) => {
                     processed_count += 1;
+                    if Self::is_vod_task_key(&current_key) {
+                        processed_vod_count += 1;
+                    } else if Self::is_series_task_key(&current_key) {
+                        processed_series_count += 1;
+                    }
                     retry_attempts.remove(&current_key);
                     if last_progress_log_at.elapsed() >= PROGRESS_LOG_INTERVAL {
                         // current_key is removed from pending_tasks later in this loop iteration;
                         // subtract it here so "remaining" reflects the post-success queue size.
-                        let remaining = self.pending_tasks.len().saturating_sub(1);
-                        let total = processed_count.saturating_add(remaining);
-                        info!("Background metadata update: {processed_count} / {total} resolved for input {input_name}");
+                        let (mut remaining_vod, mut remaining_series) =
+                            Self::queue_resolve_counts(&self.pending_tasks);
+                        if Self::is_vod_task_key(&current_key) {
+                            remaining_vod = remaining_vod.saturating_sub(1);
+                        } else if Self::is_series_task_key(&current_key) {
+                            remaining_series = remaining_series.saturating_sub(1);
+                        }
+
+                        let total_vod = processed_vod_count.saturating_add(remaining_vod);
+                        let total_series = processed_series_count.saturating_add(remaining_series);
+                        let resolved_total = processed_vod_count.saturating_add(processed_series_count);
+                        let total_resolve = total_vod.saturating_add(total_series);
+
+                        info!(
+                            "Background metadata update: {resolved_total} / {total_resolve} resolved for input {input_name} (vod: {processed_vod_count}/{total_vod}, series: {processed_series_count}/{total_series})"
+                        );
                         last_progress_log_at = Instant::now();
                     }
                 }
@@ -429,8 +471,9 @@ impl InputWorker {
                     warn!("Failed to requeue task {current_task} for input {input_name}");
                 }
             } else {
-                // Remove key immediately after processing to allow re-queueing while we sleep for rate limiting.
-                self.pending_tasks.remove(&current_key);
+                self
+                    .finalize_processed_task_success(&current_key, current_generation, &input_name)
+                    .await;
 
                 // Rate limiting
                 if delay_secs > 0
@@ -507,7 +550,29 @@ impl InputWorker {
         debug!("Metadata worker stopped for input {input_name}");
     }
 
-    async fn recv_task_fast_or_wait(&mut self) -> Option<(TaskKey, UpdateTask)> {
+    async fn finalize_processed_task_success(
+        &mut self,
+        current_key: &TaskKey,
+        current_generation: u64,
+        input_name: &str,
+    ) -> bool {
+        // Atomically remove processed key and reinsert it if it changed while in-flight.
+        if let Some((_k, removed_task)) = self.pending_tasks.remove(current_key) {
+            let latest_generation = removed_task.generation.load(Ordering::Relaxed);
+            if latest_generation != current_generation {
+                self.pending_tasks.insert(current_key.clone(), removed_task);
+                if self.sender.send(current_key.clone()).await.is_err() {
+                    self.pending_tasks.remove(current_key);
+                    warn!("Failed to schedule merged task replay for input {input_name}");
+                    return false;
+                }
+                return true;
+            }
+        }
+        false
+    }
+
+    async fn recv_task_fast_or_wait(&mut self) -> Option<(TaskKey, UpdateTask, u64)> {
         match self.receiver.try_recv() {
             Ok(key) => {
                 return self.load_task_snapshot(key).await;
@@ -533,10 +598,11 @@ impl InputWorker {
         }
     }
 
-    async fn load_task_snapshot(&self, key: TaskKey) -> Option<(TaskKey, UpdateTask)> {
+    async fn load_task_snapshot(&self, key: TaskKey) -> Option<(TaskKey, UpdateTask, u64)> {
         let entry = self.pending_tasks.get(&key)?;
-        let task = entry.lock().await.clone();
-        Some((key, task))
+        let generation = entry.generation.load(Ordering::Relaxed);
+        let task = entry.task.lock().await.clone();
+        Some((key, task, generation))
     }
 
     fn release_db_handles(&mut self) {
@@ -563,7 +629,7 @@ impl InputWorker {
         }
     }
 
-    fn queue_resolve_counts(pending_tasks: &DashMap<TaskKey, Mutex<UpdateTask>>) -> (usize, usize) {
+    fn queue_resolve_counts(pending_tasks: &DashMap<TaskKey, PendingTask>) -> (usize, usize) {
         let mut vod_count = 0_usize;
         let mut series_count = 0_usize;
 
@@ -576,6 +642,16 @@ impl InputWorker {
         }
 
         (vod_count, series_count)
+    }
+
+    #[inline]
+    fn is_vod_task_key(key: &TaskKey) -> bool {
+        matches!(key, TaskKey::Vod(_) | TaskKey::VodStr(_))
+    }
+
+    #[inline]
+    fn is_series_task_key(key: &TaskKey) -> bool {
+        matches!(key, TaskKey::Series(_) | TaskKey::SeriesStr(_))
     }
 
     // Changed to static method
@@ -1125,7 +1201,7 @@ impl InputWorker {
         }
 
         let needs_probe_connection =
-            matches!(task, UpdateTask::ProbeLive { .. } | UpdateTask::ProbeStream { .. });
+            Self::task_needs_provider_connection(task, input_base.input_type);
 
         // Reserve provider capacity only for actual probe work (ffprobe paths).
         let provider_handle = if needs_probe_connection {
@@ -1196,6 +1272,15 @@ impl InputWorker {
             app_state.connection_manager.release_provider_handle(provider_handle).await;
         }
         res
+    }
+
+    fn task_needs_provider_connection(task: &UpdateTask, input_type: InputType) -> bool {
+        match task {
+            UpdateTask::ProbeLive { .. } => true,
+            // Local library probing is fully local and must not depend on provider capacity.
+            UpdateTask::ProbeStream { .. } => !matches!(input_type, InputType::Library),
+            UpdateTask::ResolveVod { .. } | UpdateTask::ResolveSeries { .. } => false,
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1301,6 +1386,7 @@ impl InputWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::mpsc;
 
     #[tokio::test]
     async fn queue_task_creates_single_worker_per_input_under_concurrency() {
@@ -1335,5 +1421,185 @@ mod tests {
         assert_eq!(manager.active_worker_count(), 1);
 
         cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn submit_task_merges_existing_task_and_increments_generation() {
+        let (tx, mut rx) = mpsc::channel::<TaskKey>(8);
+        let pending_tasks = Arc::new(DashMap::new());
+
+        let task_initial = UpdateTask::ResolveVod {
+            id: ProviderIdType::Id(42),
+            reason: ResolveReasonSet::from_variants(&[ResolveReason::Info]),
+            delay: 10,
+        };
+        MetadataUpdateManager::submit_task(tx.clone(), pending_tasks.clone(), "input_a", task_initial).await;
+
+        let task_merge = UpdateTask::ResolveVod {
+            id: ProviderIdType::Id(42),
+            reason: ResolveReasonSet::from_variants(&[ResolveReason::Probe]),
+            delay: 2,
+        };
+        MetadataUpdateManager::submit_task(tx, pending_tasks.clone(), "input_a", task_merge).await;
+
+        let first_signal = rx.try_recv().expect("first signal should be queued");
+        assert_eq!(first_signal, TaskKey::Vod(42));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(
+                tokio::sync::mpsc::error::TryRecvError::Empty
+                    | tokio::sync::mpsc::error::TryRecvError::Disconnected
+            )
+        ));
+
+        let entry = pending_tasks
+            .get(&TaskKey::Vod(42))
+            .expect("pending entry should exist");
+        assert_eq!(entry.generation.load(Ordering::Relaxed), 1);
+
+        let merged = entry.task.lock().await.clone();
+        match merged {
+            UpdateTask::ResolveVod { reason, delay, .. } => {
+                assert!(reason.contains(ResolveReason::Info));
+                assert!(reason.contains(ResolveReason::Probe));
+                assert_eq!(delay, 2);
+            }
+            other => panic!("unexpected task type after merge: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn finalize_processed_task_success_requeues_when_generation_changed() {
+        let (tx, rx) = mpsc::channel::<TaskKey>(8);
+        let pending_tasks = Arc::new(DashMap::new());
+        let key = TaskKey::Vod(7);
+
+        pending_tasks.insert(
+            key.clone(),
+            PendingTask::new(UpdateTask::ResolveVod {
+                id: ProviderIdType::Id(7),
+                reason: ResolveReasonSet::from_variants(&[ResolveReason::Info]),
+                delay: 0,
+            }),
+        );
+        if let Some(entry) = pending_tasks.get(&key) {
+            entry.generation.store(1, Ordering::Relaxed);
+        }
+
+        let mut worker = InputWorker {
+            input_name: Arc::from("input_a"),
+            sender: tx,
+            receiver: rx,
+            pending_tasks: pending_tasks.clone(),
+            app_state_weak: None,
+            cancel_token: CancellationToken::new(),
+            batch_buffer: BatchResultCollector::new(),
+            db_handles: HashMap::new(),
+            failed_clusters: HashSet::new(),
+        };
+
+        let requeued = worker
+            .finalize_processed_task_success(&key, 0, "input_a")
+            .await;
+        assert!(requeued);
+        assert!(pending_tasks.contains_key(&key));
+        assert_eq!(
+            worker
+                .receiver
+                .try_recv()
+                .expect("requeued signal should be present"),
+            key
+        );
+    }
+
+    #[tokio::test]
+    async fn finalize_processed_task_success_removes_when_unchanged() {
+        let (tx, rx) = mpsc::channel::<TaskKey>(8);
+        let pending_tasks = Arc::new(DashMap::new());
+        let key = TaskKey::Vod(9);
+
+        pending_tasks.insert(
+            key.clone(),
+            PendingTask::new(UpdateTask::ResolveVod {
+                id: ProviderIdType::Id(9),
+                reason: ResolveReasonSet::from_variants(&[ResolveReason::Info]),
+                delay: 0,
+            }),
+        );
+
+        let mut worker = InputWorker {
+            input_name: Arc::from("input_b"),
+            sender: tx,
+            receiver: rx,
+            pending_tasks: pending_tasks.clone(),
+            app_state_weak: None,
+            cancel_token: CancellationToken::new(),
+            batch_buffer: BatchResultCollector::new(),
+            db_handles: HashMap::new(),
+            failed_clusters: HashSet::new(),
+        };
+
+        let requeued = worker
+            .finalize_processed_task_success(&key, 0, "input_b")
+            .await;
+        assert!(!requeued);
+        assert!(!pending_tasks.contains_key(&key));
+        assert!(matches!(
+            worker.receiver.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn task_needs_provider_connection_skips_library_probe_stream() {
+        let task = UpdateTask::ProbeStream {
+            probe_scope: Arc::from("input_a"),
+            unique_id: "u1".to_string(),
+            url: "file:///movie.mkv".to_string(),
+            item_type: PlaylistItemType::LocalVideo,
+            reason: ResolveReasonSet::from_variants(&[ResolveReason::MissingDetails]),
+            delay: 0,
+        };
+
+        assert!(!InputWorker::task_needs_provider_connection(
+            &task,
+            InputType::Library
+        ));
+    }
+
+    #[test]
+    fn task_needs_provider_connection_keeps_non_library_probe_stream() {
+        let task = UpdateTask::ProbeStream {
+            probe_scope: Arc::from("input_a"),
+            unique_id: "u1".to_string(),
+            url: "http://example.com/stream.m3u8".to_string(),
+            item_type: PlaylistItemType::Video,
+            reason: ResolveReasonSet::from_variants(&[ResolveReason::MissingDetails]),
+            delay: 0,
+        };
+
+        assert!(InputWorker::task_needs_provider_connection(
+            &task,
+            InputType::M3u
+        ));
+        assert!(InputWorker::task_needs_provider_connection(
+            &task,
+            InputType::Xtream
+        ));
+    }
+
+    #[test]
+    fn task_needs_provider_connection_keeps_live_probe() {
+        let task = UpdateTask::ProbeLive {
+            id: ProviderIdType::Id(1),
+            reason: ResolveReasonSet::from_variants(&[ResolveReason::Probe]),
+            delay: 0,
+            interval: 60,
+        };
+
+        assert!(InputWorker::task_needs_provider_connection(
+            &task,
+            InputType::Library
+        ));
     }
 }

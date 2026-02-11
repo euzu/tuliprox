@@ -215,7 +215,7 @@ mod tests {
                     plex: true,
                 },
                 tmdb: LibraryTmdbConfig {
-                    enabled: true,
+                    enabled: tmdb_enabled,
                     api_key: if tmdb_enabled {
                         Some("test_key".to_string())
                     } else {
@@ -267,7 +267,7 @@ mod tests {
         if let Some(MediaMetadata::Movie(movie)) = metadata {
             assert_eq!(movie.title, "The Matrix");
             assert_eq!(movie.year, Some(1999));
-            assert_eq!(movie.source, MetadataSource::Tmdb);
+            assert_eq!(movie.source, MetadataSource::FilenameParsed);
         } else {
             panic!("Expected movie metadata");
         }
@@ -289,7 +289,7 @@ mod tests {
         if let Some(MediaMetadata::Movie(movie)) = metadata {
             assert_eq!(movie.title, "Inception");
             assert_eq!(movie.year, Some(2010));
-            assert_eq!(movie.source, MetadataSource::Tmdb);
+            assert_eq!(movie.source, MetadataSource::FilenameParsed);
         } else {
             panic!("Expected movie metadata");
         }

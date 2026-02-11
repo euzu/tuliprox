@@ -865,16 +865,15 @@ fn is_probe_supported_item_type(item_type: PlaylistItemType) -> bool {
 }
 
 fn has_probe_details(item: &PlaylistItem) -> bool {
-    item.header
-        .additional_properties
-        .as_ref()
-        .and_then(|p| match p {
-            StreamProperties::Video(v) => v.details.as_ref().and_then(|d| d.video.as_ref()),
-            StreamProperties::Live(l) => l.video.as_ref(),
-            StreamProperties::Episode(e) => e.video.as_ref(),
-            StreamProperties::Series(_) => None,
-        })
-        .is_some()
+    match item.header.additional_properties.as_ref() {
+        Some(StreamProperties::Video(v)) => v
+            .details
+            .as_ref()
+            .is_some_and(|d| d.video.is_some() && d.audio.is_some()),
+        Some(StreamProperties::Live(l)) => l.video.is_some() && l.audio.is_some(),
+        Some(StreamProperties::Episode(e)) => e.video.is_some() && e.audio.is_some(),
+        Some(StreamProperties::Series(_)) | None => false,
+    }
 }
 
 fn get_live_probe_interval_settings(target: &ConfigTarget, input_type: InputType) -> Option<(u16, u64)> {
@@ -1168,4 +1167,69 @@ pub async fn exec_processing(client: &reqwest::Client, app_config: Arc<AppConfig
     //trim_allocator_after_update();
 
     info!("{update_finished_message}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shared::utils::Internable;
+
+    fn item_with_props(props: StreamProperties) -> PlaylistItem {
+        let header = shared::model::PlaylistItemHeader {
+            additional_properties: Some(props),
+            ..Default::default()
+        };
+        PlaylistItem { header }
+    }
+
+    #[test]
+    fn has_probe_details_requires_video_and_audio_for_video() {
+        let video = shared::model::VideoStreamProperties {
+            details: Some(shared::model::VideoStreamDetailProperties {
+                video: Some("{\"codec_name\":\"h264\"}".intern()),
+                audio: None,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let item_missing_audio = item_with_props(StreamProperties::Video(Box::new(video)));
+        assert!(!has_probe_details(&item_missing_audio));
+
+        let video_complete = shared::model::VideoStreamProperties {
+            details: Some(shared::model::VideoStreamDetailProperties {
+                video: Some("{\"codec_name\":\"h264\"}".intern()),
+                audio: Some("{\"codec_name\":\"aac\"}".intern()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let item_complete = item_with_props(StreamProperties::Video(Box::new(video_complete)));
+        assert!(has_probe_details(&item_complete));
+    }
+
+    #[test]
+    fn has_probe_details_requires_video_and_audio_for_live() {
+        let live_missing_audio = shared::model::LiveStreamProperties {
+            video: Some("{\"codec_name\":\"h264\"}".intern()),
+            audio: None,
+            ..Default::default()
+        };
+        let item_missing_audio = item_with_props(StreamProperties::Live(Box::new(live_missing_audio)));
+        assert!(!has_probe_details(&item_missing_audio));
+
+        let live_complete = shared::model::LiveStreamProperties {
+            video: Some("{\"codec_name\":\"h264\"}".intern()),
+            audio: Some("{\"codec_name\":\"aac\"}".intern()),
+            ..Default::default()
+        };
+        let item_complete = item_with_props(StreamProperties::Live(Box::new(live_complete)));
+        assert!(has_probe_details(&item_complete));
+    }
+
+    #[test]
+    fn has_probe_details_is_false_for_series() {
+        let series = shared::model::SeriesStreamProperties::default();
+        let item = item_with_props(StreamProperties::Series(Box::new(series)));
+        assert!(!has_probe_details(&item));
+    }
 }
