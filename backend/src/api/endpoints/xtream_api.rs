@@ -17,7 +17,7 @@ use crate::repository::storage_const;
 use crate::repository::VirtualIdRecord;
 use crate::repository::{get_target_id_mapping, user_get_bouquet_filter, xtream_get_collection_path, xtream_get_item_for_stream_id, xtream_load_rewrite_playlist};
 use crate::utils::xtream::create_vod_info_from_item;
-use crate::utils::{debug_if_enabled, file_exists_async, trace_if_enabled};
+use crate::utils::{apply_timeshift, debug_if_enabled, file_exists_async, parse_timeshift, trace_if_enabled};
 use crate::utils::{request, xtream};
 use axum::http::HeaderMap;
 use axum::response::IntoResponse;
@@ -31,6 +31,7 @@ use shared::concat_string;
 use shared::error::{info_err, info_err_res, TuliproxError};
 use shared::model::{create_stream_channel_with_type, PlaylistEntry, PlaylistItemType, ProxyType, ShortEpgResultDto, TargetType, UserConnectionPermission, XtreamCluster, XtreamPlaylistItem};
 use shared::utils::{deserialize_as_string, extract_extension_from_url, generate_playlist_uuid, sanitize_sensitive_info, trim_slash, Internable, HLS_EXT};
+use std::fmt::Write;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -197,6 +198,7 @@ async fn xtream_player_api_stream(
     app_state: &Arc<AppState>,
     api_req: &UserApiRequest,
     stream_req: ApiStreamRequest<'_>,
+    user_target: Option<(ProxyUserCredentials, Arc<ConfigTarget>)>
 ) -> impl IntoResponse + Send {
 
     // if log::log_enabled!(log::Level::Debug) {
@@ -213,11 +215,13 @@ async fn xtream_player_api_stream(
     //     debug!("{}", sanitize_sensitive_info(&message));
     // }
 
-    let (user, target) = try_option_bad_request!(
+    let (user, target) = match user_target {
+        None => try_option_bad_request!(
         get_user_target_by_credentials( stream_req.username, stream_req.password, api_req, app_state),
         false,
-        format!("Could not find any user for xc stream {}", stream_req.username)
-    );
+        format!("Could not find any user for xc stream {}", stream_req.username)),
+        Some((user, target)) => (user, target)
+    };
 
     let _guard = app_state.app_config.file_locks.write_lock_str(&user.username).await;
 
@@ -619,6 +623,7 @@ macro_rules! create_xtream_player_api_stream {
                 &app_state,
                 &api_req,
                 ApiStreamRequest::from($context, &username, &password, &stream_id, ""),
+                None,
             )
             .await
             .into_response()
@@ -691,9 +696,22 @@ async fn xtream_player_api_timeshift_stream(
     let password = get_non_empty(&timeshift_request.password, &api_req.password, &api_form_req.password).to_string();
     let stream_id = get_non_empty(&timeshift_request.stream_id, &api_req.stream_id, &api_form_req.stream_id).to_string();
     let duration = get_non_empty(&timeshift_request.duration, &api_req.duration, &api_form_req.duration);
-    let start = get_non_empty(&timeshift_request.start, &api_req.start, &api_form_req.start);
+    let start_time = get_non_empty(&timeshift_request.start, &api_req.start, &api_form_req.start);
 
-    let action_path = format!("{duration}/{start}");
+    let (user, target) = try_option_bad_request!(
+            get_user_target_by_credentials( &username, &password, &api_form_req, &app_state),
+            false,
+            format!("Could not find any user {username}")
+        );
+
+    let epg_timeshift = parse_timeshift(user.epg_request_timeshift.as_deref());
+    let start = apply_timeshift(start_time, &epg_timeshift);
+    let action_path = if start.is_empty() {
+        format!("{duration}/{start_time}")
+    } else {
+        format!("{duration}/{start}")
+    };
+
     api_req.username.clone_from(&username);
     api_req.password.clone_from(&password);
     api_req.stream_id.clone_from(&stream_id);
@@ -709,7 +727,8 @@ async fn xtream_player_api_timeshift_stream(
             &password,
             &stream_id,
             &action_path,
-        ), /*&addr*/
+        ),
+        Some((user, target)),
     )
         .await
         .into_response()
@@ -726,19 +745,31 @@ async fn xtream_player_api_timeshift_query_stream(
     let password = get_non_empty(&api_query_req.password, &api_form_req.password, "");
     let stream_id = get_non_empty(&api_query_req.stream, &api_form_req.stream, "");
     let duration = get_non_empty(&api_query_req.duration, &api_form_req.duration, "");
-    let start = get_non_empty(&api_query_req.start, &api_form_req.start, "");
-    let action_path = format!("{duration}/{start}");
+    let start_time = get_non_empty(&api_query_req.start, &api_form_req.start, "");
+
     if username.is_empty()
         || password.is_empty()
         || stream_id.is_empty()
         || duration.is_empty()
-        || start.is_empty()
+        || start_time.is_empty()
     {
-        // if token.is_empty() {
         return axum::http::StatusCode::BAD_REQUEST.into_response();
-        // }
-        // xtream_player_api_stream(&req_headers, &api_query_req, &app_state, ApiStreamRequest::from_access_token(ApiStreamContext::Timeshift, token, stream_id, &action_path)/*, &addr*/).await.into_response()
     }
+
+    let (user, target) = try_option_bad_request!(
+            get_user_target_by_credentials( username, password, &api_query_req, &app_state),
+            false,
+            format!("Could not find any user {username}")
+        );
+
+    let epg_timeshift = parse_timeshift(user.epg_request_timeshift.as_deref());
+    let start = apply_timeshift(start_time, &epg_timeshift);
+    let action_path = if start.is_empty() {
+        format!("{duration}/{start_time}")
+    } else {
+        format!("{duration}/{start}")
+    };
+
     xtream_player_api_stream(
         &fingerprint,
         &req_headers,
@@ -751,6 +782,7 @@ async fn xtream_player_api_timeshift_query_stream(
             stream_id,
             &action_path,
         ),
+        Some((user, target)),
     )
         .await
         .into_response()
@@ -959,10 +991,11 @@ async fn xtream_player_api_handle_content_action(
 #[allow(clippy::too_many_lines)]
 async fn xtream_get_catchup_response(
     app_state: &Arc<AppState>,
+    user: &ProxyUserCredentials,
     target: &Arc<ConfigTarget>,
     stream_id: &str,
-    start: &str,
-    end: &str,
+    start_time: &str,
+    end_time: &str,
 ) -> impl IntoResponse + Send {
     let req_virtual_id: u32 = if let Ok(id) = stream_id.parse::<u32>() {
         id
@@ -981,15 +1014,20 @@ async fn xtream_get_catchup_response(
         .app_config
         .get_input_by_name(&pli.input_name));
 
-    let info_url = try_option_bad_request!(xtream::get_xtream_player_api_action_url(
+    let mut info_url = try_option_bad_request!(xtream::get_xtream_player_api_action_url(
         &input,
         crate::model::XC_ACTION_GET_CATCHUP_TABLE
     )
-    .map(|action_url| format!(
-        "{action_url}&{}={}&start={start}&end={end}",
-        crate::model::XC_TAG_STREAM_ID,
-        pli.provider_id
-    )));
+    .map(|action_url| format!("{action_url}&{}={}", crate::model::XC_TAG_STREAM_ID, pli.provider_id)));
+
+    if !start_time.is_empty() && !end_time.is_empty() {
+        let epg_timeshift = parse_timeshift(user.epg_request_timeshift.as_deref());
+        let start = apply_timeshift(start_time, &epg_timeshift);
+        let end = apply_timeshift(end_time, &epg_timeshift);
+        if !start.is_empty() && !end.is_empty() {
+            let _ = write!(info_url, "&start={start}&end={end}");
+        }
+    }
 
     let input_source = InputSource::from(&*input).with_url(info_url);
     let content = try_result_bad_request!(
@@ -1038,7 +1076,7 @@ async fn xtream_get_catchup_response(
             let Ok((mut target_id_mapping, file_lock)) = get_target_id_mapping(
                 &app_state.app_config,
                 &target_path,
-                target.use_memory_cache
+                target.use_memory_cache,
             ).await else {
                 return internal_server_error!();
             };
@@ -1206,6 +1244,7 @@ async fn xtream_player_api(
                     skip_live,
                     xtream_get_catchup_response(
                         app_state,
+                        &user,
                         &target,
                         api_req.stream_id.trim(),
                         api_req.start.trim(),

@@ -265,7 +265,7 @@ mod tests {
         if let Some(MediaMetadata::Movie(movie)) = metadata {
             assert_eq!(movie.title, "The Matrix");
             assert_eq!(movie.year, Some(1999));
-            assert_eq!(movie.source, MetadataSource::FilenameParsed);
+            assert_eq!(movie.source, MetadataSource::Tmdb);
         } else {
             panic!("Expected movie metadata");
         }
@@ -287,7 +287,7 @@ mod tests {
         if let Some(MediaMetadata::Movie(movie)) = metadata {
             assert_eq!(movie.title, "Inception");
             assert_eq!(movie.year, Some(2010));
-            assert_eq!(movie.source, MetadataSource::FilenameParsed);
+            assert_eq!(movie.source, MetadataSource::Tmdb);
         } else {
             panic!("Expected movie metadata");
         }

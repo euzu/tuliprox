@@ -1,8 +1,10 @@
 use crate::model::config::cache::CacheConfig;
 use crate::model::{macros, GeoIpConfig, RateLimitConfig, StreamConfig};
-use shared::model::{ResourceRetryConfigDto, ReverseProxyConfigDto, ReverseProxyDisabledHeaderConfigDto};
+use regex::Regex;
+use shared::model::{ResourceRetryConfigDto, ReverseProxyConfigDto, ReverseProxyDisabledHeaderConfigDto, REGEX_CACHE};
 use shared::utils::{default_resource_retry_attempts, default_resource_retry_backoff_ms, default_resource_retry_backoff_multiplier, hex_to_u8_16, u8_16_to_hex};
 use std::cmp::max;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct ReverseProxyDisabledHeaderConfig {
@@ -35,6 +37,7 @@ pub struct ResourceRetryConfig {
     pub max_attempts: u32,
     pub backoff_millis: u64,
     pub backoff_multiplier: f64,
+    pub failover_redirect_patterns: Vec<Arc<Regex>>,
 }
 
 impl Default for ResourceRetryConfig {
@@ -43,8 +46,14 @@ impl Default for ResourceRetryConfig {
             max_attempts: default_resource_retry_attempts(),
             backoff_millis: default_resource_retry_backoff_ms(),
             backoff_multiplier: default_resource_retry_backoff_multiplier(),
+            failover_redirect_patterns: default_failover_redirect_patterns(),
         }
     }
+}
+
+/// Default failover redirect pattern when none is configured
+fn default_failover_redirect_patterns() -> Vec<Arc<Regex>> {
+    vec![REGEX_CACHE.get_or_compile("service-abuse").expect("default redirect  failover regex must compile")]
 }
 
 impl ResourceRetryConfig {
@@ -78,20 +87,40 @@ impl From<&ResourceRetryConfigDto> for ResourceRetryConfig {
         } else {
             1.0
         };
+        
+        // Compile patterns, default to service-abuse if none or empty
+        let patterns = dto.failover_redirect_patterns
+            .as_ref()
+            .filter(|v| !v.is_empty())
+            .map_or_else(default_failover_redirect_patterns, |patterns| {
+                patterns.iter()
+                    .filter_map(|p| REGEX_CACHE.get_or_compile(p).map_err(|e| {
+                        log::warn!("Failed to compile failover redirect pattern '{p}': {e}");
+                        e
+                    }).ok())
+                    .collect()
+            });
+        
         Self {
             max_attempts: dto.max_attempts,
             backoff_millis: dto.backoff_millis,
             backoff_multiplier: multiplier,
+            failover_redirect_patterns: patterns,
         }
     }
 }
 
 impl From<&ResourceRetryConfig> for ResourceRetryConfigDto {
     fn from(cfg: &ResourceRetryConfig) -> Self {
+        let patterns: Vec<String> = cfg.failover_redirect_patterns
+            .iter()
+            .map(|re| re.as_str().to_string())
+            .collect();
         Self {
             max_attempts: cfg.max_attempts,
             backoff_millis: cfg.backoff_millis,
             backoff_multiplier: cfg.backoff_multiplier,
+            failover_redirect_patterns: if patterns.is_empty() { None } else { Some(patterns) },
         }
     }
 }

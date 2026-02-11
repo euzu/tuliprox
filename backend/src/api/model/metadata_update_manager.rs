@@ -3,8 +3,9 @@ use log::{debug, error, info, warn};
 use shared::error::TuliproxError;
 use shared::utils::{sanitize_sensitive_info, generate_playlist_uuid};
 use std::sync::{Arc, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use dashmap::DashMap;
+use dashmap::mapref::entry::Entry;
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 use shared::create_bit_set;
@@ -21,6 +22,8 @@ use crate::utils::FileReadGuard;
 use std::cmp::min;
 
 const MAX_QUEUE_SIZE: usize = 100_000;
+const TASK_ERR_NO_CONNECTION: &str = "No connection available";
+const TASK_ERR_PREEMPTED: &str = "Task preempted";
 
 create_bit_set!(u32, ResolveReason, Info, Tmdb, Date, Probe, MissingDetails);
 
@@ -189,45 +192,53 @@ impl MetadataUpdateManager {
     /// * `input_name` - The input this task belongs to
     /// * `task` - The task to process
     pub async fn queue_task(&self, input_name: Arc<str>, task: UpdateTask) {
-        // Try to send to existing worker
-        if let Some(ctx) = self.workers.get(&input_name) {
-            Self::submit_task(ctx.sender.clone(), ctx.pending_tasks.clone(), &input_name, task).await;
-            return;
-        }
-
-        // Get app_state for worker
+        // Read app state once and reuse for worker creation when needed.
         let app_state_weak = {
             let guard = self.app_state.lock().await;
             guard.clone()
         };
 
-        // Spawn new worker
-        let (tx, rx) = mpsc::channel::<TaskKey>(256);
-        let pending_tasks = Arc::new(DashMap::new());
-        self.workers.insert(input_name.clone(), InputWorkerContext { sender: tx.clone(), pending_tasks: pending_tasks.clone() });
+        // Atomically ensure there is exactly one worker context per input.
+        let mut worker_to_spawn: Option<InputWorker> = None;
+        let ctx = match self.workers.entry(input_name.clone()) {
+            Entry::Occupied(entry) => entry.get().clone(),
+            Entry::Vacant(entry) => {
+                let (tx, rx) = mpsc::channel::<TaskKey>(256);
+                let pending_tasks = Arc::new(DashMap::new());
 
-        let worker = InputWorker {
-            input_name: input_name.clone(),
-            receiver: rx,
-            pending_tasks: pending_tasks.clone(),
-            app_state_weak,
-            cancel_token: self.cancel_token.clone(),
-            batch_buffer: BatchResultCollector::new(),
-            db_handles: HashMap::new(),
-            failed_clusters: HashSet::new(),
+                let ctx = InputWorkerContext {
+                    sender: tx.clone(),
+                    pending_tasks: pending_tasks.clone(),
+                };
+                entry.insert(ctx.clone());
+
+                worker_to_spawn = Some(InputWorker {
+                    input_name: input_name.clone(),
+                    sender: tx,
+                    receiver: rx,
+                    pending_tasks,
+                    app_state_weak,
+                    cancel_token: self.cancel_token.clone(),
+                    batch_buffer: BatchResultCollector::new(),
+                    db_handles: HashMap::new(),
+                    failed_clusters: HashSet::new(),
+                });
+
+                ctx
+            }
         };
 
-        // Spawn the worker task
-        let workers_ref = self.workers.clone();
-        let input_name_for_cleanup = input_name.clone();
-        tokio::spawn(async move {
-            worker.run().await;
-            // Cleanup: remove self from workers map when done
-            workers_ref.remove(&input_name_for_cleanup);
-        });
+        if let Some(worker) = worker_to_spawn {
+            let workers_ref = self.workers.clone();
+            let input_name_for_cleanup = input_name.clone();
+            tokio::spawn(async move {
+                worker.run().await;
+                // Cleanup: remove self from workers map when done
+                workers_ref.remove(&input_name_for_cleanup);
+            });
+        }
 
-        // Send the initial task
-        Self::submit_task(tx, pending_tasks, &input_name, task).await;
+        Self::submit_task(ctx.sender.clone(), ctx.pending_tasks.clone(), &input_name, task).await;
     }
 
     async fn submit_task(
@@ -289,6 +300,7 @@ struct DbHandle {
 
 struct InputWorker {
     input_name: Arc<str>,
+    sender: mpsc::Sender<TaskKey>,
     receiver: mpsc::Receiver<TaskKey>,
     pending_tasks: Arc<DashMap<TaskKey, Mutex<UpdateTask>>>,
     app_state_weak: Option<Weak<AppState>>,
@@ -299,10 +311,14 @@ struct InputWorker {
 }
 
 impl InputWorker {
+    #[allow(clippy::too_many_lines)]
     async fn run(mut self) {
         debug!("Metadata worker started for input {}", sanitize_sensitive_info(&self.input_name));
         
         let mut processed_count: usize = 0;
+        let mut retry_attempts: HashMap<TaskKey, u8> = HashMap::new();
+        let mut last_queue_counts: (usize, usize) = (usize::MAX, usize::MAX);
+        let mut last_queue_log_at = Instant::now();
 
         let input_name = self.input_name.clone();
         let app_state_weak = self.app_state_weak.clone();
@@ -355,23 +371,64 @@ impl InputWorker {
 
             let delay_secs = current_task.delay();
 
-            if let Err(e) = Self::process_task_static(
-                &input_name, 
-                app_state_weak.as_ref(), 
-                &current_task, 
+            let mut requeue_current = false;
+            let mut retry_delay_secs = 0_u64;
+
+            match Self::process_task_static(
+                &input_name,
+                app_state_weak.as_ref(),
+                &current_task,
                 &mut self.batch_buffer,
                 &mut self.db_handles,
-                &mut self.failed_clusters
-            ).await {
-                if e.message != "Task preempted" {
-                    error!("Task {} failed for input {}: {}", 
-                           current_task, sanitize_sensitive_info(&input_name), e);
+                &mut self.failed_clusters,
+            )
+            .await
+            {
+                Ok(()) => {
+                    processed_count += 1;
+                    retry_attempts.remove(&current_key);
+                    if processed_count.is_multiple_of(10) {
+                        info!(
+                            "Background metadata update: {} resolved for input {}",
+                            processed_count,
+                            sanitize_sensitive_info(&input_name)
+                        );
+                    }
                 }
-            } else {
-                processed_count += 1;
-                if processed_count.is_multiple_of(10) {
-                     info!("Background metadata update: {} resolved for input {}", 
-                           processed_count, sanitize_sensitive_info(&input_name));
+                Err(e) if e.message == TASK_ERR_NO_CONNECTION => {
+                    requeue_current = true;
+
+                    let entry = retry_attempts.entry(current_key.clone()).or_insert(0);
+                    *entry = entry.saturating_add(1);
+                    let attempts = *entry;
+
+                    // If there are other tasks, just move this task to the back of the queue.
+                    // If this is the only task, use exponential backoff based on resolve_delay.
+                    if self.receiver.is_empty() {
+                        let base_delay = u64::from(current_task.delay().max(1));
+                        let exp = u32::from(attempts.saturating_sub(1).min(5));
+                        retry_delay_secs = (base_delay.saturating_mul(2_u64.saturating_pow(exp))).min(60);
+                    }
+
+                    debug_if_enabled!(
+                        "No provider connection for task {} on input {}, requeueing (attempt={}, retry_delay={}s, queue_len={})",
+                        current_task,
+                        sanitize_sensitive_info(&input_name),
+                        attempts,
+                        retry_delay_secs,
+                        self.receiver.len()
+                    );
+                }
+                Err(e) => {
+                    retry_attempts.remove(&current_key);
+                    if e.message != TASK_ERR_PREEMPTED {
+                        error!(
+                            "Task {} failed for input {}: {}",
+                            current_task,
+                            sanitize_sensitive_info(&input_name),
+                            e
+                        );
+                    }
                 }
             }
 
@@ -383,19 +440,43 @@ impl InputWorker {
                 Self::flush_batch_static(&input_name, app_state_weak.as_ref(), &mut self.batch_buffer).await;
             }
 
-            // Rate limiting
-            if delay_secs > 0 {
-                tokio::time::sleep(Duration::from_secs(u64::from(delay_secs))).await;
+            if requeue_current {
+                if retry_delay_secs > 0 {
+                    tokio::time::sleep(Duration::from_secs(retry_delay_secs)).await;
+                }
+
+                if self.sender.send(current_key.clone()).await.is_err() {
+                    // Channel closed, drop the pending task key to avoid leaks.
+                    self.pending_tasks.remove(&current_key);
+                    retry_attempts.remove(&current_key);
+                    warn!(
+                        "Failed to requeue task {} for input {}",
+                        current_task,
+                        sanitize_sensitive_info(&input_name)
+                    );
+                }
+            } else {
+                // Rate limiting
+                if delay_secs > 0 {
+                    tokio::time::sleep(Duration::from_secs(u64::from(delay_secs))).await;
+                }
+
+                // Cleanup from map (allows new tasks for this ID to be queued)
+                self.pending_tasks.remove(&current_key);
             }
-            
-            // Cleanup from a map (Allowing new tasks for this ID to be queued)
-            self.pending_tasks.remove(&current_key);
 
             // Try to get the next task immediately to keep locks open
             if let Ok(key) = self.receiver.try_recv() {
                  if let Some(entry) = self.pending_tasks.get(&key) {
                     next_task = Some((key, entry.lock().await.clone()));
                  }
+            }
+
+            let queue_counts = Self::queue_resolve_counts(&self.pending_tasks);
+            if queue_counts != last_queue_counts || last_queue_log_at.elapsed() >= Duration::from_secs(30) {
+                info!("In queue to resolve vod: {}, series: {} (input: {input_name})", queue_counts.0, queue_counts.1);
+                last_queue_counts = queue_counts;
+                last_queue_log_at = Instant::now();
             }
         }
 
@@ -414,6 +495,21 @@ impl InputWorker {
         }
         
         debug!("Metadata worker stopped for input {}", sanitize_sensitive_info(&input_name));
+    }
+
+    fn queue_resolve_counts(pending_tasks: &DashMap<TaskKey, Mutex<UpdateTask>>) -> (usize, usize) {
+        let mut vod_count = 0_usize;
+        let mut series_count = 0_usize;
+
+        for entry in pending_tasks {
+            match entry.key() {
+                TaskKey::Vod(_) | TaskKey::VodStr(_) => vod_count += 1,
+                TaskKey::Series(_) | TaskKey::SeriesStr(_) => series_count += 1,
+                _ => {}
+            }
+        }
+
+        (vod_count, series_count)
     }
 
     // Changed to static method
@@ -734,7 +830,7 @@ impl InputWorker {
         // Attempt to acquire connection with low priority
         let Some(handle) = app_state.active_provider.acquire_connection_for_probe(input_name).await else {
             debug_if_enabled!("No provider connection available for background task {}, skipping...", task);
-            return Err(shared::error::info_err!("No connection available"));
+            return Err(shared::error::info_err!("{}", TASK_ERR_NO_CONNECTION));
         };
         
         let item_title = Self::get_item_name_static(input_name, &app_state, task, db_handles, failed_clusters).await;
@@ -777,7 +873,7 @@ impl InputWorker {
                     debug_if_enabled!("Metadata update task preempted by user request for input {}", 
                                       sanitize_sensitive_info(input_name));
                     app_state.connection_manager.release_provider_handle(Some(handle)).await;
-                    Err(shared::error::info_err!("Task preempted"))
+                    Err(shared::error::info_err!("{}", TASK_ERR_PREEMPTED))
                 }
                 
                 res = Self::execute_task_inner_static(&app_state, &client, &input_to_use, task, item_title.as_deref(), Some(&handle), collector, db_handles, failed_clusters) => {
@@ -889,5 +985,45 @@ impl InputWorker {
                 ).await
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn queue_task_creates_single_worker_per_input_under_concurrency() {
+        let cancel_token = CancellationToken::new();
+        let manager = Arc::new(MetadataUpdateManager::new(cancel_token.clone()));
+        let input_name: Arc<str> = Arc::from("race_input");
+
+        let mut joins = Vec::new();
+        for id in 0..32u32 {
+            let manager_cloned = manager.clone();
+            let input_cloned = input_name.clone();
+            joins.push(tokio::spawn(async move {
+                manager_cloned
+                    .queue_task(
+                        input_cloned,
+                        UpdateTask::ResolveVod {
+                            id: ProviderIdType::Id(id),
+                            reason: ResolveReasonSet::default(),
+                            delay: 0,
+                        },
+                    )
+                    .await;
+            }));
+        }
+
+        for join in joins {
+            join.await.expect("queue task spawn should complete");
+        }
+
+        // Allow spawned worker startup to settle.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(manager.active_worker_count(), 1);
+
+        cancel_token.cancel();
     }
 }

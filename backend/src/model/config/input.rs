@@ -1,12 +1,13 @@
-use crate::model::{macros, EpgConfig, PanelApiConfig};
+use crate::model::{macros, ConfigProvider, EpgConfig, PanelApiConfig};
 use crate::repository::get_csv_file_path;
 use chrono::Utc;
 use log::warn;
-use shared::check_input_credentials;
 use shared::error::TuliproxError;
 use shared::model::{ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, InputFetchMethod, InputType, StagedInputDto};
-use shared::utils::{get_credentials_from_url, Internable};
+use shared::utils::{get_credentials_from_url, parse_provider_scheme_url_parts, sanitize_sensitive_info, Internable, PROVIDER_SCHEME_PREFIX};
 use shared::{check_input_connections, info_err_res, write_if_some};
+use shared::{check_input_credentials, concat_string, info_err};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
@@ -82,6 +83,8 @@ pub struct StagedInput {
     pub method: InputFetchMethod,
     pub input_type: InputType,
     pub headers: HashMap<String, String>,
+    /// Provider configuration for failover support when using `provider://` scheme.
+    pub provider_config: Option<Arc<ConfigProvider>>,
 }
 
 macros::from_impl!(StagedInput);
@@ -95,6 +98,7 @@ impl From<&StagedInputDto> for StagedInput {
             password: dto.password.clone(),
             method: dto.method,
             headers: dto.headers.clone(),
+            provider_config: None, // Resolved later in ConfigInput::prepare()
         }
     }
 }
@@ -151,16 +155,46 @@ pub struct ConfigInput {
     pub t_batch_url: Option<String>,
     pub panel_api: Option<PanelApiConfig>,
     pub cache_duration_seconds: u64,
+    pub provider_configs: Option<Vec<Arc<ConfigProvider>>>,
 }
 
 impl ConfigInput {
-    pub fn prepare(&mut self) -> Result<Option<PathBuf>, TuliproxError> {
+    pub fn prepare(&mut self, provider_configs: &[Arc<ConfigProvider>]) -> Result<Option<PathBuf>, TuliproxError> {
+        let mut used_provider_configs: Vec<Arc<ConfigProvider>> = vec![];
         let batch_file_path = self.prepare_batch();
         self.name = self.name.trim().intern();
+
+        let resolve_provider_config = |url: &str| -> Result<Arc<ConfigProvider>, TuliproxError> {
+            let (host, _path) = parse_provider_scheme_url_parts(url).map_err(|err| {
+                info_err!(
+                    "Malformed provider URL {}: {}",
+                    sanitize_sensitive_info(url),
+                    sanitize_sensitive_info(err.to_string().as_str())
+                )
+            })?;
+
+            provider_configs
+                .iter()
+                .find(|p| p.name.as_ref() == host)
+                .cloned()
+                .ok_or_else(|| info_err!("Failed to resolve provider config for {}", sanitize_sensitive_info(url)))
+        };
+
+        if self.url.starts_with(PROVIDER_SCHEME_PREFIX) {
+            let provider_cfg = resolve_provider_config(&self.url)?;
+            used_provider_configs.push(provider_cfg);
+        }
+
         if self.enabled {
             check_input_credentials!(self, self.input_type, false, false);
             check_input_connections!(self, self.input_type, false);
             if let Some(staged_input) = &mut self.staged {
+                if staged_input.url.starts_with(PROVIDER_SCHEME_PREFIX) {
+                    let provider_cfg = resolve_provider_config(&staged_input.url)?;
+                    staged_input.provider_config = Some(provider_cfg.clone());
+                    used_provider_configs.push(provider_cfg);
+                }
+
                 check_input_credentials!(staged_input, staged_input.input_type, false, true);
                 if !matches!(staged_input.input_type, InputType::M3u | InputType::Xtream) {
                     return info_err_res!("Staged input can only be from type m3u or xtream");
@@ -178,7 +212,18 @@ impl ConfigInput {
                         warn!("Account {} expired for provider: {}", alias.username.as_ref().map_or("?", |s| s.as_str()), alias.name);
                         alias.enabled = false;
                     }
+
+                    if alias.url.starts_with(PROVIDER_SCHEME_PREFIX) {
+                        let provider_cfg = resolve_provider_config(&alias.url)?;
+                        if !used_provider_configs.iter().any(|p| p.name == provider_cfg.name) {
+                            used_provider_configs.push(provider_cfg);
+                        }
+                    }
                 }
+            }
+
+            if !used_provider_configs.is_empty() {
+                self.provider_configs = Some(used_provider_configs);
             }
 
             if let Some(panel_api) = &mut self.panel_api {
@@ -218,7 +263,6 @@ impl ConfigInput {
             self.t_batch_url = Some(self.url.clone());
             let file_path = get_csv_file_path(self.url.as_str()).ok();
             if self.enabled {
-
                 if let Some(aliases) = self.aliases.as_mut() {
                     if !aliases.is_empty() {
                         for alias in aliases.iter_mut() {
@@ -277,6 +321,7 @@ impl ConfigInput {
             t_batch_url: None,
             panel_api: self.panel_api.clone(),
             cache_duration_seconds: self.cache_duration_seconds,
+            provider_configs: self.provider_configs.clone(),
         }
     }
 
@@ -295,6 +340,42 @@ impl ConfigInput {
                 Some(result)
             }
         })
+    }
+
+    pub fn resolve_url<'a>(&self, url: &'a str) -> Result<Cow<'a, str>, TuliproxError> {
+        if !url.starts_with(PROVIDER_SCHEME_PREFIX) {
+            return Ok(Cow::Borrowed(url));
+        }
+
+        let (host, _path) = parse_provider_scheme_url_parts(url)?;
+
+        let provider_config = self.provider_configs
+            .as_ref()
+            .and_then(|configs| configs.iter().find(|p| p.name.as_ref() == host))
+            .cloned();
+
+        if let Some(provider) = provider_config {
+            let (_, resolved) = resolve_provider_scheme_url_with_provider(url, Some(provider))?;
+            Ok(resolved)
+        } else {
+            info_err_res!("Provider config for '{}' not found in input '{}'", host, self.name)
+        }
+    }
+
+    pub fn resolve(&self) -> Result<Cow<'_, str>, TuliproxError> {
+        self.resolve_url(&self.url)
+    }
+
+    pub fn get_resolve_provider(&self, url: &str) -> Option<Arc<ConfigProvider>> {
+        if !url.starts_with(PROVIDER_SCHEME_PREFIX) {
+            return None;
+        }
+        if let Some(provider) = self.provider_configs.as_ref() {
+            if let Ok((host, _path)) = parse_provider_scheme_url_parts(url) {
+                return provider.iter().find(|pc| pc.name.as_ref() == host).cloned();
+            }
+        }
+        None
     }
 }
 
@@ -322,6 +403,7 @@ impl From<&ConfigInputDto> for ConfigInput {
             t_batch_url: None,
             panel_api: dto.panel_api.as_ref().map(PanelApiConfig::from),
             cache_duration_seconds: dto.cache_duration_seconds,
+            provider_configs: None,
         }
     }
 }
@@ -351,6 +433,7 @@ impl fmt::Display for ConfigInput {
     }
 }
 
+
 pub fn is_input_expired(exp_date: Option<i64>) -> bool {
     match exp_date {
         Some(ts) => {
@@ -358,5 +441,163 @@ pub fn is_input_expired(exp_date: Option<i64>) -> bool {
             ts <= now
         }
         None => false,
+    }
+}
+
+/// Resolves a custom "provider://" URL using a pre-provided provider configuration.
+/// If the URL does not use the custom scheme, it returns the original URL.
+pub fn resolve_provider_scheme_url_with_provider(
+    stream_url: &str,
+    provider_config: Option<Arc<ConfigProvider>>,
+) -> Result<(Option<Arc<ConfigProvider>>, Cow<'_, str>), TuliproxError> {
+    if !stream_url.starts_with(PROVIDER_SCHEME_PREFIX) {
+        return Ok((None, Cow::Borrowed(stream_url)));
+    }
+
+    let (_host, path_and_query) = parse_provider_scheme_url_parts(stream_url)?;
+
+    let provider = provider_config.ok_or_else(|| {
+        info_err!("Provider config missing for resolution of: '{}'", sanitize_sensitive_info(stream_url))
+    })?;
+
+    let final_url = assemble_provider_url(&provider, path_and_query)?;
+    Ok((Some(provider), Cow::Owned(final_url)))
+}
+
+/// Internal helper to build the final URL string
+fn assemble_provider_url(provider: &ConfigProvider, path_and_query: &str) -> Result<String, TuliproxError> {
+    let base = provider.get_current_url()
+        .ok_or_else(|| info_err!("Provider '{}' has no URLs available", provider.name))?;
+
+    // Add http:// scheme if no scheme is present
+    let base_with_scheme = if base.contains("://") {
+        base.to_string()
+    } else {
+        concat_string!("http://", base)
+    };
+
+    let mut final_url = base_with_scheme.trim_end_matches('/').to_string();
+    if !path_and_query.is_empty() {
+        final_url.push_str(path_and_query);
+    }
+    Ok(final_url)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::ConfigProvider;
+    use std::borrow::Cow;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc;
+
+    #[test]
+    fn test_resolve_url_normal() {
+        let input = ConfigInput {
+            url: "http://example.com/stream".to_string(),
+            ..Default::default()
+        };
+        let resolved = input.resolve_url("http://example.com/stream").unwrap();
+        assert_eq!(resolved, "http://example.com/stream");
+        assert!(matches!(resolved, Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn test_resolve_url_provider() {
+        let provider = ConfigProvider {
+            name: "myprovider".into(),
+            urls: vec!["http://provider.com".into()],
+            current_url_index: AtomicUsize::new(0),
+        };
+        let input = ConfigInput {
+            name: "test_input".into(),
+            provider_configs: Some(vec![Arc::new(provider)]),
+            ..Default::default()
+        };
+
+        let resolved = input.resolve_url("provider://myprovider/stream").unwrap();
+        assert_eq!(resolved, "http://provider.com/stream");
+        assert!(matches!(resolved, Cow::Owned(_)));
+    }
+
+    #[test]
+    fn test_resolve_url_provider_missing() {
+        let input = ConfigInput {
+            name: "test_input".into(),
+            provider_configs: Some(vec![]),
+            ..Default::default()
+        };
+
+        let err = input.resolve_url("provider://myprovider/stream").unwrap_err();
+        assert!(err.to_string().contains("Provider config for 'myprovider' not found"));
+    }
+
+    #[test]
+    fn test_resolve_default() {
+        let input = ConfigInput {
+            url: "http://example.com/stream".to_string(),
+            ..Default::default()
+        };
+        let resolved = input.resolve().unwrap();
+        assert_eq!(resolved, "http://example.com/stream");
+    }
+
+    #[test]
+    fn test_prepare_fails_on_malformed_provider_url_in_main_input() {
+        let mut input = ConfigInput {
+            name: "test_input".into(),
+            input_type: InputType::M3u,
+            url: "provider:///bad".to_string(),
+            enabled: false,
+            ..Default::default()
+        };
+
+        let err = input.prepare(&[]).unwrap_err();
+        assert!(err.to_string().contains("Malformed provider URL"));
+    }
+
+    #[test]
+    fn test_prepare_fails_on_malformed_provider_url_in_staged_input() {
+        let mut input = ConfigInput {
+            name: "test_input".into(),
+            input_type: InputType::M3u,
+            url: "http://example.com/playlist.m3u".to_string(),
+            enabled: true,
+            staged: Some(StagedInput {
+                name: "staged".into(),
+                input_type: InputType::M3u,
+                url: "provider:///bad".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let err = input.prepare(&[]).unwrap_err();
+        assert!(err.to_string().contains("Malformed provider URL"));
+    }
+
+    #[test]
+    fn test_prepare_fails_on_malformed_provider_url_in_alias() {
+        let mut input = ConfigInput {
+            name: "test_input".into(),
+            input_type: InputType::M3u,
+            url: "http://example.com/playlist.m3u".to_string(),
+            enabled: true,
+            aliases: Some(vec![ConfigInputAlias {
+                id: 1,
+                name: "alias".into(),
+                url: "provider:///bad".to_string(),
+                username: None,
+                password: None,
+                priority: 0,
+                max_connections: 0,
+                exp_date: None,
+                enabled: true,
+            }]),
+            ..Default::default()
+        };
+
+        let err = input.prepare(&[]).unwrap_err();
+        assert!(err.to_string().contains("Malformed provider URL"));
     }
 }

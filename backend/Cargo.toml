@@ -1,6 +1,6 @@
 [package]
 name = "tuliprox"
-version = "3.2.74"
+version = "3.2.80"
 edition = "2021"
 rust-version = "1.89.0"
 
@@ -77,10 +77,11 @@ fancy-regex = "0.17.0"
 mime_guess = "2"
 crc32fast = "1.5.0"
 
-[target.'cfg(target_os = "macos")'.dependencies]
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 [target.'cfg(target_os = "windows")'.dependencies]
 winapi = { version = "0.3", features = ["psapi", "minwindef", "processthreadsapi"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
 #[target.'cfg(target_os = "linux")'.dependencies]
 #mimalloc = "0.1"
 #[target.'cfg(not(target_env = "msvc"))'.dependencies]

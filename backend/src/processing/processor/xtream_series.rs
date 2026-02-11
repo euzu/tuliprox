@@ -20,6 +20,7 @@ use serde_json::Value;
 use shared::error::TuliproxError;
 use shared::model::{InputType, MediaQuality, PlaylistEntry, PlaylistItem, SeriesStreamProperties, StreamProperties, XtreamPlaylistItem, XtreamSeriesInfo};
 use shared::model::{PlaylistGroup, PlaylistItemType, XtreamCluster};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -45,7 +46,6 @@ pub async fn playlist_resolve_series(
     playlist_resolve_series_info(
         ctx,
         errors,
-        provider_fpl,
         processed_fpl,
         resolve_options,
         do_probe,
@@ -54,6 +54,10 @@ pub async fn playlist_resolve_series(
     )
         .await;
 
+    if provider_fpl.is_memory() {
+        sync_resolved_series_properties(provider_fpl, processed_fpl);
+    }
+
     provider_fpl.source.obtain_resources().await;
 }
 
@@ -61,7 +65,6 @@ pub async fn playlist_resolve_series(
 async fn playlist_resolve_series_info(ctx: &PlaylistProcessingContext,
                                       _errors: &mut Vec<TuliproxError>,
                                       fpl: &mut FetchedPlaylist<'_>,
-                                      processed_fpl: &mut FetchedPlaylist<'_>,
                                       resolve_options: ResolveOptions,
                                       do_probe: bool,
                                       pipe: &ProcessingPipe,
@@ -95,9 +98,61 @@ async fn playlist_resolve_series_info(ctx: &PlaylistProcessingContext,
         }
     }
 
-    // Apply resolved episodes to processed_fpl
+    // Apply resolved episodes to playlist
     for group in new_playlist {
-        processed_fpl.update_playlist(&group).await;
+        fpl.update_playlist(&group).await;
+    }
+}
+
+fn sync_resolved_series_properties(
+    provider_fpl: &mut FetchedPlaylist<'_>,
+    processed_fpl: &mut FetchedPlaylist<'_>,
+) {
+    let mut resolved_series_by_provider_id: HashMap<u32, SeriesStreamProperties> = HashMap::new();
+
+    for pli in processed_fpl.items() {
+        if pli.header.xtream_cluster != XtreamCluster::Series
+            || pli.header.item_type != PlaylistItemType::SeriesInfo
+        {
+            continue;
+        }
+
+        let Some(provider_id) = pli.get_provider_id() else {
+            continue;
+        };
+        if provider_id == 0 {
+            continue;
+        }
+
+        if let Some(StreamProperties::Series(properties)) = pli.header.additional_properties.as_ref() {
+            resolved_series_by_provider_id
+                .entry(provider_id)
+                .or_insert_with(|| properties.as_ref().clone());
+        }
+    }
+
+    if resolved_series_by_provider_id.is_empty() {
+        return;
+    }
+
+    for source_pli in provider_fpl.items_mut() {
+        if source_pli.header.xtream_cluster != XtreamCluster::Series
+            || source_pli.header.item_type != PlaylistItemType::SeriesInfo
+        {
+            continue;
+        }
+
+        let Some(provider_id) = source_pli.get_provider_id() else {
+            continue;
+        };
+        if provider_id == 0 {
+            continue;
+        }
+
+        if let Some(resolved) = resolved_series_by_provider_id.get(&provider_id) {
+            source_pli.header.additional_properties =
+                Some(StreamProperties::Series(Box::new(resolved.clone())));
+        }
     }
 }
 
@@ -476,8 +531,11 @@ pub async fn update_series_metadata(
 
     let display_id = series_id_opt.map_or_else(|| "StringID".to_string(), |v| v.to_string());
 
-    // 1. Fetch Info from Provider (ONLY if fetch_info is true)
-    if fetch_info {
+    // Input DB is canonical: only fetch provider info when we still have no stored properties.
+    let should_fetch_info = fetch_info && props.is_none();
+
+    // 1. Fetch Info from Provider (only when missing in input DB)
+    if should_fetch_info {
         if let Some(series_id) = series_id_opt {
             // Fetch Info from Provider
             let info_url = xtream::get_xtream_player_api_info_url(input, XtreamCluster::Series, series_id)

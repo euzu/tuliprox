@@ -960,6 +960,7 @@ mod tests {
             exp_date: None,
             t_batch_url: None,
             panel_api: None,
+            provider_configs: None,
             cache_duration_seconds: 0,
         }
     }

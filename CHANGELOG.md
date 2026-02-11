@@ -72,6 +72,11 @@
 - **FFprobe Integration**: Added capability to probe streams for codec, resolution, HDR (HDR10/HLG/DV), and audio channels using `ffprobe`. Probing strictly respects provider connection limits. If no slot is available (considering user limits), the item is skipped to prevent provider bans.
 - **Metadata Fallback**: Automatically fetches missing TMDB IDs and release dates via the TMDB API if the provider data is incomplete.
 - **Streaming**: Added `grace_period_hold_stream` configuration option to delay stream output until grace period connection checks are completed.
+- **Provider Failover & Rotation**: Tuliprox supports robust failover mechanisms for streaming providers.
+  You can use the special `provider://<provider_name>/...` URL scheme in your configurations. Tuliprox will automatically resolve this to the current active URL of the specified provider.
+  If the current URL fails (e.g., 5xx error, timeout), Tuliprox automatically rotates to the next available URL for that provider.
+  It tracks failures and prevents infinite loops by limiting attempts to the number of available URLs.
+- Added `epg_request_timeshift: [-+]hh:mm or TimeZone`, example `Europe/Paris`, `America/New_York`, `-2:30`(-2h30m), `+0:15` (15m), `2` (2h), `:30` (30m), `:3` (3m)
 
 ### ⚙️ New Settings
 - **config.yml**:

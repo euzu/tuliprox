@@ -85,6 +85,8 @@ pub async fn persist_playlist(app_config: &Arc<AppConfig>, playlist: &mut [Playl
     }
 
     rewrite_series_info_episode_virtual_id(playlist, &local_library_series, &provider_series);
+    drop(local_library_series);
+    drop(provider_series);
 
     for output in &target.output {
         let mut filtered: Option<Vec<PlaylistGroup>> = match output {
@@ -123,8 +125,9 @@ pub async fn persist_playlist(app_config: &Arc<AppConfig>, playlist: &mut [Playl
     if let Err(err) = target_id_mapping.persist() {
         errors.push(info_err!("{err}"));
     }
-    // We must drop target_id_mapping here to release the exclusive B+Tree lock
-    // otherwise the subsequent load_xtream_target_storage will deadlock waiting for a shared lock.
+    // Keep lock until all outputs are persisted to prevent concurrent writers
+    // from interleaving mapping and output state for the same target.
+    // We must release it before loading caches below (which may acquire read locks).
     drop(target_id_mapping);
     drop(file_lock);
 

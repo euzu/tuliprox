@@ -322,6 +322,7 @@
     "MAX_CONNECTIONS": "Max Connections",
     "METHOD": "Method",
     "EPG_TIMESHIFT": "Epg Timeshift",
+    "EPG_REQUEST_TIMESHIFT": "Epg Request Timeshift",
     "CREATED_AT": "Created at",
     "EXP_DATE": "Exp. date",
     "UI_ENABLED": "Ui",
@@ -420,7 +421,9 @@
     "USE_USER_DB": "Use User DB",
     "ADD_SERVER":  "Add Server",
     "FFPROBE_ENABLED": "FFprobe Enabled",
-    "FFPROBE_TIMEOUT": "FFprobe Timeout (sec)"
+    "FFPROBE_TIMEOUT": "FFprobe Timeout (sec)",
+    "FAILOVER_REDIRECT_PATTERNS": "Failover Redirect Patterns",
+    "ADD_PATTERN": "Add Pattern"
   },
   "TITLE": {
     "USER_BOUQUET_EDITOR": "Playlist Category Selection"

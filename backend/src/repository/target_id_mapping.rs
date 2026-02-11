@@ -1,4 +1,4 @@
-use crate::repository::bplustree::{BPlusTree, BPlusTreeMetadata, BPlusTreeUpdate};
+use crate::repository::bplustree::{BPlusTree, BPlusTreeMetadata, BPlusTreeUpdate, FlushPolicy};
 use chrono::Local;
 use log::error;
 use serde::{Deserialize, Serialize};
@@ -83,25 +83,28 @@ impl TargetIdMapping {
             .map_err(|e| info_err!("Failed to create UUID index at {}: {e}", uuid_index_path.display()))?;
 
         // Open disk-based update handles
-        let disk_by_virtual_id = match BPlusTreeUpdate::<u32, VirtualIdRecord>::try_new(path) {
+        let mut disk_by_virtual_id = match BPlusTreeUpdate::<u32, VirtualIdRecord>::try_new_with_backoff(path) {
             Ok(tree) => tree,
             Err(e) => {
                 error!("Failed to open primary tree at {}: {e}", path.display());
                 // Create fresh and try again
                 let _ = BPlusTree::<u32, VirtualIdRecord>::new().store(path);
-                BPlusTreeUpdate::try_new(path).map_err(|_| info_err!("Failed to create primary tree after retry"))?
+                BPlusTreeUpdate::try_new_with_backoff(path).map_err(|_| info_err!("Failed to create primary tree after retry"))?
             }
         };
 
-        let disk_by_uuid = match BPlusTreeUpdate::<UUIDType, u32>::try_new(&uuid_index_path) {
+        let mut disk_by_uuid = match BPlusTreeUpdate::<UUIDType, u32>::try_new_with_backoff(&uuid_index_path) {
             Ok(tree) => tree,
             Err(e) => {
                 error!("Failed to open UUID index at {}: {e}", uuid_index_path.display());
                 // Create fresh and try again
                 let _ = BPlusTree::<UUIDType, u32>::new().store(&uuid_index_path);
-                BPlusTreeUpdate::try_new(&uuid_index_path).map_err(|_| info_err!("Failed to create UUID index after retry"))?
+                BPlusTreeUpdate::try_new_with_backoff(&uuid_index_path).map_err(|_| info_err!("Failed to create UUID index after retry"))?
             }
         };
+
+        disk_by_virtual_id.set_flush_policy(FlushPolicy::Batch);
+        disk_by_uuid.set_flush_policy(FlushPolicy::Batch);
 
         let mut virtual_id_counter: u32 = 0;
 
@@ -213,6 +216,9 @@ impl TargetIdMapping {
                     error!("Failed to write virtual_id_counter to tree header at {}: {e}", self.path.display());
                     e
                 })?;
+
+            self.disk_by_virtual_id.commit()?;
+            self.disk_by_uuid.commit()?;
         }
         Ok(())
     }

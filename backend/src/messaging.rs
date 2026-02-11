@@ -260,6 +260,7 @@ async fn resolve_template<'a>(app_config: &'a Arc<AppConfig>, http_client: &'a r
     let input_source =  InputSource {
         name: "Template".intern(),
         url,
+        provider: None,
         username: None,
         password: None,
         method: InputFetchMethod::GET,

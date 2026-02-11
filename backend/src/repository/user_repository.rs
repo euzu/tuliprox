@@ -28,6 +28,7 @@ struct StoredProxyUserCredentialsDeprecated {
     pub max_connections: Option<u32>,
     pub status: Option<ProxyUserStatus>,
     pub ui_enabled: bool,
+    pub comment: Option<String>,
 }
 
 impl StoredProxyUserCredentialsDeprecated {
@@ -39,12 +40,13 @@ impl StoredProxyUserCredentialsDeprecated {
             proxy: stored.proxy,
             server: stored.server.clone(),
             epg_timeshift: stored.epg_timeshift.clone(),
+            epg_request_timeshift: None,
             created_at: stored.created_at,
             exp_date: stored.exp_date,
             max_connections: stored.max_connections.unwrap_or_default(),
             status: stored.status,
             ui_enabled: stored.ui_enabled,
-            comment: None,
+            comment: stored.comment.clone(),
         }
     }
 }
@@ -62,6 +64,7 @@ struct StoredProxyUserCredentials {
     pub proxy: ProxyType,
     pub server: Option<String>,
     pub epg_timeshift: Option<String>,
+    pub epg_request_timeshift: Option<String>,
     pub created_at: Option<i64>,
     pub exp_date: Option<i64>,
     pub max_connections: Option<u32>,
@@ -80,6 +83,7 @@ impl StoredProxyUserCredentials {
             proxy: proxy.proxy,
             server: proxy.server.clone(),
             epg_timeshift: proxy.epg_timeshift.clone(),
+            epg_request_timeshift: proxy.epg_request_timeshift.clone(),
             created_at: proxy.created_at,
             exp_date: proxy.exp_date,
             max_connections: if proxy.max_connections > 0 { Some(proxy.max_connections) } else { None },
@@ -97,6 +101,7 @@ impl StoredProxyUserCredentials {
             proxy: stored.proxy,
             server: stored.server.clone(),
             epg_timeshift: stored.epg_timeshift.clone(),
+            epg_request_timeshift: stored.epg_request_timeshift.clone(),
             created_at: stored.created_at,
             exp_date: stored.exp_date,
             max_connections: stored.max_connections.unwrap_or_default(),
@@ -444,6 +449,7 @@ mod tests {
                         proxy: ProxyType::Reverse(None),
                         server: Some("default".to_string()),
                         epg_timeshift: None,
+                        epg_request_timeshift: None,
                         created_at: None,
                         exp_date: Some(1_672_705_545),
                         max_connections: 1,
@@ -458,6 +464,7 @@ mod tests {
                         proxy: ProxyType::Reverse(None),
                         server: Some("default".to_string()),
                         epg_timeshift: None,
+                        epg_request_timeshift: None,
                         created_at: None,
                         exp_date: Some(1_672_705_545),
                         max_connections: 1,
@@ -472,6 +479,7 @@ mod tests {
                         proxy: ProxyType::Reverse(None),
                         server: Some("default".to_string()),
                         epg_timeshift: None,
+                        epg_request_timeshift: None,
                         created_at: None,
                         exp_date: Some(1_672_705_545),
                         max_connections: 1,
@@ -486,6 +494,7 @@ mod tests {
                         proxy: ProxyType::Reverse(None),
                         server: Some("default".to_string()),
                         epg_timeshift: None,
+                        epg_request_timeshift: None,
                         created_at: None,
                         exp_date: Some(1_672_705_545),
                         max_connections: 1,

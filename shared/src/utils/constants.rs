@@ -110,7 +110,7 @@ pub struct Constants {
 
 pub static CONSTANTS: LazyLock<Constants> = LazyLock::new(||
     Constants {
-        re_credentials: Regex::new(r"((username|password|token)=)[^&]*").unwrap(),
+        re_credentials: Regex::new(r"((username|password|token|api_key)=)[^&]*").unwrap(),
         re_ipv4: Regex::new(r"\b((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\b").unwrap(),
         re_ipv6: Regex::new(r"\b([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b|\b::([0-9a-fA-F]{1,4}:){0,6}[0-9a-fA-F]{1,4}\b|\b([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}\b|\b::ffff:(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b").unwrap(),
         re_stream_url: Regex::new(r"(?i)^(?P<scheme>https?://)[^/]+/(?P<ctx>live|video|movie|series|m3u-stream|resource)/[^/]+/[^/]+/").unwrap(),

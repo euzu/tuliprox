@@ -16,7 +16,8 @@ use crate::utils::{debug_if_enabled, xtream};
 use log::{debug, error, info, log_enabled, warn, Level};
 use serde_json::Value;
 use shared::error::TuliproxError;
-use shared::model::{InputType, MediaQuality, PlaylistItem, PlaylistItemType, StreamProperties, VideoStreamDetailProperties, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem, XtreamVideoInfo};
+use shared::model::{InputType, MediaQuality, PlaylistEntry, PlaylistItem, PlaylistItemType, StreamProperties, VideoStreamDetailProperties, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem, XtreamVideoInfo};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -53,7 +54,63 @@ pub async fn playlist_resolve_vod(
         do_probe,
     ).await;
 
+    if provider_fpl.is_memory() {
+        sync_resolved_vod_properties(provider_fpl, fpl);
+    }
+
     provider_fpl.source.obtain_resources().await;
+}
+
+fn sync_resolved_vod_properties(
+    provider_fpl: &mut FetchedPlaylist<'_>,
+    processed_fpl: &mut FetchedPlaylist<'_>,
+) {
+    let mut resolved_vod_by_provider_id: HashMap<u32, VideoStreamProperties> = HashMap::new();
+
+    for pli in processed_fpl.items() {
+        if pli.header.xtream_cluster != XtreamCluster::Video
+            || pli.header.item_type != PlaylistItemType::Video
+        {
+            continue;
+        }
+
+        let Some(provider_id) = pli.get_provider_id() else {
+            continue;
+        };
+        if provider_id == 0 {
+            continue;
+        }
+
+        if let Some(StreamProperties::Video(properties)) = pli.header.additional_properties.as_ref() {
+            resolved_vod_by_provider_id
+                .entry(provider_id)
+                .or_insert_with(|| properties.as_ref().clone());
+        }
+    }
+
+    if resolved_vod_by_provider_id.is_empty() {
+        return;
+    }
+
+    for source_pli in provider_fpl.items_mut() {
+        if source_pli.header.xtream_cluster != XtreamCluster::Video
+            || source_pli.header.item_type != PlaylistItemType::Video
+        {
+            continue;
+        }
+
+        let Some(provider_id) = source_pli.get_provider_id() else {
+            continue;
+        };
+        if provider_id == 0 {
+            continue;
+        }
+
+        if let Some(resolved) = resolved_vod_by_provider_id.get(&provider_id) {
+            source_pli.header.additional_properties =
+                Some(StreamProperties::Video(Box::new(resolved.clone())));
+        }
+    }
 }
 
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
@@ -415,9 +472,11 @@ pub async fn update_vod_metadata(
 
     let display_id = stream_id_opt.map_or_else(|| "StringID".to_string(), |v: u32| v.to_string());
 
-    // 1. Fetch Info from Provider (ONLY if fetch_info is true)
-    // Force fetch if requested, even if we have some data, to ensure freshness/completeness
-    if fetch_info {
+    // Input DB is canonical: only fetch provider info when we still have no stored properties.
+    let should_fetch_info = fetch_info && props.is_none();
+
+    // 1. Fetch Info from Provider (only when missing in input DB)
+    if should_fetch_info {
         if let Some(stream_id) = stream_id_opt {
             let info_url = xtream::get_xtream_player_api_info_url(input, XtreamCluster::Video, stream_id)
                 .ok_or_else(|| shared::error::info_err!("Failed to build info URL"))?;

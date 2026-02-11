@@ -22,6 +22,8 @@ pub struct ProxyUserCredentialsDto {
     pub server: Option<String>,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub epg_timeshift: Option<String>,
+    #[serde(default, skip_serializing_if = "is_blank_optional_string")]
+    pub epg_request_timeshift: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<i64>,
     #[serde(default, deserialize_with = "deserialize_timestamp", skip_serializing_if = "Option::is_none")]
