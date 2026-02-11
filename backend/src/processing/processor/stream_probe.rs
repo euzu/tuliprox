@@ -89,8 +89,9 @@ pub async fn update_generic_stream_metadata(
     }
 
     let probe_url = stream_url.to_string();
-    let ffprobe_timeout = app_config.config.load().video.as_ref().and_then(|v| v.ffprobe_timeout).unwrap_or(60);
-    let user_agent = app_config.config.load().default_user_agent.clone();
+    let config = app_config.config.load();
+    let ffprobe_timeout = config.video.as_ref().and_then(|v| v.ffprobe_timeout).unwrap_or(60);
+    let user_agent = config.default_user_agent.clone();
     let analyze_duration = 10_000_000;
     let probe_size = 10_000_000;
 

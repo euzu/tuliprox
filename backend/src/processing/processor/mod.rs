@@ -47,14 +47,14 @@ macro_rules! create_resolve_options_function_for_xtream_target {
                     Some(xtream_output) => {
                         let mut flags = $crate::processing::processor::ResolveOptionsFlagsSet::new();
                         // Map config flags to resolve options flags
-                        if xtream_output.flags.contains($crate::model::XtreamTargetFlags::[<Resolve $cluster:camel>]) && fpl.input.input_type == InputType::Xtream {
+                        if xtream_output.flags.contains($crate::model::XtreamTargetFlags::[<Resolve $cluster:camel>]) && fpl.input.input_type.is_xtream() {
                             flags.add($crate::processing::processor::ResolveOptionsFlags::Resolve);
                         }
                         if resolve_tmdb_missing {
                             flags.add($crate::processing::processor::ResolveOptionsFlags::TmdbMissing);
                         }
                         if probe_requested
-                            && fpl.input.input_type == InputType::Xtream
+                            && fpl.input.input_type.is_xtream()
                             && xtream_output.flags.contains($crate::model::XtreamTargetFlags::[<Probe $cluster:camel>]) {
                             flags.add($crate::processing::processor::ResolveOptionsFlags::Probe);
                         }

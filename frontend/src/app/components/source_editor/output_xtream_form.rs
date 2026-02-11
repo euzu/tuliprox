@@ -238,7 +238,7 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
                     <div class="tp__config-view__cols-2">
                     { edit_field_number_u16!(output_form_state, translate.t(LABEL_RESOLVE_DELAY_SEC), resolve_delay,  XtreamTargetOutputFormAction::ResolveDelay) }
                     </div>
-                    { edit_field_bool!(output_form_state, translate.t(LABEL_RESOLVE_BACKGROUND), resolve_vod,  XtreamTargetOutputFormAction::ResolveBackground) }
+                    { edit_field_bool!(output_form_state, translate.t(LABEL_RESOLVE_BACKGROUND), resolve_background,  XtreamTargetOutputFormAction::ResolveBackground) }
                 </TitledCard>
                 <TitledCard title={translate.t(LABEL_PROBE)}>
                     <div class="tp__config-view__cols-3">

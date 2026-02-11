@@ -11,7 +11,6 @@ use crate::api::model::ProviderIdType;
 /// Updates metadata for a single Live stream (primarily probing)
 pub async fn update_live_stream_metadata(
     app_config: &Arc<AppConfig>,
-    client: &reqwest::Client,
     input: &ConfigInput,
     id: ProviderIdType,
     save: bool,
@@ -83,12 +82,9 @@ pub async fn update_live_stream_metadata(
         &temp_stream_prop,
         use_prefix, no_ext
     );
-
-    // 2. Configure FFProbe
-    let _ = client; 
-    
-    let ffprobe_timeout = app_config.config.load().video.as_ref().and_then(|v| v.ffprobe_timeout).unwrap_or(60);
-    let user_agent = app_config.config.load().default_user_agent.clone();
+    let config = app_config.config.load();
+    let ffprobe_timeout = config.video.as_ref().and_then(|v| v.ffprobe_timeout).unwrap_or(60);
+    let user_agent = config.default_user_agent.clone();
     let analyze_duration = 5_000_000;
     let probe_size = 5_000_000;
 

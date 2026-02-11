@@ -1353,7 +1353,6 @@ impl InputWorker {
 
                 match update_live_stream_metadata(
                     &app_state.app_config,
-                    client,
                     input,
                     id.clone(),
                     false,

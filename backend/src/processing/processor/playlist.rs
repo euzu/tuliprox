@@ -44,6 +44,8 @@ use shared::model::{CounterModifier, FieldGetAccessor, FieldSetAccessor, InputTy
 use shared::utils::{create_alias_uuid, default_as_default, interner_gc, Internable};
 use std::time::Instant;
 
+const DEFAULT_PROBE_STREAM_DELAY: u16 = 50;
+
 fn is_valid(pli: &PlaylistItem, filter: &Filter, match_as_ascii: bool) -> bool {
     let provider = ValueProvider { pli, match_as_ascii };
     filter.filter(&provider)
@@ -1002,7 +1004,7 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
             url: item.header.url.to_string(),
             item_type: item.header.item_type,
             reason: ResolveReasonSet::from_variants(&[ResolveReason::MissingDetails]),
-            delay: 50,
+            delay: DEFAULT_PROBE_STREAM_DELAY,
         };
         mgr.queue_task_background(input_name.clone(), task);
         queued_stream_count += 1;

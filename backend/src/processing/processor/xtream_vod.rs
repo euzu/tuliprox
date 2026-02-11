@@ -16,7 +16,7 @@ use crate::utils::{trace_if_enabled, debug_if_enabled, xtream};
 use log::{debug, error, info, log_enabled, trace, warn, Level};
 use serde_json::Value;
 use shared::error::TuliproxError;
-use shared::model::{InputType, MediaQuality, PlaylistEntry, PlaylistItem, PlaylistItemType, StreamProperties, VideoStreamDetailProperties, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem, XtreamVideoInfo};
+use shared::model::{MediaQuality, PlaylistEntry, PlaylistItem, PlaylistItemType, StreamProperties, VideoStreamDetailProperties, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem, XtreamVideoInfo};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -290,7 +290,7 @@ fn check_resolve_reasons(
     resolve_options: &ResolveOptions,
     do_probe: bool,
     resolve_tmdb_enabled: bool,
-    pli: &mut PlaylistItem,
+    pli: &PlaylistItem,
 ) -> ResolveReasonSet {
     // Check if we need to do anything for this item
     let mut reasons = ResolveReasonSet::default();
@@ -306,7 +306,7 @@ fn check_resolve_reasons(
     reasons
 }
 
-fn check_needs_probe(pli: &mut PlaylistItem, reasons: &mut ResolveReasonSet) {
+fn check_needs_probe(pli: &PlaylistItem, reasons: &mut ResolveReasonSet) {
     let needs_probe = match pli.header.additional_properties.as_ref() {
         Some(StreamProperties::Video(props)) => {
             let details = props.details.as_ref();
@@ -324,7 +324,7 @@ fn check_needs_probe(pli: &mut PlaylistItem, reasons: &mut ResolveReasonSet) {
     }
 }
 
-fn check_needs_info(resolve_options: &ResolveOptions, pli: &mut PlaylistItem, reasons: &mut ResolveReasonSet) -> bool {
+fn check_needs_info(resolve_options: &ResolveOptions, pli: &PlaylistItem, reasons: &mut ResolveReasonSet) -> bool {
     let needs_info = !pli.has_details() && resolve_options.flags.contains(ResolveOptionsFlags::Resolve);
 
     if needs_info {
@@ -336,7 +336,7 @@ fn check_needs_info(resolve_options: &ResolveOptions, pli: &mut PlaylistItem, re
 fn check_resolve_tmdb(
     resolve_options: &ResolveOptions,
     resolve_tmdb_enabled: bool,
-    pli: &mut PlaylistItem,
+    pli: &PlaylistItem,
     needs_info: bool,
     reasons: &mut ResolveReasonSet,
 ) {
@@ -509,11 +509,13 @@ pub async fn update_vod_metadata(
                             }
 
                             if let Ok(info) = serde_json::from_value::<XtreamVideoInfo>(json_value) {
-                                if let Some(existing) = &existing_item {
-                                    props = Some(VideoStreamProperties::from_info(&info, existing));
-                                    fetched_new = true;
-                                    properties_updated = true;
-                                }
+                                props = Some(if let Some(existing) = &existing_item {
+                                    VideoStreamProperties::from_info(&info, existing)
+                                } else {
+                                    VideoStreamProperties::from_info_without_existing(&info)
+                                });
+                                fetched_new = true;
+                                properties_updated = true;
                             }
                         }
                     }
@@ -651,8 +653,9 @@ pub async fn update_vod_metadata(
                 true, true,
             );
 
-            let ffprobe_timeout = app_config.config.load().video.as_ref().and_then(|v| v.ffprobe_timeout).unwrap_or(60);
-            let user_agent = app_config.config.load().default_user_agent.clone();
+            let config = app_config.config.load();
+            let ffprobe_timeout = config.video.as_ref().and_then(|v| v.ffprobe_timeout).unwrap_or(60);
+            let user_agent = config.default_user_agent.clone();
             let analyze_duration = 10_000_000;
             let probe_size = 10_000_000;
 

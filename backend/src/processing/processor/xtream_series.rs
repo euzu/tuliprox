@@ -18,7 +18,7 @@ use crate::utils::{debug_if_enabled, xtream};
 use log::{debug, error, info, log_enabled, trace, warn, Level};
 use serde_json::Value;
 use shared::error::TuliproxError;
-use shared::model::{InputType, MediaQuality, PlaylistEntry, PlaylistItem, SeriesStreamProperties, StreamProperties, XtreamPlaylistItem, XtreamSeriesInfo};
+use shared::model::{MediaQuality, PlaylistEntry, PlaylistItem, SeriesStreamProperties, StreamProperties, XtreamPlaylistItem, XtreamSeriesInfo};
 use shared::model::{PlaylistGroup, PlaylistItemType, XtreamCluster};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -661,8 +661,9 @@ pub async fn update_series_metadata(
     if do_probe && app_config.is_ffprobe_enabled().await {
         if let Some(details) = properties.details.as_mut() {
             if let Some(episodes) = details.episodes.as_mut() {
-                let ffprobe_timeout = app_config.config.load().video.as_ref().and_then(|v| v.ffprobe_timeout).unwrap_or(60);
-                let user_agent = app_config.config.load().default_user_agent.clone();
+                let config = app_config.config.load();
+                let ffprobe_timeout = config.video.as_ref().and_then(|v| v.ffprobe_timeout).unwrap_or(60);
+                let user_agent = config.default_user_agent.clone();
                 let analyze_duration = 10_000_000;
                 let probe_size = 10_000_000;
 
