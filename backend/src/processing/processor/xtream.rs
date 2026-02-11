@@ -4,15 +4,9 @@ use crate::model::{AppConfig, ConfigInput};
 use shared::model::{LiveStreamProperties, StreamProperties, XtreamCluster, XtreamPlaylistItem};
 use crate::repository::{get_input_storage_path, persist_input_live_info, BPlusTreeQuery, xtream_get_file_path};
 use crate::utils::{debug_if_enabled};
-use log::{debug, warn, info};
+use log::{debug, warn};
 use crate::processing::parser::xtream::create_xtream_url;
-
-// Imports for playlist resolution logic
-use crate::model::{ConfigTarget, FetchedPlaylist};
-use shared::model::{InputType};
-use crate::api::model::{MetadataUpdateManager, ResolveReason, ResolveReasonSet, UpdateTask, ProviderIdType};
-use crate::processing::processor::{create_resolve_options_function_for_xtream_target, ResolveOptionsFlags};
-use crate::processing::processor::playlist::PlaylistProcessingContext;
+use crate::api::model::ProviderIdType;
 
 /// Updates metadata for a single Live stream (primarily probing)
 pub async fn update_live_stream_metadata(
@@ -145,105 +139,4 @@ pub async fn update_live_stream_metadata(
     }
     
     Ok(Some(properties))
-}
-
-create_resolve_options_function_for_xtream_target!(live);
-
-fn get_resolve_livetv_options(target: &ConfigTarget, fpl: &FetchedPlaylist) -> (bool, u16, u32, bool) {
-
-    let resolve_options = get_resolve_live_options(target, fpl);
-    if resolve_options.flags.contains(ResolveOptionsFlags::Resolve) {
-        let interval = match target.get_xtream_output() {
-            Some(xtream_output) => xtream_output.resolve_live_interval_hours,
-            None => 0
-        };
-        return (true, resolve_options.resolve_delay, interval, resolve_options.flags.contains(ResolveOptionsFlags::Probe));
-    }
-    (false, 0, 0, false)
-
-}
-
-pub async fn playlist_resolve_livetv(
-    ctx: &PlaylistProcessingContext,
-    target: &ConfigTarget,
-    _errors: &mut Vec<TuliproxError>,
-    fpl: &mut FetchedPlaylist<'_>,
-) {
-
-    let (resolve_livetv, resolve_delay, interval_hours, probe_requested) = get_resolve_livetv_options(target, fpl);
-
-    let app_config: &Arc<AppConfig> = &ctx.config;
-    // let client: &reqwest::Client = &ctx.client;
-    // let provider_manager: Option<&Arc<ActiveProviderManager>> = ctx.provider_manager.as_ref();
-    let metadata_manager: Option<&Arc<MetadataUpdateManager>> = ctx.metadata_manager.as_ref();
-
-    // Check if ffprobe is enabled globally
-    let do_probe = probe_requested && app_config.is_ffprobe_enabled().await;
-    // We only proceed if both the target requests it AND global ffprobe is enabled
-    if !resolve_livetv || !do_probe {
-        return;
-    }
-
-    // Determine cutoff timestamp
-    let interval_secs = u64::from(interval_hours) * 3600;
-    let now = chrono::Utc::now().timestamp();
-    let cutoff_ts = now.saturating_sub(interval_secs.cast_signed());
-
-    let input_name_arc = fpl.input.name.clone();
-    let mut queued_count = 0;
-
-    for pli in fpl.items_mut() {
-        // Only interested in actual Live streams (not VOD/Series)
-        if pli.header.xtream_cluster != XtreamCluster::Live {
-            continue;
-        }
-        // Exclude generic/unknown types if necessary, though XtreamCluster::Live usually covers PlaylistItemType::Live
-        if !pli.header.item_type.is_live() {
-            continue;
-        }
-
-        let provider_id = if let Ok(uid) = pli.header.id.parse::<u32>() {
-            if uid == 0 { continue; }
-            ProviderIdType::Id(uid)
-        } else {
-            ProviderIdType::from(&*pli.header.id)
-        };
-
-        let mut needs_probe = false;
-
-        // Check existing properties
-        if let Some(StreamProperties::Live(props)) = pli.header.additional_properties.as_ref() {
-            if let Some(last_ts) = props.last_probed_timestamp {
-                if last_ts < cutoff_ts {
-                    // Expired
-                    needs_probe = true;
-                }
-            } else {
-                // Never probed
-                needs_probe = true;
-            }
-        } else {
-            // No properties at all
-            needs_probe = true;
-        }
-
-        if needs_probe {
-            if let Some(mgr) = metadata_manager {
-                let reason = ResolveReasonSet::from_variants(&[ResolveReason::Probe]);
-                let task = UpdateTask::ProbeLive {
-                    id: provider_id,
-                    reason,
-                    delay: resolve_delay,
-                    interval: interval_secs,
-                };
-                let input_name = input_name_arc.clone();
-                mgr.queue_task_background(input_name, task);
-                queued_count += 1;
-            }
-        }
-    }
-
-    if queued_count > 0 {
-        info!("Queued {queued_count} Live TV streams for probing (Input: {input_name_arc})");
-    }
 }

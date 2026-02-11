@@ -1,25 +1,30 @@
+use crate::api::model::ProviderHandle;
 use crate::api::model::{AppState, EventMessage};
+use crate::processing::processor::{update_generic_stream_metadata, update_live_stream_metadata, update_series_metadata, update_vod_metadata};
+use crate::utils::debug_if_enabled;
+use dashmap::mapref::entry::Entry;
+use dashmap::DashMap;
 use log::{debug, error, info, warn};
+use shared::create_bit_set;
 use shared::error::TuliproxError;
-use shared::utils::{sanitize_sensitive_info, generate_playlist_uuid};
+use shared::model::{LiveStreamProperties, PlaylistItemType, SeriesStreamProperties, UUIDType, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem};
+use shared::utils::generate_playlist_uuid;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
-use dashmap::DashMap;
-use dashmap::mapref::entry::Entry;
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
-use shared::create_bit_set;
-use crate::utils::debug_if_enabled;
-use crate::processing::processor::{update_vod_metadata, update_series_metadata, update_live_stream_metadata, update_generic_stream_metadata};
-use shared::model::{LiveStreamProperties, PlaylistItemType, SeriesStreamProperties, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem};
-use crate::api::model::ProviderHandle;
 
-use crate::repository::{get_input_storage_path, xtream_get_file_path, BPlusTreeQuery, get_target_id_mapping_file, write_playlist_batch_item_upsert};
-use crate::repository::{persist_input_vod_info_batch, persist_input_series_info_batch, persist_input_live_info_batch,  TargetIdMapping};
 use crate::api::model::BatchResultCollector;
-use std::collections::{HashMap, HashSet};
+use crate::repository::{get_input_storage_path, get_target_id_mapping_file, write_playlist_batch_item_upsert, xtream_get_file_path, BPlusTreeQuery};
+use crate::repository::{persist_input_live_info_batch, persist_input_series_info_batch, persist_input_vod_info_batch, TargetIdMapping};
 use crate::utils::FileReadGuard;
 use std::cmp::min;
+use std::collections::{HashMap, HashSet};
+use crate::utils::trace_if_enabled;
+
+const QUEUE_LOG_INTERVAL: Duration = Duration::from_secs(30);
+const PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(15);
+const MAX_RETRY_BACKOFF_SECS: u64 = 60;
 
 const MAX_QUEUE_SIZE: usize = 100_000;
 const TASK_ERR_NO_CONNECTION: &str = "No connection available";
@@ -67,15 +72,15 @@ pub enum UpdateTask {
     ResolveSeries { id: ProviderIdType, reason: ResolveReasonSet, delay: u16 },
     ProbeLive { id: ProviderIdType, reason: ResolveReasonSet, delay: u16, interval: u64 },
     // Generic probe for M3U/Library/etc.
-    ProbeStream { unique_id: String, url: String, item_type: PlaylistItemType, reason: ResolveReasonSet, delay: u16 },
+    ProbeStream { probe_scope: Arc<str>, unique_id: String, url: String, item_type: PlaylistItemType, reason: ResolveReasonSet, delay: u16 },
 }
 
 impl UpdateTask {
     pub fn delay(&self) -> u16 {
         match self {
-            UpdateTask::ResolveVod { delay, .. } | 
-            UpdateTask::ResolveSeries { delay, .. } | 
-            UpdateTask::ProbeLive { delay, .. } | 
+            UpdateTask::ResolveVod { delay, .. } |
+            UpdateTask::ResolveSeries { delay, .. } |
+            UpdateTask::ProbeLive { delay, .. } |
             UpdateTask::ProbeStream { delay, .. } => *delay,
         }
     }
@@ -87,7 +92,7 @@ impl std::fmt::Display for UpdateTask {
             UpdateTask::ResolveVod { id, reason, delay } => write!(f, "Resolve VOD {id} (Reason: {reason}, Delay: {delay}sec)"),
             UpdateTask::ResolveSeries { id, reason, delay } => write!(f, "Resolve Series {id} (Reason: {reason}, Delay: {delay}sec)"),
             UpdateTask::ProbeLive { id, reason, delay, interval } => write!(f, "Probe Live {id} (Reason: {reason}, Delay: {delay}sec, Interval: {interval}secs )"),
-            UpdateTask::ProbeStream { unique_id, reason, delay, .. } => write!(f, "Probe Stream {unique_id} (Reason: {reason}, Delay: {delay}sec)"),
+            UpdateTask::ProbeStream { probe_scope, unique_id, reason, delay, .. } => write!(f, "Probe Stream {probe_scope}/{unique_id} (Reason: {reason}, Delay: {delay}sec)"),
         }
     }
 }
@@ -100,7 +105,7 @@ pub enum TaskKey {
     SeriesStr(Arc<str>),
     Live(u32),
     LiveStr(Arc<str>),
-    Stream(String), 
+    Stream { scope: Arc<str>, id: Arc<str> },
 }
 
 impl TaskKey {
@@ -118,13 +123,13 @@ impl TaskKey {
                 ProviderIdType::Id(val) => TaskKey::Live(*val),
                 ProviderIdType::Text(val) => TaskKey::LiveStr(val.clone()),
             },
-            UpdateTask::ProbeStream { unique_id, url, .. } => {
+            UpdateTask::ProbeStream { probe_scope, unique_id, url, .. } => {
                 if unique_id.trim().is_empty() {
-                    TaskKey::Stream(url.clone())
+                    TaskKey::Stream { scope: probe_scope.clone(), id: Arc::from(url.as_str()) }
                 } else {
-                    TaskKey::Stream(unique_id.clone())
+                    TaskKey::Stream { scope: probe_scope.clone(), id: Arc::from(unique_id.as_str()) }
                 }
-            },
+            }
         }
     }
 }
@@ -138,7 +143,7 @@ struct InputWorkerContext {
 }
 
 /// Manager for background metadata resolution tasks.
-/// 
+///
 /// Architecture: Per-Input Worker Pattern
 /// - Each input gets its own dedicated worker (tokio task)
 /// - Tasks for the SAME input are processed sequentially with rate limiting (defined per task)
@@ -184,10 +189,10 @@ impl MetadataUpdateManager {
     }
 
     /// Queue a task for background processing.
-    /// 
+    ///
     /// If a worker exists for the input, the task is sent to it.
     /// If no worker exists, a new one is spawned.
-    /// 
+    ///
     /// # Arguments
     /// * `input_name` - The input this task belongs to
     /// * `task` - The task to process
@@ -245,7 +250,7 @@ impl MetadataUpdateManager {
         sender: mpsc::Sender<TaskKey>,
         pending_tasks: Arc<DashMap<TaskKey, Mutex<UpdateTask>>>,
         input_name: &str,
-        task: UpdateTask
+        task: UpdateTask,
     ) {
         let key = TaskKey::from_task(&task);
 
@@ -270,14 +275,14 @@ impl MetadataUpdateManager {
         }
 
         if pending_tasks.len() >= MAX_QUEUE_SIZE {
-            warn!("Metadata queue full for input {}, dropping task", sanitize_sensitive_info(input_name));
+            warn!("Metadata queue full for input {input_name}, dropping task");
             return;
         }
 
         pending_tasks.insert(key.clone(), Mutex::new(task));
         if sender.send(key.clone()).await.is_err() {
             pending_tasks.remove(&key);
-            warn!("Failed to send task signal for input {}", sanitize_sensitive_info(input_name));
+            warn!("Failed to send task signal for input {input_name}");
         }
     }
 
@@ -313,60 +318,33 @@ struct InputWorker {
 impl InputWorker {
     #[allow(clippy::too_many_lines)]
     async fn run(mut self) {
-        debug!("Metadata worker started for input {}", sanitize_sensitive_info(&self.input_name));
-        
+        debug!("Metadata worker started for input {}", &self.input_name);
+
         let mut processed_count: usize = 0;
         let mut retry_attempts: HashMap<TaskKey, u8> = HashMap::new();
-        let mut last_queue_counts: (usize, usize) = (usize::MAX, usize::MAX);
         let mut last_queue_log_at = Instant::now();
+        let mut last_progress_log_at = Instant::now();
+        let mut queue_idle_notified = false;
+        let mut started_updates_logged = false;
 
         let input_name = self.input_name.clone();
         let app_state_weak = self.app_state_weak.clone();
 
-        // Buffer for the "next" task if we picked it up via try_recv
+        // Keep one prefetched task to minimize channel waits/lock churn.
         let mut next_task: Option<(TaskKey, UpdateTask)> = None;
 
         loop {
-            // Determine the task to process
             let task_data = if let Some(t) = next_task.take() {
                 Some(t)
             } else {
-                // If we have to wait, we MUST release all DB locks/handles to avoid blocking writers
-                self.db_handles.clear();
-                self.failed_clusters.clear();
-
-                tokio::select! {
-                    biased;
-                    
-                    () = self.cancel_token.cancelled() => {
-                        debug!("Metadata worker cancelled for input {}", sanitize_sensitive_info(&input_name));
-                        break;
-                    }
-                    
-                    res = self.receiver.recv() => {
-                        match res {
-                            Some(key) => {
-                                // Retrieve task snapshot
-                                if let Some(entry) = self.pending_tasks.get(&key) {
-                                    let task = entry.lock().await.clone();
-                                    // Optimization: Remove only AFTER processing? 
-                                    // Requirement: "When a worker finishes a task, it must remove the ID"
-                                    // So we keep it in map, but we need to pass the KEY to the next block to remove it later.
-                                    Some((key, task))
-                                } else {
-                                    None // Task cancelled or processed??
-                                }
-                            },
-                            None => break, // Channel closed
-                        }
-                    }
-                }
+                self.recv_task_fast_or_wait().await
             };
-            
-            let Some((current_key, current_task)) = task_data else { continue };
-            
-            if self.db_handles.is_empty() {
-                 info!("Starting background metadata updates for input {}", sanitize_sensitive_info(&input_name));
+
+            let Some((current_key, current_task)) = task_data else { break };
+
+            if !started_updates_logged {
+                info!("Starting background metadata updates for input {input_name}");
+                started_updates_logged = true;
             }
 
             let delay_secs = current_task.delay();
@@ -382,17 +360,18 @@ impl InputWorker {
                 &mut self.db_handles,
                 &mut self.failed_clusters,
             )
-            .await
+                .await
             {
                 Ok(()) => {
                     processed_count += 1;
                     retry_attempts.remove(&current_key);
-                    if processed_count.is_multiple_of(10) {
-                        info!(
-                            "Background metadata update: {} resolved for input {}",
-                            processed_count,
-                            sanitize_sensitive_info(&input_name)
-                        );
+                    if last_progress_log_at.elapsed() >= PROGRESS_LOG_INTERVAL {
+                        // current_key is removed from pending_tasks later in this loop iteration;
+                        // subtract it here so "remaining" reflects the post-success queue size.
+                        let remaining = self.pending_tasks.len().saturating_sub(1);
+                        let total = processed_count.saturating_add(remaining);
+                        info!("Background metadata update: {processed_count} / {total} resolved for input {input_name}");
+                        last_progress_log_at = Instant::now();
                     }
                 }
                 Err(e) if e.message == TASK_ERR_NO_CONNECTION => {
@@ -402,18 +381,16 @@ impl InputWorker {
                     *entry = entry.saturating_add(1);
                     let attempts = *entry;
 
-                    // If there are other tasks, just move this task to the back of the queue.
-                    // If this is the only task, use exponential backoff based on resolve_delay.
+                    // If this is the only queued signal, use exponential backoff.
+                    // Otherwise, push to the back immediately to improve throughput/fairness.
                     if self.receiver.is_empty() {
-                        let base_delay = u64::from(current_task.delay().max(1));
-                        let exp = u32::from(attempts.saturating_sub(1).min(5));
-                        retry_delay_secs = (base_delay.saturating_mul(2_u64.saturating_pow(exp))).min(60);
+                        retry_delay_secs = Self::compute_retry_backoff_secs(current_task.delay(), attempts);
                     }
 
                     debug_if_enabled!(
                         "No provider connection for task {} on input {}, requeueing (attempt={}, retry_delay={}s, queue_len={})",
                         current_task,
-                        sanitize_sensitive_info(&input_name),
+                        &input_name,
                         attempts,
                         retry_delay_secs,
                         self.receiver.len()
@@ -425,7 +402,7 @@ impl InputWorker {
                         error!(
                             "Task {} failed for input {}: {}",
                             current_task,
-                            sanitize_sensitive_info(&input_name),
+                            &input_name,
                             e
                         );
                     }
@@ -434,67 +411,156 @@ impl InputWorker {
 
             // Check and flush batch
             if self.batch_buffer.should_flush() {
-                // Release locks before flushing (writing)
-                self.db_handles.clear();
-                self.failed_clusters.clear();
+                self.release_db_handles();
                 Self::flush_batch_static(&input_name, app_state_weak.as_ref(), &mut self.batch_buffer).await;
             }
 
             if requeue_current {
-                if retry_delay_secs > 0 {
-                    tokio::time::sleep(Duration::from_secs(retry_delay_secs)).await;
+                if retry_delay_secs > 0
+                    && Self::sleep_or_cancel(&self.cancel_token, Duration::from_secs(retry_delay_secs)).await
+                {
+                    break;
                 }
 
                 if self.sender.send(current_key.clone()).await.is_err() {
                     // Channel closed, drop the pending task key to avoid leaks.
                     self.pending_tasks.remove(&current_key);
                     retry_attempts.remove(&current_key);
-                    warn!(
-                        "Failed to requeue task {} for input {}",
-                        current_task,
-                        sanitize_sensitive_info(&input_name)
-                    );
+                    warn!("Failed to requeue task {current_task} for input {input_name}");
                 }
             } else {
-                // Rate limiting
-                if delay_secs > 0 {
-                    tokio::time::sleep(Duration::from_secs(u64::from(delay_secs))).await;
-                }
-
-                // Cleanup from map (allows new tasks for this ID to be queued)
+                // Remove key immediately after processing to allow re-queueing while we sleep for rate limiting.
                 self.pending_tasks.remove(&current_key);
+
+                // Rate limiting
+                if delay_secs > 0
+                    && Self::sleep_or_cancel(&self.cancel_token, Duration::from_secs(u64::from(delay_secs))).await
+                {
+                    break;
+                }
             }
 
             // Try to get the next task immediately to keep locks open
-            if let Ok(key) = self.receiver.try_recv() {
-                 if let Some(entry) = self.pending_tasks.get(&key) {
-                    next_task = Some((key, entry.lock().await.clone()));
-                 }
+            if next_task.is_none() {
+                match self.receiver.try_recv() {
+                    Ok(key) => {
+                        next_task = self.load_task_snapshot(key).await;
+                    }
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        break;
+                    }
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+                }
             }
 
-            let queue_counts = Self::queue_resolve_counts(&self.pending_tasks);
-            if queue_counts != last_queue_counts || last_queue_log_at.elapsed() >= Duration::from_secs(30) {
-                info!("In queue to resolve vod: {}, series: {} (input: {input_name})", queue_counts.0, queue_counts.1);
-                last_queue_counts = queue_counts;
-                last_queue_log_at = Instant::now();
+            let queue_has_work =
+                next_task.is_some() || !self.receiver.is_empty() || !self.pending_tasks.is_empty();
+
+            if queue_has_work {
+                if queue_idle_notified {
+                    queue_idle_notified = false;
+                    // Force immediate queue status log on transition back to active.
+                    last_queue_log_at = Instant::now()
+                        .checked_sub(QUEUE_LOG_INTERVAL + Duration::from_secs(1))
+                        .unwrap_or_else(Instant::now);
+                }
+
+                // Avoid O(n) queue scans per task; report queue status periodically.
+                if last_queue_log_at.elapsed() >= QUEUE_LOG_INTERVAL {
+                    let queue_counts = Self::queue_resolve_counts(&self.pending_tasks);
+                    info!("In queue to resolve vod: {}, series: {} (input: {input_name})", queue_counts.0, queue_counts.1);
+                    last_queue_log_at = Instant::now();
+                }
+            } else {
+                // Queue is drained: flush remaining batched updates immediately.
+                if !self.batch_buffer.is_empty() {
+                    self.release_db_handles();
+                    Self::flush_batch_static(&input_name, app_state_weak.as_ref(), &mut self.batch_buffer).await;
+                }
+
+                if !queue_idle_notified {
+                    info!("All pending metadata resolves completed for input {input_name}");
+                    if let Some(app_state) = app_state_weak.as_ref().and_then(Weak::upgrade) {
+                        app_state
+                            .event_manager
+                            .send_event(EventMessage::InputMetadataUpdatesCompleted(input_name.clone()));
+                    }
+                    queue_idle_notified = true;
+                }
             }
         }
 
         // Final flush
-        self.db_handles.clear();
-        self.failed_clusters.clear();
+        self.release_db_handles();
         Self::flush_batch_static(&input_name, app_state_weak.as_ref(), &mut self.batch_buffer).await;
-        
+
         // Log completion
         if processed_count > 0 {
-             info!("Metadata updates completed for input {}. Total processed: {}", 
-                   sanitize_sensitive_info(&input_name), processed_count);
-             if let Some(app_state) = app_state_weak.as_ref().and_then(Weak::upgrade) {
-                app_state.event_manager.send_event(EventMessage::InputMetadataUpdatesCompleted(input_name.clone()));
+            info!("Metadata updates completed for input {input_name}. Total processed: {processed_count}");
+            if !queue_idle_notified {
+                if let Some(app_state) = app_state_weak.as_ref().and_then(Weak::upgrade) {
+                    app_state.event_manager.send_event(EventMessage::InputMetadataUpdatesCompleted(input_name.clone()));
+                }
             }
         }
-        
-        debug!("Metadata worker stopped for input {}", sanitize_sensitive_info(&input_name));
+
+        debug!("Metadata worker stopped for input {input_name}");
+    }
+
+    async fn recv_task_fast_or_wait(&mut self) -> Option<(TaskKey, UpdateTask)> {
+        match self.receiver.try_recv() {
+            Ok(key) => {
+                return self.load_task_snapshot(key).await;
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                return None;
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+        }
+
+        // When idle, release read handles to avoid writer starvation.
+        self.release_db_handles();
+
+        tokio::select! {
+            biased;
+            () = self.cancel_token.cancelled() => None,
+            res = self.receiver.recv() => {
+                match res {
+                    Some(key) => self.load_task_snapshot(key).await,
+                    None => None,
+                }
+            }
+        }
+    }
+
+    async fn load_task_snapshot(&self, key: TaskKey) -> Option<(TaskKey, UpdateTask)> {
+        let entry = self.pending_tasks.get(&key)?;
+        let task = entry.lock().await.clone();
+        Some((key, task))
+    }
+
+    fn release_db_handles(&mut self) {
+        if !self.db_handles.is_empty() {
+            self.db_handles.clear();
+        }
+        if !self.failed_clusters.is_empty() {
+            self.failed_clusters.clear();
+        }
+    }
+
+    fn compute_retry_backoff_secs(base_delay_secs: u16, attempts: u8) -> u64 {
+        let base_delay = u64::from(base_delay_secs.max(1));
+        let exp = u32::from(attempts.saturating_sub(1).min(6));
+        base_delay
+            .saturating_mul(2_u64.saturating_pow(exp))
+            .min(MAX_RETRY_BACKOFF_SECS)
+    }
+
+    async fn sleep_or_cancel(cancel_token: &CancellationToken, duration: Duration) -> bool {
+        tokio::select! {
+            () = cancel_token.cancelled() => true,
+            () = tokio::time::sleep(duration) => false,
+        }
     }
 
     fn queue_resolve_counts(pending_tasks: &DashMap<TaskKey, Mutex<UpdateTask>>) -> (usize, usize) {
@@ -516,60 +582,79 @@ impl InputWorker {
     async fn flush_batch_static(
         input_name: &str,
         app_state_weak: Option<&Weak<AppState>>,
-        batch_buffer: &mut BatchResultCollector
+        batch_buffer: &mut BatchResultCollector,
     ) {
         if batch_buffer.is_empty() { return; }
 
         let Some(app_state) = app_state_weak.and_then(Weak::upgrade) else { return };
         let app_config = &app_state.app_config;
         let working_dir = &app_config.config.load().working_dir;
+        let vod_updates = batch_buffer.take_vod_updates();
+        let series_updates = batch_buffer.take_series_updates();
+        let live_updates = batch_buffer.take_live_updates();
+
+        if vod_updates.is_empty() && series_updates.is_empty() && live_updates.is_empty() {
+            return;
+        }
 
         if let Ok(storage_path) = get_input_storage_path(input_name, working_dir).await {
-            let vod_updates = batch_buffer.take_vod_updates();
             if !vod_updates.is_empty() {
-                let updates: Vec<(u32, VideoStreamProperties)> = vod_updates.into_iter()
-                    .filter_map(|(id, props)| if let ProviderIdType::Id(vid) = id { Some((vid, props)) } else { None })
-                    .collect();
-                
+                let mut updates: Vec<(u32, VideoStreamProperties)> = Vec::with_capacity(vod_updates.len());
+                for (id, props) in &vod_updates {
+                    if let ProviderIdType::Id(vid) = id {
+                        updates.push((*vid, props.clone()));
+                    }
+                }
+
                 if !updates.is_empty() {
                     if let Err(e) = persist_input_vod_info_batch(app_config, &storage_path, XtreamCluster::Video, input_name, updates).await {
-                         error!("Failed to flush VOD batch for input {}: {}", sanitize_sensitive_info(input_name), e);
+                        error!("Failed to flush VOD batch for input {input_name}: {e}");
                     }
                 }
             }
-            
-            let series_updates = batch_buffer.take_series_updates();
+
             if !series_updates.is_empty() {
-                let updates: Vec<(u32, SeriesStreamProperties)> = series_updates.into_iter()
-                    .filter_map(|(id, props)| if let ProviderIdType::Id(vid) = id { Some((vid, props)) } else { None })
-                    .collect();
+                let mut updates: Vec<(u32, SeriesStreamProperties)> = Vec::with_capacity(series_updates.len());
+                for (id, props) in &series_updates {
+                    if let ProviderIdType::Id(vid) = id {
+                        updates.push((*vid, props.clone()));
+                    }
+                }
 
                 if !updates.is_empty() {
                     if let Err(e) = persist_input_series_info_batch(app_config, &storage_path, XtreamCluster::Series, input_name, updates).await {
-                        error!("Failed to flush Series batch for input {}: {}", sanitize_sensitive_info(input_name), e);
+                        error!("Failed to flush Series batch for input {input_name}: {e}");
                     }
                 }
             }
 
-            let live_updates = batch_buffer.take_live_updates();
             if !live_updates.is_empty() {
-                let updates: Vec<(u32, LiveStreamProperties)> = live_updates.into_iter()
-                    .filter_map(|(id, props)| if let ProviderIdType::Id(vid) = id { Some((vid, props)) } else { None })
-                    .collect();
+                let mut updates: Vec<(u32, LiveStreamProperties)> = Vec::with_capacity(live_updates.len());
+                for (id, props) in &live_updates {
+                    if let ProviderIdType::Id(vid) = id {
+                        updates.push((*vid, props.clone()));
+                    }
+                }
 
                 if !updates.is_empty() {
                     if let Err(e) = persist_input_live_info_batch(app_config, &storage_path, XtreamCluster::Live, input_name, updates).await {
-                         error!("Failed to flush Live batch for input {}: {}", sanitize_sensitive_info(input_name), e);
+                        error!("Failed to flush Live batch for input {input_name}: {e}");
                     }
                 }
             }
         }
 
+        let cascade_batch = BatchResultCollector {
+            vod: vod_updates,
+            series: series_updates,
+            live: live_updates,
+        };
+
         Self::cascade_updates(
             &app_state,
             &app_config.config.load(),
             input_name,
-            batch_buffer
+            &cascade_batch,
         ).await;
     }
 
@@ -580,18 +665,21 @@ impl InputWorker {
         input_name: &str,
         batch: &BatchResultCollector,
     ) {
-        // Find inputs that use this input_name (including aliases)
+        if batch.is_empty() {
+            return;
+        }
+
+        // Find targets affected by this input.
         let targets = {
             let sources = app_state.app_config.sources.load();
-            let mut affected_targets = Vec::new(); // (Target, InputConfig)
+            let mut affected_targets = Vec::new();
 
             for source in &sources.sources {
-               for t_def in &source.targets {
-                   // Check if this source uses the input
-                   if source.inputs.iter().any(|i_name| i_name.as_ref() == input_name) {
-                       affected_targets.push(t_def.clone());
-                   }
-               }
+                if source.inputs.iter().any(|i_name| i_name.as_ref() == input_name) {
+                    for t_def in &source.targets {
+                        affected_targets.push(t_def.clone());
+                    }
+                }
             }
             affected_targets
         };
@@ -604,127 +692,336 @@ impl InputWorker {
             let Some(storage_path) = crate::repository::xtream_get_storage_path(config, target_name) else { continue; };
             let mapping_file = get_target_id_mapping_file(&target_path);
 
-            // Read Mapping to find Virtual IDs
-            let lock = app_state.app_config.file_locks.read_lock(&mapping_file).await;
-            let mapping = match TargetIdMapping::new(&mapping_file, false) {
-                Ok(m) => m,
-                Err(e) => {
-                    error!("Failed to open ID mapping for target {target_name}: {e}");
-                    continue;
+            // Read mapping under lock and release lock immediately after opening.
+            let mapping = {
+                let _lock = app_state.app_config.file_locks.read_lock(&mapping_file).await;
+                match TargetIdMapping::new(&mapping_file, false) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        error!("Failed to open ID mapping for target {target_name}: {e}");
+                        continue;
+                    }
                 }
             };
 
-            // Process VOD
-            if !batch.vod.is_empty() {
-                let xtream_path = xtream_get_file_path(&storage_path, XtreamCluster::Video);
-                let lock_read = app_state.app_config.file_locks.read_lock(&xtream_path).await;
-                
-                if let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) {
-                    let mut updates = Vec::with_capacity(batch.vod.len());
-                    for (pid, props) in &batch.vod {
-                        let vids = match pid {
-                            ProviderIdType::Id(vid) => mapping.find_virtual_ids(*vid),
-                            ProviderIdType::Text(sid) => {
-                                let url = props.direct_source.as_ref();
-                                let uuid = generate_playlist_uuid(input_name, sid, PlaylistItemType::Video, url);
-                                mapping.get_virtual_id_by_uuid(&uuid).into_iter().collect()
-                            }
-                        };
-                        
-                        for virtual_id in vids {
-                            if let Ok(Some(mut item)) = query.query_zero_copy(&virtual_id) {
-                                item.additional_properties = Some(shared::model::StreamProperties::Video(Box::new(props.clone())));
-                                updates.push(item);
-                            }
-                        }
+            let mut provider_virtual_ids: HashMap<u32, Vec<u32>> = HashMap::new();
+            let mut uuid_virtual_ids: HashMap<UUIDType, Option<u32>> = HashMap::new();
+
+            let vod_virtual_updates = Self::collect_vod_virtual_updates(
+                &mapping,
+                input_name,
+                batch,
+                &mut provider_virtual_ids,
+                &mut uuid_virtual_ids,
+            );
+            Self::apply_vod_cascade_updates(
+                app_state,
+                &target,
+                &storage_path,
+                vod_virtual_updates,
+            ).await;
+
+            let series_virtual_updates = Self::collect_series_virtual_updates(
+                &mapping,
+                input_name,
+                batch,
+                &mut provider_virtual_ids,
+                &mut uuid_virtual_ids,
+            );
+            Self::apply_series_cascade_updates(
+                app_state,
+                &target,
+                &storage_path,
+                series_virtual_updates,
+            ).await;
+
+            let live_virtual_updates = Self::collect_live_virtual_updates(
+                &mapping,
+                input_name,
+                batch,
+                &mut provider_virtual_ids,
+                &mut uuid_virtual_ids,
+            );
+            Self::apply_live_cascade_updates(
+                app_state,
+                &target,
+                &storage_path,
+                live_virtual_updates,
+            ).await;
+        }
+    }
+
+    fn get_cached_uuid_virtual_id(
+        mapping: &TargetIdMapping,
+        cache: &mut HashMap<UUIDType, Option<u32>>,
+        uuid: UUIDType,
+    ) -> Option<u32> {
+        if let Some(cached) = cache.get(&uuid) {
+            return *cached;
+        }
+        let resolved = mapping.get_virtual_id_by_uuid(&uuid);
+        cache.insert(uuid, resolved);
+        resolved
+    }
+
+    fn collect_vod_virtual_updates<'a>(
+        mapping: &TargetIdMapping,
+        input_name: &str,
+        batch: &'a BatchResultCollector,
+        provider_virtual_ids: &mut HashMap<u32, Vec<u32>>,
+        uuid_virtual_ids: &mut HashMap<UUIDType, Option<u32>>,
+    ) -> HashMap<u32, &'a VideoStreamProperties> {
+        let mut virtual_updates: HashMap<u32, &'a VideoStreamProperties> = HashMap::new();
+        if batch.vod.is_empty() {
+            return virtual_updates;
+        }
+
+        for (pid, props) in &batch.vod {
+            match pid {
+                ProviderIdType::Id(provider_id) => {
+                    let virtual_ids = provider_virtual_ids
+                        .entry(*provider_id)
+                        .or_insert_with(|| mapping.find_virtual_ids(*provider_id));
+                    for virtual_id in virtual_ids {
+                        virtual_updates.insert(*virtual_id, props);
                     }
-                    if !updates.is_empty() {
-                        // Release read lock before write
-                        drop(lock_read);
-                        if let Err(e) = write_playlist_batch_item_upsert(&app_state.app_config, target_name, XtreamCluster::Video, &updates).await {
-                            error!("Failed to cascade VOD updates to target {target_name}: {e}");
-                        }
-                        // Cache Update
-                        if target.use_memory_cache {
-                            Self::update_memory_cache(app_state, target_name, XtreamCluster::Video, updates).await;
-                        }
+                }
+                ProviderIdType::Text(provider_id_text) => {
+                    let uuid = generate_playlist_uuid(
+                        input_name,
+                        provider_id_text,
+                        PlaylistItemType::Video,
+                        props.direct_source.as_ref(),
+                    );
+                    if let Some(virtual_id) =
+                        Self::get_cached_uuid_virtual_id(mapping, uuid_virtual_ids, uuid)
+                    {
+                        virtual_updates.insert(virtual_id, props);
                     }
                 }
             }
+        }
 
-            // Process Series
-            if !batch.series.is_empty() {
-                let xtream_path = xtream_get_file_path(&storage_path, XtreamCluster::Series);
-                let lock_read = app_state.app_config.file_locks.read_lock(&xtream_path).await;
-                
-                if let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) {
-                    let mut updates = Vec::with_capacity(batch.series.len());
-                    for (pid, props) in &batch.series {
-                        let vids = match pid {
-                            ProviderIdType::Id(vid) => mapping.find_virtual_ids(*vid),
-                            ProviderIdType::Text(sid) => {
-                                // Series usually don't have a direct URL in properties, relying on ID
-                                let uuid = generate_playlist_uuid(input_name, sid, PlaylistItemType::Series, "");
-                                mapping.get_virtual_id_by_uuid(&uuid).into_iter().collect()
-                            }
-                        };
+        virtual_updates
+    }
 
-                        for virtual_id in vids {
-                            if let Ok(Some(mut item)) = query.query_zero_copy(&virtual_id) {
-                                item.additional_properties = Some(shared::model::StreamProperties::Series(Box::new(props.clone())));
-                                updates.push(item);
-                            }
-                        }
+    fn collect_series_virtual_updates<'a>(
+        mapping: &TargetIdMapping,
+        input_name: &str,
+        batch: &'a BatchResultCollector,
+        provider_virtual_ids: &mut HashMap<u32, Vec<u32>>,
+        uuid_virtual_ids: &mut HashMap<UUIDType, Option<u32>>,
+    ) -> HashMap<u32, &'a SeriesStreamProperties> {
+        let mut virtual_updates: HashMap<u32, &'a SeriesStreamProperties> = HashMap::new();
+        if batch.series.is_empty() {
+            return virtual_updates;
+        }
+
+        for (pid, props) in &batch.series {
+            match pid {
+                ProviderIdType::Id(provider_id) => {
+                    let virtual_ids = provider_virtual_ids
+                        .entry(*provider_id)
+                        .or_insert_with(|| mapping.find_virtual_ids(*provider_id));
+                    for virtual_id in virtual_ids {
+                        virtual_updates.insert(*virtual_id, props);
                     }
-                    if !updates.is_empty() {
-                        drop(lock_read);
-                        if let Err(e) = write_playlist_batch_item_upsert(&app_state.app_config, target_name, XtreamCluster::Series, &updates).await {
-                            error!("Failed to cascade Series updates to target {target_name}: {e}");
-                        }
-                         if target.use_memory_cache {
-                            Self::update_memory_cache(app_state, target_name, XtreamCluster::Series, updates).await;
-                        }
+                }
+                ProviderIdType::Text(provider_id_text) => {
+                    let uuid = generate_playlist_uuid(
+                        input_name,
+                        provider_id_text,
+                        PlaylistItemType::Series,
+                        "",
+                    );
+                    if let Some(virtual_id) =
+                        Self::get_cached_uuid_virtual_id(mapping, uuid_virtual_ids, uuid)
+                    {
+                        virtual_updates.insert(virtual_id, props);
                     }
                 }
             }
-            
-            // Process Live (if needed)
-             if !batch.live.is_empty() {
-                let xtream_path = xtream_get_file_path(&storage_path, XtreamCluster::Live);
-                let lock_read = app_state.app_config.file_locks.read_lock(&xtream_path).await;
-                
-                if let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) {
-                    let mut updates = Vec::with_capacity(batch.live.len());
-                    for (pid, props) in &batch.live {
-                        let vids = match pid {
-                            ProviderIdType::Id(vid) => mapping.find_virtual_ids(*vid),
-                            ProviderIdType::Text(sid) => {
-                                let url = props.direct_source.as_ref();
-                                let uuid = generate_playlist_uuid(input_name, sid, PlaylistItemType::Live, url);
-                                mapping.get_virtual_id_by_uuid(&uuid).into_iter().collect()
-                            }
-                        };
+        }
 
-                        for virtual_id in vids {
-                            if let Ok(Some(mut item)) = query.query_zero_copy(&virtual_id) {
-                                item.additional_properties = Some(shared::model::StreamProperties::Live(Box::new(props.clone())));
-                                updates.push(item);
-                            }
-                        }
+        virtual_updates
+    }
+
+    fn collect_live_virtual_updates<'a>(
+        mapping: &TargetIdMapping,
+        input_name: &str,
+        batch: &'a BatchResultCollector,
+        provider_virtual_ids: &mut HashMap<u32, Vec<u32>>,
+        uuid_virtual_ids: &mut HashMap<UUIDType, Option<u32>>,
+    ) -> HashMap<u32, &'a LiveStreamProperties> {
+        let mut virtual_updates: HashMap<u32, &'a LiveStreamProperties> = HashMap::new();
+        if batch.live.is_empty() {
+            return virtual_updates;
+        }
+
+        for (pid, props) in &batch.live {
+            match pid {
+                ProviderIdType::Id(provider_id) => {
+                    let virtual_ids = provider_virtual_ids
+                        .entry(*provider_id)
+                        .or_insert_with(|| mapping.find_virtual_ids(*provider_id));
+                    for virtual_id in virtual_ids {
+                        virtual_updates.insert(*virtual_id, props);
                     }
-                    if !updates.is_empty() {
-                        drop(lock_read);
-                        if let Err(e) = write_playlist_batch_item_upsert(&app_state.app_config, target_name, XtreamCluster::Live, &updates).await {
-                            error!("Failed to cascade Live updates to target {target_name}: {e}");
-                        }
-                         if target.use_memory_cache {
-                            Self::update_memory_cache(app_state, target_name, XtreamCluster::Live, updates).await;
-                        }
+                }
+                ProviderIdType::Text(provider_id_text) => {
+                    let uuid = generate_playlist_uuid(
+                        input_name,
+                        provider_id_text,
+                        PlaylistItemType::Live,
+                        props.direct_source.as_ref(),
+                    );
+                    if let Some(virtual_id) =
+                        Self::get_cached_uuid_virtual_id(mapping, uuid_virtual_ids, uuid)
+                    {
+                        virtual_updates.insert(virtual_id, props);
                     }
                 }
             }
+        }
 
-            drop(lock); 
+        virtual_updates
+    }
+
+    async fn apply_vod_cascade_updates(
+        app_state: &Arc<AppState>,
+        target: &crate::model::ConfigTarget,
+        storage_path: &std::path::Path,
+        virtual_updates: HashMap<u32, &VideoStreamProperties>,
+    ) {
+        if virtual_updates.is_empty() {
+            return;
+        }
+
+        let target_name = target.name.as_str();
+        let xtream_path = xtream_get_file_path(storage_path, XtreamCluster::Video);
+        let updates = {
+            let _lock_read = app_state.app_config.file_locks.read_lock(&xtream_path).await;
+            let mut updates = Vec::with_capacity(virtual_updates.len());
+            if let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) {
+                for (virtual_id, props) in &virtual_updates {
+                    if let Ok(Some(mut item)) = query.query_zero_copy(virtual_id) {
+                        item.additional_properties =
+                            Some(shared::model::StreamProperties::Video(Box::new((*props).clone())));
+                        updates.push(item);
+                    }
+                }
+            }
+            updates
+        };
+
+        if updates.is_empty() {
+            return;
+        }
+
+        if let Err(e) = write_playlist_batch_item_upsert(
+            &app_state.app_config,
+            target_name,
+            XtreamCluster::Video,
+            &updates,
+        ).await {
+            error!("Failed to cascade VOD updates to target {target_name}: {e}");
+            return;
+        }
+
+        if target.use_memory_cache {
+            Self::update_memory_cache(app_state, target_name, XtreamCluster::Video, updates).await;
+        }
+    }
+
+    async fn apply_series_cascade_updates(
+        app_state: &Arc<AppState>,
+        target: &crate::model::ConfigTarget,
+        storage_path: &std::path::Path,
+        virtual_updates: HashMap<u32, &SeriesStreamProperties>,
+    ) {
+        if virtual_updates.is_empty() {
+            return;
+        }
+
+        let target_name = target.name.as_str();
+        let xtream_path = xtream_get_file_path(storage_path, XtreamCluster::Series);
+        let updates = {
+            let _lock_read = app_state.app_config.file_locks.read_lock(&xtream_path).await;
+            let mut updates = Vec::with_capacity(virtual_updates.len());
+            if let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) {
+                for (virtual_id, props) in &virtual_updates {
+                    if let Ok(Some(mut item)) = query.query_zero_copy(virtual_id) {
+                        item.additional_properties =
+                            Some(shared::model::StreamProperties::Series(Box::new((*props).clone())));
+                        updates.push(item);
+                    }
+                }
+            }
+            updates
+        };
+
+        if updates.is_empty() {
+            return;
+        }
+
+        if let Err(e) = write_playlist_batch_item_upsert(
+            &app_state.app_config,
+            target_name,
+            XtreamCluster::Series,
+            &updates,
+        ).await {
+            error!("Failed to cascade Series updates to target {target_name}: {e}");
+            return;
+        }
+
+        if target.use_memory_cache {
+            Self::update_memory_cache(app_state, target_name, XtreamCluster::Series, updates).await;
+        }
+    }
+
+    async fn apply_live_cascade_updates(
+        app_state: &Arc<AppState>,
+        target: &crate::model::ConfigTarget,
+        storage_path: &std::path::Path,
+        virtual_updates: HashMap<u32, &LiveStreamProperties>,
+    ) {
+        if virtual_updates.is_empty() {
+            return;
+        }
+
+        let target_name = target.name.as_str();
+        let xtream_path = xtream_get_file_path(storage_path, XtreamCluster::Live);
+        let updates = {
+            let _lock_read = app_state.app_config.file_locks.read_lock(&xtream_path).await;
+            let mut updates = Vec::with_capacity(virtual_updates.len());
+            if let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) {
+                for (virtual_id, props) in &virtual_updates {
+                    if let Ok(Some(mut item)) = query.query_zero_copy(virtual_id) {
+                        item.additional_properties =
+                            Some(shared::model::StreamProperties::Live(Box::new((*props).clone())));
+                        updates.push(item);
+                    }
+                }
+            }
+            updates
+        };
+
+        if updates.is_empty() {
+            return;
+        }
+
+        if let Err(e) = write_playlist_batch_item_upsert(
+            &app_state.app_config,
+            target_name,
+            XtreamCluster::Live,
+            &updates,
+        ).await {
+            error!("Failed to cascade Live updates to target {target_name}: {e}");
+            return;
+        }
+
+        if target.use_memory_cache {
+            Self::update_memory_cache(app_state, target_name, XtreamCluster::Live, updates).await;
         }
     }
 
@@ -732,7 +1029,7 @@ impl InputWorker {
         app_state: &Arc<AppState>,
         target_name: &str,
         cluster: XtreamCluster,
-        updates: Vec<XtreamPlaylistItem>
+        updates: Vec<XtreamPlaylistItem>,
     ) {
         let mut playlists = app_state.playlists.data.write().await;
         if let Some(playlist) = playlists.get_mut(target_name) {
@@ -753,32 +1050,32 @@ impl InputWorker {
         app_state: &Arc<AppState>,
         cluster: XtreamCluster,
         db_handles: &'a mut HashMap<XtreamCluster, DbHandle>,
-        failed_clusters: &mut HashSet<XtreamCluster>
+        failed_clusters: &mut HashSet<XtreamCluster>,
     ) -> Option<&'a mut BPlusTreeQuery<u32, XtreamPlaylistItem>> {
         if failed_clusters.contains(&cluster) {
             return None;
         }
 
         if let std::collections::hash_map::Entry::Vacant(e) = db_handles.entry(cluster) {
-             let working_dir = &app_state.app_config.config.load().working_dir;
-             if let Ok(storage_path) = get_input_storage_path(input_name, working_dir).await {
-                 let file_path = xtream_get_file_path(&storage_path, cluster);
-                 if file_path.exists() {
-                     let lock = app_state.app_config.file_locks.read_lock(&file_path).await;
-                     if let Ok(query) = BPlusTreeQuery::try_new(&file_path) {
-                         e.insert(DbHandle { _guard: lock, query });
-                     } else {
-                         failed_clusters.insert(cluster);
-                     }
-                 } else {
-                     // File doesn't exist, technically a failure to open but acceptable.
-                     // We don't mark as failure to allow creation if it appears, but for read logic 
-                     // we could cache the non-existence if we wanted. 
-                     // For now, let's strictly follow the instruction about "failure cache" for *errors* or corruption.
-                 }
-             }
+            let working_dir = &app_state.app_config.config.load().working_dir;
+            if let Ok(storage_path) = get_input_storage_path(input_name, working_dir).await {
+                let file_path = xtream_get_file_path(&storage_path, cluster);
+                if file_path.exists() {
+                    let lock = app_state.app_config.file_locks.read_lock(&file_path).await;
+                    if let Ok(query) = BPlusTreeQuery::try_new(&file_path) {
+                        e.insert(DbHandle { _guard: lock, query });
+                    } else {
+                        failed_clusters.insert(cluster);
+                    }
+                } else {
+                    // File doesn't exist, technically a failure to open but acceptable.
+                    // We don't mark as failure to allow creation if it appears, but for read logic
+                    // we could cache the non-existence if we wanted.
+                    // For now, let's strictly follow the instruction about "failure cache" for *errors* or corruption.
+                }
+            }
         }
-        
+
         db_handles.get_mut(&cluster).map(|h| &mut h.query)
     }
 
@@ -788,7 +1085,7 @@ impl InputWorker {
         app_state: &Arc<AppState>,
         task: &UpdateTask,
         db_handles: &mut HashMap<XtreamCluster, DbHandle>,
-        failed_clusters: &mut HashSet<XtreamCluster>
+        failed_clusters: &mut HashSet<XtreamCluster>,
     ) -> Option<String> {
         let (id, cluster) = match task {
             UpdateTask::ResolveVod { id, .. } => (id, XtreamCluster::Video),
@@ -800,7 +1097,7 @@ impl InputWorker {
         if let ProviderIdType::Id(vid) = id {
             if let Some(query) = Self::get_or_open_query(input_name, app_state, cluster, db_handles, failed_clusters).await {
                 if let Ok(Some(item)) = query.query_zero_copy(vid) {
-                     return Some(if item.title.is_empty() { item.name.to_string() } else { item.title.to_string() });
+                    return Some(if item.title.is_empty() { item.name.to_string() } else { item.title.to_string() });
                 }
             }
         }
@@ -808,12 +1105,12 @@ impl InputWorker {
     }
 
     async fn process_task_static(
-        input_name: &Arc<str>, 
+        input_name: &Arc<str>,
         app_state_weak: Option<&Weak<AppState>>,
-        task: &UpdateTask, 
+        task: &UpdateTask,
         collector: &mut BatchResultCollector,
         db_handles: &mut HashMap<XtreamCluster, DbHandle>,
-        failed_clusters: &mut HashSet<XtreamCluster>
+        failed_clusters: &mut HashSet<XtreamCluster>,
     ) -> Result<(), TuliproxError> {
         let app_state = app_state_weak
             .and_then(Weak::upgrade)
@@ -822,24 +1119,33 @@ impl InputWorker {
         let Some(input_base) = app_state.app_config.get_input_by_name(input_name) else {
             return Err(shared::error::info_err!("Input {} not found", input_name));
         };
-        
-        if !input_base.enabled { 
-            return Err(shared::error::info_err!("Input {} is disabled", input_name)); 
+
+        if !input_base.enabled {
+            return Err(shared::error::info_err!("Input {} is disabled", input_name));
         }
 
-        // Attempt to acquire connection with low priority
-        let Some(handle) = app_state.active_provider.acquire_connection_for_probe(input_name).await else {
-            debug_if_enabled!("No provider connection available for background task {}, skipping...", task);
-            return Err(shared::error::info_err!("{}", TASK_ERR_NO_CONNECTION));
+        let needs_probe_connection =
+            matches!(task, UpdateTask::ProbeLive { .. } | UpdateTask::ProbeStream { .. });
+
+        // Reserve provider capacity only for actual probe work (ffprobe paths).
+        let provider_handle = if needs_probe_connection {
+            let Some(handle) = app_state.active_provider.acquire_connection_for_probe(input_name).await else {
+                debug_if_enabled!("No provider connection available for background task {}, skipping...", task);
+                return Err(shared::error::info_err!("{}", TASK_ERR_NO_CONNECTION));
+            };
+            Some(handle)
+        } else {
+            None
         };
-        
+
         let item_title = Self::get_item_name_static(input_name, &app_state, task, db_handles, failed_clusters).await;
-        
-        let config_to_use = handle.allocation.get_provider_config();
+
+        let config_to_use = provider_handle
+            .as_ref()
+            .and_then(|handle| handle.allocation.get_provider_config());
         let name_display = item_title.as_deref().map_or(String::new(), |n| format!(" \"{n}\""));
 
-        debug_if_enabled!("Processing task for {}: {}{}", 
-            sanitize_sensitive_info(input_name), task, name_display);
+        trace_if_enabled!("Processing task for {}: {}{}", input_name, task, name_display);
 
         // Determine input to use (may be alias)
         let input_to_use = config_to_use
@@ -864,28 +1170,32 @@ impl InputWorker {
             app_state.http_client.load()
         };
 
-        // Execute the task with preemption handling
-        if let Some(token) = &handle.cancel_token {
-            tokio::select! {
-                biased;
-                
-                () = token.cancelled() => {
-                    debug_if_enabled!("Metadata update task preempted by user request for input {}", 
-                                      sanitize_sensitive_info(input_name));
-                    app_state.connection_manager.release_provider_handle(Some(handle)).await;
-                    Err(shared::error::info_err!("{}", TASK_ERR_PREEMPTED))
+        // Execute task; probe tasks get a reserved provider handle, resolve tasks don't.
+        let res = if let Some(handle) = provider_handle.as_ref() {
+            if let Some(token) = &handle.cancel_token {
+                tokio::select! {
+                    biased;
+
+                    () = token.cancelled() => {
+                        debug_if_enabled!("Metadata update task preempted by user request for input {}", input_name);
+                        Err(shared::error::info_err!("{}", TASK_ERR_PREEMPTED))
+                    }
+
+                    res = Self::execute_task_inner_static(&app_state, &client, &input_to_use, task, item_title.as_deref(), Some(handle), collector, db_handles, failed_clusters) => {
+                        res
+                    }
                 }
-                
-                res = Self::execute_task_inner_static(&app_state, &client, &input_to_use, task, item_title.as_deref(), Some(&handle), collector, db_handles, failed_clusters) => {
-                    app_state.connection_manager.release_provider_handle(Some(handle)).await;
-                    res
-                }
+            } else {
+                Self::execute_task_inner_static(&app_state, &client, &input_to_use, task, item_title.as_deref(), Some(handle), collector, db_handles, failed_clusters).await
             }
         } else {
-            let res = Self::execute_task_inner_static(&app_state, &client, &input_to_use, task, item_title.as_deref(), Some(&handle), collector, db_handles, failed_clusters).await;
-            app_state.connection_manager.release_provider_handle(Some(handle)).await;
-            res
+            Self::execute_task_inner_static(&app_state, &client, &input_to_use, task, item_title.as_deref(), None, collector, db_handles, failed_clusters).await
+        };
+
+        if provider_handle.is_some() {
+            app_state.connection_manager.release_provider_handle(provider_handle).await;
         }
+        res
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -898,14 +1208,14 @@ impl InputWorker {
         active_handle: Option<&ProviderHandle>,
         collector: &mut BatchResultCollector,
         db_handles: &mut HashMap<XtreamCluster, DbHandle>,
-        failed_clusters: &mut HashSet<XtreamCluster>
+        failed_clusters: &mut HashSet<XtreamCluster>,
     ) -> Result<(), TuliproxError> {
         match task {
             UpdateTask::ResolveVod { id, reason, .. } => {
                 let fetch_info = reason.contains(ResolveReason::Info);
-                
+
                 let query_opt = Self::get_or_open_query(&input.name, app_state, XtreamCluster::Video, db_handles, failed_clusters).await;
-                
+
                 match update_vod_metadata(
                     &app_state.app_config,
                     client,
@@ -921,17 +1231,17 @@ impl InputWorker {
                     Ok(Some(props)) => {
                         collector.add_vod(id.clone(), props);
                         Ok(())
-                    },
+                    }
                     Ok(None) => Ok(()),
                     Err(e) => Err(e),
                 }
             }
             UpdateTask::ResolveSeries { id, reason, .. } => {
                 let fetch_info = reason.contains(ResolveReason::Info);
-                
+
                 // Get handle for Series
                 let query_opt = Self::get_or_open_query(&input.name, app_state, XtreamCluster::Series, db_handles, failed_clusters).await;
-                
+
                 match update_series_metadata(
                     &app_state.app_config,
                     client,
@@ -943,37 +1253,37 @@ impl InputWorker {
                     false, // Batch collect
                     fetch_info,
                     reason.contains(ResolveReason::Probe),
-                    query_opt, 
+                    query_opt,
                 ).await {
-                     Ok(Some(props)) => {
+                    Ok(Some(props)) => {
                         collector.add_series(id.clone(), props);
                         Ok(())
-                    },
+                    }
                     Ok(None) => Ok(()),
                     Err(e) => Err(e),
                 }
             }
             UpdateTask::ProbeLive { id, .. } => {
                 let query_opt = Self::get_or_open_query(&input.name, app_state, XtreamCluster::Live, db_handles, failed_clusters).await;
-            
+
                 match update_live_stream_metadata(
-                    &app_state.app_config, 
-                    client, 
-                    input, 
-                    id.clone(), 
+                    &app_state.app_config,
+                    client,
+                    input,
+                    id.clone(),
                     false,
-                    query_opt
+                    query_opt,
                 ).await {
-                     Ok(Some(props)) => {
+                    Ok(Some(props)) => {
                         collector.add_live(id.clone(), props);
                         Ok(())
-                    },
+                    }
                     Ok(None) => Ok(()),
                     Err(e) => Err(e),
                 }
             }
             UpdateTask::ProbeStream { unique_id, url, item_type, .. } => {
-                 // Generic probe doesn't support batching yet
+                // Generic probe doesn't support batching yet
                 update_generic_stream_metadata(
                     &app_state.app_config,
                     input.as_ref(),

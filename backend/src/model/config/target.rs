@@ -11,7 +11,8 @@ use shared::foundation::Filter;
 use shared::foundation::ValueProvider;
 use shared::create_bit_set;
 
-create_bit_set!(u16, XtreamTargetFlags, SkipLiveDirectSource, SkipVideoDirectSource, SkipSeriesDirectSource, ResolveBackground, ResolveSeries, ResolveVod, ResolveLive);
+create_bit_set!(u16, XtreamTargetFlags, SkipLiveDirectSource, SkipVideoDirectSource, SkipSeriesDirectSource,
+    ResolveBackground, ResolveSeries, ResolveVod, ProbeSeries, ProbeVod, ProbeLive);
 
 #[derive(Clone, Debug)]
 pub struct ProcessTargets {
@@ -35,7 +36,7 @@ impl ProcessTargets {
 #[derive(Debug, Clone)]
 pub struct XtreamTargetOutput {
     pub flags: XtreamTargetFlagsSet,
-    pub resolve_live_interval_hours: u32,
+    pub probe_live_interval_hours: u32,
     pub resolve_delay: u16,
     pub trakt: Option<TraktConfig>,
     pub filter: Option<Filter>,
@@ -51,12 +52,14 @@ impl From<&XtreamTargetOutputDto> for XtreamTargetOutput {
         if dto.resolve_background { flags.add(XtreamTargetFlags::ResolveBackground); }
         if dto.resolve_series { flags.add(XtreamTargetFlags::ResolveSeries); }
         if dto.resolve_vod { flags.add(XtreamTargetFlags::ResolveVod); }
-        if dto.resolve_live { flags.add(XtreamTargetFlags::ResolveLive); }
+        if dto.probe_series { flags.add(XtreamTargetFlags::ProbeSeries); }
+        if dto.probe_vod { flags.add(XtreamTargetFlags::ProbeVod); }
+        if dto.probe_live { flags.add(XtreamTargetFlags::ProbeLive); }
 
         Self {
             flags,
             resolve_delay: dto.resolve_delay,
-            resolve_live_interval_hours: dto.resolve_live_interval_hours,
+            probe_live_interval_hours: dto.probe_live_interval_hours,
             trakt: dto.trakt.as_ref().map(Into::into),
             filter: dto.t_filter.clone(),
         }
@@ -72,9 +75,11 @@ impl From<&XtreamTargetOutput> for XtreamTargetOutputDto {
             resolve_background: instance.flags.contains(XtreamTargetFlags::ResolveBackground),
             resolve_series: instance.flags.contains(XtreamTargetFlags::ResolveSeries),
             resolve_vod: instance.flags.contains(XtreamTargetFlags::ResolveVod),
-            resolve_live: instance.flags.contains(XtreamTargetFlags::ResolveLive),
+            probe_series: instance.flags.contains(XtreamTargetFlags::ProbeSeries),
+            probe_vod: instance.flags.contains(XtreamTargetFlags::ProbeVod),
+            probe_live: instance.flags.contains(XtreamTargetFlags::ProbeLive),
             resolve_delay: instance.resolve_delay,
-            resolve_live_interval_hours: instance.resolve_live_interval_hours,
+            probe_live_interval_hours: instance.probe_live_interval_hours,
             trakt: instance.trakt.as_ref().map(TraktConfigDto::from),
             filter: instance.filter.as_ref().map(ToString::to_string),
             t_filter: instance.filter.clone(),

@@ -6,7 +6,7 @@ use crate::model::{ClusterFlags, ConfigFavouritesDto, ConfigRenameDto, ConfigSor
 use crate::utils::{is_true, is_false, default_as_true, default_resolve_delay_secs, default_as_default,
                    is_blank_optional_string,
                    is_default_resolve_delay_secs, is_zero_u16, is_config_target_options_empty, is_default_processing_order,
-                   default_resolve_live_interval, is_default_resolve_live_interval};
+                   default_probe_live_interval, is_default_probe_live_interval};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -46,12 +46,16 @@ pub struct XtreamTargetOutputDto {
     pub resolve_series: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub resolve_vod: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub probe_series: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub probe_vod: bool,
     #[serde(default = "default_resolve_delay_secs", skip_serializing_if = "is_default_resolve_delay_secs")]
     pub resolve_delay: u16,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub resolve_live: bool,
-    #[serde(default = "default_resolve_live_interval", skip_serializing_if = "is_default_resolve_live_interval")]
-    pub resolve_live_interval_hours: u32,
+    #[serde(default, alias = "resolve_live", skip_serializing_if = "is_false")]
+    pub probe_live: bool,
+    #[serde(default = "default_probe_live_interval", alias = "resolve_live_interval_hours", skip_serializing_if = "is_default_probe_live_interval")]
+    pub probe_live_interval_hours: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trakt: Option<TraktConfigDto>,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
@@ -69,9 +73,11 @@ impl Default for XtreamTargetOutputDto {
             resolve_background: default_as_true(),
             resolve_series: false,
             resolve_vod: false,
+            probe_series: false,
+            probe_vod: false,
             resolve_delay: default_resolve_delay_secs(),
-            resolve_live: false,
-            resolve_live_interval_hours: default_resolve_live_interval(),
+            probe_live: false,
+            probe_live_interval_hours: default_probe_live_interval(),
             trakt: None,
             filter: None,
             t_filter: None,
@@ -97,7 +103,9 @@ impl XtreamTargetOutputDto {
             || self.resolve_background
             || self.resolve_series
             || self.resolve_vod
-            || self.resolve_live
+            || self.probe_series
+            || self.probe_vod
+            || self.probe_live
             || self.trakt.is_some()
             || self.filter.is_some()
     }

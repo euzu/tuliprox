@@ -246,7 +246,7 @@ mod tests {
         assert_eq!(shifted, "2026-02-08-12-30");
 
         // Timestamp
-        let ts = 1770550200; // 2026-02-08 11:30:00 UTC
+        let ts = 1_770_550_200; // 2026-02-08 11:30:00 UTC
         let date_str = ts.to_string();
         let shifted = apply_timeshift(&date_str, &shift);
         // +1 hour = +3600 seconds

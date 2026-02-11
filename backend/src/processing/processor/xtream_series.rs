@@ -15,7 +15,7 @@ use crate::repository::{
 };
 use crate::repository::{xtream_get_file_path, BPlusTreeQuery};
 use crate::utils::{debug_if_enabled, xtream};
-use log::{debug, error, info, log_enabled, warn, Level};
+use log::{debug, error, info, log_enabled, trace, warn, Level};
 use serde_json::Value;
 use shared::error::TuliproxError;
 use shared::model::{InputType, MediaQuality, PlaylistEntry, PlaylistItem, SeriesStreamProperties, StreamProperties, XtreamPlaylistItem, XtreamSeriesInfo};
@@ -531,8 +531,8 @@ pub async fn update_series_metadata(
 
     let display_id = series_id_opt.map_or_else(|| "StringID".to_string(), |v| v.to_string());
 
-    // Input DB is canonical: only fetch provider info when we still have no stored properties.
-    let should_fetch_info = fetch_info && props.is_none();
+    // Input DB is canonical, but if details are missing we still need one info fetch to complete the record.
+    let should_fetch_info = fetch_info && props.as_ref().is_none_or(|p| p.details.is_none());
 
     // 1. Fetch Info from Provider (only when missing in input DB)
     if should_fetch_info {
@@ -542,7 +542,7 @@ pub async fn update_series_metadata(
                 .ok_or_else(|| shared::error::info_err!("Failed to build info URL"))?;
 
             let input_source = InputSource::from(input).with_url(info_url);
-            let content = xtream::get_xtream_stream_info_content(app_config, client, &input_source, false)
+            let content = xtream::get_xtream_stream_info_content(app_config, client, &input_source, true)
                 .await
                 .map_err(|e| shared::error::info_err!("{e}"))?;
 
@@ -580,6 +580,8 @@ pub async fn update_series_metadata(
 
     let mut properties = props.unwrap();
 
+    let resolve_tmdb_enabled = input.options.as_ref().is_some_and(|o| o.resolve_tmdb);
+
     // 2. Resolve TMDB/Date if missing
     if (properties.tmdb.is_none() || properties.release_date.is_none()) && !properties.name.is_empty() {
         let config = app_config.config.load();
@@ -603,8 +605,8 @@ pub async fn update_series_metadata(
         let title_candidate = playlist_title.or_else(|| existing_item.as_ref().map(|i| i.title.as_ref()));
         if let Some(title) = title_candidate {
             if !title.is_empty() {
-                debug!("Resolving TMDB for Series using Playlist Title '{title}' (ID: {display_id})...");
-                meta = meta_resolver.resolve_from_title(title, properties.tmdb, false).await;
+                trace!("Resolving TMDB for Series using Playlist Title '{title}' (ID: {display_id})...");
+                meta = meta_resolver.resolve_from_title(title, properties.tmdb, false, resolve_tmdb_enabled).await;
                 tried_title = true;
             }
         }
@@ -615,7 +617,7 @@ pub async fn update_series_metadata(
             let title_already_tried = if let Some(t) = title_candidate { t == properties.name.as_ref() } else { false };
             if !tried_title || !title_already_tried {
                 debug!("Fallback to API Name '{}'...", properties.name);
-                meta = meta_resolver.resolve_from_title(&properties.name, properties.tmdb, false).await;
+                meta = meta_resolver.resolve_from_title(&properties.name, properties.tmdb, false, resolve_tmdb_enabled).await;
             }
         }
 

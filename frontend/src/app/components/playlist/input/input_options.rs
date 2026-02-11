@@ -22,13 +22,17 @@ pub fn InputOptions(props: &InputOptionsProps) -> Html {
                      vec![
                 (false, "LABEL.LIVE_STREAM_USE_PREFIX"),
                 (false, "LABEL.LIVE_STREAM_WITHOUT_EXTENSION"),
+                (false, "LABEL.RESOLVE_TMDB"),
+                (false, "LABEL.PROBE_STREAM"),
             ]),
             Some(options) => {
                 let has_options = options.xtream_skip_live
                     || options.xtream_skip_vod
                     || options.xtream_skip_series
                     || options.xtream_live_stream_use_prefix
-                    || options.xtream_live_stream_without_extension;
+                    || options.xtream_live_stream_without_extension
+                    || options.resolve_tmdb
+                    || options.probe_stream;
 
                 (has_options, vec![
                     (options.xtream_skip_live, "LABEL.LIVE"),
@@ -37,6 +41,8 @@ pub fn InputOptions(props: &InputOptionsProps) -> Html {
                    vec![
                     (options.xtream_live_stream_use_prefix, "LABEL.LIVE_STREAM_USE_PREFIX"),
                     (options.xtream_live_stream_without_extension, "LABEL.LIVE_STREAM_WITHOUT_EXTENSION"),
+                    (options.resolve_tmdb, "LABEL.RESOLVE_TMDB"),
+                    (options.probe_stream, "LABEL.PROBE_STREAM"),
                 ])
             }
         };

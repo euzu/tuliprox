@@ -42,7 +42,7 @@ macro_rules! create_resolve_options_function_for_xtream_target {
         paste::paste! {
             fn [<get_resolve_ $cluster _options>](target: &ConfigTarget, fpl: &FetchedPlaylist) -> $crate::processing::processor::ResolveOptions {
                 // Get input options
-                let (resolve_tmdb_missing, probe_requested) = fpl.input.options.as_ref().map_or_else(||(false, false), |o| (o.resolve_tmdb, o.analyze_stream));
+                let (resolve_tmdb_missing, probe_requested) = fpl.input.options.as_ref().map_or_else(||(false, false), |o| (o.resolve_tmdb, o.probe_stream));
                 match target.get_xtream_output() {
                     Some(xtream_output) => {
                         let mut flags = $crate::processing::processor::ResolveOptionsFlagsSet::new();
@@ -53,7 +53,9 @@ macro_rules! create_resolve_options_function_for_xtream_target {
                         if resolve_tmdb_missing {
                             flags.add($crate::processing::processor::ResolveOptionsFlags::TmdbMissing);
                         }
-                        if probe_requested {
+                        if probe_requested
+                            && fpl.input.input_type == InputType::Xtream
+                            && xtream_output.flags.contains($crate::model::XtreamTargetFlags::[<Probe $cluster:camel>]) {
                             flags.add($crate::processing::processor::ResolveOptionsFlags::Probe);
                         }
                         if xtream_output.flags.contains($crate::model::XtreamTargetFlags::ResolveBackground) {

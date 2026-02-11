@@ -1,4 +1,4 @@
-use log::{debug, error, info, warn};
+use log::{debug, error, warn};
 use shared::utils::{clean_playlist_title, TMDB_API_KEY};
 use crate::library::metadata::{MediaMetadata, MetadataSource, MovieMetadata, SeriesMetadata};
 use crate::library::scanner::ScannedMediaFile;
@@ -53,11 +53,11 @@ impl MetadataResolver {
             }
         }) else { return None };
 
-        self.resolve_internal(is_movie, metadata, Some(file)).await
+        self.resolve_internal(is_movie, metadata, Some(file), true).await
     }
 
     /// Public helper to resolve metadata purely from a title string (Main entry point for Xtream Processors)
-    pub async fn resolve_from_title(&self, title: &str, known_tmdb_id: Option<u32>, is_movie: bool) -> Option<MediaMetadata> {
+    pub async fn resolve_from_title(&self, title: &str, known_tmdb_id: Option<u32>, is_movie: bool, resolve_from_tmdb: bool) -> Option<MediaMetadata> {
         // If the title is empty or just whitespace, we can't search.
         if title.trim().is_empty() {
              return None;
@@ -81,33 +81,35 @@ impl MetadataResolver {
         if known_tmdb_id.is_some() {
             metadata.tmdb = known_tmdb_id;
         }
-        self.resolve_internal(is_movie, &metadata, None).await
+        self.resolve_internal(is_movie, &metadata, None, resolve_from_tmdb).await
     }
 
     // Internal logic shared by both resolve methods
-    async fn resolve_internal(&self, is_movie: bool, metadata: &PttMetadata, file: Option<&ScannedMediaFile>) -> Option<MediaMetadata> {
-        // Step 2: Try TMDB if enabled
-        if let Some(ref tmdb) = self.tmdb_client {
-            // Determine if we should use file-based logic or pure title/stream logic
-            let result = if let Some(f) = file {
-                self.resolve_from_tmdb_file(is_movie, metadata, tmdb, f).await
-            } else {
-                self.resolve_from_tmdb_title(is_movie, metadata, tmdb).await
-            };
+    async fn resolve_internal(&self, is_movie: bool, metadata: &PttMetadata, file: Option<&ScannedMediaFile>, resolve_from_tmdb: bool) -> Option<MediaMetadata> {
+        if resolve_from_tmdb {
+            // Try TMDB if enabled
+            if let Some(ref tmdb) = self.tmdb_client {
+                // Determine if we should use file-based logic or pure title/stream logic
+                let result = if let Some(f) = file {
+                    self.resolve_from_tmdb_file(is_movie, metadata, tmdb, f).await
+                } else {
+                    self.resolve_from_tmdb_title(is_movie, metadata, tmdb).await
+                };
 
-            match result {
-                Ok(Some(metadata)) => {
-                    if let Some(f) = file {
-                        info!("Found TMDB metadata for: {}", f.file_path);
-                    } else {
-                        info!("Found TMDB metadata for title: {}", metadata.title());
+                match result {
+                    Ok(Some(metadata)) => {
+                        if let Some(f) = file {
+                            debug!("Found TMDB metadata for: {}", f.file_path);
+                        } else {
+                            debug!("Found TMDB metadata for title: {}", metadata.title());
+                        }
+                        return Some(metadata);
                     }
-                    return Some(metadata);
+                    Ok(None) => {
+                        // continue to fallback
+                    }
+                    Err(err) => error!("Error resolving TMDB metadata: {err}"),
                 }
-                Ok(None) => {
-                    // continue to fallback
-                }
-                Err(err) => error!("Error resolving TMDB metadata: {err}"),
             }
         }
 
@@ -123,7 +125,7 @@ impl MetadataResolver {
         // Step 4: Fallback to filename parsing
         if self.fallback_to_filename {
             if let Some(f) = file {
-                info!("Using filename-based metadata for: {}", f.file_path);
+                debug!("Using filename-based metadata for: {}", f.file_path);
             }
             Some(Self::resolve_from_filename(is_movie, metadata))
         } else {
@@ -200,8 +202,8 @@ mod tests {
     use shared::utils::Internable;
     use crate::library::{MediaClassification, MediaClassifier};
 
-    fn create_test_config(tmdb_enabled: bool, fallback_filename: bool) -> Option<LibraryConfig> {
-        Some(LibraryConfig {
+    fn create_test_config(tmdb_enabled: bool, fallback_filename: bool) -> LibraryConfig {
+        LibraryConfig {
             enabled: true,
             scan_directories: vec![],
             supported_extensions: vec![],
@@ -230,7 +232,7 @@ mod tests {
                 movie_category: "Movies".intern(),
                 series_category: "Series".intern(),
             },
-        })
+        }
     }
 
     fn create_test_file(name: &str) -> ScannedMediaFile {
@@ -252,7 +254,7 @@ mod tests {
             .timeout(Duration::from_secs(30))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
-        let resolver = MetadataResolver::from_config(config.as_ref(), client, Some(MetadataStorage::new(PathBuf::from("/tmp"))));
+        let resolver = MetadataResolver::from_config(Some(&config), client, Some(MetadataStorage::new(PathBuf::from("/tmp"))));
         let file = create_test_file("The.Matrix.1999.1080p.mkv");
         let metadata = match MediaClassifier::classify(&file) {
             MediaClassification::Movie { metadata, .. } | MediaClassification::Series { metadata, .. } => metadata,
@@ -279,9 +281,9 @@ mod tests {
             .timeout(Duration::from_secs(30))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
-        let resolver = MetadataResolver::from_config(config.as_ref(), client, Some(MetadataStorage::new(PathBuf::from("/tmp"))));
+        let resolver = MetadataResolver::from_config(Some(&config), client, Some(MetadataStorage::new(PathBuf::from("/tmp"))));
         
-        let metadata = resolver.resolve_from_title("Inception.2010", None, true).await;
+        let metadata = resolver.resolve_from_title("Inception.2010", None, true, true).await;
         assert!(metadata.is_some());
 
         if let Some(MediaMetadata::Movie(movie)) = metadata {
@@ -301,7 +303,7 @@ mod tests {
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         let config = create_test_config(false, false);
-        let resolver = MetadataResolver::from_config(config.as_ref(), client, Some(MetadataStorage::new(PathBuf::from("/tmp"))));
+        let resolver = MetadataResolver::from_config(Some(&config), client, Some(MetadataStorage::new(PathBuf::from("/tmp"))));
         let file = create_test_file("343jfkjh4789dkjfh934z3.Movie.mkv");
         let metadata = match MediaClassifier::classify(&file) {
             MediaClassification::Movie { metadata, .. } | MediaClassification::Series { metadata, .. } => metadata,

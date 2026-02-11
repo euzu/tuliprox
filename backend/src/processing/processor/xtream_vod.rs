@@ -12,8 +12,8 @@ use crate::repository::get_input_storage_path;
 use crate::repository::persist_input_vod_info;
 use crate::repository::persist_input_vod_info_batch;
 use crate::repository::{xtream_get_file_path, BPlusTreeQuery};
-use crate::utils::{debug_if_enabled, xtream};
-use log::{debug, error, info, log_enabled, warn, Level};
+use crate::utils::{trace_if_enabled, debug_if_enabled, xtream};
+use log::{debug, error, info, log_enabled, trace, warn, Level};
 use serde_json::Value;
 use shared::error::TuliproxError;
 use shared::model::{InputType, MediaQuality, PlaylistEntry, PlaylistItem, PlaylistItemType, StreamProperties, VideoStreamDetailProperties, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem, XtreamVideoInfo};
@@ -23,8 +23,7 @@ use std::time::{Duration, Instant};
 
 create_resolve_options_function_for_xtream_target!(vod);
 
-const BATCH_SIZE: usize = 100;
-
+const BATCH_SIZE: usize = 200;
 
 #[allow(clippy::too_many_lines)]
 pub async fn playlist_resolve_vod(
@@ -472,8 +471,8 @@ pub async fn update_vod_metadata(
 
     let display_id = stream_id_opt.map_or_else(|| "StringID".to_string(), |v: u32| v.to_string());
 
-    // Input DB is canonical: only fetch provider info when we still have no stored properties.
-    let should_fetch_info = fetch_info && props.is_none();
+    // Input DB is canonical, but if details are missing we still need one info fetch to complete the record.
+    let should_fetch_info = fetch_info && props.as_ref().is_none_or(|p| p.details.is_none());
 
     // 1. Fetch Info from Provider (only when missing in input DB)
     if should_fetch_info {
@@ -483,7 +482,7 @@ pub async fn update_vod_metadata(
 
             let input_source = InputSource::from(input).with_url(info_url);
 
-            match xtream::get_xtream_stream_info_content(app_config, client, &input_source, false).await {
+            match xtream::get_xtream_stream_info_content(app_config, client, &input_source, true).await {
                 Ok(content) => {
                     if !content.is_empty() {
                         if let Ok(mut json_value) = serde_json::from_str::<Value>(&content) {
@@ -529,11 +528,13 @@ pub async fn update_vod_metadata(
     // Now it's safe to unwrap because we handled the None case above
     let mut properties = props.unwrap();
 
-    // 2. Resolve TMDB/Date if missing
+    let resolve_tmdb_enabled = input.options.as_ref().is_some_and(|o| o.resolve_tmdb);
+
+    // 2. Resolve TMDB/Date if missing and explicitly enabled for this input
     let missing_tmdb = properties.tmdb.is_none();
     let missing_date = properties.details.as_ref().and_then(|d| d.release_date.as_ref()).is_none();
 
-    if missing_tmdb || missing_date {
+    if resolve_tmdb_enabled && (missing_tmdb || missing_date) {
         // Try local parsing first
         if missing_date && !properties.name.is_empty() {
             let meta_parse = ptt_parse_title(&properties.name);
@@ -565,7 +566,7 @@ pub async fn update_vod_metadata(
             if let Some(title) = title_candidate {
                 if !title.is_empty() {
                     debug!("Resolving TMDB for VOD using Playlist Title '{title}' (ID: {display_id})...");
-                    meta = meta_resolver.resolve_from_title(title, properties.tmdb, true).await;
+                    meta = meta_resolver.resolve_from_title(title, properties.tmdb, true, resolve_tmdb_enabled).await;
                     tried_title = true;
                 }
             }
@@ -576,8 +577,8 @@ pub async fn update_vod_metadata(
                 let title_already_tried = if let Some(t) = title_candidate { t == properties.name.as_ref() } else { false };
 
                 if !tried_title || !title_already_tried {
-                    debug!("Fallback to API Name '{}'...", properties.name);
-                    meta = meta_resolver.resolve_from_title(&properties.name, properties.tmdb, true).await;
+                    trace!("Fallback to API Name '{}'...", properties.name);
+                    meta = meta_resolver.resolve_from_title(&properties.name, properties.tmdb, true, resolve_tmdb_enabled).await;
                 }
             }
 
@@ -585,8 +586,8 @@ pub async fn update_vod_metadata(
             if meta.is_none() || (meta.as_ref().is_some_and(|m| m.tmdb_id().is_none())) {
                 if let Some(o_name) = properties.details.as_ref().and_then(|d| d.o_name.as_deref()) {
                     if !o_name.is_empty() && o_name != properties.name.as_ref() {
-                        debug!("Fallback to API Original Name '{o_name}'...");
-                        meta = meta_resolver.resolve_from_title(o_name, properties.tmdb, true).await;
+                        trace!("Fallback to API Original Name '{o_name}'...");
+                        meta = meta_resolver.resolve_from_title(o_name, properties.tmdb, true, resolve_tmdb_enabled).await;
                     }
                 }
             }
@@ -604,7 +605,7 @@ pub async fn update_vod_metadata(
                 }
                 if properties_updated {
                     let id_display = properties.tmdb.map_or("None".to_string(), |id| id.to_string());
-                    debug_if_enabled!("Resolved TMDB for '{}' (ID: {}): {}", display_title, display_id, id_display);
+                    trace_if_enabled!("Resolved TMDB for '{}' (ID: {}): {}", display_title, display_id, id_display);
                 }
             }
         }

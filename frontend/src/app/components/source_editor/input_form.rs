@@ -2,7 +2,9 @@ use crate::app::components::config::HasFormData;
 use crate::app::components::key_value_editor::KeyValueEditor;
 use crate::app::components::select::Select;
 use crate::app::components::{AliasItemForm, BlockId, BlockInstance, Card, DropDownOption, DropDownSelection, EditMode, EpgSourceItemForm, IconButton, Panel, RadioButtonGroup, SourceEditorContext, TextButton, TitledCard};
-use crate::{config_field_child, edit_field_bool, edit_field_date, edit_field_number_i16, edit_field_number_u16, edit_field_text, edit_field_text_option, generate_form_reducer};
+use crate::{config_field_child, edit_field_bool, edit_field_date, edit_field_number_i16, edit_field_number_u16, edit_field_text, edit_field_text_option, generate_form_reducer, html_if};
+use shared::error::TuliproxError;
+use shared::info_err_res;
 use shared::model::{ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, EpgConfigDto, EpgSourceDto, InputFetchMethod, InputType, StagedInputDto};
 use std::collections::HashMap;
 use std::fmt::Display;
@@ -11,8 +13,6 @@ use std::str::FromStr;
 use web_sys::MouseEvent;
 use yew::{function_component, html, use_context, use_effect_with, use_memo, use_reducer, use_state, Callback, Html, Properties, UseReducerHandle};
 use yew_i18n::use_translation;
-use shared::error::TuliproxError;
-use shared::info_err_res;
 
 const LABEL_NAME: &str = "LABEL.NAME";
 const LABEL_INPUT_TYPE: &str = "LABEL.INPUT_TYPE";
@@ -36,6 +36,9 @@ const LABEL_XTREAM_SKIP_VOD: &str = "LABEL.VOD";
 const LABEL_XTREAM_SKIP_SERIES: &str = "LABEL.SERIES";
 const LABEL_XTREAM_LIVE_STREAM_USE_PREFIX: &str = "LABEL.LIVE_STREAM_USE_PREFIX";
 const LABEL_XTREAM_LIVE_STREAM_WITHOUT_EXTENSION: &str = "LABEL.LIVE_STREAM_WITHOUT_EXTENSION";
+const LABEL_RESOLVE_TMDB: &str = "LABEL.RESOLVE_TMDB";
+const LABEL_PROBE_STREAM: &str = "LABEL.PROBE_STREAM";
+const LABEL_METADATA: &str = "LABEL.METADATA";
 const LABEL_CACHE_DURATION: &str = "LABEL.CACHE_DURATION";
 
 const LABEL_MAIN: &str = "LABEL.MAIN_CONFIG";
@@ -51,7 +54,7 @@ enum InputFormPage {
     Options,
     Staged,
     Advanced,
-    Alias
+    Alias,
 }
 
 impl InputFormPage {
@@ -98,6 +101,8 @@ generate_form_reducer!(
       XtreamSkipSeries => xtream_skip_series: bool,
       XtreamLiveStreamUsePrefix => xtream_live_stream_use_prefix: bool,
       XtreamLiveStreamWithoutExtension => xtream_live_stream_without_extension: bool,
+      ResolveTmdb => resolve_tmdb: bool,
+      ProbeStream => probe_stream: bool,
     }
 );
 
@@ -219,10 +224,16 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         let aliases_state = aliases_state.clone();
         let headers_state = headers_state.clone();
 
-        let config_input = props.input.clone();
-
-        use_effect_with(config_input, move |cfg| {
+        let deps = (props.block_id, props.input.clone());
+        let view_visible = view_visible.clone();
+        use_effect_with(deps, move |(_, cfg)| {
             if let Some(input) = cfg {
+                if input.input_type.is_library()
+                    && matches!(*view_visible, InputFormPage::Staged | InputFormPage::Advanced)
+                {
+                    view_visible.set(InputFormPage::Main);
+                }
+
                 input_form_state.dispatch(ConfigInputFormAction::SetAll(input.as_ref().clone()));
 
                 input_options_state.dispatch(ConfigInputOptionsFormAction::SetAll(
@@ -354,6 +365,36 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         })
     };
 
+    let handle_move_alias_up = {
+        let alias_list = aliases_state.clone();
+        Callback::from(move |(idx, e): (String, MouseEvent)| {
+            e.prevent_default();
+            e.stop_propagation();
+            if let Ok(index) = idx.parse::<usize>() {
+                let mut items = (*alias_list).clone();
+                if index > 0 && index < items.len() {
+                    items.swap(index, index - 1);
+                    alias_list.set(items);
+                }
+            }
+        })
+    };
+
+    let handle_move_alias_down = {
+        let alias_list = aliases_state.clone();
+        Callback::from(move |(idx, e): (String, MouseEvent)| {
+            e.prevent_default();
+            e.stop_propagation();
+            if let Ok(index) = idx.parse::<usize>() {
+                let mut items = (*alias_list).clone();
+                if index + 1 < items.len() {
+                    items.swap(index, index + 1);
+                    alias_list.set(items);
+                }
+            }
+        })
+    };
+
     let handle_remove_epg_source = {
         let epg_list = epg_sources_state.clone();
         Callback::from(move |(idx, e): (String, MouseEvent)| {
@@ -372,15 +413,24 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     let render_options = || {
         html! {
             <Card class="tp__config-view__card">
-            <TitledCard title={translate.t(LABEL_SKIP)}>
-              <div class="tp__config-view__cols-3">
-                { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_SKIP_LIVE), xtream_skip_live, ConfigInputOptionsFormAction::XtreamSkipLive) }
-                { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_SKIP_VOD), xtream_skip_vod, ConfigInputOptionsFormAction::XtreamSkipVod) }
-                { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_SKIP_SERIES), xtream_skip_series, ConfigInputOptionsFormAction::XtreamSkipSeries) }
-              </div>
-            </TitledCard>
-            { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_LIVE_STREAM_USE_PREFIX), xtream_live_stream_use_prefix, ConfigInputOptionsFormAction::XtreamLiveStreamUsePrefix) }
-            { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_LIVE_STREAM_WITHOUT_EXTENSION), xtream_live_stream_without_extension, ConfigInputOptionsFormAction::XtreamLiveStreamWithoutExtension) }
+            { html_if!(input_form_state.form.input_type.is_xtream(), {
+                <>
+                <TitledCard title={translate.t(LABEL_SKIP)}>
+                  <div class="tp__config-view__cols-3">
+                    { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_SKIP_LIVE), xtream_skip_live, ConfigInputOptionsFormAction::XtreamSkipLive) }
+                    { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_SKIP_VOD), xtream_skip_vod, ConfigInputOptionsFormAction::XtreamSkipVod) }
+                    { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_SKIP_SERIES), xtream_skip_series, ConfigInputOptionsFormAction::XtreamSkipSeries) }
+                  </div>
+                </TitledCard>
+                { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_LIVE_STREAM_USE_PREFIX), xtream_live_stream_use_prefix, ConfigInputOptionsFormAction::XtreamLiveStreamUsePrefix) }
+                { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_LIVE_STREAM_WITHOUT_EXTENSION), xtream_live_stream_without_extension, ConfigInputOptionsFormAction::XtreamLiveStreamWithoutExtension) }
+                </>
+                })
+            }
+            <TitledCard title={translate.t(LABEL_METADATA)}>
+              { edit_field_bool!(input_options_state, translate.t(LABEL_RESOLVE_TMDB), resolve_tmdb, ConfigInputOptionsFormAction::ResolveTmdb) }
+              { edit_field_bool!(input_options_state, translate.t(LABEL_PROBE_STREAM), probe_stream, ConfigInputOptionsFormAction::ProbeStream) }
+             </TitledCard>
             </Card>
         }
     };
@@ -492,6 +542,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
               } else {
                   { config_field_child!(translate.t(LABEL_ALIASES), {
                       let aliases_list = aliases.clone();
+                      let alias_count = aliases_list.len();
                       html! {
                         <div class="tp__form-list">
                             <div class="tp__form-list__items">
@@ -500,6 +551,26 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                                     html! {
                                         <div class="tp__form-list__item" key={format!("alias-{idx}")}>
                                             <div class="tp__form-list__item-toolbar">
+                                                if idx > 0 {
+                                                    <IconButton
+                                                        class="tp__form-list__item-arrow-btn"
+                                                        name={idx.to_string()}
+                                                        icon="ArrowUp"
+                                                        onclick={handle_move_alias_up.clone()}
+                                                    />
+                                                } else if alias_count > 2 {
+                                                    <span class="tp__form-list__item-placeholder-btn"/>
+                                                }
+                                                if idx + 1 < alias_count {
+                                                    <IconButton
+                                                        class="tp__form-list__item-arrow-btn"
+                                                        name={idx.to_string()}
+                                                        icon="ArrowDown"
+                                                        onclick={handle_move_alias_down.clone()}
+                                                    />
+                                                } else if alias_count > 2 {
+                                                    <span class="tp__form-list__item-placeholder-btn"/>
+                                                }
                                                 <IconButton
                                                 name={idx.to_string()}
                                                 icon="Delete"
@@ -595,9 +666,9 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                             />
                         </div>
                       }
-                  })}
-                }
-            </Card>
+                  })
+               }}
+              </Card>
         }
     };
 
@@ -676,6 +747,9 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         })
     };
 
+    let library_input = input_form_state.form.input_type.is_library();
+
+
     let render_edit_mode = || {
         html! {
             <div class="tp__source-editor-form__body">
@@ -708,18 +782,24 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 <Panel value={InputFormPage::Main.to_string()} active={view_visible.to_string()}>
                 {render_input()}
                 </Panel>
-                <Panel value={InputFormPage::Alias.to_string()} active={view_visible.to_string()}>
-                {render_alias()}
-                </Panel>
+                { html_if!(!library_input, {
+                    <Panel value={InputFormPage::Alias.to_string()} active={view_visible.to_string()}>
+                    {render_alias()}
+                    </Panel>
+                })}
                 <Panel value={InputFormPage::Options.to_string()} active={view_visible.to_string()}>
                 {render_options()}
                 </Panel>
-                <Panel value={InputFormPage::Staged.to_string()} active={view_visible.to_string()}>
-                {render_staged()}
-                </Panel>
-                <Panel value={InputFormPage::Advanced.to_string()} active={view_visible.to_string()}>
-                {render_advanced()}
-                </Panel>
+                { html_if!(!library_input, {
+                    <>
+                  <Panel value={InputFormPage::Staged.to_string()} active={view_visible.to_string()}>
+                   {render_staged()}
+                   </Panel>
+                  <Panel value={InputFormPage::Advanced.to_string()} active={view_visible.to_string()}>
+                   {render_advanced()}
+                  </Panel>
+                    </>
+                })}
             </div>
             </div>
         }
@@ -729,10 +809,16 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         html! {
             <div class="tp__source-editor-form__sidebar">
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Main, if *view_visible == InputFormPage::Main { " active" } else {""})}  icon="Settings" hint={translate.t(LABEL_MAIN)} name={InputFormPage::Main.to_string()} onclick={&handle_menu_click}></IconButton>
+            {html_if!(!library_input, {
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Alias, if *view_visible == InputFormPage::Alias { " active" } else {""})}  icon="Alias" hint={translate.t(LABEL_ALIAS)} name={InputFormPage::Alias.to_string()} onclick={&handle_menu_click}></IconButton>
+            })}
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Options, if *view_visible == InputFormPage::Options { " active" } else {""})}  icon="Options" hint={translate.t(LABEL_OPTIONS)} name={InputFormPage::Options.to_string()} onclick={&handle_menu_click}></IconButton>
+            { html_if!(!library_input, {
+                <>
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Staged, if *view_visible == InputFormPage::Staged { " active" } else {""})}  icon="Staged" hint={translate.t(LABEL_STAGED)} name={InputFormPage::Staged.to_string()} onclick={&handle_menu_click}></IconButton>
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Advanced, if *view_visible == InputFormPage::Advanced { " active" } else {""})}  icon="Advanced" hint={translate.t(LABEL_ADVANCED)} name={InputFormPage::Advanced.to_string()} onclick={&handle_menu_click}></IconButton>
+                </>
+             })}
           </div>
         }
     };

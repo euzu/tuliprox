@@ -25,6 +25,11 @@ fn lcg_next(state: &mut u64) -> u64 {
     *state
 }
 
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
 fn percentile_nearest_rank(sorted_values: &[f64], percentile: f64) -> f64 {
     if sorted_values.is_empty() {
         return 0.0;
@@ -109,12 +114,7 @@ fn stress_test_bplustree() {
     let insert_max = *sorted_insert_throughputs.last().unwrap_or(&0.0);
     writeln!(
         log_file,
-        "Insert Throughput Summary (ops/sec): mean={:.0}, median={:.0}, p95={:.0}, min={:.0}, max={:.0}",
-        insert_mean,
-        insert_median,
-        insert_p95,
-        insert_min,
-        insert_max
+        "Insert Throughput Summary (ops/sec): mean={insert_mean:.0}, median={insert_median:.0}, p95={insert_p95:.0}, min={insert_min:.0}, max={insert_max:.0}"
     )
     .unwrap();
     let mut tree = final_tree.expect("final insert run should produce a tree");
@@ -305,7 +305,7 @@ fn stress_test_bplustree() {
                 for _ in 0..writer_batch_size {
                     let key = (lcg_next(&mut prng_state) as u32) % num_items_u32;
                     let variant = lcg_next(&mut prng_state);
-                    let payload = if (variant & 0b1111) == 0 {
+                    let payload = if variant.trailing_zeros() >= 4 {
                         &large_payload_local
                     } else {
                         &small_payload_local

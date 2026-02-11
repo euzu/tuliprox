@@ -8,13 +8,13 @@ use std::sync::{Arc, Weak};
 use tokio::sync::{Mutex, OwnedRwLockWriteGuard, RwLock};
 use tokio::task::JoinSet;
 
-use crate::api::model::{ActiveProviderManager, EventManager, EventMessage, PlaylistStorageState, UpdateGuard, MetadataUpdateManager, ResolveReasonSet, ResolveReason};
+use crate::api::model::{ActiveProviderManager, EventManager, EventMessage, PlaylistStorageState, UpdateGuard, MetadataUpdateManager, ProviderIdType, ResolveReasonSet, ResolveReason, UpdateTask};
 use crate::messaging::{send_message};
 
 
 use crate::model::FetchedPlaylist;
 use crate::model::Mapping;
-use crate::model::{ConfigTarget, ProcessTargets};
+use crate::model::{ConfigTarget, ProcessTargets, TargetOutput, XtreamTargetFlags};
 use crate::processing::input_cache;
 use crate::processing::input_cache::ClusterState;
 use crate::processing::parser::xmltv::flatten_tvguide;
@@ -23,7 +23,6 @@ use crate::processing::processor::epg::process_playlist_epg;
 use crate::processing::processor::library;
 use crate::processing::processor::sort::sort_playlist;
 use crate::processing::processor::trakt::process_trakt_categories_for_target;
-use crate::processing::processor::xtream::playlist_resolve_livetv;
 use crate::processing::processor::xtream_series::playlist_resolve_series;
 use crate::processing::processor::xtream_vod::playlist_resolve_vod;
 use crate::repository::{load_input_playlist, persist_input_playlist, persist_playlist};
@@ -41,7 +40,7 @@ use shared::model::xtream_const::XTREAM_CLUSTER;
 use shared::model::{InputStats, PlaylistStats, SourceStats, TargetStats, UUIDType};
 use shared::model::{CounterModifier, FieldGetAccessor, FieldSetAccessor, InputType, ItemField,
                     PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistUpdateState,
-                    ProcessingOrder, XtreamCluster};
+                    ProcessingOrder, StreamProperties, XtreamCluster};
 use shared::utils::{create_alias_uuid, default_as_default, interner_gc, Internable};
 use std::time::Instant;
 
@@ -829,55 +828,191 @@ async fn playlist_resolve(ctx: &PlaylistProcessingContext,
 
     playlist_resolve_series(ctx, target, errors, pipe, provider_fpl, processed_fpl).await;
     playlist_resolve_vod(ctx, target, errors, provider_fpl, processed_fpl).await;
-    playlist_resolve_livetv(ctx, target, errors, processed_fpl).await;
-    probing(ctx, provider_fpl).await;
+    playlist_probe(ctx, target, processed_fpl).await;
 }
 
-async fn probing(ctx: &PlaylistProcessingContext, provider_fpl: &mut FetchedPlaylist<'_>) {
-    // Queue generic probing if requested
-    if let Some(mgr) = ctx.metadata_manager.as_ref() {
-        if let Some(opts) = provider_fpl.input.options.as_ref() {
-            if opts.analyze_stream {
-                // Check if ffprobe enabled globally
-                if ctx.config.is_ffprobe_enabled().await {
-                    let input_name = provider_fpl.input.name.clone();
-                    // We need an input type to decide what ID to use
-                    let input_type = provider_fpl.input.input_type;
+fn is_xtream_only_output_target(target: &ConfigTarget) -> bool {
+    target.output.len() == 1 && matches!(target.output.first(), Some(TargetOutput::Xtream(_)))
+}
 
-                    for item in provider_fpl.items() {
-                        // Only probe if generic types (M3U, Library). Xtream types handled in their processors.
-                        if !matches!(input_type, shared::model::InputType::Xtream | shared::model::InputType::XtreamBatch) {
-                            let has_details = item.header.additional_properties.as_ref()
-                                .and_then(|p| match p {
-                                    shared::model::StreamProperties::Video(v) => v.details.as_ref().and_then(|d| d.video.as_ref()),
-                                    shared::model::StreamProperties::Live(l) => l.video.as_ref(),
-                                    _ => None
-                                }).is_some();
+fn get_xtream_cluster_probe_flag(target: &ConfigTarget, cluster: XtreamCluster) -> Option<bool> {
+    target.get_xtream_output().map(|xtream_output| match cluster {
+        XtreamCluster::Live => xtream_output.flags.contains(XtreamTargetFlags::ProbeLive),
+        XtreamCluster::Video => xtream_output.flags.contains(XtreamTargetFlags::ProbeVod),
+        XtreamCluster::Series => xtream_output.flags.contains(XtreamTargetFlags::ProbeSeries),
+    })
+}
 
-                            if !has_details {
-                                // For M3U, ID is the provider_id string. For Library, it is UUID.
-                                let unique_id = if input_type == shared::model::InputType::Library {
-                                    item.header.uuid.to_valid_uuid()
-                                } else {
-                                    item.header.id.to_string()
-                                };
+fn is_cluster_probe_enabled_for_target(target: &ConfigTarget, cluster: XtreamCluster) -> bool {
+    // Probe flags are only authoritative when the target is exactly one xtream output.
+    // For mixed outputs (xtream + m3u/strm/...), probing remains enabled because non-xtream outputs have no probe flags.
+    if !is_xtream_only_output_target(target) {
+        return true;
+    }
 
-                                let task = crate::api::model::UpdateTask::ProbeStream {
-                                    unique_id,
-                                    url: item.header.url.to_string(),
-                                    item_type: item.header.item_type,
-                                    reason: ResolveReasonSet::from_variants(&[ResolveReason::MissingDetails]),
-                                    delay: 50,
-                                };
-                                let mgr_clone: Arc<MetadataUpdateManager> = mgr.clone();
-                                let name_clone = input_name.clone();
-                                mgr_clone.queue_task_background(name_clone, task);
-                            }
+    get_xtream_cluster_probe_flag(target, cluster).unwrap_or(true)
+}
+
+fn is_probe_supported_item_type(item_type: PlaylistItemType) -> bool {
+    matches!(
+            item_type,
+                PlaylistItemType::Live // we skip other live streams because hls and dash have multiple resolutions
+                | PlaylistItemType::Video
+                | PlaylistItemType::LocalVideo
+                | PlaylistItemType::Series
+                | PlaylistItemType::LocalSeries
+        )
+}
+
+fn has_probe_details(item: &PlaylistItem) -> bool {
+    item.header
+        .additional_properties
+        .as_ref()
+        .and_then(|p| match p {
+            StreamProperties::Video(v) => v.details.as_ref().and_then(|d| d.video.as_ref()),
+            StreamProperties::Live(l) => l.video.as_ref(),
+            StreamProperties::Episode(e) => e.video.as_ref(),
+            StreamProperties::Series(_) => None,
+        })
+        .is_some()
+}
+
+fn get_live_probe_interval_settings(target: &ConfigTarget, input_type: InputType) -> Option<(u16, u64)> {
+    if !matches!(input_type, InputType::Xtream | InputType::XtreamBatch) {
+        return None;
+    }
+    target
+        .get_xtream_output()
+        .map(|xtream_output| (xtream_output.resolve_delay, u64::from(xtream_output.probe_live_interval_hours) * 3600))
+}
+
+fn needs_live_probe(item: &PlaylistItem, cutoff_ts: i64) -> bool {
+    match item.header.additional_properties.as_ref() {
+        Some(StreamProperties::Live(props)) => {
+            if let Some(last_ts) = props.last_probed_timestamp {
+                last_ts < cutoff_ts
+            } else {
+                true
+            }
+        }
+        _ => true,
+    }
+}
+
+fn provider_id_from_item(item: &PlaylistItem) -> Option<ProviderIdType> {
+    if let Ok(id) = item.header.id.parse::<u32>() {
+        if id == 0 {
+            return None;
+        }
+        return Some(ProviderIdType::Id(id));
+    }
+
+    let raw = item.header.id.trim();
+    if raw.is_empty() {
+        None
+    } else {
+        Some(ProviderIdType::from(raw))
+    }
+}
+
+async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, fpl: &mut FetchedPlaylist<'_>) {
+    let Some(mgr) = ctx.metadata_manager.as_ref() else {
+        return;
+    };
+    let Some(opts) = fpl.input.options.as_ref() else {
+        return;
+    };
+    if !opts.probe_stream {
+        return;
+    }
+    if !ctx.config.is_ffprobe_enabled().await {
+        return;
+    }
+
+    let input_name = fpl.input.name.clone();
+    let input_type = fpl.input.input_type;
+    let xtream_only_output = is_xtream_only_output_target(target);
+    let live_probe_settings = get_live_probe_interval_settings(target, input_type).map(|(delay, interval_secs)| {
+        let interval_signed = i64::try_from(interval_secs).unwrap_or(i64::MAX);
+        let cutoff_ts = chrono::Utc::now().timestamp().saturating_sub(interval_signed);
+        (delay, interval_secs, cutoff_ts)
+    });
+
+    let mut queued_probe_keys: HashSet<(Arc<str>, String)> = HashSet::new();
+    let mut queued_live_keys: HashSet<ProviderIdType> = HashSet::new();
+    let mut queued_live_count = 0usize;
+    let mut queued_stream_count = 0usize;
+
+    for item in fpl.items() {
+        if !is_cluster_probe_enabled_for_target(target, item.header.xtream_cluster) {
+            continue;
+        }
+
+        if !is_probe_supported_item_type(item.header.item_type) {
+            continue;
+        }
+
+        if item.header.item_type.is_live() {
+            if let Some((resolve_delay, interval_secs, cutoff_ts)) = live_probe_settings {
+                if needs_live_probe(&item, cutoff_ts) {
+                    if let Some(provider_id) = provider_id_from_item(&item) {
+                        if queued_live_keys.insert(provider_id.clone()) {
+                            let task = UpdateTask::ProbeLive {
+                                id: provider_id,
+                                reason: ResolveReasonSet::from_variants(&[ResolveReason::Probe]),
+                                delay: resolve_delay,
+                                interval: interval_secs,
+                            };
+                            mgr.queue_task_background(input_name.clone(), task);
+                            queued_live_count += 1;
                         }
                     }
                 }
+                continue;
             }
         }
+
+        // For xtream-only targets, dedicated xtream resolve/probe processors handle non-live paths.
+        if xtream_only_output && matches!(input_type, InputType::Xtream | InputType::XtreamBatch) {
+            continue;
+        }
+
+        if has_probe_details(&item) {
+            continue;
+        }
+
+        // For M3U, ID is provider id; for Library, ID is UUID.
+        let unique_id = if input_type == InputType::Library {
+            item.header.uuid.to_valid_uuid()
+        } else {
+            item.header.id.to_string()
+        };
+        let probe_scope = if item.header.input_name.is_empty() {
+            input_name.clone()
+        } else {
+            item.header.input_name.clone()
+        };
+
+        if !queued_probe_keys.insert((probe_scope.clone(), unique_id.clone())) {
+            continue;
+        }
+
+        let task = UpdateTask::ProbeStream {
+            probe_scope,
+            unique_id,
+            url: item.header.url.to_string(),
+            item_type: item.header.item_type,
+            reason: ResolveReasonSet::from_variants(&[ResolveReason::MissingDetails]),
+            delay: 50,
+        };
+        mgr.queue_task_background(input_name.clone(), task);
+        queued_stream_count += 1;
+    }
+
+    if queued_live_count > 0 || queued_stream_count > 0 {
+        info!(
+            "Queued probe tasks for input {input_name} (live_interval={queued_live_count}, generic={queued_stream_count})"
+        );
     }
 }
 

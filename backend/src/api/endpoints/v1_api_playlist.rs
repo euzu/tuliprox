@@ -31,7 +31,7 @@ fn create_config_input_for_m3u(url: &str) -> ConfigInput {
             xtream_live_stream_without_extension: false,
             xtream_live_stream_use_prefix: true,
             resolve_tmdb: false,
-            analyze_stream: false,
+            probe_stream: false,
         }),
         ..Default::default()
     }
@@ -53,7 +53,7 @@ fn create_config_input_for_xtream(username: &str, password: &str, host: &str) ->
             xtream_live_stream_without_extension: false,
             xtream_live_stream_use_prefix: true,
             resolve_tmdb: false,
-            analyze_stream: false,
+            probe_stream: false,
         }),
         ..Default::default()
     }

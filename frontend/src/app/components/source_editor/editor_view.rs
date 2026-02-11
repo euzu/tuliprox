@@ -2,8 +2,7 @@ use crate::app::components::source_editor::layout::layout;
 use crate::app::components::{can_connect, Block, BlockId, BlockInstance, BlockType, BlockView, Connection, EditMode, InputRow, PortStatus, SourceEditorContext, SourceEditorForm, SourceEditorSidebar, TextButton, BLOCK_HEADER_HEIGHT, BLOCK_HEIGHT, BLOCK_PORT_HEIGHT, BLOCK_WIDTH};
 use crate::app::{ConfigContext, PlaylistContext};
 use crate::hooks::use_service_context;
-use shared::model::{ConfigInputDto, ConfigSourceDto, ConfigTargetDto, HdHomeRunTargetOutputDto,
-                    M3uTargetOutputDto, StrmTargetOutputDto, TargetOutputDto, XtreamTargetOutputDto};
+use shared::model::{ConfigInputDto, ConfigSourceDto, ConfigTargetDto, HdHomeRunTargetOutputDto, InputType, M3uTargetOutputDto, StrmTargetOutputDto, TargetOutputDto, XtreamTargetOutputDto};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -191,11 +190,11 @@ impl EditorState {
 
 fn create_instance(block_type: BlockType) -> BlockInstance {
     match block_type {
-        BlockType::InputXtream => BlockInstance::Input(Rc::new(ConfigInputDto::default())),
-        BlockType::InputM3u => BlockInstance::Input(Rc::new(ConfigInputDto::default())),
-        BlockType::InputLibrary => BlockInstance::Input(Rc::new(ConfigInputDto::default())),
+        BlockType::InputXtream => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::Xtream))),
+        BlockType::InputM3u => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::M3u))),
+        BlockType::InputLibrary => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::Library))),
         BlockType::Target => {
-            let dto = ConfigTargetDto { name: String::new(), ..Default::default() };
+            let dto = ConfigTargetDto { name: String::new(), ..ConfigTargetDto::default() };
             BlockInstance::Target(Rc::new(dto))
         }
         BlockType::OutputM3u => BlockInstance::Output(Rc::new(TargetOutputDto::M3u(M3uTargetOutputDto::default()))),
@@ -549,6 +548,7 @@ pub fn SourceEditor() -> Html {
 
     let handle_connection_drop = {
         let editor_state_ref = editor_state_ref.clone();
+        let force_update = force_update.clone();
         Callback::from(move |to_id: BlockId| {
             let pending_connection = editor_state_ref.borrow().pending_connection;
             if let Some(from_id) = pending_connection {
@@ -575,6 +575,7 @@ pub fn SourceEditor() -> Html {
             }
             {
                 editor_state_ref.borrow_mut().clear_pending();
+                force_update.set(*force_update + 1);
             }
         })
     };

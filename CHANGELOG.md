@@ -37,7 +37,7 @@
               - '(?i)\bSD\b'
     ```
   - Trakt api config field `key` is now `api_key`. Added `user_agent` field to Trakt api config
-  - resolve_vod_delay and resolve_series_delay are now merged as resolve_delay, added `resolve_live` and `resolve_live_interval_hours` to resolve live streams.
+  - resolve_vod_delay and resolve_series_delay are now merged as resolve_delay, added `probe_live` and `probe_live_interval_hours` for live stream probing.
       ```yaml
        # Before (deprecated)
        output:
@@ -58,7 +58,7 @@
 ## 🌟 New Features
 - **Smart Connection Priority**: Introduced a priority system for connections. Users with higher priority can preempt (kick) lower priority connections (e.g., background tasks or standard users) when provider slots are full.
 - **Background Metadata Queue**: Metadata resolution (VOD/Series) and stream analysis are now queued per input and processed in the background when provider connections are idle. This prevents "No Connections" errors for active users during playlist updates.
-- **Live TV Probing**: Added support for probing Live TV streams (`resolve_livetv`) to determine codecs and resolution. This runs as a low-priority background task.
+- **Live TV Probing**: Added support for probing Live TV streams (`probe_live`) to determine codecs and resolution. This runs as a low-priority background task.
 - **Discord Notifications**: Support for Discord notifications via webhooks with optional Handlebars templates.
 - **Enhanced REST Messaging**: Support for custom HTTP methods, headers, and Handlebars templating.
 - **Local Library Module**: Comprehensive local video file scanning and metadata management.
@@ -83,10 +83,10 @@
   - Added `video.ffprobe_enabled` (default: false) and `video.ffprobe_timeout`.
 - **source.yml (input options)**:
   - Added `resolve_tmdb`: Triggers TMDB lookup if ID is missing.
-  - Added `analyze_stream`: Triggers ffprobe if technical info is missing.
+  - Added `probe_stream`: Triggers ffprobe if technical info is missing.
 - **source.yml (target output)**:
-  - Added `resolve_livetv`: Enables background probing for Live TV streams (default disabled).
-  - Added `resolve_livetv_interval_hours`: Sets the frequency for re-probing Live TV streams.
+  - Added `probe_live`: Enables background probing for Live TV streams (default disabled).
+  - Added `probe_live_interval_hours`: Sets the frequency for re-probing Live TV streams.
   - Added `resolve_background`: Toggles background metadata resolution (default `true`). Set to `false` for blocking, immediate resolution.
 
 ## 🛠 Optimizations

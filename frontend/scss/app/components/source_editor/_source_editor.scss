@@ -136,3 +136,12 @@
 .clickable {
    cursor: pointer;
 }
+
+.tp__form-list__item-arrow-btn {
+   svg {
+      transform: scale(2);
+   }
+}
+.tp__form-list__item-placeholder-btn {
+   width: 28px;
+}

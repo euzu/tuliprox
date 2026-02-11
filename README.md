@@ -327,7 +327,7 @@ inputs:
       # Attempts to resolve missing TMDB IDs and Release Date via TMDB API based on title
       resolve_tmdb: true
       # Probes stream if video/audio info is missing in provider data
-      analyze_stream: true
+      probe_stream: true
 ```
 
 **Target Config (`source.yml`):**
@@ -971,7 +971,7 @@ Each input has the following attributes:
   + `xtream_live_stream_without_extension` default false, if set to true `.ts` extension is not added to the stream link.
   + `xtream_live_stream_use_prefix` default true, if set to true `/live/` prefix is added to the stream link.
   + `resolve_tmdb`: `true`|`false` Attempts to resolve missing TMDB IDs via TMDB API based on title.
-  + `analyze_stream`: `true`|`false` Probes stream if video/audio info is missing in provider data. Probing respects the `max_connections` limit of your provider input. If no connection slot is available, the item is skipped and retried during the next update.
+  + `probe_stream`: `true`|`false` Probes stream if video/audio info is missing in provider data. Probing respects the `max_connections` limit of your provider input. If no connection slot is available, the item is skipped and retried during the next update.
 - `aliases`  for alias definitions for the same provider with different credentials
 - `staged` for side loading processed playlists.
   If you already have a provider configured but want to load the playlist from a different source — for example, 
@@ -1076,7 +1076,7 @@ inputs:
     password: test
     options:
       resolve_tmdb: true
-      analyze_stream: true
+      probe_stream: true
 ```
 
 Input alias definition for same provider with same content but different credentials.
@@ -1410,8 +1410,10 @@ Each format has different properties.
 - resolve_background: true|false (default true). If set to false, metadata (TMDB/Probe) resolution happens immediately and blocks the import process.
 - resolve_series: true|false (default false),
 - resolve_vod: true|false (default false),
-- resolve_live: true|false (default false),
-- resolve_live_interval_hours: number (default 24),
+- probe_series: true|false (default false),
+- probe_vod: true|false (default false),
+- probe_live: true|false (default false),
+- probe_live_interval_hours: number (default 24),
 - resolve_delay: seconds (default 2s),
 - update_strategy: instant|bundled (default instant),
 - trakt: Trakt Configuration
@@ -1471,7 +1473,7 @@ The processing order (Filter, Rename and Map) can be configured for each target 
 ### 2.2.2.4 `options`
 Target options are:
 
-- `ignore_logo` logo attributes are ignored to avoid caching logo files on devices.
+- `ignore_logo` logo attributes `tvg-logo`and `tvg-logo-small` are ignored to avoid caching logo files on devices for m3u playlists.
 - `share_live_streams` to share live stream connections  in reverse proxy mode.
 - `remove_duplicates` tries to remove duplicates by `url`.
 
@@ -1531,8 +1533,10 @@ There is a difference for `resolve_vod` and `resolve_series`.
 `resolve_series` works only when input: `xtream` and output: `m3u`.
 `resolve_vod` works only when input: `xtream`.
 
-- `resolve_live`: If set to `true`, live streams are analyzed (probed) in the background during idle times to determine codecs and resolution.
-- `resolve_live_interval_hours`: Defines how often (in hours) a live stream should be re-probed (default: 24h).
+- `probe_series`: If set to `true`, series entries are probed to enrich technical metadata (requires `probe_stream` and ffprobe).
+- `probe_vod`: If set to `true`, VOD entries are probed to enrich technical metadata (requires `probe_stream` and ffprobe).
+- `probe_live`: If set to `true`, live streams are analyzed (probed) in the background during idle times to determine codecs and resolution.
+- `probe_live_interval_hours`: Defines how often (in hours) a live stream should be re-probed (default: 24h).
 - `update_strategy`:
   - `instant` (default): Writes changes to the output files immediately after a stream is resolved/probed.
   - `bundled`: Queues updates and writes them in batches to reduce disk I/O operations.
