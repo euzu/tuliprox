@@ -1142,21 +1142,21 @@ fn collect_accounts(input: &ConfigInput) -> Vec<AccountCredentials> {
 }
 
 fn compare_alias_exp_date(a: &ConfigInputAliasDto, b: &ConfigInputAliasDto) -> Ordering {
-    let a_ts = a.exp_date.unwrap_or(i64::MAX);
-    let b_ts = b.exp_date.unwrap_or(i64::MAX);
-    a_ts.cmp(&b_ts).then_with(|| a.name.cmp(&b.name))
+    let a_ts = a.exp_date.unwrap_or(i64::MIN);
+    let b_ts = b.exp_date.unwrap_or(i64::MIN);
+    b_ts.cmp(&a_ts).then_with(|| a.name.cmp(&b.name))
 }
 
 fn compare_alias_exp_date_config(a: &ConfigInputAlias, b: &ConfigInputAlias) -> Ordering {
-    let a_ts = a.exp_date.unwrap_or(i64::MAX);
-    let b_ts = b.exp_date.unwrap_or(i64::MAX);
-    a_ts.cmp(&b_ts).then_with(|| a.name.cmp(&b.name))
+    let a_ts = a.exp_date.unwrap_or(i64::MIN);
+    let b_ts = b.exp_date.unwrap_or(i64::MIN);
+    b_ts.cmp(&a_ts).then_with(|| a.name.cmp(&b.name))
 }
 
 fn compare_account_exp_date(a: &AccountCredentials, b: &AccountCredentials) -> Ordering {
-    let a_ts = a.exp_date.unwrap_or(i64::MAX);
-    let b_ts = b.exp_date.unwrap_or(i64::MAX);
-    a_ts.cmp(&b_ts).then_with(|| a.name.cmp(&b.name))
+    let a_ts = a.exp_date.unwrap_or(i64::MIN);
+    let b_ts = b.exp_date.unwrap_or(i64::MIN);
+    b_ts.cmp(&a_ts).then_with(|| a.name.cmp(&b.name))
 }
 
 fn aliases_need_sort_config(aliases: &[ConfigInputAlias]) -> bool {
@@ -2439,28 +2439,17 @@ async fn sync_panel_api_for_input_on_boot(
     let mut time_cache = load_panel_api_time_cache(app_state.as_ref(), &cache_path).await;
     let cached_entry = time_cache.inputs.get(input.name.as_ref()).cloned();
 
-    if panel_cfg.alias_pool.is_some() {
-        if let Some(csv_path) = csv_path.as_ref() {
-            let _csv_lock = app_state.app_config.file_locks.write_lock(csv_path).await;
-            match csv_patch_batch_sort_by_exp_date(input.input_type, csv_path).await {
-                Ok(true) => any_change = true,
-                Ok(false) => {}
-                Err(err) => debug_if_enabled!(
-                    "panel_api boot/update failed to sort csv alias pool for {}: {}",
-                    sanitize_sensitive_info(&input.name),
-                    err
-                ),
-            }
-        } else if input
+    if panel_cfg.alias_pool.is_some()
+        && csv_path.is_none()
+        && input
             .aliases
             .as_ref()
             .is_some_and(|aliases| aliases_need_sort_config(aliases))
-        {
-            sources_yml_patches.push(SourcesYmlPatch::SortAliases {
-                input_name: input.name.clone(),
-            });
-            pending_sources_yml = true;
-        }
+    {
+        sources_yml_patches.push(SourcesYmlPatch::SortAliases {
+            input_name: input.name.clone(),
+        });
+        pending_sources_yml = true;
     }
 
     if let Some((root_username, root_password)) = extract_account_creds_from_input(input.as_ref()) {
@@ -3627,6 +3616,21 @@ async fn sync_panel_api_for_input_on_boot(
                     sanitize_sensitive_info(&input.name),
                     sanitize_sensitive_info(err.to_string().as_str())
                 );
+            }
+        }
+    }
+
+    if panel_cfg.alias_pool.is_some() {
+        if let Some(csv_path) = csv_path.as_ref() {
+            let _csv_lock = app_state.app_config.file_locks.write_lock(csv_path).await;
+            match csv_patch_batch_sort_by_exp_date(input.input_type, csv_path).await {
+                Ok(true) => any_change = true,
+                Ok(false) => {}
+                Err(err) => debug_if_enabled!(
+                    "panel_api boot/update final sort failed for csv alias pool {}: {}",
+                    sanitize_sensitive_info(&input.name),
+                    err
+                ),
             }
         }
     }
