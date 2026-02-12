@@ -4,7 +4,7 @@ use crate::processing::processor::{update_generic_stream_metadata, update_live_s
 use crate::utils::debug_if_enabled;
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
-use log::{debug, error, info, warn};
+use log::{debug, error, info, trace, warn};
 use shared::create_bit_set;
 use shared::error::TuliproxError;
 use shared::model::{InputType, LiveStreamProperties, PlaylistItemType, SeriesStreamProperties, UUIDType, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem};
@@ -342,14 +342,12 @@ impl InputWorker {
     async fn run(mut self) {
         debug!("Metadata worker started for input {}", &self.input_name);
 
-        let mut processed_count: usize = 0;
         let mut processed_vod_count: usize = 0;
         let mut processed_series_count: usize = 0;
         let mut retry_attempts: HashMap<TaskKey, u8> = HashMap::new();
         let mut last_queue_log_at = Instant::now();
         let mut last_progress_log_at = Instant::now();
-        let mut queue_idle_notified = false;
-        let mut started_updates_logged = false;
+        let mut queue_cycle_active = false;
 
         let input_name = self.input_name.clone();
         let app_state_weak = self.app_state_weak.clone();
@@ -366,9 +364,17 @@ impl InputWorker {
 
             let Some((current_key, current_task, current_generation)) = task_data else { break };
 
-            if !started_updates_logged {
-                info!("Starting background metadata updates for input {input_name}");
-                started_updates_logged = true;
+            if !queue_cycle_active {
+                // First entry of a new processing cycle.
+                queue_cycle_active = true;
+                processed_vod_count = 0;
+                processed_series_count = 0;
+                last_progress_log_at = Instant::now();
+                // Emit queue logs promptly for the new cycle.
+                last_queue_log_at = Instant::now()
+                    .checked_sub(QUEUE_LOG_INTERVAL + Duration::from_secs(1))
+                    .unwrap_or_else(Instant::now);
+                debug!("Background metadata update queue has entries for input {input_name}; starting processing");
             }
 
             let delay_secs = current_task.delay();
@@ -386,13 +392,13 @@ impl InputWorker {
             )
                 .await
             {
-                Ok(()) => {
-                    processed_count += 1;
+                Ok(task_changed) => {
                     if Self::is_vod_task_key(&current_key) {
                         processed_vod_count += 1;
                     } else if Self::is_series_task_key(&current_key) {
                         processed_series_count += 1;
                     }
+                    trace!("Processed metadata task for input {input_name}: {current_task} (changed={task_changed})");
                     retry_attempts.remove(&current_key);
                     if last_progress_log_at.elapsed() >= PROGRESS_LOG_INTERVAL {
                         // current_key is removed from pending_tasks later in this loop iteration;
@@ -410,9 +416,7 @@ impl InputWorker {
                         let resolved_total = processed_vod_count.saturating_add(processed_series_count);
                         let total_resolve = total_vod.saturating_add(total_series);
 
-                        info!(
-                            "Background metadata update: {resolved_total} / {total_resolve} resolved for input {input_name} (vod: {processed_vod_count}/{total_vod}, series: {processed_series_count}/{total_series})"
-                        );
+                        info!("Background metadata update: {resolved_total} / {total_resolve} resolved for input {input_name} (vod: {processed_vod_count}/{total_vod}, series: {processed_series_count}/{total_series})");
                         last_progress_log_at = Instant::now();
                     }
                 }
@@ -429,8 +433,7 @@ impl InputWorker {
                         retry_delay_secs = Self::compute_retry_backoff_secs(current_task.delay(), attempts);
                     }
 
-                    debug_if_enabled!(
-                        "No provider connection for task {} on input {}, requeueing (attempt={}, retry_delay={}s, queue_len={})",
+                    debug_if_enabled!("No provider connection for task {} on input {}, requeueing (attempt={}, retry_delay={}s, queue_len={})",
                         current_task,
                         &input_name,
                         attempts,
@@ -441,12 +444,7 @@ impl InputWorker {
                 Err(e) => {
                     retry_attempts.remove(&current_key);
                     if e.message != TASK_ERR_PREEMPTED {
-                        error!(
-                            "Task {} failed for input {}: {}",
-                            current_task,
-                            &input_name,
-                            e
-                        );
+                        error!("Task {current_task} failed for input {input_name}: {e}");
                     }
                 }
             }
@@ -500,18 +498,10 @@ impl InputWorker {
                 next_task.is_some() || !self.receiver.is_empty() || !self.pending_tasks.is_empty();
 
             if queue_has_work {
-                if queue_idle_notified {
-                    queue_idle_notified = false;
-                    // Force immediate queue status log on transition back to active.
-                    last_queue_log_at = Instant::now()
-                        .checked_sub(QUEUE_LOG_INTERVAL + Duration::from_secs(1))
-                        .unwrap_or_else(Instant::now);
-                }
-
                 // Avoid O(n) queue scans per task; report queue status periodically.
                 if last_queue_log_at.elapsed() >= QUEUE_LOG_INTERVAL {
                     let queue_counts = Self::queue_resolve_counts(&self.pending_tasks);
-                    info!("In queue to resolve vod: {}, series: {} (input: {input_name})", queue_counts.0, queue_counts.1);
+                    debug!("In queue to resolve vod: {}, series: {} (input: {input_name})", queue_counts.0, queue_counts.1);
                     last_queue_log_at = Instant::now();
                 }
             } else {
@@ -521,14 +511,16 @@ impl InputWorker {
                     Self::flush_batch_static(&input_name, app_state_weak.as_ref(), &mut self.batch_buffer).await;
                 }
 
-                if !queue_idle_notified {
+                if queue_cycle_active {
                     info!("All pending metadata resolves completed for input {input_name}");
                     if let Some(app_state) = app_state_weak.as_ref().and_then(Weak::upgrade) {
                         app_state
                             .event_manager
                             .send_event(EventMessage::InputMetadataUpdatesCompleted(input_name.clone()));
                     }
-                    queue_idle_notified = true;
+                    queue_cycle_active = false;
+                    processed_vod_count = 0;
+                    processed_series_count = 0;
                 }
             }
         }
@@ -536,16 +528,6 @@ impl InputWorker {
         // Final flush
         self.release_db_handles();
         Self::flush_batch_static(&input_name, app_state_weak.as_ref(), &mut self.batch_buffer).await;
-
-        // Log completion
-        if processed_count > 0 {
-            info!("Metadata updates completed for input {input_name}. Total processed: {processed_count}");
-            if !queue_idle_notified {
-                if let Some(app_state) = app_state_weak.as_ref().and_then(Weak::upgrade) {
-                    app_state.event_manager.send_event(EventMessage::InputMetadataUpdatesCompleted(input_name.clone()));
-                }
-            }
-        }
 
         debug!("Metadata worker stopped for input {input_name}");
     }
@@ -1187,7 +1169,7 @@ impl InputWorker {
         collector: &mut BatchResultCollector,
         db_handles: &mut HashMap<XtreamCluster, DbHandle>,
         failed_clusters: &mut HashSet<XtreamCluster>,
-    ) -> Result<(), TuliproxError> {
+    ) -> Result<bool, TuliproxError> {
         let app_state = app_state_weak
             .and_then(Weak::upgrade)
             .ok_or_else(|| shared::error::info_err!("AppState not available"))?;
@@ -1222,6 +1204,10 @@ impl InputWorker {
         let name_display = item_title.as_deref().map_or(String::new(), |n| format!(" \"{n}\""));
 
         trace_if_enabled!("Processing task for {}: {}{}", input_name, task, name_display);
+
+        let pre_vod_updates = collector.vod.len();
+        let pre_series_updates = collector.series.len();
+        let pre_live_updates = collector.live.len();
 
         // Determine input to use (may be alias)
         let input_to_use = config_to_use
@@ -1271,7 +1257,18 @@ impl InputWorker {
         if provider_handle.is_some() {
             app_state.connection_manager.release_provider_handle(provider_handle).await;
         }
-        res
+        match res {
+            Ok(()) => {
+                let task_changed = match task {
+                    UpdateTask::ResolveVod { .. } => collector.vod.len() > pre_vod_updates,
+                    UpdateTask::ResolveSeries { .. } => collector.series.len() > pre_series_updates,
+                    UpdateTask::ProbeLive { .. } => collector.live.len() > pre_live_updates,
+                    UpdateTask::ProbeStream { .. } => true,
+                };
+                Ok(task_changed)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     fn task_needs_provider_connection(task: &UpdateTask, input_type: InputType) -> bool {

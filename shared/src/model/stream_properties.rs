@@ -303,8 +303,13 @@ impl StreamProperties {
         match self {
             StreamProperties::Video(video) => video.details.is_some(),
             StreamProperties::Series(series) => series.details.is_some(),
-            StreamProperties::Live(_)
-            | StreamProperties::Episode(_) => false,
+            StreamProperties::Live(live) => {
+                live.video.is_some()
+                    || live.audio.is_some()
+                    || live.last_probed_timestamp.is_some()
+                    || live.last_success_timestamp.is_some()
+            },
+            StreamProperties::Episode(_) => false,
         }
     }
 

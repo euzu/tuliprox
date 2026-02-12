@@ -276,7 +276,30 @@ fn is_target_enabled(target: &ConfigTarget, user_targets: &ProcessTargets) -> bo
     (!user_targets.enabled && target.enabled) || (user_targets.enabled && user_targets.has_target(target.id))
 }
 
-async fn playlist_download_from_input(client: &reqwest::Client, app_config: &Arc<AppConfig>, input: &ConfigInput) -> (Vec<PlaylistGroup>, Vec<TuliproxError>, bool, bool) {
+struct PlaylistDownloadResult {
+    pub downloaded_playlist:Vec<PlaylistGroup>,
+    pub download_err: Vec<TuliproxError>,
+    pub was_cached: bool,
+    pub persisted: bool,
+}
+
+impl PlaylistDownloadResult {
+    pub fn new(
+        downloaded_playlist:Vec<PlaylistGroup>,
+        download_err: Vec<TuliproxError>,
+        was_cached: bool,
+        persisted: bool) -> Self {
+
+       Self {
+           downloaded_playlist,
+           download_err,
+           was_cached,
+           persisted,
+       }
+    }
+}
+
+async fn playlist_download_from_input(client: &reqwest::Client, app_config: &Arc<AppConfig>, input: &ConfigInput) -> PlaylistDownloadResult {
     let config = &*app_config.config.load();
     let working_dir = &config.working_dir;
 
@@ -315,7 +338,7 @@ async fn playlist_download_from_input(client: &reqwest::Client, app_config: &Arc
     };
 
     if fully_cached {
-        return (vec![], vec![], true, false);
+        return PlaylistDownloadResult::new(vec![], vec![], true, false);
     }
 
     let (playlist, errors, persisted) = match input.input_type {
@@ -365,7 +388,7 @@ async fn playlist_download_from_input(client: &reqwest::Client, app_config: &Arc
         }
     }
 
-    (playlist, errors, false, persisted)
+    PlaylistDownloadResult::new(playlist, errors, false, persisted)
 }
 
 async fn process_source(source_idx: usize, ctx: &PlaylistProcessingContext) -> (Vec<InputStats>, Vec<TargetStats>, Vec<TuliproxError>) {
@@ -489,7 +512,7 @@ async fn download_input(ctx: &PlaylistProcessingContext, input: &Arc<ConfigInput
     // Coordination Logic
     let need_download = !ctx.is_input_downloaded(&input.name).await;
 
-    let (downloaded_playlist, download_err, was_cached, persisted) = if need_download {
+    let playlist_download_result= if need_download {
         // Acquire named lock to prevent thundering herd on same input
         let _input_lock = ctx.get_input_lock(&input.name).await;
         // Check again after lock
@@ -497,7 +520,7 @@ async fn download_input(ctx: &PlaylistProcessingContext, input: &Arc<ConfigInput
 
         if already_processed {
             // Use empty results, will load from disk below
-            (vec![], vec![], true, false)
+            PlaylistDownloadResult::new(vec![], vec![], true, false)
         } else {
             let res = playlist_download_from_input(&ctx.client, &ctx.config, input).await;
             // Mark as processed if NO critical errors?
@@ -507,20 +530,20 @@ async fn download_input(ctx: &PlaylistProcessingContext, input: &Arc<ConfigInput
             res
         }
     } else {
-        (vec![], vec![], true, false)
+        PlaylistDownloadResult::new(vec![], vec![], true, false)
     };
 
-    let (playlist, error) = if was_cached || persisted {
+    let (playlist, error) = if playlist_download_result.was_cached || playlist_download_result.persisted {
         match load_input_playlist(ctx, input, None).await {
             Ok(pl_source) => (pl_source, None),
             Err(e) => (MemoryPlaylistSource::default().boxed(), Some(e)),
         }
     } else {
         debug!("Persisting input '{}' playlist", input.name);
-        let (pl, err) = persist_input_playlist(&ctx.config, input, downloaded_playlist).await;
+        let (pl, err) = persist_input_playlist(&ctx.config, input, playlist_download_result.downloaded_playlist).await;
         (MemoryPlaylistSource::new(pl).boxed(), err)
     };
-    (download_err, playlist, error)
+    (playlist_download_result.download_err, playlist, error)
 }
 
 fn create_broadcast_callback(event_manager: Option<&Arc<EventManager>>) -> StepMeasureCallback {

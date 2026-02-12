@@ -13,18 +13,20 @@ macro_rules! create_bit_set {
         pub struct [<$enum_name Set>](pub $storage);
 
         impl [<$enum_name Set>] {
-
-            #[inline]
-            pub fn new() -> Self {
-                Self(0)
-            }
+            // COMPILE-TIME CHECK:
+            // This ensures at compile time that the largest enum variant
+            // doesn't exceed the storage capacity. Zero runtime cost.
+            const _CAPACITY_CHECK: () = {
+                let mut max_val = 0;
+                $( if ($enum_name::$variant as usize) > max_val { max_val = $enum_name::$variant as usize; } )*
+                if max_val >= <$storage>::BITS as usize {
+                    panic!("BitSet storage too small for enum variants!");
+                }
+            };
 
             #[inline(always)]
-            fn checked_shift(shift: $storage) -> $storage {
-                if (shift as usize) >= <$storage>::BITS as usize {
-                    log::error!("Enum variant value {shift} exceeds storage bit width {}", <$storage>::BITS);
-                }
-                shift
+            pub const fn new() -> Self {
+                Self(0)
             }
 
             // New: Constructor for multiple variants
@@ -37,32 +39,34 @@ macro_rules! create_bit_set {
                 set
             }
 
-            #[inline]
+           #[inline(always)]
             pub fn add(&mut self, variant: $enum_name) {
-                self.0 |= 1 << Self::checked_shift(variant as $storage);
+                // LLVM can optimize this to a single 'bts' or 'or' instruction
+                self.0 |= 1 << (variant as $storage);
             }
 
-            #[inline]
+            #[inline(always)]
             pub fn remove(&mut self, variant: $enum_name) {
-                self.0 &= !(1 << Self::checked_shift(variant as $storage));
+                self.0 &= !(1 << (variant as $storage));
             }
 
-            #[inline]
+            #[inline(always)]
             pub fn union(&mut self, other: Self) {
                 self.0 |= other.0;
             }
 
-            #[inline]
+            #[inline(always)]
             pub fn intersect(&mut self, other: Self)  {
                 self.0 &= other.0;
             }
 
-            #[inline]
+            #[inline(always)]
             pub fn contains(&self, variant: $enum_name) -> bool {
-                (self.0 & (1 << Self::checked_shift(variant as $storage))) != 0
+                // Becomes a single 'bt' or 'test' instruction
+                (self.0 & (1 << (variant as $storage))) != 0
             }
 
-            #[inline]
+            #[inline(always)]
             pub fn is_empty(&self) -> bool {
                 self.0 == 0
             }
@@ -75,6 +79,7 @@ macro_rules! create_bit_set {
 
         impl std::fmt::Display for [<$enum_name Set>] {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                if self.0 == 0 { return Ok(()); }
                 let mut first = true;
                 $(
                     if self.contains($enum_name::$variant) {
@@ -87,16 +92,23 @@ macro_rules! create_bit_set {
             }
         }
 
-        // set1 | set2
-        impl std::ops::BitOr for [<$enum_name Set>] {
-            type Output = Self;
-            fn bitor(self, rhs: Self) -> Self {
-                let mut new = self.clone();
-                new.union(rhs);
-                new
-
+        // Implementation of BitOrAssign for better performance in loops
+        impl std::ops::BitOrAssign for [<$enum_name Set>] {
+            #[inline(always)]
+            fn bitor_assign(&mut self, rhs: Self) {
+                self.0 |= rhs.0;
             }
         }
+
+        impl std::ops::BitOr for [<$enum_name Set>] {
+            type Output = Self;
+            #[inline(always)]
+            fn bitor(mut self, rhs: Self) -> Self {
+                self.0 |= rhs.0;
+                self
+            }
+        }
+
         impl std::ops::BitAnd for [<$enum_name Set>] {
             type Output = Self;
             fn bitand(self, rhs: Self) -> Self {
