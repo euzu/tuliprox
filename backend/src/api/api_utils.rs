@@ -873,6 +873,16 @@ pub async fn stream_response(
         }
         Some(write_lock)
     } else {
+        // Opportunistic cross-target sharing: if another target already runs a shared stream
+        // for the same provider URL, subscribe to it instead of opening a separate connection.
+        if item_type == PlaylistItemType::Live {
+            if let Some(value) =
+                try_shared_stream_response_if_any(app_state, stream_url, fingerprint, user, connection_permission, stream_channel.clone(), session_token, req_headers).await
+            {
+                debug_if_enabled!("Opportunistic shared stream reuse for {}", sanitize_sensitive_info(stream_url));
+                return value.into_response();
+            }
+        }
         None
     };
 
