@@ -554,9 +554,9 @@ pub async fn csv_patch_batch_sort_by_exp_date(
     }
     let mut sorted = aliases.clone();
     sorted.sort_by(|a, b| {
-        let a_ts = a.exp_date.unwrap_or(i64::MAX);
-        let b_ts = b.exp_date.unwrap_or(i64::MAX);
-        a_ts.cmp(&b_ts).then_with(|| a.name.cmp(&b.name))
+        let a_ts = a.exp_date.unwrap_or(i64::MIN);
+        let b_ts = b.exp_date.unwrap_or(i64::MIN);
+        b_ts.cmp(&a_ts).then_with(|| a.name.cmp(&b.name))
     });
     if sorted == aliases {
         return Ok(false);

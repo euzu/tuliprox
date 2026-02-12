@@ -527,9 +527,9 @@ pub async fn persist_source_config(
         {
             if let Some(aliases) = input.aliases.as_mut() {
                 aliases.sort_by(|a, b| {
-                    let a_ts = a.exp_date.unwrap_or(i64::MAX);
-                    let b_ts = b.exp_date.unwrap_or(i64::MAX);
-                    a_ts.cmp(&b_ts).then_with(|| a.name.cmp(&b.name))
+                    let a_ts = a.exp_date.unwrap_or(i64::MIN);
+                    let b_ts = b.exp_date.unwrap_or(i64::MIN);
+                    b_ts.cmp(&a_ts).then_with(|| a.name.cmp(&b.name))
                 });
             }
         }
