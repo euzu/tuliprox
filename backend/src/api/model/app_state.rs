@@ -23,6 +23,7 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::task;
 use tokio_util::sync::CancellationToken;
+use crate::api::model::metadata_update_manager::MetadataUpdateManager;
 
 macro_rules! cancel_service {
     ($field: ident, $changes:expr, $cancel_tokens:expr) => {
@@ -330,6 +331,7 @@ pub struct AppState {
     pub playlists: Arc<PlaylistStorageState>,
     pub geoip: Arc<ArcSwapOption<GeoIp>>,
     pub update_guard: UpdateGuard,
+    pub metadata_manager: Arc<MetadataUpdateManager>,
 }
 
 impl AppState {
@@ -516,6 +518,24 @@ impl AppState {
     pub fn get_grace_options(&self) -> GracePeriodOptions {
         self.app_config.get_grace_options()
     }
+
+    pub fn should_use_manual_redirects(&self) -> bool {
+        let config = self.app_config.config.load();
+        config.proxy.is_some() || proxy_env_present()
+    }
+}
+
+fn proxy_env_present() -> bool {
+    const ENV_KEYS: [&str; 3] = [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+    ];
+
+    std::env::vars().any(|(key, value)| {
+        ENV_KEYS.iter().any(|k| k.eq_ignore_ascii_case(&key))
+            && !value.trim().is_empty()
+    })
 }
 
 fn schedules_changed(a: &[ScheduleConfig], b: &[ScheduleConfig]) -> bool {

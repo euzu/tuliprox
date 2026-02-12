@@ -17,28 +17,48 @@
   - Removed `forced_retry_interval_secs`.
 - **Input Batch Changes**: `name` attribute is now mandatory for input type batch to ensure stable playlist UUIDs.
 - **Favorites Redesign**: Replaced implicit `create_alias` with explicit `add_favourite(group_name)` script function.
-- **EpgSmartMatch**: Field `name_prefix` syntax needs to be changed from  `name_prefix: !suffix "."` to `name_prefix: { suffix: "." }`.
-- **Sort**: Sort can now use filter to sort specific entries.
-  ```yaml
-    sort:
-      match_as_ascii: true
-      rules:
-        - target: group
-          field: group
-          filter: Input ~ "provider_1"
-          order: asc
-        - target: channel  
-          field: caption
-          filter: Group ~ "!US_TNT_ENTERTAIN!"
-          order: asc
-          sequence:
-            - "!CHAN_SEQ!"
-            - '(?i)\bHD\b'
-            - '(?i)\bSD\b'
-  ```
+  - **EpgSmartMatch**: Field `name_prefix` syntax needs to be changed from  `name_prefix: !suffix "."` to `name_prefix: { suffix: "." }`.
+  - **Sort**: Sort can now use filter to sort specific entries.
+    ```yaml
+      sort:
+        match_as_ascii: true
+        rules:
+          - target: group
+            field: group
+            filter: Input ~ "provider_1"
+            order: asc
+          - target: channel  
+            field: caption
+            filter: Group ~ "!US_TNT_ENTERTAIN!"
+            order: asc
+            sequence:
+              - "!CHAN_SEQ!"
+              - '(?i)\bHD\b'
+              - '(?i)\bSD\b'
+    ```
   - Trakt api config field `key` is now `api_key`. Added `user_agent` field to Trakt api config
-
+  - resolve_vod_delay and resolve_series_delay are now merged as resolve_delay, added `probe_live` and `probe_live_interval_hours` for live stream probing.
+      ```yaml
+       # Before (deprecated)
+       output:
+       - type: xtream
+         resolve_vod: true
+         resolve_vod_delay: 500
+         resolve_series: true  
+         resolve_series_delay: 2
+      ```
+      ```yaml
+       # After (new consolidated)
+       output:
+       - type: xtream
+         resolve_vod: true
+         resolve_series: true
+         resolve_delay: 2  # Single delay for all resolution types
+       ```
 ## 🌟 New Features
+- **Smart Connection Priority**: Introduced a priority system for connections. Users with higher priority can preempt (kick) lower priority connections (e.g., background tasks or standard users) when provider slots are full.
+- **Background Metadata Queue**: Metadata resolution (VOD/Series) and stream analysis are now queued per input and processed in the background when provider connections are idle. This prevents "No Connections" errors for active users during playlist updates.
+- **Live TV Probing**: Added support for probing Live TV streams (`probe_live`) to determine codecs and resolution. This runs as a low-priority background task.
 - **Discord Notifications**: Support for Discord notifications via webhooks with optional Handlebars templates.
 - **Enhanced REST Messaging**: Support for custom HTTP methods, headers, and Handlebars templating.
 - **Local Library Module**: Comprehensive local video file scanning and metadata management.
@@ -49,12 +69,29 @@
 - **Database Viewer**: New CLI flags `--dbx` and `--dbm` to inspect internal database content.
 - **Added `disk_based_processing`**: (boolean, default `false`) to `config.yml`. When enabled, input playlists are processed from disk instead of memory.
 - **User-Agent `default_user_agent`**: Ensures that outgoing requests always pass a default user agent.
+- **FFprobe Integration**: Added capability to probe streams for codec, resolution, HDR (HDR10/HLG/DV), and audio channels using `ffprobe`. Probing strictly respects provider connection limits. If no slot is available (considering user limits), the item is skipped to prevent provider bans.
+- **Metadata Fallback**: Automatically fetches missing TMDB IDs and release dates via the TMDB API if the provider data is incomplete.
 - **Streaming**: Added `grace_period_hold_stream` configuration option to delay stream output until grace period connection checks are completed.
 - **Provider Failover & Rotation**: Tuliprox supports robust failover mechanisms for streaming providers.
   You can use the special `provider://<provider_name>/...` URL scheme in your configurations. Tuliprox will automatically resolve this to the current active URL of the specified provider.
   If the current URL fails (e.g., 5xx error, timeout), Tuliprox automatically rotates to the next available URL for that provider.
   It tracks failures and prevents infinite loops by limiting attempts to the number of available URLs.
 - Added `epg_request_timeshift: [-+]hh:mm or TimeZone`, example `Europe/Paris`, `America/New_York`, `-2:30`(-2h30m), `+0:15` (15m), `2` (2h), `:30` (30m), `:3` (3m)
+
+### ⚙️ New Settings
+- **config.yml**:
+  - Added `video.ffprobe_enabled` (default: false) and `video.ffprobe_timeout`.
+- **source.yml (input options)**:
+  - Added `resolve_tmdb`: Triggers TMDB lookup if ID is missing.
+  - Added `probe_stream`: Triggers ffprobe if technical info is missing.
+- **source.yml (target output)**:
+  - Added `probe_live`: Enables background probing for Live TV streams (default disabled).
+  - Added `probe_live_interval_hours`: Sets the frequency for re-probing Live TV streams.
+  - Added `resolve_background`: Toggles background metadata resolution (default `true`). Set to `false` for blocking, immediate resolution.
+
+## 🛠 Optimizations
+- **Quality Tagging**: Generates enhanced filename tags (e.g., `[2160p 4K HEVC HDR TrueHD 7.1]`) for STRM files based on analysis results.
+- **Flat Grouping**: When `flat: true` option for STRM output is active, multiple versions (e.g., 4K and 1080p) of the same movie are now safely merged over all categories into a single folder based on TMDB ID, compatible with Jellyfin/Emby "Multi-Version" features.
 
 ## ⚙️ Engine & Storage Optimizations
 - **Slotted Page Architecture**: Improved space utilization and support for variable-length keys.

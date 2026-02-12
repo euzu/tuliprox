@@ -1,7 +1,9 @@
 use crate::api::model::persist_pipe_stream::tee_dyn_reader;
 use crate::api::model::{AppState, STREAM_IDLE_TIMEOUT};
-use crate::model::{format_elapsed_time, AppConfig, Config, ConfigProvider, InputSource, ReverseProxyDisabledHeaderConfig};
-use crate::model::{resolve_provider_scheme_url_with_provider, ConfigInput, ResourceRetryConfig};
+use crate::model::{
+    resolve_provider_scheme_url_with_provider, AppConfig, Config, ConfigInput, ConfigProvider,
+    InputSource, ResourceRetryConfig, ReverseProxyDisabledHeaderConfig,
+};
 use crate::utils::compression::compression_utils::{is_deflate, is_gzip};
 use crate::utils::{async_file_reader, async_file_writer, debug_if_enabled};
 use crate::utils::{get_file_path, persist_file};
@@ -12,9 +14,11 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::redirect::Policy;
 use reqwest::StatusCode;
 use shared::error::{notify_err_res, string_to_io_error, TuliproxError};
-use shared::model::{InputFetchMethod, DEFAULT_USER_AGENT};
-use shared::utils::{filter_request_header, human_readable_byte_size,
-                    sanitize_sensitive_info, ENCODING_DEFLATE, ENCODING_GZIP};
+use shared::model::{format_elapsed_time, InputFetchMethod, DEFAULT_USER_AGENT};
+use shared::utils::{
+    filter_request_header, human_readable_byte_size, sanitize_sensitive_info, ENCODING_DEFLATE,
+    ENCODING_GZIP,
+};
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};

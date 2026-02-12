@@ -1,6 +1,6 @@
 use crate::app::components::config::HasFormData;
 use crate::app::components::{BlockId, BlockInstance, Card, EditMode, IconButton, Panel, SourceEditorContext, TextButton, TraktListItemForm, TitledCard, FilterInput};
-use crate::{config_field_child, edit_field_bool, edit_field_number_u16, edit_field_text, generate_form_reducer};
+use crate::{config_field_child, edit_field_bool, edit_field_number_u16, edit_field_number_u32, edit_field_text, generate_form_reducer};
 use shared::model::{TargetOutputDto, TraktApiConfigDto, TraktConfigDto, TraktContentType, TraktListConfigDto, XtreamTargetOutputDto};
 use std::fmt::Display;
 use std::rc::Rc;
@@ -16,7 +16,10 @@ const LABEL_LIVE: &str = "LABEL.LIVE";
 const LABEL_VOD: &str = "LABEL.VOD";
 const LABEL_SERIES: &str = "LABEL.SERIES";
 const LABEL_RESOLVE: &str = "LABEL.RESOLVE";
+const LABEL_PROBE: &str = "LABEL.PROBE";
 const LABEL_RESOLVE_DELAY_SEC: &str = "LABEL.RESOLVE_DELAY_SEC";
+const LABEL_RESOLVE_BACKGROUND: &str = "LABEL.RESOLVE_BACKGROUND";
+const LABEL_PROBE_LIVE_INTERVAL_HOURS: &str = "LABEL.PROBE_LIVE_INTERVAL_HOURS";
 const LABEL_FILTER: &str = "LABEL.FILTER";
 const LABEL_TRAKT_API_KEY: &str = "LABEL.API_KEY";
 const LABEL_TRAKT_API_VERSION: &str = "LABEL.API_VERSION";
@@ -88,9 +91,13 @@ generate_form_reducer!(
         SkipVideoDirectSource => skip_video_direct_source: bool,
         SkipSeriesDirectSource =>  skip_series_direct_source: bool,
         ResolveSeries =>  resolve_series: bool,
-        ResolveSeriesDelay =>  resolve_series_delay: u16,
         ResolveVod =>  resolve_vod: bool,
-        ResolveVodDelay =>  resolve_vod_delay: u16,
+        ProbeSeries =>  probe_series: bool,
+        ProbeVod =>  probe_vod: bool,
+        ProbeLive =>  probe_live: bool,
+        ResolveDelay =>  resolve_delay: u16,
+        ResolveBackground =>  resolve_background: bool,
+        ProbeLiveIntervalHours =>  probe_live_interval_hours: u32,
         Filter => filter: Option<String>,
     }
 );
@@ -224,15 +231,23 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
                   </div>
                 </TitledCard>
                 <TitledCard title={translate.t(LABEL_RESOLVE)}>
-                    <div class="tp__config-view__cols-2">
+                    <div class="tp__config-view__cols-3">
                     { edit_field_bool!(output_form_state, translate.t(LABEL_VOD), resolve_vod,  XtreamTargetOutputFormAction::ResolveVod) }
                     { edit_field_bool!(output_form_state, translate.t(LABEL_SERIES), resolve_series,  XtreamTargetOutputFormAction::ResolveSeries) }
                     </div>
-                </TitledCard>
-                <TitledCard title={translate.t(LABEL_RESOLVE_DELAY_SEC)}>
                     <div class="tp__config-view__cols-2">
-                    { edit_field_number_u16!(output_form_state, translate.t(LABEL_VOD), resolve_vod_delay,  XtreamTargetOutputFormAction::ResolveVodDelay) }
-                    { edit_field_number_u16!(output_form_state, translate.t(LABEL_SERIES), resolve_series_delay,  XtreamTargetOutputFormAction::ResolveSeriesDelay) }
+                    { edit_field_number_u16!(output_form_state, translate.t(LABEL_RESOLVE_DELAY_SEC), resolve_delay,  XtreamTargetOutputFormAction::ResolveDelay) }
+                    </div>
+                    { edit_field_bool!(output_form_state, translate.t(LABEL_RESOLVE_BACKGROUND), resolve_background,  XtreamTargetOutputFormAction::ResolveBackground) }
+                </TitledCard>
+                <TitledCard title={translate.t(LABEL_PROBE)}>
+                    <div class="tp__config-view__cols-3">
+                    { edit_field_bool!(output_form_state, translate.t(LABEL_LIVE), probe_live,  XtreamTargetOutputFormAction::ProbeLive) }
+                    { edit_field_bool!(output_form_state, translate.t(LABEL_VOD), probe_vod,  XtreamTargetOutputFormAction::ProbeVod) }
+                    { edit_field_bool!(output_form_state, translate.t(LABEL_SERIES), probe_series,  XtreamTargetOutputFormAction::ProbeSeries) }
+                    </div>
+                    <div class="tp__config-view__cols-2">
+                    { edit_field_number_u32!(output_form_state, translate.t(LABEL_PROBE_LIVE_INTERVAL_HOURS), probe_live_interval_hours,  XtreamTargetOutputFormAction::ProbeLiveIntervalHours) }
                     </div>
                 </TitledCard>
                 { config_field_child!(translate.t(LABEL_FILTER), {

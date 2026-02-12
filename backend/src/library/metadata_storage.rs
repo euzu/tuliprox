@@ -5,6 +5,7 @@ use std::fmt::Write;
 use std::path::PathBuf;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
+use path_clean::PathClean;
 
 // Metadata storage for local VOD files
 // Stores metadata as JSON files with UUID-based filenames
@@ -32,10 +33,15 @@ impl MetadataStorage {
     pub async fn store(&self, entry: &MetadataCacheEntry) -> std::io::Result<()> {
         let file_path = self.get_metadata_file_path(&entry.uuid);
 
-        debug!("Storing metadata for {}: {}", entry.file_path, file_path.display());
+        debug!("Storing metadata for {}: {}", entry.file_path, file_path.clean().display());
 
         let json = serde_json::to_string_pretty(entry)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+        // Ensure parent directory exists - unconditionally to avoid race conditions or false negatives from try_exists
+        if let Some(parent) = file_path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
 
         let mut file = fs::File::create(&file_path).await?;
         file.write_all(json.as_bytes()).await?;
@@ -158,18 +164,23 @@ impl MetadataStorage {
     // write raw tmdb movie info
     pub async fn store_tmdb_movie_info(&self, movie_id: u32, content: &[u8]) -> std::io::Result<PathBuf> {
         let file_path = self.get_tmdb_movie_data_file_path(movie_id);
-        debug!("Storing raw tmdb movie metadata for {}", file_path.display());
+        debug!("Storing raw tmdb movie metadata for {}", file_path.clean().display());
         self.store_file(content, file_path).await
     }
 
     // write raw tmdb series info
     pub async fn store_tmdb_series_info(&self, series_id: u32, content: &[u8]) -> std::io::Result<PathBuf> {
         let file_path = self.get_tmdb_series_data_file_path(series_id);
-        debug!("Storing raw tmdb series metadata for {}", file_path.display());
+        debug!("Storing raw tmdb series metadata for {}", file_path.clean().display());
         self.store_file(content, file_path).await
     }
 
     async fn store_file(&self, content: &[u8], file_path: PathBuf) -> std::io::Result<PathBuf> {
+        // Ensure parent directory exists - unconditionally
+        if let Some(parent) = file_path.parent() {
+             fs::create_dir_all(parent).await?;
+        }
+        
         let mut file = fs::File::create(&file_path).await?;
         file.write_all(content).await?;
         file.flush().await?;

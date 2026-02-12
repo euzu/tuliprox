@@ -9,6 +9,10 @@ use shared::model::PlaylistItemType;
 use std::sync::Arc;
 use shared::foundation::Filter;
 use shared::foundation::ValueProvider;
+use shared::create_bit_set;
+
+create_bit_set!(u16, XtreamTargetFlags, SkipLiveDirectSource, SkipVideoDirectSource, SkipSeriesDirectSource,
+    ResolveBackground, ResolveSeries, ResolveVod, ProbeSeries, ProbeVod, ProbeLive);
 
 #[derive(Clone, Debug)]
 pub struct ProcessTargets {
@@ -31,13 +35,9 @@ impl ProcessTargets {
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
 pub struct XtreamTargetOutput {
-    pub skip_live_direct_source: bool,
-    pub skip_video_direct_source: bool,
-    pub skip_series_direct_source: bool,
-    pub resolve_series: bool,
-    pub resolve_series_delay: u16,
-    pub resolve_vod: bool,
-    pub resolve_vod_delay: u16,
+    pub flags: XtreamTargetFlagsSet,
+    pub probe_live_interval_hours: u32,
+    pub resolve_delay: u16,
     pub trakt: Option<TraktConfig>,
     pub filter: Option<Filter>,
 }
@@ -45,14 +45,21 @@ pub struct XtreamTargetOutput {
 macros::from_impl!(XtreamTargetOutput);
 impl From<&XtreamTargetOutputDto> for XtreamTargetOutput {
     fn from(dto: &XtreamTargetOutputDto) -> Self {
+        let mut flags = XtreamTargetFlagsSet::new();
+        if dto.skip_live_direct_source { flags.add(XtreamTargetFlags::SkipLiveDirectSource); }
+        if dto.skip_video_direct_source { flags.add(XtreamTargetFlags::SkipVideoDirectSource); }
+        if dto.skip_series_direct_source { flags.add(XtreamTargetFlags::SkipSeriesDirectSource); }
+        if dto.resolve_background { flags.add(XtreamTargetFlags::ResolveBackground); }
+        if dto.resolve_series { flags.add(XtreamTargetFlags::ResolveSeries); }
+        if dto.resolve_vod { flags.add(XtreamTargetFlags::ResolveVod); }
+        if dto.probe_series { flags.add(XtreamTargetFlags::ProbeSeries); }
+        if dto.probe_vod { flags.add(XtreamTargetFlags::ProbeVod); }
+        if dto.probe_live { flags.add(XtreamTargetFlags::ProbeLive); }
+
         Self {
-            skip_live_direct_source: dto.skip_live_direct_source,
-            skip_video_direct_source: dto.skip_video_direct_source,
-            skip_series_direct_source: dto.skip_series_direct_source,
-            resolve_series: dto.resolve_series,
-            resolve_series_delay: dto.resolve_series_delay,
-            resolve_vod: dto.resolve_vod,
-            resolve_vod_delay: dto.resolve_vod_delay,
+            flags,
+            resolve_delay: dto.resolve_delay,
+            probe_live_interval_hours: dto.probe_live_interval_hours,
             trakt: dto.trakt.as_ref().map(Into::into),
             filter: dto.t_filter.clone(),
         }
@@ -62,13 +69,17 @@ impl From<&XtreamTargetOutputDto> for XtreamTargetOutput {
 impl From<&XtreamTargetOutput> for XtreamTargetOutputDto {
     fn from(instance: &XtreamTargetOutput) -> Self {
         Self {
-            skip_live_direct_source: instance.skip_live_direct_source,
-            skip_video_direct_source: instance.skip_video_direct_source,
-            skip_series_direct_source: instance.skip_series_direct_source,
-            resolve_series: instance.resolve_series,
-            resolve_series_delay: instance.resolve_series_delay,
-            resolve_vod: instance.resolve_vod,
-            resolve_vod_delay: instance.resolve_vod_delay,
+            skip_live_direct_source: instance.flags.contains(XtreamTargetFlags::SkipLiveDirectSource),
+            skip_video_direct_source: instance.flags.contains(XtreamTargetFlags::SkipVideoDirectSource),
+            skip_series_direct_source: instance.flags.contains(XtreamTargetFlags::SkipSeriesDirectSource),
+            resolve_background: instance.flags.contains(XtreamTargetFlags::ResolveBackground),
+            resolve_series: instance.flags.contains(XtreamTargetFlags::ResolveSeries),
+            resolve_vod: instance.flags.contains(XtreamTargetFlags::ResolveVod),
+            probe_series: instance.flags.contains(XtreamTargetFlags::ProbeSeries),
+            probe_vod: instance.flags.contains(XtreamTargetFlags::ProbeVod),
+            probe_live: instance.flags.contains(XtreamTargetFlags::ProbeLive),
+            resolve_delay: instance.resolve_delay,
+            probe_live_interval_hours: instance.probe_live_interval_hours,
             trakt: instance.trakt.as_ref().map(TraktConfigDto::from),
             filter: instance.filter.as_ref().map(ToString::to_string),
             t_filter: instance.filter.clone(),
@@ -119,8 +130,9 @@ pub struct StrmTargetOutput {
     pub cleanup: bool,
     pub strm_props: Option<Vec<String>>,
     pub filter: Option<Filter>,
-    // boolean flag to enable or disable quality info in filenames.
     pub add_quality_to_filename: bool,
+    pub probe_probe_size_bytes: Option<u64>,
+    pub probe_analyze_duration: Option<u64>,
 }
 
 macros::from_impl!(StrmTargetOutput);
@@ -136,6 +148,8 @@ impl From<&StrmTargetOutputDto> for StrmTargetOutput {
             strm_props: dto.strm_props.clone(),
             filter: dto.t_filter.clone(),
             add_quality_to_filename: dto.add_quality_to_filename,
+            probe_probe_size_bytes: dto.probe_probe_size_bytes,
+            probe_analyze_duration: dto.probe_analyze_duration,
         }
     }
 }
@@ -152,6 +166,8 @@ impl From<&StrmTargetOutput> for StrmTargetOutputDto {
             filter: instance.filter.as_ref().map(ToString::to_string),
             t_filter: instance.filter.clone(),
             add_quality_to_filename: instance.add_quality_to_filename,
+            probe_probe_size_bytes: instance.probe_probe_size_bytes,
+            probe_analyze_duration: instance.probe_analyze_duration,
         }
     }
 }
@@ -252,14 +268,6 @@ impl ConfigTarget {
             None
         }
     }
-
-    // pub(crate) fn get_strm_output(&self) -> Option<&StrmTargetOutput> {
-    //     if let Some(TargetOutput::Strm(output)) = self.output.iter().find(|o| matches!(o, TargetOutput::Strm(_))) {
-    //         Some(output)
-    //     } else {
-    //         None
-    //     }
-    // }
 
     pub(crate) fn get_hdhomerun_output(&self) -> Option<&HdHomeRunTargetOutput> {
         if let Some(TargetOutput::HdHomeRun(output)) = self.output.iter().find(|o| matches!(o, TargetOutput::HdHomeRun(_))) {

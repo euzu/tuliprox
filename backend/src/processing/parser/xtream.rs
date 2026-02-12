@@ -52,7 +52,7 @@ async fn map_to_xtream_streams(xtream_cluster: XtreamCluster, streams: DynReader
     }).await.map_err(|e| notify_err!("Mapping xtream streams failed for input {input_name}: {e}"))?
 }
 
-fn create_xtream_series_episode_url(url: &str, username: &str, password: &str, episode: &SeriesStreamDetailEpisodeProperties) -> Arc<str> {
+pub fn create_xtream_series_episode_url(url: &str, username: &str, password: &str, episode: &SeriesStreamDetailEpisodeProperties) -> Arc<str> {
     if episode.direct_source.is_empty() {
         let ext = episode.container_extension.clone();
         let stream_base_url = format!("{url}/series/{username}/{password}/{}.{ext}", episode.id);
@@ -62,8 +62,10 @@ fn create_xtream_series_episode_url(url: &str, username: &str, password: &str, e
     }
 }
 
-pub fn parse_xtream_series_info(parent_uuid: &UUIDType, series_info: &SeriesStreamProperties,
-                                group_title: &str, series_name: &Arc<str>, input: &ConfigInput) -> Option<Vec<PlaylistItem>> {
+pub fn parse_xtream_series_info(parent_uuid: &UUIDType, series_info: &SeriesStreamProperties, group_title: &str, series_name: &Arc<str>, input: &ConfigInput,
+                                // Add series_release_date parameter
+                                series_release_date: Option<&Arc<str>>,
+) -> Option<Vec<PlaylistItem>> {
     let url = input.url.as_str();
     let username = input.username.as_ref().map_or("", |v| v);
     let password = input.password.as_ref().map_or("", |v| v);
@@ -72,7 +74,14 @@ pub fn parse_xtream_series_info(parent_uuid: &UUIDType, series_info: &SeriesStre
         let result: Vec<PlaylistItem> = episodes.iter().map(|episode| {
             let episode_id = episode.id.to_string();
             let episode_url = create_xtream_series_episode_url(url, username, password, episode);
-            let episode_info = EpisodeStreamProperties::from_series(series_info, episode);
+
+            // Create properties and inject global release date if available
+            let mut episode_info = EpisodeStreamProperties::from_series(series_info, episode);
+            if let Some(date) = series_release_date {
+                episode_info.series_release_date = Some(Arc::clone(date));
+            }
+
+
             PlaylistItem {
                 header: PlaylistItemHeader {
                     uuid: generate_playlist_uuid(&input.name, &episode_id, PlaylistItemType::Series, &episode_url),
@@ -86,7 +95,7 @@ pub fn parse_xtream_series_info(parent_uuid: &UUIDType, series_info: &SeriesStre
                     url: episode_url,
                     item_type: PlaylistItemType::Series,
                     xtream_cluster: XtreamCluster::Series,
-                    additional_properties: Some(StreamProperties::Episode(episode_info)),
+                    additional_properties: Some(StreamProperties::Episode(Box::new(episode_info))),
                     category_id: 0,
                     input_name: input.name.intern(),
                     ..Default::default()
@@ -378,8 +387,8 @@ mod tests {
     use crate::processing::parser::xtream::map_to_xtream_streams;
     use crate::utils::async_file_reader;
     use shared::model::{XtreamCluster, XtreamSeriesInfo};
-    use std::fs;
     use shared::utils::Internable;
+    use std::fs;
 
     #[test]
     fn test_read_json_file_into_struct() {

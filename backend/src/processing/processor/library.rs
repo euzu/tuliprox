@@ -103,18 +103,19 @@ fn to_playlist_item(entry: &MetadataCacheEntry, input_name: &Arc<str>, group_nam
                                         item_type: PlaylistItemType::LocalSeries,
                                         category_id: 0,
                                         input_name: Arc::clone(input_name),
-                                        additional_properties: Some(StreamProperties::Episode(EpisodeStreamProperties {
+                                        additional_properties: Some(StreamProperties::Episode(Box::new(EpisodeStreamProperties {
                                             episode_id: episode.id,
                                             episode: episode.episode_num,
                                             season: episode.season,
                                             added: Some(episode.added.clone()),
                                             release_date: Some(episode.release_date.clone()),
+                                            series_release_date: None,
                                             tmdb: episode.tmdb,
                                             movie_image: logo,
                                             container_extension: container_extension.intern(),
                                             audio: None,
                                             video: None,
-                                        })),
+                                        }))),
                                         ..Default::default()
                                     }
                                 });
@@ -287,6 +288,7 @@ pub fn metadata_cache_entry_to_xtream_series_info(
                 direct_source: episode.file_path.clone().into(),
                 tmdb: tmdb_id,
                 release_date: episode_release_date.clone().into(),
+                series_release_date: None,
                 plot: episode.plot.clone().map(Into::into),
                 crew: Some(Arc::clone(&actor_names)),
                 duration_secs: episode.runtime.map_or(0, |r| r * 60),

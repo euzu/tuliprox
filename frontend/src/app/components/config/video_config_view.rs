@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use crate::app::components::{Card, Chip, KeyValueEditor};
 use crate::app::context::ConfigContext;
-use crate::{config_field_bool, config_field_child, config_field_optional, edit_field_bool, edit_field_text_option,
-            edit_field_list, generate_form_reducer};
+use crate::{config_field_bool, config_field_child, config_field_optional, edit_field_bool,
+            edit_field_text_option, edit_field_list, generate_form_reducer, edit_field_number_option_u64};
 use shared::model::{VideoDownloadConfigDto, VideoConfigDto};
 use yew::prelude::*;
 use yew_i18n::use_translation;
@@ -17,6 +17,9 @@ const LABEL_HEADERS: &str = "LABEL.HEADERS";
 const LABEL_EXTENSIONS: &str = "LABEL.EXTENSIONS";
 const LABEL_WEB_SEARCH: &str = "LABEL.WEB_SEARCH";
 const LABEL_ADD_EXTENSION: &str = "LABEL.ADD_EXTENSION";
+const LABEL_FFPROBE_ENABLED: &str = "LABEL.FFPROBE_ENABLED";
+const LABEL_FFPROBE_TIMEOUT: &str = "LABEL.FFPROBE_TIMEOUT";
+
 
 generate_form_reducer!(
     state: VideoDownloadConfigFormState { form: VideoDownloadConfigDto },
@@ -35,6 +38,8 @@ generate_form_reducer!(
     fields {
         WebSearch => web_search: Option<String>,
         Extensions => extensions: Vec<String>,
+        FfprobeEnabled => ffprobe_enabled: bool,
+        FfprobeTimeout => ffprobe_timeout: Option<u64>,
     }
 );
 
@@ -125,6 +130,10 @@ pub fn VideoConfigView() -> Html {
               { config_field_optional!(video_state.form, translate.t(LABEL_WEB_SEARCH), web_search) }
             </div>
             <div class="tp__video-config-view__body tp__config-view-page__body">
+              { config_field_bool!(video_state.form, translate.t(LABEL_FFPROBE_ENABLED), ffprobe_enabled) }
+              { config_field_optional!(video_state.form, translate.t(LABEL_FFPROBE_TIMEOUT), ffprobe_timeout) }
+            </div>
+            <div class="tp__video-config-view__body tp__config-view-page__body">
               { render_extensions(&video_state.form.extensions) }
               { render_download_view() }
             </div>
@@ -138,6 +147,10 @@ pub fn VideoConfigView() -> Html {
           <div class="tp__video-config-view__body tp__config-view-page__body">
             { edit_field_text_option!(video_state, translate.t(LABEL_WEB_SEARCH), web_search, VideoConfigFormAction::WebSearch) }
           </div>
+            <div class="tp__video-config-view__body tp__config-view-page__body">
+              { edit_field_bool!(video_state, translate.t(LABEL_FFPROBE_ENABLED), ffprobe_enabled, VideoConfigFormAction::FfprobeEnabled) }
+              { edit_field_number_option_u64!(video_state, translate.t(LABEL_FFPROBE_TIMEOUT), ffprobe_timeout, VideoConfigFormAction::FfprobeTimeout) }
+            </div>
           <div class="tp__video-config-view__body tp__config-view-page__body">
             <Card class="tp__config-view__card">
                 { edit_field_list!(video_state, translate.t(LABEL_EXTENSIONS), extensions, VideoConfigFormAction::Extensions, translate.t(LABEL_ADD_EXTENSION)) }

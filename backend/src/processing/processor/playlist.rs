@@ -1,4 +1,4 @@
-use crate::model::{AppConfig, ConfigFavourites, ConfigInput, ConfigRename, ReverseProxyDisabledHeaderConfig, TVGuide};
+use crate::model::{AppConfig, ConfigFavourites, ConfigInput, ConfigRename, MessageContent, ReverseProxyDisabledHeaderConfig, TVGuide};
 use crate::utils::{log_memory_snapshot, m3u};
 use crate::utils::xtream;
 use crate::utils::{epg, StepMeasureCallback};
@@ -8,15 +8,13 @@ use std::sync::{Arc, Weak};
 use tokio::sync::{Mutex, OwnedRwLockWriteGuard, RwLock};
 use tokio::task::JoinSet;
 
-use crate::api::model::{EventManager, EventMessage, PlaylistStorageState, UpdateGuard};
-use crate::messaging::send_message;
-use crate::model::messaging::MessageContent;
+use crate::api::model::{ActiveProviderManager, EventManager, EventMessage, PlaylistStorageState, UpdateGuard, MetadataUpdateManager, ProviderIdType, ResolveReasonSet, ResolveReason, UpdateTask};
+use crate::messaging::{send_message};
 
 
 use crate::model::FetchedPlaylist;
 use crate::model::Mapping;
-use crate::model::{ConfigTarget, ProcessTargets};
-use crate::model::{InputStats, PlaylistStats, SourceStats, TargetStats};
+use crate::model::{ConfigTarget, ProcessTargets, TargetOutput, XtreamTargetFlags};
 use crate::processing::input_cache;
 use crate::processing::input_cache::ClusterState;
 use crate::processing::parser::xmltv::flatten_tvguide;
@@ -39,12 +37,14 @@ use shared::error::{get_errors_notify_message, notify_err, TuliproxError};
 use shared::foundation::{get_field_value, set_field_value, ValueAccessor, ValueProvider};
 use shared::foundation::Filter;
 use shared::model::xtream_const::XTREAM_CLUSTER;
-use shared::model::UUIDType;
+use shared::model::{InputStats, PlaylistStats, SourceStats, TargetStats, UUIDType};
 use shared::model::{CounterModifier, FieldGetAccessor, FieldSetAccessor, InputType, ItemField,
                     PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistUpdateState,
-                    ProcessingOrder, XtreamCluster};
+                    ProcessingOrder, StreamProperties, XtreamCluster};
 use shared::utils::{create_alias_uuid, default_as_default, interner_gc, Internable};
 use std::time::Instant;
+
+const DEFAULT_PROBE_STREAM_DELAY: u16 = 50;
 
 fn is_valid(pli: &PlaylistItem, filter: &Filter, match_as_ascii: bool) -> bool {
     let provider = ValueProvider { pli, match_as_ascii };
@@ -276,7 +276,30 @@ fn is_target_enabled(target: &ConfigTarget, user_targets: &ProcessTargets) -> bo
     (!user_targets.enabled && target.enabled) || (user_targets.enabled && user_targets.has_target(target.id))
 }
 
-async fn playlist_download_from_input(client: &reqwest::Client, app_config: &Arc<AppConfig>, input: &ConfigInput) -> (Vec<PlaylistGroup>, Vec<TuliproxError>, bool, bool) {
+struct PlaylistDownloadResult {
+    pub downloaded_playlist:Vec<PlaylistGroup>,
+    pub download_err: Vec<TuliproxError>,
+    pub was_cached: bool,
+    pub persisted: bool,
+}
+
+impl PlaylistDownloadResult {
+    pub fn new(
+        downloaded_playlist:Vec<PlaylistGroup>,
+        download_err: Vec<TuliproxError>,
+        was_cached: bool,
+        persisted: bool) -> Self {
+
+       Self {
+           downloaded_playlist,
+           download_err,
+           was_cached,
+           persisted,
+       }
+    }
+}
+
+async fn playlist_download_from_input(client: &reqwest::Client, app_config: &Arc<AppConfig>, input: &ConfigInput) -> PlaylistDownloadResult {
     let config = &*app_config.config.load();
     let working_dir = &config.working_dir;
 
@@ -315,7 +338,7 @@ async fn playlist_download_from_input(client: &reqwest::Client, app_config: &Arc
     };
 
     if fully_cached {
-        return (vec![], vec![], true, false);
+        return PlaylistDownloadResult::new(vec![], vec![], true, false);
     }
 
     let (playlist, errors, persisted) = match input.input_type {
@@ -365,7 +388,7 @@ async fn playlist_download_from_input(client: &reqwest::Client, app_config: &Arc
         }
     }
 
-    (playlist, errors, false, persisted)
+    PlaylistDownloadResult::new(playlist, errors, false, persisted)
 }
 
 async fn process_source(source_idx: usize, ctx: &PlaylistProcessingContext) -> (Vec<InputStats>, Vec<TargetStats>, Vec<TuliproxError>) {
@@ -489,7 +512,7 @@ async fn download_input(ctx: &PlaylistProcessingContext, input: &Arc<ConfigInput
     // Coordination Logic
     let need_download = !ctx.is_input_downloaded(&input.name).await;
 
-    let (downloaded_playlist, download_err, was_cached, persisted) = if need_download {
+    let playlist_download_result= if need_download {
         // Acquire named lock to prevent thundering herd on same input
         let _input_lock = ctx.get_input_lock(&input.name).await;
         // Check again after lock
@@ -497,7 +520,7 @@ async fn download_input(ctx: &PlaylistProcessingContext, input: &Arc<ConfigInput
 
         if already_processed {
             // Use empty results, will load from disk below
-            (vec![], vec![], true, false)
+            PlaylistDownloadResult::new(vec![], vec![], true, false)
         } else {
             let res = playlist_download_from_input(&ctx.client, &ctx.config, input).await;
             // Mark as processed if NO critical errors?
@@ -507,20 +530,20 @@ async fn download_input(ctx: &PlaylistProcessingContext, input: &Arc<ConfigInput
             res
         }
     } else {
-        (vec![], vec![], true, false)
+        PlaylistDownloadResult::new(vec![], vec![], true, false)
     };
 
-    let (playlist, error) = if was_cached || persisted {
+    let (playlist, error) = if playlist_download_result.was_cached || playlist_download_result.persisted {
         match load_input_playlist(ctx, input, None).await {
             Ok(pl_source) => (pl_source, None),
             Err(e) => (MemoryPlaylistSource::default().boxed(), Some(e)),
         }
     } else {
         debug!("Persisting input '{}' playlist", input.name);
-        let (pl, err) = persist_input_playlist(&ctx.config, input, downloaded_playlist).await;
+        let (pl, err) = persist_input_playlist(&ctx.config, input, playlist_download_result.downloaded_playlist).await;
         (MemoryPlaylistSource::new(pl).boxed(), err)
     };
-    (download_err, playlist, error)
+    (playlist_download_result.download_err, playlist, error)
 }
 
 fn create_broadcast_callback(event_manager: Option<&Arc<EventManager>>) -> StepMeasureCallback {
@@ -562,9 +585,13 @@ pub struct PlaylistProcessingContext {
     pub disabled_headers: Option<ReverseProxyDisabledHeaderConfig>,
 
     // Coordination
-    processed_inputs: Arc<Mutex<HashSet<Arc<str>>>>,
+    pub processed_inputs: Arc<Mutex<HashSet<Arc<str>>>>,
     #[allow(clippy::type_complexity)]
-    input_locks: Arc<Mutex<HashMap<Arc<str>, Weak<RwLock<()>>>>>,
+    pub input_locks: Arc<Mutex<HashMap<Arc<str>, Weak<RwLock<()>>>>>,
+
+    // New field for STRM probes & background updates
+    pub provider_manager: Option<Arc<ActiveProviderManager>>,
+    pub metadata_manager: Option<Arc<MetadataUpdateManager>>,
 }
 
 impl PlaylistProcessingContext {
@@ -754,9 +781,7 @@ async fn process_playlist_for_target(ctx: &PlaylistProcessingContext,
         let mut processed_fpl = execute_pipe(target, &pipe, provider_fpl, &mut duplicates, consume_input_source);
         log_memory_snapshot(format!("target '{}' input '{}' after_pipe", target.name, provider_fpl.input.name).as_str());
         processed_fpl.sort_by_provider_ordinal();
-        playlist_resolve_series(&ctx.config, &ctx.client, target, errors, &pipe, provider_fpl, &mut processed_fpl).await;
-        log_memory_snapshot(format!("target '{}' input '{}' after_series_resolve", target.name, provider_fpl.input.name).as_str());
-        playlist_resolve_vod(&ctx.config, &ctx.client, target, errors, provider_fpl, &mut processed_fpl).await;
+        playlist_resolve(ctx, target, errors, &pipe, provider_fpl, &mut processed_fpl).await;
         log_memory_snapshot(format!("target '{}' input '{}' after_vod_resolve", target.name, provider_fpl.input.name).as_str());
         // stats
         let input_entry_name = processed_fpl.input.name.clone();
@@ -815,6 +840,203 @@ async fn process_playlist_for_target(ctx: &PlaylistProcessingContext,
         step.stop("Persisting playlists");
         log_memory_snapshot(format!("target '{}' after_persist", target.name).as_str());
         result
+    }
+}
+
+async fn playlist_resolve(ctx: &PlaylistProcessingContext,
+                        target: &ConfigTarget,
+                        errors: &mut Vec<TuliproxError>,
+                        pipe: &ProcessingPipe,
+                        provider_fpl: &mut FetchedPlaylist<'_>,
+                        processed_fpl: &mut FetchedPlaylist<'_>,
+) {
+
+    playlist_resolve_series(ctx, target, errors, pipe, provider_fpl, processed_fpl).await;
+    playlist_resolve_vod(ctx, target, errors, provider_fpl, processed_fpl).await;
+    playlist_probe(ctx, target, processed_fpl).await;
+}
+
+fn is_xtream_only_output_target(target: &ConfigTarget) -> bool {
+    target.output.len() == 1 && matches!(target.output.first(), Some(TargetOutput::Xtream(_)))
+}
+
+fn get_xtream_cluster_probe_flag(target: &ConfigTarget, cluster: XtreamCluster) -> Option<bool> {
+    target.get_xtream_output().map(|xtream_output| match cluster {
+        XtreamCluster::Live => xtream_output.flags.contains(XtreamTargetFlags::ProbeLive),
+        XtreamCluster::Video => xtream_output.flags.contains(XtreamTargetFlags::ProbeVod),
+        XtreamCluster::Series => xtream_output.flags.contains(XtreamTargetFlags::ProbeSeries),
+    })
+}
+
+fn is_cluster_probe_enabled_for_target(target: &ConfigTarget, cluster: XtreamCluster) -> bool {
+    // Probe flags are only authoritative when the target is exactly one xtream output.
+    // For mixed outputs (xtream + m3u/strm/...), probing remains enabled because non-xtream outputs have no probe flags.
+    if !is_xtream_only_output_target(target) {
+        return true;
+    }
+
+    get_xtream_cluster_probe_flag(target, cluster).unwrap_or(true)
+}
+
+fn is_probe_supported_item_type(item_type: PlaylistItemType) -> bool {
+    matches!(
+            item_type,
+                PlaylistItemType::Live // we skip other live streams because hls and dash have multiple resolutions
+                | PlaylistItemType::Video
+                | PlaylistItemType::LocalVideo
+                | PlaylistItemType::Series
+                | PlaylistItemType::LocalSeries
+        )
+}
+
+fn has_probe_details(item: &PlaylistItem) -> bool {
+    match item.header.additional_properties.as_ref() {
+        Some(StreamProperties::Video(v)) => v
+            .details
+            .as_ref()
+            .is_some_and(|d| d.video.is_some() && d.audio.is_some()),
+        Some(StreamProperties::Live(l)) => l.video.is_some() && l.audio.is_some(),
+        Some(StreamProperties::Episode(e)) => e.video.is_some() && e.audio.is_some(),
+        Some(StreamProperties::Series(_)) | None => false,
+    }
+}
+
+fn get_live_probe_interval_settings(target: &ConfigTarget, input_type: InputType) -> Option<(u16, u64)> {
+    if !matches!(input_type, InputType::Xtream | InputType::XtreamBatch) {
+        return None;
+    }
+    target
+        .get_xtream_output()
+        .map(|xtream_output| (xtream_output.resolve_delay, u64::from(xtream_output.probe_live_interval_hours) * 3600))
+}
+
+fn needs_live_probe(item: &PlaylistItem, cutoff_ts: i64) -> bool {
+    match item.header.additional_properties.as_ref() {
+        Some(StreamProperties::Live(props)) => {
+            if let Some(last_ts) = props.last_probed_timestamp {
+                last_ts < cutoff_ts
+            } else {
+                true
+            }
+        }
+        _ => true,
+    }
+}
+
+fn provider_id_from_item(item: &PlaylistItem) -> Option<ProviderIdType> {
+    if let Ok(id) = item.header.id.parse::<u32>() {
+        if id == 0 {
+            return None;
+        }
+        return Some(ProviderIdType::Id(id));
+    }
+
+    let raw = item.header.id.trim();
+    if raw.is_empty() {
+        None
+    } else {
+        Some(ProviderIdType::from(raw))
+    }
+}
+
+async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, fpl: &mut FetchedPlaylist<'_>) {
+    let Some(mgr) = ctx.metadata_manager.as_ref() else {
+        return;
+    };
+    let Some(opts) = fpl.input.options.as_ref() else {
+        return;
+    };
+    if !opts.probe_stream {
+        return;
+    }
+    if !ctx.config.is_ffprobe_enabled().await {
+        return;
+    }
+
+    let input_name = fpl.input.name.clone();
+    let input_type = fpl.input.input_type;
+    let xtream_only_output = is_xtream_only_output_target(target);
+    let live_probe_settings = get_live_probe_interval_settings(target, input_type).map(|(delay, interval_secs)| {
+        let interval_signed = i64::try_from(interval_secs).unwrap_or(i64::MAX);
+        let cutoff_ts = chrono::Utc::now().timestamp().saturating_sub(interval_signed);
+        (delay, interval_secs, cutoff_ts)
+    });
+
+    let mut queued_probe_keys: HashSet<(Arc<str>, String)> = HashSet::new();
+    let mut queued_live_keys: HashSet<ProviderIdType> = HashSet::new();
+    let mut queued_live_count = 0usize;
+    let mut queued_stream_count = 0usize;
+
+    for item in fpl.items() {
+        if !is_cluster_probe_enabled_for_target(target, item.header.xtream_cluster) {
+            continue;
+        }
+
+        if !is_probe_supported_item_type(item.header.item_type) {
+            continue;
+        }
+
+        if item.header.item_type.is_live() {
+            if let Some((resolve_delay, interval_secs, cutoff_ts)) = live_probe_settings {
+                if needs_live_probe(&item, cutoff_ts) {
+                    if let Some(provider_id) = provider_id_from_item(&item) {
+                        if queued_live_keys.insert(provider_id.clone()) {
+                            let task = UpdateTask::ProbeLive {
+                                id: provider_id,
+                                reason: ResolveReasonSet::from_variants(&[ResolveReason::Probe]),
+                                delay: resolve_delay,
+                                interval: interval_secs,
+                            };
+                            mgr.queue_task_background(input_name.clone(), task);
+                            queued_live_count += 1;
+                        }
+                    }
+                }
+                continue;
+            }
+        }
+
+        // For xtream-only targets, dedicated xtream resolve/probe processors handle non-live paths.
+        if xtream_only_output && matches!(input_type, InputType::Xtream | InputType::XtreamBatch) {
+            continue;
+        }
+
+        if has_probe_details(&item) {
+            continue;
+        }
+
+        // For M3U, ID is provider id; for Library, ID is UUID.
+        let unique_id = if input_type == InputType::Library {
+            item.header.uuid.to_valid_uuid()
+        } else {
+            item.header.id.to_string()
+        };
+        let probe_scope = if item.header.input_name.is_empty() {
+            input_name.clone()
+        } else {
+            item.header.input_name.clone()
+        };
+
+        if !queued_probe_keys.insert((probe_scope.clone(), unique_id.clone())) {
+            continue;
+        }
+
+        let task = UpdateTask::ProbeStream {
+            probe_scope,
+            unique_id,
+            url: item.header.url.to_string(),
+            item_type: item.header.item_type,
+            reason: ResolveReasonSet::from_variants(&[ResolveReason::MissingDetails]),
+            delay: DEFAULT_PROBE_STREAM_DELAY,
+        };
+        mgr.queue_task_background(input_name.clone(), task);
+        queued_stream_count += 1;
+    }
+
+    if queued_live_count > 0 || queued_stream_count > 0 {
+        info!(
+            "Queued probe tasks for input {input_name} (live_interval={queued_live_count}, generic={queued_stream_count})"
+        );
     }
 }
 
@@ -895,11 +1117,13 @@ async fn process_watch(app_config: &Arc<AppConfig>, client: &reqwest::Client, ta
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn exec_processing(client: &reqwest::Client, app_config: Arc<AppConfig>, targets: Arc<ProcessTargets>,
                              event_manager: Option<Arc<EventManager>>, playlist_state: Option<Arc<PlaylistStorageState>>,
-                             update_guard: Option<UpdateGuard>,
-                             disabled_headers: Option<ReverseProxyDisabledHeaderConfig>) {
-    let _guard = if let Some(guard) = update_guard {
+                             update_guard: Option<UpdateGuard>, disabled_headers: Option<ReverseProxyDisabledHeaderConfig>,
+                             provider_manager: Option<Arc<ActiveProviderManager>>,
+                             metadata_manager: Option<Arc<MetadataUpdateManager>>) {
+        let _guard = if let Some(guard) = update_guard {
         if let Some(permit) = guard.try_playlist() {
             Some(permit)
         } else {
@@ -925,6 +1149,8 @@ pub async fn exec_processing(client: &reqwest::Client, app_config: Arc<AppConfig
         processed_inputs: Arc::new(Mutex::new(HashSet::new())),
         input_locks: Arc::new(Mutex::new(HashMap::new())),
         disabled_headers,
+        provider_manager,
+        metadata_manager,
     };
 
     let start_time = Instant::now();
@@ -968,19 +1194,67 @@ pub async fn exec_processing(client: &reqwest::Client, app_config: Arc<AppConfig
     info!("{update_finished_message}");
 }
 
-// #[cfg(test)]
-// mod tests {
-// #[test]
-// fn test_jaro_winkeler() {
-//     let data = [("yessport5", "heyessport5gold"), ("yessport5", "heyesport5gold")];
-//
-//     data.iter().for_each(|(first, second)|
-//     println!("jaro_winkler {} = {} => {}", first, second, strsim::jaro_winkler(first, second)));
-//     // println!("jaro {}", strsim::jaro(data.0, data.1));
-//     // println!("levenhstein {}", strsim::levenshtein(data.0, data.1));
-//     // println!("damerau_levenshtein {:?}", strsim::damerau_levenshtein(data.0, data.1));
-//     // println!("osa distance {:?}", strsim::osa_distance(data.0, data.1));
-//     // println!("sorensen dice {:?}", strsim::sorensen_dice(data.0, data.1));
-// }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shared::utils::Internable;
 
-// }
+    fn item_with_props(props: StreamProperties) -> PlaylistItem {
+        let header = shared::model::PlaylistItemHeader {
+            additional_properties: Some(props),
+            ..Default::default()
+        };
+        PlaylistItem { header }
+    }
+
+    #[test]
+    fn has_probe_details_requires_video_and_audio_for_video() {
+        let video = shared::model::VideoStreamProperties {
+            details: Some(shared::model::VideoStreamDetailProperties {
+                video: Some("{\"codec_name\":\"h264\"}".intern()),
+                audio: None,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let item_missing_audio = item_with_props(StreamProperties::Video(Box::new(video)));
+        assert!(!has_probe_details(&item_missing_audio));
+
+        let video_complete = shared::model::VideoStreamProperties {
+            details: Some(shared::model::VideoStreamDetailProperties {
+                video: Some("{\"codec_name\":\"h264\"}".intern()),
+                audio: Some("{\"codec_name\":\"aac\"}".intern()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let item_complete = item_with_props(StreamProperties::Video(Box::new(video_complete)));
+        assert!(has_probe_details(&item_complete));
+    }
+
+    #[test]
+    fn has_probe_details_requires_video_and_audio_for_live() {
+        let live_missing_audio = shared::model::LiveStreamProperties {
+            video: Some("{\"codec_name\":\"h264\"}".intern()),
+            audio: None,
+            ..Default::default()
+        };
+        let item_missing_audio = item_with_props(StreamProperties::Live(Box::new(live_missing_audio)));
+        assert!(!has_probe_details(&item_missing_audio));
+
+        let live_complete = shared::model::LiveStreamProperties {
+            video: Some("{\"codec_name\":\"h264\"}".intern()),
+            audio: Some("{\"codec_name\":\"aac\"}".intern()),
+            ..Default::default()
+        };
+        let item_complete = item_with_props(StreamProperties::Live(Box::new(live_complete)));
+        assert!(has_probe_details(&item_complete));
+    }
+
+    #[test]
+    fn has_probe_details_is_false_for_series() {
+        let series = shared::model::SeriesStreamProperties::default();
+        let item = item_with_props(StreamProperties::Series(Box::new(series)));
+        assert!(!has_probe_details(&item));
+    }
+}

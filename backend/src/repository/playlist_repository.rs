@@ -1,7 +1,7 @@
 use crate::api::model::{AppState, PlaylistM3uStorage, PlaylistStorage, PlaylistStorageState, PlaylistXtreamStorage};
 use crate::model::Epg;
 use crate::model::{AppConfig, ConfigInput, ConfigTarget, TargetOutput};
-use crate::processing::processor::playlist::{apply_filter_to_playlist, PlaylistProcessingContext};
+use crate::processing::processor::{apply_filter_to_playlist, PlaylistProcessingContext};
 use crate::repository::epg_write_for_target;
 use crate::repository::write_strm_playlist;
 use crate::repository::FILE_SUFFIX_DB;
@@ -468,7 +468,7 @@ pub fn get_input_m3u_playlist_file_path(storage_path: &Path, input_name: &Arc<st
     storage_path.join(format!("m3u_{sanitized_input_name}.{FILE_SUFFIX_DB}"))
 }
 
-fn get_input_local_library_playlist_file_path(storage_path: &Path, input_name: &Arc<str>) -> PathBuf {
+pub fn get_input_local_library_playlist_file_path(storage_path: &Path, input_name: &Arc<str>) -> PathBuf {
     let sanitized_input_name: String = input_name.chars()
         .map(|c| if c.is_alphanumeric() { c } else { '_' })
         .collect();

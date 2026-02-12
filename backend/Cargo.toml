@@ -44,7 +44,7 @@ flate2 = "1.1"
 blake3 = "1.8"
 bytes = "1.11"
 tokio-stream = { version = "0.1", features = ["sync"] }
-tokio = { version = "1.49", features = ["rt-multi-thread", "parking_lot", "fs"] }
+tokio = { version = "1.49", features = ["rt-multi-thread", "parking_lot", "fs", "process"] }
 #tokio = { version = "1.46", features = ["rt-multi-thread", "parking_lot", "fs", "tracing"] }
 #console-subscriber = "0"
 #tracing = "0.1"

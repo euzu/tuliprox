@@ -13,6 +13,8 @@ pub enum EventMessage {
     PlaylistUpdateProgress(String, String),
     SystemInfoUpdate(SystemInfo),
     LibraryScanProgress(LibraryScanSummary),
+    // Triggered when MetadataUpdateManager queue drains for an input
+    InputMetadataUpdatesCompleted(Arc<str>),
 }
 
 pub struct EventManager {

@@ -11,19 +11,25 @@ use crate::api::endpoints::xmltv_api::xmltv_api_register;
 use crate::api::endpoints::xtream_api::xtream_api_register;
 use crate::api::hdhomerun_proprietary::spawn_proprietary_tasks;
 use crate::api::hdhomerun_ssdp::spawn_ssdp_discover_task;
-use crate::api::model::{create_cache, create_http_client, create_http_client_no_redirect, ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager, DownloadQueue, EventManager, HdHomerunAppState, PlaylistStorageState, SharedStreamManager, UpdateGuard};
+use crate::api::model::{create_cache, create_http_client, create_http_client_no_redirect, ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager, DownloadQueue, EventManager, HdHomerunAppState, MetadataUpdateManager, PlaylistStorageState, SharedStreamManager, UpdateGuard};
+use crate::api::panel_api::sync_panel_api_exp_dates_on_boot;
 use crate::api::scheduler::{exec_interner_prune, exec_scheduler};
 use crate::api::serve::serve;
+use crate::api::sys_usage::exec_system_usage;
 use crate::model::{AppConfig, Config, Healthcheck, ProcessTargets, RateLimitConfig};
-use crate::processing::processor::playlist;
+use crate::processing::processor::exec_processing;
+use crate::repository::get_geoip_path;
 use crate::repository::load_playlists_into_memory_cache;
+use crate::utils::{exec_file_lock_prune, GeoIp};
 use crate::VERSION;
 use arc_swap::{ArcSwap, ArcSwapOption};
-use axum::Router;
-use axum::{middleware::Next, extract::Request};
 use axum::extract::connect_info::ConnectInfo;
+use axum::Router;
+use axum::{extract::Request, middleware::Next};
 use log::{debug, error, info};
+use shared::error::TuliproxError;
 use shared::utils::{concat_path_leading_slash, sanitize_sensitive_info};
+use shared::{info_err, info_err_res};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicI8;
@@ -31,12 +37,6 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tower_governor::key_extractor::SmartIpKeyExtractor;
 use tower_http::services::ServeDir;
-use shared::error::TuliproxError;
-use shared::{info_err, info_err_res};
-use crate::api::panel_api::sync_panel_api_exp_dates_on_boot;
-use crate::api::sys_usage::exec_system_usage;
-use crate::repository::get_geoip_path;
-use crate::utils::{exec_file_lock_prune, GeoIp};
 
 fn get_web_dir_path(web_ui_enabled: bool, web_root: &str) -> Result<PathBuf, TuliproxError> {
     let web_dir = web_root.to_string();
@@ -88,11 +88,14 @@ async fn create_shared_data(
     let event_manager = Arc::new(EventManager::new());
     let active_provider = Arc::new(ActiveProviderManager::new(app_config, &event_manager));
     let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
-    let active_users = Arc::new(ActiveUserManager::new(&config,&geoip, &event_manager));
+    let active_users = Arc::new(ActiveUserManager::new(&config, &geoip, &event_manager));
     let connection_manager = Arc::new(ConnectionManager::new(&active_users, &active_provider, &shared_stream_manager, &event_manager));
 
     let client = create_http_client(app_config)?;
     let client_no_redirect = create_http_client_no_redirect(app_config)?;
+
+    let cancel_tokens = Arc::new(ArcSwap::from_pointee(CancelTokens::default()));
+    let metadata_manager = Arc::new(MetadataUpdateManager::new(cancel_tokens.load().scheduler.clone()));
 
     Ok(AppState {
         forced_targets: Arc::new(ArcSwap::new(Arc::clone(forced_targets))),
@@ -106,10 +109,11 @@ async fn create_shared_data(
         active_provider,
         connection_manager,
         event_manager,
-        cancel_tokens: Arc::new(ArcSwap::from_pointee(CancelTokens::default())),
+        cancel_tokens,
         playlists: Arc::new(PlaylistStorageState::new()),
         geoip,
         update_guard: UpdateGuard::new(),
+        metadata_manager,
     })
 }
 
@@ -130,8 +134,11 @@ fn exec_update_on_boot(
         let client = client.clone();
         let update_guard = Some(app_state.update_guard.clone());
         let disabled_headers = app_state.get_disabled_headers();
+        let provider_manager = Arc::clone(&app_state.active_provider);
+        let metadata_manager = Arc::clone(&app_state.metadata_manager);
+
         tokio::spawn(async move {
-            playlist::exec_processing(&client, app_config_clone, targets_clone, None, Some(playlist_state), update_guard, disabled_headers).await;
+            exec_processing(&client, app_config_clone, targets_clone, None, Some(playlist_state), update_guard, disabled_headers, Some(provider_manager), Some(metadata_manager)).await;
         });
     }
 }
@@ -258,6 +265,18 @@ pub async fn start_server(
     }
     let app_shared_data = create_shared_data(&app_config, &targets).await?;
     let app_state = Arc::new(app_shared_data);
+
+    // Initialize metadata manager with weak ref to app_state
+    // IMPORTANT: clone app_state here to keep it alive for the weak ref, but avoid moving it
+    app_state.metadata_manager.set_app_state(Arc::downgrade(&app_state)).await;
+
+    // Start event listener for input metadata updates
+    // Clone app_state first to ensure it lives in the closure
+    // Explicitly creating a new Arc reference for this closure.
+    let app_state_for_listener = Arc::clone(&app_state);
+    exec_input_update_listener(&app_state_for_listener, &targets);
+
+    // Keep using the original `app_state` below, which is valid because `Arc::clone` borrows.
     let shared_data = Arc::clone(&app_state);
 
     let (cancel_token_scheduler, cancel_token_hdhomerun, cancel_token_file_watch) = {
@@ -434,4 +453,78 @@ async fn log_req(req: Request, next: Next) -> impl axum::response::IntoResponse 
 
     debug!("Client request [{method}] -> {safe_uri} from {safe_ip}");
     next.run(req).await
+}
+
+
+fn exec_input_update_listener(_app_state: &Arc<AppState>, _targets: &Arc<ProcessTargets>) {
+    // TODO this method starts an playlist update after the metadata is resolved.
+    // Currently to many playlist updates are started and therefore it is disabled.
+
+    // let app_state = Arc::clone(app_state);
+    // let targets = Arc::clone(targets);
+
+    // tokio::spawn(async move {
+    //     let mut rx = app_state.event_manager.get_event_channel();
+    //     let app_state = Arc::clone(&app_state);
+    //     loop {
+    //         match rx.recv().await {
+    //             Ok(EventMessage::InputMetadataUpdatesCompleted(input_name)) => {
+    //                 // Find all targets that use this input
+    //                 let mut targets_to_update = HashSet::new();
+    //                 let sources = app_state.app_config.sources.load();
+    //
+    //                 for source in &sources.sources {
+    //                     if source.inputs.contains(&input_name) {
+    //                         for target in &source.targets {
+    //                             // Update strategy "Bundled" explicitly waits for this event.
+    //                             // Update strategy "Instant" triggers updates per item, but we ALSO trigger a full
+    //                             // update here to ensure everything is consistent (e.g. M3U files, cleaning up temp files).
+    //                             // This guarantees that any STRM/M3U files are generated/updated after metadata resolution.
+    //
+    //                             // Check if target matches process targets (CLI args or schedule)
+    //                             if let Some(valid_targets) = crate::api::scheduler::get_process_targets(&app_state.app_config, &targets, Some(&vec![target.name.clone()])).as_ref().into() {
+    //                                 if valid_targets.enabled && !valid_targets.targets.is_empty() {
+    //                                     targets_to_update.insert(target.name.clone());
+    //                                 }
+    //                             }
+    //                         }
+    //                     }
+    //                 }
+    //
+    //                 if !targets_to_update.is_empty() {
+    //                     let targets_to_update: Vec<_> = targets_to_update.into_iter().collect();
+    //                     // Small delay to ensure any lingering updates or file locks from the background thread are fully released
+    //                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    //
+    //                     info!("Triggering playlist update for targets due to metadata change completion: {targets_to_update:?}");
+    //
+    //                     let client = app_state.http_client.load().as_ref().clone();
+    //                     let app_config = Arc::clone(&app_state.app_config);
+    //                     let event_manager = Arc::clone(&app_state.event_manager);
+    //                     let playlist_state = Arc::clone(&app_state.playlists);
+    //                     let disabled_headers = app_state.get_disabled_headers();
+    //
+    //                     if let Ok(process_targets) = sources.validate_targets(Some(&targets_to_update)) {
+    //                         let proc_targets = Arc::new(process_targets);
+    //
+    //                         let update_guard = app_state.update_guard.clone();
+    //
+    //                         let app_state_clone = app_state.clone();
+    //                         tokio::spawn(async move {
+    //                             exec_processing(
+    //                                 &client, app_config, proc_targets, Some(event_manager),
+    //                                 Some(playlist_state), Some(update_guard),
+    //                                 disabled_headers,
+    //                                 Some(app_state_clone.active_provider.clone()), Some(app_state_clone.metadata_manager.clone()),
+    //                             ).await;
+    //                         });
+    //                     }
+    //                 }
+    //             }
+    //             Ok(_)
+    //             | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {},
+    //             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+    //         }
+    //     }
+    // });
 }

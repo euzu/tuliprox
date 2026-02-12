@@ -67,7 +67,7 @@ impl ConfigFile {
         let config_dto = read_config_file(config_file, true, true)?;
         let mapping_changed = paths.mapping_file_path.as_ref() != config_dto.mapping_path.as_ref();
         let mut config: Config = Config::from(config_dto);
-        config.prepare(paths.config_path.as_str())?;
+        config.prepare(paths.config_path.as_str()).await?;
         update_app_state_config(app_state, config).await?;
         info!("Loaded config file {config_file}");
         if mapping_changed {

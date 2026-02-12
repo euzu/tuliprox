@@ -1,12 +1,13 @@
-use crate::utils::is_blank_optional_string;
-use log::warn;
 use crate::error::{TuliproxError, TuliproxErrorKind};
 use crate::{info_err_res, handle_tuliprox_error_result_list};
 use crate::foundation::{get_filter, Filter};
 use crate::model::{ClusterFlags, ConfigFavouritesDto, ConfigRenameDto, ConfigSortDto, HdHomeRunDeviceOverview,
                    PatternTemplate, ProcessingOrder, StrmExportStyle, TargetType, TraktConfigDto};
 use crate::utils::{is_true, is_false, default_as_true, default_resolve_delay_secs, default_as_default,
-                   is_default_resolve_delay_secs, is_zero_u16, is_config_target_options_empty, is_default_processing_order};
+                   is_blank_optional_string,
+                   is_default_resolve_delay_secs, is_zero_u16, is_config_target_options_empty, is_default_processing_order,
+                   default_probe_live_interval, is_default_probe_live_interval};
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigTargetOptions {
@@ -39,14 +40,22 @@ pub struct XtreamTargetOutputDto {
     pub skip_video_direct_source: bool,
     #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
     pub skip_series_direct_source: bool,
+    #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
+    pub resolve_background: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub resolve_series: bool,
-    #[serde(default = "default_resolve_delay_secs", skip_serializing_if = "is_default_resolve_delay_secs")]
-    pub resolve_series_delay: u16,
     #[serde(default, skip_serializing_if = "is_false")]
     pub resolve_vod: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub probe_series: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub probe_vod: bool,
     #[serde(default = "default_resolve_delay_secs", skip_serializing_if = "is_default_resolve_delay_secs")]
-    pub resolve_vod_delay: u16,
+    pub resolve_delay: u16,
+    #[serde(default, alias = "resolve_live", skip_serializing_if = "is_false")]
+    pub probe_live: bool,
+    #[serde(default = "default_probe_live_interval", alias = "resolve_live_interval_hours", skip_serializing_if = "is_default_probe_live_interval")]
+    pub probe_live_interval_hours: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trakt: Option<TraktConfigDto>,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
@@ -61,10 +70,14 @@ impl Default for XtreamTargetOutputDto {
             skip_live_direct_source: default_as_true(),
             skip_video_direct_source: default_as_true(),
             skip_series_direct_source: default_as_true(),
+            resolve_background: default_as_true(),
             resolve_series: false,
-            resolve_series_delay: default_resolve_delay_secs(),
             resolve_vod: false,
-            resolve_vod_delay: default_resolve_delay_secs(),
+            probe_series: false,
+            probe_vod: false,
+            resolve_delay: default_resolve_delay_secs(),
+            probe_live: false,
+            probe_live_interval_hours: default_probe_live_interval(),
             trakt: None,
             filter: None,
             t_filter: None,
@@ -87,8 +100,12 @@ impl XtreamTargetOutputDto {
         self.skip_live_direct_source
             || self.skip_video_direct_source
             || self.skip_series_direct_source
+            || self.resolve_background
             || self.resolve_series
             || self.resolve_vod
+            || self.probe_series
+            || self.probe_vod
+            || self.probe_live
             || self.trakt.is_some()
             || self.filter.is_some()
     }
@@ -146,6 +163,13 @@ pub struct StrmTargetOutputDto {
     pub filter: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub add_quality_to_filename: bool,
+    
+    // New Fields for Metadata and Probe
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_probe_size_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_analyze_duration: Option<u64>,
+
     #[serde(skip)]
     pub t_filter: Option<Filter>,
 }
@@ -366,7 +390,7 @@ impl ConfigTargetDto {
 
             if let Some(hdhr_devices) = hdhr_config {
                 if !hdhr_devices.enabled {
-                    warn!("You have defined an HDHomeRun output, but HDHomeRun devices are disabled.");
+                    log::warn!("You have defined an HDHomeRun output, but HDHomeRun devices are disabled.");
                 }
             }
         }

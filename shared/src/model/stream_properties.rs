@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use log::{warn};
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Default, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct LiveStreamProperties {
     #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
     pub name: Arc<str>,
@@ -35,6 +35,15 @@ pub struct LiveStreamProperties {
     pub tv_archive_duration: Option<i32>,
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
     pub is_adult: i32,
+    // New fields for probing
+    #[serde(default, serialize_with = "serialize_json_as_opt_string", deserialize_with = "deserialize_json_as_opt_string")]
+    pub video: Option<Arc<str>>,
+    #[serde(default, serialize_with = "serialize_json_as_opt_string", deserialize_with = "deserialize_json_as_opt_string")]
+    pub audio: Option<Arc<str>>,
+    #[serde(default, deserialize_with = "deserialize_number_from_string")]
+    pub last_probed_timestamp: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_number_from_string")]
+    pub last_success_timestamp: Option<i64>,
 }
 
 #[derive(Default, Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -170,6 +179,8 @@ pub struct SeriesStreamDetailEpisodeProperties {
     #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
     pub release_date: Arc<str>,
     #[serde(default, deserialize_with = "deserialize_as_option_arc_str")]
+    pub series_release_date: Option<Arc<str>>, // Global series release date
+    #[serde(default, deserialize_with = "deserialize_as_option_arc_str")]
     pub plot: Option<Arc<str>>,
     #[serde(default, deserialize_with = "deserialize_as_option_arc_str")]
     pub crew: Option<Arc<str>>,
@@ -257,6 +268,8 @@ pub struct EpisodeStreamProperties {
     pub added: Option<Arc<str>>,
     #[serde(default, deserialize_with = "deserialize_as_option_arc_str")]
     pub release_date: Option<Arc<str>>,
+    #[serde(default, deserialize_with = "deserialize_as_option_arc_str")]
+    pub series_release_date: Option<Arc<str>>, // Global series release date
     #[serde(default, deserialize_with = "deserialize_number_from_string")]
     pub tmdb: Option<u32>,
     #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
@@ -282,7 +295,7 @@ pub enum StreamProperties {
     Live(Box<LiveStreamProperties>),
     Video(Box<VideoStreamProperties>),
     Series(Box<SeriesStreamProperties>),
-    Episode(EpisodeStreamProperties),
+    Episode(Box<EpisodeStreamProperties>),
 }
 
 impl StreamProperties {
@@ -290,8 +303,13 @@ impl StreamProperties {
         match self {
             StreamProperties::Video(video) => video.details.is_some(),
             StreamProperties::Series(series) => series.details.is_some(),
-            StreamProperties::Live(_)
-            | StreamProperties::Episode(_) => false,
+            StreamProperties::Live(live) => {
+                live.video.is_some()
+                    || live.audio.is_some()
+                    || live.last_probed_timestamp.is_some()
+                    || live.last_success_timestamp.is_some()
+            },
+            StreamProperties::Episode(_) => false,
         }
     }
 
@@ -590,11 +608,8 @@ fn parse_season_episode_field(s: &str) -> Option<(u32, u32, String)> {
 
 
 impl VideoStreamProperties {
-    pub fn from_info<P>(info: &XtreamVideoInfo, pli: &P) -> VideoStreamProperties
-    where
-        P: PlaylistEntry,
-    {
-        let mut props = VideoStreamProperties {
+    fn from_info_base(info: &XtreamVideoInfo) -> VideoStreamProperties {
+        VideoStreamProperties {
             name: info.info.name.clone(),
             category_id: info.movie_data.category_id,
             stream_id: info.movie_data.stream_id,
@@ -605,7 +620,7 @@ impl VideoStreamProperties {
             container_extension: info.movie_data.container_extension.clone(),
             rating: None, // from PlaylistItem
             rating_5based: None, // from PlaylistItem
-            stream_type: None, // from PlaylistItem
+            stream_type: Some("movie".intern()),
             trailer: info.info.youtube_trailer.clone(),
             tmdb: info.info.tmdb_id.parse::<u32>().ok(),
             is_adult: 0,  // from PlaylistItem
@@ -636,7 +651,14 @@ impl VideoStreamProperties {
                 runtime: info.info.runtime.clone(),
                 status: info.info.status.clone(),
             }),
-        };
+        }
+    }
+
+    pub fn from_info<P>(info: &XtreamVideoInfo, pli: &P) -> VideoStreamProperties
+    where
+        P: PlaylistEntry,
+    {
+        let mut props = VideoStreamProperties::from_info_base(info);
 
         if let Some(StreamProperties::Video(video)) = pli.get_additional_properties() {
             props.rating = video.rating;
@@ -649,11 +671,13 @@ impl VideoStreamProperties {
                 props.trailer = video.trailer.clone();
             }
             props.is_adult = video.is_adult;
-        } else {
-            props.stream_type = Some("movie".intern());
         }
 
         props
+    }
+
+    pub fn from_info_without_existing(info: &XtreamVideoInfo) -> VideoStreamProperties {
+        VideoStreamProperties::from_info_base(info)
     }
 }
 
@@ -711,6 +735,7 @@ impl SeriesStreamProperties {
                             direct_source: e.direct_source.clone(),
                             tmdb: info.info.tmdb,
                             release_date: e.info.as_ref().map(|i| i.air_date.clone()).unwrap_or_default(),
+                            series_release_date: None,
                             plot: None,
                             crew: e.info.as_ref().map(|i| i.crew.clone()),
                             duration_secs: e.info.as_ref().map(|i| i.duration_secs).unwrap_or_default(),
@@ -794,6 +819,7 @@ impl SeriesStreamProperties {
                             direct_source: e.direct_source.clone(),
                             tmdb,
                             release_date: e.info.air_date.clone(),
+                            series_release_date: None,
                             plot: None,
                             crew: e.info.crew.clone(),
                             duration_secs: e.info.duration_secs,
@@ -820,6 +846,8 @@ impl EpisodeStreamProperties {
             season: episode.season,
             added: Some(episode.added.clone()),
             release_date: Some(episode.release_date.clone()),
+            // Inherit global release date from the Series object if available
+            series_release_date: series.release_date.clone(),
             tmdb: episode.tmdb.or(series.tmdb),
             movie_image: episode.movie_image.clone(),
             container_extension: episode.container_extension.clone(),
@@ -831,4 +859,93 @@ impl EpisodeStreamProperties {
 
 fn non_empty_arc(s: &Arc<str>) -> Option<Arc<str>> {
     if s.is_empty() { None } else { Some(Arc::clone(s)) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{PlaylistItemType, XtreamCluster, XtreamPlaylistItem};
+    use serde_json::json;
+
+    fn sample_video_info(tmdb_id: &str) -> XtreamVideoInfo {
+        serde_json::from_value(json!({
+            "info": {
+                "name": "Fetched Movie",
+                "tmdb_id": tmdb_id,
+                "movie_image": "https://img.example/movie.jpg",
+                "video": { "codec": "h264" },
+                "audio": { "codec": "aac" }
+            },
+            "movie_data": {
+                "name": "Fetched Movie",
+                "category_id": "99",
+                "stream_id": "4242",
+                "direct_source": "https://cdn.example/stream.mkv",
+                "added": "1700000000",
+                "container_extension": "mkv"
+            }
+        }))
+        .expect("sample XtreamVideoInfo should deserialize")
+    }
+
+    fn existing_video_item() -> XtreamPlaylistItem {
+        XtreamPlaylistItem {
+            virtual_id: 1,
+            provider_id: 1001,
+            name: "Existing".into(),
+            logo: "".into(),
+            logo_small: "".into(),
+            group: "".into(),
+            title: "Existing title".into(),
+            parent_code: "".into(),
+            rec: "".into(),
+            url: "https://provider.example/stream".into(),
+            epg_channel_id: None,
+            xtream_cluster: XtreamCluster::Video,
+            additional_properties: Some(StreamProperties::Video(Box::new(VideoStreamProperties {
+                rating: Some(7.5),
+                rating_5based: Some(3.7),
+                stream_type: Some("legacy-type".into()),
+                trailer: Some("legacy-trailer".into()),
+                tmdb: Some(7788),
+                is_adult: 1,
+                ..Default::default()
+            }))),
+            item_type: PlaylistItemType::Video,
+            category_id: 99,
+            input_name: "input".into(),
+            channel_no: 0,
+            source_ordinal: 0,
+        }
+    }
+
+    #[test]
+    fn from_info_without_existing_keeps_fetched_metadata() {
+        let info = sample_video_info("12345");
+
+        let props = VideoStreamProperties::from_info_without_existing(&info);
+        let details = props.details.expect("details should be present");
+
+        assert_eq!(props.name.as_ref(), "Fetched Movie");
+        assert_eq!(props.stream_id, 4242);
+        assert_eq!(props.tmdb, Some(12345));
+        assert_eq!(props.stream_type.as_deref(), Some("movie"));
+        assert!(details.video.is_some());
+        assert!(details.audio.is_some());
+    }
+
+    #[test]
+    fn from_info_with_existing_keeps_existing_overrides() {
+        let info = sample_video_info("");
+        let existing = existing_video_item();
+
+        let props = VideoStreamProperties::from_info(&info, &existing);
+
+        assert_eq!(props.rating, Some(7.5));
+        assert_eq!(props.rating_5based, Some(3.7));
+        assert_eq!(props.stream_type.as_deref(), Some("legacy-type"));
+        assert_eq!(props.trailer.as_deref(), Some("legacy-trailer"));
+        assert_eq!(props.tmdb, Some(7788));
+        assert_eq!(props.is_adult, 1);
+    }
 }

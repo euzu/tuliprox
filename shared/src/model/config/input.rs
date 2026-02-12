@@ -51,8 +51,7 @@ macro_rules! apply_batch_aliases {
     }};
 }
 
-#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence,
-    PartialEq, Eq, Default)]
+#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq, Default)]
 pub enum InputType {
     #[serde(rename = "m3u")]
     #[default]
@@ -74,6 +73,16 @@ impl InputType {
     const M3U_BATCH: &'static str = "m3u_batch";
     const XTREAM_BATCH: &'static str = "xtream_batch";
     const LIBRARY: &'static str = "library";
+    pub fn is_xtream(&self) -> bool {
+        matches!(self, Self::Xtream | Self::XtreamBatch)
+    }
+    pub fn is_m3u(&self) -> bool {
+        matches!(self, Self::M3u | Self::M3uBatch)
+    }
+
+    pub fn is_library(&self) -> bool {
+        matches!(self, Self::Library)
+    }
 }
 
 impl Display for InputType {
@@ -168,6 +177,10 @@ pub struct ConfigInputOptionsDto {
     pub xtream_live_stream_use_prefix: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub xtream_live_stream_without_extension: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub resolve_tmdb: bool,
+    #[serde(default, alias = "analyze_stream", skip_serializing_if = "is_false")]
+    pub probe_stream: bool,
 }
 
 impl Default for ConfigInputOptionsDto {
@@ -178,6 +191,8 @@ impl Default for ConfigInputOptionsDto {
             xtream_skip_series: false,
             xtream_live_stream_use_prefix: default_as_true(),
             xtream_live_stream_without_extension: false,
+            resolve_tmdb: false,
+            probe_stream: false,
         }
     }
 }
@@ -189,6 +204,8 @@ impl ConfigInputOptionsDto {
             && !self.xtream_skip_series
             && self.xtream_live_stream_use_prefix
             && !self.xtream_live_stream_without_extension
+            && !self.resolve_tmdb
+            && !self.probe_stream
     }
 
     pub fn clean(&mut self) {
@@ -197,6 +214,8 @@ impl ConfigInputOptionsDto {
         self.xtream_skip_series = false;
         self.xtream_live_stream_use_prefix = default_as_true();
         self.xtream_live_stream_without_extension = false;
+        self.resolve_tmdb = false;
+        self.probe_stream = false;
     }
 }
 
@@ -360,6 +379,14 @@ impl Default for ConfigInputDto {
 }
 
 impl ConfigInputDto {
+
+    pub fn new_with_type(input_type: InputType) -> Self {
+        Self {
+            input_type,
+            ..Self::default()
+        }
+    }
+
     #[allow(clippy::cast_possible_truncation)]
     pub fn prepare(&mut self, index: u16, _include_computed: bool, provider_names: &HashSet<String>) -> Result<u16, TuliproxError> {
         self.name = self.name.trim().intern();

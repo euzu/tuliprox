@@ -1,6 +1,12 @@
 use std::borrow::Cow;
-use std::sync::Arc;
+use std::sync::{Arc};
 use deunicode::deunicode_with_tofu_cow;
+use crate::utils::CONSTANTS;
+
+/// Cleans a playlist title by removing common IPTV prefixes (e.g., "[US]", "┃DE┃").
+pub fn clean_playlist_title(title: &str) -> String {
+    CONSTANTS.re_clean_title.replace(title, "").trim().to_string()
+}
 
 pub trait Capitalize {
     fn capitalize(&self) -> String;
@@ -171,6 +177,7 @@ mod test {
     use crate::utils::Capitalize;
     use super::generate_random_string;
     use crate as shared; // allow path-based macro call in tests
+    use super::clean_playlist_title;
 
     #[test]
     fn test_generate_random_string() {
@@ -202,4 +209,13 @@ mod test {
         assert_eq!(s, "abc/123");
     }
 
+    #[test]
+    fn test_clean_playlist_title() {
+        assert_eq!(clean_playlist_title("┃DE┃ Movie Title"), "Movie Title");
+        assert_eq!(clean_playlist_title("[US] Movie Title"), "Movie Title");
+        assert_eq!(clean_playlist_title("|EN| Movie Title"), "Movie Title");
+        assert_eq!(clean_playlist_title("(FR) Movie Title"), "Movie Title");
+        assert_eq!(clean_playlist_title("[US] (FR) Movie Title"), "Movie Title");
+        assert_eq!(clean_playlist_title("Movie Title"), "Movie Title");
+    }
 }

@@ -21,6 +21,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
+use tokio::sync::OnceCell;
 use shared::concat_string;
 use crate::utils::request::{is_uri};
 use url::Url;
@@ -284,7 +285,7 @@ pub async fn read_initial_app_config(
     prepare_sources_batch(&mut sources_dto, include_computed).await?;
     let sources: SourcesConfig = SourcesConfig::try_from(sources_dto)?;
     let mut config: Config = Config::from(config_dto);
-    config.prepare(config_path)?;
+    config.prepare(config_path).await?;
     config.update_runtime();
 
     if paths.mapping_file_path.is_none() {
@@ -308,6 +309,7 @@ pub async fn read_initial_app_config(
         custom_stream_response: Arc::new(ArcSwapAny::default()),
         access_token_secret: Default::default(),
         encrypt_secret: Default::default(),
+        ffprobe_available: Arc::new(OnceCell::new())
     };
     app_config.prepare(include_computed)?;
     //print_info(&app_config);

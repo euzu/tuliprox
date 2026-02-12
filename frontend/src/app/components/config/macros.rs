@@ -362,6 +362,31 @@ macro_rules! edit_field_number_i16 {
 }
 
 #[macro_export]
+macro_rules! edit_field_number_u32 {
+    ($instance:expr, $label:expr, $field:ident, $action:path) => {{
+        let instance = $instance.clone();
+        html! {
+            <div class="tp__form-field tp__form-field__number">
+                <$crate::app::components::number_input::NumberInput
+                    label={$label}
+                    name={stringify!($field)}
+                    value={instance.form.$field as i64}
+                    on_change={Callback::from(move |value: Option<i64>| {
+                        match value {
+                            Some(value) => {
+                                let val = u32::try_from(value).unwrap_or(0);
+                                instance.dispatch($action(val))
+                            },
+                            None => instance.dispatch($action(0)),
+                        }
+                    })}
+                />
+            </div>
+        }
+    }};
+}
+
+#[macro_export]
 macro_rules! edit_field_number_u64 {
     ($instance:expr, $label:expr, $field:ident, $action:path) => {{
         let instance = $instance.clone();
@@ -412,7 +437,7 @@ macro_rules! edit_field_number_usize {
 }
 
 #[macro_export]
-macro_rules! edit_field_number_option {
+macro_rules! edit_field_number_option_u32 {
     ($instance:expr, $label:expr, $field:ident, $action:path) => {{
         let instance = $instance.clone();
         html! {
@@ -424,6 +449,31 @@ macro_rules! edit_field_number_option {
                     on_change={Callback::from(move |value: Option<i64>| {
                         match value {
                             Some(value) => match u32::try_from(value) {
+                                Ok(val) => instance.dispatch($action(Some(val))),
+                                Err(_) => return,
+                            },
+                            None => instance.dispatch($action(None)),
+                        }
+                    })}
+                />
+            </div>
+        }
+    }};
+}
+
+#[macro_export]
+macro_rules! edit_field_number_option_u64 {
+    ($instance:expr, $label:expr, $field:ident, $action:path) => {{
+        let instance = $instance.clone();
+        html! {
+            <div class="tp__form-field tp__form-field__number">
+                <$crate::app::components::number_input::NumberInput
+                    label={$label}
+                    name={stringify!($field)}
+                    value={instance.form.$field.map(|v:u64| v.min(i64::MAX as u64) as i64)}
+                    on_change={Callback::from(move |value: Option<i64>| {
+                        match value {
+                            Some(value) => match u64::try_from(value) {
                                 Ok(val) => instance.dispatch($action(Some(val))),
                                 Err(_) => return,
                             },

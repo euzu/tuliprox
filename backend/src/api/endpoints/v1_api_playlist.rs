@@ -4,7 +4,6 @@ use crate::api::endpoints::extract_accept_header::ExtractAcceptHeader;
 use crate::api::model::AppState;
 use crate::auth::create_access_token;
 use crate::model::{parse_xmltv_for_web_ui_from_url, ConfigInput, ConfigInputOptions};
-use crate::processing::processor::playlist;
 use axum::response::IntoResponse;
 use axum::{Router};
 use log::{debug, error};
@@ -15,6 +14,7 @@ use std::sync::Arc;
 use url::Url;
 use crate::api::endpoints::xmltv_api::{serve_epg_web_ui};
 use crate::api::endpoints::xtream_api::xtream_get_stream_info_response;
+use crate::processing::processor::exec_processing;
 use crate::repository::xtream_get_item_for_stream_id;
 
 fn create_config_input_for_m3u(url: &str) -> ConfigInput {
@@ -30,6 +30,8 @@ fn create_config_input_for_m3u(url: &str) -> ConfigInput {
             xtream_skip_series: false,
             xtream_live_stream_without_extension: false,
             xtream_live_stream_use_prefix: true,
+            resolve_tmdb: false,
+            probe_stream: false,
         }),
         ..Default::default()
     }
@@ -50,6 +52,8 @@ fn create_config_input_for_xtream(username: &str, password: &str, host: &str) ->
             xtream_skip_series: false,
             xtream_live_stream_without_extension: false,
             xtream_live_stream_use_prefix: true,
+            resolve_tmdb: false,
+            probe_stream: false,
         }),
         ..Default::default()
     }
@@ -68,12 +72,14 @@ async fn playlist_update(
             let event_manager = Arc::clone(&app_state.event_manager);
             let playlist_state = Arc::clone(&app_state.playlists);
             let valid_targets = Arc::new(valid_targets);
+            let provider_manager = Arc::clone(&app_state.active_provider);
             let disabled_headers = app_state.get_disabled_headers();
+            let metadata_manager = Arc::clone(&app_state.metadata_manager);
             tokio::spawn({
                 async move {
-                    playlist::exec_processing(&http_client, app_config, valid_targets, Some(event_manager),
-                                              Some(playlist_state), Some(app_state.update_guard.clone()),
-                                              disabled_headers).await;
+                    exec_processing(&http_client, app_config, valid_targets, Some(event_manager),
+                                    Some(playlist_state), Some(app_state.update_guard.clone()),
+                                    disabled_headers, Some(provider_manager), Some(metadata_manager)).await;
                 }
             });
             axum::http::StatusCode::ACCEPTED.into_response()

@@ -33,9 +33,23 @@ pub fn XtreamOutput(props: &XtreamOutputProps) -> Html {
         use_memo(output, move |output| {
             vec![
                 Rc::new(Tag { class: convert_bool_to_chip_style(output.resolve_series),
-                    label: format!("{} / {}s", translate.t("LABEL.SERIES"), output.resolve_series_delay) }),
+                    label: format!("{} / {}ms", translate.t("LABEL.SERIES"), output.resolve_delay) }),
                 Rc::new(Tag { class: convert_bool_to_chip_style(output.resolve_vod),
-                    label: format!("{} / {}s", translate.t("LABEL.VOD"), output.resolve_vod_delay)}),
+                    label: format!("{} / {}ms", translate.t("LABEL.VOD"), output.resolve_delay)}),
+            ]
+        })
+    };
+    let tags_probe = {
+        let output = props.output.clone();
+        let translate = translator.clone();
+        use_memo(output, move |output| {
+            vec![
+                Rc::new(Tag { class: convert_bool_to_chip_style(output.probe_live),
+                    label: format!("{} / {}h", translate.t("LABEL.LIVE"), output.probe_live_interval_hours) }),
+                Rc::new(Tag { class: convert_bool_to_chip_style(output.probe_vod),
+                    label: translate.t("LABEL.VOD").to_string() }),
+                Rc::new(Tag { class: convert_bool_to_chip_style(output.probe_series),
+                    label: translate.t("LABEL.SERIES").to_string() }),
             ]
         })
     };
@@ -44,7 +58,9 @@ pub fn XtreamOutput(props: &XtreamOutputProps) -> Html {
       <div class="tp__xtream-output tp__target-common">
         { html_if!(props.output.t_filter.is_some(), {
         <div class="tp__target-common__section">
-            <RevealContent preview={Some(html!{<FilterView inline={true} filter={props.output.t_filter.clone()} />})}><FilterView pretty={true} filter={props.output.t_filter.clone()} /></RevealContent>
+            <RevealContent preview={Some(html!{<FilterView inline={true} filter={props.output.t_filter.clone()} />})}>
+               <FilterView pretty={true} filter={props.output.t_filter.clone()} />
+            </RevealContent>
         </div>
         }) }
         <div class="tp__target-common__section">
@@ -54,6 +70,10 @@ pub fn XtreamOutput(props: &XtreamOutputProps) -> Html {
         <div class="tp__target-common__section">
           <span class="tp__target-common__label">{translator.t("LABEL.RESOLVE")}</span>
           <TagList tags={(*tags_resolve).clone()} />
+        </div>
+        <div class="tp__target-common__section">
+          <span class="tp__target-common__label">{translator.t("LABEL.PROBE")}</span>
+          <TagList tags={(*tags_probe).clone()} />
         </div>
       </div>
     }

@@ -290,10 +290,14 @@ It has 2 entries `extensions` and `download`.
     Example: `.*(?P<episode>[Ss]\\d{1,2}(.*?)[Ee]\\d{1,2}).*`
 - `web_search` is _optional_, example: `https://www.imdb.com/search/title/?title={}`,
   define `download.episode_pattern` to remove episode suffix from titles.
+- `ffprobe_enabled`: _optional_ (default `false`). Enable or disable FFprobe analysis for streams globally.
+- `ffprobe_timeout`: _optional_ (default `60`). Timeout in seconds for FFprobe analysis.
 
 ```yaml
 video:
   web_search: 'https://www.imdb.com/search/title/?title={}'
+  ffprobe_enabled: true
+  ffprobe_timeout: 60
   extensions:
     - mkv
     - mp4
@@ -307,7 +311,45 @@ video:
     episode_pattern: '.*(?P<episode>[Ss]\\d{1,2}(.*?)[Ee]\\d{1,2}).*'
 ```
 
-### 1.5 `schedules`
+### 1.5a Video Analysis & Metadata Fallback
+Tuliprox can automatically analyze streams using `ffprobe` to determine resolution, codecs, and audio channels. It also fetches missing metadata (TMDB ID, Release Date) if the provider does not supply them.
+
+This feature is enabled globally in `video` configuration but must be activated per input options.
+
+**Input Config (`source.yml`):**
+
+```yaml
+inputs:
+  - name: my-provider
+    type: xtream
+    url: ...
+    options:
+      # Attempts to resolve missing TMDB IDs and Release Date via TMDB API based on title
+      resolve_tmdb: true
+      # Probes stream if video/audio info is missing in provider data
+      probe_stream: true
+```
+
+**Target Config (`source.yml`):**
+If `add_quality_to_filename` is set for STRM output, the analyzed quality tags are used in filenames.
+
+```yaml
+targets:
+  - name: my-library
+    output:
+      - type: strm
+        directory: /media/strm
+        style: jellyfin
+        # Adds tags like [2160p 4K HEVC HDR] to the filename
+        add_quality_to_filename: true
+        # Groups different versions of the same movie into one folder (based on TMDB ID)
+        flat: true
+```
+
+**Note on Probing:** 
+Probing respects the `max_connections` limit of your provider input. If no connection slot is available, the item is skipped and retried during the next update.
+
+### 1.6 `schedules`
 For `version < 2.0.11`:
 Schedule is optional.
 Format is
@@ -333,11 +375,11 @@ schedules:
 At the given times the update is started. Do not start it every second or minute.
 You could be banned from your server. Twice a day should be enough.
 
-### 1.6 `reverse_proxy`
+### 1.7 `reverse_proxy`
 
 This configuration is only used for reverse proxy mode. The Reverse Proxy mode can be activated for each user individually.
 
-#### 1.6.1 `stream`
+#### 1.7.1 `stream`
 Attributes:
 - `retry`
 - `buffer`
@@ -347,10 +389,10 @@ Attributes:
 - `grace_period_hold_stream` if set to `true`, the stream will only start after the grace period check has completed. Default is `false`.
 - `shared_burst_buffer_mb` optional (default `12`). Minimum burst buffer size (in MB) used for shared streams.
 
-##### 1.6.1.1 `retry`
+##### 1.7.1.1 `retry`
 If set to `true` on connection loss to provider, the stream will be reconnected.
 
-##### 1.6.1.2 `buffer`
+##### 1.7.1.2 `buffer`
 Has 2 attributes
 - `enabled`
 - `size`
@@ -374,7 +416,7 @@ be `1024 × 8 KB`, which is approximately `8 MB`  as stated above.
 
 - The key difference: the `b.` approach is based on complex stream handling and more memory footprint.
 
-##### 1.6.1.3 `throttle` 
+##### 1.7.1.3 `throttle` 
 Bandwidth throttle (speed limit).
 Allowed units are `KB/s`,`MB/s`,`KiB/s`,`MiB/s`,`kbps`,`mbps`,`Mibps`.
 Default unit is `kbps`.
@@ -386,24 +428,24 @@ Default unit is `kbps`.
 |1080p (1920x1080)|  30 fps | 5.737–12.288   | Full-HD     |
 |4K (3840x2160)   |  30 fps | 20.480–49.152  | Ultra-HD    |
 
-##### 1.6.1.3 `grace_period_millis`
+##### 1.7.1.3 `grace_period_millis`
 If you have a provider or a user where the max_connection attribute is greater than 0,
 a grace period can be given during the switchover.
 If this period is set too short, it may result in access being denied in some cases.
 The default is 0 milliseconds.
 If the connection is not throttled, the player will play its buffered content longer than expected.
 
-##### 1.6.1.4 `grace_period_timeout_secs`
+##### 1.7.1.4 `grace_period_timeout_secs`
 How long the grace grant will last, until another grace grant can made.
 
-##### 1.6.1.5 `grace_period_hold_stream`
+##### 1.7.1.5 `grace_period_hold_stream`
 If set to `true`, tuliprox will wait until the grace period check (defined by `grace_period_millis`) is finished before sending any data to the client. This is useful for players that might time out or error if they receive data and then a "connections exhausted" stream switch occurs. Default is `false`.
 
-#### 1.6.2 `cache`
+#### 1.7.2 `cache`
 LRU-Cache is for resources. If it is `enabled`, the resources/images are persisted in the given `dir`. If the cache size exceeds `size`,
 In an LRU cache, the least recently used items are evicted to make room for new items if the cache `size`is exceeded.
 
-#### 1.6.3 `resource_rewrite_disabled`
+#### 1.7.3 `resource_rewrite_disabled`
 If you have tuliprox behind a reverse proxy and dont want rewritten resource urls inside responses, you can disable the resource_url rewrite.
 Default value is false.
 If you set it `true` `cache` is disabled! Because the cache cant work without rewritten urls.
@@ -423,7 +465,7 @@ reverse_proxy:
     dir: ./cache
 ```
 
-#### 1.6.4 `rate_limit`
+#### 1.7.4 `rate_limit`
 Rate limiting per IP. The burst_size defines the initial number of available connections,
 while period_millis specifies the interval at which one connection is replenished.
 If behind a proxy `x-forwarded-for`, `x-real-ip` or `forwarded` should be set as header.
@@ -436,7 +478,7 @@ reverse_proxy:
     burst_size: 10
 ```
 
-#### 1.6.5 `disabled_header`
+#### 1.7.5 `disabled_header`
 Controls which headers are removed before tuliprox forwards a request to the upstream provider when acting as a reverse proxy. Use `referer_header` to drop the Referer header, enable `x_header` to strip every header beginning with `X-`, and list any additional headers to remove under `custom_header`.
 
 has the following attributes:
@@ -455,7 +497,7 @@ reverse_proxy:
       - my-custom-header
 ```
 
-#### 1.6.6 `resource_retry`
+#### 1.7.6 `resource_retry`
 Controls how aggressively tuliprox retries upstream resource (logo, EPG, stream) downloads whenever it proxies requests for clients.  
 It has three attributes:
 
@@ -471,7 +513,7 @@ reverse_proxy:
     backoff_multiplier: 1.5
 ```
 
-### 1.6.7 `geoip`
+### 1.7.7 `geoip`
 `geoip` is for resolving IP addresses to country names.
 
 Disabled by default.
@@ -494,7 +536,7 @@ Example:
 1.0.4.0,1.0.7.255,AU
 ```
 
-#### 1.6.8 `rewrite_secret`
+#### 1.7.8 `rewrite_secret`
 The `rewrite_secret` field is used to keep generated resource URLs stable across application restarts.
 Some parts of the system generate URLs that include a hashed or signed component based on an internal secret value.
 Normally, this secret would change after every restart, which would invalidate previously generated URLs.
@@ -928,6 +970,8 @@ Each input has the following attributes:
   + `xtream_skip_series` true or false, series section can be skipped.
   + `xtream_live_stream_without_extension` default false, if set to true `.ts` extension is not added to the stream link.
   + `xtream_live_stream_use_prefix` default true, if set to true `/live/` prefix is added to the stream link.
+  + `resolve_tmdb`: `true`|`false` Attempts to resolve missing TMDB IDs via TMDB API based on title.
+  + `probe_stream`: `true`|`false` Probes stream if video/audio info is missing in provider data. Probing respects the `max_connections` limit of your provider input. If no connection slot is available, the item is skipped and retried during the next update.
 - `aliases`  for alias definitions for the same provider with different credentials
 - `staged` for side loading processed playlists.
   If you already have a provider configured but want to load the playlist from a different source — for example, 
@@ -1030,6 +1074,9 @@ inputs:
     url: 'http://localhost:8080'
     username: test
     password: test
+    options:
+      resolve_tmdb: true
+      probe_stream: true
 ```
 
 Input alias definition for same provider with same content but different credentials.
@@ -1357,13 +1404,18 @@ Each format has different properties.
 #### 'Target types':
 `xtream`
 - type: xtream
-- skip_live_direct_source: true|false,
-- skip_video_direct_source: true|false,
-- skip_series_direct_source: true|false,
-- resolve_series: true|false,
-- resolve_series_delay: seconds,
-- resolve_vod: true|false,
-- resolve_vod_delay: true|false,
+- skip_live_direct_source: true|false (default true),
+- skip_video_direct_source: true|false (default true),
+- skip_series_direct_source: true|false (default true),
+- resolve_background: true|false (default true). If set to false, metadata (TMDB/Probe) resolution happens immediately and blocks the import process.
+- resolve_series: true|false (default false),
+- resolve_vod: true|false (default false),
+- probe_series: true|false (default false),
+- probe_vod: true|false (default false),
+- probe_live: true|false (default false),
+- probe_live_interval_hours: number (default 24),
+- resolve_delay: seconds (default 2s),
+- update_strategy: instant|bundled (default instant),
 - trakt: Trakt Configuration
 - filter: optional filter
 
@@ -1421,7 +1473,7 @@ The processing order (Filter, Rename and Map) can be configured for each target 
 ### 2.2.2.4 `options`
 Target options are:
 
-- `ignore_logo` logo attributes are ignored to avoid caching logo files on devices.
+- `ignore_logo` logo attributes `tvg-logo`and `tvg-logo-small` are ignored to avoid caching logo files on devices for m3u playlists.
 - `share_live_streams` to share live stream connections  in reverse proxy mode.
 - `remove_duplicates` tries to remove duplicates by `url`.
 
@@ -1435,7 +1487,7 @@ For example, with a buffer size of 2024, memory usage is at least 24 MB for **ea
 - `style`: Naming style convention for your media player / server (kodi, plex, emby, jellyfin)
 - `flat`: If `true`, creates flat directory structure with category tags in folder names
 - `strm_props`: List of stream properties placed within .strm file to configure how Kodi's internal player handles the media stream.
-- `add_quality_to_filename`: If `true`, adds media quality tags to the filename (e.g., `Movie Title - [1080p|x265|HDR].strm`).
+- `add_quality_to_filename`: If `true`, adds media quality tags to the filename (e.g., `Movie Title - [1080p 4K HEVC HDR].strm`).
 
 Supported styles:
 - Kodi: `Movie Name (Year) {tmdb=ID}/Movie Name (Year).strm`
@@ -1481,6 +1533,13 @@ There is a difference for `resolve_vod` and `resolve_series`.
 `resolve_series` works only when input: `xtream` and output: `m3u`.
 `resolve_vod` works only when input: `xtream`.
 
+- `probe_series`: If set to `true`, series entries are probed to enrich technical metadata (requires `probe_stream` and ffprobe).
+- `probe_vod`: If set to `true`, VOD entries are probed to enrich technical metadata (requires `probe_stream` and ffprobe).
+- `probe_live`: If set to `true`, live streams are analyzed (probed) in the background during idle times to determine codecs and resolution.
+- `probe_live_interval_hours`: Defines how often (in hours) a live stream should be re-probed (default: 24h).
+- `update_strategy`:
+  - `instant` (default): Writes changes to the output files immediately after a stream is resolved/probed.
+  - `bundled`: Queues updates and writes them in batches to reduce disk I/O operations.
 
 - `xtream` `trakt`:
 Trakt.tv is an online platform that helps you track, manage, and discover TV shows and movies. Think of it like Goodreads for TV and film.
@@ -1516,7 +1575,7 @@ You can define a `Trakt` config like
 This will create 2 new categories with matched entries. 
 
 ### 2.2.2.5 `filter`
-The filter is a string with a filter statement.
+The filter is a string with a statement (@see filter statements).
 The filter can have UnaryExpression `NOT`, BinaryExpression `AND OR`, Regexp Comparison `(Group|Title|Name|Url) ~ "regexp"`
 and Type Comparsison `Type = vod` or `Type = live` or `Type = series`.
 Filter fields are `Group`, `Title`, `Name`, `Caption`, `Url`, `Genre`, `Input` and `Type`.
@@ -1997,7 +2056,7 @@ User definitions are made for the targets. Each target can have multiple users. 
 user:
 - target: xc_m3u
   credentials:
-  - username: test1
+  - username: NewHighPrioUser
     password: secret1
     token: 'token1'
     proxy: reverse

@@ -1,32 +1,36 @@
 use crate::api::model::AppState;
-use crate::model::{ConfigInput, PlaylistXtreamCategory};
+use crate::model::XtreamCategory;
 use crate::model::{AppConfig, ProxyUserCredentials};
 use crate::model::{Config, ConfigTarget};
-use crate::repository::bplustree::{BPlusTree, BPlusTreeQuery, BPlusTreeUpdate};
+use crate::model::{ConfigInput, PlaylistXtreamCategory};
+use crate::processing::parser::xtream;
+use crate::repository::bplustree::{BPlusTree, BPlusTreeQuery, BPlusTreeUpdate, FlushPolicy};
 use crate::repository::playlist_scratch::PlaylistScratch;
-use crate::repository::storage::{get_input_storage_path, get_target_id_mapping_file, get_target_storage_path};
+use crate::repository::storage::{ensure_input_storage_path, get_input_storage_path, get_target_id_mapping_file, get_target_storage_path};
 use crate::repository::storage_const;
 use crate::repository::target_id_mapping::VirtualIdRecord;
 use crate::repository::xtream_playlist_iterator::XtreamPlaylistJsonIterator;
-use crate::utils::{file_exists_async, file_reader};
 use crate::utils::json_write_documents_to_file;
+use crate::utils::request::DynReader;
 use crate::utils::FileReadGuard;
+use crate::utils::{file_exists_async, file_reader};
 use bytes::Bytes;
+use fs2::FileExt;
 use futures::{stream, Stream, StreamExt};
 use indexmap::IndexMap;
-use log::error;
+use log::{error};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use shared::error::{info_err_res, notify_err, string_to_io_error, TuliproxError};
 use shared::model::xtream_const::XTREAM_CLUSTER;
-use shared::model::{PlaylistGroup, PlaylistItem, PlaylistItemType, SeriesStreamProperties, StreamProperties, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem};
+use shared::model::{LiveStreamProperties, PlaylistGroup, PlaylistItem, PlaylistItemType, SeriesStreamProperties, StreamProperties, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem};
 use shared::utils::{arc_str_serde, get_u32_from_serde_value, Internable};
+use shared::{concat_string, notify_err_res};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use shared::{concat_string, notify_err_res};
 
 macro_rules! cant_write_result {
     ($path:expr, $err:expr) => {
@@ -92,10 +96,10 @@ async fn write_playlists_to_file(
             continue;
         }
         let xtream_path = xtream_get_file_path(storage_path, cluster);
-        
+
         // Acquire FileLockManager lock (async, in-process coordination)
         let file_lock = app_config.file_locks.write_lock(&xtream_path).await;
-        
+
         // Move all B+Tree building and I/O to spawn_blocking
         // We take ownership of `playlist` here (no cloning needed)
         let path_clone = xtream_path.clone();
@@ -115,9 +119,9 @@ async fn write_playlists_to_file(
             }
             Ok(())
         })
-        .await
-        .map_err(|e| notify_err!("Blocking task failed: {e}"))?
-        .map_err(|err| cant_write_result!(&xtream_path, err))?;
+            .await
+            .map_err(|e| notify_err!("Blocking task failed: {e}"))?
+            .map_err(|err| cant_write_result!(&xtream_path, err))?;
     }
     Ok(())
 }
@@ -151,10 +155,10 @@ pub async fn write_playlist_item_update(
         tree.upsert_batch_encoded(prepared_items)?;
         Ok(())
     })
-    .await
-    .map_err(|e| notify_err!("Blocking task failed: {e}"))?
-    .map_err(|err| cant_write_result!(&xtream_path, err))?;
-    
+        .await
+        .map_err(|e| notify_err!("Blocking task failed: {e}"))?
+        .map_err(|err| cant_write_result!(&xtream_path, err))?;
+
     Ok(())
 }
 
@@ -167,7 +171,7 @@ pub async fn write_playlist_batch_item_upsert(
     if pli_list.is_empty() {
         return Ok(());
     }
-    
+
     let storage_path = {
         let config = app_config.config.load();
         ensure_xtream_storage_path(&config, target_name).await?
@@ -196,10 +200,10 @@ pub async fn write_playlist_batch_item_upsert(
         tree.upsert_batch_encoded(prepared_items)?;
         Ok(())
     })
-    .await
-    .map_err(|e| notify_err!("Blocking task failed: {e}"))?
-    .map_err(|err| cant_write_result!(&xtream_path, err))?;
-    
+        .await
+        .map_err(|e| notify_err!("Blocking task failed: {e}"))?
+        .map_err(|err| cant_write_result!(&xtream_path, err))?;
+
     Ok(())
 }
 
@@ -361,7 +365,7 @@ pub async fn xtream_write_playlist(
             StorageKey::VirtualId,
             vec![(cluster, data)],
         )
-        .await
+            .await
         {
             errors.push(format!("Persisting collection failed:{err}"));
         }
@@ -649,7 +653,7 @@ where
         return None;
     }
 
-    let iter: Box<dyn Iterator<Item = XtreamPlaylistItem> + Send> = {
+    let iter: Box<dyn Iterator<Item=XtreamPlaylistItem> + Send> = {
         match BPlusTreeQuery::<ItemKey, XtreamPlaylistItem>::try_new(xtream_path) {
             Ok(tree) => match tree.disk_iter_sorted::<SortKey>() {
                 Ok(sorted_iter) => Box::new(sorted_iter.filter_map(Result::ok).map(|(_, v)| v)),
@@ -708,6 +712,295 @@ pub(crate) async fn xtream_get_playlist_categories(config: &Config, target_name:
     None
 }
 
+const BATCH_SIZE: usize = 1000;
+
+fn preserve_details_input_xtream_playlist_cluster_to_disk(
+    old_path: &Path,
+    tmp_path: &Path,
+) -> Result<(), TuliproxError> {
+
+   let Ok(mut old_tree) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(old_path) else {
+       return Ok(())
+   };
+
+    let Ok(mut new_tree) = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::try_new_with_backoff(tmp_path) else {
+        return Ok(())
+    };
+
+    let mut updates: Vec<(u32, XtreamPlaylistItem)> = Vec::with_capacity(BATCH_SIZE);
+    for (_, old_item) in old_tree.iter() {
+        if let Some(old_props) = old_item.additional_properties.as_ref() {
+            if old_props.has_details() {
+                if let Ok(Some(mut new_item)) = new_tree.query(&old_item.provider_id) {
+                    if let Some(new_props) = new_item.additional_properties.as_mut() {
+                        if needs_preserved_stream_property_merge(new_props, old_props) {
+                            if merge_preserved_stream_properties(new_props, old_props) {
+                                updates.push((new_item.provider_id, new_item));
+                                if updates.len() >= BATCH_SIZE {
+                                    let refs: Vec<(&u32, &XtreamPlaylistItem)> = updates.iter().map(|(id, pli)| (id, pli)).collect();
+                                    new_tree.update_batch(&refs).map_err(|e| notify_err!("Failed to update tmp tree during merge: {e}"))?;
+                                    updates.clear();
+                                }
+                            }
+                        }
+                    };
+                };
+            }
+        }
+    }
+
+    if !updates.is_empty() {
+        let refs: Vec<(&u32, &XtreamPlaylistItem)> =
+            updates.iter().map(|(id, pli)| (id, pli)).collect();
+        new_tree.update_batch(&refs)
+            .map_err(|e| notify_err!("Failed to update tmp tree during merge: {e}"))?;
+    }
+
+    new_tree.commit()
+        .map_err(|e| notify_err!("Failed to commit tmp tree merge: {e}"))?;
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+pub async fn persist_input_xtream_playlist_cluster_to_disk(
+    app_config: &Arc<AppConfig>,
+    input: &ConfigInput,
+    cluster: XtreamCluster,
+    categories: DynReader,
+    streams: DynReader,
+) -> Result<(), TuliproxError> {
+    let cfg = app_config.config.load();
+    let storage_path = ensure_input_storage_path(&cfg, &input.name).await?;
+    let xtream_path = xtream_get_file_path(&storage_path, cluster);
+
+    // Channel for transferring items from Parser (Async Task) to Consumer (Blocking Task)
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<XtreamPlaylistItem>(BATCH_SIZE * 2);
+    let input_clone = input.clone();
+
+    // 1. Parser Task: Runs the async parsing logic
+    // We move the readers into this task.
+    let parse_task = tokio::spawn(async move {
+        let tx_for_closure = tx.clone();
+        let res = xtream::parse_xtream_streaming(
+            &input_clone,
+            cluster,
+            categories,
+            streams,
+            move |item| {
+                // Copy needed data before moving the item into the channel.
+                let item_id = item.virtual_id;
+
+                // We use blocking_send because the closure provided by the parser library is synchronous.
+                // This is safe here because it runs within its own tokio::spawn task.
+                if let Err(e) = tx_for_closure.blocking_send(item) {
+                    error!("Channel closed while processing {cluster} for item {item_id}: {e}");
+                    return notify_err_res!("Channel closed while processing {cluster}");
+                }
+                Ok(())
+            },
+        )
+            .await;
+
+        // CRITICAL: Explicitly drop the sender to signal rx.blocking_recv() to stop.
+        // This prevents the consumer from waiting forever if the parser fails.
+        drop(tx);
+        res
+    });
+
+    // 2. Consumer Task: Handles heavy Disk I/O (BPlusTree updates)
+    let xtream_path_for_consumer = xtream_path.clone();
+    let consumer_task = tokio::task::spawn_blocking(move || {
+        let tmp_xtream_path = xtream_path_for_consumer.with_extension("tmp");
+
+        BPlusTree::<u32, XtreamPlaylistItem>::new()
+            .store(&tmp_xtream_path)
+            .map_err(|e| {
+                error!(
+                    "Failed to initialize ghost BPlusTree at {}: {e}",
+                    tmp_xtream_path.display()
+                );
+                notify_err!("Init tree error {e}")
+            })?;
+
+        let mut tree: BPlusTreeUpdate<u32, XtreamPlaylistItem> =
+            BPlusTreeUpdate::try_new_with_backoff(&tmp_xtream_path).map_err(|e| {
+                error!("Failed to open ghost tree at {}: {e}", tmp_xtream_path.display());
+                notify_err!("Failed to open tree {e}")
+            })?;
+        tree.set_flush_policy(FlushPolicy::Batch);
+
+        let mut buffer = Vec::with_capacity(BATCH_SIZE);
+
+        // This loop exits when all 'tx' clones are dropped (signaling end of stream)
+        while let Some(item) = rx.blocking_recv() {
+            buffer.push(item);
+            if buffer.len() >= BATCH_SIZE {
+                let batch: Vec<(&u32, &XtreamPlaylistItem)> =
+                    buffer.iter().map(|i| (&i.provider_id, i)).collect();
+                let prepared = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::prepare_upsert_batch(&batch)
+                    .map_err(|e| {
+                        error!("Batch prepare failed for cluster {cluster}: {e}");
+                        notify_err!("Prepare failed {e}")
+                    })?;
+                tree.upsert_batch_encoded(prepared).map_err(|e| {
+                    error!("Batch upsert failed for cluster {cluster}: {e}");
+                    notify_err!("Upsert failed {e}")
+                })?;
+                buffer.clear();
+            }
+        }
+
+        // Final batch processing
+        if !buffer.is_empty() {
+            let batch: Vec<(&u32, &XtreamPlaylistItem)> =
+                buffer.iter().map(|i| (&i.provider_id, i)).collect();
+            let prepared = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::prepare_upsert_batch(&batch)
+                .map_err(|e| {
+                    error!("Final batch prepare failed for cluster {cluster}: {e}");
+                    notify_err!("Prepare failed {e}")
+                })?;
+            tree.upsert_batch_encoded(prepared).map_err(|e| {
+                error!("Final batch upsert failed for cluster {cluster}: {e}");
+                notify_err!("Upsert failed {e}")
+            })?;
+        }
+
+        tree.commit().map_err(|e| {
+            error!("Commit failed for cluster {cluster}: {e}");
+            notify_err!("Commit failed {e}")
+        })?;
+        Ok::<(), TuliproxError>(())
+    });
+
+    // 3. Robust Joining of both tasks
+    // try_join! returns immediately if any task returns an error or panics.
+    let (parse_res, consumer_res) = tokio::try_join!(parse_task, consumer_task)
+        .map_err(|e| notify_err!("Task join error during cluster {cluster} update: {e}"))?;
+
+    // Handle internal errors from the tasks
+    let parsed_categories = parse_res?;
+    consumer_res?;
+
+    // --- Post-Processing & Atomic Swap ---
+
+    let col_path = match cluster {
+        XtreamCluster::Live => get_live_cat_collection_path(&storage_path),
+        XtreamCluster::Video => get_vod_cat_collection_path(&storage_path),
+        XtreamCluster::Series => get_series_cat_collection_path(&storage_path),
+    };
+
+    let tmp_col_path = col_path.with_extension("tmp");
+
+    // Use the parsed_categories returned from the task, not the 'categories' reader
+    save_xtream_categories_to_file(&tmp_col_path, &parsed_categories).await?;
+
+    let tmp_xtream_path = xtream_path.with_extension("tmp");
+
+    // Acquire file lock to ensure atomic operations
+    let swap_lock = app_config.file_locks.write_lock(&xtream_path).await;
+
+    {
+        let old_path = xtream_path.clone();
+        let new_tmp_path = tmp_xtream_path.clone();
+        tokio::task::spawn_blocking(move || preserve_details_input_xtream_playlist_cluster_to_disk(&old_path, &new_tmp_path))
+            .await
+            .map_err(|e| notify_err!("Merge task join error during cluster {cluster} update: {e}"))??;
+    }
+
+    // Optional compaction to optimize the newly created database file.
+    // Run on blocking pool because B+Tree lock backoff uses std::thread::sleep.
+    let compact_path = tmp_xtream_path.clone();
+    match tokio::task::spawn_blocking(move || -> Result<(), std::io::Error> {
+        if let Ok(mut tree_update) = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::try_new_with_backoff(&compact_path) {
+            tree_update.compact(&compact_path)?;
+        }
+        Ok(())
+    })
+        .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            error!(
+                "Failed to compact temporary database for {cluster} at {:?}: {e}",
+                tmp_xtream_path.display()
+            );
+        }
+        Err(e) => {
+            error!(
+                "Compaction task join failed for {cluster} at {:?}: {e}",
+                tmp_xtream_path.display()
+            );
+        }
+    }
+
+    // Atomic Swap: Replace old database with new one
+    if let Err(e) = crate::utils::rename_or_copy(&tmp_xtream_path, &xtream_path, false) {
+        error!(
+            "Failed to swap xtream database for {cluster} (from {:?} to {:?}): {e}",
+            tmp_xtream_path.display(),
+            xtream_path.display()
+        );
+        return notify_err_res!("Failed to swap database: {e}");
+    }
+
+    // Atomic Swap: Replace old categories with new ones
+    if let Err(e) = crate::utils::rename_or_copy(&tmp_col_path, &col_path, false) {
+        error!(
+            "Failed to swap xtream categories for {cluster} (from {:?} to {:?}): {e}",
+            tmp_col_path.display(),
+            col_path.display()
+        );
+        return notify_err_res!("Failed to swap categories: {e}");
+    }
+
+    // Cleanup: Remove temporary files if they still exist (defensive)
+    let _ = tokio::fs::remove_file(&tmp_xtream_path).await;
+    let _ = tokio::fs::remove_file(&tmp_col_path).await;
+
+    // Explicitly release the lock (though RAII would handle it too)
+    drop(swap_lock);
+
+    log::debug!("Cluster {cluster} updated and swapped successfully.");
+    Ok(())
+}
+
+async fn save_xtream_categories_to_file(
+    col_path: &Path,
+    categories: &[XtreamCategory],
+) -> Result<(), TuliproxError> {
+    let col_path_buf = col_path.to_path_buf();
+    let cat_entries: Vec<CategoryEntry> = categories
+        .iter()
+        .map(|c| CategoryEntry {
+            category_id: c.category_id,
+            category_name: c.category_name.clone(),
+            parent_id: 0,
+        })
+        .collect();
+
+    tokio::task::spawn_blocking(move || {
+        if let Ok(file) = File::create(&col_path_buf) {
+            if let Err(e) = file.lock_exclusive() {
+                log::warn!(
+                    "Could not acquire exclusive lock for {}: {e}, proceeding without lock",
+                    col_path_buf.display()
+                );
+            }
+            serde_json::to_writer(&file, &cat_entries).map_err(|e| {
+                error!("Failed to write categories to file {}: {e}", col_path_buf.display());
+                notify_err!("Write failed: {e}")
+            })?;
+            let _ = file.unlock();
+        } else {
+            return notify_err_res!("Failed to create category file {}", col_path_buf.display());
+        }
+        Ok(())
+    })
+        .await
+        .map_err(|e| notify_err!("Spawn error {e}"))?
+}
+
 #[allow(clippy::too_many_lines)]
 pub async fn persist_input_xtream_playlist(app_config: &Arc<AppConfig>, storage_path: &Path,
                                            playlist: Vec<PlaylistGroup>) -> (Vec<PlaylistGroup>, Option<TuliproxError>) {
@@ -750,16 +1043,8 @@ pub async fn persist_input_xtream_playlist(app_config: &Arc<AppConfig>, storage_
                 if let Ok(provider_id) = pli.header.id.parse::<u32>() {
                     if let Some(stored_pli) = stored_col.get_mut(&provider_id) {
                         if let (Some(new_stream_props), Some(old_stream_props)) = (&mut pli.header.additional_properties, stored_pli.additional_properties.take()) {
-                            if !needs_update_info_details(new_stream_props, &old_stream_props) {
-                                match (new_stream_props, old_stream_props) {
-                                    (StreamProperties::Video(value_1), StreamProperties::Video(value_2)) => {
-                                        value_1.details = value_2.details;
-                                    }
-                                    (StreamProperties::Series(value_1), StreamProperties::Series(value_2)) => {
-                                        value_1.details = value_2.details;
-                                    }
-                                    _ => {}
-                                }
+                            if needs_preserved_stream_property_merge(new_stream_props, &old_stream_props) {
+                                merge_preserved_stream_properties(new_stream_props, &old_stream_props);
                             }
                         }
                     }
@@ -840,16 +1125,107 @@ pub async fn persist_input_xtream_playlist(app_config: &Arc<AppConfig>, storage_
 }
 
 // Checks if the info has changed after the last update
-fn needs_update_info_details(
+pub(crate) fn needs_update_info_details(
     new_stream_props: &StreamProperties,
     old_stream_props: &StreamProperties,
 ) -> bool {
+
     let new_modified = new_stream_props.get_last_modified();
     let old_modified = old_stream_props.get_last_modified();
 
     match (new_modified, old_modified) {
         (Some(new_ts), Some(old_ts)) => new_ts > old_ts,
-        (None, Some(_)) => true,
+        (Some(_), None) => true,
+        _ => false,
+    }
+}
+
+fn needs_preserved_stream_property_merge(
+    new_stream_props: &StreamProperties,
+    old_stream_props: &StreamProperties,
+) -> bool {
+    let preserve_info_details = old_stream_props.has_details() && !needs_update_info_details(new_stream_props, old_stream_props);
+
+    match (new_stream_props, old_stream_props) {
+        (StreamProperties::Video(v_new), StreamProperties::Video(v_old))
+            if preserve_info_details && v_old.details.is_some() =>
+        {
+            v_new.details != v_old.details
+        }
+        (StreamProperties::Series(s_new), StreamProperties::Series(s_old))
+            if preserve_info_details && s_old.details.is_some() =>
+        {
+            s_new.details != s_old.details
+        }
+        (StreamProperties::Live(l_new), StreamProperties::Live(l_old)) => {
+            (l_new.video.is_none() && l_old.video.is_some())
+                || (l_new.audio.is_none() && l_old.audio.is_some())
+                || (l_new.last_probed_timestamp.is_none() && l_old.last_probed_timestamp.is_some())
+                || (l_new.last_success_timestamp.is_none() && l_old.last_success_timestamp.is_some())
+        }
+        _ => false,
+    }
+}
+
+/// Merges persisted fields from old stream properties into freshly fetched properties.
+///
+/// This keeps long-lived metadata stable across full playlist rewrites:
+/// - VOD/Series `details` are preserved when incoming provider metadata is not newer.
+/// - Live probe fields (`video`, `audio`, `last_probed_timestamp`, `last_success_timestamp`)
+///   are copied only when missing in the incoming payload.
+pub(crate) fn merge_preserved_stream_properties(
+    new_stream_props: &mut StreamProperties,
+    old_stream_props: &StreamProperties,
+) -> bool {
+    let preserve_info_details =
+        old_stream_props.has_details() && !needs_update_info_details(new_stream_props, old_stream_props);
+
+    match (new_stream_props, old_stream_props) {
+        (StreamProperties::Video(v_new), StreamProperties::Video(v_old))
+        if preserve_info_details && v_old.details.is_some() =>
+            {
+                if v_new.details == v_old.details {
+                    false
+                } else {
+                    v_new.details.clone_from(&v_old.details);
+                    true
+                }
+            }
+        (StreamProperties::Series(s_new), StreamProperties::Series(s_old))
+        if preserve_info_details && s_old.details.is_some() =>
+            {
+                if s_new.details == s_old.details {
+                    false
+                } else {
+                    s_new.details.clone_from(&s_old.details);
+                    true
+                }
+            }
+        (StreamProperties::Live(l_new), StreamProperties::Live(l_old)) => {
+            let mut changed = false;
+
+            if l_new.video.is_none() && l_old.video.is_some() {
+                l_new.video.clone_from(&l_old.video);
+                changed = true;
+            }
+
+            if l_new.audio.is_none() && l_old.audio.is_some() {
+                l_new.audio.clone_from(&l_old.audio);
+                changed = true;
+            }
+
+            if l_new.last_probed_timestamp.is_none() && l_old.last_probed_timestamp.is_some() {
+                l_new.last_probed_timestamp = l_old.last_probed_timestamp;
+                changed = true;
+            }
+
+            if l_new.last_success_timestamp.is_none() && l_old.last_success_timestamp.is_some() {
+                l_new.last_success_timestamp = l_old.last_success_timestamp;
+                changed = true;
+            }
+
+            changed
+        }
         _ => false,
     }
 }
@@ -896,8 +1272,14 @@ pub async fn persist_input_info_batch(app_config: &Arc<AppConfig>, storage_path:
             let mut tree: BPlusTreeUpdate<u32, XtreamPlaylistItem> = BPlusTreeUpdate::try_new_with_backoff(&xtream_path_clone)
                 .map_err(|err| Error::other(format!("failed to open BPlusTree for input {input_name_owned}: {err}")))?;
 
-            let mut updated_plis = Vec::with_capacity(updates.len());
+            // Keep only the latest update per provider id to avoid duplicate reads/writes.
+            let mut deduped_updates: HashMap<u32, StreamProperties> = HashMap::with_capacity(updates.len());
             for (provider_id, props) in updates {
+                deduped_updates.insert(provider_id, props);
+            }
+
+            let mut updated_plis = Vec::with_capacity(deduped_updates.len());
+            for (provider_id, props) in deduped_updates {
                 match tree.query(&provider_id) {
                     Ok(Some(mut pli)) => {
                         pli.additional_properties = Some(props);
@@ -929,6 +1311,21 @@ pub async fn persist_input_vod_info(app_config: &Arc<AppConfig>, storage_path: &
                                     cluster: XtreamCluster, input_name: &str, provider_id: u32,
                                     props: &VideoStreamProperties) -> Result<(), Error> {
     persist_input_info(app_config, storage_path, cluster, input_name, provider_id, StreamProperties::Video(Box::new(props.clone()))).await
+}
+
+pub async fn persist_input_live_info(app_config: &Arc<AppConfig>, storage_path: &Path,
+                                     cluster: XtreamCluster, input_name: &str, provider_id: u32,
+                                     props: &LiveStreamProperties) -> Result<(), Error> {
+    persist_input_info(app_config, storage_path, cluster, input_name, provider_id, StreamProperties::Live(Box::new(props.clone()))).await
+}
+
+pub async fn persist_input_live_info_batch(app_config: &Arc<AppConfig>, storage_path: &Path,
+                                           cluster: XtreamCluster, input_name: &str,
+                                           updates: Vec<(u32, LiveStreamProperties)>) -> Result<(), Error> {
+    let batch = updates.into_iter()
+        .map(|(id, props)| (id, StreamProperties::Live(Box::new(props))))
+        .collect();
+    persist_input_info_batch(app_config, storage_path, cluster, input_name, batch).await
 }
 
 pub async fn persist_input_vod_info_batch(app_config: &Arc<AppConfig>, storage_path: &Path,
@@ -1002,4 +1399,291 @@ pub async fn load_input_xtream_playlist(app_config: &Arc<AppConfig>, storage_pat
     }
 
     Ok(groups.into_values().collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{merge_preserved_stream_properties, needs_update_info_details, preserve_details_input_xtream_playlist_cluster_to_disk};
+    use crate::repository::{BPlusTreeQuery, BPlusTreeUpdate};
+    use shared::model::{
+        LiveStreamProperties, SeriesStreamProperties, StreamProperties, VideoStreamProperties,
+        XtreamCluster, XtreamPlaylistItem,
+    };
+    use shared::utils::Internable;
+    use std::path::Path;
+    use tempfile::tempdir;
+
+    #[test]
+    fn keeps_existing_details_when_new_timestamp_is_missing() {
+        let new_props = StreamProperties::Video(Box::new(VideoStreamProperties {
+            added: "".into(),
+            ..VideoStreamProperties::default()
+        }));
+        let old_props = StreamProperties::Video(Box::new(VideoStreamProperties {
+            added: "1700000000".into(),
+            ..VideoStreamProperties::default()
+        }));
+
+        assert!(!needs_update_info_details(&new_props, &old_props));
+    }
+
+    #[test]
+    fn updates_details_when_new_timestamp_is_newer() {
+        let new_props = StreamProperties::Series(Box::new(SeriesStreamProperties {
+            last_modified: Some("200".into()),
+            ..SeriesStreamProperties::default()
+        }));
+        let old_props = StreamProperties::Series(Box::new(SeriesStreamProperties {
+            last_modified: Some("100".into()),
+            ..SeriesStreamProperties::default()
+        }));
+
+        assert!(needs_update_info_details(&new_props, &old_props));
+    }
+
+    #[test]
+    fn does_not_update_details_when_new_timestamp_is_older() {
+        let new_props = StreamProperties::Series(Box::new(SeriesStreamProperties {
+            last_modified: Some("100".into()),
+            ..SeriesStreamProperties::default()
+        }));
+        let old_props = StreamProperties::Series(Box::new(SeriesStreamProperties {
+            last_modified: Some("200".into()),
+            ..SeriesStreamProperties::default()
+        }));
+
+        assert!(!needs_update_info_details(&new_props, &old_props));
+    }
+
+    #[test]
+    fn keeps_old_details_when_new_timestamp_is_newer_but_new_has_no_details() {
+        let new_props = StreamProperties::Video(Box::new(VideoStreamProperties {
+            added: "200".into(),
+            details: None,
+            ..VideoStreamProperties::default()
+        }));
+        let old_props = StreamProperties::Video(Box::new(VideoStreamProperties {
+            added: "100".into(),
+            details: Some(shared::model::VideoStreamDetailProperties::default()),
+            ..VideoStreamProperties::default()
+        }));
+
+        assert!(!needs_update_info_details(&new_props, &old_props));
+    }
+
+    #[test]
+    fn merge_preserves_missing_live_probe_timestamps() {
+        let mut new_props = StreamProperties::Live(Box::new(LiveStreamProperties {
+            stream_id: 1,
+            ..LiveStreamProperties::default()
+        }));
+        let old_props = StreamProperties::Live(Box::new(LiveStreamProperties {
+            stream_id: 1,
+            last_probed_timestamp: Some(1_700_000_000),
+            last_success_timestamp: Some(1_700_000_100),
+            ..LiveStreamProperties::default()
+        }));
+
+        let changed = merge_preserved_stream_properties(&mut new_props, &old_props);
+        assert!(changed);
+
+        match new_props {
+            StreamProperties::Live(live) => {
+                assert_eq!(live.last_probed_timestamp, Some(1_700_000_000));
+                assert_eq!(live.last_success_timestamp, Some(1_700_000_100));
+            }
+            _ => panic!("expected live properties"),
+        }
+    }
+
+    #[test]
+    fn merge_does_not_override_existing_live_probe_timestamps() {
+        let mut new_props = StreamProperties::Live(Box::new(LiveStreamProperties {
+            stream_id: 1,
+            last_probed_timestamp: Some(1_800_000_000),
+            last_success_timestamp: Some(1_800_000_100),
+            ..LiveStreamProperties::default()
+        }));
+        let old_props = StreamProperties::Live(Box::new(LiveStreamProperties {
+            stream_id: 1,
+            last_probed_timestamp: Some(1_700_000_000),
+            last_success_timestamp: Some(1_700_000_100),
+            ..LiveStreamProperties::default()
+        }));
+
+        let changed = merge_preserved_stream_properties(&mut new_props, &old_props);
+        assert!(!changed);
+
+        match new_props {
+            StreamProperties::Live(live) => {
+                assert_eq!(live.last_probed_timestamp, Some(1_800_000_000));
+                assert_eq!(live.last_success_timestamp, Some(1_800_000_100));
+            }
+            _ => panic!("expected live properties"),
+        }
+    }
+
+    fn make_live_item(
+        provider_id: u32,
+        video: Option<&str>,
+        audio: Option<&str>,
+        last_probed_timestamp: Option<i64>,
+        last_success_timestamp: Option<i64>,
+    ) -> XtreamPlaylistItem {
+        XtreamPlaylistItem {
+            virtual_id: provider_id,
+            provider_id,
+            name: "live".intern(),
+            logo: "".intern(),
+            logo_small: "".intern(),
+            group: "group".intern(),
+            title: "".intern(),
+            parent_code: "".intern(),
+            rec: "".intern(),
+            url: "http://example.com/live.ts".intern(),
+            epg_channel_id: None,
+            xtream_cluster: XtreamCluster::Live,
+            additional_properties: Some(StreamProperties::Live(Box::new(LiveStreamProperties {
+                video: video.map(Internable::intern),
+                audio: audio.map(Internable::intern),
+                last_probed_timestamp,
+                last_success_timestamp,
+                ..Default::default()
+            }))),
+            item_type: shared::model::PlaylistItemType::Live,
+            category_id: 1,
+            input_name: "input_a".intern(),
+            channel_no: 0,
+            source_ordinal: 0,
+        }
+    }
+
+    fn write_single_item(path: &Path, item: &XtreamPlaylistItem) {
+        crate::repository::BPlusTree::<u32, XtreamPlaylistItem>::new()
+            .store(path)
+            .expect("tree creation should succeed");
+        let mut tree = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::try_new_with_backoff(path)
+            .expect("tree open should succeed");
+        let batch: Vec<(&u32, &XtreamPlaylistItem)> = vec![(&item.provider_id, item)];
+        let prepared = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::prepare_upsert_batch(&batch)
+            .expect("batch preparation should succeed");
+        tree.upsert_batch_encoded(prepared)
+            .expect("batch upsert should succeed");
+        tree.commit().expect("tree commit should succeed");
+    }
+
+    fn read_live_props(path: &Path, provider_id: u32) -> LiveStreamProperties {
+        let mut query =
+            BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(path).expect("query open should succeed");
+        let item = query
+            .query_zero_copy(&provider_id)
+            .expect("query should succeed")
+            .expect("item should exist");
+        match item.additional_properties {
+            Some(StreamProperties::Live(live)) => *live,
+            other => panic!("expected live stream properties, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn preserve_details_for_disk_cluster_copies_missing_live_probe_fields() {
+        let dir = tempdir().expect("temp dir should be created");
+        let old_path = dir.path().join("old_live.db");
+        let tmp_path = dir.path().join("tmp_live.db");
+        let provider_id = 100_u32;
+
+        write_single_item(
+            &old_path,
+            &make_live_item(
+                provider_id,
+                Some("{\"codec_name\":\"h264\"}"),
+                Some("{\"codec_name\":\"aac\"}"),
+                Some(1_700_000_000),
+                Some(1_700_000_100),
+            ),
+        );
+        write_single_item(&tmp_path, &make_live_item(provider_id, None, None, None, None));
+
+        preserve_details_input_xtream_playlist_cluster_to_disk(&old_path, &tmp_path).expect("merge should succeed");
+
+        let merged = read_live_props(&tmp_path, provider_id);
+        assert_eq!(merged.video, Some("{\"codec_name\":\"h264\"}".intern()));
+        assert_eq!(merged.audio, Some("{\"codec_name\":\"aac\"}".intern()));
+        assert_eq!(merged.last_probed_timestamp, Some(1_700_000_000));
+        assert_eq!(merged.last_success_timestamp, Some(1_700_000_100));
+    }
+
+    #[test]
+    fn preserve_details_for_disk_cluster_does_not_override_existing_live_probe_fields() {
+        let dir = tempdir().expect("temp dir should be created");
+        let old_path = dir.path().join("old_live_existing.db");
+        let tmp_path = dir.path().join("tmp_live_existing.db");
+        let provider_id = 200_u32;
+
+        write_single_item(
+            &old_path,
+            &make_live_item(
+                provider_id,
+                Some("{\"codec_name\":\"h264\"}"),
+                Some("{\"codec_name\":\"aac\"}"),
+                Some(1_700_000_000),
+                Some(1_700_000_100),
+            ),
+        );
+        write_single_item(
+            &tmp_path,
+            &make_live_item(
+                provider_id,
+                Some("{\"codec_name\":\"hevc\"}"),
+                Some("{\"codec_name\":\"ac3\"}"),
+                Some(1_800_000_000),
+                Some(1_800_000_100),
+            ),
+        );
+
+        preserve_details_input_xtream_playlist_cluster_to_disk(&old_path, &tmp_path).expect("merge should succeed");
+
+        let merged = read_live_props(&tmp_path, provider_id);
+        assert_eq!(merged.video, Some("{\"codec_name\":\"hevc\"}".intern()));
+        assert_eq!(merged.audio, Some("{\"codec_name\":\"ac3\"}".intern()));
+        assert_eq!(merged.last_probed_timestamp, Some(1_800_000_000));
+        assert_eq!(merged.last_success_timestamp, Some(1_800_000_100));
+    }
+
+    #[test]
+    fn preserve_details_for_disk_cluster_fills_only_missing_live_probe_fields() {
+        let dir = tempdir().expect("temp dir should be created");
+        let old_path = dir.path().join("old_live_partial.db");
+        let tmp_path = dir.path().join("tmp_live_partial.db");
+        let provider_id = 300_u32;
+
+        write_single_item(
+            &old_path,
+            &make_live_item(
+                provider_id,
+                Some("{\"codec_name\":\"h264\"}"),
+                Some("{\"codec_name\":\"aac\"}"),
+                Some(1_700_000_000),
+                Some(1_700_000_100),
+            ),
+        );
+        write_single_item(
+            &tmp_path,
+            &make_live_item(
+                provider_id,
+                Some("{\"codec_name\":\"hevc\"}"),
+                None,
+                Some(1_800_000_000),
+                None,
+            ),
+        );
+
+        preserve_details_input_xtream_playlist_cluster_to_disk(&old_path, &tmp_path).expect("merge should succeed");
+
+        let merged = read_live_props(&tmp_path, provider_id);
+        assert_eq!(merged.video, Some("{\"codec_name\":\"hevc\"}".intern()));
+        assert_eq!(merged.audio, Some("{\"codec_name\":\"aac\"}".intern()));
+        assert_eq!(merged.last_probed_timestamp, Some(1_800_000_000));
+        assert_eq!(merged.last_success_timestamp, Some(1_700_000_100));
+    }
 }

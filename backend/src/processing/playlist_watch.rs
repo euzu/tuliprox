@@ -75,7 +75,10 @@ async fn load_watch_tree(path: &Path) -> Option<BTreeSet<Arc<str>>> {
 }
 
 async fn save_watch_tree(path: &Path, tree: &BTreeSet<Arc<str>>) -> std::io::Result<()> {
+    // Ensure the parent directory exists unconditionally
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
     let encoded: Vec<u8> = binary_serialize(&tree)?;
     tokio::fs::write(path, encoded).await
 }
-

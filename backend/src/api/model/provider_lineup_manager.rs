@@ -881,6 +881,17 @@ impl ProviderLineupManager {
             false
         }
     }
+
+    pub fn is_provider_for_input(&self, provider_name: &str, input_name: &str) -> bool {
+        let lineups = self.providers.load();
+        if let Some((lineup, _)) = Self::get_provider_config_by_name(&provider_name.into(), &lineups) {
+             match lineup {
+                 ProviderLineup::Single(_) => return input_name == provider_name,
+                 ProviderLineup::Multi(m) => return m.name.as_ref() == input_name,
+             }
+        }
+        false
+    }
 }
 
 

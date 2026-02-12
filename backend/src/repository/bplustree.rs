@@ -5218,11 +5218,11 @@ mod tests {
 
         let size_before = std::fs::metadata(&filepath)?.len();
         let mut updater = BPlusTreeUpdate::<u32, String>::try_new(&filepath)?;
-        let updates = [
+        let batch_updates = [
             (0u32, "X".repeat(6_000)),
             (u32::MAX, "missing".to_string()),
         ];
-        let refs: Vec<(&u32, &String)> = updates.iter().map(|(k, v)| (k, v)).collect();
+        let refs: Vec<(&u32, &String)> = batch_updates.iter().map(|(k, v)| (k, v)).collect();
         let result = updater.update_batch(&refs);
         assert!(matches!(result, Err(BPlusTreeError::KeyNotFound)));
         drop(updater);
@@ -5256,16 +5256,16 @@ mod tests {
         tree.store(&filepath)?;
         drop(tree);
 
-        let mut updater = BPlusTreeUpdate::<u32, String>::try_new(&filepath)?;
-        let updates = [
+        let mut batch_updater = BPlusTreeUpdate::<u32, String>::try_new(&filepath)?;
+        let update_items = [
             (1u32, updated.clone()),
             (u32::MAX, "missing".to_string()),
         ];
-        let refs: Vec<(&u32, &String)> = updates.iter().map(|(k, v)| (k, v)).collect();
+        let refs: Vec<(&u32, &String)> = update_items.iter().map(|(k, v)| (k, v)).collect();
 
-        let result = updater.update_batch(&refs);
+        let result = batch_updater.update_batch(&refs);
         assert!(matches!(result, Err(BPlusTreeError::KeyNotFound)));
-        drop(updater);
+        drop(batch_updater);
 
         // On failed batch, key 1 must still have original value.
         let mut query = BPlusTreeQuery::<u32, String>::try_new(&filepath)?;

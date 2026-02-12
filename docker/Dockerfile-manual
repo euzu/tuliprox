@@ -11,6 +11,9 @@ RUN apk add --no-cache tzdata \
   && mkdir -p /output/etc/ssl/certs \
   && cp /etc/ssl/certs/ca-certificates.crt /output/etc/ssl/certs/ca-certificates.crt
 
+# Fetch static FFmpeg binaries
+FROM mwader/static-ffmpeg:7.1 AS ffmpeg-static
+
 # Binary selector stage
 FROM alpine:latest AS binary-selector
 
@@ -39,6 +42,10 @@ COPY --from=tz-prep /output/usr/share/zoneinfo /usr/share/zoneinfo
 COPY --from=tz-prep /output/etc/localtime /etc/localtime
 COPY --from=tz-prep /output/etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
+# Copy static ffmpeg/ffprobe binaries
+COPY --from=ffmpeg-static /ffmpeg /usr/local/bin/
+COPY --from=ffmpeg-static /ffprobe /usr/local/bin/
+
 # RUN ln -sf /usr/share/zoneinfo/${TZ} /etc/localtime
 
 WORKDIR /app
@@ -56,7 +63,8 @@ FROM alpine:latest AS alpine-final
 ARG TZ=UTC
 ENV TZ=${TZ}
 
-RUN apk add --no-cache bash curl strace tcpdump bind-tools nano ca-certificates tini
+# Install dependencies including ffmpeg
+RUN apk add --no-cache bash curl strace tcpdump bind-tools nano ca-certificates tini ffmpeg
 
 # Copy timezone data and localtime from tz-prep
 COPY --from=tz-prep /output/usr/share/zoneinfo /usr/share/zoneinfo

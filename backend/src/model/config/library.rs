@@ -55,11 +55,21 @@ pub struct LibraryConfig {
 }
 
 impl LibraryConfig {
-    pub fn prepare(&mut self) -> Result<(), TuliproxError> {
+    pub fn prepare(&mut self, working_dir: &str) -> Result<(), TuliproxError> {
         if self.enabled {
             if self.metadata.path.is_empty() {
                 self.metadata.path = default_metadata_path();
             }
+
+            // Resolve metadata path to absolute path based on working_dir
+            let meta_path = PathBuf::from(&self.metadata.path);
+            let meta_path = if meta_path.is_relative() {
+                PathBuf::from(working_dir).join(&meta_path)
+            } else {
+                meta_path
+            };
+            self.metadata.path = meta_path.to_string_lossy().to_string();
+
             for dir in &mut self.scan_directories {
                 match PathBuf::from(&dir.path).canonicalize() {
                     Ok(path_buf) => {
@@ -75,11 +85,11 @@ impl LibraryConfig {
     }
 }
 
-impl Default for LibraryConfig {
-    fn default() -> Self {
-        Self::from(&LibraryConfigDto::default())
-    }
-}
+// impl Default for LibraryConfig {
+//     fn default() -> Self {
+//         Self::from(&LibraryConfigDto::default())
+//     }
+// }
 
 macros::from_impl!(LibraryConfig);
 

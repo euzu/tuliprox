@@ -8,6 +8,7 @@ use crate::model::{AppConfig, LibraryConfig};
 use log::{debug, error, info, warn};
 use shared::model::{LibraryMetadataFormat, LibraryScanResult};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 // Action taken when processing a file
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,6 +24,7 @@ pub struct LibraryProcessor {
     scanner: LibraryScanner,
     resolver: MetadataResolver,
     storage: MetadataStorage,
+    app_config: Option<Arc<AppConfig>>, // Need access to global config for FFprobe settings
 }
 
 impl LibraryProcessor {
@@ -40,13 +42,14 @@ impl LibraryProcessor {
         let storage_path = std::path::PathBuf::from(&config.metadata.path);
         let scanner = LibraryScanner::new(config.clone());
         let storage = MetadataStorage::new(storage_path);
-        let resolver = MetadataResolver::from_config(&config, client, storage.clone());
+        let resolver = MetadataResolver::from_config(Some(&config), client, Some(storage.clone()));
 
         Self {
             config,
             scanner,
             resolver,
             storage,
+            app_config: None,
         }
     }
 
@@ -80,9 +83,16 @@ impl LibraryProcessor {
             errors: 0,
         };
 
+        // Check global ffprobe config
+        let ffprobe_enabled = if let Some(app_cfg) = &self.app_config {
+            app_cfg.is_ffprobe_enabled().await
+        } else {
+            false
+        };
+
         // Process each scanned file
         for group in &media_groups {
-            match self.process_group(group, &existing_map, force_rescan).await {
+            match self.process_group(group, &existing_map, force_rescan, ffprobe_enabled).await {
                 Ok(action) => match action {
                     ProcessAction::Added => result.files_added += 1,
                     ProcessAction::Updated => result.files_updated += 1,
@@ -119,20 +129,39 @@ impl LibraryProcessor {
         Ok(result)
     }
 
-    async fn process_group(&self, group: &MediaGroup, existing_map: &HashMap<String, MetadataCacheEntry>, force_rescan: bool) -> Result<ProcessAction, String> {
+    async fn process_group(&self, group: &MediaGroup, existing_map: &HashMap<String, MetadataCacheEntry>, force_rescan: bool, can_probe: bool) -> Result<ProcessAction, String> {
         match group {
             MediaGroup::Movie { file: _, .. } => {
-                self.process_movie(group, existing_map, force_rescan).await
+                self.process_movie(group, existing_map, force_rescan, can_probe).await
             }
             MediaGroup::Series { show_key: _, episodes: _ } => {
-                self.process_series_group(group, existing_map, force_rescan).await
+                self.process_series_group(group, existing_map, force_rescan, can_probe).await
             }
         }
     }
 
+    // TODO: Implement enrich_metadata_with_ffprobe to add technical info (resolution, codecs) from local files
+    //fn enrich_metadata_with_ffprobe(&self, _metadata: &mut MediaMetadata, _file_path: &str, _can_probe: bool) {
+        //if !can_probe { return; }
+
+        // let _url = format!("file://{file_path}"); // Simple file URL for ffmpeg
+        //
+        // // TODO: Logic for series episodes iteration
+        //  match metadata {
+        //      MediaMetadata::Movie(_movie) => {
+        //          // Currently we don't have fields in MovieMetadata to store tech info
+        //          // But we could add them. For now, let's just log.
+        //          // In the future this should update the metadata struct.
+        //          debug!("Probe logic for local movie {} not yet fully integrated into Metadata struct", file_path);
+        //      }
+        //      MediaMetadata::Series(_) => {
+        //          // Series handle episodes separately
+        //      }
+        //  }
+    //}
+
     // Processes a single video file
-    async fn process_movie(&self, group: &MediaGroup, existing_map: &HashMap<String, MetadataCacheEntry>, force_rescan: bool,
-    ) -> Result<ProcessAction, String> {
+    async fn process_movie(&self, group: &MediaGroup, existing_map: &HashMap<String, MetadataCacheEntry>, force_rescan: bool, _can_probe: bool) -> Result<ProcessAction, String> {
         let MediaGroup::Movie { file, .. } = group else { return Err(format!("Expected movie to resolve but got {group}")) };
         // Check if file already exists in cache
         let (cache_entry, status) = if let Some(existing_entry) = existing_map.get(&file.file_path) {
@@ -145,6 +174,8 @@ impl LibraryProcessor {
             debug!("File modified, updating metadata: {}", file.file_path);
             // Reuse existing UUID
             let metadata = self.resolve_metadata(group).await?;
+            //self.enrich_metadata_with_ffprobe(&mut metadata, &file.file_path, can_probe);
+            
             let entry = MetadataCacheEntry {
                 uuid: existing_entry.uuid.clone(),
                 file_path: file.file_path.clone(),
@@ -157,6 +188,7 @@ impl LibraryProcessor {
         } else {
             debug!("New file, resolving metadata: {}", file.file_path);
             let metadata = self.resolve_metadata(group).await?;
+            //self.enrich_metadata_with_ffprobe(&mut metadata, &file.file_path, can_probe);
 
             let entry = MetadataCacheEntry::new(
                 file.file_path.clone(),
@@ -177,7 +209,7 @@ impl LibraryProcessor {
         &self,
         group: &MediaGroup,
         existing_map: &HashMap<String, MetadataCacheEntry>,
-        force_rescan: bool,
+        force_rescan: bool, _can_probe: bool
     ) -> Result<ProcessAction, String> {
         let MediaGroup::Series { show_key, episodes } = group else { return Err(format!("Expected series to resolve but got {group}")) };
         let series_file_path = episodes
