@@ -11,3 +11,42 @@ To contribute you will need Rust, cargo, cross, trunk, wasm-bindgen, and cargo-s
 ```bash
 make install-tools
 ```
+
+### Steps to Contribute
+
+1. **Fork the Repository**: Start by forking the Tuliprox repository to your GitHub account.
+2. **Clone Your Fork**: Clone the forked repository to your local machine.
+
+   ```bash
+   git clone git@github.com:your-username/tuliprox.git
+   cd tuliprox
+   ```
+
+3. **Create a Branch**: Create a new branch for your contribution.
+
+   ```bash
+   git checkout -b feature/your-feature-name
+   ```
+
+4. **Make Your Changes**: Implement your changes in the codebase. Please ensure that your code follows the existing style and conventions.
+5. **Test Your Changes**: Format, lint, and run tests to ensure that your changes are clean and tidy and do not break existing functionality.
+
+    ```bash
+    make fmt lint test
+    ```
+
+6. **Commit Your Changes**: Commit your changes with a descriptive message.
+
+   ```bash
+   git add .
+   git commit -m "Add your descriptive message here"
+   ```
+
+7. **Push Your Changes**: Push your changes to your forked repository.
+
+   ```bash
+   git push origin feature/your-feature-name
+   ```
+
+8. **Create a Pull Request**: Open a pull request on the original Tuliprox repository, describing your changes and their purpose.
+9. **Address Feedback**: Be responsive to any feedback or requests for changes from the maintainers.

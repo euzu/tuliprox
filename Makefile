@@ -67,3 +67,25 @@ $(CARGO_SET_VERSION):
 	@echo "📦 Installing $@"
 	@$(CARGO) install cargo-edit
 	@echo "✅ $@ installed"
+
+##@ Development:
+
+.PHONY: test
+test: ## Run all workspace tests
+	@echo "==> Running tests"
+	$(CARGO) test --workspace
+
+.PHONY: lint
+lint: ## Run clippy linter
+	@echo "==> Running clippy"
+	$(CARGO) clippy --workspace -- -D warnings
+
+.PHONY: fmt
+fmt: ## Format all code
+	@echo "==> Formatting code"
+	$(CARGO) fmt --all
+
+.PHONY: fmt-check
+fmt-check: ## Check code formatting
+	@echo "==> Checking formatting"
+	$(CARGO) fmt --all -- --check
