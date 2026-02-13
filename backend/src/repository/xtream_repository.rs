@@ -733,18 +733,17 @@ fn preserve_details_input_xtream_playlist_cluster_to_disk(
             if old_props.has_details() {
                 if let Ok(Some(mut new_item)) = new_tree.query(&old_item.provider_id) {
                     if let Some(new_props) = new_item.additional_properties.as_mut() {
-                        if needs_preserved_stream_property_merge(new_props, old_props) {
-                            if merge_preserved_stream_properties(new_props, old_props) {
-                                updates.push((new_item.provider_id, new_item));
-                                if updates.len() >= BATCH_SIZE {
-                                    let refs: Vec<(&u32, &XtreamPlaylistItem)> = updates.iter().map(|(id, pli)| (id, pli)).collect();
-                                    new_tree.update_batch(&refs).map_err(|e| notify_err!("Failed to update tmp tree during merge: {e}"))?;
-                                    updates.clear();
-                                }
+                        if needs_preserved_stream_property_merge(new_props, old_props)
+                            && merge_preserved_stream_properties(new_props, old_props) {
+                            updates.push((new_item.provider_id, new_item));
+                            if updates.len() >= BATCH_SIZE {
+                                let refs: Vec<(&u32, &XtreamPlaylistItem)> = updates.iter().map(|(id, pli)| (id, pli)).collect();
+                                new_tree.update_batch(&refs).map_err(|e| notify_err!("Failed to update tmp tree during merge: {e}"))?;
+                                updates.clear();
                             }
                         }
-                    };
-                };
+                    }
+                }
             }
         }
     }

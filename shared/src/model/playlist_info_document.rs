@@ -5,7 +5,8 @@ use indexmap::IndexMap;
 use serde_json::Value;
 use crate::concat_string;
 use crate::model::{PlaylistItemType, SeriesStreamDetailEpisodeProperties, SeriesStreamDetailSeasonProperties,
-                   SeriesStreamProperties, StreamProperties, VideoStreamProperties, VirtualId, XtreamCluster, XtreamMappingOptions};
+                   SeriesStreamProperties, StreamProperties, VideoStreamProperties, VirtualId, XtreamCluster,
+                   XtreamMappingFlags, XtreamMappingOptions};
 use crate::model::info_doc_utils::InfoDocUtils;
 
 #[inline]
@@ -365,7 +366,14 @@ impl StreamProperties {
                 category_ids: vec![category_id],
                 container_extension: Arc::clone(&video.container_extension),
                 custom_sid: video.custom_sid.as_ref().map(Arc::clone),
-                direct_source: if options.skip_video_direct_source { Arc::clone(&empty_str) } else { Arc::clone(&video.direct_source) },
+                direct_source: if options
+                    .flags
+                    .contains(XtreamMappingFlags::SkipVideoDirectSource)
+                {
+                    Arc::clone(&empty_str)
+                } else {
+                    Arc::clone(&video.direct_source)
+                },
             }
         }
     }
@@ -419,7 +427,14 @@ impl StreamProperties {
                 custom_sid: ep.custom_sid.as_ref().map(Arc::clone),
                 added: Arc::clone(&ep.added),
                 season: ep.season,
-                direct_source: if options.skip_series_direct_source { Arc::clone(&empty_str) } else { Arc::clone(&ep.direct_source) },
+                direct_source: if options
+                    .flags
+                    .contains(XtreamMappingFlags::SkipSeriesDirectSource)
+                {
+                    Arc::clone(&empty_str)
+                } else {
+                    Arc::clone(&ep.direct_source)
+                },
             };
             map.entry(ep.season).or_default().push(doc);
         }

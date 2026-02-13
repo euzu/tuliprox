@@ -4035,6 +4035,7 @@ dependencies = [
  "js-sys",
  "log",
  "lz4_flex",
+ "paste",
  "path-clean",
  "pest",
  "pest_derive",

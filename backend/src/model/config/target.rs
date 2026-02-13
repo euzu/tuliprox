@@ -9,10 +9,10 @@ use shared::model::PlaylistItemType;
 use std::sync::Arc;
 use shared::foundation::Filter;
 use shared::foundation::ValueProvider;
-use shared::create_bit_set;
+use shared::create_bitset;
 
-create_bit_set!(u16, XtreamTargetFlags, SkipLiveDirectSource, SkipVideoDirectSource, SkipSeriesDirectSource,
-    ResolveBackground, ResolveSeries, ResolveVod, ProbeSeries, ProbeVod, ProbeLive);
+create_bitset!(u8, XtreamTargetFlags, SkipLiveDirectSource, SkipVideoDirectSource, SkipSeriesDirectSource);
+create_bitset!(u8, StrmTargetFlags, Flat, UnderscoreWhitespace, Cleanup, AddQualityToFilename);
 
 #[derive(Clone, Debug)]
 pub struct ProcessTargets {
@@ -32,12 +32,9 @@ impl ProcessTargets {
     }
 }
 
-#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
 pub struct XtreamTargetOutput {
     pub flags: XtreamTargetFlagsSet,
-    pub probe_live_interval_hours: u32,
-    pub resolve_delay: u16,
     pub trakt: Option<TraktConfig>,
     pub filter: Option<Filter>,
 }
@@ -49,17 +46,9 @@ impl From<&XtreamTargetOutputDto> for XtreamTargetOutput {
         if dto.skip_live_direct_source { flags.add(XtreamTargetFlags::SkipLiveDirectSource); }
         if dto.skip_video_direct_source { flags.add(XtreamTargetFlags::SkipVideoDirectSource); }
         if dto.skip_series_direct_source { flags.add(XtreamTargetFlags::SkipSeriesDirectSource); }
-        if dto.resolve_background { flags.add(XtreamTargetFlags::ResolveBackground); }
-        if dto.resolve_series { flags.add(XtreamTargetFlags::ResolveSeries); }
-        if dto.resolve_vod { flags.add(XtreamTargetFlags::ResolveVod); }
-        if dto.probe_series { flags.add(XtreamTargetFlags::ProbeSeries); }
-        if dto.probe_vod { flags.add(XtreamTargetFlags::ProbeVod); }
-        if dto.probe_live { flags.add(XtreamTargetFlags::ProbeLive); }
 
         Self {
             flags,
-            resolve_delay: dto.resolve_delay,
-            probe_live_interval_hours: dto.probe_live_interval_hours,
             trakt: dto.trakt.as_ref().map(Into::into),
             filter: dto.t_filter.clone(),
         }
@@ -68,22 +57,14 @@ impl From<&XtreamTargetOutputDto> for XtreamTargetOutput {
 
 impl From<&XtreamTargetOutput> for XtreamTargetOutputDto {
     fn from(instance: &XtreamTargetOutput) -> Self {
-        Self {
-            skip_live_direct_source: instance.flags.contains(XtreamTargetFlags::SkipLiveDirectSource),
-            skip_video_direct_source: instance.flags.contains(XtreamTargetFlags::SkipVideoDirectSource),
-            skip_series_direct_source: instance.flags.contains(XtreamTargetFlags::SkipSeriesDirectSource),
-            resolve_background: instance.flags.contains(XtreamTargetFlags::ResolveBackground),
-            resolve_series: instance.flags.contains(XtreamTargetFlags::ResolveSeries),
-            resolve_vod: instance.flags.contains(XtreamTargetFlags::ResolveVod),
-            probe_series: instance.flags.contains(XtreamTargetFlags::ProbeSeries),
-            probe_vod: instance.flags.contains(XtreamTargetFlags::ProbeVod),
-            probe_live: instance.flags.contains(XtreamTargetFlags::ProbeLive),
-            resolve_delay: instance.resolve_delay,
-            probe_live_interval_hours: instance.probe_live_interval_hours,
-            trakt: instance.trakt.as_ref().map(TraktConfigDto::from),
-            filter: instance.filter.as_ref().map(ToString::to_string),
-            t_filter: instance.filter.clone(),
-        }
+        let mut dto = XtreamTargetOutputDto::default();
+        dto.skip_live_direct_source = instance.flags.contains(XtreamTargetFlags::SkipLiveDirectSource);
+        dto.skip_video_direct_source = instance.flags.contains(XtreamTargetFlags::SkipVideoDirectSource);
+        dto.skip_series_direct_source = instance.flags.contains(XtreamTargetFlags::SkipSeriesDirectSource);
+        dto.trakt = instance.trakt.as_ref().map(TraktConfigDto::from);
+        dto.filter = instance.filter.as_ref().map(ToString::to_string);
+        dto.t_filter.clone_from(&instance.filter);
+        dto
     }
 }
 
@@ -120,17 +101,13 @@ impl From<&M3uTargetOutput> for M3uTargetOutputDto {
 
 
 #[derive(Debug, Clone)]
-#[allow(clippy::struct_excessive_bools)]
 pub struct StrmTargetOutput {
     pub directory: String,
     pub username: Option<String>,
     pub style: StrmExportStyle,
-    pub flat: bool,
-    pub underscore_whitespace: bool,
-    pub cleanup: bool,
+    pub flags: StrmTargetFlagsSet,
     pub strm_props: Option<Vec<String>>,
     pub filter: Option<Filter>,
-    pub add_quality_to_filename: bool,
     pub probe_probe_size_bytes: Option<u64>,
     pub probe_analyze_duration: Option<u64>,
 }
@@ -138,16 +115,26 @@ pub struct StrmTargetOutput {
 macros::from_impl!(StrmTargetOutput);
 impl From<&StrmTargetOutputDto> for StrmTargetOutput {
     fn from(dto: &StrmTargetOutputDto) -> Self {
+        let mut flags = StrmTargetFlagsSet::new();
+        if dto.flat {
+            flags.add(StrmTargetFlags::Flat);
+        }
+        if dto.underscore_whitespace {
+            flags.add(StrmTargetFlags::UnderscoreWhitespace);
+        }
+        if dto.cleanup {
+            flags.add(StrmTargetFlags::Cleanup);
+        }
+        if dto.add_quality_to_filename {
+            flags.add(StrmTargetFlags::AddQualityToFilename);
+        }
         Self {
             directory: dto.directory.clone(),
             username: dto.username.clone(),
             style: dto.style,
-            flat: dto.flat,
-            underscore_whitespace: dto.underscore_whitespace,
-            cleanup: dto.cleanup,
+            flags,
             strm_props: dto.strm_props.clone(),
             filter: dto.t_filter.clone(),
-            add_quality_to_filename: dto.add_quality_to_filename,
             probe_probe_size_bytes: dto.probe_probe_size_bytes,
             probe_analyze_duration: dto.probe_analyze_duration,
         }
@@ -159,13 +146,13 @@ impl From<&StrmTargetOutput> for StrmTargetOutputDto {
             directory: instance.directory.clone(),
             username: instance.username.clone(),
             style: instance.style,
-            flat: instance.flat,
-            underscore_whitespace: instance.underscore_whitespace,
-            cleanup: instance.cleanup,
+            flat: instance.flags.contains(StrmTargetFlags::Flat),
+            underscore_whitespace: instance.flags.contains(StrmTargetFlags::UnderscoreWhitespace),
+            cleanup: instance.flags.contains(StrmTargetFlags::Cleanup),
             strm_props: instance.strm_props.clone(),
             filter: instance.filter.as_ref().map(ToString::to_string),
             t_filter: instance.filter.clone(),
-            add_quality_to_filename: instance.add_quality_to_filename,
+            add_quality_to_filename: instance.flags.contains(StrmTargetFlags::AddQualityToFilename),
             probe_probe_size_bytes: instance.probe_probe_size_bytes,
             probe_analyze_duration: instance.probe_analyze_duration,
         }

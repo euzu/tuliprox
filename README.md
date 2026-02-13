@@ -972,6 +972,14 @@ Each input has the following attributes:
   + `xtream_live_stream_use_prefix` default true, if set to true `/live/` prefix is added to the stream link.
   + `resolve_tmdb`: `true`|`false` Attempts to resolve missing TMDB IDs via TMDB API based on title.
   + `probe_stream`: `true`|`false` Probes stream if video/audio info is missing in provider data. Probing respects the `max_connections` limit of your provider input. If no connection slot is available, the item is skipped and retried during the next update.
+  + `resolve_background`: `true`|`false` (default `true`). If `false`, metadata resolve/probe runs blocking during update.
+  + `resolve_series`: `true`|`false` (default `false`) for Xtream series metadata resolution.
+  + `resolve_vod`: `true`|`false` (default `false`) for Xtream VOD metadata resolution.
+  + `probe_series`: `true`|`false` (default `false`) for series probing (requires `probe_stream` + ffprobe).
+  + `probe_vod`: `true`|`false` (default `false`) for VOD probing (requires `probe_stream` + ffprobe).
+  + `probe_live`: `true`|`false` (default `false`) for background live probing.
+  + `probe_live_interval_hours`: number (default `120`) re-probe interval for live channels.
+  + `resolve_delay`: seconds (default `2`) shared delay for resolve/probe metadata requests.
 - `aliases`  for alias definitions for the same provider with different credentials
 - `staged` for side loading processed playlists.
   If you already have a provider configured but want to load the playlist from a different source — for example, 
@@ -1407,17 +1415,11 @@ Each format has different properties.
 - skip_live_direct_source: true|false (default true),
 - skip_video_direct_source: true|false (default true),
 - skip_series_direct_source: true|false (default true),
-- resolve_background: true|false (default true). If set to false, metadata (TMDB/Probe) resolution happens immediately and blocks the import process.
-- resolve_series: true|false (default false),
-- resolve_vod: true|false (default false),
-- probe_series: true|false (default false),
-- probe_vod: true|false (default false),
-- probe_live: true|false (default false),
-- probe_live_interval_hours: number (default 24),
-- resolve_delay: seconds (default 2s),
 - update_strategy: instant|bundled (default instant),
 - trakt: Trakt Configuration
 - filter: optional filter
+
+`Note:` `resolve_*` / `probe_*` options are configured on `inputs[].options` (xtream input), not on output/target.
 
 `m3u`
 - type: m3u
@@ -1512,31 +1514,20 @@ The options `skip_live_direct_source`, `skip_video_direct_source` and`skip_serie
 are default `true` to avoid this problem.
 You can set them fo `false`to keep the direct-source attribute.
 
-Because xtream api delivers only the metadata to series, we need to fetch the series and resolve them. But be aware,
-each series info entry needs to be fetched one by one and the provider can ban you if you are doing request too frequently.
-- `resolve_series` if is set to `true` and you have xtream input and m3u output, the series are fetched and resolved.
-  This can cause a lot of requests to the provider. Be cautious when using this option.
-- `resolve_series_delay` to avoid a provider ban you can set the seconds between series_info_request's. Default is 2 seconds.
-  But be aware that the more series entries there are, the longer the process takes.
+Because xtream api delivers only partial metadata to series and VOD, Tuliprox can resolve and probe missing details.
+These settings are configured on the xtream input (`inputs[].options`), not on target/output.
 
-For `resolve_(vod|series)` the files are only fetched one for each input and cached. Only new and modified ones are updated.
+- `resolve_series`: If `true` and you have xtream input with m3u output, series metadata is resolved.
+- `resolve_vod`: If `true` and you have xtream input, VOD metadata is resolved.
+- `resolve_delay`: Delay in seconds between metadata requests (default `2`) to reduce provider ban risk.
+- `resolve_background`: If `true` (default), metadata jobs are queued in background. If `false`, they run blocking.
 
-The `kodi` format for movies can contain the `tmdb-id` (_optional_). Because xtream api delivers the data only on request,
-we need to fetch this info for each movie entry. But be aware the provider can ban you if you are doing request too frequently.
-- `xtream` `resolve_vod` if is set to `true` and you have xtream input, the movies info are fetched and stored.
-  This can cause a lot of requests to the provider. Be cautious when using this option.
-- `xtream` `resolve_vod_delay` to avoid a provider ban you can set the seconds between vod_info_request's. Default is 2 seconds.
-  But be aware that the more series entries there are, the longer the process takes.
-  Unlike `series info` `movie info` is only fetched once for each movie. If the data is stored locally there will be no update.
+For `resolve_(vod|series)` data is cached per input; only new/changed entries are updated.
 
-There is a difference for `resolve_vod` and `resolve_series`.
-`resolve_series` works only when input: `xtream` and output: `m3u`.
-`resolve_vod` works only when input: `xtream`.
-
-- `probe_series`: If set to `true`, series entries are probed to enrich technical metadata (requires `probe_stream` and ffprobe).
-- `probe_vod`: If set to `true`, VOD entries are probed to enrich technical metadata (requires `probe_stream` and ffprobe).
-- `probe_live`: If set to `true`, live streams are analyzed (probed) in the background during idle times to determine codecs and resolution.
-- `probe_live_interval_hours`: Defines how often (in hours) a live stream should be re-probed (default: 24h).
+- `probe_series`: If `true`, series entries are probed to enrich technical metadata (requires `probe_stream` and ffprobe).
+- `probe_vod`: If `true`, VOD entries are probed to enrich technical metadata (requires `probe_stream` and ffprobe).
+- `probe_live`: If `true`, live streams are analyzed (probed) in the background during idle times to determine codecs and resolution.
+- `probe_live_interval_hours`: Defines how often (in hours) a live stream should be re-probed (default: `120`).
 - `update_strategy`:
   - `instant` (default): Writes changes to the output files immediately after a stream is resolved/probed.
   - `bundled`: Queues updates and writes them in batches to reduce disk I/O operations.
@@ -1546,14 +1537,23 @@ Trakt.tv is an online platform that helps you track, manage, and discover TV sho
 You can add trakt list matches into your playlist.
 You can define a `Trakt` config like
 ```yaml
+inputs:
+  - name: my_xtream_input
+    type: xtream
+    options:
+      resolve_series: false
+      resolve_vod: false
+
+sources:
+  - inputs:
+      - my_xtream_input
+    targets:
       - name: iptv-trakt-example
         output:
           - type: xtream
             skip_live_direct_source: true
             skip_video_direct_source: true
             skip_series_direct_source: true
-            resolve_series: false
-            resolve_vod: false
             trakt:
               api:
                 api_key: "your api key"

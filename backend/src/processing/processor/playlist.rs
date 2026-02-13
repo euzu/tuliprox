@@ -1,20 +1,20 @@
 use crate::model::{AppConfig, ConfigFavourites, ConfigInput, ConfigRename, MessageContent, ReverseProxyDisabledHeaderConfig, TVGuide};
-use crate::utils::{log_memory_snapshot, m3u};
 use crate::utils::xtream;
 use crate::utils::{epg, StepMeasureCallback};
+use crate::utils::{log_memory_snapshot, m3u};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Weak};
 use tokio::sync::{Mutex, OwnedRwLockWriteGuard, RwLock};
 use tokio::task::JoinSet;
 
-use crate::api::model::{ActiveProviderManager, EventManager, EventMessage, PlaylistStorageState, UpdateGuard, MetadataUpdateManager, ProviderIdType, ResolveReasonSet, ResolveReason, UpdateTask};
-use crate::messaging::{send_message};
+use crate::api::model::{ActiveProviderManager, EventManager, EventMessage, MetadataUpdateManager, PlaylistStorageState, ProviderIdType, ResolveReason, ResolveReasonSet, UpdateGuard, UpdateTask};
+use crate::messaging::send_message;
 
 
 use crate::model::FetchedPlaylist;
 use crate::model::Mapping;
-use crate::model::{ConfigTarget, ProcessTargets, TargetOutput, XtreamTargetFlags};
+use crate::model::{ConfigInputFlags, ConfigInputOptions, ConfigTarget, ProcessTargets, TargetOutput};
 use crate::processing::input_cache;
 use crate::processing::input_cache::ClusterState;
 use crate::processing::parser::xmltv::flatten_tvguide;
@@ -34,14 +34,15 @@ use indexmap::IndexMap;
 use log::{debug, error, info, log_enabled, warn, Level};
 use shared::concat_string;
 use shared::error::{get_errors_notify_message, notify_err, TuliproxError};
-use shared::foundation::{get_field_value, set_field_value, ValueAccessor, ValueProvider};
 use shared::foundation::Filter;
+use shared::foundation::{get_field_value, set_field_value, ValueAccessor, ValueProvider};
 use shared::model::xtream_const::XTREAM_CLUSTER;
-use shared::model::{InputStats, PlaylistStats, SourceStats, TargetStats, UUIDType};
 use shared::model::{CounterModifier, FieldGetAccessor, FieldSetAccessor, InputType, ItemField,
                     PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistUpdateState,
                     ProcessingOrder, StreamProperties, XtreamCluster};
-use shared::utils::{create_alias_uuid, default_as_default, interner_gc, Internable};
+use shared::model::{InputStats, PlaylistStats, SourceStats, TargetStats, UUIDType};
+use shared::utils::{create_alias_uuid, default_as_default, default_probe_live_interval, default_resolve_delay_secs,
+                    interner_gc, Internable, is_default_probe_live_interval, is_default_resolve_delay_secs};
 use std::time::Instant;
 
 const DEFAULT_PROBE_STREAM_DELAY: u16 = 50;
@@ -277,7 +278,7 @@ fn is_target_enabled(target: &ConfigTarget, user_targets: &ProcessTargets) -> bo
 }
 
 struct PlaylistDownloadResult {
-    pub downloaded_playlist:Vec<PlaylistGroup>,
+    pub downloaded_playlist: Vec<PlaylistGroup>,
     pub download_err: Vec<TuliproxError>,
     pub was_cached: bool,
     pub persisted: bool,
@@ -285,17 +286,16 @@ struct PlaylistDownloadResult {
 
 impl PlaylistDownloadResult {
     pub fn new(
-        downloaded_playlist:Vec<PlaylistGroup>,
+        downloaded_playlist: Vec<PlaylistGroup>,
         download_err: Vec<TuliproxError>,
         was_cached: bool,
         persisted: bool) -> Self {
-
-       Self {
-           downloaded_playlist,
-           download_err,
-           was_cached,
-           persisted,
-       }
+        Self {
+            downloaded_playlist,
+            download_err,
+            was_cached,
+            persisted,
+        }
     }
 }
 
@@ -512,7 +512,7 @@ async fn download_input(ctx: &PlaylistProcessingContext, input: &Arc<ConfigInput
     // Coordination Logic
     let need_download = !ctx.is_input_downloaded(&input.name).await;
 
-    let playlist_download_result= if need_download {
+    let playlist_download_result = if need_download {
         // Acquire named lock to prevent thundering herd on same input
         let _input_lock = ctx.get_input_lock(&input.name).await;
         // Check again after lock
@@ -844,38 +844,60 @@ async fn process_playlist_for_target(ctx: &PlaylistProcessingContext,
 }
 
 async fn playlist_resolve(ctx: &PlaylistProcessingContext,
-                        target: &ConfigTarget,
-                        errors: &mut Vec<TuliproxError>,
-                        pipe: &ProcessingPipe,
-                        provider_fpl: &mut FetchedPlaylist<'_>,
-                        processed_fpl: &mut FetchedPlaylist<'_>,
-) {
-
+                          target: &ConfigTarget,
+                          errors: &mut Vec<TuliproxError>,
+                          pipe: &ProcessingPipe,
+                          provider_fpl: &mut FetchedPlaylist<'_>,
+                          processed_fpl: &mut FetchedPlaylist<'_>) {
     playlist_resolve_series(ctx, target, errors, pipe, provider_fpl, processed_fpl).await;
     playlist_resolve_vod(ctx, target, errors, provider_fpl, processed_fpl).await;
     playlist_probe(ctx, target, processed_fpl).await;
 }
 
-fn is_xtream_only_output_target(target: &ConfigTarget) -> bool {
-    target.output.len() == 1 && matches!(target.output.first(), Some(TargetOutput::Xtream(_)))
+fn has_target_m3u_output(target: &ConfigTarget) -> bool {
+    for output in &target.output {
+        if matches!(output, TargetOutput::M3u(_)) {
+            return true;
+        }
+    }
+    false
 }
 
-fn get_xtream_cluster_probe_flag(target: &ConfigTarget, cluster: XtreamCluster) -> Option<bool> {
-    target.get_xtream_output().map(|xtream_output| match cluster {
-        XtreamCluster::Live => xtream_output.flags.contains(XtreamTargetFlags::ProbeLive),
-        XtreamCluster::Video => xtream_output.flags.contains(XtreamTargetFlags::ProbeVod),
-        XtreamCluster::Series => xtream_output.flags.contains(XtreamTargetFlags::ProbeSeries),
+fn get_xtream_cluster_probe_flag(target: &ConfigTarget,
+                                 input_options: Option<&ConfigInputOptions>,
+                                 cluster: XtreamCluster) -> Option<bool> {
+    target.get_xtream_output().map(|_| {
+        let legacy_options = target.options.as_ref();
+        let input_probe_enabled = match cluster {
+            XtreamCluster::Live => input_options
+                .is_some_and(|options| options.flags.contains(ConfigInputFlags::ProbeLive)),
+            XtreamCluster::Video => input_options
+                .is_some_and(|options| options.flags.contains(ConfigInputFlags::ProbeVod)),
+            XtreamCluster::Series => input_options
+                .is_some_and(|options| options.flags.contains(ConfigInputFlags::ProbeSeries)),
+        };
+        let legacy_probe_enabled = match cluster {
+            XtreamCluster::Live => legacy_options
+                .is_some_and(shared::model::ConfigTargetOptions::legacy_probe_live),
+            XtreamCluster::Video => legacy_options
+                .is_some_and(shared::model::ConfigTargetOptions::legacy_probe_vod),
+            XtreamCluster::Series => legacy_options
+                .is_some_and(shared::model::ConfigTargetOptions::legacy_probe_series),
+        };
+        input_probe_enabled || legacy_probe_enabled
     })
 }
 
-fn is_cluster_probe_enabled_for_target(target: &ConfigTarget, cluster: XtreamCluster) -> bool {
+fn is_cluster_probe_enabled_for_target(target: &ConfigTarget,
+                                       input_options: Option<&ConfigInputOptions>,
+                                       cluster: XtreamCluster) -> bool {
     // Probe flags are only authoritative when the target is exactly one xtream output.
-    // For mixed outputs (xtream + m3u/strm/...), probing remains enabled because non-xtream outputs have no probe flags.
-    if !is_xtream_only_output_target(target) {
+    // For mixed outputs (xtream + m3u), probing remains enabled because non-xtream outputs have no probe flags.
+    if has_target_m3u_output(target) {
         return true;
     }
 
-    get_xtream_cluster_probe_flag(target, cluster).unwrap_or(true)
+    get_xtream_cluster_probe_flag(target, input_options, cluster).unwrap_or(true)
 }
 
 fn is_probe_supported_item_type(item_type: PlaylistItemType) -> bool {
@@ -901,13 +923,37 @@ fn has_probe_details(item: &PlaylistItem) -> bool {
     }
 }
 
-fn get_live_probe_interval_settings(target: &ConfigTarget, input_type: InputType) -> Option<(u16, u64)> {
+fn get_live_probe_interval_settings(target: &ConfigTarget,
+                                    input_type: InputType,
+                                    input_options: Option<&ConfigInputOptions>) -> Option<(u16, u64)> {
     if !matches!(input_type, InputType::Xtream | InputType::XtreamBatch) {
         return None;
     }
     target
         .get_xtream_output()
-        .map(|xtream_output| (xtream_output.resolve_delay, u64::from(xtream_output.probe_live_interval_hours) * 3600))
+        .map(|_| {
+            let legacy_options = target.options.as_ref();
+            let input_resolve_delay = input_options
+                .map_or_else(default_resolve_delay_secs, |options| options.resolve_delay);
+            let legacy_resolve_delay = legacy_options
+                .map_or_else(default_resolve_delay_secs, shared::model::ConfigTargetOptions::legacy_resolve_delay);
+            let resolve_delay = if is_default_resolve_delay_secs(&input_resolve_delay) {
+                legacy_resolve_delay
+            } else {
+                input_resolve_delay
+            };
+
+            let input_probe_live_interval_hours = input_options
+                .map_or_else(default_probe_live_interval, |options| options.probe_live_interval_hours);
+            let legacy_probe_live_interval_hours = legacy_options
+                .map_or_else(default_probe_live_interval, shared::model::ConfigTargetOptions::legacy_probe_live_interval_hours);
+            let probe_live_interval_hours = if is_default_probe_live_interval(&input_probe_live_interval_hours) {
+                legacy_probe_live_interval_hours
+            } else {
+                input_probe_live_interval_hours
+            };
+            (resolve_delay, u64::from(probe_live_interval_hours) * 3600)
+        })
 }
 
 fn needs_live_probe(item: &PlaylistItem, cutoff_ts: i64) -> bool {
@@ -946,7 +992,7 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
     let Some(opts) = fpl.input.options.as_ref() else {
         return;
     };
-    if !opts.probe_stream {
+    if !opts.flags.contains(ConfigInputFlags::ProbeStream) {
         return;
     }
     if !ctx.config.is_ffprobe_enabled().await {
@@ -955,8 +1001,7 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
 
     let input_name = fpl.input.name.clone();
     let input_type = fpl.input.input_type;
-    let xtream_only_output = is_xtream_only_output_target(target);
-    let live_probe_settings = get_live_probe_interval_settings(target, input_type).map(|(delay, interval_secs)| {
+    let live_probe_settings = get_live_probe_interval_settings(target, input_type, Some(opts)).map(|(delay, interval_secs)| {
         let interval_signed = i64::try_from(interval_secs).unwrap_or(i64::MAX);
         let cutoff_ts = chrono::Utc::now().timestamp().saturating_sub(interval_signed);
         (delay, interval_secs, cutoff_ts)
@@ -968,7 +1013,7 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
     let mut queued_stream_count = 0usize;
 
     for item in fpl.items() {
-        if !is_cluster_probe_enabled_for_target(target, item.header.xtream_cluster) {
+        if !is_cluster_probe_enabled_for_target(target, Some(opts), item.header.xtream_cluster) {
             continue;
         }
 
@@ -996,16 +1041,11 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
             }
         }
 
-        // For xtream-only targets, dedicated xtream resolve/probe processors handle non-live paths.
-        if xtream_only_output && matches!(input_type, InputType::Xtream | InputType::XtreamBatch) {
-            continue;
-        }
-
         if has_probe_details(&item) {
             continue;
         }
 
-        // For M3U, ID is provider id; for Library, ID is UUID.
+        // For M3U, ID is a provider id; for Library, ID is UUID.
         let unique_id = if input_type == InputType::Library {
             item.header.uuid.to_valid_uuid()
         } else {
@@ -1034,9 +1074,7 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
     }
 
     if queued_live_count > 0 || queued_stream_count > 0 {
-        info!(
-            "Queued probe tasks for input {input_name} (live_interval={queued_live_count}, generic={queued_stream_count})"
-        );
+        info!("Queued probe tasks for input {input_name} (live_interval={queued_live_count}, generic={queued_stream_count})");
     }
 }
 
@@ -1123,7 +1161,7 @@ pub async fn exec_processing(client: &reqwest::Client, app_config: Arc<AppConfig
                              update_guard: Option<UpdateGuard>, disabled_headers: Option<ReverseProxyDisabledHeaderConfig>,
                              provider_manager: Option<Arc<ActiveProviderManager>>,
                              metadata_manager: Option<Arc<MetadataUpdateManager>>) {
-        let _guard = if let Some(guard) = update_guard {
+    let _guard = if let Some(guard) = update_guard {
         if let Some(permit) = guard.try_playlist() {
             Some(permit)
         } else {

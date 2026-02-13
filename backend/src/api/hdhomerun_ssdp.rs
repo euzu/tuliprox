@@ -1,4 +1,4 @@
-use crate::model::{AppConfig, HdHomeRunDeviceConfig};
+use crate::model::{AppConfig, HdHomeRunDeviceConfig, HdHomeRunFlags};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket as StdUdpSocket};
 use std::sync::Arc;
@@ -61,7 +61,7 @@ async fn ssdp_task_loop(socket: UdpSocket, app_config: Arc<AppConfig>, server_ho
         trace!("Received HDHomeRun M-SEARCH from {remote_addr}");
         let hdhomerun_guard = app_config.hdhomerun.load();
         if let Some(hd_config) = &*hdhomerun_guard {
-            if hd_config.enabled {
+            if hd_config.flags.contains(HdHomeRunFlags::Enabled) {
                 for device in &hd_config.devices {
                     if device.t_enabled {
                         let response = create_ssdp_response(device, &server_host);

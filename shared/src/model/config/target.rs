@@ -8,7 +8,7 @@ use crate::utils::{is_true, is_false, default_as_true, default_resolve_delay_sec
                    is_default_resolve_delay_secs, is_zero_u16, is_config_target_options_empty, is_default_processing_order,
                    default_probe_live_interval, is_default_probe_live_interval};
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigTargetOptions {
     #[serde(default, skip_serializing_if = "is_false")]
@@ -19,9 +19,92 @@ pub struct ConfigTargetOptions {
     pub remove_duplicates: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub force_redirect: Option<ClusterFlags>,
+    #[serde(default = "default_as_true", alias = "resolve_background", skip_serializing)]
+    legacy_resolve_background: bool,
+    #[serde(default, alias = "resolve_series", skip_serializing)]
+    legacy_resolve_series: bool,
+    #[serde(default, alias = "resolve_vod", skip_serializing)]
+    legacy_resolve_vod: bool,
+    #[serde(default, alias = "probe_series", skip_serializing)]
+    legacy_probe_series: bool,
+    #[serde(default, alias = "probe_vod", skip_serializing)]
+    legacy_probe_vod: bool,
+    #[serde(default = "default_resolve_delay_secs", alias = "resolve_delay", skip_serializing)]
+    legacy_resolve_delay: u16,
+    #[serde(default, alias = "probe_live", alias = "resolve_live", skip_serializing)]
+    legacy_probe_live: bool,
+    #[serde(
+        default = "default_probe_live_interval",
+        alias = "probe_live_interval_hours",
+        alias = "resolve_live_interval_hours",
+        skip_serializing
+    )]
+    legacy_probe_live_interval_hours: u32,
+}
+
+impl Default for ConfigTargetOptions {
+    fn default() -> Self {
+        Self {
+            ignore_logo: false,
+            share_live_streams: false,
+            remove_duplicates: false,
+            force_redirect: None,
+            legacy_resolve_background: default_as_true(),
+            legacy_resolve_series: false,
+            legacy_resolve_vod: false,
+            legacy_probe_series: false,
+            legacy_probe_vod: false,
+            legacy_resolve_delay: default_resolve_delay_secs(),
+            legacy_probe_live: false,
+            legacy_probe_live_interval_hours: default_probe_live_interval(),
+        }
+    }
 }
 
 impl ConfigTargetOptions {
+    pub fn has_legacy_resolve_probe_options(&self) -> bool {
+        !self.legacy_resolve_background
+            || self.legacy_resolve_series
+            || self.legacy_resolve_vod
+            || self.legacy_probe_series
+            || self.legacy_probe_vod
+            || self.legacy_probe_live
+            || !is_default_resolve_delay_secs(&self.legacy_resolve_delay)
+            || !is_default_probe_live_interval(&self.legacy_probe_live_interval_hours)
+    }
+
+    pub fn legacy_resolve_background(&self) -> bool {
+        self.legacy_resolve_background
+    }
+
+    pub fn legacy_resolve_series(&self) -> bool {
+        self.legacy_resolve_series
+    }
+
+    pub fn legacy_resolve_vod(&self) -> bool {
+        self.legacy_resolve_vod
+    }
+
+    pub fn legacy_probe_series(&self) -> bool {
+        self.legacy_probe_series
+    }
+
+    pub fn legacy_probe_vod(&self) -> bool {
+        self.legacy_probe_vod
+    }
+
+    pub fn legacy_probe_live(&self) -> bool {
+        self.legacy_probe_live
+    }
+
+    pub fn legacy_resolve_delay(&self) -> u16 {
+        self.legacy_resolve_delay
+    }
+
+    pub fn legacy_probe_live_interval_hours(&self) -> u32 {
+        self.legacy_probe_live_interval_hours
+    }
+
     pub fn is_empty(&self) -> bool {
         !self.ignore_logo
         && !self.share_live_streams
@@ -40,26 +123,31 @@ pub struct XtreamTargetOutputDto {
     pub skip_video_direct_source: bool,
     #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
     pub skip_series_direct_source: bool,
-    #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
-    pub resolve_background: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub resolve_series: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub resolve_vod: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub probe_series: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub probe_vod: bool,
-    #[serde(default = "default_resolve_delay_secs", skip_serializing_if = "is_default_resolve_delay_secs")]
-    pub resolve_delay: u16,
-    #[serde(default, alias = "resolve_live", skip_serializing_if = "is_false")]
-    pub probe_live: bool,
-    #[serde(default = "default_probe_live_interval", alias = "resolve_live_interval_hours", skip_serializing_if = "is_default_probe_live_interval")]
-    pub probe_live_interval_hours: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trakt: Option<TraktConfigDto>,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub filter: Option<String>,
+    #[serde(default = "default_as_true", alias = "resolve_background", skip_serializing)]
+    legacy_resolve_background: bool,
+    #[serde(default, alias = "resolve_series", skip_serializing)]
+    legacy_resolve_series: bool,
+    #[serde(default, alias = "resolve_vod", skip_serializing)]
+    legacy_resolve_vod: bool,
+    #[serde(default, alias = "probe_series", skip_serializing)]
+    legacy_probe_series: bool,
+    #[serde(default, alias = "probe_vod", skip_serializing)]
+    legacy_probe_vod: bool,
+    #[serde(default, alias = "probe_live", alias = "resolve_live", skip_serializing)]
+    legacy_probe_live: bool,
+    #[serde(default = "default_resolve_delay_secs", alias = "resolve_delay", skip_serializing)]
+    legacy_resolve_delay: u16,
+    #[serde(
+        default = "default_probe_live_interval",
+        alias = "probe_live_interval_hours",
+        alias = "resolve_live_interval_hours",
+        skip_serializing
+    )]
+    legacy_probe_live_interval_hours: u32,
     #[serde(skip)]
     pub t_filter: Option<Filter>,
 }
@@ -70,16 +158,16 @@ impl Default for XtreamTargetOutputDto {
             skip_live_direct_source: default_as_true(),
             skip_video_direct_source: default_as_true(),
             skip_series_direct_source: default_as_true(),
-            resolve_background: default_as_true(),
-            resolve_series: false,
-            resolve_vod: false,
-            probe_series: false,
-            probe_vod: false,
-            resolve_delay: default_resolve_delay_secs(),
-            probe_live: false,
-            probe_live_interval_hours: default_probe_live_interval(),
             trakt: None,
             filter: None,
+            legacy_resolve_background: default_as_true(),
+            legacy_resolve_series: false,
+            legacy_resolve_vod: false,
+            legacy_probe_series: false,
+            legacy_probe_vod: false,
+            legacy_probe_live: false,
+            legacy_resolve_delay: default_resolve_delay_secs(),
+            legacy_probe_live_interval_hours: default_probe_live_interval(),
             t_filter: None,
         }
     }
@@ -100,14 +188,39 @@ impl XtreamTargetOutputDto {
         self.skip_live_direct_source
             || self.skip_video_direct_source
             || self.skip_series_direct_source
-            || self.resolve_background
-            || self.resolve_series
-            || self.resolve_vod
-            || self.probe_series
-            || self.probe_vod
-            || self.probe_live
             || self.trakt.is_some()
             || self.filter.is_some()
+    }
+
+    fn merge_legacy_resolve_probe_options(&self, options: &mut ConfigTargetOptions) {
+        if !options.legacy_resolve_series && self.legacy_resolve_series {
+            options.legacy_resolve_series = true;
+        }
+        if !options.legacy_resolve_vod && self.legacy_resolve_vod {
+            options.legacy_resolve_vod = true;
+        }
+        if !options.legacy_probe_series && self.legacy_probe_series {
+            options.legacy_probe_series = true;
+        }
+        if !options.legacy_probe_vod && self.legacy_probe_vod {
+            options.legacy_probe_vod = true;
+        }
+        if !options.legacy_probe_live && self.legacy_probe_live {
+            options.legacy_probe_live = true;
+        }
+        if options.legacy_resolve_background && !self.legacy_resolve_background {
+            options.legacy_resolve_background = false;
+        }
+        if is_default_resolve_delay_secs(&options.legacy_resolve_delay)
+            && !is_default_resolve_delay_secs(&self.legacy_resolve_delay)
+        {
+            options.legacy_resolve_delay = self.legacy_resolve_delay;
+        }
+        if is_default_probe_live_interval(&options.legacy_probe_live_interval_hours)
+            && !is_default_probe_live_interval(&self.legacy_probe_live_interval_hours)
+        {
+            options.legacy_probe_live_interval_hours = self.legacy_probe_live_interval_hours;
+        }
     }
 }
 
@@ -276,6 +389,25 @@ impl Default for ConfigTargetDto {
 }
 
 impl ConfigTargetDto {
+    fn merge_legacy_xtream_options(&mut self) {
+        let mut merged_options = self.options.clone().unwrap_or_default();
+        let initial_options = merged_options.clone();
+
+        for output in &self.output {
+            if let TargetOutputDto::Xtream(xtream) = output {
+                xtream.merge_legacy_resolve_probe_options(&mut merged_options);
+            }
+        }
+
+        if self.options.is_some() || merged_options != initial_options {
+            self.options = if merged_options.is_empty() && !merged_options.has_legacy_resolve_probe_options() {
+                None
+            } else {
+                Some(merged_options)
+            };
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     pub fn prepare(&mut self, id: u16, templates: Option<&Vec<PatternTemplate>>, hdhr_config: Option<&HdHomeRunDeviceOverview>) -> Result<(), TuliproxError> {
         self.id = id;
@@ -394,6 +526,8 @@ impl ConfigTargetDto {
                 }
             }
         }
+
+        self.merge_legacy_xtream_options();
 
         if let Some(favourites) = self.favourites.as_mut() {
             for favourite in favourites {

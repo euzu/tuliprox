@@ -1,4 +1,4 @@
-use crate::model::ConfigInput;
+use crate::model::{ConfigInput, ConfigInputFlags};
 use crate::model::XtreamCategory;
 use crate::utils::request::DynReader;
 use crate::utils::xtream::get_xtream_stream_url_base;
@@ -162,8 +162,13 @@ pub async fn parse_xtream(input: &ConfigInput,
                         channels: vec![],
                     };
 
-                    let (live_stream_use_prefix, live_stream_without_extension) = input.options.as_ref()
-                        .map_or((true, false), |o| (o.xtream_live_stream_use_prefix, o.xtream_live_stream_without_extension));
+                    let (live_stream_use_prefix, live_stream_without_extension) =
+                        input.options.as_ref().map_or((true, false), |o| {
+                            (
+                                o.flags.contains(ConfigInputFlags::XtreamLiveStreamUsePrefix),
+                                o.flags.contains(ConfigInputFlags::XtreamLiveStreamWithoutExtension),
+                            )
+                        });
 
                     // Re-implement the loop to add ordinal
                     let mut ord_counter: u32 = 1;
@@ -246,8 +251,15 @@ where
         let reader = tokio_util::io::SyncIoBridge::new(streams);
         let mut deserializer = serde_json::Deserializer::from_reader(reader);
 
-        let (live_stream_use_prefix, live_stream_without_extension) = options.as_ref()
-            .map_or((true, false), |o| (o.xtream_live_stream_use_prefix, o.xtream_live_stream_without_extension));
+        let (live_stream_use_prefix, live_stream_without_extension) = options.as_ref().map_or(
+            (true, false),
+            |o| {
+                (
+                    o.flags.contains(ConfigInputFlags::XtreamLiveStreamUsePrefix),
+                    o.flags.contains(ConfigInputFlags::XtreamLiveStreamWithoutExtension),
+                )
+            },
+        );
 
         let mut source_ordinal = 0u32;
 

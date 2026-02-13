@@ -1,5 +1,6 @@
 use shared::model::{HdHomeRunConfigDto, HdHomeRunDeviceConfigDto};
 use crate::model::macros;
+use shared::create_bitset;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HdHomeRunDeviceConfig {
@@ -41,24 +42,39 @@ impl From<&HdHomeRunDeviceConfigDto> for HdHomeRunDeviceConfig {
     }
 }
 
+create_bitset!(
+    u8,
+    HdHomeRunFlags,
+    Enabled,
+    Auth,
+    SsdpDiscovery,
+    ProprietaryDiscovery
+);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(clippy::struct_excessive_bools)]
 pub struct HdHomeRunConfig {
-    pub enabled: bool,
-    pub auth: bool,
-    pub ssdp_discovery: bool,
-    pub proprietary_discovery: bool,
+    pub flags: HdHomeRunFlagsSet,
     pub devices: Vec<HdHomeRunDeviceConfig>,
 }
 
 macros::from_impl!(HdHomeRunConfig);
 impl From<&HdHomeRunConfigDto> for HdHomeRunConfig {
     fn from(dto: &HdHomeRunConfigDto) -> Self {
+        let mut flags = HdHomeRunFlagsSet::new();
+        if dto.enabled {
+            flags.add(HdHomeRunFlags::Enabled);
+        }
+        if dto.auth {
+            flags.add(HdHomeRunFlags::Auth);
+        }
+        if dto.ssdp_discovery {
+            flags.add(HdHomeRunFlags::SsdpDiscovery);
+        }
+        if dto.proprietary_discovery {
+            flags.add(HdHomeRunFlags::ProprietaryDiscovery);
+        }
         Self {
-            enabled: dto.enabled,
-            auth: dto.auth,
-            ssdp_discovery: dto.ssdp_discovery,
-            proprietary_discovery: dto.proprietary_discovery,
+            flags,
             devices: dto.devices.iter().map(Into::into).collect(),
         }
     }

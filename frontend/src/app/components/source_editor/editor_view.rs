@@ -735,7 +735,7 @@ pub fn SourceEditor() -> Html {
                     if let Some(div) = editor_state.block_elements.get(block_id) {
                         if let Some(block) = editor_state.get_block(*block_id) {
                             let (x, y) = block.position;
-                            div.style().set_property("transform", &format!("translate({}px,{}px)", x + canvas_ox, y + canvas_oy)).unwrap();
+                            div.style().set_property("transform", &format!("translate3d({}px,{}px, 0)", x + canvas_ox, y + canvas_oy)).unwrap();
                         }
                     }
                 }

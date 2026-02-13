@@ -1,5 +1,5 @@
 use crate::model::{macros, ConfigApi, LibraryConfig, ReverseProxyConfig, ReverseProxyDisabledHeaderConfig, ScheduleConfig};
-use crate::model::{HdHomeRunConfig, IpCheckConfig, LogConfig, MessagingConfig, ProxyConfig, VideoConfig, WebUiConfig};
+use crate::model::{HdHomeRunConfig, HdHomeRunFlags, IpCheckConfig, LogConfig, MessagingConfig, ProxyConfig, VideoConfig, WebUiConfig};
 use crate::utils;
 use log::{error, info};
 use path_clean::PathClean;
@@ -146,7 +146,7 @@ impl Config {
     pub fn get_hdhr_device_overview(&self) -> Option<HdHomeRunDeviceOverview> {
         self.hdhomerun.as_ref().map(|hdhr|
             HdHomeRunDeviceOverview {
-                enabled: hdhr.enabled,
+                enabled: hdhr.flags.contains(HdHomeRunFlags::Enabled),
                 devices: hdhr.devices.iter().map(|d| d.name.clone()).collect::<Vec<String>>(),
             })
     }

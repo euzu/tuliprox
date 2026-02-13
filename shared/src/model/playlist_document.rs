@@ -2,7 +2,8 @@ use crate::utils::{arc_str_serde, arc_str_option_serde, arc_str_vec_serde, Inter
 use crate::model::info_doc_utils::InfoDocUtils;
 use crate::model::{
     LiveStreamProperties, SeriesStreamProperties, StreamProperties, VideoStreamProperties,
-    XtreamCluster, XtreamEmptyDoc, XtreamInfoDocument, XtreamMappingOptions, XtreamPlaylistItem,
+    XtreamCluster, XtreamEmptyDoc, XtreamInfoDocument, XtreamMappingFlags,
+    XtreamMappingOptions, XtreamPlaylistItem,
     XtreamSeriesInfoData, XtreamSeriesInfoDoc, XtreamVideoInfoData,
     XtreamVideoInfoDoc, XtreamVideoMovieData,
 };
@@ -268,7 +269,14 @@ impl XtreamPlaylistItem {
             category_ids: vec![self.category_id],
             container_extension: video.container_extension.clone(),
             custom_sid: video.custom_sid.clone(),
-            direct_source: if options.skip_video_direct_source { empty_str } else { video.direct_source.clone() },
+            direct_source: if options
+                .flags
+                .contains(XtreamMappingFlags::SkipVideoDirectSource)
+            {
+                empty_str
+            } else {
+                video.direct_source.clone()
+            },
         })
     }
 
@@ -289,7 +297,14 @@ impl XtreamPlaylistItem {
             category_ids: vec![self.category_id],
             custom_sid: live.custom_sid.clone(),
             tv_archive: live.tv_archive.unwrap_or_default(),
-            direct_source: if options.skip_live_direct_source { empty_str } else { live.direct_source.clone() },
+            direct_source: if options
+                .flags
+                .contains(XtreamMappingFlags::SkipLiveDirectSource)
+            {
+                empty_str
+            } else {
+                live.direct_source.clone()
+            },
             tv_archive_duration: live.tv_archive_duration.unwrap_or_default(),
         })
     }
@@ -382,4 +397,3 @@ pub enum XtreamDocument {
     Series(XtreamSeriesDoc),
     Episode(XtreamEmptyDoc),
 }
-

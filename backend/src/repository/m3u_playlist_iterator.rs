@@ -2,6 +2,7 @@ use shared::error::info_err;
 use shared::error::{TuliproxError};
 use crate::model::{AppConfig, ProxyUserCredentials};
 use crate::model::{ConfigTarget};
+use shared::create_bitset;
 use shared::model::{ConfigTargetOptions, M3uPlaylistItem, PlaylistItemType, ProxyType, TargetType, XtreamCluster};
 use crate::repository::{BPlusTreeQuery, PlaylistIteratorReader};
 use crate::repository::m3u_get_file_path_for_db;
@@ -14,21 +15,32 @@ use std::iter::Peekable;
 use log::error;
 use shared::utils::{extract_extension_from_url, Internable};
 
-#[allow(clippy::struct_excessive_bools)]
-pub struct M3uPlaylistIterator {
+create_bitset!(
+    u8,
+    M3uPlaylistIteratorFlags,
+    MaskRedirectUrl,
+    IncludeTypeInUrl,
+    RewriteResource
+);
+
+
+struct M3uPlaylistCursor {
     reader: Peekable<PlaylistIteratorReader<M3uPlaylistItem>>,
+    lookup_item: Option<M3uPlaylistItem>,
+}
+
+pub struct M3uPlaylistIterator {
+    cursor: Box<M3uPlaylistCursor>,
     base_url: String,
     username: String,
     password: String,
     target_options: Option<ConfigTargetOptions>,
-    mask_redirect_url: bool,
-    include_type_in_url: bool,
-    rewrite_resource: bool,
+    flags: M3uPlaylistIteratorFlagsSet,
     proxy_type: ProxyType,
     filter: Option<HashSet<String>>,
-    lookup_item: Option<(M3uPlaylistItem, bool)>,
     _file_lock: FileReadGuard,
 }
+
 
 impl M3uPlaylistIterator {
     pub async fn new(
@@ -66,21 +78,31 @@ impl M3uPlaylistIterator {
         }.peekable();
 
         let filter = user_get_bouquet_filter(&config, &user.username, None, TargetType::M3u, XtreamCluster::Live).await;
+        let mut flags = M3uPlaylistIteratorFlagsSet::new();
+        if m3u_output.include_type_in_url {
+            flags.add(M3uPlaylistIteratorFlags::IncludeTypeInUrl);
+        }
+        if m3u_output.mask_redirect_url {
+            flags.add(M3uPlaylistIteratorFlags::MaskRedirectUrl);
+        }
+        if cfg.is_reverse_proxy_resource_rewrite_enabled() {
+            flags.add(M3uPlaylistIteratorFlags::RewriteResource);
+        }
 
         let server_info = cfg.get_user_server_info(user);
         Ok(Self {
-            reader,
+            cursor: Box::new(M3uPlaylistCursor {
+                reader,
+                lookup_item: None,
+            }),
             base_url: server_info.get_base_url(),
             username: user.username.clone(),
             password: user.password.clone(),
             target_options: target.options.clone(),
-            include_type_in_url: m3u_output.include_type_in_url,
-            mask_redirect_url: m3u_output.mask_redirect_url,
+            flags,
             filter,
             proxy_type: user.proxy,
             _file_lock: file_lock, // Save lock inside struct
-            rewrite_resource: cfg.is_reverse_proxy_resource_rewrite_enabled(),
-            lookup_item: None,
         })
     }
 
@@ -150,26 +172,26 @@ impl M3uPlaylistIterator {
 
     fn get_next(&mut self) -> Option<(M3uPlaylistItem, bool)> {
         let entry = if let Some(set) = &self.filter {
-            if let Some((current_item, _)) = self.lookup_item.take() {
+            if let Some(current_item) = self.cursor.lookup_item.take() {
                 // Avoid cloning strings while filtering
-                let next_valid = Self::find_next_matching(&mut self.reader, set);
-                self.lookup_item = next_valid.map(|v| (v, true)); // has_next handled by iterator usually, but here we just need the item
-                let has_next = self.lookup_item.is_some();
+                let next_valid = Self::find_next_matching(&mut self.cursor.reader, set);
+                self.cursor.lookup_item = next_valid;
+                let has_next = self.cursor.lookup_item.is_some();
                 Some((current_item, has_next))
             } else {
-                let current_item = Self::find_next_matching(&mut self.reader, set);
+                let current_item = Self::find_next_matching(&mut self.cursor.reader, set);
                 if let Some(item) = current_item {
-                    self.lookup_item = Self::find_next_matching(&mut self.reader, set).map(|item| (item, true));
-                    let has_next = self.lookup_item.is_some();
+                    self.cursor.lookup_item = Self::find_next_matching(&mut self.cursor.reader, set);
+                    let has_next = self.cursor.lookup_item.is_some();
                     Some((item, has_next))
                 } else {
                     None
                 }
             }
         } else {
-            match self.reader.next() {
+            match self.cursor.reader.next() {
                 Some(Ok((_, v))) => {
-                    let has_next = matches!(self.reader.peek(), Some(Ok(_)));
+                    let has_next = matches!(self.cursor.reader.peek(), Some(Ok(_)));
                     Some((v, has_next))
                 },
                 Some(Err(e)) => {
@@ -188,11 +210,19 @@ impl M3uPlaylistIterator {
                     .as_ref()
                     .and_then(|o| o.force_redirect.as_ref())
                     .is_some_and(|f| f.has_cluster(m3u_pli.item_type));
-            let should_rewrite_urls = if is_redirect { self.mask_redirect_url } else { true };
+            let should_rewrite_urls = if is_redirect {
+                self.flags.contains(M3uPlaylistIteratorFlags::MaskRedirectUrl)
+            } else {
+                true
+            };
 
             if should_rewrite_urls {
-                let stream_url = self.get_stream_url(&m3u_pli, self.include_type_in_url);
-                let resource_url = if self.rewrite_resource {
+                let stream_url = self.get_stream_url(
+                    &m3u_pli,
+                    self.flags
+                        .contains(M3uPlaylistIteratorFlags::IncludeTypeInUrl),
+                );
+                let resource_url = if self.flags.contains(M3uPlaylistIteratorFlags::RewriteResource) {
                     Some(self.get_resource_url(&m3u_pli))
                 } else {
                     None

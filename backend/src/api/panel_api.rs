@@ -20,6 +20,7 @@ use log::{error, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use shared::concat_string;
+use shared::create_bitset;
 use shared::error::{info_err, info_err_res, TuliproxError};
 use shared::model::{
     ConfigInputAliasDto, InputType, PanelApiAliasPoolSizeValue,
@@ -328,45 +329,53 @@ fn validate_client_adult_content_params(
     Ok(())
 }
 
-#[allow(clippy::struct_excessive_bools)]
-#[derive(Debug, Clone, Copy)]
-struct PanelApiOptionalFlags {
-    account_info: bool,
-    client_new: bool,
-    client_renew: bool,
-    adult_content: bool,
-}
+create_bitset!(
+    u8,
+    PanelApiOptionalFlags,
+    AccountInfo,
+    ClientNew,
+    ClientRenew,
+    AdultContent
+);
 
 fn resolve_panel_api_optional_flags(
     cfg: &PanelApiConfig,
     input_name: &str,
-) -> PanelApiOptionalFlags {
-    let flags = PanelApiOptionalFlags {
-        account_info: !cfg.query_parameter.account_info.is_empty(),
-        client_new: !cfg.query_parameter.client_new.is_empty(),
-        client_renew: !cfg.query_parameter.client_renew.is_empty(),
-        adult_content: !cfg.query_parameter.client_adult_content.is_empty(),
-    };
+) -> PanelApiOptionalFlagsSet {
+    let mut flags = PanelApiOptionalFlagsSet::new();
+    if !cfg.query_parameter.account_info.is_empty() {
+        flags.add(PanelApiOptionalFlags::AccountInfo);
+    }
+    if !cfg.query_parameter.client_new.is_empty() {
+        flags.add(PanelApiOptionalFlags::ClientNew);
+    }
+    if !cfg.query_parameter.client_renew.is_empty() {
+        flags.add(PanelApiOptionalFlags::ClientRenew);
+    }
+    if !cfg.query_parameter.client_adult_content.is_empty() {
+        flags.add(PanelApiOptionalFlags::AdultContent);
+    }
+
     let name = sanitize_sensitive_info(input_name);
-    if !flags.client_renew {
+    if !flags.contains(PanelApiOptionalFlags::ClientRenew) {
         debug_if_enabled!(
             "panel_api request for client_renew disabled due to missing arguments for {}",
             name
         );
     }
-    if !flags.client_new {
+    if !flags.contains(PanelApiOptionalFlags::ClientNew) {
         debug_if_enabled!(
             "panel_api request for client_new disabled due to missing arguments for {}",
             name
         );
     }
-    if !flags.adult_content {
+    if !flags.contains(PanelApiOptionalFlags::AdultContent) {
         debug_if_enabled!(
             "panel_api request for client_adult_content disabled due to missing arguments for {}",
             name
         );
     }
-    if !flags.account_info {
+    if !flags.contains(PanelApiOptionalFlags::AccountInfo) {
         debug_if_enabled!(
             "panel_api request for account_info disabled due to missing arguments for {}",
             name
@@ -1798,12 +1807,12 @@ async fn try_renew_expired_account(
     is_batch: bool,
     sources_path: &Path,
     treat_missing_exp_date_as_expired: bool,
-    optional: PanelApiOptionalFlags,
+    optional: PanelApiOptionalFlagsSet,
 ) -> Option<PanelApiProvisionOutcome> {
-    if !optional.client_renew {
+    if !optional.contains(PanelApiOptionalFlags::ClientRenew) {
         return None;
     }
-    let adult_enabled = optional.adult_content;
+    let adult_enabled = optional.contains(PanelApiOptionalFlags::AdultContent);
     let mut candidates = collect_accounts(input);
     for acct in &mut candidates {
         if treat_missing_exp_date_as_expired && acct.exp_date.is_none() {
@@ -1937,12 +1946,12 @@ async fn try_create_new_account(
     panel_cfg: &PanelApiConfig,
     is_batch: bool,
     sources_path: &Path,
-    optional: PanelApiOptionalFlags,
+    optional: PanelApiOptionalFlagsSet,
 ) -> Option<PanelApiProvisionOutcome> {
-    if !optional.client_new {
+    if !optional.contains(PanelApiOptionalFlags::ClientNew) {
         return None;
     }
-    let adult_enabled = optional.adult_content;
+    let adult_enabled = optional.contains(PanelApiOptionalFlags::AdultContent);
     match panel_client_new(app_state, panel_cfg).await {
         Ok((username, password, base_url_from_resp)) => {
             let base_url = base_url_from_resp.unwrap_or_else(|| input.url.clone());
@@ -2154,15 +2163,15 @@ async fn ensure_alias_pool_min(
     sources_yml_patches: &mut Vec<SourcesYmlPatch>,
     time_ctx: Option<&PanelApiTimeContext>,
     effective_now: u64,
-    optional: PanelApiOptionalFlags,
+    optional: PanelApiOptionalFlagsSet,
 ) -> (bool, u16) {
     if min_pool == 0 {
         return (false, 0);
     }
 
-    let renew_enabled = optional.client_renew;
-    let new_enabled = optional.client_new;
-    let adult_enabled = optional.adult_content;
+    let renew_enabled = optional.contains(PanelApiOptionalFlags::ClientRenew);
+    let new_enabled = optional.contains(PanelApiOptionalFlags::ClientNew);
+    let adult_enabled = optional.contains(PanelApiOptionalFlags::AdultContent);
     if !renew_enabled && !new_enabled {
         return (false, 0);
     }
@@ -2620,9 +2629,9 @@ async fn sync_panel_api_for_input_on_boot(
         .unwrap_or(0);
 
     let min_pool = resolve_alias_pool_min(app_state.as_ref(), &input.name, panel_cfg);
-    let renew_enabled = optional.client_renew;
-    let new_enabled = optional.client_new;
-    let adult_enabled = optional.adult_content;
+    let renew_enabled = optional.contains(PanelApiOptionalFlags::ClientRenew);
+    let new_enabled = optional.contains(PanelApiOptionalFlags::ClientNew);
+    let adult_enabled = optional.contains(PanelApiOptionalFlags::AdultContent);
     let provisioning_enabled = renew_enabled || new_enabled;
     // Refresh/provision credentials on boot/update.
     // Root is handled first (may affect desired_aliases and avoids over-provisioning).
@@ -3592,7 +3601,7 @@ async fn sync_panel_api_for_input_on_boot(
         }
     }
 
-    if optional.account_info {
+    if optional.contains(PanelApiOptionalFlags::AccountInfo) {
         let creds = accounts
             .first()
             .map(|acct| (acct.username.as_str(), acct.password.as_str()));

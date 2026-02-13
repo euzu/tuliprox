@@ -12,6 +12,7 @@ use futures::{StreamExt, TryStreamExt};
 use log::{debug, log_enabled, warn};
 use reqwest::header::{HeaderMap, RANGE};
 use reqwest::StatusCode;
+use shared::create_bitset;
 use shared::model::{PlaylistItemType, DEFAULT_USER_AGENT};
 use shared::utils::{filter_request_header, sanitize_sensitive_info};
 use std::collections::HashMap;
@@ -26,21 +27,26 @@ use crate::api::model::streams::client_stream::ClientStream;
 const RETRY_SECONDS: u64 = 5;
 const ERR_MAX_RETRY_COUNT: u32 = 5;
 
-#[allow(clippy::struct_excessive_bools)]
+create_bitset!(
+    u8,
+    ProviderStreamFactoryFlags,
+    ReconnectEnabled,
+    BufferEnabled,
+    ShareStream,
+    PipeStream,
+    RangeRequested
+);
+
 #[derive(Debug, Clone)]
 pub struct ProviderStreamFactoryOptions {
     addr: SocketAddr,
     // item_type: PlaylistItemType,
-    reconnect_enabled: bool,
-    buffer_enabled: bool,
+    flags: ProviderStreamFactoryFlagsSet,
     buffer_size: usize,
-    share_stream: bool,
-    pipe_stream: bool,
     url: Url,
     headers: HeaderMap,
     default_user_agent: Option<axum::http::header::HeaderValue>,
     range_bytes: Arc<Option<AtomicUsize>>,
-    range_requested: bool,
     reconnect_flag: Arc<AtomicOnceFlag>,
     provider: Option<Arc<ConfigProvider>>,
 }
@@ -89,21 +95,33 @@ impl ProviderStreamFactoryOptions {
         } else {
             Arc::new(Some(AtomicUsize::new(requested_range.unwrap_or(0))))
         };
+        let mut flags = ProviderStreamFactoryFlagsSet::new();
+        if stream_options.stream_retry {
+            flags.add(ProviderStreamFactoryFlags::ReconnectEnabled);
+        }
+        if stream_options.pipe_provider_stream {
+            flags.add(ProviderStreamFactoryFlags::PipeStream);
+        }
+        if stream_options.buffer_enabled {
+            flags.add(ProviderStreamFactoryFlags::BufferEnabled);
+        }
+        if share_stream {
+            flags.add(ProviderStreamFactoryFlags::ShareStream);
+        }
+        if requested_range.is_some() {
+            flags.add(ProviderStreamFactoryFlags::RangeRequested);
+        }
 
         Self {
             // item_type,
             addr,
-            reconnect_enabled: stream_options.stream_retry,
-            pipe_stream: stream_options.pipe_provider_stream,
-            buffer_enabled: stream_options.buffer_enabled,
+            flags,
             buffer_size,
-            share_stream,
             reconnect_flag: Arc::new(AtomicOnceFlag::new()),
             url,
             headers,
             default_user_agent,
             range_bytes,
-            range_requested: requested_range.is_some(),
             provider: None,
         }
     }
@@ -118,17 +136,17 @@ impl ProviderStreamFactoryOptions {
 
     #[inline]
     fn is_piped(&self) -> bool {
-        self.pipe_stream
+        self.flags.contains(ProviderStreamFactoryFlags::PipeStream)
     }
 
     #[inline]
     fn is_buffer_enabled(&self) -> bool {
-        self.buffer_enabled
+        self.flags.contains(ProviderStreamFactoryFlags::BufferEnabled)
     }
 
     #[inline]
     fn is_shared_stream(&self) -> bool {
-        self.share_stream
+        self.flags.contains(ProviderStreamFactoryFlags::ShareStream)
     }
 
     #[inline]
@@ -158,7 +176,8 @@ impl ProviderStreamFactoryOptions {
 
     #[inline]
     pub fn should_reconnect(&self) -> bool {
-        self.reconnect_enabled
+        self.flags
+            .contains(ProviderStreamFactoryFlags::ReconnectEnabled)
     }
 
     #[inline]
@@ -190,7 +209,7 @@ impl ProviderStreamFactoryOptions {
 
     #[inline]
     pub fn was_range_requested(&self) -> bool {
-        self.range_requested
+        self.flags.contains(ProviderStreamFactoryFlags::RangeRequested)
     }
 
 }
@@ -612,9 +631,9 @@ pub async fn create_provider_stream(
         Ok(Some((init_stream, info))) => {
             let is_media_stream_or_not_piped = if let Some((headers, _, _, _custom_video_type)) = &info {
                 // if it is piped or no video stream, then we don't reconnect
-                !stream_options.pipe_stream && classify_content_type(headers) == MimeCategory::Video
+                !stream_options.is_piped() && classify_content_type(headers) == MimeCategory::Video
             } else {
-                !stream_options.pipe_stream // don't know what it is but lets assume it is something
+                !stream_options.is_piped() // don't know what it is but lets assume it is something
             };
 
             let continue_signal = stream_options.get_reconnect_flag_clone();

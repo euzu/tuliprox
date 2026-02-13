@@ -10,7 +10,7 @@ use crate::api::model::XtreamAuthorizationResponse;
 use crate::api::model::{create_custom_video_stream_response, CustomVideoStreamType};
 use crate::auth::Fingerprint;
 use crate::model::{xtream_mapping_option_from_target_options, ConfigTarget};
-use crate::model::{Config, ConfigInput};
+use crate::model::{Config, ConfigInput, ConfigInputFlags};
 use crate::model::{InputSource, ProxyUserCredentials};
 use crate::repository::get_target_storage_path;
 use crate::repository::storage_const;
@@ -156,7 +156,7 @@ pub(in crate::api) fn get_xtream_player_api_stream_url(
                 let use_prefix = input
                     .options
                     .as_ref()
-                    .is_none_or(|o| o.xtream_live_stream_use_prefix);
+                    .is_none_or(|o| o.flags.contains(ConfigInputFlags::XtreamLiveStreamUsePrefix));
                 String::from(if use_prefix { "live" } else { "" })
             }
             ApiStreamContext::Movie | ApiStreamContext::Series | ApiStreamContext::Timeshift => {
@@ -405,7 +405,7 @@ fn get_query_path(action_path: &str, stream_ext: Option<&String>, pli: &XtreamPl
     let discard_extension = if pli.item_type.is_live() {
         app_state.app_config.sources.load().get_input_by_name(&pli.input_name)
             .as_ref().and_then(|i| i.options.as_ref())
-            .is_some_and(|o| o.xtream_live_stream_without_extension)
+            .is_some_and(|o| o.flags.contains(ConfigInputFlags::XtreamLiveStreamWithoutExtension))
     } else {
         false
     };
@@ -1188,9 +1188,9 @@ async fn xtream_player_api(
                     let (l, v, s) = acc;
                     i.options.as_ref().map_or((false, false, false), |o| {
                         (
-                            l && o.xtream_skip_live,
-                            v && o.xtream_skip_vod,
-                            s && o.xtream_skip_series,
+                            l && o.flags.contains(ConfigInputFlags::XtreamSkipLive),
+                            v && o.flags.contains(ConfigInputFlags::XtreamSkipVod),
+                            s && o.flags.contains(ConfigInputFlags::XtreamSkipSeries),
                         )
                     })
                 })

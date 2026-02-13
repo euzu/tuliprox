@@ -2,6 +2,7 @@ use crate::model::{macros, ConfigProvider, EpgConfig, PanelApiConfig};
 use crate::repository::get_csv_file_path;
 use chrono::Utc;
 use log::warn;
+use shared::create_bitset;
 use shared::error::TuliproxError;
 use shared::model::{ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, InputFetchMethod, InputType, StagedInputDto};
 use shared::utils::{get_credentials_from_url, parse_provider_scheme_url_parts, sanitize_sensitive_info, Internable, PROVIDER_SCHEME_PREFIX};
@@ -14,29 +15,79 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use url::Url;
 
-#[allow(clippy::struct_excessive_bools)]
+create_bitset!(
+    u16,
+    ConfigInputFlags,
+    XtreamSkipLive,
+    XtreamSkipVod,
+    XtreamSkipSeries,
+    XtreamLiveStreamUsePrefix,
+    XtreamLiveStreamWithoutExtension,
+    ResolveTmdb,
+    ProbeStream,
+    ResolveBackground,
+    ResolveSeries,
+    ResolveVod,
+    ProbeSeries,
+    ProbeVod,
+    ProbeLive
+);
+
 #[derive(Debug, Clone)]
 pub struct ConfigInputOptions {
-    pub xtream_skip_live: bool,
-    pub xtream_skip_vod: bool,
-    pub xtream_skip_series: bool,
-    pub xtream_live_stream_use_prefix: bool,
-    pub xtream_live_stream_without_extension: bool,
-    pub resolve_tmdb: bool,
-    pub probe_stream: bool,
+    pub flags: ConfigInputFlagsSet,
+    pub resolve_delay: u16,
+    pub probe_live_interval_hours: u32,
 }
 
 macros::from_impl!(ConfigInputOptions);
 impl From<&ConfigInputOptionsDto> for ConfigInputOptions {
     fn from(dto: &ConfigInputOptionsDto) -> Self {
+        let mut flags = ConfigInputFlagsSet::new();
+        if dto.xtream_skip_live {
+            flags.add(ConfigInputFlags::XtreamSkipLive);
+        }
+        if dto.xtream_skip_vod {
+            flags.add(ConfigInputFlags::XtreamSkipVod);
+        }
+        if dto.xtream_skip_series {
+            flags.add(ConfigInputFlags::XtreamSkipSeries);
+        }
+        if dto.xtream_live_stream_use_prefix {
+            flags.add(ConfigInputFlags::XtreamLiveStreamUsePrefix);
+        }
+        if dto.xtream_live_stream_without_extension {
+            flags.add(ConfigInputFlags::XtreamLiveStreamWithoutExtension);
+        }
+        if dto.resolve_tmdb {
+            flags.add(ConfigInputFlags::ResolveTmdb);
+        }
+        if dto.probe_stream {
+            flags.add(ConfigInputFlags::ProbeStream);
+        }
+        if dto.resolve_background {
+            flags.add(ConfigInputFlags::ResolveBackground);
+        }
+        if dto.resolve_series {
+            flags.add(ConfigInputFlags::ResolveSeries);
+        }
+        if dto.resolve_vod {
+            flags.add(ConfigInputFlags::ResolveVod);
+        }
+        if dto.probe_series {
+            flags.add(ConfigInputFlags::ProbeSeries);
+        }
+        if dto.probe_vod {
+            flags.add(ConfigInputFlags::ProbeVod);
+        }
+        if dto.probe_live {
+            flags.add(ConfigInputFlags::ProbeLive);
+        }
+
         Self {
-            xtream_skip_live: dto.xtream_skip_live,
-            xtream_skip_vod: dto.xtream_skip_vod,
-            xtream_skip_series: dto.xtream_skip_series,
-            xtream_live_stream_use_prefix: dto.xtream_live_stream_use_prefix,
-            xtream_live_stream_without_extension: dto.xtream_live_stream_without_extension,
-            resolve_tmdb: dto.resolve_tmdb,
-            probe_stream: dto.probe_stream,
+            flags,
+            resolve_delay: dto.resolve_delay,
+            probe_live_interval_hours: dto.probe_live_interval_hours,
         }
     }
 }

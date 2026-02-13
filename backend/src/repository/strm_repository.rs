@@ -1,5 +1,5 @@
 use crate::model::{ApiProxyServerInfo, AppConfig, ProxyUserCredentials};
-use crate::model::{ConfigTarget, StrmTargetOutput};
+use crate::model::{ConfigTarget, StrmTargetFlags, StrmTargetOutput};
 use crate::repository::storage::ensure_target_storage_path;
 use crate::repository::storage_const;
 use crate::utils::{async_file_reader, async_file_writer, normalize_string_path, truncate_filename,
@@ -688,17 +688,29 @@ fn prepare_strm_files(
                 &strm_item_info,
                 pli.get_tmdb_id(),
                 strm_target_output.style,
-                strm_target_output.underscore_whitespace,
-                strm_target_output.flat,
+                strm_target_output
+                    .flags
+                    .contains(StrmTargetFlags::UnderscoreWhitespace),
+                strm_target_output.flags.contains(StrmTargetFlags::Flat),
                 &mut flat_dedup_paths,
             );
 
             // Conditionally generate the quality string based on the new config flag
-            let separator = if strm_target_output.underscore_whitespace { "_" } else { " " };
+            let separator = if strm_target_output
+                .flags
+                .contains(StrmTargetFlags::UnderscoreWhitespace)
+            {
+                "_"
+            } else {
+                " "
+            };
             let quality_string = get_quality(strm_target_output, pli, separator);
             
             // Add category suffix for flat movie structure to avoid collisions
-            let category_suffix = if strm_target_output.flat && pli.get_tmdb_id().is_some() && pli.header.item_type == PlaylistItemType::Video {
+            let category_suffix = if strm_target_output.flags.contains(StrmTargetFlags::Flat)
+                && pli.get_tmdb_id().is_some()
+                && pli.header.item_type == PlaylistItemType::Video
+            {
                 let cat = sanitize_for_filename(&strm_item_info.group, false);
                 format!("{separator}[{cat}]")
             } else { 
@@ -726,7 +738,14 @@ fn prepare_strm_files(
     if !collisions.is_empty() {
         // This separator is specifically for the multi-version naming convention.
         let version_separator = " ";
-        let separator = if strm_target_output.underscore_whitespace { "_" } else { " " };
+        let separator = if strm_target_output
+            .flags
+            .contains(StrmTargetFlags::UnderscoreWhitespace)
+        {
+            "_"
+        } else {
+            " "
+        };
 
         for s in &mut result {
             {
@@ -750,7 +769,10 @@ fn prepare_strm_files(
 }
 
 fn get_quality(strm_target_output: &StrmTargetOutput, pli: &PlaylistItem, separator: &str) -> String {
-    if strm_target_output.add_quality_to_filename {
+    if strm_target_output
+        .flags
+        .contains(StrmTargetFlags::AddQualityToFilename)
+    {
         // Use `additional_properties` which are populated by metadata_update_manager/probe
         let (audio, video) = match pli.header.additional_properties.as_ref() {
             None => (None, None),
@@ -867,7 +889,13 @@ pub async fn write_strm_playlist(
     }
 
     if let Err(err) =
-        cleanup_strm_output_directory(target_output.cleanup, &root_path, &existing_strm, &processed_strm).await
+        cleanup_strm_output_directory(
+            target_output.flags.contains(StrmTargetFlags::Cleanup),
+            &root_path,
+            &existing_strm,
+            &processed_strm,
+        )
+        .await
     {
         failed.push(err);
     }

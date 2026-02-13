@@ -3,7 +3,7 @@ use crate::api::endpoints::api_playlist_utils::{get_playlist_for_custom_provider
 use crate::api::endpoints::extract_accept_header::ExtractAcceptHeader;
 use crate::api::model::AppState;
 use crate::auth::create_access_token;
-use crate::model::{parse_xmltv_for_web_ui_from_url, ConfigInput, ConfigInputOptions};
+use crate::model::{parse_xmltv_for_web_ui_from_url, ConfigInput, ConfigInputFlags, ConfigInputFlagsSet, ConfigInputOptions};
 use axum::response::IntoResponse;
 use axum::{Router};
 use log::{debug, error};
@@ -25,13 +25,12 @@ fn create_config_input_for_m3u(url: &str) -> ConfigInput {
         url: String::from(url),
         enabled: true,
         options: Some(ConfigInputOptions {
-            xtream_skip_live: false,
-            xtream_skip_vod: false,
-            xtream_skip_series: false,
-            xtream_live_stream_without_extension: false,
-            xtream_live_stream_use_prefix: true,
-            resolve_tmdb: false,
-            probe_stream: false,
+            flags: ConfigInputFlagsSet::from_variants(&[
+                ConfigInputFlags::XtreamLiveStreamUsePrefix,
+                ConfigInputFlags::ResolveBackground,
+            ]),
+            resolve_delay: 2,
+            probe_live_interval_hours: 120,
         }),
         ..Default::default()
     }
@@ -47,13 +46,12 @@ fn create_config_input_for_xtream(username: &str, password: &str, host: &str) ->
         password: Some(String::from(password)),
         enabled: true,
         options: Some(ConfigInputOptions {
-            xtream_skip_live: false,
-            xtream_skip_vod: false,
-            xtream_skip_series: false,
-            xtream_live_stream_without_extension: false,
-            xtream_live_stream_use_prefix: true,
-            resolve_tmdb: false,
-            probe_stream: false,
+            flags: ConfigInputFlagsSet::from_variants(&[
+                ConfigInputFlags::XtreamLiveStreamUsePrefix,
+                ConfigInputFlags::ResolveBackground,
+            ]),
+            resolve_delay: 2,
+            probe_live_interval_hours: 120,
         }),
         ..Default::default()
     }

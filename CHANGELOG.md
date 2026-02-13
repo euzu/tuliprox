@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased
+
+## ⚠️ Breaking Changes
+- !BREAKING CHANGE! Xtream metadata/probe options were moved from target configuration to input configuration.
+  - Moved to `inputs[].options`: `resolve_background`, `resolve_series`, `resolve_vod`, `probe_series`, `probe_vod`, `probe_live`, `probe_live_interval_hours`, `resolve_delay`.
+  - Old target-level locations (`target.options` / `output[type=xtream]`) are legacy-only and should be migrated.
+
+## 🧭 Migration
+```yaml
+# before
+targets:
+  - name: my_target
+    options:
+      resolve_background: true
+      resolve_delay: 2
+    output:
+      - type: xtream
+        resolve_series: true
+        resolve_vod: true
+        probe_live: true
+
+# after
+inputs:
+  - name: my_xtream_input
+    type: xtream
+    options:
+      resolve_background: true
+      resolve_delay: 2
+      resolve_series: true
+      resolve_vod: true
+      probe_live: true
+```
+
 
 ## 3.3.0 (2026-01-03)
 

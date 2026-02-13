@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use shared::error::{TuliproxError};
-use crate::model::{AppConfig, ConfigInput};
+use crate::model::{AppConfig, ConfigInput, ConfigInputFlags};
 use shared::model::{LiveStreamProperties, StreamProperties, XtreamCluster, XtreamPlaylistItem};
 use crate::repository::{get_input_storage_path, persist_input_live_info, BPlusTreeQuery, xtream_get_file_path};
 use crate::utils::{debug_if_enabled};
@@ -72,8 +72,8 @@ pub async fn update_live_stream_metadata(
     let username = input.username.as_deref().unwrap_or("");
     let password = input.password.as_deref().unwrap_or("");
     let opts = input.options.as_ref();
-    let use_prefix = opts.is_none_or(|o| o.xtream_live_stream_use_prefix);
-    let no_ext = opts.is_some_and(|o| o.xtream_live_stream_without_extension);
+    let use_prefix = opts.is_none_or(|o| o.flags.contains(ConfigInputFlags::XtreamLiveStreamUsePrefix));
+    let no_ext = opts.is_some_and(|o| o.flags.contains(ConfigInputFlags::XtreamLiveStreamWithoutExtension));
 
     // We generate the URL to probe directly on the provider
     let stream_url = create_xtream_url(

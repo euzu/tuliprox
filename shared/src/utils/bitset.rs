@@ -1,5 +1,5 @@
 #[macro_export]
-macro_rules! create_bit_set {
+macro_rules! create_bitset {
     ($storage:ty, $enum_name:ident, $($variant:ident),*) => {
         paste::paste! {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]

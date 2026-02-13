@@ -1,6 +1,7 @@
 use crate::model::UUIDType;
 use crate::model::{xtream_const, ClusterFlags, CommonPlaylistItem, ConfigTargetOptions, EpisodeStreamProperties,
                    SeriesStreamProperties, StreamProperties, VideoStreamProperties, XtreamInfoDocument};
+use crate::create_bitset;
 use crate::utils::{arc_str_option_serde, arc_str_serde, extract_extension_from_url, generate_playlist_uuid,
                    get_provider_id, Internable};
 use enum_iterator::Sequence;
@@ -635,12 +636,17 @@ impl From<M3uPlaylistItem> for CommonPlaylistItem {
     }
 }
 
-#[allow(clippy::struct_excessive_bools)]
+create_bitset!(
+    u8,
+    XtreamMappingFlags,
+    SkipLiveDirectSource,
+    SkipVideoDirectSource,
+    SkipSeriesDirectSource,
+    RewriteResourceUrl
+);
+
 pub struct XtreamMappingOptions {
-    pub skip_live_direct_source: bool,
-    pub skip_video_direct_source: bool,
-    pub skip_series_direct_source: bool,
-    pub rewrite_resource_url: bool,
+    pub flags: XtreamMappingFlagsSet,
     pub force_redirect: Option<ClusterFlags>,
     pub reverse_item_types: PlaylistItemTypeSet,
     pub username: String,
@@ -656,7 +662,10 @@ impl XtreamMappingOptions {
 
     pub fn get_resource_url(&self, xtream_cluster: XtreamCluster, item_type: PlaylistItemType, virtual_id: VirtualId) -> Option<String> {
         let is_reverse = self.is_reverse(item_type);
-        let resource_url = if is_reverse && self.rewrite_resource_url && self.base_url.is_some() {
+        let resource_url = if is_reverse
+            && self.flags.contains(XtreamMappingFlags::RewriteResourceUrl)
+            && self.base_url.is_some()
+        {
             let resource_url = format!("{}/resource/{}/{}/{}/{}", self.base_url.as_ref().map_or_else(String::new, |b| b.clone()),
                                        xtream_cluster.as_stream_type(), self.username, self.password, virtual_id);
             Some(resource_url)

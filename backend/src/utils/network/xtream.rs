@@ -1,7 +1,7 @@
 use crate::api::model::AppState;
 use crate::messaging::send_message;
 use crate::model::{is_input_expired, xtream_mapping_option_from_target_options, AppConfig,
-                   ConfigInput, ConfigTarget, MessageContent, XtreamLoginInfo, XtreamTargetOutput};
+                   ConfigInput, ConfigInputFlags, ConfigTarget, MessageContent, XtreamLoginInfo, XtreamTargetOutput};
 use crate::model::{InputSource, ProxyUserCredentials};
 use crate::processing::parser::xtream;
 use crate::processing::parser::xtream::parse_xtream_series_info;
@@ -246,13 +246,13 @@ fn xtream_resolve_stream_info(app_state: &Arc<AppState>, user: &ProxyUserCredent
 fn get_skip_cluster(input: &ConfigInput) -> Vec<XtreamCluster> {
     let mut skip_cluster = vec![];
     if let Some(input_options) = &input.options {
-        if input_options.xtream_skip_live {
+        if input_options.flags.contains(ConfigInputFlags::XtreamSkipLive) {
             skip_cluster.push(XtreamCluster::Live);
         }
-        if input_options.xtream_skip_vod {
+        if input_options.flags.contains(ConfigInputFlags::XtreamSkipVod) {
             skip_cluster.push(XtreamCluster::Video);
         }
-        if input_options.xtream_skip_series {
+        if input_options.flags.contains(ConfigInputFlags::XtreamSkipSeries) {
             skip_cluster.push(XtreamCluster::Series);
         }
     }

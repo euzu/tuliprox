@@ -1,7 +1,7 @@
 use crate::api::model::{ActiveProviderManager, ProviderHandle};
 use crate::api::model::{ResolveReason, ResolveReasonSet, UpdateTask, ProviderIdType};
 use crate::library::MetadataResolver;
-use crate::model::ConfigInput;
+use crate::model::{ConfigInput, ConfigInputFlags};
 use crate::model::FetchedPlaylist;
 use crate::model::InputSource;
 use crate::model::{AppConfig, ConfigTarget};
@@ -130,7 +130,11 @@ async fn playlist_resolve_vod_info(
         true
     };
 
-    let resolve_tmdb_enabled = fpl.input.options.as_ref().is_some_and(|o| o.resolve_tmdb);
+    let resolve_tmdb_enabled = fpl
+        .input
+        .options
+        .as_ref()
+        .is_some_and(|o| o.flags.contains(ConfigInputFlags::ResolveTmdb));
 
     if resolve_options.flags.contains(ResolveOptionsFlags::Background) && ctx.metadata_manager.is_some() {
         queue_background_vod_info(
@@ -441,7 +445,7 @@ pub async fn update_vod_metadata(
 
     // Check if we should skip based on input options
     let opts = input.options.as_ref();
-    if opts.is_some_and(|o| o.xtream_skip_vod) {
+    if opts.is_some_and(|o| o.flags.contains(ConfigInputFlags::XtreamSkipVod)) {
         return Ok(None);
     }
 
@@ -548,7 +552,10 @@ pub async fn update_vod_metadata(
     // Now it's safe to unwrap because we handled the None case above
     let mut properties = props.unwrap();
 
-    let resolve_tmdb_enabled = input.options.as_ref().is_some_and(|o| o.resolve_tmdb);
+    let resolve_tmdb_enabled = input
+        .options
+        .as_ref()
+        .is_some_and(|o| o.flags.contains(ConfigInputFlags::ResolveTmdb));
 
     // 2. Resolve TMDB/Date if missing and explicitly enabled for this input
     let missing_tmdb = properties.tmdb.is_none();

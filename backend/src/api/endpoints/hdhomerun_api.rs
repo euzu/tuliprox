@@ -1,7 +1,7 @@
 use crate::api::api_utils::{try_unwrap_body, internal_server_error};
 use crate::api::model::HdHomerunAppState;
 use crate::auth::AuthBasic;
-use crate::model::{AppConfig, ConfigTarget, ProxyUserCredentials};
+use crate::model::{AppConfig, ConfigInputFlags, ConfigTarget, ProxyUserCredentials};
 use crate::utils::arc_str_serde;
 use crate::processing::parser::xtream::get_xtream_url;
 use crate::repository::{iter_raw_m3u_target_playlist, M3uPlaylistIterator};
@@ -108,8 +108,8 @@ where
                     .as_ref()
                     .map_or((true, false), |o| {
                         (
-                            o.xtream_live_stream_use_prefix,
-                            o.xtream_live_stream_without_extension,
+                            o.flags.contains(ConfigInputFlags::XtreamLiveStreamUsePrefix),
+                            o.flags.contains(ConfigInputFlags::XtreamLiveStreamWithoutExtension),
                         )
                     });
                 let container_extension = item.get_container_extension();

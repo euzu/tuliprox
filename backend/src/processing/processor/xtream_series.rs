@@ -3,7 +3,7 @@ use crate::api::model::{ActiveProviderManager, ProviderHandle, ProviderIdType, R
 use crate::library::MetadataResolver;
 use crate::model::FetchedPlaylist;
 use crate::model::{AppConfig, ConfigTarget};
-use crate::model::{ConfigInput, InputSource};
+use crate::model::{ConfigInput, ConfigInputFlags, InputSource};
 use crate::processing::parser::xtream::create_xtream_series_episode_url;
 use crate::processing::parser::xtream::parse_xtream_series_info;
 use crate::processing::processor::playlist::{PlaylistProcessingContext, ProcessingPipe};
@@ -81,7 +81,11 @@ async fn playlist_resolve_series_info(ctx: &PlaylistProcessingContext,
     // Skip if nothing to do
     let skip_resolve = !resolve_options.flags.contains(ResolveOptionsFlags::Resolve) && !do_probe && !resolve_options.flags.contains(ResolveOptionsFlags::TmdbMissing);
 
-    let resolve_tmdb_enabled = fpl.input.options.as_ref().is_some_and(|o| o.resolve_tmdb);
+    let resolve_tmdb_enabled = fpl
+        .input
+        .options
+        .as_ref()
+        .is_some_and(|o| o.flags.contains(ConfigInputFlags::ResolveTmdb));
 
     let groups_to_add = if resolve_options.flags.contains(ResolveOptionsFlags::Background) && ctx.metadata_manager.is_some() {
         queue_background_series_info(
@@ -511,7 +515,7 @@ pub async fn update_series_metadata(
         .map_err(|e| shared::error::info_err!("Storage path error: {e}"))?;
 
     let opts = input.options.as_ref();
-    if opts.is_some_and(|o| o.xtream_skip_series) {
+    if opts.is_some_and(|o| o.flags.contains(ConfigInputFlags::XtreamSkipSeries)) {
         return Ok(None);
     }
 
@@ -600,7 +604,10 @@ pub async fn update_series_metadata(
 
     let mut properties = props.unwrap();
 
-    let resolve_tmdb_enabled = input.options.as_ref().is_some_and(|o| o.resolve_tmdb);
+    let resolve_tmdb_enabled = input
+        .options
+        .as_ref()
+        .is_some_and(|o| o.flags.contains(ConfigInputFlags::ResolveTmdb));
 
     // 2. Resolve TMDB/Date if missing
     if resolve_tmdb_enabled && (properties.tmdb.is_none() || properties.release_date.is_none()) && !properties.name.is_empty() {
