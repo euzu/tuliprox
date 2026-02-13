@@ -1,11 +1,13 @@
+use crate::app::components::config::config_page::{ConfigForm, LABEL_MAIN_CONFIG};
+use crate::app::components::config::config_view_context::ConfigViewContext;
+use crate::app::context::ConfigContext;
+use crate::{
+    config_field, config_field_bool, config_field_optional, edit_field_bool, edit_field_number,
+    edit_field_number_option_u32, edit_field_text, edit_field_text_option, generate_form_reducer,
+};
+use shared::model::MainConfigDto;
 use yew::prelude::*;
 use yew_i18n::use_translation;
-use shared::model::MainConfigDto;
-use crate::app::context::ConfigContext;
-use crate::app::components::config::config_view_context::ConfigViewContext;
-use crate::app::components::config::config_page::{ConfigForm, LABEL_MAIN_CONFIG};
-use crate::{config_field_optional, config_field_bool, config_field, edit_field_text_option, edit_field_bool,
-            generate_form_reducer, edit_field_number, edit_field_number_option_u32, edit_field_text};
 
 const LABEL_UPDATE_ON_BOOT: &str = "LABEL.UPDATE_ON_BOOT";
 const LABEL_CONFIG_HOT_RELOAD: &str = "LABEL.CONFIG_HOT_RELOAD";
@@ -49,8 +51,9 @@ pub fn MainConfigView() -> Html {
     let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");
     let config_view_ctx = use_context::<ConfigViewContext>().expect("ConfigViewContext not found");
 
-    let form_state: UseReducerHandle<MainConfigFormState> = use_reducer(|| {
-        MainConfigFormState { form: MainConfigDto::default(), modified: false }
+    let form_state: UseReducerHandle<MainConfigFormState> = use_reducer(|| MainConfigFormState {
+        form: MainConfigDto::default(),
+        modified: false,
     });
 
     {
@@ -64,15 +67,18 @@ pub fn MainConfigView() -> Html {
     {
         let form_state = form_state.clone();
         let config = config_ctx.config.as_ref().map(|c| c.config.clone());
-        use_effect_with((config, config_view_ctx.edit_mode.clone()), move |(cfg, _mode)| {
-            if let Some(main) = cfg {
-                let main_config =  MainConfigDto::from(main);
-                form_state.dispatch(MainConfigFormAction::SetAll(main_config.clone()));
-            } else {
-                form_state.dispatch(MainConfigFormAction::SetAll(MainConfigDto::default()));
-            }
-            || ()
-        });
+        use_effect_with(
+            (config, config_view_ctx.edit_mode.clone()),
+            move |(cfg, _mode)| {
+                if let Some(main) = cfg {
+                    let main_config = MainConfigDto::from(main);
+                    form_state.dispatch(MainConfigFormAction::SetAll(main_config.clone()));
+                } else {
+                    form_state.dispatch(MainConfigFormAction::SetAll(MainConfigDto::default()));
+                }
+                || ()
+            },
+        );
     }
 
     let render_view_mode = || {
@@ -96,23 +102,25 @@ pub fn MainConfigView() -> Html {
         }
     };
 
-    let render_edit_mode = || html! {
-        <>
-            { edit_field_bool!(form_state, translate.t(LABEL_UPDATE_ON_BOOT), update_on_boot, MainConfigFormAction::UpdateOnBoot) }
-            { edit_field_bool!(form_state, translate.t(LABEL_CONFIG_HOT_RELOAD), config_hot_reload, MainConfigFormAction::ConfigHotReload) }
-            { edit_field_bool!(form_state, translate.t(LABEL_USER_ACCESS_CONTROL), user_access_control, MainConfigFormAction::UserAccessControl) }
-            { edit_field_bool!(form_state, translate.t(LABEL_ACCEPT_INSECURE_SSL_CERTIFICATES), accept_insecure_ssl_certificates, MainConfigFormAction::AcceptInsecureSslCertificates) }
-            { edit_field_bool!(form_state, translate.t(LABEL_PROCESS_PARALLEL), process_parallel, MainConfigFormAction::ProcessParallel) }
-            { edit_field_bool!(form_state, translate.t(LABEL_DISK_BASED_PROCESSING), disk_based_processing, MainConfigFormAction::DiskBasedProcessing) }
-            { edit_field_text!(form_state, translate.t(LABEL_WORKING_DIR), working_dir, MainConfigFormAction::WorkingDir) }
-            { edit_field_text_option!(form_state, translate.t(LABEL_DEFAULT_USER_AGENT), default_user_agent, MainConfigFormAction::DefaultUserAgent) }
-            { edit_field_text_option!(form_state, translate.t(LABEL_MAPPING_PATH), mapping_path, MainConfigFormAction::MappingPath) }
-            { edit_field_text_option!(form_state, translate.t(LABEL_BACKUP_DIR), backup_dir, MainConfigFormAction::BackupDir) }
-            { edit_field_text_option!(form_state, translate.t(LABEL_USER_CONFIG_DIR), user_config_dir, MainConfigFormAction::UserConfigDir) }
-            { edit_field_number_option_u32!(form_state, translate.t(LABEL_SLEEP_TIMER_MINS), sleep_timer_mins, MainConfigFormAction::SleepTimerMins) }
-            { edit_field_number!(form_state, translate.t(LABEL_CONNECT_TIMEOUT_SECS), connect_timeout_secs, MainConfigFormAction::ConnectTimeoutSecs) }
-            { edit_field_text_option!(form_state, translate.t(LABEL_CUSTOM_STREAM_RESPONSE_PATH), custom_stream_response_path, MainConfigFormAction::CustomStreamResponsePath) }
-        </>
+    let render_edit_mode = || {
+        html! {
+            <>
+                { edit_field_bool!(form_state, translate.t(LABEL_UPDATE_ON_BOOT), update_on_boot, MainConfigFormAction::UpdateOnBoot) }
+                { edit_field_bool!(form_state, translate.t(LABEL_CONFIG_HOT_RELOAD), config_hot_reload, MainConfigFormAction::ConfigHotReload) }
+                { edit_field_bool!(form_state, translate.t(LABEL_USER_ACCESS_CONTROL), user_access_control, MainConfigFormAction::UserAccessControl) }
+                { edit_field_bool!(form_state, translate.t(LABEL_ACCEPT_INSECURE_SSL_CERTIFICATES), accept_insecure_ssl_certificates, MainConfigFormAction::AcceptInsecureSslCertificates) }
+                { edit_field_bool!(form_state, translate.t(LABEL_PROCESS_PARALLEL), process_parallel, MainConfigFormAction::ProcessParallel) }
+                { edit_field_bool!(form_state, translate.t(LABEL_DISK_BASED_PROCESSING), disk_based_processing, MainConfigFormAction::DiskBasedProcessing) }
+                { edit_field_text!(form_state, translate.t(LABEL_WORKING_DIR), working_dir, MainConfigFormAction::WorkingDir) }
+                { edit_field_text_option!(form_state, translate.t(LABEL_DEFAULT_USER_AGENT), default_user_agent, MainConfigFormAction::DefaultUserAgent) }
+                { edit_field_text_option!(form_state, translate.t(LABEL_MAPPING_PATH), mapping_path, MainConfigFormAction::MappingPath) }
+                { edit_field_text_option!(form_state, translate.t(LABEL_BACKUP_DIR), backup_dir, MainConfigFormAction::BackupDir) }
+                { edit_field_text_option!(form_state, translate.t(LABEL_USER_CONFIG_DIR), user_config_dir, MainConfigFormAction::UserConfigDir) }
+                { edit_field_number_option_u32!(form_state, translate.t(LABEL_SLEEP_TIMER_MINS), sleep_timer_mins, MainConfigFormAction::SleepTimerMins) }
+                { edit_field_number!(form_state, translate.t(LABEL_CONNECT_TIMEOUT_SECS), connect_timeout_secs, MainConfigFormAction::ConnectTimeoutSecs) }
+                { edit_field_text_option!(form_state, translate.t(LABEL_CUSTOM_STREAM_RESPONSE_PATH), custom_stream_response_path, MainConfigFormAction::CustomStreamResponsePath) }
+            </>
+        }
     };
 
     html! {

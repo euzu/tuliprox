@@ -1,8 +1,11 @@
+use crate::app::components::{Card, CollapsePanel, TextButton};
+use crate::{
+    config_field, edit_field_number_u16, edit_field_number_u8, edit_field_text,
+    generate_form_reducer, html_if,
+};
+use shared::model::HdHomeRunDeviceConfigDto;
 use yew::prelude::*;
 use yew_i18n::use_translation;
-use shared::model::{HdHomeRunDeviceConfigDto};
-use crate::app::components::{Card, CollapsePanel, TextButton};
-use crate::{config_field, edit_field_number_u16, edit_field_number_u8, edit_field_text, generate_form_reducer, html_if};
 
 generate_form_reducer!(
     state: HdHomeRunDeviceConfigFormState { form: Box<HdHomeRunDeviceConfigDto> },
@@ -36,9 +39,11 @@ pub struct HdHomerunDeviceViewProps {
 pub fn HdHomerunDeviceView(props: &HdHomerunDeviceViewProps) -> Html {
     let translate = use_translation();
 
-    let form_state: UseReducerHandle<HdHomeRunDeviceConfigFormState> = use_reducer(|| {
-        HdHomeRunDeviceConfigFormState { form: Box::new(props.device.clone()), modified: false }
-    });
+    let form_state: UseReducerHandle<HdHomeRunDeviceConfigFormState> =
+        use_reducer(|| HdHomeRunDeviceConfigFormState {
+            form: Box::new(props.device.clone()),
+            modified: false,
+        });
 
     {
         let on_form_change = props.on_form_change.clone();

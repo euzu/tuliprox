@@ -1,15 +1,24 @@
 use crate::app::components::config::HasFormData;
 use crate::app::components::select::Select;
-use crate::app::components::{BlockId, BlockInstance, Card, DropDownOption, DropDownSelection, EditMode, FilterInput, IconButton, Panel, SourceEditorContext, TextButton};
-use crate::{config_field_child, edit_field_bool, edit_field_list_option, edit_field_text, edit_field_text_option, generate_form_reducer};
+use crate::app::components::{
+    BlockId, BlockInstance, Card, DropDownOption, DropDownSelection, EditMode, FilterInput,
+    IconButton, Panel, SourceEditorContext, TextButton,
+};
+use crate::{
+    config_field_child, edit_field_bool, edit_field_list_option, edit_field_text,
+    edit_field_text_option, generate_form_reducer,
+};
+use shared::error::TuliproxError;
+use shared::info_err_res;
 use shared::model::{StrmExportStyle, StrmTargetOutputDto, TargetOutputDto};
 use std::fmt::Display;
 use std::rc::Rc;
 use std::str::FromStr;
-use yew::{function_component, html, use_context, use_effect_with, use_memo, use_reducer, use_state, Callback, Html, Properties, UseReducerHandle};
+use yew::{
+    function_component, html, use_context, use_effect_with, use_memo, use_reducer, use_state,
+    Callback, Html, Properties, UseReducerHandle,
+};
 use yew_i18n::use_translation;
-use shared::error::TuliproxError;
-use shared::info_err_res;
 
 const LABEL_DIRECTORY: &str = "LABEL.DIRECTORY";
 const LABEL_USERNAME: &str = "LABEL.USERNAME";
@@ -30,7 +39,6 @@ enum StrmFormPage {
     Options,
 }
 
-
 impl StrmFormPage {
     const MAIN: &str = "Main";
     const OPTIONS: &str = "Options";
@@ -48,13 +56,16 @@ impl FromStr for StrmFormPage {
     }
 }
 
-
 impl Display for StrmFormPage {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", match *self {
-            StrmFormPage::Main => Self::MAIN,
-            StrmFormPage::Options => Self::OPTIONS,
-        })
+        write!(
+            f,
+            "{}",
+            match *self {
+                StrmFormPage::Main => Self::MAIN,
+                StrmFormPage::Options => Self::OPTIONS,
+            }
+        )
     }
 }
 
@@ -83,7 +94,8 @@ pub struct StrmTargetOutputViewProps {
 #[function_component]
 pub fn StrmTargetOutputView(props: &StrmTargetOutputViewProps) -> Html {
     let translate = use_translation();
-    let source_editor_ctx = use_context::<SourceEditorContext>().expect("SourceEditorContext not found");
+    let source_editor_ctx =
+        use_context::<SourceEditorContext>().expect("SourceEditorContext not found");
 
     let output_form_state: UseReducerHandle<StrmTargetOutputFormState> =
         use_reducer(|| StrmTargetOutputFormState {
@@ -110,12 +122,13 @@ pub fn StrmTargetOutputView(props: &StrmTargetOutputViewProps) -> Html {
             StrmExportStyle::Emby,
             StrmExportStyle::Jellyfin,
         ]
-            .iter()
-            .map(|s| DropDownOption {
-                id: s.to_string(),
-                label: html! { s.to_string() },
-                selected: *s == default_style,
-            }).collect::<Vec<DropDownOption>>()
+        .iter()
+        .map(|s| DropDownOption {
+            id: s.to_string(),
+            label: html! { s.to_string() },
+            selected: *s == default_style,
+        })
+        .collect::<Vec<DropDownOption>>()
     });
 
     {
@@ -124,9 +137,12 @@ pub fn StrmTargetOutputView(props: &StrmTargetOutputViewProps) -> Html {
 
         use_effect_with(config_output, move |cfg| {
             if let Some(output) = cfg {
-                output_form_state.dispatch(StrmTargetOutputFormAction::SetAll(output.as_ref().clone()));
+                output_form_state
+                    .dispatch(StrmTargetOutputFormAction::SetAll(output.as_ref().clone()));
             } else {
-                output_form_state.dispatch(StrmTargetOutputFormAction::SetAll(StrmTargetOutputDto::default()));
+                output_form_state.dispatch(StrmTargetOutputFormAction::SetAll(
+                    StrmTargetOutputDto::default(),
+                ));
             }
             || ()
         });
@@ -216,7 +232,10 @@ pub fn StrmTargetOutputView(props: &StrmTargetOutputViewProps) -> Html {
         let block_id = props.block_id;
         Callback::from(move |_| {
             let output = output_form_state.data().clone();
-            source_editor_ctx.on_form_change.emit((block_id, BlockInstance::Output(Rc::new(TargetOutputDto::Strm(output)))));
+            source_editor_ctx.on_form_change.emit((
+                block_id,
+                BlockInstance::Output(Rc::new(TargetOutputDto::Strm(output))),
+            ));
             source_editor_ctx.edit_mode.set(EditMode::Inactive);
         })
     };

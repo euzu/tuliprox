@@ -1,20 +1,19 @@
-use log::error;
-use yew::prelude::*;
-use yew_i18n::use_translation;
-use shared::model::{HdHomeRunDeviceConfigDto, HdHomeRunConfigDto};
+use crate::app::components::config::config_page::{ConfigForm, LABEL_HDHOMERUN_CONFIG};
+use crate::app::components::config::config_view_context::ConfigViewContext;
+use crate::app::components::config::hdhomerun_device_view::HdHomerunDeviceView;
 use crate::app::components::{Card, NoContent, TextButton};
 use crate::app::context::ConfigContext;
 use crate::{config_field_bool, edit_field_bool, generate_form_reducer, html_if};
-use crate::app::components::config::config_page::{ConfigForm, LABEL_HDHOMERUN_CONFIG};
-use crate::app::components::config::hdhomerun_device_view::{HdHomerunDeviceView};
-use crate::app::components::config::config_view_context::ConfigViewContext;
+use log::error;
+use shared::model::{HdHomeRunConfigDto, HdHomeRunDeviceConfigDto};
+use yew::prelude::*;
+use yew_i18n::use_translation;
 
 const LABEL_ENABLED: &str = "LABEL.ENABLED";
 const LABEL_DEVICE_AUTH: &str = "LABEL.DEVICE_AUTH";
-const LABEL_DEVICES: &str ="LABEL.DEVICES";
-const LABEL_SSDP_DISCOVERY: &str ="LABEL.SSDP_DISCOVERY";
-const LABEL_PROPRIETARY_DISCOVERY: &str ="LABEL.PROPRIETARY_DISCOVERY";
-
+const LABEL_DEVICES: &str = "LABEL.DEVICES";
+const LABEL_SSDP_DISCOVERY: &str = "LABEL.SSDP_DISCOVERY";
+const LABEL_PROPRIETARY_DISCOVERY: &str = "LABEL.PROPRIETARY_DISCOVERY";
 
 generate_form_reducer!(
     state: HdHomeRunConfigFormState { form: HdHomeRunConfigDto },
@@ -34,9 +33,11 @@ pub fn HdHomerunConfigView() -> Html {
     let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");
     let config_view_ctx = use_context::<ConfigViewContext>().expect("ConfigViewContext not found");
 
-    let form_state: UseReducerHandle<HdHomeRunConfigFormState> = use_reducer(|| {
-        HdHomeRunConfigFormState { form: HdHomeRunConfigDto::default(), modified: false }
-    });
+    let form_state: UseReducerHandle<HdHomeRunConfigFormState> =
+        use_reducer(|| HdHomeRunConfigFormState {
+            form: HdHomeRunConfigDto::default(),
+            modified: false,
+        });
 
     {
         let on_form_change = config_view_ctx.on_form_change.clone();
@@ -53,14 +54,19 @@ pub fn HdHomerunConfigView() -> Html {
             .as_ref()
             .and_then(|c| c.config.hdhomerun.clone());
 
-        use_effect_with((hdhr_config, config_view_ctx.edit_mode.clone()), move |(hdhr_cfg, _mode)| {
-            if let Some(hdhr) = hdhr_cfg {
-                form_state.dispatch(HdHomeRunConfigFormAction::SetAll((*hdhr).clone()));
-            } else {
-                form_state.dispatch(HdHomeRunConfigFormAction::SetAll(HdHomeRunConfigDto::default()));
-            }
-            || ()
-        });
+        use_effect_with(
+            (hdhr_config, config_view_ctx.edit_mode.clone()),
+            move |(hdhr_cfg, _mode)| {
+                if let Some(hdhr) = hdhr_cfg {
+                    form_state.dispatch(HdHomeRunConfigFormAction::SetAll((*hdhr).clone()));
+                } else {
+                    form_state.dispatch(HdHomeRunConfigFormAction::SetAll(
+                        HdHomeRunConfigDto::default(),
+                    ));
+                }
+                || ()
+            },
+        );
     }
 
     let handle_device_change = {
@@ -79,10 +85,7 @@ pub fn HdHomerunConfigView() -> Html {
         Callback::from(move |_| {
             let mut devices = form_state.form.devices.clone();
             let mut new_device = HdHomeRunDeviceConfigDto::default();
-            let next_port = devices.iter()
-                .map(|d| d.port)
-                .max()
-                .unwrap_or(8901) + 1;
+            let next_port = devices.iter().map(|d| d.port).max().unwrap_or(8901) + 1;
             new_device.port = next_port;
             new_device.name = format!("hdhr_{next_port}");
             if let Err(err) = new_device.prepare(devices.len() as u8, false) {
@@ -96,10 +99,10 @@ pub fn HdHomerunConfigView() -> Html {
     let handle_remove_device = {
         let form_state = form_state.clone();
         Callback::from(move |device_idx| {
-          let mut devices = form_state.form.devices.clone();
-          devices.remove(device_idx);
-          form_state.dispatch(HdHomeRunConfigFormAction::Devices(devices));
-      })
+            let mut devices = form_state.form.devices.clone();
+            devices.remove(device_idx);
+            form_state.dispatch(HdHomeRunConfigFormAction::Devices(devices));
+        })
     };
 
     let render_empty = || {
@@ -119,7 +122,7 @@ pub fn HdHomerunConfigView() -> Html {
         if devices.is_empty() {
             render_empty()
         } else {
-            html!{ for devices.iter().enumerate().map(|(idx, entry)| html! {
+            html! { for devices.iter().enumerate().map(|(idx, entry)| html! {
                 <HdHomerunDeviceView key={entry.port.to_string()} device_id={idx} device={entry.clone()}
                 edit_mode={edit_mode} on_form_change={handle_device_change.clone()} on_remove={handle_remove_device.clone()}/>
             })}

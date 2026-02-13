@@ -53,10 +53,12 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
             if !*block_sidebar_toggle {
                 let current = *collapsed;
                 let next = match current {
-                    CollapseState::AutoCollapsed
-                    | CollapseState::ManualCollapsed => CollapseState::ManualExpanded,
-                    CollapseState::AutoExpanded
-                    | CollapseState::ManualExpanded => CollapseState::ManualCollapsed,
+                    CollapseState::AutoCollapsed | CollapseState::ManualCollapsed => {
+                        CollapseState::ManualExpanded
+                    }
+                    CollapseState::AutoExpanded | CollapseState::ManualExpanded => {
+                        CollapseState::ManualCollapsed
+                    }
                 };
                 if current != next {
                     collapsed.set(next);
@@ -76,8 +78,7 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                 let is_mobile = inner_width.as_f64().unwrap_or(0.0) < 720.0;
 
                 match *collapsed {
-                    CollapseState::AutoExpanded
-                    | CollapseState::ManualExpanded => {
+                    CollapseState::AutoExpanded | CollapseState::ManualExpanded => {
                         if is_mobile {
                             collapsed.set(CollapseState::AutoCollapsed);
                         }
@@ -124,7 +125,10 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
             // Cleanup
             move || {
                 if let Some(closure) = callback_handle.borrow_mut().take() {
-                    let _ = window.remove_event_listener_with_callback("resize", closure.as_ref().unchecked_ref());
+                    let _ = window.remove_event_listener_with_callback(
+                        "resize",
+                        closure.as_ref().unchecked_ref(),
+                    );
                 }
             }
         });

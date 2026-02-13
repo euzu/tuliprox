@@ -1,7 +1,10 @@
+use crate::model::WebConfig;
+use crate::services::{
+    AuthService, ConfigService, EventService, PlaylistService, StatusService, StreamsService,
+    ToastrService, UserApiService, UserService, WebSocketService,
+};
 use std::rc::Rc;
 use yew::prelude::*;
-use crate::model::WebConfig;
-use crate::services::{AuthService, ConfigService, EventService, PlaylistService, StatusService, StreamsService, ToastrService, UserApiService, UserService, WebSocketService};
 
 pub struct Services {
     pub auth: Rc<AuthService>,
@@ -38,7 +41,7 @@ impl Services {
             user,
             user_api,
             toastr,
-            websocket
+            websocket,
         }
     }
 }
@@ -59,16 +62,18 @@ pub struct ServiceContext {
 impl ServiceContext {
     pub fn new(config: &WebConfig) -> Self {
         Self {
-            services: Rc::new(Services::new(config))
+            services: Rc::new(Services::new(config)),
         }
     }
 
-    pub fn services(&self) ->  Rc<Services> {
-            self.services.clone()
+    pub fn services(&self) -> Rc<Services> {
+        self.services.clone()
     }
 }
 
 #[hook]
 pub fn use_service_context() -> Rc<Services> {
-    use_context::<UseStateHandle<ServiceContext>>().expect("Services context not found").services()
+    use_context::<UseStateHandle<ServiceContext>>()
+        .expect("Services context not found")
+        .services()
 }

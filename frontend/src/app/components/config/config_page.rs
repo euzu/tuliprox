@@ -1,5 +1,9 @@
-use shared::error::{TuliproxError, info_err_res};
-use shared::model::{ApiProxyConfigDto, ConfigApiDto, HdHomeRunConfigDto, IpCheckConfigDto, LibraryConfigDto, LogConfigDto, MainConfigDto, MessagingConfigDto, ProxyConfigDto, ReverseProxyConfigDto, SchedulesConfigDto, SourcesConfigDto, VideoConfigDto, WebUiConfigDto};
+use shared::error::{info_err_res, TuliproxError};
+use shared::model::{
+    ApiProxyConfigDto, ConfigApiDto, HdHomeRunConfigDto, IpCheckConfigDto, LibraryConfigDto,
+    LogConfigDto, MainConfigDto, MessagingConfigDto, ProxyConfigDto, ReverseProxyConfigDto,
+    SchedulesConfigDto, SourcesConfigDto, VideoConfigDto, WebUiConfigDto,
+};
 use std::fmt;
 use std::str::FromStr;
 
@@ -112,19 +116,22 @@ pub enum ConfigForm {
 
 impl ConfigForm {
     pub(crate) fn is_modified(&self) -> bool {
-        matches!(self, ConfigForm::Main(true, _)
-              | ConfigForm::Api(true, _)
-              | ConfigForm::ApiProxy(true, _)
-              | ConfigForm::Log(true, _)
-              | ConfigForm::Schedules(true, _)
-              | ConfigForm::Video(true, _)
-              | ConfigForm::Messaging(true, _)
-              | ConfigForm::WebUi(true, _)
-              | ConfigForm::ReverseProxy(true, _)
-              | ConfigForm::HdHomerun(true, _)
-              | ConfigForm::Proxy(true, _)
-              | ConfigForm::IpCheck(true, _)
-              | ConfigForm::Panel(true, _)
-              | ConfigForm::Library(true, _))
+        matches!(
+            self,
+            ConfigForm::Main(true, _)
+                | ConfigForm::Api(true, _)
+                | ConfigForm::ApiProxy(true, _)
+                | ConfigForm::Log(true, _)
+                | ConfigForm::Schedules(true, _)
+                | ConfigForm::Video(true, _)
+                | ConfigForm::Messaging(true, _)
+                | ConfigForm::WebUi(true, _)
+                | ConfigForm::ReverseProxy(true, _)
+                | ConfigForm::HdHomerun(true, _)
+                | ConfigForm::Proxy(true, _)
+                | ConfigForm::IpCheck(true, _)
+                | ConfigForm::Panel(true, _)
+                | ConfigForm::Library(true, _)
+        )
     }
 }

@@ -11,10 +11,10 @@ use shared::model::{
     ConfigInputDto, PanelApiAliasPoolAuto, PanelApiAliasPoolSizeDto, PanelApiAliasPoolSizeValue,
     PanelApiConfigDto, PanelApiProvisioningMethod, PanelApiQueryParamDto, SourcesConfigDto,
 };
+use shared::utils::Internable;
 use std::rc::Rc;
 use yew::prelude::*;
 use yew_i18n::use_translation;
-use shared::utils::Internable;
 
 const LABEL_ENABLED: &str = "LABEL.ENABLED";
 const LABEL_URL: &str = "LABEL.URL";
@@ -416,10 +416,7 @@ impl Reducible for PanelConfigFormState {
                 modified: false,
             }
             .into(),
-            PanelConfigFormAction::SetEnabled {
-                input_idx,
-                enabled,
-            } => {
+            PanelConfigFormAction::SetEnabled { input_idx, enabled } => {
                 let mut form = self.form.clone();
                 with_input_mut(&mut form, input_idx, |input| {
                     if enabled {
@@ -437,10 +434,7 @@ impl Reducible for PanelConfigFormState {
                 }
                 .into()
             }
-            PanelConfigFormAction::SetPanelUrl {
-                input_idx,
-                url,
-            } => {
+            PanelConfigFormAction::SetPanelUrl { input_idx, url } => {
                 let mut form = self.form.clone();
                 with_input_mut(&mut form, input_idx, |input| {
                     let panel = input
@@ -454,10 +448,7 @@ impl Reducible for PanelConfigFormState {
                 }
                 .into()
             }
-            PanelConfigFormAction::SetApiKey {
-                input_idx,
-                api_key,
-            } => {
+            PanelConfigFormAction::SetApiKey { input_idx, api_key } => {
                 let mut form = self.form.clone();
                 with_input_mut(&mut form, input_idx, |input| {
                     let panel = input
@@ -526,10 +517,7 @@ impl Reducible for PanelConfigFormState {
                 }
                 .into()
             }
-            PanelConfigFormAction::SetProvisioningMethod {
-                input_idx,
-                method,
-            } => {
+            PanelConfigFormAction::SetProvisioningMethod { input_idx, method } => {
                 let mut form = self.form.clone();
                 with_input_mut(&mut form, input_idx, |input| {
                     let panel = input
@@ -543,10 +531,7 @@ impl Reducible for PanelConfigFormState {
                 }
                 .into()
             }
-            PanelConfigFormAction::SetProvisioningOffset {
-                input_idx,
-                offset,
-            } => {
+            PanelConfigFormAction::SetProvisioningOffset { input_idx, offset } => {
                 let mut form = self.form.clone();
                 with_input_mut(&mut form, input_idx, |input| {
                     let panel = input
@@ -565,10 +550,7 @@ impl Reducible for PanelConfigFormState {
                 }
                 .into()
             }
-            PanelConfigFormAction::SetAliasPoolMin {
-                input_idx,
-                value,
-            } => {
+            PanelConfigFormAction::SetAliasPoolMin { input_idx, value } => {
                 let mut form = self.form.clone();
                 with_input_mut(&mut form, input_idx, |input| {
                     let panel = input
@@ -584,10 +566,7 @@ impl Reducible for PanelConfigFormState {
                 }
                 .into()
             }
-            PanelConfigFormAction::SetAliasPoolMax {
-                input_idx,
-                value,
-            } => {
+            PanelConfigFormAction::SetAliasPoolMax { input_idx, value } => {
                 let mut form = self.form.clone();
                 with_input_mut(&mut form, input_idx, |input| {
                     let panel = input
@@ -621,10 +600,7 @@ impl Reducible for PanelConfigFormState {
                 }
                 .into()
             }
-            PanelConfigFormAction::AddParam {
-                input_idx,
-                section,
-            } => {
+            PanelConfigFormAction::AddParam { input_idx, section } => {
                 let mut form = self.form.clone();
                 with_input_mut(&mut form, input_idx, |input| {
                     let panel = input
@@ -700,10 +676,7 @@ impl Reducible for PanelConfigFormState {
                 }
                 .into()
             }
-            PanelConfigFormAction::EnsureRequired {
-                input_idx,
-                section,
-            } => {
+            PanelConfigFormAction::EnsureRequired { input_idx, section } => {
                 let mut form = self.form.clone();
                 with_input_mut(&mut form, input_idx, |input| {
                     let panel = input
@@ -733,10 +706,7 @@ fn render_param_editor(
         let form_state = form_state.clone();
         Callback::from(move |(name, _): (String, MouseEvent)| {
             if name == "required" {
-                form_state.dispatch(PanelConfigFormAction::EnsureRequired {
-                    input_idx,
-                    section,
-                });
+                form_state.dispatch(PanelConfigFormAction::EnsureRequired { input_idx, section });
             }
         })
     };
@@ -745,10 +715,7 @@ fn render_param_editor(
         let form_state = form_state.clone();
         Callback::from(move |(name, _): (String, MouseEvent)| {
             if name == "add" {
-                form_state.dispatch(PanelConfigFormAction::AddParam {
-                    input_idx,
-                    section,
-                });
+                form_state.dispatch(PanelConfigFormAction::AddParam { input_idx, section });
             }
         })
     };
@@ -875,10 +842,7 @@ pub fn PanelConfigView() -> Html {
         let on_toggle = {
             let form_state = form_state.clone();
             Callback::from(move |enabled: bool| {
-                form_state.dispatch(PanelConfigFormAction::SetEnabled {
-                    input_idx,
-                    enabled,
-                });
+                form_state.dispatch(PanelConfigFormAction::SetEnabled { input_idx, enabled });
             })
         };
 

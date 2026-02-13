@@ -1,11 +1,15 @@
+use crate::app::components::config::config_page::{ConfigForm, LABEL_WEB_UI_CONFIG};
+use crate::app::components::config::config_view_context::ConfigViewContext;
 use crate::app::components::{AppIcon, Card, Chip};
 use crate::app::context::ConfigContext;
-use crate::app::components::config::config_view_context::ConfigViewContext;
-use crate::app::components::config::config_page::{ConfigForm, LABEL_WEB_UI_CONFIG};
-use crate::{config_field, config_field_bool, config_field_child, config_field_hide, config_field_optional, edit_field_bool, edit_field_list_option, edit_field_number, edit_field_number_u64, edit_field_text, edit_field_text_option, generate_form_reducer, html_if};
+use crate::{
+    config_field, config_field_bool, config_field_child, config_field_hide, config_field_optional,
+    edit_field_bool, edit_field_list_option, edit_field_number, edit_field_number_u64,
+    edit_field_text, edit_field_text_option, generate_form_reducer, html_if,
+};
+use shared::model::{ContentSecurityPolicyConfigDto, WebAuthConfigDto, WebUiConfigDto};
 use yew::prelude::*;
 use yew_i18n::use_translation;
-use shared::model::{WebUiConfigDto, ContentSecurityPolicyConfigDto, WebAuthConfigDto};
 
 // Labels
 const LABEL_AUTH: &str = "LABEL.AUTH";
@@ -62,14 +66,19 @@ pub fn WebUiConfigView() -> Html {
     let config_view_ctx = use_context::<ConfigViewContext>().expect("ConfigViewContext not found");
 
     // Local form states
-    let webui_state: UseReducerHandle<WebUiConfigFormState> = use_reducer(|| {
-        WebUiConfigFormState { form: WebUiConfigDto::default(), modified: false }
-    });
-    let auth_state: UseReducerHandle<WebUiAuthConfigFormState> = use_reducer(|| {
-        WebUiAuthConfigFormState { form: WebAuthConfigDto::default(), modified: false }
-    });
-    let csp_state: UseReducerHandle<CspConfigFormState> = use_reducer(|| {
-        CspConfigFormState { form: ContentSecurityPolicyConfigDto::default(), modified: false }
+    let webui_state: UseReducerHandle<WebUiConfigFormState> =
+        use_reducer(|| WebUiConfigFormState {
+            form: WebUiConfigDto::default(),
+            modified: false,
+        });
+    let auth_state: UseReducerHandle<WebUiAuthConfigFormState> =
+        use_reducer(|| WebUiAuthConfigFormState {
+            form: WebAuthConfigDto::default(),
+            modified: false,
+        });
+    let csp_state: UseReducerHandle<CspConfigFormState> = use_reducer(|| CspConfigFormState {
+        form: ContentSecurityPolicyConfigDto::default(),
+        modified: false,
     });
 
     // Notify parent when form changes
@@ -78,9 +87,15 @@ pub fn WebUiConfigView() -> Html {
         let webui_state = webui_state.clone();
         let auth_state = auth_state.clone();
         let csp_state = csp_state.clone();
-        let deps = (webui_state.modified, auth_state.modified, csp_state.modified, webui_state, auth_state, csp_state);
-        use_effect_with(deps,
-                        move |(wm, am, cm, w, a, c)| {
+        let deps = (
+            webui_state.modified,
+            auth_state.modified,
+            csp_state.modified,
+            webui_state,
+            auth_state,
+            csp_state,
+        );
+        use_effect_with(deps, move |(wm, am, cm, w, a, c)| {
             let mut form = w.form.clone();
             form.auth = Some(a.form.clone());
             form.content_security_policy = Some(c.form.clone());
@@ -96,28 +111,41 @@ pub fn WebUiConfigView() -> Html {
         let auth_state = auth_state.clone();
         let csp_state = csp_state.clone();
 
-        let webui_cfg = config_ctx.config.as_ref().and_then(|c| c.config.web_ui.clone());
-        use_effect_with((webui_cfg, config_view_ctx.edit_mode.clone()), move |(cfg, _mode)| {
-            if let Some(webui) = cfg {
-                webui_state.dispatch(WebUiConfigFormAction::SetAll((*webui).clone()));
-                if let Some(auth) = &webui.auth {
-                    auth_state.dispatch(WebUiAuthConfigFormAction::SetAll(auth.clone()));
+        let webui_cfg = config_ctx
+            .config
+            .as_ref()
+            .and_then(|c| c.config.web_ui.clone());
+        use_effect_with(
+            (webui_cfg, config_view_ctx.edit_mode.clone()),
+            move |(cfg, _mode)| {
+                if let Some(webui) = cfg {
+                    webui_state.dispatch(WebUiConfigFormAction::SetAll((*webui).clone()));
+                    if let Some(auth) = &webui.auth {
+                        auth_state.dispatch(WebUiAuthConfigFormAction::SetAll(auth.clone()));
+                    } else {
+                        auth_state.dispatch(WebUiAuthConfigFormAction::SetAll(
+                            WebAuthConfigDto::default(),
+                        ));
+                    }
+                    if let Some(csp) = &webui.content_security_policy {
+                        csp_state.dispatch(CspConfigFormAction::SetAll(csp.clone()));
+                    } else {
+                        csp_state.dispatch(CspConfigFormAction::SetAll(
+                            ContentSecurityPolicyConfigDto::default(),
+                        ));
+                    }
                 } else {
-                    auth_state.dispatch(WebUiAuthConfigFormAction::SetAll(WebAuthConfigDto::default()));
+                    webui_state.dispatch(WebUiConfigFormAction::SetAll(WebUiConfigDto::default()));
+                    auth_state.dispatch(WebUiAuthConfigFormAction::SetAll(
+                        WebAuthConfigDto::default(),
+                    ));
+                    csp_state.dispatch(CspConfigFormAction::SetAll(
+                        ContentSecurityPolicyConfigDto::default(),
+                    ));
                 }
-                if let Some(csp) = &webui.content_security_policy {
-                    csp_state.dispatch(CspConfigFormAction::SetAll(csp.clone()));
-                } else {
-                    csp_state.dispatch(CspConfigFormAction::SetAll(ContentSecurityPolicyConfigDto::default()));
-                }
-
-            } else {
-                webui_state.dispatch(WebUiConfigFormAction::SetAll(WebUiConfigDto::default()));
-                auth_state.dispatch(WebUiAuthConfigFormAction::SetAll(WebAuthConfigDto::default()));
-                csp_state.dispatch(CspConfigFormAction::SetAll(ContentSecurityPolicyConfigDto::default()));
-            }
-            || ()
-        });
+                || ()
+            },
+        );
     }
 
     // View mode

@@ -19,7 +19,6 @@ impl Default for EventService {
     }
 }
 
-
 impl EventService {
     pub fn new() -> Self {
         Self {
@@ -34,10 +33,11 @@ impl EventService {
         self.block_config_updated_message.load(Ordering::Relaxed)
     }
 
-    pub fn set_config_change_message_blocked(&self, value: bool)  {
+    pub fn set_config_change_message_blocked(&self, value: bool) {
         if value {
             // Re-block and bump epoch to invalidate any pending unblocks.
-            self.block_config_updated_message.store(true, Ordering::Release);
+            self.block_config_updated_message
+                .store(true, Ordering::Release);
             self.block_epoch.fetch_add(1, Ordering::AcqRel);
         } else {
             let flag = Rc::clone(&self.block_config_updated_message);
@@ -54,7 +54,9 @@ impl EventService {
 
     pub fn subscribe<F: Fn(EventMessage) + 'static>(&self, callback: F) -> usize {
         let sub_id = self.subscriber_id.fetch_add(1, Ordering::AcqRel);
-        self.subscribers.borrow_mut().insert(sub_id, Box::new(callback));
+        self.subscribers
+            .borrow_mut()
+            .insert(sub_id, Box::new(callback));
         sub_id
     }
 

@@ -1,11 +1,11 @@
-use std::cell::RefCell;
-use std::rc::Rc;
 use crate::app::components::{AppIcon, FilterEditor, FilterView};
 use crate::app::ConfigContext;
 use crate::model::{DialogAction, DialogActions, DialogResult};
 use crate::services::DialogService;
 use shared::foundation::get_filter;
 use shared::model::PatternTemplate;
+use std::cell::RefCell;
+use std::rc::Rc;
 use yew::platform::spawn_local;
 use yew::prelude::*;
 
@@ -25,8 +25,20 @@ pub fn FilterInput(props: &FilterInputProps) -> Html {
     let dialog = use_context::<DialogService>().expect("Dialog service not found");
     let dialog_actions = use_memo((), |()| {
         Some(DialogActions {
-            left: Some(vec![DialogAction::new("close", "LABEL.CLOSE", DialogResult::Cancel, Some("Close".to_owned()), None)]),
-            right: vec![DialogAction::new("submit", "LABEL.OK", DialogResult::Ok, Some("Accept".to_owned()), Some("primary".to_string()))],
+            left: Some(vec![DialogAction::new(
+                "close",
+                "LABEL.CLOSE",
+                DialogResult::Cancel,
+                Some("Close".to_owned()),
+                None,
+            )]),
+            right: vec![DialogAction::new(
+                "submit",
+                "LABEL.OK",
+                DialogResult::Ok,
+                Some("Accept".to_owned()),
+                Some("primary".to_string()),
+            )],
         })
     });
 
@@ -36,7 +48,10 @@ pub fn FilterInput(props: &FilterInputProps) -> Html {
 
     {
         let templates = templates_state.clone();
-        let cfg_templates = config_ctx.config.as_ref().and_then(|c| c.sources.templates.clone());
+        let cfg_templates = config_ctx
+            .config
+            .as_ref()
+            .and_then(|c| c.sources.templates.clone());
         use_effect_with(cfg_templates, move |templ| {
             templates.set(templ.clone());
         });
@@ -102,8 +117,8 @@ pub fn FilterInput(props: &FilterInputProps) -> Html {
                 };
 
                 let filter_view = html! {<FilterEditor filter={current_filter}
-                    on_filter_change={handle_filter_edit}
-                    on_templates_change={handle_templates_edit} />};
+                on_filter_change={handle_filter_edit}
+                on_templates_change={handle_templates_edit} />};
                 let result = dlg.content(filter_view, (*actions).clone(), false).await;
                 match result {
                     DialogResult::Ok => on_change.emit(filter_ref.borrow().clone()),

@@ -1,5 +1,5 @@
-use yew::prelude::*;
 use crate::app::components::{AccordionState, AppIcon};
+use yew::prelude::*;
 
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct AccordionPanelProps {
@@ -16,7 +16,8 @@ pub struct AccordionPanelProps {
 
 #[function_component]
 pub fn AccordionPanel(props: &AccordionPanelProps) -> Html {
-    let context = use_context::<AccordionState>().expect("AccordionPanel must be used inside Accordion");
+    let context =
+        use_context::<AccordionState>().expect("AccordionPanel must be used inside Accordion");
     let expanded = (**context.active_panel).as_ref() == Some(&props.id);
 
     let toggle = {

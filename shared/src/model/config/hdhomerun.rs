@@ -1,35 +1,60 @@
+use crate::error::TuliproxError;
 use crate::info_err_res;
-use crate::error::{TuliproxError};
-use crate::utils::{is_false, is_true, default_as_true, default_device_type, default_device_udn,
-                   default_firmware_name, default_firmware_version, default_friendly_name,
-                   default_manufacturer, default_model_name, generate_hdhr_device_id,
-                   generate_hdhr_device_id_from_base, hash_string, is_default_device_type,
-                   is_default_device_udn, is_default_firmware_name, is_default_firmware_version,
-                   is_default_friendly_name, is_default_manufacturer, is_default_model_name,
-                   validate_hdhr_device_id};
+use crate::utils::{
+    default_as_true, default_device_type, default_device_udn, default_firmware_name,
+    default_firmware_version, default_friendly_name, default_manufacturer, default_model_name,
+    generate_hdhr_device_id, generate_hdhr_device_id_from_base, hash_string,
+    is_default_device_type, is_default_device_udn, is_default_firmware_name,
+    is_default_firmware_version, is_default_friendly_name, is_default_manufacturer,
+    is_default_model_name, is_false, is_true, validate_hdhr_device_id,
+};
 use log::warn;
 use std::collections::HashSet;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct HdHomeRunDeviceConfigDto {
-    #[serde(default = "default_friendly_name", skip_serializing_if = "is_default_friendly_name")]
+    #[serde(
+        default = "default_friendly_name",
+        skip_serializing_if = "is_default_friendly_name"
+    )]
     pub friendly_name: String,
-    #[serde(default = "default_manufacturer", skip_serializing_if = "is_default_manufacturer")]
+    #[serde(
+        default = "default_manufacturer",
+        skip_serializing_if = "is_default_manufacturer"
+    )]
     pub manufacturer: String,
-    #[serde(default = "default_model_name", skip_serializing_if = "is_default_model_name")]
+    #[serde(
+        default = "default_model_name",
+        skip_serializing_if = "is_default_model_name"
+    )]
     pub model_name: String,
-    #[serde(default = "default_model_name", skip_serializing_if = "is_default_model_name")]
+    #[serde(
+        default = "default_model_name",
+        skip_serializing_if = "is_default_model_name"
+    )]
     pub model_number: String,
-    #[serde(default = "default_firmware_name", skip_serializing_if = "is_default_firmware_name")]
+    #[serde(
+        default = "default_firmware_name",
+        skip_serializing_if = "is_default_firmware_name"
+    )]
     pub firmware_name: String,
-    #[serde(default = "default_firmware_version", skip_serializing_if = "is_default_firmware_version")]
+    #[serde(
+        default = "default_firmware_version",
+        skip_serializing_if = "is_default_firmware_version"
+    )]
     pub firmware_version: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub device_id: String,
-    #[serde(default = "default_device_type", skip_serializing_if = "is_default_device_type")]
+    #[serde(
+        default = "default_device_type",
+        skip_serializing_if = "is_default_device_type"
+    )]
     pub device_type: String,
-    #[serde(default = "default_device_udn", skip_serializing_if = "is_default_device_udn")]
+    #[serde(
+        default = "default_device_udn",
+        skip_serializing_if = "is_default_device_udn"
+    )]
     pub device_udn: String,
     pub name: String,
     #[serde(default)]
@@ -87,7 +112,11 @@ impl HdHomeRunDeviceConfigDto {
         } else {
             // Ensure only the UUID part is stored.
             if let Some(uuid_part) = self.device_udn.strip_prefix("uuid:") {
-                self.device_udn = uuid_part.split("::").next().unwrap_or(uuid_part).to_string();
+                self.device_udn = uuid_part
+                    .split("::")
+                    .next()
+                    .unwrap_or(uuid_part)
+                    .to_string();
             }
         }
 
@@ -108,7 +137,6 @@ impl HdHomeRunDeviceConfigDto {
     }
 }
 
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct HdHomeRunConfigDto {
@@ -125,7 +153,11 @@ pub struct HdHomeRunConfigDto {
 
 impl HdHomeRunConfigDto {
     pub fn is_empty(&self) -> bool {
-        !self.enabled && !self.auth && self.devices.is_empty() && !self.ssdp_discovery && !self.proprietary_discovery
+        !self.enabled
+            && !self.auth
+            && self.devices.is_empty()
+            && !self.ssdp_discovery
+            && !self.proprietary_discovery
     }
 
     pub fn clean(&mut self) {
@@ -155,7 +187,8 @@ impl HdHomeRunConfigDto {
             if device.port == 0 {
                 while ports.contains(&current_port) || current_port == 0 {
                     current_port = current_port.wrapping_add(1);
-                    if current_port == api_port { // full cycle guard
+                    if current_port == api_port {
+                        // full cycle guard
                         return info_err_res!("No free port available for HdHomeRun devices");
                     }
                 }

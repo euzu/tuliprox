@@ -9,7 +9,12 @@ use crate::app::components::{Block, BlockType, Connection};
 ///   - 1x OutputXtream
 ///   - 1x OutputHdhomerun
 ///   - up to 4x OutputStrm
-pub fn can_connect(from_block: &Block, to_block: &Block, connections: &[Connection], blocks: &[Block]) -> bool {
+pub fn can_connect(
+    from_block: &Block,
+    to_block: &Block,
+    connections: &[Connection],
+    blocks: &[Block],
+) -> bool {
     // Prevent self-connection
     if from_block.id == to_block.id {
         return false;
@@ -28,7 +33,10 @@ pub fn can_connect(from_block: &Block, to_block: &Block, connections: &[Connecti
     }
 
     // Prevent duplicate connection
-    if connections.iter().any(|c| c.from == from_block.id && c.to == to_block.id) {
+    if connections
+        .iter()
+        .any(|c| c.from == from_block.id && c.to == to_block.id)
+    {
         return false;
     }
 

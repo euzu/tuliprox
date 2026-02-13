@@ -1,11 +1,11 @@
 use crate::app::components::{ActionCard, TextButton};
+use crate::app::CardContext;
 use crate::hooks::use_service_context;
 use shared::model::IpCheckDto;
 use std::future;
 use yew::prelude::*;
 use yew::suspense::use_future;
 use yew_i18n::use_translation;
-use crate::app::CardContext;
 
 #[function_component]
 pub fn IpinfoActionCard() -> Html {
@@ -54,8 +54,9 @@ pub fn IpinfoActionCard() -> Html {
         let config_exists_state = config_exists.clone();
         let fetch_ip_info_cb = fetch_ip_info.clone();
         let _ = use_future(|| async move {
-            services_ctx.config.config_subscribe(
-                &mut |cfg| {
+            services_ctx
+                .config
+                .config_subscribe(&mut |cfg| {
                     let exists = if let Some(app_cfg) = &cfg {
                         app_cfg.config.ipcheck.is_some()
                     } else {
@@ -64,8 +65,8 @@ pub fn IpinfoActionCard() -> Html {
                     config_exists_state.set(exists);
                     fetch_ip_info_cb.emit(exists);
                     future::ready(())
-                }
-            ).await
+                })
+                .await
         });
     }
 

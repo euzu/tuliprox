@@ -1,6 +1,6 @@
+use crate::utils::sanitize_sensitive_info;
 use std::error::Error;
 use std::fmt::{Display, Formatter, Result};
-use crate::utils::sanitize_sensitive_info;
 
 #[macro_export]
 macro_rules! get_errors_notify_message {
@@ -50,7 +50,6 @@ macro_rules! notify_err_res {
 
 pub use notify_err_res;
 
-
 #[macro_export]
 macro_rules! info_err {
     // This matches any arguments (format string + variables) and forwards them
@@ -73,7 +72,6 @@ macro_rules! info_err_res {
 
 pub use info_err_res;
 
-
 #[macro_export]
 macro_rules! handle_tuliprox_error_result_list {
     ($kind:expr, $result: expr) => {
@@ -89,7 +87,7 @@ macro_rules! handle_tuliprox_error_result_list {
         if !&errors.is_empty() {
             return Err($crate::error::TuliproxError::new($kind, errors.join("\n")));
         }
-    }
+    };
 }
 
 pub use handle_tuliprox_error_result_list;
@@ -100,7 +98,7 @@ macro_rules! handle_tuliprox_error_result {
         if let Err(err) = $result {
             return Err($crate::error::TuliproxError::new($kind, err.to_string()));
         }
-    }
+    };
 }
 pub use handle_tuliprox_error_result;
 
@@ -134,7 +132,9 @@ impl Error for TuliproxError {}
 pub fn to_io_error<E>(err: E) -> std::io::Error
 where
     E: std::error::Error,
-{ std::io::Error::other(sanitize_sensitive_info(&err.to_string())) }
+{
+    std::io::Error::other(sanitize_sensitive_info(&err.to_string()))
+}
 
 pub fn str_to_io_error(err: &str) -> std::io::Error {
     std::io::Error::other(sanitize_sensitive_info(err))

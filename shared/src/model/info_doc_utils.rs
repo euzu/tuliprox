@@ -1,5 +1,5 @@
-use serde_json::Value;
 use crate::model::xtream_const;
+use serde_json::Value;
 
 pub struct InfoDocUtils {}
 
@@ -21,10 +21,18 @@ impl InfoDocUtils {
         digits_only.parse::<u32>().ok()
     }
 
-    pub fn make_bdpath_resource_url(resource_url: Option<&str>, bd_path: &str, index: usize, field_prefix: &str) -> String {
+    pub fn make_bdpath_resource_url(
+        resource_url: Option<&str>,
+        bd_path: &str,
+        index: usize,
+        field_prefix: &str,
+    ) -> String {
         if let Some(url) = resource_url {
             if bd_path.starts_with("http") {
-                return format!("{url}/{field_prefix}{}_{index}", xtream_const::XC_PROP_BACKDROP_PATH);
+                return format!(
+                    "{url}/{field_prefix}{}_{index}",
+                    xtream_const::XC_PROP_BACKDROP_PATH
+                );
             }
         }
         bd_path.to_string()

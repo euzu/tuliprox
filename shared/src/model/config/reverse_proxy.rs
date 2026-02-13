@@ -1,14 +1,13 @@
 use crate::error::{TuliproxError, TuliproxErrorKind};
-use crate::model::{CacheConfigDto, GeoIpConfigDto, RateLimitConfigDto, StreamConfigDto};
-use crate::utils::{is_false, is_empty_optional_vec, default_resource_retry_attempts,
-                   default_resource_retry_backoff_ms,
-                   default_resource_retry_backoff_multiplier,
-                   is_default_resource_retry_attempts,
-                   is_default_resource_retry_backoff_ms,
-                   is_default_resource_retry_backoff_multiplier,
-                   hex_to_u8_16};
-use log::warn;
 use crate::info_err_res;
+use crate::model::{CacheConfigDto, GeoIpConfigDto, RateLimitConfigDto, StreamConfigDto};
+use crate::utils::{
+    default_resource_retry_attempts, default_resource_retry_backoff_ms,
+    default_resource_retry_backoff_multiplier, hex_to_u8_16, is_default_resource_retry_attempts,
+    is_default_resource_retry_backoff_ms, is_default_resource_retry_backoff_multiplier,
+    is_empty_optional_vec, is_false,
+};
+use log::warn;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -90,7 +89,11 @@ impl ReverseProxyConfigDto {
         if self.cache.as_ref().is_some_and(CacheConfigDto::is_empty) {
             self.cache = None;
         }
-        if self.rate_limit.as_ref().is_some_and(RateLimitConfigDto::is_empty) {
+        if self
+            .rate_limit
+            .as_ref()
+            .is_some_and(RateLimitConfigDto::is_empty)
+        {
             self.rate_limit = None;
         }
         if self.geoip.as_ref().is_some_and(GeoIpConfigDto::is_empty) {
@@ -99,8 +102,8 @@ impl ReverseProxyConfigDto {
     }
 
     pub(crate) fn prepare(&mut self, working_dir: &str) -> Result<(), TuliproxError> {
-
-        hex_to_u8_16(&self.rewrite_secret).map_err(|e| TuliproxError::new(TuliproxErrorKind::Info, e))?;
+        hex_to_u8_16(&self.rewrite_secret)
+            .map_err(|e| TuliproxError::new(TuliproxErrorKind::Info, e))?;
 
         if let Some(stream) = self.stream.as_mut() {
             stream.prepare()?;
@@ -130,11 +133,20 @@ impl ReverseProxyConfigDto {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceRetryConfigDto {
-    #[serde(default = "default_resource_retry_attempts", skip_serializing_if = "is_default_resource_retry_attempts")]
+    #[serde(
+        default = "default_resource_retry_attempts",
+        skip_serializing_if = "is_default_resource_retry_attempts"
+    )]
     pub max_attempts: u32,
-    #[serde(default = "default_resource_retry_backoff_ms", skip_serializing_if = "is_default_resource_retry_backoff_ms")]
+    #[serde(
+        default = "default_resource_retry_backoff_ms",
+        skip_serializing_if = "is_default_resource_retry_backoff_ms"
+    )]
     pub backoff_millis: u64,
-    #[serde(default = "default_resource_retry_backoff_multiplier", skip_serializing_if = "is_default_resource_retry_backoff_multiplier")]
+    #[serde(
+        default = "default_resource_retry_backoff_multiplier",
+        skip_serializing_if = "is_default_resource_retry_backoff_multiplier"
+    )]
     pub backoff_multiplier: f64,
     #[serde(default, skip_serializing_if = "is_empty_optional_vec")]
     pub failover_redirect_patterns: Option<Vec<String>>,
@@ -155,7 +167,8 @@ impl ResourceRetryConfigDto {
     pub fn is_default(&self) -> bool {
         self.max_attempts == default_resource_retry_attempts()
             && self.backoff_millis == default_resource_retry_backoff_ms()
-            && (self.backoff_multiplier - default_resource_retry_backoff_multiplier()).abs() < f64::EPSILON
+            && (self.backoff_multiplier - default_resource_retry_backoff_multiplier()).abs()
+                < f64::EPSILON
             && is_empty_optional_vec(&self.failover_redirect_patterns)
     }
 

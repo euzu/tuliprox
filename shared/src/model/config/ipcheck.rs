@@ -67,20 +67,24 @@ impl IpCheckConfigDto {
         // }
 
         if let Some(p4) = &self.pattern_ipv4 {
-            crate::model::REGEX_CACHE.get_or_compile(p4).map_err(|err| {
-                TuliproxError::new(
-                    TuliproxErrorKind::Info,
-                    format!("Invalid IPv4 regex: {p4} {err}"),
-                )
-            })?;
+            crate::model::REGEX_CACHE
+                .get_or_compile(p4)
+                .map_err(|err| {
+                    TuliproxError::new(
+                        TuliproxErrorKind::Info,
+                        format!("Invalid IPv4 regex: {p4} {err}"),
+                    )
+                })?;
         }
         if let Some(p6) = &self.pattern_ipv6 {
-            crate::model::REGEX_CACHE.get_or_compile(p6).map_err(|err| {
-                TuliproxError::new(
-                    TuliproxErrorKind::Info,
-                    format!("Invalid IPv6 regex: {p6} {err}"),
-                )
-            })?;
+            crate::model::REGEX_CACHE
+                .get_or_compile(p6)
+                .map_err(|err| {
+                    TuliproxError::new(
+                        TuliproxErrorKind::Info,
+                        format!("Invalid IPv6 regex: {p6} {err}"),
+                    )
+                })?;
         }
         Ok(())
     }

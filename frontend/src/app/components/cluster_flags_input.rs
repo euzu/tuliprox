@@ -1,4 +1,4 @@
-use shared::model::{ClusterFlags};
+use shared::model::ClusterFlags;
 use yew::prelude::*;
 use yew_i18n::use_translation;
 
@@ -17,7 +17,7 @@ pub struct ClusterFlagsInputProps {
     #[prop_or_default]
     pub on_change: Callback<(String, Option<ClusterFlags>)>,
     #[prop_or_default]
-    pub mode:  ClusterFlagsInputMode,
+    pub mode: ClusterFlagsInputMode,
 }
 
 #[function_component]
@@ -25,7 +25,7 @@ pub fn ClusterFlagsInput(props: &ClusterFlagsInputProps) -> Html {
     let translate = use_translation();
 
     let flags = use_state(|| {
-       props.value.unwrap_or_else(|| match props.mode {
+        props.value.unwrap_or_else(|| match props.mode {
             ClusterFlagsInputMode::NoneIsAll => ClusterFlags::all(),
             ClusterFlagsInputMode::NoneIsNone => ClusterFlags::empty(),
         })
@@ -33,25 +33,25 @@ pub fn ClusterFlagsInput(props: &ClusterFlagsInputProps) -> Html {
     {
         let set_flags = flags.clone();
         use_effect_with((props.value, props.mode), move |(val, cmode)| {
-           set_flags.set((*val).unwrap_or_else(|| match cmode {
-               ClusterFlagsInputMode::NoneIsAll => ClusterFlags::all(),
-               ClusterFlagsInputMode::NoneIsNone => ClusterFlags::empty(),
-           }));
+            set_flags.set((*val).unwrap_or_else(|| match cmode {
+                ClusterFlagsInputMode::NoneIsAll => ClusterFlags::all(),
+                ClusterFlagsInputMode::NoneIsNone => ClusterFlags::empty(),
+            }));
         });
     }
 
     let handle_change = {
-      let onchange = props.on_change.clone();
-      let name = props.name.clone();
-      Callback::from(move |new_flags: Option<ClusterFlags>| {
-        let cluster_flags = if new_flags.is_none_or(|f| f.is_empty()) {
-            None
-        } else {
-            new_flags
-        };
-        let name = name.clone();
-        onchange.emit((name, cluster_flags));
-      })
+        let onchange = props.on_change.clone();
+        let name = props.name.clone();
+        Callback::from(move |new_flags: Option<ClusterFlags>| {
+            let cluster_flags = if new_flags.is_none_or(|f| f.is_empty()) {
+                None
+            } else {
+                new_flags
+            };
+            let name = name.clone();
+            onchange.emit((name, cluster_flags));
+        })
     };
 
     let handle_flag_click = {

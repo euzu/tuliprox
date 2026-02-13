@@ -1,12 +1,14 @@
-use std::rc::Rc;
+use crate::app::components::{
+    AppIcon, DropDownIconButton, DropDownOption, DropDownSelection, IconButton,
+};
+use crate::html_if;
 use gloo_timers::callback::Timeout;
+use shared::model::SearchRequest;
+use std::rc::Rc;
 use web_sys::HtmlInputElement;
 use yew::prelude::*;
-use shared::model::SearchRequest;
-use crate::app::components::{AppIcon, DropDownIconButton, DropDownOption, DropDownSelection, IconButton};
-use crate::html_if;
 
-const DEBOUNCE_TIMEOUT_MS:  u32 = 500;
+const DEBOUNCE_TIMEOUT_MS: u32 = 500;
 
 enum RegexState {
     Active,
@@ -27,7 +29,6 @@ pub struct SearchProps {
 
 #[function_component]
 pub fn Search(props: &SearchProps) -> Html {
-
     let search_fields = use_state(|| None::<Rc<Vec<String>>>);
     let input_ref = use_node_ref();
     let invalid_search = use_state(|| false);
@@ -36,27 +37,23 @@ pub fn Search(props: &SearchProps) -> Html {
     let handle_regex_click = {
         let regex_active = regex_active.clone();
         let input = input_ref.clone();
-        Callback::from(move |_: (String, MouseEvent)| {
-            match *regex_active {
-                RegexState::Active
-                | RegexState::Invalid => {
-                    regex_active.set(RegexState::Inactive);
-                }
-                RegexState::Inactive => {
-                    if let Some(input) = input.cast::<HtmlInputElement>() {
-                        let text = input.value();
-                        if shared::model::REGEX_CACHE.get_or_compile(&text).is_ok() {
-                            regex_active.set(RegexState::Active);
-                        } else {
-                            regex_active.set(RegexState::Invalid);
-                        }
-                        shared::model::REGEX_CACHE.sweep();
+        Callback::from(move |_: (String, MouseEvent)| match *regex_active {
+            RegexState::Active | RegexState::Invalid => {
+                regex_active.set(RegexState::Inactive);
+            }
+            RegexState::Inactive => {
+                if let Some(input) = input.cast::<HtmlInputElement>() {
+                    let text = input.value();
+                    if shared::model::REGEX_CACHE.get_or_compile(&text).is_ok() {
+                        regex_active.set(RegexState::Active);
+                    } else {
+                        regex_active.set(RegexState::Invalid);
                     }
+                    shared::model::REGEX_CACHE.sweep();
                 }
             }
         })
     };
-
 
     let debounce_timeout = use_mut_ref(|| None::<Timeout>);
 
@@ -86,7 +83,10 @@ pub fn Search(props: &SearchProps) -> Html {
                             if !matches!(*regex, RegexState::Inactive) {
                                 if shared::model::REGEX_CACHE.get_or_compile(&text).is_ok() {
                                     regex.set(RegexState::Active);
-                                    cb_search.emit(SearchRequest::Regexp(text, (*search_fields).clone()));
+                                    cb_search.emit(SearchRequest::Regexp(
+                                        text,
+                                        (*search_fields).clone(),
+                                    ));
                                 } else {
                                     regex.set(RegexState::Invalid);
                                 }
@@ -106,26 +106,25 @@ pub fn Search(props: &SearchProps) -> Html {
                 do_search();
             } else {
                 // Set new timeout
-                *debounce_timeout.borrow_mut() = Some(Timeout::new(DEBOUNCE_TIMEOUT_MS, move || {
-                    do_search();
-                }));
+                *debounce_timeout.borrow_mut() =
+                    Some(Timeout::new(DEBOUNCE_TIMEOUT_MS, move || {
+                        do_search();
+                    }));
             }
         })
     };
 
     let handle_options_click = {
         let search_fields = search_fields.clone();
-        Callback::from(move |(_name, selections)| {
-            match selections {
-                DropDownSelection::Empty => {
-                    search_fields.set(None);
-                }
-                DropDownSelection::Multi(options) => {
-                    search_fields.set(Some(Rc::new(options)));
-                }
-                DropDownSelection::Single(option) => {
-                    search_fields.set(Some(Rc::new(vec![option])));
-                }
+        Callback::from(move |(_name, selections)| match selections {
+            DropDownSelection::Empty => {
+                search_fields.set(None);
+            }
+            DropDownSelection::Multi(options) => {
+                search_fields.set(Some(Rc::new(options)));
+            }
+            DropDownSelection::Single(option) => {
+                search_fields.set(Some(Rc::new(vec![option])));
             }
         })
     };

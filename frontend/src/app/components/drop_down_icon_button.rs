@@ -1,12 +1,14 @@
+use crate::app::components::popup_menu::PopupMenu;
+use crate::app::components::{AppIcon, IconButton};
+use crate::html_if;
 use std::collections::HashSet;
 use std::rc::Rc;
 use web_sys::MouseEvent;
-use yew::{classes, function_component, html, use_effect_with, use_state, Callback, Html, NodeRef, Properties};
+use yew::{
+    classes, function_component, html, use_effect_with, use_state, Callback, Html, NodeRef,
+    Properties,
+};
 use yew_hooks::use_set;
-use crate::app::components::{AppIcon, IconButton};
-use crate::app::components::popup_menu::PopupMenu;
-use crate::html_if;
-
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DropDownSelection {
@@ -14,7 +16,6 @@ pub enum DropDownSelection {
     Single(String),
     Multi(Vec<String>),
 }
-
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct DropDownOption {
@@ -25,7 +26,11 @@ pub struct DropDownOption {
 
 impl DropDownOption {
     pub fn new(id: &str, label: Html, selected: bool) -> Self {
-        Self { id: id.to_owned(), label, selected }
+        Self {
+            id: id.to_owned(),
+            label,
+            selected,
+        }
     }
 }
 
@@ -53,7 +58,11 @@ pub fn DropDownIconButton(props: &DropDownIconButtonProps) -> Html {
     {
         let set_selections = selections.clone();
         use_effect_with(props.options.clone(), move |options| {
-            let selections = options.iter().filter(|x| x.selected).map(|x|x.id.clone()).collect::<HashSet<String>>();
+            let selections = options
+                .iter()
+                .filter(|x| x.selected)
+                .map(|x| x.id.clone())
+                .collect::<HashSet<String>>();
             set_selections.set(selections);
         })
     }
@@ -96,8 +105,14 @@ pub fn DropDownIconButton(props: &DropDownIconButtonProps) -> Html {
             let selected_options = if multi_select {
                 if selections.current().is_empty() {
                     DropDownSelection::Empty
-                }  else {
-                    DropDownSelection::Multi(selections.current().iter().map(Clone::clone).collect::<Vec<_>>())
+                } else {
+                    DropDownSelection::Multi(
+                        selections
+                            .current()
+                            .iter()
+                            .map(Clone::clone)
+                            .collect::<Vec<_>>(),
+                    )
                 }
             } else {
                 DropDownSelection::Single(id.clone())

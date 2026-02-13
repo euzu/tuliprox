@@ -1,8 +1,8 @@
+use crate::app::components::custom_dialog::CustomDialog;
+use crate::app::components::TextButton;
+use crate::model::{DialogAction, DialogActions, DialogResult};
 use yew::prelude::*;
 use yew_i18n::use_translation;
-use crate::app::components::TextButton;
-use crate::app::components::custom_dialog::CustomDialog;
-use crate::model::{DialogAction, DialogActions, DialogResult};
 
 #[derive(Properties, PartialEq)]
 pub struct ContentDialogProps {
@@ -51,10 +51,13 @@ pub fn ContentDialog(props: &ContentDialogProps) -> Html {
     // Find a cancel action to use for backdrop clicks
     let on_close = {
         let on_result = on_result.clone();
-        let cancel_action = props.actions.right.iter()
+        let cancel_action = props
+            .actions
+            .right
+            .iter()
             .find(|action| matches!(action.result, DialogResult::Cancel))
             .or_else(|| props.actions.right.first());
-            
+
         if let Some(action) = cancel_action {
             let result = action.result.clone();
             Some(Callback::from(move |_| {
@@ -66,10 +69,10 @@ pub fn ContentDialog(props: &ContentDialogProps) -> Html {
     };
 
     html! {
-        <CustomDialog 
-            open={*is_open} 
-            class="tp__content-dialog" 
-            modal=true 
+        <CustomDialog
+            open={*is_open}
+            class="tp__content-dialog"
+            modal=true
             close_on_backdrop_click={props.close_on_backdrop_click}
             on_close={on_close}
         >

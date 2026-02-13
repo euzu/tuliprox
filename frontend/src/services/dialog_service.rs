@@ -27,10 +27,7 @@ impl DialogFuture {
             }
         };
 
-        (
-            DialogFuture { result, waker },
-            resolve,
-        )
+        (DialogFuture { result, waker }, resolve)
     }
 }
 
@@ -99,16 +96,27 @@ impl DialogService {
         future
     }
 
-    pub fn content(&self, content: Html, actions: Option<DialogActions>, close_on_backdrop_click: bool) -> DialogFuture {
+    pub fn content(
+        &self,
+        content: Html,
+        actions: Option<DialogActions>,
+        close_on_backdrop_click: bool,
+    ) -> DialogFuture {
         let (future, resolver) = DialogFuture::new();
         let request = ContentRequest {
             content,
             actions: actions.unwrap_or_else(|| DialogActions {
                 left: None,
-                right: vec![DialogAction::new_focused("close", "LABEL.CLOSE", DialogResult::Cancel, Some("Close".to_owned()), None)],
+                right: vec![DialogAction::new_focused(
+                    "close",
+                    "LABEL.CLOSE",
+                    DialogResult::Cancel,
+                    Some("Close".to_owned()),
+                    None,
+                )],
             }),
             resolve: Rc::new(RefCell::new(Some(Box::new(resolver)))),
-            close_on_backdrop_click
+            close_on_backdrop_click,
         };
 
         if let Some(cb) = &*self.inner.borrow() {

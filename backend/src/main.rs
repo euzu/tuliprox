@@ -21,7 +21,7 @@ use crate::library::LibraryProcessor;
 use crate::model::{
     AppConfig, Config, Healthcheck, HealthcheckConfig, ProcessTargets, SourcesConfig,
 };
-use crate::processing::processor::{exec_processing};
+use crate::processing::processor::exec_processing;
 use crate::utils::request::create_client;
 use crate::utils::{config_file_reader, resolve_env_var};
 use crate::utils::{db_viewer, init_logger};
@@ -86,11 +86,19 @@ struct Args {
     healthcheck: bool,
 
     /// Scan local Library directory
-    #[arg(long = "scan-library", default_value_t = false, default_missing_value = "true")]
+    #[arg(
+        long = "scan-library",
+        default_value_t = false,
+        default_missing_value = "true"
+    )]
     scan_library: bool,
 
     /// Force rescan of all local Library files
-    #[arg(long = "force-library-rescan", default_value_t = false, default_missing_value = "true")]
+    #[arg(
+        long = "force-library-rescan",
+        default_value_t = false,
+        default_missing_value = "true"
+    )]
     force_library_rescan: bool,
 
     #[arg(long = "dbx")]
@@ -121,10 +129,12 @@ const BUILD_TIMESTAMP: &str = env!("VERGEN_BUILD_TIMESTAMP");
 async fn main() {
     let args = Args::parse();
 
-    db_viewer(args.db_xtream_file_name.as_deref(),
-              args.db_m3u_file_name.as_deref(),
-              args.db_epg_file_name.as_deref(),
-              args.db_tim_file_name.as_deref());
+    db_viewer(
+        args.db_xtream_file_name.as_deref(),
+        args.db_m3u_file_name.as_deref(),
+        args.db_epg_file_name.as_deref(),
+        args.db_tim_file_name.as_deref(),
+    );
 
     if args.genpwd {
         match generate_password() {
@@ -149,7 +159,11 @@ async fn main() {
     // Handle Library scan before starting main application
     if args.scan_library || args.force_library_rescan {
         info!("Library scan mode requested");
-        let app_config = Arc::new(utils::read_initial_app_config(&mut config_paths, true, true, false).await.unwrap_or_else(|err| exit!("{}", err)));
+        let app_config = Arc::new(
+            utils::read_initial_app_config(&mut config_paths, true, true, false)
+                .await
+                .unwrap_or_else(|err| exit!("{}", err)),
+        );
         scan_library_cli(&app_config, args.force_library_rescan).await;
         return;
     }
@@ -193,7 +207,13 @@ fn print_info(app_config: &AppConfig) {
     info!("Config file: {:?}", &paths.config_file_path);
     info!("Source file: {:?}", &paths.sources_file_path);
     info!("Api Proxy File: {:?}", &paths.api_proxy_file_path);
-    info!("Mapping path: {:?}", &paths.mapping_file_path.as_ref().map_or_else(|| "not used", |v| v.as_str()));
+    info!(
+        "Mapping path: {:?}",
+        &paths
+            .mapping_file_path
+            .as_ref()
+            .map_or_else(|| "not used", |v| v.as_str())
+    );
 
     if let Some(mapping_paths) = paths.mapping_files_used.as_ref() {
         for mapping_path in mapping_paths {
@@ -217,10 +237,24 @@ fn print_info(app_config: &AppConfig) {
 }
 
 fn get_file_paths(args: &Args) -> ConfigPaths {
-    let config_path: String = utils::resolve_directory_path(&resolve_env_var(&args.config_path.as_ref().map_or_else(utils::get_default_config_path, ToString::to_string)));
-    let config_file: String = resolve_env_var(&args.config_file.as_ref().map_or_else(|| utils::get_default_config_file_path(&config_path), ToString::to_string));
-    let api_proxy_file = resolve_env_var(&args.api_proxy.as_ref().map_or_else(|| utils::get_default_api_proxy_config_path(config_path.as_str()), ToString::to_string));
-    let sources_file: String = resolve_env_var(&args.source_file.as_ref().map_or_else(|| utils::get_default_sources_file_path(&config_path), ToString::to_string));
+    let config_path: String = utils::resolve_directory_path(&resolve_env_var(
+        &args
+            .config_path
+            .as_ref()
+            .map_or_else(utils::get_default_config_path, ToString::to_string),
+    ));
+    let config_file: String = resolve_env_var(&args.config_file.as_ref().map_or_else(
+        || utils::get_default_config_file_path(&config_path),
+        ToString::to_string,
+    ));
+    let api_proxy_file = resolve_env_var(&args.api_proxy.as_ref().map_or_else(
+        || utils::get_default_api_proxy_config_path(config_path.as_str()),
+        ToString::to_string,
+    ));
+    let sources_file: String = resolve_env_var(&args.source_file.as_ref().map_or_else(
+        || utils::get_default_sources_file_path(&config_path),
+        ToString::to_string,
+    ));
     let mappings_file = args.mapping_file.as_ref().map(|p| resolve_env_var(p));
 
     ConfigPaths {
@@ -257,7 +291,6 @@ async fn scan_library_cli(app_config: &Arc<AppConfig>, force_rescan: bool) {
         std::process::exit(1);
     };
 
-
     match processor.scan(force_rescan).await {
         Ok(result) => {
             info!("Library scan completed successfully!");
@@ -281,14 +314,17 @@ async fn healthcheck(config_file: &str) -> bool {
     let path = std::path::PathBuf::from(config_file);
     match File::open(path) {
         Ok(file) => {
-            match serde_saphyr::from_reader::<_, HealthcheckConfig>(config_file_reader(file, true)) {
+            match serde_saphyr::from_reader::<_, HealthcheckConfig>(config_file_reader(file, true))
+            {
                 Ok(config) => {
                     match reqwest::Client::new()
                         .get(format!("http://localhost:{}/healthcheck", config.api.port))
                         .send()
                         .await
                     {
-                        Ok(response) => matches!(response.json::<Healthcheck>().await, Ok(check) if check.status == "ok"),
+                        Ok(response) => {
+                            matches!(response.json::<Healthcheck>().await, Ok(check) if check.status == "ok")
+                        }
                         Err(_) => false,
                     }
                 }

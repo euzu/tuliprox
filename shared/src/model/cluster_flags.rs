@@ -1,8 +1,8 @@
-use std::fmt;
-use bitflags::bitflags;
-use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
-use serde::de::{Error, SeqAccess, Visitor};
 use crate::model::{PlaylistItemType, XtreamCluster};
+use bitflags::bitflags;
+use serde::de::{Error, SeqAccess, Visitor};
+use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
+use std::fmt;
 
 bitflags! {
     #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -15,11 +15,13 @@ bitflags! {
 
 impl ClusterFlags {
     pub fn has_cluster(&self, item_type: PlaylistItemType) -> bool {
-        XtreamCluster::try_from(item_type).ok().is_some_and(|cluster| match cluster {
-            XtreamCluster::Live => self.contains(ClusterFlags::Live),
-            XtreamCluster::Video => self.contains(ClusterFlags::Vod),
-            XtreamCluster::Series => self.contains(ClusterFlags::Series),
-        })
+        XtreamCluster::try_from(item_type)
+            .ok()
+            .is_some_and(|cluster| match cluster {
+                XtreamCluster::Live => self.contains(ClusterFlags::Live),
+                XtreamCluster::Video => self.contains(ClusterFlags::Vod),
+                XtreamCluster::Series => self.contains(ClusterFlags::Series),
+            })
     }
 
     pub fn has_full_flags(&self) -> bool {
@@ -28,7 +30,7 @@ impl ClusterFlags {
 
     fn from_items<I, S>(items: I) -> Result<Self, &'static str>
     where
-        I: IntoIterator<Item=S>,
+        I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
         let mut result = ClusterFlags::empty();
@@ -67,7 +69,9 @@ impl TryFrom<&str> for ClusterFlags {
     type Error = &'static str;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
-        let input = value.trim().trim_matches(|c| ['[', ']', '(', ')'].contains(&c));
+        let input = value
+            .trim()
+            .trim_matches(|c| ['[', ']', '(', ')'].contains(&c));
         let items = input.split(',').map(str::trim);
         ClusterFlags::from_items(items)
     }

@@ -1,8 +1,8 @@
+use crate::app::components::CustomDialog;
+use crate::app::components::TextButton;
+use crate::model::DialogResult;
 use yew::prelude::*;
 use yew_i18n::use_translation;
-use crate::app::components::TextButton;
-use crate::app::components::CustomDialog;
-use crate::model::DialogResult;
 
 #[derive(Properties, PartialEq)]
 pub struct ConfirmDialogProps {
@@ -43,12 +43,15 @@ pub fn ConfirmDialog(props: &ConfirmDialogProps) -> Html {
         Callback::from(move |()| on_result(DialogResult::Cancel))
     };
 
-    let title_html: Html = props.title
+    let title_html: Html = props
+        .title
         .split('\n')
-        .map(|line| html! { <>
-            { line }
-            <br/>
-        </> })
+        .map(|line| {
+            html! { <>
+                { line }
+                <br/>
+            </> }
+        })
         .collect::<Html>();
 
     html! {

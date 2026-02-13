@@ -1,7 +1,7 @@
-use std::rc::Rc;
 use crate::services::{get_base_href, request_get};
 use shared::model::StreamInfo;
 use shared::utils::concat_path_leading_slash;
+use std::rc::Rc;
 
 pub struct StreamsService {
     streams_path: String,
@@ -21,7 +21,9 @@ impl StreamsService {
         }
     }
 
-    pub async fn get_streams_info(&self) -> Result<Option<Vec<Rc<StreamInfo>>>, crate::error::Error> {
+    pub async fn get_streams_info(
+        &self,
+    ) -> Result<Option<Vec<Rc<StreamInfo>>>, crate::error::Error> {
         request_get::<Vec<Rc<StreamInfo>>>(&self.streams_path, None, None).await
     }
 }

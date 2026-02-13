@@ -1,8 +1,8 @@
+use crate::app::components::chip::Chip;
 use std::collections::HashMap;
 use std::rc::Rc;
 use web_sys::HtmlInputElement;
 use yew::prelude::*;
-use crate::app::components::chip::Chip;
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct KeyValue {
@@ -38,7 +38,15 @@ pub fn KeyValueEditor(props: &KeyValueEditorProps) -> Html {
 
     // local state for editing
     let entry_state = use_state(|| {
-        entries.iter().map(|(k,v)| Rc::new(KeyValue { key: k.clone(), value: v.clone() })).collect::<Vec<_>>()
+        entries
+            .iter()
+            .map(|(k, v)| {
+                Rc::new(KeyValue {
+                    key: k.clone(),
+                    value: v.clone(),
+                })
+            })
+            .collect::<Vec<_>>()
     });
     let new_key = use_state(String::default);
     let new_value = use_state(String::default);
@@ -48,9 +56,15 @@ pub fn KeyValueEditor(props: &KeyValueEditorProps) -> Html {
         let entry_state = entry_state.clone();
         use_effect_with(entries.clone(), move |entries| {
             entry_state.set(
-                entries.iter()
-                    .map(|(k,v)| Rc::new(KeyValue { key: k.clone(), value: v.clone() }))
-                    .collect()
+                entries
+                    .iter()
+                    .map(|(k, v)| {
+                        Rc::new(KeyValue {
+                            key: k.clone(),
+                            value: v.clone(),
+                        })
+                    })
+                    .collect(),
             );
             || ()
         });
@@ -64,7 +78,10 @@ pub fn KeyValueEditor(props: &KeyValueEditorProps) -> Html {
             let mut updated = (*entry_state).clone();
             updated.retain(|kv| kv.key != key);
             // emit new HashMap
-            let map = updated.iter().map(|kv| (kv.key.clone(), kv.value.clone())).collect::<HashMap<_,_>>();
+            let map = updated
+                .iter()
+                .map(|kv| (kv.key.clone(), kv.value.clone()))
+                .collect::<HashMap<_, _>>();
             on_change.emit(map.clone());
             entry_state.set(updated);
         })
@@ -99,11 +116,20 @@ pub fn KeyValueEditor(props: &KeyValueEditorProps) -> Html {
                 e.stop_propagation();
                 let key = (*new_key).trim().to_string();
                 let value = (*new_value).trim().to_string();
-                if !key.is_empty() && !value.is_empty() && !entry_state.iter().any(|kv| kv.key == key) {
+                if !key.is_empty()
+                    && !value.is_empty()
+                    && !entry_state.iter().any(|kv| kv.key == key)
+                {
                     let mut updated = (*entry_state).clone();
-                    updated.push(Rc::new(KeyValue { key: key.clone(), value: value.clone() }));
+                    updated.push(Rc::new(KeyValue {
+                        key: key.clone(),
+                        value: value.clone(),
+                    }));
                     // emit new HashMap
-                    let map = updated.iter().map(|kv| (kv.key.clone(), kv.value.clone())).collect::<HashMap<_,_>>();
+                    let map = updated
+                        .iter()
+                        .map(|kv| (kv.key.clone(), kv.value.clone()))
+                        .collect::<HashMap<_, _>>();
                     on_change.emit(map.clone());
                     entry_state.set(updated);
                 }

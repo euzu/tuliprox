@@ -1,6 +1,9 @@
-use std::ops::Deref;
 use regex::Regex;
-use shared::foundation::{AssignmentTarget, BuiltInFunction, ExprId, Expression, ForEachExpr, ForEachKey, MapCase, MapCaseKey, MapKey, MapperScript, MatchCase, MatchCaseKey, RegexSource, Statement};
+use shared::foundation::{
+    AssignmentTarget, BuiltInFunction, ExprId, Expression, ForEachExpr, ForEachKey, MapCase,
+    MapCaseKey, MapKey, MapperScript, MatchCase, MatchCaseKey, RegexSource, Statement,
+};
+use std::ops::Deref;
 use yew::prelude::*;
 
 #[derive(Properties, PartialEq, Clone)]
@@ -62,7 +65,7 @@ fn newline(format_params: &mut FormatParams) -> Html {
     if format_params.pretty {
         html! { <br /> }
     } else {
-        html!{}
+        html! {}
     }
 }
 
@@ -98,7 +101,12 @@ fn render_map_key(key: &MapKey) -> Html {
     }
 }
 
-fn render_function_call(name: &BuiltInFunction, args: &[ExprId], script: &MapperScript, format_params: &mut FormatParams) -> Html {
+fn render_function_call(
+    name: &BuiltInFunction,
+    args: &[ExprId],
+    script: &MapperScript,
+    format_params: &mut FormatParams,
+) -> Html {
     html! {
         <span class="built-in-function">{name.to_string()}{"("}{render_args(args, script, format_params)}{")"} </span>
     }
@@ -116,7 +124,11 @@ fn render_null_value() -> Html {
     html! { <span class="null-value">{ "null" }</span> }
 }
 
-fn render_map_case(case: &MapCase, script: &MapperScript, format_params: &mut FormatParams) -> Html {
+fn render_map_case(
+    case: &MapCase,
+    script: &MapperScript,
+    format_params: &mut FormatParams,
+) -> Html {
     let keys_html = html! {
         <>
             {
@@ -152,9 +164,12 @@ fn render_map_case(case: &MapCase, script: &MapperScript, format_params: &mut Fo
     }
 }
 
-
-fn render_map_cases(cases: &[MapCase], script: &MapperScript, format_params: &mut FormatParams) -> Html {
-    html!{
+fn render_map_cases(
+    cases: &[MapCase],
+    script: &MapperScript,
+    format_params: &mut FormatParams,
+) -> Html {
+    html! {
         <>
             {
                 for cases.iter().map(|case| render_map_case(case, script, format_params))
@@ -163,7 +178,12 @@ fn render_map_cases(cases: &[MapCase], script: &MapperScript, format_params: &mu
     }
 }
 
-fn render_map_block(map_key: &MapKey, cases: &[MapCase], script: &MapperScript, format_params: &mut FormatParams) -> Html {
+fn render_map_block(
+    map_key: &MapKey,
+    cases: &[MapCase],
+    script: &MapperScript,
+    format_params: &mut FormatParams,
+) -> Html {
     html! {
         <>
             {indent(format_params.level, true)}
@@ -186,10 +206,15 @@ fn render_for_each_key(key: &ForEachKey) -> Html {
     }
 }
 
-fn render_for_each_block(for_each_key: &ForEachKey, expr: &ForEachExpr, script: &MapperScript, format_params: &mut FormatParams) -> Html {
+fn render_for_each_block(
+    for_each_key: &ForEachKey,
+    expr: &ForEachExpr,
+    script: &MapperScript,
+    format_params: &mut FormatParams,
+) -> Html {
     let key_var = expr.key_var.clone().unwrap_or_else(|| "_".to_string());
     let value_var = expr.value_var.clone().unwrap_or_else(|| "_".to_string());
-    
+
     html! {
         <>
             {indent(format_params.level, true)}
@@ -207,7 +232,11 @@ fn render_for_each_block(for_each_key: &ForEachKey, expr: &ForEachExpr, script: 
     }
 }
 
-fn render_block(expr_ids: &[ExprId], script: &MapperScript, format_params: &mut FormatParams) -> Html {
+fn render_block(
+    expr_ids: &[ExprId],
+    script: &MapperScript,
+    format_params: &mut FormatParams,
+) -> Html {
     html! {
         <>
           <span class="bracket">{"{"}
@@ -229,7 +258,12 @@ fn render_block(expr_ids: &[ExprId], script: &MapperScript, format_params: &mut 
     }
 }
 
-fn render_assignment(target: &AssignmentTarget, expr_id: &ExprId, script: &MapperScript, format_params: &mut FormatParams) -> Html {
+fn render_assignment(
+    target: &AssignmentTarget,
+    expr_id: &ExprId,
+    script: &MapperScript,
+    format_params: &mut FormatParams,
+) -> Html {
     let target_html = match target {
         AssignmentTarget::Identifier(ident) => render_identifier(ident),
         AssignmentTarget::Field(field) => render_field(field),
@@ -244,7 +278,11 @@ fn render_assignment(target: &AssignmentTarget, expr_id: &ExprId, script: &Mappe
     }
 }
 
-fn render_match_case(case: &MatchCase, script: &MapperScript, format_params: &mut FormatParams) -> Html {
+fn render_match_case(
+    case: &MatchCase,
+    script: &MapperScript,
+    format_params: &mut FormatParams,
+) -> Html {
     let keys_html = html! {
         <>
             {
@@ -276,9 +314,12 @@ fn render_match_case(case: &MatchCase, script: &MapperScript, format_params: &mu
     }
 }
 
-
-fn render_match_cases(cases: &[MatchCase], script: &MapperScript, format_params: &mut FormatParams) -> Html {
-    html!{
+fn render_match_cases(
+    cases: &[MatchCase],
+    script: &MapperScript,
+    format_params: &mut FormatParams,
+) -> Html {
+    html! {
         <>
             {
                 for cases.iter().map(|case| render_match_case(case, script, format_params))
@@ -287,7 +328,11 @@ fn render_match_cases(cases: &[MatchCase], script: &MapperScript, format_params:
     }
 }
 
-fn render_match_block(match_cases: &[MatchCase], script: &MapperScript, format_params: &mut FormatParams) -> Html {
+fn render_match_block(
+    match_cases: &[MatchCase],
+    script: &MapperScript,
+    format_params: &mut FormatParams,
+) -> Html {
     html! {
         <>
             {indent(format_params.level, true)}
@@ -302,9 +347,8 @@ fn render_match_block(match_cases: &[MatchCase], script: &MapperScript, format_p
     }
 }
 
-
 fn render_regex_source(source: &RegexSource) -> Html {
-    match source  {
+    match source {
         RegexSource::Identifier(ident) => render_identifier(ident),
         RegexSource::Field(field) => render_field(field),
     }
@@ -314,40 +358,62 @@ fn render_regexp(field: &RegexSource, pattern: &String, _regex: &Regex) -> Html 
     html! { <> {render_regex_source(field)} {" ~ "} <span class="regex">{"'"}{ pattern }{"'"}</span></> }
 }
 
-fn render_expression(expr_id: &ExprId, script: &MapperScript, format_params: &mut FormatParams) -> Html {
-    script.get_expr_by_id(*expr_id.deref()).map(|expression| {
-        match expression {
+fn render_expression(
+    expr_id: &ExprId,
+    script: &MapperScript,
+    format_params: &mut FormatParams,
+) -> Html {
+    script
+        .get_expr_by_id(*expr_id.deref())
+        .map(|expression| match expression {
             Expression::Identifier(ident) => render_identifier(ident),
             Expression::StringLiteral(literal) => render_literal(literal),
             Expression::NumberLiteral(num) => render_num_literal(num),
             Expression::FieldAccess(field) => render_field(field),
             Expression::VarAccess(name, field) => render_var_access(name, field),
-            Expression::RegexExpr { field, pattern, re_pattern } => render_regexp(field, pattern, re_pattern),
-            Expression::FunctionCall { name, args } => render_function_call(name, args, script, format_params),
-            Expression::Assignment { target, expr } => render_assignment(target, expr, script, format_params),
-            Expression::MatchBlock(match_cases) => render_match_block(match_cases, script, format_params),
-            Expression::MapBlock { key, cases } => render_map_block(key, cases, script, format_params),
-            Expression::ForEachBlock { key, expr } => render_for_each_block(key, expr, script, format_params),
+            Expression::RegexExpr {
+                field,
+                pattern,
+                re_pattern,
+            } => render_regexp(field, pattern, re_pattern),
+            Expression::FunctionCall { name, args } => {
+                render_function_call(name, args, script, format_params)
+            }
+            Expression::Assignment { target, expr } => {
+                render_assignment(target, expr, script, format_params)
+            }
+            Expression::MatchBlock(match_cases) => {
+                render_match_block(match_cases, script, format_params)
+            }
+            Expression::MapBlock { key, cases } => {
+                render_map_block(key, cases, script, format_params)
+            }
+            Expression::ForEachBlock { key, expr } => {
+                render_for_each_block(key, expr, script, format_params)
+            }
             Expression::NullValue => render_null_value(),
             Expression::Block(expr_ids) => render_block(expr_ids, script, format_params),
-        }
-    }).unwrap_or_else(|| html! { <span class="expr-not-found">{"ExprNotFound"}</span> })
+        })
+        .unwrap_or_else(|| html! { <span class="expr-not-found">{"ExprNotFound"}</span> })
 }
 
-fn render_script(script: &MapperScript, pretty: bool, level: usize /*, do_indent: bool, p_count: usize*/) -> Html {
+fn render_script(
+    script: &MapperScript,
+    pretty: bool,
+    level: usize, /*, do_indent: bool, p_count: usize*/
+) -> Html {
     let mut format_params = FormatParams {
-        pretty, level /*, do_indent, p_count*/
+        pretty,
+        level, /*, do_indent, p_count*/
     };
-    let items = script.statements.iter().map(|stmt| {
-        match stmt {
-            Statement::Expression(expr_id) => html! {
-                <>
-                {render_expression(expr_id, script, &mut format_params)}
-                {newline(&mut format_params)}
-                </>
-            },
-            Statement::Comment(comment) => html!{ <pre>{ comment }</pre> },
-        }
+    let items = script.statements.iter().map(|stmt| match stmt {
+        Statement::Expression(expr_id) => html! {
+            <>
+            {render_expression(expr_id, script, &mut format_params)}
+            {newline(&mut format_params)}
+            </>
+        },
+        Statement::Comment(comment) => html! { <pre>{ comment }</pre> },
     });
 
     html! {

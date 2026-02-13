@@ -6,7 +6,7 @@ pub enum CellValue<'a> {
     Status(ProxyUserStatus),
     Proxy(ProxyType),
     Text(&'a str),
-    Date(i64)
+    Date(i64),
 }
 
 impl<'a> PartialOrd for CellValue<'a> {
@@ -28,9 +28,13 @@ impl<'a> Ord for CellValue<'a> {
             (CellValue::Empty, _) => std::cmp::Ordering::Less,
             (CellValue::Bool(_), CellValue::Empty) => std::cmp::Ordering::Greater,
             (CellValue::Bool(_), _) => std::cmp::Ordering::Less,
-            (CellValue::Status(_), CellValue::Empty | CellValue::Bool(_)) => std::cmp::Ordering::Greater,
+            (CellValue::Status(_), CellValue::Empty | CellValue::Bool(_)) => {
+                std::cmp::Ordering::Greater
+            }
             (CellValue::Status(_), _) => std::cmp::Ordering::Less,
-            (CellValue::Proxy(_), CellValue::Empty | CellValue::Bool(_) | CellValue::Status(_)) => std::cmp::Ordering::Greater,
+            (CellValue::Proxy(_), CellValue::Empty | CellValue::Bool(_) | CellValue::Status(_)) => {
+                std::cmp::Ordering::Greater
+            }
             (CellValue::Proxy(_), _) => std::cmp::Ordering::Less,
             (CellValue::Text(_), CellValue::Date(_)) => std::cmp::Ordering::Less,
             (CellValue::Text(_), _) => std::cmp::Ordering::Greater,

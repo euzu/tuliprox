@@ -1,8 +1,10 @@
-use crate::error::{TuliproxError};
+use crate::error::TuliproxError;
 use crate::info_err;
 use crate::utils::is_blank_optional_string;
-use crate::utils::{default_best_match_threshold, default_match_threshold, is_default_best_match_threshold,
-                   is_default_match_threshold, is_false};
+use crate::utils::{
+    default_best_match_threshold, default_match_threshold, is_default_best_match_threshold,
+    is_default_match_threshold, is_false,
+};
 use log::warn;
 use std::fmt::Display;
 
@@ -97,12 +99,16 @@ impl EpgSmartMatchConfigDto {
             self.match_threshold = 100;
         }
 
-        if self.best_match_threshold == 0 || self.best_match_threshold > 100 || self.best_match_threshold < self.match_threshold {
+        if self.best_match_threshold == 0
+            || self.best_match_threshold > 100
+            || self.best_match_threshold < self.match_threshold
+        {
             self.best_match_threshold = 99;
         }
 
         if let Some(regstr) = self.normalize_regex.as_ref() {
-            crate::model::REGEX_CACHE.get_or_compile(regstr.as_str())
+            crate::model::REGEX_CACHE
+                .get_or_compile(regstr.as_str())
                 .map_err(|_| info_err!("can't parse regex: {}", regstr))?;
         }
 

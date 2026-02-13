@@ -1,13 +1,13 @@
-use std::cell::RefCell;
 use super::{check_dummy_token, get_base_href, request_post, set_token};
+use crate::error::{Error, Error::Unauthorized};
+use base64::{engine::general_purpose, Engine as _};
 use futures_signals::signal::Mutable;
 use futures_signals::signal::SignalExt;
+use log::warn;
 use shared::model::{Claims, TokenResponse, UserCredential, ROLE_ADMIN, ROLE_USER, TOKEN_NO_AUTH};
-use std::future::Future;
 use shared::utils::{concat_path, concat_path_leading_slash};
-use base64::{engine::general_purpose, Engine as _};
-use log::{warn};
-use crate::error::{Error, Error::Unauthorized};
+use std::cell::RefCell;
+use std::future::Future;
 
 fn decode_jwt_payload(token: &str) -> Option<Claims> {
     let payload_enc = token.split('.').nth(1)?;
@@ -34,7 +34,7 @@ impl AuthService {
     }
 
     pub fn get_username(&self) -> String {
-      self.username.borrow().to_string()
+        self.username.borrow().to_string()
     }
     pub fn is_admin(&self) -> bool {
         self.roles.borrow().iter().any(|r| r == ROLE_ADMIN)
@@ -50,7 +50,7 @@ impl AuthService {
 
     pub async fn auth_subscribe<F, U>(&self, callback: &mut F)
     where
-        U: Future<Output=()>,
+        U: Future<Output = ()>,
         F: FnMut(bool) -> U,
     {
         let fut = self.auth_channel.signal_cloned().for_each(callback);
@@ -69,12 +69,20 @@ impl AuthService {
         Err(Unauthorized)
     }
 
-    pub async fn authenticate(&self, username: String, password: String) -> Result<TokenResponse, Error> {
-        let credentials = UserCredential {
-            username,
-            password,
-        };
-        match request_post::<UserCredential, TokenResponse>(&concat_path(&self.auth_path, "token"), credentials, None, None).await {
+    pub async fn authenticate(
+        &self,
+        username: String,
+        password: String,
+    ) -> Result<TokenResponse, Error> {
+        let credentials = UserCredential { username, password };
+        match request_post::<UserCredential, TokenResponse>(
+            &concat_path(&self.auth_path, "token"),
+            credentials,
+            None,
+            None,
+        )
+        .await
+        {
             Ok(Some(token)) => {
                 self.username.replace(token.username.to_string());
                 self.auth_channel.set(true);
@@ -88,7 +96,14 @@ impl AuthService {
 
     pub async fn refresh(&self) -> Result<TokenResponse, Error> {
         check_dummy_token();
-        match request_post::<(), TokenResponse>(&concat_path(&self.auth_path, "refresh"), (), None, None).await {
+        match request_post::<(), TokenResponse>(
+            &concat_path(&self.auth_path, "refresh"),
+            (),
+            None,
+            None,
+        )
+        .await
+        {
             Ok(Some(token)) => {
                 self.username.replace(token.username.to_string());
                 self.auth_channel.set(true);

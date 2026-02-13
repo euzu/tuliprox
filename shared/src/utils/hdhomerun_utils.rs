@@ -1,4 +1,6 @@
-const CHECKSUM_LOOKUP: [u8; 16] = [0xA, 0x5, 0xF, 0x6, 0x7, 0xC, 0x1, 0xB, 0x9, 0x2, 0x8, 0xD, 0x4, 0x3, 0xE, 0x0];
+const CHECKSUM_LOOKUP: [u8; 16] = [
+    0xA, 0x5, 0xF, 0x6, 0x7, 0xC, 0x1, 0xB, 0x9, 0x2, 0x8, 0xD, 0x4, 0x3, 0xE, 0x0,
+];
 
 fn calculate_checksum(device_id_int: u32) -> u8 {
     let mut checksum: u8 = 0;
@@ -46,7 +48,9 @@ pub fn generate_hdhr_device_id_from_base(base_id: &str) -> String {
 
 pub fn generate_hdhr_device_id() -> String {
     // 3 fixed + 4 random = 7 hex digits base
-    let rnd = (0..4).map(|_| format!("{:X}", fastrand::u8(0..16))).collect::<String>();
+    let rnd = (0..4)
+        .map(|_| format!("{:X}", fastrand::u8(0..16)))
+        .collect::<String>();
     let base7 = format!("105{rnd}");
     generate_hdhr_device_id_from_base(&base7)
 }

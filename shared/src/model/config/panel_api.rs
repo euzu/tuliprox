@@ -1,10 +1,10 @@
 use crate::error::TuliproxError;
 use crate::info_err_res;
 use crate::utils::{
-    default_as_true, default_panel_api_alias_pool_max, default_panel_api_alias_pool_min,
-    default_panel_api_provision_cooldown_secs, default_panel_api_provision_probe_interval_secs,
-    default_panel_api_provision_timeout_secs, deserialize_as_option_string, is_true,
-    serialize_vec_flow_map_items, arc_str_serde, arc_str_option_serde, is_blank_optional_arc_str
+    arc_str_option_serde, arc_str_serde, default_as_true, default_panel_api_alias_pool_max,
+    default_panel_api_alias_pool_min, default_panel_api_provision_cooldown_secs,
+    default_panel_api_provision_probe_interval_secs, default_panel_api_provision_timeout_secs,
+    deserialize_as_option_string, is_blank_optional_arc_str, is_true, serialize_vec_flow_map_items,
 };
 use log::warn;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -221,7 +221,10 @@ pub struct PanelApiConfigDto {
     #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
     pub enabled: bool,
     pub url: String,
-    #[serde(with = "arc_str_option_serde", skip_serializing_if = "is_blank_optional_arc_str")]
+    #[serde(
+        with = "arc_str_option_serde",
+        skip_serializing_if = "is_blank_optional_arc_str"
+    )]
     pub api_key: Option<Arc<str>>,
     #[serde(default, skip_serializing_if = "PanelApiProvisioningDto::is_default")]
     pub provisioning: PanelApiProvisioningDto,
@@ -258,7 +261,7 @@ impl PanelApiConfigDto {
                 let size = alias_pool
                     .size
                     .get_or_insert_with(PanelApiAliasPoolSizeDto::default);
-               // Capture original state before applying defaults
+                // Capture original state before applying defaults
                 let min_was_none = size.min.is_none();
                 if size.min.is_none() {
                     size.min = Some(PanelApiAliasPoolSizeValue::Number(1));
@@ -290,7 +293,9 @@ impl PanelApiConfigDto {
             }
 
             if self.provisioning.probe_interval_sec == 0 {
-                return info_err_res!("panel_api.provisioning.probe_interval_sec must be greater than 0");
+                return info_err_res!(
+                    "panel_api.provisioning.probe_interval_sec must be greater than 0"
+                );
             }
         }
         Ok(())

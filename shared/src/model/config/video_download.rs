@@ -1,9 +1,12 @@
-use std::collections::HashMap;
-use std::borrow::BorrowMut;
+use crate::error::TuliproxError;
 use crate::info_err_res;
-use crate::error::{TuliproxError};
 use crate::model::DEFAULT_USER_AGENT;
-use crate::utils::{is_false, is_blank_optional_string, is_blank_optional_str, default_supported_video_extensions, is_default_supported_video_extensions};
+use crate::utils::{
+    default_supported_video_extensions, is_blank_optional_str, is_blank_optional_string,
+    is_default_supported_video_extensions, is_false,
+};
+use std::borrow::BorrowMut;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -31,7 +34,10 @@ impl VideoDownloadConfigDto {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct VideoConfigDto {
-    #[serde(default = "default_supported_video_extensions", skip_serializing_if = "is_default_supported_video_extensions")]
+    #[serde(
+        default = "default_supported_video_extensions",
+        skip_serializing_if = "is_default_supported_video_extensions"
+    )]
     pub extensions: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download: Option<VideoDownloadConfigDto>,
@@ -45,10 +51,11 @@ pub struct VideoConfigDto {
 
 impl VideoConfigDto {
     pub fn is_empty(&self) -> bool {
-        self.extensions.is_empty() && is_blank_optional_str(self.web_search.as_deref())
-        && (self.download.is_none() || self.download.as_ref().is_some_and(|d| d.is_empty()))
-        && !self.ffprobe_enabled
-        && self.ffprobe_timeout.is_none()
+        self.extensions.is_empty()
+            && is_blank_optional_str(self.web_search.as_deref())
+            && (self.download.is_none() || self.download.as_ref().is_some_and(|d| d.is_empty()))
+            && !self.ffprobe_enabled
+            && self.ffprobe_timeout.is_none()
     }
 
     pub fn clean(&mut self) {
@@ -68,13 +75,19 @@ impl VideoConfigDto {
             None => {}
             Some(downl) => {
                 if downl.headers.is_empty() {
-                    downl.headers.borrow_mut().insert("Accept".to_string(), "video/*".to_string());
-                    downl.headers.borrow_mut().insert("User-Agent".to_string(), DEFAULT_USER_AGENT.to_string());
+                    downl
+                        .headers
+                        .borrow_mut()
+                        .insert("Accept".to_string(), "video/*".to_string());
+                    downl
+                        .headers
+                        .borrow_mut()
+                        .insert("User-Agent".to_string(), DEFAULT_USER_AGENT.to_string());
                 }
 
                 if let Some(episode_pattern) = &downl.episode_pattern {
                     if let Err(err) = crate::model::REGEX_CACHE.get_or_compile(episode_pattern) {
-                         return info_err_res!("can't parse regex: {episode_pattern} {err}");
+                        return info_err_res!("can't parse regex: {episode_pattern} {err}");
                     }
                 }
             }

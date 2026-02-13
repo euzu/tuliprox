@@ -4,9 +4,14 @@ use crate::app::components::userlist::proxy_type_input::ProxyTypeInput;
 use crate::app::components::{DropDownOption, DropDownSelection, TextButton, UserStatus};
 use crate::app::TargetUser;
 use crate::hooks::use_service_context;
-use crate::{config_field_child, config_field_custom, edit_field_bool, edit_field_date, edit_field_number, edit_field_text, edit_field_text_option, generate_form_reducer};
+use crate::{
+    config_field_child, config_field_custom, edit_field_bool, edit_field_date, edit_field_number,
+    edit_field_text, edit_field_text_option, generate_form_reducer,
+};
 use chrono::{Duration, Utc};
-use shared::model::{ApiProxyServerInfoDto, ConfigTargetDto, ProxyType, ProxyUserCredentialsDto, ProxyUserStatus};
+use shared::model::{
+    ApiProxyServerInfoDto, ConfigTargetDto, ProxyType, ProxyUserCredentialsDto, ProxyUserStatus,
+};
 use shared::utils::generate_random_string;
 use std::rc::Rc;
 use yew::prelude::*;
@@ -50,78 +55,96 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
     let selected_target = use_state(|| None);
     let update = use_state(|| false);
 
-    let form_state: UseReducerHandle<UserFormState> = use_reducer(|| {
-        UserFormState { form: ProxyUserCredentialsDto::default(), modified: false }
+    let form_state: UseReducerHandle<UserFormState> = use_reducer(|| UserFormState {
+        form: ProxyUserCredentialsDto::default(),
+        modified: false,
     });
 
-    let proxy_user_status = use_memo(form_state.data().status, |status|
-        [ProxyUserStatus::Active,
+    let proxy_user_status = use_memo(form_state.data().status, |status| {
+        [
+            ProxyUserStatus::Active,
             ProxyUserStatus::Expired,
             ProxyUserStatus::Banned,
             ProxyUserStatus::Trial,
             ProxyUserStatus::Disabled,
-            ProxyUserStatus::Pending].iter().map(|s| DropDownOption {
+            ProxyUserStatus::Pending,
+        ]
+        .iter()
+        .map(|s| DropDownOption {
             id: s.to_string(),
             label: html! { <UserStatus status={Some(*s)} /> },
             selected: status.as_ref() == Some(s),
-        }).collect::<Vec<DropDownOption>>(),
+        })
+        .collect::<Vec<DropDownOption>>()
+    });
+
+    let targets = use_memo(
+        (props.targets.clone(), (*selected_target).clone()),
+        |(targets, selected)| {
+            targets
+                .iter()
+                .map(|t| DropDownOption {
+                    id: t.name.clone(),
+                    label: html! { t.name.clone() },
+                    selected: selected.as_ref().is_some_and(|ut: &String| ut == &t.name),
+                })
+                .collect::<Vec<DropDownOption>>()
+        },
     );
 
-    let targets = use_memo((props.targets.clone(), (*selected_target).clone()),
-                           |(targets, selected)|
-                               targets.iter().map(|t| DropDownOption {
-                                   id: t.name.clone(),
-                                   label: html! { t.name.clone() },
-                                   selected: selected.as_ref().is_some_and(|ut: &String| ut == &t.name),
-                               }).collect::<Vec<DropDownOption>>(),
-    );
-
-    let server = use_memo((props.server.clone(), form_state.data().server.clone()),
-                          |(server_list, user_server)|
-                              server_list.iter().map(|s| DropDownOption {
-                                  id: s.name.to_string(),
-                                  label: html! { s.name.clone() },
-                                  selected: user_server.as_ref() == Some(&s.name),
-                              }).collect::<Vec<DropDownOption>>(),
+    let server = use_memo(
+        (props.server.clone(), form_state.data().server.clone()),
+        |(server_list, user_server)| {
+            server_list
+                .iter()
+                .map(|s| DropDownOption {
+                    id: s.name.to_string(),
+                    label: html! { s.name.clone() },
+                    selected: user_server.as_ref() == Some(&s.name),
+                })
+                .collect::<Vec<DropDownOption>>()
+        },
     );
 
     {
         let form_state = form_state.clone();
         let set_selected_target = selected_target.clone();
         let set_update = update.clone();
-        use_effect_with((props.user.clone(), props.server.clone()), move |(user, server)| {
-            if let Some(u) = user.clone() {
-                set_update.set(true);
-                set_selected_target.set(Some(u.target.clone()));
-                form_state.dispatch(UserFormAction::SetAll((*u.credentials).clone()));
-            } else {
-                set_update.set(false);
-                set_selected_target.set(None);
-                let mut user = ProxyUserCredentialsDto::default();
-                if let Some(api_server) = (*server).first() {
-                    user.server = Some(api_server.name.clone());
-                }
-                user.max_connections = DEFAULT_MAX_CONNECTIONS;
-                user.proxy = ProxyType::Reverse(None);
-                user.status = Some(ProxyUserStatus::Active);
-                user.ui_enabled = true;
-                let now = Utc::now();
-                user.created_at = Some(now.timestamp());
-                let in_one_year = now + Duration::days(DEFAULT_EXPIRATION_DAYS);
-                user.exp_date = Some(in_one_year.timestamp());
+        use_effect_with(
+            (props.user.clone(), props.server.clone()),
+            move |(user, server)| {
+                if let Some(u) = user.clone() {
+                    set_update.set(true);
+                    set_selected_target.set(Some(u.target.clone()));
+                    form_state.dispatch(UserFormAction::SetAll((*u.credentials).clone()));
+                } else {
+                    set_update.set(false);
+                    set_selected_target.set(None);
+                    let mut user = ProxyUserCredentialsDto::default();
+                    if let Some(api_server) = (*server).first() {
+                        user.server = Some(api_server.name.clone());
+                    }
+                    user.max_connections = DEFAULT_MAX_CONNECTIONS;
+                    user.proxy = ProxyType::Reverse(None);
+                    user.status = Some(ProxyUserStatus::Active);
+                    user.ui_enabled = true;
+                    let now = Utc::now();
+                    user.created_at = Some(now.timestamp());
+                    let in_one_year = now + Duration::days(DEFAULT_EXPIRATION_DAYS);
+                    user.exp_date = Some(in_one_year.timestamp());
 
-                if user.username.is_empty(){
-                    user.username = generate_random_string(6).to_uppercase();
-                }
-                if user.password.is_empty(){
-                    user.password = generate_random_string(6).to_uppercase();
-                }
-                user.token = Some(generate_random_string(6));
+                    if user.username.is_empty() {
+                        user.username = generate_random_string(6).to_uppercase();
+                    }
+                    if user.password.is_empty() {
+                        user.password = generate_random_string(6).to_uppercase();
+                    }
+                    user.token = Some(generate_random_string(6));
 
-                form_state.dispatch(UserFormAction::SetAll(user));
-            }
-            || ()
-        },
+                    form_state.dispatch(UserFormAction::SetAll(user));
+                }
+                || ()
+            },
         );
     }
 
@@ -141,9 +164,16 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
         let onsave = props.on_save.clone();
         let is_update = update.clone();
         Callback::from(move |_| {
-            let nothing_to_save = || services.toastr.warning(translate_clone.t("MESSAGES.SAVE.USER.NOTHING_TO_SAVE"));
+            let nothing_to_save = || {
+                services
+                    .toastr
+                    .warning(translate_clone.t("MESSAGES.SAVE.USER.NOTHING_TO_SAVE"))
+            };
             if let Some(target_name) = (*target).as_ref().cloned() {
-                let original_target = original.as_ref().map(|u| u.target.clone()).unwrap_or_default();
+                let original_target = original
+                    .as_ref()
+                    .map(|u| u.target.clone())
+                    .unwrap_or_default();
                 let target_changed = target_name != original_target;
                 if target_changed || user.modified() {
                     let user = user.data();
@@ -165,7 +195,9 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                     nothing_to_save();
                 }
             } else {
-                services.toastr.error(translate_clone.t("MESSAGES.SAVE.USER.TARGET_NOT_SELECTED"));
+                services
+                    .toastr
+                    .error(translate_clone.t("MESSAGES.SAVE.USER.TARGET_NOT_SELECTED"));
             }
         })
     };

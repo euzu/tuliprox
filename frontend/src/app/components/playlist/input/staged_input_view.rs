@@ -1,8 +1,8 @@
 use crate::app::components::{Chip, HideContent, InputHeaders};
+use crate::html_if;
 use shared::model::{InputType, StagedInputDto};
 use yew::prelude::*;
-use yew_i18n::{use_translation};
-use crate::html_if;
+use yew_i18n::use_translation;
 
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct StagedInputViewProps {
@@ -44,7 +44,7 @@ pub fn StagedInputView(props: &StagedInputViewProps) -> Html {
                     <InputHeaders headers={input.headers.clone()} />
                 </div>
             }
-        },
-        None => html! {}
+        }
+        None => html! {},
     }
 }

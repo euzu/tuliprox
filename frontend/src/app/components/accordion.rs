@@ -1,5 +1,5 @@
-use yew::prelude::*;
 use std::rc::Rc;
+use yew::prelude::*;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AccordionState {

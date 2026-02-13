@@ -1,9 +1,9 @@
-use std::fmt::Display;
-use std::str::FromStr;
+use crate::error::TuliproxError;
+use crate::info_err_res;
 use enum_iterator::Sequence;
 use serde::{Deserialize, Deserializer};
-use crate::info_err_res;
-use crate::error::{TuliproxError};
+use std::fmt::Display;
+use std::str::FromStr;
 
 #[derive(Debug, Copy, Clone, serde::Serialize, Sequence, Eq, PartialEq)]
 pub enum ItemField {
@@ -51,16 +51,20 @@ impl ItemField {
 
 impl Display for ItemField {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", match *self {
-            Self::Group => Self::GROUP,
-            Self::Name => Self::NAME,
-            Self::Title => Self::TITLE,
-            Self::Genre => Self::GENRE,
-            Self::Url => Self::URL,
-            Self::Input => Self::INPUT,
-            Self::Type => Self::TYPE,
-            Self::Caption => Self::CAPTION,
-        })
+        write!(
+            f,
+            "{}",
+            match *self {
+                Self::Group => Self::GROUP,
+                Self::Name => Self::NAME,
+                Self::Title => Self::TITLE,
+                Self::Genre => Self::GENRE,
+                Self::Url => Self::URL,
+                Self::Input => Self::INPUT,
+                Self::Type => Self::TYPE,
+                Self::Caption => Self::CAPTION,
+            }
+        )
     }
 }
 

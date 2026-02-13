@@ -1,8 +1,8 @@
-use std::sync::Arc;
-use crate::error::{TuliproxError};
+use crate::error::TuliproxError;
 use crate::foundation::{get_filter, Filter};
 use crate::model::{PatternTemplate, XtreamCluster};
 use crate::utils::{arc_str_serde, xtream_cluster_serde};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -20,7 +20,10 @@ pub struct ConfigFavouritesDto {
 }
 
 impl ConfigFavouritesDto {
-    pub fn prepare(&mut self, templates: Option<&Vec<PatternTemplate>>) -> Result<(), TuliproxError> {
+    pub fn prepare(
+        &mut self,
+        templates: Option<&Vec<PatternTemplate>>,
+    ) -> Result<(), TuliproxError> {
         self.t_filter = Some(get_filter(&self.filter, templates)?);
         Ok(())
     }

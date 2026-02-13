@@ -1,10 +1,12 @@
+use crate::model::{
+    M3uPlaylistItem, PlaylistEntry, PlaylistItemType, XtreamCluster, XtreamPlaylistItem,
+};
 use crate::utils::arc_str_serde;
 use crate::utils::is_blank_optional_string;
+use crate::utils::{current_time_secs, longest};
+use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use serde::{Deserialize, Serialize};
-use crate::model::{M3uPlaylistItem, PlaylistEntry, PlaylistItemType, XtreamCluster, XtreamPlaylistItem};
-use crate::utils::{current_time_secs, longest};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StreamChannel {
@@ -22,7 +24,11 @@ pub struct StreamChannel {
     pub shared: bool,
 }
 
-pub fn create_stream_channel_with_type(target_id: u16, pli: &XtreamPlaylistItem, item_type: PlaylistItemType) -> StreamChannel {
+pub fn create_stream_channel_with_type(
+    target_id: u16,
+    pli: &XtreamPlaylistItem,
+    item_type: PlaylistItemType,
+) -> StreamChannel {
     let mut stream_channel = pli.to_stream_channel(target_id);
     stream_channel.item_type = item_type;
     stream_channel
@@ -79,9 +85,16 @@ pub struct StreamInfo {
 
 impl StreamInfo {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(username: &str, addr: &SocketAddr, client_ip: &str, provider: &str,
-               stream_channel: StreamChannel, user_agent: String, country: Option<String>,
-               session_token: Option<&str>) -> Self {
+    pub fn new(
+        username: &str,
+        addr: &SocketAddr,
+        client_ip: &str,
+        provider: &str,
+        stream_channel: StreamChannel,
+        user_agent: String,
+        country: Option<String>,
+        session_token: Option<&str>,
+    ) -> Self {
         Self {
             username: username.to_string(),
             channel: stream_channel,

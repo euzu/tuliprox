@@ -4,7 +4,6 @@ use std::string::ToString;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, LazyLock};
 
-
 pub const USER_FILE: &str = "user.txt";
 pub const CONFIG_PATH: &str = "config";
 pub const CONFIG_FILE: &str = "config.yml";
@@ -14,7 +13,6 @@ pub const API_PROXY_FILE: &str = "api-proxy.yml";
 
 pub const ENCODING_GZIP: &str = "gzip";
 pub const ENCODING_DEFLATE: &str = "deflate";
-
 
 pub const HLS_EXT: &str = ".m3u8";
 pub const DASH_EXT: &str = ".mpd";
@@ -46,9 +44,8 @@ const SUPPORTED_RESPONSE_HEADERS: &[&str] = &[
     "last-modified",
     "cache-control",
     "etag",
-    "expires"
+    "expires",
 ];
-
 
 pub fn filter_response_header(key: &str) -> bool {
     SUPPORTED_RESPONSE_HEADERS.contains(&key)
@@ -108,7 +105,7 @@ pub struct Constants {
     pub re_html_tag: Regex,
 }
 
-pub static CONSTANTS: LazyLock<Constants> = LazyLock::new(||
+pub static CONSTANTS: LazyLock<Constants> = LazyLock::new(|| {
     Constants {
         re_credentials: Regex::new(r"((username|password|token|api_key)=)[^&]*").unwrap(),
         re_ipv4: Regex::new(r"\b((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\b").unwrap(),
@@ -168,4 +165,4 @@ pub static CONSTANTS: LazyLock<Constants> = LazyLock::new(||
         re_clean_title: Regex::new(r"^(?:\s*[\[\(┃|].*?[\]\)┃|]\s*)+").unwrap(),      // Matches patterns like "┃DE┃", "[US]", "(FR)", "|EN|" at the start of the string
         re_html_tag: Regex::new(r"</?([a-zA-Z0-9]+)[^>]*>").unwrap()
     }
-);
+});

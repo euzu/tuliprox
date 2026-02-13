@@ -1,8 +1,12 @@
 use crate::model::UUIDType;
-use crate::model::{xtream_const, ClusterFlags, CommonPlaylistItem, ConfigTargetOptions, EpisodeStreamProperties,
-                   SeriesStreamProperties, StreamProperties, VideoStreamProperties, XtreamInfoDocument};
-use crate::utils::{arc_str_option_serde, arc_str_serde, extract_extension_from_url, generate_playlist_uuid,
-                   get_provider_id, Internable};
+use crate::model::{
+    xtream_const, ClusterFlags, CommonPlaylistItem, ConfigTargetOptions, EpisodeStreamProperties,
+    SeriesStreamProperties, StreamProperties, VideoStreamProperties, XtreamInfoDocument,
+};
+use crate::utils::{
+    arc_str_option_serde, arc_str_serde, extract_extension_from_url, generate_playlist_uuid,
+    get_provider_id, Internable,
+};
 use enum_iterator::Sequence;
 use serde::{Deserialize, Serialize};
 use std::fmt::Write;
@@ -63,9 +67,17 @@ impl TryFrom<PlaylistItemType> for XtreamCluster {
     type Error = String;
     fn try_from(item_type: PlaylistItemType) -> Result<Self, Self::Error> {
         match item_type {
-            PlaylistItemType::Live | PlaylistItemType::LiveHls | PlaylistItemType::LiveDash | PlaylistItemType::LiveUnknown => Ok(Self::Live),
-            PlaylistItemType::Catchup | PlaylistItemType::Video | PlaylistItemType::LocalVideo => Ok(Self::Video),
-            PlaylistItemType::Series | PlaylistItemType::SeriesInfo | PlaylistItemType::LocalSeries | PlaylistItemType::LocalSeriesInfo => Ok(Self::Series),
+            PlaylistItemType::Live
+            | PlaylistItemType::LiveHls
+            | PlaylistItemType::LiveDash
+            | PlaylistItemType::LiveUnknown => Ok(Self::Live),
+            PlaylistItemType::Catchup | PlaylistItemType::Video | PlaylistItemType::LocalVideo => {
+                Ok(Self::Video)
+            }
+            PlaylistItemType::Series
+            | PlaylistItemType::SeriesInfo
+            | PlaylistItemType::LocalSeries
+            | PlaylistItemType::LocalSeriesInfo => Ok(Self::Series),
         }
     }
 }
@@ -76,12 +88,12 @@ pub enum PlaylistItemType {
     #[default]
     Live = 1,
     Video = 2,
-    Series = 3, //  xtream series description
+    Series = 3,     //  xtream series description
     SeriesInfo = 4, //  xtream series info fetched for series description
     Catchup = 5,
     LiveUnknown = 6, // No Provider id
-    LiveHls = 7, // m3u8 entry
-    LiveDash = 8, // mpd
+    LiveHls = 7,     // m3u8 entry
+    LiveDash = 8,    // mpd
     LocalVideo = 9,
     LocalSeries = 10,
     LocalSeriesInfo = 11,
@@ -126,11 +138,22 @@ impl PlaylistItemType {
     const CATCHUP: &'static str = "catchup";
 
     pub fn is_local(&self) -> bool {
-        matches!(self, PlaylistItemType::LocalVideo | PlaylistItemType::LocalSeries | PlaylistItemType::LocalSeriesInfo)
+        matches!(
+            self,
+            PlaylistItemType::LocalVideo
+                | PlaylistItemType::LocalSeries
+                | PlaylistItemType::LocalSeriesInfo
+        )
     }
 
     pub fn is_live(&self) -> bool {
-        matches!(self, PlaylistItemType::Live | PlaylistItemType::LiveDash | PlaylistItemType::LiveHls | PlaylistItemType::LiveUnknown)
+        matches!(
+            self,
+            PlaylistItemType::Live
+                | PlaylistItemType::LiveDash
+                | PlaylistItemType::LiveHls
+                | PlaylistItemType::LiveUnknown
+        )
     }
 
     pub fn as_u8(self) -> u8 {
@@ -149,10 +172,13 @@ impl PlaylistItemType {
 
     pub fn is_cluster(&self, cluster: XtreamCluster) -> bool {
         match self {
-            Self::Live | Self::LiveHls | Self::LiveDash | Self::LiveUnknown => cluster == XtreamCluster::Live,
+            Self::Live | Self::LiveHls | Self::LiveDash | Self::LiveUnknown => {
+                cluster == XtreamCluster::Live
+            }
             Self::Catchup | Self::Video | Self::LocalVideo => cluster == XtreamCluster::Video,
-            Self::Series | Self::LocalSeries
-            | Self::SeriesInfo | Self::LocalSeriesInfo => cluster == XtreamCluster::Series,
+            Self::Series | Self::LocalSeries | Self::SeriesInfo | Self::LocalSeriesInfo => {
+                cluster == XtreamCluster::Series
+            }
         }
     }
 }
@@ -204,7 +230,6 @@ impl PlaylistItemTypeSet {
     }
 }
 
-
 pub trait FieldGetAccessor {
     fn get_field(&self, field: &str) -> Option<Arc<str>>;
 }
@@ -221,7 +246,10 @@ pub trait PlaylistEntry: Send + Sync {
     fn get_item_type(&self) -> PlaylistItemType;
     fn get_group(&self) -> Arc<str>;
     fn get_name(&self) -> Arc<str>;
-    fn get_resolved_info_document(&self, options: &XtreamMappingOptions) -> Option<XtreamInfoDocument>;
+    fn get_resolved_info_document(
+        &self,
+        options: &XtreamMappingOptions,
+    ) -> Option<XtreamInfoDocument>;
     fn get_additional_properties(&self) -> Option<&StreamProperties>;
     fn get_additional_properties_mut(&mut self) -> Option<&mut StreamProperties>;
 }
@@ -258,7 +286,7 @@ pub struct PlaylistItemHeader {
     pub input_name: Arc<str>,
     #[serde(default)]
     pub additional_properties: Option<StreamProperties>,
-    
+
     // 4-byte aligned
     pub virtual_id: VirtualId, // virtual id
     pub chno: u32,
@@ -333,7 +361,9 @@ impl PlaylistItemHeader {
 
     #[inline]
     pub fn get_container_extension(&self) -> Option<Arc<str>> {
-        self.additional_properties.as_ref().and_then(|a| a.get_container_extension())
+        self.additional_properties
+            .as_ref()
+            .and_then(|a| a.get_container_extension())
     }
 }
 
@@ -482,13 +512,21 @@ pub struct M3uPlaylistItem {
 
 impl M3uPlaylistItem {
     #[allow(clippy::missing_panics_doc)]
-    pub fn to_m3u(&self, target_options: Option<&ConfigTargetOptions>, rewrite_urls: bool) -> String {
+    pub fn to_m3u(
+        &self,
+        target_options: Option<&ConfigTargetOptions>,
+        rewrite_urls: bool,
+    ) -> String {
         let options = target_options.as_ref();
         let ignore_logo = options.is_some_and(|o| o.ignore_logo);
         let mut line = String::with_capacity(256);
-        let _ = write!(&mut line, "#EXTINF:-1 tvg-id=\"{}\" tvg-name=\"{}\" group-title=\"{}\"",
-                       self.epg_channel_id.as_ref().map_or("", |o| o.as_ref()),
-                       self.name, self.group);
+        let _ = write!(
+            &mut line,
+            "#EXTINF:-1 tvg-id=\"{}\" tvg-name=\"{}\" group-title=\"{}\"",
+            self.epg_channel_id.as_ref().map_or("", |o| o.as_ref()),
+            self.name,
+            self.group
+        );
 
         if !ignore_logo {
             if let (true, Some(resource_url)) = (rewrite_urls, self.t_resource_url.as_ref()) {
@@ -507,7 +545,11 @@ impl M3uPlaylistItem {
             (time_shift, "timeshift"),
             (rec, "tvg-rec"););
 
-        let url = if self.t_stream_url.is_empty() { &self.url } else { &self.t_stream_url };
+        let url = if self.t_stream_url.is_empty() {
+            &self.url
+        } else {
+            &self.t_stream_url
+        };
         let _ = write!(&mut line, ",{}\n{}", self.title, url);
         line
     }
@@ -556,7 +598,12 @@ impl PlaylistEntry for M3uPlaylistItem {
     }
 
     fn get_uuid(&self) -> UUIDType {
-        generate_playlist_uuid(&self.input_name, &self.provider_id, self.item_type, &self.url)
+        generate_playlist_uuid(
+            &self.input_name,
+            &self.provider_id,
+            self.item_type,
+            &self.url,
+        )
     }
 
     #[inline]
@@ -579,7 +626,10 @@ impl PlaylistEntry for M3uPlaylistItem {
     }
 
     #[inline]
-    fn get_resolved_info_document(&self, _options: &XtreamMappingOptions) -> Option<XtreamInfoDocument> {
+    fn get_resolved_info_document(
+        &self,
+        _options: &XtreamMappingOptions,
+    ) -> Option<XtreamInfoDocument> {
         None
     }
     #[inline]
@@ -654,11 +704,24 @@ impl XtreamMappingOptions {
         self.reverse_item_types.is_set(item_type)
     }
 
-    pub fn get_resource_url(&self, xtream_cluster: XtreamCluster, item_type: PlaylistItemType, virtual_id: VirtualId) -> Option<String> {
+    pub fn get_resource_url(
+        &self,
+        xtream_cluster: XtreamCluster,
+        item_type: PlaylistItemType,
+        virtual_id: VirtualId,
+    ) -> Option<String> {
         let is_reverse = self.is_reverse(item_type);
         let resource_url = if is_reverse && self.rewrite_resource_url && self.base_url.is_some() {
-            let resource_url = format!("{}/resource/{}/{}/{}/{}", self.base_url.as_ref().map_or_else(String::new, |b| b.clone()),
-                                       xtream_cluster.as_stream_type(), self.username, self.password, virtual_id);
+            let resource_url = format!(
+                "{}/resource/{}/{}/{}/{}",
+                self.base_url
+                    .as_ref()
+                    .map_or_else(String::new, |b| b.clone()),
+                xtream_cluster.as_stream_type(),
+                self.username,
+                self.password,
+                virtual_id
+            );
             Some(resource_url)
         } else {
             None
@@ -729,20 +792,22 @@ impl XtreamPlaylistItem {
     pub fn get_container_extension(&self) -> Option<Arc<str>> {
         match self.additional_properties {
             None => None,
-            Some(ref props) => {
-                match props {
-                    StreamProperties::Live(_) => Some("ts".intern()),
-                    StreamProperties::Video(video) => Some(Arc::clone(&video.container_extension)),
-                    StreamProperties::Series(_) => None,
-                    StreamProperties::Episode(episode) => Some(Arc::clone(&episode.container_extension)),
+            Some(ref props) => match props {
+                StreamProperties::Live(_) => Some("ts".intern()),
+                StreamProperties::Video(video) => Some(Arc::clone(&video.container_extension)),
+                StreamProperties::Series(_) => None,
+                StreamProperties::Episode(episode) => {
+                    Some(Arc::clone(&episode.container_extension))
                 }
-            }
+            },
         }
     }
 
     #[inline]
     pub fn has_details(&self) -> bool {
-        self.additional_properties.as_ref().is_some_and(|p| p.has_details())
+        self.additional_properties
+            .as_ref()
+            .is_some_and(|p| p.has_details())
     }
 
     pub fn resolve_resource_url(&self, field: &str) -> Option<Arc<str>> {
@@ -752,10 +817,11 @@ impl XtreamPlaylistItem {
         } else if bytes.eq_ignore_ascii_case(b"logo_small") && !self.logo_small.is_empty() {
             return Some(Arc::clone(&self.logo_small));
         }
-        self.additional_properties.as_ref().and_then(|a| a.resolve_resource_url(field))
+        self.additional_properties
+            .as_ref()
+            .and_then(|a| a.resolve_resource_url(field))
     }
 }
-
 
 impl PlaylistEntry for XtreamPlaylistItem {
     #[inline]
@@ -777,7 +843,12 @@ impl PlaylistEntry for XtreamPlaylistItem {
 
     #[inline]
     fn get_uuid(&self) -> UUIDType {
-        generate_playlist_uuid(&self.input_name, &self.provider_id.to_string(), self.item_type, &self.url)
+        generate_playlist_uuid(
+            &self.input_name,
+            &self.provider_id.to_string(),
+            self.item_type,
+            &self.url,
+        )
     }
     #[inline]
     fn get_item_type(&self) -> PlaylistItemType {
@@ -796,11 +867,19 @@ impl PlaylistEntry for XtreamPlaylistItem {
         }
     }
 
-    fn get_resolved_info_document(&self, options: &XtreamMappingOptions) -> Option<XtreamInfoDocument> {
+    fn get_resolved_info_document(
+        &self,
+        options: &XtreamMappingOptions,
+    ) -> Option<XtreamInfoDocument> {
         if self.has_details() {
-            self.additional_properties.as_ref()
-                .map(|p| p.to_info_document(options, self.get_item_type(),
-                                            self.get_virtual_id(), self.get_category_id().unwrap_or(0)))
+            self.additional_properties.as_ref().map(|p| {
+                p.to_info_document(
+                    options,
+                    self.get_item_type(),
+                    self.get_virtual_id(),
+                    self.get_category_id().unwrap_or(0),
+                )
+            })
         } else {
             None
         }
@@ -919,7 +998,9 @@ impl PlaylistItem {
                 match header.xtream_cluster {
                     XtreamCluster::Live => None,
                     XtreamCluster::Video => {
-                        let container_extension = extract_extension_from_url(&header.url).map(|e| e.strip_prefix('.').unwrap_or(&*e).to_string()).unwrap_or_default();
+                        let container_extension = extract_extension_from_url(&header.url)
+                            .map(|e| e.strip_prefix('.').unwrap_or(&*e).to_string())
+                            .unwrap_or_default();
                         Some(StreamProperties::Video(Box::new(VideoStreamProperties {
                             name: header.name.clone(),
                             category_id: header.category_id,
@@ -940,21 +1021,25 @@ impl PlaylistItem {
                     }
                     XtreamCluster::Series => {
                         if header.item_type == PlaylistItemType::Series {
-                            let container_extension = extract_extension_from_url(&header.url).map(|e| e.strip_prefix('.').unwrap_or(&e).to_string()).unwrap_or_default();
+                            let container_extension = extract_extension_from_url(&header.url)
+                                .map(|e| e.strip_prefix('.').unwrap_or(&e).to_string())
+                                .unwrap_or_default();
                             // TODO maybe from link ? like s01e02 or something like this
-                            Some(StreamProperties::Episode(Box::new(EpisodeStreamProperties {
-                                episode_id: 0,
-                                episode: 0,
-                                season: 0,
-                                added: None,
-                                release_date: None,
-                                series_release_date: None,
-                                tmdb: None,
-                                movie_image: "".intern(),
-                                container_extension: container_extension.intern(),
-                                audio: None,
-                                video: None,
-                            })))
+                            Some(StreamProperties::Episode(Box::new(
+                                EpisodeStreamProperties {
+                                    episode_id: 0,
+                                    episode: 0,
+                                    season: 0,
+                                    added: None,
+                                    release_date: None,
+                                    series_release_date: None,
+                                    tmdb: None,
+                                    movie_image: "".intern(),
+                                    container_extension: container_extension.intern(),
+                                    audio: None,
+                                    video: None,
+                                },
+                            )))
                         } else if header.item_type == PlaylistItemType::SeriesInfo {
                             Some(StreamProperties::Series(Box::new(SeriesStreamProperties {
                                 name: header.name.clone(),
@@ -985,11 +1070,17 @@ impl PlaylistItem {
     }
 
     pub fn has_details(&self) -> bool {
-        self.header.additional_properties.as_ref().is_some_and(|p| p.has_details())
+        self.header
+            .additional_properties
+            .as_ref()
+            .is_some_and(|p| p.has_details())
     }
 
     pub fn get_tmdb_id(&self) -> Option<u32> {
-        self.header.additional_properties.as_ref().and_then(|p| p.get_tmdb_id())
+        self.header
+            .additional_properties
+            .as_ref()
+            .and_then(|p| p.get_tmdb_id())
     }
 }
 
@@ -1002,7 +1093,11 @@ impl From<&PlaylistItem> for XtreamPlaylistItem {
         XtreamPlaylistItem {
             virtual_id: header.virtual_id,
             provider_id,
-            name: if header.item_type == PlaylistItemType::Series { Arc::clone(&header.title) } else { Arc::clone(&header.name) },
+            name: if header.item_type == PlaylistItemType::Series {
+                Arc::clone(&header.title)
+            } else {
+                Arc::clone(&header.name)
+            },
             logo: Arc::clone(&header.logo),
             logo_small: Arc::clone(&header.logo_small),
             group: Arc::clone(&header.group),
@@ -1028,7 +1123,11 @@ impl From<&PlaylistItem> for M3uPlaylistItem {
         M3uPlaylistItem {
             virtual_id: header.virtual_id,
             provider_id: Arc::clone(&header.id),
-            name: if header.item_type == PlaylistItemType::Series { Arc::clone(&header.title) } else { Arc::clone(&header.name) },
+            name: if header.item_type == PlaylistItemType::Series {
+                Arc::clone(&header.title)
+            } else {
+                Arc::clone(&header.name)
+            },
             chno: header.chno,
             logo: Arc::clone(&header.logo),
             logo_small: Arc::clone(&header.logo_small),
@@ -1059,7 +1158,11 @@ impl From<&PlaylistItem> for CommonPlaylistItem {
         CommonPlaylistItem {
             virtual_id: header.virtual_id,
             provider_id: Arc::clone(&header.id),
-            name: if header.item_type == PlaylistItemType::Series { Arc::clone(&header.title) } else { Arc::clone(&header.name) },
+            name: if header.item_type == PlaylistItemType::Series {
+                Arc::clone(&header.title)
+            } else {
+                Arc::clone(&header.name)
+            },
             logo: header.logo.clone(),
             logo_small: header.logo_small.clone(),
             group: Arc::clone(&header.group),
@@ -1106,9 +1209,7 @@ impl From<&XtreamPlaylistItem> for PlaylistItem {
             source_ordinal: item.source_ordinal,
         };
 
-        PlaylistItem {
-            header
-        }
+        PlaylistItem { header }
     }
 }
 
@@ -1138,12 +1239,9 @@ impl From<&M3uPlaylistItem> for PlaylistItem {
             source_ordinal: item.source_ordinal,
         };
 
-        PlaylistItem {
-            header
-        }
+        PlaylistItem { header }
     }
 }
-
 
 impl PlaylistEntry for PlaylistItem {
     #[inline]
@@ -1169,7 +1267,12 @@ impl PlaylistEntry for PlaylistItem {
     #[inline]
     fn get_uuid(&self) -> UUIDType {
         let header = &self.header;
-        generate_playlist_uuid(&header.input_name, &header.id, header.item_type, &header.url)
+        generate_playlist_uuid(
+            &header.input_name,
+            &header.id,
+            header.item_type,
+            &header.url,
+        )
     }
 
     #[inline]
@@ -1187,11 +1290,19 @@ impl PlaylistEntry for PlaylistItem {
         self.header.get_name()
     }
 
-    fn get_resolved_info_document(&self, options: &XtreamMappingOptions) -> Option<XtreamInfoDocument> {
+    fn get_resolved_info_document(
+        &self,
+        options: &XtreamMappingOptions,
+    ) -> Option<XtreamInfoDocument> {
         if self.has_details() {
-            self.header.additional_properties.as_ref().map(|p|
-                p.to_info_document(options, self.get_item_type(), self.get_virtual_id(),
-                                   self.get_category_id().unwrap_or(0)))
+            self.header.additional_properties.as_ref().map(|p| {
+                p.to_info_document(
+                    options,
+                    self.get_item_type(),
+                    self.get_virtual_id(),
+                    self.get_category_id().unwrap_or(0),
+                )
+            })
         } else {
             None
         }

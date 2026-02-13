@@ -63,9 +63,10 @@ pub fn extract_id_from_url(url: &str) -> String {
 }
 
 pub fn get_provider_id(provider_id: &str, url: &str) -> Option<u32> {
-    provider_id.parse::<u32>().ok().or_else(|| {
-        extract_id_from_url(url).parse::<u32>().ok()
-    })
+    provider_id
+        .parse::<u32>()
+        .ok()
+        .or_else(|| extract_id_from_url(url).parse::<u32>().ok())
 }
 
 fn url_path_and_more(url: &str) -> Option<String> {
@@ -86,7 +87,12 @@ fn url_path_and_more(url: &str) -> Option<String> {
     Some(out)
 }
 
-pub fn generate_playlist_uuid(key: &str, provider_id: &str, item_type: PlaylistItemType, url: &str) -> UUIDType {
+pub fn generate_playlist_uuid(
+    key: &str,
+    provider_id: &str,
+    item_type: PlaylistItemType,
+    url: &str,
+) -> UUIDType {
     if provider_id.is_empty() || provider_id == "0" {
         if let Some(url_path) = url_path_and_more(url) {
             return hash_string(&url_path);
@@ -108,9 +114,7 @@ pub fn base64_to_u32(encoded: &str) -> Option<u32> {
         return None;
     }
 
-    let arr: [u8; 4] = decoded
-        .as_slice()
-        .try_into().ok()?;
+    let arr: [u8; 4] = decoded.as_slice().try_into().ok()?;
     Some(u32::from_be_bytes(arr))
 }
 

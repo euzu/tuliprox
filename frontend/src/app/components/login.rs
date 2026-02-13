@@ -1,13 +1,13 @@
 use web_sys::HtmlInputElement;
 
+use crate::app::components::floating_background::FloatingBackground;
+use crate::app::components::input::Input;
 use crate::app::components::svg_icon::AppIcon;
+use crate::app::components::TextButton;
 use crate::hooks::use_service_context;
 use yew::prelude::*;
 use yew_hooks::use_async;
 use yew_i18n::use_translation;
-use crate::app::components::floating_background::FloatingBackground;
-use crate::app::components::input::Input;
-use crate::app::components::TextButton;
 
 #[function_component]
 pub fn Login() -> Html {
@@ -17,10 +17,15 @@ pub fn Login() -> Html {
     let auth_success = use_state(|| true);
     let translation = use_translation();
 
-    let app_title = services.config.ui_config.app_title.as_ref().map_or("tuliprox", |v| v.as_str());
+    let app_title = services
+        .config
+        .ui_config
+        .app_title
+        .as_ref()
+        .map_or("tuliprox", |v| v.as_str());
 
     let services_ctx = services.clone();
-    let app_logo = use_memo(services_ctx,|service| {
+    let app_logo = use_memo(services_ctx, |service| {
         match service.config.ui_config.app_logo.as_ref() {
             Some(logo) => html! { <img src={logo.to_string()} alt="logo"/> },
             None => html! { <AppIcon name="Logo"  width={"48"} height={"48"}/> },
@@ -38,16 +43,15 @@ pub fn Login() -> Html {
             let username = username_input.value();
             let password = password_input.value();
             let result = services_ctx.auth.authenticate(username, password).await;
-            match &result  {
-                Ok(_token) => {
-                    authorized_state.set(true)
+            match &result {
+                Ok(_token) => authorized_state.set(true),
+                Err(_) => {
+                    authorized_state.set(false);
                 }
-                Err(_) => {authorized_state.set(false);}
             }
             result
         })
     };
-
 
     let handle_login = {
         let authenticator = authenticate.clone();

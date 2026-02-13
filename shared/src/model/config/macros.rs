@@ -59,27 +59,33 @@ macro_rules! check_input_credentials {
 #[macro_export]
 macro_rules! check_input_connections {
     ($this:ident, $input_type:expr, $alias:expr) => {
-
-     match $input_type {
-            InputType::M3u |InputType::Xtream  => {
-            }
+        match $input_type {
+            InputType::M3u | InputType::Xtream => {}
             InputType::M3uBatch => {
                 if !$alias {
                     if $this.max_connections > 0 {
-                        return info_err_res!("input type m3u-batch should not define max_connections attribute ");
+                        return info_err_res!(
+                            "input type m3u-batch should not define max_connections attribute "
+                        );
                     }
                     if $this.priority != 0 {
-                        return info_err_res!("input type m3u-batch should not define priority attribute ");
+                        return info_err_res!(
+                            "input type m3u-batch should not define priority attribute "
+                        );
                     }
                 }
             }
             InputType::XtreamBatch => {
                 if !$alias {
                     if $this.max_connections > 0 {
-                        return info_err_res!("input type xtream-batch should not define max_connections attribute ");
+                        return info_err_res!(
+                            "input type xtream-batch should not define max_connections attribute "
+                        );
                     }
                     if $this.priority != 0 {
-                        return info_err_res!("input type xtream-batch should not define priority attribute ");
+                        return info_err_res!(
+                            "input type xtream-batch should not define priority attribute "
+                        );
                     }
                 }
             }
@@ -88,5 +94,5 @@ macro_rules! check_input_connections {
     };
 }
 
-pub use check_input_credentials;
 pub use check_input_connections;
+pub use check_input_credentials;

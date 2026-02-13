@@ -1,17 +1,26 @@
-use crate::app::components::config::config_page::{ConfigForm, ConfigPage, LABEL_API_CONFIG, LABEL_HDHOMERUN_CONFIG, LABEL_IP_CHECK_CONFIG, LABEL_LIBRARY_CONFIG, LABEL_LOG_CONFIG, LABEL_MAIN_CONFIG, LABEL_MESSAGING_CONFIG, LABEL_PANEL_CONFIG, LABEL_PROXY_CONFIG, LABEL_REVERSE_PROXY_CONFIG, LABEL_SCHEDULES_CONFIG, LABEL_VIDEO_CONFIG, LABEL_WEB_UI_CONFIG};
+use crate::app::components::config::config_page::{
+    ConfigForm, ConfigPage, LABEL_API_CONFIG, LABEL_HDHOMERUN_CONFIG, LABEL_IP_CHECK_CONFIG,
+    LABEL_LIBRARY_CONFIG, LABEL_LOG_CONFIG, LABEL_MAIN_CONFIG, LABEL_MESSAGING_CONFIG,
+    LABEL_PANEL_CONFIG, LABEL_PROXY_CONFIG, LABEL_REVERSE_PROXY_CONFIG, LABEL_SCHEDULES_CONFIG,
+    LABEL_VIDEO_CONFIG, LABEL_WEB_UI_CONFIG,
+};
+use crate::app::components::config::config_update::update_config;
 use crate::app::components::config::config_view_context::ConfigViewContext;
-use crate::app::components::config::{ApiConfigView, HdHomerunConfigView, IpCheckConfigView, LibraryConfigView, LogConfigView, MainConfigView, MessagingConfigView, PanelConfigView, ProxyConfigView, ReverseProxyConfigView, SchedulesConfigView, VideoConfigView, WebUiConfigView};
+use crate::app::components::config::{
+    ApiConfigView, HdHomerunConfigView, IpCheckConfigView, LibraryConfigView, LogConfigView,
+    MainConfigView, MessagingConfigView, PanelConfigView, ProxyConfigView, ReverseProxyConfigView,
+    SchedulesConfigView, VideoConfigView, WebUiConfigView,
+};
 use crate::app::components::{Card, TabItem, TabSet, TextButton};
+use crate::app::ConfigContext;
+use crate::hooks::use_service_context;
 use crate::html_if;
-use std::str::FromStr;
 use log::warn;
+use shared::model::{ApiProxyConfigDto, ConfigDto, SourcesConfigDto};
+use std::str::FromStr;
 use yew::platform::spawn_local;
 use yew::prelude::*;
 use yew_i18n::use_translation;
-use shared::model::{ApiProxyConfigDto, ConfigDto, SourcesConfigDto};
-use crate::app::components::config::config_update::update_config;
-use crate::app::{ConfigContext};
-use crate::hooks::use_service_context;
 
 const LABEL_CONFIG: &str = "LABEL.CONFIG";
 const LABEL_EDIT: &str = "LABEL.EDIT";
@@ -96,44 +105,138 @@ pub fn ConfigView() -> Html {
         let translate = translate.clone();
         let edit_value = *edit_mode;
 
-        use_memo((form_state, edit_value, translate.clone()), move |(forms, editing, translate)| {
-            let forms: &ConfigFormState = forms;
-            let modified_pages = collect_modified!(forms, [
-                main, api, log, schedules, video, messaging, web_ui,
-                reverse_proxy, hd_homerun, proxy, ipcheck, panel, library
-            ]).iter()
+        use_memo(
+            (form_state, edit_value, translate.clone()),
+            move |(forms, editing, translate)| {
+                let forms: &ConfigFormState = forms;
+                let modified_pages = collect_modified!(
+                    forms,
+                    [
+                        main,
+                        api,
+                        log,
+                        schedules,
+                        video,
+                        messaging,
+                        web_ui,
+                        reverse_proxy,
+                        hd_homerun,
+                        proxy,
+                        ipcheck,
+                        panel,
+                        library
+                    ]
+                )
+                .iter()
                 .map(config_form_to_config_page)
                 .collect::<Vec<ConfigPage>>();
 
-            let tab_configs = vec![
-                (ConfigPage::Main, LABEL_MAIN_CONFIG, html! { <MainConfigView/> }, "MainConfig"),
-                (ConfigPage::Api, LABEL_API_CONFIG, html! { <ApiConfigView/> }, "ApiConfig"),
-                (ConfigPage::Log, LABEL_LOG_CONFIG, html! { <LogConfigView/> }, "Log"),
-                (ConfigPage::Schedules, LABEL_SCHEDULES_CONFIG, html! { <SchedulesConfigView/> }, "SchedulesConfig"),
-                (ConfigPage::Messaging, LABEL_MESSAGING_CONFIG, html! { <MessagingConfigView/> }, "MessagingConfig"),
-                (ConfigPage::WebUi, LABEL_WEB_UI_CONFIG, html! { <WebUiConfigView/> }, "WebUiConfig"),
-                (ConfigPage::ReverseProxy, LABEL_REVERSE_PROXY_CONFIG, html! { <ReverseProxyConfigView/> }, "ReverseProxyConfig"),
-                (ConfigPage::HdHomerun, LABEL_HDHOMERUN_CONFIG, html! { <HdHomerunConfigView/> }, "HdHomerunConfig"),
-                (ConfigPage::Proxy, LABEL_PROXY_CONFIG, html! { <ProxyConfigView/> }, "ProxyConfig"),
-                (ConfigPage::IpCheck, LABEL_IP_CHECK_CONFIG, html! { <IpCheckConfigView/> }, "IpCheckConfig"),
-                (ConfigPage::Panel, LABEL_PANEL_CONFIG, html! { <PanelConfigView/> }, "Settings"),
-                (ConfigPage::Video, LABEL_VIDEO_CONFIG, html! { <VideoConfigView/> }, "VideoConfig"),
-                (ConfigPage::Library, LABEL_LIBRARY_CONFIG, html! { <LibraryConfigView/> }, "VideoLibrary"),
-            ];
+                let tab_configs = vec![
+                    (
+                        ConfigPage::Main,
+                        LABEL_MAIN_CONFIG,
+                        html! { <MainConfigView/> },
+                        "MainConfig",
+                    ),
+                    (
+                        ConfigPage::Api,
+                        LABEL_API_CONFIG,
+                        html! { <ApiConfigView/> },
+                        "ApiConfig",
+                    ),
+                    (
+                        ConfigPage::Log,
+                        LABEL_LOG_CONFIG,
+                        html! { <LogConfigView/> },
+                        "Log",
+                    ),
+                    (
+                        ConfigPage::Schedules,
+                        LABEL_SCHEDULES_CONFIG,
+                        html! { <SchedulesConfigView/> },
+                        "SchedulesConfig",
+                    ),
+                    (
+                        ConfigPage::Messaging,
+                        LABEL_MESSAGING_CONFIG,
+                        html! { <MessagingConfigView/> },
+                        "MessagingConfig",
+                    ),
+                    (
+                        ConfigPage::WebUi,
+                        LABEL_WEB_UI_CONFIG,
+                        html! { <WebUiConfigView/> },
+                        "WebUiConfig",
+                    ),
+                    (
+                        ConfigPage::ReverseProxy,
+                        LABEL_REVERSE_PROXY_CONFIG,
+                        html! { <ReverseProxyConfigView/> },
+                        "ReverseProxyConfig",
+                    ),
+                    (
+                        ConfigPage::HdHomerun,
+                        LABEL_HDHOMERUN_CONFIG,
+                        html! { <HdHomerunConfigView/> },
+                        "HdHomerunConfig",
+                    ),
+                    (
+                        ConfigPage::Proxy,
+                        LABEL_PROXY_CONFIG,
+                        html! { <ProxyConfigView/> },
+                        "ProxyConfig",
+                    ),
+                    (
+                        ConfigPage::IpCheck,
+                        LABEL_IP_CHECK_CONFIG,
+                        html! { <IpCheckConfigView/> },
+                        "IpCheckConfig",
+                    ),
+                    (
+                        ConfigPage::Panel,
+                        LABEL_PANEL_CONFIG,
+                        html! { <PanelConfigView/> },
+                        "Settings",
+                    ),
+                    (
+                        ConfigPage::Video,
+                        LABEL_VIDEO_CONFIG,
+                        html! { <VideoConfigView/> },
+                        "VideoConfig",
+                    ),
+                    (
+                        ConfigPage::Library,
+                        LABEL_LIBRARY_CONFIG,
+                        html! { <LibraryConfigView/> },
+                        "VideoLibrary",
+                    ),
+                ];
 
-            let editing = *editing;
-            tab_configs.into_iter().map(|(page, label, children, icon)| {
-                let is_modified = editing && modified_pages.contains(&page);
-                TabItem {
-                    id: page.to_string(),
-                    title: translate.t(label),
-                    icon: icon.to_string(),
-                    children,
-                    active_class: if is_modified { Some("tp__tab__modified__active".to_string()) } else { None },
-                    inactive_class: if is_modified { Some("tp__tab__modified__inactive".to_string()) } else { None },
-                }
-            }).collect::<Vec<TabItem>>()
-        })
+                let editing = *editing;
+                tab_configs
+                    .into_iter()
+                    .map(|(page, label, children, icon)| {
+                        let is_modified = editing && modified_pages.contains(&page);
+                        TabItem {
+                            id: page.to_string(),
+                            title: translate.t(label),
+                            icon: icon.to_string(),
+                            children,
+                            active_class: if is_modified {
+                                Some("tp__tab__modified__active".to_string())
+                            } else {
+                                None
+                            },
+                            inactive_class: if is_modified {
+                                Some("tp__tab__modified__inactive".to_string())
+                            } else {
+                                None
+                            },
+                        }
+                    })
+                    .collect::<Vec<TabItem>>()
+            },
+        )
     };
 
     let handle_config_edit = {
@@ -152,14 +255,31 @@ pub fn ConfigView() -> Html {
 
         Callback::from(move |_| {
             let forms = &*get_form_state;
-            let modified_forms: Vec<ConfigForm> = collect_modified!(forms, [
-                main, api, api_proxy, log, schedules, video, messaging, web_ui,
-                reverse_proxy, hd_homerun, proxy, ipcheck, panel, library
-            ]);
+            let modified_forms: Vec<ConfigForm> = collect_modified!(
+                forms,
+                [
+                    main,
+                    api,
+                    api_proxy,
+                    log,
+                    schedules,
+                    video,
+                    messaging,
+                    web_ui,
+                    reverse_proxy,
+                    hd_homerun,
+                    proxy,
+                    ipcheck,
+                    panel,
+                    library
+                ]
+            );
 
             if modified_forms.is_empty() {
                 set_edit_mode.set(false);
-                services.toastr.info(translate.t("MESSAGES.SAVE.NO_CHANGES"));
+                services
+                    .toastr
+                    .info(translate.t("MESSAGES.SAVE.NO_CHANGES"));
                 return;
             }
 
@@ -211,11 +331,15 @@ pub fn ConfigView() -> Html {
                 if let Some(config_dto) = modified_main_dto {
                     match services.config.save_config(config_dto).await {
                         Ok(()) => {
-                            services.toastr.success(translate.t("MESSAGES.SAVE.MAIN_CONFIG.SUCCESS"));
+                            services
+                                .toastr
+                                .success(translate.t("MESSAGES.SAVE.MAIN_CONFIG.SUCCESS"));
                         }
                         Err(err) => {
                             ok = false;
-                            services.toastr.error(translate.t("MESSAGES.SAVE.MAIN_CONFIG.FAIL"));
+                            services
+                                .toastr
+                                .error(translate.t("MESSAGES.SAVE.MAIN_CONFIG.FAIL"));
                             services.toastr.error(err.to_string());
                         }
                     }
@@ -224,11 +348,15 @@ pub fn ConfigView() -> Html {
                 if let Some(api_proxy_dto) = modified_api_proxy {
                     match services.config.save_api_proxy_config(api_proxy_dto).await {
                         Ok(()) => {
-                            services.toastr.success(translate.t("MESSAGES.SAVE.API_PROXY_CONFIG.SUCCESS"));
+                            services
+                                .toastr
+                                .success(translate.t("MESSAGES.SAVE.API_PROXY_CONFIG.SUCCESS"));
                         }
                         Err(err) => {
                             ok = false;
-                            services.toastr.error(translate.t("MESSAGES.SAVE.API_PROXY_CONFIG.FAIL"));
+                            services
+                                .toastr
+                                .error(translate.t("MESSAGES.SAVE.API_PROXY_CONFIG.FAIL"));
                             services.toastr.error(err.to_string());
                         }
                     }
@@ -237,11 +365,15 @@ pub fn ConfigView() -> Html {
                 if let Some(sources_dto) = modified_sources {
                     match services.config.save_sources(sources_dto).await {
                         Ok(()) => {
-                            services.toastr.success(translate.t("MESSAGES.SAVE.SOURCES_CONFIG.SUCCESS"));
+                            services
+                                .toastr
+                                .success(translate.t("MESSAGES.SAVE.SOURCES_CONFIG.SUCCESS"));
                         }
                         Err(err) => {
                             ok = false;
-                            services.toastr.error(translate.t("MESSAGES.SAVE.SOURCES_CONFIG.FAIL"));
+                            services
+                                .toastr
+                                .error(translate.t("MESSAGES.SAVE.SOURCES_CONFIG.FAIL"));
                             services.toastr.error(err.to_string());
                         }
                     }
@@ -288,7 +420,6 @@ pub fn ConfigView() -> Html {
         })
     };
 
-
     let handle_update_content = {
         let services = services_ctx.clone();
         let translate = translate.clone();
@@ -298,8 +429,12 @@ pub fn ConfigView() -> Html {
             wasm_bindgen_futures::spawn_local(async move {
                 if name.as_str() == ACTION_UPDATE_GEO_IP {
                     match services.config.update_geoip().await {
-                        Ok(_) => services.toastr.success(translate.t("MESSAGES.DOWNLOAD.GEOIP.SUCCESS")),
-                        Err(_err) => services.toastr.error(translate.t("MESSAGES.DOWNLOAD.GEOIP.FAIL")),
+                        Ok(_) => services
+                            .toastr
+                            .success(translate.t("MESSAGES.DOWNLOAD.GEOIP.SUCCESS")),
+                        Err(_err) => services
+                            .toastr
+                            .error(translate.t("MESSAGES.DOWNLOAD.GEOIP.FAIL")),
                     }
                 }
             });
@@ -311,7 +446,10 @@ pub fn ConfigView() -> Html {
         on_form_change: on_form_change.clone(),
     };
 
-    let geo_ip_enabled = config_ctx.config.as_ref().is_some_and(|c| c.config.is_geoip_enabled());
+    let geo_ip_enabled = config_ctx
+        .config
+        .as_ref()
+        .is_some_and(|c| c.config.is_geoip_enabled());
 
     html! {
         <ContextProvider<ConfigViewContext> context={context}>

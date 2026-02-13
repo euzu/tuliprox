@@ -1,16 +1,28 @@
+use crate::error::TuliproxError;
+use crate::info_err_res;
+use enum_iterator::Sequence;
 use std::fmt::Display;
 use std::str::FromStr;
-use enum_iterator::Sequence;
-use crate::info_err_res;
-use crate::error::{TuliproxError};
 
-#[derive(Debug, Default, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq, Ord, PartialOrd)]
+#[derive(
+    Debug,
+    Default,
+    Copy,
+    Clone,
+    serde::Serialize,
+    serde::Deserialize,
+    Sequence,
+    PartialEq,
+    Eq,
+    Ord,
+    PartialOrd,
+)]
 pub enum ProxyUserStatus {
     #[default]
     Active, // The account is in good standing and can stream content
-    Expired, // The account can no longer access content unless it is renewed.
+    Expired,  // The account can no longer access content unless it is renewed.
     Banned, // The account is temporarily or permanently disabled. Typically used for users who violate terms of service or abuse the system.
-    Trial, // The account is marked as a trial account.
+    Trial,  // The account is marked as a trial account.
     Disabled, // The account is inactive or deliberately disabled by the administrator.
     Pending,
 }
@@ -26,14 +38,18 @@ impl ProxyUserStatus {
 
 impl Display for ProxyUserStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", match self {
-            Self::Active => Self::ACTIVE,
-            Self::Expired => Self::EXPIRED,
-            Self::Banned => Self::BANNED,
-            Self::Trial => Self::TRIAL,
-            Self::Disabled => Self::DISABLED,
-            Self::Pending => Self::PENDING,
-        })
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::Active => Self::ACTIVE,
+                Self::Expired => Self::EXPIRED,
+                Self::Banned => Self::BANNED,
+                Self::Trial => Self::TRIAL,
+                Self::Disabled => Self::DISABLED,
+                Self::Pending => Self::PENDING,
+            }
+        )
     }
 }
 
@@ -48,7 +64,7 @@ impl FromStr for ProxyUserStatus {
             Self::TRIAL => Ok(Self::Trial),
             Self::DISABLED => Ok(Self::Disabled),
             Self::PENDING => Ok(Self::Pending),
-            _ => info_err_res!("Unknown ProxyUserStatus: {}", s)
+            _ => info_err_res!("Unknown ProxyUserStatus: {}", s),
         }
     }
 }

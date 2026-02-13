@@ -2,7 +2,7 @@ use crate::app::components::{make_tags, CollapsePanel, Tag, TagList};
 use shared::model::{ClusterFlags, ConfigTargetDto};
 use std::rc::Rc;
 use yew::prelude::*;
-use yew_i18n::{use_translation};
+use yew_i18n::use_translation;
 
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct TargetOptionsProps {
@@ -13,33 +13,42 @@ pub struct TargetOptionsProps {
 pub fn TargetOptions(props: &TargetOptionsProps) -> Html {
     let translate = use_translation();
     let tags = use_memo(props.target.clone(), |target| {
-        let redirect_default= vec![
+        let redirect_default = vec![
             (false, "LABEL.LIVE"),
             (false, "LABEL.VOD"),
             (false, "LABEL.SERIES"),
-
         ];
         let (flags, options, redirect) = match target.options.as_ref() {
             None => (
                 vec![false, false, false, false, false, false],
                 vec![
-                (false, "LABEL.IGNORE_LOGO"),
-                (false, "LABEL.SHARE_LIVE_STREAMS"),
-                (false, "LABEL.REMOVE_DUPLICATES"),
+                    (false, "LABEL.IGNORE_LOGO"),
+                    (false, "LABEL.SHARE_LIVE_STREAMS"),
+                    (false, "LABEL.REMOVE_DUPLICATES"),
                 ],
                 redirect_default.clone(),
             ),
             Some(options) => {
-                let force_redirect =                     match options.force_redirect {
+                let force_redirect = match options.force_redirect {
                     None => redirect_default.clone(),
                     Some(force_redirect) => vec![
                         (force_redirect.contains(ClusterFlags::Live), "LABEL.LIVE"),
                         (force_redirect.contains(ClusterFlags::Vod), "LABEL.VOD"),
-                        (force_redirect.contains(ClusterFlags::Series), "LABEL.SERIES"),
+                        (
+                            force_redirect.contains(ClusterFlags::Series),
+                            "LABEL.SERIES",
+                        ),
                     ],
                 };
                 (
-                    vec![options.ignore_logo, options.share_live_streams, options.remove_duplicates, force_redirect[0].0, force_redirect[1].0, force_redirect[2].0],
+                    vec![
+                        options.ignore_logo,
+                        options.share_live_streams,
+                        options.remove_duplicates,
+                        force_redirect[0].0,
+                        force_redirect[1].0,
+                        force_redirect[2].0,
+                    ],
                     vec![
                         (options.ignore_logo, "LABEL.IGNORE_LOGO"),
                         (options.share_live_streams, "LABEL.SHARE_LIVE_STREAMS"),
@@ -51,9 +60,9 @@ pub fn TargetOptions(props: &TargetOptionsProps) -> Html {
         };
 
         (
-         flags.iter().any(|&v| v),
-         make_tags(&options, &translate),
-         make_tags(&redirect, &translate),
+            flags.iter().any(|&v| v),
+            make_tags(&options, &translate),
+            make_tags(&redirect, &translate),
         )
     });
 

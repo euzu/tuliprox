@@ -1,18 +1,19 @@
+use crate::app::components::userlist::user_table::UserTable;
 use crate::app::components::{DropDownOption, Search, TextButton, UserlistContext, UserlistPage};
 use yew::prelude::*;
 use yew_i18n::use_translation;
-use crate::app::components::userlist::user_table::UserTable;
 
 #[function_component]
 pub fn UserlistList() -> Html {
     let translate = use_translation();
     let userlist_ctx = use_context::<UserlistContext>().expect("Userlist context not found");
-    let search_fields = use_memo((), |_| vec![
-        DropDownOption::new("username", html! { translate.t("LABEL.NAME") }, true),
-        DropDownOption::new("playlist", html! { translate.t("LABEL.PLAYLIST") }, false),
-        DropDownOption::new("server", html! { translate.t("LABEL.SERVER") }, false),
-    ]);
-
+    let search_fields = use_memo((), |_| {
+        vec![
+            DropDownOption::new("username", html! { translate.t("LABEL.NAME") }, true),
+            DropDownOption::new("playlist", html! { translate.t("LABEL.PLAYLIST") }, false),
+            DropDownOption::new("server", html! { translate.t("LABEL.SERVER") }, false),
+        ]
+    });
 
     let handle_create = {
         let userlist_ctx = userlist_ctx.clone();
@@ -35,7 +36,7 @@ pub fn UserlistList() -> Html {
             </div>
         }
     } else {
-        html! {  }
+        html! {}
     };
 
     html! {

@@ -10,9 +10,8 @@ use std::collections::HashSet;
 use std::sync::{Arc, LazyLock, RwLock};
 
 // Global interner store
-static INTERNER: LazyLock<RwLock<HashSet<Arc<str>>>> = LazyLock::new(|| {
-    RwLock::new(HashSet::new())
-});
+static INTERNER: LazyLock<RwLock<HashSet<Arc<str>>>> =
+    LazyLock::new(|| RwLock::new(HashSet::new()));
 
 pub trait Internable {
     fn intern(self) -> Arc<str>;
@@ -131,7 +130,10 @@ pub fn interner_gc() -> usize {
         guard.retain(|s| Arc::strong_count(s) > 1);
         let removed = before - guard.len();
         if removed > 0 {
-            log::debug!("Pruned {removed} unused interned strings ({} remaining)", guard.len());
+            log::debug!(
+                "Pruned {removed} unused interned strings ({} remaining)",
+                guard.len()
+            );
         }
         return removed;
     }
@@ -142,10 +144,7 @@ pub mod arc_str_vec_serde {
     use super::*;
     use serde::ser::SerializeSeq;
 
-    pub fn serialize<S>(
-        value: &Vec<Arc<str>>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error>
+    pub fn serialize<S>(value: &Vec<Arc<str>>, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
@@ -156,9 +155,7 @@ pub mod arc_str_vec_serde {
         seq.end()
     }
 
-    pub fn deserialize<'de, D>(
-        deserializer: D,
-    ) -> Result<Vec<Arc<str>>, D::Error>
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<Arc<str>>, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -217,11 +214,14 @@ pub mod arc_str_option_serde {
                 Value::String(v) => Ok(Some(v.intern())),
                 Value::Null | Value::Array(_) | Value::Object(_) => Ok(None),
             },
-            None => Ok(None)
+            None => Ok(None),
         }
     }
 
-    pub fn serialize_null_if_empty<S>(value: &Option<Arc<str>>, serializer: S) -> Result<S::Ok, S::Error>
+    pub fn serialize_null_if_empty<S>(
+        value: &Option<Arc<str>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {

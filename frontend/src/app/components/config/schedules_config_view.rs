@@ -1,17 +1,19 @@
-use std::str::FromStr;
-use cron::{Schedule};
-use crate::app::components::{Card, Chip, DropDownOption, DropDownSelection, IconButton, NoContent};
-use crate::app::ConfigContext;
-use yew::prelude::*;
-use yew_i18n::use_translation;
-use shared::model::{ScheduleConfigDto, SchedulesConfigDto};
 use crate::app::components::config::config_page::{ConfigForm, LABEL_SCHEDULES_CONFIG};
 use crate::app::components::config::config_view_context::ConfigViewContext;
 use crate::app::components::config::HasFormData;
-use crate::{config_field_child, generate_form_reducer, html_if};
 use crate::app::components::input::Input;
 use crate::app::components::select::Select;
+use crate::app::components::{
+    Card, Chip, DropDownOption, DropDownSelection, IconButton, NoContent,
+};
+use crate::app::ConfigContext;
 use crate::hooks::use_service_context;
+use crate::{config_field_child, generate_form_reducer, html_if};
+use cron::Schedule;
+use shared::model::{ScheduleConfigDto, SchedulesConfigDto};
+use std::str::FromStr;
+use yew::prelude::*;
+use yew_i18n::use_translation;
 
 const LABEL_SCHEDULE: &str = "LABEL.SCHEDULE";
 const LABEL_TARGETS: &str = "LABEL.TARGETS";
@@ -34,29 +36,36 @@ pub fn SchedulesConfigView() -> Html {
     let selected_targets = use_state(|| None::<Vec<String>>);
     let selected_schedule = use_state(|| None);
 
-    let all_targets = use_memo(config_ctx.config.clone(),
-                               move |config| config
-                                   .as_ref()
-                                   .map(|c| &c.sources.sources)
-                                   .into_iter()
-                                   .flat_map(|sources| sources.iter())
-                                   .flat_map(|s| s.targets.iter())
-                                   .map(|t| t.name.clone()).collect::<Vec<String>>(),
-    );
-
-    let target_options = use_memo((selected_targets.clone(), all_targets.clone()),
-                     move |(selected, all_targets)| all_targets
-                        .iter()
-                        .map(|t| DropDownOption {
-                           id: t.clone(),
-                           label: html! { t.clone() },
-                           selected: (*selected).as_ref().is_some_and(|s| s.contains(t)),
-                       }).collect::<Vec<DropDownOption>>(),
-    );
-
-    let form_state: UseReducerHandle<SchedulesConfigFormState> = use_reducer(|| {
-        SchedulesConfigFormState { form: SchedulesConfigDto::default(), modified: false }
+    let all_targets = use_memo(config_ctx.config.clone(), move |config| {
+        config
+            .as_ref()
+            .map(|c| &c.sources.sources)
+            .into_iter()
+            .flat_map(|sources| sources.iter())
+            .flat_map(|s| s.targets.iter())
+            .map(|t| t.name.clone())
+            .collect::<Vec<String>>()
     });
+
+    let target_options = use_memo(
+        (selected_targets.clone(), all_targets.clone()),
+        move |(selected, all_targets)| {
+            all_targets
+                .iter()
+                .map(|t| DropDownOption {
+                    id: t.clone(),
+                    label: html! { t.clone() },
+                    selected: (*selected).as_ref().is_some_and(|s| s.contains(t)),
+                })
+                .collect::<Vec<DropDownOption>>()
+        },
+    );
+
+    let form_state: UseReducerHandle<SchedulesConfigFormState> =
+        use_reducer(|| SchedulesConfigFormState {
+            form: SchedulesConfigDto::default(),
+            modified: false,
+        });
 
     {
         let on_form_change = config_view_ctx.on_form_change.clone();
@@ -69,38 +78,44 @@ pub fn SchedulesConfigView() -> Html {
     {
         let form_state = form_state.clone();
         let config = config_ctx.config.as_ref().map(|c| c.config.clone());
-        use_effect_with((config, config_view_ctx.edit_mode.clone()), move |(cfg, _mode)| {
-            if let Some(conf) = cfg {
-                let schedules_config = SchedulesConfigDto::from(conf);
-                form_state.dispatch(SchedulesConfigFormAction::SetAll(schedules_config.clone()));
-            } else {
-                form_state.dispatch(SchedulesConfigFormAction::SetAll(SchedulesConfigDto::default()));
-            }
-            || ()
-        });
+        use_effect_with(
+            (config, config_view_ctx.edit_mode.clone()),
+            move |(cfg, _mode)| {
+                if let Some(conf) = cfg {
+                    let schedules_config = SchedulesConfigDto::from(conf);
+                    form_state
+                        .dispatch(SchedulesConfigFormAction::SetAll(schedules_config.clone()));
+                } else {
+                    form_state.dispatch(SchedulesConfigFormAction::SetAll(
+                        SchedulesConfigDto::default(),
+                    ));
+                }
+                || ()
+            },
+        );
     }
 
     let handle_schedule_selection = {
         let set_selected_schedule = selected_schedule.clone();
-        Callback::from(move |text:String| {
+        Callback::from(move |text: String| {
             let trimmed = text.trim().to_string();
-          if trimmed.is_empty() {
-              set_selected_schedule.set(None);
-          } else {
-            set_selected_schedule.set(Some(trimmed));
-          }
+            if trimmed.is_empty() {
+                set_selected_schedule.set(None);
+            } else {
+                set_selected_schedule.set(Some(trimmed));
+            }
         })
     };
 
     let handle_target_selection = {
         let set_selected_targets = selected_targets.clone();
-        Callback::from(move |(_name, selections):(String, DropDownSelection)| {
-            match selections {
+        Callback::from(
+            move |(_name, selections): (String, DropDownSelection)| match selections {
                 DropDownSelection::Empty => set_selected_targets.set(None),
                 DropDownSelection::Single(options) => set_selected_targets.set(Some(vec![options])),
                 DropDownSelection::Multi(options) => set_selected_targets.set(Some(options)),
-            }
-        })
+            },
+        )
     };
 
     let handle_add_schedule = {
@@ -118,16 +133,26 @@ pub fn SchedulesConfigView() -> Html {
                             schedule: schedule.clone(),
                             targets,
                         };
-                        let mut new_schedules = form_state.data().schedules.as_ref().cloned().unwrap_or_default();
+                        let mut new_schedules = form_state
+                            .data()
+                            .schedules
+                            .as_ref()
+                            .cloned()
+                            .unwrap_or_default();
 
-                        let exists = new_schedules.iter().any(|s|
-                            s.schedule == dto.schedule && s.targets.as_deref() == dto.targets.as_deref()
-                        );
+                        let exists = new_schedules.iter().any(|s| {
+                            s.schedule == dto.schedule
+                                && s.targets.as_deref() == dto.targets.as_deref()
+                        });
                         if exists {
-                            services.toastr.warning(translate.t("MESSAGES.SCHEDULE_EXISTS"));
+                            services
+                                .toastr
+                                .warning(translate.t("MESSAGES.SCHEDULE_EXISTS"));
                         } else {
                             new_schedules.push(dto);
-                            form_state.dispatch(SchedulesConfigFormAction::Schedules(Some(new_schedules)));
+                            form_state.dispatch(SchedulesConfigFormAction::Schedules(Some(
+                                new_schedules,
+                            )));
                             // clear editor
                             set_selected_schedule.set(None);
                             set_selected_targets.set(None);
@@ -138,7 +163,9 @@ pub fn SchedulesConfigView() -> Html {
                     }
                 }
             } else {
-                services.toastr.warning(translate.t("MESSAGES.SCHEDULE_NOT_SET"));
+                services
+                    .toastr
+                    .warning(translate.t("MESSAGES.SCHEDULE_NOT_SET"));
             }
         })
     };
@@ -147,7 +174,11 @@ pub fn SchedulesConfigView() -> Html {
         let form_state = form_state.clone();
         Callback::from(move |target: String| {
             if let Some(schedules) = form_state.data().schedules.as_ref() {
-                let new_schedules: Vec<ScheduleConfigDto> = schedules.iter().filter(|&s|  s.schedule != target).cloned().collect();
+                let new_schedules: Vec<ScheduleConfigDto> = schedules
+                    .iter()
+                    .filter(|&s| s.schedule != target)
+                    .cloned()
+                    .collect();
                 if new_schedules.is_empty() {
                     form_state.dispatch(SchedulesConfigFormAction::Schedules(None));
                 } else {
@@ -157,76 +188,74 @@ pub fn SchedulesConfigView() -> Html {
         })
     };
 
-    let render_view_mode = |deletable: bool| {
-        match form_state.data().schedules.as_ref() {
-            Some(schedules) => html! {
-                <Card class="tp__config-view__card">
-                 <div class="tp__schedules-config-view__schedule">
-                    <table class="tp__config-view__table tp__table__table ">
-                        <thead>
+    let render_view_mode = |deletable: bool| match form_state.data().schedules.as_ref() {
+        Some(schedules) => html! {
+            <Card class="tp__config-view__card">
+             <div class="tp__schedules-config-view__schedule">
+                <table class="tp__config-view__table tp__table__table ">
+                    <thead>
+                        <tr>
+                            {html_if!(deletable, {<th></th>})}
+                            <th>{ translate.t(LABEL_SCHEDULE) }</th>
+                            <th>{ translate.t(LABEL_TARGETS) }</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        { for schedules.iter().map(|entry| {
+                            let handle_remove_clone = handle_remove.clone();
+                            let schedule = entry.schedule.clone();
+                            html! {
                             <tr>
-                                {html_if!(deletable, {<th></th>})}
-                                <th>{ translate.t(LABEL_SCHEDULE) }</th>
-                                <th>{ translate.t(LABEL_TARGETS) }</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            { for schedules.iter().map(|entry| {
-                                let handle_remove_clone = handle_remove.clone();
-                                let schedule = entry.schedule.clone();
-                                html! {
-                                <tr>
-                                    { html_if!(deletable, {
-                                        <td>
-                                        <IconButton class="tp__schedules-config-view__delete-btn"
-                                           name="RemoveSchedule" icon="Delete"
-                                           onclick={Callback::from(move |_| handle_remove_clone.emit(schedule.clone()))} />
-                                        </td>
-                                    })}
-                                    <td>{ entry.schedule.clone() }</td>
+                                { html_if!(deletable, {
                                     <td>
-                                        <div class="tp__config-view__tags">
-                                        {
-                                        match entry.targets.as_ref() {
-                                            Some(targets) if !targets.is_empty() => html! {
-                                                { for targets.iter().map(|t| {
-                                                    html! { <Chip label={t.clone()} />
-                                                }})}
-                                            },
-                                            _ => html! {
-                                                <Chip label={translate.t(LABEL_ALL)} />
-                                            },
-                                        }
-                                        }
-                                     </div>
+                                    <IconButton class="tp__schedules-config-view__delete-btn"
+                                       name="RemoveSchedule" icon="Delete"
+                                       onclick={Callback::from(move |_| handle_remove_clone.emit(schedule.clone()))} />
                                     </td>
-                                </tr>
-                            }}) }
-                        </tbody>
-                    </table>
-                </div>
-              </Card>
-            },
-            None => html! { <NoContent /> }
-        }
+                                })}
+                                <td>{ entry.schedule.clone() }</td>
+                                <td>
+                                    <div class="tp__config-view__tags">
+                                    {
+                                    match entry.targets.as_ref() {
+                                        Some(targets) if !targets.is_empty() => html! {
+                                            { for targets.iter().map(|t| {
+                                                html! { <Chip label={t.clone()} />
+                                            }})}
+                                        },
+                                        _ => html! {
+                                            <Chip label={translate.t(LABEL_ALL)} />
+                                        },
+                                    }
+                                    }
+                                 </div>
+                                </td>
+                            </tr>
+                        }}) }
+                    </tbody>
+                </table>
+            </div>
+          </Card>
+        },
+        None => html! { <NoContent /> },
     };
 
     let render_edit_mode = || {
-      html! {
-          <div class="tp__schedules-config-view__editor">
-          {config_field_child!(translate.t(LABEL_SCHEDULE), {
-              html!{ <Input name="schedule" value={(*selected_schedule).as_ref().map_or_else(String::new, ToString::to_string)} on_change={handle_schedule_selection} /> }
-          })}
-          {config_field_child!(translate.t(LABEL_TARGETS), {
-               html!{ <Select name="target"
-                    multi_select={true}
-                    on_select={handle_target_selection}
-                    options={target_options.clone()}
-                />
-           }})}
-          <IconButton name="AddSchedule" icon="ScheduleAdd" class="primary" onclick={handle_add_schedule} />
-          </div>
-      }
+        html! {
+            <div class="tp__schedules-config-view__editor">
+            {config_field_child!(translate.t(LABEL_SCHEDULE), {
+                html!{ <Input name="schedule" value={(*selected_schedule).as_ref().map_or_else(String::new, ToString::to_string)} on_change={handle_schedule_selection} /> }
+            })}
+            {config_field_child!(translate.t(LABEL_TARGETS), {
+                 html!{ <Select name="target"
+                      multi_select={true}
+                      on_select={handle_target_selection}
+                      options={target_options.clone()}
+                  />
+             }})}
+            <IconButton name="AddSchedule" icon="ScheduleAdd" class="primary" onclick={handle_add_schedule} />
+            </div>
+        }
     };
 
     html! {

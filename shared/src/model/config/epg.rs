@@ -1,7 +1,7 @@
-use crate::{info_err_res};
-use crate::error::{TuliproxError};
+use crate::error::TuliproxError;
+use crate::info_err_res;
 use crate::model::EpgSmartMatchConfigDto;
-use crate::utils::{is_false};
+use crate::utils::is_false;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -23,8 +23,6 @@ impl EpgSourceDto {
     }
 }
 
-
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct EpgConfigDto {
@@ -37,7 +35,11 @@ pub struct EpgConfigDto {
 }
 
 impl EpgConfigDto {
-    pub fn prepare<F>(&mut self, create_auto_url: F, include_computed: bool) -> Result<(), TuliproxError>
+    pub fn prepare<F>(
+        &mut self,
+        create_auto_url: F,
+        include_computed: bool,
+    ) -> Result<(), TuliproxError>
     where
         F: Fn() -> Result<String, String>,
     {
@@ -57,7 +59,7 @@ impl EpgConfigDto {
                                         logo_override: epg_source.logo_override,
                                     });
                                 }
-                                Err(err) => return info_err_res!("{err}")
+                                Err(err) => return info_err_res!("{err}"),
                             }
                         } else {
                             self.t_sources.push(epg_source.clone());

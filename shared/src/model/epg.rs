@@ -42,8 +42,7 @@ impl EpgTv {
 
 impl PartialEq for EpgTv {
     fn eq(&self, other: &Self) -> bool {
-        self.start == other.start
-            && self.stop == other.stop
+        self.start == other.start && self.stop == other.stop
         // Note: self.channels is skipped
     }
 }
@@ -70,7 +69,9 @@ impl EpgChannel {
         let now = Utc::now().timestamp();
 
         // find index for first relevant entry
-        let start_idx = self.programmes.iter()
+        let start_idx = self
+            .programmes
+            .iter()
             .position(|p| (p.start <= now && now <= p.stop) || (p.start >= now))
             .unwrap_or(self.programmes.len()); // nothing found, empty response
 
@@ -110,7 +111,13 @@ impl EpgProgramme {
             desc: None,
         }
     }
-    pub fn new_all(start: i64, stop: i64, channel: Arc<str>, title: Option<Arc<str>>, desc: Option<Arc<str>>) -> Self {
+    pub fn new_all(
+        start: i64,
+        stop: i64,
+        channel: Arc<str>,
+        title: Option<Arc<str>>,
+        desc: Option<Arc<str>>,
+    ) -> Self {
         Self {
             start,
             stop,

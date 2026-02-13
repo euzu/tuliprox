@@ -1,6 +1,8 @@
 use crate::model::DEFAULT_USER_AGENT;
-use crate::utils::{default_as_true, default_trakt_fuzzy_threshold, is_true,
-                   TRAKT_API_KEY, TRAKT_API_URL, TRAKT_API_VERSION};
+use crate::utils::{
+    default_as_true, default_trakt_fuzzy_threshold, is_true, TRAKT_API_KEY, TRAKT_API_URL,
+    TRAKT_API_VERSION,
+};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -16,11 +18,15 @@ pub enum TraktContentType {
 
 impl fmt::Display for TraktContentType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", match self {
-            TraktContentType::Vod => "Vod",
-            TraktContentType::Series => "Series",
-            TraktContentType::Both => "Both",
-        })
+        write!(
+            f,
+            "{}",
+            match self {
+                TraktContentType::Vod => "Vod",
+                TraktContentType::Series => "Series",
+                TraktContentType::Both => "Both",
+            }
+        )
     }
 }
 
@@ -36,7 +42,6 @@ impl FromStr for TraktContentType {
         }
     }
 }
-
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -56,14 +61,21 @@ impl TraktApiConfigDto {
         let key = self.api_key.trim();
         self.api_key = String::from(if key.is_empty() { TRAKT_API_KEY } else { key });
         let version = self.version.trim();
-        self.version = String::from(if version.is_empty() { TRAKT_API_VERSION } else { version });
+        self.version = String::from(if version.is_empty() {
+            TRAKT_API_VERSION
+        } else {
+            version
+        });
         let url = self.url.trim();
         self.url = String::from(if url.is_empty() { TRAKT_API_URL } else { url });
         let user_agent = self.user_agent.trim();
-        self.user_agent = String::from(if user_agent.is_empty() { DEFAULT_USER_AGENT } else { user_agent });
+        self.user_agent = String::from(if user_agent.is_empty() {
+            DEFAULT_USER_AGENT
+        } else {
+            user_agent
+        });
     }
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]

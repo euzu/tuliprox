@@ -1,7 +1,12 @@
 use crate::app::components::menu_item::MenuItem;
 use crate::app::components::popup_menu::PopupMenu;
-use crate::app::components::{convert_bool_to_chip_style, AppIcon, Chip, FilterView, PlaylistMappings, PlaylistProcessing, RevealContent, Table, TableDefinition, TargetOptions, TargetOutput, TargetRename, TargetSort, TargetWatch, ToggleSwitch};
+use crate::app::components::{
+    convert_bool_to_chip_style, AppIcon, Chip, FilterView, PlaylistMappings, PlaylistProcessing,
+    RevealContent, Table, TableDefinition, TargetOptions, TargetOutput, TargetRename, TargetSort,
+    TargetWatch, ToggleSwitch,
+};
 use crate::hooks::use_service_context;
+use crate::html_if;
 use crate::model::DialogResult;
 use crate::services::DialogService;
 use shared::error::{info_err_res, TuliproxError};
@@ -12,7 +17,6 @@ use std::str::FromStr;
 use yew::platform::spawn_local;
 use yew::prelude::*;
 use yew_i18n::use_translation;
-use crate::html_if;
 
 const HEADERS: [&str; 12] = [
     "LABEL.EMPTY",
@@ -113,15 +117,13 @@ pub fn TargetTable(props: &TargetTableProps) -> Html {
                     11 => html! { <ToggleSwitch value={dto.use_memory_cache} readonly={true} /> },
                     _ => html! {""},
                 }
-            })
+            },
+        )
     };
 
-    let is_sortable = Callback::<usize, bool>::from(move |_col| {
-        false
-    });
+    let is_sortable = Callback::<usize, bool>::from(move |_col| false);
 
-    let on_sort = Callback::<Option<(usize, SortOrder)>, ()>::from(move |_args| {
-    });
+    let on_sort = Callback::<Option<(usize, SortOrder)>, ()>::from(move |_args| {});
 
     let table_definition = {
         // first register for config update
@@ -131,18 +133,22 @@ pub fn TargetTable(props: &TargetTableProps) -> Html {
         let on_sort = on_sort.clone();
         let num_cols = HEADERS.len();
         use_memo(props.targets.clone(), move |targets| {
-            targets.as_ref().map(|list|
+            targets.as_ref().map(|list| {
                 Rc::new(TableDefinition::<ConfigTargetDto> {
-                    items: if list.is_empty() {None} else {Some(Rc::new(list.clone()))},
+                    items: if list.is_empty() {
+                        None
+                    } else {
+                        Some(Rc::new(list.clone()))
+                    },
                     num_cols,
                     is_sortable,
                     on_sort,
                     render_header_cell: render_header_cell_cb,
                     render_data_cell: render_data_cell_cb,
-                }))
+                })
+            })
         })
     };
-
 
     let handle_menu_click = {
         let popup_is_open_state = popup_is_open.clone();
@@ -157,12 +163,22 @@ pub fn TargetTable(props: &TargetTableProps) -> Html {
                     TargetTableAction::Refresh => {
                         let translate = translate.clone();
                         let services_ctx = services_ctx.clone();
-                        let dto_name = selected_dto.as_ref().map_or_else(String::new, |d| d.name.to_string());
+                        let dto_name = selected_dto
+                            .as_ref()
+                            .map_or_else(String::new, |d| d.name.to_string());
                         spawn_local(async move {
                             let targets = vec![dto_name.as_str()];
                             match services_ctx.playlist.update_targets(&targets).await {
-                                true => { services_ctx.toastr.success(translate.t("MESSAGES.PLAYLIST_UPDATE.SUCCESS")); }
-                                false => { services_ctx.toastr.error(translate.t("MESSAGES.PLAYLIST_UPDATE.FAIL")); }
+                                true => {
+                                    services_ctx
+                                        .toastr
+                                        .success(translate.t("MESSAGES.PLAYLIST_UPDATE.SUCCESS"));
+                                }
+                                false => {
+                                    services_ctx
+                                        .toastr
+                                        .error(translate.t("MESSAGES.PLAYLIST_UPDATE.FAIL"));
+                                }
                             }
                         });
                     }
@@ -170,7 +186,9 @@ pub fn TargetTable(props: &TargetTableProps) -> Html {
                         let confirm = confirm.clone();
                         let translator = translate.clone();
                         spawn_local(async move {
-                            let result = confirm.confirm(&translator.t("MESSAGES.CONFIRM_DELETE")).await;
+                            let result = confirm
+                                .confirm(&translator.t("MESSAGES.CONFIRM_DELETE"))
+                                .await;
                             if result == DialogResult::Ok {
                                 // TODO edit
                             }
@@ -205,7 +223,6 @@ pub fn TargetTable(props: &TargetTableProps) -> Html {
     }
 }
 
-
 #[derive(Debug, Clone, Eq, PartialEq)]
 enum TargetTableAction {
     Edit,
@@ -215,17 +232,20 @@ enum TargetTableAction {
 
 impl Display for TargetTableAction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", match self {
-            Self::Edit => "edit",
-            Self::Refresh => "refresh",
-            Self::Delete => "delete",
-        })
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::Edit => "edit",
+                Self::Refresh => "refresh",
+                Self::Delete => "delete",
+            }
+        )
     }
 }
 
 impl FromStr for TargetTableAction {
     type Err = TuliproxError;
-
 
     fn from_str(s: &str) -> Result<Self, TuliproxError> {
         match s {

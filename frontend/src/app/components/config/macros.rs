@@ -335,7 +335,6 @@ macro_rules! edit_field_number_u16 {
     }};
 }
 
-
 #[macro_export]
 macro_rules! edit_field_number_i16 {
     ($instance:expr, $label:expr, $field:ident, $action:path) => {{

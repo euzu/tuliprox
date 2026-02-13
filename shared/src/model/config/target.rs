@@ -1,12 +1,15 @@
 use crate::error::{TuliproxError, TuliproxErrorKind};
-use crate::{info_err_res, handle_tuliprox_error_result_list};
 use crate::foundation::{get_filter, Filter};
-use crate::model::{ClusterFlags, ConfigFavouritesDto, ConfigRenameDto, ConfigSortDto, HdHomeRunDeviceOverview,
-                   PatternTemplate, ProcessingOrder, StrmExportStyle, TargetType, TraktConfigDto};
-use crate::utils::{is_true, is_false, default_as_true, default_resolve_delay_secs, default_as_default,
-                   is_blank_optional_string,
-                   is_default_resolve_delay_secs, is_zero_u16, is_config_target_options_empty, is_default_processing_order,
-                   default_probe_live_interval, is_default_probe_live_interval};
+use crate::model::{
+    ClusterFlags, ConfigFavouritesDto, ConfigRenameDto, ConfigSortDto, HdHomeRunDeviceOverview,
+    PatternTemplate, ProcessingOrder, StrmExportStyle, TargetType, TraktConfigDto,
+};
+use crate::utils::{
+    default_as_default, default_as_true, default_probe_live_interval, default_resolve_delay_secs,
+    is_blank_optional_string, is_config_target_options_empty, is_default_probe_live_interval,
+    is_default_processing_order, is_default_resolve_delay_secs, is_false, is_true, is_zero_u16,
+};
+use crate::{handle_tuliprox_error_result_list, info_err_res};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -24,9 +27,12 @@ pub struct ConfigTargetOptions {
 impl ConfigTargetOptions {
     pub fn is_empty(&self) -> bool {
         !self.ignore_logo
-        && !self.share_live_streams
-        && !self.remove_duplicates
-        && (self.force_redirect.is_none() || self.force_redirect.is_some_and(|f| f.has_full_flags() || f.is_empty()))
+            && !self.share_live_streams
+            && !self.remove_duplicates
+            && (self.force_redirect.is_none()
+                || self
+                    .force_redirect
+                    .is_some_and(|f| f.has_full_flags() || f.is_empty()))
     }
 }
 
@@ -50,11 +56,18 @@ pub struct XtreamTargetOutputDto {
     pub probe_series: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub probe_vod: bool,
-    #[serde(default = "default_resolve_delay_secs", skip_serializing_if = "is_default_resolve_delay_secs")]
+    #[serde(
+        default = "default_resolve_delay_secs",
+        skip_serializing_if = "is_default_resolve_delay_secs"
+    )]
     pub resolve_delay: u16,
     #[serde(default, alias = "resolve_live", skip_serializing_if = "is_false")]
     pub probe_live: bool,
-    #[serde(default = "default_probe_live_interval", alias = "resolve_live_interval_hours", skip_serializing_if = "is_default_probe_live_interval")]
+    #[serde(
+        default = "default_probe_live_interval",
+        alias = "resolve_live_interval_hours",
+        skip_serializing_if = "is_default_probe_live_interval"
+    )]
     pub probe_live_interval_hours: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trakt: Option<TraktConfigDto>,
@@ -86,7 +99,10 @@ impl Default for XtreamTargetOutputDto {
 }
 
 impl XtreamTargetOutputDto {
-    pub fn prepare(&mut self, templates: Option<&Vec<PatternTemplate>>) -> Result<(), TuliproxError> {
+    pub fn prepare(
+        &mut self,
+        templates: Option<&Vec<PatternTemplate>>,
+    ) -> Result<(), TuliproxError> {
         if let Some(raw_filter) = &self.filter {
             self.t_filter = Some(get_filter(raw_filter, templates)?);
         }
@@ -127,8 +143,10 @@ pub struct M3uTargetOutputDto {
 }
 
 impl M3uTargetOutputDto {
-
-    pub fn prepare(&mut self, templates: Option<&Vec<PatternTemplate>>) -> Result<(), TuliproxError> {
+    pub fn prepare(
+        &mut self,
+        templates: Option<&Vec<PatternTemplate>>,
+    ) -> Result<(), TuliproxError> {
         if let Some(raw_filter) = &self.filter {
             self.t_filter = Some(get_filter(raw_filter, templates)?);
         }
@@ -163,7 +181,7 @@ pub struct StrmTargetOutputDto {
     pub filter: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub add_quality_to_filename: bool,
-    
+
     // New Fields for Metadata and Probe
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub probe_probe_size_bytes: Option<u64>,
@@ -175,7 +193,10 @@ pub struct StrmTargetOutputDto {
 }
 
 impl StrmTargetOutputDto {
-    pub fn prepare(&mut self, templates: Option<&Vec<PatternTemplate>>) -> Result<(), TuliproxError> {
+    pub fn prepare(
+        &mut self,
+        templates: Option<&Vec<PatternTemplate>>,
+    ) -> Result<(), TuliproxError> {
         if let Some(raw_filter) = &self.filter {
             self.t_filter = Some(get_filter(raw_filter, templates)?);
         }
@@ -212,12 +233,15 @@ pub enum TargetOutputDto {
 }
 
 impl TargetOutputDto {
-    pub fn prepare(&mut self, templates: Option<&Vec<PatternTemplate>>) -> Result<(), TuliproxError> {
+    pub fn prepare(
+        &mut self,
+        templates: Option<&Vec<PatternTemplate>>,
+    ) -> Result<(), TuliproxError> {
         match self {
             TargetOutputDto::Xtream(output) => output.prepare(templates),
             TargetOutputDto::M3u(output) => output.prepare(templates),
             TargetOutputDto::Strm(output) => output.prepare(templates),
-            TargetOutputDto::HdHomeRun(_) => Ok(())
+            TargetOutputDto::HdHomeRun(_) => Ok(()),
         }
     }
 }
@@ -277,7 +301,12 @@ impl Default for ConfigTargetDto {
 
 impl ConfigTargetDto {
     #[allow(clippy::too_many_lines)]
-    pub fn prepare(&mut self, id: u16, templates: Option<&Vec<PatternTemplate>>, hdhr_config: Option<&HdHomeRunDeviceOverview>) -> Result<(), TuliproxError> {
+    pub fn prepare(
+        &mut self,
+        id: u16,
+        templates: Option<&Vec<PatternTemplate>>,
+        hdhr_config: Option<&HdHomeRunDeviceOverview>,
+    ) -> Result<(), TuliproxError> {
         self.id = id;
         if self.output.is_empty() {
             return info_err_res!("Missing output format for {}", self.name);
@@ -304,7 +333,10 @@ impl ConfigTargetDto {
                 TargetOutputDto::Xtream(_) => {
                     xtream_cnt += 1;
                     if default_as_default().eq_ignore_ascii_case(&self.name) {
-                        return info_err_res!("unique target name is required for xtream type output: {}", self.name);
+                        return info_err_res!(
+                            "unique target name is required for xtream type output: {}",
+                            self.name
+                        );
                     }
                 }
                 TargetOutputDto::M3u(m3u_output) => {
@@ -337,7 +369,10 @@ impl ConfigTargetDto {
                     // }
                     // strm_export_styles.push(strm_output.style);
                     if strm_directories.contains(&strm_output.directory.as_str()) {
-                        return info_err_res!("strm outputs with same export directory are not allowed: {}", self.name);
+                        return info_err_res!(
+                            "strm outputs with same export directory are not allowed: {}",
+                            self.name
+                        );
                     }
                     strm_directories.push(strm_output.directory.as_str());
                 }
@@ -345,12 +380,18 @@ impl ConfigTargetDto {
                     hdhr_cnt += 1;
                     hdhomerun_output.username = hdhomerun_output.username.trim().to_string();
                     if hdhomerun_output.username.is_empty() {
-                        return info_err_res!("Username is required for HdHomeRun type: {}", self.name);
+                        return info_err_res!(
+                            "Username is required for HdHomeRun type: {}",
+                            self.name
+                        );
                     }
 
                     hdhomerun_output.device = hdhomerun_output.device.trim().to_string();
                     if hdhomerun_output.device.is_empty() {
-                        return info_err_res!("Device is required for HdHomeRun type: {}", self.name);
+                        return info_err_res!(
+                            "Device is required for HdHomeRun type: {}",
+                            self.name
+                        );
                     }
 
                     if let Some(use_output) = hdhomerun_output.use_output.as_ref() {
@@ -362,7 +403,10 @@ impl ConfigTargetDto {
                     }
                     if let Some(hdhr_devices) = hdhr_config {
                         if !hdhr_devices.devices.contains(&hdhomerun_output.device) {
-                            return info_err_res!("HdHomeRun output device is not defined: {}", hdhomerun_output.device);
+                            return info_err_res!(
+                                "HdHomeRun output device is not defined: {}",
+                                hdhomerun_output.device
+                            );
                         }
                     }
                 }
@@ -382,15 +426,23 @@ impl ConfigTargetDto {
                 return info_err_res!("HdHomeRun output is only permitted when used in combination with xtream or m3u output: {}", self.name);
             }
             if hdhomerun_needs_m3u && m3u_cnt == 0 {
-                return info_err_res!("HdHomeRun output has `use_output=m3u` but no `m3u` output defined: {}", self.name);
+                return info_err_res!(
+                    "HdHomeRun output has `use_output=m3u` but no `m3u` output defined: {}",
+                    self.name
+                );
             }
             if hdhomerun_needs_xtream && xtream_cnt == 0 {
-                return info_err_res!("HdHomeRun output has `use_output=xtream` but no `xtream` output defined: {}", self.name);
+                return info_err_res!(
+                    "HdHomeRun output has `use_output=xtream` but no `xtream` output defined: {}",
+                    self.name
+                );
             }
 
             if let Some(hdhr_devices) = hdhr_config {
                 if !hdhr_devices.enabled {
-                    log::warn!("You have defined an HDHomeRun output, but HDHomeRun devices are disabled.");
+                    log::warn!(
+                        "You have defined an HDHomeRun output, but HDHomeRun devices are disabled."
+                    );
                 }
             }
         }
@@ -414,7 +466,10 @@ impl ConfigTargetDto {
                 // debug!("Filter: {}", fltr);
                 self.t_filter = Some(fltr);
                 if let Some(renames) = self.rename.as_mut() {
-                    handle_tuliprox_error_result_list!(TuliproxErrorKind::Info, renames.iter_mut().map(|cr|cr.prepare(templates)));
+                    handle_tuliprox_error_result_list!(
+                        TuliproxErrorKind::Info,
+                        renames.iter_mut().map(|cr| cr.prepare(templates))
+                    );
                 }
                 if let Some(sort) = self.sort.as_mut() {
                     sort.prepare(templates)?;

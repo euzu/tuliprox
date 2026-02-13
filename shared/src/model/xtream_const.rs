@@ -25,19 +25,45 @@ pub const XC_PROP_BACKDROP_PATH: &str = "backdrop_path";
 pub const XC_PROP_COVER: &str = "cover";
 pub const XC_TAG_CATEGORY_NAME: &str = "category_name";
 
-pub const VIDEO_STREAM_FIELDS: [&str;14] = [
-    "release_date", "cast",
-    "director", "episode_run_time", "genre",
-    "stream_type", "title", "year", "youtube_trailer", "trailer",
-    "plot", "rating_5based", "stream_icon", "container_extension"
+pub const VIDEO_STREAM_FIELDS: [&str; 14] = [
+    "release_date",
+    "cast",
+    "director",
+    "episode_run_time",
+    "genre",
+    "stream_type",
+    "title",
+    "year",
+    "youtube_trailer",
+    "trailer",
+    "plot",
+    "rating_5based",
+    "stream_icon",
+    "container_extension",
 ];
 
-pub const SERIES_STREAM_FIELDS: [&str;15] = [
-    XC_PROP_BACKDROP_PATH, "cast", XC_PROP_COVER, "director", "episode_run_time", "genre",
-    "last_modified", "name", "plot", "rating_5based",
-    "stream_type", "title", "year", "youtube_trailer", "trailer"
+pub const SERIES_STREAM_FIELDS: [&str; 15] = [
+    XC_PROP_BACKDROP_PATH,
+    "cast",
+    XC_PROP_COVER,
+    "director",
+    "episode_run_time",
+    "genre",
+    "last_modified",
+    "name",
+    "plot",
+    "rating_5based",
+    "stream_type",
+    "title",
+    "year",
+    "youtube_trailer",
+    "trailer",
 ];
 
 pub const XTREAM_VOD_REWRITE_URL_PROPS: [&str; 1] = [XC_PROP_COVER];
 
-pub const XTREAM_CLUSTER: [XtreamCluster; 3] = [XtreamCluster::Live, XtreamCluster::Video, XtreamCluster::Series];
+pub const XTREAM_CLUSTER: [XtreamCluster; 3] = [
+    XtreamCluster::Live,
+    XtreamCluster::Video,
+    XtreamCluster::Series,
+];

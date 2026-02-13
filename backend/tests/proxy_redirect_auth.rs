@@ -2,8 +2,8 @@ use base64::Engine;
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;
-use hyper::service::service_fn;
 use hyper::http::{self, HeaderName, HeaderValue};
+use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder;
@@ -35,14 +35,15 @@ impl ProxyState {
     }
 }
 
-fn response_with_status(status: StatusCode, headers: Vec<(HeaderName, HeaderValue)>) -> Response<Full<Bytes>> {
+fn response_with_status(
+    status: StatusCode,
+    headers: Vec<(HeaderName, HeaderValue)>,
+) -> Response<Full<Bytes>> {
     let mut builder = Response::builder().status(status);
     for (name, value) in headers {
         builder = builder.header(name, value);
     }
-    builder
-        .body(Full::new(Bytes::from_static(b"")))
-        .unwrap()
+    builder.body(Full::new(Bytes::from_static(b""))).unwrap()
 }
 
 async fn proxy_handler(
@@ -87,7 +88,9 @@ async fn start_proxy(state: Arc<ProxyState>) -> (SocketAddr, tokio::task::JoinHa
 
     let handle = tokio::spawn(async move {
         loop {
-            let Ok((socket, _)) = listener.accept().await else { continue };
+            let Ok((socket, _)) = listener.accept().await else {
+                continue;
+            };
             let state = Arc::clone(&state);
             tokio::spawn(async move {
                 let io = TokioIo::new(socket);
@@ -122,9 +125,7 @@ async fn send_with_manual_redirects(
             let Ok(location_str) = location.to_str() else {
                 return response;
             };
-            let next_url = url
-                .join(location_str)
-                .or_else(|_| Url::parse(location_str));
+            let next_url = url.join(location_str).or_else(|_| Url::parse(location_str));
             let Ok(next_url) = next_url else {
                 return response;
             };
@@ -139,8 +140,7 @@ async fn send_with_manual_redirects(
 async fn run_proxy_flow(manual_redirects: bool) -> (StatusCode, usize, Vec<String>) {
     let credentials = "user:pass";
     let encoded = base64::engine::general_purpose::STANDARD.encode(credentials);
-    let expected_auth =
-        HeaderValue::from_str(&format!("Basic {encoded}")).unwrap();
+    let expected_auth = HeaderValue::from_str(&format!("Basic {encoded}")).unwrap();
 
     let state = Arc::new(ProxyState::new(expected_auth.clone()));
     let (addr, server_handle) = start_proxy(Arc::clone(&state)).await;
@@ -157,12 +157,8 @@ async fn run_proxy_flow(manual_redirects: bool) -> (StatusCode, usize, Vec<Strin
         .unwrap();
 
     let response = if manual_redirects {
-        send_with_manual_redirects(
-            &client,
-            Url::parse("http://origin.local/start").unwrap(),
-            5,
-        )
-        .await
+        send_with_manual_redirects(&client, Url::parse("http://origin.local/start").unwrap(), 5)
+            .await
     } else {
         client
             .get("http://origin.local/start")
@@ -211,10 +207,8 @@ async fn proxy_auth_survives_redirect_regression() {
         uris
     );
     assert_eq!(
-        missing_auth,
-        0,
+        missing_auth, 0,
         "Expected no missing proxy auth after fix. missing_auth={}, uris={:?}",
-        missing_auth,
-        uris
+        missing_auth, uris
     );
 }

@@ -1,8 +1,8 @@
+use crate::model::StreamInfo;
 use crate::utils::is_blank_optional_string;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use serde::{Deserialize, Serialize};
-use crate::model::StreamInfo;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StatusCheck {

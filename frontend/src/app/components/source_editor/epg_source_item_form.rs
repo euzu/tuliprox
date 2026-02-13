@@ -30,15 +30,13 @@ pub struct EpgSourceItemFormProps {
 pub fn EpgSourceItemForm(props: &EpgSourceItemFormProps) -> Html {
     let translate = use_translation();
 
-    let form_state: UseReducerHandle<EpgSourceFormState> = use_reducer(|| {
-        EpgSourceFormState {
-            form: props.initial.clone().unwrap_or_else(|| EpgSourceDto {
-                url: String::new(),
-                priority: 0,
-                logo_override: false,
-            }),
-            modified: false,
-        }
+    let form_state: UseReducerHandle<EpgSourceFormState> = use_reducer(|| EpgSourceFormState {
+        form: props.initial.clone().unwrap_or_else(|| EpgSourceDto {
+            url: String::new(),
+            priority: 0,
+            logo_override: false,
+        }),
+        modified: false,
     });
 
     let handle_submit = {

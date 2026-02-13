@@ -1,8 +1,8 @@
+use serde::{Deserialize, Serialize};
+use shared::model::{ConfigInputDto, ConfigTargetDto, InputType, TargetOutputDto};
 use std::fmt;
 use std::rc::Rc;
-use serde::{Deserialize, Serialize};
 use yew::{Callback, UseStateHandle};
-use shared::model::{ConfigInputDto, ConfigTargetDto, InputType, TargetOutputDto};
 
 pub const BLOCK_WIDTH: f32 = 100.0;
 pub const BLOCK_HEIGHT: f32 = 50.0;
@@ -34,7 +34,10 @@ impl BlockType {
     pub const OUTPUT_STRM: &'static str = "OutputStrm";
 
     pub fn is_input(&self) -> bool {
-        matches!(self, Self::InputXtream | Self::InputM3u | Self::InputLibrary)
+        matches!(
+            self,
+            Self::InputXtream | Self::InputM3u | Self::InputLibrary
+        )
     }
 
     pub fn is_target(&self) -> bool {
@@ -42,7 +45,10 @@ impl BlockType {
     }
 
     pub fn is_output(&self) -> bool {
-        matches!(self, Self::OutputXtream | Self::OutputM3u | Self::OutputHdHomeRun | Self::OutputStrm)
+        matches!(
+            self,
+            Self::OutputXtream | Self::OutputM3u | Self::OutputHdHomeRun | Self::OutputStrm
+        )
     }
 }
 
@@ -72,15 +78,12 @@ impl From<String> for BlockType {
 impl From<InputType> for BlockType {
     fn from(s: InputType) -> Self {
         match s {
-            InputType::M3uBatch
-            | InputType::M3u => BlockType::InputM3u,
-            InputType::XtreamBatch
-            | InputType::Xtream => BlockType::InputXtream,
+            InputType::M3uBatch | InputType::M3u => BlockType::InputM3u,
+            InputType::XtreamBatch | InputType::Xtream => BlockType::InputXtream,
             InputType::Library => BlockType::InputLibrary,
         }
     }
 }
-
 
 // Display trait using constants
 impl fmt::Display for BlockType {
@@ -138,13 +141,9 @@ impl Block {
         let r_right = x1.max(x2);
         let r_bottom = y1.max(y2);
 
-        b_right >= r_left &&
-            b_left <= r_right &&
-            b_bottom >= r_top &&
-            b_top <= r_bottom
+        b_right >= r_left && b_left <= r_right && b_bottom >= r_top && b_top <= r_bottom
     }
 }
-
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Connection {
@@ -156,14 +155,14 @@ pub struct Connection {
 pub enum PortStatus {
     Valid,
     Invalid,
-    Inactive
+    Inactive,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum BlockInstance {
     Input(Rc<ConfigInputDto>),
     Target(Rc<ConfigTargetDto>),
-    Output(Rc<TargetOutputDto>)
+    Output(Rc<TargetOutputDto>),
 }
 
 #[derive(Clone, PartialEq)]
@@ -175,5 +174,5 @@ pub enum EditMode {
 #[derive(Clone, PartialEq)]
 pub struct SourceEditorContext {
     pub on_form_change: Callback<(BlockId, BlockInstance)>,
-    pub edit_mode: UseStateHandle<EditMode>
+    pub edit_mode: UseStateHandle<EditMode>,
 }

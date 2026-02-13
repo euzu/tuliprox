@@ -21,37 +21,43 @@ pub fn PopupMenu(props: &PopupMenuProps) -> Html {
         let is_open = props.is_open;
         let anchor_ref = props.anchor_ref.clone();
         let popup_ref = popup_ref.clone();
-        use_memo((is_open, anchor_ref.clone()), move |(is_open, anchor_ref)| {
-            if !*is_open || anchor_ref.is_none() {
-                return "hidden".to_string();
-            }
-            let anchor_ref = anchor_ref.as_ref().unwrap().clone();
+        use_memo(
+            (is_open, anchor_ref.clone()),
+            move |(is_open, anchor_ref)| {
+                if !*is_open || anchor_ref.is_none() {
+                    return "hidden".to_string();
+                }
+                let anchor_ref = anchor_ref.as_ref().unwrap().clone();
 
-            let rect = anchor_ref.get_bounding_client_rect();
-            let window = window().expect("no global window");
-            let inner_width = window.inner_width().unwrap().as_f64().unwrap();
-            let inner_height = window.inner_height().unwrap().as_f64().unwrap();
+                let rect = anchor_ref.get_bounding_client_rect();
+                let window = window().expect("no global window");
+                let inner_width = window.inner_width().unwrap().as_f64().unwrap();
+                let inner_height = window.inner_height().unwrap().as_f64().unwrap();
 
-            // Basic positioning below the anchor element
-            let mut top = rect.bottom();
-            let mut left = rect.left();
+                // Basic positioning below the anchor element
+                let mut top = rect.bottom();
+                let mut left = rect.left();
 
-            // Clamp popup within viewport width (assuming popup width ~200px)
-            if left + 200.0 > inner_width {
-                left = inner_width - 200.0;
-            }
-            if top + 150.0 > inner_height {
-                // show above if no space below (assuming popup height ~150px)
-                top = rect.top() - 150.0;
-            }
+                // Clamp popup within viewport width (assuming popup width ~200px)
+                if left + 200.0 > inner_width {
+                    left = inner_width - 200.0;
+                }
+                if top + 150.0 > inner_height {
+                    // show above if no space below (assuming popup height ~150px)
+                    top = rect.top() - 150.0;
+                }
 
-            if let Some(popup) = popup_ref.cast::<HtmlElement>() {
-                let _ = popup.style().set_property("--popup-top", &format!("{top}px"));
-                let _ = popup.style().set_property("--popup-left", &format!("{left}px"));
-            }
-            "".to_owned()
-
-        })
+                if let Some(popup) = popup_ref.cast::<HtmlElement>() {
+                    let _ = popup
+                        .style()
+                        .set_property("--popup-top", &format!("{top}px"));
+                    let _ = popup
+                        .style()
+                        .set_property("--popup-left", &format!("{left}px"));
+                }
+                "".to_owned()
+            },
+        )
     };
 
     // Close popup when clicking outside of it
@@ -62,7 +68,10 @@ pub fn PopupMenu(props: &PopupMenuProps) -> Html {
             let handler = if *is_open {
                 let handler = Closure::wrap(Box::new(move |event: MouseEvent| {
                     if let Some(popup) = popup_ref.cast::<HtmlElement>() {
-                        if let Some(target) = event.target().and_then(|t| t.dyn_into::<HtmlElement>().ok()) {
+                        if let Some(target) = event
+                            .target()
+                            .and_then(|t| t.dyn_into::<HtmlElement>().ok())
+                        {
                             if !popup.contains(Some(&target)) {
                                 on_close.emit(());
                             }
@@ -84,7 +93,10 @@ pub fn PopupMenu(props: &PopupMenuProps) -> Html {
                 if let Some(handler) = handler {
                     window()
                         .unwrap()
-                        .remove_event_listener_with_callback("mousedown", handler.as_ref().unchecked_ref())
+                        .remove_event_listener_with_callback(
+                            "mousedown",
+                            handler.as_ref().unchecked_ref(),
+                        )
                         .unwrap();
                 }
             }

@@ -1,8 +1,8 @@
+use crate::app::components::{DropDownIconButton, DropDownOption, DropDownSelection};
 use std::rc::Rc;
 use yew::prelude::*;
-use crate::app::components::{DropDownIconButton, DropDownOption, DropDownSelection};
 
-fn map_selection(o: &DropDownOption) -> Html  {
+fn map_selection(o: &DropDownOption) -> Html {
     html! {<span>{o.label.clone()}</span>}
 }
 
@@ -26,11 +26,17 @@ pub fn Select(props: &SelectProps) -> Html {
     let selected_options = use_state(Vec::new);
     {
         let set_selected_options = selected_options.clone();
-        use_effect_with(props.options.clone(), move |options: &Rc<Vec<DropDownOption>>| {
-            let selections = options.iter().filter(|o| o.selected)
-                .map(map_selection).collect::<Vec<Html>>();
-            set_selected_options.set(selections);
-        });
+        use_effect_with(
+            props.options.clone(),
+            move |options: &Rc<Vec<DropDownOption>>| {
+                let selections = options
+                    .iter()
+                    .filter(|o| o.selected)
+                    .map(map_selection)
+                    .collect::<Vec<Html>>();
+                set_selected_options.set(selections);
+            },
+        );
     }
 
     let handle_click_button = {

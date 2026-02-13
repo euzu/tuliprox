@@ -1,25 +1,22 @@
-use crate::app::components::{CollapsePanel, IconButton};
 use crate::app::components::source_editor::editor_model::BlockType;
+use crate::app::components::{CollapsePanel, IconButton};
 use yew::prelude::*;
 use yew_i18n::use_translation;
-
 
 pub const BLOCK_TYPES_INPUT: [BlockType; 3] = [
     BlockType::InputXtream,
     BlockType::InputM3u,
-    BlockType::InputLibrary
+    BlockType::InputLibrary,
 ];
 
-pub const BLOCK_TYPES_TARGET: [BlockType; 1] = [
-    BlockType::Target,
-];
+pub const BLOCK_TYPES_TARGET: [BlockType; 1] = [BlockType::Target];
 
 pub const BLOCK_TYPES_OUTPUT: [BlockType; 4] = [
     BlockType::OutputM3u,
     BlockType::OutputXtream,
     BlockType::OutputHdHomeRun,
-    BlockType::OutputStrm];
-
+    BlockType::OutputStrm,
+];
 
 fn create_brick(t: &BlockType, on_drag_start: Callback<DragEvent>, label: String) -> Html {
     html! {

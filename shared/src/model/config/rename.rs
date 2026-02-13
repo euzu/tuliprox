@@ -11,7 +11,10 @@ pub struct ConfigRenameDto {
 }
 
 impl ConfigRenameDto {
-    pub fn prepare(&mut self, templates: Option<&Vec<PatternTemplate>>) -> Result<(), TuliproxError> {
+    pub fn prepare(
+        &mut self,
+        templates: Option<&Vec<PatternTemplate>>,
+    ) -> Result<(), TuliproxError> {
         self.pattern = apply_templates_to_pattern_single(&self.pattern, templates)?;
         if let Err(err) = crate::model::REGEX_CACHE.get_or_compile(&self.pattern) {
             return info_err_res!("can't parse regex: {} {err}", &self.pattern);

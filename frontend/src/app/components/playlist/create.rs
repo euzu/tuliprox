@@ -1,15 +1,18 @@
+use crate::app::components::{PlaylistEditorContext, PlaylistEditorPage, TextButton};
 use yew::prelude::*;
 use yew_i18n::use_translation;
-use crate::app::components::{PlaylistEditorContext, PlaylistEditorPage, TextButton};
 
 #[function_component]
 pub fn PlaylistCreate() -> Html {
     let translate = use_translation();
-    let playlist_editor_ctx = use_context::<PlaylistEditorContext>().expect("PlaylistEditor context not found");
+    let playlist_editor_ctx =
+        use_context::<PlaylistEditorContext>().expect("PlaylistEditor context not found");
 
     let handle_back = {
         Callback::from(move |_| {
-            playlist_editor_ctx.active_page.set(PlaylistEditorPage::List);
+            playlist_editor_ctx
+                .active_page
+                .set(PlaylistEditorPage::List);
         })
     };
 

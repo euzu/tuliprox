@@ -1,23 +1,18 @@
-use gloo_utils::window;
 use crate::app::components::{ActionCard, TextButton};
 use crate::hooks::use_service_context;
+use gloo_utils::window;
 use yew::prelude::*;
 use yew_i18n::use_translation;
-
 
 #[function_component]
 pub fn DiscordActionCard() -> Html {
     let services = use_service_context();
     let translate = use_translation();
 
-
     let handle_url = {
         let discord_link = services.config.ui_config.discord.to_string();
         Callback::from(move |_| {
-            let _ = window().open_with_url_and_target(
-                &discord_link,
-                "_blank",
-            );
+            let _ = window().open_with_url_and_target(&discord_link, "_blank");
         })
     };
 

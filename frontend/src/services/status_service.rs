@@ -1,7 +1,7 @@
-use std::rc::Rc;
 use crate::services::{get_base_href, request_get};
 use shared::model::StatusCheck;
 use shared::utils::concat_path_leading_slash;
+use std::rc::Rc;
 
 pub struct StatusService {
     status_path: String,

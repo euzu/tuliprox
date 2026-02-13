@@ -2,8 +2,9 @@ use enum_iterator::Sequence;
 use std::fmt::Display;
 use std::str::FromStr;
 
-#[derive( Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence,
-    PartialEq, Eq, Hash, Default)]
+#[derive(
+    Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq, Hash, Default,
+)]
 pub enum StrmExportStyle {
     #[serde(rename = "kodi")]
     #[default]
@@ -25,12 +26,16 @@ impl StrmExportStyle {
 
 impl Display for StrmExportStyle {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", match *self {
-            Self::Kodi => Self::KODI,
-            Self::Plex => Self::PLEX,
-            Self::Emby => Self::EMBY,
-            Self::Jellyfin => Self::JELLYFIN,
-        })
+        write!(
+            f,
+            "{}",
+            match *self {
+                Self::Kodi => Self::KODI,
+                Self::Plex => Self::PLEX,
+                Self::Emby => Self::EMBY,
+                Self::Jellyfin => Self::JELLYFIN,
+            }
+        )
     }
 }
 
@@ -43,7 +48,7 @@ impl FromStr for StrmExportStyle {
             Self::PLEX => Ok(Self::Plex),
             Self::EMBY => Ok(Self::Emby),
             Self::JELLYFIN => Ok(Self::Jellyfin),
-            _ => Err(format!("Unknown StrmExportStyle: {}", s))
+            _ => Err(format!("Unknown StrmExportStyle: {}", s)),
         }
     }
 }

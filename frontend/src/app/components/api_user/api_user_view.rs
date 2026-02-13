@@ -1,11 +1,11 @@
-use yew::{function_component, html, Callback, Html};
+use crate::app::components::api_user::playlist::ApiUserPlaylist;
 use crate::app::components::loading_indicator::BusyIndicator;
-use crate::app::components::{AppIcon, IconButton, ToastrView, WebsocketStatus};
 use crate::app::components::theme::Theme;
+use crate::app::components::{AppIcon, IconButton, ToastrView, WebsocketStatus};
 use crate::hooks::use_service_context;
 use crate::provider::DialogProvider;
 use yew::use_state;
-use crate::app::components::api_user::playlist::ApiUserPlaylist;
+use yew::{function_component, html, Callback, Html};
 
 #[function_component]
 pub fn ApiUserView() -> Html {
@@ -15,7 +15,11 @@ pub fn ApiUserView() -> Html {
     let handle_theme_switch = {
         let set_theme = theme.clone();
         Callback::from(move |_| {
-            let new_theme = if *set_theme == Theme::Dark { Theme::Bright } else { Theme::Dark };
+            let new_theme = if *set_theme == Theme::Dark {
+                Theme::Bright
+            } else {
+                Theme::Dark
+            };
             new_theme.switch_theme();
             set_theme.set(new_theme);
         })

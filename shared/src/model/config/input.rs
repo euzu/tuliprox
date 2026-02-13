@@ -1,10 +1,13 @@
 use super::PanelApiConfigDto;
 use crate::error::{TuliproxError, TuliproxErrorKind};
 use crate::model::EpgConfigDto;
-use crate::utils::{arc_str_serde, default_as_true, deserialize_timestamp, get_credentials_from_url_str,
-                   get_trimmed_string, is_false, is_true, is_zero_u16, parse_provider_scheme_url_parts,
-                   sanitize_sensitive_info, serialize_option_vec_flow_map_items, trim_last_slash, PROVIDER_SCHEME_PREFIX};
-use crate::utils::{is_blank_optional_string, Internable, arc_str_vec_serde};
+use crate::utils::{
+    arc_str_serde, default_as_true, deserialize_timestamp, get_credentials_from_url_str,
+    get_trimmed_string, is_false, is_true, is_zero_u16, parse_provider_scheme_url_parts,
+    sanitize_sensitive_info, serialize_option_vec_flow_map_items, trim_last_slash,
+    PROVIDER_SCHEME_PREFIX,
+};
+use crate::utils::{arc_str_vec_serde, is_blank_optional_string, Internable};
 use crate::{check_input_connections, check_input_credentials, info_err_res};
 
 use enum_iterator::Sequence;
@@ -51,7 +54,9 @@ macro_rules! apply_batch_aliases {
     }};
 }
 
-#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq, Default)]
+#[derive(
+    Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq, Default,
+)]
 pub enum InputType {
     #[serde(rename = "m3u")]
     #[default]
@@ -65,7 +70,6 @@ pub enum InputType {
     #[serde(rename = "library")]
     Library,
 }
-
 
 impl InputType {
     const M3U: &'static str = "m3u";
@@ -87,13 +91,17 @@ impl InputType {
 
 impl Display for InputType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", match self {
-            Self::M3u => Self::M3U,
-            Self::Xtream => Self::XTREAM,
-            Self::M3uBatch => Self::M3U_BATCH,
-            Self::XtreamBatch => Self::XTREAM_BATCH,
-            Self::Library => Self::LIBRARY,
-        })
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::M3u => Self::M3U,
+                Self::Xtream => Self::XTREAM,
+                Self::M3uBatch => Self::M3U_BATCH,
+                Self::XtreamBatch => Self::XTREAM_BATCH,
+                Self::Library => Self::LIBRARY,
+            }
+        )
     }
 }
 
@@ -118,15 +126,7 @@ impl FromStr for InputType {
 }
 
 #[derive(
-    Debug,
-    Copy,
-    Clone,
-    serde::Serialize,
-    serde::Deserialize,
-    Sequence,
-    PartialEq,
-    Eq,
-    Default
+    Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq, Default,
 )]
 pub enum InputFetchMethod {
     #[default]
@@ -141,10 +141,14 @@ impl InputFetchMethod {
 
 impl Display for InputFetchMethod {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", match self {
-            Self::GET => Self::GET_METHOD,
-            Self::POST => Self::POST_METHOD,
-        })
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::GET => Self::GET_METHOD,
+                Self::POST => Self::POST_METHOD,
+            }
+        )
     }
 }
 
@@ -161,7 +165,6 @@ impl FromStr for InputFetchMethod {
         }
     }
 }
-
 
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -273,11 +276,14 @@ pub struct ConfigInputAliasDto {
     pub priority: i16,
     #[serde(default)]
     pub max_connections: u16,
-    #[serde(default, deserialize_with = "deserialize_timestamp", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_timestamp",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub exp_date: Option<i64>,
     #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
     pub enabled: bool,
-
 }
 
 impl ConfigInputAliasDto {
@@ -379,7 +385,6 @@ impl Default for ConfigInputDto {
 }
 
 impl ConfigInputDto {
-
     pub fn new_with_type(input_type: InputType) -> Self {
         Self {
             input_type,
@@ -388,7 +393,12 @@ impl ConfigInputDto {
     }
 
     #[allow(clippy::cast_possible_truncation)]
-    pub fn prepare(&mut self, index: u16, _include_computed: bool, provider_names: &HashSet<String>) -> Result<u16, TuliproxError> {
+    pub fn prepare(
+        &mut self,
+        index: u16,
+        _include_computed: bool,
+        provider_names: &HashSet<String>,
+    ) -> Result<u16, TuliproxError> {
         self.name = self.name.trim().intern();
         if self.name.is_empty() {
             return info_err_res!("name for input is mandatory");
@@ -489,9 +499,21 @@ impl ConfigInputDto {
                             "m" => val * 60,
                             "h" => val * 3600,
                             "d" => val * 86400,
-                            _ => return info_err_res!("Invalid cache_duration unit in '{}': {}", self.name, unit),
+                            _ => {
+                                return info_err_res!(
+                                    "Invalid cache_duration unit in '{}': {}",
+                                    self.name,
+                                    unit
+                                )
+                            }
                         },
-                        Err(_) => return info_err_res!("Invalid cache_duration format in '{}': {}", self.name, duration_str),
+                        Err(_) => {
+                            return info_err_res!(
+                                "Invalid cache_duration format in '{}': {}",
+                                self.name,
+                                duration_str
+                            )
+                        }
                     }
                 } else {
                     return info_err_res!("Invalid cache_duration format in '{}'", self.name);
@@ -503,7 +525,10 @@ impl ConfigInputDto {
     pub fn prepare_epg(&mut self, include_computed: bool) -> Result<(), TuliproxError> {
         if let Some(epg) = self.epg.as_mut() {
             if self.input_type == InputType::Library {
-                warn!("EPG is not supported for library inputs {}, skipping", self.name);
+                warn!(
+                    "EPG is not supported for library inputs {}, skipping",
+                    self.name
+                );
                 self.epg = None;
                 return Ok(());
             }
@@ -511,13 +536,24 @@ impl ConfigInputDto {
             let create_auto_url = || {
                 let get_creds = || {
                     if self.username.is_some() && self.password.is_some() {
-                        return (self.username.clone(), self.password.clone(), Some(self.url.clone()));
+                        return (
+                            self.username.clone(),
+                            self.password.clone(),
+                            Some(self.url.clone()),
+                        );
                     }
 
-                    let (u, p, r) = self.aliases
+                    let (u, p, r) = self
+                        .aliases
                         .as_ref()
                         .and_then(|aliases| aliases.iter().find(|a| a.enabled))
-                        .map(|alias| (alias.username.clone(), alias.password.clone(), Some(alias.url.clone())))
+                        .map(|alias| {
+                            (
+                                alias.username.clone(),
+                                alias.password.clone(),
+                                Some(alias.url.clone()),
+                            )
+                        })
                         .unwrap_or((None, None, None));
 
                     if u.is_some() && p.is_some() && r.is_some() {
@@ -542,15 +578,24 @@ impl ConfigInputDto {
                 let (username, password, base_url) = get_creds();
 
                 if username.is_none() || password.is_none() || base_url.is_none() {
-                    Err(format!("auto_epg is enabled for input {}, but no credentials could be extracted", self.name))
+                    Err(format!(
+                        "auto_epg is enabled for input {}, but no credentials could be extracted",
+                        self.name
+                    ))
                 } else if base_url.is_some() {
-                    let provider_epg_url = format!("{}/xmltv.php?username={}&password={}",
-                                                   trim_last_slash(&base_url.unwrap_or_default()),
-                                                   username.unwrap_or_default(),
-                                                   password.unwrap_or_default());
+                    let provider_epg_url = format!(
+                        "{}/xmltv.php?username={}&password={}",
+                        trim_last_slash(&base_url.unwrap_or_default()),
+                        username.unwrap_or_default(),
+                        password.unwrap_or_default()
+                    );
                     Ok(provider_epg_url)
                 } else {
-                    Err(format!("auto_epg is enabled for input {}, but url could not be parsed {}", self.name, sanitize_sensitive_info(&self.url)))
+                    Err(format!(
+                        "auto_epg is enabled for input {}, but url could not be parsed {}",
+                        self.name,
+                        sanitize_sensitive_info(&self.url)
+                    ))
                 }
             };
 
@@ -566,7 +611,11 @@ impl ConfigInputDto {
         Ok(())
     }
 
-    pub fn prepare_batch(&mut self, batch_aliases: Vec<ConfigInputAliasDto>, index: u16) -> Result<Option<u16>, TuliproxError> {
+    pub fn prepare_batch(
+        &mut self,
+        batch_aliases: Vec<ConfigInputAliasDto>,
+        index: u16,
+    ) -> Result<Option<u16>, TuliproxError> {
         let idx = apply_batch_aliases!(self, batch_aliases, Some(index));
         Ok(idx)
     }
@@ -583,7 +632,12 @@ impl ConfigInputDto {
         Ok(())
     }
 
-    pub fn update_account_expiration_date(&mut self, input_name: &Arc<str>, username: &str, exp_date: i64) -> Result<(), TuliproxError> {
+    pub fn update_account_expiration_date(
+        &mut self,
+        input_name: &Arc<str>,
+        username: &str,
+        exp_date: i64,
+    ) -> Result<(), TuliproxError> {
         if &self.name == input_name {
             if let Some(input_username) = &self.username {
                 if input_username == username {
@@ -622,7 +676,12 @@ impl ConfigProviderDto {
         if self.name.is_empty() {
             return info_err_res!("Name for provider is mandatory");
         }
-        self.urls = self.urls.drain(..).filter(|url| !url.trim().is_empty()).map(|u| u.trim().intern()).collect();
+        self.urls = self
+            .urls
+            .drain(..)
+            .filter(|url| !url.trim().is_empty())
+            .map(|u| u.trim().intern())
+            .collect();
         if self.urls.is_empty() {
             return info_err_res!("Urls for provider is mandatory");
         }

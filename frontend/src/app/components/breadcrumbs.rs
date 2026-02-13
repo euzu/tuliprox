@@ -1,8 +1,8 @@
+use crate::app::components::AppIcon;
 use std::rc::Rc;
 use std::str::FromStr;
 use wasm_bindgen::JsCast;
 use yew::prelude::*;
-use crate::app::components::AppIcon;
 
 #[derive(Properties, PartialEq, Clone)]
 pub struct BreadcrumbsProps {

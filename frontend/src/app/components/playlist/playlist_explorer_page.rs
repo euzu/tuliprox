@@ -1,6 +1,6 @@
+use shared::error::{info_err_res, TuliproxError};
 use std::fmt::Display;
 use std::str::FromStr;
-use shared::error::{TuliproxError, info_err_res};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PlaylistExplorerPage {
@@ -20,8 +20,12 @@ impl FromStr for PlaylistExplorerPage {
 
 impl Display for PlaylistExplorerPage {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", match *self {
-            Self::SourceSelector => "source-selector",
-        })
+        write!(
+            f,
+            "{}",
+            match *self {
+                Self::SourceSelector => "source-selector",
+            }
+        )
     }
 }

@@ -1,9 +1,12 @@
-use shared::model::{ProxyUserStatus};
-use yew::prelude::*;
 use crate::app::components::Chip;
+use shared::model::ProxyUserStatus;
+use yew::prelude::*;
 
 fn convert_status_to_chip_style(status: &ProxyUserStatus) -> String {
-     format!("tp__user-status tp__user-status__{}", status.to_string().to_lowercase())
+    format!(
+        "tp__user-status tp__user-status__{}",
+        status.to_string().to_lowercase()
+    )
 }
 
 #[derive(Properties, Clone, PartialEq, Debug)]

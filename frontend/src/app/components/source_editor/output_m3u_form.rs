@@ -1,9 +1,14 @@
 use crate::app::components::config::HasFormData;
-use crate::app::components::{BlockId, BlockInstance, Card, EditMode, FilterInput, SourceEditorContext, TextButton};
+use crate::app::components::{
+    BlockId, BlockInstance, Card, EditMode, FilterInput, SourceEditorContext, TextButton,
+};
 use crate::{config_field_child, edit_field_bool, edit_field_text_option, generate_form_reducer};
 use shared::model::{M3uTargetOutputDto, TargetOutputDto};
 use std::rc::Rc;
-use yew::{function_component, html, use_context, use_effect_with, use_reducer, Callback, Html, Properties, UseReducerHandle};
+use yew::{
+    function_component, html, use_context, use_effect_with, use_reducer, Callback, Html,
+    Properties, UseReducerHandle,
+};
 use yew_i18n::use_translation;
 
 const LABEL_FILENAME: &str = "LABEL.FILENAME";
@@ -31,7 +36,8 @@ pub struct M3uTargetOutputViewProps {
 #[function_component]
 pub fn M3uTargetOutputView(props: &M3uTargetOutputViewProps) -> Html {
     let translate = use_translation();
-    let source_editor_ctx = use_context::<SourceEditorContext>().expect("SourceEditorContext not found");
+    let source_editor_ctx =
+        use_context::<SourceEditorContext>().expect("SourceEditorContext not found");
 
     let output_form_state: UseReducerHandle<M3uTargetOutputFormState> =
         use_reducer(|| M3uTargetOutputFormState {
@@ -45,9 +51,12 @@ pub fn M3uTargetOutputView(props: &M3uTargetOutputViewProps) -> Html {
 
         use_effect_with(config_output, move |cfg| {
             if let Some(output) = cfg {
-                output_form_state.dispatch(M3uTargetOutputFormAction::SetAll(output.as_ref().clone()));
+                output_form_state
+                    .dispatch(M3uTargetOutputFormAction::SetAll(output.as_ref().clone()));
             } else {
-                output_form_state.dispatch(M3uTargetOutputFormAction::SetAll(M3uTargetOutputDto::default()));
+                output_form_state.dispatch(M3uTargetOutputFormAction::SetAll(
+                    M3uTargetOutputDto::default(),
+                ));
             }
             || ()
         });
@@ -77,7 +86,10 @@ pub fn M3uTargetOutputView(props: &M3uTargetOutputViewProps) -> Html {
         let block_id = props.block_id;
         Callback::from(move |_| {
             let output = output_form_state.data().clone();
-            source_editor_ctx.on_form_change.emit((block_id, BlockInstance::Output(Rc::new(TargetOutputDto::M3u(output)))));
+            source_editor_ctx.on_form_change.emit((
+                block_id,
+                BlockInstance::Output(Rc::new(TargetOutputDto::M3u(output))),
+            ));
             source_editor_ctx.edit_mode.set(EditMode::Inactive);
         })
     };

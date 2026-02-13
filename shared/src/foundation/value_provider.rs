@@ -1,37 +1,38 @@
-use std::sync::Arc;
 use crate::model::{FieldGetAccessor, ItemField, PlaylistItem};
 use crate::utils::{deunicode_string, Internable};
+use std::sync::Arc;
 
 #[macro_export]
 macro_rules! set_genre {
     ($header:ident, $value:ident) => {
         if let Some(ref mut additional_properties) = $header.additional_properties {
-                match additional_properties {
-                    $crate::model::StreamProperties::Video(v) => {
-                        if let Some(details) = &mut v.details {
-                            details.genre = Some($value.intern());
-                            true
-                        } else {
-                            v.details = Some($crate::model::VideoStreamDetailProperties {
-                                genre: Some($value.intern()),
-                                ..$crate::model::VideoStreamDetailProperties::default()
-                            });
-                            true
-                        }
-                    }
-                    $crate::model::StreamProperties::Series(s) => {
-                        s.genre = Some($value.intern());
+            match additional_properties {
+                $crate::model::StreamProperties::Video(v) => {
+                    if let Some(details) = &mut v.details {
+                        details.genre = Some($value.intern());
+                        true
+                    } else {
+                        v.details = Some($crate::model::VideoStreamDetailProperties {
+                            genre: Some($value.intern()),
+                            ..$crate::model::VideoStreamDetailProperties::default()
+                        });
                         true
                     }
-                    $crate::model::StreamProperties::Live(_)
-                    | $crate::model::StreamProperties::Episode(_) => false,
                 }
-            } else {
-                let empty_str = "".intern();
-                match $header.item_type {
-                    $crate::model::PlaylistItemType::LocalVideo
-                    | $crate::model::PlaylistItemType::Video => {
-                        $header.additional_properties = Some($crate::model::StreamProperties::Video(Box::from($crate::model::VideoStreamProperties {
+                $crate::model::StreamProperties::Series(s) => {
+                    s.genre = Some($value.intern());
+                    true
+                }
+                $crate::model::StreamProperties::Live(_)
+                | $crate::model::StreamProperties::Episode(_) => false,
+            }
+        } else {
+            let empty_str = "".intern();
+            match $header.item_type {
+                $crate::model::PlaylistItemType::LocalVideo
+                | $crate::model::PlaylistItemType::Video => {
+                    $header.additional_properties = Some($crate::model::StreamProperties::Video(
+                        Box::from($crate::model::VideoStreamProperties {
                             name: $header.title.clone(),
                             category_id: $header.category_id,
                             stream_id: $header.virtual_id,
@@ -39,7 +40,9 @@ macro_rules! set_genre {
                             direct_source: ::std::sync::Arc::clone(&empty_str),
                             custom_sid: None,
                             added: ::std::sync::Arc::clone(&empty_str),
-                            container_extension: $header.get_container_extension().unwrap_or_else(|| Arc::clone(&empty_str)),
+                            container_extension: $header
+                                .get_container_extension()
+                                .unwrap_or_else(|| Arc::clone(&empty_str)),
                             rating: None,
                             rating_5based: None,
                             stream_type: None,
@@ -50,12 +53,14 @@ macro_rules! set_genre {
                                 genre: Some($value.intern()),
                                 ..$crate::model::VideoStreamDetailProperties::default()
                             }),
-                        })));
-                        true
-                    }
-                    $crate::model::PlaylistItemType::LocalSeriesInfo
-                    | $crate::model::PlaylistItemType::SeriesInfo => {
-                        $header.additional_properties = Some($crate::model::StreamProperties::Series(Box::from($crate::model::SeriesStreamProperties {
+                        }),
+                    ));
+                    true
+                }
+                $crate::model::PlaylistItemType::LocalSeriesInfo
+                | $crate::model::PlaylistItemType::SeriesInfo => {
+                    $header.additional_properties = Some($crate::model::StreamProperties::Series(
+                        Box::from($crate::model::SeriesStreamProperties {
                             name: $header.title.clone(),
                             category_id: $header.category_id,
                             series_id: $header.virtual_id,
@@ -73,33 +78,38 @@ macro_rules! set_genre {
                             youtube_trailer: ::std::sync::Arc::clone(&empty_str),
                             tmdb: None,
                             details: None,
-                        })));
-                        true
-                    }
-                    _ => false,
+                        }),
+                    ));
+                    true
                 }
+                _ => false,
             }
+        }
     };
 }
 
 #[macro_export]
 macro_rules! get_genre {
     ($header:ident) => {
-        $header.additional_properties.as_ref().and_then(|props| {
-            match props {
-                $crate::model::StreamProperties::Video(v) => {
-                    v.details.as_ref().and_then(|details| details.genre.as_ref().map(::std::sync::Arc::clone))
+        $header
+            .additional_properties
+            .as_ref()
+            .and_then(|props| match props {
+                $crate::model::StreamProperties::Video(v) => v
+                    .details
+                    .as_ref()
+                    .and_then(|details| details.genre.as_ref().map(::std::sync::Arc::clone)),
+                $crate::model::StreamProperties::Series(s) => {
+                    s.genre.as_ref().map(::std::sync::Arc::clone)
                 }
-                $crate::model::StreamProperties::Series(s) => { s.genre.as_ref().map(::std::sync::Arc::clone) }
                 $crate::model::StreamProperties::Live(_)
-                | $crate::model::StreamProperties::Episode(_) => None
-            }
-        })
+                | $crate::model::StreamProperties::Episode(_) => None,
+            })
     };
 }
 
-pub use set_genre;
 pub use get_genre;
+pub use set_genre;
 
 pub fn get_field_value(pli: &PlaylistItem, field: ItemField) -> Arc<str> {
     let header = &pli.header;
@@ -111,7 +121,13 @@ pub fn get_field_value(pli: &PlaylistItem, field: ItemField) -> Arc<str> {
         ItemField::Url => Arc::clone(&header.url),
         ItemField::Input => Arc::clone(&header.input_name),
         ItemField::Type => header.item_type.intern(),
-        ItemField::Caption => if header.title.is_empty() { Arc::clone(&header.name) } else { Arc::clone(&header.title) },
+        ItemField::Caption => {
+            if header.title.is_empty() {
+                Arc::clone(&header.name)
+            } else {
+                Arc::clone(&header.title)
+            }
+        }
     }
 }
 

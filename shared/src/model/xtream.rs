@@ -1,6 +1,8 @@
-use crate::utils::{deserialize_as_string_array,
-                   deserialize_number_from_string, deserialize_number_from_string_or_zero,
-                   deserialize_json_as_opt_string, serialize_json_as_opt_string, arc_str_option_serde, arc_str_serde};
+use crate::utils::{
+    arc_str_option_serde, arc_str_serde, deserialize_as_string_array,
+    deserialize_json_as_opt_string, deserialize_number_from_string,
+    deserialize_number_from_string_or_zero, serialize_json_as_opt_string,
+};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
@@ -17,7 +19,11 @@ pub struct XtreamVideoInfoMovieData {
     pub stream_id: u32,
     #[serde(default, with = "arc_str_serde")]
     pub direct_source: Arc<str>,
-    #[serde(default, serialize_with = "arc_str_option_serde::serialize_null_if_empty", deserialize_with = "arc_str_option_serde::deserialize")]
+    #[serde(
+        default,
+        serialize_with = "arc_str_option_serde::serialize_null_if_empty",
+        deserialize_with = "arc_str_option_serde::deserialize"
+    )]
     pub custom_sid: Option<Arc<str>>,
     #[serde(default, with = "arc_str_serde")]
     pub added: Arc<str>,
@@ -71,9 +77,17 @@ pub struct XtreamVideoInfoInfo {
     pub duration_secs: Option<Arc<str>>,
     #[serde(default, with = "arc_str_option_serde")]
     pub duration: Option<Arc<str>>,
-    #[serde(default, serialize_with = "serialize_json_as_opt_string", deserialize_with = "deserialize_json_as_opt_string")]
+    #[serde(
+        default,
+        serialize_with = "serialize_json_as_opt_string",
+        deserialize_with = "deserialize_json_as_opt_string"
+    )]
     pub video: Option<Arc<str>>,
-    #[serde(default, serialize_with = "serialize_json_as_opt_string", deserialize_with = "deserialize_json_as_opt_string")]
+    #[serde(
+        default,
+        serialize_with = "serialize_json_as_opt_string",
+        deserialize_with = "deserialize_json_as_opt_string"
+    )]
     pub audio: Option<Arc<str>>,
     #[serde(default)]
     pub bitrate: u32,
@@ -88,7 +102,6 @@ pub struct XtreamVideoInfo {
     pub info: XtreamVideoInfoInfo,
     pub movie_data: XtreamVideoInfoMovieData,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct XtreamSeriesInfoSeason {
@@ -168,9 +181,17 @@ pub struct XtreamSeriesInfoEpisodeInfo {
     pub duration: Arc<str>,
     #[serde(default, with = "arc_str_serde")]
     pub movie_image: Arc<str>,
-    #[serde(default, serialize_with = "serialize_json_as_opt_string", deserialize_with = "deserialize_json_as_opt_string")]
+    #[serde(
+        default,
+        serialize_with = "serialize_json_as_opt_string",
+        deserialize_with = "deserialize_json_as_opt_string"
+    )]
     pub video: Option<Arc<str>>,
-    #[serde(default, serialize_with = "serialize_json_as_opt_string", deserialize_with = "deserialize_json_as_opt_string")]
+    #[serde(
+        default,
+        serialize_with = "serialize_json_as_opt_string",
+        deserialize_with = "deserialize_json_as_opt_string"
+    )]
     pub audio: Option<Arc<str>>,
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
     pub bitrate: u32,
@@ -189,7 +210,11 @@ pub struct XtreamSeriesInfoEpisode {
     pub container_extension: Arc<str>,
     #[serde(default)]
     pub info: Option<XtreamSeriesInfoEpisodeInfo>,
-    #[serde(default, serialize_with = "arc_str_option_serde::serialize_null_if_empty", deserialize_with = "arc_str_option_serde::deserialize")]
+    #[serde(
+        default,
+        serialize_with = "arc_str_option_serde::serialize_null_if_empty",
+        deserialize_with = "arc_str_option_serde::deserialize"
+    )]
     pub custom_sid: Option<Arc<str>>,
     #[serde(default, with = "arc_str_serde")]
     pub added: Arc<str>,
@@ -219,9 +244,10 @@ pub struct XtreamSeriesInfo {
     pub episodes: Option<Vec<XtreamSeriesInfoEpisode>>,
 }
 
-
 // sometimes episodes are a map with season as key, sometimes an array
-fn deserialize_episodes<'de, D>(deserializer: D) -> Result<Option<Vec<XtreamSeriesInfoEpisode>>, D::Error>
+fn deserialize_episodes<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<XtreamSeriesInfoEpisode>>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -249,7 +275,11 @@ where
                         result.push(ep);
                     }
                 }
-                Ok(if result.is_empty() { None } else { Some(result) })
+                Ok(if result.is_empty() {
+                    None
+                } else {
+                    Some(result)
+                })
             }
         }
         Value::Object(object) => {

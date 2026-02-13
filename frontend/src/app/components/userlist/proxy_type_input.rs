@@ -2,7 +2,7 @@ use shared::model::{ClusterFlags, ProxyType};
 use yew::prelude::*;
 use yew_i18n::use_translation;
 
-fn get_flags(pt: ProxyType)-> (bool, bool, bool, bool, bool) {
+fn get_flags(pt: ProxyType) -> (bool, bool, bool, bool, bool) {
     match pt {
         ProxyType::Reverse(flags) => {
             let cluster = flags.unwrap_or_else(ClusterFlags::all);
@@ -37,29 +37,29 @@ pub fn ProxyTypeInput(props: &ProxyTypeInputProps) -> Html {
     let selections = get_flags(props.value);
 
     let handle_change = {
-      let onchange = props.on_change.clone();
-      Callback::from(move |(redirect, _reverse, live, vod, series)| {
-        if redirect {
-            onchange.emit(ProxyType::Redirect);
-        } else {
-            let cluster_flags = if live && vod && series {
-                None
+        let onchange = props.on_change.clone();
+        Callback::from(move |(redirect, _reverse, live, vod, series)| {
+            if redirect {
+                onchange.emit(ProxyType::Redirect);
             } else {
-                let mut flags = ClusterFlags::empty();
-                if live {
-                    flags.insert(ClusterFlags::Live);
-                }
-                if vod {
-                    flags.insert(ClusterFlags::Vod);
-                }
-                if series {
-                    flags.insert(ClusterFlags::Series);
-                }
-                Some(flags)
-            };
-            onchange.emit(ProxyType::Reverse(cluster_flags));
-        }
-      })
+                let cluster_flags = if live && vod && series {
+                    None
+                } else {
+                    let mut flags = ClusterFlags::empty();
+                    if live {
+                        flags.insert(ClusterFlags::Live);
+                    }
+                    if vod {
+                        flags.insert(ClusterFlags::Vod);
+                    }
+                    if series {
+                        flags.insert(ClusterFlags::Series);
+                    }
+                    Some(flags)
+                };
+                onchange.emit(ProxyType::Reverse(cluster_flags));
+            }
+        })
     };
 
     let handle_redirect_click = {
@@ -83,7 +83,7 @@ pub fn ProxyTypeInput(props: &ProxyTypeInputProps) -> Html {
             let new_flags = if flags.0 {
                 (false, true, true, true, true)
             } else {
-               (false, true, !flags.2, flags.3, flags.4)
+                (false, true, !flags.2, flags.3, flags.4)
             };
             let new_flags = check_flag_validity(new_flags);
             emit_change.emit(new_flags);

@@ -16,10 +16,9 @@ pub struct CsvTableProps {
 pub fn CsvTable(props: &CsvTableProps) -> Html {
     let separator = props.separator;
 
-    let rows = use_memo(
-        (props.content.clone(), separator),
-        |(content, sep)| parse_csv(content, *sep),
-    );
+    let rows = use_memo((props.content.clone(), separator), |(content, sep)| {
+        parse_csv(content, *sep)
+    });
 
     if rows.is_empty() {
         return html! { <NoContent/> };

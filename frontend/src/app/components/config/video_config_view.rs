@@ -1,13 +1,15 @@
-use std::collections::HashMap;
-use crate::app::components::{Card, Chip, KeyValueEditor};
-use crate::app::context::ConfigContext;
-use crate::{config_field_bool, config_field_child, config_field_optional, edit_field_bool,
-            edit_field_text_option, edit_field_list, generate_form_reducer, edit_field_number_option_u64};
-use shared::model::{VideoDownloadConfigDto, VideoConfigDto};
-use yew::prelude::*;
-use yew_i18n::use_translation;
 use crate::app::components::config::config_page::{ConfigForm, LABEL_VIDEO_CONFIG};
 use crate::app::components::config::config_view_context::ConfigViewContext;
+use crate::app::components::{Card, Chip, KeyValueEditor};
+use crate::app::context::ConfigContext;
+use crate::{
+    config_field_bool, config_field_child, config_field_optional, edit_field_bool, edit_field_list,
+    edit_field_number_option_u64, edit_field_text_option, generate_form_reducer,
+};
+use shared::model::{VideoConfigDto, VideoDownloadConfigDto};
+use std::collections::HashMap;
+use yew::prelude::*;
+use yew_i18n::use_translation;
 
 const LABEL_DOWNLOAD: &str = "LABEL.DOWNLOAD";
 const LABEL_ORGANIZE_INTO_DIRECTORIES: &str = "LABEL.ORGANIZE_INTO_DIRECTORIES";
@@ -19,7 +21,6 @@ const LABEL_WEB_SEARCH: &str = "LABEL.WEB_SEARCH";
 const LABEL_ADD_EXTENSION: &str = "LABEL.ADD_EXTENSION";
 const LABEL_FFPROBE_ENABLED: &str = "LABEL.FFPROBE_ENABLED";
 const LABEL_FFPROBE_TIMEOUT: &str = "LABEL.FFPROBE_TIMEOUT";
-
 
 generate_form_reducer!(
     state: VideoDownloadConfigFormState { form: VideoDownloadConfigDto },
@@ -49,12 +50,16 @@ pub fn VideoConfigView() -> Html {
     let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");
     let config_view_ctx = use_context::<ConfigViewContext>().expect("ConfigViewContext not found");
 
-    let download_state: UseReducerHandle<VideoDownloadConfigFormState> = use_reducer(|| {
-        VideoDownloadConfigFormState { form: VideoDownloadConfigDto::default(), modified: false }
-    });
-    let video_state: UseReducerHandle<VideoConfigFormState> = use_reducer(|| {
-        VideoConfigFormState { form: VideoConfigDto::default(), modified: false }
-    });
+    let download_state: UseReducerHandle<VideoDownloadConfigFormState> =
+        use_reducer(|| VideoDownloadConfigFormState {
+            form: VideoDownloadConfigDto::default(),
+            modified: false,
+        });
+    let video_state: UseReducerHandle<VideoConfigFormState> =
+        use_reducer(|| VideoConfigFormState {
+            form: VideoConfigDto::default(),
+            modified: false,
+        });
 
     let handle_headers = {
         let download_state = download_state.clone();
@@ -66,14 +71,24 @@ pub fn VideoConfigView() -> Html {
     {
         let video_state = video_state.clone();
         let download_state = download_state.clone();
-        let video_cfg = config_ctx.config.as_ref().and_then(|c| c.config.video.clone());
+        let video_cfg = config_ctx
+            .config
+            .as_ref()
+            .and_then(|c| c.config.video.clone());
         use_effect_with(video_cfg, move |video_cfg| {
             if let Some(video) = video_cfg {
                 video_state.dispatch(VideoConfigFormAction::SetAll(video.clone()));
-                download_state.dispatch(VideoDownloadConfigFormAction::SetAll(video.download.as_ref().map_or_else(VideoDownloadConfigDto::default, |d| d.clone() )));
+                download_state.dispatch(VideoDownloadConfigFormAction::SetAll(
+                    video
+                        .download
+                        .as_ref()
+                        .map_or_else(VideoDownloadConfigDto::default, |d| d.clone()),
+                ));
             } else {
                 video_state.dispatch(VideoConfigFormAction::SetAll(VideoConfigDto::default()));
-                download_state.dispatch(VideoDownloadConfigFormAction::SetAll(VideoDownloadConfigDto::default()));
+                download_state.dispatch(VideoDownloadConfigFormAction::SetAll(
+                    VideoDownloadConfigDto::default(),
+                ));
             }
             || ()
         });
@@ -84,43 +99,55 @@ pub fn VideoConfigView() -> Html {
         let on_form_change = config_view_ctx.on_form_change.clone();
         let download_state = download_state.clone();
         let video_state = video_state.clone();
-        let deps = (video_state.modified, download_state.modified, video_state, download_state);
-        use_effect_with(deps,
-                        move |(vm, dm, v, d)| {
+        let deps = (
+            video_state.modified,
+            download_state.modified,
+            video_state,
+            download_state,
+        );
+        use_effect_with(deps, move |(vm, dm, v, d)| {
             let mut form = v.form.clone();
-            form.download = if *dm { Some(d.form.clone()) } else { form.download };
+            form.download = if *dm {
+                Some(d.form.clone())
+            } else {
+                form.download
+            };
             let modified = *vm || *dm;
             on_form_change.emit(ConfigForm::Video(modified, form));
         });
     }
 
-    let render_extensions = |extensions: &Vec<String>| html! {
-        <Card>
-        { config_field_child!(translate.t(LABEL_EXTENSIONS), {
-           html! {
-             <div class="tp__config-view__tags">
-             { html! { for extensions.iter().map(|t| html! { <Chip label={t.clone()} /> }) } }
-             </div>
-            }})}
-        </Card>
+    let render_extensions = |extensions: &Vec<String>| {
+        html! {
+            <Card>
+            { config_field_child!(translate.t(LABEL_EXTENSIONS), {
+               html! {
+                 <div class="tp__config-view__tags">
+                 { html! { for extensions.iter().map(|t| html! { <Chip label={t.clone()} /> }) } }
+                 </div>
+                }})}
+            </Card>
+        }
     };
 
-    let render_download_view = || html! {
-        <Card class="tp__config-view__card">
-            <h1>{translate.t(LABEL_DOWNLOAD)}</h1>
-            { config_field_bool!(download_state.form, translate.t(LABEL_ORGANIZE_INTO_DIRECTORIES), organize_into_directories) }
-            { config_field_optional!(download_state.form, translate.t(LABEL_DIRECTORY), directory) }
-            { config_field_optional!(download_state.form, translate.t(LABEL_EPISODE_PATTERN), episode_pattern) }
-            { config_field_child!(translate.t(LABEL_HEADERS), {
-                html! {
-                    <div class="tp__config-view__tags">
-                      <ul>
-                        { for download_state.form.headers.iter().map(|(k,v)| html!{ <li key={k.clone()}>{"- "}{k}{": "} {v}</li> }) }
-                      </ul>
-                    </div>
-                }
-            })}
-        </Card>
+    let render_download_view = || {
+        html! {
+            <Card class="tp__config-view__card">
+                <h1>{translate.t(LABEL_DOWNLOAD)}</h1>
+                { config_field_bool!(download_state.form, translate.t(LABEL_ORGANIZE_INTO_DIRECTORIES), organize_into_directories) }
+                { config_field_optional!(download_state.form, translate.t(LABEL_DIRECTORY), directory) }
+                { config_field_optional!(download_state.form, translate.t(LABEL_EPISODE_PATTERN), episode_pattern) }
+                { config_field_child!(translate.t(LABEL_HEADERS), {
+                    html! {
+                        <div class="tp__config-view__tags">
+                          <ul>
+                            { for download_state.form.headers.iter().map(|(k,v)| html!{ <li key={k.clone()}>{"- "}{k}{": "} {v}</li> }) }
+                          </ul>
+                        </div>
+                    }
+                })}
+            </Card>
+        }
     };
 
     let render_view_mode = || {

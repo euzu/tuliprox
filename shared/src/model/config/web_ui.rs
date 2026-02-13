@@ -1,6 +1,9 @@
 use crate::error::{TuliproxError, TuliproxErrorKind};
 use crate::model::WebAuthConfigDto;
-use crate::utils::{is_true, default_as_true, is_blank_optional_string, default_kick_secs, is_default_kick_secs, is_blank_optional_str};
+use crate::utils::{
+    default_as_true, default_kick_secs, is_blank_optional_str, is_blank_optional_string,
+    is_default_kick_secs, is_true,
+};
 
 const RESERVED_PATHS: &[&str] = &[
     "cvs",
@@ -82,7 +85,10 @@ pub struct WebUiConfigDto {
     pub auth: Option<WebAuthConfigDto>,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub player_server: Option<String>,
-    #[serde(default = "default_kick_secs", skip_serializing_if = "is_default_kick_secs")]
+    #[serde(
+        default = "default_kick_secs",
+        skip_serializing_if = "is_default_kick_secs"
+    )]
     pub kick_secs: u64,
 }
 

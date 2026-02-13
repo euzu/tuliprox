@@ -16,9 +16,7 @@ pub struct Icons {
 
 impl Icons {
     pub fn new() -> Self {
-        Self {
-            definitions: None
-        }
+        Self { definitions: None }
     }
 
     pub fn new_with(definitions: &Vec<Rc<IconDefinition>>) -> Self {
@@ -30,7 +28,9 @@ impl Icons {
             }
         }
 
-        Self { definitions: Some(map) }
+        Self {
+            definitions: Some(map),
+        }
     }
 
     pub fn get_icon(&self, name: &str) -> Option<Rc<IconDefinition>> {
@@ -55,7 +55,7 @@ pub struct IconContext {
 impl IconContext {
     pub fn new(definitions: &Vec<Rc<IconDefinition>>) -> Self {
         Self {
-            icons: Rc::new(Icons::new_with(definitions))
+            icons: Rc::new(Icons::new_with(definitions)),
         }
     }
 
@@ -66,5 +66,7 @@ impl IconContext {
 
 #[hook]
 pub fn use_icon_context() -> Rc<Icons> {
-    use_context::<UseStateHandle<IconContext>>().expect("Icon context not found").icons()
+    use_context::<UseStateHandle<IconContext>>()
+        .expect("Icon context not found")
+        .icons()
 }

@@ -72,7 +72,9 @@ where
     }
 }
 
-pub fn deserialize_as_string_array<'de, D>(deserializer: D) -> Result<Option<Vec<Arc<str>>>, D::Error>
+pub fn deserialize_as_string_array<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<Arc<str>>>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -120,7 +122,12 @@ where
                     num_pos = Some(i);
                     break;
                 }
-                if c == '.' && s[i + 1..].chars().next().is_some_and(|n| n.is_ascii_digit()) {
+                if c == '.'
+                    && s[i + 1..]
+                        .chars()
+                        .next()
+                        .is_some_and(|n| n.is_ascii_digit())
+                {
                     num_pos = Some(i);
                     break;
                 }
@@ -128,7 +135,9 @@ where
                     last_non_ws = Some((i, c));
                 }
             }
-            let Some(num_i) = num_pos else { return Ok(None); };
+            let Some(num_i) = num_pos else {
+                return Ok(None);
+            };
 
             let start = match last_non_ws {
                 Some((i, '-')) | Some((i, '+')) => i,
@@ -217,7 +226,6 @@ where
     ciborium::de::from_reader(value).map_err(to_io_error)
 }
 
-
 pub fn u8_16_to_hex(bytes: &[u8; 16]) -> String {
     bytes.iter().map(|b| format!("{:02X}", b)).collect()
 }
@@ -296,8 +304,9 @@ pub fn parse_timestamp(value: &str) -> Result<Option<i64>, ParseError> {
 /// - The string is compressed using LZ4 and encoded in Base64.
 /// - Works for any JSON content: strings, arrays, and objects.
 /// - Empty arrays or objects are serialized as `null`.
-pub fn serialize_json_as_opt_string<S>(value: &Option<Arc<str>>,
-                                       serializer: S,
+pub fn serialize_json_as_opt_string<S>(
+    value: &Option<Arc<str>>,
+    serializer: S,
 ) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
@@ -320,9 +329,7 @@ where
 /// - Returns `None` for empty arrays, empty objects, null, numbers, or booleans.
 /// - Decompresses Base64-LZ4 content back into the original string.
 /// - Handles arrays and objects by converting them to JSON strings if not empty.
-pub fn deserialize_json_as_opt_string<'de, D>(
-    deserializer: D,
-) -> Result<Option<Arc<str>>, D::Error>
+pub fn deserialize_json_as_opt_string<'de, D>(deserializer: D) -> Result<Option<Arc<str>>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -352,10 +359,10 @@ where
                 }
             }
         }
-        Some(Value::Null)
-        | Some(Value::Number(_))
-        | Some(Value::Bool(_)) => Ok(None),
-        Some(v) => Ok(Some(serde_json::to_string(&v).map_err(D::Error::custom)?.into())),
+        Some(Value::Null) | Some(Value::Number(_)) | Some(Value::Bool(_)) => Ok(None),
+        Some(v) => Ok(Some(
+            serde_json::to_string(&v).map_err(D::Error::custom)?.into(),
+        )),
     }
 }
 
@@ -369,9 +376,7 @@ where
     S: serde::Serializer,
 {
     match opt {
-        Some(items) if !items.is_empty() => {
-            serde_saphyr::FlowSeq(items).serialize(serializer)
-        }
+        Some(items) if !items.is_empty() => serde_saphyr::FlowSeq(items).serialize(serializer),
         _ => serializer.serialize_none(),
     }
 }
@@ -411,7 +416,6 @@ where
 {
     serializer.serialize_str(&value.to_string())
 }
-
 
 /// Serde support for `XtreamCluster` fields.
 /// Serializes as string (e.g., "live", "video", "series") and deserializes via `FromStr`.

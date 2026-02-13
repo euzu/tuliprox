@@ -1,7 +1,7 @@
-use web_sys::MouseEvent;
-use yew::prelude::*;
 use crate::app::components::AppIcon;
 use crate::html_if;
+use web_sys::MouseEvent;
+use yew::prelude::*;
 
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct MenuItemProps {
@@ -17,7 +17,6 @@ pub struct MenuItemProps {
 
 #[function_component]
 pub fn MenuItem(props: &MenuItemProps) -> Html {
-
     let handle_click = {
         let click = props.onclick.clone();
         let name = props.name.clone();

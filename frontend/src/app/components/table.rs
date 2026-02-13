@@ -1,7 +1,7 @@
+use crate::app::components::{AppIcon, NoContent};
+use shared::model::SortOrder;
 use std::rc::Rc;
 use yew::prelude::*;
-use crate::app::components::{NoContent, AppIcon};
-use shared::model::{SortOrder};
 
 #[derive(Properties, PartialEq)]
 pub struct TableDefinition<T: PartialEq + Clone> {

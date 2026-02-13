@@ -1,5 +1,7 @@
-use crate::model::{PlaylistItemType, SearchRequest, StreamProperties, UiPlaylistItem, XtreamCluster};
-use crate::utils::{arc_str_serde, arc_str_option_serde};
+use crate::model::{
+    PlaylistItemType, SearchRequest, StreamProperties, UiPlaylistItem, XtreamCluster,
+};
+use crate::utils::{arc_str_option_serde, arc_str_serde};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::rc::Rc;
@@ -22,7 +24,7 @@ pub enum PlaylistRequest {
     Target(u16),
     Input(u16),
     CustomXtream(PlaylistRequestXtream),
-    CustomM3u(PlaylistRequestM3u)
+    CustomM3u(PlaylistRequestM3u),
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -124,7 +126,10 @@ fn filter_channels(
     })
 }
 
-fn filter_channels_re(groups: Option<&Vec<Rc<UiPlaylistGroup>>>, regex: &Regex) -> Option<Vec<Rc<UiPlaylistGroup>>> {
+fn filter_channels_re(
+    groups: Option<&Vec<Rc<UiPlaylistGroup>>>,
+    regex: &Regex,
+) -> Option<Vec<Rc<UiPlaylistGroup>>> {
     groups.as_ref().map(|gs| {
         gs.iter()
             .filter_map(|group| {
@@ -154,17 +159,15 @@ fn filter_channels_re(groups: Option<&Vec<Rc<UiPlaylistGroup>>>, regex: &Regex) 
     })
 }
 
-fn build_result(live: Option<Vec<Rc<UiPlaylistGroup>>>,
-                vod: Option<Vec<Rc<UiPlaylistGroup>>>,
-                series: Option<Vec<Rc<UiPlaylistGroup>>>) -> Option<UiPlaylistCategories> {
+fn build_result(
+    live: Option<Vec<Rc<UiPlaylistGroup>>>,
+    vod: Option<Vec<Rc<UiPlaylistGroup>>>,
+    series: Option<Vec<Rc<UiPlaylistGroup>>>,
+) -> Option<UiPlaylistCategories> {
     if live.is_none() && vod.is_none() && series.is_none() {
         None
     } else {
-        Some(UiPlaylistCategories {
-            live,
-            vod,
-            series,
-        })
+        Some(UiPlaylistCategories { live, vod, series })
     }
 }
 

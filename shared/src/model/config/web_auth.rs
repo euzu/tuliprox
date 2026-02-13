@@ -1,4 +1,7 @@
-use crate::utils::{is_true, default_as_true, default_token_ttl_mins, is_default_token_ttl_mins, is_blank_optional_string, is_blank_optional_str};
+use crate::utils::{
+    default_as_true, default_token_ttl_mins, is_blank_optional_str, is_blank_optional_string,
+    is_default_token_ttl_mins, is_true,
+};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -7,7 +10,10 @@ pub struct WebAuthConfigDto {
     pub enabled: bool,
     pub issuer: String,
     pub secret: String,
-    #[serde(default = "default_token_ttl_mins", skip_serializing_if = "is_default_token_ttl_mins")]
+    #[serde(
+        default = "default_token_ttl_mins",
+        skip_serializing_if = "is_default_token_ttl_mins"
+    )]
     pub token_ttl_mins: u32,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub userfile: Option<String>,

@@ -1,10 +1,10 @@
 mod storage;
 
-use wasm_bindgen::JsCast;
+pub use storage::*;
 use wasm_bindgen::prelude::Closure;
+use wasm_bindgen::JsCast;
 use web_sys::window;
 use yew_i18n::YewI18n;
-pub use storage::*;
 
 #[macro_export]
 macro_rules! html_if {
@@ -26,10 +26,7 @@ where
     let cb = Closure::once_into_js(Box::new(callback) as Box<dyn FnOnce()>);
     window()
         .unwrap()
-        .set_timeout_with_callback_and_timeout_and_arguments_0(
-            cb.unchecked_ref(),
-            millis,
-        )
+        .set_timeout_with_callback_and_timeout_and_arguments_0(cb.unchecked_ref(), millis)
         .unwrap();
 }
 

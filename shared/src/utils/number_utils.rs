@@ -24,7 +24,7 @@ pub fn parse_localized_float(s: &str) -> Option<f64> {
         // Everything to the left of the last separator: integer part
         let left = s[..pos]
             .chars()
-            .filter(|c| c.is_ascii_digit() || *c == '-' )
+            .filter(|c| c.is_ascii_digit() || *c == '-')
             .collect::<String>();
 
         // Everything to the right of the last separator: fractional part
@@ -51,7 +51,7 @@ pub fn parse_localized_float(s: &str) -> Option<f64> {
         // No decimal separator → clean out all grouping chars and parse as integer
         let cleaned = s
             .chars()
-            .filter(|c| c.is_ascii_digit() || *c == '-' )
+            .filter(|c| c.is_ascii_digit() || *c == '-')
             .collect::<String>();
         cleaned.parse::<f64>().ok()
     }
@@ -157,21 +157,16 @@ mod tests {
     fn test_format_and_parse_roundtrip() {
         // check that formatted values can be parsed back exactly
         let values = [
-            0.0,
-            1.0,
-            12.34,
-            1234.56,
-            1000.0,
-            1000000.25,
-            -42.75,
-            0.0001,
-            1_234.56
+            0.0, 1.0, 12.34, 1234.56, 1000.0, 1000000.25, -42.75, 0.0001, 1_234.56,
         ];
         for &v in &values {
             let formatted = format_float_localized(v, 4, true);
             let parsed = parse_localized_float(&formatted).unwrap();
             let diff = (parsed - v).abs();
-            assert!(diff < 1e-10, "roundtrip failed for {v}: {formatted} -> {parsed}");
+            assert!(
+                diff < 1e-10,
+                "roundtrip failed for {v}: {formatted} -> {parsed}"
+            );
         }
     }
 }

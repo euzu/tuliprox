@@ -1,8 +1,10 @@
+use crate::app::components::{
+    Card, DiscordActionCard, DocumentationActionCard, GithubActionCard, IpinfoActionCard,
+    UserActionCard, VersionActionCard,
+};
+use crate::app::context::StatusContext;
 use yew::prelude::*;
 use yew_i18n::use_translation;
-use crate::app::components::{Card, DiscordActionCard, UserActionCard, VersionActionCard,
-                             DocumentationActionCard, IpinfoActionCard, GithubActionCard};
-use crate::app::context::StatusContext;
 
 #[function_component]
 pub fn DashboardView() -> Html {

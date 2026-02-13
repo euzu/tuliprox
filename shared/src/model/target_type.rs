@@ -1,8 +1,10 @@
+use enum_iterator::Sequence;
 use std::fmt::Display;
 use std::str::FromStr;
-use enum_iterator::Sequence;
 
-#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq, Hash)]
+#[derive(
+    Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq, Hash,
+)]
 pub enum TargetType {
     #[serde(rename = "m3u")]
     M3u,
@@ -23,12 +25,16 @@ impl TargetType {
 
 impl Display for TargetType {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", match *self {
-            Self::M3u => Self::M3U,
-            Self::Xtream => Self::XTREAM,
-            Self::Strm => Self::STRM,
-            Self::HdHomeRun => Self::HDHOMERUN,
-        })
+        write!(
+            f,
+            "{}",
+            match *self {
+                Self::M3u => Self::M3U,
+                Self::Xtream => Self::XTREAM,
+                Self::Strm => Self::STRM,
+                Self::HdHomeRun => Self::HDHOMERUN,
+            }
+        )
     }
 }
 
@@ -41,8 +47,7 @@ impl FromStr for TargetType {
             Self::XTREAM => Ok(Self::Xtream),
             Self::STRM => Ok(Self::Strm),
             Self::HDHOMERUN => Ok(Self::HdHomeRun),
-            _ => Err(format!("Unknown TargetType: {}", s))
+            _ => Err(format!("Unknown TargetType: {}", s)),
         }
     }
 }
-

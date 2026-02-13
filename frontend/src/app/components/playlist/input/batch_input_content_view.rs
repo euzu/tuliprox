@@ -1,9 +1,9 @@
+use crate::app::components::{CsvTable, NoContent};
+use crate::hooks::use_service_context;
+use shared::model::ConfigInputDto;
 use std::rc::Rc;
 use yew::platform::spawn_local;
 use yew::prelude::*;
-use crate::hooks::use_service_context;
-use crate::app::components::{CsvTable, NoContent};
-use shared::model::ConfigInputDto;
 
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct BatchInputContentViewProps {

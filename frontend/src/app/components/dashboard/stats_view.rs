@@ -1,7 +1,7 @@
+use crate::app::components::{Card, PlaylistProgressStatusCard, StatusCard, StatusContext};
+use shared::utils::human_readable_byte_size;
 use yew::prelude::*;
 use yew_i18n::use_translation;
-use shared::utils::human_readable_byte_size;
-use crate::app::components::{Card, PlaylistProgressStatusCard, StatusCard, StatusContext};
 
 #[function_component]
 pub fn StatsView() -> Html {
@@ -9,14 +9,16 @@ pub fn StatsView() -> Html {
     let status_ctx = use_context::<StatusContext>().expect("Status context not found");
 
     let render_active_provider_connections = || -> Html {
-       let empty_card = || html! {
-                    <Card>
-                        <StatusCard
-                            title={translate.t("LABEL.ACTIVE_PROVIDER_CONNECTIONS")}
-                            data={"-"}
-                        />
-                    </Card>
-                };
+        let empty_card = || {
+            html! {
+                <Card>
+                    <StatusCard
+                        title={translate.t("LABEL.ACTIVE_PROVIDER_CONNECTIONS")}
+                        data={"-"}
+                    />
+                </Card>
+            }
+        };
         match &status_ctx.status {
             Some(stats) => {
                 if let Some(map) = &stats.active_provider_connections {
@@ -41,16 +43,37 @@ pub fn StatsView() -> Html {
                     empty_card()
                 }
             }
-            None => empty_card()
+            None => empty_card(),
         }
     };
 
-    let (mem, cpu) = status_ctx.system_info.as_ref().map_or_else(|| ("n/a".to_string(), "n/a".to_string()),
-        |system| (format!("{} / {}", human_readable_byte_size(system.memory_usage), human_readable_byte_size(system.memory_total)), format!("{:.2}%", system.cpu_usage)));
+    let (mem, cpu) = status_ctx.system_info.as_ref().map_or_else(
+        || ("n/a".to_string(), "n/a".to_string()),
+        |system| {
+            (
+                format!(
+                    "{} / {}",
+                    human_readable_byte_size(system.memory_usage),
+                    human_readable_byte_size(system.memory_total)
+                ),
+                format!("{:.2}%", system.cpu_usage),
+            )
+        },
+    );
 
-
-    let (cache, users, connections) = status_ctx.status.as_ref().map_or_else(|| ("n/a".to_string(),"n/a".to_string(),"n/a".to_string()),
-         |status| (status.cache.as_ref().map_or_else(|| "n/a".to_string(), |c| c.clone()), status.active_users.to_string(), status.active_user_connections.to_string()));
+    let (cache, users, connections) = status_ctx.status.as_ref().map_or_else(
+        || ("n/a".to_string(), "n/a".to_string(), "n/a".to_string()),
+        |status| {
+            (
+                status
+                    .cache
+                    .as_ref()
+                    .map_or_else(|| "n/a".to_string(), |c| c.clone()),
+                status.active_users.to_string(),
+                status.active_user_connections.to_string(),
+            )
+        },
+    );
 
     html! {
       <div class="tp__stats">

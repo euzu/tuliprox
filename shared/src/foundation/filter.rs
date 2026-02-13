@@ -3,6 +3,7 @@
 use pest_derive::Parser;
 
 use crate::error::{info_err_res, TuliproxError};
+use crate::foundation::value_provider::ValueProvider;
 use crate::info_err;
 pub use crate::model::{ItemField, PatternTemplate, PlaylistItemType, TemplateValue};
 use crate::utils::{DirectedGraph, Internable, CONSTANTS};
@@ -14,7 +15,6 @@ use pest::Parser;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
-use crate::foundation::value_provider::ValueProvider;
 
 #[derive(Debug, Clone)]
 pub struct CompiledRegex {
@@ -72,10 +72,14 @@ impl BinaryOperator {
 
 impl std::fmt::Display for BinaryOperator {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", match *self {
-            Self::Or => Self::OP_OR,
-            Self::And => Self::OP_AND,
-        })
+        write!(
+            f,
+            "{}",
+            match *self {
+                Self::Or => Self::OP_OR,
+                Self::And => Self::OP_AND,
+            }
+        )
     }
 }
 
@@ -90,7 +94,13 @@ pub enum Filter {
 
 impl Default for Filter {
     fn default() -> Self {
-        Self::Group(Box::new(Filter::FieldComparison(ItemField::Group, CompiledRegex { restr: ".*".to_string(), re: crate::model::REGEX_CACHE.get_or_compile(".*").unwrap() })))
+        Self::Group(Box::new(Filter::FieldComparison(
+            ItemField::Group,
+            CompiledRegex {
+                restr: ".*".to_string(),
+                re: crate::model::REGEX_CACHE.get_or_compile(".*").unwrap(),
+            },
+        )))
     }
 }
 
@@ -124,7 +134,10 @@ impl Filter {
                     if is_match {
                         trace!("Match found: {rewc:?} {} => {field}='{value}'", &rewc.restr);
                     } else {
-                        trace!("Match failed: {self}: {rewc:?} {} => {field}='{value}'", &rewc.restr);
+                        trace!(
+                            "Match failed: {self}: {rewc:?} {} => {field}='{value}'",
+                            &rewc.restr
+                        );
                     }
                 }
                 is_match
@@ -133,8 +146,14 @@ impl Filter {
                 if let Some(value) = provider.get(field.as_str()) {
                     get_filter_item_type(&value).is_some_and(|pli_type| {
                         let is_match = match item_type {
-                            PlaylistItemType::Video => matches!(pli_type, PlaylistItemType::Video | PlaylistItemType::LocalVideo),
-                            PlaylistItemType::Series => matches!(pli_type, PlaylistItemType::Series | PlaylistItemType::LocalSeries),
+                            PlaylistItemType::Video => matches!(
+                                pli_type,
+                                PlaylistItemType::Video | PlaylistItemType::LocalVideo
+                            ),
+                            PlaylistItemType::Series => matches!(
+                                pli_type,
+                                PlaylistItemType::Series | PlaylistItemType::LocalSeries
+                            ),
                             _ => pli_type.eq(item_type),
                         };
                         if log_enabled!(Level::Trace) {
@@ -155,12 +174,8 @@ impl Filter {
                 UnaryOperator::Not => !expr.filter(provider),
             },
             Self::BinaryExpression(left, op, right) => match op {
-                BinaryOperator::And => {
-                    left.filter(provider) && right.filter(provider)
-                }
-                BinaryOperator::Or => {
-                    left.filter(provider) || right.filter(provider)
-                }
+                BinaryOperator::And => left.filter(provider) && right.filter(provider),
+                BinaryOperator::Or => left.filter(provider) || right.filter(provider),
             },
         }
     }
@@ -181,16 +196,20 @@ impl std::fmt::Display for Filter {
                 write!(f, "{} ~ \"{}\"", field, String::from(&rewc.restr))
             }
             Self::TypeComparison(field, item_type) => {
-                write!(f, "{} = {}", field, match item_type {
-                    PlaylistItemType::Live => Self::LIVE,
-                    PlaylistItemType::Video
-                    | PlaylistItemType::LocalVideo => Self::MOVIE,
-                    PlaylistItemType::Series
-                    | PlaylistItemType::SeriesInfo
-                    | PlaylistItemType::LocalSeries
-                    | PlaylistItemType::LocalSeriesInfo => Self::SERIES, // yes series-info is handled as series in filter
-                    _ => Self::UNSUPPORTED
-                })
+                write!(
+                    f,
+                    "{} = {}",
+                    field,
+                    match item_type {
+                        PlaylistItemType::Live => Self::LIVE,
+                        PlaylistItemType::Video | PlaylistItemType::LocalVideo => Self::MOVIE,
+                        PlaylistItemType::Series
+                        | PlaylistItemType::SeriesInfo
+                        | PlaylistItemType::LocalSeries
+                        | PlaylistItemType::LocalSeriesInfo => Self::SERIES, // yes series-info is handled as series in filter
+                        _ => Self::UNSUPPORTED,
+                    }
+                )
             }
             Self::Group(stmt) => {
                 write!(f, "({stmt})")
@@ -282,8 +301,10 @@ fn get_parser_type_comparison(expr: Pair<Rule>) -> Result<Filter, TuliproxError>
     let expr_inner = expr.into_inner();
     let text_item_type = expr_inner.as_str();
     let item_type = get_filter_item_type(text_item_type);
-    item_type.map_or_else(|| info_err_res!("can't parse item type: {text_item_type}"),
-                          |itype| Ok(Filter::TypeComparison(ItemField::Type, itype)))
+    item_type.map_or_else(
+        || info_err_res!("can't parse item type: {text_item_type}"),
+        |itype| Ok(Filter::TypeComparison(ItemField::Type, itype)),
+    )
 }
 
 macro_rules! handle_expr {
@@ -332,12 +353,10 @@ fn get_parser_expression(
                     Err(err) => errors.push(err.to_string()),
                 }
             }
-            Rule::comparison | Rule::expr => {
-                match get_parser_expression(pair, templates, errors) {
-                    Ok(expr) => handle_expr!(bop, uop, stmts, expr),
-                    Err(err) => return Err(err),
-                }
-            }
+            Rule::comparison | Rule::expr => match get_parser_expression(pair, templates, errors) {
+                Ok(expr) => handle_expr!(bop, uop, stmts, expr),
+                Err(err) => return Err(err),
+            },
             Rule::expr_group => {
                 match get_parser_expression(pair.into_inner().next().unwrap(), templates, errors) {
                     Ok(expr) => handle_expr!(bop, uop, stmts, Filter::Group(Box::new(expr))),
@@ -364,7 +383,9 @@ fn get_parser_expression(
         return Err(format!("Invalid Filter, could not parse {errors:?}"));
     }
     if stmts.len() > 1 {
-        return Err(format!("did not expect multiple rule: {stmts:?}, {errors:?}"));
+        return Err(format!(
+            "did not expect multiple rule: {stmts:?}, {errors:?}"
+        ));
     }
 
     Ok(stmts.pop().unwrap())
@@ -374,7 +395,7 @@ fn get_parser_binary_op(expr: &Pair<Rule>) -> Result<BinaryOperator, TuliproxErr
     match expr.as_rule() {
         Rule::and => Ok(BinaryOperator::And),
         Rule::or => Ok(BinaryOperator::Or),
-        _ => info_err_res!("Unknown binary operator {}",expr.as_str()),
+        _ => info_err_res!("Unknown binary operator {}", expr.as_str()),
     }
 }
 
@@ -396,19 +417,17 @@ pub fn get_filter(
                             match expr.as_rule() {
                                 Rule::expr => {
                                     match get_parser_expression(expr, templates, &mut errors) {
-                                        Ok(expr) => {
-                                            match &op {
-                                                Some(binop) => {
-                                                    result = Some(Filter::BinaryExpression(
-                                                        Box::new(result.unwrap()),
-                                                        *binop,
-                                                        Box::new(expr),
-                                                    ));
-                                                    op = None;
-                                                }
-                                                _ => result = Some(expr),
+                                        Ok(expr) => match &op {
+                                            Some(binop) => {
+                                                result = Some(Filter::BinaryExpression(
+                                                    Box::new(result.unwrap()),
+                                                    *binop,
+                                                    Box::new(expr),
+                                                ));
+                                                op = None;
                                             }
-                                        }
+                                            _ => result = Some(expr),
+                                        },
                                         Err(err) => errors.push(err),
                                     }
                                 }
@@ -440,7 +459,10 @@ pub fn get_filter(
                 return info_err_res!("{}", errors.join("\n"));
             }
 
-            result.map_or_else(|| info_err_res!("Unable to parse filter: {}", &filter_text), Ok)
+            result.map_or_else(
+                || info_err_res!("Unable to parse filter: {}", &filter_text),
+                Ok,
+            )
         }
         Err(err) => info_err_res!("{err}"),
     }
@@ -453,7 +475,8 @@ fn build_dependency_graph(
     for template in templates {
         graph.add_node(&template.name);
         let mut handle_template_value = |value| {
-            CONSTANTS.re_template_var
+            CONSTANTS
+                .re_template_var
                 .captures_iter(value)
                 .filter(|caps| caps.len() > 1)
                 .filter_map(|caps| caps.get(1))
@@ -465,7 +488,9 @@ fn build_dependency_graph(
         };
         match &template.value {
             TemplateValue::Single(value) => handle_template_value(value),
-            TemplateValue::Multi(values) => values.iter().for_each(|value| handle_template_value(value)),
+            TemplateValue::Multi(values) => {
+                values.iter().for_each(|value| handle_template_value(value))
+            }
         }
     }
     let cycles = graph.find_cycles();
@@ -481,7 +506,9 @@ fn build_dependency_graph(
     Ok(graph)
 }
 
-pub fn prepare_templates(templates: &mut Vec<PatternTemplate>) -> Result<Vec<PatternTemplate>, TuliproxError> {
+pub fn prepare_templates(
+    templates: &mut Vec<PatternTemplate>,
+) -> Result<Vec<PatternTemplate>, TuliproxError> {
     let graph = build_dependency_graph(templates)?;
     let mut template_values = HashMap::new();
     let mut template_map = HashMap::with_capacity(templates.len());
@@ -498,38 +525,49 @@ pub fn prepare_templates(templates: &mut Vec<PatternTemplate>) -> Result<Vec<Pat
                 if let Some(depends_on) = dependencies.get(&template_name) {
                     let mut templ_value = template_values.get(&template_name).unwrap().clone();
                     for dep_templ_name in depends_on {
-                        let dep_value = template_values.get(dep_templ_name).ok_or_else(|| info_err!("Failed to load template {dep_templ_name}"))?;
+                        let dep_value = template_values
+                            .get(dep_templ_name)
+                            .ok_or_else(|| info_err!("Failed to load template {dep_templ_name}"))?;
                         let dep_templ = template_map.get_mut(dep_templ_name).unwrap();
-                        templ_value = match dep_value {
-                            TemplateValue::Single(dep_val) => {
-                                match templ_value {
-                                    TemplateValue::Single(templ_val) => {
-                                        if templ_val.contains(&dep_templ.placeholder) {
-                                            TemplateValue::Single(templ_val.replace(&dep_templ.placeholder, dep_val.as_str()))
-                                        } else {
-                                            TemplateValue::Single(templ_val)
-                                        }
-                                    }
-                                    TemplateValue::Multi(templ_vals) => {
-                                        let mut new_values = vec![];
-                                        for val in templ_vals {
-                                            if val.contains(&dep_templ.placeholder) {
-                                                new_values.push(val.replace(&dep_templ.placeholder, dep_val.as_str()));
+                        templ_value =
+                            match dep_value {
+                                TemplateValue::Single(dep_val) => {
+                                    match templ_value {
+                                        TemplateValue::Single(templ_val) => {
+                                            if templ_val.contains(&dep_templ.placeholder) {
+                                                TemplateValue::Single(templ_val.replace(
+                                                    &dep_templ.placeholder,
+                                                    dep_val.as_str(),
+                                                ))
                                             } else {
-                                                new_values.push(val);
+                                                TemplateValue::Single(templ_val)
                                             }
                                         }
-                                        TemplateValue::Multi(new_values)
+                                        TemplateValue::Multi(templ_vals) => {
+                                            let mut new_values = vec![];
+                                            for val in templ_vals {
+                                                if val.contains(&dep_templ.placeholder) {
+                                                    new_values.push(val.replace(
+                                                        &dep_templ.placeholder,
+                                                        dep_val.as_str(),
+                                                    ));
+                                                } else {
+                                                    new_values.push(val);
+                                                }
+                                            }
+                                            TemplateValue::Multi(new_values)
+                                        }
                                     }
                                 }
-                            }
-                            TemplateValue::Multi(dep_vals) => {
-                                match templ_value {
+                                TemplateValue::Multi(dep_vals) => match templ_value {
                                     TemplateValue::Single(templ_val) => {
                                         let mut new_values = vec![];
                                         for dep_val in dep_vals {
                                             if templ_val.contains(&dep_templ.placeholder) {
-                                                new_values.push(templ_val.replace(&dep_templ.placeholder, dep_val.as_str()));
+                                                new_values.push(templ_val.replace(
+                                                    &dep_templ.placeholder,
+                                                    dep_val.as_str(),
+                                                ));
                                             } else {
                                                 new_values.push(templ_val.clone());
                                             }
@@ -541,7 +579,10 @@ pub fn prepare_templates(templates: &mut Vec<PatternTemplate>) -> Result<Vec<Pat
                                         for dep_val in dep_vals {
                                             for templ_val in &templ_vals {
                                                 if templ_val.contains(&dep_templ.placeholder) {
-                                                    new_values.push(templ_val.replace(&dep_templ.placeholder, dep_val.as_str()));
+                                                    new_values.push(templ_val.replace(
+                                                        &dep_templ.placeholder,
+                                                        dep_val.as_str(),
+                                                    ));
                                                 } else {
                                                     new_values.push(templ_val.clone());
                                                 }
@@ -549,9 +590,8 @@ pub fn prepare_templates(templates: &mut Vec<PatternTemplate>) -> Result<Vec<Pat
                                         }
                                         TemplateValue::Multi(new_values)
                                     }
-                                }
-                            }
-                        };
+                                },
+                            };
                     }
                     template_values.insert(template_name.clone(), templ_value);
                 }
@@ -577,24 +617,22 @@ pub fn apply_templates_to_pattern(
     if let Some(templates) = templates_list {
         for template in templates {
             match &template.value {
-                TemplateValue::Single(val) => {
-                    match new_pattern {
-                        TemplateValue::Single(ref mut pat) => {
+                TemplateValue::Single(val) => match new_pattern {
+                    TemplateValue::Single(ref mut pat) => {
+                        let replaced = pat.replace(&template.placeholder, val);
+                        if replaced != *pat {
+                            *pat = replaced;
+                        }
+                    }
+                    TemplateValue::Multi(ref mut pats) => {
+                        for pat in pats.iter_mut() {
                             let replaced = pat.replace(&template.placeholder, val);
                             if replaced != *pat {
                                 *pat = replaced;
                             }
                         }
-                        TemplateValue::Multi(ref mut pats) => {
-                            for pat in pats.iter_mut() {
-                                let replaced = pat.replace(&template.placeholder, val);
-                                if replaced != *pat {
-                                    *pat = replaced;
-                                }
-                            }
-                        }
                     }
-                }
+                },
 
                 TemplateValue::Multi(ref multi_vals) => {
                     new_pattern = match &new_pattern {
@@ -631,29 +669,36 @@ pub fn apply_templates_to_pattern(
     if !allow_multi {
         match &new_pattern {
             TemplateValue::Single(_) => {}
-            TemplateValue::Multi(multi_vals) => {
-                match multi_vals.len().cmp(&1) {
-                    Ordering::Less => {
-                        return info_err_res!("Empty multi value templates are not supported for pattern! {pattern}");
-                    }
-                    Ordering::Equal => {
-                        new_pattern = TemplateValue::Single(multi_vals.first().unwrap().to_owned());
-                    }
-                    Ordering::Greater => {
-                        return info_err_res!("Multi value templates are not supported for pattern! {pattern}");
-                    }
+            TemplateValue::Multi(multi_vals) => match multi_vals.len().cmp(&1) {
+                Ordering::Less => {
+                    return info_err_res!(
+                        "Empty multi value templates are not supported for pattern! {pattern}"
+                    );
                 }
-            }
+                Ordering::Equal => {
+                    new_pattern = TemplateValue::Single(multi_vals.first().unwrap().to_owned());
+                }
+                Ordering::Greater => {
+                    return info_err_res!(
+                        "Multi value templates are not supported for pattern! {pattern}"
+                    );
+                }
+            },
         }
     }
 
     Ok(new_pattern)
 }
 
-pub fn apply_templates_to_pattern_single(pattern: &str, templates: Option<&Vec<PatternTemplate>>) -> Result<String, TuliproxError> {
+pub fn apply_templates_to_pattern_single(
+    pattern: &str,
+    templates: Option<&Vec<PatternTemplate>>,
+) -> Result<String, TuliproxError> {
     match apply_templates_to_pattern(pattern, templates, false)? {
         TemplateValue::Single(value) => Ok(value),
-        TemplateValue::Multi(_) => info_err_res!("Multi value templates are not supported for pattern!"),
+        TemplateValue::Multi(_) => {
+            info_err_res!("Multi value templates are not supported for pattern!")
+        }
     }
 }
 
@@ -734,27 +779,21 @@ mod tests {
                     })
                     .collect();
                 assert_eq!(filtered.len(), 2);
-                assert!(
-                    filtered.iter().any(|&chan| {
-                        let group = chan.header.group.to_string();
-                        let name = chan.header.name.to_string();
-                        name.eq("24/7: Cars") && group.eq("FR Channels")
-                    })
-                );
-                assert!(
-                    filtered.iter().any(|&chan| {
-                        let group = chan.header.group.to_string();
-                        let name = chan.header.name.to_string();
-                        name.eq("Entertainment") && group.eq("US Channels")
-                    })
-                );
-                assert!(
-                    !filtered.iter().any(|&chan| {
-                        let group = chan.header.group.to_string();
-                        let name = chan.header.name.to_string();
-                        name.eq("24/7: Cars") && group.eq("US Channels")
-                    })
-                );
+                assert!(filtered.iter().any(|&chan| {
+                    let group = chan.header.group.to_string();
+                    let name = chan.header.name.to_string();
+                    name.eq("24/7: Cars") && group.eq("FR Channels")
+                }));
+                assert!(filtered.iter().any(|&chan| {
+                    let group = chan.header.group.to_string();
+                    let name = chan.header.name.to_string();
+                    name.eq("Entertainment") && group.eq("US Channels")
+                }));
+                assert!(!filtered.iter().any(|&chan| {
+                    let group = chan.header.group.to_string();
+                    let name = chan.header.name.to_string();
+                    name.eq("24/7: Cars") && group.eq("US Channels")
+                }));
             }
             Err(e) => {
                 panic!("{e}")
@@ -849,13 +888,11 @@ mod tests {
                     })
                     .collect();
                 assert_eq!(filtered.len(), 1);
-                assert!(
-                    filtered.iter().any(|&chan| {
-                        let group = chan.header.group.to_string();
-                        let name = chan.header.name.to_string();
-                        name.eq("Entertainment") && group.eq("US Channels")
-                    })
-                );
+                assert!(filtered.iter().any(|&chan| {
+                    let group = chan.header.group.to_string();
+                    let name = chan.header.name.to_string();
+                    name.eq("Entertainment") && group.eq("US Channels")
+                }));
             }
             Err(e) => {
                 panic!("{e}")

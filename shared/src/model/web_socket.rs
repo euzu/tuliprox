@@ -1,9 +1,12 @@
+use crate::model::user_command::UserCommand;
+use crate::model::{
+    ActiveUserConnectionChange, ConfigType, LibraryScanSummary, PlaylistUpdateState, StatusCheck,
+    SystemInfo,
+};
+use bytes::Bytes;
+use serde::{Deserialize, Serialize};
 use std::io;
 use std::sync::Arc;
-use bytes::Bytes;
-use crate::model::{ActiveUserConnectionChange, ConfigType, LibraryScanSummary, PlaylistUpdateState, StatusCheck, SystemInfo};
-use serde::{Deserialize, Serialize};
-use crate::model::user_command::UserCommand;
 
 pub const PROTOCOL_VERSION: u8 = 1;
 
@@ -98,9 +101,7 @@ pub enum ProtocolMessage {
 impl ProtocolMessage {
     pub fn to_bytes(&self) -> io::Result<Bytes> {
         match self {
-            ProtocolMessage::Version(version) => {
-                Ok(Bytes::from(vec![*version]))
-            }
+            ProtocolMessage::Version(version) => Ok(Bytes::from(vec![*version])),
             _ => {
                 //let encoded = bincode_serialize(self)?;
                 let json = serde_json::to_string(self)
@@ -117,8 +118,7 @@ impl ProtocolMessage {
             //bincode_deserialize::<ProtocolMessage>(bytes.as_ref())
             let s = std::str::from_utf8(&bytes)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            serde_json::from_str(s)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+            serde_json::from_str(s).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
         }
     }
 }

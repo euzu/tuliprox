@@ -2,7 +2,9 @@ use crate::app::components::select::Select;
 use crate::app::components::{Card, DropDownOption, DropDownSelection, TextButton};
 use crate::{config_field_child, edit_field_number_u8, edit_field_text, generate_form_reducer};
 use shared::model::{TraktContentType, TraktListConfigDto};
-use yew::{function_component, html, use_memo, use_reducer, Callback, Html, Properties, UseReducerHandle};
+use yew::{
+    function_component, html, use_memo, use_reducer, Callback, Html, Properties, UseReducerHandle,
+};
 use yew_i18n::use_translation;
 
 const LABEL_TRAKT_USER: &str = "LABEL.TRAKT_USER";
@@ -35,17 +37,15 @@ pub struct TraktListItemFormProps {
 pub fn TraktListItemForm(props: &TraktListItemFormProps) -> Html {
     let translate = use_translation();
 
-    let form_state: UseReducerHandle<TraktListFormState> = use_reducer(|| {
-        TraktListFormState {
-            form: props.initial.clone().unwrap_or_else(|| TraktListConfigDto {
-                user: String::new(),
-                list_slug: String::new(),
-                category_name: String::new(),
-                content_type: TraktContentType::Both,
-                fuzzy_match_threshold: 80,
-            }),
-            modified: false,
-        }
+    let form_state: UseReducerHandle<TraktListFormState> = use_reducer(|| TraktListFormState {
+        form: props.initial.clone().unwrap_or_else(|| TraktListConfigDto {
+            user: String::new(),
+            list_slug: String::new(),
+            category_name: String::new(),
+            content_type: TraktContentType::Both,
+            fuzzy_match_threshold: 80,
+        }),
+        modified: false,
     });
 
     let content_type_options = use_memo(form_state.form.content_type, |content_type| {
@@ -76,7 +76,8 @@ pub fn TraktListItemForm(props: &TraktListItemFormProps) -> Html {
             let data = form_state.form.clone();
             if !data.user.trim().is_empty()
                 && !data.list_slug.trim().is_empty()
-                && !data.category_name.trim().is_empty() {
+                && !data.category_name.trim().is_empty()
+            {
                 on_submit.emit(data);
             }
         })

@@ -1,7 +1,10 @@
-use web_sys::{HtmlInputElement, InputEvent, KeyboardEvent, MouseEvent};
-use yew::{function_component, html, use_effect_with, use_state, Callback, Html, NodeRef, Properties, TargetCast};
 use crate::app::components::{AppIcon, IconButton};
 use crate::html_if;
+use web_sys::{HtmlInputElement, InputEvent, KeyboardEvent, MouseEvent};
+use yew::{
+    function_component, html, use_effect_with, use_state, Callback, Html, NodeRef, Properties,
+    TargetCast,
+};
 
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct InputProps {
@@ -25,7 +28,6 @@ pub struct InputProps {
     pub icon: Option<String>,
     #[prop_or_default]
     pub placeholder: Option<String>,
-
 }
 
 #[function_component]
@@ -44,12 +46,12 @@ pub fn Input(props: &InputProps) -> Html {
     }
 
     let handle_hide_content = {
-      let hide_content = hide_content.clone();
-      Callback::from(move |(name, _event): (String, MouseEvent)| {
-          if name == "hide" {
-              hide_content.set(!*hide_content);
-          }
-      })
+        let hide_content = hide_content.clone();
+        Callback::from(move |(name, _event): (String, MouseEvent)| {
+            if name == "hide" {
+                hide_content.set(!*hide_content);
+            }
+        })
     };
 
     let handle_oninput = {

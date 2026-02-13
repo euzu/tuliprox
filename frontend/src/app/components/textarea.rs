@@ -1,6 +1,8 @@
-use web_sys::{HtmlTextAreaElement, InputEvent, KeyboardEvent};
-use yew::{function_component, html, use_effect_with, Callback, Html, NodeRef, Properties, TargetCast};
 use crate::app::components::CollapsePanel;
+use web_sys::{HtmlTextAreaElement, InputEvent, KeyboardEvent};
+use yew::{
+    function_component, html, use_effect_with, Callback, Html, NodeRef, Properties, TargetCast,
+};
 
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct TextAreaProps {

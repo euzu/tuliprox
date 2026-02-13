@@ -19,7 +19,12 @@ struct TargetBlock {
 impl TargetBlock {
     pub fn new(id: BlockId, outputs: Option<Vec<BlockId>>) -> Self {
         let height = Self::height(outputs.as_ref());
-        TargetBlock { id, outputs, height, position: (0.0, 0.0) }
+        TargetBlock {
+            id,
+            outputs,
+            height,
+            position: (0.0, 0.0),
+        }
     }
 
     fn height(outputs: Option<&Vec<BlockId>>) -> f32 {
@@ -37,7 +42,7 @@ impl TargetBlock {
         let mut out_y = y;
         if let Some(outputs) = self.outputs.as_ref() {
             for out in outputs {
-                blocks[*out as usize -1].position = (out_x, out_y);
+                blocks[*out as usize - 1].position = (out_x, out_y);
                 out_y += BLOCK_HEIGHT + Y_GAP;
             }
         }
@@ -61,7 +66,6 @@ fn build_target_blocks(blocks: &mut [Block], connections: &[Connection]) -> Vec<
         .collect()
 }
 
-
 /// calcuates Barycenter for a Block, based on connected Blocks in given Order-Array
 fn barycenter(id: BlockId, map: &HashMap<BlockId, Vec<BlockId>>, order: &[BlockId]) -> f32 {
     if let Some(connected) = map.get(&id) {
@@ -73,7 +77,11 @@ fn barycenter(id: BlockId, map: &HashMap<BlockId, Vec<BlockId>>, order: &[BlockI
                 count += 1;
             }
         }
-        if count == 0 { f32::INFINITY } else { sum / count as f32 }
+        if count == 0 {
+            f32::INFINITY
+        } else {
+            sum / count as f32
+        }
     } else {
         f32::INFINITY
     }
@@ -85,10 +93,16 @@ fn count_crossings(
     target_order: &[BlockId],
     connections: &[Connection],
 ) -> usize {
-    let input_index: HashMap<BlockId, usize> =
-        input_order.iter().enumerate().map(|(i, &id)| (id, i)).collect();
-    let target_index: HashMap<BlockId, usize> =
-        target_order.iter().enumerate().map(|(i, &id)| (id, i)).collect();
+    let input_index: HashMap<BlockId, usize> = input_order
+        .iter()
+        .enumerate()
+        .map(|(i, &id)| (id, i))
+        .collect();
+    let target_index: HashMap<BlockId, usize> = target_order
+        .iter()
+        .enumerate()
+        .map(|(i, &id)| (id, i))
+        .collect();
 
     let mut count = 0;
     for (i, c1) in connections.iter().enumerate() {
@@ -162,12 +176,16 @@ pub fn barycentric_sort(
     // simple local cross optimisation for inputs
     let mut improved = true;
     for _ in 0..10 {
-        if !improved { break; }
+        if !improved {
+            break;
+        }
         improved = false;
         for i in 0..input_order.len().saturating_sub(1) {
             let mut swapped = input_order.clone();
             swapped.swap(i, i + 1);
-            if count_crossings(&swapped, &target_order, connections) < count_crossings(&input_order, &target_order, connections) {
+            if count_crossings(&swapped, &target_order, connections)
+                < count_crossings(&input_order, &target_order, connections)
+            {
                 input_order.swap(i, i + 1);
                 improved = true;
             }
@@ -177,12 +195,16 @@ pub fn barycentric_sort(
     // simple local cross optimisation for targets
     improved = true;
     for _ in 0..10 {
-        if !improved { break; }
+        if !improved {
+            break;
+        }
         improved = false;
         for i in 0..target_order.len().saturating_sub(1) {
             let mut swapped = target_order.clone();
             swapped.swap(i, i + 1);
-            if count_crossings(&input_order, &swapped, connections) < count_crossings(&input_order, &target_order, connections) {
+            if count_crossings(&input_order, &swapped, connections)
+                < count_crossings(&input_order, &target_order, connections)
+            {
                 target_order.swap(i, i + 1);
                 improved = true;
             }
@@ -193,23 +215,20 @@ pub fn barycentric_sort(
 }
 
 pub fn layout(blocks: &mut [Block], connections: &[Connection]) {
-
     let (input_order, target_order) = barycentric_sort(blocks, connections, 5);
 
     let mut target_blocks = build_target_blocks(blocks, connections);
     target_blocks.sort_by_key(|a| target_order.iter().position(|&id| id == a.id).unwrap());
 
     let mut start_y = CANVAS_OFFSET;
-    let start_x = CANVAS_OFFSET + BLOCK_WIDTH  + X_GAP;
-    for  target_block in &mut target_blocks {
+    let start_x = CANVAS_OFFSET + BLOCK_WIDTH + X_GAP;
+    for target_block in &mut target_blocks {
         target_block.set_position(start_x, start_y, blocks);
         start_y += target_block.height + Y_GAP;
     }
 
-    let target_map: HashMap<BlockId, &TargetBlock> = target_blocks
-        .iter()
-        .map(|t| (t.id, t))
-        .collect();
+    let target_map: HashMap<BlockId, &TargetBlock> =
+        target_blocks.iter().map(|t| (t.id, t)).collect();
 
     let mut last_input_y = CANVAS_OFFSET;
 
@@ -235,7 +254,7 @@ pub fn layout(blocks: &mut [Block], connections: &[Connection]) {
                 .map(|t| t.position.1 + t.height)
                 .fold(f32::NEG_INFINITY, |a, b| a.max(b));
 
-            (min_y + max_y)/2.0 - BLOCK_HEIGHT/2.0
+            (min_y + max_y) / 2.0 - BLOCK_HEIGHT / 2.0
         };
 
         let mut final_y = desired_y;
@@ -244,8 +263,8 @@ pub fn layout(blocks: &mut [Block], connections: &[Connection]) {
             final_y = last_input_y;
         }
 
-        let block = &mut blocks[*block_id as usize -1];
+        let block = &mut blocks[*block_id as usize - 1];
         block.position = (CANVAS_OFFSET, final_y);
-        last_input_y = final_y + BLOCK_HEIGHT + Y_GAP*2.0;
+        last_input_y = final_y + BLOCK_HEIGHT + Y_GAP * 2.0;
     }
 }

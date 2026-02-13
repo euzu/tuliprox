@@ -1,4 +1,3 @@
-
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum DialogResult {
     Ok,
@@ -16,7 +15,13 @@ pub struct DialogAction {
 }
 
 impl DialogAction {
-    pub(crate) fn new(name: &str, label: &str, result: DialogResult, icon: Option<String>, style: Option<String>) -> Self {
+    pub(crate) fn new(
+        name: &str,
+        label: &str,
+        result: DialogResult,
+        icon: Option<String>,
+        style: Option<String>,
+    ) -> Self {
         Self {
             name: name.to_string(),
             label: label.to_string(),
@@ -26,7 +31,13 @@ impl DialogAction {
             focus: false,
         }
     }
-    pub(crate) fn new_focused(name: &str, label: &str, result: DialogResult, icon: Option<String>, style: Option<String>) -> Self {
+    pub(crate) fn new_focused(
+        name: &str,
+        label: &str,
+        result: DialogResult,
+        icon: Option<String>,
+        style: Option<String>,
+    ) -> Self {
         let mut result = Self::new(name, label, result, icon, style);
         result.focus = true;
         result

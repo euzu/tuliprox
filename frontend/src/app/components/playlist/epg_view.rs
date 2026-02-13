@@ -4,6 +4,7 @@ use crate::model::{BusyStatus, EventMessage};
 use crate::utils::set_timeout;
 use chrono::{Datelike, Local, TimeZone, Utc};
 use gloo_timers::callback::{Interval, Timeout};
+use shared::concat_string;
 use shared::model::{EpgTv, PlaylistEpgRequest};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -11,9 +12,11 @@ use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::JsCast;
 use web_sys::{window, HtmlElement};
 use yew::platform::spawn_local;
-use yew::{classes, function_component, html, use_effect_with, use_memo, use_node_ref, use_state, Callback, Html, UseStateHandle};
+use yew::{
+    classes, function_component, html, use_effect_with, use_memo, use_node_ref, use_state,
+    Callback, Html, UseStateHandle,
+};
 use yew_i18n::use_translation;
-use shared::concat_string;
 
 const TIME_BLOCK_WIDTH: f64 = 210.0;
 const TIME_BLOCK_MINS: i64 = 30;
@@ -32,7 +35,12 @@ pub fn EpgView() -> Html {
     let services = use_service_context();
     let translate = use_translation();
     let epg = use_state::<Option<EpgTv>, _>(|| None);
-    let breadcrumbs = use_state(|| Rc::new(vec![translate.t("LABEL.PLAYLISTS"), translate.t("LABEL.PLAYLIST_EPG")]));
+    let breadcrumbs = use_state(|| {
+        Rc::new(vec![
+            translate.t("LABEL.PLAYLISTS"),
+            translate.t("LABEL.PLAYLIST_EPG"),
+        ])
+    });
     let container_ref = use_node_ref();
     let now_line_ref = use_node_ref();
 
@@ -46,11 +54,20 @@ pub fn EpgView() -> Html {
             epg_set.set(None);
             let service_ctx = service_ctx.clone();
             let epg_set = epg_set.clone();
-            service_ctx.event.broadcast(EventMessage::Busy(BusyStatus::Show));
+            service_ctx
+                .event
+                .broadcast(EventMessage::Busy(BusyStatus::Show));
             spawn_local(async move {
                 let playlist_epg = service_ctx.playlist.get_playlist_epg(req).await;
-                service_ctx.event.broadcast(EventMessage::Busy(BusyStatus::Hide));
-                set_timeout(move || { epg_set.set(playlist_epg); }, 16);
+                service_ctx
+                    .event
+                    .broadcast(EventMessage::Busy(BusyStatus::Hide));
+                set_timeout(
+                    move || {
+                        epg_set.set(playlist_epg);
+                    },
+                    16,
+                );
             });
         })
     };
@@ -62,27 +79,37 @@ pub fn EpgView() -> Html {
             // Updates the now-line position
             let epg_tv_clone = epg_tv.clone();
 
-            let calculate_position = Rc::new(move |epg_tv: &UseStateHandle<Option<EpgTv>>, recenter: bool| {
-                if let Some(tv) = &**epg_tv {
-                    if let (Some(div), Some(now_line)) = (container_ref.cast::<HtmlElement>(), now_line_ref.cast::<HtmlElement>()) {
-                        let now = Utc::now().timestamp();
-                        if now >= tv.start && now <= tv.stop {
-                            let start_window_secs = (tv.start / (TIME_BLOCK_MINS * 60)) * (TIME_BLOCK_MINS * 60);
-                            let start_window = (start_window_secs / 60).max(0);
-                            let now_line_pos = get_pos(now, start_window);
-                            now_line.style().set_property("width", &format!("{now_line_pos}px")).unwrap();
-                            now_line.style().set_property("display", "block").unwrap();
-                            if recenter {
-                                let container_width = div.client_width();
-                                let scroll_pos = (now_line_pos as i32 - (container_width >> 1)).max(0);
-                                div.set_scroll_left(scroll_pos);
+            let calculate_position = Rc::new(
+                move |epg_tv: &UseStateHandle<Option<EpgTv>>, recenter: bool| {
+                    if let Some(tv) = &**epg_tv {
+                        if let (Some(div), Some(now_line)) = (
+                            container_ref.cast::<HtmlElement>(),
+                            now_line_ref.cast::<HtmlElement>(),
+                        ) {
+                            let now = Utc::now().timestamp();
+                            if now >= tv.start && now <= tv.stop {
+                                let start_window_secs =
+                                    (tv.start / (TIME_BLOCK_MINS * 60)) * (TIME_BLOCK_MINS * 60);
+                                let start_window = (start_window_secs / 60).max(0);
+                                let now_line_pos = get_pos(now, start_window);
+                                now_line
+                                    .style()
+                                    .set_property("width", &format!("{now_line_pos}px"))
+                                    .unwrap();
+                                now_line.style().set_property("display", "block").unwrap();
+                                if recenter {
+                                    let container_width = div.client_width();
+                                    let scroll_pos =
+                                        (now_line_pos as i32 - (container_width >> 1)).max(0);
+                                    div.set_scroll_left(scroll_pos);
+                                }
+                            } else {
+                                now_line.style().set_property("display", "none").unwrap();
                             }
-                        } else {
-                            now_line.style().set_property("display", "none").unwrap();
                         }
                     }
-                }
-            });
+                },
+            );
 
             let calculate_pos = calculate_position.clone();
             let interval = Interval::new(60_000, move || {
@@ -96,13 +123,21 @@ pub fn EpgView() -> Html {
     let row_height = use_memo((), move |_| {
         let doc = window().unwrap().document().unwrap();
         let root = doc.document_element().unwrap(); // <html>
-        let style = window().unwrap().get_computed_style(&root).unwrap().unwrap();
+        let style = window()
+            .unwrap()
+            .get_computed_style(&root)
+            .unwrap()
+            .unwrap();
 
-        let row_height = style.get_property_value("--epg-row-height")
+        let row_height = style
+            .get_property_value("--epg-row-height")
             .unwrap_or_else(|_| String::new()); // fallback if not set
 
-
-        row_height.trim_end_matches("px").parse::<usize>().unwrap_or(60).max(1)
+        row_height
+            .trim_end_matches("px")
+            .parse::<usize>()
+            .unwrap_or(60)
+            .max(1)
     });
 
     // Add scroll listener to calculate visible channels
@@ -132,15 +167,19 @@ pub fn EpgView() -> Html {
                             let client_height = div.client_height(); // Calculate which channel rows are visible
 
                             // render 10 + 10 more lines
-                            let start_index = (scroll_top / (channel_row_height as i32) - 10).max(0);
-                            let end_index = ((scroll_top + client_height) / (channel_row_height as i32) + 10).max(0);
+                            let start_index =
+                                (scroll_top / (channel_row_height as i32) - 10).max(0);
+                            let end_index =
+                                ((scroll_top + client_height) / (channel_row_height as i32) + 10)
+                                    .max(0);
                             vr.set((start_index as usize, end_index as usize));
                         }
                     });
 
                     *debounce_handle_clone.borrow_mut() = Some(handle);
                 }) as Box<dyn FnMut(_)>);
-                div.add_event_listener_with_callback("scroll", onscroll.as_ref().unchecked_ref()).unwrap();
+                div.add_event_listener_with_callback("scroll", onscroll.as_ref().unchecked_ref())
+                    .unwrap();
                 *onscroll_handle_clone.borrow_mut() = Some(onscroll);
             }
             move || {

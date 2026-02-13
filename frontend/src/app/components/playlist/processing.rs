@@ -1,11 +1,11 @@
+use crate::app::components::{Tag, TagList};
+use shared::model::ProcessingOrder;
 use std::rc::Rc;
 use yew::prelude::*;
-use shared::model::ProcessingOrder;
-use crate::app::components::{Tag, TagList};
 
 #[derive(Properties, PartialEq, Clone)]
 pub struct PlaylistProcessingProps {
-  pub order: ProcessingOrder,
+    pub order: ProcessingOrder,
 }
 
 #[function_component]
@@ -19,7 +19,14 @@ pub fn PlaylistProcessing(props: &PlaylistProcessingProps) -> Html {
             ProcessingOrder::Mfr => vec!["M", "F", "R"],
             ProcessingOrder::Mrf => vec!["M", "R", "F"],
         };
-        text.iter().map(|s| Rc::new(Tag { label: s.to_string(), class: None })).collect::<Vec<Rc<Tag>>>()
+        text.iter()
+            .map(|s| {
+                Rc::new(Tag {
+                    label: s.to_string(),
+                    class: None,
+                })
+            })
+            .collect::<Vec<Rc<Tag>>>()
     });
 
     html! {

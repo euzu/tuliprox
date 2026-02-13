@@ -8,13 +8,18 @@ use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 use std::sync::Arc;
 
-fn compile_regex_vec(patterns: Option<&Vec<String>>) -> Result<Option<Vec<Arc<Regex>>>, TuliproxError> {
-    patterns.as_ref()
+fn compile_regex_vec(
+    patterns: Option<&Vec<String>>,
+) -> Result<Option<Vec<Arc<Regex>>>, TuliproxError> {
+    patterns
+        .as_ref()
         .map(|seq| {
             seq.iter()
-                .map(|s| crate::model::REGEX_CACHE.get_or_compile(s).map_err(|err| {
-                    info_err!("can't parse regex: {s} {err}")
-                }))
+                .map(|s| {
+                    crate::model::REGEX_CACHE
+                        .get_or_compile(s)
+                        .map_err(|err| info_err!("can't parse regex: {s} {err}"))
+                })
                 .collect::<Result<Vec<_>, _>>()
         })
         .transpose() // convert Option<Result<...>> to Result<Option<...>>
@@ -45,7 +50,6 @@ impl Display for SortOrder {
         f.write_str(self.as_str())
     }
 }
-
 
 #[derive(Serialize, Debug, Copy, Clone, Eq, PartialEq)]
 pub enum SortTarget {
@@ -123,12 +127,17 @@ impl PartialEq for ConfigSortRuleDto {
     }
 }
 
-
 impl ConfigSortRuleDto {
-    pub fn prepare(&mut self, templates: Option<&Vec<PatternTemplate>>) -> Result<(), TuliproxError> {
+    pub fn prepare(
+        &mut self,
+        templates: Option<&Vec<PatternTemplate>>,
+    ) -> Result<(), TuliproxError> {
         if self.target == SortTarget::Group {
             // What the user sets is not important, we allow this but force to use Group
-            if !matches!(self.field, ItemField::Group | ItemField::Title | ItemField::Name | ItemField::Caption) {
+            if !matches!(
+                self.field,
+                ItemField::Group | ItemField::Title | ItemField::Name | ItemField::Caption
+            ) {
                 return info_err_res!("Group sorting can only be done on the Group field");
             }
             self.field = ItemField::Group; // hard coded because we only can't match a group until we can use PlaylistGroup with filter
@@ -168,8 +177,14 @@ pub struct ConfigSortDto {
 }
 
 impl ConfigSortDto {
-    pub fn prepare(&mut self, templates: Option<&Vec<PatternTemplate>>) -> Result<(), TuliproxError> {
-        handle_tuliprox_error_result_list!(TuliproxErrorKind::Info, self.rules.iter_mut().map(|rule| rule.prepare(templates)));
+    pub fn prepare(
+        &mut self,
+        templates: Option<&Vec<PatternTemplate>>,
+    ) -> Result<(), TuliproxError> {
+        handle_tuliprox_error_result_list!(
+            TuliproxErrorKind::Info,
+            self.rules.iter_mut().map(|rule| rule.prepare(templates))
+        );
         Ok(())
     }
 }

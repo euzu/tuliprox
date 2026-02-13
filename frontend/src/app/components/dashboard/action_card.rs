@@ -1,5 +1,5 @@
-use yew::prelude::*;
 use crate::app::components::AppIcon;
+use yew::prelude::*;
 
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct ActionProps {
@@ -20,7 +20,6 @@ pub struct ActionProps {
 
 #[function_component]
 pub fn ActionCard(props: &ActionProps) -> Html {
-
     html! {
         <div class={classes!("tp__action-card", if props.classname.is_empty() {String::new()} else {props.classname.to_string()})}>
           <div class="tp__action-card__icon">

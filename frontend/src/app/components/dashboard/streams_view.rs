@@ -1,10 +1,10 @@
-use std::rc::Rc;
-use yew::prelude::*;
-use yew_i18n::use_translation;
 use crate::app::components::{Card, StatusCard, StreamsTable};
 use crate::app::StatusContext;
 use crate::hooks::use_service_context;
 use crate::model::EventMessage;
+use std::rc::Rc;
+use yew::prelude::*;
+use yew_i18n::use_translation;
 
 #[function_component]
 pub fn StreamsView() -> Html {
@@ -16,7 +16,13 @@ pub fn StreamsView() -> Html {
     let memo_streams = {
         let status = status_ctx.status.clone();
         use_memo(status, |s| {
-            s.as_ref().map(|st| st.active_user_streams.iter().cloned().map(Rc::new).collect::<Vec<_>>())
+            s.as_ref().map(|st| {
+                st.active_user_streams
+                    .iter()
+                    .cloned()
+                    .map(Rc::new)
+                    .collect::<Vec<_>>()
+            })
         })
     };
 
@@ -38,8 +44,13 @@ pub fn StreamsView() -> Html {
         let status_ctx = status_ctx.clone();
         let provider_connections = provider_connections.clone();
         use_effect_with(status_ctx.status, move |status| {
-            let count = status.as_ref().map_or(0, |status|
-                status.active_provider_connections.as_ref().map(|map| map.values().sum::<usize>()).unwrap_or(0));
+            let count = status.as_ref().map_or(0, |status| {
+                status
+                    .active_provider_connections
+                    .as_ref()
+                    .map(|map| map.values().sum::<usize>())
+                    .unwrap_or(0)
+            });
             provider_connections.set(count);
         })
     }

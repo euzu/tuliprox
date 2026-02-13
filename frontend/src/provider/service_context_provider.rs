@@ -1,17 +1,16 @@
-
-use yew::prelude::*;
 use crate::hooks::ServiceContext;
 use crate::model::WebConfig;
+use yew::prelude::*;
 
 #[derive(Properties, Clone, PartialEq)]
 pub struct ServiceContextProps {
     pub children: Children,
-    pub config: WebConfig
+    pub config: WebConfig,
 }
 
 #[function_component]
 pub fn ServiceContextProvider(props: &ServiceContextProps) -> Html {
-    let service_ctx = use_state(||ServiceContext::new(&props.config));
+    let service_ctx = use_state(|| ServiceContext::new(&props.config));
 
     html! {
         <ContextProvider<UseStateHandle<ServiceContext>> context={service_ctx}>

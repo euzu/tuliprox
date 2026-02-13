@@ -1,6 +1,6 @@
 use crate::error::TuliproxError;
 use crate::model::MsgKind;
-use crate::utils::{is_false, is_blank_optional_string, is_blank_optional_str};
+use crate::utils::{is_blank_optional_str, is_blank_optional_string, is_false};
 
 #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -16,9 +16,7 @@ pub struct TelegramMessagingConfigDto {
 
 impl TelegramMessagingConfigDto {
     pub fn is_empty(&self) -> bool {
-        self.bot_token.trim().is_empty()
-            && self.chat_ids.is_empty()
-            && self.templates.is_empty()
+        self.bot_token.trim().is_empty() && self.chat_ids.is_empty() && self.templates.is_empty()
     }
 }
 
@@ -93,7 +91,7 @@ impl MessagingConfigDto {
     pub fn is_empty(&self) -> bool {
         self.notify_on.is_empty()
             && (self.telegram.is_none() || self.telegram.as_ref().is_some_and(|c| c.is_empty()))
-            && (self.rest.is_none()  || self.rest.as_ref().is_some_and(|c| c.is_empty()))
+            && (self.rest.is_none() || self.rest.as_ref().is_some_and(|c| c.is_empty()))
             && (self.pushover.is_none() || self.pushover.as_ref().is_some_and(|c| c.is_empty()))
             && (self.discord.is_none() || self.discord.as_ref().is_some_and(|c| c.is_empty()))
     }

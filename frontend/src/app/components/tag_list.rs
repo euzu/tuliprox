@@ -1,7 +1,7 @@
+use crate::app::components::chip::Chip;
+use std::rc::Rc;
 use web_sys::HtmlInputElement;
 use yew::prelude::*;
-use std::rc::Rc;
-use crate::app::components::chip::Chip;
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Tag {
@@ -74,7 +74,10 @@ pub fn TagList(props: &TagListProps) -> Html {
                 let val = (*new_tag).trim().to_string();
                 if !val.is_empty() && !tag_state.iter().any(|t| t.label == val) {
                     let mut updated = (*tag_state).clone();
-                    updated.push(Rc::new(Tag { label: val.clone(), class: None }));
+                    updated.push(Rc::new(Tag {
+                        label: val.clone(),
+                        class: None,
+                    }));
                     on_change.emit(updated.clone());
                     tag_state.set(updated);
                 }

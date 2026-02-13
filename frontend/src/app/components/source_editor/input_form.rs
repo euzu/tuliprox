@@ -1,17 +1,30 @@
 use crate::app::components::config::HasFormData;
 use crate::app::components::key_value_editor::KeyValueEditor;
 use crate::app::components::select::Select;
-use crate::app::components::{AliasItemForm, BlockId, BlockInstance, Card, DropDownOption, DropDownSelection, EditMode, EpgSourceItemForm, IconButton, Panel, RadioButtonGroup, SourceEditorContext, TextButton, TitledCard};
-use crate::{config_field_child, edit_field_bool, edit_field_date, edit_field_number_i16, edit_field_number_u16, edit_field_text, edit_field_text_option, generate_form_reducer, html_if};
+use crate::app::components::{
+    AliasItemForm, BlockId, BlockInstance, Card, DropDownOption, DropDownSelection, EditMode,
+    EpgSourceItemForm, IconButton, Panel, RadioButtonGroup, SourceEditorContext, TextButton,
+    TitledCard,
+};
+use crate::{
+    config_field_child, edit_field_bool, edit_field_date, edit_field_number_i16,
+    edit_field_number_u16, edit_field_text, edit_field_text_option, generate_form_reducer, html_if,
+};
 use shared::error::TuliproxError;
 use shared::info_err_res;
-use shared::model::{ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, EpgConfigDto, EpgSourceDto, InputFetchMethod, InputType, StagedInputDto};
+use shared::model::{
+    ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, EpgConfigDto, EpgSourceDto,
+    InputFetchMethod, InputType, StagedInputDto,
+};
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::rc::Rc;
 use std::str::FromStr;
 use web_sys::MouseEvent;
-use yew::{function_component, html, use_context, use_effect_with, use_memo, use_reducer, use_state, Callback, Html, Properties, UseReducerHandle};
+use yew::{
+    function_component, html, use_context, use_effect_with, use_memo, use_reducer, use_state,
+    Callback, Html, Properties, UseReducerHandle,
+};
 use yew_i18n::use_translation;
 
 const LABEL_NAME: &str = "LABEL.NAME";
@@ -47,7 +60,6 @@ const LABEL_STAGED: &str = "LABEL.STAGED";
 const LABEL_ADVANCED: &str = "LABEL.ADVANCED";
 const LABEL_ALIAS: &str = "LABEL.ALIAS";
 
-
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum InputFormPage {
     Main,
@@ -82,13 +94,17 @@ impl FromStr for InputFormPage {
 
 impl Display for InputFormPage {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", match *self {
-            InputFormPage::Main => Self::MAIN,
-            InputFormPage::Options => Self::OPTIONS,
-            InputFormPage::Staged => Self::STAGED,
-            InputFormPage::Advanced => Self::ADVANCED,
-            InputFormPage::Alias => Self::ALIAS,
-        })
+        write!(
+            f,
+            "{}",
+            match *self {
+                InputFormPage::Main => Self::MAIN,
+                InputFormPage::Options => Self::OPTIONS,
+                InputFormPage::Staged => Self::STAGED,
+                InputFormPage::Advanced => Self::ADVANCED,
+                InputFormPage::Alias => Self::ALIAS,
+            }
+        )
     }
 }
 
@@ -208,12 +224,13 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             // InputType::M3uBatch,
             // InputType::XtreamBatch,
         ]
-            .iter()
-            .map(|t| DropDownOption {
-                id: t.to_string(),
-                label: html! { t.to_string() },
-                selected: t == default_it,
-            }).collect::<Vec<DropDownOption>>()
+        .iter()
+        .map(|t| DropDownOption {
+            id: t.to_string(),
+            label: html! { t.to_string() },
+            selected: t == default_it,
+        })
+        .collect::<Vec<DropDownOption>>()
     });
 
     {
@@ -229,7 +246,10 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         use_effect_with(deps, move |(_, cfg)| {
             if let Some(input) = cfg {
                 if input.input_type.is_library()
-                    && matches!(*view_visible, InputFormPage::Staged | InputFormPage::Advanced)
+                    && matches!(
+                        *view_visible,
+                        InputFormPage::Staged | InputFormPage::Advanced
+                    )
                 {
                     view_visible.set(InputFormPage::Main);
                 }
@@ -237,25 +257,40 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 input_form_state.dispatch(ConfigInputFormAction::SetAll(input.as_ref().clone()));
 
                 input_options_state.dispatch(ConfigInputOptionsFormAction::SetAll(
-                    input.options.as_ref().map_or_else(ConfigInputOptionsDto::default, |d| d.clone()),
+                    input
+                        .options
+                        .as_ref()
+                        .map_or_else(ConfigInputOptionsDto::default, |d| d.clone()),
                 ));
 
                 staged_input_state.dispatch(StagedInputFormAction::SetAll(
-                    input.staged.as_ref().map_or_else(StagedInputDto::default, |c| c.clone()),
+                    input
+                        .staged
+                        .as_ref()
+                        .map_or_else(StagedInputDto::default, |c| c.clone()),
                 ));
 
                 // Load headers
                 headers_state.set(input.headers.clone());
 
                 // Load EPG sources
-                epg_sources_state.set(input.epg.as_ref().and_then(|epg| epg.sources.clone()).unwrap_or_default());
+                epg_sources_state.set(
+                    input
+                        .epg
+                        .as_ref()
+                        .and_then(|epg| epg.sources.clone())
+                        .unwrap_or_default(),
+                );
 
                 // Load aliases
                 aliases_state.set(input.aliases.clone().unwrap_or_default());
             } else {
                 input_form_state.dispatch(ConfigInputFormAction::SetAll(ConfigInputDto::default()));
-                input_options_state.dispatch(ConfigInputOptionsFormAction::SetAll(ConfigInputOptionsDto::default()));
-                staged_input_state.dispatch(StagedInputFormAction::SetAll(StagedInputDto::default()));
+                input_options_state.dispatch(ConfigInputOptionsFormAction::SetAll(
+                    ConfigInputOptionsDto::default(),
+                ));
+                staged_input_state
+                    .dispatch(StagedInputFormAction::SetAll(StagedInputDto::default()));
                 headers_state.set(HashMap::new());
                 epg_sources_state.set(Vec::new());
                 aliases_state.set(Vec::new());
@@ -329,7 +364,6 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             edit_alias.set(None);
         })
     };
-
 
     let handle_remove_alias_list_item = {
         let alias_list = aliases_state.clone();
@@ -706,7 +740,11 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             // Handle EPG: update sources but preserve other fields if present
             let epg_sources = (*epg_sources_state).clone();
             if let Some(mut epg_cfg) = input.epg.take() {
-                epg_cfg.sources = if epg_sources.is_empty() { None } else { Some(epg_sources) };
+                epg_cfg.sources = if epg_sources.is_empty() {
+                    None
+                } else {
+                    Some(epg_sources)
+                };
                 input.epg = if epg_cfg.sources.is_some() || epg_cfg.smart_match.is_some() {
                     Some(epg_cfg)
                 } else {
@@ -730,7 +768,8 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             if let Some(on_apply) = &on_apply {
                 on_apply.emit(input);
             } else if let (Some(ctx), Some(block_id)) = (&source_editor_ctx, block_id) {
-                ctx.on_form_change.emit((block_id, BlockInstance::Input(Rc::new(input))));
+                ctx.on_form_change
+                    .emit((block_id, BlockInstance::Input(Rc::new(input))));
                 ctx.edit_mode.set(EditMode::Inactive);
             }
         })
@@ -748,7 +787,6 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     };
 
     let library_input = input_form_state.form.input_type.is_library();
-
 
     let render_edit_mode = || {
         html! {

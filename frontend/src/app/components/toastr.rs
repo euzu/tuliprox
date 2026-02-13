@@ -1,8 +1,8 @@
+use crate::app::components::IconButton;
 use crate::hooks::use_service_context;
 use crate::services::{Toast, ToastCloseMode, ToastType};
 use yew::prelude::*;
 use yew_hooks::use_mount;
-use crate::app::components::IconButton;
 
 #[function_component]
 pub fn ToastrView() -> Html {
@@ -13,17 +13,19 @@ pub fn ToastrView() -> Html {
         // Subscribe to toast updates when component mounts
         let service_ctx = service_ctx.clone();
         let toasts = toasts.clone();
-        use_mount(move || service_ctx.toastr.subscribe(move |new_toasts| {
-            toasts.set(new_toasts);
-        }));
+        use_mount(move || {
+            service_ctx.toastr.subscribe(move |new_toasts| {
+                toasts.set(new_toasts);
+            })
+        });
     }
 
     let render_message = |msg: &str| {
         html! {
-        <>
-            { for msg.split('\n').map(|line| html! { <span>{ line }</span> }) }
-        </>
-       }
+         <>
+             { for msg.split('\n').map(|line| html! { <span>{ line }</span> }) }
+         </>
+        }
     };
 
     if toasts.is_empty() {

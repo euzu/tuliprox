@@ -143,7 +143,6 @@ impl fmt::Display for VideoBitDepth {
     }
 }
 
-
 /// A struct that holds all classified media quality features.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MediaQuality {
@@ -167,24 +166,28 @@ impl MediaQuality {
         if self.video_codec != VideoCodec::Other {
             parts.push(self.video_codec.to_string());
         }
-        
+
         if self.bit_depth != VideoBitDepth::Eight {
-             parts.push(self.bit_depth.to_string());
+            parts.push(self.bit_depth.to_string());
         }
 
         if self.dynamic_range != VideoDynamicRange::SDR {
             parts.push(self.dynamic_range.to_string());
         }
-        
+
         if self.audio_codec != AudioCodec::Other {
             parts.push(self.audio_codec.to_string());
         }
         if self.audio_channels != AudioChannels::Unknown {
             parts.push(self.audio_channels.to_string());
         }
-        
+
         // Filter empty strings from Display impls
-        let valid_parts: Vec<&str> = parts.iter().map(std::string::String::as_str).filter(|s| !s.is_empty()).collect();
+        let valid_parts: Vec<&str> = parts
+            .iter()
+            .map(std::string::String::as_str)
+            .filter(|s| !s.is_empty())
+            .collect();
 
         valid_parts.join(separator)
     }
@@ -220,7 +223,14 @@ impl MediaQuality {
         Some((audio_codec, audio_channels))
     }
 
-    fn from_ffprobe_info_video(video: Option<&str>) -> Option<(VideoResolution, VideoCodec, VideoDynamicRange, VideoBitDepth)> {
+    fn from_ffprobe_info_video(
+        video: Option<&str>,
+    ) -> Option<(
+        VideoResolution,
+        VideoCodec,
+        VideoDynamicRange,
+        VideoBitDepth,
+    )> {
         let video_info = video.and_then(|v| serde_json::from_str::<Map<String, Value>>(v).ok())?;
 
         // 1. Classify video resolution from height
@@ -269,11 +279,11 @@ impl MediaQuality {
         let bit_depth = get_value(&video_info, &["pix_fmt"])
             .and_then(|v| v.as_str().map(ToString::to_string))
             .map_or(VideoBitDepth::Eight, |fmt| {
-               if fmt.contains("10le") || fmt.contains("10be") {
-                   VideoBitDepth::Ten
-               } else {
-                   VideoBitDepth::Eight
-               }
+                if fmt.contains("10le") || fmt.contains("10be") {
+                    VideoBitDepth::Ten
+                } else {
+                    VideoBitDepth::Eight
+                }
             });
 
         Some((resolution, video_codec, dynamic_range, bit_depth))
@@ -286,12 +296,17 @@ impl MediaQuality {
         if audio.is_none() && video.is_none() {
             return None;
         }
-        
-        let (resolution, video_codec, dynamic_range, bit_depth) = Self::from_ffprobe_info_video(video)
-            .unwrap_or((VideoResolution::default(), VideoCodec::default(), VideoDynamicRange::default(), VideoBitDepth::default()));
-        
+
+        let (resolution, video_codec, dynamic_range, bit_depth) =
+            Self::from_ffprobe_info_video(video).unwrap_or((
+                VideoResolution::default(),
+                VideoCodec::default(),
+                VideoDynamicRange::default(),
+                VideoBitDepth::default(),
+            ));
+
         let (audio_codec, audio_channels) = Self::from_ffprobe_info_audio(audio)
-             .unwrap_or((AudioCodec::default(), AudioChannels::default()));
+            .unwrap_or((AudioCodec::default(), AudioChannels::default()));
 
         Some(Self {
             resolution,
@@ -308,24 +323,25 @@ impl MediaQuality {
     /// Returns false for empty arrays "[]" or objects without specific keys.
     pub fn is_valid_media_info(info: Option<&str>) -> bool {
         if let Some(json_str) = info {
-             if let Ok(json) = serde_json::from_str::<serde_json::Value>(json_str) {
-                 // API often returns [] for empty info
-                 if let Some(arr) = json.as_array() {
-                     return !arr.is_empty();
-                 }
-                 if let Some(obj) = json.as_object() {
-                     // Check for minimal necessary fields
-                     // For video: codec_name, width, height
-                     // For audio: codec_name, channels
-                     // We check generically if it looks populated
-                     return obj.contains_key("codec_name") || obj.contains_key("width") || obj.contains_key("channels");
-                 }
-             }
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(json_str) {
+                // API often returns [] for empty info
+                if let Some(arr) = json.as_array() {
+                    return !arr.is_empty();
+                }
+                if let Some(obj) = json.as_object() {
+                    // Check for minimal necessary fields
+                    // For video: codec_name, width, height
+                    // For audio: codec_name, channels
+                    // We check generically if it looks populated
+                    return obj.contains_key("codec_name")
+                        || obj.contains_key("width")
+                        || obj.contains_key("channels");
+                }
+            }
         }
         false
     }
 }
-
 
 // Helper to get a value by trying a prioritized list of field names.
 fn get_value(obj: &Map<String, Value>, fields: &[&str]) -> Option<Value> {

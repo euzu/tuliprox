@@ -1,11 +1,15 @@
-use std::borrow::Cow;
-use std::sync::{Arc};
-use deunicode::deunicode_with_tofu_cow;
 use crate::utils::CONSTANTS;
+use deunicode::deunicode_with_tofu_cow;
+use std::borrow::Cow;
+use std::sync::Arc;
 
 /// Cleans a playlist title by removing common IPTV prefixes (e.g., "[US]", "┃DE┃").
 pub fn clean_playlist_title(title: &str) -> String {
-    CONSTANTS.re_clean_title.replace(title, "").trim().to_string()
+    CONSTANTS
+        .re_clean_title
+        .replace(title, "")
+        .trim()
+        .to_string()
 }
 
 pub trait Capitalize {
@@ -67,7 +71,8 @@ pub fn get_non_empty_str<'a>(first: &'a str, second: &'a str, third: &'a str) ->
 }
 
 pub fn is_blank_optional_str(s: Option<&str>) -> bool {
-    s.as_ref().is_none_or(|s| s.chars().all(|c| c.is_whitespace()))
+    s.as_ref()
+        .is_none_or(|s| s.chars().all(|c| c.is_whitespace()))
 }
 
 pub fn trim_slash(s: &str) -> Cow<'_, str> {
@@ -82,7 +87,7 @@ pub fn trim_slash(s: &str) -> Cow<'_, str> {
 pub fn trim_last_slash(s: &str) -> Cow<'_, str> {
     if s.ends_with('/') {
         if let Some(stripped) = s.strip_suffix('/') {
-          return  Cow::Owned(stripped.to_string())
+            return Cow::Owned(stripped.to_string());
         }
     }
     Cow::Borrowed(s)
@@ -97,7 +102,6 @@ impl Substring for String {
         self.chars().skip(from).take(to - from).collect()
     }
 }
-
 
 pub fn truncate_string(s: &str, max_len: usize) -> String {
     if s.chars().count() <= max_len {
@@ -136,11 +140,15 @@ pub fn humanize_snake_case(s: &str) -> String {
 }
 
 pub fn deunicode_string(s: &str) -> Cow<'_, str> {
-    deunicode_with_tofu_cow(s,  "[?]")
+    deunicode_with_tofu_cow(s, "[?]")
 }
 
 pub fn longest<'a>(a: &'a Arc<str>, b: &'a Arc<str>) -> &'a Arc<str> {
-   if a.len() >= b.len() { a } else { b }
+    if a.len() >= b.len() {
+        a
+    } else {
+        b
+    }
 }
 
 // ------------------------------------------------------------
@@ -170,14 +178,13 @@ macro_rules! concat_string {
     }};
 }
 
-
 #[cfg(test)]
 mod test {
-    use std::collections::HashSet;
-    use crate::utils::Capitalize;
+    use super::clean_playlist_title;
     use super::generate_random_string;
     use crate as shared; // allow path-based macro call in tests
-    use super::clean_playlist_title;
+    use crate::utils::Capitalize;
+    use std::collections::HashSet;
 
     #[test]
     fn test_generate_random_string() {

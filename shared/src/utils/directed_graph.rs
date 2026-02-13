@@ -71,7 +71,9 @@ where
                     self.dfs_find_cycles(neighbor, visited, recursion_stack, cycles);
                 } else if recursion_stack.contains(neighbor) {
                     // Cycle detected; collect the cycle path
-                    if let Some(cycle_start_index) = recursion_stack.iter().position(|n| n == neighbor) {
+                    if let Some(cycle_start_index) =
+                        recursion_stack.iter().position(|n| n == neighbor)
+                    {
                         let cycle = recursion_stack[cycle_start_index..].to_vec();
                         cycles.push(cycle);
                     }
@@ -95,19 +97,16 @@ where
     }
 
     // Depth-first search for cycle detection
-    fn dfs(
-        &self,
-        node: &K,
-        visited: &mut HashSet<K>,
-        recursion_stack: &mut HashSet<K>,
-    ) -> bool {
+    fn dfs(&self, node: &K, visited: &mut HashSet<K>, recursion_stack: &mut HashSet<K>) -> bool {
         if !visited.contains(node) {
             visited.insert(node.clone());
             recursion_stack.insert(node.clone());
 
             if let Some(neighbors) = self.adjacencies.get(node) {
                 for neighbor in neighbors {
-                    if (!visited.contains(neighbor) && self.dfs(neighbor, visited, recursion_stack)) || recursion_stack.contains(neighbor) {
+                    if (!visited.contains(neighbor) && self.dfs(neighbor, visited, recursion_stack))
+                        || recursion_stack.contains(neighbor)
+                    {
                         return true;
                     }
                 }
@@ -136,7 +135,6 @@ where
         Some(dependencies)
     }
 
-
     // Topological sort function
     pub fn topological_sort(&self) -> Option<Vec<K>> {
         let mut visited = HashSet::new();
@@ -144,7 +142,9 @@ where
         let mut result = Vec::new();
 
         for node in self.adjacencies.keys() {
-            if !visited.contains(node) && !self.dfs_topological_sort(node, &mut visited, &mut temp_mark, &mut result) {
+            if !visited.contains(node)
+                && !self.dfs_topological_sort(node, &mut visited, &mut temp_mark, &mut result)
+            {
                 return None; // Cycle detected
             }
         }
@@ -208,8 +208,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
     use crate::utils::DirectedGraph;
+    use std::collections::HashSet;
 
     fn are_vecs_equal(vec1: &Vec<&str>, vec2: &Vec<&str>) -> bool {
         let set1: HashSet<String> = vec1.iter().map(|s| (*s).to_string()).collect();
@@ -234,12 +234,10 @@ mod tests {
         graph.add_edge(&"D", &"B"); // Cyclic dependency: D -> B
         graph.add_edge(&"B", &"D"); // Cyclic dependency: B -> D
 
-
         let cycles = graph.find_cycles();
         assert!(!cycles.is_empty(), "No cyclic dependencies found.");
         // println!("{:?}", &cycles);
     }
-
 
     #[test]
     fn graph_dependency_test() {
@@ -254,7 +252,6 @@ mod tests {
         graph.add_edge(&"C", &"D");
         graph.add_edge(&"B", &"D");
 
-
         let cycles = graph.find_cycles();
         assert!(cycles.is_empty(), "cyclic dependencies found.");
 
@@ -264,13 +261,22 @@ mod tests {
         let dependencies = dependencies_opt.unwrap();
         let a_deps = dependencies.get("A");
         assert!(a_deps.is_some(), "No dependencies for A found");
-        assert!(are_vecs_equal(a_deps.unwrap(), &vec!["B"]), "Dependencies for A not match");
+        assert!(
+            are_vecs_equal(a_deps.unwrap(), &vec!["B"]),
+            "Dependencies for A not match"
+        );
         let b_deps = dependencies.get("B");
         assert!(b_deps.is_some(), "No dependencies for B found");
-        assert!(are_vecs_equal(b_deps.unwrap(), &vec!["C", "D"]), "Dependencies for B not match");
+        assert!(
+            are_vecs_equal(b_deps.unwrap(), &vec!["C", "D"]),
+            "Dependencies for B not match"
+        );
         let c_deps = dependencies.get("C");
         assert!(c_deps.is_some(), "No dependencies for C found");
-        assert!(are_vecs_equal(c_deps.unwrap(), &vec!["D"]), "Dependencies for C not match");
+        assert!(
+            are_vecs_equal(c_deps.unwrap(), &vec!["D"]),
+            "Dependencies for C not match"
+        );
         let d_deps = dependencies.get("D");
         assert!(d_deps.is_none(), "No dependencies for D found");
     }
@@ -303,7 +309,10 @@ mod tests {
         let sorted = graph.topological_sort();
         assert!(sorted.is_some(), "Could not sort");
         let sorted_list = sorted.unwrap();
-        assert!(are_vecs_equal(&sorted_list, &vec!["D", "A", "C", "B"]), "sort order wrong");
+        assert!(
+            are_vecs_equal(&sorted_list, &vec!["D", "A", "C", "B"]),
+            "sort order wrong"
+        );
     }
 
     #[test]
@@ -324,14 +333,15 @@ mod tests {
         graph.add_edge(&"G", &"C");
         graph.add_edge(&"G", &"F");
 
-
         let sorted = graph.topological_sort();
         assert!(sorted.is_some(), "Could not sort");
         let sorted_list = sorted.unwrap();
-        assert!(are_vecs_equal(&sorted_list, &vec!["F", "B", "A", "C", "E", "D", "G"]), "sort order wrong");
+        assert!(
+            are_vecs_equal(&sorted_list, &vec!["F", "B", "A", "C", "E", "D", "G"]),
+            "sort order wrong"
+        );
 
         // should be {"D": ["C", "E"], "G": ["C", "F"], "C": ["A", "B"]}
         assert!(graph.get_dependencies().is_some(), "No dependencies");
-
     }
 }
