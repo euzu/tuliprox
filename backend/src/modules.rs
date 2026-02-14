@@ -6,14 +6,13 @@ macro_rules! include_modules {
         extern crate pest;
         pub mod api;
         pub mod auth;
+        pub mod library;
         pub mod messaging;
         pub mod model;
         pub mod processing;
-        pub mod repository;
-        pub mod utils;
-        pub mod tools;
-        pub mod library;
         pub mod ptt;
-    }
+        pub mod repository;
+        pub mod tools;
+        pub mod utils;
+    };
 }
-

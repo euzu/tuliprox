@@ -1,5 +1,7 @@
-use std::collections::{HashMap, HashSet};
-use std::fmt::{Debug, Display, Formatter, Result};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::{Debug, Display, Formatter, Result},
+};
 
 #[derive(Debug)]
 pub struct DirectedGraph<K>
@@ -13,16 +15,10 @@ impl<K> DirectedGraph<K>
 where
     K: Eq + std::hash::Hash + Clone + Display + Debug,
 {
-    pub fn new() -> Self {
-        Self {
-            adjacencies: HashMap::new(),
-        }
-    }
+    pub fn new() -> Self { Self { adjacencies: HashMap::new() } }
 
     // Add a node to the graph, ignore if it already exists
-    pub fn add_node(&mut self, node: &K) {
-        self.adjacencies.entry(node.to_owned()).or_default();
-    }
+    pub fn add_node(&mut self, node: &K) { self.adjacencies.entry(node.to_owned()).or_default(); }
 
     // Add a directed edge to the graph, ignore if it already exists
     pub fn add_edge(&mut self, from: &K, to: &K) {
@@ -95,19 +91,16 @@ where
     }
 
     // Depth-first search for cycle detection
-    fn dfs(
-        &self,
-        node: &K,
-        visited: &mut HashSet<K>,
-        recursion_stack: &mut HashSet<K>,
-    ) -> bool {
+    fn dfs(&self, node: &K, visited: &mut HashSet<K>, recursion_stack: &mut HashSet<K>) -> bool {
         if !visited.contains(node) {
             visited.insert(node.clone());
             recursion_stack.insert(node.clone());
 
             if let Some(neighbors) = self.adjacencies.get(node) {
                 for neighbor in neighbors {
-                    if (!visited.contains(neighbor) && self.dfs(neighbor, visited, recursion_stack)) || recursion_stack.contains(neighbor) {
+                    if (!visited.contains(neighbor) && self.dfs(neighbor, visited, recursion_stack))
+                        || recursion_stack.contains(neighbor)
+                    {
                         return true;
                     }
                 }
@@ -135,7 +128,6 @@ where
         }
         Some(dependencies)
     }
-
 
     // Topological sort function
     pub fn topological_sort(&self) -> Option<Vec<K>> {
@@ -201,15 +193,13 @@ impl<K> Default for DirectedGraph<K>
 where
     K: Eq + std::hash::Hash + Clone + Display + Debug,
 {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
     use crate::utils::DirectedGraph;
+    use std::collections::HashSet;
 
     fn are_vecs_equal(vec1: &Vec<&str>, vec2: &Vec<&str>) -> bool {
         let set1: HashSet<String> = vec1.iter().map(|s| (*s).to_string()).collect();
@@ -234,12 +224,10 @@ mod tests {
         graph.add_edge(&"D", &"B"); // Cyclic dependency: D -> B
         graph.add_edge(&"B", &"D"); // Cyclic dependency: B -> D
 
-
         let cycles = graph.find_cycles();
         assert!(!cycles.is_empty(), "No cyclic dependencies found.");
         // println!("{:?}", &cycles);
     }
-
 
     #[test]
     fn graph_dependency_test() {
@@ -253,7 +241,6 @@ mod tests {
         graph.add_edge(&"B", &"C");
         graph.add_edge(&"C", &"D");
         graph.add_edge(&"B", &"D");
-
 
         let cycles = graph.find_cycles();
         assert!(cycles.is_empty(), "cyclic dependencies found.");
@@ -324,7 +311,6 @@ mod tests {
         graph.add_edge(&"G", &"C");
         graph.add_edge(&"G", &"F");
 
-
         let sorted = graph.topological_sort();
         assert!(sorted.is_some(), "Could not sort");
         let sorted_list = sorted.unwrap();
@@ -332,6 +318,5 @@ mod tests {
 
         // should be {"D": ["C", "E"], "G": ["C", "F"], "C": ["A", "B"]}
         assert!(graph.get_dependencies().is_some(), "No dependencies");
-
     }
 }

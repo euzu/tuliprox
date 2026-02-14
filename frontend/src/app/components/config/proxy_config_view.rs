@@ -1,13 +1,17 @@
+use crate::{
+    app::{
+        components::config::{
+            config_page::{ConfigForm, LABEL_PROXY_CONFIG},
+            config_view_context::ConfigViewContext,
+        },
+        context::ConfigContext,
+    },
+    config_field, config_field_optional, config_field_optional_hide, edit_field_text, edit_field_text_option,
+    generate_form_reducer,
+};
+use shared::model::ProxyConfigDto;
 use yew::prelude::*;
 use yew_i18n::use_translation;
-use shared::model::ProxyConfigDto;
-use crate::app::context::ConfigContext;
-use crate::app::components::config::config_view_context::ConfigViewContext;
-use crate::app::components::config::config_page::{ConfigForm, LABEL_PROXY_CONFIG};
-use crate::{
-    config_field, config_field_optional, config_field_optional_hide,
-    edit_field_text, edit_field_text_option, generate_form_reducer,
-};
 
 const LABEL_URL: &str = "LABEL.URL";
 const LABEL_USERNAME: &str = "LABEL.USERNAME";
@@ -29,9 +33,8 @@ pub fn ProxyConfigView() -> Html {
     let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");
     let config_view_ctx = use_context::<ConfigViewContext>().expect("ConfigViewContext not found");
 
-    let form_state: UseReducerHandle<ProxyConfigFormState> = use_reducer(|| {
-        ProxyConfigFormState { form: ProxyConfigDto::default(), modified: false }
-    });
+    let form_state: UseReducerHandle<ProxyConfigFormState> =
+        use_reducer(|| ProxyConfigFormState { form: ProxyConfigDto::default(), modified: false });
 
     {
         let on_form_change = config_view_ctx.on_form_change.clone();
@@ -64,12 +67,14 @@ pub fn ProxyConfigView() -> Html {
         }
     };
 
-    let render_edit_mode = || html! {
-        <div class="tp__proxy-config-config-view__body tp__config-view-page__body">
-            { edit_field_text!(form_state, translate.t(LABEL_URL), url, ProxyConfigFormAction::Url) }
-            { edit_field_text_option!(form_state, translate.t(LABEL_USERNAME), username, ProxyConfigFormAction::Username) }
-            { edit_field_text_option!(form_state, translate.t(LABEL_PASSWORD), password, ProxyConfigFormAction::Password) }
-        </div>
+    let render_edit_mode = || {
+        html! {
+            <div class="tp__proxy-config-config-view__body tp__config-view-page__body">
+                { edit_field_text!(form_state, translate.t(LABEL_URL), url, ProxyConfigFormAction::Url) }
+                { edit_field_text_option!(form_state, translate.t(LABEL_USERNAME), username, ProxyConfigFormAction::Username) }
+                { edit_field_text_option!(form_state, translate.t(LABEL_PASSWORD), password, ProxyConfigFormAction::Password) }
+            </div>
+        }
     };
 
     html! {

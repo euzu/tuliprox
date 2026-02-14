@@ -1,6 +1,6 @@
+use shared::model::HdHomeRunTargetOutputDto;
 use yew::prelude::*;
 use yew_i18n::use_translation;
-use shared::model::HdHomeRunTargetOutputDto;
 
 #[derive(Properties, PartialEq, Clone)]
 pub struct HdHomeRunOutputProps {

@@ -1,6 +1,5 @@
-use std::fmt::Display;
-use std::str::FromStr;
 use enum_iterator::Sequence;
+use std::{fmt::Display, str::FromStr};
 
 #[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq, Default)]
 pub enum ProcessingOrder {
@@ -30,14 +29,18 @@ impl ProcessingOrder {
 
 impl Display for ProcessingOrder {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", match *self {
-            Self::Frm => Self::FRM,
-            Self::Fmr => Self::FMR,
-            Self::Rfm => Self::RFM,
-            Self::Rmf => Self::RMF,
-            Self::Mfr => Self::MFR,
-            Self::Mrf => Self::MRF,
-        })
+        write!(
+            f,
+            "{}",
+            match *self {
+                Self::Frm => Self::FRM,
+                Self::Fmr => Self::FMR,
+                Self::Rfm => Self::RFM,
+                Self::Rmf => Self::RMF,
+                Self::Mfr => Self::MFR,
+                Self::Mrf => Self::MRF,
+            }
+        )
     }
 }
 

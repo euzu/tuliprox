@@ -1,19 +1,23 @@
-use crate::app::components::{Breadcrumbs, EpgSourceSelector, NoContent};
-use crate::hooks::use_service_context;
-use crate::model::{BusyStatus, EventMessage};
-use crate::utils::set_timeout;
+use crate::{
+    app::components::{Breadcrumbs, EpgSourceSelector, NoContent},
+    hooks::use_service_context,
+    model::{BusyStatus, EventMessage},
+    utils::set_timeout,
+};
 use chrono::{Datelike, Local, TimeZone, Utc};
 use gloo_timers::callback::{Interval, Timeout};
-use shared::model::{EpgTv, PlaylistEpgRequest};
-use std::cell::RefCell;
-use std::rc::Rc;
-use wasm_bindgen::prelude::Closure;
-use wasm_bindgen::JsCast;
+use shared::{
+    concat_string,
+    model::{EpgTv, PlaylistEpgRequest},
+};
+use std::{cell::RefCell, rc::Rc};
+use wasm_bindgen::{prelude::Closure, JsCast};
 use web_sys::{window, HtmlElement};
-use yew::platform::spawn_local;
-use yew::{classes, function_component, html, use_effect_with, use_memo, use_node_ref, use_state, Callback, Html, UseStateHandle};
+use yew::{
+    classes, function_component, html, platform::spawn_local, use_effect_with, use_memo, use_node_ref, use_state,
+    Callback, Html, UseStateHandle,
+};
 use yew_i18n::use_translation;
-use shared::concat_string;
 
 const TIME_BLOCK_WIDTH: f64 = 210.0;
 const TIME_BLOCK_MINS: i64 = 30;
@@ -50,7 +54,12 @@ pub fn EpgView() -> Html {
             spawn_local(async move {
                 let playlist_epg = service_ctx.playlist.get_playlist_epg(req).await;
                 service_ctx.event.broadcast(EventMessage::Busy(BusyStatus::Hide));
-                set_timeout(move || { epg_set.set(playlist_epg); }, 16);
+                set_timeout(
+                    move || {
+                        epg_set.set(playlist_epg);
+                    },
+                    16,
+                );
             });
         })
     };
@@ -64,7 +73,9 @@ pub fn EpgView() -> Html {
 
             let calculate_position = Rc::new(move |epg_tv: &UseStateHandle<Option<EpgTv>>, recenter: bool| {
                 if let Some(tv) = &**epg_tv {
-                    if let (Some(div), Some(now_line)) = (container_ref.cast::<HtmlElement>(), now_line_ref.cast::<HtmlElement>()) {
+                    if let (Some(div), Some(now_line)) =
+                        (container_ref.cast::<HtmlElement>(), now_line_ref.cast::<HtmlElement>())
+                    {
                         let now = Utc::now().timestamp();
                         if now >= tv.start && now <= tv.stop {
                             let start_window_secs = (tv.start / (TIME_BLOCK_MINS * 60)) * (TIME_BLOCK_MINS * 60);
@@ -98,9 +109,7 @@ pub fn EpgView() -> Html {
         let root = doc.document_element().unwrap(); // <html>
         let style = window().unwrap().get_computed_style(&root).unwrap().unwrap();
 
-        let row_height = style.get_property_value("--epg-row-height")
-            .unwrap_or_else(|_| String::new()); // fallback if not set
-
+        let row_height = style.get_property_value("--epg-row-height").unwrap_or_else(|_| String::new()); // fallback if not set
 
         row_height.trim_end_matches("px").parse::<usize>().unwrap_or(60).max(1)
     });

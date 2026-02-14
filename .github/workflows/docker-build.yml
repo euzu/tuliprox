@@ -1,8 +1,5 @@
 name: Docker Build and Push
 
-run-name: >-
-  ${{ github.workflow }}${{ github.event_name == 'workflow_dispatch' && format(' [{0}] {1}:{2}', inputs.run_key, inputs.branch, inputs.choice) || '' }}
-
 permissions:
   contents: write
   packages: write
@@ -12,266 +9,130 @@ on:
     inputs:
       branch:
         type: choice
-        description: Target branch to build/push for
-        required: true
+        description: Target branch
+        options: [develop, master]
         default: develop
-        options:
-          - develop
-          - master
       choice:
         type: choice
-        description: Trigger build and optionally bump version
-        required: true
+        description: Version bump
+        options: [none, major, minor, patch]
         default: none
-        options:
-          - none
-          - major
-          - minor
-          - patch
-      run_key:
-        type: string
-        description: Correlation id (optional)
-        required: false
-        default: ""
   push:
-    branches:
-      - develop
+    branches: [develop]
+
+# Avoid multiple parallel builds for the same branch to prevent race conditions
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false # Set to true if you want to abort old builds immediately
 
 jobs:
   docker-build:
     runs-on: ubuntu-latest
     if: >-
-      (
-        github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/develop'
-      ) && (
-        github.event_name != 'push' || github.actor != 'github-actions[bot]'
-      ) && (
-        github.event_name != 'push' ||
-        github.event.head_commit.message == null ||
-        !startsWith(github.event.head_commit.message, 'ci: bump version v')
-      )
+      (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/develop') &&
+      (github.event_name != 'push' || github.actor != 'github-actions[bot]')
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.branch || github.ref }}
-        
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+          # Ensure we always have the right branch context
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.branch || github.ref }}
+
+      - name: Install Rust Tools (Binaries)
+        uses: taiki-e/install-action@v2
         with:
-          platforms: linux/amd64,linux/arm64
-      
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-        with:
-          platforms: linux/amd64,linux/arm64
-          
-      - name: Create and use multi-platform builder
-        run: |
-          docker buildx create --name multiarch --use --bootstrap
-          docker buildx inspect multiarch
-      
-      - name: Install Rust
+          tool: cross,trunk,wasm-bindgen-cli,cargo-edit
+
+      - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl,wasm32-unknown-unknown
 
-      - name: Detect runner image/libc
-        id: runner_env
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "image_os=${ImageOS:-unknown}" >> "$GITHUB_OUTPUT"
-          echo "image_version=${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
-          if command -v ldd >/dev/null 2>&1; then
-            glibc="$(ldd --version 2>/dev/null | head -n1 | awk '{print $NF}')"
-          else
-            glibc="unknown"
-          fi
-          echo "glibc=${glibc:-unknown}" >> "$GITHUB_OUTPUT"
-          
-      - name: Cache cargo tools
-        id: cache-tools
-        uses: actions/cache@v4
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/bin
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-${{ steps.runner_env.outputs.image_os }}-${{ steps.runner_env.outputs.image_version }}-${{ steps.runner_env.outputs.glibc }}-cargo-tools-v2
-          restore-keys: |
-            ${{ runner.os }}-${{ steps.runner_env.outputs.image_os }}-${{ steps.runner_env.outputs.image_version }}-${{ steps.runner_env.outputs.glibc }}-cargo-tools-
+          cache-targets: "true"
 
-      - name: Install cross
-        run: |
-          if ! command -v cross &> /dev/null; then
-            cargo install cross --git https://github.com/cross-rs/cross
-          fi
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
-      - name: Install trunk
-        run: |
-          if ! command -v trunk &> /dev/null; then
-            RUSTFLAGS="" cargo install trunk --locked
-          fi
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Install wasm-bindgen-cli
-        run: |
-          if ! command -v wasm-bindgen &> /dev/null; then
-            cargo install wasm-bindgen-cli
-          fi
-
-      - name: Install cargo-edit
-        run: |
-          if ! command -v cargo-set-version &> /dev/null; then
-            cargo install cargo-edit --locked
-          fi
-
-      - name: Cache cargo registry and dependencies
-        id: cache-cargo-deps
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-          key: ${{ runner.os }}-${{ steps.runner_env.outputs.image_os }}-${{ steps.runner_env.outputs.image_version }}-${{ steps.runner_env.outputs.glibc }}-cargo-deps-v2-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/Cargo.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ steps.runner_env.outputs.image_os }}-${{ steps.runner_env.outputs.image_version }}-${{ steps.runner_env.outputs.glibc }}-cargo-deps-v2-${{ hashFiles('**/Cargo.lock') }}-
-            ${{ runner.os }}-${{ steps.runner_env.outputs.image_os }}-${{ steps.runner_env.outputs.image_version }}-${{ steps.runner_env.outputs.glibc }}-cargo-deps-v2-
-            ${{ runner.os }}-cargo-deps-
-      
-      - name: Cache Docker buildx
-        uses: actions/cache@v4
-        with:
-          path: /tmp/.buildx-cache
-          key: ${{ runner.os }}-buildx-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-buildx-
-      
-      - name: Cache frontend dist
-        id: cache-frontend
-        uses: actions/cache@v4
-        with:
-          path: frontend/dist
-          key: ${{ runner.os }}-frontend-${{ hashFiles('frontend/**/*', 'shared/**/*') }}-${{ hashFiles('frontend/Cargo.toml', 'frontend/Trunk.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-frontend-
-      
-      - name: Cache cross-compilation tools
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cross
-            ~/.rustup/toolchains/*/lib/rustlib/x86_64-unknown-linux-musl
-            ~/.rustup/toolchains/*/lib/rustlib/aarch64-unknown-linux-musl
-          key: ${{ runner.os }}-cross-${{ hashFiles('**/Cargo.lock') }}-v2
-          restore-keys: |
-            ${{ runner.os }}-cross-
-      
       - name: Cache built resources
         id: cache-resources
         uses: actions/cache@v4
         with:
-          path: |
-            resources/*.ts
-          key: ${{ runner.os }}-resources-${{ hashFiles('resources/*.jpg') }}-v1
-          restore-keys: |
-            ${{ runner.os }}-resources-
-      
-      - name: Install ffmpeg (only if resources not cached)
+          path: resources/*.ts
+          key: ${{ runner.os }}-resources-${{ hashFiles('resources/*.jpg') }}
+
+      - name: Install ffmpeg
         if: steps.cache-resources.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
 
-      - name: Bump patch version (develop)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
-        run: ./bin/inc_version.sh
-
-      - name: Set version (manual)
-        if: github.event_name == 'workflow_dispatch'
-        shell: bash
+      - name: Build TS resources
+        if: steps.cache-resources.outputs.cache-hit != 'true'
         run: |
-          CHOICE='${{ github.event.inputs.choice }}'
-          case "${CHOICE:-none}" in
-            none) echo "Skipping version bump" ;;
-            major) ./bin/inc_version.sh m ;;
-            minor) ./bin/inc_version.sh p ;;
-            patch) ./bin/inc_version.sh ;;
-            *)     echo "🧨 Error: Unsupported option"; exit 1 ;;
-          esac
+          chmod +x ./bin/build_resources.sh
+          ./bin/build_resources.sh
 
-      - name: Commit version bump (local)
-        id: version_commit
-        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-        shell: bash
+      - name: Verify TS resources
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          FILES=(Cargo.lock backend/Cargo.lock backend/Cargo.toml frontend/Cargo.toml shared/Cargo.toml)
-          for f in "${FILES[@]}"; do
-            if [ -f "$f" ]; then
-              git add "$f"
+          required_resources=(
+            "channel_unavailable"
+            "user_connections_exhausted"
+            "provider_connections_exhausted"
+            "user_account_expired"
+            "panel_api_provisioning"
+          )
+          for resource in "${required_resources[@]}"; do
+            if [[ ! -f "resources/${resource}.ts" ]]; then
+              echo "🧨 Missing resource: resources/${resource}.ts"
+              exit 1
             fi
           done
 
+      - name: Handle Version Bump
+        run: |
+          chmod +x ./bin/inc_version.sh
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            ./bin/inc_version.sh
+          else
+            case "${{ github.event.inputs.choice }}" in
+              major) ./bin/inc_version.sh m ;;
+              minor) ./bin/inc_version.sh p ;;
+              patch) ./bin/inc_version.sh ;;
+            esac
+          fi
+
+      - name: Commit version bump
+        id: version_commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .
           if git diff --cached --quiet; then
             echo "did_commit=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          VERSION="$(grep '^version' backend/Cargo.toml | head -n1 | cut -d'"' -f2)"
-          if [ -n "${VERSION}" ]; then
-            git commit -m "ci: bump version v${VERSION}"
           else
-            git commit -m "ci: bump version"
+            VERSION=$(grep '^version' backend/Cargo.toml | head -n1 | cut -d'"' -f2)
+            git commit -m "ci: bump version v$VERSION"
+            echo "did_commit=true" >> "$GITHUB_OUTPUT"
           fi
-          echo "did_commit=true" >> "$GITHUB_OUTPUT"
-
-      - name: Extract branch name
-        shell: bash
-        id: extract_branch
-        run: |
-          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
-            echo "branch=${{ inputs.branch }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "branch=${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Make build script executable
-        run: chmod +x ./bin/build_docker.sh
 
       - name: Build and push Docker images
         env:
           GITHUB_IO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO_OWNER: ${{ github.repository_owner }}
-          FRONTEND_CACHE_HIT: ${{ steps.cache-frontend.outputs.cache-hit }}
-          CARGO_DEPS_CACHE_HIT: ${{ steps.cache-cargo-deps.outputs.cache-hit }}
-          BUILDX_CACHE_FROM: type=local,src=/tmp/.buildx-cache
-          BUILDX_CACHE_TO: type=local,dest=/tmp/.buildx-cache-new,mode=max
-        run: ./bin/build_docker.sh ${{ steps.extract_branch.outputs.branch }}
+        run: |
+          chmod +x ./bin/build_docker.sh
+          ./bin/build_docker.sh ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.branch || 'develop' }}
 
       - name: Push version bump
         if: success() && steps.version_commit.outputs.did_commit == 'true'
-        shell: bash
         run: |
-          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
-            BRANCH='${{ inputs.branch }}'
-          else
-            BRANCH="${GITHUB_REF#refs/heads/}"
-          fi
-
-          if [[ "${BRANCH}" != "develop" && "${BRANCH}" != "master" ]]; then
-            echo "Skipping push: unsupported branch '${BRANCH}'"
-            exit 0
-          fi
-
-          git push origin "HEAD:${BRANCH}"
-
-      - name: Move buildx cache
-        run: |
-          rm -rf /tmp/.buildx-cache
-          mv /tmp/.buildx-cache-new /tmp/.buildx-cache || true
+          # Use origin HEAD to push to the correct remote branch
+          git push origin HEAD

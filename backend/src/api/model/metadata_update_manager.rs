@@ -277,12 +277,12 @@ impl MetadataUpdateManager {
                 (UpdateTask::ResolveVod { reason: r1, delay: d1, .. }, UpdateTask::ResolveVod { reason: r2, delay: d2, .. })
                 | (UpdateTask::ResolveSeries { reason: r1, delay: d1, .. }, UpdateTask::ResolveSeries { reason: r2, delay: d2, .. })
                 | (UpdateTask::ProbeStream { reason: r1, delay: d1, .. }, UpdateTask::ProbeStream { reason: r2, delay: d2, .. }) => {
-                    *r1 = *r1 | r2;
+                    *r1 |= r2;
                     *d1 = min(*d1, d2);
                     merged = true;
                 }
                 (UpdateTask::ProbeLive { reason: r1, delay: d1, interval: i1, .. }, UpdateTask::ProbeLive { reason: r2, delay: d2, interval: i2, .. }) => {
-                    *r1 = *r1 | r2;
+                    *r1 |= r2;
                     *d1 = min(*d1, d2);
                     *i1 = min(*i1, i2);
                     merged = true;

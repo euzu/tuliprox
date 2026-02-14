@@ -1,4 +1,7 @@
-use crate::utils::{is_true, default_as_true, default_token_ttl_mins, is_default_token_ttl_mins, is_blank_optional_string, is_blank_optional_str};
+use crate::utils::{
+    default_as_true, default_token_ttl_mins, is_blank_optional_str, is_blank_optional_string,
+    is_default_token_ttl_mins, is_true,
+};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]

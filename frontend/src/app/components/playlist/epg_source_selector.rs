@@ -1,14 +1,16 @@
-use crate::app::components::input::Input;
-use crate::app::components::{Card, CollapsePanel, InputRow, Panel, PlaylistContext, RadioButtonGroup, TextButton};
-use crate::hooks::use_service_context;
-use crate::model::ExplorerSourceType;
+use crate::{
+    app::components::{
+        input::Input, Card, CollapsePanel, InputRow, Panel, PlaylistContext, RadioButtonGroup, TextButton,
+    },
+    hooks::use_service_context,
+    html_if,
+    model::ExplorerSourceType,
+};
 use shared::model::PlaylistEpgRequest;
-use std::rc::Rc;
-use std::str::FromStr;
+use std::{rc::Rc, str::FromStr};
 use web_sys::HtmlInputElement;
 use yew::prelude::*;
 use yew_i18n::use_translation;
-use crate::html_if;
 
 #[derive(Properties, PartialEq, Clone)]
 pub struct EpgSourceSelectorProps {
@@ -27,7 +29,8 @@ pub fn EpgSourceSelector(props: &EpgSourceSelectorProps) -> Html {
     let url_ref = use_node_ref();
     let source_types = use_memo(props.source_types.clone(), |st| {
         let st = st.as_ref().map(|v| v.as_slice()).unwrap_or(&[
-            ExplorerSourceType::Hosted, /*ExplorerSourceType::Provider,*/ ExplorerSourceType::Custom,
+            ExplorerSourceType::Hosted,
+            /*ExplorerSourceType::Provider,*/ ExplorerSourceType::Custom,
         ]);
         st.iter().map(ToString::to_string).collect::<Vec<String>>()
     });
@@ -45,9 +48,7 @@ pub fn EpgSourceSelector(props: &EpgSourceSelectorProps) -> Html {
 
     let handle_source_download = {
         let on_select = props.on_select.clone();
-        Callback::from(move |request: PlaylistEpgRequest| {
-            on_select.emit(request)
-        })
+        Callback::from(move |request: PlaylistEpgRequest| on_select.emit(request))
     };
 
     let handle_custom_source = {
@@ -89,28 +90,28 @@ pub fn EpgSourceSelector(props: &EpgSourceSelectorProps) -> Html {
         let handle_defined_source = handle_source_download.clone();
         move || {
             html! {
-        <>
-        {
-            if let Some(data) = playlist_ctx_clone.sources.as_ref() {
-                html! {
-                    <div class="tp__playlist-source-selector__source-list">
-                        { for data.iter().flat_map(|(_inputs, targets)| targets)
-                            .map(Rc::clone)
-                            .map(|target| {
-                                let handle_click = handle_defined_source.clone();
-                                html! {
-                                <TextButton name={target.name.clone()} title={target.name.clone()} icon={"Download"}
-                                onclick={move |_| handle_click.emit(PlaylistEpgRequest::Target(target.id))}/>
-                                }
-                        })}
-                    </div>
+            <>
+            {
+                if let Some(data) = playlist_ctx_clone.sources.as_ref() {
+                    html! {
+                        <div class="tp__playlist-source-selector__source-list">
+                            { for data.iter().flat_map(|(_inputs, targets)| targets)
+                                .map(Rc::clone)
+                                .map(|target| {
+                                    let handle_click = handle_defined_source.clone();
+                                    html! {
+                                    <TextButton name={target.name.clone()} title={target.name.clone()} icon={"Download"}
+                                    onclick={move |_| handle_click.emit(PlaylistEpgRequest::Target(target.id))}/>
+                                    }
+                            })}
+                        </div>
+                    }
+                } else {
+                    html! {}
                 }
-            } else {
-                html! {}
             }
-        }
-        </>
-        }
+            </>
+            }
         }
     };
 
@@ -119,40 +120,40 @@ pub fn EpgSourceSelector(props: &EpgSourceSelectorProps) -> Html {
         let handle_defined_source = handle_source_download.clone();
         move || {
             html! {
-        <>
-        {
-            if let Some(data) = playlist_ctx_clone.sources.as_ref() {
-                html! {
-                    <div class="tp__playlist-source-selector__source-list">
-                        { for data.iter().flat_map(|(inputs, _targets)| inputs)
-                            .map(Rc::clone)
-                            .map(|provider| {
-                                let handle_click = handle_defined_source.clone();
-                                let result = match &*provider {
-                                    InputRow::Input(input) => {
-                                       Some((input.name.clone(), input.id))
-                                    },
-                                    InputRow::Alias(alias, _input) => {
-                                        Some((alias.name.clone(), alias.id))
+            <>
+            {
+                if let Some(data) = playlist_ctx_clone.sources.as_ref() {
+                    html! {
+                        <div class="tp__playlist-source-selector__source-list">
+                            { for data.iter().flat_map(|(inputs, _targets)| inputs)
+                                .map(Rc::clone)
+                                .map(|provider| {
+                                    let handle_click = handle_defined_source.clone();
+                                    let result = match &*provider {
+                                        InputRow::Input(input) => {
+                                           Some((input.name.clone(), input.id))
+                                        },
+                                        InputRow::Alias(alias, _input) => {
+                                            Some((alias.name.clone(), alias.id))
+                                        }
+                                    };
+                                    if let Some((name, id)) = result {
+                                        html! {
+                                        <TextButton name={name.to_string()} title={name.to_string()} icon={"CloudDownload"}
+                                        onclick={move |_| handle_click.emit(PlaylistEpgRequest::Input(id))}/>
+                                        }
+                                    } else {
+                                        html!{}
                                     }
-                                };
-                                if let Some((name, id)) = result {
-                                    html! {
-                                    <TextButton name={name.to_string()} title={name.to_string()} icon={"CloudDownload"}
-                                    onclick={move |_| handle_click.emit(PlaylistEpgRequest::Input(id))}/>
-                                    }
-                                } else {
-                                    html!{}
-                                }
-                        })}
-                    </div>
+                            })}
+                        </div>
+                    }
+                } else {
+                    html! {}
                 }
-            } else {
-                html! {}
             }
-        }
-        </>
-        }
+            </>
+            }
         }
     };
 

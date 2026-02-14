@@ -1,13 +1,20 @@
-use crate::app::components::config::HasFormData;
-use crate::app::components::select::Select;
-use crate::app::components::userlist::proxy_type_input::ProxyTypeInput;
-use crate::app::components::{DropDownOption, DropDownSelection, TextButton, UserStatus};
-use crate::app::TargetUser;
-use crate::hooks::use_service_context;
-use crate::{config_field_child, config_field_custom, edit_field_bool, edit_field_date, edit_field_number, edit_field_text, edit_field_text_option, generate_form_reducer};
+use crate::{
+    app::{
+        components::{
+            config::HasFormData, select::Select, userlist::proxy_type_input::ProxyTypeInput, DropDownOption,
+            DropDownSelection, TextButton, UserStatus,
+        },
+        TargetUser,
+    },
+    config_field_child, config_field_custom, edit_field_bool, edit_field_date, edit_field_number, edit_field_text,
+    edit_field_text_option, generate_form_reducer,
+    hooks::use_service_context,
+};
 use chrono::{Duration, Utc};
-use shared::model::{ApiProxyServerInfoDto, ConfigTargetDto, ProxyType, ProxyUserCredentialsDto, ProxyUserStatus};
-use shared::utils::generate_random_string;
+use shared::{
+    model::{ApiProxyServerInfoDto, ConfigTargetDto, ProxyType, ProxyUserCredentialsDto, ProxyUserStatus},
+    utils::generate_random_string,
+};
 use std::rc::Rc;
 use yew::prelude::*;
 use yew_i18n::use_translation;
@@ -50,40 +57,48 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
     let selected_target = use_state(|| None);
     let update = use_state(|| false);
 
-    let form_state: UseReducerHandle<UserFormState> = use_reducer(|| {
-        UserFormState { form: ProxyUserCredentialsDto::default(), modified: false }
-    });
+    let form_state: UseReducerHandle<UserFormState> =
+        use_reducer(|| UserFormState { form: ProxyUserCredentialsDto::default(), modified: false });
 
-    let proxy_user_status = use_memo(form_state.data().status, |status|
-        [ProxyUserStatus::Active,
+    let proxy_user_status = use_memo(form_state.data().status, |status| {
+        [
+            ProxyUserStatus::Active,
             ProxyUserStatus::Expired,
             ProxyUserStatus::Banned,
             ProxyUserStatus::Trial,
             ProxyUserStatus::Disabled,
-            ProxyUserStatus::Pending].iter().map(|s| DropDownOption {
+            ProxyUserStatus::Pending,
+        ]
+        .iter()
+        .map(|s| DropDownOption {
             id: s.to_string(),
             label: html! { <UserStatus status={Some(*s)} /> },
             selected: status.as_ref() == Some(s),
-        }).collect::<Vec<DropDownOption>>(),
-    );
+        })
+        .collect::<Vec<DropDownOption>>()
+    });
 
-    let targets = use_memo((props.targets.clone(), (*selected_target).clone()),
-                           |(targets, selected)|
-                               targets.iter().map(|t| DropDownOption {
-                                   id: t.name.clone(),
-                                   label: html! { t.name.clone() },
-                                   selected: selected.as_ref().is_some_and(|ut: &String| ut == &t.name),
-                               }).collect::<Vec<DropDownOption>>(),
-    );
+    let targets = use_memo((props.targets.clone(), (*selected_target).clone()), |(targets, selected)| {
+        targets
+            .iter()
+            .map(|t| DropDownOption {
+                id: t.name.clone(),
+                label: html! { t.name.clone() },
+                selected: selected.as_ref().is_some_and(|ut: &String| ut == &t.name),
+            })
+            .collect::<Vec<DropDownOption>>()
+    });
 
-    let server = use_memo((props.server.clone(), form_state.data().server.clone()),
-                          |(server_list, user_server)|
-                              server_list.iter().map(|s| DropDownOption {
-                                  id: s.name.to_string(),
-                                  label: html! { s.name.clone() },
-                                  selected: user_server.as_ref() == Some(&s.name),
-                              }).collect::<Vec<DropDownOption>>(),
-    );
+    let server = use_memo((props.server.clone(), form_state.data().server.clone()), |(server_list, user_server)| {
+        server_list
+            .iter()
+            .map(|s| DropDownOption {
+                id: s.name.to_string(),
+                label: html! { s.name.clone() },
+                selected: user_server.as_ref() == Some(&s.name),
+            })
+            .collect::<Vec<DropDownOption>>()
+    });
 
     {
         let form_state = form_state.clone();
@@ -110,10 +125,10 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                 let in_one_year = now + Duration::days(DEFAULT_EXPIRATION_DAYS);
                 user.exp_date = Some(in_one_year.timestamp());
 
-                if user.username.is_empty(){
+                if user.username.is_empty() {
                     user.username = generate_random_string(6).to_uppercase();
                 }
-                if user.password.is_empty(){
+                if user.password.is_empty() {
                     user.password = generate_random_string(6).to_uppercase();
                 }
                 user.token = Some(generate_random_string(6));
@@ -121,8 +136,7 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                 form_state.dispatch(UserFormAction::SetAll(user));
             }
             || ()
-        },
-        );
+        });
     }
 
     let handle_cancel = {

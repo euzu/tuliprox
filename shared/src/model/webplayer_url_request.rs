@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use crate::model::XtreamCluster;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WebplayerUrlRequest {

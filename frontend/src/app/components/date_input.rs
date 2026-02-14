@@ -1,4 +1,4 @@
-use web_sys::{HtmlInputElement};
+use web_sys::HtmlInputElement;
 use yew::{function_component, html, use_effect_with, Callback, Html, NodeRef, Properties, TargetCast};
 
 #[derive(Properties, Clone, PartialEq, Debug)]

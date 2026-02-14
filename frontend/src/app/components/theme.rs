@@ -1,15 +1,15 @@
-use shared::error::{TuliproxError, info_err_res};
-use std::fmt::{Display, Formatter};
-use std::str::FromStr;
-use web_sys::window;
 use crate::utils::{get_local_storage_item, remove_local_storage_item, set_local_storage_item};
+use shared::error::{info_err_res, TuliproxError};
+use std::{
+    fmt::{Display, Formatter},
+    str::FromStr,
+};
+use web_sys::window;
 
 pub const TP_THEME_KEY: &str = "tp-theme";
 
 const THEME_DARK: &str = "dark";
 const THEME_BRIGHT: &str = "bright";
-
-
 
 #[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub enum Theme {
@@ -19,7 +19,9 @@ pub enum Theme {
 
 impl Display for Theme {
     fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
-        write!(f, "{}",
+        write!(
+            f,
+            "{}",
             match self {
                 Theme::Dark => THEME_DARK,
                 Theme::Bright => THEME_BRIGHT,
@@ -41,9 +43,9 @@ impl FromStr for Theme {
 }
 
 impl Theme {
-
     pub fn get_current_theme() -> Theme {
-       let theme = get_local_storage_item(TP_THEME_KEY).map_or(Theme::Dark, |t| Theme::from_str(&t).unwrap_or(Theme::Dark));
+        let theme =
+            get_local_storage_item(TP_THEME_KEY).map_or(Theme::Dark, |t| Theme::from_str(&t).unwrap_or(Theme::Dark));
         theme.switch_theme();
         theme
     }

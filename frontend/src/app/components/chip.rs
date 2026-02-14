@@ -1,5 +1,5 @@
-use yew::{classes, function_component, html, Callback, Html, Properties};
 use crate::app::components::AppIcon;
+use yew::{classes, function_component, html, Callback, Html, Properties};
 
 pub fn convert_bool_to_chip_style(value: bool) -> Option<String> {
     Option::from((if value { "active" } else { "inactive" }).to_string())
@@ -18,7 +18,6 @@ pub struct ChipProps {
 
 #[function_component]
 pub fn Chip(props: &ChipProps) -> Html {
-
     let handle_remove = {
         if props.removable {
             let on_remove = props.on_remove.clone();
@@ -32,7 +31,7 @@ pub fn Chip(props: &ChipProps) -> Html {
         let remove = handle_remove.clone();
         let label = props.label.clone();
         let on_remove = Callback::from(move |_| remove.emit(label.clone()));
-        html ! {
+        html! {
             <span class="tp__chip__remove" onclick={on_remove}>
                <AppIcon name="Delete"/>
             </span>

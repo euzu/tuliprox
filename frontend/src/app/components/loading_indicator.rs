@@ -1,5 +1,7 @@
-use crate::hooks::use_service_context;
-use crate::model::{BusyStatus, EventMessage};
+use crate::{
+    hooks::use_service_context,
+    model::{BusyStatus, EventMessage},
+};
 use yew::{classes, function_component, html, use_effect_with, use_mut_ref, use_state, Html, Properties};
 
 #[derive(Properties, Clone, PartialEq, Debug)]

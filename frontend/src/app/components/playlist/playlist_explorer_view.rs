@@ -1,10 +1,13 @@
-use crate::app::components::{Breadcrumbs, Panel, PlaylistExplorerPage, PlaylistSourceSelector};
-use crate::app::context::PlaylistExplorerContext;
+use crate::app::{
+    components::{
+        playlist::playlist_explorer::PlaylistExplorer, Breadcrumbs, Panel, PlaylistExplorerPage, PlaylistSourceSelector,
+    },
+    context::PlaylistExplorerContext,
+};
+use shared::model::{PlaylistRequest, UiPlaylistCategories};
 use std::rc::Rc;
 use yew::prelude::*;
 use yew_i18n::use_translation;
-use shared::model::{PlaylistRequest, UiPlaylistCategories};
-use crate::app::components::playlist::playlist_explorer::PlaylistExplorer;
 
 #[function_component]
 pub fn PlaylistExplorerView() -> Html {
@@ -28,9 +31,9 @@ pub fn PlaylistExplorerView() -> Html {
         let view_visible_dep = active_page.clone();
         let view_visible = active_page.clone();
         let translate = translate.clone();
-        use_effect_with(view_visible_dep, move |_| {
-            match *view_visible {
-                PlaylistExplorerPage::SourceSelector => breadcrumbs.set(Rc::new(vec![translate.t("LABEL.PLAYLIST_EXPLORER"), translate.t("LABEL.SOURCES")])),
+        use_effect_with(view_visible_dep, move |_| match *view_visible {
+            PlaylistExplorerPage::SourceSelector => {
+                breadcrumbs.set(Rc::new(vec![translate.t("LABEL.PLAYLIST_EXPLORER"), translate.t("LABEL.SOURCES")]))
             }
         });
     };

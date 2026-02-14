@@ -1,5 +1,5 @@
-use yew::prelude::*;
 use crate::app::components::PlaylistAssistantContext;
+use yew::prelude::*;
 
 #[function_component]
 pub fn TypeStep() -> Html {

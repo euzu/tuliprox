@@ -1,6 +1,8 @@
-use std::error::Error;
-use std::fmt::{Display, Formatter, Result};
 use crate::utils::sanitize_sensitive_info;
+use std::{
+    error::Error,
+    fmt::{Display, Formatter, Result},
+};
 
 #[macro_export]
 macro_rules! get_errors_notify_message {
@@ -50,7 +52,6 @@ macro_rules! notify_err_res {
 
 pub use notify_err_res;
 
-
 #[macro_export]
 macro_rules! info_err {
     // This matches any arguments (format string + variables) and forwards them
@@ -73,23 +74,16 @@ macro_rules! info_err_res {
 
 pub use info_err_res;
 
-
 #[macro_export]
 macro_rules! handle_tuliprox_error_result_list {
     ($kind:expr, $result: expr) => {
         let errors = $result
-            .filter_map(|result| {
-                if let Err(err) = result {
-                    Some(err.to_string())
-                } else {
-                    None
-                }
-            })
+            .filter_map(|result| if let Err(err) = result { Some(err.to_string()) } else { None })
             .collect::<Vec<String>>();
         if !&errors.is_empty() {
             return Err($crate::error::TuliproxError::new($kind, errors.join("\n")));
         }
-    }
+    };
 }
 
 pub use handle_tuliprox_error_result_list;
@@ -100,7 +94,7 @@ macro_rules! handle_tuliprox_error_result {
         if let Err(err) = $result {
             return Err($crate::error::TuliproxError::new($kind, err.to_string()));
         }
-    }
+    };
 }
 pub use handle_tuliprox_error_result;
 
@@ -118,15 +112,11 @@ pub struct TuliproxError {
 }
 
 impl TuliproxError {
-    pub const fn new(kind: TuliproxErrorKind, message: String) -> Self {
-        Self { kind, message }
-    }
+    pub const fn new(kind: TuliproxErrorKind, message: String) -> Self { Self { kind, message } }
 }
 
 impl Display for TuliproxError {
-    fn fmt(&self, f: &mut Formatter) -> Result {
-        write!(f, "Tuliprox error: {}", self.message)
-    }
+    fn fmt(&self, f: &mut Formatter) -> Result { write!(f, "Tuliprox error: {}", self.message) }
 }
 
 impl Error for TuliproxError {}
@@ -134,12 +124,10 @@ impl Error for TuliproxError {}
 pub fn to_io_error<E>(err: E) -> std::io::Error
 where
     E: std::error::Error,
-{ std::io::Error::other(sanitize_sensitive_info(&err.to_string())) }
-
-pub fn str_to_io_error(err: &str) -> std::io::Error {
-    std::io::Error::other(sanitize_sensitive_info(err))
+{
+    std::io::Error::other(sanitize_sensitive_info(&err.to_string()))
 }
 
-pub fn string_to_io_error(err: String) -> std::io::Error {
-    std::io::Error::other(sanitize_sensitive_info(&err))
-}
+pub fn str_to_io_error(err: &str) -> std::io::Error { std::io::Error::other(sanitize_sensitive_info(err)) }
+
+pub fn string_to_io_error(err: String) -> std::io::Error { std::io::Error::other(sanitize_sensitive_info(&err)) }

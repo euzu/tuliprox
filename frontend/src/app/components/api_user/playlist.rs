@@ -1,14 +1,16 @@
-use crate::app::components::api_user::target_playlist::{BouquetSelection, UserTargetPlaylist};
-use crate::app::components::{Panel, RadioButtonGroup, TextButton};
-use crate::hooks::use_service_context;
-use crate::model::{BusyStatus, EventMessage};
-use shared::error::{TuliproxError, info_err_res};
-use shared::model::{PlaylistBouquetDto, PlaylistCategoriesDto, PlaylistClusterBouquetDto};
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::fmt;
-use std::rc::Rc;
-use std::str::FromStr;
+use crate::{
+    app::components::{
+        api_user::target_playlist::{BouquetSelection, UserTargetPlaylist},
+        Panel, RadioButtonGroup, TextButton,
+    },
+    hooks::use_service_context,
+    model::{BusyStatus, EventMessage},
+};
+use shared::{
+    error::{info_err_res, TuliproxError},
+    model::{PlaylistBouquetDto, PlaylistCategoriesDto, PlaylistClusterBouquetDto},
+};
+use std::{cell::RefCell, collections::HashMap, fmt, rc::Rc, str::FromStr};
 use yew::prelude::*;
 use yew_i18n::use_translation;
 
@@ -40,16 +42,20 @@ impl fmt::Display for ApiUserPlaylistPage {
     }
 }
 
-fn to_playlist_cluster(count: (usize, usize, usize), bouquet: Option<&Rc<RefCell<BouquetSelection>>>) -> Option<PlaylistClusterBouquetDto> {
+fn to_playlist_cluster(
+    count: (usize, usize, usize),
+    bouquet: Option<&Rc<RefCell<BouquetSelection>>>,
+) -> Option<PlaylistClusterBouquetDto> {
     if let Some(bouq) = bouquet {
         let selections = bouq.borrow();
 
         let selected_vec = |map: &HashMap<String, bool>| {
-            let v: Vec<String> = map.iter()
-                .filter(|(_, &selected)| selected)
-                .map(|(c, _)| c.clone())
-                .collect();
-            if v.is_empty() { None } else { Some(v) }
+            let v: Vec<String> = map.iter().filter(|(_, &selected)| selected).map(|(c, _)| c.clone()).collect();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v)
+            }
         };
 
         let live = selected_vec(&selections.live).filter(|v| v.len() != count.0);
@@ -79,9 +85,7 @@ pub fn ApiUserPlaylist() -> Html {
     });
 
     // Selection reference
-    let selections = use_mut_ref(|| {
-        HashMap::<ApiUserPlaylistPage, Rc<RefCell<BouquetSelection>>>::new()
-    });
+    let selections = use_mut_ref(HashMap::<ApiUserPlaylistPage, Rc<RefCell<BouquetSelection>>>::new);
 
     let handle_tab_select = {
         let active_tab_clone = active_tab.clone();
@@ -104,7 +108,8 @@ pub fn ApiUserPlaylist() -> Html {
         use_effect_with((), move |_| {
             wasm_bindgen_futures::spawn_local(async move {
                 services.event.broadcast(EventMessage::Busy(BusyStatus::Show));
-                let result = (services.user_api.get_playlist_bouquet().await, services.user_api.get_playlist_categories().await);
+                let result =
+                    (services.user_api.get_playlist_bouquet().await, services.user_api.get_playlist_categories().await);
                 match result {
                     (Ok(bouquet), Ok(cats)) => {
                         bouquets.set(bouquet.clone());
@@ -137,16 +142,30 @@ pub fn ApiUserPlaylist() -> Html {
             let selections = selections.clone();
             let services = services.clone();
             let translate = translate.clone();
-            let categories_xtream_count = categories.as_ref().and_then(|plc| plc.xtream.as_ref().map(|x|
-                (x.live.as_ref().map(|v| v.len()).unwrap_or(0),
-                 x.vod.as_ref().map(|v| v.len()).unwrap_or(0),
-                 x.series.as_ref().map(|v| v.len()).unwrap_or(0))
-            )).unwrap_or((0, 0, 0));
-            let categories_m3u_count = categories.as_ref().and_then(|plc| plc.m3u.as_ref().map(|x|
-                (x.live.as_ref().map(|v| v.len()).unwrap_or(0),
-                 x.vod.as_ref().map(|v| v.len()).unwrap_or(0),
-                 x.series.as_ref().map(|v| v.len()).unwrap_or(0))
-            )).unwrap_or((0, 0, 0));
+            let categories_xtream_count = categories
+                .as_ref()
+                .and_then(|plc| {
+                    plc.xtream.as_ref().map(|x| {
+                        (
+                            x.live.as_ref().map(|v| v.len()).unwrap_or(0),
+                            x.vod.as_ref().map(|v| v.len()).unwrap_or(0),
+                            x.series.as_ref().map(|v| v.len()).unwrap_or(0),
+                        )
+                    })
+                })
+                .unwrap_or((0, 0, 0));
+            let categories_m3u_count = categories
+                .as_ref()
+                .and_then(|plc| {
+                    plc.m3u.as_ref().map(|x| {
+                        (
+                            x.live.as_ref().map(|v| v.len()).unwrap_or(0),
+                            x.vod.as_ref().map(|v| v.len()).unwrap_or(0),
+                            x.series.as_ref().map(|v| v.len()).unwrap_or(0),
+                        )
+                    })
+                })
+                .unwrap_or((0, 0, 0));
 
             wasm_bindgen_futures::spawn_local(async move {
                 services.event.broadcast(EventMessage::Busy(BusyStatus::Show));
@@ -159,7 +178,7 @@ pub fn ApiUserPlaylist() -> Html {
                 };
 
                 match services.user_api.save_playlist_bouquet(&result).await {
-                    Ok(()) =>  services.toastr.success(translate.t("MESSAGES.SAVE.BOUQUET.SUCCESS")),
+                    Ok(()) => services.toastr.success(translate.t("MESSAGES.SAVE.BOUQUET.SUCCESS")),
                     Err(_) => services.toastr.error(translate.t("MESSAGES.SAVE.BOUQUET.FAIL")),
                 }
 

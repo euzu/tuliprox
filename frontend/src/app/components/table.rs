@@ -1,7 +1,7 @@
+use crate::app::components::{AppIcon, NoContent};
+use shared::model::SortOrder;
 use std::rc::Rc;
 use yew::prelude::*;
-use crate::app::components::{NoContent, AppIcon};
-use shared::model::{SortOrder};
 
 #[derive(Properties, PartialEq)]
 pub struct TableDefinition<T: PartialEq + Clone> {
@@ -22,14 +22,8 @@ pub struct TableProps<T: PartialEq + Clone> {
 
 #[function_component]
 pub fn Table<T: PartialEq + Clone>(props: &TableProps<T>) -> Html {
-    let TableDefinition {
-        items,
-        num_cols,
-        is_sortable,
-        on_sort,
-        render_header_cell,
-        render_data_cell,
-    } = &*props.definition;
+    let TableDefinition { items, num_cols, is_sortable, on_sort, render_header_cell, render_data_cell } =
+        &*props.definition;
 
     // Local sort state: None = neutral; Some((col, order)) = sorted column and order
     let sort_state = use_state::<Option<(usize, SortOrder)>, _>(|| None);

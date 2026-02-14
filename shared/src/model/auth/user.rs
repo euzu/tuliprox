@@ -21,9 +21,7 @@ pub struct UserCredential {
 }
 
 impl UserCredential {
-    pub fn zeroize(&mut self) {
-        self.password.zeroize();
-    }
+    pub fn zeroize(&mut self) { self.password.zeroize(); }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Eq, PartialEq, Default)]

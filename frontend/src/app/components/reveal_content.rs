@@ -1,8 +1,5 @@
-use crate::app::components::AppIcon;
-use crate::model::DialogActions;
-use crate::services::DialogService;
-use yew::platform::spawn_local;
-use yew::prelude::*;
+use crate::{app::components::AppIcon, model::DialogActions, services::DialogService};
+use yew::{platform::spawn_local, prelude::*};
 
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct RevealContentProps {

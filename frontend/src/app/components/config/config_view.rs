@@ -1,17 +1,31 @@
-use crate::app::components::config::config_page::{ConfigForm, ConfigPage, LABEL_API_CONFIG, LABEL_HDHOMERUN_CONFIG, LABEL_IP_CHECK_CONFIG, LABEL_LIBRARY_CONFIG, LABEL_LOG_CONFIG, LABEL_MAIN_CONFIG, LABEL_MESSAGING_CONFIG, LABEL_PANEL_CONFIG, LABEL_PROXY_CONFIG, LABEL_REVERSE_PROXY_CONFIG, LABEL_SCHEDULES_CONFIG, LABEL_VIDEO_CONFIG, LABEL_WEB_UI_CONFIG};
-use crate::app::components::config::config_view_context::ConfigViewContext;
-use crate::app::components::config::{ApiConfigView, HdHomerunConfigView, IpCheckConfigView, LibraryConfigView, LogConfigView, MainConfigView, MessagingConfigView, PanelConfigView, ProxyConfigView, ReverseProxyConfigView, SchedulesConfigView, VideoConfigView, WebUiConfigView};
-use crate::app::components::{Card, TabItem, TabSet, TextButton};
-use crate::html_if;
-use std::str::FromStr;
+use crate::{
+    app::{
+        components::{
+            config::{
+                config_page::{
+                    ConfigForm, ConfigPage, LABEL_API_CONFIG, LABEL_HDHOMERUN_CONFIG, LABEL_IP_CHECK_CONFIG,
+                    LABEL_LIBRARY_CONFIG, LABEL_LOG_CONFIG, LABEL_MAIN_CONFIG, LABEL_MESSAGING_CONFIG,
+                    LABEL_PANEL_CONFIG, LABEL_PROXY_CONFIG, LABEL_REVERSE_PROXY_CONFIG, LABEL_SCHEDULES_CONFIG,
+                    LABEL_VIDEO_CONFIG, LABEL_WEB_UI_CONFIG,
+                },
+                config_update::update_config,
+                config_view_context::ConfigViewContext,
+                ApiConfigView, HdHomerunConfigView, IpCheckConfigView, LibraryConfigView, LogConfigView,
+                MainConfigView, MessagingConfigView, PanelConfigView, ProxyConfigView, ReverseProxyConfigView,
+                SchedulesConfigView, VideoConfigView, WebUiConfigView,
+            },
+            Card, TabItem, TabSet, TextButton,
+        },
+        ConfigContext,
+    },
+    hooks::use_service_context,
+    html_if,
+};
 use log::warn;
-use yew::platform::spawn_local;
-use yew::prelude::*;
-use yew_i18n::use_translation;
 use shared::model::{ApiProxyConfigDto, ConfigDto, SourcesConfigDto};
-use crate::app::components::config::config_update::update_config;
-use crate::app::{ConfigContext};
-use crate::hooks::use_service_context;
+use std::str::FromStr;
+use yew::{platform::spawn_local, prelude::*};
+use yew_i18n::use_translation;
 
 const LABEL_CONFIG: &str = "LABEL.CONFIG";
 const LABEL_EDIT: &str = "LABEL.EDIT";
@@ -98,12 +112,27 @@ pub fn ConfigView() -> Html {
 
         use_memo((form_state, edit_value, translate.clone()), move |(forms, editing, translate)| {
             let forms: &ConfigFormState = forms;
-            let modified_pages = collect_modified!(forms, [
-                main, api, log, schedules, video, messaging, web_ui,
-                reverse_proxy, hd_homerun, proxy, ipcheck, panel, library
-            ]).iter()
-                .map(config_form_to_config_page)
-                .collect::<Vec<ConfigPage>>();
+            let modified_pages = collect_modified!(
+                forms,
+                [
+                    main,
+                    api,
+                    log,
+                    schedules,
+                    video,
+                    messaging,
+                    web_ui,
+                    reverse_proxy,
+                    hd_homerun,
+                    proxy,
+                    ipcheck,
+                    panel,
+                    library
+                ]
+            )
+            .iter()
+            .map(config_form_to_config_page)
+            .collect::<Vec<ConfigPage>>();
 
             let tab_configs = vec![
                 (ConfigPage::Main, LABEL_MAIN_CONFIG, html! { <MainConfigView/> }, "MainConfig"),
@@ -112,7 +141,12 @@ pub fn ConfigView() -> Html {
                 (ConfigPage::Schedules, LABEL_SCHEDULES_CONFIG, html! { <SchedulesConfigView/> }, "SchedulesConfig"),
                 (ConfigPage::Messaging, LABEL_MESSAGING_CONFIG, html! { <MessagingConfigView/> }, "MessagingConfig"),
                 (ConfigPage::WebUi, LABEL_WEB_UI_CONFIG, html! { <WebUiConfigView/> }, "WebUiConfig"),
-                (ConfigPage::ReverseProxy, LABEL_REVERSE_PROXY_CONFIG, html! { <ReverseProxyConfigView/> }, "ReverseProxyConfig"),
+                (
+                    ConfigPage::ReverseProxy,
+                    LABEL_REVERSE_PROXY_CONFIG,
+                    html! { <ReverseProxyConfigView/> },
+                    "ReverseProxyConfig",
+                ),
                 (ConfigPage::HdHomerun, LABEL_HDHOMERUN_CONFIG, html! { <HdHomerunConfigView/> }, "HdHomerunConfig"),
                 (ConfigPage::Proxy, LABEL_PROXY_CONFIG, html! { <ProxyConfigView/> }, "ProxyConfig"),
                 (ConfigPage::IpCheck, LABEL_IP_CHECK_CONFIG, html! { <IpCheckConfigView/> }, "IpCheckConfig"),
@@ -122,17 +156,24 @@ pub fn ConfigView() -> Html {
             ];
 
             let editing = *editing;
-            tab_configs.into_iter().map(|(page, label, children, icon)| {
-                let is_modified = editing && modified_pages.contains(&page);
-                TabItem {
-                    id: page.to_string(),
-                    title: translate.t(label),
-                    icon: icon.to_string(),
-                    children,
-                    active_class: if is_modified { Some("tp__tab__modified__active".to_string()) } else { None },
-                    inactive_class: if is_modified { Some("tp__tab__modified__inactive".to_string()) } else { None },
-                }
-            }).collect::<Vec<TabItem>>()
+            tab_configs
+                .into_iter()
+                .map(|(page, label, children, icon)| {
+                    let is_modified = editing && modified_pages.contains(&page);
+                    TabItem {
+                        id: page.to_string(),
+                        title: translate.t(label),
+                        icon: icon.to_string(),
+                        children,
+                        active_class: if is_modified { Some("tp__tab__modified__active".to_string()) } else { None },
+                        inactive_class: if is_modified {
+                            Some("tp__tab__modified__inactive".to_string())
+                        } else {
+                            None
+                        },
+                    }
+                })
+                .collect::<Vec<TabItem>>()
         })
     };
 
@@ -152,10 +193,25 @@ pub fn ConfigView() -> Html {
 
         Callback::from(move |_| {
             let forms = &*get_form_state;
-            let modified_forms: Vec<ConfigForm> = collect_modified!(forms, [
-                main, api, api_proxy, log, schedules, video, messaging, web_ui,
-                reverse_proxy, hd_homerun, proxy, ipcheck, panel, library
-            ]);
+            let modified_forms: Vec<ConfigForm> = collect_modified!(
+                forms,
+                [
+                    main,
+                    api,
+                    api_proxy,
+                    log,
+                    schedules,
+                    video,
+                    messaging,
+                    web_ui,
+                    reverse_proxy,
+                    hd_homerun,
+                    proxy,
+                    ipcheck,
+                    panel,
+                    library
+                ]
+            );
 
             if modified_forms.is_empty() {
                 set_edit_mode.set(false);
@@ -176,10 +232,8 @@ pub fn ConfigView() -> Html {
 
             let mut modified_main_dto: Option<ConfigDto> = None;
             if !modified_main_forms.is_empty() {
-                let mut config_dto = config_ctx
-                    .config
-                    .as_ref()
-                    .map_or_else(ConfigDto::default, |app_cfg| app_cfg.config.clone());
+                let mut config_dto =
+                    config_ctx.config.as_ref().map_or_else(ConfigDto::default, |app_cfg| app_cfg.config.clone());
                 update_config(&mut config_dto, modified_main_forms);
                 if let Err(err) = config_dto.prepare(false) {
                     services.toastr.error(err.to_string());
@@ -288,7 +342,6 @@ pub fn ConfigView() -> Html {
         })
     };
 
-
     let handle_update_content = {
         let services = services_ctx.clone();
         let translate = translate.clone();
@@ -306,10 +359,7 @@ pub fn ConfigView() -> Html {
         })
     };
 
-    let context = ConfigViewContext {
-        edit_mode: edit_mode.clone(),
-        on_form_change: on_form_change.clone(),
-    };
+    let context = ConfigViewContext { edit_mode: edit_mode.clone(), on_form_change: on_form_change.clone() };
 
     let geo_ip_enabled = config_ctx.config.as_ref().is_some_and(|c| c.config.is_geoip_enabled());
 

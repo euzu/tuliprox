@@ -1,21 +1,24 @@
-use crate::app::components::menu_item::MenuItem;
-use crate::app::components::popup_menu::PopupMenu;
-use crate::app::components::{AppIcon, Chip, IconButton, NoContent, Panel, Search};
-use crate::app::context::PlaylistExplorerContext;
-use crate::hooks::use_service_context;
-use crate::html_if;
-use crate::model::{BusyStatus, EventMessage};
-use crate::services::DialogService;
-use shared::error::{info_err_res, TuliproxError};
-use shared::model::{PlaylistRequest, SearchRequest, SeriesStreamDetailEpisodeProperties, SeriesStreamProperties, UiPlaylistGroup, UiPlaylistItem, VirtualId, XtreamCluster};
-use shared::utils::format_float_localized;
-use std::collections::HashMap;
-use std::fmt::Display;
-use std::rc::Rc;
-use std::str::FromStr;
+use crate::{
+    app::{
+        components::{menu_item::MenuItem, popup_menu::PopupMenu, AppIcon, Chip, IconButton, NoContent, Panel, Search},
+        context::PlaylistExplorerContext,
+    },
+    hooks::use_service_context,
+    html_if,
+    model::{BusyStatus, EventMessage},
+    services::DialogService,
+};
+use shared::{
+    error::{info_err_res, TuliproxError},
+    model::{
+        PlaylistRequest, SearchRequest, SeriesStreamDetailEpisodeProperties, SeriesStreamProperties, UiPlaylistGroup,
+        UiPlaylistItem, VirtualId, XtreamCluster,
+    },
+    utils::format_float_localized,
+};
+use std::{collections::HashMap, fmt::Display, rc::Rc, str::FromStr};
 use wasm_bindgen::JsCast;
-use yew::platform::spawn_local;
-use yew::prelude::*;
+use yew::{platform::spawn_local, prelude::*};
 use yew_hooks::use_clipboard;
 use yew_i18n::use_translation;
 
@@ -40,11 +43,15 @@ enum ExplorerAction {
 
 impl Display for ExplorerAction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", match self {
-            Self::CopyLinkTuliproxVirtualId => COPY_LINK_TULIPROX_VIRTUAL_ID,
-            Self::CopyLinkTuliproxWebPlayerUrl => COPY_LINK_TULIPROX_WEBPLAYER_URL,
-            Self::CopyLinkProviderUrl => COPY_LINK_PROVIDER_URL,
-        })
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::CopyLinkTuliproxVirtualId => COPY_LINK_TULIPROX_VIRTUAL_ID,
+                Self::CopyLinkTuliproxWebPlayerUrl => COPY_LINK_TULIPROX_WEBPLAYER_URL,
+                Self::CopyLinkProviderUrl => COPY_LINK_PROVIDER_URL,
+            }
+        )
     }
 }
 
@@ -150,7 +157,11 @@ pub fn PlaylistExplorer() -> Html {
                 if let Some(playlist_request) = ctx.playlist_request.as_ref() {
                     if let Some(props) = services.playlist.get_series_info(&dto, playlist_request).await {
                         handled = true;
-                        set_current_item.set(ExplorerLevel::SeriesInfo(group.clone(), dto.clone(), Some(Box::new(props))));
+                        set_current_item.set(ExplorerLevel::SeriesInfo(
+                            group.clone(),
+                            dto.clone(),
+                            Some(Box::new(props)),
+                        ));
                     }
                 }
                 if !handled {
@@ -198,7 +209,9 @@ pub fn PlaylistExplorer() -> Html {
             } else {
                 let dlg = dialog.clone();
                 spawn_local(async move {
-                    let _result = dlg.content(html! {<input value={text} readonly={true} class="tp__copy-input"/>}, None, false).await;
+                    let _result = dlg
+                        .content(html! {<input value={text} readonly={true} class="tp__copy-input"/>}, None, false)
+                        .await;
                 });
             }
         })
@@ -232,11 +245,20 @@ pub fn PlaylistExplorer() -> Html {
                                         let target_id = *target_id;
                                         let services_clone = services.clone();
                                         spawn_local(async move {
-                                            if let Some(url) = services.playlist.get_playlist_webplayer_url(target_id, virtual_id, cluster).await {
+                                            if let Some(url) = services
+                                                .playlist
+                                                .get_playlist_webplayer_url(target_id, virtual_id, cluster)
+                                                .await
+                                            {
                                                 copy_to_clipboard.emit(url);
-                                                services_clone.toastr.success(translate_clone.t("MESSAGES.PLAYLIST.WEBPLAYER_URL_COPY_TO_CLIPBOARD"));
+                                                services_clone.toastr.success(
+                                                    translate_clone
+                                                        .t("MESSAGES.PLAYLIST.WEBPLAYER_URL_COPY_TO_CLIPBOARD"),
+                                                );
                                             } else {
-                                                services_clone.toastr.error(translate_clone.t("MESSAGES.FAILED_TO_RETRIEVE_WEBPLAYER_URL"));
+                                                services_clone.toastr.error(
+                                                    translate_clone.t("MESSAGES.FAILED_TO_RETRIEVE_WEBPLAYER_URL"),
+                                                );
                                             }
                                         });
                                     }
@@ -249,23 +271,25 @@ pub fn PlaylistExplorer() -> Html {
                     }
                     ExplorerAction::CopyLinkProviderUrl => {
                         if let Some(dto) = &*selected_channel {
-                             let url = dto.url.clone();
-                             if !url.is_empty() {
+                            let url = dto.url.clone();
+                            if !url.is_empty() {
                                 copy_to_clipboard.emit(url);
-                             } else {
+                            } else {
                                 // Try to fetch episode
                                 if let Some(playlist_request) = playlist_ctx.playlist_request.as_ref() {
-                                     let copy_to_clipboard = copy_to_clipboard.clone();
-                                     let services = services.clone();
-                                     let virtual_id = dto.virtual_id;
-                                     let playlist_request = playlist_request.clone();
-                                     spawn_local(async move {
-                                         if let Some(pli) = services.playlist.get_episode(virtual_id, &playlist_request).await {
-                                             copy_to_clipboard.emit(pli.url.to_string());
-                                         }
-                                     });
+                                    let copy_to_clipboard = copy_to_clipboard.clone();
+                                    let services = services.clone();
+                                    let virtual_id = dto.virtual_id;
+                                    let playlist_request = playlist_request.clone();
+                                    spawn_local(async move {
+                                        if let Some(pli) =
+                                            services.playlist.get_episode(virtual_id, &playlist_request).await
+                                        {
+                                            copy_to_clipboard.emit(pli.url.to_string());
+                                        }
+                                    });
                                 }
-                             }
+                            }
                         }
                     }
                 }
@@ -276,15 +300,13 @@ pub fn PlaylistExplorer() -> Html {
 
     let handle_back_click = {
         let current_item = current_item.clone();
-        Callback::from(move |_| {
-            match *current_item {
-                ExplorerLevel::Categories => {}
-                ExplorerLevel::Group(_) => {
-                    current_item.set(ExplorerLevel::Categories);
-                }
-                ExplorerLevel::SeriesInfo(ref group, _, _) => {
-                    current_item.set(ExplorerLevel::Group(group.clone()));
-                }
+        Callback::from(move |_| match *current_item {
+            ExplorerLevel::Categories => {}
+            ExplorerLevel::Group(_) => {
+                current_item.set(ExplorerLevel::Categories);
+            }
+            ExplorerLevel::SeriesInfo(ref group, _, _) => {
+                current_item.set(ExplorerLevel::Group(group.clone()));
             }
         })
     };
@@ -294,27 +316,22 @@ pub fn PlaylistExplorer() -> Html {
         let set_playlist = playlist.clone();
         let set_current_item = current_item.clone();
         let context = context.clone();
-        Callback::from(move |search_req| {
-            match search_req {
-                SearchRequest::Clear => set_playlist.set((*context.playlist).clone()),
-                SearchRequest::Text(ref _text, ref _search_fields)
-                | SearchRequest::Regexp(ref _text, ref _search_fields) => {
-                    services.event.broadcast(EventMessage::Busy(BusyStatus::Show));
-                    let set_playlist = set_playlist.clone();
-                    let set_current_item = set_current_item.clone();
-                    let context = context.clone();
-                    let services = services.clone();
-                    spawn_local(async move {
-                        let filtered = context
-                            .playlist
-                            .as_ref()
-                            .and_then(|categories| categories.filter(&search_req))
-                            .map(Rc::new);
-                        set_playlist.set(filtered);
-                        set_current_item.set(ExplorerLevel::Categories);
-                        services.event.broadcast(EventMessage::Busy(BusyStatus::Hide));
-                    });
-                }
+        Callback::from(move |search_req| match search_req {
+            SearchRequest::Clear => set_playlist.set((*context.playlist).clone()),
+            SearchRequest::Text(ref _text, ref _search_fields)
+            | SearchRequest::Regexp(ref _text, ref _search_fields) => {
+                services.event.broadcast(EventMessage::Busy(BusyStatus::Show));
+                let set_playlist = set_playlist.clone();
+                let set_current_item = set_current_item.clone();
+                let context = context.clone();
+                let services = services.clone();
+                spawn_local(async move {
+                    let filtered =
+                        context.playlist.as_ref().and_then(|categories| categories.filter(&search_req)).map(Rc::new);
+                    set_playlist.set(filtered);
+                    set_current_item.set(ExplorerLevel::Categories);
+                    services.event.broadcast(EventMessage::Busy(BusyStatus::Hide));
+                });
             }
         })
     };
@@ -393,11 +410,7 @@ pub fn PlaylistExplorer() -> Html {
     };
 
     let render_channel_logo = |logo: &str| {
-        let logo = if logo.is_empty() {
-            "assets/missing-logo.svg".to_string()
-        } else {
-            logo.to_string()
-        };
+        let logo = if logo.is_empty() { "assets/missing-logo.svg".to_string() } else { logo.to_string() };
         html! {
             <span  class="tp__playlist-explorer__channel-logo">
                 <img  alt={"n/a"} src={logo} loading="lazy"
@@ -416,14 +429,14 @@ pub fn PlaylistExplorer() -> Html {
         let popup_onclick = handle_popup_onclick.clone();
         let chan_clone = Rc::clone(chan);
         html! {
-            <span class="tp__playlist-explorer__channel tp__playlist-explorer__channel-live">
-                <button class="tp__icon-button" onclick={Callback::from(move |event: MouseEvent| popup_onclick.emit((chan_clone.clone(), event)))}>
-                    <AppIcon name="Popup"></AppIcon>
-                </button>
-                {render_channel_logo(&chan.logo)}
-                <span class="tp__playlist-explorer__channel-title">{chan.title.clone()}</span>
-                </span>
-            }
+        <span class="tp__playlist-explorer__channel tp__playlist-explorer__channel-live">
+            <button class="tp__icon-button" onclick={Callback::from(move |event: MouseEvent| popup_onclick.emit((chan_clone.clone(), event)))}>
+                <AppIcon name="Popup"></AppIcon>
+            </button>
+            {render_channel_logo(&chan.logo)}
+            <span class="tp__playlist-explorer__channel-title">{chan.title.clone()}</span>
+            </span>
+        }
     };
 
     let render_movie = |chan: &Rc<UiPlaylistItem>| {
@@ -499,24 +512,22 @@ pub fn PlaylistExplorer() -> Html {
         }
     };
 
-    let render_channel = |chan: &Rc<UiPlaylistItem>| {
-        match chan.xtream_cluster {
-            XtreamCluster::Live => render_live(chan),
-            XtreamCluster::Video => render_movie(chan),
-            XtreamCluster::Series => render_series(chan),
-        }
+    let render_channel = |chan: &Rc<UiPlaylistItem>| match chan.xtream_cluster {
+        XtreamCluster::Live => render_live(chan),
+        XtreamCluster::Video => render_movie(chan),
+        XtreamCluster::Series => render_series(chan),
     };
 
     let render_group = |group: &Rc<UiPlaylistGroup>| {
         html! {
-                <div class="tp__playlist-explorer__group">
-                  <div class={format!("tp__playlist-explorer__group-list tp__playlist-explorer__group-list-{}", group.xtream_cluster.to_string().to_lowercase())}>
-                  {
-                      group.channels.iter().map(render_channel).collect::<Html>()
-                  }
-                  </div>
-                </div>
-            }
+            <div class="tp__playlist-explorer__group">
+              <div class={format!("tp__playlist-explorer__group-list tp__playlist-explorer__group-list-{}", group.xtream_cluster.to_string().to_lowercase())}>
+              {
+                  group.channels.iter().map(render_channel).collect::<Html>()
+              }
+              </div>
+            </div>
+        }
     };
 
     let render_series_info = |series_info: &Rc<UiPlaylistItem>, props: Option<&Box<SeriesStreamProperties>>| {
@@ -524,29 +535,34 @@ pub fn PlaylistExplorer() -> Html {
         let series_info_props = props;
         let (mut backdrop, plot, cast, genre, release_date, rating, details) = match series_info_props {
             Some(series_props) => {
-                let backdrop = series_props.backdrop_path.as_ref().and_then(|l| l.first()).map_or_else(|| if series_props.cover.is_empty() { series_info.logo.to_string() } else { series_props.cover.to_string() }, ToString::to_string);
-                (Some(backdrop.to_string()),
-                 series_props.plot.as_deref().map(ToString::to_string).unwrap_or_default(),
-                 series_props.cast.to_string(),
-                 series_props.genre.as_deref().map(ToString::to_string).unwrap_or_default(),
-                 series_props.release_date.as_deref().map(ToString::to_string).unwrap_or_default(),
-                 series_props.rating,
-                 series_props.details.as_ref(),
+                let backdrop = series_props.backdrop_path.as_ref().and_then(|l| l.first()).map_or_else(
+                    || {
+                        if series_props.cover.is_empty() {
+                            series_info.logo.to_string()
+                        } else {
+                            series_props.cover.to_string()
+                        }
+                    },
+                    ToString::to_string,
+                );
+                (
+                    Some(backdrop.to_string()),
+                    series_props.plot.as_deref().map(ToString::to_string).unwrap_or_default(),
+                    series_props.cast.to_string(),
+                    series_props.genre.as_deref().map(ToString::to_string).unwrap_or_default(),
+                    series_props.release_date.as_deref().map(ToString::to_string).unwrap_or_default(),
+                    series_props.rating,
+                    series_props.details.as_ref(),
                 )
             }
-            _ => {
-                (None, String::new(), String::new(), String::new(), String::new(), 0.0, None)
-            }
+            _ => (None, String::new(), String::new(), String::new(), String::new(), 0.0, None),
         };
 
         if !series_info.logo.is_empty() && backdrop.as_ref().is_none_or(|v| v.is_empty()) {
             backdrop = Some(series_info.logo.to_string());
         };
 
-        let style = backdrop
-            .as_ref()
-            .map(|b| format!("background-image: url(\"{b}\");"))
-            .unwrap_or_default();
+        let style = backdrop.as_ref().map(|b| format!("background-image: url(\"{b}\");")).unwrap_or_default();
 
         let series_html = html! {
             <div class="tp__playlist-explorer__series-info__body-top" style={style}>
@@ -576,10 +592,8 @@ pub fn PlaylistExplorer() -> Html {
         let episodes_html = if let Some(episodes) = details.as_ref().and_then(|d| d.episodes.as_ref()) {
             let mut grouped: HashMap<u32, Vec<&SeriesStreamDetailEpisodeProperties>> = HashMap::new();
             for item in episodes {
-                grouped.entry(item.season)
-                    .or_default()
-                    .push(item);
-            };
+                grouped.entry(item.season).or_default().push(item);
+            }
             let mut grouped_list: Vec<(u32, Vec<&SeriesStreamDetailEpisodeProperties>)> = grouped.into_iter().collect();
             grouped_list.sort_by_key(|(season, _)| *season);
 

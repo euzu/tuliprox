@@ -1,15 +1,25 @@
-use crate::app::components::config::HasFormData;
-use crate::app::components::{BlockId, BlockInstance, Card, EditMode, IconButton, Panel, SourceEditorContext, TextButton, TraktListItemForm, TitledCard, FilterInput};
-use crate::{config_field_child, edit_field_bool, edit_field_number_u16, edit_field_number_u32, edit_field_text, generate_form_reducer};
-use shared::model::{TargetOutputDto, TraktApiConfigDto, TraktConfigDto, TraktContentType, TraktListConfigDto, XtreamTargetOutputDto};
-use std::fmt::Display;
-use std::rc::Rc;
-use std::str::FromStr;
+use crate::{
+    app::components::{
+        config::HasFormData, BlockId, BlockInstance, Card, EditMode, FilterInput, IconButton, Panel,
+        SourceEditorContext, TextButton, TitledCard, TraktListItemForm,
+    },
+    config_field_child, edit_field_bool, edit_field_number_u16, edit_field_number_u32, edit_field_text,
+    generate_form_reducer,
+};
+use shared::{
+    error::TuliproxError,
+    info_err_res,
+    model::{
+        TargetOutputDto, TraktApiConfigDto, TraktConfigDto, TraktContentType, TraktListConfigDto, XtreamTargetOutputDto,
+    },
+};
+use std::{fmt::Display, rc::Rc, str::FromStr};
 use web_sys::MouseEvent;
-use yew::{function_component, html, use_context, use_effect_with, use_reducer, use_state, Callback, Html, Properties, UseReducerHandle};
+use yew::{
+    function_component, html, use_context, use_effect_with, use_reducer, use_state, Callback, Html, Properties,
+    UseReducerHandle,
+};
 use yew_i18n::use_translation;
-use shared::error::TuliproxError;
-use shared::info_err_res;
 
 const LABEL_SKIP_DIRECT_SOURCE: &str = "LABEL.SKIP_DIRECT_SOURCE";
 const LABEL_LIVE: &str = "LABEL.LIVE";
@@ -57,10 +67,14 @@ impl FromStr for XtreamOutputFormPage {
 
 impl Display for XtreamOutputFormPage {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", match *self {
-            XtreamOutputFormPage::Main => Self::MAIN,
-            XtreamOutputFormPage::Trakt => Self::TRAKT,
-        })
+        write!(
+            f,
+            "{}",
+            match *self {
+                XtreamOutputFormPage::Main => Self::MAIN,
+                XtreamOutputFormPage::Trakt => Self::TRAKT,
+            }
+        )
     }
 }
 
@@ -114,22 +128,13 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
     let source_editor_ctx = use_context::<SourceEditorContext>().expect("SourceEditorContext not found");
 
     let output_form_state: UseReducerHandle<XtreamTargetOutputFormState> =
-        use_reducer(|| XtreamTargetOutputFormState {
-            form: XtreamTargetOutputDto::default(),
-            modified: false,
-        });
+        use_reducer(|| XtreamTargetOutputFormState { form: XtreamTargetOutputDto::default(), modified: false });
 
     let trakt_state: UseReducerHandle<TraktConfigFormState> =
-        use_reducer(|| TraktConfigFormState {
-            form: TraktConfigDto::default(),
-            modified: false,
-        });
+        use_reducer(|| TraktConfigFormState { form: TraktConfigDto::default(), modified: false });
 
     let trakt_api_state: UseReducerHandle<TraktApiConfigFormState> =
-        use_reducer(|| TraktApiConfigFormState {
-            form: TraktApiConfigDto::default(),
-            modified: false,
-        });
+        use_reducer(|| TraktApiConfigFormState { form: TraktApiConfigDto::default(), modified: false });
 
     // State for Trakt lists
     let trakt_lists_state = use_state(Vec::<TraktListConfigDto>::new);
@@ -395,7 +400,9 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
                 })
             };
 
-            source_editor_ctx.on_form_change.emit((block_id, BlockInstance::Output(Rc::new(TargetOutputDto::Xtream(output)))));
+            source_editor_ctx
+                .on_form_change
+                .emit((block_id, BlockInstance::Output(Rc::new(TargetOutputDto::Xtream(output)))));
             source_editor_ctx.edit_mode.set(EditMode::Inactive);
         })
     };

@@ -1,7 +1,7 @@
+use shared::model::MappingCounter;
 use std::sync::atomic::Ordering;
 use yew::prelude::*;
 use yew_i18n::use_translation;
-use shared::model::MappingCounter;
 
 #[derive(Properties, PartialEq, Clone)]
 pub struct MapperCounterViewProps {

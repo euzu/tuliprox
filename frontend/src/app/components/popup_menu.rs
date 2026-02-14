@@ -1,5 +1,4 @@
-use wasm_bindgen::prelude::Closure;
-use wasm_bindgen::JsCast;
+use wasm_bindgen::{prelude::Closure, JsCast};
 use web_sys::{window, HtmlElement, MouseEvent};
 use yew::prelude::*;
 
@@ -50,7 +49,6 @@ pub fn PopupMenu(props: &PopupMenuProps) -> Html {
                 let _ = popup.style().set_property("--popup-left", &format!("{left}px"));
             }
             "".to_owned()
-
         })
     };
 

@@ -1,3 +1,4 @@
+unstable_features = true
 # --- Space-Saving Configuration ---
 
 # Max line length before wrapping (default is 100)
@@ -15,9 +16,6 @@ fn_single_line = true
 
 # Allow struct literals to be formatted on a single line
 struct_lit_single_line = true
-
-# Disable alignment of enum discriminants to save horizontal space
-enum_discrim_align = false
 
 # Consolidate imports from the same crate into a single line
 imports_granularity = "Crate"
