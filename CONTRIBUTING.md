@@ -1,6 +1,7 @@
 # Contributing
 
-Thank you for your interest in contributing to Tuliprox! We welcome contributions of all kinds, including bug fixes, new features, documentation improvements, and more. To ensure a smooth contribution process, please follow the guidelines outlined below.
+Thank you for your interest in contributing to Tuliprox! We welcome contributions of all kinds, including bug fixes, new features, documentation
+improvements, and more. To ensure a smooth contribution process, please follow the guidelines outlined below.
 
 ## How to Contribute
 
@@ -10,6 +11,12 @@ To contribute you will need Rust, cargo, cross, trunk, wasm-bindgen, and cargo-s
 
 ```bash
 make install-tools
+```
+
+To force a reinstall of tooling or updating to the latest version, you can run:
+
+```bash
+make -B install-tools
 ```
 
 ### Steps to Contribute

@@ -12,7 +12,19 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Job 1: Check code style (very fast)
+  # Job 1: Check markdown files
+  markdown:
+    name: Markdown Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint Markdown files
+        uses: DavidAnson/markdownlint-cli2-action@v22
+        with:
+          globs: '**/*.md'
+
+  # Job 2: Check code style (very fast)
   style:
     name: Format & Lint
     runs-on: ubuntu-latest
@@ -31,7 +43,7 @@ jobs:
       - name: Lint with Clippy
         run: make lint
 
-  # Job 2: Build and Test (takes longer)
+  # Job 3: Build and Test (takes longer)
   test:
     name: Build & Test
     runs-on: ubuntu-latest

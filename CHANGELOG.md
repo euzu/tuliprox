@@ -3,40 +3,6 @@
 ## Unreleased
 
 ## ⚠️ Breaking Changes
-- !BREAKING CHANGE! Xtream metadata/probe options were moved from target configuration to input configuration.
-  - Moved to `inputs[].options`: `resolve_background`, `resolve_series`, `resolve_vod`, `probe_series`, `probe_vod`, `probe_live`, `probe_live_interval_hours`, `resolve_delay`.
-  - Old target-level locations (`target.options` / `output[type=xtream]`) were removed and are now invalid.
-
-## 🧭 Migration
-```yaml
-# before
-targets:
-  - name: my_target
-    options:
-      resolve_background: true
-      resolve_delay: 2
-    output:
-      - type: xtream
-        resolve_series: true
-        resolve_vod: true
-        probe_live: true
-
-# after
-inputs:
-  - name: my_xtream_input
-    type: xtream
-    options:
-      resolve_background: true
-      resolve_delay: 2
-      resolve_series: true
-      resolve_vod: true
-      probe_live: true
-```
-
-
-## 3.3.0 (2026-01-03)
-
-## ⚠️ Breaking Changes
 - **Global Input Definitions**: To align input definitions with the SourceEditor, inputs are now defined globally in the `inputs` section of the config file. Each source can reference one or more inputs by their name in the `inputs` attribute.
 - **Data Format Migration**: Due to heavy refactoring, the old data format is invalid. You need to clean your `data` folder and update the playlists.
 - **B+Tree Storage Format**: Storage format has changed to a more efficient Slotted Page architecture.
@@ -44,7 +10,7 @@ inputs:
   - **TargetIdMapping Optimization**: Refactored to use disk-based B+Tree operations, eliminating startup latency.
   - **B+Tree Header Metadata**: Implemented efficient `BPlusTreeMetadata` Enum to persist `VirtualId` counter directly in the database header.
   - **Fast Initialization**: `TargetIdMapping` now conditionally loads the tree, achieving near-instant startup for established databases.
-- **Configuration Renames**: 
+- **Configuration Renames**:
   - `threads` attribute in `config.yml` renamed to `process_parallel` (boolean).
   - Added mandatory `rewrite_secret` to `reverse_proxy` config for stable resource URLs.
   - Removed `forced_retry_interval_secs`.
@@ -244,7 +210,7 @@ inputs:
 - UserTable: Copy credentials to clipboard from user table
 - UserTable: Kick user action from streams table
 - UserTable: Auto-generated username/password for new proxy users
-- Update process uses now streams for data processing. 
+- Update process uses now streams for data processing.
 
 # 3.1.7 (2025-10-10)
 - Added Dark/Bright theme switch
