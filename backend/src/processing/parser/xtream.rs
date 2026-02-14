@@ -167,7 +167,7 @@ pub async fn parse_xtream(input: &ConfigInput,
                     };
 
                     let (live_stream_use_prefix, live_stream_without_extension) = (
-                        input.has_flag_or(ConfigInputFlags::XtreamLiveStreamUsePrefix, true),
+                        input.has_flag(ConfigInputFlags::XtreamLiveStreamUsePrefix),
                         input.has_flag(ConfigInputFlags::XtreamLiveStreamWithoutExtension),
                     );
 
@@ -244,7 +244,15 @@ where
         input.username.as_deref().unwrap_or("").to_string(),
         input.password.as_deref().unwrap_or("").to_string(),
     );
-    let options = input.options.clone();
+    let (live_stream_use_prefix, live_stream_without_extension) = input.options.as_ref().map_or(
+        (false, false),
+        |o| {
+            (
+                o.has_flag(ConfigInputFlags::XtreamLiveStreamUsePrefix),
+                o.has_flag(ConfigInputFlags::XtreamLiveStreamWithoutExtension),
+            )
+        },
+    );
 
     // Map categories for lookup
     let group_map: IndexMap<u32, Arc<str>> = xtream_categories.iter().map(|c| (c.category_id, c.category_name.clone())).collect();
@@ -253,16 +261,6 @@ where
     spawn_blocking(move || {
         let reader = tokio_util::io::SyncIoBridge::new(streams);
         let mut deserializer = serde_json::Deserializer::from_reader(reader);
-
-        let (live_stream_use_prefix, live_stream_without_extension) = options.as_ref().map_or(
-            (true, false),
-            |o| {
-                (
-                    o.has_flag(ConfigInputFlags::XtreamLiveStreamUsePrefix),
-                    o.has_flag(ConfigInputFlags::XtreamLiveStreamWithoutExtension),
-                )
-            },
-        );
 
         let mut source_ordinal = 0u32;
 

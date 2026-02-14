@@ -116,6 +116,9 @@ pub const fn default_probe_live_interval() -> u32 { 120 }
 
 pub const fn is_default_probe_live_interval(v: &u32) -> bool { *v == default_probe_live_interval() }
 
+pub const fn default_resolve_background() -> bool { true }
+pub const fn default_xtream_live_stream_use_prefix() -> bool { true }
+
 //////////////////////////////
 // HDHomerun Device Defaults
 //////////////////////////////

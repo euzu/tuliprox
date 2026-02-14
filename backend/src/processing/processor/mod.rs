@@ -38,7 +38,7 @@ impl Default for ResolveOptions {
     fn default() -> Self {
         Self {
             flags: ResolveOptionsFlagsSet::from_variants(&[ResolveOptionsFlags::Background]),
-            resolve_delay: 0,
+            resolve_delay: default_resolve_delay_secs(),
         }
     }
 }
@@ -61,29 +61,28 @@ macro_rules! create_resolve_options_function_for_xtream_target {
                             resolve_tmdb_missing,
                             input_resolve_enabled,
                             input_probe_enabled,
-                            input_resolve_background,
                             input_resolve_delay,
+                            resolve_background
                         ) = if let Some(options) = input_options {
                             (
                                 options.has_flag($crate::model::ConfigInputFlags::ResolveTmdb),
                                 options.has_flag($crate::model::ConfigInputFlags::[<Resolve $cluster:camel>]),
                                 options.has_flag($crate::model::ConfigInputFlags::[<Probe $cluster:camel>]),
-                                options.has_flag($crate::model::ConfigInputFlags::ResolveBackground),
                                 options.resolve_delay,
+                                options.has_flag($crate::model::ConfigInputFlags::ResolveBackground)
                             )
                         } else {
                             (
                                 false,
                                 false,
                                 false,
-                                shared::utils::default_as_true(),
                                 shared::utils::default_resolve_delay_secs(),
+                                shared::utils::default_resolve_background(),
                             )
                         };
 
                         let resolve_enabled = input_resolve_enabled;
                         let probe_enabled = input_probe_enabled;
-                        let resolve_background = input_resolve_background;
                         let resolve_delay = input_resolve_delay;
 
                         let mut flags = $crate::processing::processor::ResolveOptionsFlagsSet::new();
@@ -111,3 +110,4 @@ macro_rules! create_resolve_options_function_for_xtream_target {
     };
 }
 use create_resolve_options_function_for_xtream_target;
+use shared::utils::default_resolve_delay_secs;

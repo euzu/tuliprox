@@ -362,17 +362,10 @@ async fn resolve_streaming_strategy(
                     sanitize_sensitive_info(&url)
                 );
 
-                match allocation {
-                    ProviderAllocation::Exhausted => {
-                        let stream = create_provider_connections_exhausted_stream(&app_state.app_config, &[]);
-                        ProviderStreamState::Custom(stream)
-                    }
-                    ProviderAllocation::Available(_) => {
-                        ProviderStreamState::Available(Some(selected_provider_name.intern()), url.intern())
-                    }
-                    ProviderAllocation::GracePeriod(_) => {
-                        ProviderStreamState::GracePeriod(Some(selected_provider_name.intern()), url.intern())
-                    }
+                if matches!(allocation, ProviderAllocation::Available(_)) {
+                    ProviderStreamState::Available(Some(selected_provider_name.intern()), url.intern())
+                } else {
+                    ProviderStreamState::GracePeriod(Some(selected_provider_name.intern()), url.intern())
                 }
             }
         }

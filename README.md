@@ -326,8 +326,8 @@ It has 2 entries `extensions` and `download`.
   - `episode_pattern` _optional_ if you download episodes, the suffix like `S01.E01` should be removed to place all
     files into one folder. The named capture group `episode` is mandatory.
     Example: `.*(?P<episode>[Ss]\\d{1,2}(.*?)[Ee]\\d{1,2}).*`
-- `web_search` is _optional_, example: `<\1>
-  define `download.episode_pattern` to remove episode suffix from titles.
+- `web_search` is _optional_
+- `download.episode_pattern` to remove episode suffix from titles.
 - `ffprobe_enabled`: _optional_ (default `false`). Enable or disable FFprobe analysis for streams globally.
 - `ffprobe_timeout`: _optional_ (default `60`). Timeout in seconds for FFprobe analysis.
 
@@ -986,11 +986,11 @@ library:
 **API Endpoints**:
 
 - `POST /api/v1/library/scan` - Trigger library scan
-  ```json
 
+ ```json
   {"force_rescan": false}
-
   ```
+
 - `GET /api/v1/library/status` - Get library status
 
 **Integration with source.yml**:

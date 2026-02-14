@@ -153,7 +153,7 @@ pub(in crate::api) fn get_xtream_player_api_stream_url(
     if let Some(input_user_info) = input.get_user_info() {
         let ctx = match context {
             ApiStreamContext::LiveAlt | ApiStreamContext::Live => {
-                let use_prefix = input.has_flag_or(ConfigInputFlags::XtreamLiveStreamUsePrefix, true);
+                let use_prefix = input.has_flag(ConfigInputFlags::XtreamLiveStreamUsePrefix);
                 String::from(if use_prefix { "live" } else { "" })
             }
             ApiStreamContext::Movie | ApiStreamContext::Series | ApiStreamContext::Timeshift => {

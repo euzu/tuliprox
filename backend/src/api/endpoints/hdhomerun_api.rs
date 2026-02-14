@@ -103,13 +103,13 @@ where
     match channels {
         Some(chans) => {
             let mapped = chans.map(move |(item, has_next)| {
-                let input_options = cfg.get_input_options_by_name(&item.input_name);
-                let (live_stream_use_prefix, live_stream_without_extension) = input_options
+                let input = cfg.get_input_by_name(&item.input_name);
+                let (live_stream_use_prefix, live_stream_without_extension) = input
                     .as_ref()
-                    .map_or((true, false), |o| {
+                    .map_or((true, false), |i| {
                         (
-                            o.has_flag(ConfigInputFlags::XtreamLiveStreamUsePrefix),
-                            o.has_flag(ConfigInputFlags::XtreamLiveStreamWithoutExtension),
+                            i.has_flag(ConfigInputFlags::XtreamLiveStreamUsePrefix),
+                            i.has_flag(ConfigInputFlags::XtreamLiveStreamWithoutExtension),
                         )
                     });
                 let container_extension = item.get_container_extension();

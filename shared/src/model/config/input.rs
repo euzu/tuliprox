@@ -5,11 +5,12 @@ use crate::{
     info_err_res,
     model::EpgConfigDto,
     utils::{
-        arc_str_serde, arc_str_vec_serde, default_as_true, default_probe_live_interval, default_resolve_delay_secs,
-        deserialize_timestamp, get_credentials_from_url_str, get_trimmed_string, is_blank_optional_string,
-        is_default_probe_live_interval, is_default_resolve_delay_secs, is_false, is_true, is_zero_u16,
-        parse_provider_scheme_url_parts, sanitize_sensitive_info, serialize_option_vec_flow_map_items, trim_last_slash,
-        Internable, PROVIDER_SCHEME_PREFIX,
+        arc_str_serde, arc_str_vec_serde, default_as_true, default_probe_live_interval, default_resolve_background,
+        default_resolve_delay_secs, default_xtream_live_stream_use_prefix, deserialize_timestamp,
+        get_credentials_from_url_str, get_trimmed_string, is_blank_optional_string, is_default_probe_live_interval,
+        is_default_resolve_delay_secs, is_false, is_true, is_zero_u16, parse_provider_scheme_url_parts,
+        sanitize_sensitive_info, serialize_option_vec_flow_map_items, trim_last_slash, Internable,
+        PROVIDER_SCHEME_PREFIX,
     },
 };
 use enum_iterator::Sequence;
@@ -170,13 +171,13 @@ pub struct ConfigInputOptionsDto {
     pub xtream_skip_vod: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub xtream_skip_series: bool,
-    #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
+    #[serde(default = "default_xtream_live_stream_use_prefix", skip_serializing_if = "is_true")]
     pub xtream_live_stream_use_prefix: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub xtream_live_stream_without_extension: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub resolve_tmdb: bool,
-    #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
+    #[serde(default = "default_resolve_background", skip_serializing_if = "is_true")]
     pub resolve_background: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub resolve_series: bool,
@@ -204,10 +205,10 @@ impl Default for ConfigInputOptionsDto {
             xtream_skip_live: false,
             xtream_skip_vod: false,
             xtream_skip_series: false,
-            xtream_live_stream_use_prefix: default_as_true(),
+            xtream_live_stream_use_prefix: default_xtream_live_stream_use_prefix(),
             xtream_live_stream_without_extension: false,
             resolve_tmdb: false,
-            resolve_background: default_as_true(),
+            resolve_background: default_resolve_background(),
             resolve_series: false,
             resolve_vod: false,
             probe_series: false,
