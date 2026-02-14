@@ -1,20 +1,28 @@
-use crate::app::components::config::config_page::{ConfigForm, LABEL_PANEL_CONFIG};
-use crate::app::components::config::config_view_context::ConfigViewContext;
-use crate::app::components::input::Input;
-use crate::app::components::select::Select;
-use crate::app::components::{
-    Card, Chip, DropDownOption, DropDownSelection, IconButton, ToggleSwitch,
+use crate::{
+    app::{
+        components::{
+            config::{
+                config_page::{ConfigForm, LABEL_PANEL_CONFIG},
+                config_view_context::ConfigViewContext,
+            },
+            input::Input,
+            select::Select,
+            Card, Chip, DropDownOption, DropDownSelection, IconButton, ToggleSwitch,
+        },
+        context::ConfigContext,
+    },
+    html_if,
 };
-use crate::app::context::ConfigContext;
-use crate::html_if;
-use shared::model::{
-    ConfigInputDto, PanelApiAliasPoolAuto, PanelApiAliasPoolSizeDto, PanelApiAliasPoolSizeValue,
-    PanelApiConfigDto, PanelApiProvisioningMethod, PanelApiQueryParamDto, SourcesConfigDto,
+use shared::{
+    model::{
+        ConfigInputDto, PanelApiAliasPoolAuto, PanelApiAliasPoolSizeDto, PanelApiAliasPoolSizeValue, PanelApiConfigDto,
+        PanelApiProvisioningMethod, PanelApiQueryParamDto, SourcesConfigDto,
+    },
+    utils::Internable,
 };
 use std::rc::Rc;
 use yew::prelude::*;
 use yew_i18n::use_translation;
-use shared::utils::Internable;
 
 const LABEL_ENABLED: &str = "LABEL.ENABLED";
 const LABEL_URL: &str = "LABEL.URL";
@@ -69,81 +77,25 @@ struct PanelConfigFormState {
 #[derive(Clone)]
 enum PanelConfigFormAction {
     SetAll(SourcesConfigDto),
-    SetEnabled {
-        input_idx: usize,
-        enabled: bool,
-    },
-    SetPanelUrl {
-        input_idx: usize,
-        url: String,
-    },
-    SetApiKey {
-        input_idx: usize,
-        api_key: String,
-    },
-    SetProvisioningTimeout {
-        input_idx: usize,
-        timeout_sec: u64,
-    },
-    SetProvisioningProbeInterval {
-        input_idx: usize,
-        probe_interval_sec: u64,
-    },
-    SetProvisioningCooldown {
-        input_idx: usize,
-        cooldown_sec: u64,
-    },
-    SetProvisioningMethod {
-        input_idx: usize,
-        method: PanelApiProvisioningMethod,
-    },
-    SetProvisioningOffset {
-        input_idx: usize,
-        offset: String,
-    },
-    SetAliasPoolMin {
-        input_idx: usize,
-        value: Option<PanelApiAliasPoolSizeValue>,
-    },
-    SetAliasPoolMax {
-        input_idx: usize,
-        value: Option<PanelApiAliasPoolSizeValue>,
-    },
-    SetAliasPoolRemoveExpired {
-        input_idx: usize,
-        remove_expired: bool,
-    },
-    AddParam {
-        input_idx: usize,
-        section: PanelSection,
-    },
-    RemoveParam {
-        input_idx: usize,
-        section: PanelSection,
-        param_idx: usize,
-    },
-    SetParamKey {
-        input_idx: usize,
-        section: PanelSection,
-        param_idx: usize,
-        key: String,
-    },
-    SetParamValue {
-        input_idx: usize,
-        section: PanelSection,
-        param_idx: usize,
-        value: String,
-    },
-    EnsureRequired {
-        input_idx: usize,
-        section: PanelSection,
-    },
+    SetEnabled { input_idx: usize, enabled: bool },
+    SetPanelUrl { input_idx: usize, url: String },
+    SetApiKey { input_idx: usize, api_key: String },
+    SetProvisioningTimeout { input_idx: usize, timeout_sec: u64 },
+    SetProvisioningProbeInterval { input_idx: usize, probe_interval_sec: u64 },
+    SetProvisioningCooldown { input_idx: usize, cooldown_sec: u64 },
+    SetProvisioningMethod { input_idx: usize, method: PanelApiProvisioningMethod },
+    SetProvisioningOffset { input_idx: usize, offset: String },
+    SetAliasPoolMin { input_idx: usize, value: Option<PanelApiAliasPoolSizeValue> },
+    SetAliasPoolMax { input_idx: usize, value: Option<PanelApiAliasPoolSizeValue> },
+    SetAliasPoolRemoveExpired { input_idx: usize, remove_expired: bool },
+    AddParam { input_idx: usize, section: PanelSection },
+    RemoveParam { input_idx: usize, section: PanelSection, param_idx: usize },
+    SetParamKey { input_idx: usize, section: PanelSection, param_idx: usize, key: String },
+    SetParamValue { input_idx: usize, section: PanelSection, param_idx: usize, value: String },
+    EnsureRequired { input_idx: usize, section: PanelSection },
 }
 
-fn params_mut(
-    panel: &mut PanelApiConfigDto,
-    section: PanelSection,
-) -> &mut Vec<PanelApiQueryParamDto> {
+fn params_mut(panel: &mut PanelApiConfigDto, section: PanelSection) -> &mut Vec<PanelApiQueryParamDto> {
     match section {
         PanelSection::AccountInfo => &mut panel.query_parameter.account_info,
         PanelSection::Info => &mut panel.query_parameter.client_info,
@@ -154,16 +106,11 @@ fn params_mut(
 }
 
 fn has_param(params: &[PanelApiQueryParamDto], key: &str) -> bool {
-    params
-        .iter()
-        .any(|p| p.key.trim().eq_ignore_ascii_case(key))
+    params.iter().any(|p| p.key.trim().eq_ignore_ascii_case(key))
 }
 
 fn get_param_value(params: &[PanelApiQueryParamDto], key: &str) -> Option<String> {
-    params
-        .iter()
-        .find(|p| p.key.trim().eq_ignore_ascii_case(key))
-        .map(|p| p.value.trim().to_string())
+    params.iter().find(|p| p.key.trim().eq_ignore_ascii_case(key)).map(|p| p.value.trim().to_string())
 }
 
 fn alias_pool_size_to_string(value: Option<&PanelApiAliasPoolSizeValue>) -> String {
@@ -181,14 +128,9 @@ fn parse_alias_pool_size(value: &str) -> Option<PanelApiAliasPoolSizeValue> {
     }
     // this is for the search
     if "auto".starts_with(&trimmed.to_ascii_lowercase()) {
-        return Some(PanelApiAliasPoolSizeValue::Auto(
-            PanelApiAliasPoolAuto::Auto,
-        ));
+        return Some(PanelApiAliasPoolSizeValue::Auto(PanelApiAliasPoolAuto::Auto));
     }
-    trimmed
-        .parse::<u16>()
-        .ok()
-        .map(PanelApiAliasPoolSizeValue::Number)
+    trimmed.parse::<u16>().ok().map(PanelApiAliasPoolSizeValue::Number)
 }
 
 fn validate_panel(panel: Option<&PanelApiConfigDto>) -> Vec<String> {
@@ -208,23 +150,11 @@ fn validate_panel(panel: Option<&PanelApiConfigDto>) -> Vec<String> {
     }
 
     let sections = [
-        (
-            PanelSection::AccountInfo,
-            &panel.query_parameter.account_info,
-            false,
-        ),
+        (PanelSection::AccountInfo, &panel.query_parameter.account_info, false),
         (PanelSection::Info, &panel.query_parameter.client_info, true),
         (PanelSection::New, &panel.query_parameter.client_new, true),
-        (
-            PanelSection::Renew,
-            &panel.query_parameter.client_renew,
-            true,
-        ),
-        (
-            PanelSection::AdultContent,
-            &panel.query_parameter.client_adult_content,
-            false,
-        ),
+        (PanelSection::Renew, &panel.query_parameter.client_renew, true),
+        (PanelSection::AdultContent, &panel.query_parameter.client_adult_content, false),
     ];
     for (section, params, required) in sections {
         if params.is_empty() {
@@ -245,9 +175,7 @@ fn validate_panel(panel: Option<&PanelApiConfigDto>) -> Vec<String> {
                 PanelSection::Info => "client_info: missing api_key param".to_string(),
                 PanelSection::New => "client_new: missing api_key param".to_string(),
                 PanelSection::Renew => "client_renew: missing api_key param".to_string(),
-                PanelSection::AdultContent => {
-                    "client_adult_content: missing api_key param".to_string()
-                }
+                PanelSection::AdultContent => "client_adult_content: missing api_key param".to_string(),
             });
         }
         match section {
@@ -302,14 +230,8 @@ fn validate_panel(panel: Option<&PanelApiConfigDto>) -> Vec<String> {
     }
 
     if let Some(size) = panel.alias_pool.as_ref().and_then(|p| p.size.as_ref()) {
-        let min = size
-            .min
-            .as_ref()
-            .and_then(PanelApiAliasPoolSizeValue::as_number);
-        let max = size
-            .max
-            .as_ref()
-            .and_then(PanelApiAliasPoolSizeValue::as_number);
+        let min = size.min.as_ref().and_then(PanelApiAliasPoolSizeValue::as_number);
+        let max = size.max.as_ref().and_then(PanelApiAliasPoolSizeValue::as_number);
         if let (Some(min), Some(max)) = (min, max) {
             if min > max {
                 errors.push("alias_pool.size: min must be <= max".to_string());
@@ -331,7 +253,8 @@ fn validate_panel(panel: Option<&PanelApiConfigDto>) -> Vec<String> {
     }
     if let Some(offset) = panel.provisioning.offset.as_deref() {
         if !offset.trim().is_empty() && parse_offset_secs(offset).is_none() {
-            errors.push("provisioning: offset must be a number with optional suffix s/m/h/d (e.g. 30m, 12h)".to_string());
+            errors
+                .push("provisioning: offset must be a number with optional suffix s/m/h/d (e.g. 30m, 12h)".to_string());
         }
     }
     errors
@@ -364,10 +287,7 @@ fn parse_offset_secs(value: &str) -> Option<u64> {
 fn ensure_required_params(params: &mut Vec<PanelApiQueryParamDto>, section: PanelSection) {
     let ensure = |params: &mut Vec<PanelApiQueryParamDto>, key: &str, value: &str| {
         if !has_param(params, key) {
-            params.push(PanelApiQueryParamDto {
-                key: key.intern(),
-                value: value.intern(),
-            });
+            params.push(PanelApiQueryParamDto { key: key.intern(), value: value.intern() });
         }
     };
     ensure(params, "api_key", "auto");
@@ -396,11 +316,7 @@ fn ensure_required_params(params: &mut Vec<PanelApiQueryParamDto>, section: Pane
     }
 }
 
-fn with_input_mut(
-    form: &mut SourcesConfigDto,
-    input_idx: usize,
-    f: impl FnOnce(&mut ConfigInputDto),
-) {
+fn with_input_mut(form: &mut SourcesConfigDto, input_idx: usize, f: impl FnOnce(&mut ConfigInputDto)) {
     if let Some(input) = form.inputs.get_mut(input_idx) {
         f(input);
     }
@@ -411,238 +327,114 @@ impl Reducible for PanelConfigFormState {
 
     fn reduce(self: Rc<Self>, action: Self::Action) -> Rc<Self> {
         match action {
-            PanelConfigFormAction::SetAll(form) => Self {
-                form,
-                modified: false,
-            }
-            .into(),
-            PanelConfigFormAction::SetEnabled {
-                input_idx,
-                enabled,
-            } => {
+            PanelConfigFormAction::SetAll(form) => Self { form, modified: false }.into(),
+            PanelConfigFormAction::SetEnabled { input_idx, enabled } => {
                 let mut form = self.form.clone();
                 with_input_mut(&mut form, input_idx, |input| {
                     if enabled {
-                        let panel = input
-                            .panel_api
-                            .get_or_insert_with(PanelApiConfigDto::default);
+                        let panel = input.panel_api.get_or_insert_with(PanelApiConfigDto::default);
                         panel.enabled = true;
                     } else if let Some(panel) = input.panel_api.as_mut() {
                         panel.enabled = false;
                     }
                 });
-                Self {
-                    form,
-                    modified: true,
-                }
-                .into()
+                Self { form, modified: true }.into()
             }
-            PanelConfigFormAction::SetPanelUrl {
-                input_idx,
-                url,
-            } => {
+            PanelConfigFormAction::SetPanelUrl { input_idx, url } => {
                 let mut form = self.form.clone();
                 with_input_mut(&mut form, input_idx, |input| {
-                    let panel = input
-                        .panel_api
-                        .get_or_insert_with(PanelApiConfigDto::default);
+                    let panel = input.panel_api.get_or_insert_with(PanelApiConfigDto::default);
                     panel.url = url;
                 });
-                Self {
-                    form,
-                    modified: true,
-                }
-                .into()
+                Self { form, modified: true }.into()
             }
-            PanelConfigFormAction::SetApiKey {
-                input_idx,
-                api_key,
-            } => {
+            PanelConfigFormAction::SetApiKey { input_idx, api_key } => {
                 let mut form = self.form.clone();
                 with_input_mut(&mut form, input_idx, |input| {
-                    let panel = input
-                        .panel_api
-                        .get_or_insert_with(PanelApiConfigDto::default);
-                    panel.api_key = if api_key.trim().is_empty() {
-                        None
-                    } else {
-                        Some(api_key.intern())
-                    };
+                    let panel = input.panel_api.get_or_insert_with(PanelApiConfigDto::default);
+                    panel.api_key = if api_key.trim().is_empty() { None } else { Some(api_key.intern()) };
                 });
-                Self {
-                    form,
-                    modified: true,
-                }
-                .into()
+                Self { form, modified: true }.into()
             }
-            PanelConfigFormAction::SetProvisioningTimeout {
-                input_idx,
-                timeout_sec,
-            } => {
+            PanelConfigFormAction::SetProvisioningTimeout { input_idx, timeout_sec } => {
                 let mut form = self.form.clone();
                 with_input_mut(&mut form, input_idx, |input| {
-                    let panel = input
-                        .panel_api
-                        .get_or_insert_with(PanelApiConfigDto::default);
+                    let panel = input.panel_api.get_or_insert_with(PanelApiConfigDto::default);
                     panel.provisioning.timeout_sec = timeout_sec;
                 });
-                Self {
-                    form,
-                    modified: true,
-                }
-                .into()
+                Self { form, modified: true }.into()
             }
-            PanelConfigFormAction::SetProvisioningProbeInterval {
-                input_idx,
-                probe_interval_sec,
-            } => {
+            PanelConfigFormAction::SetProvisioningProbeInterval { input_idx, probe_interval_sec } => {
                 let mut form = self.form.clone();
                 with_input_mut(&mut form, input_idx, |input| {
-                    let panel = input
-                        .panel_api
-                        .get_or_insert_with(PanelApiConfigDto::default);
+                    let panel = input.panel_api.get_or_insert_with(PanelApiConfigDto::default);
                     panel.provisioning.probe_interval_sec = probe_interval_sec;
                 });
-                Self {
-                    form,
-                    modified: true,
-                }
-                .into()
+                Self { form, modified: true }.into()
             }
-            PanelConfigFormAction::SetProvisioningCooldown {
-                input_idx,
-                cooldown_sec,
-            } => {
+            PanelConfigFormAction::SetProvisioningCooldown { input_idx, cooldown_sec } => {
                 let mut form = self.form.clone();
                 with_input_mut(&mut form, input_idx, |input| {
-                    let panel = input
-                        .panel_api
-                        .get_or_insert_with(PanelApiConfigDto::default);
+                    let panel = input.panel_api.get_or_insert_with(PanelApiConfigDto::default);
                     panel.provisioning.cooldown_sec = cooldown_sec;
                 });
-                Self {
-                    form,
-                    modified: true,
-                }
-                .into()
+                Self { form, modified: true }.into()
             }
-            PanelConfigFormAction::SetProvisioningMethod {
-                input_idx,
-                method,
-            } => {
+            PanelConfigFormAction::SetProvisioningMethod { input_idx, method } => {
                 let mut form = self.form.clone();
                 with_input_mut(&mut form, input_idx, |input| {
-                    let panel = input
-                        .panel_api
-                        .get_or_insert_with(PanelApiConfigDto::default);
+                    let panel = input.panel_api.get_or_insert_with(PanelApiConfigDto::default);
                     panel.provisioning.method = method;
                 });
-                Self {
-                    form,
-                    modified: true,
-                }
-                .into()
+                Self { form, modified: true }.into()
             }
-            PanelConfigFormAction::SetProvisioningOffset {
-                input_idx,
-                offset,
-            } => {
+            PanelConfigFormAction::SetProvisioningOffset { input_idx, offset } => {
                 let mut form = self.form.clone();
                 with_input_mut(&mut form, input_idx, |input| {
-                    let panel = input
-                        .panel_api
-                        .get_or_insert_with(PanelApiConfigDto::default);
+                    let panel = input.panel_api.get_or_insert_with(PanelApiConfigDto::default);
                     let normalized = offset.trim().to_string();
-                    panel.provisioning.offset = if normalized.is_empty() {
-                        None
-                    } else {
-                        Some(normalized)
-                    };
+                    panel.provisioning.offset = if normalized.is_empty() { None } else { Some(normalized) };
                 });
-                Self {
-                    form,
-                    modified: true,
-                }
-                .into()
+                Self { form, modified: true }.into()
             }
-            PanelConfigFormAction::SetAliasPoolMin {
-                input_idx,
-                value,
-            } => {
+            PanelConfigFormAction::SetAliasPoolMin { input_idx, value } => {
                 let mut form = self.form.clone();
                 with_input_mut(&mut form, input_idx, |input| {
-                    let panel = input
-                        .panel_api
-                        .get_or_insert_with(PanelApiConfigDto::default);
+                    let panel = input.panel_api.get_or_insert_with(PanelApiConfigDto::default);
                     let alias_pool = panel.alias_pool.get_or_insert_with(Default::default);
                     let size = alias_pool.size.get_or_insert_with(Default::default);
                     size.min = value;
                 });
-                Self {
-                    form,
-                    modified: true,
-                }
-                .into()
+                Self { form, modified: true }.into()
             }
-            PanelConfigFormAction::SetAliasPoolMax {
-                input_idx,
-                value,
-            } => {
+            PanelConfigFormAction::SetAliasPoolMax { input_idx, value } => {
                 let mut form = self.form.clone();
                 with_input_mut(&mut form, input_idx, |input| {
-                    let panel = input
-                        .panel_api
-                        .get_or_insert_with(PanelApiConfigDto::default);
+                    let panel = input.panel_api.get_or_insert_with(PanelApiConfigDto::default);
                     let alias_pool = panel.alias_pool.get_or_insert_with(Default::default);
                     let size = alias_pool.size.get_or_insert_with(Default::default);
                     size.max = value;
                 });
-                Self {
-                    form,
-                    modified: true,
-                }
-                .into()
+                Self { form, modified: true }.into()
             }
-            PanelConfigFormAction::SetAliasPoolRemoveExpired {
-                input_idx,
-                remove_expired,
-            } => {
+            PanelConfigFormAction::SetAliasPoolRemoveExpired { input_idx, remove_expired } => {
                 let mut form = self.form.clone();
                 with_input_mut(&mut form, input_idx, |input| {
-                    let panel = input
-                        .panel_api
-                        .get_or_insert_with(PanelApiConfigDto::default);
+                    let panel = input.panel_api.get_or_insert_with(PanelApiConfigDto::default);
                     let alias_pool = panel.alias_pool.get_or_insert_with(Default::default);
                     alias_pool.remove_expired = remove_expired;
                 });
-                Self {
-                    form,
-                    modified: true,
-                }
-                .into()
+                Self { form, modified: true }.into()
             }
-            PanelConfigFormAction::AddParam {
-                input_idx,
-                section,
-            } => {
+            PanelConfigFormAction::AddParam { input_idx, section } => {
                 let mut form = self.form.clone();
                 with_input_mut(&mut form, input_idx, |input| {
-                    let panel = input
-                        .panel_api
-                        .get_or_insert_with(PanelApiConfigDto::default);
+                    let panel = input.panel_api.get_or_insert_with(PanelApiConfigDto::default);
                     params_mut(panel, section).push(PanelApiQueryParamDto::default());
                 });
-                Self {
-                    form,
-                    modified: true,
-                }
-                .into()
+                Self { form, modified: true }.into()
             }
-            PanelConfigFormAction::RemoveParam {
-                input_idx,
-                section,
-                param_idx,
-            } => {
+            PanelConfigFormAction::RemoveParam { input_idx, section, param_idx } => {
                 let mut form = self.form.clone();
                 with_input_mut(&mut form, input_idx, |input| {
                     if let Some(panel) = input.panel_api.as_mut() {
@@ -652,18 +444,9 @@ impl Reducible for PanelConfigFormState {
                         }
                     }
                 });
-                Self {
-                    form,
-                    modified: true,
-                }
-                .into()
+                Self { form, modified: true }.into()
             }
-            PanelConfigFormAction::SetParamKey {
-                input_idx,
-                section,
-                param_idx,
-                key,
-            } => {
+            PanelConfigFormAction::SetParamKey { input_idx, section, param_idx, key } => {
                 let mut form = self.form.clone();
                 with_input_mut(&mut form, input_idx, |input| {
                     if let Some(panel) = input.panel_api.as_mut() {
@@ -673,18 +456,9 @@ impl Reducible for PanelConfigFormState {
                         }
                     }
                 });
-                Self {
-                    form,
-                    modified: true,
-                }
-                .into()
+                Self { form, modified: true }.into()
             }
-            PanelConfigFormAction::SetParamValue {
-                input_idx,
-                section,
-                param_idx,
-                value,
-            } => {
+            PanelConfigFormAction::SetParamValue { input_idx, section, param_idx, value } => {
                 let mut form = self.form.clone();
                 with_input_mut(&mut form, input_idx, |input| {
                     if let Some(panel) = input.panel_api.as_mut() {
@@ -694,28 +468,15 @@ impl Reducible for PanelConfigFormState {
                         }
                     }
                 });
-                Self {
-                    form,
-                    modified: true,
-                }
-                .into()
+                Self { form, modified: true }.into()
             }
-            PanelConfigFormAction::EnsureRequired {
-                input_idx,
-                section,
-            } => {
+            PanelConfigFormAction::EnsureRequired { input_idx, section } => {
                 let mut form = self.form.clone();
                 with_input_mut(&mut form, input_idx, |input| {
-                    let panel = input
-                        .panel_api
-                        .get_or_insert_with(PanelApiConfigDto::default);
+                    let panel = input.panel_api.get_or_insert_with(PanelApiConfigDto::default);
                     ensure_required_params(params_mut(panel, section), section);
                 });
-                Self {
-                    form,
-                    modified: true,
-                }
-                .into()
+                Self { form, modified: true }.into()
             }
         }
     }
@@ -733,10 +494,7 @@ fn render_param_editor(
         let form_state = form_state.clone();
         Callback::from(move |(name, _): (String, MouseEvent)| {
             if name == "required" {
-                form_state.dispatch(PanelConfigFormAction::EnsureRequired {
-                    input_idx,
-                    section,
-                });
+                form_state.dispatch(PanelConfigFormAction::EnsureRequired { input_idx, section });
             }
         })
     };
@@ -745,10 +503,7 @@ fn render_param_editor(
         let form_state = form_state.clone();
         Callback::from(move |(name, _): (String, MouseEvent)| {
             if name == "add" {
-                form_state.dispatch(PanelConfigFormAction::AddParam {
-                    input_idx,
-                    section,
-                });
+                form_state.dispatch(PanelConfigFormAction::AddParam { input_idx, section });
             }
         })
     };
@@ -829,10 +584,8 @@ pub fn PanelConfigView() -> Html {
     let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");
     let config_view_ctx = use_context::<ConfigViewContext>().expect("ConfigViewContext not found");
 
-    let form_state: UseReducerHandle<PanelConfigFormState> = use_reducer(|| PanelConfigFormState {
-        form: SourcesConfigDto::default(),
-        modified: false,
-    });
+    let form_state: UseReducerHandle<PanelConfigFormState> =
+        use_reducer(|| PanelConfigFormState { form: SourcesConfigDto::default(), modified: false });
 
     {
         let on_form_change = config_view_ctx.on_form_change.clone();
@@ -845,17 +598,14 @@ pub fn PanelConfigView() -> Html {
     {
         let form_state = form_state.clone();
         let sources_cfg = config_ctx.config.as_ref().map(|c| c.sources.clone());
-        use_effect_with(
-            (sources_cfg, config_view_ctx.edit_mode.clone()),
-            move |(sources_cfg, _mode)| {
-                if let Some(src) = sources_cfg {
-                    form_state.dispatch(PanelConfigFormAction::SetAll((*src).clone()));
-                } else {
-                    form_state.dispatch(PanelConfigFormAction::SetAll(SourcesConfigDto::default()));
-                }
-                || ()
-            },
-        );
+        use_effect_with((sources_cfg, config_view_ctx.edit_mode.clone()), move |(sources_cfg, _mode)| {
+            if let Some(src) = sources_cfg {
+                form_state.dispatch(PanelConfigFormAction::SetAll((*src).clone()));
+            } else {
+                form_state.dispatch(PanelConfigFormAction::SetAll(SourcesConfigDto::default()));
+            }
+            || ()
+        });
     }
 
     let render_input_card = |input_idx: usize, input: &ConfigInputDto| -> Html {
@@ -875,60 +625,43 @@ pub fn PanelConfigView() -> Html {
         let on_toggle = {
             let form_state = form_state.clone();
             Callback::from(move |enabled: bool| {
-                form_state.dispatch(PanelConfigFormAction::SetEnabled {
-                    input_idx,
-                    enabled,
-                });
+                form_state.dispatch(PanelConfigFormAction::SetEnabled { input_idx, enabled });
             })
         };
 
         let on_url = {
             let form_state = form_state.clone();
             Callback::from(move |value: String| {
-                form_state.dispatch(PanelConfigFormAction::SetPanelUrl {
-                    input_idx,
-                    url: value,
-                });
+                form_state.dispatch(PanelConfigFormAction::SetPanelUrl { input_idx, url: value });
             })
         };
 
         let on_api_key = {
             let form_state = form_state.clone();
             Callback::from(move |value: String| {
-                form_state.dispatch(PanelConfigFormAction::SetApiKey {
-                    input_idx,
-                    api_key: value,
-                });
+                form_state.dispatch(PanelConfigFormAction::SetApiKey { input_idx, api_key: value });
             })
         };
         let on_provision_timeout = {
             let form_state = form_state.clone();
             Callback::from(move |value: String| {
                 let timeout_sec = value.trim().parse::<u64>().unwrap_or(0);
-                form_state.dispatch(PanelConfigFormAction::SetProvisioningTimeout {
-                    input_idx,
-                    timeout_sec,
-                });
+                form_state.dispatch(PanelConfigFormAction::SetProvisioningTimeout { input_idx, timeout_sec });
             })
         };
         let on_probe_interval = {
             let form_state = form_state.clone();
             Callback::from(move |value: String| {
                 let probe_interval_sec = value.trim().parse::<u64>().unwrap_or(0);
-                form_state.dispatch(PanelConfigFormAction::SetProvisioningProbeInterval {
-                    input_idx,
-                    probe_interval_sec,
-                });
+                form_state
+                    .dispatch(PanelConfigFormAction::SetProvisioningProbeInterval { input_idx, probe_interval_sec });
             })
         };
         let on_provision_cooldown = {
             let form_state = form_state.clone();
             Callback::from(move |value: String| {
                 let cooldown_sec = value.trim().parse::<u64>().unwrap_or(0);
-                form_state.dispatch(PanelConfigFormAction::SetProvisioningCooldown {
-                    input_idx,
-                    cooldown_sec,
-                });
+                form_state.dispatch(PanelConfigFormAction::SetProvisioningCooldown { input_idx, cooldown_sec });
             })
         };
         let on_method_select = {
@@ -936,10 +669,7 @@ pub fn PanelConfigView() -> Html {
             Callback::from(move |(_name, selection): (String, DropDownSelection)| {
                 if let DropDownSelection::Single(option) = selection {
                     if let Ok(method) = option.parse::<PanelApiProvisioningMethod>() {
-                        form_state.dispatch(PanelConfigFormAction::SetProvisioningMethod {
-                            input_idx,
-                            method,
-                        });
+                        form_state.dispatch(PanelConfigFormAction::SetProvisioningMethod { input_idx, method });
                     }
                 }
             })
@@ -947,10 +677,7 @@ pub fn PanelConfigView() -> Html {
         let on_provision_offset = {
             let form_state = form_state.clone();
             Callback::from(move |value: String| {
-                form_state.dispatch(PanelConfigFormAction::SetProvisioningOffset {
-                    input_idx,
-                    offset: value,
-                });
+                form_state.dispatch(PanelConfigFormAction::SetProvisioningOffset { input_idx, offset: value });
             })
         };
         let on_alias_pool_min = {
@@ -974,55 +701,34 @@ pub fn PanelConfigView() -> Html {
         let on_alias_pool_remove_expired = {
             let form_state = form_state.clone();
             Callback::from(move |value: bool| {
-                form_state.dispatch(PanelConfigFormAction::SetAliasPoolRemoveExpired {
-                    input_idx,
-                    remove_expired: value,
-                });
+                form_state
+                    .dispatch(PanelConfigFormAction::SetAliasPoolRemoveExpired { input_idx, remove_expired: value });
             })
         };
 
         let panel = input.panel_api.as_ref();
         let url_val = panel.map(|p| p.url.clone()).unwrap_or_default();
         let api_key_val = panel.and_then(|p| p.api_key.clone()).unwrap_or_default();
-        let provisioning_timeout_val = panel
-            .map(|p| p.provisioning.timeout_sec.to_string())
-            .unwrap_or_default();
-        let provisioning_probe_interval_val = panel
-            .map(|p| p.provisioning.probe_interval_sec.to_string())
-            .unwrap_or_default();
-        let provisioning_cooldown_val = panel
-            .map(|p| p.provisioning.cooldown_sec.to_string())
-            .unwrap_or_default();
-        let provisioning_offset_val = panel
-            .and_then(|p| p.provisioning.offset.as_ref())
-            .map(|v| v.trim().to_string())
-            .unwrap_or_default();
+        let provisioning_timeout_val = panel.map(|p| p.provisioning.timeout_sec.to_string()).unwrap_or_default();
+        let provisioning_probe_interval_val =
+            panel.map(|p| p.provisioning.probe_interval_sec.to_string()).unwrap_or_default();
+        let provisioning_cooldown_val = panel.map(|p| p.provisioning.cooldown_sec.to_string()).unwrap_or_default();
+        let provisioning_offset_val =
+            panel.and_then(|p| p.provisioning.offset.as_ref()).map(|v| v.trim().to_string()).unwrap_or_default();
         let provisioning_method = panel.map(|p| p.provisioning.method).unwrap_or_default();
         let alias_pool = panel.and_then(|p| p.alias_pool.as_ref());
         let alias_pool_size_default = PanelApiAliasPoolSizeDto::default();
-        let alias_pool_size = alias_pool
-            .and_then(|p| p.size.as_ref())
-            .unwrap_or(&alias_pool_size_default);
+        let alias_pool_size = alias_pool.and_then(|p| p.size.as_ref()).unwrap_or(&alias_pool_size_default);
         let alias_pool_min = alias_pool_size.min.as_ref();
         let alias_pool_max = alias_pool_size.max.as_ref();
         let alias_pool_min_val = alias_pool_size_to_string(alias_pool_min);
         let alias_pool_max_val = alias_pool_size_to_string(alias_pool_max);
         let alias_pool_remove_expired = alias_pool.is_some_and(|p| p.remove_expired);
-        let client_info = panel
-            .map(|p| p.query_parameter.client_info.as_slice())
-            .unwrap_or(&[]);
-        let client_new = panel
-            .map(|p| p.query_parameter.client_new.as_slice())
-            .unwrap_or(&[]);
-        let client_renew = panel
-            .map(|p| p.query_parameter.client_renew.as_slice())
-            .unwrap_or(&[]);
-        let account_info = panel
-            .map(|p| p.query_parameter.account_info.as_slice())
-            .unwrap_or(&[]);
-        let adult_content = panel
-            .map(|p| p.query_parameter.client_adult_content.as_slice())
-            .unwrap_or(&[]);
+        let client_info = panel.map(|p| p.query_parameter.client_info.as_slice()).unwrap_or(&[]);
+        let client_new = panel.map(|p| p.query_parameter.client_new.as_slice()).unwrap_or(&[]);
+        let client_renew = panel.map(|p| p.query_parameter.client_renew.as_slice()).unwrap_or(&[]);
+        let account_info = panel.map(|p| p.query_parameter.account_info.as_slice()).unwrap_or(&[]);
+        let adult_content = panel.map(|p| p.query_parameter.client_adult_content.as_slice()).unwrap_or(&[]);
         let credits_value = panel
             .and_then(|p| p.credits.as_ref())
             .map(|credits| credits.trim().to_string())
@@ -1038,21 +744,11 @@ pub fn PanelConfigView() -> Html {
             provisioning_probe_interval_val,
             provisioning_cooldown_val
         );
-        let alias_pool_min_label = if alias_pool_min_val.is_empty() {
-            "—".to_string()
-        } else {
-            alias_pool_min_val.clone()
-        };
-        let alias_pool_max_label = if alias_pool_max_val.is_empty() {
-            "—".to_string()
-        } else {
-            alias_pool_max_val.clone()
-        };
-        let alias_pool_remove_label = if alias_pool_remove_expired {
-            "true".to_string()
-        } else {
-            "false".to_string()
-        };
+        let alias_pool_min_label =
+            if alias_pool_min_val.is_empty() { "—".to_string() } else { alias_pool_min_val.clone() };
+        let alias_pool_max_label =
+            if alias_pool_max_val.is_empty() { "—".to_string() } else { alias_pool_max_val.clone() };
+        let alias_pool_remove_label = if alias_pool_remove_expired { "true".to_string() } else { "false".to_string() };
         let method_options = Rc::new(vec![
             DropDownOption::new(
                 "HEAD",
@@ -1243,12 +939,7 @@ pub fn PanelConfigView() -> Html {
         }
     };
 
-    let inputs = form_state
-        .form
-        .inputs
-        .iter()
-        .enumerate()
-        .collect::<Vec<_>>();
+    let inputs = form_state.form.inputs.iter().enumerate().collect::<Vec<_>>();
 
     html! {
         <div class="tp__panel-api-config-view tp__config-view-page">

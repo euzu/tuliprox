@@ -1,25 +1,26 @@
+use crate::{
+    app::components::{Block, BlockId, BlockInstance, PortStatus},
+    html_if,
+};
 use web_sys::MouseEvent;
 use yew::{classes, function_component, html, Callback, Html, Properties, TargetCast};
 use yew_i18n::use_translation;
-use crate::html_if;
-use crate::app::components::{Block, BlockId, BlockInstance, PortStatus};
 #[derive(Properties, PartialEq)]
 pub struct BlockProps {
     pub(crate) block: Block,
-    pub(crate) edited:bool,
-    pub(crate) selected:bool,
+    pub(crate) edited: bool,
+    pub(crate) selected: bool,
     pub(crate) delete_mode: bool,
     pub(crate) delete_block: Callback<BlockId>,
     pub(crate) port_status: PortStatus,
     pub(crate) on_edit: Callback<BlockId>,
     pub(crate) on_mouse_down: Callback<(BlockId, MouseEvent)>,
-    pub(crate) on_connection_drop: Callback<BlockId>, // to_id
-    pub(crate) on_connection_start:  Callback<BlockId>, // from_id
+    pub(crate) on_connection_drop: Callback<BlockId>,  // to_id
+    pub(crate) on_connection_start: Callback<BlockId>, // from_id
 }
 
 #[function_component]
 pub fn BlockView(props: &BlockProps) -> Html {
-
     let translate = use_translation();
 
     let delete_mode = props.delete_mode;
@@ -35,11 +36,11 @@ pub fn BlockView(props: &BlockProps) -> Html {
 
     let is_target = block_type.is_target();
     let is_input = !is_target && block_type.is_input();
-    let is_output =  !is_input && !is_target;
+    let is_output = !is_input && !is_target;
 
     let port_style = match port_status {
-        PortStatus::Valid =>  "tp__source-editor__block-port--valid",
-        PortStatus::Invalid =>  "tp__source-editor__block-port--invalid",
+        PortStatus::Valid => "tp__source-editor__block-port--valid",
+        PortStatus::Invalid => "tp__source-editor__block-port--invalid",
         _ => "",
     };
 
@@ -60,25 +61,18 @@ pub fn BlockView(props: &BlockProps) -> Html {
 
     let handle_edit = {
         let on_edit = props.on_edit.clone();
-        Callback::from(move |_| {
-           on_edit.emit(block_id)
-        })
+        Callback::from(move |_| on_edit.emit(block_id))
     };
 
     let (title, show_type, is_batch) = {
         let (dto_title, show_type, is_batch) = match &block.instance {
-            BlockInstance::Input(dto) => {
-                dto.aliases.as_ref().map_or(
-                    (dto.name.to_string(), true, false),
-                    |a| {
-                        if a.is_empty() {
-                            (dto.name.to_string(), true, false)
-                        } else {
-                            (if dto.name.is_empty() {a[0].name.to_string()} else {dto.name.to_string()}, true, true)
-                        }
-                    }
-                )
-            },
+            BlockInstance::Input(dto) => dto.aliases.as_ref().map_or((dto.name.to_string(), true, false), |a| {
+                if a.is_empty() {
+                    (dto.name.to_string(), true, false)
+                } else {
+                    (if dto.name.is_empty() { a[0].name.to_string() } else { dto.name.to_string() }, true, true)
+                }
+            }),
             BlockInstance::Target(dto) => (dto.name.to_string(), true, false),
             BlockInstance::Output(_output) => {
                 (translate.t(&format!("SOURCE_EDITOR.BRICK_{}", block_type)), false, false)

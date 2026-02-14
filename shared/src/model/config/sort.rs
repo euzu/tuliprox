@@ -1,20 +1,25 @@
-use crate::error::{TuliproxError, TuliproxErrorKind};
-use crate::foundation::{apply_templates_to_pattern, get_filter, Filter};
-use crate::model::{ItemField, PatternTemplate, TemplateValue};
-use crate::{handle_tuliprox_error_result_list, info_err, info_err_res};
+use crate::{
+    error::{TuliproxError, TuliproxErrorKind},
+    foundation::{apply_templates_to_pattern, get_filter, Filter},
+    handle_tuliprox_error_result_list, info_err, info_err_res,
+    model::{ItemField, PatternTemplate, TemplateValue},
+};
 use regex::Regex;
 use serde::{Deserialize, Deserializer, Serialize};
-use std::fmt::{Display, Formatter};
-use std::str::FromStr;
-use std::sync::Arc;
+use std::{
+    fmt::{Display, Formatter},
+    str::FromStr,
+    sync::Arc,
+};
 
 fn compile_regex_vec(patterns: Option<&Vec<String>>) -> Result<Option<Vec<Arc<Regex>>>, TuliproxError> {
-    patterns.as_ref()
+    patterns
+        .as_ref()
         .map(|seq| {
             seq.iter()
-                .map(|s| crate::model::REGEX_CACHE.get_or_compile(s).map_err(|err| {
-                    info_err!("can't parse regex: {s} {err}")
-                }))
+                .map(|s| {
+                    crate::model::REGEX_CACHE.get_or_compile(s).map_err(|err| info_err!("can't parse regex: {s} {err}"))
+                })
                 .collect::<Result<Vec<_>, _>>()
         })
         .transpose() // convert Option<Result<...>> to Result<Option<...>>
@@ -41,11 +46,8 @@ impl SortOrder {
 }
 
 impl Display for SortOrder {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(self.as_str()) }
 }
-
 
 #[derive(Serialize, Debug, Copy, Clone, Eq, PartialEq)]
 pub enum SortTarget {
@@ -92,9 +94,7 @@ impl<'de> Deserialize<'de> for SortTarget {
 }
 
 impl Display for SortTarget {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result { f.write_str(self.as_str()) }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -122,7 +122,6 @@ impl PartialEq for ConfigSortRuleDto {
             && self.filter == other.filter
     }
 }
-
 
 impl ConfigSortRuleDto {
     pub fn prepare(&mut self, templates: Option<&Vec<PatternTemplate>>) -> Result<(), TuliproxError> {
@@ -169,7 +168,10 @@ pub struct ConfigSortDto {
 
 impl ConfigSortDto {
     pub fn prepare(&mut self, templates: Option<&Vec<PatternTemplate>>) -> Result<(), TuliproxError> {
-        handle_tuliprox_error_result_list!(TuliproxErrorKind::Info, self.rules.iter_mut().map(|rule| rule.prepare(templates)));
+        handle_tuliprox_error_result_list!(
+            TuliproxErrorKind::Info,
+            self.rules.iter_mut().map(|rule| rule.prepare(templates))
+        );
         Ok(())
     }
 }

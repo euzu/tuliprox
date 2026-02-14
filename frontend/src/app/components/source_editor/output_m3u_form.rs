@@ -1,9 +1,14 @@
-use crate::app::components::config::HasFormData;
-use crate::app::components::{BlockId, BlockInstance, Card, EditMode, FilterInput, SourceEditorContext, TextButton};
-use crate::{config_field_child, edit_field_bool, edit_field_text_option, generate_form_reducer};
+use crate::{
+    app::components::{
+        config::HasFormData, BlockId, BlockInstance, Card, EditMode, FilterInput, SourceEditorContext, TextButton,
+    },
+    config_field_child, edit_field_bool, edit_field_text_option, generate_form_reducer,
+};
 use shared::model::{M3uTargetOutputDto, TargetOutputDto};
 use std::rc::Rc;
-use yew::{function_component, html, use_context, use_effect_with, use_reducer, Callback, Html, Properties, UseReducerHandle};
+use yew::{
+    function_component, html, use_context, use_effect_with, use_reducer, Callback, Html, Properties, UseReducerHandle,
+};
 use yew_i18n::use_translation;
 
 const LABEL_FILENAME: &str = "LABEL.FILENAME";
@@ -34,10 +39,7 @@ pub fn M3uTargetOutputView(props: &M3uTargetOutputViewProps) -> Html {
     let source_editor_ctx = use_context::<SourceEditorContext>().expect("SourceEditorContext not found");
 
     let output_form_state: UseReducerHandle<M3uTargetOutputFormState> =
-        use_reducer(|| M3uTargetOutputFormState {
-            form: M3uTargetOutputDto::default(),
-            modified: false,
-        });
+        use_reducer(|| M3uTargetOutputFormState { form: M3uTargetOutputDto::default(), modified: false });
 
     {
         let output_form_state = output_form_state.clone();
@@ -77,7 +79,9 @@ pub fn M3uTargetOutputView(props: &M3uTargetOutputViewProps) -> Html {
         let block_id = props.block_id;
         Callback::from(move |_| {
             let output = output_form_state.data().clone();
-            source_editor_ctx.on_form_change.emit((block_id, BlockInstance::Output(Rc::new(TargetOutputDto::M3u(output)))));
+            source_editor_ctx
+                .on_form_change
+                .emit((block_id, BlockInstance::Output(Rc::new(TargetOutputDto::M3u(output)))));
             source_editor_ctx.edit_mode.set(EditMode::Inactive);
         })
     };

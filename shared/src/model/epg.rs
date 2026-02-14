@@ -1,7 +1,9 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::cmp::{max, min};
-use std::sync::Arc;
+use std::{
+    cmp::{max, min},
+    sync::Arc,
+};
 
 fn get_epg_interval(channels: &Vec<EpgChannel>) -> (i64, i64) {
     if channels.is_empty() {
@@ -32,18 +34,13 @@ pub struct EpgTv {
 impl EpgTv {
     pub fn new(channels: Vec<EpgChannel>) -> Self {
         let (start, stop) = get_epg_interval(&channels);
-        Self {
-            start,
-            stop,
-            channels,
-        }
+        Self { start, stop, channels }
     }
 }
 
 impl PartialEq for EpgTv {
     fn eq(&self, other: &Self) -> bool {
-        self.start == other.start
-            && self.stop == other.stop
+        self.start == other.start && self.stop == other.stop
         // Note: self.channels is skipped
     }
 }
@@ -57,29 +54,20 @@ pub struct EpgChannel {
 }
 
 impl EpgChannel {
-    pub fn new(id: Arc<str>) -> Self {
-        Self {
-            id,
-            title: None,
-            icon: None,
-            programmes: Vec::new(),
-        }
-    }
+    pub fn new(id: Arc<str>) -> Self { Self { id, title: None, icon: None, programmes: Vec::new() } }
 
     pub fn get_programme_with_limit(&self, limit: u32) -> Vec<&EpgProgramme> {
         let now = Utc::now().timestamp();
 
         // find index for first relevant entry
-        let start_idx = self.programmes.iter()
+        let start_idx = self
+            .programmes
+            .iter()
             .position(|p| (p.start <= now && now <= p.stop) || (p.start >= now))
             .unwrap_or(self.programmes.len()); // nothing found, empty response
 
         // slice from start_idx, max. limit
-        self.programmes
-            .iter()
-            .skip(start_idx)
-            .take(limit as usize)
-            .collect()
+        self.programmes.iter().skip(start_idx).take(limit as usize).collect()
     }
 }
 
@@ -95,28 +83,14 @@ pub struct EpgProgramme {
 
 impl EpgProgramme {
     // the channel_id is only available when read from xml file, reading from db do not return any epg_id
-    pub fn get_transient_channel_id(&self) -> &Arc<str> {
-        &self.channel
-    }
+    pub fn get_transient_channel_id(&self) -> &Arc<str> { &self.channel }
 }
 
 impl EpgProgramme {
     pub fn new(start: i64, stop: i64, channel: Arc<str>) -> Self {
-        Self {
-            start,
-            stop,
-            channel,
-            title: None,
-            desc: None,
-        }
+        Self { start, stop, channel, title: None, desc: None }
     }
     pub fn new_all(start: i64, stop: i64, channel: Arc<str>, title: Option<Arc<str>>, desc: Option<Arc<str>>) -> Self {
-        Self {
-            start,
-            stop,
-            channel,
-            title,
-            desc,
-        }
+        Self { start, stop, channel, title, desc }
     }
 }

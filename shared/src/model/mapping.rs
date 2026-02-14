@@ -1,29 +1,42 @@
+use crate::{
+    error::{info_err_res, TuliproxError},
+    foundation::{apply_templates_to_pattern_single, get_filter, prepare_templates, Filter, MapperScript},
+    model::PatternTemplate,
+};
 use enum_iterator::Sequence;
-use std::fmt::Display;
-use std::str::FromStr;
-use std::sync::atomic::AtomicU32;
-use std::sync::Arc;
-use log::{trace};
-use crate::error::{TuliproxError, info_err_res};
-use crate::foundation::{apply_templates_to_pattern_single, get_filter, prepare_templates, Filter};
-use crate::foundation::MapperScript;
-use crate::model::PatternTemplate;
+use log::trace;
+use std::{
+    fmt::Display,
+    str::FromStr,
+    sync::{atomic::AtomicU32, Arc},
+};
 pub const COUNTER_FIELDS: &[&str] = &["name", "title", "caption", "chno"];
 
 pub const MAPPER_FIELDS: &[&str] = &[
-    "name", "title", "caption", "group", "id", "chno", "logo",
-    "logo_small", "parent_code", "audio_track",
-    "time_shift", "rec", "url", "epg_channel_id", "epg_id"
+    "name",
+    "title",
+    "caption",
+    "group",
+    "id",
+    "chno",
+    "logo",
+    "logo_small",
+    "parent_code",
+    "audio_track",
+    "time_shift",
+    "rec",
+    "url",
+    "epg_channel_id",
+    "epg_id",
 ];
 
 #[macro_export]
 macro_rules! valid_property {
-  ($key:expr, $array:expr) => {{
+    ($key:expr, $array:expr) => {{
         $array.contains(&$key)
     }};
 }
 pub use valid_property;
-
 
 #[derive(Debug, Default, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq)]
 pub enum CounterModifier {
@@ -44,11 +57,15 @@ impl CounterModifier {
 
 impl Display for CounterModifier {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", match self {
-            Self::Assign => Self::ASSIGN,
-            Self::Suffix => Self::SUFFIX,
-            Self::Prefix => Self::PREFIX,
-        })
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::Assign => Self::ASSIGN,
+                Self::Suffix => Self::SUFFIX,
+                Self::Prefix => Self::PREFIX,
+            }
+        )
     }
 }
 
@@ -119,7 +136,7 @@ pub enum MapperOperation {
 impl MapperOperation {
     pub fn prepare(&mut self, templates: Option<&Vec<PatternTemplate>>) -> Result<(), TuliproxError> {
         match self {
-            MapperOperation::Lowercase {ref field }
+            MapperOperation::Lowercase { ref field }
             | MapperOperation::Uppercase { ref field }
             | MapperOperation::Capitalize { ref field } => {
                 if !valid_property!(field.as_str(), MAPPER_FIELDS) {
@@ -181,7 +198,6 @@ impl MapperDto {
     }
 }
 
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
 pub struct MappingDto {
     pub id: String,
@@ -192,7 +208,7 @@ pub struct MappingDto {
     #[serde(skip_serializing, skip_deserializing)]
     pub t_counter: Option<Vec<MappingCounter>>,
     #[serde(skip_serializing, skip_deserializing)]
-    pub templates: Option<Vec<PatternTemplate>>
+    pub templates: Option<Vec<PatternTemplate>>,
 }
 
 impl MappingDto {
@@ -221,7 +237,7 @@ impl MappingDto {
                             padding: def.padding,
                         });
                     }
-                    Err(e) => return info_err_res!("Counter field error: {}", e.to_string())
+                    Err(e) => return info_err_res!("Counter field error: {}", e.to_string()),
                 }
             }
             self.t_counter = Some(counters);
@@ -261,8 +277,5 @@ pub struct MappingsDto {
 }
 
 impl MappingsDto {
-    pub fn prepare(&mut self) -> Result<(), TuliproxError> {
-        self.mappings.prepare()
-    }
-
+    pub fn prepare(&mut self) -> Result<(), TuliproxError> { self.mappings.prepare() }
 }

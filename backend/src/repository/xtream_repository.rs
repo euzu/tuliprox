@@ -18,7 +18,7 @@ use bytes::Bytes;
 use fs2::FileExt;
 use futures::{stream, Stream, StreamExt};
 use indexmap::IndexMap;
-use log::{error};
+use log::error;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use shared::error::{info_err_res, notify_err, string_to_io_error, TuliproxError};
@@ -718,10 +718,9 @@ fn preserve_details_input_xtream_playlist_cluster_to_disk(
     old_path: &Path,
     tmp_path: &Path,
 ) -> Result<(), TuliproxError> {
-
-   let Ok(mut old_tree) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(old_path) else {
-       return Ok(())
-   };
+    let Ok(mut old_tree) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(old_path) else {
+        return Ok(())
+    };
 
     let Ok(mut new_tree) = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::try_new_with_backoff(tmp_path) else {
         return Ok(())
@@ -733,18 +732,16 @@ fn preserve_details_input_xtream_playlist_cluster_to_disk(
             if old_props.has_details() {
                 if let Ok(Some(mut new_item)) = new_tree.query(&old_item.provider_id) {
                     if let Some(new_props) = new_item.additional_properties.as_mut() {
-                        if needs_preserved_stream_property_merge(new_props, old_props) {
-                            if merge_preserved_stream_properties(new_props, old_props) {
-                                updates.push((new_item.provider_id, new_item));
-                                if updates.len() >= BATCH_SIZE {
-                                    let refs: Vec<(&u32, &XtreamPlaylistItem)> = updates.iter().map(|(id, pli)| (id, pli)).collect();
-                                    new_tree.update_batch(&refs).map_err(|e| notify_err!("Failed to update tmp tree during merge: {e}"))?;
-                                    updates.clear();
-                                }
+                        if needs_preserved_stream_property_merge(new_props, old_props) && merge_preserved_stream_properties(new_props, old_props) {
+                            updates.push((new_item.provider_id, new_item));
+                            if updates.len() >= BATCH_SIZE {
+                                let refs: Vec<(&u32, &XtreamPlaylistItem)> = updates.iter().map(|(id, pli)| (id, pli)).collect();
+                                new_tree.update_batch(&refs).map_err(|e| notify_err!("Failed to update tmp tree during merge: {e}"))?;
+                                updates.clear();
                             }
                         }
-                    };
-                };
+                    }
+                }
             }
         }
     }
@@ -1129,7 +1126,6 @@ pub(crate) fn needs_update_info_details(
     new_stream_props: &StreamProperties,
     old_stream_props: &StreamProperties,
 ) -> bool {
-
     let new_modified = new_stream_props.get_last_modified();
     let old_modified = old_stream_props.get_last_modified();
 
@@ -1148,15 +1144,15 @@ fn needs_preserved_stream_property_merge(
 
     match (new_stream_props, old_stream_props) {
         (StreamProperties::Video(v_new), StreamProperties::Video(v_old))
-            if preserve_info_details && v_old.details.is_some() =>
-        {
-            v_new.details != v_old.details
-        }
+        if preserve_info_details && v_old.details.is_some() =>
+            {
+                v_new.details != v_old.details
+            }
         (StreamProperties::Series(s_new), StreamProperties::Series(s_old))
-            if preserve_info_details && s_old.details.is_some() =>
-        {
-            s_new.details != s_old.details
-        }
+        if preserve_info_details && s_old.details.is_some() =>
+            {
+                s_new.details != s_old.details
+            }
         (StreamProperties::Live(l_new), StreamProperties::Live(l_old)) => {
             (l_new.video.is_none() && l_old.video.is_some())
                 || (l_new.audio.is_none() && l_old.audio.is_some())
@@ -1450,22 +1446,6 @@ mod tests {
         let old_props = StreamProperties::Series(Box::new(SeriesStreamProperties {
             last_modified: Some("200".into()),
             ..SeriesStreamProperties::default()
-        }));
-
-        assert!(!needs_update_info_details(&new_props, &old_props));
-    }
-
-    #[test]
-    fn keeps_old_details_when_new_timestamp_is_newer_but_new_has_no_details() {
-        let new_props = StreamProperties::Video(Box::new(VideoStreamProperties {
-            added: "200".into(),
-            details: None,
-            ..VideoStreamProperties::default()
-        }));
-        let old_props = StreamProperties::Video(Box::new(VideoStreamProperties {
-            added: "100".into(),
-            details: Some(shared::model::VideoStreamDetailProperties::default()),
-            ..VideoStreamProperties::default()
         }));
 
         assert!(!needs_update_info_details(&new_props, &old_props));

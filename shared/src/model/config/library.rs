@@ -1,7 +1,15 @@
-use crate::error::{TuliproxError};
-use crate::utils::{default_as_true, default_metadata_path, default_movie_category, default_series_category, default_storage_formats, default_supported_library_extensions, default_tmdb_api_key, default_tmdb_cache_duration_days, default_tmdb_language, default_tmdb_rate_limit_ms, is_default_supported_library_extensions, is_default_tmdb_cache_duration_days, is_default_tmdb_language, is_default_tmdb_rate_limit_ms, is_tmdb_default_api_key, is_true, TMDB_API_KEY};
+use crate::{
+    error::TuliproxError,
+    info_err_res,
+    utils::{
+        default_as_true, default_metadata_path, default_movie_category, default_series_category,
+        default_storage_formats, default_supported_library_extensions, default_tmdb_api_key,
+        default_tmdb_cache_duration_days, default_tmdb_language, default_tmdb_rate_limit_ms,
+        is_default_supported_library_extensions, is_default_tmdb_cache_duration_days, is_default_tmdb_language,
+        is_default_tmdb_rate_limit_ms, is_tmdb_default_api_key, is_true, TMDB_API_KEY,
+    },
+};
 use serde::{Deserialize, Serialize};
-use crate::info_err_res;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(deny_unknown_fields)]
@@ -49,12 +57,7 @@ pub struct LibraryScanDirectoryDto {
 }
 impl Default for LibraryScanDirectoryDto {
     fn default() -> Self {
-        Self {
-            enabled: true,
-            path: String::new(),
-            content_type: LibraryContentType::default(),
-            recursive: true,
-        }
+        Self { enabled: true, path: String::new(), content_type: LibraryContentType::default(), recursive: true }
     }
 }
 
@@ -110,9 +113,7 @@ pub struct LibraryMetadataReadConfigDto {
 }
 
 impl LibraryMetadataReadConfigDto {
-    pub fn is_empty(&self) -> bool {
-        self.kodi && self.jellyfin && self.plex
-    }
+    pub fn is_empty(&self) -> bool { self.kodi && self.jellyfin && self.plex }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -122,15 +123,9 @@ pub struct LibraryTmdbConfigDto {
     pub enabled: bool,
     #[serde(default = "default_tmdb_api_key", skip_serializing_if = "is_tmdb_default_api_key")]
     pub api_key: Option<String>,
-    #[serde(
-        default = "default_tmdb_rate_limit_ms",
-        skip_serializing_if = "is_default_tmdb_rate_limit_ms"
-    )]
+    #[serde(default = "default_tmdb_rate_limit_ms", skip_serializing_if = "is_default_tmdb_rate_limit_ms")]
     pub rate_limit_ms: u64,
-    #[serde(
-        default = "default_tmdb_cache_duration_days",
-        skip_serializing_if = "is_default_tmdb_cache_duration_days"
-    )]
+    #[serde(default = "default_tmdb_cache_duration_days", skip_serializing_if = "is_default_tmdb_cache_duration_days")]
     pub cache_duration_days: u32,
     #[serde(default = "default_tmdb_language", skip_serializing_if = "is_default_tmdb_language")]
     pub language: String,
@@ -168,8 +163,7 @@ pub struct LibraryPlaylistConfigDto {
 
 impl LibraryPlaylistConfigDto {
     pub fn is_empty(&self) -> bool {
-        self.movie_category == default_movie_category()
-            && self.series_category == default_series_category()
+        self.movie_category == default_movie_category() && self.series_category == default_series_category()
     }
     pub fn clean(&mut self) {
         if self.movie_category.trim().is_empty() {

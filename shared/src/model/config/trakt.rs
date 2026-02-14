@@ -1,9 +1,9 @@
-use crate::model::DEFAULT_USER_AGENT;
-use crate::utils::{default_as_true, default_trakt_fuzzy_threshold, is_true,
-                   TRAKT_API_KEY, TRAKT_API_URL, TRAKT_API_VERSION};
+use crate::{
+    model::DEFAULT_USER_AGENT,
+    utils::{default_as_true, default_trakt_fuzzy_threshold, is_true, TRAKT_API_KEY, TRAKT_API_URL, TRAKT_API_VERSION},
+};
 use serde::{Deserialize, Serialize};
-use std::fmt;
-use std::str::FromStr;
+use std::{fmt, str::FromStr};
 
 #[derive(Debug, Default, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -16,11 +16,15 @@ pub enum TraktContentType {
 
 impl fmt::Display for TraktContentType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", match self {
-            TraktContentType::Vod => "Vod",
-            TraktContentType::Series => "Series",
-            TraktContentType::Both => "Both",
-        })
+        write!(
+            f,
+            "{}",
+            match self {
+                TraktContentType::Vod => "Vod",
+                TraktContentType::Series => "Series",
+                TraktContentType::Both => "Both",
+            }
+        )
     }
 }
 
@@ -36,7 +40,6 @@ impl FromStr for TraktContentType {
         }
     }
 }
-
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -63,7 +66,6 @@ impl TraktApiConfigDto {
         self.user_agent = String::from(if user_agent.is_empty() { DEFAULT_USER_AGENT } else { user_agent });
     }
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -99,17 +101,9 @@ pub struct TraktConfigDto {
 }
 
 impl Default for TraktConfigDto {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            api: TraktApiConfigDto::default(),
-            lists: Vec::new(),
-        }
-    }
+    fn default() -> Self { Self { enabled: true, api: TraktApiConfigDto::default(), lists: Vec::new() } }
 }
 
 impl TraktConfigDto {
-    pub fn prepare(&mut self) {
-        self.api.prepare();
-    }
+    pub fn prepare(&mut self) { self.api.prepare(); }
 }

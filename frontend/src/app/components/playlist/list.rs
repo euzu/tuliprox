@@ -1,7 +1,9 @@
+use crate::app::{
+    components::{AppIcon, CollapsePanel, InputTable, PlaylistContext, PlaylistEditorPage, TargetTable, TextButton},
+    context::PlaylistEditorContext,
+};
 use yew::prelude::*;
 use yew_i18n::use_translation;
-use crate::app::components::{AppIcon, CollapsePanel, InputTable, PlaylistContext, PlaylistEditorPage, TargetTable, TextButton};
-use crate::app::context::PlaylistEditorContext;
 
 #[function_component]
 pub fn PlaylistList() -> Html {
@@ -17,20 +19,20 @@ pub fn PlaylistList() -> Html {
 
     let playlist_body = if let Some(data) = playlist_ctx.sources.as_ref() {
         html! {
-        <>
-            { for data.iter().map(|(inputs, targets)| html! {
-                <div class="tp__playlist-list__source">
-                    <CollapsePanel class="tp__playlist-list__source-inputs" expanded={false} title_content={Some(html!{<><AppIcon name="Input"/>{translate.t("LABEL.INPUTS")}</>})}>
-                        <InputTable inputs={Some(inputs.clone())} />
-                    </CollapsePanel>
-                    <span class="tp__playlist-list__source-label"><AppIcon name="Target" />{translate.t("LABEL.TARGETS")}</span>
-                    <TargetTable targets={Some(targets.clone())} />
-                </div>
-            }) }
-        </>
-    }
+            <>
+                { for data.iter().map(|(inputs, targets)| html! {
+                    <div class="tp__playlist-list__source">
+                        <CollapsePanel class="tp__playlist-list__source-inputs" expanded={false} title_content={Some(html!{<><AppIcon name="Input"/>{translate.t("LABEL.INPUTS")}</>})}>
+                            <InputTable inputs={Some(inputs.clone())} />
+                        </CollapsePanel>
+                        <span class="tp__playlist-list__source-label"><AppIcon name="Target" />{translate.t("LABEL.TARGETS")}</span>
+                        <TargetTable targets={Some(targets.clone())} />
+                    </div>
+                }) }
+            </>
+        }
     } else {
-        html! {  }
+        html! {}
     };
 
     html! {

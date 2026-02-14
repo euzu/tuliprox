@@ -1,5 +1,5 @@
-use yew::prelude::*;
 use crate::app::components::AppIcon;
+use yew::prelude::*;
 
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct HideContentProps {
@@ -10,7 +10,6 @@ pub struct HideContentProps {
 
 #[function_component]
 pub fn HideContent(props: &HideContentProps) -> Html {
-
     let hidden = use_state(|| true);
 
     let handle_click = {

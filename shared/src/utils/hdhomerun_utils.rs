@@ -24,11 +24,7 @@ pub fn validate_hdhr_device_id(device_id: &str) -> bool {
 }
 
 pub fn generate_hdhr_device_id_from_base(base_id: &str) -> String {
-    let base_sanitized: String = base_id
-        .chars()
-        .filter(|c| c.is_ascii_hexdigit())
-        .collect::<String>()
-        .to_uppercase();
+    let base_sanitized: String = base_id.chars().filter(|c| c.is_ascii_hexdigit()).collect::<String>().to_uppercase();
     if base_sanitized.is_empty() {
         return generate_hdhr_device_id();
     }

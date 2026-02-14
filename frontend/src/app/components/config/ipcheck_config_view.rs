@@ -1,15 +1,21 @@
+use crate::{
+    app::{
+        components::config::{
+            config_page::{ConfigForm, LABEL_IP_CHECK_CONFIG},
+            config_view_context::ConfigViewContext,
+        },
+        context::ConfigContext,
+    },
+    config_field_empty, config_field_optional, edit_field_text_option, generate_form_reducer,
+};
+use shared::model::IpCheckConfigDto;
 use yew::prelude::*;
 use yew_i18n::use_translation;
-use shared::model::{IpCheckConfigDto};
-use crate::app::context::ConfigContext;
-use crate::{config_field_empty, config_field_optional, edit_field_text_option, generate_form_reducer};
-use crate::app::components::config::config_view_context::ConfigViewContext;
-use crate::app::components::config::config_page::{ConfigForm, LABEL_IP_CHECK_CONFIG};
-const LABEL_URL: &str =  "LABEL.URL";
-const LABEL_URL_IPV4: &str =  "LABEL.URL_IPV4";
-const LABEL_URL_IPV6: &str =  "LABEL.URL_IPV6";
-const LABEL_PATTERN_IPV4: &str =  "LABEL.PATTERN_IPV4";
-const LABEL_PATTERN_IPV6: &str =  "LABEL.PATTERN_IPV6";
+const LABEL_URL: &str = "LABEL.URL";
+const LABEL_URL_IPV4: &str = "LABEL.URL_IPV4";
+const LABEL_URL_IPV6: &str = "LABEL.URL_IPV6";
+const LABEL_PATTERN_IPV4: &str = "LABEL.PATTERN_IPV4";
+const LABEL_PATTERN_IPV6: &str = "LABEL.PATTERN_IPV6";
 
 generate_form_reducer!(
     state: IpCheckConfigFormState { form: IpCheckConfigDto },
@@ -29,9 +35,8 @@ pub fn IpCheckConfigView() -> Html {
     let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");
     let config_view_ctx = use_context::<ConfigViewContext>().expect("ConfigViewContext not found");
 
-    let form_state: UseReducerHandle<IpCheckConfigFormState> = use_reducer(|| {
-        IpCheckConfigFormState { form: IpCheckConfigDto::default(), modified: false }
-    });
+    let form_state: UseReducerHandle<IpCheckConfigFormState> =
+        use_reducer(|| IpCheckConfigFormState { form: IpCheckConfigDto::default(), modified: false });
 
     {
         let on_form_change = config_view_ctx.on_form_change.clone();
@@ -43,10 +48,7 @@ pub fn IpCheckConfigView() -> Html {
 
     {
         let form_state = form_state.clone();
-        let ipcheck_config = config_ctx
-            .config
-            .as_ref()
-            .and_then(|c| c.config.ipcheck.clone());
+        let ipcheck_config = config_ctx.config.as_ref().and_then(|c| c.config.ipcheck.clone());
 
         use_effect_with((ipcheck_config, config_view_ctx.edit_mode.clone()), move |(ipcheck_cfg, _mode)| {
             if let Some(ipcheck) = ipcheck_cfg {

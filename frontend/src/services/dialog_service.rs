@@ -1,9 +1,11 @@
 use crate::model::{DialogAction, DialogActions, DialogResult};
-use std::cell::RefCell;
-use std::future::Future;
-use std::pin::Pin;
-use std::rc::Rc;
-use std::task::{Context, Poll, Waker};
+use std::{
+    cell::RefCell,
+    future::Future,
+    pin::Pin,
+    rc::Rc,
+    task::{Context, Poll, Waker},
+};
 use yew::{Callback, Html};
 
 #[derive(Clone)]
@@ -27,10 +29,7 @@ impl DialogFuture {
             }
         };
 
-        (
-            DialogFuture { result, waker },
-            resolve,
-        )
+        (DialogFuture { result, waker }, resolve)
     }
 }
 
@@ -75,13 +74,9 @@ pub struct DialogService {
 }
 
 impl DialogService {
-    pub fn new() -> Self {
-        Self::default()
-    }
+    pub fn new() -> Self { Self::default() }
 
-    pub fn register(&self, cb: Callback<DialogRequest>) {
-        *self.inner.borrow_mut() = Some(cb);
-    }
+    pub fn register(&self, cb: Callback<DialogRequest>) { *self.inner.borrow_mut() = Some(cb); }
 
     pub fn confirm(&self, title: &str) -> DialogFuture {
         let (future, resolver) = DialogFuture::new();
@@ -99,16 +94,27 @@ impl DialogService {
         future
     }
 
-    pub fn content(&self, content: Html, actions: Option<DialogActions>, close_on_backdrop_click: bool) -> DialogFuture {
+    pub fn content(
+        &self,
+        content: Html,
+        actions: Option<DialogActions>,
+        close_on_backdrop_click: bool,
+    ) -> DialogFuture {
         let (future, resolver) = DialogFuture::new();
         let request = ContentRequest {
             content,
             actions: actions.unwrap_or_else(|| DialogActions {
                 left: None,
-                right: vec![DialogAction::new_focused("close", "LABEL.CLOSE", DialogResult::Cancel, Some("Close".to_owned()), None)],
+                right: vec![DialogAction::new_focused(
+                    "close",
+                    "LABEL.CLOSE",
+                    DialogResult::Cancel,
+                    Some("Close".to_owned()),
+                    None,
+                )],
             }),
             resolve: Rc::new(RefCell::new(Some(Box::new(resolver)))),
-            close_on_backdrop_click
+            close_on_backdrop_click,
         };
 
         if let Some(cb) = &*self.inner.borrow() {

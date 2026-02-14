@@ -26,7 +26,7 @@ pub fn ToggleSwitch(props: &ToggleSwitchProps) -> Html {
         let toggled = toggled.clone();
         let readonly = props.readonly;
         let onchange = props.on_change.clone();
-        Callback::from(move |e: MouseEvent|  {
+        Callback::from(move |e: MouseEvent| {
             if readonly {
                 e.prevent_default();
                 e.stop_propagation();

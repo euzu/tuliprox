@@ -2,19 +2,48 @@ name: CI
 
 on:
   push:
+    branches: [develop]
   pull_request:
-    branches: [main]
+    branches: [develop]
+
+# Avoid running the same CI multiple times for the same PR
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  ci:
+  # Job 1: Check code style (very fast)
+  style:
+    name: Format & Lint
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install Rust
+      - name: Install Nightly Rust
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt, clippy
+
+      - name: Check Formatting
+        # This now works with cargo +nightly fmt
+        run: make fmt-check
+
+      - name: Lint with Clippy
+        run: make lint
+
+  # Job 2: Build and Test (takes longer)
+  test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Stable Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Check code formatting
-        run: make fmt-check
+      - name: Rust Cache
+        # This magic step saves compiled dependencies between runs
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run Tests
+        run: make test

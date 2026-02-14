@@ -1,5 +1,7 @@
-use crate::app::components::{Card, TextButton};
-use crate::{edit_field_bool, edit_field_number_i16, edit_field_text, generate_form_reducer};
+use crate::{
+    app::components::{Card, TextButton},
+    edit_field_bool, edit_field_number_i16, edit_field_text, generate_form_reducer,
+};
 use shared::model::EpgSourceDto;
 use yew::{function_component, html, use_reducer, Callback, Html, Properties, UseReducerHandle};
 use yew_i18n::use_translation;
@@ -30,15 +32,13 @@ pub struct EpgSourceItemFormProps {
 pub fn EpgSourceItemForm(props: &EpgSourceItemFormProps) -> Html {
     let translate = use_translation();
 
-    let form_state: UseReducerHandle<EpgSourceFormState> = use_reducer(|| {
-        EpgSourceFormState {
-            form: props.initial.clone().unwrap_or_else(|| EpgSourceDto {
-                url: String::new(),
-                priority: 0,
-                logo_override: false,
-            }),
-            modified: false,
-        }
+    let form_state: UseReducerHandle<EpgSourceFormState> = use_reducer(|| EpgSourceFormState {
+        form: props.initial.clone().unwrap_or_else(|| EpgSourceDto {
+            url: String::new(),
+            priority: 0,
+            logo_override: false,
+        }),
+        modified: false,
     });
 
     let handle_submit = {

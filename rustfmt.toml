@@ -1,0 +1,30 @@
+unstable_features = true
+# --- Space-Saving Configuration ---
+
+# Max line length before wrapping (default is 100)
+max_width = 120
+
+# Maximize single-line formatting for structs, enums, and matches
+use_small_heuristics = "Max"
+
+# Allow rustfmt to format the content of macros (Unstable)
+# This helps keeping logs on one line if they fit
+format_macro_bodies = true
+
+# Allow simple functions to stay on one line (e.g., getters)
+fn_single_line = true
+
+# Allow struct literals to be formatted on a single line
+struct_lit_single_line = true
+
+# Consolidate imports from the same crate into a single line
+imports_granularity = "Crate"
+
+# Group all imports into a single block
+group_imports = "One"
+
+# Keep opening braces on the same line as 'where' clauses
+brace_style = "SameLineWhere"
+
+# Format empty items (like empty impl blocks) on a single line
+empty_item_single_line = true

@@ -1,5 +1,5 @@
-use shared::model::{ConfigDto};
 use crate::app::components::config::config_page::ConfigForm;
+use shared::model::ConfigDto;
 
 macro_rules! set_config_field {
     ($main_config:expr, $config:expr, $field:ident) => {
@@ -24,17 +24,19 @@ pub fn update_config(config: &mut ConfigDto, forms: Vec<ConfigForm>) {
                 } else {
                     config.schedules = schedules_cfg.schedules.clone();
                 }
-            },
-            ConfigForm::Video(_, mut video_cfg) =>  set_config_field!(config, video_cfg, video),
+            }
+            ConfigForm::Video(_, mut video_cfg) => set_config_field!(config, video_cfg, video),
             ConfigForm::Messaging(_, mut messaging_cfg) => set_config_field!(config, messaging_cfg, messaging),
             ConfigForm::WebUi(_, mut web_ui_cfg) => set_config_field!(config, web_ui_cfg, web_ui),
-            ConfigForm::ReverseProxy(_, mut reverse_proxy_cfg) => set_config_field!(config, reverse_proxy_cfg, reverse_proxy),
+            ConfigForm::ReverseProxy(_, mut reverse_proxy_cfg) => {
+                set_config_field!(config, reverse_proxy_cfg, reverse_proxy)
+            }
             ConfigForm::HdHomerun(_, mut hdhr_cfg) => set_config_field!(config, hdhr_cfg, hdhomerun),
             ConfigForm::Proxy(_, mut proxy_cfg) => set_config_field!(config, proxy_cfg, proxy),
             ConfigForm::IpCheck(_, mut ipcheck_cfg) => set_config_field!(config, ipcheck_cfg, ipcheck),
             ConfigForm::Library(_, mut library_cfg) => set_config_field!(config, library_cfg, library),
-            ConfigForm::Panel(_, _) => {},
-            ConfigForm::ApiProxy(_, _) => {},
+            ConfigForm::Panel(_, _) => {}
+            ConfigForm::ApiProxy(_, _) => {}
         }
     }
 }

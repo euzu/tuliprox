@@ -1,19 +1,12 @@
 #[cfg(target_arch = "wasm32")]
-pub fn current_time_secs() -> u64 {
-    (js_sys::Date::now() / 1000.0) as u64
-}
+pub fn current_time_secs() -> u64 { (js_sys::Date::now() / 1000.0) as u64 }
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn current_time_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
-pub fn unix_ts_to_str(ts: i64) -> Option<String> {
-    unix_ts_to_str_with_format(ts, "%Y-%m-%d %H:%M:%S")
-}
+pub fn unix_ts_to_str(ts: i64) -> Option<String> { unix_ts_to_str_with_format(ts, "%Y-%m-%d %H:%M:%S") }
 
 fn normalize_ts(ts: i64) -> Option<i64> {
     if ts >= 0 {

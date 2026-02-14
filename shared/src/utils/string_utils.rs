@@ -1,12 +1,9 @@
-use std::borrow::Cow;
-use std::sync::{Arc};
-use deunicode::deunicode_with_tofu_cow;
 use crate::utils::CONSTANTS;
+use deunicode::deunicode_with_tofu_cow;
+use std::{borrow::Cow, sync::Arc};
 
 /// Cleans a playlist title by removing common IPTV prefixes (e.g., "[US]", "┃DE┃").
-pub fn clean_playlist_title(title: &str) -> String {
-    CONSTANTS.re_clean_title.replace(title, "").trim().to_string()
-}
+pub fn clean_playlist_title(title: &str) -> String { CONSTANTS.re_clean_title.replace(title, "").trim().to_string() }
 
 pub trait Capitalize {
     fn capitalize(&self) -> String;
@@ -17,10 +14,7 @@ impl<T: AsRef<str>> Capitalize for T {
     fn capitalize(&self) -> String {
         let s = self.as_ref();
         let mut chars = s.chars();
-        let first = chars
-            .next()
-            .map(|c| c.to_uppercase().collect::<String>())
-            .unwrap_or_default();
+        let first = chars.next().map(|c| c.to_uppercase().collect::<String>()).unwrap_or_default();
         let rest = chars.as_str().to_lowercase();
         first + &rest
     }
@@ -82,7 +76,7 @@ pub fn trim_slash(s: &str) -> Cow<'_, str> {
 pub fn trim_last_slash(s: &str) -> Cow<'_, str> {
     if s.ends_with('/') {
         if let Some(stripped) = s.strip_suffix('/') {
-          return  Cow::Owned(stripped.to_string())
+            return Cow::Owned(stripped.to_string());
         }
     }
     Cow::Borrowed(s)
@@ -93,11 +87,8 @@ pub trait Substring {
 }
 
 impl Substring for String {
-    fn substring(&self, from: usize, to: usize) -> String {
-        self.chars().skip(from).take(to - from).collect()
-    }
+    fn substring(&self, from: usize, to: usize) -> String { self.chars().skip(from).take(to - from).collect() }
 }
-
 
 pub fn truncate_string(s: &str, max_len: usize) -> String {
     if s.chars().count() <= max_len {
@@ -135,12 +126,14 @@ pub fn humanize_snake_case(s: &str) -> String {
     result
 }
 
-pub fn deunicode_string(s: &str) -> Cow<'_, str> {
-    deunicode_with_tofu_cow(s,  "[?]")
-}
+pub fn deunicode_string(s: &str) -> Cow<'_, str> { deunicode_with_tofu_cow(s, "[?]") }
 
 pub fn longest<'a>(a: &'a Arc<str>, b: &'a Arc<str>) -> &'a Arc<str> {
-   if a.len() >= b.len() { a } else { b }
+    if a.len() >= b.len() {
+        a
+    } else {
+        b
+    }
 }
 
 // ------------------------------------------------------------
@@ -170,14 +163,12 @@ macro_rules! concat_string {
     }};
 }
 
-
 #[cfg(test)]
 mod test {
-    use std::collections::HashSet;
-    use crate::utils::Capitalize;
-    use super::generate_random_string;
+    use super::{clean_playlist_title, generate_random_string};
     use crate as shared; // allow path-based macro call in tests
-    use super::clean_playlist_title;
+    use crate::utils::Capitalize;
+    use std::collections::HashSet;
 
     #[test]
     fn test_generate_random_string() {

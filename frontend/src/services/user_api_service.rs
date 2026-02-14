@@ -1,9 +1,13 @@
-use std::rc::Rc;
+use crate::{
+    error::Error,
+    services::{get_base_href, request_get, request_post},
+};
 use log::error;
-use shared::model::{PlaylistBouquetDto, PlaylistCategoriesDto};
-use shared::utils::{concat_path_leading_slash};
-use crate::error::Error;
-use crate::services::{get_base_href, request_get, request_post};
+use shared::{
+    model::{PlaylistBouquetDto, PlaylistCategoriesDto},
+    utils::concat_path_leading_slash,
+};
+use std::rc::Rc;
 
 #[derive(Debug, Default)]
 pub struct UserApiService {
