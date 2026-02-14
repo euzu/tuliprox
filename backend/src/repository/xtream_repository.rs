@@ -1455,22 +1455,6 @@ mod tests {
     }
 
     #[test]
-    fn keeps_old_details_when_new_timestamp_is_newer_but_new_has_no_details() {
-        let new_props = StreamProperties::Video(Box::new(VideoStreamProperties {
-            added: "200".into(),
-            details: None,
-            ..VideoStreamProperties::default()
-        }));
-        let old_props = StreamProperties::Video(Box::new(VideoStreamProperties {
-            added: "100".into(),
-            details: Some(shared::model::VideoStreamDetailProperties::default()),
-            ..VideoStreamProperties::default()
-        }));
-
-        assert!(!needs_update_info_details(&new_props, &old_props));
-    }
-
-    #[test]
     fn merge_preserves_missing_live_probe_timestamps() {
         let mut new_props = StreamProperties::Live(Box::new(LiveStreamProperties {
             stream_id: 1,

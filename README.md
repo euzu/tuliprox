@@ -1,4 +1,4 @@
-# **tuliprox** - A Powerful IPTV Proxy & Playlist Processor
+## **tuliprox** - A Powerful IPTV Proxy & Playlist Processor
 
 **tuliprox** is a lightweight, high-performance IPTV proxy and playlist processor written in Rust 🦀
 It supports M3U and M3U8 formats, Xtream Codes API, HDHomeRun and STRM, making it easy to filter, merge, and serve IPTV streams for Plex, Jellyfin,
@@ -9,7 +9,8 @@ Emby, and other media servers.
 ## 🔧 Core Features
 
 - **Advanced Playlist Processing**: Filter, rename, map, and sort entries with ease.
-- **Flexible Proxy Support**: Acts as a reverse/redirect proxy for EXTM3U, Xtream Codes, HDHomeRun, and STRM formats (Kodi, Plex, Emby, Jellyfin) with:
+- **Flexible Proxy Support**: Acts as a reverse/redirect proxy for EXTM3U, Xtream Codes, HDHomeRun, and STRM formats (Kodi, Plex, Emby, Jellyfin)
+  with:
   - app-specific naming conventions
   - flat directory structure option (for compatibility reasons of some media scanners)
 - **Local Media Library Management**: Scan and serve local video files with automatic metadata resolution:
@@ -55,6 +56,7 @@ Define complex filters using expressive logic, e.g.:
 ## Command line Arguments
 
 ```shell
+
 Usage: tuliprox [OPTIONS]
 
 Options:
@@ -76,6 +78,7 @@ Options:
   --dbm                            Dump database with content type: m3u
   --dbe                            Dump database with content type: epg
   --dbv                            Dump database with content type: taregt id mapping
+
 ```
 
 ## 1. `config.yml`
@@ -209,7 +212,8 @@ Messaging is Opt-In, you need to set the `notify_on` message types which are:
 `telegram`, `rest` and `pushover.net` configurations are optional.
 
 `telegram` supports markdown generation for structured json messages.
-`telegram` supports `message_thread_id` for group chats. Simply put thread_id behind chat_id separated by `:`. `'<telegram chat id>:<message thread id>'`
+`telegram` supports `message_thread_id` for group chats. Simply put thread_id behind chat_id separated by `:`. `'<telegram chat id>:<message thread
+id>'`
 
 ```yaml
 messaging:
@@ -236,7 +240,6 @@ messaging:
       - 'Content-Type: application/json'
     templates:
       error: '{"text": "Error: {{message}}"}'
-
   pushover:
     token: <api_token>
     user: <api_username>
@@ -271,6 +274,7 @@ Templates can be provided in two ways:
 **Example Multi-Source Telegram Template**:
 
 ```handlebars
+
 *🔄 Playlist Update Report*
 
 {{#each stats}}
@@ -281,11 +285,13 @@ Templates can be provided in two ways:
   📊 `{{raw.groups}}`/`{{raw.channels}}` ➔ *`{{processed.groups}}`*/*`{{processed.channels}}`*
 {{/each}}
 {{/each}}
+
 ```
 
 **Example Discord Template (Complex Embed)**:
 
 ```handlebars
+
 {
   "content": "Tuliprox Notification",
   "embeds": [{
@@ -300,6 +306,7 @@ Templates can be provided in two ways:
     "footer": { "text": "Reported at {{timestamp}}" }
   }]
 }
+
 ```
 
 For more information: [Telegram bots](https://core.telegram.org/bots/tutorial)
@@ -312,7 +319,6 @@ It has 2 entries `extensions` and `download`.
 
 - `extensions` are a list of video file extensions like `mp4`, `avi`, `mkv`.
   When you have input `m3u` and output `xtream` the url's with the matching endings will be categorized as `video`.
-
 - `download` is _optional_ and is only necessary if you want to download the video files from the ui
   to a specific directory. if defined, the download button from the `ui` is available.
   - `headers` _optional_, download headers
@@ -320,7 +326,7 @@ It has 2 entries `extensions` and `download`.
   - `episode_pattern` _optional_ if you download episodes, the suffix like `S01.E01` should be removed to place all
     files into one folder. The named capture group `episode` is mandatory.
     Example: `.*(?P<episode>[Ss]\\d{1,2}(.*?)[Ee]\\d{1,2}).*`
-- `web_search` is _optional_, example: `https://www.imdb.com/search/title/?title={}`,
+- `web_search` is _optional_, example: `<\1>
   define `download.episode_pattern` to remove episode suffix from titles.
 - `ffprobe_enabled`: _optional_ (default `false`). Enable or disable FFprobe analysis for streams globally.
 - `ffprobe_timeout`: _optional_ (default `60`). Timeout in seconds for FFprobe analysis.
@@ -456,7 +462,6 @@ be `1024 × 8 KB`, which is approximately `8 MB`  as stated above.
 
 - _a._ if `retry` is `false` and `buffer.enabled` is `false`  the provider stream is piped as is to the client.
 - _b._ if `retry` is `true` or  `buffer.enabled` is `true` the provider stream is processed and send to the client.
-
 - The key difference: the `b.` approach is based on complex stream handling and more memory footprint.
 
 ##### 1.7.1.3 `throttle`
@@ -486,8 +491,10 @@ How long the grace grant will last, until another grace grant can made.
 
 ##### 1.7.1.5 `grace_period_hold_stream`
 
-If set to `true`, tuliprox will wait until the grace period check (defined by `grace_period_millis`) is finished before sending any data to the client.
-This is useful for players that might time out or error if they receive data and then a "connections exhausted" stream switch occurs. Default is `false`.
+If set to `true`, tuliprox will wait until the grace period check (defined by `grace_period_millis`) is finished before sending any data to the
+client.
+This is useful for players that might time out or error if they receive data and then a "connections exhausted" stream switch occurs. Default is
+`false`.
 
 #### 1.7.2 `cache`
 
@@ -584,15 +591,17 @@ It has 2 attributes:
      url: <the url>
 ```
 
-The `url` is optional; default value: `https://raw.githubusercontent.com/sapics/ip-location-db/refs/heads/main/asn-country/asn-country-ipv4.csv`
+The `url` is optional; default value: `<\1>
 The format is CSV with 3 columns: `range_start,range_end,country_code`.
 
 Example:
 
 ```csv
+
 1.0.0.0,1.0.0.255,AU
 1.0.1.0,1.0.3.255,CN
 1.0.4.0,1.0.7.255,AU
+
 ```
 
 #### 1.7.8 `rewrite_secret`
@@ -617,9 +626,13 @@ reverse_proxy:
 You can generate a random secret using:
 
 ```bash
+
 openssl rand -hex 16
+
 # or
+
 node -e "console.log(require('crypto').randomBytes(16).toString('hex').toUpperCase())"
+
 ```
 
 ### 1.7 `backup_dir`
@@ -706,13 +719,17 @@ nobody: $argon2id$v=$argon2id$v=19$m=19456,t=2,p=1$Y2FROE83ZDQ1c2VaYmJ4VU9YdHpuZ
 The password can be generated with
 
 ```shell
+
 ./tuliprox --genpwd`
+
 ```
 
 or with docker
 
 ```shell
+
 docker container exec -it tuliprox ./tuliprox --genpwd
+
 ```
 
 The encrypted pasword needs to be added manually into the users file.
@@ -832,7 +849,8 @@ targets:
   - If left empty, a valid, random ID will be generated.
   - If you provide a value that is not a valid HDHomeRun ID, `tuliprox` will automatically correct it by calculating the proper checksum.
 - `device_udn`: (Optional) The Unique Device Name (UDN) for the standard UPnP/SSDP discovery protocol (Port 1900). It must be a UUID.
-  - It is recommended to leave this at its default value. `tuliprox` will automatically append a suffix to ensure it's unique for each device you define.
+  - It is recommended to leave this at its default value. `tuliprox` will automatically append a suffix to ensure it's unique for each device you
+    define.
 - `manufacturer`, `model_name`, `model_number`, `firmware_name`, `firmware_version`: (Optional) These fields allow you to customize the device
   information that is reported to clients. It is safe to leave them at their default values, which mimic a real HDTC-2US model.
 
@@ -877,12 +895,16 @@ If you are using a bind mount, the file watcher may report the original source p
 For example, if you have a bind mount like this:
 
 ```fstab
+
 /config /home/tuliprox/config none bind 0 0
+
 ```
 
 ```text
+
 /config                ← your configured mount point
 /home/tuliprox/config  ← original source directory
+
 ```
 
 and you use `/config` in your configuration files, the file watcher will still report events using `/home/tuliprox/config`.
@@ -915,7 +937,6 @@ library:
       path: "/projects/media"
       content_type: auto
       recursive: true
-
   supported_extensions:
     - "mp4"
     - "mkv"
@@ -924,53 +945,52 @@ library:
     - "ts"
     - "m4v"
     - "webm"
-
   metadata:
     path: "${env:TULIPROX_HOME}/library_metadata"
     read_existing:
       kodi: true
       jellyfin: false
       plex: false
-
     tmdb:
       enabled: true
       # api_key: "4219e299c89411838049ab0dab19ebd5" # Get your API key from https://www.themoviedb.org/settings/api
       rate_limit_ms: 250  # Milliseconds between API calls (default: 250ms)
-
     fallback_to_filename: true
-
     formats:
       - "nfo"  # Optionally write Kodi-compatible NFO files
-
   playlist:
     movie_category: "Local Movies"
     series_category: "Local Series"
-
 ```
 
 **CLI Usage**:
 
 ```bash
+
 # Scan VOD directories
+
 ./tuliprox --scan-library
 
 # Force full rescan (ignores modification timestamps)
+
 ./tuliprox --force-library-rescan
 
 # Show db content
+
 ./tuliprox --dbx /opt/tuliprox/data/all_channels/xtream/video.db
 ./tuliprox --dbm /opt/tuliprox/data/all_channels/m3u.db
 ./tuliprox --dbe /opt/tuliprox/data/all_channels/xtream/epg.db
+
 ```
 
 **API Endpoints**:
 
 - `POST /api/v1/library/scan` - Trigger library scan
-
   ```json
-  {"force_rescan": false}
-  ```
 
+  {"force_rescan": false}
+
+  ```
 - `GET /api/v1/library/status` - Get library status
 
 **Integration with source.yml**:
@@ -980,7 +1000,6 @@ inputs:
 - name: local-movies
   type: library  # New input type
   enabled: true
-
 sources:
 - inputs:
   - local-movies
@@ -1052,8 +1071,9 @@ Each input has the following attributes:
 - `name` is mandatory, it must be unique.
 - `type` is optional, default is `m3u`. Valid values are `m3u` and `xtream`
 - `enabled` is optional, default is true, if you disable the processing is skipped
-- `persist` is optional, you can skip or leave it blank to avoid persisting the input file. The `{}` in the filename is filled with the current timestamp.
-- `url` for type `m3u` is the download url or a local filename (can be gzip) of the input-source. For type `xtream`it is `http://<hostname>:<port>`
+- `persist` is optional, you can skip or leave it blank to avoid persisting the input file. The `{}` in the filename is filled with the current
+  timestamp.
+- `url` for type `m3u` is the download url or a local filename (can be gzip) of the input-source. For type `xtream`it is `<\1>
 - `epg` _optional_ xmltv epg configuration
 - `headers` is optional
 - `method` can be `GET` or `POST`
@@ -1067,21 +1087,22 @@ Each input has the following attributes:
   for subsequent updates instead of downloading it again.
 - `exp_date` optional, is a date as "YYYY-MM-DD HH:MM:SS" format like `2028-11-30 12:34:12` or Unix timestamp (seconds since epoch)
 - `options` is optional,
-  + `xtream_skip_live` true or false, live section can be skipped.
-  + `xtream_skip_vod` true or false, vod section can be skipped.
-  + `xtream_skip_series` true or false, series section can be skipped.
-  + `xtream_live_stream_without_extension` default false, if set to true `.ts` extension is not added to the stream link.
-  + `xtream_live_stream_use_prefix` default true, if set to true `/live/` prefix is added to the stream link.
-  + `resolve_tmdb`: `true`|`false` Attempts to resolve missing TMDB IDs via TMDB API based on title.
-  + `probe_stream`: `true`|`false` Probes stream if video/audio info is missing in provider data. Probing respects the `max_connections` limit of your provider input. If no connection slot is available, the item is skipped and retried during the next update.
-  + `resolve_background`: `true`|`false` (default `true`). If `false`, metadata resolve/probe runs blocking during update.
-  + `resolve_series`: `true`|`false` (default `false`) for Xtream series metadata resolution.
-  + `resolve_vod`: `true`|`false` (default `false`) for Xtream VOD metadata resolution.
-  + `probe_series`: `true`|`false` (default `false`) for series probing (requires `probe_stream` + ffprobe).
-  + `probe_vod`: `true`|`false` (default `false`) for VOD probing (requires `probe_stream` + ffprobe).
-  + `probe_live`: `true`|`false` (default `false`) for background live probing.
-  + `probe_live_interval_hours`: number (default `120`) re-probe interval for live channels.
-  + `resolve_delay`: seconds (default `2`) shared delay for resolve/probe metadata requests.
+  - `xtream_skip_live` true or false, live section can be skipped.
+  - `xtream_skip_vod` true or false, vod section can be skipped.
+  - `xtream_skip_series` true or false, series section can be skipped.
+  - `xtream_live_stream_without_extension` default false, if set to true `.ts` extension is not added to the stream link.
+  - `xtream_live_stream_use_prefix` default true, if set to true `/live/` prefix is added to the stream link.
+  - `resolve_tmdb`: `true`|`false` Attempts to resolve missing TMDB IDs via TMDB API based on title.
+  - `probe_stream`: `true`|`false` Probes stream if video/audio info is missing in provider data. Probing respects the `max_connections` limit of your
+    provider input. If no connection slot is available, the item is skipped and retried during the next update.
+  - `resolve_background`: `true`|`false` (default `true`). If `false`, metadata resolve/probe runs blocking during update.
+  - `resolve_series`: `true`|`false` (default `false`) for Xtream series metadata resolution.
+  - `resolve_vod`: `true`|`false` (default `false`) for Xtream VOD metadata resolution.
+  - `probe_series`: `true`|`false` (default `false`) for series probing (requires `probe_stream` + ffprobe).
+  - `probe_vod`: `true`|`false` (default `false`) for VOD probing (requires `probe_stream` + ffprobe).
+  - `probe_live`: `true`|`false` (default `false`) for background live probing.
+  - `probe_live_interval_hours`: number (default `120`) re-probe interval for live channels.
+  - `resolve_delay`: seconds (default `2`) shared delay for resolve/probe metadata requests.
 - `aliases`  for alias definitions for the same provider with different credentials
 - `staged` for side loading processed playlists.
   If you already have a provider configured but want to load the playlist from a different source — for example,
@@ -1100,7 +1121,7 @@ the list. All streaming, proxying, and metadata still come from the provider’s
 `staged` has the following properties:
 
 - `type` is optional, default is `m3u`. Valid values are `m3u` and `xtream`
-- `url` for type `m3u` is the download url or a local filename (can be gzip) of the input-source. For type `xtream`it is `http://<hostname>:<port>`
+- `url` for type `m3u` is the download url or a local filename (can be gzip) of the input-source. For type `xtream`it is `<\1>
 - `headers` is optional
 - `method` can be `GET` or `POST`
 - `username` only mandatory for type `xtream`
@@ -1233,9 +1254,11 @@ sources:
 ```
 
 ```csv
+
 #name;username;password;url;max_connections;priority;exp_date
 my_provider_1;user1;password1;http://my_provider_1.com:80;1;0;2028-11-23 12:34:23
 my_provider_2;user2;password2;http://my_provider_2.com:8080;1;0;2028-11-23 12:34:23
+
 ```
 
 Important: the first alias is renamed with the `name` from input definition. `my_provider_1` gets `my_provider`.
@@ -1255,9 +1278,11 @@ sources:
 ```
 
 ```csv
+
 #url;max_connections;priority
 http://my_provider_1.com:80/get_php?username=user1&password=password1;1;0
 http://my_provider_2.com:8080/get_php?username=user2&password=password2;1;0
+
 ```
 
 The Fields `max_connections` and `priority`are optional.
@@ -1291,7 +1316,8 @@ Optional alias pool controls:
   - `number`: keep at least this many valid (not expired) accounts beyond the defined offset on boot/update. Must be greater `0` and <= `max`
     (when `max` is a number). Default `1`.
   - `auto`: uses the number of enabled tuliprox users (Active/Trial and not expired) for targets in the same source. If below, tuliprox tries to renew
-    expired accounts first and then creates new accounts until the amount of enabled users is met during boot/update + offset. User add/update triggers
+    expired accounts first and then creates new accounts until the amount of enabled users is met during boot/update + offset. User add/update
+triggers
     only when `max` is also `auto`.
 - `alias_pool.size.max`: `number` or `auto`.
   - `number`: upper bound for valid accounts when provisioning is triggered by provider exhaustion. When the maximum is reached, provisioning
@@ -1314,7 +1340,9 @@ Provisioning settings:
   - Default `10`
 - `panel_api.provisioning.cooldown_sec`: `number`
   - Extra wait time (seconds) after a successful probe before continuing boot/update provisioning. If you continue to see a 5XX message during the
-    boot/update process despite a successful probe, gradually increase the cooldown time to give the provider enough time to provision the new root account.
+    boot/update process despite a successful probe, gradually increase the cooldown time to give the provider enough time to provision the new root
+account.
+
   - Default `0`
 - `panel_api.provisioning.offset`: e.g.: `15m` | `5h` | `1d`
   - Optional pre-expiry window for boot/update renewal of input accounts with `exp_date`; if `now + offset > exp_date`, tuliprox tries `client_renew`,
@@ -1453,7 +1481,9 @@ Tuliprox evaluates Panel API responses as JSON with the following logic, dependi
 For `client_new`, the Panel API call would look like this in the example shown:
 
 ```text
+
 https://panel.example.tld/api.php?action=new&type=m3u&sub=1&api_key=1234567890
+
 ```
 
 ### 2.3. `sources`
@@ -1481,6 +1511,7 @@ Has the following top level entries:
 - `mapping` _optional_
 - `watch` _optional_
 - `use_memory_cache`, default is false. If set to `true` playlist is cached into memory to reduce disc access.
+
 Placing playlist into memory causes more RAM usage but reduces disk access.
 
 ### 2.2.2.1 `sort`
@@ -1676,8 +1707,8 @@ For `resolve_(vod|series)` data is cached per input; only new/changed entries ar
 - `update_strategy`:
   - `instant` (default): Writes changes to the output files immediately after a stream is resolved/probed.
   - `bundled`: Queues updates and writes them in batches to reduce disk I/O operations.
-
 - `xtream` `trakt`:
+
 Trakt.tv is an online platform that helps you track, manage, and discover TV shows and movies. Think of it like Goodreads for TV and film.
 You can add trakt list matches into your playlist.
 
@@ -1690,7 +1721,6 @@ inputs:
     options:
       resolve_series: false
       resolve_vod: false
-
 sources:
   - inputs:
       - my_xtream_input
@@ -1765,7 +1795,8 @@ In the above example each entry starting with `DE` will be prefixed with `1.`.
 Mapping can be defined in a file, or multiple mapping files can be stored in the mapping path.
 If you use a mapping path, you need to set `mapping_path` in `config.yml`
 The files are loaded in **alphanumeric** order.
-**Note:** This is a lexicographic sort — so `m_10.yml` comes before `m_2.yml` unless you name files carefully (e.g., `m_01.yml`, `m_02.yml`, ..., `m_10.yml`).
+**Note:** This is a lexicographic sort — so `m_10.yml` comes before `m_2.yml` unless you name files carefully (e.g., `m_01.yml`, `m_02.yml`, ...,
+`m_10.yml`).
 
 The filename or path can be given as `-m` argument. (See Mappings section)
 
@@ -1844,7 +1875,8 @@ Allows you to explicitly add items to a favorite group based on a filter. This i
 - `cluster`: can be Series, Movie or Live.
 - `group`: The name of the group to add the favorite items to.
 - `filter`: A filter statement to select the original items.
-- `match_as_ascii`: _optional_ (default `false`). If `true`, the filter matching will be case-insensitive and normalized (e.g., "Cinema" matches "Cinéma").
+- `match_as_ascii`: _optional_ (default `false`). If `true`, the filter matching will be case-insensitive and normalized (e.g., "Cinema" matches
+  "Cinéma").
 
 Example:
 
@@ -1894,7 +1926,8 @@ Instead of using a single `mapping.yml` file, you can use multiple mapping files
 when you set `mapping_path` in `config.yml` to a directory.
 
 The files are loaded in **alphanumeric** order.
-**Note:** This is a lexicographic sort — so `m_10.yml` comes before `m_2.yml` unless you name files carefully (e.g., `m_01.yml`, `m_02.yml`, ..., `m_10.yml`).
+**Note:** This is a lexicographic sort — so `m_10.yml` comes before `m_2.yml` unless you name files carefully (e.g., `m_01.yml`, `m_02.yml`, ...,
+`m_10.yml`).
 
 The filename or path can be given as `-m` argument. (See Mappings section)
 
@@ -2004,8 +2037,10 @@ Example `print(uppercase("hello"))`. output is only visible in `trace` log level
 - Assignment assigns an expression result. variable or field.
 
 ```dsl
+
   @Title = uppercase("hello")
   hello = concat(capitalize("hello"), " ", capitalize("world"))
+
 ```
 
 - Match block evaluates expressions based on multiple matching cases.
@@ -2013,12 +2048,14 @@ Example `print(uppercase("hello"))`. output is only visible in `trace` log level
 Note: **The order of the cases are important.**
 
 ```dsl
+
 result = match {
     (var1, var2) => result1,  <- only executed when both variables set
      var2 => result2,  <- only executed when var2 variable is set
      var3 => result3,  <- only executed when var3 variable is set
      _ => default <-  matches anything.
    }
+
 ```
 
 - Map block assigns expression results to a variable or field
@@ -2027,6 +2064,7 @@ Mapping over text
 It is possible to define multiple keys with `|` seperated for one case.
 
 ```dsl
+
 result = map variable_name {
     "key1" => result1,
     "key2" => result2,
@@ -2037,11 +2075,13 @@ result = map variable_name {
     "key1" | "key2" => result1,
     _ => null
 }
+
 ```
 
 Mapping over number ranges
 
 ```dsl
+
   year_text = @Caption ~ "(\d{4})\)?$"
   year = number(year_text)
 
@@ -2052,11 +2092,13 @@ Mapping over number ranges
    2025.. => "> 2025",
    _ =>  year_text,
   }
+
 ```
 
 Example `if then else` block
 
 ```dsl
+
   # Maybe there is no station
   station = @Caption ~ "ABC"
   match {
@@ -2070,6 +2112,7 @@ Example `if then else` block
          # station does not exists
      }
   }
+
 ```
 
 Example `for each` block
@@ -2087,6 +2130,7 @@ You can use `_` for parameters you want to ignore (e.g., `(_, value)` or `(key, 
 2. **Regex with capture groups**: keys are group names (or indices), values are the captured matches.
 
 ```dsl
+
   # 1. Using split()
   # Split the genre string into a Named result (index as key, genre as value)
   genres = split(@Genre, "[,/&]")
@@ -2106,6 +2150,7 @@ You can use `_` for parameters you want to ignore (e.g., `(_, value)` or `(key, 
       # v will be "Inception" then "2010"
       print(concat("Found ", k, ": ", v))
   })
+
 ```
 
 Example of removing prefix
@@ -2119,23 +2164,17 @@ mappings:
     # Template to match and capture different qualities in the caption (FHD, HD, SD, UHD)
     - name: QUALITY
       value: '(?i)\b([FUSL]?HD|SD|4K|1080p|720p|3840p)\b'
-
     - name: COAST
       value: '(?i)\b(EAST|WEST)\b'
-
     - name: USA_TNT_FILTER
       value: 'Caption ~ "(?i)^(US|USA|United States).*?TNT"'
-
     - name: US_TNT_PREFIX
       value: "US: TNT"
-
     - name: US_TNT_ENTERTAIN_GROUP
       value: "United States - Entertainment"
-
     # Template to capture the group name for US TNT channels
     - name: US_TNT_ENTERTAIN
       value: 'Group ~ "^United States - Entertainment"'
-
   mapping:
     # Mapping rules for all channels
     - id: all_channels
@@ -2290,13 +2329,13 @@ If you set  `use_user_db` to `true` you need to use the `Web-UI` to `edit`/`add`
 
 To access the api for:
 
-- `xtream` use url like `http://192.169.1.2/player_api.php?username={}&password={}`
-- `m3u` use url `http://192.169.1.2/get.php?username={}&password={}`
+- `xtream` use url like `<\1>
+- `m3u` use url `<\1>
   or with token
-- `xtream` use url like `http://192.169.1.2/player_api.php?token={}`
-- `m3u` use url `http://192.169.1.2/get.php?token={}`
+- `xtream` use url like `<\1>
+- `m3u` use url `<\1>
 
-To access the xmltv-api use url like `http://192.169.1.2/xmltv.php?username={}&password={}`
+To access the xmltv-api use url like `<\1>
 
 _Do not forget to replace `{}` with credentials._
 
@@ -2356,6 +2395,7 @@ If you use a reverse proxy in front of Tuliprox, don’t forget to forward:
 Now you can do `nginx`  configuration like
 
 ```config
+
    location /tuliprox {
       rewrite ^/tuliprox/(.*)$ /$1 break;
       proxy_set_header X-Real-IP $remote_addr;
@@ -2370,17 +2410,20 @@ Now you can do `nginx`  configuration like
       tcp_nopush on;
       tcp_nodelay on;
    }
+
 ```
 
 When you use nginx be sure to have
 
 ```nginx
+
       proxy_redirect off;
       proxy_buffering off;
       proxy_request_buffering off;
       proxy_cache off;
       tcp_nopush on;
       tcp_nodelay on;
+
 ```
 
 because without this config you could get very high cpu peaks.
@@ -2395,19 +2438,15 @@ for web-ui and api-proxy must be different. In this short example used paths are
 labels:
   # ----- Service -----
   - "traefik.enable=true"
-
   # ----- HTTP (Port 80) -----
   - "traefik.http.routers.tuliprox.entrypoints=web"
   - "traefik.http.routers.tuliprox.rule=Host(`tv.my-domain.io`) && (PathPrefix(`/tv`) || PathPrefix(`/tuliprox`))" # 1. path: api-proxy endpoint || 2. path: web-ui endpoint
-
   # ----- HTTPS (Port 443) -----
   - "traefik.http.routers.tuliprox-secure.entrypoints=websecure"
   - "traefik.http.routers.tuliprox-secure.rule=Host(`tv.my-domain.io`) && (PathPrefix(`/tv`) || PathPrefix(`/tuliprox`))" # 1. path: api-proxy endpoint || 2. path: web-ui endpoint
   - "traefik.http.routers.tuliprox-secure.service=tuliprox"
-
   # ----- Serviceport -----
   - "traefik.http.services.tuliprox.loadbalancer.server.port=8901"
-
   # ----- Middlewares -----
   - "traefik.http.middlewares.tuliprox-strip.stripprefix.prefixes=/tv"  # <-- important for api-proxy endpoint
   - "traefik.http.routers.tuliprox.middlewares=forward-real-ip@file,tuliprox-strip@docker"
@@ -2469,7 +2508,9 @@ and configure their playlist.
 Change into the root directory and run:
 
 ```shell
+
 docker build --rm -f docker/Dockerfile -t tuliprox .
+
 ```
 
 This will build the complete project and create a docker image.
@@ -2484,22 +2525,28 @@ But you need to change `image: ghcr.io/euzu/tuliprox:latest` to `image: tuliprox
 Ease way to compile is a docker toolchain `cross`
 
 ```shell
+
 rust install cross
 env  RUSTFLAGS="--remap-path-prefix $HOME=~" cross build -p tuliprox --release --target x86_64-unknown-linux-musl
+
 ```
 
 #### Manual compile - install prerequisites
 
 ```shell
+
 rustup update
 sudo apt-get install pkg-config musl-tools libssl-dev
 rustup target add x86_64-unknown-linux-musl
+
 ```
 
 #### Build statically linked binary
 
 ```shell
+
 cargo build -p tuliprox --target x86_64-unknown-linux-musl --release
+
 ```
 
 #### Dockerize
@@ -2514,16 +2561,20 @@ Targets are
 - `alpine-final`
 
 ```shell
+
 # Build for a specific architecture
+
 docker build --rm -f docker/Dockerfile -t tuliprox --target scratch-final --build-arg RUST_TARGET=x86_64-unknown-linux-musl .
 docker build --rm -f docker/Dockerfile -t tuliprox --target scratch-final --build-arg RUST_TARGET=aarch64-unknown-linux-musl .
 docker build --rm -f docker/Dockerfile -t tuliprox --target scratch-final --build-arg RUST_TARGET=armv7-unknown-linux-musleabihf .
 docker build --rm -f docker/Dockerfile -t tuliprox --target scratch-final --build-arg RUST_TARGET=x86_64-apple-darwin .
+
 ```
 
 ##### docker-compose.yml
 
 ```docker
+
 version: '3'
 services:
   tuliprox:
@@ -2532,15 +2583,25 @@ services:
     user: "133:144"
     working_dir: /app
     volumes:
+
       - /opt/tuliprox/config:/app/config
+
       - /opt/tuliprox/data:/app/data
+
       - /opt/tuliprox/backup:/app/backup
+
       - /opt/tuliprox/downloads:/app/downloads
+
     environment:
+
       - TZ=Europe/Paris
+
     ports:
+
       - "8901:8901"
+
     restart: unless-stopped
+
 ```
 
 This example is for the local image, the official can be found under `ghcr.io/euzu/tuliprox:latest`
@@ -2548,12 +2609,14 @@ This example is for the local image, the official can be found under `ghcr.io/eu
 If you want to use tuliprox with docker-compose, there is a `--healthcheck` argument for healthchecks
 
 ```docker
+
     healthcheck:
       test: ["CMD", "/app/tuliprox", "-p", "/app/config" "--healthcheck"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 10s
+
 ```
 
 #### Installing in LXC Container (Alpine)
@@ -2561,6 +2624,7 @@ If you want to use tuliprox with docker-compose, there is a `--healthcheck` argu
 To get it started in a Alpine 3.19 LXC
 
 ```shell
+
 apk update
 apk add nano git yarn bash cargo perl-local-lib perl-module-build make
 cd /opt
@@ -2575,11 +2639,13 @@ ln -s /opt/tuliprox/frontend/build /web
 ln -s /opt/tuliprox/config /config
 mkdir /data
 mkdir /backup
+
 ```
 
 ### Creating a service, create /etc/init.d/tuliprox
 
 ```shell
+
 #!/sbin/openrc-run
 name=tuliprox
 command="/bin/tuliprox"
@@ -2598,12 +2664,15 @@ start_pre() {
     checkpath --directory --owner $command_user:$command_user --mode 0775 \
            /run/tuliprox /var/log/tuliprox
 }
+
 ```
 
 #### then add it to boot
 
 ```shell
+
 rc-update add tuliprox default
+
 ```
 
 ### Cross compile for windows on linux
@@ -2615,20 +2684,26 @@ If you want to compile this project on linux for windows, you need to do the fol
 For ubuntu type:
 
 ```shell
+
 sudo apt-get install gcc-mingw-w64
+
 ```
 
 #### Install mingw support for rust
 
 ```shell
+
 rustup target add x86_64-pc-windows-gnu
 rustup toolchain install stable-x86_64-pc-windows-gnu
+
 ```
 
 Compile it with:
 
 ```shell
+
 cargo build -p tuliprox --release --target x86_64-pc-windows-gnu
+
 ```
 
 ### Cross compile for raspberry pi 2/3/4
@@ -2636,8 +2711,10 @@ cargo build -p tuliprox --release --target x86_64-pc-windows-gnu
 Ease way to compile is a docker toolchain `cross`
 
 ```shell
+
 rust install cross
 env  RUSTFLAGS="--remap-path-prefix $HOME=~" cross build -p tuliprox --release --target armv7-unknown-linux-musleabihf
+
 ```
 
 ## Different Scenarios
@@ -2652,10 +2729,10 @@ You have a provider who supports the xtream api.
 
 The provider gives you:
 
-- the url: `http://fantastic.provider.xyz:8080`
+- the url: `<\1>
 - username: `tvjunkie`
 - password: `junkie.secret`
-- epg_url: `http://fantastic.provider.xyz:8080/xmltv.php?username=tvjunkie&password=junkie.secret`
+- epg_url: `<\1>
 
 To use `tuliprox` you need to create the configuration.
 The configuration consist of 4 files.
@@ -2677,7 +2754,8 @@ update_on_boot: true
 
 This configuration starts `tuliprox`and listens on the 8901 port. The downloaded playlists are stored inside the `data`-folder in the current working
 directory.
-The property `update_on_boot` is optional and can be helpful in the beginning until you have found a working configuration. I prefer to set it to false.
+The property `update_on_boot` is optional and can be helpful in the beginning until you have found a working configuration. I prefer to set it to
+false.
 
 Now we have to define the sources we want to import. We do this inside `source.yml`
 
@@ -2685,7 +2763,6 @@ Now we have to define the sources we want to import. We do this inside `source.y
 templates:
 - name: ALL_CHAN
   value: 'Group ~ ".*"'
-
 inputs:
 - type: xtream
   name: my_provider
@@ -2744,10 +2821,13 @@ access requires port forwarding on your router and an SSL terminator proxy such 
 not have a static IP address (this is outside the scope of this manual).
 
 The next section of the `api-proxy.yml` contains the user definition. We can define users for each `target` from the `source.yml`.
-This means that each `user` can only access one `target` from `source.yml`.  We have named our target `all_channels` in `source.yml` and used this name
+This means that each `user` can only access one `target` from `source.yml`.  We have named our target `all_channels` in `source.yml` and used this
+name
 for the user definition.  We have defined 2 users, one for local access and one for external access.
-We have set the proxy type to `redirect`, which means that the client will be redirected to the original provider URL when opening a stream. If you set
-the proxy type to `reverse`, the stream will be streamed from the provider through `tuliprox`. Based on the hardware you are running `tuliprox` on, you
+We have set the proxy type to `redirect`, which means that the client will be redirected to the original provider URL when opening a stream. If you
+set
+the proxy type to `reverse`, the stream will be streamed from the provider through `tuliprox`. Based on the hardware you are running `tuliprox` on,
+you
 can opt for the proxy type `reverse`. But you should start with `redirect` first until everything works well.
 
 If no server is specified for a user, the default one is taken.
@@ -2755,7 +2835,7 @@ If no server is specified for a user, the default one is taken.
 To access a xtream api from our IPTV-application we need at least 3 information  the `url`, `username` and `password`.
 All this information are now defined in `api-proxy.yml`.
 
-- url: `http://192.168.1.41:8901`
+- url: `<\1>
 - username: `xt`
 - password: `xt.secret`
 
@@ -2763,7 +2843,8 @@ Start `tuliprox`,  fire up your IPTV-Application, enter credentials and watch.
 
 ## It works well, but I don't need all the channels, how can I filter
 
-You need to understand regular expressions to define filters. A good site for learning and testing regular expressions is [regex101.com](https://regex101.com).
+You need to understand regular expressions to define filters. A good site for learning and testing regular expressions is
+[regex101.com](https://regex101.com).
 Don't forget to set FLAVOR on the left side to Rust.
 
 To adjust the filter, you must change the `source.yml` file.
@@ -2776,7 +2857,7 @@ templates:
 inputs:
 - type: xtream
   name: my_provider
-  ...
+  # ...
 sources:
 - inputs:
   - my_provider
@@ -2785,7 +2866,6 @@ sources:
     output:
       - type: xtream
     filter: "!ALL_CHAN!"
-
 ```
 
 We use templates to make the filters easier to maintain and read.
@@ -2826,11 +2906,10 @@ templates:
   value: 'Group ~ "^FR: .*"'
 - name: MY_CHANNELS
   value: '!NO_SHOOPING! AND (!GERMAN_CHANNELS! OR !FRENCH_CHANNELS!)'
-
 inputs:
 - type: xtream
   name: my_provider
-  ...
+  # ...
 sources:
 - inputs:
   - my_provider
@@ -2839,7 +2918,7 @@ sources:
     output:
       - type: xtream
     filter: "!MY_CHANNELS!"
-    ...
+    # ...
  ```
 
 The resulting playlist contains all French and German channels except Shopping.
@@ -2897,7 +2976,7 @@ in the group name.
 We wwant to group the channels inside  NEWS.  NATIONAL, SATELLITE by their quality.
 The other groups should get a number prefix for ordering.
 
-```toml
+```dsl
   group = Group ~ "(EU|SATELLITE|NATIONAL|NEWS|MUSIC|SPORT|RELIGION|FILM|KIDS|DOCU)"
   quality = Caption ~ "\b([F]?HD[i]?)\b"
   title_match = Caption ~ "(.*?)\:\s*(.*)"
@@ -2942,12 +3021,14 @@ The other groups should get a number prefix for ordering.
 
   @Group = name
   @Caption = title_name
+
 ```
 
 The transformation logic processes each entry and modifies two key fields:
 
 - `Group`: The group or category the stream belongs to.
 - `Caption`: The title or name of the stream.
+
 It extracts data from these fields and applies structured transformations.
 
 This extracts a known group keyword from `Group`
@@ -2961,12 +3042,14 @@ You get something like
 
 - title_prefix = 'FR'
 - title_name = 'TV5Monde'
+
 from "FR: TV5Monde"
 
-```toml
+```dsl
 title_match = @Caption ~ "(.*?)\:\s*(.*)"
 title_prefix = title_match.1
 title_name = title_match.2
+
 ```
 
 We will later merge 3 groups together and want to keep the quality for the group name.
@@ -2974,19 +3057,23 @@ For example all channels from the groups "NEWS", "NATIONAL" amd "SATELLITE" will
 into new groups named by the previously extracted quality.
 
 ```dsl
+
 quality = map group {
 "NEWS" | "NATIONAL" | "SATELLITE" => quality,
 _ => null,
 }
+
 ```
 
 is equivalent to
 
 ```python
+
 if group in ["NEWS", "NATIONAL", "SATELLITE"]:
    keep quality
 else:
    quality = null
+
 ```
 
 Generate prefix. We have later 3 new groups named by the quality.
@@ -2997,6 +3084,7 @@ if the current plalyist item has one of the qualities we set the prefix accordin
 otherwise we use the group category.
 
 ```dsl
+
   prefix = map quality {
    "HD" => "01.",
    "FHD" => "02.",
@@ -3015,27 +3103,32 @@ otherwise we use the group category.
       _ => group
     },
   }
+
 ```
 
 Final name construction
 
 ```dsl
+
   name = match {
     quality => concat(prefix, " FR [", quality, "]"),
     group => concat(prefix, " FR [", group, "]"),
     _ => prefix
   }
+
 ```
 
 is equivalent to
 
 ```python
+
 if quality is set:
     name = prefix + " FR [" + quality + "]"
 elif group is set:
     name = prefix + " FR [" + group + "]"
 else:
     name = prefix
+
 ```
 
 Update the playlist item
@@ -3044,8 +3137,10 @@ Update the playlist item
 - Caption is overwritten with the cleaned-up title name.
 
 ```dsl
+
   @Group = name
   @Caption = title_name
+
 ```
 
 ## Grouping by release year
@@ -3054,15 +3149,19 @@ We want to automatically group these channels by their release year, using the f
 
 - All movies released before 2020 should be grouped together under one label.
 - Movies from 2020 onward should each be grouped by their specific year.
+
 Example title: "Master Movie (2020)"
 The result should look like
+
 - FR | Movies < 2020
 - FR | Movies 2020
 - FR | Movies 2021
 - FR | Movies …
 
 ```dsl
+
 - filter: 'Group ~ "^FR" AND Caption ~ "\(?\d{4}\)?$"'
+
   script: |
     year_text = @Caption ~ "(\d{4})\)?$"
     year = number(year_text)
@@ -3071,6 +3170,7 @@ The result should look like
      _ =>  year_text,
     }
     @Group = concat("FR | MOVIES ", year_group)
+
 ```
 
 Filter: Matches channels where the Group starts with "FR" and the Caption ends in a 4-digit year (optionally inside parentheses).
