@@ -1,5 +1,7 @@
-use crate::error::{TuliproxError, TuliproxErrorKind};
-use crate::utils::{is_blank_optional_str, is_blank_optional_string};
+use crate::{
+    error::{TuliproxError, TuliproxErrorKind},
+    utils::{is_blank_optional_str, is_blank_optional_string},
+};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -55,10 +57,7 @@ impl IpCheckConfigDto {
     pub fn prepare(&mut self) -> Result<(), TuliproxError> {
         self.clean();
         if self.url.is_none() && self.url_ipv4.is_none() && self.url_ipv6.is_none() {
-            return Err(TuliproxError::new(
-                TuliproxErrorKind::Info,
-                "No url provided!".to_owned(),
-            ));
+            return Err(TuliproxError::new(TuliproxErrorKind::Info, "No url provided!".to_owned()));
         }
 
         // TODO allow or do not allow ?
@@ -68,18 +67,12 @@ impl IpCheckConfigDto {
 
         if let Some(p4) = &self.pattern_ipv4 {
             crate::model::REGEX_CACHE.get_or_compile(p4).map_err(|err| {
-                TuliproxError::new(
-                    TuliproxErrorKind::Info,
-                    format!("Invalid IPv4 regex: {p4} {err}"),
-                )
+                TuliproxError::new(TuliproxErrorKind::Info, format!("Invalid IPv4 regex: {p4} {err}"))
             })?;
         }
         if let Some(p6) = &self.pattern_ipv6 {
             crate::model::REGEX_CACHE.get_or_compile(p6).map_err(|err| {
-                TuliproxError::new(
-                    TuliproxErrorKind::Info,
-                    format!("Invalid IPv6 regex: {p6} {err}"),
-                )
+                TuliproxError::new(TuliproxErrorKind::Info, format!("Invalid IPv6 regex: {p6} {err}"))
             })?;
         }
         Ok(())

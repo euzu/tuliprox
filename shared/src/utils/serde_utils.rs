@@ -1,17 +1,11 @@
-use crate::error::to_io_error;
-use crate::utils::Internable;
-use base64::engine::general_purpose;
-use base64::Engine;
+use crate::{error::to_io_error, utils::Internable};
+use base64::{engine::general_purpose, Engine};
 use chrono::{NaiveDateTime, ParseError, TimeZone, Utc};
-use serde::de::Error;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
-use std::io;
-use std::sync::Arc;
+use std::{io, sync::Arc};
 
-fn value_to_string_array(value: &[Value]) -> Vec<Arc<str>> {
-    value.iter().filter_map(value_to_arc_str).collect()
-}
+fn value_to_string_array(value: &[Value]) -> Vec<Arc<str>> { value.iter().filter_map(value_to_arc_str).collect() }
 
 fn value_to_arc_str(v: &Value) -> Option<Arc<str>> {
     match v {
@@ -43,10 +37,7 @@ where
     }
 }
 
-pub fn serialize_option_string_as_null_if_empty<T, S>(
-    value: &Option<T>,
-    serializer: S,
-) -> Result<S::Ok, S::Error>
+pub fn serialize_option_string_as_null_if_empty<T, S>(value: &Option<T>, serializer: S) -> Result<S::Ok, S::Error>
 where
     T: AsRef<str>,
     S: serde::Serializer,
@@ -128,7 +119,9 @@ where
                     last_non_ws = Some((i, c));
                 }
             }
-            let Some(num_i) = num_pos else { return Ok(None); };
+            let Some(num_i) = num_pos else {
+                return Ok(None);
+            };
 
             let start = match last_non_ws {
                 Some((i, '-')) | Some((i, '+')) => i,
@@ -217,10 +210,7 @@ where
     ciborium::de::from_reader(value).map_err(to_io_error)
 }
 
-
-pub fn u8_16_to_hex(bytes: &[u8; 16]) -> String {
-    bytes.iter().map(|b| format!("{:02X}", b)).collect()
-}
+pub fn u8_16_to_hex(bytes: &[u8; 16]) -> String { bytes.iter().map(|b| format!("{:02X}", b)).collect() }
 
 pub fn hex_to_u8_16(hex: &str) -> Result<[u8; 16], String> {
     if hex.len() != 32 {
@@ -262,10 +252,7 @@ where
     // - try to deserialize as date-time string of format like "2028-11-23 14:12:34"
     let val = Option::<Value>::deserialize(deserializer)?;
     match val {
-        Some(Value::Number(n)) => n
-            .as_i64()
-            .ok_or_else(|| serde::de::Error::custom("invalid number"))
-            .map(Some),
+        Some(Value::Number(n)) => n.as_i64().ok_or_else(|| serde::de::Error::custom("invalid number")).map(Some),
         Some(Value::String(s)) => parse_timestamp(&s).map_err(serde::de::Error::custom),
         Some(Value::Null) => Ok(None),
         Some(_) => Err(serde::de::Error::custom("expected number or string")),
@@ -296,9 +283,7 @@ pub fn parse_timestamp(value: &str) -> Result<Option<i64>, ParseError> {
 /// - The string is compressed using LZ4 and encoded in Base64.
 /// - Works for any JSON content: strings, arrays, and objects.
 /// - Empty arrays or objects are serialized as `null`.
-pub fn serialize_json_as_opt_string<S>(value: &Option<Arc<str>>,
-                                       serializer: S,
-) -> Result<S::Ok, S::Error>
+pub fn serialize_json_as_opt_string<S>(value: &Option<Arc<str>>, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
@@ -320,9 +305,7 @@ where
 /// - Returns `None` for empty arrays, empty objects, null, numbers, or booleans.
 /// - Decompresses Base64-LZ4 content back into the original string.
 /// - Handles arrays and objects by converting them to JSON strings if not empty.
-pub fn deserialize_json_as_opt_string<'de, D>(
-    deserializer: D,
-) -> Result<Option<Arc<str>>, D::Error>
+pub fn deserialize_json_as_opt_string<'de, D>(deserializer: D) -> Result<Option<Arc<str>>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -352,35 +335,25 @@ where
                 }
             }
         }
-        Some(Value::Null)
-        | Some(Value::Number(_))
-        | Some(Value::Bool(_)) => Ok(None),
+        Some(Value::Null) | Some(Value::Number(_)) | Some(Value::Bool(_)) => Ok(None),
         Some(v) => Ok(Some(serde_json::to_string(&v).map_err(D::Error::custom)?.into())),
     }
 }
 
 /// Serialize an Option<Vec<T>> in flow-style YAML (- { key: value, ... })
-pub fn serialize_option_slice_flow<T, S>(
-    opt: &Option<Vec<T>>,
-    serializer: S,
-) -> Result<S::Ok, S::Error>
+pub fn serialize_option_slice_flow<T, S>(opt: &Option<Vec<T>>, serializer: S) -> Result<S::Ok, S::Error>
 where
     T: serde::Serialize,
     S: serde::Serializer,
 {
     match opt {
-        Some(items) if !items.is_empty() => {
-            serde_saphyr::FlowSeq(items).serialize(serializer)
-        }
+        Some(items) if !items.is_empty() => serde_saphyr::FlowSeq(items).serialize(serializer),
         _ => serializer.serialize_none(),
     }
 }
 
 /// Serialize an Option<Vec<T>> as a block sequence where each item is in flow-style
-pub fn serialize_option_vec_flow_map_items<T, S>(
-    opt: &Option<Vec<T>>,
-    serializer: S,
-) -> Result<S::Ok, S::Error>
+pub fn serialize_option_vec_flow_map_items<T, S>(opt: &Option<Vec<T>>, serializer: S) -> Result<S::Ok, S::Error>
 where
     T: serde::Serialize,
     S: serde::Serializer,
@@ -412,13 +385,11 @@ where
     serializer.serialize_str(&value.to_string())
 }
 
-
 /// Serde support for `XtreamCluster` fields.
 /// Serializes as string (e.g., "live", "video", "series") and deserializes via `FromStr`.
 pub mod xtream_cluster_serde {
     use crate::model::XtreamCluster;
-    use serde::de::Error;
-    use serde::{Deserialize, Deserializer, Serializer};
+    use serde::{de::Error, Deserialize, Deserializer, Serializer};
     use std::str::FromStr;
 
     pub fn serialize<S>(value: &XtreamCluster, serializer: S) -> Result<S::Ok, S::Error>

@@ -1,6 +1,6 @@
+use crate::app::components::{IconButton, Panel, TextButton};
 use std::rc::Rc;
 use yew::prelude::*;
-use crate::app::components::{IconButton, TextButton, Panel};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TabItem {
@@ -26,9 +26,7 @@ pub struct TabSetProps {
 #[function_component]
 pub fn TabSet(props: &TabSetProps) -> Html {
     let active_tab = use_state(|| {
-        props.active_tab.clone()
-            .or_else(|| props.tabs.first().map(|tab| tab.id.clone()))
-            .unwrap_or_default()
+        props.active_tab.clone().or_else(|| props.tabs.first().map(|tab| tab.id.clone())).unwrap_or_default()
     });
 
     // Update active tab when prop changes
@@ -59,7 +57,7 @@ pub fn TabSet(props: &TabSetProps) -> Html {
         let tabs = props.tabs.clone();
         let active_tab_id = (*active_tab).clone();
         let handle_click = handle_tab_click.clone();
-        
+
         html! {
             <div class="tp__tab-set__header">
             {
@@ -113,7 +111,7 @@ pub fn TabSet(props: &TabSetProps) -> Html {
     let render_tab_content = {
         let tabs = props.tabs.clone();
         let active_tab_id = (*active_tab).clone();
-        
+
         html! {
             <div class="tp__tab-set__body">
             {

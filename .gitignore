@@ -40,3 +40,4 @@ docker/resources
 /.vscode
 
 .claude
+.envrc

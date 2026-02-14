@@ -1,6 +1,5 @@
-use std::fmt;
-use std::str::FromStr;
 use shared::error::{info_err_res, TuliproxError};
+use std::{fmt, str::FromStr};
 
 const DASHBOARD: &str = "dashboard";
 const STATS: &str = "stats";
@@ -13,7 +12,6 @@ const PLAYLIST_EXPLORER: &str = "playlist_explorer";
 const PLAYLIST_EPG: &str = "playlist_epg";
 const SOURCE_EDITOR: &str = "source_editor";
 
-
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ViewType {
     Dashboard,
@@ -25,7 +23,7 @@ pub enum ViewType {
     PlaylistUpdate,
     PlaylistEditor,
     PlaylistExplorer,
-    PlaylistEpg
+    PlaylistEpg,
 }
 
 impl FromStr for ViewType {

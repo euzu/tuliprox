@@ -8,9 +8,7 @@ pub struct UUIDType(pub [u8; 32]);
 
 #[allow(clippy::len_without_is_empty)]
 impl UUIDType {
-    pub const fn len(&self) -> usize {
-        32usize
-    }
+    pub const fn len(&self) -> usize { 32usize }
 
     /// Converts the first 16 bytes of this `UUIDType` into a valid UUID v4 string.
     ///
@@ -66,9 +64,7 @@ impl UUIDType {
 }
 
 impl AsRef<[u8]> for UUIDType {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
+    fn as_ref(&self) -> &[u8] { &self.0 }
 }
 
 impl FromStr for UUIDType {
@@ -81,9 +77,7 @@ impl FromStr for UUIDType {
 }
 
 impl std::fmt::Display for UUIDType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", hex::encode(self.0))
-    }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{}", hex::encode(self.0)) }
 }
 
 impl Serialize for UUIDType {
@@ -123,9 +117,7 @@ impl<'de> serde::de::Visitor<'de> for UUIDTypeVisitor {
     {
         let mut bytes = [0u8; 32];
         for (i, byte) in bytes.iter_mut().enumerate() {
-            *byte = seq
-                .next_element()?
-                .ok_or_else(|| serde::de::Error::invalid_length(i, &self))?;
+            *byte = seq.next_element()?.ok_or_else(|| serde::de::Error::invalid_length(i, &self))?;
         }
         Ok(UUIDType(bytes))
     }

@@ -1,8 +1,6 @@
-use crate::app::components::login::Login;
-use crate::hooks::use_service_context;
+use crate::{app::components::login::Login, hooks::use_service_context};
 use std::future;
-use yew::prelude::*;
-use yew::suspense::use_future;
+use yew::{prelude::*, suspense::use_future};
 use yew_hooks::{use_async_with_options, UseAsyncOptions};
 
 #[derive(Properties, Clone, PartialEq)]
@@ -20,15 +18,16 @@ pub fn Authentication(props: &AuthenticationProps) -> Html {
         let services_ctx = services.clone();
         let authenticated_state = authenticated.clone();
         let _ = use_future(|| async move {
-            services_ctx.auth.auth_subscribe(
-                &mut |success| {
+            services_ctx
+                .auth
+                .auth_subscribe(&mut |success| {
                     authenticated_state.set(success);
                     if success {
                         services_ctx.websocket.connect_ws_with_backoff();
                     }
                     future::ready(())
-                }
-            ).await
+                })
+                .await
         });
     }
 
@@ -36,13 +35,16 @@ pub fn Authentication(props: &AuthenticationProps) -> Html {
         let services_ctx = services.clone();
         let authenticated_state = authenticated.clone();
         let loading_state = loading.clone();
-        use_async_with_options(async move {
-            let result = services_ctx.auth.refresh().await;
-            let success = result.is_ok();
-            authenticated_state.set(success);
-            loading_state.set(false);
-            result
-        }, UseAsyncOptions::enable_auto());
+        use_async_with_options(
+            async move {
+                let result = services_ctx.auth.refresh().await;
+                let success = result.is_ok();
+                authenticated_state.set(success);
+                loading_state.set(false);
+                result
+            },
+            UseAsyncOptions::enable_auto(),
+        );
     }
 
     if *loading {

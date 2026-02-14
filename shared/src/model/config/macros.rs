@@ -1,8 +1,7 @@
 #[macro_export]
 macro_rules! check_input_credentials {
     ($this:ident, $input_type:expr, $definition:expr, $alias:expr ) => {
-     if !matches!($input_type, InputType::Library) {
-
+        if !matches!($input_type, InputType::Library) {
             $this.url = $this.url.trim().to_string();
             if $this.url.is_empty() {
                 return info_err_res!("url for input is mandatory");
@@ -10,8 +9,8 @@ macro_rules! check_input_credentials {
 
             $this.username = $crate::utils::get_trimmed_string($this.username.as_deref());
             $this.password = $crate::utils::get_trimmed_string($this.password.as_deref());
-     }
-     match $input_type {
+        }
+        match $input_type {
             InputType::M3u => {
                 if $this.username.is_some() || $this.password.is_some() {
                     // TODO only for initial check
@@ -23,9 +22,9 @@ macro_rules! check_input_credentials {
             }
             InputType::M3uBatch => {
                 if $definition {
-                  if $this.url.trim().is_empty() {
+                    if $this.url.trim().is_empty() {
                         return info_err_res!("for input type m3u-batch: url is mandatory");
-                  }
+                    }
                 }
 
                 // if !$alias && ($this.username.is_some() || $this.password.is_some()) {
@@ -40,13 +39,13 @@ macro_rules! check_input_credentials {
             }
             InputType::XtreamBatch => {
                 if $definition {
-                  if $this.url.trim().is_empty() {
+                    if $this.url.trim().is_empty() {
                         return info_err_res!("for input type xtream-batch: url is mandatory");
-                  }
+                    }
                 }
 
                 if !$alias && ($this.username.is_some() || $this.password.is_some()) {
-                  return info_err_res!("input type xtream-batch should not define username or password attribute ");
+                    return info_err_res!("input type xtream-batch should not define username or password attribute ");
                 }
             }
             InputType::Library => {
@@ -59,10 +58,8 @@ macro_rules! check_input_credentials {
 #[macro_export]
 macro_rules! check_input_connections {
     ($this:ident, $input_type:expr, $alias:expr) => {
-
-     match $input_type {
-            InputType::M3u |InputType::Xtream  => {
-            }
+        match $input_type {
+            InputType::M3u | InputType::Xtream => {}
             InputType::M3uBatch => {
                 if !$alias {
                     if $this.max_connections > 0 {
@@ -88,5 +85,5 @@ macro_rules! check_input_connections {
     };
 }
 
-pub use check_input_credentials;
 pub use check_input_connections;
+pub use check_input_credentials;

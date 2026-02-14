@@ -1,6 +1,6 @@
+use crate::app::components::AppIcon;
 use web_sys::MouseEvent;
 use yew::{classes, function_component, html, Callback, Html, Properties};
-use crate::app::components::AppIcon;
 
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct TextButtonProps {
@@ -17,7 +17,6 @@ pub struct TextButtonProps {
 
 #[function_component]
 pub fn TextButton(props: &TextButtonProps) -> Html {
-
     let handle_click = {
         let click = props.onclick.clone();
         let name = props.name.clone();

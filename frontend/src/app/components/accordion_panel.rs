@@ -1,5 +1,5 @@
-use yew::prelude::*;
 use crate::app::components::{AccordionState, AppIcon};
+use yew::prelude::*;
 
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct AccordionPanelProps {

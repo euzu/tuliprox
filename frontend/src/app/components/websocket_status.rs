@@ -1,11 +1,8 @@
+use crate::{app::components::AppIcon, hooks::use_service_context, model::EventMessage};
 use yew::prelude::*;
-use crate::app::components::AppIcon;
-use crate::hooks::use_service_context;
-use crate::model::EventMessage;
 
 #[derive(Properties, PartialEq)]
-pub struct WebsocketStatusProps {
-}
+pub struct WebsocketStatusProps {}
 
 #[function_component]
 pub fn WebsocketStatus(_props: &WebsocketStatusProps) -> Html {
@@ -27,7 +24,7 @@ pub fn WebsocketStatus(_props: &WebsocketStatusProps) -> Html {
     }
 
     if *status {
-        return html! { <></> }
+        return html! { <></> };
     }
 
     html! {

@@ -50,13 +50,13 @@ fn render_filter(filter: &Filter, pretty: bool, level: usize, do_indent: bool, p
     match filter {
         Filter::Group(inner) => {
             html! {
-            <>
-                { indent(level, do_indent &&  pretty) }
-                <span class={format!("bracket bracket-{}", p_count % 6)}>{"("}</span>
-                { render_filter(inner, pretty, level, false, p_count+1) }
-                <span class={format!("bracket bracket-{}", p_count % 6)}>{ ")" }</span>
-            </>
-         }
+               <>
+                   { indent(level, do_indent &&  pretty) }
+                   <span class={format!("bracket bracket-{}", p_count % 6)}>{"("}</span>
+                   { render_filter(inner, pretty, level, false, p_count+1) }
+                   <span class={format!("bracket bracket-{}", p_count % 6)}>{ ")" }</span>
+               </>
+            }
         }
         Filter::FieldComparison(field, regex) => html! {
             <>

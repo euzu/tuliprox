@@ -1,5 +1,7 @@
-use crate::app::components::{Breadcrumbs, Panel, PlaylistCreate, PlaylistEditorPage, PlaylistList};
-use crate::app::context::PlaylistEditorContext;
+use crate::app::{
+    components::{Breadcrumbs, Panel, PlaylistCreate, PlaylistEditorPage, PlaylistList},
+    context::PlaylistEditorContext,
+};
 use std::rc::Rc;
 use yew::prelude::*;
 use yew_i18n::use_translation;
@@ -24,17 +26,17 @@ pub fn PlaylistEditorView() -> Html {
         let view_visible_dep = active_page.clone();
         let view_visible = active_page.clone();
         let translate = translate.clone();
-        use_effect_with(view_visible_dep, move |_| {
-            match *view_visible {
-                PlaylistEditorPage::List => breadcrumbs.set(Rc::new(vec![translate.t("LABEL.PLAYLISTS"), translate.t("LABEL.LIST")])),
-                PlaylistEditorPage::Create => breadcrumbs.set(Rc::new(vec![translate.t("LABEL.PLAYLISTS"), translate.t("LABEL.CREATE")])),
+        use_effect_with(view_visible_dep, move |_| match *view_visible {
+            PlaylistEditorPage::List => {
+                breadcrumbs.set(Rc::new(vec![translate.t("LABEL.PLAYLISTS"), translate.t("LABEL.LIST")]))
+            }
+            PlaylistEditorPage::Create => {
+                breadcrumbs.set(Rc::new(vec![translate.t("LABEL.PLAYLISTS"), translate.t("LABEL.CREATE")]))
             }
         });
     };
 
-    let context = PlaylistEditorContext {
-        active_page: active_page.clone(),
-    };
+    let context = PlaylistEditorContext { active_page: active_page.clone() };
 
     html! {
         <ContextProvider<PlaylistEditorContext> context={context}>

@@ -1,5 +1,5 @@
-use yew::prelude::*;
 use crate::app::CardContext;
+use yew::prelude::*;
 
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct CardProps {
@@ -11,9 +11,7 @@ pub struct CardProps {
 #[function_component]
 pub fn Card(props: &CardProps) -> Html {
     let custom_class = use_state(String::new);
-    let context = CardContext {
-        custom_class: custom_class.clone(),
-    };
+    let context = CardContext { custom_class: custom_class.clone() };
     html! {
         <ContextProvider<CardContext> context={context}>
             <div class={classes!("tp__card", &props.class, &*custom_class)}>

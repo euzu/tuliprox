@@ -1,5 +1,5 @@
-use yew::prelude::*;
 use std::rc::Rc;
+use yew::prelude::*;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AccordionState {
@@ -17,9 +17,7 @@ pub struct AccordionProps {
 #[function_component]
 pub fn Accordion(props: &AccordionProps) -> Html {
     let active_panel = use_state(|| props.default_panel.clone());
-    let state = AccordionState {
-        active_panel: Rc::new(active_panel),
-    };
+    let state = AccordionState { active_panel: Rc::new(active_panel) };
 
     html! {
         <ContextProvider<AccordionState> context={state}>

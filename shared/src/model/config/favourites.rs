@@ -1,8 +1,10 @@
+use crate::{
+    error::TuliproxError,
+    foundation::{get_filter, Filter},
+    model::{PatternTemplate, XtreamCluster},
+    utils::{arc_str_serde, xtream_cluster_serde},
+};
 use std::sync::Arc;
-use crate::error::{TuliproxError};
-use crate::foundation::{get_filter, Filter};
-use crate::model::{PatternTemplate, XtreamCluster};
-use crate::utils::{arc_str_serde, xtream_cluster_serde};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]

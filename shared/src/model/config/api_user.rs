@@ -1,6 +1,8 @@
-use crate::utils::{is_blank_optional_string, is_true, default_as_true, deserialize_timestamp};
-use crate::error::{TuliproxError, TuliproxErrorKind};
-use crate::model::{ProxyType, ProxyUserStatus};
+use crate::{
+    error::{TuliproxError, TuliproxErrorKind},
+    model::{ProxyType, ProxyUserStatus},
+    utils::{default_as_true, deserialize_timestamp, is_blank_optional_string, is_true},
+};
 
 #[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub enum UserConnectionPermission {
@@ -39,9 +41,7 @@ pub struct ProxyUserCredentialsDto {
 }
 
 impl ProxyUserCredentialsDto {
-    pub fn prepare(&mut self) {
-        self.trim();
-    }
+    pub fn prepare(&mut self) { self.trim(); }
 
     fn trim(&mut self) {
         self.username = self.username.trim().to_string();
@@ -66,10 +66,13 @@ impl ProxyUserCredentialsDto {
 
     pub fn is_active(&self) -> bool {
         if let Some(status) = &self.status {
-            if matches!(status, ProxyUserStatus::Expired
-            | ProxyUserStatus::Banned
-            | ProxyUserStatus::Disabled
-            | ProxyUserStatus::Pending) {
+            if matches!(
+                status,
+                ProxyUserStatus::Expired
+                    | ProxyUserStatus::Banned
+                    | ProxyUserStatus::Disabled
+                    | ProxyUserStatus::Pending
+            ) {
                 return false;
             }
         }

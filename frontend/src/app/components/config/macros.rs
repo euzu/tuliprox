@@ -140,10 +140,10 @@ pub trait HasFormData {
 #[macro_export]
 macro_rules! edit_field_text_option {
     ($instance:expr, $label:expr, $field:ident, $action:path) => {
-        $crate::edit_field_text_option!(@inner $instance, $label, $field, $action, false)
+$crate::edit_field_text_option!(@inner $instance, $label, $field, $action, false)
     };
     ($instance:expr, $label:expr, $field:ident, $action:path, $hidden:expr) => {
-        $crate::edit_field_text_option!(@inner $instance, $label, $field, $action, $hidden)
+$crate::edit_field_text_option!(@inner $instance, $label, $field, $action, $hidden)
     };
     (@inner $instance:expr, $label:expr, $field:ident, $action:path, $hidden:expr) => {{
         let instance = $instance.clone();
@@ -194,10 +194,10 @@ macro_rules! edit_field_textarea_option {
 #[macro_export]
 macro_rules! edit_field_text {
     ($instance:expr, $label:expr, $field:ident, $action:path) => {
-        $crate::edit_field_text!(@inner $instance, $label, $field, $action, false)
+$crate::edit_field_text!(@inner $instance, $label, $field, $action, false)
     };
     ($instance:expr, $label:expr, $field:ident, $action:path,  $hidden:expr) => {
-        $crate::edit_field_text!(@inner $instance, $label, $field, $action, $hidden)
+$crate::edit_field_text!(@inner $instance, $label, $field, $action, $hidden)
     };
     (@inner $instance:expr, $label:expr, $field:ident, $action:path, $hidden:expr) => {{
         let instance = $instance.clone();
@@ -334,7 +334,6 @@ macro_rules! edit_field_number_u16 {
         }
     }};
 }
-
 
 #[macro_export]
 macro_rules! edit_field_number_i16 {
@@ -509,9 +508,12 @@ macro_rules! edit_field_date {
 macro_rules! edit_field_list {
     ($instance:expr, $label:expr, $field:ident, $action:path, $placeholder:expr) => {{
         let instance = $instance.clone();
-        let tag_list = instance.form.$field.iter()
-              .map(|s| std::rc::Rc::new($crate::app::components::Tag { label: s.clone(), class: None }))
-              .collect::<Vec<std::rc::Rc<$crate::app::components::Tag>>>();
+        let tag_list = instance
+            .form
+            .$field
+            .iter()
+            .map(|s| std::rc::Rc::new($crate::app::components::Tag { label: s.clone(), class: None }))
+            .collect::<Vec<std::rc::Rc<$crate::app::components::Tag>>>();
         html! {
             <div class="tp__form-field tp__form-field__list">
                 <label>{$label}</label>
@@ -532,9 +534,11 @@ macro_rules! edit_field_list {
 macro_rules! edit_field_list_option {
     ($instance:expr, $label:expr, $field:ident, $action:path, $placeholder:expr) => {{
         let instance = $instance.clone();
-        let tag_list = instance.form.$field.as_ref().map_or_else(Vec::new, |f| f.iter()
-              .map(|s| std::rc::Rc::new($crate::app::components::Tag { label: s.clone(), class: None }))
-              .collect::<Vec<std::rc::Rc<$crate::app::components::Tag>>>());
+        let tag_list = instance.form.$field.as_ref().map_or_else(Vec::new, |f| {
+            f.iter()
+                .map(|s| std::rc::Rc::new($crate::app::components::Tag { label: s.clone(), class: None }))
+                .collect::<Vec<std::rc::Rc<$crate::app::components::Tag>>>()
+        });
         html! {
             <div class="tp__form-field tp__form-field__list">
                 <label>{$label}</label>

@@ -1,9 +1,10 @@
-use crate::model::{PlaylistItemType, SearchRequest, StreamProperties, UiPlaylistItem, XtreamCluster};
-use crate::utils::{arc_str_serde, arc_str_option_serde};
+use crate::{
+    model::{PlaylistItemType, SearchRequest, StreamProperties, UiPlaylistItem, XtreamCluster},
+    utils::{arc_str_option_serde, arc_str_serde},
+};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::rc::Rc;
-use std::sync::Arc;
+use std::{rc::Rc, sync::Arc};
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct PlaylistRequestXtream {
@@ -22,7 +23,7 @@ pub enum PlaylistRequest {
     Target(u16),
     Input(u16),
     CustomXtream(PlaylistRequestXtream),
-    CustomM3u(PlaylistRequestM3u)
+    CustomM3u(PlaylistRequestM3u),
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -83,10 +84,7 @@ pub struct UiPlaylistCategories {
     pub series: Option<Vec<Rc<UiPlaylistGroup>>>,
 }
 
-fn filter_channels(
-    groups: Option<&Vec<Rc<UiPlaylistGroup>>>,
-    text: &str,
-) -> Option<Vec<Rc<UiPlaylistGroup>>> {
+fn filter_channels(groups: Option<&Vec<Rc<UiPlaylistGroup>>>, text: &str) -> Option<Vec<Rc<UiPlaylistGroup>>> {
     // normalize search text (lowercase)
     let text = text.to_lowercase();
 
@@ -102,10 +100,7 @@ fn filter_channels(
                 let filtered_channels: Vec<Rc<UiPlaylistItem>> = group
                     .channels
                     .iter()
-                    .filter(|c| {
-                        c.title.to_lowercase().contains(&text)
-                            || c.name.to_lowercase().contains(&text)
-                    })
+                    .filter(|c| c.title.to_lowercase().contains(&text) || c.name.to_lowercase().contains(&text))
                     .cloned()
                     .collect();
 
@@ -154,17 +149,15 @@ fn filter_channels_re(groups: Option<&Vec<Rc<UiPlaylistGroup>>>, regex: &Regex) 
     })
 }
 
-fn build_result(live: Option<Vec<Rc<UiPlaylistGroup>>>,
-                vod: Option<Vec<Rc<UiPlaylistGroup>>>,
-                series: Option<Vec<Rc<UiPlaylistGroup>>>) -> Option<UiPlaylistCategories> {
+fn build_result(
+    live: Option<Vec<Rc<UiPlaylistGroup>>>,
+    vod: Option<Vec<Rc<UiPlaylistGroup>>>,
+    series: Option<Vec<Rc<UiPlaylistGroup>>>,
+) -> Option<UiPlaylistCategories> {
     if live.is_none() && vod.is_none() && series.is_none() {
         None
     } else {
-        Some(UiPlaylistCategories {
-            live,
-            vod,
-            series,
-        })
+        Some(UiPlaylistCategories { live, vod, series })
     }
 }
 

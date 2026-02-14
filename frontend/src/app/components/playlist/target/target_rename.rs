@@ -1,8 +1,8 @@
-use shared::model::{ConfigTargetDto};
+use crate::app::components::Card;
+use shared::model::ConfigTargetDto;
 use std::rc::Rc;
 use yew::prelude::*;
 use yew_i18n::use_translation;
-use crate::app::components::Card;
 
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct TargetRenameProps {
@@ -21,7 +21,7 @@ pub fn TargetRename(props: &TargetRenameProps) -> Html {
     html! {
         <div class="tp__target-rename">
          <h2>{translator.t("LABEL.RENAME_SETTINGS")}</h2>
-        
+
         <Card class="tp__target-rename__card">
             {
                 for renames.iter().map(|rename| html! {
@@ -42,7 +42,7 @@ pub fn TargetRename(props: &TargetRenameProps) -> Html {
                 })
             }
         </Card>
-        
+
         </div>
     }
 }

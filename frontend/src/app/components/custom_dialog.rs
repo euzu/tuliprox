@@ -1,5 +1,5 @@
-use yew::prelude::*;
 use web_sys::MouseEvent;
+use yew::prelude::*;
 
 #[derive(Properties, PartialEq)]
 pub struct CustomDialogProps {
@@ -17,7 +17,7 @@ pub struct CustomDialogProps {
 #[function_component]
 pub fn CustomDialog(props: &CustomDialogProps) -> Html {
     let is_open = use_state(|| props.open);
-    
+
     // Update state when props change
     {
         let is_open = is_open.clone();
@@ -40,7 +40,7 @@ pub fn CustomDialog(props: &CustomDialogProps) -> Html {
             }
         })
     };
-    
+
     // Only render if open
     if !*is_open {
         return html! {};

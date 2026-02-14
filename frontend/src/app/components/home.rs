@@ -1,20 +1,24 @@
-use crate::app::components::{AppIcon, DashboardView, EpgView, IconButton, InputRow, Panel, PlaylistEditorView, PlaylistExplorerView, PlaylistUpdateView, Sidebar, SourceEditor, StatsView, StreamsView, ToastrView, UserlistView, WebsocketStatus};
-use crate::app::context::{ConfigContext, PlaylistContext, StatusContext};
-use crate::hooks::{use_server_status, use_service_context};
-use crate::model::{EventMessage, ViewType};
-use shared::model::{ApiProxyConfigDto, AppConfigDto, ConfigInputDto, LibraryScanSummaryStatus, PlaylistUpdateState, StatusCheck, SystemInfo};
-use std::collections::HashMap;
-use std::future;
-use std::rc::Rc;
-use std::sync::Arc;
-use yew::prelude::*;
-use yew::suspense::use_future;
+use crate::{
+    app::{
+        components::{
+            config::ConfigView, loading_indicator::BusyIndicator, theme::Theme, AppIcon, DashboardView, EpgView,
+            IconButton, InputRow, Panel, PlaylistEditorView, PlaylistExplorerView, PlaylistUpdateView, Sidebar,
+            SourceEditor, StatsView, StreamsView, ToastrView, UserlistView, WebsocketStatus,
+        },
+        context::{ConfigContext, PlaylistContext, StatusContext},
+    },
+    hooks::{use_server_status, use_service_context},
+    model::{EventMessage, ViewType},
+    provider::DialogProvider,
+    services::{ToastCloseMode, ToastOptions},
+};
+use shared::model::{
+    ApiProxyConfigDto, AppConfigDto, ConfigInputDto, LibraryScanSummaryStatus, PlaylistUpdateState, StatusCheck,
+    SystemInfo,
+};
+use std::{collections::HashMap, future, rc::Rc, sync::Arc};
+use yew::{prelude::*, suspense::use_future};
 use yew_i18n::use_translation;
-use crate::app::components::config::{ConfigView};
-use crate::app::components::loading_indicator::{BusyIndicator};
-use crate::provider::DialogProvider;
-use crate::services::{ToastCloseMode, ToastOptions};
-use crate::app::components::theme::Theme;
 
 #[function_component]
 pub fn Home() -> Html {
@@ -48,33 +52,30 @@ pub fn Home() -> Html {
             let services_ctx = services_ctx.clone();
             let services_ctx_clone = services_ctx.clone();
             let translate_clone = translate_clone.clone();
-            let subid = services_ctx.event.subscribe(move |msg| {
-                match msg {
-                    EventMessage::Unauthorized => {
-                        services_ctx_clone.auth.logout()
-                    },
-                    EventMessage::ServerError(msg) => {
-                        services_ctx_clone.toastr.error(msg);
-                    },
-                    EventMessage::ConfigChange(config_type) => {
-                        services_ctx_clone.toastr.warning_with_options(
-                            format!("{}: {config_type}", translate_clone.t("MESSAGES.CONFIG_CHANGED")),
-                            ToastOptions { close_mode: ToastCloseMode::Manual });
-                    },
-                    EventMessage::PlaylistUpdate(update_state) => {
-                        match update_state {
-                          PlaylistUpdateState::Success => services_ctx_clone.toastr.success(translate_clone.t("MESSAGES.PLAYLIST_UPDATE.SUCCESS_FINISH")),
-                          PlaylistUpdateState::Failure => services_ctx_clone.toastr.error(translate_clone.t("MESSAGES.PLAYLIST_UPDATE.FAIL_FINISH")),
-                        }
-                    },
-                    EventMessage::LibraryScanProgress(summary) => {
-                        match summary.status {
-                            LibraryScanSummaryStatus::Success => services_ctx_clone.toastr.success(summary.message),
-                            LibraryScanSummaryStatus::Error => services_ctx_clone.toastr.error(summary.message),
-                        }
-                    },
-                    _=> {}
+            let subid = services_ctx.event.subscribe(move |msg| match msg {
+                EventMessage::Unauthorized => services_ctx_clone.auth.logout(),
+                EventMessage::ServerError(msg) => {
+                    services_ctx_clone.toastr.error(msg);
                 }
+                EventMessage::ConfigChange(config_type) => {
+                    services_ctx_clone.toastr.warning_with_options(
+                        format!("{}: {config_type}", translate_clone.t("MESSAGES.CONFIG_CHANGED")),
+                        ToastOptions { close_mode: ToastCloseMode::Manual },
+                    );
+                }
+                EventMessage::PlaylistUpdate(update_state) => match update_state {
+                    PlaylistUpdateState::Success => {
+                        services_ctx_clone.toastr.success(translate_clone.t("MESSAGES.PLAYLIST_UPDATE.SUCCESS_FINISH"))
+                    }
+                    PlaylistUpdateState::Failure => {
+                        services_ctx_clone.toastr.error(translate_clone.t("MESSAGES.PLAYLIST_UPDATE.FAIL_FINISH"))
+                    }
+                },
+                EventMessage::LibraryScanProgress(summary) => match summary.status {
+                    LibraryScanSummaryStatus::Success => services_ctx_clone.toastr.success(summary.message),
+                    LibraryScanSummaryStatus::Error => services_ctx_clone.toastr.error(summary.message),
+                },
+                _ => {}
             });
             move || services_ctx.event.unsubscribe(subid)
         });
@@ -87,23 +88,25 @@ pub fn Home() -> Html {
         let services_ctx = services.clone();
         let config_state = config.clone();
         let _ = use_future(|| async move {
-            services_ctx.config.config_subscribe(
-                &mut |cfg| {
+            services_ctx
+                .config
+                .config_subscribe(&mut |cfg| {
                     config_state.set(cfg.clone());
                     future::ready(())
-                }
-            ).await
+                })
+                .await
         });
 
         let services_ctx = services.clone();
         let api_proxy_config_state = api_proxy_config.clone();
         let _ = use_future(|| async move {
-            services_ctx.config.api_proxy_config_subscribe(
-                &mut |cfg| {
+            services_ctx
+                .config
+                .api_proxy_config_subscribe(&mut |cfg| {
                     api_proxy_config_state.set(cfg.clone());
                     future::ready(())
-                }
-            ).await
+                })
+                .await
         });
     }
 
@@ -118,7 +121,8 @@ pub fn Home() -> Html {
         if let Some(cfg) = config_ctx.as_ref() {
             let mut sources = vec![];
             // Create a map for a faster lookup of global inputs by name
-            let inputs_map: HashMap<Arc<str>, &ConfigInputDto> = cfg.sources.inputs.iter().map(|i| (i.name.clone(), i)).collect();
+            let inputs_map: HashMap<Arc<str>, &ConfigInputDto> =
+                cfg.sources.inputs.iter().map(|i| (i.name.clone(), i)).collect();
 
             for source in &cfg.sources.sources {
                 let mut inputs = vec![];
@@ -147,18 +151,10 @@ pub fn Home() -> Html {
         }
     });
 
-    let config_context = ConfigContext {
-        config: (*config).clone(),
-        api_proxy: (*api_proxy_config).clone(),
-    };
+    let config_context = ConfigContext { config: (*config).clone(), api_proxy: (*api_proxy_config).clone() };
 
-    let status_context = StatusContext {
-        status: (*status).clone(),
-        system_info: (*system_info).clone(),
-    };
-    let playlist_context = PlaylistContext {
-        sources: sources.clone(),
-    };
+    let status_context = StatusContext { status: (*status).clone(), system_info: (*system_info).clone() };
+    let playlist_context = PlaylistContext { sources: sources.clone() };
 
     let handle_view_change = {
         let view_vis = view_visible.clone();
