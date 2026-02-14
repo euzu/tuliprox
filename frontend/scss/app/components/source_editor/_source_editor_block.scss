@@ -17,6 +17,11 @@ $port-size: 10px;
   width: $block-width;
   box-sizing: border-box;
 
+  /* Safari Fixes */
+  will-change: transform;
+  -webkit-transform-style: preserve-3d;
+  backface-visibility: hidden;
+
   &-editing {
     .tp__source-editor__block-content {
       border-color: red !important;

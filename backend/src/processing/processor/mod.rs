@@ -14,20 +14,31 @@ pub use self::xtream::*;
 pub use self::xtream_vod::*;
 pub use self::xtream_series::*;
 pub use self::stream_probe::*;
-use shared::create_bit_set;
+use shared::create_bitset;
 
-create_bit_set!(u16, ResolveOptionsFlags, Resolve, TmdbMissing, Probe, Background);
+create_bitset!(u8, ResolveOptionsFlags, Resolve, TmdbMissing, Probe, Background);
 
 pub struct ResolveOptions {
-    pub flags: ResolveOptionsFlagsSet,
+    flags: ResolveOptionsFlagsSet,
     pub resolve_delay: u16,
+}
+
+impl ResolveOptions {
+    #[inline]
+    pub fn has_flag(&self, flag: ResolveOptionsFlags) -> bool {
+        self.flags.contains(flag)
+    }
+    #[inline]
+    pub fn unset_flag(&mut self, flag: ResolveOptionsFlags) {
+        self.flags.unset(flag);
+    }
 }
 
 impl Default for ResolveOptions {
     fn default() -> Self {
         Self {
             flags: ResolveOptionsFlagsSet::from_variants(&[ResolveOptionsFlags::Background]),
-            resolve_delay: 0,
+            resolve_delay: default_resolve_delay_secs(),
         }
     }
 }
@@ -41,30 +52,55 @@ macro_rules! create_resolve_options_function_for_xtream_target {
     ($cluster:ident) => {
         paste::paste! {
             fn [<get_resolve_ $cluster _options>](target: &ConfigTarget, fpl: &FetchedPlaylist) -> $crate::processing::processor::ResolveOptions {
-                // Get input options
-                let (resolve_tmdb_missing, probe_requested) = fpl.input.options.as_ref().map_or_else(||(false, false), |o| (o.resolve_tmdb, o.probe_stream));
                 match target.get_xtream_output() {
-                    Some(xtream_output) => {
+                    Some(_) => {
+                        let input_options = fpl.input.options.as_ref();
+                        let input_is_xtream = fpl.input.input_type.is_xtream();
+
+                        let (
+                            resolve_tmdb_missing,
+                            input_resolve_enabled,
+                            input_probe_enabled,
+                            input_resolve_delay,
+                            resolve_background
+                        ) = if let Some(options) = input_options {
+                            (
+                                options.has_flag($crate::model::ConfigInputFlags::ResolveTmdb),
+                                options.has_flag($crate::model::ConfigInputFlags::[<Resolve $cluster:camel>]),
+                                options.has_flag($crate::model::ConfigInputFlags::[<Probe $cluster:camel>]),
+                                options.resolve_delay,
+                                options.has_flag($crate::model::ConfigInputFlags::ResolveBackground)
+                            )
+                        } else {
+                            (
+                                false,
+                                false,
+                                false,
+                                shared::utils::default_resolve_delay_secs(),
+                                shared::utils::default_resolve_background(),
+                            )
+                        };
+
+                        let resolve_enabled = input_resolve_enabled;
+                        let probe_enabled = input_probe_enabled;
+                        let resolve_delay = input_resolve_delay;
+
                         let mut flags = $crate::processing::processor::ResolveOptionsFlagsSet::new();
-                        // Map config flags to resolve options flags
-                        if xtream_output.flags.contains($crate::model::XtreamTargetFlags::[<Resolve $cluster:camel>]) && fpl.input.input_type.is_xtream() {
-                            flags.add($crate::processing::processor::ResolveOptionsFlags::Resolve);
+                        if resolve_enabled && input_is_xtream {
+                            flags.set($crate::processing::processor::ResolveOptionsFlags::Resolve);
                         }
                         if resolve_tmdb_missing {
-                            flags.add($crate::processing::processor::ResolveOptionsFlags::TmdbMissing);
+                            flags.set($crate::processing::processor::ResolveOptionsFlags::TmdbMissing);
                         }
-                        if probe_requested
-                            && fpl.input.input_type.is_xtream()
-                            && xtream_output.flags.contains($crate::model::XtreamTargetFlags::[<Probe $cluster:camel>]) {
-                            flags.add($crate::processing::processor::ResolveOptionsFlags::Probe);
+                        if input_is_xtream && probe_enabled {
+                            flags.set($crate::processing::processor::ResolveOptionsFlags::Probe);
                         }
-                        if xtream_output.flags.contains($crate::model::XtreamTargetFlags::ResolveBackground) {
-                            flags.add($crate::processing::processor::ResolveOptionsFlags::Background);
+                        if resolve_background {
+                            flags.set($crate::processing::processor::ResolveOptionsFlags::Background);
                         }
-                        
                         $crate::processing::processor::ResolveOptions {
                             flags,
-                            resolve_delay: xtream_output.resolve_delay,
+                            resolve_delay,
                         }
                     },
                     None => $crate::processing::processor::ResolveOptions::default(),
@@ -74,3 +110,4 @@ macro_rules! create_resolve_options_function_for_xtream_target {
     };
 }
 use create_resolve_options_function_for_xtream_target;
+use shared::utils::default_resolve_delay_secs;

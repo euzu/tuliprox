@@ -3,7 +3,7 @@ use crate::api::model::{ActiveProviderManager, ProviderHandle, ProviderIdType, R
 use crate::library::MetadataResolver;
 use crate::model::FetchedPlaylist;
 use crate::model::{AppConfig, ConfigTarget};
-use crate::model::{ConfigInput, InputSource};
+use crate::model::{ConfigInput, ConfigInputFlags, InputSource};
 use crate::processing::parser::xtream::create_xtream_series_episode_url;
 use crate::processing::parser::xtream::parse_xtream_series_info;
 use crate::processing::processor::playlist::{PlaylistProcessingContext, ProcessingPipe};
@@ -37,10 +37,16 @@ pub async fn playlist_resolve_series(
     provider_fpl: &mut FetchedPlaylist<'_>,
     processed_fpl: &mut FetchedPlaylist<'_>,
 ) {
-    let resolve_options = get_resolve_series_options(target, processed_fpl);
+    // Skip-flag is the kill-switch: no resolve, no probe, no iteration.
+    if processed_fpl.input.has_flag(ConfigInputFlags::XtreamSkipSeries) {
+        return;
+    }
 
-    let do_probe = resolve_options.flags.contains(ResolveOptionsFlags::Probe) && ctx.config.is_ffprobe_enabled().await;
+    let mut resolve_options = get_resolve_series_options(target, processed_fpl);
 
+    if !ctx.config.is_ffprobe_enabled().await {
+        resolve_options.unset_flag(ResolveOptionsFlags::Probe);
+    }
     provider_fpl.source.release_resources(XtreamCluster::Series);
 
     playlist_resolve_series_info(
@@ -48,7 +54,6 @@ pub async fn playlist_resolve_series(
         errors,
         processed_fpl,
         resolve_options,
-        do_probe,
         pipe,
         target,
     )
@@ -66,7 +71,6 @@ async fn playlist_resolve_series_info(ctx: &PlaylistProcessingContext,
                                       _errors: &mut Vec<TuliproxError>,
                                       fpl: &mut FetchedPlaylist<'_>,
                                       resolve_options: ResolveOptions,
-                                      do_probe: bool,
                                       pipe: &ProcessingPipe,
                                       target: &ConfigTarget) {
     let filter = |pli: &PlaylistItem| {
@@ -79,17 +83,18 @@ async fn playlist_resolve_series_info(ctx: &PlaylistProcessingContext,
     };
 
     // Skip if nothing to do
-    let skip_resolve = !resolve_options.flags.contains(ResolveOptionsFlags::Resolve) && !do_probe && !resolve_options.flags.contains(ResolveOptionsFlags::TmdbMissing);
+    let skip_resolve = !resolve_options.has_flag(ResolveOptionsFlags::Resolve)
+        && !resolve_options.has_flag(ResolveOptionsFlags::Probe)
+        && !resolve_options.has_flag(ResolveOptionsFlags::TmdbMissing);
 
-    let resolve_tmdb_enabled = fpl.input.options.as_ref().is_some_and(|o| o.resolve_tmdb);
+    let resolve_tmdb_enabled = fpl.input.has_flag(ConfigInputFlags::ResolveTmdb);
 
-    let groups_to_add = if resolve_options.flags.contains(ResolveOptionsFlags::Background) && ctx.metadata_manager.is_some() {
+    let groups_to_add = if resolve_options.has_flag(ResolveOptionsFlags::Background) && ctx.metadata_manager.is_some() {
         queue_background_series_info(
             ctx,
             fpl,
             filter,
             &resolve_options,
-            do_probe,
             skip_resolve,
             resolve_tmdb_enabled,
         )
@@ -99,7 +104,6 @@ async fn playlist_resolve_series_info(ctx: &PlaylistProcessingContext,
             fpl,
             filter,
             &resolve_options,
-            do_probe,
             skip_resolve,
             resolve_tmdb_enabled,
         )
@@ -180,7 +184,6 @@ fn queue_background_series_info(
     fpl: &mut FetchedPlaylist<'_>,
     filter: impl Fn(&PlaylistItem) -> bool,
     resolve_options: &ResolveOptions,
-    do_probe: bool,
     skip_resolve: bool,
     resolve_tmdb_enabled: bool,
 ) -> Vec<PlaylistGroup> {
@@ -204,7 +207,7 @@ fn queue_background_series_info(
         };
 
         if !skip_resolve {
-            let reasons = check_resolve_reasons(resolve_options, do_probe, resolve_tmdb_enabled, pli);
+            let reasons = check_resolve_reasons(resolve_options, resolve_tmdb_enabled, pli);
 
             if !reasons.is_empty() {
                 let task = UpdateTask::ResolveSeries {
@@ -229,7 +232,6 @@ async fn process_immediate_series_info(
     fpl: &mut FetchedPlaylist<'_>,
     filter: impl Fn(&PlaylistItem) -> bool,
     resolve_options: &ResolveOptions,
-    do_probe: bool,
     skip_resolve: bool,
     resolve_tmdb_enabled: bool,
 ) -> Vec<PlaylistGroup> {
@@ -265,7 +267,7 @@ async fn process_immediate_series_info(
         };
 
         if !skip_resolve {
-            let reasons = check_resolve_reasons(resolve_options, do_probe, resolve_tmdb_enabled, pli);
+            let reasons = check_resolve_reasons(resolve_options, resolve_tmdb_enabled, pli);
 
             if !reasons.is_empty() {
                 if let Some(active_provider) = ctx.provider_manager.as_ref() {
@@ -420,7 +422,6 @@ async fn update_series_info_immediate(
 
 fn check_resolve_reasons(
     resolve_options: &ResolveOptions,
-    do_probe: bool,
     resolve_tmdb_enabled: bool,
     pli: &mut PlaylistItem,
 ) -> ResolveReasonSet {
@@ -429,16 +430,16 @@ fn check_resolve_reasons(
     let needs_info = check_needs_info(resolve_options, pli, &mut reasons);
     check_resolve_tmdb(resolve_options, resolve_tmdb_enabled, pli, needs_info, &mut reasons);
 
-    if do_probe {
-        check_needs_probe(pli, &mut reasons);
+    if resolve_options.has_flag(ResolveOptionsFlags::Probe) {
+        check_needs_probe(pli, needs_info, &mut reasons);
     }
     reasons
 }
 
 fn check_needs_info(resolve_options: &ResolveOptions, pli: &mut PlaylistItem, reasons: &mut ResolveReasonSet) -> bool {
-    let needs_info = resolve_options.flags.contains(ResolveOptionsFlags::Resolve) && !pli.has_details();
+    let needs_info = resolve_options.has_flag(ResolveOptionsFlags::Resolve) && !pli.has_details();
     if needs_info {
-        reasons.add(ResolveReason::Info);
+        reasons.set(ResolveReason::Info);
     }
     needs_info
 }
@@ -450,25 +451,26 @@ fn check_resolve_tmdb(
     needs_info: bool,
     reasons: &mut ResolveReasonSet,
 ) {
-    if resolve_tmdb_enabled && resolve_options.flags.contains(ResolveOptionsFlags::TmdbMissing) {
+    if resolve_tmdb_enabled
+        && resolve_options.has_flag(ResolveOptionsFlags::TmdbMissing)
+        && needs_info {
         if let Some(StreamProperties::Series(series_stream_props)) = pli.header.additional_properties.as_ref() {
             let has_tmdb = series_stream_props.tmdb.is_some();
             let has_date = series_stream_props.release_date.is_some();
             let title_present = !series_stream_props.name.is_empty() || !pli.header.title.is_empty();
 
             if title_present && (!has_tmdb || !has_date) {
-                if !has_tmdb { reasons.add(ResolveReason::Tmdb); }
-                if !has_date { reasons.add(ResolveReason::Date); }
+                if !has_tmdb { reasons.set(ResolveReason::Tmdb); }
+                if !has_date { reasons.set(ResolveReason::Date); }
             }
-        } else if needs_info {
-            // Covered by info
-        } else {
-            reasons.add(ResolveReason::MissingDetails);
         }
     }
 }
 
-fn check_needs_probe(pli: &mut PlaylistItem, reasons: &mut ResolveReasonSet) {
+fn check_needs_probe(pli: &mut PlaylistItem, needs_info: bool, reasons: &mut ResolveReasonSet) {
+    if !needs_info {
+        return;
+    }
     if let Some(StreamProperties::Series(series_stream_props)) = pli.header.additional_properties.as_ref() {
         if let Some(details) = series_stream_props.details.as_ref() {
             if let Some(episodes) = details.episodes.as_ref() {
@@ -476,7 +478,7 @@ fn check_needs_probe(pli: &mut PlaylistItem, reasons: &mut ResolveReasonSet) {
                     let missing_video = !MediaQuality::is_valid_media_info(ep.video.as_deref());
                     let missing_audio = !MediaQuality::is_valid_media_info(ep.audio.as_deref());
                     if missing_video || missing_audio {
-                        reasons.add(ResolveReason::Probe);
+                        reasons.set(ResolveReason::Probe);
                         break;
                     }
                 }
@@ -510,8 +512,7 @@ pub async fn update_series_metadata(
     let storage_path = get_input_storage_path(&input.name, working_dir).await
         .map_err(|e| shared::error::info_err!("Storage path error: {e}"))?;
 
-    let opts = input.options.as_ref();
-    if opts.is_some_and(|o| o.xtream_skip_series) {
+    if input.has_flag(ConfigInputFlags::XtreamSkipSeries) {
         return Ok(None);
     }
 
@@ -600,10 +601,13 @@ pub async fn update_series_metadata(
 
     let mut properties = props.unwrap();
 
-    let resolve_tmdb_enabled = input.options.as_ref().is_some_and(|o| o.resolve_tmdb);
+    let resolve_tmdb_enabled = input.has_flag(ConfigInputFlags::ResolveTmdb);
 
     // 2. Resolve TMDB/Date if missing
-    if resolve_tmdb_enabled && (properties.tmdb.is_none() || properties.release_date.is_none()) && !properties.name.is_empty() {
+    if fetch_info
+        && resolve_tmdb_enabled
+        && (properties.tmdb.is_none() || properties.release_date.is_none())
+        && !properties.name.is_empty() {
         let config = app_config.config.load();
         let library_config = config.library.as_ref();
         let meta_resolver = MetadataResolver::new(library_config, client.clone());

@@ -1,4 +1,5 @@
 use crate::{
+    create_bitset,
     model::{
         xtream_const, ClusterFlags, CommonPlaylistItem, ConfigTargetOptions, EpisodeStreamProperties,
         SeriesStreamProperties, StreamProperties, UUIDType, VideoStreamProperties, XtreamInfoDocument,
@@ -617,12 +618,17 @@ impl From<M3uPlaylistItem> for CommonPlaylistItem {
     fn from(item: M3uPlaylistItem) -> Self { item.to_common() }
 }
 
-#[allow(clippy::struct_excessive_bools)]
+create_bitset!(
+    u8,
+    XtreamMappingFlags,
+    SkipLiveDirectSource,
+    SkipVideoDirectSource,
+    SkipSeriesDirectSource,
+    RewriteResourceUrl
+);
+
 pub struct XtreamMappingOptions {
-    pub skip_live_direct_source: bool,
-    pub skip_video_direct_source: bool,
-    pub skip_series_direct_source: bool,
-    pub rewrite_resource_url: bool,
+    pub flags: XtreamMappingFlagsSet,
     pub force_redirect: Option<ClusterFlags>,
     pub reverse_item_types: PlaylistItemTypeSet,
     pub username: String,
@@ -641,19 +647,20 @@ impl XtreamMappingOptions {
         virtual_id: VirtualId,
     ) -> Option<String> {
         let is_reverse = self.is_reverse(item_type);
-        let resource_url = if is_reverse && self.rewrite_resource_url && self.base_url.is_some() {
-            let resource_url = format!(
-                "{}/resource/{}/{}/{}/{}",
-                self.base_url.as_ref().map_or_else(String::new, |b| b.clone()),
-                xtream_cluster.as_stream_type(),
-                self.username,
-                self.password,
-                virtual_id
-            );
-            Some(resource_url)
-        } else {
-            None
-        };
+        let resource_url =
+            if is_reverse && self.flags.contains(XtreamMappingFlags::RewriteResourceUrl) && self.base_url.is_some() {
+                let resource_url = format!(
+                    "{}/resource/{}/{}/{}/{}",
+                    self.base_url.as_ref().map_or_else(String::new, |b| b.clone()),
+                    xtream_cluster.as_stream_type(),
+                    self.username,
+                    self.password,
+                    virtual_id
+                );
+                Some(resource_url)
+            } else {
+                None
+            };
         resource_url
     }
 }

@@ -4,8 +4,8 @@ use crate::processing::processor::{update_generic_stream_metadata, update_live_s
 use crate::utils::debug_if_enabled;
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
-use log::{debug, error, info, trace, warn};
-use shared::create_bit_set;
+use log::{debug, error, info, warn};
+use shared::create_bitset;
 use shared::error::TuliproxError;
 use shared::model::{InputType, LiveStreamProperties, PlaylistItemType, SeriesStreamProperties, UUIDType, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem};
 use shared::utils::generate_playlist_uuid;
@@ -21,7 +21,6 @@ use crate::repository::{persist_input_live_info_batch, persist_input_series_info
 use crate::utils::FileReadGuard;
 use std::cmp::min;
 use std::collections::{HashMap, HashSet};
-use crate::utils::trace_if_enabled;
 
 const QUEUE_LOG_INTERVAL: Duration = Duration::from_secs(30);
 const PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(15);
@@ -31,7 +30,7 @@ const MAX_QUEUE_SIZE: usize = 100_000;
 const TASK_ERR_NO_CONNECTION: &str = "No connection available";
 const TASK_ERR_PREEMPTED: &str = "Task preempted";
 
-create_bit_set!(u32, ResolveReason, Info, Tmdb, Date, Probe, MissingDetails);
+create_bitset!(u8, ResolveReason, Info, Tmdb, Date, Probe, MissingDetails);
 
 /// `PlaylistItemIdType` ID can be either a String (M3U) or u32 (Xtream/TargetDB)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -398,7 +397,7 @@ impl InputWorker {
                     } else if Self::is_series_task_key(&current_key) {
                         processed_series_count += 1;
                     }
-                    trace!("Processed metadata task for input {input_name}: {current_task} (changed={task_changed})");
+                    debug!("Processed metadata task for input {input_name}: {current_task} (changed={task_changed})");
                     retry_attempts.remove(&current_key);
                     if last_progress_log_at.elapsed() >= PROGRESS_LOG_INTERVAL {
                         // current_key is removed from pending_tasks later in this loop iteration;
@@ -1203,7 +1202,7 @@ impl InputWorker {
             .and_then(|handle| handle.allocation.get_provider_config());
         let name_display = item_title.as_deref().map_or(String::new(), |n| format!(" \"{n}\""));
 
-        trace_if_enabled!("Processing task for {}: {}{}", input_name, task, name_display);
+        debug!("Processing task for {input_name}: {task}{name_display}");
 
         let pre_vod_updates = collector.vod.len();
         let pre_series_updates = collector.series.len();
@@ -1308,6 +1307,7 @@ impl InputWorker {
                     item_title,
                     false, // Batch collect
                     fetch_info,
+                    reason.contains(ResolveReason::Probe),
                     query_opt,
                 ).await {
                     Ok(Some(props)) => {

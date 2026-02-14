@@ -24,7 +24,7 @@ axum = { version = "0.8" , features = ["macros", "default", "ws"]}
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "auth", "fs", "compression-full", "trace"] }
 tower_governor = { version = "0.8", features = ["axum"] }
-jsonwebtoken = { version = "10.2", features = ["rust_crypto"] }
+jsonwebtoken = { version = "10.3", features = ["rust_crypto"] }
 rust-argon2 = "3"
 futures = "0.3"
 path-clean = "1.0"
@@ -50,7 +50,7 @@ tokio = { version = "1.49", features = ["rt-multi-thread", "parking_lot", "fs", 
 #tracing = "0.1"
 #tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 tokio-util =  { version = "0.7", features = ["io", "io-util"] }
-tempfile = "3.24"
+tempfile = "3.25"
 filetime = "0.2"
 strsim = "0.11"
 rphonetic = "3.0"
@@ -89,7 +89,7 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_
 # tikv-jemallocator =  { version = "*", features = ["profiling", "unprefixed_malloc_on_supported_platforms"] }
 
 [build-dependencies]
-vergen = { version = "9.0", features = ["build"] }
+vergen = { version = "9.1", features = ["build"] }
 
 [dev-dependencies]
 http-body-util = "0.1"

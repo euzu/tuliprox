@@ -1,7 +1,7 @@
 use crate::api::model::{ActiveProviderManager, ProviderHandle};
 use crate::api::model::{ResolveReason, ResolveReasonSet, UpdateTask, ProviderIdType};
 use crate::library::MetadataResolver;
-use crate::model::ConfigInput;
+use crate::model::{ConfigInput, ConfigInputFlags};
 use crate::model::FetchedPlaylist;
 use crate::model::InputSource;
 use crate::model::{AppConfig, ConfigTarget};
@@ -33,13 +33,20 @@ pub async fn playlist_resolve_vod(
     provider_fpl: &mut FetchedPlaylist<'_>,
     fpl: &mut FetchedPlaylist<'_>,
 ) {
+    // Skip-flag is the kill-switch: no resolve, no probe, no iteration.
+    if fpl.input.has_flag(ConfigInputFlags::XtreamSkipVod) {
+        return;
+    }
+
     let resolve_options = get_resolve_vod_options(target, fpl);
 
     let app_config: &Arc<AppConfig> = &ctx.config;
-    let do_probe = resolve_options.flags.contains(ResolveOptionsFlags::Probe) && app_config.is_ffprobe_enabled().await;
+    let do_probe = resolve_options.has_flag(ResolveOptionsFlags::Probe) && app_config.is_ffprobe_enabled().await;
 
     // Determine if we need to do anything
-    if !resolve_options.flags.contains(ResolveOptionsFlags::Resolve) && !do_probe && !resolve_options.flags.contains(ResolveOptionsFlags::TmdbMissing) {
+    if !resolve_options.has_flag(ResolveOptionsFlags::Resolve)
+        && !do_probe
+        && !resolve_options.has_flag(ResolveOptionsFlags::TmdbMissing) {
         return;
     }
 
@@ -130,9 +137,9 @@ async fn playlist_resolve_vod_info(
         true
     };
 
-    let resolve_tmdb_enabled = fpl.input.options.as_ref().is_some_and(|o| o.resolve_tmdb);
+    let resolve_tmdb_enabled = fpl.input.has_flag(ConfigInputFlags::ResolveTmdb);
 
-    if resolve_options.flags.contains(ResolveOptionsFlags::Background) && ctx.metadata_manager.is_some() {
+    if resolve_options.has_flag(ResolveOptionsFlags::Background) && ctx.metadata_manager.is_some() {
         queue_background_vod_info(
             ctx,
             fpl,
@@ -227,20 +234,25 @@ async fn process_immediate_vod_info(ctx: &PlaylistProcessingContext, fpl: &mut F
                                 })
                                 .collect();
 
-                            if !updates.is_empty() {
-                                if let Err(err) = persist_input_vod_info_batch(
+                            if updates.is_empty() {
+                                batch.clear();
+                            } else {
+                                match persist_input_vod_info_batch(
                                     &ctx.config,
                                     &storage_path,
                                     XtreamCluster::Video,
                                     &input.name,
                                     updates,
                                 ).await {
-                                    error!("Failed to persist batch VOD info: {err}");
+                                    Ok(()) => batch.clear(),
+                                    Err(err) => {
+                                        error!(
+                                            "persist_input_vod_info_batch failed for XtreamCluster::Video on input '{}'. batch.clear() skipped. Error: {err}",
+                                            input.name
+                                        );
+                                    }
                                 }
                             }
-
-                            // Clear batch
-                            batch.clear();
                         }
 
                         processed_count += 1;
@@ -301,12 +313,15 @@ fn check_resolve_reasons(
 
     // Probe check
     if do_probe {
-        check_needs_probe(pli, &mut reasons);
+        check_needs_probe(pli, needs_info, &mut reasons);
     }
     reasons
 }
 
-fn check_needs_probe(pli: &PlaylistItem, reasons: &mut ResolveReasonSet) {
+fn check_needs_probe(pli: &PlaylistItem, needs_info: bool, reasons: &mut ResolveReasonSet) {
+    if !needs_info {
+        return;
+    }
     let needs_probe = match pli.header.additional_properties.as_ref() {
         Some(StreamProperties::Video(props)) => {
             let details = props.details.as_ref();
@@ -320,15 +335,15 @@ fn check_needs_probe(pli: &PlaylistItem, reasons: &mut ResolveReasonSet) {
         _ => false,
     };
     if needs_probe {
-        reasons.add(ResolveReason::Probe);
+        reasons.set(ResolveReason::Probe);
     }
 }
 
 fn check_needs_info(resolve_options: &ResolveOptions, pli: &PlaylistItem, reasons: &mut ResolveReasonSet) -> bool {
-    let needs_info = !pli.has_details() && resolve_options.flags.contains(ResolveOptionsFlags::Resolve);
+    let needs_info = !pli.has_details() && resolve_options.has_flag(ResolveOptionsFlags::Resolve);
 
     if needs_info {
-        reasons.add(ResolveReason::Info);
+        reasons.set(ResolveReason::Info);
     }
     needs_info
 }
@@ -340,17 +355,16 @@ fn check_resolve_tmdb(
     needs_info: bool,
     reasons: &mut ResolveReasonSet,
 ) {
-    if resolve_tmdb_enabled && resolve_options.flags.contains(ResolveOptionsFlags::TmdbMissing) {
+    if resolve_tmdb_enabled
+        && resolve_options.has_flag(ResolveOptionsFlags::TmdbMissing)
+        && needs_info {
         if let Some(StreamProperties::Video(video_stream_props)) = pli.header.additional_properties.as_ref() {
             let has_tmdb = video_stream_props.tmdb.is_some();
             let has_date = video_stream_props.details.as_ref().and_then(|d| d.release_date.as_ref()).is_some();
             if !has_tmdb || !has_date {
-                if !has_tmdb { reasons.add(ResolveReason::Tmdb); }
-                if !has_date { reasons.add(ResolveReason::Date); }
+                if !has_tmdb { reasons.set(ResolveReason::Tmdb); }
+                if !has_date { reasons.set(ResolveReason::Date); }
             }
-        } else if !needs_info {
-            // No properties but no download requested? Should be rare
-            reasons.add(ResolveReason::MissingDetails);
         }
     }
 }
@@ -410,6 +424,7 @@ async fn update_vod_info_immediate(
         Some(&pli.header.title),
         false,
         fetch_info,
+        reasons.contains(ResolveReason::Probe),
         db_query,
     ).await
 }
@@ -433,6 +448,7 @@ pub async fn update_vod_metadata(
     playlist_title: Option<&str>,
     save: bool,
     fetch_info: bool,
+    do_probe: bool,
     db_query: Option<&mut BPlusTreeQuery<u32, XtreamPlaylistItem>>,
 ) -> Result<Option<VideoStreamProperties>, TuliproxError> {
     let working_dir = &app_config.config.load().working_dir;
@@ -440,8 +456,7 @@ pub async fn update_vod_metadata(
         .map_err(|e| shared::error::info_err!("Storage path error: {e}"))?;
 
     // Check if we should skip based on input options
-    let opts = input.options.as_ref();
-    if opts.is_some_and(|o| o.xtream_skip_vod) {
+    if input.has_flag(ConfigInputFlags::XtreamSkipVod) {
         return Ok(None);
     }
 
@@ -548,13 +563,13 @@ pub async fn update_vod_metadata(
     // Now it's safe to unwrap because we handled the None case above
     let mut properties = props.unwrap();
 
-    let resolve_tmdb_enabled = input.options.as_ref().is_some_and(|o| o.resolve_tmdb);
+    let resolve_tmdb_enabled = input.has_flag(ConfigInputFlags::ResolveTmdb);
 
     // 2. Resolve TMDB/Date if missing and explicitly enabled for this input
     let missing_tmdb = properties.tmdb.is_none();
     let missing_date = properties.details.as_ref().and_then(|d| d.release_date.as_ref()).is_none();
 
-    if resolve_tmdb_enabled && (missing_tmdb || missing_date) {
+    if fetch_info && resolve_tmdb_enabled && (missing_tmdb || missing_date) {
         // Try local parsing first
         if missing_date && !properties.name.is_empty() {
             let meta_parse = ptt_parse_title(&properties.name);
@@ -633,7 +648,7 @@ pub async fn update_vod_metadata(
 
     // 3. Probe (if enabled globally in config)
     let ffprobe_enabled = app_config.is_ffprobe_enabled().await;
-    if ffprobe_enabled {
+    if do_probe && ffprobe_enabled {
         // Ensure details struct exists before probing
         if properties.details.is_none() {
             properties.details = Some(VideoStreamDetailProperties::default());

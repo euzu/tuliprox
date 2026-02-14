@@ -1,5 +1,5 @@
 use crate::api::model::AppState;
-use crate::model::{AppConfig, HdHomeRunDeviceConfig};
+use crate::model::{AppConfig, HdHomeRunDeviceConfig, HdHomeRunFlags};
 use bytes::{Buf, BufMut, BytesMut};
 use log::{error, info, trace};
 use std::collections::HashMap;
@@ -236,7 +236,7 @@ async fn proprietary_discover_loop(
             trace!("Received proprietary HDHomeRun discover from {remote_addr}");
             let hdhomerun_guard = app_config.hdhomerun.load();
             if let Some(hd_config) = &*hdhomerun_guard {
-                if hd_config.enabled {
+                if hd_config.flags.contains(HdHomeRunFlags::Enabled) {
                     for device in &hd_config.devices {
                         if device.t_enabled {
                             let dev_id = u32::from_str_radix(&device.device_id, 16).unwrap_or(0);

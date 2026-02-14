@@ -1,7 +1,7 @@
 use crate::api::api_utils::{try_unwrap_body, internal_server_error};
 use crate::api::model::HdHomerunAppState;
 use crate::auth::AuthBasic;
-use crate::model::{AppConfig, ConfigTarget, ProxyUserCredentials};
+use crate::model::{AppConfig, ConfigInputFlags, ConfigTarget, ProxyUserCredentials};
 use crate::utils::arc_str_serde;
 use crate::processing::parser::xtream::get_xtream_url;
 use crate::repository::{iter_raw_m3u_target_playlist, M3uPlaylistIterator};
@@ -103,13 +103,13 @@ where
     match channels {
         Some(chans) => {
             let mapped = chans.map(move |(item, has_next)| {
-                let input_options = cfg.get_input_options_by_name(&item.input_name);
-                let (live_stream_use_prefix, live_stream_without_extension) = input_options
+                let input = cfg.get_input_by_name(&item.input_name);
+                let (live_stream_use_prefix, live_stream_without_extension) = input
                     .as_ref()
-                    .map_or((true, false), |o| {
+                    .map_or((true, false), |i| {
                         (
-                            o.xtream_live_stream_use_prefix,
-                            o.xtream_live_stream_without_extension,
+                            i.has_flag(ConfigInputFlags::XtreamLiveStreamUsePrefix),
+                            i.has_flag(ConfigInputFlags::XtreamLiveStreamWithoutExtension),
                         )
                     });
                 let container_extension = item.get_container_extension();

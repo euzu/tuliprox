@@ -16,7 +16,7 @@ use crate::api::panel_api::sync_panel_api_exp_dates_on_boot;
 use crate::api::scheduler::{exec_interner_prune, exec_scheduler};
 use crate::api::serve::serve;
 use crate::api::sys_usage::exec_system_usage;
-use crate::model::{AppConfig, Config, Healthcheck, ProcessTargets, RateLimitConfig};
+use crate::model::{AppConfig, Config, HdHomeRunFlags, Healthcheck, ProcessTargets, RateLimitConfig};
 use crate::processing::processor::exec_processing;
 use crate::repository::get_geoip_path;
 use crate::repository::load_playlists_into_memory_cache;
@@ -182,8 +182,8 @@ pub(in crate::api) fn start_hdhomerun(
     let host = config.api.host.clone();
     let guard = app_config.hdhomerun.load();
     if let Some(hdhomerun) = &*guard {
-        if hdhomerun.enabled {
-            if hdhomerun.ssdp_discovery {
+        if hdhomerun.flags.contains(HdHomeRunFlags::Enabled) {
+            if hdhomerun.flags.contains(HdHomeRunFlags::SsdpDiscovery) {
                 info!("HDHomeRun SSDP discovery is enabled.");
                 spawn_ssdp_discover_task(
                     Arc::clone(app_config),
@@ -194,7 +194,10 @@ pub(in crate::api) fn start_hdhomerun(
                 info!("HDHomeRun SSDP discovery is disabled.");
             }
 
-            if hdhomerun.proprietary_discovery {
+            if hdhomerun
+                .flags
+                .contains(HdHomeRunFlags::ProprietaryDiscovery)
+            {
                 info!("HDHomeRun proprietary discovery is enabled.");
                 spawn_proprietary_tasks(
                     Arc::clone(app_state),
@@ -211,7 +214,7 @@ pub(in crate::api) fn start_hdhomerun(
                     let app_host = host.clone();
                     let port = device.port;
                     let device_clone = Arc::new(device.clone());
-                    let basic_auth = hdhomerun.auth;
+                    let basic_auth = hdhomerun.flags.contains(HdHomeRunFlags::Auth);
                     infos.push(format!(
                         "HdHomeRun Server '{}' running: http://{host}:{port}",
                         device.name

@@ -5,7 +5,7 @@ use crate::{
         SourceEditorContext, TextButton, TitledCard,
     },
     config_field_child, edit_field_bool, edit_field_date, edit_field_number_i16, edit_field_number_u16,
-    edit_field_text, edit_field_text_option, generate_form_reducer, html_if,
+    edit_field_number_u32, edit_field_text, edit_field_text_option, generate_form_reducer, html_if,
 };
 use shared::{
     error::TuliproxError,
@@ -46,15 +46,19 @@ const LABEL_XTREAM_SKIP_SERIES: &str = "LABEL.SERIES";
 const LABEL_XTREAM_LIVE_STREAM_USE_PREFIX: &str = "LABEL.LIVE_STREAM_USE_PREFIX";
 const LABEL_XTREAM_LIVE_STREAM_WITHOUT_EXTENSION: &str = "LABEL.LIVE_STREAM_WITHOUT_EXTENSION";
 const LABEL_RESOLVE_TMDB: &str = "LABEL.RESOLVE_TMDB";
-const LABEL_PROBE_STREAM: &str = "LABEL.PROBE_STREAM";
+const LABEL_RESOLVE: &str = "LABEL.RESOLVE";
+const LABEL_PROBE: &str = "LABEL.PROBE";
+const LABEL_RESOLVE_DELAY_SEC: &str = "LABEL.RESOLVE_DELAY_SEC";
+const LABEL_RESOLVE_BACKGROUND: &str = "LABEL.RESOLVE_BACKGROUND";
+const LABEL_PROBE_LIVE_INTERVAL_HOURS: &str = "LABEL.PROBE_LIVE_INTERVAL_HOURS";
 const LABEL_METADATA: &str = "LABEL.METADATA";
 const LABEL_CACHE_DURATION: &str = "LABEL.CACHE_DURATION";
-
 const LABEL_MAIN: &str = "LABEL.MAIN_CONFIG";
 const LABEL_OPTIONS: &str = "LABEL.OPTIONS";
 const LABEL_STAGED: &str = "LABEL.STAGED";
 const LABEL_ADVANCED: &str = "LABEL.ADVANCED";
 const LABEL_ALIAS: &str = "LABEL.ALIAS";
+const LABEL_LIVE_STREAMS: &str = "LABEL.LIVE_STREAMS";
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum InputFormPage {
@@ -114,7 +118,14 @@ generate_form_reducer!(
       XtreamLiveStreamUsePrefix => xtream_live_stream_use_prefix: bool,
       XtreamLiveStreamWithoutExtension => xtream_live_stream_without_extension: bool,
       ResolveTmdb => resolve_tmdb: bool,
-      ProbeStream => probe_stream: bool,
+      ResolveBackground => resolve_background: bool,
+      ResolveSeries => resolve_series: bool,
+      ResolveVod => resolve_vod: bool,
+      ResolveDelay => resolve_delay: u16,
+      ProbeLive => probe_live: bool,
+      ProbeVod => probe_vod: bool,
+      ProbeSeries => probe_series: bool,
+      ProbeLiveIntervalHours => probe_live_interval_hours: u32,
     }
 );
 
@@ -418,15 +429,37 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                     { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_SKIP_SERIES), xtream_skip_series, ConfigInputOptionsFormAction::XtreamSkipSeries) }
                   </div>
                 </TitledCard>
-                { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_LIVE_STREAM_USE_PREFIX), xtream_live_stream_use_prefix, ConfigInputOptionsFormAction::XtreamLiveStreamUsePrefix) }
-                { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_LIVE_STREAM_WITHOUT_EXTENSION), xtream_live_stream_without_extension, ConfigInputOptionsFormAction::XtreamLiveStreamWithoutExtension) }
+                <TitledCard title={translate.t(LABEL_LIVE_STREAMS)}>
+                  <div class="tp__config-view__cols-2">
+                    { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_LIVE_STREAM_USE_PREFIX), xtream_live_stream_use_prefix, ConfigInputOptionsFormAction::XtreamLiveStreamUsePrefix) }
+                    { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_LIVE_STREAM_WITHOUT_EXTENSION), xtream_live_stream_without_extension, ConfigInputOptionsFormAction::XtreamLiveStreamWithoutExtension) }
+                  </div>
+                </TitledCard>
+                <TitledCard title={translate.t(LABEL_RESOLVE)}>
+                    <div class="tp__config-view__cols-3">
+                    { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_SKIP_VOD), resolve_vod,  ConfigInputOptionsFormAction::ResolveVod) }
+                    { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_SKIP_SERIES), resolve_series,  ConfigInputOptionsFormAction::ResolveSeries) }
+                    </div>
+                    <div class="tp__config-view__cols-2">
+                    { edit_field_number_u16!(input_options_state, translate.t(LABEL_RESOLVE_DELAY_SEC), resolve_delay,  ConfigInputOptionsFormAction::ResolveDelay) }
+                    </div>
+                    { edit_field_bool!(input_options_state, translate.t(LABEL_RESOLVE_BACKGROUND), resolve_background,  ConfigInputOptionsFormAction::ResolveBackground) }
+                </TitledCard>
+                <TitledCard title={translate.t(LABEL_PROBE)}>
+                    <div class="tp__config-view__cols-3">
+                    { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_SKIP_LIVE), probe_live,  ConfigInputOptionsFormAction::ProbeLive) }
+                    { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_SKIP_VOD), probe_vod,  ConfigInputOptionsFormAction::ProbeVod) }
+                    { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_SKIP_SERIES), probe_series,  ConfigInputOptionsFormAction::ProbeSeries) }
+                    </div>
+                    <div class="tp__config-view__cols-2">
+                    { edit_field_number_u32!(input_options_state, translate.t(LABEL_PROBE_LIVE_INTERVAL_HOURS), probe_live_interval_hours,  ConfigInputOptionsFormAction::ProbeLiveIntervalHours) }
+                    </div>
+                </TitledCard>
                 </>
-                })
-            }
+            })}
             <TitledCard title={translate.t(LABEL_METADATA)}>
               { edit_field_bool!(input_options_state, translate.t(LABEL_RESOLVE_TMDB), resolve_tmdb, ConfigInputOptionsFormAction::ResolveTmdb) }
-              { edit_field_bool!(input_options_state, translate.t(LABEL_PROBE_STREAM), probe_stream, ConfigInputOptionsFormAction::ProbeStream) }
-             </TitledCard>
+            </TitledCard>
             </Card>
         }
     };

@@ -1,4 +1,4 @@
-use crate::model::ConfigInput;
+use crate::model::{ConfigInput, ConfigInputFlags};
 use crate::model::XtreamCategory;
 use crate::utils::request::DynReader;
 use crate::utils::xtream::get_xtream_stream_url_base;
@@ -67,8 +67,10 @@ pub fn parse_xtream_series_info(parent_uuid: &UUIDType, series_info: &SeriesStre
                                 series_release_date: Option<&Arc<str>>,
 ) -> Option<Vec<PlaylistItem>> {
     let url = input.url.as_str();
-    let username = input.username.as_ref().map_or("", |v| v);
-    let password = input.password.as_ref().map_or("", |v| v);
+    let (username, password) = (
+        input.username.as_deref().unwrap_or(""),
+        input.password.as_deref().unwrap_or(""),
+    );
 
     if let Some(episodes) = series_info.details.as_ref().and_then(|d| d.episodes.as_ref()) {
         let result: Vec<PlaylistItem> = episodes.iter().map(|episode| {
@@ -149,8 +151,10 @@ pub async fn parse_xtream(input: &ConfigInput,
         Ok(xtream_categories) => {
             let input_name = input.name.clone();
             let url = input.url.as_str();
-            let username = input.username.as_ref().map_or("", |v| v);
-            let password = input.password.as_ref().map_or("", |v| v);
+            let (username, password) = (
+                input.username.as_deref().unwrap_or(""),
+                input.password.as_deref().unwrap_or(""),
+            );
 
             match map_to_xtream_streams(xtream_cluster, streams, &input.name).await {
                 Ok(xtream_streams) => {
@@ -162,8 +166,10 @@ pub async fn parse_xtream(input: &ConfigInput,
                         channels: vec![],
                     };
 
-                    let (live_stream_use_prefix, live_stream_without_extension) = input.options.as_ref()
-                        .map_or((true, false), |o| (o.xtream_live_stream_use_prefix, o.xtream_live_stream_without_extension));
+                    let (live_stream_use_prefix, live_stream_without_extension) = (
+                        input.has_flag(ConfigInputFlags::XtreamLiveStreamUsePrefix),
+                        input.has_flag(ConfigInputFlags::XtreamLiveStreamWithoutExtension),
+                    );
 
                     // Re-implement the loop to add ordinal
                     let mut ord_counter: u32 = 1;
@@ -234,9 +240,19 @@ where
     // 2. Prepare for Stream Parsing
     let input_name = input.name.clone();
     let url = input.url.as_str().to_string();
-    let username = input.username.as_ref().map_or("", |v| v).to_string();
-    let password = input.password.as_ref().map_or("", |v| v).to_string();
-    let options = input.options.clone();
+    let (username, password) = (
+        input.username.as_deref().unwrap_or("").to_string(),
+        input.password.as_deref().unwrap_or("").to_string(),
+    );
+    let (live_stream_use_prefix, live_stream_without_extension) = input.options.as_ref().map_or(
+        (false, false),
+        |o| {
+            (
+                o.has_flag(ConfigInputFlags::XtreamLiveStreamUsePrefix),
+                o.has_flag(ConfigInputFlags::XtreamLiveStreamWithoutExtension),
+            )
+        },
+    );
 
     // Map categories for lookup
     let group_map: IndexMap<u32, Arc<str>> = xtream_categories.iter().map(|c| (c.category_id, c.category_name.clone())).collect();
@@ -245,9 +261,6 @@ where
     spawn_blocking(move || {
         let reader = tokio_util::io::SyncIoBridge::new(streams);
         let mut deserializer = serde_json::Deserializer::from_reader(reader);
-
-        let (live_stream_use_prefix, live_stream_without_extension) = options.as_ref()
-            .map_or((true, false), |o| (o.xtream_live_stream_use_prefix, o.xtream_live_stream_without_extension));
 
         let mut source_ordinal = 0u32;
 

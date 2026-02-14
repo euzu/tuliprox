@@ -5,8 +5,10 @@ use crate::{
     info_err_res,
     model::EpgConfigDto,
     utils::{
-        arc_str_serde, arc_str_vec_serde, default_as_true, deserialize_timestamp, get_credentials_from_url_str,
-        get_trimmed_string, is_blank_optional_string, is_false, is_true, is_zero_u16, parse_provider_scheme_url_parts,
+        arc_str_serde, arc_str_vec_serde, default_as_true, default_probe_live_interval, default_resolve_background,
+        default_resolve_delay_secs, default_xtream_live_stream_use_prefix, deserialize_timestamp,
+        get_credentials_from_url_str, get_trimmed_string, is_blank_optional_string, is_default_probe_live_interval,
+        is_default_resolve_delay_secs, is_false, is_true, is_zero_u16, parse_provider_scheme_url_parts,
         sanitize_sensitive_info, serialize_option_vec_flow_map_items, trim_last_slash, Internable,
         PROVIDER_SCHEME_PREFIX,
     },
@@ -169,14 +171,32 @@ pub struct ConfigInputOptionsDto {
     pub xtream_skip_vod: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub xtream_skip_series: bool,
-    #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
+    #[serde(default = "default_xtream_live_stream_use_prefix", skip_serializing_if = "is_true")]
     pub xtream_live_stream_use_prefix: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub xtream_live_stream_without_extension: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub resolve_tmdb: bool,
-    #[serde(default, alias = "analyze_stream", skip_serializing_if = "is_false")]
-    pub probe_stream: bool,
+    #[serde(default = "default_resolve_background", skip_serializing_if = "is_true")]
+    pub resolve_background: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub resolve_series: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub resolve_vod: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub probe_series: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub probe_vod: bool,
+    #[serde(default = "default_resolve_delay_secs", skip_serializing_if = "is_default_resolve_delay_secs")]
+    pub resolve_delay: u16,
+    #[serde(default, alias = "resolve_live", skip_serializing_if = "is_false")]
+    pub probe_live: bool,
+    #[serde(
+        default = "default_probe_live_interval",
+        alias = "resolve_live_interval_hours",
+        skip_serializing_if = "is_default_probe_live_interval"
+    )]
+    pub probe_live_interval_hours: u32,
 }
 
 impl Default for ConfigInputOptionsDto {
@@ -185,10 +205,17 @@ impl Default for ConfigInputOptionsDto {
             xtream_skip_live: false,
             xtream_skip_vod: false,
             xtream_skip_series: false,
-            xtream_live_stream_use_prefix: default_as_true(),
+            xtream_live_stream_use_prefix: default_xtream_live_stream_use_prefix(),
             xtream_live_stream_without_extension: false,
             resolve_tmdb: false,
-            probe_stream: false,
+            resolve_background: default_resolve_background(),
+            resolve_series: false,
+            resolve_vod: false,
+            probe_series: false,
+            probe_vod: false,
+            resolve_delay: default_resolve_delay_secs(),
+            probe_live: false,
+            probe_live_interval_hours: default_probe_live_interval(),
         }
     }
 }
@@ -201,7 +228,14 @@ impl ConfigInputOptionsDto {
             && self.xtream_live_stream_use_prefix
             && !self.xtream_live_stream_without_extension
             && !self.resolve_tmdb
-            && !self.probe_stream
+            && self.resolve_background
+            && !self.resolve_series
+            && !self.resolve_vod
+            && !self.probe_series
+            && !self.probe_vod
+            && is_default_resolve_delay_secs(&self.resolve_delay)
+            && !self.probe_live
+            && is_default_probe_live_interval(&self.probe_live_interval_hours)
     }
 
     pub fn clean(&mut self) {
@@ -211,7 +245,14 @@ impl ConfigInputOptionsDto {
         self.xtream_live_stream_use_prefix = default_as_true();
         self.xtream_live_stream_without_extension = false;
         self.resolve_tmdb = false;
-        self.probe_stream = false;
+        self.resolve_background = default_as_true();
+        self.resolve_series = false;
+        self.resolve_vod = false;
+        self.probe_series = false;
+        self.probe_vod = false;
+        self.resolve_delay = default_resolve_delay_secs();
+        self.probe_live = false;
+        self.probe_live_interval_hours = default_probe_live_interval();
     }
 }
 

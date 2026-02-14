@@ -1,4 +1,4 @@
-use crate::ptt::parser::{HandlerOptions, MatchInfo, ParseContext, PttParser};
+use crate::ptt::parser::{handler_options, HandlerOptions, MatchInfo, ParseContext, PttParser};
 use crate::ptt::transformers::{boolean, date, first_uinteger, lowercase, none, range_i32, range_u32, transform_resolution, uinteger, uppercase, value};
 use fancy_regex::Regex as FancyRegex;
 
@@ -36,7 +36,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.tmdb = Some(v);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: true,
             ..Default::default()
@@ -51,7 +51,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.tvdb = Some(v);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: true,
             ..Default::default()
@@ -68,7 +68,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.quality = Some("SCR".to_string());
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -83,7 +83,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -99,7 +99,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.quality = Some("TeleSync".to_string());
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -115,7 +115,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.year = Some(v);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: false,
             ..Default::default()
         },
@@ -126,7 +126,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\b(?:19|20)\d{2}\s*[-]\s*(?:(?:19|20)\d{2}|\d{2})\b").unwrap(),
         none,
         |_, _| {},
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -137,7 +137,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\b100[ .-]*years?[ .-]*quest\b").unwrap(),
         none,
         |_, _| {},
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -147,7 +147,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\[?(\+.)?Extras\]?").unwrap(),
         none,
         |_, _| {},
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -157,7 +157,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)(\+Movies)?\+Specials").unwrap(),
         none,
         |_, _| {},
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -167,7 +167,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"-?EDGE2020").unwrap(),
         |_| "EDGE2020".to_string(),
         |meta, val| meta.group = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -177,7 +177,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)TV Money").unwrap(),
         none,
         |_, _| {},
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -196,7 +196,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"\.torrent$").unwrap(),
         boolean,
         |_, _| {},
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -207,7 +207,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"\b(XXX|xxx|Xxx)\b").unwrap(),
         boolean,
         |meta, val| meta.adult = val,
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -228,7 +228,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bOVA\b").unwrap(),
         |_| "OVA".to_string(),
         |_, _| {},
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -239,7 +239,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bOVA\b").unwrap(),
         |_| "OVA".to_string(),
         |_, _| {},
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -250,7 +250,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\[?\]?3840x\d{4}[\])?]?").unwrap(),
         |_| "2160p".to_string(),
         |meta, val| meta.resolution = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -260,7 +260,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\[?\]?1920x\d{3,4}[\])?]?").unwrap(),
         |_| "1080p".to_string(),
         |meta, val| meta.resolution = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -270,7 +270,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\[?\]?1280x\d{3}[\])?]?").unwrap(),
         |_| "720p".to_string(),
         |meta, val| meta.resolution = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -280,7 +280,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\[?\]?(\d{3,4}x\d{3,4})[\])?]?p?").unwrap(),
         |val: &str| format!("{val}p"),
         |meta, val| meta.resolution = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -290,7 +290,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)(480|720|1080)0[pi]").unwrap(),
         |val: &str| format!("{val}p"),
         |meta, val| meta.resolution = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -300,7 +300,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)(?:QHD|QuadHD|WQHD|2560(\d+)?x(\d+)?1440p?)").unwrap(),
         |_| "1440p".to_string(),
         |meta, val| meta.resolution = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -310,7 +310,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)(?:Full HD|FHD|1920(\d+)?x(\d+)?1080p?)").unwrap(),
         |_| "1080p".to_string(),
         |meta, val| meta.resolution = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -320,7 +320,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)(?:BD|HD|M)(2160p?|4k)").unwrap(),
         |_| "2160p".to_string(),
         |meta, val| meta.resolution = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -330,7 +330,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)(?:BD|HD|M)1080p?").unwrap(),
         |_| "1080p".to_string(),
         |meta, val| meta.resolution = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -340,7 +340,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)(?:BD|HD|M)720p?").unwrap(),
         |_| "720p".to_string(),
         |meta, val| meta.resolution = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -350,7 +350,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)(?:BD|HD|M)480p?").unwrap(),
         |_| "480p".to_string(),
         |meta, val| meta.resolution = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -361,7 +361,7 @@ pub fn add_defaults(parser: &mut PttParser) {
             .unwrap(),
         transform_resolution,
         |meta, val| meta.resolution = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -371,7 +371,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\b4k|21600?[pi]\b").unwrap(),
         |_| "2160p".to_string(),
         |meta, val| meta.resolution = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -381,7 +381,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)(\d{3,4}[pi])").unwrap(),
         lowercase,
         |meta, val| meta.resolution = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -391,7 +391,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)(240|360|480|576|720|1080|2160|3840)[pi]").unwrap(),
         lowercase,
         |meta, val| meta.resolution = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -402,7 +402,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"[\[\()]([A-Fa-f0-9]{8})[\]\)]").unwrap(),
         uppercase,
         |meta, val| meta.episode_code = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -412,7 +412,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"[\[\()]([0-9]{8})[\]\)]").unwrap(),
         uppercase,
         |meta, val| meta.episode_code = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: true,
             ..Default::default()
@@ -424,7 +424,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\b(?:H[DQ][ .-]*)?(?<!Body\s)CAM(?:H[DQ])?(?!.?(S|E|\()\d+)(?:H[DQ])?(?:[ .-]*Rip|Rp)?\b").unwrap(),
         boolean,
         |meta, val| { meta.trash = val; },
-        HandlerOptions { remove: false, skip_from_title: true, skip_if_already_found: false, ..Default::default() },
+        handler_options! { remove: false, skip_from_title: true, skip_if_already_found: false, ..Default::default() },
     );
     parser.add_handler(
         "trash",
@@ -436,7 +436,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.quality = Some("TeleSync".to_string());
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -452,7 +452,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.quality = Some("TeleCine".to_string());
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -468,7 +468,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.quality = Some("SCR".to_string());
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -484,7 +484,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.quality = Some("SCR".to_string());
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: false,
             skip_if_already_found: false,
             ..Default::default()
@@ -500,7 +500,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.quality = Some("VHSRip".to_string());
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -516,7 +516,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.quality = Some("VHS".to_string());
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -527,7 +527,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\b(?:H[DQ][ .-]*)?R5(?:[ .-]*Line)?\b").unwrap(),
         boolean,
         |meta, val| meta.trash = val,
-        HandlerOptions {
+        handler_options! {
             remove: false,
             ..Default::default()
         },
@@ -537,7 +537,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bVHSRip\b").unwrap(),
         boolean,
         |meta, val| meta.trash = val,
-        HandlerOptions {
+        handler_options! {
             remove: false,
             ..Default::default()
         },
@@ -548,7 +548,7 @@ pub fn add_defaults(parser: &mut PttParser) {
     //     FancyRegex::new(r"(?i)\bHDTV(?:Rip)?\b").unwrap(),
     //     boolean,
     //     |meta, val| { println!("TRASH MATCH HDTV: {}", val); meta.trash = val; },
-    //     HandlerOptions { remove: false, ..Default::default() }
+    //     handler_options! { remove: false, ..Default::default() }
     // );
 
     parser.add_handler(
@@ -556,14 +556,14 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?:\W|^)([\[(]?(?:19[6-9]|20[012])[0-9]([. \-/\\])(?:0[1-9]|1[012])\2(?:0[1-9]|[12][0-9]|3[01])[\])]?)(?:\W|$)").unwrap(),
         |val| date(val, &["%Y-%m-%d", "%Y.%m.%d", "%Y %m %d"]).unwrap_or_default(),
         |meta, val| if !val.is_empty() { meta.date = Some(val) },
-        HandlerOptions { remove: true, ..Default::default() },
+        handler_options! { remove: true, ..Default::default() },
     );
     parser.add_handler(
         "date",
         FancyRegex::new(r"(?:\W|^)(\[?\]?(?:0[1-9]|[12][0-9]|3[01])([. \-/\\])(?:0[1-9]|1[012])\2(?:19[6-9]|20[01])[0-9][\])]?)(?:\W|$)").unwrap(),
         |val| date(val, &["%d-%m-%Y", "%d.%m.%Y", "%d %m %Y"]).unwrap_or_default(),
         |meta, val| if !val.is_empty() { meta.date = Some(val) },
-        HandlerOptions { remove: true, ..Default::default() },
+        handler_options! { remove: true, ..Default::default() },
     );
 
     parser.add_handler(
@@ -571,42 +571,42 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?:\W)(\[?\]?(?:0[1-9]|1[012])([. \-/\\])(?:0[1-9]|[12][0-9]|3[01])\2(?:[0][1-9]|[0126789][0-9])[\])]?)(?:\W|$)").unwrap(),
         |val| date(val, &["%m %d %y", "%m.%d.%y", "%m-%d-%y"]).unwrap_or_default(),
         |meta, val| if !val.is_empty() { meta.date = Some(val) },
-        HandlerOptions { remove: true, ..Default::default() },
+        handler_options! { remove: true, ..Default::default() },
     );
     parser.add_handler(
         "date",
         FancyRegex::new(r"(?:\W)(\[?\]?(?:[0][1-9]|[12][0-9]|3[0-9])([. \-/\\])(?:0[1-9]|1[012])\2(?:0[1-9]|[12][0-9])[\])]?)(?:\W|$)").unwrap(),
         |val| date(val, &["%y %m %d", "%y.%m.%d", "%y-%m-%d"]).unwrap_or_default(),
         |meta, val| if !val.is_empty() { meta.date = Some(val) },
-        HandlerOptions { remove: true, ..Default::default() },
+        handler_options! { remove: true, ..Default::default() },
     );
     parser.add_handler(
         "date",
         FancyRegex::new(r"(?:\W)(\[?\]?(?:0[1-9]|[12][0-9]|3[01])([. \-/\\])(?:0[1-9]|1[012])\2(?:[0][1-9]|[0126789][0-9])[\])]?)(?:\W|$)").unwrap(),
         |val| date(val, &["%d %m %y", "%d.%m.%y", "%d-%m-%y"]).unwrap_or_default(),
         |meta, val| if !val.is_empty() { meta.date = Some(val) },
-        HandlerOptions { remove: true, ..Default::default() },
+        handler_options! { remove: true, ..Default::default() },
     );
     parser.add_handler(
         "date",
         FancyRegex::new(r"(?i)(?:\W|^)([(\[]?(?:0?[1-9]|[12][0-9]|3[01])[. ]?(?:st|nd|rd|th)?([. \-/\\])(?:feb(?:ruary)?|jan(?:uary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\2(?:19[7-9]|20[012])[0-9][)\]]?)(?=\W|$)").unwrap(),
         |val| date(val, &["%d %b %Y", "%d %B %Y", "%d.%b.%Y", "%d.%B.%Y", "%d-%b-%Y", "%d-%B-%Y"]).unwrap_or_default(),
         |meta, val| if !val.is_empty() { meta.date = Some(val) },
-        HandlerOptions { remove: true, ..Default::default() },
+        handler_options! { remove: true, ..Default::default() },
     );
     parser.add_handler(
         "date",
         FancyRegex::new(r"(?i)(?:\W|^)(\[?\]?(?:0?[1-9]|[12][0-9]|3[01])[. ]?(?:st|nd|rd|th)?([. \-\/\\])(?:feb(?:ruary)?|jan(?:uary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\2(?:0[1-9]|[0126789][0-9])[\])]?)(?:\W|$)").unwrap(),
         |val| date(val, &["%d %b %y", "%d %B %y", "%d.%b.%y", "%d.%B.%y", "%d-%b-%y", "%d-%B-%y"]).unwrap_or_default(),
         |meta, val| if !val.is_empty() { meta.date = Some(val) },
-        HandlerOptions { remove: true, ..Default::default() },
+        handler_options! { remove: true, ..Default::default() },
     );
     parser.add_handler(
         "date",
         FancyRegex::new(r"(?:\W|^)(\[?\]?20[012][0-9](?:0[1-9]|1[012])(?:0[1-9]|[12][0-9]|3[01])[\])]?)(?:\W|$)").unwrap(),
         |val| date(val, &["%Y%m%d"]).unwrap_or_default(),
         |meta, val| if !val.is_empty() { meta.date = Some(val) },
-        HandlerOptions { remove: true, ..Default::default() },
+        handler_options! { remove: true, ..Default::default() },
     );
     parser.add_handler(
         "date",
@@ -616,7 +616,7 @@ pub fn add_defaults(parser: &mut PttParser) {
             date(&clean, &["%d %b %Y", "%d %B %Y"]).unwrap_or_default()
         },
         |meta, val| if !val.is_empty() { meta.date = Some(val) },
-        HandlerOptions { remove: true, ..Default::default() },
+        handler_options! { remove: true, ..Default::default() },
     );
 
     parser.add_handler(
@@ -624,7 +624,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\b((?:19\d|20[012])\d[ .]?-[ .]?(?:19\d|20[012])\d)\b").unwrap(),
         boolean,
         |meta, val| meta.complete = val,
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -634,7 +634,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)[(\[][ .]?((?:19\d|20[012])\d[ .]?-[ .]?\d{2})[ .]?[)\]]").unwrap(),
         boolean,
         |meta, val| meta.complete = val,
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -644,7 +644,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bcomplete\b").unwrap(),
         boolean,
         |meta, val| meta.complete = val,
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -654,7 +654,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\b(?:INTEGRALE?|INTÉGRALE?)\b").unwrap(),
         boolean,
         |meta, val| meta.complete = val,
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -665,7 +665,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)(Movie|Complete).Collection").unwrap(),
         boolean,
         |meta, val| meta.complete = val,
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -676,7 +676,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)Complete(.\d{1,2})").unwrap(),
         boolean,
         |meta, val| meta.complete = val,
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -688,7 +688,7 @@ pub fn add_defaults(parser: &mut PttParser) {
             .unwrap(),
         boolean,
         |meta, val| meta.complete = val,
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -713,7 +713,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)(Top\W+)?\d+\W+(movies?|series|seasons?)\W+Collection").unwrap(),
         boolean,
         |meta, val| meta.complete = val,
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -723,7 +723,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)(?:\bthe\W)?\bultimate\b[ .]\bcollection\b").unwrap(),
         boolean,
         |meta, val| meta.complete = val,
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -740,7 +740,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bcollection(?:(\s\[|\s\())").unwrap(),
         boolean,
         |meta, val| meta.complete = val,
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -753,7 +753,7 @@ pub fn add_defaults(parser: &mut PttParser) {
             .unwrap(),
         boolean,
         |meta, val| meta.complete = val,
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -763,7 +763,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bcompleta\b").unwrap(),
         boolean,
         |meta, val| meta.complete = val,
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -773,7 +773,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bsaga\b").unwrap(),
         boolean,
         |meta, val| meta.complete = val,
-        HandlerOptions {
+        handler_options! {
             skip_from_title: true,
             skip_if_already_found: true,
             ..Default::default()
@@ -784,7 +784,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\b\[Complete\]\b").unwrap(),
         boolean,
         |meta, val| meta.complete = val,
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -794,7 +794,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)(?<!A.?|The.?)\bComplete\b").unwrap(),
         boolean,
         |meta, val| meta.complete = val,
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -805,7 +805,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\b\d+[kmg]bps\b").unwrap(),
         lowercase,
         |meta, val| meta.bitrate = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -820,7 +820,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.year = Some(v);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -831,7 +831,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)(?:\b[ée]p?(?:isode)?|[Ээ]пизод|[Сс]ер(?:ии|ия|\.)?|cap(?:itulo)?|epis[oó]dio)[. ]?[-:#№]?[. ]?(\d{1,4})(?:[abc]|v0?[1-4]|\W|$)").unwrap(),
         uinteger,
         |meta, val| if let Some(v) = val { meta.episodes.push(v) },
-        HandlerOptions { remove: false, ..Default::default() },
+        handler_options! { remove: false, ..Default::default() },
     );
 
     parser.add_handler(
@@ -839,7 +839,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\b\d+[0o]+[mg]b\b").unwrap(),
         boolean,
         |meta, val| meta.trash = val,
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -850,7 +850,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\b(?:(?:D[ .])?HD[ .-]*)?T(?:ELE)?S(?:YNC)?(?:Rip)?\b").unwrap(),
         |_val| "TeleSync".to_string(),
         |meta, val| meta.quality = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -865,7 +865,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.seasons.push(v);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -879,7 +879,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.episodes.push(v);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -889,7 +889,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)[^SE][\[(]?(?!^)(?<![\d-]|Cap[.]?|Ep[.]?)((?:19\d|20[012])\d)(?!(?:\s*[-]\s*\d{4}|\s*\d{4}|kbps)\b)[)\]]?").unwrap(),
         uinteger,
         |meta, val| if let Some(v) = val { meta.year = Some(v) },
-        HandlerOptions { remove: true, ..Default::default() },
+        handler_options! { remove: true, ..Default::default() },
     );
     parser.add_handler(
         "year",
@@ -899,7 +899,7 @@ pub fn add_defaults(parser: &mut PttParser) {
             println!("YEAR MATCHED: {v}");
             meta.year = Some(v);
         },
-        HandlerOptions { remove: true, ..Default::default() },
+        handler_options! { remove: true, ..Default::default() },
     );
 
     parser.add_handler(
@@ -908,7 +908,7 @@ pub fn add_defaults(parser: &mut PttParser) {
             .unwrap(),
         |_| "Anniversary Edition".to_string(),
         |meta, val| meta.edition = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -918,7 +918,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bRemaster(?:ed)?\b").unwrap(),
         |_| "Remastered".to_string(),
         |meta, val| meta.edition = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: true,
             ..Default::default()
@@ -930,7 +930,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\b(?:AI.?)?(Upscal(ed?|ing)|Enhanced?)\b").unwrap(),
         boolean,
         |meta, val| meta.upscaled = val,
-        HandlerOptions {
+        handler_options! {
             remove: false,
             ..Default::default()
         },
@@ -941,7 +941,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"\bCONVERT\b").unwrap(),
         boolean,
         |meta, val| meta.convert = val,
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -952,7 +952,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"\b(HC|HARDCODED)\b").unwrap(),
         boolean,
         |meta, val| meta.hardcoded = val,
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -963,7 +963,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\b(?:REAL.)?PROPER\b").unwrap(),
         boolean,
         |meta, val| meta.proper = val,
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -974,7 +974,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bREPACK|RERIP\b").unwrap(),
         boolean,
         |meta, val| meta.repack = val,
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -985,7 +985,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bRetail\b").unwrap(),
         boolean,
         |meta, val| meta.retail = val,
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -996,7 +996,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bRemaster(?:ed)?\b").unwrap(),
         boolean,
         |meta, val| meta.remastered = val,
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1007,7 +1007,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bDOCU(?:menta?ry)?\b").unwrap(),
         boolean,
         |meta, val| meta.documentary = val,
-        HandlerOptions {
+        handler_options! {
             skip_from_title: true,
             ..Default::default()
         },
@@ -1018,7 +1018,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bunrated\b").unwrap(),
         boolean,
         |meta, val| meta.unrated = val,
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1029,7 +1029,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\buncensored\b").unwrap(),
         boolean,
         |meta, val| meta.uncensored = val,
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1040,7 +1040,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bcommentary\b").unwrap(),
         boolean,
         |meta, val| meta.commentary = val,
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1051,7 +1051,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"R\dJ?\b").unwrap(),
         uppercase,
         |meta, val| meta.region = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1061,7 +1061,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\b(PAL|NTSC|SECAM)\b").unwrap(),
         uppercase,
         |meta, val| meta.region = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1074,7 +1074,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         |meta, val| {
             meta.quality = Some(val);
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1084,7 +1084,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\b(?:BD|Blu-?Ray|UHD|4K)[ .-]*(?:Remux)\b").unwrap(),
         |_| "BluRay REMUX".to_string(),
         |meta, val| meta.quality = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1094,7 +1094,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\b(?:UHD|BD)Remux\b").unwrap(),
         |_| "BluRay REMUX".to_string(),
         |meta, val| meta.quality = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1104,7 +1104,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bBlu[ .-]*Ray[ .-]*Rip\b").unwrap(),
         |_| "BRRip".to_string(),
         |meta, val| meta.quality = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1123,7 +1123,7 @@ pub fn add_defaults(parser: &mut PttParser) {
             }
             meta.quality = Some(val);
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -1143,7 +1143,7 @@ pub fn add_defaults(parser: &mut PttParser) {
             }
             meta.quality = Some(val);
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -1154,7 +1154,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\b(?:HD)?TC(?:Rip)?\b").unwrap(),
         |_| "TeleCine".to_string(),
         |meta, val| meta.quality = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1165,7 +1165,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bUHD[ .-]*Rip\b").unwrap(),
         |_| "UHDRip".to_string(),
         |meta, val| meta.quality = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1175,7 +1175,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bR5\b").unwrap(),
         |_| "R5".to_string(),
         |meta, val| meta.quality = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1185,7 +1185,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\b(?:BD|Blu-?Ray)(?:Rip)?\b").unwrap(),
         |_| "BDRip".to_string(),
         |meta, val| meta.quality = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1195,7 +1195,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bWEB[ .-]*(?:DLRip|DL-?Rip)\b").unwrap(),
         |_| "WEB-DLRip".to_string(),
         |meta, val| meta.quality = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1205,7 +1205,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\b(?:BD|Blu-?Ray|UHD|4K)[ .-]*(?:Remux)\b").unwrap(),
         |_| "BluRay REMUX".to_string(),
         |meta, val| meta.quality = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1215,7 +1215,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\b(?:UHD|BD)Remux\b").unwrap(),
         |_| "BluRay REMUX".to_string(),
         |meta, val| meta.quality = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1225,7 +1225,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bWEB[ .-]*(DL|.BDrip)\b").unwrap(),
         |_| "WEB-DL".to_string(),
         |meta, val| meta.quality = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1235,7 +1235,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\b(?<!\w.)WEB\b|\bWEB(?!([ \.\-\(\],]+\d))\b").unwrap(),
         |_| "WEB".to_string(),
         |meta, val| meta.quality = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_from_title: true,
             ..Default::default()
@@ -1247,7 +1247,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\b(?:HD[ .-]*)?DVD[ .-]*Rip\b").unwrap(),
         |_| "DVDRip".to_string(),
         |meta, val| meta.quality = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1257,7 +1257,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bHD-?DVD-?Rip\b").unwrap(),
         |_| "DVDRip".to_string(),
         |meta, val| meta.quality = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1267,7 +1267,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\b(?:DVD?|BD|BR|HD)?[ .-]*Scr(?:eener)?\b").unwrap(),
         |_| "SCR".to_string(),
         |meta, val| meta.quality = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1277,7 +1277,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bDVD(?:R\d?|.*Mux)?\b").unwrap(),
         |_| "DVD".to_string(),
         |meta, val| meta.quality = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1287,7 +1287,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\b(?:H[DQ][ .-]*)?S[ \.\-]print\b").unwrap(),
         |_| "CAM".to_string(),
         |meta, val| meta.quality = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_from_title: true,
             ..Default::default()
@@ -1298,7 +1298,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\b4K[ .-]*UHD[ .-]*remux\b").unwrap(),
         |_| "BluRay REMUX".to_string(),
         |meta, val| meta.quality = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1308,7 +1308,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\b(?:HD)?CAM(?:-?Rip)?\b").unwrap(),
         |_| "CAM".to_string(),
         |meta, val| meta.quality = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_from_title: true,
             ..Default::default()
@@ -1327,7 +1327,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)(?:8|10|12)[-\.]?(?=bit\b)").unwrap(),
         |val| format!("{val}bit"),
         |meta, val| meta.bit_depth = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1342,7 +1342,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.hdr.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -1357,7 +1357,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.hdr.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -1372,7 +1372,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.hdr.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -1384,7 +1384,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\b[hx][\. \-]?264\b").unwrap(),
         |_| "avc".to_string(),
         |meta, val| meta.codec = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1394,7 +1394,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\[AVC\]").unwrap(),
         |_| "avc".to_string(),
         |meta, val| meta.codec = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1404,7 +1404,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\[HEVC\]").unwrap(),
         |_| "hevc".to_string(),
         |meta, val| meta.codec = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1414,7 +1414,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bAVC[_\s]").unwrap(),
         |_| "avc".to_string(),
         |meta, val| meta.codec = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: false,
             ..Default::default()
         },
@@ -1424,7 +1424,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bHEVC10(bit)?\b|\b[xh][\. \-]?265\b").unwrap(),
         |_| "hevc".to_string(),
         |meta, val| meta.codec = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1434,7 +1434,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bhevc(?:\s?10)?\b").unwrap(),
         |_| "hevc".to_string(),
         |meta, val| meta.codec = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -1445,7 +1445,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bav1\b").unwrap(),
         |_| "av1".to_string(),
         |meta, val| meta.codec = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -1456,7 +1456,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\b(?:mpe?g\d*)\b").unwrap(),
         |_| "mpeg".to_string(),
         |meta, val| meta.codec = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -1467,7 +1467,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"\b\W264\W\b").unwrap(),
         |_| "avc".to_string(),
         |meta, val| meta.codec = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: true,
             skip_from_title: true,
@@ -1479,7 +1479,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"\b\W265\W\b").unwrap(),
         |_| "hevc".to_string(),
         |meta, val| meta.codec = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: true,
             skip_from_title: true,
@@ -1491,7 +1491,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bdivx|xvid\b").unwrap(),
         |_| "xvid".to_string(),
         |meta, val| meta.codec = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -1507,7 +1507,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.audio.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1521,7 +1521,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.channels.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -1532,7 +1532,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\b(custom.?)?Extended\b").unwrap(),
         |_| "Extended Edition".to_string(),
         |meta, val| meta.edition = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1542,7 +1542,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\buncut(?!.gems)\b").unwrap(),
         |_| "Uncut".to_string(),
         |meta, val| meta.edition = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1552,7 +1552,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bRemaster(?:ed)?\b").unwrap(),
         |_| "Remastered".to_string(),
         |meta, val| meta.edition = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: true,
             ..Default::default()
@@ -1563,7 +1563,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bDirector(')?s.?Cut\b").unwrap(),
         |_| "Directors Cut".to_string(),
         |meta, val| meta.edition = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1573,7 +1573,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bCollector(')?s\b").unwrap(),
         |_| "Collectors Edition".to_string(),
         |meta, val| meta.edition = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1583,7 +1583,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bTheatrical\b").unwrap(),
         |_| "Theatrical".to_string(),
         |meta, val| meta.edition = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1593,7 +1593,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bIMAX\b").unwrap(),
         |_| "IMAX".to_string(),
         |meta, val| meta.edition = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1603,7 +1603,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bUltimate[\.\s\-\+_\/(),]Edition\b").unwrap(),
         |_| "Ultimate Edition".to_string(),
         |meta, val| meta.edition = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1614,7 +1614,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bPPV\b").unwrap(),
         boolean,
         |meta, val| meta.ppv = val,
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_from_title: true,
             ..Default::default()
@@ -1625,7 +1625,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\b\W?Fight.?Nights?\W?\b").unwrap(),
         boolean,
         |meta, val| meta.ppv = val,
-        HandlerOptions {
+        handler_options! {
             skip_from_title: true,
             ..Default::default()
         },
@@ -1636,7 +1636,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bPROPER\b").unwrap(),
         boolean,
         |meta, val| meta.proper = val,
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1646,7 +1646,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bREPACK\b").unwrap(),
         boolean,
         |meta, val| meta.repack = val,
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1656,7 +1656,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bRetail\b").unwrap(),
         boolean,
         |meta, val| meta.retail = val,
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1666,7 +1666,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bEXTENDED\b").unwrap(),
         boolean,
         |meta, val| meta.extended = val,
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1676,7 +1676,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bRemastered\b").unwrap(),
         boolean,
         |meta, val| meta.remastered = val,
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1686,7 +1686,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\b(?:uncensored|unrated)\b").unwrap(),
         boolean,
         |meta, val| meta.unrated = val,
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1696,7 +1696,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\buncensored\b").unwrap(),
         boolean,
         |meta, val| meta.uncensored = val,
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -1711,7 +1711,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 .to_string()
         },
         |meta, val| meta.site = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_from_title: true,
             skip_if_already_found: false,
@@ -1723,7 +1723,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)^\[\s*([\w.-]+\.[a-z]{2,4})\s*\]").unwrap(),
         std::string::ToString::to_string,
         |meta, val| meta.site = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_from_title: true,
             ..Default::default()
@@ -1734,7 +1734,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\[\s*([\w.-]+\.[a-z]{2,4})\s*\]$").unwrap(),
         std::string::ToString::to_string,
         |meta, val| meta.site = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_from_title: true,
             ..Default::default()
@@ -1745,7 +1745,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\[([^\]]+\.[^\]]+)\](?=\.\w{2,4}$|\s)").unwrap(),
         std::string::ToString::to_string,
         |meta, val| meta.site = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_from_title: true,
             ..Default::default()
@@ -1760,7 +1760,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 .to_string()
         },
         |meta, val| meta.site = Some(val),
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -1777,7 +1777,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 .unwrap()
         },
         |meta, val| meta.year = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: false,
             ..Default::default()
         },
@@ -1791,7 +1791,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.channels.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -1806,7 +1806,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.channels.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -1821,7 +1821,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.channels.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -1837,7 +1837,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.audio.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -1852,7 +1852,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.audio.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -1867,7 +1867,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.audio.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -1882,7 +1882,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.audio.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             skip_from_title: true,
@@ -1898,7 +1898,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.audio.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             skip_from_title: true,
@@ -1914,7 +1914,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.audio.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -1930,7 +1930,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.audio.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -1945,7 +1945,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.audio.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: true,
             ..Default::default()
@@ -1960,7 +1960,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.audio.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -1975,7 +1975,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.audio.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -1990,7 +1990,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.audio.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -2002,7 +2002,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)- ?(?!\d+$|S\d+|\d+x|ep?\d+|[^\[]+]$)([^\-. \[]+[^\-. \[)\]\d][^\-. \[)\]]*)(?:\[[\w.-]+])?(?=\.\w{2,4}$|$)").unwrap(),
         value,
         |meta, val| meta.group = Some(val),
-        HandlerOptions { remove: false, ..Default::default() },
+        handler_options! { remove: false, ..Default::default() },
     );
     parser.add_handler(
         "group",
@@ -2028,7 +2028,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.volumes = v;
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -2082,7 +2082,7 @@ pub fn add_defaults(parser: &mut PttParser) {
             .unwrap(),
         parse_season_range,
         |meta, val| meta.seasons.extend(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -2092,7 +2092,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)(?:complete\W|seasons?\W|\W|^)[(\[]?(s\d{2,}-\d{2,}\b)[)\]]?").unwrap(),
         parse_season_range,
         |meta, val| meta.seasons.extend(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -2102,7 +2102,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)(?:complete\W|seasons?\W|\W|^)[(\[]?(s[1-9]-[2-9])[)\]]?").unwrap(),
         parse_season_range,
         |meta, val| meta.seasons.extend(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -2112,7 +2112,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\d+ª(?:.+)?(?:a.?)?\d+ª(?:(?:.+)?(?:temporadas?))").unwrap(),
         parse_season_range,
         |meta, val| meta.seasons.extend(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -2122,35 +2122,35 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)(?:(?:\bthe\W)?\bcomplete\W)?(?:seasons?|[Сс]езони?|temporadas?)[. ]?[-:]?[. ]?[( \[]?((?:\d{1,2}[., /\\&]+)+\d{1,2}\b)[)\]]?").unwrap(),
         parse_season_range,
         |meta, val| meta.seasons.extend(val),
-        HandlerOptions { remove: true, ..Default::default() },
+        handler_options! { remove: true, ..Default::default() },
     );
     parser.add_handler(
         "seasons",
         FancyRegex::new(r"(?i)(?:(?:\bthe\W)?\bcomplete\W)?(?:seasons?|[Сс]езони?|temporadas?)[. ]?[-:]?[. ]?[( \[]?((?:\d{1,2}[.-]+)+[1-9]\d?\b)(?!\W*\d{4})[)\]]?").unwrap(),
         parse_season_range,
         |meta, val| meta.seasons.extend(val),
-        HandlerOptions { remove: true, ..Default::default() },
+        handler_options! { remove: true, ..Default::default() },
     );
     parser.add_handler(
         "seasons",
         FancyRegex::new(r"(?i)(?:(?:\bthe\W)?\bcomplete\W)?season[. ]?[( \[]?((?:\d{1,2}[. -]+)+[1-9]\d?\b)[)\]]?(?!.*\.\w{2,4}$)").unwrap(),
         parse_season_range,
         |meta, val| meta.seasons.extend(val),
-        HandlerOptions { remove: true, ..Default::default() },
+        handler_options! { remove: true, ..Default::default() },
     );
     parser.add_handler(
         "seasons",
         FancyRegex::new(r"(?i)(?:(?:\bthe\W)?\bcomplete\W)?\bseasons?\b[. -]?(\d{1,2}[. -]?(?:to|thru|and|\+|:)[. -]?\d{1,2})\b").unwrap(),
         parse_season_range,
         |meta, val| meta.seasons.extend(val),
-        HandlerOptions { remove: true, ..Default::default() },
+        handler_options! { remove: true, ..Default::default() },
     );
     parser.add_handler(
         "quality",
         FancyRegex::new(r"(?i)\bDVB(?:\b|-)").unwrap(),
         |_| "HDTV".to_string(),
         |meta, val| meta.quality = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -2160,14 +2160,14 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)(?:(?:\bthe\W)?\bcomplete\W)?(?:saison|seizoen|season|series|temp(?:orada)?):?[. ]?(\d{1,2})\b").unwrap(),
         |val| vec![val.parse().unwrap_or(0)],
         |meta, val| meta.seasons.extend(val),
-        HandlerOptions { remove: true, ..Default::default() },
+        handler_options! { remove: true, ..Default::default() },
     );
     parser.add_handler(
         "seasons",
         FancyRegex::new(r"(?i)(\d{1,2})(?:-?й)?[. _]?(?:[Сс]езон|sez(?:on)?)(?:\W?\D|$)").unwrap(),
         |val| vec![val.parse().unwrap_or(0)],
         |meta, val| meta.seasons.extend(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -2177,7 +2177,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)[Сс]езон:?[. _]?№?(\d{1,2})(?!\d)").unwrap(),
         |val| vec![val.parse().unwrap_or(0)],
         |meta, val| meta.seasons.extend(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -2187,7 +2187,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)(?:\D|^)(\d{1,2})Â?[°ºªa]?[. ]*temporada").unwrap(),
         |val| vec![val.parse().unwrap_or(0)],
         |meta, val| meta.seasons.extend(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -2197,7 +2197,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)t(\d{1,3})(?:[ex]+|$)").unwrap(),
         |val| vec![val.parse().unwrap_or(0)],
         |meta, val| meta.seasons.extend(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -2208,7 +2208,7 @@ pub fn add_defaults(parser: &mut PttParser) {
             .unwrap(),
         |val| vec![val.parse().unwrap_or(0)],
         |meta, val| meta.seasons.extend(val),
-        HandlerOptions {
+        handler_options! {
             remove: false,
             skip_if_already_found: false,
             ..Default::default()
@@ -2222,7 +2222,7 @@ pub fn add_defaults(parser: &mut PttParser) {
             .unwrap(),
         |val| vec![val.parse().unwrap_or(0)],
         |meta, val| meta.seasons.extend(val),
-        HandlerOptions {
+        handler_options! {
             remove: false,
             ..Default::default()
         },
@@ -2232,7 +2232,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)(?<=S)\d{2}(?=E\d+)").unwrap(),
         |val| vec![val.parse().unwrap_or(0)],
         |meta, val| meta.seasons.extend(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -2242,7 +2242,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)(?:\D|^)(\d{1,2})[xх]\d{1,3}(?:\D|$)").unwrap(),
         |val| vec![val.parse().unwrap_or(0)],
         |meta, val| meta.seasons.extend(val),
-        HandlerOptions {
+        handler_options! {
             remove: false,
             ..Default::default()
         },
@@ -2252,7 +2252,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bSn([1-9])(?:\D|$)").unwrap(),
         |val| vec![val.parse().unwrap_or(0)],
         |meta, val| meta.seasons.extend(val),
-        HandlerOptions {
+        handler_options! {
             remove: false,
             ..Default::default()
         },
@@ -2262,7 +2262,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)[(\[](\d{1,2})\.\d{1,3}[)\]]").unwrap(),
         |val| vec![val.parse().unwrap_or(0)],
         |meta, val| meta.seasons.extend(val),
-        HandlerOptions {
+        handler_options! {
             remove: false,
             ..Default::default()
         },
@@ -2272,7 +2272,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)-\s?(\d{1,2})\.\d{2,3}\s?-").unwrap(),
         |val| vec![val.parse().unwrap_or(0)],
         |meta, val| meta.seasons.extend(val),
-        HandlerOptions {
+        handler_options! {
             remove: false,
             ..Default::default()
         },
@@ -2282,7 +2282,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)(?:^|\/)(\d{1,2})-\d{2}\b(?!-\d)").unwrap(),
         |val| vec![val.parse().unwrap_or(0)],
         |meta, val| meta.seasons.extend(val),
-        HandlerOptions {
+        handler_options! {
             remove: false,
             ..Default::default()
         },
@@ -2292,7 +2292,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)[^\w-](\d{1,2})-\d{2}(?=\.\w{2,4}$|$)").unwrap(),
         |val| vec![val.parse().unwrap_or(0)],
         |meta, val| meta.seasons.extend(val),
-        HandlerOptions {
+        handler_options! {
             remove: false,
             ..Default::default()
         },
@@ -2302,7 +2302,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\b(\d{2})[ ._]\d{2}(?:.F)?\.\w{2,4}$").unwrap(),
         |val| vec![val.parse().unwrap_or(0)],
         |meta, val| meta.seasons.extend(val),
-        HandlerOptions {
+        handler_options! {
             remove: false,
             ..Default::default()
         },
@@ -2312,7 +2312,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bEp(?:isode)?\W+(\d{1,2})\.\d{1,3}\b").unwrap(),
         |val| vec![val.parse().unwrap_or(0)],
         |meta, val| meta.seasons.extend(val),
-        HandlerOptions {
+        handler_options! {
             remove: false,
             ..Default::default()
         },
@@ -2322,7 +2322,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bSeasons?\b.*\b(?!(?:19|20)\d{2})(\d{1,2}-\d{1,2})\b").unwrap(),
         parse_season_range,
         |meta, val| meta.seasons.extend(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -2332,7 +2332,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)(?:\W|^)(\d{1,2})(?:e|ep)\d{1,3}(?:\W|$)").unwrap(),
         |val| vec![val.parse().unwrap_or(0)],
         |meta, val| meta.seasons.extend(val),
-        HandlerOptions {
+        handler_options! {
             remove: false,
             ..Default::default()
         },
@@ -2342,7 +2342,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bТВ-(\d{1,2})\b").unwrap(),
         |val| vec![val.parse().unwrap_or(0)],
         |meta, val| meta.seasons.extend(val),
-        HandlerOptions {
+        handler_options! {
             remove: false,
             ..Default::default()
         },
@@ -2352,7 +2352,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bs(\d{1,4})").unwrap(),
         |val| vec![val.parse::<u32>().unwrap_or(0)],
         |meta, val| meta.seasons.extend(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: true,
             ..Default::default()
@@ -2370,7 +2370,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.episodes.extend(v);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -2451,7 +2451,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.episodes.extend(v);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: true,
             ..Default::default()
@@ -2462,7 +2462,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)[st]\d{1,2}[. ]?[xх-]?[. ]?(?:e|x|х|ep|-|\.)[. ]?(\d{1,4})(?:[abc]|v0?[1-4]|\D|$)").unwrap(),
         |val| Some(vec![val.parse::<u32>().unwrap_or(0)]),
         |meta, val| if let Some(v) = val { meta.episodes.extend(v) },
-        HandlerOptions { remove: true, ..Default::default() },
+        handler_options! { remove: true, ..Default::default() },
     );
     parser.add_handler(
         "episodes",
@@ -2528,7 +2528,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.episodes.extend(v);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -2567,7 +2567,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.episodes.extend(v);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -2699,7 +2699,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.episodes.extend(v);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: true,
             ..Default::default()
@@ -2714,7 +2714,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.episodes.extend(v);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -2728,7 +2728,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.episodes.extend(v);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: false,
             skip_if_already_found: true,
             ..Default::default()
@@ -2743,7 +2743,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.episodes.extend(v);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: false,
             skip_if_already_found: true,
             ..Default::default()
@@ -2767,7 +2767,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -2782,7 +2782,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -2796,7 +2796,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -2810,7 +2810,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -2825,7 +2825,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push("en".to_string());
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -2839,7 +2839,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -2853,7 +2853,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -2867,7 +2867,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -2881,7 +2881,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -2896,7 +2896,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -2910,7 +2910,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_from_title: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -2925,7 +2925,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -2940,7 +2940,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -2955,7 +2955,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_first: true,
             skip_if_already_found: false,
@@ -2971,7 +2971,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -2985,7 +2985,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: true,
             ..Default::default()
@@ -3000,7 +3000,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_from_title: true,
             skip_if_already_found: false,
             remove: true,
@@ -3016,7 +3016,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_from_title: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -3031,7 +3031,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -3045,7 +3045,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -3059,7 +3059,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_from_title: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -3074,7 +3074,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_from_title: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -3089,7 +3089,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_from_title: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -3104,7 +3104,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_from_title: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -3119,7 +3119,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -3133,7 +3133,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: false,
             skip_if_already_found: false,
             ..Default::default()
@@ -3148,7 +3148,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: false,
             skip_if_already_found: false,
             ..Default::default()
@@ -3163,7 +3163,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             remove: true,
             ..Default::default()
@@ -3178,7 +3178,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             remove: true,
             ..Default::default()
@@ -3194,7 +3194,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -3208,7 +3208,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -3222,7 +3222,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -3236,7 +3236,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -3250,7 +3250,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_from_title: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -3265,7 +3265,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -3280,7 +3280,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_from_title: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -3295,7 +3295,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -3310,7 +3310,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_from_title: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -3325,7 +3325,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_from_title: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -3340,7 +3340,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_first: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -3355,7 +3355,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_from_title: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -3370,7 +3370,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_from_title: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -3385,7 +3385,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_from_title: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -3400,7 +3400,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_from_title: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -3415,7 +3415,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -3429,7 +3429,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_from_title: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -3444,7 +3444,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -3458,7 +3458,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -3472,7 +3472,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -3486,7 +3486,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_from_title: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -3501,7 +3501,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -3515,7 +3515,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_from_title: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -3530,7 +3530,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -3544,7 +3544,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -3558,7 +3558,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_from_title: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -3573,7 +3573,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_from_title: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -3588,7 +3588,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -3602,7 +3602,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_from_title: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -3617,7 +3617,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -3631,7 +3631,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_from_title: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -3646,7 +3646,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -3660,7 +3660,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_from_title: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -3675,7 +3675,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_from_title: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -3690,7 +3690,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -3705,7 +3705,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -3720,7 +3720,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             skip_if_first: true,
@@ -3736,7 +3736,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -3751,7 +3751,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -3765,7 +3765,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_first: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -3780,7 +3780,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -3794,7 +3794,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_first: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -3809,7 +3809,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -3824,7 +3824,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -3838,7 +3838,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -3852,7 +3852,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_first: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -3867,7 +3867,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_from_title: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -3882,7 +3882,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_from_title: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -3897,7 +3897,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_from_title: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -3912,7 +3912,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_from_title: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -3927,7 +3927,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_from_title: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -3942,7 +3942,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_first: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -3957,7 +3957,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -3971,7 +3971,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_first: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -3986,7 +3986,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -4000,7 +4000,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_first: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -4015,7 +4015,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_first: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -4105,7 +4105,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -4120,7 +4120,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -4135,7 +4135,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -4150,7 +4150,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -4165,7 +4165,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -4180,7 +4180,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_first: true,
             skip_if_already_found: false,
@@ -4196,7 +4196,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -4211,7 +4211,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -4225,7 +4225,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -4239,7 +4239,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -4253,7 +4253,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_first: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -4268,7 +4268,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_from_title: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -4283,7 +4283,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_first: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -4298,7 +4298,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -4312,7 +4312,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.languages.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             skip_if_first: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -4330,7 +4330,7 @@ pub fn add_defaults(parser: &mut PttParser) {
             }
         },
         |meta, val| meta.quality = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: true,
             ..Default::default()
@@ -4341,7 +4341,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bSAT(?:Rip)?\b").unwrap(),
         |_| "SATRip".to_string(),
         |meta, val| meta.quality = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: true,
             ..Default::default()
@@ -4358,7 +4358,7 @@ pub fn add_defaults(parser: &mut PttParser) {
             }
         },
         |meta, val| meta.quality = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: true,
             ..Default::default()
@@ -4369,7 +4369,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bPPVRip\b").unwrap(),
         |_| "PPVRip".to_string(),
         |meta, val| meta.quality = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: true,
             ..Default::default()
@@ -4380,7 +4380,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bWEBMux\b").unwrap(),
         |_| "WEBMux".to_string(),
         |meta, val| meta.quality = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: true,
             ..Default::default()
@@ -4391,7 +4391,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\b(?:HDRip|MicroHD)\b").unwrap(),
         |_| "HDRip".to_string(),
         |meta, val| meta.quality = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: true,
             ..Default::default()
@@ -4410,7 +4410,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.quality = Some("REMUX".to_string());
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -4427,7 +4427,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.quality = Some("CAM".to_string());
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -4443,7 +4443,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.quality = Some("TeleCine".to_string());
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -4455,7 +4455,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bmulti(?:ple)?[ .-]*(?:su?$|sub\w*|dub\w*)\b|msub").unwrap(),
         boolean,
         |meta, val| meta.subbed = val,
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -4465,7 +4465,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\b(?:Official.*?|Dual-?)?sub(s|bed)?\b").unwrap(),
         boolean,
         |meta, val| meta.subbed = val,
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -4477,7 +4477,7 @@ pub fn add_defaults(parser: &mut PttParser) {
             .unwrap(),
         boolean,
         |meta, val| meta.dubbed = val,
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -4487,7 +4487,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\btri(?:ple)?[ .-]*(?:audio|dub\w*)\b").unwrap(),
         boolean,
         |meta, val| meta.dubbed = val,
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -4497,7 +4497,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bdual[ .-]*(?:au?$|[aá]udio|line)\b").unwrap(),
         boolean,
         |meta, val| meta.dubbed = val,
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -4507,7 +4507,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bdual\b(?![ .-]*sub)").unwrap(),
         boolean,
         |meta, val| meta.dubbed = val,
-        HandlerOptions {
+        handler_options! {
             skip_if_already_found: false,
             ..Default::default()
         },
@@ -4517,7 +4517,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\b(fan\s?dub)\b").unwrap(),
         boolean,
         |meta, val| meta.dubbed = val,
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_from_title: true,
             ..Default::default()
@@ -4528,7 +4528,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\b(Fan.*)?(?:DUBBED|dublado|dubbing|DUBS?)\b").unwrap(),
         boolean,
         |meta, val| meta.dubbed = val,
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -4541,7 +4541,7 @@ pub fn add_defaults(parser: &mut PttParser) {
             .unwrap(),
         boolean,
         |meta, val| meta.dubbed = val,
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -4551,7 +4551,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bMULTi\b").unwrap(),
         boolean,
         |meta, val| meta.dubbed = val,
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -4562,7 +4562,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\b3D\b").unwrap(),
         boolean,
         |meta, val| meta.is_3d = val,
-        HandlerOptions {
+        handler_options! {
             remove: false,
             skip_if_first: true,
             ..Default::default()
@@ -4574,7 +4574,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\b(\d+(\.\d+)?\s?(MB|GB|TB))\b").unwrap(),
         |val| val.replace(' ', "").to_uppercase(),
         |meta, val| meta.size = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -4584,7 +4584,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)[-\s](\d+(?:\.\d+)?(?:MB|GB|TB))[-\s]").unwrap(),
         |val| val.replace(' ', "").to_uppercase(),
         |meta, val| meta.size = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: true,
             ..Default::default()
@@ -4598,7 +4598,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         ).unwrap(),
         value,
         |meta, val| meta.site = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -4608,7 +4608,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\bwww?.?[\w.-]+\.(?:link|world|cam|xyz|info|club)\b").unwrap(),
         value,
         |meta, val| meta.site = Some(val),
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -4620,7 +4620,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         |meta, val| {
             meta.site = Some(val);
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -4636,7 +4636,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.networks.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -4650,7 +4650,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.networks.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -4664,7 +4664,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.networks.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             skip_if_already_found: false,
             ..Default::default()
@@ -4679,7 +4679,7 @@ pub fn add_defaults(parser: &mut PttParser) {
                 meta.networks.push(val);
             }
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -4692,7 +4692,7 @@ pub fn add_defaults(parser: &mut PttParser) {
         |meta, val| {
             meta.trash = val;
         },
-        HandlerOptions {
+        handler_options! {
             remove: true,
             ..Default::default()
         },
@@ -4703,6 +4703,6 @@ pub fn add_defaults(parser: &mut PttParser) {
         FancyRegex::new(r"(?i)\.(3g2|3gp|avi|flv|mkv|mk3d|mov|mp2|mp4|m4v|mpe|mpeg|mpg|mpv|webm|wmv|ogm|divx|ts|m2ts|iso|vob|sub|idx|ttxt|txt|smi|srt|ssa|ass|vtt|nfo|html)$").unwrap(),
         |val| val.to_lowercase().trim_start_matches('.').to_string(),
         |meta, val| meta.extension = Some(val),
-        HandlerOptions { remove: true, ..Default::default() },
+        handler_options! { remove: true, ..Default::default() },
     );
 }

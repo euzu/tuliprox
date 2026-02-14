@@ -779,7 +779,7 @@ pub fn SourceEditor() -> Html {
                             div.style()
                                 .set_property(
                                     "transform",
-                                    &format!("translate({}px,{}px)", x + canvas_ox, y + canvas_oy),
+                                    &format!("translate3d({}px,{}px, 0)", x + canvas_ox, y + canvas_oy),
                                 )
                                 .unwrap();
                         }

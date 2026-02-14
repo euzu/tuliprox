@@ -20,7 +20,7 @@ base64 = "0"
 blake3 = "1"
 fastrand = { version = "2", features = ["js"] }
 zeroize = "1"
-chrono = "0.4.42"
+chrono = "0.4.43"
 bytes = "1"
 ciborium = "0.2.2"
 hex = "0.4.3"
@@ -29,7 +29,8 @@ deunicode = "1.6.2"
 serde-saphyr = "0.0.14"
 dashmap = "6.1.0"
 serde_tuple = "0.5"
+paste = "1"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-js-sys = "0.3.83"
+js-sys = "0.3.85"
 getrandom = { version = "0.3", features = ["wasm_js"] }

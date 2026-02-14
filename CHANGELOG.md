@@ -1,11 +1,11 @@
 # Changelog
 
-## 3.3.0 (2026-01-03)
+## Unreleased
 
-### ⚠️ Breaking Changes
+## ⚠️ Breaking Changes
 
-- **Global Input Definitions**: To align input definitions with the SourceEditor, inputs are now defined globally in the `inputs` section of the config
-  file. Each source can reference one or more inputs by their name in the `inputs` attribute.
+- **Global Input Definitions**: To align input definitions with the SourceEditor, inputs are now defined globally in the `inputs` section of the
+  config file. Each source can reference one or more inputs by their name in the `inputs` attribute.
 - **Data Format Migration**: Due to heavy refactoring, the old data format is invalid. You need to clean your `data` folder and update the playlists.
 - **B+Tree Storage Format**: Storage format has changed to a more efficient Slotted Page architecture.
   - **Index optimization**: Added index to B+Tree to accelerate queries without tree traversal.
@@ -20,7 +20,7 @@
 - **Favorites Redesign**: Replaced implicit `create_alias` with explicit `add_favourite(group_name)` script function.
   - **EpgSmartMatch**: Field `name_prefix` syntax needs to be changed from  `name_prefix: !suffix "."` to `name_prefix: { suffix: "." }`.
   - **Sort**: Sort can now use filter to sort specific entries.
-
+  
     ```yaml
       sort:
         match_as_ascii: true
@@ -37,12 +37,14 @@
               - "!CHAN_SEQ!"
               - '(?i)\bHD\b'
               - '(?i)\bSD\b'
-    ```
-
+        ```
+    
   - Trakt api config field `key` is now `api_key`. Added `user_agent` field to Trakt api config
-  - resolve_vod_delay and resolve_series_delay are now merged as resolve_delay, added `probe_live` and `probe_live_interval_hours` for live stream probing.
-
+  - resolve_vod_delay and resolve_series_delay are now merged as resolve_delay, added `probe_live` and `probe_live_interval_hours` for live stream
+    probing.
+  
       ```yaml
+
        # Before (deprecated)
        output:
        - type: xtream
@@ -51,8 +53,9 @@
          resolve_series: true
          resolve_series_delay: 2
       ```
-
+    
       ```yaml
+
        # After (new consolidated)
        output:
        - type: xtream
@@ -61,10 +64,10 @@
          resolve_delay: 2  # Single delay for all resolution types
        ```
 
-### 🌟 New Features
+## 🌟 New Features
 
-- **Smart Connection Priority**: Introduced a priority system for connections. Users with higher priority can preempt (kick) lower priority connections
-  (e.g., background tasks or standard users) when provider slots are full.
+- **Smart Connection Priority**: Introduced a priority system for connections. Users with higher priority can preempt (kick) lower priority
+  connections (e.g., background tasks or standard users) when provider slots are full.
 - **Background Metadata Queue**: Metadata resolution (VOD/Series) and stream analysis are now queued per input and processed in the background when
   provider connections are idle. This prevents "No Connections" errors for active users during playlist updates.
 - **Live TV Probing**: Added support for probing Live TV streams (`probe_live`) to determine codecs and resolution. This runs as a low-priority
@@ -75,10 +78,11 @@
   - Recursive scanning, automatic classification, and NFO/TMDB metadata resolution.
   - Incremental scanning and virtual ID management.
 - **Panel API Integration**: Optional integration to renew expired input accounts or provision new accounts to ensure a minimum valid input accounts.
-- **Playlist Caching**: Added `cache_duration` to inputs, allowing configurable provider playlist cache times during subsequent updates
-  (e.g., `60s`, `5m` `12h`, `1d`).
+- **Playlist Caching**: Added `cache_duration` to inputs, allowing configurable provider playlist cache times during subsequent updates (e.g., `60s`,
+  `5m` `12h`, `1d`).
 - **Database Viewer**: New CLI flags `--dbx` and `--dbm` to inspect internal database content.
-- **Added `disk_based_processing`**: (boolean, default `false`) to `config.yml`. When enabled, input playlists are processed from disk instead of memory.
+- **Added `disk_based_processing`**: (boolean, default `false`) to `config.yml`. When enabled, input playlists are processed from disk instead of
+  memory.
 - **User-Agent `default_user_agent`**: Ensures that outgoing requests always pass a default user agent.
 - **FFprobe Integration**: Added capability to probe streams for codec, resolution, HDR (HDR10/HLG/DV), and audio channels using `ffprobe`. Probing
   strictly respects provider connection limits. If no slot is available (considering user limits), the item is skipped to prevent provider bans.
@@ -86,13 +90,13 @@
 - **Streaming**: Added `grace_period_hold_stream` configuration option to delay stream output until grace period connection checks are completed.
 - **Provider Failover & Rotation**: Tuliprox supports robust failover mechanisms for streaming providers.
   You can use the special `provider://<provider_name>/...` URL scheme in your configurations. Tuliprox will automatically resolve this to the current
-  active URL of the specified provider.
+active URL of the specified provider.
   If the current URL fails (e.g., 5xx error, timeout), Tuliprox automatically rotates to the next available URL for that provider.
   It tracks failures and prevents infinite loops by limiting attempts to the number of available URLs.
-- Added `epg_request_timeshift: [-+]hh:mm or TimeZone`, example `Europe/Paris`, `America/New_York`, `-2:30`(-2h30m), `+0:15` (15m), `2` (2h),
-  `:30` (30m), `:3` (3m)
+- Added `epg_request_timeshift: [-+]hh:mm or TimeZone`, example `Europe/Paris`, `America/New_York`, `-2:30`(-2h30m), `+0:15` (15m), `2` (2h), `:30`
+  (30m), `:3` (3m)
 
-### ⚙️ New Settings
+## ⚙️ New Settings
 
 - **config.yml**:
   - Added `video.ffprobe_enabled` (default: false) and `video.ffprobe_timeout`.
@@ -104,13 +108,13 @@
   - Added `probe_live_interval_hours`: Sets the frequency for re-probing Live TV streams.
   - Added `resolve_background`: Toggles background metadata resolution (default `true`). Set to `false` for blocking, immediate resolution.
 
-### 🛠 Optimizations
+## 🛠 Optimizations
 
 - **Quality Tagging**: Generates enhanced filename tags (e.g., `[2160p 4K HEVC HDR TrueHD 7.1]`) for STRM files based on analysis results.
 - **Flat Grouping**: When `flat: true` option for STRM output is active, multiple versions (e.g., 4K and 1080p) of the same movie are now safely
   merged over all categories into a single folder based on TMDB ID, compatible with Jellyfin/Emby "Multi-Version" features.
 
-### ⚙️ Engine & Storage Optimizations
+## ⚙️ Engine & Storage Optimizations
 
 - **Slotted Page Architecture**: Improved space utilization and support for variable-length keys.
 - **Adaptive LZ4 Compression**: Optimized disk footprint for stored values.
@@ -128,16 +132,18 @@
 - **String Interning**: Implemented `Arc<str>` string interning for playlist items to further reduce memory footprint.
 - **Zero-Copy B+Tree Scan**: Implemented zero-copy scanning for B+Tree internal nodes, significantly reducing heap allocations and improving random
   read throughput (up to 96k ops/sec).
-- **Optimized Key Lookups**: `XtreamRepository` and `M3uRepository` now use zero-copy queries for `u32` keys, enhancing performance for high-traffic endpoints.
+- **Optimized Key Lookups**: `XtreamRepository` and `M3uRepository` now use zero-copy queries for `u32` keys, enhancing performance for high-traffic
+  endpoints.
 
-### 🔍 Mapping & Filtering Enhancements
+## 🔍 Mapping & Filtering Enhancements
 
 - **Accent-Independent Matching**: Integrated `match_as_ascii` flag for robust text matching (e.g., "Cinema" matches "Cinéma").
 - **Deunicoding Support**: `ValueProvider` and `ValueAccessor` now support on-the-fly deunicoding.
 - **Flexible Sorting**: Added `order: none` support to retain source order in mappings.
-- **Mapper Loop enhancement**: Updated `for_each` syntax to `variable.for_each((key, value) => { ... })`. Added support for `_` ignored variables in loop.
+- **Mapper Loop enhancement**: Updated `for_each` syntax to `variable.for_each((key, value) => { ... })`. Added support for `_` ignored variables in
+  loop.
 
-### 💻 WebUI & API
+## 💻 WebUI & API
 
 - **Source Editor Integration**: Redesigned UI for global input management and hot-reloading.
 - **Messaging Config View**: New UI for configuring Discord and enhanced REST settings.
@@ -149,7 +155,7 @@
 - Added **Stream Buffer** settings (Enabled, Size) to Reverse Proxy configuration UI.
 - Added **TMDB** settings (Rate Limit, Cache Duration, Language) and **Metadata Formats** (NFO support) to Library configuration UI.
 
-### 🚀 Performance & Stability
+## 🚀 Performance & Stability
 
 - **Deadlock Resolution**: Fixed a potential deadlock in `ProviderLineupManager::reconcile_connections` by refactoring `DashMap` iterations to use
   snapshots, preventing internal shard locks from being held during async lock acquisition.
@@ -187,7 +193,7 @@
 - **EPG**: Fixed XMLTV timeshift to correctly apply user-defined timezone offsets in the generated XML output.
 - **407 Proxy Authentication Required** fix.
 
-### ⚙️ Messaging Refactoring
+## ⚙️ Messaging Refactoring
 
 - **Structured Messaging**: Transitioned from JSON-string-based notifications to a strictly typed messaging pipeline.
 - **Backend Model Migration**: Moved complex messaging models (`WatchChanges`, `ProcessingStats`) from the shared crate to the backend to reduce
@@ -208,7 +214,8 @@
 - Fixed SSL certificate field binding in configuration view
 - More robust connection-state and provider-handle management
 - Streamlined event notifications and provider-count reporting
-- Added configurable `reverse_proxy.resource_retry` (UI + server) to tune max attempts, base delay, and exponential backoff multiplier for proxied resources.
+- Added configurable `reverse_proxy.resource_retry` (UI + server) to tune max attempts, base delay, and exponential backoff multiplier for proxied
+  resources.
 - Multi Strm outputs with same type is now allowed.
 - Added new mapper function `pad(text | number, number, char, optional position: "<" | ">" | "^")`
 - Added new mapper function `format` for simple in-text replacement like `format("Hello {}! Hello {}!", "Bob", "World")`
@@ -229,7 +236,9 @@
 - Added `use_memory_cache` attribute to target definition to hold playlist in memory to reduce disc access.
   Placing playlist into memory causes more RAM usage but reduces disk access.
 - Added optional `filter` attribute to Output (except HDHomerun-Output).
-  Output filters are applied after all transformations have been performed, therefore, all filter contents must refer to the final state of the playlist.
+  Output filters are applied after all transformations have been performed, therefore, all filter contents must refer to the final state of the
+playlist.
+
 - Added burst buffer to shared stream
 - Telegram message thread support. thread id can now be appended to chat-id like `chat-id:thread-id`.
 - Telegram supports markdown generation for structured json messages. simply set `markdown: true` in telegram config.
@@ -238,8 +247,9 @@
 - Added standardized SSDP (Simple Service Discovery Protocol) and the Proprietary HDHomeRun UDP Discovery Protocol (Port 65001)
 - Fixed some session handling issue
 - added `reverse_proxy.disabled_header` configuration
-  Allows removing selected headers before forwarding requests when acting as a reverse proxy. Configure removal of the referer header,
-  all `X-*` headers, and additional custom headers.
+  Allows removing selected headers before forwarding requests when acting as a reverse proxy. Configure removal of the referer header, all `X-*`
+headers, and additional custom headers.
+
 - !BREAKING_CHANGE! `disble_referer_header` is now part of `reverse_proxy.disabled_header` configuration
 - UserTable: Copy credentials to clipboard from user table
 - UserTable: Kick user action from streams table
@@ -259,7 +269,8 @@
 - WebSocket now reconnects on disconnect; added WebSocket connection status icon in Web UI
 - Added Playlist EPG view with timeline, channels, `now` line, and program details
 - EPG data can now be fetched from selected targets and custom URLs
-- Faster, more reliable EPG loading via streaming and asynchronous processing, with reduced memory usage and better support for large or compressed guides.
+- Faster, more reliable EPG loading via streaming and asynchronous processing, with reduced memory usage and better support for large or compressed
+  guides.
 - Invalid EPG text data fix
 - Added new sidebar entry and icon for quick EPG access
 - Added CBOR (binary JSON) support for large API data
@@ -295,9 +306,11 @@
 - added sleep timer  `sleep_timer_mins`  to config.yml
 - added mapper script builtin function `template` to access template definitions.
 
-  ```toml
-  station_prefix = template(concat("US_", station, "_PREFIX")),
-  ```
+```text
+
+   station_prefix = template(concat("US_", station, "_PREFIX")),
+
+```
 
 If we assume the variable `station` contains the value `WINK`,
 this script receives the template with the concatenated name `US_WINK_PREFIX` which should be defined in `templates` section,
@@ -308,7 +321,7 @@ and assigns it to the variable `station_prefix`.
   - Optional flat directory structure via 'flat' parameter (nested folder structures are not supported by some media scanners).
 - Added Trakt support for XC targets
 
-  ```yaml
+```yaml
       - name: iptv-trakt-example
         output:
           - type: xtream
@@ -332,7 +345,7 @@ and assigns it to the variable `station_prefix`.
                   category_name: "📺 Latest TV Shows"
                   content_type: "series"
                   fuzzy_match_threshold: 80
-  ```
+```
 
 ## 3.1.3 (2025-06-06)
 
@@ -341,21 +354,23 @@ and assigns it to the variable `station_prefix`.
 - Mapper script can have blocks now.
   For example, you want to write a `if then else` block
 
-  ```txt
-    # Maybe there is no station
-    station = @Caption ~ "(ABC)"
-    match {
-      station => {
-          # if block
-          # station exists
-      }
-      # optional any match as else block
-      _ => {
-          # else block
-          # station does not exists
-      }
-    }
-  ```
+```text
+
+  # Maybe there is no station
+  station = @Caption ~ "(ABC)"
+  match {
+     station => {
+        # if block
+        # station exists
+     }
+     # optional any match as else block
+     _ => {
+         # else block
+         # station does not exists
+     }
+  }
+
+```
 
 - New BuiltIn Mapper function `first`. When you use Regular expressions it could be that your match contains multiple results.
   The builtin function `first` returns the first match.
@@ -384,7 +399,6 @@ and assigns it to the variable `station_prefix`.
   - channel_unavailable.ts
     `user_account_expired.ts`: Tuliprox will return a 403 Forbidden response for any playlist request if the user is expired.
     So this screen will only ever appear if someone tries to directly access a stream URL after their account has expired.
-
 - !BREAKING_CHANGE! epg refactored
   - url config is now renamed to sources
   - Added `priority`, priority is `optional`
@@ -424,9 +438,10 @@ epg:
   You can now place multiple mapping files inside a directory like `mapping.d` and specify it using the `-m` option, for example:
   `-m /home/tuliprox/config/mapping.d`
   The files are loaded in **alphanumeric** order.
-  **Note:** This is a lexicographic sort — so `m_10.yml` comes before `m_2.yml` unless you name files carefully (e.g., `m_01.yml`, `m_02.yml`, ..., `m_10.yml`).
-- Added `mapping_path` to `config.yml`.
+  **Note:** This is a lexicographic sort — so `m_10.yml` comes before `m_2.yml` unless you name files carefully (e.g., `m_01.yml`, `m_02.yml`, ...,
+`m_10.yml`).
 
+- Added `mapping_path` to `config.yml`.
 - Added list template for sequences. List templates can only be used for sequences.
 
 ```yaml
@@ -455,10 +470,11 @@ The template can now be used for sequence
 
 - added `disable_referer_header` to `reverse_proxy` config
   This option, when set to `true`, prevents tuliprox from sending the Referer header in requests made when acting as a reverse proxy. This can be
-  particularly useful when dealing with certain Xtream Codes providers that might restrict or behave differently based on the Referer header.
-  Default is `false`.
+particularly useful when dealing with certain Xtream Codes providers that might restrict or behave differently based on the Referer header. Default is
+`false`.
 
 ```yaml
+
 reverse_proxy:
   disable_referer_header: false
 ```
@@ -476,6 +492,7 @@ reverse_proxy:
 - !BREAKING_CHANGE! `web_ui config` restructured and added `user_ui_enabled` attribute
 
 ```yaml
+
 web_ui:
   enabled: true
   user_ui_enabled: true
@@ -485,6 +502,7 @@ web_ui:
     issuer: tuliprox
     secret: ef9ab256a8c0abe5de92c2e05ca92baa810472ab702ff1674e9248308ceeec92
     userfile: user.txt
+
 ```
 
 - `grace_period_millis` default set to 300 milliseconds.
@@ -500,11 +518,13 @@ web_ui:
   The configuration below allows up to 10 connections initially and then replenishes 1 connection every 500 milliseconds.
 
 ```yaml
+
 reverse_proxy:
   rate_limit:
     enabled: true
     period_millis: 500
     burst_size: 10
+
 ```
 
 - Multi epg processing/optimization, auto guessing/assigning epg id's
@@ -512,10 +532,13 @@ reverse_proxy:
 - Added `force_redirect` to target config options. valid options are `live`, `vod`, `series`
 
 ```yaml
+
  options: {ignore_logo: false, share_live_streams: false, force_redirect: [vod, series]}
+
 ```
 
 ```yaml
+
 epg:
   url: ['http://localhost:3001/xmltv.php?epg_id=1', 'http://localhost:3001/xmltv.php?epg_id=2']
   smart_match:
@@ -527,6 +550,7 @@ epg:
     name_prefix_separator: [':', '|', '-']
     strip :  ["3840p", "uhd", "fhd", "hd", "sd", "4k", "plus", "raw"]
     normalize_regex: '[^a-zA-Z0-9\-]'
+
 ```
 
 `match_threshold`is optional and if not set 80.
@@ -536,18 +560,27 @@ epg:
 `normalize_regex: [^a-zA-Z0-9\-]`   is the default
 
 ```yaml
+
 # single epg
+
 url: 'https://localhost.com/epg.xml'
+
 ```
 
 ```yaml
+
 # multi local file  epg
+
 url: ['file:///${env:TULIPROX_HOME}/epg.xml', 'file:///${env:TULIPROX_HOME}/epg2.xml']
+
 ```
 
 ```yaml
+
 # multi url  epg
+
 url: ['http://localhost:3001/xmltv.php?epg_id=1', 'http://localhost:3001/xmltv.php?epg_id=2']
+
 ```
 
 - Added `strip` to input for auto epg matching, if not given `["3840p", "uhd", "fhd", "hd", "sd", "4k", "plus", "raw"]` is default
@@ -563,13 +596,15 @@ url: ['http://localhost:3001/xmltv.php?epg_id=1', 'http://localhost:3001/xmltv.p
 - hdhomerun supports now basic auth like <http://user:password@ip:port/lineup.json>
   you need to enable auth in config
 
-  ```yaml
-  hdhomerun:
-    enabled: true
-    auth: true
-    devices:
-      - name: hdhr1
-  ```
+```yaml
+
+hdhomerun:
+  enabled: true
+  auth: true
+  devices:
+    - name: hdhr1
+
+```
 
 - A new filter field `caption` has been added. This field is used to bypass the `title/name` issue.
   If `caption` is provided, its value is read from `title` if available, otherwise from `name`.
@@ -577,35 +612,37 @@ url: ['http://localhost:3001/xmltv.php?epg_id=1', 'http://localhost:3001/xmltv.p
 - Counter has now an attribute `padding`. Which fills the number like 001.
 - Added proxy configuration for all outgoing requests in `config.yml`. supported http, https, socks5 proxies.
 
-  ```yaml
-  proxy:
-    url: socks5://192.168.1.6:8123
-    username: uname  # <- optional basic auth
-    password: secret # <- optional basic auth
-  ```
+```yaml
+
+proxy:
+  url: socks5://192.168.1.6:8123
+  username: uname  # <- optional basic auth
+  password: secret # <- optional basic auth
+
+```
 
 - Added support for regular expression-based sequence sorting.
   You can now sort both groups and channels using custom regex sequences.
 
-  ```yaml
-  sort:
-    groups:
-    order: asc
-    sequence:
-      - '^Freetv'
-      - '^Shopping'
-      - '^Entertainment'
-      - '^Sunrise'
-    channels:
-      - field: caption
-        group_pattern: '^Freetv'
-        order: asc
-        sequence:
-          - '(?P<c1>.*?)\bUHD\b'
-          - '(?P<c1>.*?)\bFHD\b'
-          - '(?P<c1>.*?)\bHD\b'
-          - '(?P<c1>.*?)\bSD\b'
-  ```
+```yaml
+sort:
+  groups:
+  order: asc
+  sequence:
+    - '^Freetv'
+    - '^Shopping'
+    - '^Entertainment'
+    - '^Sunrise'
+  channels:
+    - field: caption
+      group_pattern: '^Freetv'
+      order: asc
+      sequence:
+        - '(?P<c1>.*?)\bUHD\b'
+        - '(?P<c1>.*?)\bFHD\b'
+        - '(?P<c1>.*?)\bHD\b'
+        - '(?P<c1>.*?)\bSD\b'
+```
 
 In the example above, groups are sorted based on the specified sequence.
 Channels within the `Freetv` group are first sorted by `quality` (as matched by the regex sequence), and then by the `captured prefix`.
@@ -621,8 +658,10 @@ The numeric suffix indicates the priority: `c1` is evaluated first, followed by 
   - pattern_ipv6 # Optional regex pattern to extract IPv6
 
 ```yaml
+
 ipcheck:
   url_ipv4: https://ipinfo.io/ip
+
 ```
 
 ## 2.2.5 (2025-03-27)
@@ -655,20 +694,22 @@ ipcheck:
 - hls reverse proxy implemented
 - dash redirect implemented (reverse proxy not supported)
 - !BREAKING CHANGE! `channel_unavailable_file` is now under `custom_stream_response`,
-- New custom streams `user_connections_exhausted` and `provider_connections_exhausted` added.
+- New custom streams `user_connections_exhausted` and `provider_connections_exhausted`added.
 
 ```yaml
+
 custom_stream_response:
   channel_unavailable: /home/tuliprox/resources/channel_unavailable.ts
   user_connections_exhausted: /home/tuliprox/resources/user_connections_exhausted.ts
   provider_connections_exhausted: /home/tuliprox/resources/provider_connections_exhausted.ts
+
 ```
 
 - input alias definition for same provider with same content but different credentials
 
 ```yaml
 - sources:
-- inputs:
+  - inputs:
     - type: xtream
       name: my_provider
       url: 'http://provider.net'
@@ -679,8 +720,8 @@ custom_stream_response:
           url: 'http://provider.net'
           username: abcd
           password: secret2
-  targets:
-    - name: test
+    targets:
+      - name: test
 ```
 
 Input aliases can be defined as batches in csv files with `;` separator.
@@ -689,34 +730,38 @@ There are 2 batch input types  `xtream_batch` and `m3u_batch`.
 
 ```yaml
 - sources:
-- inputs:
+  - inputs:
     - type: xtream_batch
       url: 'file:///home/tuliprox/config/my_provider_batch.csv'
-  targets:
-    - name: test
+    targets:
+      - name: test
 ```
 
 ```csv
+
 #name;username;password;url;max_connections;priority
 my_provider_1;user1;password1;http://my_provider_1.com:80;1;0
 my_provider_2;user2;password2;http://my_provider_2.com:8080;1;0
+
 ```
 
 `M3uBatch`:
 
 ```yaml
 - sources:
-- inputs:
+  - inputs:
     - type: m3u_batch
       url: 'file:///home/tuliprox/config/my_provider_batch.csv'
-  targets:
+    targets:
     - name: test
 ```
 
 ```csv
+
 #url;max_connections;priority
 http://my_provider_1.com:80/get_php?username=user1&password=password1;1;0
 http://my_provider_2.com:8080/get_php?username=user2&password=password2;1;0
+
 ```
 
 The Fields `max_connections` and `priority`are optional.
@@ -786,11 +831,13 @@ targets:
     options: {ignore_logo: false, share_live_streams: true, remove_duplicates: false}
 ```
 
-- The Web UI now includes a login feature for playlist users, allowing them to set their groups for filtering and managing their own bouquet of groups.
+- The Web UI now includes a login feature for playlist users, allowing them to set their groups for filtering and managing their own bouquet of
+  groups.
   The playlist user can login with his credentials and can select the desired groups for his playlist.
 - Added `user_config_dir` to `config.yml`. It is the storage path for user configurations (f.e. bouquets).
 - New Filter field `input` can be used along `name`, `group`, `title`, `url` and `type`. Input is a `regexp` filter. `input ~ "provider\-\d+"`
-- New option `use_user_db` in `api-proxy.yml`. The Playlist Users are stored inside the config file `api-proxy.yml`. When you set this option to `true`
+- New option `use_user_db` in `api-proxy.yml`. The Playlist Users are stored inside the config file `api-proxy.yml`. When you set this option to
+  `true`
   the user are stored in a db file. This is a better choice if you have a lot of users. If you have only a few let it default to `false`
 - WebUI playlist browser with tree and gallery mode. Explore self hosted and provider playlists in browser.
 - Added HdHomeRun tuner target for use with Plex/Emby/Jellyfin
@@ -805,7 +852,8 @@ targets:
 
 ## 2.2.0 (2025-02-11)
 
-- !BREAKING CHANGE!  unique `input` `name` is now mandatory, because rearranging the `source.yml` could lead to wrong results without a playlist update.
+- !BREAKING CHANGE!  unique `input` `name` is now mandatory, because rearranging the `source.yml` could lead to wrong results without a playlist
+  update.
 - !BREAKING_CHANGE! `log_sanitize_sensitive_info`  is now under `log` section  as `sanitize_sensitive_info`
 - !BREAKING_CHANGE! uuid generation for entries changed to `input.name` + `stream_id`. Virtual id mapping changed. The new Virtual id is not a
   sequence anymore.
@@ -834,18 +882,22 @@ server:
 - Added `log_level` to `log` config. Priority:  CLI-Argument, Env-Var, Config, Default(`info`)
 
 ```yaml
+
 log:
   sanitize_sensitive_info: false
   active_clients: true
   log_level: debug
 update_on_boot: false
 web_ui_enabled: true
+
 ```
 
-- Added new option to `input` `xtream_live_stream_without_extension`. Default is `false`.  Some providers don't like `.ts`  extension,
-  some providers need it. Now you can disable or enable it for a provider.
-- Aded new option to `input` `xtream_live_stream_use_prefix`.. Default is `true`.  Some providers don't like `/live/`  prefix for streams,
-  some providers need it. Now you can disable or enable it for a provider.
+- Added new option to `input` `xtream_live_stream_without_extension`. Default is `false`.  Some providers don't like `.ts`  extension, some providers
+  need it.
+  Now you can disable or enable it for a provider.
+- Aded new option to `input` `xtream_live_stream_use_prefix`.. Default is `true`.  Some providers don't like `/live/`  prefix for streams, some
+  providers need it.
+  Now you can disable or enable it for a provider.
 - Added `path` to `api-proxy.yml` server config for simpler front reverse-proxy configuration (like nginx)
 - added `hlsr` handling.
 - fixed mapper counter not incrementing.
@@ -859,9 +911,11 @@ web_ui_enabled: true
 - Added option `channel_unavailable_file` in `config.yml`. If a provider stream is not available this file content is send instead.
 
 ```yaml
+
 update_on_boot: false
 web_ui_enabled: true
 channel_unavailable_file: /freeze_frame.ts
+
 ```
 
 ## 2.1.3 (2025-01-26)
@@ -879,11 +933,13 @@ channel_unavailable_file: /freeze_frame.ts
 - Added `pushover.net` config to messaging.
 
 ```yaml
+
 messaging:
   pushover:
     token: _required_
     user: _required_
     url: `optional`, default is https://api.pushover.net/1/messages.json
+
 ```
 
 ## 2.1.1 (2025-01-19)
@@ -897,7 +953,8 @@ messaging:
 
 ## 2.1.0 (2025-01-17)
 
-- Watch files are now moved inside the `target` folder. Move them manually from `watch_<target_name>_<watched_group>.bin` to `<target_name>/watch_<watched_group>.bin`
+- Watch files are now moved inside the `target` folder. Move them manually from `watch_<target_name>_<watched_group>.bin` to
+  `<target_name>/watch_<watched_group>.bin`
 - No error log for xtream api when content is skipped with options `xtream_skip_[live|vod|series]`
 - _experimental_:  added live channel connection sharing in reverse proxy mode. To activate set `share_live_streams` in target options.
 - Added `info` and `tmdb-id` caching for vod and series with options `xtream_resolve_(series|vod)`.
@@ -928,6 +985,7 @@ schedules:
 - `config.yml` `backup_dir` is now default `backup`. If you want to keep the old name set `backup_dir: .backup`
 
 ```yaml
+
 reverse_proxy:
   stream:
     retry: true
@@ -939,11 +997,13 @@ reverse_proxy:
     size: 500MB
     enabled: true
     dir: ./cache
+
 ```
 
 ## 2.0.10 (2024-12-03)
 
-- added Target Output Option `m3u_include_type_in_url`, default false. This adds `live`, `movie`, `series` to the url of the stream in reverse proxy mode.
+- added Target Output Option `m3u_include_type_in_url`, default false. This adds `live`, `movie`, `series` to the url of the stream in reverse proxy
+  mode.
 - added Target Output Option `m3u_mask_redirect_url`, default false. The urls are pointed to tuliprox in redirect mode. In stream request a redirect
   response is send. Usefully if you want to track calls in redirect mode.
 - fixed xtream api redirect url problem.
@@ -961,7 +1021,8 @@ reverse_proxy:
 
 ## 2.0.7 (2024-11-05)
 
-- EPG is now first downloaded to disk instead of directly into memory, then processed using a SAX parser (slower but reduces memory usage from up to 2GB).
+- EPG is now first downloaded to disk instead of directly into memory, then processed using a SAX parser (slower but reduces memory usage from up to
+  2GB).
 - Various code optimizations have been applied.
 - Regular expression matching in log output is now set to trace level to prevent flooding the debug log.
 - Processing stats now include a `took` field indicating the processing time.
@@ -973,12 +1034,15 @@ reverse_proxy:
 - api responses are now streamed directly from disk to avoid memory allocation.
 - fixed scheduler implementation to only wake up on scheduled times.
 
+-
+
 ## 2.0.5(2024-10-16)
 
 - input url supports now scheme `file://...` (which is not necessary because file paths are supported). Gzip files are also supported.
 - sort takes now a sequence for channel values which has higher priority than sort order
 - fixed error handling in filter parsing
-- `NOT` filter is now `non greedy`. `NOT Name ~ "A" AND Group ~ "B"` was `NOT (Name ~ "A" AND Group ~ "B")`. Now it is `(NOT Name ~ "A") AND Group ~ "B"`
+- `NOT` filter is now `non greedy`. `NOT Name ~ "A" AND Group ~ "B"` was `NOT (Name ~ "A" AND Group ~ "B")`. Now it is `(NOT Name ~ "A") AND Group ~
+  "B"`
 - Implemented workaround for missing tvg-ID
 
 ## 2.0.4(2024-09-19)
@@ -999,18 +1063,18 @@ reverse_proxy:
 - added `chno`  to Playlist attributes.
 - `epg_channel_id` mapping fixed
 
-## 2.0.2(2024-05-28)
+## v2.0.2(2024-05-28)
 
 - Added Encoding handling: gzip,deflate
 - Fixed panic when `tvg-id` is not set.
 
-## 2.0.1(2024-05-24)
+## v2.0.1(2024-05-24)
 
 - m3u playlists are not saved as plainfile, therefor m3u output filename is not mandatory, if given the plain m3u playlist is stored.
 - Added `--healthcheck` argument for docker
 - Added `catch-up`/`timeshift`  api for `xtream`
 
-## 2.0.0(2024-05-10)
+## v2.0.0(2024-05-10)
 
 - major version change due to massive changes
 - `update_on_boot` for config, default is false, if true an update is run on start
@@ -1027,7 +1091,8 @@ reverse_proxy:
 - Generating xtream stream urls from m3u input.
 - Reverse proxy implementation for m3u playlist.
 - Mapper can now set `epg_channel_id`.
-- Added environment variables for User Credentials `username`, `password` and `token` in format `${env:<EnvVarName>}` where `<EnvVarName>` should be replaced.
+- Added environment variables for User Credentials `username`, `password` and `token` in format `${env:<EnvVarName>}` where `<EnvVarName>` should be
+  replaced.
 - Added `web_ui_enabled` to `config.yml`. Default is `true`. Set to `false` to disable webui.
 - Added `web_auth` to `config.yml` struct for web-ui-authentication is optional.
   - `enabled`: default true
@@ -1084,7 +1149,7 @@ reverse_proxy:
   - `organize_into_directories`
   - `episode_pattern`
 - Web-UI - Download View with multi download support
-- Added WebSearch Url `web_search: 'https://www.imdb.com/search/title/?title={}'` under video configuration.
+- Added WebSearch Url `web_search: '<\1> under video configuration.
 
 ## v1.1.2(2023-11-03)
 
@@ -1142,6 +1207,7 @@ user:
   - target: pl1
     credentials:
       - {username: x3452, password: ztrhgrGZrt83hjerter}
+
 ```
 
 ## v1.0.1(2023-09-07)
@@ -1228,11 +1294,13 @@ user:
   - MRF
     default is FMR
 - Added mapping parameter `match_as_ascii`. Default is `false`.
-  If `true` before regexp matching the matching text will be converted to ascii. [unidecode](https://chowdhurya.github.io/rust-unidecode/unidecode/index.html)
+  If `true` before regexp matching the matching text will be converted to ascii.
+[unidecode](https://chowdhurya.github.io/rust-unidecode/unidecode/index.html)
 
 Added regexp templates to mapper:
 
 ```yaml
+
 mappings:
   - id: France
     tag: ""
@@ -1257,7 +1325,7 @@ mappings:
 
 - `mapping` attribute for target is now a list. You can assign multiple mapper to a target.
 
-```yaml
+```text
 mapping:
   - France
   - Belgium
@@ -1268,6 +1336,7 @@ mapping:
 
 - Added mappings. Mappings are defined in a file named ```mapping.yml``` or can be given by command line option ```-m```.
   ```target``` has now an optional field ```mapping``` which has the id of the mapping configuration.
+
 - rename is now optional
 
 ## v0.9.3(2022-04-21)
@@ -1282,8 +1351,8 @@ mapping:
 ## v0.9.1(2022-04-05)
 
 - There are two types of targets ```m3u``` and ```strm```. This can be set by the ```output``` attribute to ```Strm``` or ```M3u```.
-  If the attribute is not specified ```M3u``` is created by default. ```Strm``` output has an additional option ```underscore_whitespace```.
-  This replaces all whitespaces with ```_``` in the path.
+  If the attribute is not specified ```M3u``` is created by default. ```Strm``` output has an additional option
+  ```underscore_whitespace```. This replaces all whitespaces with ```_``` in the path.
 
 ## v0.9.0(2022-04-04)
 
@@ -1325,7 +1394,7 @@ mapping:
 ## v0.2.0(2021-10-07)
 
 - Added simple WEB-UI
-- Start in server mode
+  - Start in server mode
 
 ## v0.1.0(2021-10-01)
 

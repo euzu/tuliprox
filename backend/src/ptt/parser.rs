@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use fancy_regex::{Regex as FancyRegex, Match};
 use crate::ptt::constants::{BRACKETS, PTT_CONSTANTS};
 use crate::ptt::models::PttMetadata;
+use shared::create_bitset;
 
 #[derive(Debug, Clone)]
 pub struct MatchInfo {
@@ -19,6 +20,15 @@ pub struct ParseContext {
 }
 
 pub type HandlerFn = Box<dyn Fn(&mut ParseContext) -> Option<MatchInfo> + Send + Sync>;
+
+create_bitset!(
+    u8,
+    HandlerOptionFlags,
+    SkipIfAlreadyFound,
+    SkipFromTitle,
+    SkipIfFirst,
+    Remove
+);
 
 #[derive(Default)]
 pub struct PttParser {
@@ -51,7 +61,11 @@ impl PttParser {
         let name_clone = name.to_string();
 
         let handler = Box::new(move |context: &mut ParseContext| -> Option<MatchInfo> {
-            if options.skip_if_already_found && context.matched.contains_key(&name_owned) {
+            if options
+                .flags
+                .contains(HandlerOptionFlags::SkipIfAlreadyFound)
+                && context.matched.contains_key(&name_owned)
+            {
                 return None;
             }
 
@@ -85,11 +99,12 @@ impl PttParser {
                     false
                 };
 
-                let current_skip_from_title = before_title_matched || options.skip_from_title;
+                let current_skip_from_title = before_title_matched
+                    || options.flags.contains(HandlerOptionFlags::SkipFromTitle);
 
                 let transformed_value = transformer(&clean_match);
 
-                if options.skip_if_first {
+                if options.flags.contains(HandlerOptionFlags::SkipIfFirst) {
                     let other_matches_exist = !context.matched.is_empty();
                     if other_matches_exist {
                         let current_start = match_index;
@@ -108,7 +123,7 @@ impl PttParser {
                 let info = MatchInfo {
                     raw_match,
                     match_index,
-                    remove: options.remove,
+                    remove: options.flags.contains(HandlerOptionFlags::Remove),
                     skip_from_title: current_skip_from_title,
                 };
                 context.matched.insert(name_owned.clone(), info.clone());
@@ -229,21 +244,56 @@ pub fn clean_title(raw_title: &str) -> String {
     title
 }
 
-#[allow(clippy::struct_excessive_bools)]
 pub struct HandlerOptions {
-    pub skip_if_already_found: bool,
-    pub skip_from_title: bool,
-    pub skip_if_first: bool,
-    pub remove: bool,
+    pub flags: HandlerOptionFlagsSet,
+}
+
+impl HandlerOptions {
+    pub fn set_flag(&mut self, flag: HandlerOptionFlags, enabled: bool) {
+        if enabled {
+            self.flags.set(flag);
+        } else {
+            self.flags.unset(flag);
+        }
+    }
 }
 
 impl Default for HandlerOptions {
     fn default() -> Self {
+        let mut flags = HandlerOptionFlagsSet::new();
+        flags.set(HandlerOptionFlags::SkipIfAlreadyFound);
         Self {
-            skip_if_already_found: true,
-            skip_from_title: false,
-            skip_if_first: false,
-            remove: false,
+            flags,
         }
     }
 }
+
+macro_rules! handler_options_set_field {
+    ($opts:ident, skip_if_already_found, $value:expr) => {
+        $opts.set_flag($crate::ptt::parser::HandlerOptionFlags::SkipIfAlreadyFound, $value);
+    };
+    ($opts:ident, skip_from_title, $value:expr) => {
+        $opts.set_flag($crate::ptt::parser::HandlerOptionFlags::SkipFromTitle, $value);
+    };
+    ($opts:ident, skip_if_first, $value:expr) => {
+        $opts.set_flag($crate::ptt::parser::HandlerOptionFlags::SkipIfFirst, $value);
+    };
+    ($opts:ident, remove, $value:expr) => {
+        $opts.set_flag($crate::ptt::parser::HandlerOptionFlags::Remove, $value);
+    };
+}
+pub(crate) use handler_options_set_field;
+
+macro_rules! handler_options {
+    ($($field:ident : $value:expr),* , ..Default::default() $(,)?) => {{
+        let mut options = $crate::ptt::parser::HandlerOptions::default();
+        $($crate::ptt::parser::handler_options_set_field!(options, $field, $value);)*
+        options
+    }};
+    ($($field:ident : $value:expr),* $(,)?) => {{
+        let mut options = $crate::ptt::parser::HandlerOptions::default();
+        $($crate::ptt::parser::handler_options_set_field!(options, $field, $value);)*
+        options
+    }};
+}
+pub(crate) use handler_options;

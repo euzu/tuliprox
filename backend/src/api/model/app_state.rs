@@ -12,6 +12,7 @@ use crate::utils::GeoIp;
 use arc_swap::{ArcSwap, ArcSwapOption};
 use log::{error, info};
 use reqwest::Client;
+use shared::create_bitset;
 use shared::error::TuliproxError;
 use shared::info_err_res;
 use shared::model::UserConnectionPermission;
@@ -26,8 +27,8 @@ use tokio_util::sync::CancellationToken;
 use crate::api::model::metadata_update_manager::MetadataUpdateManager;
 
 macro_rules! cancel_service {
-    ($field: ident, $changes:expr, $cancel_tokens:expr) => {
-        if $changes.$field {
+    ($field: ident, $flag:expr, $changes:expr, $cancel_tokens:expr) => {
+        if $changes.flags.contains($flag) {
             $cancel_tokens.$field.cancel();
             CancellationToken::default()
         } else {
@@ -58,18 +59,22 @@ struct TargetChanges {
     target: Arc<ConfigTarget>,
 }
 
-#[allow(clippy::struct_excessive_bools)]
+create_bitset!(u8, UpdateChangesFlags, Scheduler, Hdhomerun, FileWatch, Geoip);
+
 pub(in crate::api) struct UpdateChanges {
-    scheduler: bool,
-    hdhomerun: bool,
-    file_watch: bool,
-    geoip: bool,
+    flags: UpdateChangesFlagsSet,
     targets: Option<HashMap<String, TargetChanges>>,
 }
 
 impl UpdateChanges {
     pub(in crate::api) fn modified(&self) -> bool {
-        self.scheduler || self.hdhomerun || self.file_watch || self.geoip
+        !self.flags.is_empty()
+    }
+
+    fn set_flag_if(&mut self, condition: bool, flag: UpdateChangesFlags) {
+        if condition {
+            self.flags.set(flag);
+        }
     }
 }
 
@@ -142,9 +147,9 @@ fn cancel_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
     }
     let cancel_tokens = app_state.cancel_tokens.load();
 
-    let scheduler = cancel_service!(scheduler, changes, cancel_tokens);
-    let hdhomerun = cancel_service!(hdhomerun, changes, cancel_tokens);
-    let file_watch = cancel_service!(file_watch, changes, cancel_tokens);
+    let scheduler = cancel_service!(scheduler, UpdateChangesFlags::Scheduler, changes, cancel_tokens);
+    let hdhomerun = cancel_service!(hdhomerun, UpdateChangesFlags::Hdhomerun, changes, cancel_tokens);
+    let file_watch = cancel_service!(file_watch, UpdateChangesFlags::FileWatch, changes, cancel_tokens);
 
     let tokens = CancelTokens {
         scheduler,
@@ -159,7 +164,7 @@ fn start_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
     if !changes.modified() {
         return;
     }
-    if changes.scheduler {
+    if changes.flags.contains(UpdateChangesFlags::Scheduler) {
         exec_scheduler(
             &Arc::clone(&app_state.http_client.load()),
             app_state,
@@ -168,7 +173,7 @@ fn start_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
         );
     }
 
-    if changes.hdhomerun && app_state.app_config.api_proxy.load().is_some() {
+    if changes.flags.contains(UpdateChangesFlags::Hdhomerun) && app_state.app_config.api_proxy.load().is_some() {
         let mut infos = Vec::new();
         crate::api::main_api::start_hdhomerun(
             &app_state.app_config,
@@ -178,7 +183,7 @@ fn start_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
         );
     }
 
-    if changes.file_watch {
+    if changes.flags.contains(UpdateChangesFlags::FileWatch) {
         exec_config_watch(app_state, &app_state.cancel_tokens.load().file_watch);
     }
 }
@@ -347,7 +352,7 @@ impl AppState {
         self.active_provider.update_config(&self.app_config).await;
         self.update_config().await?;
 
-        if changes.geoip {
+        if changes.flags.contains(UpdateChangesFlags::Geoip) {
             let new_geoip = if use_geoip {
                 let path = get_geoip_path(&working_dir);
                 let _file_lock = self.app_config.file_locks.read_lock(&path).await;
@@ -429,13 +434,15 @@ impl AppState {
         let geoip_enabled = config.is_geoip_enabled();
         let geoip_enabled_old = old_config.is_geoip_enabled();
 
-        UpdateChanges {
-            scheduler: changed_schedules,
-            hdhomerun: changed_hdhomerun,
-            file_watch: changed_file_watch,
+        let mut changes = UpdateChanges {
+            flags: UpdateChangesFlagsSet::new(),
             targets: None,
-            geoip: geoip_enabled != geoip_enabled_old,
-        }
+        };
+        changes.set_flag_if(changed_schedules, UpdateChangesFlags::Scheduler);
+        changes.set_flag_if(changed_hdhomerun, UpdateChangesFlags::Hdhomerun);
+        changes.set_flag_if(changed_file_watch, UpdateChangesFlags::FileWatch);
+        changes.set_flag_if(geoip_enabled != geoip_enabled_old, UpdateChangesFlags::Geoip);
+        changes
     }
 
     fn detect_changes_for_sources(&self, sources: &SourcesConfig) -> UpdateChanges {
@@ -498,13 +505,12 @@ impl AppState {
             (file_watch_changed, target_changes)
         };
 
-        UpdateChanges {
-            scheduler: false,
-            hdhomerun: false,
-            file_watch: file_watch_changed,
-            geoip: false,
+        let mut changes = UpdateChanges {
+            flags: UpdateChangesFlagsSet::new(),
             targets: Some(target_changes),
-        }
+        };
+        changes.set_flag_if(file_watch_changed, UpdateChangesFlags::FileWatch);
+        changes
     }
 
     pub async fn cache_playlist(&self, target_name: &str, playlist: PlaylistStorage) {
@@ -560,11 +566,7 @@ fn schedules_changed(a: &[ScheduleConfig], b: &[ScheduleConfig]) -> bool {
 }
 
 fn hdhomerun_changed(a: &HdHomeRunConfig, b: &HdHomeRunConfig) -> bool {
-    if a.enabled != b.enabled
-        || a.auth != b.auth
-        || a.ssdp_discovery != b.ssdp_discovery
-        || a.proprietary_discovery != b.proprietary_discovery
-    {
+    if a.flags != b.flags {
         return true;
     }
     if !small_vecs_equal_unordered(a.devices.as_ref(), b.devices.as_ref()) {

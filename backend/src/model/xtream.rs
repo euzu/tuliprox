@@ -3,7 +3,10 @@ use crate::model::{AppConfig, ProxyUserCredentials};
 use crate::model::{ConfigTarget, XtreamTargetOutput};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use shared::model::{PlaylistItem, PlaylistItemType, PlaylistItemTypeSet, ProxyUserStatus, XtreamMappingOptions};
+use shared::model::{
+    PlaylistItem, PlaylistItemType, PlaylistItemTypeSet, ProxyUserStatus, XtreamMappingFlags,
+    XtreamMappingFlagsSet, XtreamMappingOptions,
+};
 use shared::utils::{arc_str_serde, deserialize_number_from_string_or_zero};
 use enum_iterator::all;
 use crate::model::XtreamTargetFlags;
@@ -45,11 +48,31 @@ pub fn xtream_mapping_option_from_target_options(target: &ConfigTarget, target_o
         }
     }
 
+    let mut flags = XtreamMappingFlagsSet::new();
+    if target_output
+        .flags
+        .contains(XtreamTargetFlags::SkipLiveDirectSource)
+    {
+        flags.set(XtreamMappingFlags::SkipLiveDirectSource);
+    }
+    if target_output
+        .flags
+        .contains(XtreamTargetFlags::SkipVideoDirectSource)
+    {
+        flags.set(XtreamMappingFlags::SkipVideoDirectSource);
+    }
+    if target_output
+        .flags
+        .contains(XtreamTargetFlags::SkipSeriesDirectSource)
+    {
+        flags.set(XtreamMappingFlags::SkipSeriesDirectSource);
+    }
+    if cfg.is_reverse_proxy_resource_rewrite_enabled() {
+        flags.set(XtreamMappingFlags::RewriteResourceUrl);
+    }
+
     XtreamMappingOptions {
-        skip_live_direct_source: target_output.flags.contains(XtreamTargetFlags::SkipLiveDirectSource),
-        skip_video_direct_source: target_output.flags.contains(XtreamTargetFlags::SkipVideoDirectSource),
-        skip_series_direct_source: target_output.flags.contains(XtreamTargetFlags::SkipSeriesDirectSource),
-        rewrite_resource_url: cfg.is_reverse_proxy_resource_rewrite_enabled(),
+        flags,
         force_redirect,
         reverse_item_types,
         username: user.username.clone(),

@@ -1,5 +1,5 @@
 use crate::api::model::TransportStreamBuffer;
-use crate::model::{ApiProxyConfig, ApiProxyServerInfo, Config, ConfigInput, ConfigInputOptions, ConfigTarget, CustomStreamResponse, GracePeriodOptions, HdHomeRunConfig, Mappings, ProxyUserCredentials, ReverseProxyDisabledHeaderConfig, SourcesConfig, TargetOutput};
+use crate::model::{ApiProxyConfig, ApiProxyServerInfo, Config, ConfigInput, ConfigInputOptions, ConfigTarget, CustomStreamResponse, GracePeriodOptions, HdHomeRunConfig, HdHomeRunFlags, Mappings, ProxyUserCredentials, ReverseProxyDisabledHeaderConfig, SourcesConfig, TargetOutput};
 use crate::utils;
 use crate::utils::ffmpeg::check_ffprobe_availability;
 use arc_swap::{ArcSwap, ArcSwapOption};
@@ -98,7 +98,10 @@ impl AppConfig {
         let check_homerun = {
             let config = self.config.load();
             self.hdhomerun.store(config.hdhomerun.as_ref().map(|h| Arc::new(h.clone())));
-            config.hdhomerun.as_ref().is_some_and(|h| h.enabled)
+            config
+                .hdhomerun
+                .as_ref()
+                .is_some_and(|h| h.flags.contains(HdHomeRunFlags::Enabled))
         };
         let sources = self.sources.load();
         for source in &sources.sources {
@@ -437,4 +440,3 @@ impl AppConfig {
         }).await
     }
 }
-
