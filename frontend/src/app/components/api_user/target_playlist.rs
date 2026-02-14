@@ -1,22 +1,25 @@
-use std::cell::RefCell;
-use crate::app::components::{AppIcon, Card, CollapsePanel, IconButton, RadioButtonGroup};
-use shared::model::{PlaylistClusterBouquetDto, PlaylistClusterCategoriesDto, XtreamCluster};
-use std::collections::HashMap;
-use std::fmt::{Display, Formatter};
-use std::rc::Rc;
-use std::str::FromStr;
+use crate::{
+    app::components::{AppIcon, Card, CollapsePanel, IconButton, RadioButtonGroup},
+    html_if,
+};
+use shared::{
+    error::TuliproxError,
+    info_err_res,
+    model::{PlaylistClusterBouquetDto, PlaylistClusterCategoriesDto, XtreamCluster},
+};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    fmt::{Display, Formatter},
+    rc::Rc,
+    str::FromStr,
+};
 use wasm_bindgen::JsCast;
 use yew::prelude::*;
 use yew_i18n::use_translation;
-use shared::error::TuliproxError;
-use shared::info_err_res;
-use crate::html_if;
 
 fn normalize(s: &str) -> String {
-    let cleaned: String = s
-        .chars()
-        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
-        .collect();
+    let cleaned: String = s.chars().filter(|c| c.is_alphanumeric() || c.is_whitespace()).collect();
     cleaned.trim().to_lowercase()
 }
 
@@ -57,12 +60,14 @@ impl FilterState {
 
 impl Display for FilterState {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}",
-               match self {
-                   Self::All => Self::ALL,
-                   Self::Selected => Self::SELECTED,
-                   Self::Deselected => Self::DESELECTED,
-               }
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::All => Self::ALL,
+                Self::Selected => Self::SELECTED,
+                Self::Deselected => Self::DESELECTED,
+            }
         )
     }
 }
@@ -203,7 +208,9 @@ pub fn UserTargetPlaylist(props: &UserTargetPlaylistProps) -> Html {
         })
     };
 
-    let render_category_cluster = |cluster: XtreamCluster, cats: Option<&Vec<String>>, selections: &HashMap<String, bool>| {
+    let render_category_cluster = |cluster: XtreamCluster,
+                                   cats: Option<&Vec<String>>,
+                                   selections: &HashMap<String, bool>| {
         if let Some(c) = cats {
             let cats_clone = c.clone();
             let cluster_clone = cluster;
@@ -229,7 +236,8 @@ pub fn UserTargetPlaylist(props: &UserTargetPlaylistProps) -> Html {
             };
 
             let filter_state_handle = filter_state.clone();
-            let filter_state_selections = Rc::new(vec![filter_state.get(&cluster).cloned().unwrap_or(FilterState::All).to_string()]);
+            let filter_state_selections =
+                Rc::new(vec![filter_state.get(&cluster).cloned().unwrap_or(FilterState::All).to_string()]);
             let title_content = if *collapse_state.get(&cluster).unwrap_or(&true) {
                 html! {
                 <div class="tp__api-user-target-playlist__section-header">

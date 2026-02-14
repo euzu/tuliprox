@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use thiserror::Error as ThisError;
 
 /// Conduit api error info for Unprocessable Entity error

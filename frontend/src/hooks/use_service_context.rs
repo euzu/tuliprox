@@ -1,7 +1,12 @@
+use crate::{
+    model::WebConfig,
+    services::{
+        AuthService, ConfigService, EventService, PlaylistService, StatusService, StreamsService, ToastrService,
+        UserApiService, UserService, WebSocketService,
+    },
+};
 use std::rc::Rc;
 use yew::prelude::*;
-use crate::model::WebConfig;
-use crate::services::{AuthService, ConfigService, EventService, PlaylistService, StatusService, StreamsService, ToastrService, UserApiService, UserService, WebSocketService};
 
 pub struct Services {
     pub auth: Rc<AuthService>,
@@ -28,25 +33,12 @@ impl Services {
         let user = Rc::new(UserService::new(Rc::clone(&event)));
         let user_api = Rc::new(UserApiService::new());
         let websocket = Rc::new(WebSocketService::new(Rc::clone(&status), Rc::clone(&event)));
-        Self {
-            auth,
-            config,
-            status,
-            streams,
-            event,
-            playlist,
-            user,
-            user_api,
-            toastr,
-            websocket
-        }
+        Self { auth, config, status, streams, event, playlist, user, user_api, toastr, websocket }
     }
 }
 
 impl PartialEq for Services {
-    fn eq(&self, _other: &Self) -> bool {
-        true
-    }
+    fn eq(&self, _other: &Self) -> bool { true }
 }
 
 impl Eq for Services {}
@@ -57,15 +49,9 @@ pub struct ServiceContext {
 }
 
 impl ServiceContext {
-    pub fn new(config: &WebConfig) -> Self {
-        Self {
-            services: Rc::new(Services::new(config))
-        }
-    }
+    pub fn new(config: &WebConfig) -> Self { Self { services: Rc::new(Services::new(config)) } }
 
-    pub fn services(&self) ->  Rc<Services> {
-            self.services.clone()
-    }
+    pub fn services(&self) -> Rc<Services> { self.services.clone() }
 }
 
 #[hook]

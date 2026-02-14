@@ -1,7 +1,7 @@
+use crate::app::components::chip::Chip;
+use std::rc::Rc;
 use web_sys::HtmlInputElement;
 use yew::prelude::*;
-use std::rc::Rc;
-use crate::app::components::chip::Chip;
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Tag {
@@ -22,12 +22,7 @@ pub struct TagListProps {
 
 #[function_component]
 pub fn TagList(props: &TagListProps) -> Html {
-    let TagListProps {
-        tags,
-        on_change,
-        readonly,
-        placeholder,
-    } = props.clone();
+    let TagListProps { tags, on_change, readonly, placeholder } = props.clone();
 
     let tag_state = use_state(|| tags.clone());
     let new_tag = use_state(String::default);

@@ -1,18 +1,24 @@
 use super::PanelApiConfigDto;
-use crate::error::{TuliproxError, TuliproxErrorKind};
-use crate::model::EpgConfigDto;
-use crate::utils::{arc_str_serde, default_as_true, deserialize_timestamp, get_credentials_from_url_str,
-                   get_trimmed_string, is_false, is_true, is_zero_u16, parse_provider_scheme_url_parts,
-                   sanitize_sensitive_info, serialize_option_vec_flow_map_items, trim_last_slash, PROVIDER_SCHEME_PREFIX};
-use crate::utils::{is_blank_optional_string, Internable, arc_str_vec_serde};
-use crate::{check_input_connections, check_input_credentials, info_err_res};
-
+use crate::{
+    check_input_connections, check_input_credentials,
+    error::{TuliproxError, TuliproxErrorKind},
+    info_err_res,
+    model::EpgConfigDto,
+    utils::{
+        arc_str_serde, arc_str_vec_serde, default_as_true, deserialize_timestamp, get_credentials_from_url_str,
+        get_trimmed_string, is_blank_optional_string, is_false, is_true, is_zero_u16, parse_provider_scheme_url_parts,
+        sanitize_sensitive_info, serialize_option_vec_flow_map_items, trim_last_slash, Internable,
+        PROVIDER_SCHEME_PREFIX,
+    },
+};
 use enum_iterator::Sequence;
 use log::warn;
-use std::collections::{HashMap, HashSet};
-use std::fmt::Display;
-use std::str::FromStr;
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Display,
+    str::FromStr,
+    sync::Arc,
+};
 
 #[macro_export]
 macro_rules! apply_batch_aliases {
@@ -33,7 +39,7 @@ macro_rules! apply_batch_aliases {
             } else {
                 $source.aliases = Some($batch_aliases);
             }
-                if let Some(index) = $index {
+            if let Some(index) = $index {
                 let mut idx = index + 1;
                 // set to the same id as the first alias, because the first alias is copied into this input
                 $source.id = idx;
@@ -66,34 +72,31 @@ pub enum InputType {
     Library,
 }
 
-
 impl InputType {
     const M3U: &'static str = "m3u";
     const XTREAM: &'static str = "xtream";
     const M3U_BATCH: &'static str = "m3u_batch";
     const XTREAM_BATCH: &'static str = "xtream_batch";
     const LIBRARY: &'static str = "library";
-    pub fn is_xtream(&self) -> bool {
-        matches!(self, Self::Xtream | Self::XtreamBatch)
-    }
-    pub fn is_m3u(&self) -> bool {
-        matches!(self, Self::M3u | Self::M3uBatch)
-    }
+    pub fn is_xtream(&self) -> bool { matches!(self, Self::Xtream | Self::XtreamBatch) }
+    pub fn is_m3u(&self) -> bool { matches!(self, Self::M3u | Self::M3uBatch) }
 
-    pub fn is_library(&self) -> bool {
-        matches!(self, Self::Library)
-    }
+    pub fn is_library(&self) -> bool { matches!(self, Self::Library) }
 }
 
 impl Display for InputType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", match self {
-            Self::M3u => Self::M3U,
-            Self::Xtream => Self::XTREAM,
-            Self::M3uBatch => Self::M3U_BATCH,
-            Self::XtreamBatch => Self::XTREAM_BATCH,
-            Self::Library => Self::LIBRARY,
-        })
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::M3u => Self::M3U,
+                Self::Xtream => Self::XTREAM,
+                Self::M3uBatch => Self::M3U_BATCH,
+                Self::XtreamBatch => Self::XTREAM_BATCH,
+                Self::Library => Self::LIBRARY,
+            }
+        )
     }
 }
 
@@ -117,17 +120,7 @@ impl FromStr for InputType {
     }
 }
 
-#[derive(
-    Debug,
-    Copy,
-    Clone,
-    serde::Serialize,
-    serde::Deserialize,
-    Sequence,
-    PartialEq,
-    Eq,
-    Default
-)]
+#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq, Default)]
 pub enum InputFetchMethod {
     #[default]
     GET,
@@ -141,10 +134,14 @@ impl InputFetchMethod {
 
 impl Display for InputFetchMethod {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", match self {
-            Self::GET => Self::GET_METHOD,
-            Self::POST => Self::POST_METHOD,
-        })
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::GET => Self::GET_METHOD,
+                Self::POST => Self::POST_METHOD,
+            }
+        )
     }
 }
 
@@ -161,7 +158,6 @@ impl FromStr for InputFetchMethod {
         }
     }
 }
-
 
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -277,7 +273,6 @@ pub struct ConfigInputAliasDto {
     pub exp_date: Option<i64>,
     #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
     pub enabled: bool,
-
 }
 
 impl ConfigInputAliasDto {
@@ -327,11 +322,7 @@ pub struct ConfigInputDto {
     pub cache_duration: Option<String>,
     #[serde(skip)]
     pub cache_duration_seconds: u64,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        serialize_with = "serialize_option_vec_flow_map_items"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "serialize_option_vec_flow_map_items")]
     pub aliases: Option<Vec<ConfigInputAliasDto>>,
     #[serde(default)]
     pub priority: i16,
@@ -341,11 +332,7 @@ pub struct ConfigInputDto {
     pub method: InputFetchMethod,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub staged: Option<StagedInputDto>,
-    #[serde(
-        default,
-        deserialize_with = "deserialize_timestamp",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, deserialize_with = "deserialize_timestamp", skip_serializing_if = "Option::is_none")]
     pub exp_date: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub panel_api: Option<PanelApiConfigDto>,
@@ -379,16 +366,15 @@ impl Default for ConfigInputDto {
 }
 
 impl ConfigInputDto {
-
-    pub fn new_with_type(input_type: InputType) -> Self {
-        Self {
-            input_type,
-            ..Self::default()
-        }
-    }
+    pub fn new_with_type(input_type: InputType) -> Self { Self { input_type, ..Self::default() } }
 
     #[allow(clippy::cast_possible_truncation)]
-    pub fn prepare(&mut self, index: u16, _include_computed: bool, provider_names: &HashSet<String>) -> Result<u16, TuliproxError> {
+    pub fn prepare(
+        &mut self,
+        index: u16,
+        _include_computed: bool,
+        provider_names: &HashSet<String>,
+    ) -> Result<u16, TuliproxError> {
         self.name = self.name.trim().intern();
         if self.name.is_empty() {
             return info_err_res!("name for input is mandatory");
@@ -491,7 +477,9 @@ impl ConfigInputDto {
                             "d" => val * 86400,
                             _ => return info_err_res!("Invalid cache_duration unit in '{}': {}", self.name, unit),
                         },
-                        Err(_) => return info_err_res!("Invalid cache_duration format in '{}': {}", self.name, duration_str),
+                        Err(_) => {
+                            return info_err_res!("Invalid cache_duration format in '{}': {}", self.name, duration_str)
+                        }
                     }
                 } else {
                     return info_err_res!("Invalid cache_duration format in '{}'", self.name);
@@ -514,7 +502,8 @@ impl ConfigInputDto {
                         return (self.username.clone(), self.password.clone(), Some(self.url.clone()));
                     }
 
-                    let (u, p, r) = self.aliases
+                    let (u, p, r) = self
+                        .aliases
                         .as_ref()
                         .and_then(|aliases| aliases.iter().find(|a| a.enabled))
                         .map(|alias| (alias.username.clone(), alias.password.clone(), Some(alias.url.clone())))
@@ -544,29 +533,36 @@ impl ConfigInputDto {
                 if username.is_none() || password.is_none() || base_url.is_none() {
                     Err(format!("auto_epg is enabled for input {}, but no credentials could be extracted", self.name))
                 } else if base_url.is_some() {
-                    let provider_epg_url = format!("{}/xmltv.php?username={}&password={}",
-                                                   trim_last_slash(&base_url.unwrap_or_default()),
-                                                   username.unwrap_or_default(),
-                                                   password.unwrap_or_default());
+                    let provider_epg_url = format!(
+                        "{}/xmltv.php?username={}&password={}",
+                        trim_last_slash(&base_url.unwrap_or_default()),
+                        username.unwrap_or_default(),
+                        password.unwrap_or_default()
+                    );
                     Ok(provider_epg_url)
                 } else {
-                    Err(format!("auto_epg is enabled for input {}, but url could not be parsed {}", self.name, sanitize_sensitive_info(&self.url)))
+                    Err(format!(
+                        "auto_epg is enabled for input {}, but url could not be parsed {}",
+                        self.name,
+                        sanitize_sensitive_info(&self.url)
+                    ))
                 }
             };
 
             epg.prepare(create_auto_url, include_computed)?;
             epg.t_sources = {
                 let mut seen_urls = HashSet::new();
-                epg.t_sources
-                    .drain(..)
-                    .filter(|src| seen_urls.insert(src.url.clone()))
-                    .collect()
+                epg.t_sources.drain(..).filter(|src| seen_urls.insert(src.url.clone())).collect()
             };
         }
         Ok(())
     }
 
-    pub fn prepare_batch(&mut self, batch_aliases: Vec<ConfigInputAliasDto>, index: u16) -> Result<Option<u16>, TuliproxError> {
+    pub fn prepare_batch(
+        &mut self,
+        batch_aliases: Vec<ConfigInputAliasDto>,
+        index: u16,
+    ) -> Result<Option<u16>, TuliproxError> {
         let idx = apply_batch_aliases!(self, batch_aliases, Some(index));
         Ok(idx)
     }
@@ -583,7 +579,12 @@ impl ConfigInputDto {
         Ok(())
     }
 
-    pub fn update_account_expiration_date(&mut self, input_name: &Arc<str>, username: &str, exp_date: i64) -> Result<(), TuliproxError> {
+    pub fn update_account_expiration_date(
+        &mut self,
+        input_name: &Arc<str>,
+        username: &str,
+        exp_date: i64,
+    ) -> Result<(), TuliproxError> {
         if &self.name == input_name {
             if let Some(input_username) = &self.username {
                 if input_username == username {
@@ -594,16 +595,16 @@ impl ConfigInputDto {
         }
 
         if let Some(aliases) = &mut self.aliases {
-            if let Some(alias) = aliases
-                .iter_mut()
-                .find(|a| a.username.as_deref() == Some(username))
-            {
+            if let Some(alias) = aliases.iter_mut().find(|a| a.username.as_deref() == Some(username)) {
                 alias.exp_date = Some(exp_date);
                 return Ok(());
             }
         }
 
-        Err(TuliproxError::new(TuliproxErrorKind::Info, format!("No matching input or alias found for input '{input_name}' with username '{username}'")))
+        Err(TuliproxError::new(
+            TuliproxErrorKind::Info,
+            format!("No matching input or alias found for input '{input_name}' with username '{username}'"),
+        ))
     }
 }
 

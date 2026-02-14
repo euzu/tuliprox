@@ -6,13 +6,11 @@ pub enum CellValue<'a> {
     Status(ProxyUserStatus),
     Proxy(ProxyType),
     Text(&'a str),
-    Date(i64)
+    Date(i64),
 }
 
 impl<'a> PartialOrd for CellValue<'a> {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(other)) }
 }
 
 impl<'a> Ord for CellValue<'a> {
@@ -30,7 +28,9 @@ impl<'a> Ord for CellValue<'a> {
             (CellValue::Bool(_), _) => std::cmp::Ordering::Less,
             (CellValue::Status(_), CellValue::Empty | CellValue::Bool(_)) => std::cmp::Ordering::Greater,
             (CellValue::Status(_), _) => std::cmp::Ordering::Less,
-            (CellValue::Proxy(_), CellValue::Empty | CellValue::Bool(_) | CellValue::Status(_)) => std::cmp::Ordering::Greater,
+            (CellValue::Proxy(_), CellValue::Empty | CellValue::Bool(_) | CellValue::Status(_)) => {
+                std::cmp::Ordering::Greater
+            }
             (CellValue::Proxy(_), _) => std::cmp::Ordering::Less,
             (CellValue::Text(_), CellValue::Date(_)) => std::cmp::Ordering::Less,
             (CellValue::Text(_), _) => std::cmp::Ordering::Greater,
@@ -40,9 +40,7 @@ impl<'a> Ord for CellValue<'a> {
 }
 
 impl<'a> PartialEq for CellValue<'a> {
-    fn eq(&self, other: &Self) -> bool {
-        self.cmp(other) == std::cmp::Ordering::Equal
-    }
+    fn eq(&self, other: &Self) -> bool { self.cmp(other) == std::cmp::Ordering::Equal }
 }
 
 impl<'a> Eq for CellValue<'a> {}

@@ -1,6 +1,6 @@
+use crate::app::components::TextButton;
 use std::rc::Rc;
 use yew::prelude::*;
-use crate::app::components::TextButton;
 
 #[derive(Properties, PartialEq, Clone)]
 pub struct RadioButtonGroupProps {

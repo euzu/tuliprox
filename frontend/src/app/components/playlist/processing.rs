@@ -1,11 +1,11 @@
+use crate::app::components::{Tag, TagList};
+use shared::model::ProcessingOrder;
 use std::rc::Rc;
 use yew::prelude::*;
-use shared::model::ProcessingOrder;
-use crate::app::components::{Tag, TagList};
 
 #[derive(Properties, PartialEq, Clone)]
 pub struct PlaylistProcessingProps {
-  pub order: ProcessingOrder,
+    pub order: ProcessingOrder,
 }
 
 #[function_component]

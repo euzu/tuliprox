@@ -1,14 +1,14 @@
-use crate::error::{TuliproxError, TuliproxErrorKind};
-use crate::model::{CacheConfigDto, GeoIpConfigDto, RateLimitConfigDto, StreamConfigDto};
-use crate::utils::{is_false, is_empty_optional_vec, default_resource_retry_attempts,
-                   default_resource_retry_backoff_ms,
-                   default_resource_retry_backoff_multiplier,
-                   is_default_resource_retry_attempts,
-                   is_default_resource_retry_backoff_ms,
-                   is_default_resource_retry_backoff_multiplier,
-                   hex_to_u8_16};
+use crate::{
+    error::{TuliproxError, TuliproxErrorKind},
+    info_err_res,
+    model::{CacheConfigDto, GeoIpConfigDto, RateLimitConfigDto, StreamConfigDto},
+    utils::{
+        default_resource_retry_attempts, default_resource_retry_backoff_ms, default_resource_retry_backoff_multiplier,
+        hex_to_u8_16, is_default_resource_retry_attempts, is_default_resource_retry_backoff_ms,
+        is_default_resource_retry_backoff_multiplier, is_empty_optional_vec, is_false,
+    },
+};
 use log::warn;
-use crate::info_err_res;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -31,9 +31,7 @@ impl ReverseProxyDisabledHeaderConfigDto {
             && self.custom_header.iter().all(|h| h.trim().is_empty())
     }
 
-    pub fn clean(&mut self) {
-        self.custom_header.retain(|h| !h.trim().is_empty());
-    }
+    pub fn clean(&mut self) { self.custom_header.retain(|h| !h.trim().is_empty()); }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
@@ -60,10 +58,7 @@ impl ReverseProxyConfigDto {
     pub fn is_empty(&self) -> bool {
         !self.resource_rewrite_disabled
             && self.disabled_header.as_ref().is_none_or(|d| d.is_empty())
-            && self
-                .resource_retry
-                .as_ref()
-                .is_none_or(ResourceRetryConfigDto::is_default)
+            && self.resource_retry.as_ref().is_none_or(ResourceRetryConfigDto::is_default)
             && (self.stream.is_none() || self.stream.as_ref().is_some_and(|s| s.is_empty()))
             && (self.cache.is_none() || self.cache.as_ref().is_some_and(|c| c.is_empty()))
             && (self.rate_limit.is_none() || self.rate_limit.as_ref().is_some_and(|r| r.is_empty()))
@@ -77,11 +72,7 @@ impl ReverseProxyConfigDto {
                 self.disabled_header = None;
             }
         }
-        if self
-            .resource_retry
-            .as_ref()
-            .is_some_and(ResourceRetryConfigDto::is_default)
-        {
+        if self.resource_retry.as_ref().is_some_and(ResourceRetryConfigDto::is_default) {
             self.resource_retry = None;
         }
         if self.stream.as_ref().is_some_and(StreamConfigDto::is_empty) {
@@ -99,7 +90,6 @@ impl ReverseProxyConfigDto {
     }
 
     pub(crate) fn prepare(&mut self, working_dir: &str) -> Result<(), TuliproxError> {
-
         hex_to_u8_16(&self.rewrite_secret).map_err(|e| TuliproxError::new(TuliproxErrorKind::Info, e))?;
 
         if let Some(stream) = self.stream.as_mut() {
@@ -132,9 +122,15 @@ impl ReverseProxyConfigDto {
 pub struct ResourceRetryConfigDto {
     #[serde(default = "default_resource_retry_attempts", skip_serializing_if = "is_default_resource_retry_attempts")]
     pub max_attempts: u32,
-    #[serde(default = "default_resource_retry_backoff_ms", skip_serializing_if = "is_default_resource_retry_backoff_ms")]
+    #[serde(
+        default = "default_resource_retry_backoff_ms",
+        skip_serializing_if = "is_default_resource_retry_backoff_ms"
+    )]
     pub backoff_millis: u64,
-    #[serde(default = "default_resource_retry_backoff_multiplier", skip_serializing_if = "is_default_resource_retry_backoff_multiplier")]
+    #[serde(
+        default = "default_resource_retry_backoff_multiplier",
+        skip_serializing_if = "is_default_resource_retry_backoff_multiplier"
+    )]
     pub backoff_multiplier: f64,
     #[serde(default, skip_serializing_if = "is_empty_optional_vec")]
     pub failover_redirect_patterns: Option<Vec<String>>,

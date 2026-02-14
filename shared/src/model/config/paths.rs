@@ -12,5 +12,4 @@ pub struct ConfigPaths {
     pub api_proxy_file_path: String,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub custom_stream_response_path: Option<String>,
-
 }

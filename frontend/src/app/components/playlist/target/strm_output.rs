@@ -1,9 +1,11 @@
+use crate::{
+    app::components::{convert_bool_to_chip_style, FilterView, RevealContent, Tag, TagList},
+    html_if,
+};
+use shared::model::StrmTargetOutputDto;
 use std::rc::Rc;
 use yew::prelude::*;
 use yew_i18n::use_translation;
-use shared::model::{StrmTargetOutputDto};
-use crate::app::components::{convert_bool_to_chip_style, FilterView, RevealContent, Tag, TagList};
-use crate::html_if;
 
 #[derive(Properties, PartialEq, Clone)]
 pub struct StrmOutputProps {
@@ -21,8 +23,14 @@ pub fn StrmOutput(props: &StrmOutputProps) -> Html {
             vec![
                 Rc::new(Tag { class: convert_bool_to_chip_style(output.flat), label: translate.t("LABEL.FLAT") }),
                 Rc::new(Tag { class: convert_bool_to_chip_style(output.cleanup), label: translate.t("LABEL.CLEANUP") }),
-                Rc::new(Tag { class: convert_bool_to_chip_style(output.underscore_whitespace), label: translate.t("LABEL.UNDERSCORE_WHITESPACE") }),
-                Rc::new(Tag { class: convert_bool_to_chip_style(output.add_quality_to_filename), label: translate.t("LABEL.ADD_QUALITY_TO_FILENAME") }),
+                Rc::new(Tag {
+                    class: convert_bool_to_chip_style(output.underscore_whitespace),
+                    label: translate.t("LABEL.UNDERSCORE_WHITESPACE"),
+                }),
+                Rc::new(Tag {
+                    class: convert_bool_to_chip_style(output.add_quality_to_filename),
+                    label: translate.t("LABEL.ADD_QUALITY_TO_FILENAME"),
+                }),
             ]
         })
     };

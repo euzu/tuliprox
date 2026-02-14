@@ -1,15 +1,21 @@
-use crate::app::components::config::HasFormData;
-use crate::app::components::select::Select;
-use crate::app::components::{BlockId, BlockInstance, Card, ClusterFlagsInput, ClusterFlagsInputMode, DropDownOption, DropDownSelection, EditMode, FilterInput, IconButton, Panel, SourceEditorContext, TextButton};
-use crate::{config_field_child, edit_field_bool, edit_field_list_option, edit_field_text, generate_form_reducer};
-use shared::model::{ClusterFlags, ConfigTargetDto, ConfigTargetOptions, ProcessingOrder};
-use std::fmt::Display;
-use std::rc::Rc;
-use std::str::FromStr;
-use yew::{function_component, html, use_context, use_effect_with, use_memo, use_reducer, use_state, Callback, Html, Properties, UseReducerHandle};
+use crate::{
+    app::components::{
+        config::HasFormData, select::Select, BlockId, BlockInstance, Card, ClusterFlagsInput, ClusterFlagsInputMode,
+        DropDownOption, DropDownSelection, EditMode, FilterInput, IconButton, Panel, SourceEditorContext, TextButton,
+    },
+    config_field_child, edit_field_bool, edit_field_list_option, edit_field_text, generate_form_reducer,
+};
+use shared::{
+    error::TuliproxError,
+    info_err_res,
+    model::{ClusterFlags, ConfigTargetDto, ConfigTargetOptions, ProcessingOrder},
+};
+use std::{fmt::Display, rc::Rc, str::FromStr};
+use yew::{
+    function_component, html, use_context, use_effect_with, use_memo, use_reducer, use_state, Callback, Html,
+    Properties, UseReducerHandle,
+};
 use yew_i18n::use_translation;
-use shared::error::TuliproxError;
-use shared::info_err_res;
 
 const LABEL_ENABLED: &str = "LABEL.ENABLED";
 const LABEL_NAME: &str = "LABEL.NAME";
@@ -59,7 +65,6 @@ impl Display for TargetFormPage {
     }
 }
 
-
 // pub sort: Option<ConfigSortDto>,
 // pub rename: Option<Vec<ConfigRenameDto>>,
 // pub favourites: Option<Vec<ConfigFavouritesDto>>,
@@ -101,18 +106,11 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
     let source_editor_ctx = use_context::<SourceEditorContext>().expect("SourceEditorContext not found");
 
     let target_form_state: UseReducerHandle<ConfigTargetFormState> =
-        use_reducer(|| ConfigTargetFormState {
-            form: ConfigTargetDto::default(),
-            modified: false,
-        });
+        use_reducer(|| ConfigTargetFormState { form: ConfigTargetDto::default(), modified: false });
     let target_options_state: UseReducerHandle<ConfigTargetOptionsFormState> =
-        use_reducer(|| ConfigTargetOptionsFormState {
-            form: ConfigTargetOptions::default(),
-            modified: false,
-        });
+        use_reducer(|| ConfigTargetOptionsFormState { form: ConfigTargetOptions::default(), modified: false });
 
     let view_visible = use_state(|| TargetFormPage::Main);
-
 
     let handle_menu_click = {
         let active_menu = view_visible.clone();
@@ -123,24 +121,21 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
         })
     };
 
-
-    let processing_orders = use_memo(target_form_state.clone(), |target_state: &UseReducerHandle<ConfigTargetFormState>| {
-        let default_po = target_state.form.processing_order;
-        [
-            ProcessingOrder::Frm,
-            ProcessingOrder::Fmr,
-            ProcessingOrder::Rfm,
-            ProcessingOrder::Rmf,
-            ProcessingOrder::Mfr,
-            ProcessingOrder::Mrf,
-        ]
+    let processing_orders =
+        use_memo(target_form_state.clone(), |target_state: &UseReducerHandle<ConfigTargetFormState>| {
+            let default_po = target_state.form.processing_order;
+            [
+                ProcessingOrder::Frm,
+                ProcessingOrder::Fmr,
+                ProcessingOrder::Rfm,
+                ProcessingOrder::Rmf,
+                ProcessingOrder::Mfr,
+                ProcessingOrder::Mrf,
+            ]
             .iter()
-            .map(|t| DropDownOption {
-                id: t.to_string(),
-                label: html! { t.to_string() },
-                selected: *t == default_po,
-            }).collect::<Vec<DropDownOption>>()
-    });
+            .map(|t| DropDownOption { id: t.to_string(), label: html! { t.to_string() }, selected: *t == default_po })
+            .collect::<Vec<DropDownOption>>()
+        });
 
     {
         let target_form_state = target_form_state.clone();
@@ -152,8 +147,7 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
             if let Some(target) = cfg {
                 target_form_state.dispatch(ConfigTargetFormAction::SetAll(target.as_ref().clone()));
                 target_options_state.dispatch(ConfigTargetOptionsFormAction::SetAll(
-                    target.options.as_ref()
-                        .map_or_else(ConfigTargetOptions::default, |d| d.clone()),
+                    target.options.as_ref().map_or_else(ConfigTargetOptions::default, |d| d.clone()),
                 ));
             } else {
                 target_form_state.dispatch(ConfigTargetFormAction::SetAll(ConfigTargetDto::default()));
@@ -283,21 +277,21 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
     };
 
     html! {
-        <div class="tp__source-editor-form tp__config-view-page">
-             <div class="tp__source-editor-form_toolbar tp__form-page__toolbar">
-             <TextButton class="secondary" name="cancel_input"
-                icon="Cancel"
-                title={ translate.t("LABEL.CANCEL")}
-                onclick={handle_cancel}></TextButton>
-             <TextButton class="primary" name="apply_input"
-                icon="Accept"
-                title={ translate.t("LABEL.OK")}
-                onclick={handle_apply_target}></TextButton>
-          </div>
-            <div class="tp__source-editor-form__content">
-                { render_sidebar() }
-                { render_edit_mode() }
-            </div>
+    <div class="tp__source-editor-form tp__config-view-page">
+         <div class="tp__source-editor-form_toolbar tp__form-page__toolbar">
+         <TextButton class="secondary" name="cancel_input"
+            icon="Cancel"
+            title={ translate.t("LABEL.CANCEL")}
+            onclick={handle_cancel}></TextButton>
+         <TextButton class="primary" name="apply_input"
+            icon="Accept"
+            title={ translate.t("LABEL.OK")}
+            onclick={handle_apply_target}></TextButton>
+      </div>
+        <div class="tp__source-editor-form__content">
+            { render_sidebar() }
+            { render_edit_mode() }
         </div>
-        }
+    </div>
+    }
 }

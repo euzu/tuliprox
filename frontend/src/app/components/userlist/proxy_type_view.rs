@@ -1,4 +1,4 @@
-use crate::app::components::{Chip};
+use crate::app::components::Chip;
 use shared::model::{ClusterFlags, ProxyType};
 use yew::prelude::*;
 use yew_i18n::use_translation;
@@ -12,13 +12,13 @@ pub struct ProxyTypeViewProps {
 pub fn ProxyTypeView(props: &ProxyTypeViewProps) -> Html {
     let translate = use_translation();
 
-    let render_chip = |flag: bool, class_sfx: &str,  label: &str, | -> Html {
+    let render_chip = |flag: bool, class_sfx: &str, label: &str| -> Html {
         if flag {
             html! {
                 <Chip class={ format!("tp__proxy-type__reverse tp__proxy-type__reverse-{} active", class_sfx) } label={translate.t(label)} />
             }
         } else {
-            html!{
+            html! {
                 <Chip class={ format!("tp__proxy-type__redirect tp__proxy-type__redirect-{}", class_sfx)} label={translate.t(label)} />
             }
         }

@@ -1,19 +1,28 @@
-use std::fmt::Display;
-use crate::app::components::config::config_page::{ConfigForm, LABEL_API_CONFIG};
-use crate::app::components::config::config_view_context::ConfigViewContext;
-use crate::app::components::{AppIcon, Card, NoContent, Table, TableDefinition, TextButton};
-use crate::app::context::ConfigContext;
-use crate::{config_field, config_field_bool, config_field_empty, edit_field_bool, edit_field_number_u16,
-            edit_field_text, generate_form_reducer, html_if};
-use shared::model::{ApiProxyConfigDto, ApiProxyServerInfoDto, ConfigApiDto, SortOrder};
-use std::rc::Rc;
-use std::str::FromStr;
+use crate::{
+    app::{
+        components::{
+            config::{
+                config_page::{ConfigForm, LABEL_API_CONFIG},
+                config_view_context::ConfigViewContext,
+            },
+            menu_item::MenuItem,
+            popup_menu::PopupMenu,
+            AppIcon, Card, NoContent, Table, TableDefinition, TextButton,
+        },
+        context::ConfigContext,
+    },
+    config_field, config_field_bool, config_field_empty, edit_field_bool, edit_field_number_u16, edit_field_text,
+    generate_form_reducer, html_if,
+};
+use shared::{
+    concat_string,
+    error::TuliproxError,
+    info_err_res,
+    model::{ApiProxyConfigDto, ApiProxyServerInfoDto, ConfigApiDto, SortOrder},
+};
+use std::{fmt::Display, rc::Rc, str::FromStr};
 use yew::prelude::*;
 use yew_i18n::use_translation;
-use shared::{concat_string, info_err_res};
-use shared::error::TuliproxError;
-use crate::app::components::menu_item::MenuItem;
-use crate::app::components::popup_menu::PopupMenu;
 
 const LABEL_HOST: &str = "LABEL.HOST";
 const LABEL_PORT: &str = "LABEL.PORT";
@@ -28,17 +37,7 @@ const LABEL_USE_USER_DB: &str = "LABEL.USE_USER_DB";
 const LABEL_SERVER: &str = "LABEL.SERVER";
 const LABEL_ADD_SERVER: &str = "LABEL.ADD_SERVER";
 
-const SERVER_HEADERS: [&str; 8] = [
-    "EMPTY",
-    "NAME",
-    "PROTOCOL",
-    "HOST",
-    "PORT",
-    "TIMEZONE",
-    "MESSAGE",
-    "PATH",
-];
-
+const SERVER_HEADERS: [&str; 8] = ["EMPTY", "NAME", "PROTOCOL", "HOST", "PORT", "TIMEZONE", "MESSAGE", "PATH"];
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 enum ServerTableAction {
@@ -48,10 +47,14 @@ enum ServerTableAction {
 
 impl Display for ServerTableAction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", match self {
-            Self::Delete => "Delete",
-            Self::Edit => "Edit",
-        })
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::Delete => "Delete",
+                Self::Edit => "Edit",
+            }
+        )
     }
 }
 
@@ -89,7 +92,6 @@ generate_form_reducer!(
     }
 );
 
-
 #[function_component]
 pub fn ApiConfigView() -> Html {
     let translate = use_translation();
@@ -99,13 +101,11 @@ pub fn ApiConfigView() -> Html {
     let popup_is_open = use_state(|| false);
     let selected_dto = use_state(|| None::<Rc<ApiProxyServerInfoDto>>);
 
-    let form_state_api_config: UseReducerHandle<ApiConfigFormState> = use_reducer(|| {
-        ApiConfigFormState { form: ConfigApiDto::default(), modified: false }
-    });
+    let form_state_api_config: UseReducerHandle<ApiConfigFormState> =
+        use_reducer(|| ApiConfigFormState { form: ConfigApiDto::default(), modified: false });
 
-    let form_state_api_proxy_config: UseReducerHandle<ApiProxyConfigFormState> = use_reducer(|| {
-        ApiProxyConfigFormState { form: ApiProxyConfigDto::default(), modified: false }
-    });
+    let form_state_api_proxy_config: UseReducerHandle<ApiProxyConfigFormState> =
+        use_reducer(|| ApiProxyConfigFormState { form: ApiProxyConfigDto::default(), modified: false });
 
     {
         let on_form_change = config_view_ctx.on_form_change.clone();
@@ -127,10 +127,7 @@ pub fn ApiConfigView() -> Html {
 
     {
         let form_state_api_config = form_state_api_config.clone();
-        let api_config = config_ctx
-            .config
-            .as_ref()
-            .map(|c| c.config.api.clone());
+        let api_config = config_ctx.config.as_ref().map(|c| c.config.api.clone());
 
         let deps = (api_config, *config_view_ctx.edit_mode);
         use_effect_with(deps, move |(cfg, _mode)| {
@@ -181,7 +178,6 @@ pub fn ApiConfigView() -> Html {
         })
     };
 
-
     let handle_popup_close = {
         let set_is_open = popup_is_open.clone();
         Callback::from(move |()| {
@@ -228,30 +224,29 @@ pub fn ApiConfigView() -> Html {
         let popup_onclick = handle_popup_onclick.clone();
         let edit_mode_ref = edit_mode_ref.clone();
         Callback::<(usize, usize, Rc<ApiProxyServerInfoDto>), Html>::from(
-            move |(row, col, dto): (usize, usize, Rc<ApiProxyServerInfoDto>)| {
-                match SERVER_HEADERS[col] {
-                    "EMPTY" => {
-                      let popup_onclick = popup_onclick.clone();
-                      let edit_mode_ref = edit_mode_ref.clone();
-                      html! {
-                        <button class="tp__icon-button"
-                            onclick={Callback::from(move |event: MouseEvent| if *edit_mode_ref.borrow() {
-                              popup_onclick.emit((dto.clone(), event))})}
-                            data-row={row.to_string()}>
-                            <AppIcon name="Popup"></AppIcon>
-                        </button>
-                      }
+            move |(row, col, dto): (usize, usize, Rc<ApiProxyServerInfoDto>)| match SERVER_HEADERS[col] {
+                "EMPTY" => {
+                    let popup_onclick = popup_onclick.clone();
+                    let edit_mode_ref = edit_mode_ref.clone();
+                    html! {
+                      <button class="tp__icon-button"
+                          onclick={Callback::from(move |event: MouseEvent| if *edit_mode_ref.borrow() {
+                            popup_onclick.emit((dto.clone(), event))})}
+                          data-row={row.to_string()}>
+                          <AppIcon name="Popup"></AppIcon>
+                      </button>
                     }
-                    "NAME" => html! {&dto.name},
-                    "PROTOCOL" => html! {&dto.protocol},
-                    "HOST" => html! {&dto.host},
-                    "PORT" => html! {&dto.port.as_ref().map_or_else(String::new, ToString::to_string)},
-                    "TIMEZONE" => html! {&dto.timezone},
-                    "MESSAGE" => html! {&dto.message},
-                    "PATH" => html! {&dto.path.as_ref().map_or_else(String::new, ToString::to_string)},
-                    _ => html! {""},
                 }
-            })
+                "NAME" => html! {&dto.name},
+                "PROTOCOL" => html! {&dto.protocol},
+                "HOST" => html! {&dto.host},
+                "PORT" => html! {&dto.port.as_ref().map_or_else(String::new, ToString::to_string)},
+                "TIMEZONE" => html! {&dto.timezone},
+                "MESSAGE" => html! {&dto.message},
+                "PATH" => html! {&dto.path.as_ref().map_or_else(String::new, ToString::to_string)},
+                _ => html! {""},
+            },
+        )
     };
 
     let table_definition = {
@@ -262,15 +257,20 @@ pub fn ApiConfigView() -> Html {
         let render_data_cell_cb = render_data_cell.clone();
         let num_cols = SERVER_HEADERS.len();
         use_memo(config_ctx.api_proxy.clone(), move |config| {
-            config.as_ref().map(|api_proxy|
+            config.as_ref().map(|api_proxy| {
                 Rc::new(TableDefinition::<ApiProxyServerInfoDto> {
-                    items: if api_proxy.server.is_empty() { None } else { Some(Rc::new(api_proxy.server.iter().map(|s| Rc::new(s.clone())).collect())) },
+                    items: if api_proxy.server.is_empty() {
+                        None
+                    } else {
+                        Some(Rc::new(api_proxy.server.iter().map(|s| Rc::new(s.clone())).collect()))
+                    },
                     num_cols,
                     is_sortable,
                     on_sort,
                     render_header_cell: render_header_cell_cb,
                     render_data_cell: render_data_cell_cb,
-                }))
+                })
+            })
         })
     };
 

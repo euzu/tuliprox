@@ -1,16 +1,12 @@
-use serde_json::Value;
 use crate::model::xtream_const;
+use serde_json::Value;
 
 pub struct InfoDocUtils {}
 
 impl InfoDocUtils {
     pub fn extract_year_from_release_date(release_date: &str) -> Option<u32> {
         // collect only digits
-        let digits_only: String = release_date
-            .chars()
-            .filter(|c| c.is_ascii_digit())
-            .take(4)
-            .collect();
+        let digits_only: String = release_date.chars().filter(|c| c.is_ascii_digit()).take(4).collect();
 
         // do we have 4 digits?
         if digits_only.len() < 4 {
@@ -21,7 +17,12 @@ impl InfoDocUtils {
         digits_only.parse::<u32>().ok()
     }
 
-    pub fn make_bdpath_resource_url(resource_url: Option<&str>, bd_path: &str, index: usize, field_prefix: &str) -> String {
+    pub fn make_bdpath_resource_url(
+        resource_url: Option<&str>,
+        bd_path: &str,
+        index: usize,
+        field_prefix: &str,
+    ) -> String {
         if let Some(url) = resource_url {
             if bd_path.starts_with("http") {
                 return format!("{url}/{field_prefix}{}_{index}", xtream_const::XC_PROP_BACKDROP_PATH);

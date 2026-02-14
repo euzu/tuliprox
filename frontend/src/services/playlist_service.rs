@@ -1,10 +1,14 @@
 use crate::services::{get_base_href, request_post};
-use log::error;
-use shared::model::{EpgChannel, EpgTv, PlaylistEpgRequest, PlaylistRequest, SeriesStreamProperties, UiPlaylistCategories, UiPlaylistGroup, UiPlaylistItem, WebplayerUrlRequest, XtreamCluster, XtreamSeriesInfoDoc};
-
 use futures::join;
 use indexmap::IndexMap;
-use shared::utils::{concat_path_leading_slash, ACCEPT_PREFER_CBOR};
+use log::error;
+use shared::{
+    model::{
+        EpgChannel, EpgTv, PlaylistEpgRequest, PlaylistRequest, SeriesStreamProperties, UiPlaylistCategories,
+        UiPlaylistGroup, UiPlaylistItem, WebplayerUrlRequest, XtreamCluster, XtreamSeriesInfoDoc,
+    },
+    utils::{concat_path_leading_slash, ACCEPT_PREFER_CBOR},
+};
 use std::rc::Rc;
 
 pub struct PlaylistService {
@@ -18,9 +22,7 @@ pub struct PlaylistService {
     playlist_api_episode_info_path: String,
 }
 impl Default for PlaylistService {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 impl PlaylistService {
@@ -38,55 +40,93 @@ impl PlaylistService {
         }
     }
     pub async fn update_targets(&self, targets: &[&str]) -> bool {
-        request_post::<&[&str], ()>(&self.target_update_api_path, targets, None, None).await.map_or_else(|_err| {
-            false
-        }, |_| true)
+        request_post::<&[&str], ()>(&self.target_update_api_path, targets, None, None)
+            .await
+            .map_or_else(|_err| false, |_| true)
     }
 
-    pub async fn get_playlist_categories(&self, playlist_request: &PlaylistRequest) -> Option<Rc<UiPlaylistCategories>> {
+    pub async fn get_playlist_categories(
+        &self,
+        playlist_request: &PlaylistRequest,
+    ) -> Option<Rc<UiPlaylistCategories>> {
         let (live_res, vod_res, series_res) = join!(
-            request_post::<&PlaylistRequest, Vec<UiPlaylistItem>>(&self.playlist_api_live_path, playlist_request, None, Some(ACCEPT_PREFER_CBOR.to_string())),
-            request_post::<&PlaylistRequest, Vec<UiPlaylistItem>>(&self.playlist_api_vod_path, playlist_request, None, Some(ACCEPT_PREFER_CBOR.to_string())),
-            request_post::<&PlaylistRequest, Vec<UiPlaylistItem>>(&self.playlist_api_series_path, playlist_request, None, Some(ACCEPT_PREFER_CBOR.to_string())),
+            request_post::<&PlaylistRequest, Vec<UiPlaylistItem>>(
+                &self.playlist_api_live_path,
+                playlist_request,
+                None,
+                Some(ACCEPT_PREFER_CBOR.to_string())
+            ),
+            request_post::<&PlaylistRequest, Vec<UiPlaylistItem>>(
+                &self.playlist_api_vod_path,
+                playlist_request,
+                None,
+                Some(ACCEPT_PREFER_CBOR.to_string())
+            ),
+            request_post::<&PlaylistRequest, Vec<UiPlaylistItem>>(
+                &self.playlist_api_series_path,
+                playlist_request,
+                None,
+                Some(ACCEPT_PREFER_CBOR.to_string())
+            ),
         );
 
-        let live = live_res.map_or_else(|err| {
-            error!("Failed to fetch live playlist: {err}");
-            None
-        }, |r| r.map(|resp| to_ui_playlist_groups(resp, XtreamCluster::Live)));
-        let vod = vod_res.map_or_else(|err| {
-            error!("Failed to fetch vod playlist: {err}");
-            None
-        }, |r| r.map(|resp| to_ui_playlist_groups(resp, XtreamCluster::Video)));
-        let series = series_res.map_or_else(|err| {
-            error!("Failed to fetch series playlist: {err}");
-            None
-        }, |r| r.map(|resp| to_ui_playlist_groups(resp, XtreamCluster::Series)));
+        let live = live_res.map_or_else(
+            |err| {
+                error!("Failed to fetch live playlist: {err}");
+                None
+            },
+            |r| r.map(|resp| to_ui_playlist_groups(resp, XtreamCluster::Live)),
+        );
+        let vod = vod_res.map_or_else(
+            |err| {
+                error!("Failed to fetch vod playlist: {err}");
+                None
+            },
+            |r| r.map(|resp| to_ui_playlist_groups(resp, XtreamCluster::Video)),
+        );
+        let series = series_res.map_or_else(
+            |err| {
+                error!("Failed to fetch series playlist: {err}");
+                None
+            },
+            |r| r.map(|resp| to_ui_playlist_groups(resp, XtreamCluster::Series)),
+        );
 
         if live.is_some() || vod.is_some() || series.is_some() {
-            return Some(Rc::new(UiPlaylistCategories {
-                live,
-                vod,
-                series,
-            }));
+            return Some(Rc::new(UiPlaylistCategories { live, vod, series }));
         }
         None
     }
 
-    pub async fn get_playlist_webplayer_url(&self, target_id: u16, virtual_id: u32, cluster: XtreamCluster) -> Option<String> {
-        let request = WebplayerUrlRequest {
-            target_id,
-            virtual_id,
-            cluster,
-        };
-        request_post::<&WebplayerUrlRequest, String>(&self.playlist_api_webplayer_url_path, &request, None, Some("text/plain".to_string())).await.unwrap_or_else(|err| {
+    pub async fn get_playlist_webplayer_url(
+        &self,
+        target_id: u16,
+        virtual_id: u32,
+        cluster: XtreamCluster,
+    ) -> Option<String> {
+        let request = WebplayerUrlRequest { target_id, virtual_id, cluster };
+        request_post::<&WebplayerUrlRequest, String>(
+            &self.playlist_api_webplayer_url_path,
+            &request,
+            None,
+            Some("text/plain".to_string()),
+        )
+        .await
+        .unwrap_or_else(|err| {
             error!("{err}");
             None
         })
     }
 
     pub async fn get_playlist_epg(&self, request: PlaylistEpgRequest) -> Option<EpgTv> {
-        match request_post::<&PlaylistEpgRequest, Vec<EpgChannel>>(&self.playlist_api_epg_path, &request, None, Some(ACCEPT_PREFER_CBOR.to_string())).await {
+        match request_post::<&PlaylistEpgRequest, Vec<EpgChannel>>(
+            &self.playlist_api_epg_path,
+            &request,
+            None,
+            Some(ACCEPT_PREFER_CBOR.to_string()),
+        )
+        .await
+        {
             Ok(channels) => channels.map(EpgTv::new),
             Err(err) => {
                 error!("{err}");
@@ -95,22 +135,36 @@ impl PlaylistService {
         }
     }
 
-    pub async fn get_series_info(&self, pli: &Rc<UiPlaylistItem>, playlist_request: &PlaylistRequest) -> Option<SeriesStreamProperties> {
+    pub async fn get_series_info(
+        &self,
+        pli: &Rc<UiPlaylistItem>,
+        playlist_request: &PlaylistRequest,
+    ) -> Option<SeriesStreamProperties> {
         let path = format!("{}/{}/{}", self.playlist_api_series_info_path, pli.virtual_id, pli.provider_id);
-        request_post::<&PlaylistRequest, XtreamSeriesInfoDoc>(&path, playlist_request, None, Some(ACCEPT_PREFER_CBOR.to_string())).await.map_or_else(|err| {
-            error!("{err}");
-            None
-        }, |response| {
-            response.as_ref().map(|doc| SeriesStreamProperties::from_info_doc(doc, pli.virtual_id))
-        })
+        request_post::<&PlaylistRequest, XtreamSeriesInfoDoc>(
+            &path,
+            playlist_request,
+            None,
+            Some(ACCEPT_PREFER_CBOR.to_string()),
+        )
+        .await
+        .map_or_else(
+            |err| {
+                error!("{err}");
+                None
+            },
+            |response| response.as_ref().map(|doc| SeriesStreamProperties::from_info_doc(doc, pli.virtual_id)),
+        )
     }
 
     pub async fn get_episode(&self, virtual_id: u32, playlist_request: &PlaylistRequest) -> Option<UiPlaylistItem> {
         let path = format!("{}/{virtual_id}", self.playlist_api_episode_info_path);
-        request_post::<&PlaylistRequest, UiPlaylistItem>(&path, playlist_request, None, None).await.unwrap_or_else(|err| {
-            error!("{err}");
-            None
-        })
+        request_post::<&PlaylistRequest, UiPlaylistItem>(&path, playlist_request, None, None).await.unwrap_or_else(
+            |err| {
+                error!("{err}");
+                None
+            },
+        )
     }
 }
 

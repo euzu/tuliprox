@@ -1,6 +1,6 @@
-use std::fmt::Display;
-use serde::{Deserialize, Serialize, Serializer, Deserializer};
 use crate::model::InputType;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::fmt::Display;
 
 pub fn format_elapsed_time(seconds: u64) -> String {
     if seconds < 60 {
@@ -34,8 +34,8 @@ where
             let secs = parts[1].parse::<u64>().map_err(serde::de::Error::custom)?;
             Ok(mins * 60 + secs)
         } else {
-             // Fallback if no colon (e.g. just "5 mins")
-             parts[0].parse::<u64>().map(|m| m * 60).map_err(serde::de::Error::custom)
+            // Fallback if no colon (e.g. just "5 mins")
+            parts[0].parse::<u64>().map(|m| m * 60).map_err(serde::de::Error::custom)
         }
     } else {
         s.parse::<u64>().map_err(serde::de::Error::custom)
@@ -71,7 +71,6 @@ impl Display for InputStats {
     }
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TargetStats {
     #[serde(rename = "target")]
@@ -80,12 +79,8 @@ pub struct TargetStats {
 }
 
 impl TargetStats {
-    pub fn success(name: &str) -> Self {
-        Self  {name: name.to_string(), success: true}
-    }
-    pub fn failure(name: &str) -> Self {
-        Self  {name: name.to_string(), success: false}
-    }
+    pub fn success(name: &str) -> Self { Self { name: name.to_string(), success: true } }
+    pub fn failure(name: &str) -> Self { Self { name: name.to_string(), success: false } }
 }
 
 impl Display for TargetStats {
@@ -107,7 +102,7 @@ impl SourceStats {
         if inputs.is_empty() || targets.is_empty() {
             None
         } else {
-            Some(Self {inputs, targets})
+            Some(Self { inputs, targets })
         }
     }
 }
@@ -117,4 +112,3 @@ impl Display for SourceStats {
         serde_json::to_string(&self).map_or(Err(std::fmt::Error), |json_str| write!(f, "{json_str}"))
     }
 }
-

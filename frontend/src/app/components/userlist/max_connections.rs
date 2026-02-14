@@ -1,5 +1,5 @@
+use crate::app::components::AppIcon;
 use yew::prelude::*;
-use crate::app::components::{AppIcon};
 
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct MaxConnectionsProps {
@@ -8,7 +8,6 @@ pub struct MaxConnectionsProps {
 
 #[function_component]
 pub fn MaxConnections(props: &MaxConnectionsProps) -> Html {
-
     if props.value == 0 {
         html! { <span class="tp__max-connections"><AppIcon name="Unlimited" /></span> }
     } else {

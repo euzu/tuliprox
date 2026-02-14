@@ -1,17 +1,15 @@
+use crate::{
+    app::components::{menu_item::MenuItem, svg_icon::AppIcon, CollapsePanel, IconButton},
+    hooks::use_service_context,
+    model::ViewType,
+    utils::html_if,
+};
 use std::str::FromStr;
-use wasm_bindgen::closure::Closure;
-use wasm_bindgen::JsCast;
+use wasm_bindgen::{closure::Closure, JsCast};
 use web_sys::window;
 use yew::prelude::*;
 use yew_hooks::use_mount;
 use yew_i18n::use_translation;
-
-use crate::app::components::menu_item::MenuItem;
-use crate::app::components::svg_icon::AppIcon;
-use crate::app::components::{CollapsePanel, IconButton};
-use crate::hooks::use_service_context;
-use crate::model::ViewType;
-use crate::utils::html_if;
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 enum CollapseState {
@@ -53,10 +51,8 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
             if !*block_sidebar_toggle {
                 let current = *collapsed;
                 let next = match current {
-                    CollapseState::AutoCollapsed
-                    | CollapseState::ManualCollapsed => CollapseState::ManualExpanded,
-                    CollapseState::AutoExpanded
-                    | CollapseState::ManualExpanded => CollapseState::ManualCollapsed,
+                    CollapseState::AutoCollapsed | CollapseState::ManualCollapsed => CollapseState::ManualExpanded,
+                    CollapseState::AutoExpanded | CollapseState::ManualExpanded => CollapseState::ManualCollapsed,
                 };
                 if current != next {
                     collapsed.set(next);
@@ -76,8 +72,7 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                 let is_mobile = inner_width.as_f64().unwrap_or(0.0) < 720.0;
 
                 match *collapsed {
-                    CollapseState::AutoExpanded
-                    | CollapseState::ManualExpanded => {
+                    CollapseState::AutoExpanded | CollapseState::ManualExpanded => {
                         if is_mobile {
                             collapsed.set(CollapseState::AutoCollapsed);
                         }
@@ -109,9 +104,7 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
 
         use_effect_with(check_sidebar_state, move |check_sidebar| {
             let check_sidebar = check_sidebar.clone();
-            let closure = Closure::<dyn FnMut(Event)>::wrap(Box::new(move |_event: Event| {
-                check_sidebar.emit(())
-            }));
+            let closure = Closure::<dyn FnMut(Event)>::wrap(Box::new(move |_event: Event| check_sidebar.emit(())));
 
             let window = window().expect("no global window");
             window

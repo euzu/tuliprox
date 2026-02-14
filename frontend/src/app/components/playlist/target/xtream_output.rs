@@ -1,11 +1,11 @@
+use crate::{
+    app::components::{chip::convert_bool_to_chip_style, tag_list::TagList, FilterView, RevealContent, Tag},
+    html_if,
+};
+use shared::model::XtreamTargetOutputDto;
 use std::rc::Rc;
 use yew::prelude::*;
 use yew_i18n::use_translation;
-use shared::model::XtreamTargetOutputDto;
-use crate::app::components::chip::{convert_bool_to_chip_style};
-use crate::app::components::{FilterView, RevealContent, Tag};
-use crate::app::components::tag_list::{TagList};
-use crate::html_if;
 
 #[derive(Properties, PartialEq, Clone)]
 pub struct XtreamOutputProps {
@@ -21,9 +21,18 @@ pub fn XtreamOutput(props: &XtreamOutputProps) -> Html {
         let translate = translator.clone();
         use_memo(output, move |output| {
             vec![
-                Rc::new(Tag { class: convert_bool_to_chip_style(output.skip_live_direct_source), label: translate.t("LABEL.LIVE") }),
-                Rc::new(Tag { class: convert_bool_to_chip_style(output.skip_video_direct_source), label: translate.t("LABEL.VOD") }),
-                Rc::new(Tag { class: convert_bool_to_chip_style(output.skip_series_direct_source), label: translate.t("LABEL.SERIES") }),
+                Rc::new(Tag {
+                    class: convert_bool_to_chip_style(output.skip_live_direct_source),
+                    label: translate.t("LABEL.LIVE"),
+                }),
+                Rc::new(Tag {
+                    class: convert_bool_to_chip_style(output.skip_video_direct_source),
+                    label: translate.t("LABEL.VOD"),
+                }),
+                Rc::new(Tag {
+                    class: convert_bool_to_chip_style(output.skip_series_direct_source),
+                    label: translate.t("LABEL.SERIES"),
+                }),
             ]
         })
     };
@@ -32,10 +41,14 @@ pub fn XtreamOutput(props: &XtreamOutputProps) -> Html {
         let translate = translator.clone();
         use_memo(output, move |output| {
             vec![
-                Rc::new(Tag { class: convert_bool_to_chip_style(output.resolve_series),
-                    label: format!("{} / {}ms", translate.t("LABEL.SERIES"), output.resolve_delay) }),
-                Rc::new(Tag { class: convert_bool_to_chip_style(output.resolve_vod),
-                    label: format!("{} / {}ms", translate.t("LABEL.VOD"), output.resolve_delay)}),
+                Rc::new(Tag {
+                    class: convert_bool_to_chip_style(output.resolve_series),
+                    label: format!("{} / {}ms", translate.t("LABEL.SERIES"), output.resolve_delay),
+                }),
+                Rc::new(Tag {
+                    class: convert_bool_to_chip_style(output.resolve_vod),
+                    label: format!("{} / {}ms", translate.t("LABEL.VOD"), output.resolve_delay),
+                }),
             ]
         })
     };
@@ -44,12 +57,18 @@ pub fn XtreamOutput(props: &XtreamOutputProps) -> Html {
         let translate = translator.clone();
         use_memo(output, move |output| {
             vec![
-                Rc::new(Tag { class: convert_bool_to_chip_style(output.probe_live),
-                    label: format!("{} / {}h", translate.t("LABEL.LIVE"), output.probe_live_interval_hours) }),
-                Rc::new(Tag { class: convert_bool_to_chip_style(output.probe_vod),
-                    label: translate.t("LABEL.VOD").to_string() }),
-                Rc::new(Tag { class: convert_bool_to_chip_style(output.probe_series),
-                    label: translate.t("LABEL.SERIES").to_string() }),
+                Rc::new(Tag {
+                    class: convert_bool_to_chip_style(output.probe_live),
+                    label: format!("{} / {}h", translate.t("LABEL.LIVE"), output.probe_live_interval_hours),
+                }),
+                Rc::new(Tag {
+                    class: convert_bool_to_chip_style(output.probe_vod),
+                    label: translate.t("LABEL.VOD").to_string(),
+                }),
+                Rc::new(Tag {
+                    class: convert_bool_to_chip_style(output.probe_series),
+                    label: translate.t("LABEL.SERIES").to_string(),
+                }),
             ]
         })
     };

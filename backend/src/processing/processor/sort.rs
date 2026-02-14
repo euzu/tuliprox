@@ -114,7 +114,7 @@ pub(in crate::processing::processor) fn sort_playlist(
 ) -> bool {
     let Some(sort) = &target.sort else {
         for group in &mut *playlist {
-            group.channels.sort_by(|a, b| a.header.source_ordinal.cmp(&b.header.source_ordinal));
+            group.channels.sort_by_key(|a| a.header.source_ordinal);
         }
         sort_groups_by_source_order!(playlist);
         return true;
@@ -206,7 +206,7 @@ fn sort_channels_in_groups(
         for group in groups {
             group
                 .channels
-                .sort_by(|a, b| a.header.source_ordinal.cmp(&b.header.source_ordinal));
+                .sort_by_key(|a| a.header.source_ordinal);
         }
         return;
     }

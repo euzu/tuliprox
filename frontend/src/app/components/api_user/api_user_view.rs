@@ -1,11 +1,12 @@
-use yew::{function_component, html, Callback, Html};
-use crate::app::components::loading_indicator::BusyIndicator;
-use crate::app::components::{AppIcon, IconButton, ToastrView, WebsocketStatus};
-use crate::app::components::theme::Theme;
-use crate::hooks::use_service_context;
-use crate::provider::DialogProvider;
-use yew::use_state;
-use crate::app::components::api_user::playlist::ApiUserPlaylist;
+use crate::{
+    app::components::{
+        api_user::playlist::ApiUserPlaylist, loading_indicator::BusyIndicator, theme::Theme, AppIcon, IconButton,
+        ToastrView, WebsocketStatus,
+    },
+    hooks::use_service_context,
+    provider::DialogProvider,
+};
+use yew::{function_component, html, use_state, Callback, Html};
 
 #[function_component]
 pub fn ApiUserView() -> Html {

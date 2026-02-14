@@ -1,14 +1,18 @@
-use crate::error::{TuliproxError, TuliproxErrorKind};
-use crate::model::{ConfigApiDto, HdHomeRunConfigDto, IpCheckConfigDto, LibraryConfigDto, LogConfigDto, MessagingConfigDto,
-                   ProxyConfigDto, ReverseProxyConfigDto, ScheduleConfigDto, VideoConfigDto, WebUiConfigDto};
-use crate::utils::{is_false, default_connect_timeout_secs, is_default_connect_timeout_secs, is_blank_optional_string,
-                   default_supported_video_extensions};
+use crate::{
+    error::{TuliproxError, TuliproxErrorKind},
+    model::{
+        ConfigApiDto, HdHomeRunConfigDto, IpCheckConfigDto, LibraryConfigDto, LogConfigDto, MessagingConfigDto,
+        ProxyConfigDto, ReverseProxyConfigDto, ScheduleConfigDto, VideoConfigDto, WebUiConfigDto,
+    },
+    utils::{
+        default_connect_timeout_secs, default_supported_video_extensions, is_blank_optional_string,
+        is_default_connect_timeout_secs, is_false,
+    },
+};
 
 pub const DEFAULT_USER_AGENT: &str = "VLC/3.0.16 LibVLC/3.0.16";
 
-fn default_default_user_agent() -> Option<String> {
-    Some(DEFAULT_USER_AGENT.to_string())
-}
+fn default_default_user_agent() -> Option<String> { Some(DEFAULT_USER_AGENT.to_string()) }
 
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
@@ -148,19 +152,12 @@ pub struct SchedulesConfigDto {
 }
 
 impl SchedulesConfigDto {
-    pub fn is_empty(&self) -> bool {
-        self.schedules.as_deref().is_none_or(|s| s.is_empty())
-    }
+    pub fn is_empty(&self) -> bool { self.schedules.as_deref().is_none_or(|s| s.is_empty()) }
 }
 
 impl From<&ConfigDto> for SchedulesConfigDto {
-    fn from(config: &ConfigDto) -> Self {
-        Self {
-            schedules: config.schedules.clone(),
-        }
-    }
+    fn from(config: &ConfigDto) -> Self { Self { schedules: config.schedules.clone() } }
 }
-
 
 pub struct HdHomeRunDeviceOverview {
     pub enabled: bool,
@@ -175,7 +172,10 @@ impl ConfigDto {
 
         if let Some(mins) = self.sleep_timer_mins {
             if mins == 0 {
-                return Err(TuliproxError::new(TuliproxErrorKind::Info, "`sleep_timer_mins` must be > 0 when specified".to_string()));
+                return Err(TuliproxError::new(
+                    TuliproxErrorKind::Info,
+                    "`sleep_timer_mins` must be > 0 when specified".to_string(),
+                ));
             }
         }
 
@@ -228,12 +228,10 @@ impl ConfigDto {
                     ffprobe_timeout: None,
                 });
             }
-            Some(video) => {
-                match video.prepare() {
-                    Ok(()) => {}
-                    Err(err) => return Err(err)
-                }
-            }
+            Some(video) => match video.prepare() {
+                Ok(()) => {}
+                Err(err) => return Err(err),
+            },
         }
         Ok(())
     }
@@ -259,11 +257,10 @@ impl ConfigDto {
     }
 
     pub fn get_hdhr_device_overview(&self) -> Option<HdHomeRunDeviceOverview> {
-        self.hdhomerun.as_ref().map(|hdhr|
-            HdHomeRunDeviceOverview {
-                enabled: hdhr.enabled,
-                devices: hdhr.devices.iter().map(|d| d.name.to_string()).collect::<Vec<String>>(),
-            })
+        self.hdhomerun.as_ref().map(|hdhr| HdHomeRunDeviceOverview {
+            enabled: hdhr.enabled,
+            devices: hdhr.devices.iter().map(|d| d.name.to_string()).collect::<Vec<String>>(),
+        })
     }
 
     pub fn update_from_main_config(&mut self, main_config: &MainConfigDto) {
@@ -281,15 +278,11 @@ impl ConfigDto {
         self.update_on_boot = main_config.update_on_boot;
         self.config_hot_reload = main_config.config_hot_reload;
         self.accept_insecure_ssl_certificates = main_config.accept_insecure_ssl_certificates;
-
     }
 
     pub fn is_geoip_enabled(&self) -> bool {
         self.reverse_proxy.as_ref().is_some_and(|r| r.geoip.as_ref().is_some_and(|g| g.enabled))
     }
 
-    pub fn is_library_enabled(&self) -> bool {
-        self.library.as_ref().is_some_and(|l| l.enabled)
-    }
-
+    pub fn is_library_enabled(&self) -> bool { self.library.as_ref().is_some_and(|l| l.enabled) }
 }

@@ -1,12 +1,14 @@
-use crate::info_err_res;
-use crate::error::{TuliproxError};
-use crate::utils::{is_false, is_true, default_as_true, default_device_type, default_device_udn,
-                   default_firmware_name, default_firmware_version, default_friendly_name,
-                   default_manufacturer, default_model_name, generate_hdhr_device_id,
-                   generate_hdhr_device_id_from_base, hash_string, is_default_device_type,
-                   is_default_device_udn, is_default_firmware_name, is_default_firmware_version,
-                   is_default_friendly_name, is_default_manufacturer, is_default_model_name,
-                   validate_hdhr_device_id};
+use crate::{
+    error::TuliproxError,
+    info_err_res,
+    utils::{
+        default_as_true, default_device_type, default_device_udn, default_firmware_name, default_firmware_version,
+        default_friendly_name, default_manufacturer, default_model_name, generate_hdhr_device_id,
+        generate_hdhr_device_id_from_base, hash_string, is_default_device_type, is_default_device_udn,
+        is_default_firmware_name, is_default_firmware_version, is_default_friendly_name, is_default_manufacturer,
+        is_default_model_name, is_false, is_true, validate_hdhr_device_id,
+    },
+};
 use log::warn;
 use std::collections::HashSet;
 
@@ -82,7 +84,10 @@ impl HdHomeRunDeviceConfigDto {
             // Format the hash into a valid UUID string
             self.device_udn = hash.to_valid_uuid();
             if include_computed {
-                warn!("HDHomeRun device '{}' is missing a unique device_udn. A new one has been generated: {}", self.name, self.device_udn);
+                warn!(
+                    "HDHomeRun device '{}' is missing a unique device_udn. A new one has been generated: {}",
+                    self.name, self.device_udn
+                );
             }
         } else {
             // Ensure only the UUID part is stored.
@@ -95,19 +100,24 @@ impl HdHomeRunDeviceConfigDto {
         if self.device_id.is_empty() {
             self.device_id = generate_hdhr_device_id();
             if include_computed {
-                warn!("HDHomeRun device '{}' is missing a device_id. A new one has been generated: {}", self.name, self.device_id);
+                warn!(
+                    "HDHomeRun device '{}' is missing a device_id. A new one has been generated: {}",
+                    self.name, self.device_id
+                );
             }
         } else if !validate_hdhr_device_id(&self.device_id) {
             let old_id = self.device_id.clone();
             self.device_id = generate_hdhr_device_id_from_base(&self.device_id);
             if include_computed {
-                warn!("HDHomeRun device '{}' has an invalid device_id '{}'. A valid one has been generated: {}", self.name, old_id, self.device_id);
+                warn!(
+                    "HDHomeRun device '{}' has an invalid device_id '{}'. A valid one has been generated: {}",
+                    self.name, old_id, self.device_id
+                );
             }
         }
         Ok(())
     }
 }
-
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -155,7 +165,8 @@ impl HdHomeRunConfigDto {
             if device.port == 0 {
                 while ports.contains(&current_port) || current_port == 0 {
                     current_port = current_port.wrapping_add(1);
-                    if current_port == api_port { // full cycle guard
+                    if current_port == api_port {
+                        // full cycle guard
                         return info_err_res!("No free port available for HdHomeRun devices");
                     }
                 }

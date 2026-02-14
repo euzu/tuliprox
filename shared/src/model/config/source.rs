@@ -1,11 +1,13 @@
-use std::collections::HashSet;
-use std::sync::Arc;
-use crate::info_err_res;
-use crate::error::{TuliproxError};
-use crate::foundation::prepare_templates;
-use crate::model::{ConfigInputDto, ConfigProviderDto, HdHomeRunDeviceOverview, PatternTemplate};
-use crate::model::config::target::ConfigTargetDto;
-use crate::utils::{arc_str_vec_serde, default_as_default, Internable};
+use crate::{
+    error::TuliproxError,
+    foundation::prepare_templates,
+    info_err_res,
+    model::{
+        config::target::ConfigTargetDto, ConfigInputDto, ConfigProviderDto, HdHomeRunDeviceOverview, PatternTemplate,
+    },
+    utils::{arc_str_vec_serde, default_as_default, Internable},
+};
+use std::{collections::HashSet, sync::Arc};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -42,9 +44,13 @@ pub struct SourcesConfigDto {
 }
 
 impl SourcesConfigDto {
-    pub fn prepare(&mut self, include_computed: bool, hdhr_config: Option<&HdHomeRunDeviceOverview>) -> Result<(), TuliproxError> {
+    pub fn prepare(
+        &mut self,
+        include_computed: bool,
+        hdhr_config: Option<&HdHomeRunDeviceOverview>,
+    ) -> Result<(), TuliproxError> {
         self.prepare_templates()?;
-        let provider_names =self.prepare_providers()?;
+        let provider_names = self.prepare_providers()?;
         self.prepare_sources(include_computed, hdhr_config, &provider_names)?;
         self.check_unique_target_names()?;
         Ok(())
@@ -64,7 +70,12 @@ impl SourcesConfigDto {
         Ok(names)
     }
 
-    fn prepare_sources(&mut self, include_computed: bool, hdhr_config: Option<&HdHomeRunDeviceOverview>, provider_names: &HashSet<String>) -> Result<(), TuliproxError> {
+    fn prepare_sources(
+        &mut self,
+        include_computed: bool,
+        hdhr_config: Option<&HdHomeRunDeviceOverview>,
+        provider_names: &HashSet<String>,
+    ) -> Result<(), TuliproxError> {
         // prepare sources and set id's
         let mut source_index: u16 = 0;
         let mut input_index: u16 = 0;
@@ -80,7 +91,7 @@ impl SourcesConfigDto {
             // Validate referenced inputs
             for name in &source.inputs {
                 if !self.inputs.iter().any(|i| &i.name == name) {
-                     return info_err_res!("Source references unknown input: '{name}'");
+                    return info_err_res!("Source references unknown input: '{name}'");
                 }
             }
 
@@ -88,7 +99,7 @@ impl SourcesConfigDto {
                 // prepare target templates
                 let prepare_result = match &self.templates {
                     Some(templ) => target.prepare(target_index, Some(templ), hdhr_config),
-                    _ => target.prepare(target_index, None, hdhr_config)
+                    _ => target.prepare(target_index, None, hdhr_config),
                 };
                 prepare_result?;
                 target_index += 1;
@@ -129,7 +140,5 @@ impl SourcesConfigDto {
         Ok(())
     }
 
-    pub fn get_input(&self, name: &Arc<str>) -> Option<&ConfigInputDto> {
-        self.inputs.iter().find(|i| &i.name == name)
-    }
+    pub fn get_input(&self, name: &Arc<str>) -> Option<&ConfigInputDto> { self.inputs.iter().find(|i| &i.name == name) }
 }

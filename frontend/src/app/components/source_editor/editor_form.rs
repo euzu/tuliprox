@@ -1,18 +1,21 @@
+use crate::app::components::{
+    BlockInstance, ConfigInputView, ConfigOutputView, ConfigTargetView, EditMode, SourceEditorContext,
+};
 use yew::{classes, function_component, html, use_context, use_effect_with, use_state, Html};
-use crate::app::components::{BlockInstance, ConfigInputView, ConfigOutputView, ConfigTargetView, EditMode, SourceEditorContext};
 
 #[function_component]
 pub fn SourceEditorForm() -> Html {
-    let source_editor_ctx =
-        use_context::<SourceEditorContext>().expect("SourceEditorContext not found");
+    let source_editor_ctx = use_context::<SourceEditorContext>().expect("SourceEditorContext not found");
     let visible = use_state(|| false);
 
     {
         let visible_set = visible.clone();
-        use_effect_with(source_editor_ctx.edit_mode.clone(), move |edit_mode| {
-            match **edit_mode {
-                EditMode::Inactive => { visible_set.set(false); }
-                EditMode::Active(_) => { visible_set.set(true); }
+        use_effect_with(source_editor_ctx.edit_mode.clone(), move |edit_mode| match **edit_mode {
+            EditMode::Inactive => {
+                visible_set.set(false);
+            }
+            EditMode::Active(_) => {
+                visible_set.set(true);
             }
         });
     }

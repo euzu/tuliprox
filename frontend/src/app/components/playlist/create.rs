@@ -1,6 +1,6 @@
+use crate::app::components::{PlaylistEditorContext, PlaylistEditorPage, TextButton};
 use yew::prelude::*;
 use yew_i18n::use_translation;
-use crate::app::components::{PlaylistEditorContext, PlaylistEditorPage, TextButton};
 
 #[function_component]
 pub fn PlaylistCreate() -> Html {

@@ -16,10 +16,7 @@ pub struct CsvTableProps {
 pub fn CsvTable(props: &CsvTableProps) -> Html {
     let separator = props.separator;
 
-    let rows = use_memo(
-        (props.content.clone(), separator),
-        |(content, sep)| parse_csv(content, *sep),
-    );
+    let rows = use_memo((props.content.clone(), separator), |(content, sep)| parse_csv(content, *sep));
 
     if rows.is_empty() {
         return html! { <NoContent/> };
@@ -31,10 +28,7 @@ pub fn CsvTable(props: &CsvTableProps) -> Html {
         (None, rows.to_vec())
     };
 
-    let table_class = props
-        .class
-        .clone()
-        .unwrap_or_else(|| "tp__csv-table__table".to_string());
+    let table_class = props.class.clone().unwrap_or_else(|| "tp__csv-table__table".to_string());
 
     html! {
         <div class="tp__csv-table tp__table">
@@ -128,7 +122,5 @@ fn parse_csv(input: &str, separator: char) -> Vec<Vec<String>> {
     }
 
     // Trailing empty lines are ignored
-    rows.into_iter()
-        .filter(|r| r.iter().any(|c| !c.is_empty()))
-        .collect()
+    rows.into_iter().filter(|r| r.iter().any(|c| !c.is_empty())).collect()
 }

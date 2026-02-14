@@ -4,5 +4,5 @@ use std::rc::Rc;
 pub enum SearchRequest {
     Clear,
     Text(String, Option<Rc<Vec<String>>>),
-    Regexp(String, Option<Rc<Vec<String>>>)
+    Regexp(String, Option<Rc<Vec<String>>>),
 }

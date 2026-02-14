@@ -1,7 +1,10 @@
+use crate::app::components::{InputRow, PlaylistEditorPage, PlaylistExplorerPage, UserlistPage};
+use shared::model::{
+    ApiProxyConfigDto, AppConfigDto, ConfigTargetDto, PlaylistRequest, ProxyUserCredentialsDto, SearchRequest,
+    StatusCheck, SystemInfo, UiPlaylistCategories,
+};
 use std::rc::Rc;
 use yew::UseStateHandle;
-use shared::model::{ApiProxyConfigDto, AppConfigDto, ConfigTargetDto, PlaylistRequest, ProxyUserCredentialsDto, SearchRequest, StatusCheck, SystemInfo, UiPlaylistCategories};
-use crate::app::components::{InputRow, PlaylistEditorPage, PlaylistExplorerPage, UserlistPage};
 
 type SingleSource = (Vec<Rc<InputRow>>, Vec<Rc<ConfigTargetDto>>);
 
@@ -39,7 +42,7 @@ pub struct UserlistContext {
 }
 
 impl UserlistContext {
-    pub fn get_users(&self) ->  TargetUserList {
+    pub fn get_users(&self) -> TargetUserList {
         match &*self.filtered_users {
             Some(filtered) => Some(Rc::clone(filtered)),
             None => (*self.users).clone(),
@@ -50,13 +53,16 @@ impl UserlistContext {
         match search_req {
             SearchRequest::Clear => {
                 self.filtered_users.set(None);
-            },
+            }
             SearchRequest::Text(text, search_fields) => {
                 let text_lc = text.to_lowercase();
                 let filter_username = search_fields.as_ref().is_none_or(|f| f.iter().any(|s| s == "username"));
                 let filter_server = search_fields.as_ref().is_none_or(|f| f.iter().any(|s| s == "server"));
                 let filter_playlist = search_fields.as_ref().is_none_or(|f| f.iter().any(|s| s == "playlist"));
-                let filtered = self.users.as_ref().into_iter()
+                let filtered = self
+                    .users
+                    .as_ref()
+                    .into_iter()
                     .flat_map(|rc_vec| rc_vec.iter())
                     .filter(|&user_rc| {
                         let user = &**user_rc;
@@ -81,7 +87,10 @@ impl UserlistContext {
                     let filter_username = search_fields.as_ref().is_none_or(|f| f.iter().any(|s| s == "username"));
                     let filter_server = search_fields.as_ref().is_none_or(|f| f.iter().any(|s| s == "server"));
                     let filter_playlist = search_fields.as_ref().is_none_or(|f| f.iter().any(|s| s == "playlist"));
-                    let filtered = self.users.as_ref().into_iter()
+                    let filtered = self
+                        .users
+                        .as_ref()
+                        .into_iter()
                         .flat_map(|rc_vec| rc_vec.iter())
                         .filter(|&user_rc| {
                             let user = &**user_rc;

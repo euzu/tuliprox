@@ -1,9 +1,10 @@
-use std::io;
-use std::sync::Arc;
+use crate::model::{
+    user_command::UserCommand, ActiveUserConnectionChange, ConfigType, LibraryScanSummary, PlaylistUpdateState,
+    StatusCheck, SystemInfo,
+};
 use bytes::Bytes;
-use crate::model::{ActiveUserConnectionChange, ConfigType, LibraryScanSummary, PlaylistUpdateState, StatusCheck, SystemInfo};
 use serde::{Deserialize, Serialize};
-use crate::model::user_command::UserCommand;
+use std::{io, sync::Arc};
 
 pub const PROTOCOL_VERSION: u8 = 1;
 
@@ -16,12 +17,8 @@ pub enum UserRole {
 }
 
 impl UserRole {
-    pub fn is_admin(&self) -> bool {
-        self.eq(&UserRole::Admin)
-    }
-    pub fn is_user(&self) -> bool {
-        self.eq(&UserRole::User)
-    }
+    pub fn is_admin(&self) -> bool { self.eq(&UserRole::Admin) }
+    pub fn is_user(&self) -> bool { self.eq(&UserRole::User) }
 }
 
 #[derive(Default)]
@@ -98,13 +95,10 @@ pub enum ProtocolMessage {
 impl ProtocolMessage {
     pub fn to_bytes(&self) -> io::Result<Bytes> {
         match self {
-            ProtocolMessage::Version(version) => {
-                Ok(Bytes::from(vec![*version]))
-            }
+            ProtocolMessage::Version(version) => Ok(Bytes::from(vec![*version])),
             _ => {
                 //let encoded = bincode_serialize(self)?;
-                let json = serde_json::to_string(self)
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                let json = serde_json::to_string(self).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                 Ok(Bytes::from(json.into_bytes()))
             }
         }
@@ -115,10 +109,8 @@ impl ProtocolMessage {
             Ok(ProtocolMessage::Version(bytes[0]))
         } else {
             //bincode_deserialize::<ProtocolMessage>(bytes.as_ref())
-            let s = std::str::from_utf8(&bytes)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            serde_json::from_str(s)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+            let s = std::str::from_utf8(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            serde_json::from_str(s).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
         }
     }
 }
