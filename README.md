@@ -591,7 +591,7 @@ It has 2 attributes:
      url: <the url>
 ```
 
-The `url` is optional; default value: `<\1>
+The `url` is optional;
 The format is CSV with 3 columns: `range_start,range_end,country_code`.
 
 Example:
@@ -1073,7 +1073,7 @@ Each input has the following attributes:
 - `enabled` is optional, default is true, if you disable the processing is skipped
 - `persist` is optional, you can skip or leave it blank to avoid persisting the input file. The `{}` in the filename is filled with the current
   timestamp.
-- `url` for type `m3u` is the download url or a local filename (can be gzip) of the input-source. For type `xtream`it is `<\1>
+- `url` for type `m3u` is the download url or a local filename (can be gzip) of the input-source.  For type `xtream`it is `http://<hostname>:<port>`
 - `epg` _optional_ xmltv epg configuration
 - `headers` is optional
 - `method` can be `GET` or `POST`
@@ -1121,7 +1121,7 @@ the list. All streaming, proxying, and metadata still come from the provider’s
 `staged` has the following properties:
 
 - `type` is optional, default is `m3u`. Valid values are `m3u` and `xtream`
-- `url` for type `m3u` is the download url or a local filename (can be gzip) of the input-source. For type `xtream`it is `<\1>
+- `url` for type `m3u` is the download url or a local filename (can be gzip) of the input-source.  For type `xtream`it is `http://<hostname>:<port>`
 - `headers` is optional
 - `method` can be `GET` or `POST`
 - `username` only mandatory for type `xtream`
@@ -2328,14 +2328,13 @@ be migrated to the corresponding file (`false` → `api_proxy.yml`, `true` → `
 If you set  `use_user_db` to `true` you need to use the `Web-UI` to `edit`/`add`/`remove` users.
 
 To access the api for:
-
-- `xtream` use url like `<\1>
-- `m3u` use url `<\1>
+- `xtream` use url like `http://192.169.1.2/player_api.php?username={}&password={}`
+- `m3u` use url `http://192.169.1.2/get.php?username={}&password={}`
   or with token
-- `xtream` use url like `<\1>
-- `m3u` use url `<\1>
+- `xtream` use url like `http://192.169.1.2/player_api.php?token={}`
+- `m3u` use url `http://192.169.1.2/get.php?token={}`
 
-To access the xmltv-api use url like `<\1>
+To access the xmltv-api use url like `http://192.169.1.2/xmltv.php?username={}&password={}`
 
 _Do not forget to replace `{}` with credentials._
 
@@ -2728,11 +2727,11 @@ todo.
 You have a provider who supports the xtream api.
 
 The provider gives you:
-
-- the url: `<\1>
+- the url: `http://fantastic.provider.xyz:8080`
 - username: `tvjunkie`
 - password: `junkie.secret`
-- epg_url: `<\1>
+- epg_url: `http://fantastic.provider.xyz:8080/xmltv.php?username=tvjunkie&password=junkie.secret`
+
 
 To use `tuliprox` you need to create the configuration.
 The configuration consist of 4 files.
@@ -2834,8 +2833,7 @@ If no server is specified for a user, the default one is taken.
 
 To access a xtream api from our IPTV-application we need at least 3 information  the `url`, `username` and `password`.
 All this information are now defined in `api-proxy.yml`.
-
-- url: `<\1>
+- url: `http://192.168.1.41:8901`
 - username: `xt`
 - password: `xt.secret`
 
