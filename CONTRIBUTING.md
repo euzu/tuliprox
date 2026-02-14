@@ -12,6 +12,12 @@ To contribute you will need Rust, cargo, cross, trunk, wasm-bindgen, and cargo-s
 make install-tools
 ```
 
+To force a reinstall of tooling or updating to the latest version, you can run:
+
+```bash
+make -B install-tools
+```
+
 ### Steps to Contribute
 
 1. **Fork the Repository**: Start by forking the Tuliprox repository to your GitHub account.
