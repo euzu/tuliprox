@@ -20,16 +20,16 @@ pub fn FloatingBackground() -> Html {
         let area = width * height;
         let num_stars = ((area / 50000.0) as usize).clamp(10, 40);
         let mut rng = fastrand::Rng::new();
-        let stars: Vec<Star> = (0..num_stars).map(|_| {
-            Star {
+        let stars: Vec<Star> = (0..num_stars)
+            .map(|_| Star {
                 x: rng.f64() * 100.0,
                 y: rng.f64() * 100.0,
                 size: 16.0 + fastrand::f64() * (5.0 - 2.0),
                 dx: -0.025 + rng.f64() * 0.1,
                 dy: -0.025 + rng.f64() * 0.1,
                 anim_delay: rng.f64() * 8.0,
-            }
-        }).collect();
+            })
+            .collect();
         stars
     });
 
@@ -38,16 +38,27 @@ pub fn FloatingBackground() -> Html {
         use_effect(move || {
             let interval = Interval::new(200, move || {
                 stars.set(
-                    stars.iter().map(|s| {
-                        let mut star = s.clone();
-                        star.x += star.dx;
-                        star.y += star.dy;
-                        if star.x < 0.0 { star.x = 100.0; }
-                        if star.x > 100.0 { star.x = 0.0; }
-                        if star.y < 0.0 { star.y = 100.0; }
-                        if star.y > 100.0 { star.y = 0.0; }
-                        star
-                    }).collect::<Vec<Star>>()
+                    stars
+                        .iter()
+                        .map(|s| {
+                            let mut star = s.clone();
+                            star.x += star.dx;
+                            star.y += star.dy;
+                            if star.x < 0.0 {
+                                star.x = 100.0;
+                            }
+                            if star.x > 100.0 {
+                                star.x = 0.0;
+                            }
+                            if star.y < 0.0 {
+                                star.y = 100.0;
+                            }
+                            if star.y > 100.0 {
+                                star.y = 0.0;
+                            }
+                            star
+                        })
+                        .collect::<Vec<Star>>(),
                 );
             });
             move || drop(interval)

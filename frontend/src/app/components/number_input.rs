@@ -1,7 +1,6 @@
-use web_sys::{HtmlInputElement, KeyboardEvent};
-use yew::prelude::*;
-use yew::TargetCast;
 use shared::utils::{format_float_localized, parse_localized_float};
+use web_sys::{HtmlInputElement, KeyboardEvent};
+use yew::{prelude::*, TargetCast};
 
 #[derive(Properties, Clone, PartialEq)]
 pub struct NumberInputProps {

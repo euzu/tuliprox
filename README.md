@@ -980,6 +980,7 @@ Each input has the following attributes:
   + `probe_live`: `true`|`false` (default `false`) for background live probing.
   + `probe_live_interval_hours`: number (default `120`) re-probe interval for live channels.
   + `resolve_delay`: seconds (default `2`) shared delay for resolve/probe metadata requests.
+  + Legacy target-level fields were removed: do not use resolve/probe fields under `targets[].options` or `targets[].output[type=xtream]`.
 - `aliases`  for alias definitions for the same provider with different credentials
 - `staged` for side loading processed playlists.
   If you already have a provider configured but want to load the playlist from a different source — for example, 
@@ -1516,6 +1517,7 @@ You can set them fo `false`to keep the direct-source attribute.
 
 Because xtream api delivers only partial metadata to series and VOD, Tuliprox can resolve and probe missing details.
 These settings are configured on the xtream input (`inputs[].options`), not on target/output.
+Legacy target-level resolve/probe fields are no longer supported.
 
 - `resolve_series`: If `true` and you have xtream input with m3u output, series metadata is resolved.
 - `resolve_vod`: If `true` and you have xtream input, VOD metadata is resolved.

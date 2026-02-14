@@ -1,6 +1,5 @@
-use std::fmt;
-use std::str::FromStr;
 use shared::error::{info_err_res, TuliproxError};
+use std::{fmt, str::FromStr};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ExplorerSourceType {

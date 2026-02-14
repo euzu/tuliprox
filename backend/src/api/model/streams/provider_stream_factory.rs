@@ -97,19 +97,19 @@ impl ProviderStreamFactoryOptions {
         };
         let mut flags = ProviderStreamFactoryFlagsSet::new();
         if stream_options.stream_retry {
-            flags.add(ProviderStreamFactoryFlags::ReconnectEnabled);
+            flags.set(ProviderStreamFactoryFlags::ReconnectEnabled);
         }
         if stream_options.pipe_provider_stream {
-            flags.add(ProviderStreamFactoryFlags::PipeStream);
+            flags.set(ProviderStreamFactoryFlags::PipeStream);
         }
         if stream_options.buffer_enabled {
-            flags.add(ProviderStreamFactoryFlags::BufferEnabled);
+            flags.set(ProviderStreamFactoryFlags::BufferEnabled);
         }
         if share_stream {
-            flags.add(ProviderStreamFactoryFlags::ShareStream);
+            flags.set(ProviderStreamFactoryFlags::ShareStream);
         }
         if requested_range.is_some() {
-            flags.add(ProviderStreamFactoryFlags::RangeRequested);
+            flags.set(ProviderStreamFactoryFlags::RangeRequested);
         }
 
         Self {

@@ -5,23 +5,21 @@
 
 use crate::model::UUIDType;
 use serde::{Deserialize, Deserializer, Serializer};
-use std::borrow::Cow;
-use std::collections::HashSet;
-use std::sync::{Arc, LazyLock, RwLock};
+use std::{
+    borrow::Cow,
+    collections::HashSet,
+    sync::{Arc, LazyLock, RwLock},
+};
 
 // Global interner store
-static INTERNER: LazyLock<RwLock<HashSet<Arc<str>>>> = LazyLock::new(|| {
-    RwLock::new(HashSet::new())
-});
+static INTERNER: LazyLock<RwLock<HashSet<Arc<str>>>> = LazyLock::new(|| RwLock::new(HashSet::new()));
 
 pub trait Internable {
     fn intern(self) -> Arc<str>;
 }
 
 impl Internable for &Arc<str> {
-    fn intern(self) -> Arc<str> {
-        Arc::clone(self)
-    }
+    fn intern(self) -> Arc<str> { Arc::clone(self) }
 }
 
 impl Internable for &Cow<'_, str> {
@@ -34,45 +32,31 @@ impl Internable for &Cow<'_, str> {
 }
 
 impl Internable for &UUIDType {
-    fn intern(self) -> Arc<str> {
-        intern_string(self.to_string())
-    }
+    fn intern(self) -> Arc<str> { intern_string(self.to_string()) }
 }
 
 impl Internable for String {
-    fn intern(self) -> Arc<str> {
-        intern_string(self)
-    }
+    fn intern(self) -> Arc<str> { intern_string(self) }
 }
 
 impl Internable for &String {
-    fn intern(self) -> Arc<str> {
-        intern_str(self.as_str())
-    }
+    fn intern(self) -> Arc<str> { intern_str(self.as_str()) }
 }
 
 impl Internable for &str {
-    fn intern(self) -> Arc<str> {
-        intern_str(self)
-    }
+    fn intern(self) -> Arc<str> { intern_str(self) }
 }
 
 impl Internable for u32 {
-    fn intern(self) -> Arc<str> {
-        intern_string(self.to_string())
-    }
+    fn intern(self) -> Arc<str> { intern_string(self.to_string()) }
 }
 
 impl Internable for u64 {
-    fn intern(self) -> Arc<str> {
-        intern_string(self.to_string())
-    }
+    fn intern(self) -> Arc<str> { intern_string(self.to_string()) }
 }
 
 impl Internable for i64 {
-    fn intern(self) -> Arc<str> {
-        intern_string(self.to_string())
-    }
+    fn intern(self) -> Arc<str> { intern_string(self.to_string()) }
 }
 
 /// Interns a string slice.
@@ -142,10 +126,7 @@ pub mod arc_str_vec_serde {
     use super::*;
     use serde::ser::SerializeSeq;
 
-    pub fn serialize<S>(
-        value: &Vec<Arc<str>>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error>
+    pub fn serialize<S>(value: &Vec<Arc<str>>, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
@@ -156,9 +137,7 @@ pub mod arc_str_vec_serde {
         seq.end()
     }
 
-    pub fn deserialize<'de, D>(
-        deserializer: D,
-    ) -> Result<Vec<Arc<str>>, D::Error>
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<Arc<str>>, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -217,7 +196,7 @@ pub mod arc_str_option_serde {
                 Value::String(v) => Ok(Some(v.intern())),
                 Value::Null | Value::Array(_) | Value::Object(_) => Ok(None),
             },
-            None => Ok(None)
+            None => Ok(None),
         }
     }
 

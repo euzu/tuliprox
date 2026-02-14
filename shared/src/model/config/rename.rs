@@ -1,6 +1,8 @@
-use crate::error::{info_err_res, TuliproxError};
-use crate::foundation::apply_templates_to_pattern_single;
-use crate::model::{ItemField, PatternTemplate};
+use crate::{
+    error::{info_err_res, TuliproxError},
+    foundation::apply_templates_to_pattern_single,
+    model::{ItemField, PatternTemplate},
+};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]

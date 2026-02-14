@@ -1,8 +1,10 @@
 use crate::model::LogLevelConfig;
 use crate::utils::config_file_reader;
+use chrono::{Local, Offset, SecondsFormat};
 use env_logger::{Builder, Target};
 use log::{error, info, LevelFilter};
 use std::fs::File;
+use std::io::Write;
 
 const LOG_ERROR_LEVEL_MOD: &[&str] = &[
     "reqwest::async_impl::client",
@@ -10,7 +12,6 @@ const LOG_ERROR_LEVEL_MOD: &[&str] = &[
     "hyper_util::client",
     "tungstenite::protocol"
 ];
-
 
 fn get_log_level(log_level: &str) -> LevelFilter {
     match log_level.to_lowercase().as_str() {
@@ -36,6 +37,17 @@ pub fn init_logger(user_log_level: Option<&str>, config_file: &str) {
 
     let mut log_builder = Builder::from_default_env();
     log_builder.target(Target::Stdout);
+    log_builder.format(move |buf, record| {
+        let now = Local::now();
+        let timestamp = now.to_rfc3339_opts(SecondsFormat::Secs, now.offset().fix().local_minus_utc() == 0);
+        writeln!(
+            buf,
+            "[{timestamp} {} {}] {}",
+            record.level(),
+            record.target(),
+            record.args()
+        )
+    });
 
     // priority  CLI-Argument, Env-Var, Config, Default
     let log_level = user_log_level
@@ -75,5 +87,6 @@ pub fn init_logger(user_log_level: Option<&str>, config_file: &str) {
         log_builder.filter_module(module, LevelFilter::Error);
     }
     let _ = log_builder.try_init();
+    info!("Log timezone system localtime (TZ)");
     info!("Log Level {}", &log_levels.join(", "));
 }

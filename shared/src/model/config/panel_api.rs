@@ -1,16 +1,16 @@
-use crate::error::TuliproxError;
-use crate::info_err_res;
-use crate::utils::{
-    default_as_true, default_panel_api_alias_pool_max, default_panel_api_alias_pool_min,
-    default_panel_api_provision_cooldown_secs, default_panel_api_provision_probe_interval_secs,
-    default_panel_api_provision_timeout_secs, deserialize_as_option_string, is_true,
-    serialize_vec_flow_map_items, arc_str_serde, arc_str_option_serde, is_blank_optional_arc_str
+use crate::{
+    error::TuliproxError,
+    info_err_res,
+    utils::{
+        arc_str_option_serde, arc_str_serde, default_as_true, default_panel_api_alias_pool_max,
+        default_panel_api_alias_pool_min, default_panel_api_provision_cooldown_secs,
+        default_panel_api_provision_probe_interval_secs, default_panel_api_provision_timeout_secs,
+        deserialize_as_option_string, is_blank_optional_arc_str, is_true, serialize_vec_flow_map_items,
+    },
 };
 use log::warn;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::fmt;
-use std::str::FromStr;
-use std::sync::Arc;
+use std::{fmt, str::FromStr, sync::Arc};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -24,35 +24,15 @@ pub struct PanelApiQueryParamDto {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct PanelApiQueryParametersDto {
-    #[serde(
-        default,
-        skip_serializing_if = "Vec::is_empty",
-        serialize_with = "serialize_vec_flow_map_items"
-    )]
+    #[serde(default, skip_serializing_if = "Vec::is_empty", serialize_with = "serialize_vec_flow_map_items")]
     pub account_info: Vec<PanelApiQueryParamDto>,
-    #[serde(
-        default,
-        skip_serializing_if = "Vec::is_empty",
-        serialize_with = "serialize_vec_flow_map_items"
-    )]
+    #[serde(default, skip_serializing_if = "Vec::is_empty", serialize_with = "serialize_vec_flow_map_items")]
     pub client_info: Vec<PanelApiQueryParamDto>,
-    #[serde(
-        default,
-        skip_serializing_if = "Vec::is_empty",
-        serialize_with = "serialize_vec_flow_map_items"
-    )]
+    #[serde(default, skip_serializing_if = "Vec::is_empty", serialize_with = "serialize_vec_flow_map_items")]
     pub client_new: Vec<PanelApiQueryParamDto>,
-    #[serde(
-        default,
-        skip_serializing_if = "Vec::is_empty",
-        serialize_with = "serialize_vec_flow_map_items"
-    )]
+    #[serde(default, skip_serializing_if = "Vec::is_empty", serialize_with = "serialize_vec_flow_map_items")]
     pub client_renew: Vec<PanelApiQueryParamDto>,
-    #[serde(
-        default,
-        skip_serializing_if = "Vec::is_empty",
-        serialize_with = "serialize_vec_flow_map_items"
-    )]
+    #[serde(default, skip_serializing_if = "Vec::is_empty", serialize_with = "serialize_vec_flow_map_items")]
     pub client_adult_content: Vec<PanelApiQueryParamDto>,
 }
 
@@ -77,44 +57,29 @@ impl PanelApiAliasPoolSizeValue {
         }
     }
 
-    pub fn is_auto(&self) -> bool {
-        matches!(self, Self::Auto(_))
-    }
+    pub fn is_auto(&self) -> bool { matches!(self, Self::Auto(_)) }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct PanelApiAliasPoolSizeDto {
-    #[serde(
-        default = "default_panel_api_alias_pool_min_value",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default = "default_panel_api_alias_pool_min_value", skip_serializing_if = "Option::is_none")]
     pub min: Option<PanelApiAliasPoolSizeValue>,
-    #[serde(
-        default = "default_panel_api_alias_pool_max_value",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default = "default_panel_api_alias_pool_max_value", skip_serializing_if = "Option::is_none")]
     pub max: Option<PanelApiAliasPoolSizeValue>,
 }
 
 fn default_panel_api_alias_pool_min_value() -> Option<PanelApiAliasPoolSizeValue> {
-    Some(PanelApiAliasPoolSizeValue::Number(
-        default_panel_api_alias_pool_min(),
-    ))
+    Some(PanelApiAliasPoolSizeValue::Number(default_panel_api_alias_pool_min()))
 }
 
 fn default_panel_api_alias_pool_max_value() -> Option<PanelApiAliasPoolSizeValue> {
-    Some(PanelApiAliasPoolSizeValue::Number(
-        default_panel_api_alias_pool_max(),
-    ))
+    Some(PanelApiAliasPoolSizeValue::Number(default_panel_api_alias_pool_max()))
 }
 
 impl Default for PanelApiAliasPoolSizeDto {
     fn default() -> Self {
-        Self {
-            min: default_panel_api_alias_pool_min_value(),
-            max: default_panel_api_alias_pool_max_value(),
-        }
+        Self { min: default_panel_api_alias_pool_min_value(), max: default_panel_api_alias_pool_max_value() }
     }
 }
 
@@ -189,11 +154,7 @@ pub struct PanelApiProvisioningDto {
     pub probe_interval_sec: u64,
     #[serde(default = "default_panel_api_provision_cooldown_secs")]
     pub cooldown_sec: u64,
-    #[serde(
-        default,
-        deserialize_with = "deserialize_as_option_string",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, deserialize_with = "deserialize_as_option_string", skip_serializing_if = "Option::is_none")]
     pub offset: Option<String>,
 }
 
@@ -210,9 +171,7 @@ impl Default for PanelApiProvisioningDto {
 }
 
 impl PanelApiProvisioningDto {
-    pub fn is_default(&self) -> bool {
-        *self == Self::default()
-    }
+    pub fn is_default(&self) -> bool { *self == Self::default() }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -227,11 +186,7 @@ pub struct PanelApiConfigDto {
     pub provisioning: PanelApiProvisioningDto,
     #[serde(default)]
     pub query_parameter: PanelApiQueryParametersDto,
-    #[serde(
-        default,
-        deserialize_with = "deserialize_as_option_string",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, deserialize_with = "deserialize_as_option_string", skip_serializing_if = "Option::is_none")]
     pub credits: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alias_pool: Option<PanelApiAliasPoolDto>,
@@ -255,10 +210,8 @@ impl PanelApiConfigDto {
     pub fn prepare(&mut self, input_name: &Arc<str>) -> Result<(), TuliproxError> {
         if self.enabled {
             if let Some(alias_pool) = self.alias_pool.as_mut() {
-                let size = alias_pool
-                    .size
-                    .get_or_insert_with(PanelApiAliasPoolSizeDto::default);
-               // Capture original state before applying defaults
+                let size = alias_pool.size.get_or_insert_with(PanelApiAliasPoolSizeDto::default);
+                // Capture original state before applying defaults
                 let min_was_none = size.min.is_none();
                 if size.min.is_none() {
                     size.min = Some(PanelApiAliasPoolSizeValue::Number(1));
@@ -266,24 +219,15 @@ impl PanelApiConfigDto {
                 if size.max.is_none() {
                     size.max = Some(PanelApiAliasPoolSizeValue::Number(1));
                 }
-                let min = size
-                    .min
-                    .as_ref()
-                    .and_then(PanelApiAliasPoolSizeValue::as_number);
-                let max = size
-                    .max
-                    .as_ref()
-                    .and_then(PanelApiAliasPoolSizeValue::as_number);
+                let min = size.min.as_ref().and_then(PanelApiAliasPoolSizeValue::as_number);
+                let max = size.max.as_ref().and_then(PanelApiAliasPoolSizeValue::as_number);
                 if let (Some(min), Some(max)) = (min, max) {
                     if min > max {
                         return info_err_res!("panel_api.alias_pool.size.min must be <= panel_api.alias_pool.size.max");
                     }
                 }
 
-                let max_auto = size
-                    .max
-                    .as_ref()
-                    .is_some_and(PanelApiAliasPoolSizeValue::is_auto);
+                let max_auto = size.max.as_ref().is_some_and(PanelApiAliasPoolSizeValue::is_auto);
                 if max_auto && min_was_none {
                     warn!("panel_api.alias_pool.size.max is set to auto without min for input {input_name}");
                 }

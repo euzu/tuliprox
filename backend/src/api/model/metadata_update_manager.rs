@@ -1307,6 +1307,7 @@ impl InputWorker {
                     item_title,
                     false, // Batch collect
                     fetch_info,
+                    reason.contains(ResolveReason::Probe),
                     query_opt,
                 ).await {
                     Ok(Some(props)) => {

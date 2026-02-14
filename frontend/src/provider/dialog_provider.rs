@@ -1,7 +1,11 @@
-use crate::services::{DialogRequest, DialogService};
-use yew::{function_component, html, use_effect_with, use_state, Callback, Children, ContextProvider, Html, Properties};
-use crate::app::{ConfirmDialog, ContentDialog};
-use crate::model::DialogResult;
+use crate::{
+    app::{ConfirmDialog, ContentDialog},
+    model::DialogResult,
+    services::{DialogRequest, DialogService},
+};
+use yew::{
+    function_component, html, use_effect_with, use_state, Callback, Children, ContextProvider, Html, Properties,
+};
 
 #[derive(Properties, PartialEq)]
 pub struct ConfirmProviderProps {
@@ -10,21 +14,18 @@ pub struct ConfirmProviderProps {
 
 #[function_component]
 pub fn DialogProvider(props: &ConfirmProviderProps) -> Html {
-
     let service = use_state(DialogService::new);
     let dialog_request = use_state(|| None::<DialogRequest>);
 
     {
         let service = service.clone();
         let request = dialog_request.clone();
-        use_effect_with((),
-            move |_| {
-                service.register(Callback::from(move |req: DialogRequest| {
-                    request.set(Some(req));
-                }));
-                || ()
-            },
-        );
+        use_effect_with((), move |_| {
+            service.register(Callback::from(move |req: DialogRequest| {
+                request.set(Some(req));
+            }));
+            || ()
+        });
     }
 
     let on_confirm = {
@@ -36,7 +37,7 @@ pub fn DialogProvider(props: &ConfirmProviderProps) -> Html {
                         if let Some(cb) = confirm.resolve.borrow_mut().take() {
                             cb(result);
                         }
-                    },
+                    }
                     DialogRequest::Content(content) => {
                         if let Some(cb) = content.resolve.borrow_mut().take() {
                             cb(result);

@@ -19,8 +19,19 @@ use shared::create_bitset;
 create_bitset!(u8, ResolveOptionsFlags, Resolve, TmdbMissing, Probe, Background);
 
 pub struct ResolveOptions {
-    pub flags: ResolveOptionsFlagsSet,
+    flags: ResolveOptionsFlagsSet,
     pub resolve_delay: u16,
+}
+
+impl ResolveOptions {
+    #[inline]
+    pub fn has_flag(&self, flag: ResolveOptionsFlags) -> bool {
+        self.flags.contains(flag)
+    }
+    #[inline]
+    pub fn unset_flag(&mut self, flag: ResolveOptionsFlags) {
+        self.flags.unset(flag);
+    }
 }
 
 impl Default for ResolveOptions {
@@ -44,23 +55,20 @@ macro_rules! create_resolve_options_function_for_xtream_target {
                 match target.get_xtream_output() {
                     Some(_) => {
                         let input_options = fpl.input.options.as_ref();
-                        let target_options = target.options.as_ref();
                         let input_is_xtream = fpl.input.input_type.is_xtream();
 
                         let (
                             resolve_tmdb_missing,
-                            probe_requested,
                             input_resolve_enabled,
                             input_probe_enabled,
                             input_resolve_background,
                             input_resolve_delay,
                         ) = if let Some(options) = input_options {
                             (
-                                options.flags.contains($crate::model::ConfigInputFlags::ResolveTmdb),
-                                options.flags.contains($crate::model::ConfigInputFlags::ProbeStream),
-                                options.flags.contains($crate::model::ConfigInputFlags::[<Resolve $cluster:camel>]),
-                                options.flags.contains($crate::model::ConfigInputFlags::[<Probe $cluster:camel>]),
-                                options.flags.contains($crate::model::ConfigInputFlags::ResolveBackground),
+                                options.has_flag($crate::model::ConfigInputFlags::ResolveTmdb),
+                                options.has_flag($crate::model::ConfigInputFlags::[<Resolve $cluster:camel>]),
+                                options.has_flag($crate::model::ConfigInputFlags::[<Probe $cluster:camel>]),
+                                options.has_flag($crate::model::ConfigInputFlags::ResolveBackground),
                                 options.resolve_delay,
                             )
                         } else {
@@ -68,57 +76,28 @@ macro_rules! create_resolve_options_function_for_xtream_target {
                                 false,
                                 false,
                                 false,
-                                false,
                                 shared::utils::default_as_true(),
                                 shared::utils::default_resolve_delay_secs(),
                             )
                         };
 
-                        let (
-                            legacy_resolve_enabled,
-                            legacy_probe_enabled,
-                            legacy_resolve_background,
-                            legacy_resolve_delay,
-                        ) = if let Some(options) = target_options {
-                            (
-                                options.[<legacy_resolve_ $cluster>](),
-                                options.[<legacy_probe_ $cluster>](),
-                                options.legacy_resolve_background(),
-                                options.legacy_resolve_delay(),
-                            )
-                        } else {
-                            (
-                                false,
-                                false,
-                                shared::utils::default_as_true(),
-                                shared::utils::default_resolve_delay_secs(),
-                            )
-                        };
-
-                        let resolve_enabled = input_resolve_enabled || legacy_resolve_enabled;
-                        let probe_enabled = input_probe_enabled || legacy_probe_enabled;
-                        let resolve_background = input_resolve_background && legacy_resolve_background;
-                        let resolve_delay =
-                            if shared::utils::is_default_resolve_delay_secs(&input_resolve_delay) {
-                                legacy_resolve_delay
-                            } else {
-                                input_resolve_delay
-                            };
+                        let resolve_enabled = input_resolve_enabled;
+                        let probe_enabled = input_probe_enabled;
+                        let resolve_background = input_resolve_background;
+                        let resolve_delay = input_resolve_delay;
 
                         let mut flags = $crate::processing::processor::ResolveOptionsFlagsSet::new();
                         if resolve_enabled && input_is_xtream {
-                            flags.add($crate::processing::processor::ResolveOptionsFlags::Resolve);
+                            flags.set($crate::processing::processor::ResolveOptionsFlags::Resolve);
                         }
                         if resolve_tmdb_missing {
-                            flags.add($crate::processing::processor::ResolveOptionsFlags::TmdbMissing);
+                            flags.set($crate::processing::processor::ResolveOptionsFlags::TmdbMissing);
                         }
-                        if probe_requested
-                            && input_is_xtream
-                            && probe_enabled {
-                            flags.add($crate::processing::processor::ResolveOptionsFlags::Probe);
+                        if input_is_xtream && probe_enabled {
+                            flags.set($crate::processing::processor::ResolveOptionsFlags::Probe);
                         }
                         if resolve_background {
-                            flags.add($crate::processing::processor::ResolveOptionsFlags::Background);
+                            flags.set($crate::processing::processor::ResolveOptionsFlags::Background);
                         }
                         $crate::processing::processor::ResolveOptions {
                             flags,

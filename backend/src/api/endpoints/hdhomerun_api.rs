@@ -108,8 +108,8 @@ where
                     .as_ref()
                     .map_or((true, false), |o| {
                         (
-                            o.flags.contains(ConfigInputFlags::XtreamLiveStreamUsePrefix),
-                            o.flags.contains(ConfigInputFlags::XtreamLiveStreamWithoutExtension),
+                            o.has_flag(ConfigInputFlags::XtreamLiveStreamUsePrefix),
+                            o.has_flag(ConfigInputFlags::XtreamLiveStreamWithoutExtension),
                         )
                     });
                 let container_extension = item.get_container_extension();

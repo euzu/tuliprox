@@ -251,9 +251,9 @@ pub struct HandlerOptions {
 impl HandlerOptions {
     pub fn set_flag(&mut self, flag: HandlerOptionFlags, enabled: bool) {
         if enabled {
-            self.flags.add(flag);
+            self.flags.set(flag);
         } else {
-            self.flags.remove(flag);
+            self.flags.unset(flag);
         }
     }
 }
@@ -261,7 +261,7 @@ impl HandlerOptions {
 impl Default for HandlerOptions {
     fn default() -> Self {
         let mut flags = HandlerOptionFlagsSet::new();
-        flags.add(HandlerOptionFlags::SkipIfAlreadyFound);
+        flags.set(HandlerOptionFlags::SkipIfAlreadyFound);
         Self {
             flags,
         }

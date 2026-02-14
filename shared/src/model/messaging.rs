@@ -1,7 +1,5 @@
-use std::fmt;
-use std::str::FromStr;
-use crate::{concat_string, info_err_res};
-use crate::error::{TuliproxError};
+use crate::{concat_string, error::TuliproxError, info_err_res};
+use std::{fmt, str::FromStr};
 
 #[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash)]
 pub enum MsgKind {

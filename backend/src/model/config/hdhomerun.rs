@@ -1,6 +1,6 @@
 use shared::model::{HdHomeRunConfigDto, HdHomeRunDeviceConfigDto};
 use crate::model::macros;
-use shared::create_bitset;
+use shared::{apply_flags, create_bitset};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HdHomeRunDeviceConfig {
@@ -61,18 +61,13 @@ macros::from_impl!(HdHomeRunConfig);
 impl From<&HdHomeRunConfigDto> for HdHomeRunConfig {
     fn from(dto: &HdHomeRunConfigDto) -> Self {
         let mut flags = HdHomeRunFlagsSet::new();
-        if dto.enabled {
-            flags.add(HdHomeRunFlags::Enabled);
-        }
-        if dto.auth {
-            flags.add(HdHomeRunFlags::Auth);
-        }
-        if dto.ssdp_discovery {
-            flags.add(HdHomeRunFlags::SsdpDiscovery);
-        }
-        if dto.proprietary_discovery {
-            flags.add(HdHomeRunFlags::ProprietaryDiscovery);
-        }
+        apply_flags!(
+            dto, flags, HdHomeRunFlags;
+            (enabled, Enabled),
+            (auth, Auth),
+            (ssdp_discovery, SsdpDiscovery),
+            (proprietary_discovery, ProprietaryDiscovery)
+        );
         Self {
             flags,
             devices: dto.devices.iter().map(Into::into).collect(),

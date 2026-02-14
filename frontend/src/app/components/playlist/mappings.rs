@@ -1,7 +1,9 @@
+use crate::app::components::{
+    Accordion, AccordionPanel, ConfigContext, FilterView, MapperCounterView, MapperScriptView, NoContent, ToggleSwitch,
+};
+use shared::model::{MapperDto, MappingCounter, MappingDto};
 use yew::prelude::*;
 use yew_i18n::use_translation;
-use shared::model::{MapperDto, MappingCounter, MappingDto};
-use crate::app::components::{Accordion, AccordionPanel, ConfigContext, FilterView, MapperCounterView, MapperScriptView, NoContent, ToggleSwitch};
 
 #[derive(Properties, PartialEq, Clone)]
 pub struct PlaylistMappingsProps {
@@ -14,20 +16,17 @@ pub fn PlaylistMappings(props: &PlaylistMappingsProps) -> Html {
     let config_ctx = use_context::<ConfigContext>().expect("Config context not found");
     let mappings = {
         let ids = props.mappings.clone();
-        use_memo((config_ctx.clone(), ids), |(context, mapping_ids)| {
-            match mapping_ids {
-                Some(ids) => {
-                    context.config.as_ref()
-                        .and_then(|c| c.mappings.as_ref())
-                        .map(|mappings_dto| {
-                            mappings_dto.mappings.mapping.iter()
-                                .filter(|m| ids.contains(&m.id))
-                                .cloned()
-                                .collect::<Vec<MappingDto>>()
-                        })
-                }
-                None => None,
-            }
+        use_memo((config_ctx.clone(), ids), |(context, mapping_ids)| match mapping_ids {
+            Some(ids) => context.config.as_ref().and_then(|c| c.mappings.as_ref()).map(|mappings_dto| {
+                mappings_dto
+                    .mappings
+                    .mapping
+                    .iter()
+                    .filter(|m| ids.contains(&m.id))
+                    .cloned()
+                    .collect::<Vec<MappingDto>>()
+            }),
+            None => None,
         })
     };
 

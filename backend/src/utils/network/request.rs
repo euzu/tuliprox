@@ -200,8 +200,9 @@ pub async fn send_with_retry_and_provider(
 
     // Record the starting URL index for full-cycle detection.
     // This allows us to try all URLs even when starting from a non-zero index.
-    let start_index = provider.as_ref().map_or(0, |p| p.get_current_index());
-    let max_provider_attempts = provider.as_ref().map_or(0, |p| p.urls.len());
+    let (start_index, max_provider_attempts) = provider
+        .as_ref()
+        .map_or((0, 0), |p| (p.get_current_index(), p.urls.len()));
     let mut provider_attempts = usize::from(max_provider_attempts > 0);
 
     'provider_loop: loop {

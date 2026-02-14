@@ -2,7 +2,7 @@ use crate::model::{macros, ConfigProvider, EpgConfig, PanelApiConfig};
 use crate::repository::get_csv_file_path;
 use chrono::Utc;
 use log::warn;
-use shared::create_bitset;
+use shared::{apply_flags, create_bitset};
 use shared::error::TuliproxError;
 use shared::model::{ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, InputFetchMethod, InputType, StagedInputDto};
 use shared::utils::{get_credentials_from_url, parse_provider_scheme_url_parts, sanitize_sensitive_info, Internable, PROVIDER_SCHEME_PREFIX};
@@ -24,7 +24,6 @@ create_bitset!(
     XtreamLiveStreamUsePrefix,
     XtreamLiveStreamWithoutExtension,
     ResolveTmdb,
-    ProbeStream,
     ResolveBackground,
     ResolveSeries,
     ResolveVod,
@@ -32,6 +31,37 @@ create_bitset!(
     ProbeVod,
     ProbeLive
 );
+
+impl ConfigInputFlagsSet {
+    #[inline]
+    pub fn contains_any(&self, other: Self) -> bool {
+        (self.0 & other.0) != 0
+    }
+
+    #[inline]
+    pub fn contains_all(&self, other: Self) -> bool {
+        (self.0 & other.0) == other.0
+    }
+}
+
+impl std::ops::BitOr for ConfigInputFlags {
+    type Output = ConfigInputFlagsSet;
+
+    #[inline]
+    fn bitor(self, rhs: Self) -> Self::Output {
+        ConfigInputFlagsSet::from_variants(&[self, rhs])
+    }
+}
+
+impl std::ops::BitOr<ConfigInputFlags> for ConfigInputFlagsSet {
+    type Output = Self;
+
+    #[inline]
+    fn bitor(mut self, rhs: ConfigInputFlags) -> Self::Output {
+        self.set(rhs);
+        self
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ConfigInputOptions {
@@ -41,48 +71,40 @@ pub struct ConfigInputOptions {
 }
 
 macros::from_impl!(ConfigInputOptions);
+impl ConfigInputOptions {
+    #[inline]
+    pub fn has_flag(&self, flag: ConfigInputFlags) -> bool {
+        self.flags.contains(flag)
+    }
+
+    #[inline]
+    pub fn has_any_flags(&self, flags: ConfigInputFlagsSet) -> bool {
+        self.flags.contains_any(flags)
+    }
+
+    #[inline]
+    pub fn has_all_flags(&self, flags: ConfigInputFlagsSet) -> bool {
+        self.flags.contains_all(flags)
+    }
+}
 impl From<&ConfigInputOptionsDto> for ConfigInputOptions {
     fn from(dto: &ConfigInputOptionsDto) -> Self {
         let mut flags = ConfigInputFlagsSet::new();
-        if dto.xtream_skip_live {
-            flags.add(ConfigInputFlags::XtreamSkipLive);
-        }
-        if dto.xtream_skip_vod {
-            flags.add(ConfigInputFlags::XtreamSkipVod);
-        }
-        if dto.xtream_skip_series {
-            flags.add(ConfigInputFlags::XtreamSkipSeries);
-        }
-        if dto.xtream_live_stream_use_prefix {
-            flags.add(ConfigInputFlags::XtreamLiveStreamUsePrefix);
-        }
-        if dto.xtream_live_stream_without_extension {
-            flags.add(ConfigInputFlags::XtreamLiveStreamWithoutExtension);
-        }
-        if dto.resolve_tmdb {
-            flags.add(ConfigInputFlags::ResolveTmdb);
-        }
-        if dto.probe_stream {
-            flags.add(ConfigInputFlags::ProbeStream);
-        }
-        if dto.resolve_background {
-            flags.add(ConfigInputFlags::ResolveBackground);
-        }
-        if dto.resolve_series {
-            flags.add(ConfigInputFlags::ResolveSeries);
-        }
-        if dto.resolve_vod {
-            flags.add(ConfigInputFlags::ResolveVod);
-        }
-        if dto.probe_series {
-            flags.add(ConfigInputFlags::ProbeSeries);
-        }
-        if dto.probe_vod {
-            flags.add(ConfigInputFlags::ProbeVod);
-        }
-        if dto.probe_live {
-            flags.add(ConfigInputFlags::ProbeLive);
-        }
+        apply_flags!(
+            dto, flags, ConfigInputFlags;
+            (xtream_skip_live, XtreamSkipLive),
+            (xtream_skip_vod, XtreamSkipVod),
+            (xtream_skip_series, XtreamSkipSeries),
+            (xtream_live_stream_use_prefix, XtreamLiveStreamUsePrefix),
+            (xtream_live_stream_without_extension, XtreamLiveStreamWithoutExtension),
+            (resolve_tmdb, ResolveTmdb),
+            (resolve_background, ResolveBackground),
+            (resolve_series, ResolveSeries),
+            (resolve_vod, ResolveVod),
+            (probe_series, ProbeSeries),
+            (probe_vod, ProbeVod),
+            (probe_live, ProbeLive)
+        );
 
         Self {
             flags,
@@ -210,6 +232,36 @@ pub struct ConfigInput {
 }
 
 impl ConfigInput {
+    #[inline]
+    pub fn has_flag(&self, flag: ConfigInputFlags) -> bool {
+        self.options.as_ref().is_some_and(|o| o.has_flag(flag))
+    }
+
+    #[inline]
+    pub fn has_flag_or(&self, flag: ConfigInputFlags, default: bool) -> bool {
+        self.options.as_ref().map_or(default, |o| o.has_flag(flag))
+    }
+
+    #[inline]
+    pub fn has_any_flags(&self, flags: ConfigInputFlagsSet) -> bool {
+        self.options.as_ref().is_some_and(|o| o.has_any_flags(flags))
+    }
+
+    #[inline]
+    pub fn has_any_flags_or(&self, flags: ConfigInputFlagsSet, default: bool) -> bool {
+        self.options.as_ref().map_or(default, |o| o.has_any_flags(flags))
+    }
+
+    #[inline]
+    pub fn has_all_flags(&self, flags: ConfigInputFlagsSet) -> bool {
+        self.options.as_ref().is_some_and(|o| o.has_all_flags(flags))
+    }
+
+    #[inline]
+    pub fn has_all_flags_or(&self, flags: ConfigInputFlagsSet, default: bool) -> bool {
+        self.options.as_ref().map_or(default, |o| o.has_all_flags(flags))
+    }
+
     pub fn prepare(&mut self, provider_configs: &[Arc<ConfigProvider>]) -> Result<Option<PathBuf>, TuliproxError> {
         let mut used_provider_configs: Vec<Arc<ConfigProvider>> = vec![];
         let batch_file_path = self.prepare_batch();

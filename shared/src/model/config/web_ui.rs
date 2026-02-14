@@ -1,6 +1,11 @@
-use crate::error::{TuliproxError, TuliproxErrorKind};
-use crate::model::WebAuthConfigDto;
-use crate::utils::{is_true, default_as_true, is_blank_optional_string, default_kick_secs, is_default_kick_secs, is_blank_optional_str};
+use crate::{
+    error::{TuliproxError, TuliproxErrorKind},
+    model::WebAuthConfigDto,
+    utils::{
+        default_as_true, default_kick_secs, is_blank_optional_str, is_blank_optional_string, is_default_kick_secs,
+        is_true,
+    },
+};
 
 const RESERVED_PATHS: &[&str] = &[
     "cvs",
@@ -34,11 +39,7 @@ pub struct ContentSecurityPolicyConfigDto {
 impl ContentSecurityPolicyConfigDto {
     pub fn is_empty(&self) -> bool {
         !self.enabled
-            && (self.custom_attributes.is_none()
-                || self
-                    .custom_attributes
-                    .as_ref()
-                    .is_some_and(|v| v.is_empty()))
+            && (self.custom_attributes.is_none() || self.custom_attributes.as_ref().is_some_and(|v| v.is_empty()))
     }
 
     pub fn validate(&self) -> Result<(), TuliproxError> {
@@ -109,19 +110,12 @@ impl WebUiConfigDto {
             && is_blank_optional_str(self.player_server.as_deref())
             && self.kick_secs == default_kick_secs()
             && (self.content_security_policy.is_none()
-                || self
-                    .content_security_policy
-                    .as_ref()
-                    .is_some_and(|c| c.is_empty()))
+                || self.content_security_policy.as_ref().is_some_and(|c| c.is_empty()))
             && (self.auth.is_none() || self.auth.as_ref().is_some_and(|c| c.is_empty()))
     }
 
     pub fn clean(&mut self) {
-        if self
-            .content_security_policy
-            .as_ref()
-            .is_some_and(|c| c.is_empty())
-        {
+        if self.content_security_policy.as_ref().is_some_and(|c| c.is_empty()) {
             self.content_security_policy = None;
         }
         if self.auth.as_ref().is_some_and(|c| c.is_empty()) {
@@ -147,11 +141,7 @@ impl WebUiConfigDto {
             if web_path.is_empty() {
                 self.path = None;
             } else {
-                let web_path = web_path
-                    .trim()
-                    .trim_start_matches('/')
-                    .trim_end_matches('/')
-                    .to_string();
+                let web_path = web_path.trim().trim_start_matches('/').trim_end_matches('/').to_string();
                 if RESERVED_PATHS.contains(&web_path.to_lowercase().as_str()) {
                     return Err(TuliproxError::new(
                         TuliproxErrorKind::Info,

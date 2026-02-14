@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-
 // Request to trigger a Library scan
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LibraryScanRequest {
@@ -8,7 +7,6 @@ pub struct LibraryScanRequest {
     #[serde(default)]
     pub force_rescan: bool,
 }
-
 
 // Scan result with statistics
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]

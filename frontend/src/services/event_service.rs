@@ -1,8 +1,10 @@
 use crate::model::EventMessage;
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    rc::Rc,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 
 type Subscriber = RefCell<HashMap<usize, Box<dyn Fn(EventMessage)>>>;
 
@@ -14,11 +16,8 @@ pub struct EventService {
 }
 
 impl Default for EventService {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
-
 
 impl EventService {
     pub fn new() -> Self {
@@ -30,11 +29,9 @@ impl EventService {
         }
     }
 
-    pub fn is_config_change_message_blocked(&self) -> bool {
-        self.block_config_updated_message.load(Ordering::Relaxed)
-    }
+    pub fn is_config_change_message_blocked(&self) -> bool { self.block_config_updated_message.load(Ordering::Relaxed) }
 
-    pub fn set_config_change_message_blocked(&self, value: bool)  {
+    pub fn set_config_change_message_blocked(&self, value: bool) {
         if value {
             // Re-block and bump epoch to invalidate any pending unblocks.
             self.block_config_updated_message.store(true, Ordering::Release);
@@ -58,9 +55,7 @@ impl EventService {
         sub_id
     }
 
-    pub fn unsubscribe(&self, sub_id: usize) {
-        self.subscribers.borrow_mut().remove(&sub_id);
-    }
+    pub fn unsubscribe(&self, sub_id: usize) { self.subscribers.borrow_mut().remove(&sub_id); }
 
     pub fn broadcast(&self, msg: EventMessage) {
         for (_, cb) in self.subscribers.borrow().iter() {

@@ -1,11 +1,11 @@
-use crate::app::components::chip::convert_bool_to_chip_style;
-use crate::app::components::{make_tags, CollapsePanel, Tag, TagList};
-use shared::model::ConfigInputDto;
-use shared::utils::{default_probe_live_interval, default_resolve_delay_secs};
+use crate::app::components::{chip::convert_bool_to_chip_style, make_tags, CollapsePanel, Tag, TagList};
+use shared::{
+    model::ConfigInputDto,
+    utils::{default_probe_live_interval, default_resolve_delay_secs},
+};
 use std::rc::Rc;
 use yew::prelude::*;
-use yew_i18n::{use_translation};
-
+use yew_i18n::use_translation;
 
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct InputOptionsProps {
@@ -17,26 +17,43 @@ pub fn InputOptions(props: &InputOptionsProps) -> Html {
     let translate = use_translation();
     let tags = use_memo(props.input.clone(), |input| {
         let (has_options, options1, options2, resolve_tags, probe_tags) = match input.options.as_ref() {
-            None => (false, vec![
-                (false, "LABEL.LIVE"),
-                (false, "LABEL.VOD"),
-                (false, "LABEL.SERIES")],
-                     vec![
-                (false, "LABEL.LIVE_STREAM_USE_PREFIX"),
-                (false, "LABEL.LIVE_STREAM_WITHOUT_EXTENSION"),
-                (false, "LABEL.RESOLVE_TMDB"),
-                (false, "LABEL.PROBE_STREAM"),
-            ],
-                    vec![
-                        Rc::new(Tag { class: convert_bool_to_chip_style(false), label: format!("{} / {}s", translate.t("LABEL.SERIES"), default_resolve_delay_secs()) }),
-                        Rc::new(Tag { class: convert_bool_to_chip_style(false), label: format!("{} / {}s", translate.t("LABEL.VOD"), default_resolve_delay_secs()) }),
-                        Rc::new(Tag { class: convert_bool_to_chip_style(true), label: translate.t("LABEL.RESOLVE_BACKGROUND").to_string() }),
-                    ],
-                    vec![
-                        Rc::new(Tag { class: convert_bool_to_chip_style(false), label: format!("{} / {}h", translate.t("LABEL.LIVE"), default_probe_live_interval()) }),
-                        Rc::new(Tag { class: convert_bool_to_chip_style(false), label: translate.t("LABEL.VOD").to_string() }),
-                        Rc::new(Tag { class: convert_bool_to_chip_style(false), label: translate.t("LABEL.SERIES").to_string() }),
-                    ]),
+            None => (
+                false,
+                vec![(false, "LABEL.LIVE"), (false, "LABEL.VOD"), (false, "LABEL.SERIES")],
+                vec![
+                    (false, "LABEL.LIVE_STREAM_USE_PREFIX"),
+                    (false, "LABEL.LIVE_STREAM_WITHOUT_EXTENSION"),
+                    (false, "LABEL.RESOLVE_TMDB"),
+                ],
+                vec![
+                    Rc::new(Tag {
+                        class: convert_bool_to_chip_style(false),
+                        label: format!("{} / {}s", translate.t("LABEL.SERIES"), default_resolve_delay_secs()),
+                    }),
+                    Rc::new(Tag {
+                        class: convert_bool_to_chip_style(false),
+                        label: format!("{} / {}s", translate.t("LABEL.VOD"), default_resolve_delay_secs()),
+                    }),
+                    Rc::new(Tag {
+                        class: convert_bool_to_chip_style(true),
+                        label: translate.t("LABEL.RESOLVE_BACKGROUND").to_string(),
+                    }),
+                ],
+                vec![
+                    Rc::new(Tag {
+                        class: convert_bool_to_chip_style(false),
+                        label: format!("{} / {}h", translate.t("LABEL.LIVE"), default_probe_live_interval()),
+                    }),
+                    Rc::new(Tag {
+                        class: convert_bool_to_chip_style(false),
+                        label: translate.t("LABEL.VOD").to_string(),
+                    }),
+                    Rc::new(Tag {
+                        class: convert_bool_to_chip_style(false),
+                        label: translate.t("LABEL.SERIES").to_string(),
+                    }),
+                ],
+            ),
             Some(options) => {
                 let has_options = options.xtream_skip_live
                     || options.xtream_skip_vod
@@ -44,7 +61,6 @@ pub fn InputOptions(props: &InputOptionsProps) -> Html {
                     || !options.xtream_live_stream_use_prefix
                     || options.xtream_live_stream_without_extension
                     || options.resolve_tmdb
-                    || options.probe_stream
                     || !options.resolve_background
                     || options.resolve_series
                     || options.resolve_vod
@@ -54,35 +70,50 @@ pub fn InputOptions(props: &InputOptionsProps) -> Html {
                     || options.resolve_delay != default_resolve_delay_secs()
                     || options.probe_live_interval_hours != default_probe_live_interval();
 
-                (has_options, vec![
-                    (options.xtream_skip_live, "LABEL.LIVE"),
-                    (options.xtream_skip_vod, "LABEL.VOD"),
-                    (options.xtream_skip_series, "LABEL.SERIES"),],
-                   vec![
-                    (options.xtream_live_stream_use_prefix, "LABEL.LIVE_STREAM_USE_PREFIX"),
-                    (options.xtream_live_stream_without_extension, "LABEL.LIVE_STREAM_WITHOUT_EXTENSION"),
-                    (options.resolve_tmdb, "LABEL.RESOLVE_TMDB"),
-                    (options.probe_stream, "LABEL.PROBE_STREAM"),
-                ],
+                (
+                    has_options,
                     vec![
-                        Rc::new(Tag { class: convert_bool_to_chip_style(options.resolve_series), label: format!("{} / {}s", translate.t("LABEL.SERIES"), options.resolve_delay) }),
-                        Rc::new(Tag { class: convert_bool_to_chip_style(options.resolve_vod), label: format!("{} / {}s", translate.t("LABEL.VOD"), options.resolve_delay) }),
-                        Rc::new(Tag { class: convert_bool_to_chip_style(options.resolve_background), label: translate.t("LABEL.RESOLVE_BACKGROUND").to_string() }),
+                        (options.xtream_skip_live, "LABEL.LIVE"),
+                        (options.xtream_skip_vod, "LABEL.VOD"),
+                        (options.xtream_skip_series, "LABEL.SERIES"),
                     ],
                     vec![
-                        Rc::new(Tag { class: convert_bool_to_chip_style(options.probe_live), label: format!("{} / {}h", translate.t("LABEL.LIVE"), options.probe_live_interval_hours) }),
-                        Rc::new(Tag { class: convert_bool_to_chip_style(options.probe_vod), label: translate.t("LABEL.VOD").to_string() }),
-                        Rc::new(Tag { class: convert_bool_to_chip_style(options.probe_series), label: translate.t("LABEL.SERIES").to_string() }),
-                    ])
+                        (options.xtream_live_stream_use_prefix, "LABEL.LIVE_STREAM_USE_PREFIX"),
+                        (options.xtream_live_stream_without_extension, "LABEL.LIVE_STREAM_WITHOUT_EXTENSION"),
+                        (options.resolve_tmdb, "LABEL.RESOLVE_TMDB"),
+                    ],
+                    vec![
+                        Rc::new(Tag {
+                            class: convert_bool_to_chip_style(options.resolve_series),
+                            label: format!("{} / {}s", translate.t("LABEL.SERIES"), options.resolve_delay),
+                        }),
+                        Rc::new(Tag {
+                            class: convert_bool_to_chip_style(options.resolve_vod),
+                            label: format!("{} / {}s", translate.t("LABEL.VOD"), options.resolve_delay),
+                        }),
+                        Rc::new(Tag {
+                            class: convert_bool_to_chip_style(options.resolve_background),
+                            label: translate.t("LABEL.RESOLVE_BACKGROUND").to_string(),
+                        }),
+                    ],
+                    vec![
+                        Rc::new(Tag {
+                            class: convert_bool_to_chip_style(options.probe_live),
+                            label: format!("{} / {}h", translate.t("LABEL.LIVE"), options.probe_live_interval_hours),
+                        }),
+                        Rc::new(Tag {
+                            class: convert_bool_to_chip_style(options.probe_vod),
+                            label: translate.t("LABEL.VOD").to_string(),
+                        }),
+                        Rc::new(Tag {
+                            class: convert_bool_to_chip_style(options.probe_series),
+                            label: translate.t("LABEL.SERIES").to_string(),
+                        }),
+                    ],
+                )
             }
         };
-        (
-            has_options,
-            make_tags(&options1, &translate),
-            make_tags(&options2, &translate),
-            resolve_tags,
-            probe_tags,
-        )
+        (has_options, make_tags(&options1, &translate), make_tags(&options2, &translate), resolve_tags, probe_tags)
     });
 
     let has_options = tags.0;

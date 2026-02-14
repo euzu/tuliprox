@@ -344,16 +344,16 @@ fn resolve_panel_api_optional_flags(
 ) -> PanelApiOptionalFlagsSet {
     let mut flags = PanelApiOptionalFlagsSet::new();
     if !cfg.query_parameter.account_info.is_empty() {
-        flags.add(PanelApiOptionalFlags::AccountInfo);
+        flags.set(PanelApiOptionalFlags::AccountInfo);
     }
     if !cfg.query_parameter.client_new.is_empty() {
-        flags.add(PanelApiOptionalFlags::ClientNew);
+        flags.set(PanelApiOptionalFlags::ClientNew);
     }
     if !cfg.query_parameter.client_renew.is_empty() {
-        flags.add(PanelApiOptionalFlags::ClientRenew);
+        flags.set(PanelApiOptionalFlags::ClientRenew);
     }
     if !cfg.query_parameter.client_adult_content.is_empty() {
-        flags.add(PanelApiOptionalFlags::AdultContent);
+        flags.set(PanelApiOptionalFlags::AdultContent);
     }
 
     let name = sanitize_sensitive_info(input_name);

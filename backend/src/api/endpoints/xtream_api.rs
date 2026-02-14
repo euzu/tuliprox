@@ -153,10 +153,7 @@ pub(in crate::api) fn get_xtream_player_api_stream_url(
     if let Some(input_user_info) = input.get_user_info() {
         let ctx = match context {
             ApiStreamContext::LiveAlt | ApiStreamContext::Live => {
-                let use_prefix = input
-                    .options
-                    .as_ref()
-                    .is_none_or(|o| o.flags.contains(ConfigInputFlags::XtreamLiveStreamUsePrefix));
+                let use_prefix = input.has_flag_or(ConfigInputFlags::XtreamLiveStreamUsePrefix, true);
                 String::from(if use_prefix { "live" } else { "" })
             }
             ApiStreamContext::Movie | ApiStreamContext::Series | ApiStreamContext::Timeshift => {
@@ -404,8 +401,8 @@ async fn xtream_player_api_stream(
 fn get_query_path(action_path: &str, stream_ext: Option<&String>, pli: &XtreamPlaylistItem, app_state: &Arc<AppState>) -> (String, String) {
     let discard_extension = if pli.item_type.is_live() {
         app_state.app_config.sources.load().get_input_by_name(&pli.input_name)
-            .as_ref().and_then(|i| i.options.as_ref())
-            .is_some_and(|o| o.flags.contains(ConfigInputFlags::XtreamLiveStreamWithoutExtension))
+            .as_ref()
+            .is_some_and(|i| i.has_flag(ConfigInputFlags::XtreamLiveStreamWithoutExtension))
     } else {
         false
     };
@@ -1185,14 +1182,12 @@ async fn xtream_player_api(
         let (skip_live, skip_vod, skip_series) =
             if let Some(inputs) = app_state.app_config.get_inputs_for_target(&target.name) {
                 inputs.iter().fold((true, true, true), |acc, i| {
-                    let (l, v, s) = acc;
-                    i.options.as_ref().map_or((false, false, false), |o| {
-                        (
-                            l && o.flags.contains(ConfigInputFlags::XtreamSkipLive),
-                            v && o.flags.contains(ConfigInputFlags::XtreamSkipVod),
-                            s && o.flags.contains(ConfigInputFlags::XtreamSkipSeries),
-                        )
-                    })
+                    let (live, vod, series) = acc;
+                    (
+                        live && i.has_flag(ConfigInputFlags::XtreamSkipLive),
+                        vod && i.has_flag(ConfigInputFlags::XtreamSkipVod),
+                        series && i.has_flag(ConfigInputFlags::XtreamSkipSeries),
+                    )
                 })
             } else {
                 (false, false, false)

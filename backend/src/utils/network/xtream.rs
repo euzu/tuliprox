@@ -23,7 +23,7 @@ use std::str::FromStr;
 
 use std::sync::Arc;
 
-use shared::info_err;
+use shared::{concat_string, info_err};
 
 const THREE_DAYS_IN_SECS: i64 = 3 * 24 * 60 * 60;
 
@@ -245,16 +245,14 @@ fn xtream_resolve_stream_info(app_state: &Arc<AppState>, user: &ProxyUserCredent
 
 fn get_skip_cluster(input: &ConfigInput) -> Vec<XtreamCluster> {
     let mut skip_cluster = vec![];
-    if let Some(input_options) = &input.options {
-        if input_options.flags.contains(ConfigInputFlags::XtreamSkipLive) {
-            skip_cluster.push(XtreamCluster::Live);
-        }
-        if input_options.flags.contains(ConfigInputFlags::XtreamSkipVod) {
-            skip_cluster.push(XtreamCluster::Video);
-        }
-        if input_options.flags.contains(ConfigInputFlags::XtreamSkipSeries) {
-            skip_cluster.push(XtreamCluster::Series);
-        }
+    if input.has_flag(ConfigInputFlags::XtreamSkipLive) {
+        skip_cluster.push(XtreamCluster::Live);
+    }
+    if input.has_flag(ConfigInputFlags::XtreamSkipVod) {
+        skip_cluster.push(XtreamCluster::Video);
+    }
+    if input.has_flag(ConfigInputFlags::XtreamSkipSeries) {
+        skip_cluster.push(XtreamCluster::Series);
     }
     if skip_cluster.len() == 3 {
         info!("You have skipped all sections from xtream input {}", &input.name);
@@ -346,8 +344,10 @@ pub async fn download_xtream_playlist(app_config: &Arc<AppConfig>, client: &reqw
         }
     };
 
-    let username = input_source.username.as_ref().map_or("", |v| v);
-    let password = input_source.password.as_ref().map_or("", |v| v);
+    let (username, password) = (
+        input_source.username.as_deref().unwrap_or(""),
+        input_source.password.as_deref().unwrap_or(""),
+    );
 
     let is_provider_url = input_source.url.starts_with(PROVIDER_SCHEME_PREFIX);
     let base_input_url = if is_provider_url {
@@ -383,12 +383,12 @@ pub async fn download_xtream_playlist(app_config: &Arc<AppConfig>, client: &reqw
     for (xtream_cluster, category, stream) in &ACTIONS {
         let is_requested = clusters.is_none_or(|c| c.contains(xtream_cluster));
         if is_requested && !skip_cluster.contains(xtream_cluster) {
-            let input_source_category = input_source.with_url(format!("{base_url}&action={category}"));
-            let input_source_stream = input_source.with_url(format!("{base_url}&action={stream}"));
+            let input_source_category = input_source.with_url(concat_string!(&base_url, "&action=", category));
+            let input_source_stream = input_source.with_url(concat_string!(&base_url, "&action=", stream));
             let category_file_path = crate::utils::prepare_file_path(input.persist.as_deref(),
-                                                                     working_dir, format!("{category}_").as_str());
+                                                                     working_dir, concat_string!(category, "_").as_str());
             let stream_file_path = crate::utils::prepare_file_path(input.persist.as_deref(),
-                                                                   working_dir, format!("{stream}_").as_str());
+                                                                   working_dir, concat_string!(stream, "_").as_str());
 
             match futures::join!(
                 request::get_input_json_content_as_stream(app_config, client, &input_source_category, category_file_path),

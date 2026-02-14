@@ -1,4 +1,4 @@
-use shared::model::{ConfigTargetDto};
+use shared::model::ConfigTargetDto;
 use std::rc::Rc;
 use yew::prelude::*;
 
@@ -17,6 +17,6 @@ pub fn TargetWatch(props: &TargetWatchProps) -> Html {
                     { watch.iter().map(|item| html! { <li>{ item }</li> }).collect::<Html>() }
                 </ul>
             </div>
-        }
+        },
     }
 }

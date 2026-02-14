@@ -1,12 +1,23 @@
-use crate::app::components::config::config_page::{ConfigForm, LABEL_MESSAGING_CONFIG};
-use crate::app::components::config::config_view_context::ConfigViewContext;
-use crate::app::components::{Card, Chip, RadioButtonGroup, TextArea};
-use crate::app::ConfigContext;
-use crate::{config_field, config_field_bool, config_field_bool_empty, config_field_child, config_field_custom, config_field_empty, config_field_hide, config_field_optional, edit_field_bool, edit_field_list, edit_field_text, edit_field_text_option, generate_form_reducer};
-use shared::model::{DiscordMessagingConfigDto, MessagingConfigDto, MsgKind, PushoverMessagingConfigDto,
-                    RestMessagingConfigDto, TelegramMessagingConfigDto};
-use std::rc::Rc;
-use std::str::FromStr;
+use crate::{
+    app::{
+        components::{
+            config::{
+                config_page::{ConfigForm, LABEL_MESSAGING_CONFIG},
+                config_view_context::ConfigViewContext,
+            },
+            Card, Chip, RadioButtonGroup, TextArea,
+        },
+        ConfigContext,
+    },
+    config_field, config_field_bool, config_field_bool_empty, config_field_child, config_field_custom,
+    config_field_empty, config_field_hide, config_field_optional, edit_field_bool, edit_field_list, edit_field_text,
+    edit_field_text_option, generate_form_reducer,
+};
+use shared::model::{
+    DiscordMessagingConfigDto, MessagingConfigDto, MsgKind, PushoverMessagingConfigDto, RestMessagingConfigDto,
+    TelegramMessagingConfigDto,
+};
+use std::{rc::Rc, str::FromStr};
 use yew::prelude::*;
 use yew_i18n::use_translation;
 
@@ -81,43 +92,25 @@ pub fn MessagingConfigView() -> Html {
     let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");
     let config_view_ctx = use_context::<ConfigViewContext>().expect("ConfigViewContext not found");
 
-    let telegram_state =
-        use_reducer(|| TelegramMessagingConfigFormState {
-            form: TelegramMessagingConfigDto::default(),
-            modified: false,
-        });
+    let telegram_state = use_reducer(|| TelegramMessagingConfigFormState {
+        form: TelegramMessagingConfigDto::default(),
+        modified: false,
+    });
     let rest_state =
-        use_reducer(|| RestMessagingConfigFormState {
-            form: RestMessagingConfigDto::default(),
-            modified: false,
-        });
+        use_reducer(|| RestMessagingConfigFormState { form: RestMessagingConfigDto::default(), modified: false });
 
-    let pushover_state =
-        use_reducer(|| PushoverMessagingConfigFormState {
-            form: PushoverMessagingConfigDto::default(),
-            modified: false,
-        });
+    let pushover_state = use_reducer(|| PushoverMessagingConfigFormState {
+        form: PushoverMessagingConfigDto::default(),
+        modified: false,
+    });
 
     let discord_state =
-        use_reducer(|| DiscordMessagingConfigFormState {
-            form: DiscordMessagingConfigDto::default(),
-            modified: false,
-        });
+        use_reducer(|| DiscordMessagingConfigFormState { form: DiscordMessagingConfigDto::default(), modified: false });
 
     let messaging_state =
-        use_reducer(|| MessagingConfigFormState {
-            form: MessagingConfigDto::default(),
-            modified: false,
-        });
+        use_reducer(|| MessagingConfigFormState { form: MessagingConfigDto::default(), modified: false });
 
-    let notify_on_options = use_memo((), |_| {
-        vec![
-            MsgKind::Info,
-            MsgKind::Stats,
-            MsgKind::Error,
-            MsgKind::Watch,
-        ]
-    });
+    let notify_on_options = use_memo((), |_| vec![MsgKind::Info, MsgKind::Stats, MsgKind::Error, MsgKind::Watch]);
 
     let notify_on_options_text = use_memo((*notify_on_options).clone(), |options: &Vec<MsgKind>| {
         options.iter().map(ToString::to_string).collect::<Vec<String>>()
@@ -154,7 +147,6 @@ pub fn MessagingConfigView() -> Html {
             on_form_change.emit(ConfigForm::Messaging(modified, form));
         });
     }
-
 
     {
         let msg_state = messaging_state.clone();
@@ -342,14 +334,7 @@ pub fn MessagingConfigView() -> Html {
 
     let render_edit_mode = || {
         let msg_state = messaging_state.clone();
-        let notify_on_selections = Rc::new(
-            msg_state
-                .form
-                .notify_on
-                .iter()
-                .map(ToString::to_string)
-                .collect(),
-        );
+        let notify_on_selections = Rc::new(msg_state.form.notify_on.iter().map(ToString::to_string).collect());
         html! {
             <>
             <div class="tp__messaging-config-view__header tp__config-view-page__header">
@@ -379,7 +364,7 @@ pub fn MessagingConfigView() -> Html {
                             let telegram_state = telegram_state.clone();
                             let kind = *kind;
                             html! {
-                                <TextArea 
+                                <TextArea
                                     label={kind_str}
                                     value={current_val}
                                     collapse_on_empty={true}
@@ -411,7 +396,7 @@ pub fn MessagingConfigView() -> Html {
                             let rest_state = rest_state.clone();
                             let kind = *kind;
                             html! {
-                                <TextArea 
+                                <TextArea
                                     label={kind_str}
                                     value={current_val}
                                     collapse_on_empty={true}
@@ -448,7 +433,7 @@ pub fn MessagingConfigView() -> Html {
                             let discord_state = discord_state.clone();
                             let kind = *kind;
                             html! {
-                                <TextArea 
+                                <TextArea
                                     label={kind_str}
                                     value={current_val}
                                     collapse_on_empty={true}

@@ -40,6 +40,7 @@ fn percentile_nearest_rank(sorted_values: &[f64], percentile: f64) -> f64 {
     sorted_values[rank]
 }
 
+#[ignore = "Should be run local for stress testing"]
 #[test]
 #[allow(
     clippy::cast_precision_loss,

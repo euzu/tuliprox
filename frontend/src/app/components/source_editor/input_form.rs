@@ -1,17 +1,26 @@
-use crate::app::components::config::HasFormData;
-use crate::app::components::key_value_editor::KeyValueEditor;
-use crate::app::components::select::Select;
-use crate::app::components::{AliasItemForm, BlockId, BlockInstance, Card, DropDownOption, DropDownSelection, EditMode, EpgSourceItemForm, IconButton, Panel, RadioButtonGroup, SourceEditorContext, TextButton, TitledCard};
-use crate::{config_field_child, edit_field_bool, edit_field_date, edit_field_number_i16, edit_field_number_u16, edit_field_number_u32, edit_field_text, edit_field_text_option, generate_form_reducer, html_if};
-use shared::error::TuliproxError;
-use shared::info_err_res;
-use shared::model::{ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, EpgConfigDto, EpgSourceDto, InputFetchMethod, InputType, StagedInputDto};
-use std::collections::HashMap;
-use std::fmt::Display;
-use std::rc::Rc;
-use std::str::FromStr;
+use crate::{
+    app::components::{
+        config::HasFormData, key_value_editor::KeyValueEditor, select::Select, AliasItemForm, BlockId, BlockInstance,
+        Card, DropDownOption, DropDownSelection, EditMode, EpgSourceItemForm, IconButton, Panel, RadioButtonGroup,
+        SourceEditorContext, TextButton, TitledCard,
+    },
+    config_field_child, edit_field_bool, edit_field_date, edit_field_number_i16, edit_field_number_u16,
+    edit_field_number_u32, edit_field_text, edit_field_text_option, generate_form_reducer, html_if,
+};
+use shared::{
+    error::TuliproxError,
+    info_err_res,
+    model::{
+        ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, EpgConfigDto, EpgSourceDto, InputFetchMethod,
+        InputType, StagedInputDto,
+    },
+};
+use std::{collections::HashMap, fmt::Display, rc::Rc, str::FromStr};
 use web_sys::MouseEvent;
-use yew::{function_component, html, use_context, use_effect_with, use_memo, use_reducer, use_state, Callback, Html, Properties, UseReducerHandle};
+use yew::{
+    function_component, html, use_context, use_effect_with, use_memo, use_reducer, use_state, Callback, Html,
+    Properties, UseReducerHandle,
+};
 use yew_i18n::use_translation;
 
 const LABEL_NAME: &str = "LABEL.NAME";
@@ -37,7 +46,6 @@ const LABEL_XTREAM_SKIP_SERIES: &str = "LABEL.SERIES";
 const LABEL_XTREAM_LIVE_STREAM_USE_PREFIX: &str = "LABEL.LIVE_STREAM_USE_PREFIX";
 const LABEL_XTREAM_LIVE_STREAM_WITHOUT_EXTENSION: &str = "LABEL.LIVE_STREAM_WITHOUT_EXTENSION";
 const LABEL_RESOLVE_TMDB: &str = "LABEL.RESOLVE_TMDB";
-const LABEL_PROBE_STREAM: &str = "LABEL.PROBE_STREAM";
 const LABEL_RESOLVE: &str = "LABEL.RESOLVE";
 const LABEL_PROBE: &str = "LABEL.PROBE";
 const LABEL_RESOLVE_DELAY_SEC: &str = "LABEL.RESOLVE_DELAY_SEC";
@@ -51,7 +59,6 @@ const LABEL_OPTIONS: &str = "LABEL.OPTIONS";
 const LABEL_STAGED: &str = "LABEL.STAGED";
 const LABEL_ADVANCED: &str = "LABEL.ADVANCED";
 const LABEL_ALIAS: &str = "LABEL.ALIAS";
-
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum InputFormPage {
@@ -87,13 +94,17 @@ impl FromStr for InputFormPage {
 
 impl Display for InputFormPage {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", match *self {
-            InputFormPage::Main => Self::MAIN,
-            InputFormPage::Options => Self::OPTIONS,
-            InputFormPage::Staged => Self::STAGED,
-            InputFormPage::Advanced => Self::ADVANCED,
-            InputFormPage::Alias => Self::ALIAS,
-        })
+        write!(
+            f,
+            "{}",
+            match *self {
+                InputFormPage::Main => Self::MAIN,
+                InputFormPage::Options => Self::OPTIONS,
+                InputFormPage::Staged => Self::STAGED,
+                InputFormPage::Advanced => Self::ADVANCED,
+                InputFormPage::Alias => Self::ALIAS,
+            }
+        )
     }
 }
 
@@ -107,7 +118,6 @@ generate_form_reducer!(
       XtreamLiveStreamUsePrefix => xtream_live_stream_use_prefix: bool,
       XtreamLiveStreamWithoutExtension => xtream_live_stream_without_extension: bool,
       ResolveTmdb => resolve_tmdb: bool,
-      ProbeStream => probe_stream: bool,
       ResolveBackground => resolve_background: bool,
       ResolveSeries => resolve_series: bool,
       ResolveVod => resolve_vod: bool,
@@ -166,10 +176,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     let translate = use_translation();
     let source_editor_ctx = use_context::<SourceEditorContext>();
     let fetch_methods = use_memo((), |_| {
-        [InputFetchMethod::GET, InputFetchMethod::POST]
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<String>>()
+        [InputFetchMethod::GET, InputFetchMethod::POST].iter().map(ToString::to_string).collect::<Vec<String>>()
     });
     let view_visible = use_state(|| InputFormPage::Main);
 
@@ -188,20 +195,11 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     };
 
     let input_form_state: UseReducerHandle<ConfigInputFormState> =
-        use_reducer(|| ConfigInputFormState {
-            form: ConfigInputDto::default(),
-            modified: false,
-        });
+        use_reducer(|| ConfigInputFormState { form: ConfigInputDto::default(), modified: false });
     let input_options_state: UseReducerHandle<ConfigInputOptionsDtoFormState> =
-        use_reducer(|| ConfigInputOptionsDtoFormState {
-            form: ConfigInputOptionsDto::default(),
-            modified: false,
-        });
+        use_reducer(|| ConfigInputOptionsDtoFormState { form: ConfigInputOptionsDto::default(), modified: false });
     let staged_input_state: UseReducerHandle<StagedInputDtoFormState> =
-        use_reducer(|| StagedInputDtoFormState {
-            form: StagedInputDto::default(),
-            modified: false,
-        });
+        use_reducer(|| StagedInputDtoFormState { form: StagedInputDto::default(), modified: false });
 
     // State for EPG sources, Aliases, and Headers
     let epg_sources_state = use_state(Vec::<EpgSourceDto>::new);
@@ -221,12 +219,9 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             // InputType::M3uBatch,
             // InputType::XtreamBatch,
         ]
-            .iter()
-            .map(|t| DropDownOption {
-                id: t.to_string(),
-                label: html! { t.to_string() },
-                selected: t == default_it,
-            }).collect::<Vec<DropDownOption>>()
+        .iter()
+        .map(|t| DropDownOption { id: t.to_string(), label: html! { t.to_string() }, selected: t == default_it })
+        .collect::<Vec<DropDownOption>>()
     });
 
     {
@@ -343,7 +338,6 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         })
     };
 
-
     let handle_remove_alias_list_item = {
         let alias_list = aliases_state.clone();
         Callback::from(move |(idx, e): (String, MouseEvent)| {
@@ -442,7 +436,6 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             }
             <TitledCard title={translate.t(LABEL_METADATA)}>
               { edit_field_bool!(input_options_state, translate.t(LABEL_RESOLVE_TMDB), resolve_tmdb, ConfigInputOptionsFormAction::ResolveTmdb) }
-              { edit_field_bool!(input_options_state, translate.t(LABEL_PROBE_STREAM), probe_stream, ConfigInputOptionsFormAction::ProbeStream) }
              </TitledCard>
             { html_if!(input_form_state.form.input_type.is_xtream(), {
                 <>
@@ -724,18 +717,10 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             let mut input = input_form_state.data().clone();
 
             let options = input_options_state.data();
-            input.options = if options.is_empty() {
-                None
-            } else {
-                Some(options.clone())
-            };
+            input.options = if options.is_empty() { None } else { Some(options.clone()) };
 
             let staged_input = staged_input_state.data();
-            input.staged = if staged_input.is_empty() {
-                None
-            } else {
-                Some(staged_input.clone())
-            };
+            input.staged = if staged_input.is_empty() { None } else { Some(staged_input.clone()) };
 
             // Handle Headers
             input.headers = (*headers_state).clone();
@@ -744,25 +729,15 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             let epg_sources = (*epg_sources_state).clone();
             if let Some(mut epg_cfg) = input.epg.take() {
                 epg_cfg.sources = if epg_sources.is_empty() { None } else { Some(epg_sources) };
-                input.epg = if epg_cfg.sources.is_some() || epg_cfg.smart_match.is_some() {
-                    Some(epg_cfg)
-                } else {
-                    None
-                };
+                input.epg =
+                    if epg_cfg.sources.is_some() || epg_cfg.smart_match.is_some() { Some(epg_cfg) } else { None };
             } else if !epg_sources.is_empty() {
-                input.epg = Some(EpgConfigDto {
-                    sources: Some(epg_sources),
-                    ..EpgConfigDto::default()
-                });
+                input.epg = Some(EpgConfigDto { sources: Some(epg_sources), ..EpgConfigDto::default() });
             }
 
             // Handle Aliases
             let aliases = (*aliases_state).clone();
-            input.aliases = if aliases.is_empty() {
-                None
-            } else {
-                Some(aliases)
-            };
+            input.aliases = if aliases.is_empty() { None } else { Some(aliases) };
 
             if let Some(on_apply) = &on_apply {
                 on_apply.emit(input);
@@ -785,7 +760,6 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     };
 
     let library_input = input_form_state.form.input_type.is_library();
-
 
     let render_edit_mode = || {
         html! {

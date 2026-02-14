@@ -1,9 +1,13 @@
-use std::fmt::Display;
-use std::hash::{Hash, Hasher};
-use std::str::FromStr;
+use crate::{
+    error::{info_err_res, TuliproxError},
+    model::{ClusterFlags, PlaylistItemType},
+};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use crate::error::{TuliproxError, info_err_res};
-use crate::model::{ClusterFlags, PlaylistItemType};
+use std::{
+    fmt::Display,
+    hash::{Hash, Hasher},
+    str::FromStr,
+};
 
 #[derive(Debug, Default, Copy, Clone)]
 pub enum ProxyType {
@@ -17,8 +21,8 @@ impl PartialEq for ProxyType {
         match (self, other) {
             (ProxyType::Redirect, ProxyType::Redirect) => true,
             (ProxyType::Reverse(a), ProxyType::Reverse(b)) => {
-                let a_flags = a.map_or(0u16, |f| if f.has_full_flags() { 0u16 } else { f.bits() } );
-                let b_flags = b.map_or(0u16, |f| if f.has_full_flags() { 0u16 } else { f.bits() } );
+                let a_flags = a.map_or(0u16, |f| if f.has_full_flags() { 0u16 } else { f.bits() });
+                let b_flags = b.map_or(0u16, |f| if f.has_full_flags() { 0u16 } else { f.bits() });
                 a_flags == b_flags
             }
             _ => false,
@@ -40,9 +44,7 @@ impl Ord for ProxyType {
 }
 
 impl PartialOrd for ProxyType {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(other)) }
 }
 
 impl Hash for ProxyType {
@@ -53,7 +55,7 @@ impl Hash for ProxyType {
             }
             ProxyType::Reverse(flags_opt) => {
                 1u8.hash(state);
-                let flags = flags_opt.map_or(0u16, |f| if f.has_full_flags() { 0u16 } else { f.bits() } );
+                let flags = flags_opt.map_or(0u16, |f| if f.has_full_flags() { 0u16 } else { f.bits() });
                 flags.hash(state);
             }
         }
@@ -77,15 +79,13 @@ impl ProxyType {
                     return false;
                 }
                 true
-            },
+            }
             ProxyType::Reverse(None) => false,
-            ProxyType::Redirect => true
+            ProxyType::Redirect => true,
         }
     }
 
-    pub fn is_reverse(&self, item_type: PlaylistItemType) -> bool {
-        !self.is_redirect(item_type)
-    }
+    pub fn is_reverse(&self, item_type: PlaylistItemType) -> bool { !self.is_redirect(item_type) }
 }
 
 impl Display for ProxyType {
@@ -152,7 +152,7 @@ impl Serialize for ProxyType {
             ProxyType::Reverse(None) => serializer.serialize_str(ProxyType::REVERSE),
             ProxyType::Reverse(Some(ref force_redirect)) => {
                 serializer.serialize_str(&format!("{}{}", ProxyType::REVERSE, force_redirect))
-            },
+            }
         }
     }
 }

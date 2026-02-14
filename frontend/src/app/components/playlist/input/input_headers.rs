@@ -11,7 +11,7 @@ pub fn InputHeaders(props: &InputHeadersProps) -> Html {
     if props.headers.is_empty() {
         html! {}
     } else {
-       html! {
+        html! {
             <div class="tp__input-headers">
                 <ul>
                     { props.headers.iter().map(|(key, value)| html! { <li>{ key } {":"} {value}</li> }).collect::<Html>() }

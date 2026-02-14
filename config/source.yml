@@ -33,8 +33,6 @@ sources:
             skip_live_direct_source: true
             skip_video_direct_source: true
             skip_series_direct_source: true
-            resolve_series: false
-            resolve_vod: false
             trakt:
               lists:
                 - user: "linaspurinis"

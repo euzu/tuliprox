@@ -1,10 +1,13 @@
+use crate::app::{
+    components::{CollapsePanel, FilterView},
+    ConfigContext,
+};
+use shared::{foundation::get_filter, model::PatternTemplate};
 use web_sys::InputEvent;
-use crate::app::ConfigContext;
-use shared::model::PatternTemplate;
-use yew::{classes, function_component, html, use_context, use_effect_with, use_state, Callback, Html, Properties, TargetCast};
+use yew::{
+    classes, function_component, html, use_context, use_effect_with, use_state, Callback, Html, Properties, TargetCast,
+};
 use yew_i18n::use_translation;
-use shared::foundation::{get_filter};
-use crate::app::components::{CollapsePanel, FilterView};
 
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct FilterEditorProps {
@@ -28,7 +31,7 @@ pub fn FilterEditor(props: &FilterEditorProps) -> Html {
     {
         let templates = templates_state.clone();
         let cfg_templates = config_ctx.config.as_ref().and_then(|c| c.sources.templates.clone());
-        use_effect_with(cfg_templates,  move |templ| {
+        use_effect_with(cfg_templates, move |templ| {
             templates.set(templ.clone());
         });
     }
@@ -66,20 +69,20 @@ pub fn FilterEditor(props: &FilterEditorProps) -> Html {
     }
 
     let handle_filter_input = {
-      let filter = filter_state.clone();
-      let on_filter_change = props.on_filter_change.clone();
-      Callback::from(move |event: InputEvent| {
-          if let Some(input) = event.target_dyn_into::<web_sys::HtmlTextAreaElement>() {
-              let value = input.value();
-              if value.is_empty() {
-                  filter.set(None);
-                  on_filter_change.emit(None);
-              } else {
-                  filter.set(Some(value.clone()));
-                  on_filter_change.emit(Some(value));
-              }
-          }
-      })
+        let filter = filter_state.clone();
+        let on_filter_change = props.on_filter_change.clone();
+        Callback::from(move |event: InputEvent| {
+            if let Some(input) = event.target_dyn_into::<web_sys::HtmlTextAreaElement>() {
+                let value = input.value();
+                if value.is_empty() {
+                    filter.set(None);
+                    on_filter_change.emit(None);
+                } else {
+                    filter.set(Some(value.clone()));
+                    on_filter_change.emit(Some(value));
+                }
+            }
+        })
     };
 
     html! {

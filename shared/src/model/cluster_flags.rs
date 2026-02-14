@@ -1,8 +1,11 @@
-use std::fmt;
-use bitflags::bitflags;
-use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
-use serde::de::{Error, SeqAccess, Visitor};
 use crate::model::{PlaylistItemType, XtreamCluster};
+use bitflags::bitflags;
+use serde::{
+    de,
+    de::{Error, SeqAccess, Visitor},
+    Deserialize, Deserializer, Serialize, Serializer,
+};
+use std::fmt;
 
 bitflags! {
     #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -22,13 +25,11 @@ impl ClusterFlags {
         })
     }
 
-    pub fn has_full_flags(&self) -> bool {
-        self.is_all()
-    }
+    pub fn has_full_flags(&self) -> bool { self.is_all() }
 
     fn from_items<I, S>(items: I) -> Result<Self, &'static str>
     where
-        I: IntoIterator<Item=S>,
+        I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
         let mut result = ClusterFlags::empty();
@@ -76,9 +77,7 @@ impl TryFrom<&str> for ClusterFlags {
 impl TryFrom<Vec<String>> for ClusterFlags {
     type Error = &'static str;
 
-    fn try_from(value: Vec<String>) -> Result<Self, Self::Error> {
-        ClusterFlags::from_items(value)
-    }
+    fn try_from(value: Vec<String>) -> Result<Self, Self::Error> { ClusterFlags::from_items(value) }
 }
 
 impl Serialize for ClusterFlags {

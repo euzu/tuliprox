@@ -71,9 +71,8 @@ pub async fn update_live_stream_metadata(
     let input_url = input.url.as_str();
     let username = input.username.as_deref().unwrap_or("");
     let password = input.password.as_deref().unwrap_or("");
-    let opts = input.options.as_ref();
-    let use_prefix = opts.is_none_or(|o| o.flags.contains(ConfigInputFlags::XtreamLiveStreamUsePrefix));
-    let no_ext = opts.is_some_and(|o| o.flags.contains(ConfigInputFlags::XtreamLiveStreamWithoutExtension));
+    let use_prefix = input.has_flag_or(ConfigInputFlags::XtreamLiveStreamUsePrefix, true);
+    let no_ext = input.has_flag(ConfigInputFlags::XtreamLiveStreamWithoutExtension);
 
     // We generate the URL to probe directly on the provider
     let stream_url = create_xtream_url(

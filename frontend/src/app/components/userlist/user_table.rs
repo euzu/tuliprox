@@ -1,25 +1,26 @@
-use std::cmp::Ordering;
-use crate::app::components::menu_item::MenuItem;
-use crate::app::components::popup_menu::PopupMenu;
-use crate::app::components::{convert_bool_to_chip_style, AppIcon, CellValue, Chip, HideContent,
-                             MaxConnections, ProxyTypeView, RevealContent, Table, TableDefinition,
-                             UserStatus, UserlistContext, UserlistPage};
-use crate::app::context::TargetUser;
-use crate::model::DialogResult;
-use crate::services::DialogService;
-use shared::error::{info_err_res, TuliproxError};
-use shared::model::{SortOrder};
-use shared::utils::{unix_ts_to_str, Substring};
-use std::fmt::Display;
-use std::rc::Rc;
-use std::str::FromStr;
-use std::collections::HashSet;
-use yew::platform::spawn_local;
-use yew::prelude::*;
+use crate::{
+    app::{
+        components::{
+            convert_bool_to_chip_style, menu_item::MenuItem, popup_menu::PopupMenu, AppIcon, CellValue, Chip,
+            HideContent, MaxConnections, ProxyTypeView, RevealContent, Table, TableDefinition, UserStatus,
+            UserlistContext, UserlistPage,
+        },
+        context::TargetUser,
+        ConfigContext, TargetUserList,
+    },
+    hooks::use_service_context,
+    model::DialogResult,
+    services::DialogService,
+};
+use shared::{
+    error::{info_err_res, TuliproxError},
+    model::SortOrder,
+    utils::{unix_ts_to_str, Substring},
+};
+use std::{cmp::Ordering, collections::HashSet, fmt::Display, rc::Rc, str::FromStr};
+use yew::{platform::spawn_local, prelude::*};
 use yew_hooks::use_clipboard;
 use yew_i18n::use_translation;
-use crate::app::{ConfigContext, TargetUserList};
-use crate::hooks::use_service_context;
 
 const HEADERS: [&str; 16] = [
     "LABEL.EMPTY",
@@ -47,17 +48,14 @@ fn get_cell_value(user: &TargetUser, col: usize) -> CellValue<'_> {
         3 => CellValue::Text(user.target.as_str()),
         4 => CellValue::Text(user.credentials.username.as_str()),
         7 => CellValue::Proxy(user.credentials.proxy),
-        8 => user.credentials.server.as_ref().map_or(CellValue::Empty, |s|CellValue::Text(s)),
+        8 => user.credentials.server.as_ref().map_or(CellValue::Empty, |s| CellValue::Text(s)),
         13 => user.credentials.created_at.as_ref().map_or(CellValue::Empty, |d| CellValue::Date(*d)),
         14 => user.credentials.exp_date.as_ref().map_or(CellValue::Empty, |d| CellValue::Date(*d)),
         _ => CellValue::Empty,
     }
 }
 
-fn is_col_sortable(col: usize) -> bool {
-    matches!(col, 1 | 2 | 3 | 4 | 7 | 8 | 13  | 14)
-}
-
+fn is_col_sortable(col: usize) -> bool { matches!(col, 1 | 2 | 3 | 4 | 7 | 8 | 13 | 14) }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 enum TableAction {
@@ -69,12 +67,16 @@ enum TableAction {
 
 impl Display for TableAction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", match self {
-            Self::Edit => "edit",
-            Self::Refresh => "refresh",
-            Self::Delete => "delete",
-            Self::CopyCredentials => "copy_credentials",
-        })
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::Edit => "edit",
+                Self::Refresh => "refresh",
+                Self::Delete => "delete",
+                Self::CopyCredentials => "copy_credentials",
+            }
+        )
     }
 }
 
@@ -113,14 +115,19 @@ pub fn UserTable(props: &UserTableProps) -> Html {
     let popup_is_open = use_state(|| false);
     let selected_dto = use_state(|| None::<Rc<TargetUser>>);
     let user_list = use_state(|| props.users.clone());
-    let target_names = use_memo(config_ctx.clone(), |cfg|
-        cfg.config.as_ref().map(|c| c.sources.sources.iter().flat_map(|s| s.targets.iter())
-            .map(|t| t.name.clone())
-            .collect::<HashSet<String>>()
-            )
+    let target_names = use_memo(config_ctx.clone(), |cfg| {
+        cfg.config
+            .as_ref()
+            .map(|c| {
+                c.sources
+                    .sources
+                    .iter()
+                    .flat_map(|s| s.targets.iter())
+                    .map(|t| t.name.clone())
+                    .collect::<HashSet<String>>()
+            })
             .unwrap_or_default()
-    );
-
+    });
 
     {
         let user_list = user_list.clone();
@@ -210,9 +217,9 @@ pub fn UserTable(props: &UserTableProps) -> Html {
                                      |comment| html! { <RevealContent preview={Some(html! {comment.substring(0, 50)})}>{comment}</RevealContent> }),
                     _ => html! {""},
                 }
-            })
+            },
+        )
     };
-
 
     let is_sortable = Callback::<usize, bool>::from(is_col_sortable);
 
@@ -221,7 +228,7 @@ pub fn UserTable(props: &UserTableProps) -> Html {
         let user_list = user_list.clone();
         Callback::<Option<(usize, SortOrder)>, ()>::from(move |args| {
             if let Some((col, order)) = args {
-                if let Some(new_user_list)= users.as_ref() {
+                if let Some(new_user_list) = users.as_ref() {
                     let mut new_user_list = new_user_list.as_ref().clone();
                     new_user_list.sort_by(|a, b| {
                         let a_value = get_cell_value(a, col);
@@ -249,7 +256,7 @@ pub fn UserTable(props: &UserTableProps) -> Html {
         let num_cols = HEADERS.len();
         let user_list_clone = user_list.clone();
         use_memo(user_list_clone.clone(), move |targets| {
-            let items = if (*targets).as_ref().is_none_or(|l| l.is_empty()) {None} else {(**targets).clone()};
+            let items = if (*targets).as_ref().is_none_or(|l| l.is_empty()) { None } else { (**targets).clone() };
             TableDefinition::<TargetUser> {
                 items,
                 num_cols,
@@ -260,7 +267,6 @@ pub fn UserTable(props: &UserTableProps) -> Html {
             }
         })
     };
-
 
     let handle_menu_click = {
         let popup_is_open_state = popup_is_open.clone();
@@ -293,18 +299,30 @@ pub fn UserTable(props: &UserTableProps) -> Html {
                             let result = confirm.confirm(&translator.t("MESSAGES.CONFIRM_DELETE")).await;
                             if result == DialogResult::Ok {
                                 if let Some(dto) = &*selected_user {
-                                    match services.user.delete_user(dto.target.clone(), dto.credentials.username.clone()).await {
+                                    match services
+                                        .user
+                                        .delete_user(dto.target.clone(), dto.credentials.username.clone())
+                                        .await
+                                    {
                                         Ok(()) => {
                                             if let Some(user_list) = userlist.users.as_ref() {
-                                                let new_list: Vec<Rc<TargetUser>> = user_list.iter().filter(|target_user|
-                                                    !(target_user.target.eq(&dto.target) && target_user.credentials.username.eq(&dto.credentials.username))
-                                                ).map(Rc::clone).collect();
+                                                let new_list: Vec<Rc<TargetUser>> = user_list
+                                                    .iter()
+                                                    .filter(|target_user| {
+                                                        !(target_user.target.eq(&dto.target)
+                                                            && target_user
+                                                                .credentials
+                                                                .username
+                                                                .eq(&dto.credentials.username))
+                                                    })
+                                                    .map(Rc::clone)
+                                                    .collect();
                                                 userlist.users.set(Some(Rc::new(new_list)));
                                                 services.toastr.success(translator.t("MESSAGES.USER_DELETED"));
                                             }
-                                        },
+                                        }
                                         Err(err) => {
-                                           services.toastr.error(err.to_string());
+                                            services.toastr.error(err.to_string());
                                         }
                                     }
                                 }
@@ -313,16 +331,25 @@ pub fn UserTable(props: &UserTableProps) -> Html {
                     }
                     TableAction::CopyCredentials => {
                         if let Some(dto) = &*selected_dto {
-                            let text = format!("username: {} password: {} token: {}",
-                                               dto.credentials.username, dto.credentials.password,
-                                               dto.credentials.token.as_ref().map_or_else(String::new, |t| t.to_string()));
+                            let text = format!(
+                                "username: {} password: {} token: {}",
+                                dto.credentials.username,
+                                dto.credentials.password,
+                                dto.credentials.token.as_ref().map_or_else(String::new, |t| t.to_string())
+                            );
 
                             if *clipboard.is_supported {
                                 clipboard.write_text(text);
                             } else {
                                 let dlg = dialog.clone();
                                 spawn_local(async move {
-                                    let _result = dlg.content(html! {<input value={text} readonly={true} class="tp__copy-input"/>}, None, false).await;
+                                    let _result = dlg
+                                        .content(
+                                            html! {<input value={text} readonly={true} class="tp__copy-input"/>},
+                                            None,
+                                            false,
+                                        )
+                                        .await;
                                 });
                             }
                         }

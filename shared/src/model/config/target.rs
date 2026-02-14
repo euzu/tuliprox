@@ -1,14 +1,18 @@
-use crate::error::{TuliproxError, TuliproxErrorKind};
-use crate::{info_err_res, handle_tuliprox_error_result_list};
-use crate::foundation::{get_filter, Filter};
-use crate::model::{ClusterFlags, ConfigFavouritesDto, ConfigRenameDto, ConfigSortDto, HdHomeRunDeviceOverview,
-                   PatternTemplate, ProcessingOrder, StrmExportStyle, TargetType, TraktConfigDto};
-use crate::utils::{is_true, is_false, default_as_true, default_resolve_delay_secs, default_as_default,
-                   is_blank_optional_string,
-                   is_default_resolve_delay_secs, is_zero_u16, is_config_target_options_empty, is_default_processing_order,
-                   default_probe_live_interval, is_default_probe_live_interval};
+use crate::{
+    error::{TuliproxError, TuliproxErrorKind},
+    foundation::{get_filter, Filter},
+    handle_tuliprox_error_result_list, info_err_res,
+    model::{
+        ClusterFlags, ConfigFavouritesDto, ConfigRenameDto, ConfigSortDto, HdHomeRunDeviceOverview, PatternTemplate,
+        ProcessingOrder, StrmExportStyle, TargetType, TraktConfigDto,
+    },
+    utils::{
+        default_as_default, default_as_true, is_blank_optional_string, is_config_target_options_empty,
+        is_default_processing_order, is_false, is_true, is_zero_u16,
+    },
+};
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigTargetOptions {
     #[serde(default, skip_serializing_if = "is_false")]
@@ -19,97 +23,15 @@ pub struct ConfigTargetOptions {
     pub remove_duplicates: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub force_redirect: Option<ClusterFlags>,
-    #[serde(default = "default_as_true", alias = "resolve_background", skip_serializing)]
-    legacy_resolve_background: bool,
-    #[serde(default, alias = "resolve_series", skip_serializing)]
-    legacy_resolve_series: bool,
-    #[serde(default, alias = "resolve_vod", skip_serializing)]
-    legacy_resolve_vod: bool,
-    #[serde(default, alias = "probe_series", skip_serializing)]
-    legacy_probe_series: bool,
-    #[serde(default, alias = "probe_vod", skip_serializing)]
-    legacy_probe_vod: bool,
-    #[serde(default = "default_resolve_delay_secs", alias = "resolve_delay", skip_serializing)]
-    legacy_resolve_delay: u16,
-    #[serde(default, alias = "probe_live", alias = "resolve_live", skip_serializing)]
-    legacy_probe_live: bool,
-    #[serde(
-        default = "default_probe_live_interval",
-        alias = "probe_live_interval_hours",
-        alias = "resolve_live_interval_hours",
-        skip_serializing
-    )]
-    legacy_probe_live_interval_hours: u32,
-}
-
-impl Default for ConfigTargetOptions {
-    fn default() -> Self {
-        Self {
-            ignore_logo: false,
-            share_live_streams: false,
-            remove_duplicates: false,
-            force_redirect: None,
-            legacy_resolve_background: default_as_true(),
-            legacy_resolve_series: false,
-            legacy_resolve_vod: false,
-            legacy_probe_series: false,
-            legacy_probe_vod: false,
-            legacy_resolve_delay: default_resolve_delay_secs(),
-            legacy_probe_live: false,
-            legacy_probe_live_interval_hours: default_probe_live_interval(),
-        }
-    }
 }
 
 impl ConfigTargetOptions {
-    pub fn has_legacy_resolve_probe_options(&self) -> bool {
-        !self.legacy_resolve_background
-            || self.legacy_resolve_series
-            || self.legacy_resolve_vod
-            || self.legacy_probe_series
-            || self.legacy_probe_vod
-            || self.legacy_probe_live
-            || !is_default_resolve_delay_secs(&self.legacy_resolve_delay)
-            || !is_default_probe_live_interval(&self.legacy_probe_live_interval_hours)
-    }
-
-    pub fn legacy_resolve_background(&self) -> bool {
-        self.legacy_resolve_background
-    }
-
-    pub fn legacy_resolve_series(&self) -> bool {
-        self.legacy_resolve_series
-    }
-
-    pub fn legacy_resolve_vod(&self) -> bool {
-        self.legacy_resolve_vod
-    }
-
-    pub fn legacy_probe_series(&self) -> bool {
-        self.legacy_probe_series
-    }
-
-    pub fn legacy_probe_vod(&self) -> bool {
-        self.legacy_probe_vod
-    }
-
-    pub fn legacy_probe_live(&self) -> bool {
-        self.legacy_probe_live
-    }
-
-    pub fn legacy_resolve_delay(&self) -> u16 {
-        self.legacy_resolve_delay
-    }
-
-    pub fn legacy_probe_live_interval_hours(&self) -> u32 {
-        self.legacy_probe_live_interval_hours
-    }
-
     pub fn is_empty(&self) -> bool {
         !self.ignore_logo
-        && !self.share_live_streams
-        && !self.remove_duplicates
-        && (self.force_redirect.is_none() || self.force_redirect.is_some_and(|f| f.has_full_flags() || f.is_empty()))
+            && !self.share_live_streams
+            && !self.remove_duplicates
+            && (self.force_redirect.is_none()
+                || self.force_redirect.is_some_and(|f| f.has_full_flags() || f.is_empty()))
     }
 }
 
@@ -127,27 +49,6 @@ pub struct XtreamTargetOutputDto {
     pub trakt: Option<TraktConfigDto>,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub filter: Option<String>,
-    #[serde(default = "default_as_true", alias = "resolve_background", skip_serializing)]
-    legacy_resolve_background: bool,
-    #[serde(default, alias = "resolve_series", skip_serializing)]
-    legacy_resolve_series: bool,
-    #[serde(default, alias = "resolve_vod", skip_serializing)]
-    legacy_resolve_vod: bool,
-    #[serde(default, alias = "probe_series", skip_serializing)]
-    legacy_probe_series: bool,
-    #[serde(default, alias = "probe_vod", skip_serializing)]
-    legacy_probe_vod: bool,
-    #[serde(default, alias = "probe_live", alias = "resolve_live", skip_serializing)]
-    legacy_probe_live: bool,
-    #[serde(default = "default_resolve_delay_secs", alias = "resolve_delay", skip_serializing)]
-    legacy_resolve_delay: u16,
-    #[serde(
-        default = "default_probe_live_interval",
-        alias = "probe_live_interval_hours",
-        alias = "resolve_live_interval_hours",
-        skip_serializing
-    )]
-    legacy_probe_live_interval_hours: u32,
     #[serde(skip)]
     pub t_filter: Option<Filter>,
 }
@@ -160,14 +61,6 @@ impl Default for XtreamTargetOutputDto {
             skip_series_direct_source: default_as_true(),
             trakt: None,
             filter: None,
-            legacy_resolve_background: default_as_true(),
-            legacy_resolve_series: false,
-            legacy_resolve_vod: false,
-            legacy_probe_series: false,
-            legacy_probe_vod: false,
-            legacy_probe_live: false,
-            legacy_resolve_delay: default_resolve_delay_secs(),
-            legacy_probe_live_interval_hours: default_probe_live_interval(),
             t_filter: None,
         }
     }
@@ -191,37 +84,6 @@ impl XtreamTargetOutputDto {
             || self.trakt.is_some()
             || self.filter.is_some()
     }
-
-    fn merge_legacy_resolve_probe_options(&self, options: &mut ConfigTargetOptions) {
-        if !options.legacy_resolve_series && self.legacy_resolve_series {
-            options.legacy_resolve_series = true;
-        }
-        if !options.legacy_resolve_vod && self.legacy_resolve_vod {
-            options.legacy_resolve_vod = true;
-        }
-        if !options.legacy_probe_series && self.legacy_probe_series {
-            options.legacy_probe_series = true;
-        }
-        if !options.legacy_probe_vod && self.legacy_probe_vod {
-            options.legacy_probe_vod = true;
-        }
-        if !options.legacy_probe_live && self.legacy_probe_live {
-            options.legacy_probe_live = true;
-        }
-        if options.legacy_resolve_background && !self.legacy_resolve_background {
-            options.legacy_resolve_background = false;
-        }
-        if is_default_resolve_delay_secs(&options.legacy_resolve_delay)
-            && !is_default_resolve_delay_secs(&self.legacy_resolve_delay)
-        {
-            options.legacy_resolve_delay = self.legacy_resolve_delay;
-        }
-        if is_default_probe_live_interval(&options.legacy_probe_live_interval_hours)
-            && !is_default_probe_live_interval(&self.legacy_probe_live_interval_hours)
-        {
-            options.legacy_probe_live_interval_hours = self.legacy_probe_live_interval_hours;
-        }
-    }
 }
 
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -240,7 +102,6 @@ pub struct M3uTargetOutputDto {
 }
 
 impl M3uTargetOutputDto {
-
     pub fn prepare(&mut self, templates: Option<&Vec<PatternTemplate>>) -> Result<(), TuliproxError> {
         if let Some(raw_filter) = &self.filter {
             self.t_filter = Some(get_filter(raw_filter, templates)?);
@@ -249,10 +110,7 @@ impl M3uTargetOutputDto {
     }
 
     pub fn has_any_option(&self) -> bool {
-        self.filename.is_some()
-            || self.include_type_in_url
-            || self.mask_redirect_url
-            || self.filter.is_some()
+        self.filename.is_some() || self.include_type_in_url || self.mask_redirect_url || self.filter.is_some()
     }
 }
 
@@ -276,7 +134,7 @@ pub struct StrmTargetOutputDto {
     pub filter: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub add_quality_to_filename: bool,
-    
+
     // New Fields for Metadata and Probe
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub probe_probe_size_bytes: Option<u64>,
@@ -306,13 +164,7 @@ pub struct HdHomeRunTargetOutputDto {
 }
 
 impl Default for HdHomeRunTargetOutputDto {
-    fn default() -> Self {
-        Self {
-            device: String::new(),
-            username: String::new(),
-            use_output: Some(TargetType::M3u),
-        }
-    }
+    fn default() -> Self { Self { device: String::new(), username: String::new(), use_output: Some(TargetType::M3u) } }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -330,7 +182,7 @@ impl TargetOutputDto {
             TargetOutputDto::Xtream(output) => output.prepare(templates),
             TargetOutputDto::M3u(output) => output.prepare(templates),
             TargetOutputDto::Strm(output) => output.prepare(templates),
-            TargetOutputDto::HdHomeRun(_) => Ok(())
+            TargetOutputDto::HdHomeRun(_) => Ok(()),
         }
     }
 }
@@ -389,27 +241,13 @@ impl Default for ConfigTargetDto {
 }
 
 impl ConfigTargetDto {
-    fn merge_legacy_xtream_options(&mut self) {
-        let mut merged_options = self.options.clone().unwrap_or_default();
-        let initial_options = merged_options.clone();
-
-        for output in &self.output {
-            if let TargetOutputDto::Xtream(xtream) = output {
-                xtream.merge_legacy_resolve_probe_options(&mut merged_options);
-            }
-        }
-
-        if self.options.is_some() || merged_options != initial_options {
-            self.options = if merged_options.is_empty() && !merged_options.has_legacy_resolve_probe_options() {
-                None
-            } else {
-                Some(merged_options)
-            };
-        }
-    }
-
     #[allow(clippy::too_many_lines)]
-    pub fn prepare(&mut self, id: u16, templates: Option<&Vec<PatternTemplate>>, hdhr_config: Option<&HdHomeRunDeviceOverview>) -> Result<(), TuliproxError> {
+    pub fn prepare(
+        &mut self,
+        id: u16,
+        templates: Option<&Vec<PatternTemplate>>,
+        hdhr_config: Option<&HdHomeRunDeviceOverview>,
+    ) -> Result<(), TuliproxError> {
         self.id = id;
         if self.output.is_empty() {
             return info_err_res!("Missing output format for {}", self.name);
@@ -487,14 +325,26 @@ impl ConfigTargetDto {
 
                     if let Some(use_output) = hdhomerun_output.use_output.as_ref() {
                         match &use_output {
-                            TargetType::M3u => { hdhomerun_needs_m3u = true; }
-                            TargetType::Xtream => { hdhomerun_needs_xtream = true; }
-                            _ => return info_err_res!("HdHomeRun output option `use_output` only accepts `m3u` or `xtream` for target: {}", self.name),
+                            TargetType::M3u => {
+                                hdhomerun_needs_m3u = true;
+                            }
+                            TargetType::Xtream => {
+                                hdhomerun_needs_xtream = true;
+                            }
+                            _ => {
+                                return info_err_res!(
+                                "HdHomeRun output option `use_output` only accepts `m3u` or `xtream` for target: {}",
+                                self.name
+                            )
+                            }
                         }
                     }
                     if let Some(hdhr_devices) = hdhr_config {
                         if !hdhr_devices.devices.contains(&hdhomerun_output.device) {
-                            return info_err_res!("HdHomeRun output device is not defined: {}", hdhomerun_output.device);
+                            return info_err_res!(
+                                "HdHomeRun output device is not defined: {}",
+                                hdhomerun_output.device
+                            );
                         }
                     }
                 }
@@ -506,18 +356,30 @@ impl ConfigTargetDto {
         }
 
         if strm_cnt > 0 && strm_needs_xtream && xtream_cnt == 0 {
-            return info_err_res!("strm output with a username is only permitted when used in combination with xtream output: {}", self.name);
+            return info_err_res!(
+                "strm output with a username is only permitted when used in combination with xtream output: {}",
+                self.name
+            );
         }
 
         if hdhr_cnt > 0 {
             if xtream_cnt == 0 && m3u_cnt == 0 {
-                return info_err_res!("HdHomeRun output is only permitted when used in combination with xtream or m3u output: {}", self.name);
+                return info_err_res!(
+                    "HdHomeRun output is only permitted when used in combination with xtream or m3u output: {}",
+                    self.name
+                );
             }
             if hdhomerun_needs_m3u && m3u_cnt == 0 {
-                return info_err_res!("HdHomeRun output has `use_output=m3u` but no `m3u` output defined: {}", self.name);
+                return info_err_res!(
+                    "HdHomeRun output has `use_output=m3u` but no `m3u` output defined: {}",
+                    self.name
+                );
             }
             if hdhomerun_needs_xtream && xtream_cnt == 0 {
-                return info_err_res!("HdHomeRun output has `use_output=xtream` but no `xtream` output defined: {}", self.name);
+                return info_err_res!(
+                    "HdHomeRun output has `use_output=xtream` but no `xtream` output defined: {}",
+                    self.name
+                );
             }
 
             if let Some(hdhr_devices) = hdhr_config {
@@ -526,8 +388,6 @@ impl ConfigTargetDto {
                 }
             }
         }
-
-        self.merge_legacy_xtream_options();
 
         if let Some(favourites) = self.favourites.as_mut() {
             for favourite in favourites {
@@ -548,7 +408,10 @@ impl ConfigTargetDto {
                 // debug!("Filter: {}", fltr);
                 self.t_filter = Some(fltr);
                 if let Some(renames) = self.rename.as_mut() {
-                    handle_tuliprox_error_result_list!(TuliproxErrorKind::Info, renames.iter_mut().map(|cr|cr.prepare(templates)));
+                    handle_tuliprox_error_result_list!(
+                        TuliproxErrorKind::Info,
+                        renames.iter_mut().map(|cr| cr.prepare(templates))
+                    );
                 }
                 if let Some(sort) = self.sort.as_mut() {
                     sort.prepare(templates)?;

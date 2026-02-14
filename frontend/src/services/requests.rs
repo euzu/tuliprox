@@ -16,9 +16,7 @@ enum RequestMethod {
 }
 
 const TOKEN_KEY: &str = "tuliprox.token";
-pub fn get_token() -> Option<String> {
-    LocalStorage::get(TOKEN_KEY).ok()
-}
+pub fn get_token() -> Option<String> { LocalStorage::get(TOKEN_KEY).ok() }
 
 pub fn set_token(token: Option<&str>) {
     if let Some(t) = token {
@@ -39,8 +37,13 @@ pub fn check_dummy_token() {
 }
 
 /// build all kinds of http request: post/get/delete etc.
-async fn request<B, T>(method: RequestMethod, url: &str, body: B, content_type: Option<String>,
-                       response_type: Option<String>) -> Result<Option<T>, Error>
+async fn request<B, T>(
+    method: RequestMethod,
+    url: &str,
+    body: B,
+    content_type: Option<String>,
+    response_type: Option<String>,
+) -> Result<Option<T>, Error>
 where
     T: DeserializeOwned + 'static + std::fmt::Debug,
     B: Serialize + std::fmt::Debug,
@@ -72,10 +75,7 @@ where
         Ok(response) => {
             match response.status() {
                 200 | 205 | 206 => {
-                    let content_type = response
-                        .headers()
-                        .get("content-type")
-                        .unwrap_or(r_type.to_string());
+                    let content_type = response.headers().get("content-type").unwrap_or(r_type.to_string());
                     let is_json = content_type.contains(CONTENT_TYPE_JSON);
                     let is_bin = !is_json && content_type.contains(CONTENT_TYPE_CBOR);
                     if (is_json || is_bin) && std::any::TypeId::of::<T>() == std::any::TypeId::of::<()>() {
@@ -86,15 +86,13 @@ where
 
                     if is_bin {
                         match response.binary().await {
-                            Ok(bytes) => {
-                                match bin_deserialize::<T>(&bytes) {
-                                    Ok(data) => Ok(Some(data)),
-                                    Err(err) => {
-                                        error!("Failed to deserialize {err}");
-                                        Err(Error::DeserializeError)
-                                    }
+                            Ok(bytes) => match bin_deserialize::<T>(&bytes) {
+                                Ok(data) => Ok(Some(data)),
+                                Err(err) => {
+                                    error!("Failed to deserialize {err}");
+                                    Err(Error::DeserializeError)
                                 }
-                            }
+                            },
                             Err(err) => {
                                 error!("Failed to deserialize {err}");
                                 Err(Error::DeserializeError)
@@ -109,12 +107,10 @@ where
                         }
                     } else {
                         match response.text().await {
-                            Ok(content) => {
-                                match serde_json::from_value::<T>(Value::String(content)) {
-                                    Ok(parsed) => Ok(Some(parsed)),
-                                    Err(_err) => Err(Error::DeserializeError)
-                                }
-                            }
+                            Ok(content) => match serde_json::from_value::<T>(Value::String(content)) {
+                                Ok(parsed) => Ok(Some(parsed)),
+                                Err(_err) => Err(Error::DeserializeError),
+                            },
                             Err(_err) => Err(Error::RequestError),
                         }
                     }
@@ -127,7 +123,7 @@ where
                     let data: Result<ErrorInfo, _> = if is_bin {
                         match response.binary().await {
                             Ok(bytes) => bin_deserialize::<ErrorInfo>(&bytes).map_err(|_| Error::DeserializeError),
-                            Err(_) => Err(Error::DeserializeError)
+                            Err(_) => Err(Error::DeserializeError),
                         }
                     } else {
                         response.json::<ErrorInfo>().await.map_err(|_| Error::DeserializeError)
@@ -150,7 +146,7 @@ where
                     let data: Result<ErrorSetInfo, _> = if is_bin {
                         match response.binary().await {
                             Ok(bytes) => bin_deserialize::<ErrorSetInfo>(&bytes).map_err(|_| Error::DeserializeError),
-                            Err(_) => Err(Error::DeserializeError)
+                            Err(_) => Err(Error::DeserializeError),
                         }
                     } else {
                         response.json::<ErrorSetInfo>().await.map_err(|_| Error::DeserializeError)
@@ -173,7 +169,11 @@ where
 }
 
 /// Delete request
-pub async fn request_delete<T>(url: &str, content_type: Option<String>, response_type: Option<String>) -> Result<Option<T>, Error>
+pub async fn request_delete<T>(
+    url: &str,
+    content_type: Option<String>,
+    response_type: Option<String>,
+) -> Result<Option<T>, Error>
 where
     T: DeserializeOwned + 'static + std::fmt::Debug,
 {
@@ -181,7 +181,11 @@ where
 }
 
 /// Get request
-pub async fn request_get<T>(url: &str, content_type: Option<String>, response_type: Option<String>) -> Result<Option<T>, Error>
+pub async fn request_get<T>(
+    url: &str,
+    content_type: Option<String>,
+    response_type: Option<String>,
+) -> Result<Option<T>, Error>
 where
     T: DeserializeOwned + 'static + std::fmt::Debug,
 {
@@ -196,7 +200,12 @@ where
 // }
 
 /// Post request with a body
-pub async fn request_post<B, T>(url: &str, body: B, content_type: Option<String>, response_type: Option<String>) -> Result<Option<T>, Error>
+pub async fn request_post<B, T>(
+    url: &str,
+    body: B,
+    content_type: Option<String>,
+    response_type: Option<String>,
+) -> Result<Option<T>, Error>
 where
     T: DeserializeOwned + 'static + std::fmt::Debug,
     B: Serialize + std::fmt::Debug,
@@ -205,7 +214,12 @@ where
 }
 
 /// Put request with a body
-pub async fn request_put<B, T>(url: &str, body: B, content_type: Option<String>, response_type: Option<String>) -> Result<Option<T>, Error>
+pub async fn request_put<B, T>(
+    url: &str,
+    body: B,
+    content_type: Option<String>,
+    response_type: Option<String>,
+) -> Result<Option<T>, Error>
 where
     T: DeserializeOwned + 'static + std::fmt::Debug,
     B: Serialize + std::fmt::Debug,

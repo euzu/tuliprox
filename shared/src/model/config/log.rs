@@ -1,4 +1,4 @@
-use crate::utils::{is_true, is_false, default_as_true, is_blank_optional_string, is_blank_optional_str};
+use crate::utils::{default_as_true, is_blank_optional_str, is_blank_optional_string, is_false, is_true};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -13,11 +13,7 @@ pub struct LogConfigDto {
 
 impl Default for LogConfigDto {
     fn default() -> Self {
-        LogConfigDto {
-            sanitize_sensitive_info: default_as_true(),
-            log_active_user: false,
-            log_level: None,
-        }
+        LogConfigDto { sanitize_sensitive_info: default_as_true(), log_active_user: false, log_level: None }
     }
 }
 

@@ -80,13 +80,13 @@ impl M3uPlaylistIterator {
         let filter = user_get_bouquet_filter(&config, &user.username, None, TargetType::M3u, XtreamCluster::Live).await;
         let mut flags = M3uPlaylistIteratorFlagsSet::new();
         if m3u_output.include_type_in_url {
-            flags.add(M3uPlaylistIteratorFlags::IncludeTypeInUrl);
+            flags.set(M3uPlaylistIteratorFlags::IncludeTypeInUrl);
         }
         if m3u_output.mask_redirect_url {
-            flags.add(M3uPlaylistIteratorFlags::MaskRedirectUrl);
+            flags.set(M3uPlaylistIteratorFlags::MaskRedirectUrl);
         }
         if cfg.is_reverse_proxy_resource_rewrite_enabled() {
-            flags.add(M3uPlaylistIteratorFlags::RewriteResource);
+            flags.set(M3uPlaylistIteratorFlags::RewriteResource);
         }
 
         let server_info = cfg.get_user_server_info(user);

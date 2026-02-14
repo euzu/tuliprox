@@ -53,22 +53,22 @@ pub fn xtream_mapping_option_from_target_options(target: &ConfigTarget, target_o
         .flags
         .contains(XtreamTargetFlags::SkipLiveDirectSource)
     {
-        flags.add(XtreamMappingFlags::SkipLiveDirectSource);
+        flags.set(XtreamMappingFlags::SkipLiveDirectSource);
     }
     if target_output
         .flags
         .contains(XtreamTargetFlags::SkipVideoDirectSource)
     {
-        flags.add(XtreamMappingFlags::SkipVideoDirectSource);
+        flags.set(XtreamMappingFlags::SkipVideoDirectSource);
     }
     if target_output
         .flags
         .contains(XtreamTargetFlags::SkipSeriesDirectSource)
     {
-        flags.add(XtreamMappingFlags::SkipSeriesDirectSource);
+        flags.set(XtreamMappingFlags::SkipSeriesDirectSource);
     }
     if cfg.is_reverse_proxy_resource_rewrite_enabled() {
-        flags.add(XtreamMappingFlags::RewriteResourceUrl);
+        flags.set(XtreamMappingFlags::RewriteResourceUrl);
     }
 
     XtreamMappingOptions {

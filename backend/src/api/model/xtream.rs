@@ -87,8 +87,16 @@ impl XtreamAuthorizationResponse {
             },
             server_info: XtreamServerInfoResponse {
                 url: server_info.host.clone(),
-                port: if server_info.protocol == "http" { server_info.port.as_ref().map_or("80", |v| v.as_str()).to_string() } else { String::from("80") },
-                https_port: if server_info.protocol == "https" { server_info.port.as_ref().map_or("443", |v| v.as_str()).to_string() } else { String::from("443") },
+                port: if server_info.protocol == "http" {
+                    server_info.port.as_deref().unwrap_or("80").to_string()
+                } else {
+                    String::from("80")
+                },
+                https_port: if server_info.protocol == "https" {
+                    server_info.port.as_deref().unwrap_or("443").to_string()
+                } else {
+                    String::from("443")
+                },
                 server_protocol: server_info.protocol.clone(),
                 rtmp_port: String::new(),
                 timezone: server_info.timezone.clone(),

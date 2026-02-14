@@ -73,7 +73,7 @@ impl UpdateChanges {
 
     fn set_flag_if(&mut self, condition: bool, flag: UpdateChangesFlags) {
         if condition {
-            self.flags.add(flag);
+            self.flags.set(flag);
         }
     }
 }

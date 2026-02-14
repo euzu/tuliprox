@@ -1,14 +1,23 @@
-use crate::app::components::config::config_page::{ConfigForm, LABEL_LIBRARY_CONFIG};
-use crate::app::components::config::config_view_context::ConfigViewContext;
-use crate::app::components::input::Input;
-use crate::app::components::select::Select;
-use crate::app::components::{Card, Chip, DropDownOption, DropDownSelection, IconButton, ToggleSwitch};
-use crate::app::context::ConfigContext;
-use crate::{config_field, config_field_bool, config_field_child, config_field_optional,
-            edit_field_bool, edit_field_list, edit_field_number, edit_field_number_u64, edit_field_text, edit_field_text_option, generate_form_reducer};
-use shared::model::{LibraryConfigDto, LibraryContentType, LibraryMetadataConfigDto,
-                    LibraryMetadataReadConfigDto, LibraryPlaylistConfigDto, LibraryScanDirectoryDto,
-                    LibraryTmdbConfigDto, LibraryMetadataFormat};
+use crate::{
+    app::{
+        components::{
+            config::{
+                config_page::{ConfigForm, LABEL_LIBRARY_CONFIG},
+                config_view_context::ConfigViewContext,
+            },
+            input::Input,
+            select::Select,
+            Card, Chip, DropDownOption, DropDownSelection, IconButton, ToggleSwitch,
+        },
+        context::ConfigContext,
+    },
+    config_field, config_field_bool, config_field_child, config_field_optional, edit_field_bool, edit_field_list,
+    edit_field_number, edit_field_number_u64, edit_field_text, edit_field_text_option, generate_form_reducer,
+};
+use shared::model::{
+    LibraryConfigDto, LibraryContentType, LibraryMetadataConfigDto, LibraryMetadataFormat,
+    LibraryMetadataReadConfigDto, LibraryPlaylistConfigDto, LibraryScanDirectoryDto, LibraryTmdbConfigDto,
+};
 use std::rc::Rc;
 use yew::prelude::*;
 use yew_i18n::use_translation;
@@ -44,7 +53,6 @@ const LABEL_ADD_FORMAT: &str = "LABEL.ADD_FORMAT";
 const TYPE_AUTO: &str = "Auto";
 const TYPE_MOVIE: &str = "Movie";
 const TYPE_SERIES: &str = "Series";
-
 
 generate_form_reducer!(
     state: LibraryConfigFormState { form: LibraryConfigDto },
@@ -103,25 +111,21 @@ pub fn LibraryConfigView() -> Html {
     let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");
     let config_view_ctx = use_context::<ConfigViewContext>().expect("ConfigViewContext not found");
 
-    let form_state: UseReducerHandle<LibraryConfigFormState> = use_reducer(|| {
-        LibraryConfigFormState { form: LibraryConfigDto::default(), modified: false }
-    });
+    let form_state: UseReducerHandle<LibraryConfigFormState> =
+        use_reducer(|| LibraryConfigFormState { form: LibraryConfigDto::default(), modified: false });
 
-    let playlist_state: UseReducerHandle<LibraryPlaylistConfigFormState> = use_reducer(|| {
-        LibraryPlaylistConfigFormState { form: LibraryPlaylistConfigDto::default(), modified: false }
-    });
+    let playlist_state: UseReducerHandle<LibraryPlaylistConfigFormState> =
+        use_reducer(|| LibraryPlaylistConfigFormState { form: LibraryPlaylistConfigDto::default(), modified: false });
 
-    let metadata_state: UseReducerHandle<LibraryMetadataConfigFormState> = use_reducer(|| {
-        LibraryMetadataConfigFormState { form: LibraryMetadataConfigDto::default(), modified: false }
-    });
+    let metadata_state: UseReducerHandle<LibraryMetadataConfigFormState> =
+        use_reducer(|| LibraryMetadataConfigFormState { form: LibraryMetadataConfigDto::default(), modified: false });
 
     let metadata_read_state: UseReducerHandle<LibraryMetadataReadConfigFormState> = use_reducer(|| {
         LibraryMetadataReadConfigFormState { form: LibraryMetadataReadConfigDto::default(), modified: false }
     });
 
-    let tmdb_state: UseReducerHandle<LibraryTmdbConfigFormState> = use_reducer(|| {
-        LibraryTmdbConfigFormState { form: LibraryTmdbConfigDto::default(), modified: false }
-    });
+    let tmdb_state: UseReducerHandle<LibraryTmdbConfigFormState> =
+        use_reducer(|| LibraryTmdbConfigFormState { form: LibraryTmdbConfigDto::default(), modified: false });
 
     {
         let form_state = form_state.clone();
@@ -136,13 +140,15 @@ pub fn LibraryConfigView() -> Html {
                 form_state.dispatch(LibraryConfigFormAction::SetAll(library.clone()));
                 playlist_state.dispatch(LibraryPlaylistConfigFormAction::SetAll(library.playlist.clone()));
                 metadata_state.dispatch(LibraryMetadataConfigFormAction::SetAll(library.metadata.clone()));
-                metadata_read_state.dispatch(LibraryMetadataReadConfigFormAction::SetAll(library.metadata.read_existing.clone()));
+                metadata_read_state
+                    .dispatch(LibraryMetadataReadConfigFormAction::SetAll(library.metadata.read_existing.clone()));
                 tmdb_state.dispatch(LibraryTmdbConfigFormAction::SetAll(library.metadata.tmdb.clone()));
             } else {
                 form_state.dispatch(LibraryConfigFormAction::SetAll(LibraryConfigDto::default()));
                 playlist_state.dispatch(LibraryPlaylistConfigFormAction::SetAll(LibraryPlaylistConfigDto::default()));
                 metadata_state.dispatch(LibraryMetadataConfigFormAction::SetAll(LibraryMetadataConfigDto::default()));
-                metadata_read_state.dispatch(LibraryMetadataReadConfigFormAction::SetAll(LibraryMetadataReadConfigDto::default()));
+                metadata_read_state
+                    .dispatch(LibraryMetadataReadConfigFormAction::SetAll(LibraryMetadataReadConfigDto::default()));
                 tmdb_state.dispatch(LibraryTmdbConfigFormAction::SetAll(LibraryTmdbConfigDto::default()));
             }
             || ()
@@ -158,13 +164,7 @@ pub fn LibraryConfigView() -> Html {
         let tmdb_state = tmdb_state.clone();
 
         use_effect_with(
-            (
-                form_state,
-                playlist_state,
-                metadata_state,
-                metadata_read_state,
-                tmdb_state,
-            ),
+            (form_state, playlist_state, metadata_state, metadata_read_state, tmdb_state),
             move |(form, playlist, metadata, metadata_read, tmdb)| {
                 let mut new_form = form.form.clone();
                 new_form.playlist = playlist.form.clone();
@@ -172,27 +172,35 @@ pub fn LibraryConfigView() -> Html {
                 new_form.metadata.read_existing = metadata_read.form.clone();
                 new_form.metadata.tmdb = tmdb.form.clone();
 
-                let modified = form.modified
-                    || playlist.modified
-                    || metadata.modified
-                    || metadata_read.modified
-                    || tmdb.modified;
+                let modified =
+                    form.modified || playlist.modified || metadata.modified || metadata_read.modified || tmdb.modified;
 
                 on_form_change.emit(ConfigForm::Library(modified, new_form));
             },
         );
     }
 
-
     let get_content_type_options = {
         let translate = translate.clone();
-        Callback::from(move |content_type: LibraryContentType|
+        Callback::from(move |content_type: LibraryContentType| {
             vec![
-                DropDownOption { id: TYPE_AUTO.to_string(), label: html! { translate.t(LABEL_AUTO) }, selected: content_type == LibraryContentType::Auto },
-                DropDownOption { id: TYPE_MOVIE.to_string(), label: html! { translate.t(LABEL_MOVIE) }, selected: content_type == LibraryContentType::Movie },
-                DropDownOption { id: TYPE_SERIES.to_string(), label: html! { translate.t(LABEL_SERIES) }, selected: content_type == LibraryContentType::Series },
+                DropDownOption {
+                    id: TYPE_AUTO.to_string(),
+                    label: html! { translate.t(LABEL_AUTO) },
+                    selected: content_type == LibraryContentType::Auto,
+                },
+                DropDownOption {
+                    id: TYPE_MOVIE.to_string(),
+                    label: html! { translate.t(LABEL_MOVIE) },
+                    selected: content_type == LibraryContentType::Movie,
+                },
+                DropDownOption {
+                    id: TYPE_SERIES.to_string(),
+                    label: html! { translate.t(LABEL_SERIES) },
+                    selected: content_type == LibraryContentType::Series,
+                },
             ]
-        )
+        })
     };
 
     let handle_path_change = {
@@ -200,7 +208,7 @@ pub fn LibraryConfigView() -> Html {
         Callback::from(move |(idx, value): (usize, String)| {
             let mut scan_directories = form.form.scan_directories.clone();
             if idx >= scan_directories.len() {
-               return;
+                return;
             }
             scan_directories[idx].path = value;
             form.dispatch(LibraryConfigFormAction::ScanDirectories(scan_directories));
@@ -255,7 +263,7 @@ pub fn LibraryConfigView() -> Html {
         Callback::from(move |idx: usize| {
             let mut current_list = form_state.form.scan_directories.clone();
             if idx >= current_list.len() {
-               return;
+                return;
             }
             current_list.remove(idx);
             form_state.dispatch(LibraryConfigFormAction::ScanDirectories(current_list));
@@ -273,36 +281,40 @@ pub fn LibraryConfigView() -> Html {
         })
     };
 
-    let render_extensions = |extensions: &Vec<String>| html! {
-        <Card class="tp__config-view__card">
-        { config_field_child!(translate.t(LABEL_SUPPORTED_EXTENSIONS), {
-           html! {
-             <div class="tp__config-view__tags">
-             { html! { for extensions.iter().map(|t| html! { <Chip label={t.clone()} /> }) } }
-             </div>
-            }})}
-        </Card>
+    let render_extensions = |extensions: &Vec<String>| {
+        html! {
+            <Card class="tp__config-view__card">
+            { config_field_child!(translate.t(LABEL_SUPPORTED_EXTENSIONS), {
+               html! {
+                 <div class="tp__config-view__tags">
+                 { html! { for extensions.iter().map(|t| html! { <Chip label={t.clone()} /> }) } }
+                 </div>
+                }})}
+            </Card>
+        }
     };
 
-    let render_scan_directories_view = |directories: &Vec<LibraryScanDirectoryDto>| html! {
-         <>
-            <h1>{translate.t(LABEL_SCAN_DIRECTORIES)}</h1>
-            <ul>
-            { for directories.iter().map(|dir| html! {
-                <li class="tp__library-config-view__list"><span class="tp__library-config-view__list-item">{&dir.path}</span>
-                    <span>{format!("({}, {}, {}: {})",
-                        if dir.enabled { translate.t("LABEL.ENABLED") } else {translate.t("LABEL.DISABLED")},
-                        if dir.recursive { translate.t("LABEL.RECURSIVE") } else {translate.t("LABEL.NON_RECURSIVE")},
-                        translate.t(LABEL_CONTENT_TYPE),
-                        match dir.content_type {
-                            LibraryContentType::Auto => translate.t(LABEL_AUTO),
-                            LibraryContentType::Movie => translate.t(LABEL_MOVIE),
-                            LibraryContentType::Series => translate.t(LABEL_SERIES),
-                        })}</span>
-                </li>
-            }) }
-            </ul>
-         </>
+    let render_scan_directories_view = |directories: &Vec<LibraryScanDirectoryDto>| {
+        html! {
+             <>
+                <h1>{translate.t(LABEL_SCAN_DIRECTORIES)}</h1>
+                <ul>
+                { for directories.iter().map(|dir| html! {
+                    <li class="tp__library-config-view__list"><span class="tp__library-config-view__list-item">{&dir.path}</span>
+                        <span>{format!("({}, {}, {}: {})",
+                            if dir.enabled { translate.t("LABEL.ENABLED") } else {translate.t("LABEL.DISABLED")},
+                            if dir.recursive { translate.t("LABEL.RECURSIVE") } else {translate.t("LABEL.NON_RECURSIVE")},
+                            translate.t(LABEL_CONTENT_TYPE),
+                            match dir.content_type {
+                                LibraryContentType::Auto => translate.t(LABEL_AUTO),
+                                LibraryContentType::Movie => translate.t(LABEL_MOVIE),
+                                LibraryContentType::Series => translate.t(LABEL_SERIES),
+                            })}</span>
+                    </li>
+                }) }
+                </ul>
+             </>
+        }
     };
     let render_scan_directories_edit = || {
         html! {
@@ -404,70 +416,72 @@ pub fn LibraryConfigView() -> Html {
         }
     };
 
-    let render_edit_mode = || html! {
-        <>
-         <div class="tp__library-config-view__header">
-            { edit_field_bool!(form_state, translate.t(LABEL_ENABLED), enabled, LibraryConfigFormAction::Enabled) }
-            { render_scan_directories_edit() }
-         </div>
-         <div class="tp__library-config-view__body tp__config-view-page__body">
-             <Card class="tp__config-view__card">
-                { edit_field_list!(form_state, translate.t(LABEL_SUPPORTED_EXTENSIONS), supported_extensions, LibraryConfigFormAction::SupportedExtensions, translate.t(LABEL_ADD_EXTENSION)) }
-            </Card>
+    let render_edit_mode = || {
+        html! {
+            <>
+             <div class="tp__library-config-view__header">
+                { edit_field_bool!(form_state, translate.t(LABEL_ENABLED), enabled, LibraryConfigFormAction::Enabled) }
+                { render_scan_directories_edit() }
+             </div>
+             <div class="tp__library-config-view__body tp__config-view-page__body">
+                 <Card class="tp__config-view__card">
+                    { edit_field_list!(form_state, translate.t(LABEL_SUPPORTED_EXTENSIONS), supported_extensions, LibraryConfigFormAction::SupportedExtensions, translate.t(LABEL_ADD_EXTENSION)) }
+                </Card>
 
-             <Card class="tp__config-view__card">
-                <h1>{translate.t(LABEL_METADATA)}</h1>
-                { edit_field_text!(metadata_state, translate.t(LABEL_METADATA_PATH), path, LibraryMetadataConfigFormAction::Path) }
-                { edit_field_bool!(metadata_state, translate.t(LABEL_FALLBACK_TO_FILENAME), fallback_to_filename, LibraryMetadataConfigFormAction::FallbackToFilename) }
-                { config_field_child!(translate.t(LABEL_FORMATS), {
-                    let metadata_state = metadata_state.clone();
-                    let formats = metadata_state.form.formats.clone();
-                    html! {
-                        <div class="tp__config-view__tags">
-                             { for formats.iter().map(|f| {
-                                 let metadata_state = metadata_state.clone();
-                                 let f = *f;
-                                 html! { <Chip label={format!("{f:?}")} on_remove={Callback::from(move |_| {
-                                     let mut updated = metadata_state.form.formats.clone();
-                                     updated.retain(|&x| x != f);
-                                     metadata_state.dispatch(LibraryMetadataConfigFormAction::Formats(updated));
-                                 })} /> }
-                             }) }
-                             if !formats.contains(&LibraryMetadataFormat::Nfo) {
-                                 <IconButton name="Add" icon="Add" hint={translate.t(LABEL_ADD_FORMAT)} onclick={Callback::from(move |_| {
-                                     let mut updated = metadata_state.form.formats.clone();
-                                     updated.push(LibraryMetadataFormat::Nfo);
-                                     metadata_state.dispatch(LibraryMetadataConfigFormAction::Formats(updated));
-                                 })} />
-                             }
-                        </div>
-                    }
-                }) }
-            </Card>
+                 <Card class="tp__config-view__card">
+                    <h1>{translate.t(LABEL_METADATA)}</h1>
+                    { edit_field_text!(metadata_state, translate.t(LABEL_METADATA_PATH), path, LibraryMetadataConfigFormAction::Path) }
+                    { edit_field_bool!(metadata_state, translate.t(LABEL_FALLBACK_TO_FILENAME), fallback_to_filename, LibraryMetadataConfigFormAction::FallbackToFilename) }
+                    { config_field_child!(translate.t(LABEL_FORMATS), {
+                        let metadata_state = metadata_state.clone();
+                        let formats = metadata_state.form.formats.clone();
+                        html! {
+                            <div class="tp__config-view__tags">
+                                 { for formats.iter().map(|f| {
+                                     let metadata_state = metadata_state.clone();
+                                     let f = *f;
+                                     html! { <Chip label={format!("{f:?}")} on_remove={Callback::from(move |_| {
+                                         let mut updated = metadata_state.form.formats.clone();
+                                         updated.retain(|&x| x != f);
+                                         metadata_state.dispatch(LibraryMetadataConfigFormAction::Formats(updated));
+                                     })} /> }
+                                 }) }
+                                 if !formats.contains(&LibraryMetadataFormat::Nfo) {
+                                     <IconButton name="Add" icon="Add" hint={translate.t(LABEL_ADD_FORMAT)} onclick={Callback::from(move |_| {
+                                         let mut updated = metadata_state.form.formats.clone();
+                                         updated.push(LibraryMetadataFormat::Nfo);
+                                         metadata_state.dispatch(LibraryMetadataConfigFormAction::Formats(updated));
+                                     })} />
+                                 }
+                            </div>
+                        }
+                    }) }
+                </Card>
 
-             <Card class="tp__config-view__card">
-                <h1>{translate.t(LABEL_READ_EXISTING)}</h1>
-                { edit_field_bool!(metadata_read_state, translate.t(LABEL_KODI), kodi, LibraryMetadataReadConfigFormAction::Kodi) }
-                { edit_field_bool!(metadata_read_state, translate.t(LABEL_JELLYFIN), jellyfin, LibraryMetadataReadConfigFormAction::Jellyfin) }
-                { edit_field_bool!(metadata_read_state, translate.t(LABEL_PLEX), plex, LibraryMetadataReadConfigFormAction::Plex) }
-            </Card>
+                 <Card class="tp__config-view__card">
+                    <h1>{translate.t(LABEL_READ_EXISTING)}</h1>
+                    { edit_field_bool!(metadata_read_state, translate.t(LABEL_KODI), kodi, LibraryMetadataReadConfigFormAction::Kodi) }
+                    { edit_field_bool!(metadata_read_state, translate.t(LABEL_JELLYFIN), jellyfin, LibraryMetadataReadConfigFormAction::Jellyfin) }
+                    { edit_field_bool!(metadata_read_state, translate.t(LABEL_PLEX), plex, LibraryMetadataReadConfigFormAction::Plex) }
+                </Card>
 
-             <Card class="tp__config-view__card">
-                <h1>{translate.t(LABEL_TMDB)}</h1>
-                { edit_field_bool!(tmdb_state, translate.t(LABEL_ENABLED), enabled, LibraryTmdbConfigFormAction::Enabled) }
-                { edit_field_text_option!(tmdb_state, translate.t(LABEL_API_KEY), api_key, LibraryTmdbConfigFormAction::ApiKey, true) }
-                { edit_field_number_u64!(tmdb_state, translate.t(LABEL_RATE_LIMIT_MS), rate_limit_ms, LibraryTmdbConfigFormAction::RateLimitMs) }
-                { edit_field_number!(tmdb_state, translate.t(LABEL_CACHE_DURATION_DAYS), cache_duration_days, LibraryTmdbConfigFormAction::CacheDurationDays) }
-                { edit_field_text!(tmdb_state, translate.t(LABEL_LANGUAGE), language, LibraryTmdbConfigFormAction::Language) }
-             </Card>
+                 <Card class="tp__config-view__card">
+                    <h1>{translate.t(LABEL_TMDB)}</h1>
+                    { edit_field_bool!(tmdb_state, translate.t(LABEL_ENABLED), enabled, LibraryTmdbConfigFormAction::Enabled) }
+                    { edit_field_text_option!(tmdb_state, translate.t(LABEL_API_KEY), api_key, LibraryTmdbConfigFormAction::ApiKey, true) }
+                    { edit_field_number_u64!(tmdb_state, translate.t(LABEL_RATE_LIMIT_MS), rate_limit_ms, LibraryTmdbConfigFormAction::RateLimitMs) }
+                    { edit_field_number!(tmdb_state, translate.t(LABEL_CACHE_DURATION_DAYS), cache_duration_days, LibraryTmdbConfigFormAction::CacheDurationDays) }
+                    { edit_field_text!(tmdb_state, translate.t(LABEL_LANGUAGE), language, LibraryTmdbConfigFormAction::Language) }
+                 </Card>
 
-             <Card class="tp__config-view__card">
-                <h1>{translate.t(LABEL_PLAYLIST)}</h1>
-                 { edit_field_text!(playlist_state, translate.t(LABEL_MOVIE_CATEGORY), movie_category, LibraryPlaylistConfigFormAction::MovieCategory) }
-                 { edit_field_text!(playlist_state, translate.t(LABEL_SERIES_CATEGORY), series_category, LibraryPlaylistConfigFormAction::SeriesCategory) }
-             </Card>
-        </div>
-        </>
+                 <Card class="tp__config-view__card">
+                    <h1>{translate.t(LABEL_PLAYLIST)}</h1>
+                     { edit_field_text!(playlist_state, translate.t(LABEL_MOVIE_CATEGORY), movie_category, LibraryPlaylistConfigFormAction::MovieCategory) }
+                     { edit_field_text!(playlist_state, translate.t(LABEL_SERIES_CATEGORY), series_category, LibraryPlaylistConfigFormAction::SeriesCategory) }
+                 </Card>
+            </div>
+            </>
+        }
     };
 
     html! {

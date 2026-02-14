@@ -34,19 +34,19 @@ macro_rules! create_bitset {
             pub fn from_variants(variants: &[$enum_name]) -> Self {
                 let mut set = Self::new();
                 for &v in variants {
-                    set.add(v);
+                    set.set(v);
                 }
                 set
             }
 
            #[inline(always)]
-            pub fn add(&mut self, variant: $enum_name) {
+            pub fn set(&mut self, variant: $enum_name) {
                 // LLVM can optimize this to a single 'bts' or 'or' instruction
                 self.0 |= 1 << (variant as $storage);
             }
 
             #[inline(always)]
-            pub fn remove(&mut self, variant: $enum_name) {
+            pub fn unset(&mut self, variant: $enum_name) {
                 self.0 &= !(1 << (variant as $storage));
             }
 
@@ -119,5 +119,16 @@ macro_rules! create_bitset {
         }
 
     }
+    };
+}
+
+#[macro_export]
+macro_rules! apply_flags {
+    ($dto:expr, $set:expr, $enum_type:path; $(($field:ident, $variant:ident)),* $(,)?) => {
+        $(
+            if $dto.$field {
+                $set.set(<$enum_type>::$variant);
+            }
+        )*
     };
 }

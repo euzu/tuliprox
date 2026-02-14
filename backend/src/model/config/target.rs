@@ -9,7 +9,7 @@ use shared::model::PlaylistItemType;
 use std::sync::Arc;
 use shared::foundation::Filter;
 use shared::foundation::ValueProvider;
-use shared::create_bitset;
+use shared::{apply_flags, create_bitset};
 
 create_bitset!(u8, XtreamTargetFlags, SkipLiveDirectSource, SkipVideoDirectSource, SkipSeriesDirectSource);
 create_bitset!(u8, StrmTargetFlags, Flat, UnderscoreWhitespace, Cleanup, AddQualityToFilename);
@@ -43,9 +43,12 @@ macros::from_impl!(XtreamTargetOutput);
 impl From<&XtreamTargetOutputDto> for XtreamTargetOutput {
     fn from(dto: &XtreamTargetOutputDto) -> Self {
         let mut flags = XtreamTargetFlagsSet::new();
-        if dto.skip_live_direct_source { flags.add(XtreamTargetFlags::SkipLiveDirectSource); }
-        if dto.skip_video_direct_source { flags.add(XtreamTargetFlags::SkipVideoDirectSource); }
-        if dto.skip_series_direct_source { flags.add(XtreamTargetFlags::SkipSeriesDirectSource); }
+        apply_flags!(
+            dto, flags, XtreamTargetFlags;
+            (skip_live_direct_source, SkipLiveDirectSource),
+            (skip_video_direct_source, SkipVideoDirectSource),
+            (skip_series_direct_source, SkipSeriesDirectSource)
+        );
 
         Self {
             flags,
@@ -57,14 +60,14 @@ impl From<&XtreamTargetOutputDto> for XtreamTargetOutput {
 
 impl From<&XtreamTargetOutput> for XtreamTargetOutputDto {
     fn from(instance: &XtreamTargetOutput) -> Self {
-        let mut dto = XtreamTargetOutputDto::default();
-        dto.skip_live_direct_source = instance.flags.contains(XtreamTargetFlags::SkipLiveDirectSource);
-        dto.skip_video_direct_source = instance.flags.contains(XtreamTargetFlags::SkipVideoDirectSource);
-        dto.skip_series_direct_source = instance.flags.contains(XtreamTargetFlags::SkipSeriesDirectSource);
-        dto.trakt = instance.trakt.as_ref().map(TraktConfigDto::from);
-        dto.filter = instance.filter.as_ref().map(ToString::to_string);
-        dto.t_filter.clone_from(&instance.filter);
-        dto
+        Self {
+            skip_live_direct_source: instance.flags.contains(XtreamTargetFlags::SkipLiveDirectSource),
+            skip_video_direct_source: instance.flags.contains(XtreamTargetFlags::SkipVideoDirectSource),
+            skip_series_direct_source: instance.flags.contains(XtreamTargetFlags::SkipSeriesDirectSource),
+            trakt: instance.trakt.as_ref().map(TraktConfigDto::from),
+            filter: instance.filter.as_ref().map(ToString::to_string),
+            t_filter: instance.filter.clone(),
+        }
     }
 }
 
@@ -116,18 +119,13 @@ macros::from_impl!(StrmTargetOutput);
 impl From<&StrmTargetOutputDto> for StrmTargetOutput {
     fn from(dto: &StrmTargetOutputDto) -> Self {
         let mut flags = StrmTargetFlagsSet::new();
-        if dto.flat {
-            flags.add(StrmTargetFlags::Flat);
-        }
-        if dto.underscore_whitespace {
-            flags.add(StrmTargetFlags::UnderscoreWhitespace);
-        }
-        if dto.cleanup {
-            flags.add(StrmTargetFlags::Cleanup);
-        }
-        if dto.add_quality_to_filename {
-            flags.add(StrmTargetFlags::AddQualityToFilename);
-        }
+        apply_flags!(
+            dto, flags, StrmTargetFlags;
+            (flat, Flat),
+            (underscore_whitespace, UnderscoreWhitespace),
+            (cleanup, Cleanup),
+            (add_quality_to_filename, AddQualityToFilename)
+        );
         Self {
             directory: dto.directory.clone(),
             username: dto.username.clone(),

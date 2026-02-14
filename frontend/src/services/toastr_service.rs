@@ -1,7 +1,9 @@
 use gloo_timers::callback::Timeout;
-use std::cell::RefCell;
-use std::rc::Rc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::{
+    cell::RefCell,
+    rc::Rc,
+    sync::atomic::{AtomicU32, Ordering},
+};
 
 #[derive(Clone, PartialEq, Default)]
 pub enum ToastType {
@@ -24,11 +26,7 @@ pub struct ToastOptions {
 }
 
 impl Default for ToastOptions {
-    fn default() -> Self {
-        Self {
-            close_mode: ToastCloseMode::Auto(3500),
-        }
-    }
+    fn default() -> Self { Self { close_mode: ToastCloseMode::Auto(3500) } }
 }
 
 #[derive(Clone, PartialEq)]
@@ -45,17 +43,11 @@ pub struct ToastrState {
 }
 
 impl ToastrState {
-    pub fn new() -> Self {
-        Self::default()
-    }
+    pub fn new() -> Self { Self::default() }
 
-    pub fn add_toast(&mut self, toast: Toast) {
-        self.toasts.push(toast);
-    }
+    pub fn add_toast(&mut self, toast: Toast) { self.toasts.push(toast); }
 
-    pub fn remove_toast(&mut self, id: u32) {
-        self.toasts.retain(|t| t.id != id);
-    }
+    pub fn remove_toast(&mut self, id: u32) { self.toasts.retain(|t| t.id != id); }
 }
 
 type ToastrSubscriber = Rc<RefCell<Option<Box<dyn Fn(Vec<Toast>)>>>>;
@@ -67,9 +59,7 @@ pub struct ToastrService {
 }
 
 impl Default for ToastrService {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 impl ToastrService {
@@ -85,12 +75,7 @@ impl ToastrService {
         self.subscriber.borrow_mut().replace(Box::new(callback));
     }
 
-    pub fn show_with_options(
-        &self,
-        msg: impl Into<String>,
-        toast_type: ToastType,
-        options: ToastOptions,
-    ) {
+    pub fn show_with_options(&self, msg: impl Into<String>, toast_type: ToastType, options: ToastOptions) {
         let mut state = self.state.borrow_mut();
         let toast = Toast {
             id: self.counter.fetch_add(1, Ordering::AcqRel),
@@ -121,43 +106,19 @@ impl ToastrService {
     }
 
     pub fn success(&self, msg: impl Into<String>) {
-        self.show_with_options(
-            msg,
-            ToastType::Success,
-            ToastOptions {
-                close_mode: ToastCloseMode::Auto(3000),
-            },
-        );
+        self.show_with_options(msg, ToastType::Success, ToastOptions { close_mode: ToastCloseMode::Auto(3000) });
     }
 
     pub fn error(&self, msg: impl Into<String>) {
-        self.show_with_options(
-            msg,
-            ToastType::Error,
-            ToastOptions {
-                close_mode: ToastCloseMode::Auto(4000),
-            },
-        );
+        self.show_with_options(msg, ToastType::Error, ToastOptions { close_mode: ToastCloseMode::Auto(4000) });
     }
 
     pub fn info(&self, msg: impl Into<String>) {
-        self.show_with_options(
-            msg,
-            ToastType::Info,
-            ToastOptions {
-                close_mode: ToastCloseMode::Auto(3500),
-            },
-        );
+        self.show_with_options(msg, ToastType::Info, ToastOptions { close_mode: ToastCloseMode::Auto(3500) });
     }
 
     pub fn warning(&self, msg: impl Into<String>) {
-        self.show_with_options(
-            msg,
-            ToastType::Warning,
-            ToastOptions {
-                close_mode: ToastCloseMode::Auto(3500),
-            },
-        );
+        self.show_with_options(msg, ToastType::Warning, ToastOptions { close_mode: ToastCloseMode::Auto(3500) });
     }
 
     // Show a Success toast with custom options

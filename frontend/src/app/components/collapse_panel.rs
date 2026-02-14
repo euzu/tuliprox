@@ -1,5 +1,5 @@
-use yew::prelude::*;
 use crate::app::components::AppIcon;
+use yew::prelude::*;
 
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct CollapsePanelProps {
