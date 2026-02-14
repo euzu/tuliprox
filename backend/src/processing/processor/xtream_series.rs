@@ -37,6 +37,11 @@ pub async fn playlist_resolve_series(
     provider_fpl: &mut FetchedPlaylist<'_>,
     processed_fpl: &mut FetchedPlaylist<'_>,
 ) {
+    // Skip-flag is the kill-switch: no resolve, no probe, no iteration.
+    if processed_fpl.input.has_flag(ConfigInputFlags::XtreamSkipSeries) {
+        return;
+    }
+
     let mut resolve_options = get_resolve_series_options(target, processed_fpl);
 
     if !ctx.config.is_ffprobe_enabled().await {

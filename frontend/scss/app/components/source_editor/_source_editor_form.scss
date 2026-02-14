@@ -21,7 +21,8 @@ $form-width: 480px;
 
 .tp__source-editor-form {
 
-  padding: 0 var(--padding-micro);
+  padding: 0 var(--padding-mini) var(--padding-mini) var(--padding-mini);
+  border-radius: var(--border-radius);
   background-color: var(--card-background-color);
 
   &__body {

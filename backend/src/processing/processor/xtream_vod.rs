@@ -33,6 +33,11 @@ pub async fn playlist_resolve_vod(
     provider_fpl: &mut FetchedPlaylist<'_>,
     fpl: &mut FetchedPlaylist<'_>,
 ) {
+    // Skip-flag is the kill-switch: no resolve, no probe, no iteration.
+    if fpl.input.has_flag(ConfigInputFlags::XtreamSkipVod) {
+        return;
+    }
+
     let resolve_options = get_resolve_vod_options(target, fpl);
 
     let app_config: &Arc<AppConfig> = &ctx.config;
@@ -229,20 +234,25 @@ async fn process_immediate_vod_info(ctx: &PlaylistProcessingContext, fpl: &mut F
                                 })
                                 .collect();
 
-                            if !updates.is_empty() {
-                                if let Err(err) = persist_input_vod_info_batch(
+                            if updates.is_empty() {
+                                batch.clear();
+                            } else {
+                                match persist_input_vod_info_batch(
                                     &ctx.config,
                                     &storage_path,
                                     XtreamCluster::Video,
                                     &input.name,
                                     updates,
                                 ).await {
-                                    error!("Failed to persist batch VOD info: {err}");
+                                    Ok(()) => batch.clear(),
+                                    Err(err) => {
+                                        error!(
+                                            "persist_input_vod_info_batch failed for XtreamCluster::Video on input '{}'. batch.clear() skipped. Error: {err}",
+                                            input.name
+                                        );
+                                    }
                                 }
                             }
-
-                            // Clear batch
-                            batch.clear();
                         }
 
                         processed_count += 1;

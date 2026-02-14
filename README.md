@@ -72,9 +72,10 @@ Options:
   --healthcheck                    Healthcheck for docker
   --scan-library                   Scan library directories
   --force-library-rescan           Force full library rescan
-  --dbx                            Database file type: xtream
-  --dbm                            Database file type: m3u
-  --dbe                            Database file type: epg
+  --dbx                            Dump database with content type: xtream
+  --dbm                            Dump database with content type: m3u
+  --dbe                            Dump database with content type: epg
+  --dbv                            Dump database with content type: taregt id mapping
 ```
 
 ## 1. `config.yml`

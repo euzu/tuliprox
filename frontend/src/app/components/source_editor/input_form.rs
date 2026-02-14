@@ -53,12 +53,12 @@ const LABEL_RESOLVE_BACKGROUND: &str = "LABEL.RESOLVE_BACKGROUND";
 const LABEL_PROBE_LIVE_INTERVAL_HOURS: &str = "LABEL.PROBE_LIVE_INTERVAL_HOURS";
 const LABEL_METADATA: &str = "LABEL.METADATA";
 const LABEL_CACHE_DURATION: &str = "LABEL.CACHE_DURATION";
-
 const LABEL_MAIN: &str = "LABEL.MAIN_CONFIG";
 const LABEL_OPTIONS: &str = "LABEL.OPTIONS";
 const LABEL_STAGED: &str = "LABEL.STAGED";
 const LABEL_ADVANCED: &str = "LABEL.ADVANCED";
 const LABEL_ALIAS: &str = "LABEL.ALIAS";
+const LABEL_LIVE_STREAMS: &str = "LABEL.LIVE_STREAMS";
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum InputFormPage {
@@ -429,16 +429,12 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                     { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_SKIP_SERIES), xtream_skip_series, ConfigInputOptionsFormAction::XtreamSkipSeries) }
                   </div>
                 </TitledCard>
-                { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_LIVE_STREAM_USE_PREFIX), xtream_live_stream_use_prefix, ConfigInputOptionsFormAction::XtreamLiveStreamUsePrefix) }
-                { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_LIVE_STREAM_WITHOUT_EXTENSION), xtream_live_stream_without_extension, ConfigInputOptionsFormAction::XtreamLiveStreamWithoutExtension) }
-                </>
-                })
-            }
-            <TitledCard title={translate.t(LABEL_METADATA)}>
-              { edit_field_bool!(input_options_state, translate.t(LABEL_RESOLVE_TMDB), resolve_tmdb, ConfigInputOptionsFormAction::ResolveTmdb) }
-             </TitledCard>
-            { html_if!(input_form_state.form.input_type.is_xtream(), {
-                <>
+                <TitledCard title={translate.t(LABEL_LIVE_STREAMS)}>
+                  <div class="tp__config-view__cols-2">
+                    { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_LIVE_STREAM_USE_PREFIX), xtream_live_stream_use_prefix, ConfigInputOptionsFormAction::XtreamLiveStreamUsePrefix) }
+                    { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_LIVE_STREAM_WITHOUT_EXTENSION), xtream_live_stream_without_extension, ConfigInputOptionsFormAction::XtreamLiveStreamWithoutExtension) }
+                  </div>
+                </TitledCard>
                 <TitledCard title={translate.t(LABEL_RESOLVE)}>
                     <div class="tp__config-view__cols-3">
                     { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_SKIP_VOD), resolve_vod,  ConfigInputOptionsFormAction::ResolveVod) }
@@ -461,6 +457,9 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 </TitledCard>
                 </>
             })}
+            <TitledCard title={translate.t(LABEL_METADATA)}>
+              { edit_field_bool!(input_options_state, translate.t(LABEL_RESOLVE_TMDB), resolve_tmdb, ConfigInputOptionsFormAction::ResolveTmdb) }
+            </TitledCard>
             </Card>
         }
     };
