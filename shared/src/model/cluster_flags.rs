@@ -25,7 +25,9 @@ impl ClusterFlags {
         })
     }
 
-    pub fn has_full_flags(&self) -> bool { self.is_all() }
+    pub fn has_full_flags(&self) -> bool {
+        self.is_all()
+    }
 
     fn from_items<I, S>(items: I) -> Result<Self, &'static str>
     where
@@ -77,7 +79,9 @@ impl TryFrom<&str> for ClusterFlags {
 impl TryFrom<Vec<String>> for ClusterFlags {
     type Error = &'static str;
 
-    fn try_from(value: Vec<String>) -> Result<Self, Self::Error> { ClusterFlags::from_items(value) }
+    fn try_from(value: Vec<String>) -> Result<Self, Self::Error> {
+        ClusterFlags::from_items(value)
+    }
 }
 
 impl Serialize for ClusterFlags {
