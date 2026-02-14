@@ -2,9 +2,11 @@
 OS   := $(shell uname -s)
 ARCH := $(shell uname -m)
 
-# Tool Commands (Using system PATH instead of hardcoded paths for portability)
+# Tool Commands
 CARGO            := cargo
 RUSTUP           := rustup
+# Explicitly force stable/nightly to avoid system-wide overrides
+CARGO_STABLE     := $(CARGO) +stable
 CARGO_NIGHTLY    := $(CARGO) +nightly
 CROSS            := cross
 TRUNK            := trunk
@@ -23,12 +25,12 @@ help: ## Display this help
 ##@ Prerequisites:
 
 .PHONY: install-tools
-install-tools: check-rustup install-nightly-fmt ## Install all required development tools (checks if already installed)
+install-tools: check-rustup install-nightly-fmt ## Install all required development tools
 	@echo "📦 Checking and installing CLI tools..."
-	@command -v cross >/dev/null || $(CARGO) install cross
-	@command -v trunk >/dev/null || $(CARGO) install trunk
-	@command -v wasm-bindgen >/dev/null || $(CARGO) install wasm-bindgen-cli
-	@command -v cargo-set-version >/dev/null || $(CARGO) install cargo-edit
+	@command -v cross >/dev/null || $(CARGO_STABLE) install cross
+	@command -v trunk >/dev/null || $(CARGO_STABLE) install trunk
+	@command -v wasm-bindgen >/dev/null || $(CARGO_STABLE) install wasm-bindgen-cli
+	@command -v cargo-set-version >/dev/null || $(CARGO_STABLE) install cargo-edit
 	@echo "✅ All tools installed"
 
 .PHONY: check-rustup
@@ -45,18 +47,18 @@ install-nightly-fmt: ## Install nightly toolchain specifically for formatting
 
 .PHONY: test
 test: ## Run all workspace tests (Stable)
-	@echo "==> Running tests"
-	$(CARGO) test --workspace
+	@echo "==> Running tests (stable)"
+	$(CARGO_STABLE) test --workspace
 
 .PHONY: lint
-lint: ## Run clippy linter and check for warnings
-	@echo "==> Running clippy"
-	$(CARGO) clippy --workspace -- -D warnings
+lint: ## Run clippy linter (Stable)
+	@echo "==> Running clippy (stable)"
+	$(CARGO_STABLE) clippy --workspace -- -D warnings
 
 .PHONY: lint-fix
-lint-fix: ## Automatically fix clippy suggestions (e.g., inline variables into strings)
+lint-fix: ## Automatically fix clippy suggestions (Stable)
 	@echo "==> Applying clippy auto-fixes"
-	$(CARGO) clippy --fix --workspace --allow-dirty --allow-staged -- -D clippy::uninlined_format_args
+	$(CARGO_STABLE) clippy --fix --workspace --allow-dirty --allow-staged -- -D clippy::uninlined_format_args
 
 .PHONY: fmt
 fmt: ## Format all code using nightly rules (Compact)
