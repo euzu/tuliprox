@@ -33,7 +33,7 @@ help: ## Display this help
 ##@ Prerequisites:
 
 .PHONY: install-tools
-install-tools: rustup install-nightly-fmt cross trunk wasm-bindgen cargo-set-version ## Install required development tools
+install-tools: rustup install-nightly-fmt cross trunk wasm-bindgen cargo-set-version markdownlint ## Install required development tools
 
 .PHONY: install-nightly-fmt
 install-nightly-fmt: ## Install nightly toolchain specifically for formatting
@@ -81,6 +81,16 @@ $(CARGO_SET_VERSION):
 	@$(CARGO) install cargo-edit
 	@echo "✅ $@ installed"
 
+.PHONY: markdownlint
+markdownlint: ## Install markdownlint-cli2 (requires npm)
+	@echo "📦 Installing markdownlint-cli2"
+	@command -v npm >/dev/null 2>&1 || { \
+		echo "❌ npm not found. Please install Node.js and npm first."; \
+		exit 1; \
+	}
+	@npm install -g markdownlint-cli2
+	@echo "✅ markdownlint-cli2 installed"
+
 ##@ Development:
 
 .PHONY: test
@@ -107,3 +117,13 @@ fmt: ## Format all code using nightly rules (Compact)
 fmt-check: ## Check if code follows formatting rules (Nightly)
 	@echo "==> Checking formatting (nightly)"
 	$(CARGO_NIGHTLY) fmt --all -- --check
+
+.PHONY: markdown-lint
+markdown-lint: ## Lint markdown files
+	@echo "==> Linting markdown files"
+	@command -v markdownlint-cli2 >/dev/null 2>&1 || { \
+		echo "❌ markdownlint-cli2 not found. Install with: npm install -g markdownlint-cli2"; \
+		exit 1; \
+	}
+	@markdownlint-cli2 "**/*.md"
+	@echo "✅ Markdown linting complete"
