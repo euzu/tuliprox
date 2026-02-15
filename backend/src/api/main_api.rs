@@ -523,16 +523,13 @@ fn exec_input_update_listener(app_state: &Arc<AppState>, targets: &Arc<ProcessTa
                         let sources = app_config.sources.load();
 
                         // For each target, we need to gather ALL its inputs to pass as pre_processed_inputs
-                        let mut targets_set: HashSet<String> = HashSet::new();
-                        for t in &targets_to_trigger {
-                            targets_set.insert(t.clone());
-                        }
+                        let targets_set: HashSet<String> = targets_to_trigger.iter().map(Clone::clone).collect();
 
                         if let Ok(process_targets) = sources.validate_targets(Some(&targets_to_trigger)) {
                             let proc_targets = Arc::new(process_targets);
                             // Collect all inputs for these targets
                             let mut pre_processed_inputs: HashSet<Arc<str>> = HashSet::new();
-                             for source in &sources.sources {
+                            for source in &sources.sources {
                                 for target in &source.targets {
                                     if targets_set.contains(&target.name) {
                                         for input in &source.inputs {
@@ -552,7 +549,7 @@ fn exec_input_update_listener(app_state: &Arc<AppState>, targets: &Arc<ProcessTa
 
                                 // Wait for any current update to finish before starting a new one
                                 let lock_opt = update_guard.acquire_playlist_lock().await;
-                                
+
                                 // Only proceed if we successfully acquired the lock (semaphore not closed)
                                 if let Some(lock) = lock_opt {
                                     exec_processing(
@@ -570,12 +567,13 @@ fn exec_input_update_listener(app_state: &Arc<AppState>, targets: &Arc<ProcessTa
                         }
                     }
                 }
-                Ok(_) => {},
+                Ok(_) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                    warn!("Input update listener lagged by {skipped} messages. Resetting tracking state to avoid deadlocks.");
+                    warn!("Input update listener lagged by {skipped} messages. Resetting tracking state (active_targets={}, pending={}) to avoid inconsistencies.",
+                        active_target_inputs.len(), pending_targets.len());
                     active_target_inputs.clear();
                     pending_targets.clear();
-                },
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }

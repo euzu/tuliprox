@@ -571,12 +571,10 @@ async fn download_input(
             // Use empty results, will load from disk below
             PlaylistDownloadResult::new(vec![], vec![], true, false)
         } else if ctx.pre_processed_inputs.as_ref().is_some_and(|s| s.contains(&input.name)) {
-             // If input is in pre_processed_inputs, we consider it "downloaded"/cached.
-             // We do NOT mark it as processed in the coordination set because that tracks the *current session's* work,
-             // but here we just want to skip the download for this specific run.
-             // Actually, to prevent re-entrancy issues if it's called again in valid way, maybe we should?
-             // But for "No-Overwrite", we just return cached result.
-             PlaylistDownloadResult::new(vec![], vec![], true, false)
+            // Input was already processed in a prior session; skip download and mark as processed
+            // for this session to avoid redundant lock acquisitions from other targets.
+            ctx.mark_input_downloaded(input.name.clone()).await;
+            PlaylistDownloadResult::new(vec![], vec![], true, false)
         } else {
             let res = playlist_download_from_input(&ctx.client, &ctx.config, input).await;
             // Mark as processed if NO critical errors?
@@ -1213,7 +1211,6 @@ pub async fn exec_processing(
         } else {
             warn!("Playlist update already in progress; update skipped.");
             if let Some(events) = event_manager.as_deref() {
-                let events: &EventManager = events;
                 events.send_event(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Failure));
             }
             return;
@@ -1259,12 +1256,10 @@ pub async fn exec_processing(
     // send errors
     if let Some(message) = get_errors_notify_message!(errors, 255) {
         if let Some(events) = event_manager.as_deref() {
-            let events: &EventManager = events;
             events.send_event(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Failure));
         }
         send_message(&app_config, client, MessageContent::event_error(message)).await;
     } else if let Some(events) = event_manager.as_deref() {
-        let events: &EventManager = events;
         events.send_event(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Success));
     }
 
@@ -1272,7 +1267,6 @@ pub async fn exec_processing(
     let update_finished_message = format!("🌷 Update process finished! Took {elapsed} secs.");
 
     if let Some(events) = event_manager.as_deref() {
-        let events: &EventManager = events;
         events.send_event(EventMessage::PlaylistUpdateProgress(
             "Playlist Update".to_string(),
             update_finished_message.clone(),
