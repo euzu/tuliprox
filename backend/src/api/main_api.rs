@@ -137,9 +137,10 @@ fn exec_update_on_boot(
         let disabled_headers = app_state.get_disabled_headers();
         let provider_manager = Arc::clone(&app_state.active_provider);
         let metadata_manager = Arc::clone(&app_state.metadata_manager);
+        let event_manager = Some(Arc::clone(&app_state.event_manager));
 
         tokio::spawn(async move {
-            exec_processing(&client, app_config_clone, targets_clone, None, Some(playlist_state), update_guard, disabled_headers, Some(provider_manager), Some(metadata_manager), None, None).await;
+            exec_processing(&client, app_config_clone, targets_clone, event_manager, Some(playlist_state), update_guard, disabled_headers, Some(provider_manager), Some(metadata_manager), None, None).await;
         });
     }
 }
