@@ -20,7 +20,7 @@
 - **Favorites Redesign**: Replaced implicit `create_alias` with explicit `add_favourite(group_name)` script function.
   - **EpgSmartMatch**: Field `name_prefix` syntax needs to be changed from  `name_prefix: !suffix "."` to `name_prefix: { suffix: "." }`.
   - **Sort**: Sort can now use filter to sort specific entries.
-  
+
     ```yaml
       sort:
         match_as_ascii: true
@@ -37,12 +37,12 @@
               - "!CHAN_SEQ!"
               - '(?i)\bHD\b'
               - '(?i)\bSD\b'
-        ```
-    
+      ```
+
   - Trakt api config field `key` is now `api_key`. Added `user_agent` field to Trakt api config
   - resolve_vod_delay and resolve_series_delay are now merged as resolve_delay, added `probe_live` and `probe_live_interval_hours` for live stream
     probing.
-  
+
       ```yaml
 
        # Before (deprecated)
@@ -53,7 +53,7 @@
          resolve_series: true
          resolve_series_delay: 2
       ```
-    
+
       ```yaml
 
        # After (new consolidated)

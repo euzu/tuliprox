@@ -1,5 +1,5 @@
 # TULIPROX_HOME should point to /app for docker
-threads: 0
+process_parallel: true
 api:
   host: 0.0.0.0
   port: 8901
@@ -75,6 +75,7 @@ reverse_proxy:
     backoff_multiplier: 1.0
   stream:
     shared_burst_buffer_mb: 12 # default 12 MB
+  rewrite_secret: ${env:TULIPROX_PROXY_REWRITE_SECRET} # use openssl rand -hex 16
 
 library:
   enabled: true

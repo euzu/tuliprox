@@ -2328,6 +2328,7 @@ be migrated to the corresponding file (`false` → `api_proxy.yml`, `true` → `
 If you set  `use_user_db` to `true` you need to use the `Web-UI` to `edit`/`add`/`remove` users.
 
 To access the api for:
+
 - `xtream` use url like `http://192.169.1.2/player_api.php?username={}&password={}`
 - `m3u` use url `http://192.169.1.2/get.php?username={}&password={}`
   or with token
@@ -2727,11 +2728,11 @@ todo.
 You have a provider who supports the xtream api.
 
 The provider gives you:
+
 - the url: `http://fantastic.provider.xyz:8080`
 - username: `tvjunkie`
 - password: `junkie.secret`
 - epg_url: `http://fantastic.provider.xyz:8080/xmltv.php?username=tvjunkie&password=junkie.secret`
-
 
 To use `tuliprox` you need to create the configuration.
 The configuration consist of 4 files.
@@ -2833,6 +2834,7 @@ If no server is specified for a user, the default one is taken.
 
 To access a xtream api from our IPTV-application we need at least 3 information  the `url`, `username` and `password`.
 All this information are now defined in `api-proxy.yml`.
+
 - url: `http://192.168.1.41:8901`
 - username: `xt`
 - password: `xt.secret`
