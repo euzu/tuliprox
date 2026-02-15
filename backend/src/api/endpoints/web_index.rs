@@ -116,7 +116,12 @@ fn inject_nonce_with_parser(html: String, nonce_b64: &str) -> String {
                 el.set_attribute("nonce", nonce_b64)?;
                 Ok(())
             }),
-            // 2) Remove meta CSP from HTML, if present
+            // 2) All <style> without nonce → add nonce
+            element!("style:not([nonce])", move |el| {
+                el.set_attribute("nonce", nonce_b64)?;
+                Ok(())
+            }),
+            // 3) Remove meta CSP from HTML, if present
             element!("meta[http-equiv='Content-Security-Policy']", |el| {
                 el.remove();
                 Ok(())

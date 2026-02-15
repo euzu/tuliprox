@@ -2,8 +2,8 @@ use crate::{
     app::components::{Block, BlockId, BlockInstance, PortStatus},
     html_if,
 };
-use web_sys::MouseEvent;
-use yew::{classes, function_component, html, Callback, Html, Properties, TargetCast};
+use web_sys::{HtmlElement, MouseEvent};
+use yew::{classes, function_component, html, use_effect_with, use_node_ref, Callback, Html, Properties, TargetCast};
 use yew_i18n::use_translation;
 #[derive(Properties, PartialEq)]
 pub struct BlockProps {
@@ -27,10 +27,10 @@ pub fn BlockView(props: &BlockProps) -> Html {
     let delete_block = props.delete_block.clone();
     let block = &props.block;
     let port_status = props.port_status;
+    let block_ref = use_node_ref();
 
     let block_id = block.id;
     let block_type = block.block_type;
-    let style = format!("transform: translate({}px, {}px)", block.position.0, block.position.1);
     let from_id = block_id;
     let to_id = block_id;
 
@@ -63,6 +63,16 @@ pub fn BlockView(props: &BlockProps) -> Html {
         let on_edit = props.on_edit.clone();
         Callback::from(move |_| on_edit.emit(block_id))
     };
+    {
+        let block_ref = block_ref.clone();
+        let position = block.position;
+        use_effect_with(position, move |(x, y)| {
+            if let Some(el) = block_ref.cast::<HtmlElement>() {
+                let _ = el.style().set_property("transform", &format!("translate3d({x}px, {y}px, 0)"));
+            }
+            || {}
+        });
+    }
 
     let (title, show_type, is_batch) = {
         let (dto_title, show_type, is_batch) = match &block.instance {
@@ -87,7 +97,7 @@ pub fn BlockView(props: &BlockProps) -> Html {
 
     html! {
         <div id={format!("block-{block_id}")} class={format!("tp__source-editor__block no-select tp__source-editor__block-{}{}{}", block_type, if props.edited {" tp__source-editor__block-editing"} else {""}, if props.selected {" tp__source-editor__block-selected"} else {""})}
-              style={style} title={title.clone()}>
+              ref={block_ref} title={title.clone()}>
             <div class={"tp__source-editor__block-header"}>
                 // Block handle (drag)
                 <div class="tp__source-editor__block-handle" onmousedown={handle_mouse_down.clone()} />
