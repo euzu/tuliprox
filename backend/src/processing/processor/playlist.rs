@@ -18,7 +18,7 @@ use crate::messaging::send_message;
 
 use crate::model::FetchedPlaylist;
 use crate::model::Mapping;
-use crate::model::{ConfigInputFlags, ConfigInputOptions, ConfigTarget, ProcessTargets, TargetOutput};
+use crate::model::{ConfigInputFlags, ConfigInputOptions, ConfigTarget, ProcessTargets};
 use crate::processing::input_cache;
 use crate::processing::input_cache::ClusterState;
 use crate::processing::parser::xmltv::flatten_tvguide;
@@ -919,41 +919,6 @@ async fn playlist_resolve(
     playlist_probe(ctx, target, processed_fpl).await;
 }
 
-fn has_target_m3u_output(target: &ConfigTarget) -> bool {
-    for output in &target.output {
-        if matches!(output, TargetOutput::M3u(_)) {
-            return true;
-        }
-    }
-    false
-}
-
-fn get_xtream_cluster_probe_flag(
-    target: &ConfigTarget,
-    input_options: Option<&ConfigInputOptions>,
-    cluster: XtreamCluster,
-) -> Option<bool> {
-    target.get_xtream_output().map(|_| match cluster {
-        XtreamCluster::Live => input_options.is_some_and(|options| options.has_flag(ConfigInputFlags::ProbeLive)),
-        XtreamCluster::Video => input_options.is_some_and(|options| options.has_flag(ConfigInputFlags::ProbeVod)),
-        XtreamCluster::Series => input_options.is_some_and(|options| options.has_flag(ConfigInputFlags::ProbeSeries)),
-    })
-}
-
-fn is_cluster_probe_enabled_for_target(
-    target: &ConfigTarget,
-    input_options: Option<&ConfigInputOptions>,
-    cluster: XtreamCluster,
-) -> bool {
-    // Probe flags are only authoritative when the target is exactly one xtream output.
-    // For mixed outputs (xtream + m3u), probing remains enabled because non-xtream outputs have no probe flags.
-    if has_target_m3u_output(target) {
-        return true;
-    }
-
-    get_xtream_cluster_probe_flag(target, input_options, cluster).unwrap_or(true)
-}
-
 fn is_probe_supported_item_type(item_type: PlaylistItemType) -> bool {
     matches!(
         item_type,
@@ -1027,7 +992,11 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
     let Some(opts) = fpl.input.options.as_ref() else {
         return;
     };
-    if !opts.has_any_flags(ConfigInputFlags::ProbeLive | ConfigInputFlags::ProbeVod | ConfigInputFlags::ProbeSeries) {
+    let probe_live_enabled = opts.has_flag(ConfigInputFlags::ProbeLive);
+    let probe_vod_enabled = opts.has_flag(ConfigInputFlags::ProbeVod);
+    let probe_series_enabled = opts.has_flag(ConfigInputFlags::ProbeSeries);
+
+    if !(probe_live_enabled || probe_vod_enabled || probe_series_enabled) {
         return;
     }
     if !ctx.config.is_ffprobe_enabled().await {
@@ -1036,12 +1005,15 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
 
     let input_name = fpl.input.name.clone();
     let input_type = fpl.input.input_type;
-    let live_probe_settings =
+    let live_probe_settings = if probe_live_enabled {
         get_live_probe_interval_settings(target, input_type, Some(opts)).map(|(delay, interval_secs)| {
             let interval_signed = i64::try_from(interval_secs).unwrap_or(i64::MAX);
             let cutoff_ts = chrono::Utc::now().timestamp().saturating_sub(interval_signed);
             (delay, interval_secs, cutoff_ts)
-        });
+        })
+    } else {
+        None
+    };
 
     let mut queued_probe_keys: HashSet<(Arc<str>, String)> = HashSet::new();
     let mut queued_live_keys: HashSet<ProviderIdType> = HashSet::new();
@@ -1049,32 +1021,47 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
     let mut queued_stream_count = 0usize;
 
     for item in fpl.items() {
-        if !is_cluster_probe_enabled_for_target(target, Some(opts), item.header.xtream_cluster) {
-            continue;
-        }
-
         if !is_probe_supported_item_type(item.header.item_type) {
             continue;
         }
 
-        if item.header.item_type.is_live() {
-            if let Some((resolve_delay, interval_secs, cutoff_ts)) = live_probe_settings {
-                if needs_live_probe(&item, cutoff_ts) {
-                    if let Some(provider_id) = provider_id_from_item(&item) {
-                        if queued_live_keys.insert(provider_id.clone()) {
-                            let task = UpdateTask::ProbeLive {
-                                id: provider_id,
-                                reason: ResolveReasonSet::from_variants(&[ResolveReason::Probe]),
-                                delay: resolve_delay,
-                                interval: interval_secs,
-                            };
-                            mgr.queue_task_background(input_name.clone(), task);
-                            queued_live_count += 1;
+        match item.header.item_type {
+            PlaylistItemType::Live => {
+                if !probe_live_enabled {
+                    continue;
+                }
+
+                if let Some((resolve_delay, interval_secs, cutoff_ts)) = live_probe_settings {
+                    if needs_live_probe(&item, cutoff_ts) {
+                        if let Some(provider_id) = provider_id_from_item(&item) {
+                            if queued_live_keys.insert(provider_id.clone()) {
+                                let task = UpdateTask::ProbeLive {
+                                    id: provider_id,
+                                    reason: ResolveReasonSet::from_variants(&[ResolveReason::Probe]),
+                                    delay: resolve_delay,
+                                    interval: interval_secs,
+                                };
+                                mgr.queue_task_background(input_name.clone(), task);
+                                queued_live_count += 1;
+                            }
                         }
                     }
+                    continue;
                 }
-                continue;
+                // If live probes are enabled but no live-specific settings are available, fall through to the
+                // generic probe path to keep behaviour consistent with non-xtream outputs.
             }
+            PlaylistItemType::Video | PlaylistItemType::LocalVideo => {
+                if !probe_vod_enabled {
+                    continue;
+                }
+            }
+            PlaylistItemType::Series | PlaylistItemType::LocalSeries => {
+                if !probe_series_enabled {
+                    continue;
+                }
+            }
+            _ => continue,
         }
 
         if has_probe_details(&item) {
