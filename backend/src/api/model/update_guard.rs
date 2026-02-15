@@ -29,6 +29,15 @@ impl UpdateGuard {
             .map(|permit| UpdateGuardPermit { _permit: permit })
     }
 
+    pub async fn acquire_playlist_lock(&self) -> Option<UpdateGuardPermit> {
+        self.playlist
+            .clone()
+            .acquire_owned()
+            .await
+            .ok()
+            .map(|permit| UpdateGuardPermit { _permit: permit })
+    }
+
     pub fn try_library(&self) -> Option<UpdateGuardPermit> {
         self.library
             .clone()

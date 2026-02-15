@@ -11,7 +11,7 @@ use crate::api::endpoints::xmltv_api::xmltv_api_register;
 use crate::api::endpoints::xtream_api::xtream_api_register;
 use crate::api::hdhomerun_proprietary::spawn_proprietary_tasks;
 use crate::api::hdhomerun_ssdp::spawn_ssdp_discover_task;
-use crate::api::model::{create_cache, create_http_client, create_http_client_no_redirect, ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager, DownloadQueue, EventManager, HdHomerunAppState, MetadataUpdateManager, PlaylistStorageState, SharedStreamManager, UpdateGuard};
+use crate::api::model::{create_cache, create_http_client, create_http_client_no_redirect, ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager, DownloadQueue, EventManager, EventMessage, HdHomerunAppState, MetadataUpdateManager, PlaylistStorageState, SharedStreamManager, UpdateGuard};
 use crate::api::panel_api::sync_panel_api_exp_dates_on_boot;
 use crate::api::scheduler::{exec_interner_prune, exec_scheduler};
 use crate::api::serve::serve;
@@ -30,6 +30,7 @@ use log::{debug, error, info};
 use shared::error::TuliproxError;
 use shared::utils::{concat_path_leading_slash, sanitize_sensitive_info};
 use shared::{info_err, info_err_res};
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicI8;
@@ -138,7 +139,7 @@ fn exec_update_on_boot(
         let metadata_manager = Arc::clone(&app_state.metadata_manager);
 
         tokio::spawn(async move {
-            exec_processing(&client, app_config_clone, targets_clone, None, Some(playlist_state), update_guard, disabled_headers, Some(provider_manager), Some(metadata_manager)).await;
+            exec_processing(&client, app_config_clone, targets_clone, None, Some(playlist_state), update_guard, disabled_headers, Some(provider_manager), Some(metadata_manager), None).await;
         });
     }
 }
@@ -459,75 +460,117 @@ async fn log_req(req: Request, next: Next) -> impl axum::response::IntoResponse 
 }
 
 
-fn exec_input_update_listener(_app_state: &Arc<AppState>, _targets: &Arc<ProcessTargets>) {
-    // TODO this method starts an playlist update after the metadata is resolved.
-    // Currently to many playlist updates are started and therefore it is disabled.
+fn exec_input_update_listener(app_state: &Arc<AppState>, targets: &Arc<ProcessTargets>) {
+    let app_state = Arc::clone(app_state);
+    let targets = Arc::clone(targets);
 
-    // let app_state = Arc::clone(app_state);
-    // let targets = Arc::clone(targets);
+    tokio::spawn(async move {
+        let mut rx = app_state.event_manager.get_event_channel();
+        // Map<TargetName, Set<InputName>>: Tracks which inputs are currently updating for a given target
+        let mut active_target_inputs: HashMap<String, HashSet<String>> = HashMap::new();
+        // Set<TargetName>: Tracks which targets are pending an update once their inputs are done
+        let mut pending_targets: HashSet<String> = HashSet::new();
 
-    // tokio::spawn(async move {
-    //     let mut rx = app_state.event_manager.get_event_channel();
-    //     let app_state = Arc::clone(&app_state);
-    //     loop {
-    //         match rx.recv().await {
-    //             Ok(EventMessage::InputMetadataUpdatesCompleted(input_name)) => {
-    //                 // Find all targets that use this input
-    //                 let mut targets_to_update = HashSet::new();
-    //                 let sources = app_state.app_config.sources.load();
-    //
-    //                 for source in &sources.sources {
-    //                     if source.inputs.contains(&input_name) {
-    //                         for target in &source.targets {
-    //                             // Update strategy "Bundled" explicitly waits for this event.
-    //                             // Update strategy "Instant" triggers updates per item, but we ALSO trigger a full
-    //                             // update here to ensure everything is consistent (e.g. M3U files, cleaning up temp files).
-    //                             // This guarantees that any STRM/M3U files are generated/updated after metadata resolution.
-    //
-    //                             // Check if target matches process targets (CLI args or schedule)
-    //                             if let Some(valid_targets) = crate::api::scheduler::get_process_targets(&app_state.app_config, &targets, Some(&vec![target.name.clone()])).as_ref().into() {
-    //                                 if valid_targets.enabled && !valid_targets.targets.is_empty() {
-    //                                     targets_to_update.insert(target.name.clone());
-    //                                 }
-    //                             }
-    //                         }
-    //                     }
-    //                 }
-    //
-    //                 if !targets_to_update.is_empty() {
-    //                     let targets_to_update: Vec<_> = targets_to_update.into_iter().collect();
-    //                     // Small delay to ensure any lingering updates or file locks from the background thread are fully released
-    //                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    //
-    //                     info!("Triggering playlist update for targets due to metadata change completion: {targets_to_update:?}");
-    //
-    //                     let client = app_state.http_client.load().as_ref().clone();
-    //                     let app_config = Arc::clone(&app_state.app_config);
-    //                     let event_manager = Arc::clone(&app_state.event_manager);
-    //                     let playlist_state = Arc::clone(&app_state.playlists);
-    //                     let disabled_headers = app_state.get_disabled_headers();
-    //
-    //                     if let Ok(process_targets) = sources.validate_targets(Some(&targets_to_update)) {
-    //                         let proc_targets = Arc::new(process_targets);
-    //
-    //                         let update_guard = app_state.update_guard.clone();
-    //
-    //                         let app_state_clone = app_state.clone();
-    //                         tokio::spawn(async move {
-    //                             exec_processing(
-    //                                 &client, app_config, proc_targets, Some(event_manager),
-    //                                 Some(playlist_state), Some(update_guard),
-    //                                 disabled_headers,
-    //                                 Some(app_state_clone.active_provider.clone()), Some(app_state_clone.metadata_manager.clone()),
-    //                             ).await;
-    //                         });
-    //                     }
-    //                 }
-    //             }
-    //             Ok(_)
-    //             | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {},
-    //             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-    //         }
-    //     }
-    // });
+        loop {
+            match rx.recv().await {
+                Ok(EventMessage::InputMetadataUpdatesStarted(input_name)) => {
+                    let sources = app_state.app_config.sources.load();
+                    for source in &sources.sources {
+                        if source.inputs.iter().any(|i| i.as_ref() == input_name.as_ref()) {
+                            for target in &source.targets {
+                                // Check if this target is allowed by the global process targets
+                                if targets.enabled && !targets.target_names.contains(&target.name) {
+                                    continue;
+                                }
+                                // Add this input to the active set for this target
+                                active_target_inputs
+                                    .entry(target.name.clone())
+                                    .or_default()
+                                    .insert(input_name.to_string());
+                                // Mark target as potentially needing an update
+                                pending_targets.insert(target.name.clone());
+                            }
+                        }
+                    }
+                }
+                Ok(EventMessage::InputMetadataUpdatesCompleted(input_name)) => {
+                    // 1. Remove this input from all active sets
+                    // We need to iterate over keys to modify values
+                    let target_names: Vec<String> = active_target_inputs.keys().cloned().collect();
+                    let mut targets_to_trigger = Vec::new();
+
+                    for target_name in target_names {
+                        if let std::collections::hash_map::Entry::Occupied(mut entry) = active_target_inputs.entry(target_name.clone()) {
+                            let inputs = entry.get_mut();
+                            inputs.remove(input_name.as_ref());
+                            if inputs.is_empty() {
+                                entry.remove();
+                                // If this target was pending, it's now ready to trigger
+                                if pending_targets.remove(&target_name) {
+                                    targets_to_trigger.push(target_name);
+                                }
+                            }
+                        }
+                    }
+
+                    if !targets_to_trigger.is_empty() {
+                         // Small delay to ensure any lingering updates or file locks from the background thread are fully released
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+                        info!("Triggering playlist update for targets due to metadata change completion: {targets_to_trigger:?}");
+
+                        let client = app_state.http_client.load().as_ref().clone();
+                        let app_config = Arc::clone(&app_state.app_config);
+                        let event_manager = Arc::clone(&app_state.event_manager);
+                        let playlist_state = Arc::clone(&app_state.playlists);
+                        let disabled_headers = app_state.get_disabled_headers();
+                        let sources = app_config.sources.load();
+
+                        // For each target, we need to gather ALL its inputs to pass as pre_processed_inputs
+                        // This ensures that when we run exec_processing, we skip downloading ALL inputs for this target,
+                        // effectively making it a "resolve-only" / "regeneration-only" run using existing DBs.
+                        let mut targets_set: HashSet<String> = HashSet::new();
+                        for t in &targets_to_trigger {
+                            targets_set.insert(t.clone());
+                        }
+
+                        if let Ok(process_targets) = sources.validate_targets(Some(&targets_to_trigger)) {
+                            let proc_targets = Arc::new(process_targets);
+                            // Collect all inputs for these targets
+                            let mut pre_processed_inputs: HashSet<Arc<str>> = HashSet::new();
+                             for source in &sources.sources {
+                                for target in &source.targets {
+                                    if targets_set.contains(&target.name) {
+                                        for input in &source.inputs {
+                                            pre_processed_inputs.insert(input.clone());
+                                        }
+                                    }
+                                }
+                            }
+
+                            let update_guard = app_state.update_guard.clone();
+                            let app_state_clone = app_state.clone();
+
+                            tokio::spawn(async move {
+                                // Wait for any current update to finish before starting a new one
+                                let lock = update_guard.acquire_playlist_lock().await;
+                                drop(lock);
+
+                                exec_processing(
+                                    &client, app_config, proc_targets, Some(event_manager),
+                                    Some(playlist_state), Some(update_guard),
+                                    disabled_headers,
+                                    Some(app_state_clone.active_provider.clone()), Some(app_state_clone.metadata_manager.clone()),
+                                    Some(pre_processed_inputs),
+                                ).await;
+                            });
+                        }
+                    }
+                }
+                Ok(_)
+                | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {},
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
 }

@@ -569,6 +569,13 @@ async fn download_input(
         if already_processed {
             // Use empty results, will load from disk below
             PlaylistDownloadResult::new(vec![], vec![], true, false)
+        } else if ctx.pre_processed_inputs.as_ref().is_some_and(|s| s.contains(&input.name)) {
+             // If input is in pre_processed_inputs, we consider it "downloaded"/cached.
+             // We do NOT mark it as processed in the coordination set because that tracks the *current session's* work,
+             // but here we just want to skip the download for this specific run.
+             // Actually, to prevent re-entrancy issues if it's called again in valid way, maybe we should?
+             // But for "No-Overwrite", we just return cached result.
+             PlaylistDownloadResult::new(vec![], vec![], true, false)
         } else {
             let res = playlist_download_from_input(&ctx.client, &ctx.config, input).await;
             // Mark as processed if NO critical errors?
@@ -640,6 +647,7 @@ pub struct PlaylistProcessingContext {
     // New field for STRM probes & background updates
     pub provider_manager: Option<Arc<ActiveProviderManager>>,
     pub metadata_manager: Option<Arc<MetadataUpdateManager>>,
+    pub pre_processed_inputs: Option<Arc<HashSet<Arc<str>>>>,
 }
 
 impl PlaylistProcessingContext {
@@ -1192,6 +1200,7 @@ pub async fn exec_processing(
     disabled_headers: Option<ReverseProxyDisabledHeaderConfig>,
     provider_manager: Option<Arc<ActiveProviderManager>>,
     metadata_manager: Option<Arc<MetadataUpdateManager>>,
+    pre_processed_inputs: Option<HashSet<Arc<str>>>,
 ) {
     let _guard = if let Some(guard) = update_guard {
         if let Some(permit) = guard.try_playlist() {
@@ -1221,6 +1230,7 @@ pub async fn exec_processing(
         disabled_headers,
         provider_manager,
         metadata_manager,
+        pre_processed_inputs: pre_processed_inputs.map(Arc::new),
     };
 
     let start_time = Instant::now();

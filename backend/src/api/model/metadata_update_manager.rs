@@ -373,6 +373,11 @@ impl InputWorker {
                 last_queue_log_at = Instant::now()
                     .checked_sub(QUEUE_LOG_INTERVAL + Duration::from_secs(1))
                     .unwrap_or_else(Instant::now);
+                if let Some(app_state) = app_state_weak.as_ref().and_then(Weak::upgrade) {
+                    app_state
+                        .event_manager
+                        .send_event(EventMessage::InputMetadataUpdatesStarted(input_name.clone()));
+                }
                 debug!("Background metadata update queue has entries for input {input_name}; starting processing");
             }
 
