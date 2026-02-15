@@ -565,6 +565,8 @@ fn exec_input_update_listener(app_state: &Arc<AppState>, targets: &Arc<ProcessTa
                                     warn!("Skipping triggered update because shutdown signal received (lock closed)");
                                 }
                             });
+                        } else {
+                            warn!("Failed to validate targets for triggered update: {targets_to_trigger:?}");
                         }
                     }
                 }
