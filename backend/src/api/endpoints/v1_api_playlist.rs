@@ -77,7 +77,7 @@ async fn playlist_update(
                 async move {
                     exec_processing(&http_client, app_config, valid_targets, Some(event_manager),
                                     Some(playlist_state), Some(app_state.update_guard.clone()),
-                                    disabled_headers, Some(provider_manager), Some(metadata_manager)).await;
+                                    disabled_headers, Some(provider_manager), Some(metadata_manager), None, None).await;
                 }
             });
             axum::http::StatusCode::ACCEPTED.into_response()

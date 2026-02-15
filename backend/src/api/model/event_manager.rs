@@ -15,6 +15,8 @@ pub enum EventMessage {
     LibraryScanProgress(LibraryScanSummary),
     // Triggered when MetadataUpdateManager queue drains for an input
     InputMetadataUpdatesCompleted(Arc<str>),
+    // Triggered when MetadataUpdateManager starts a new processing cycle for an input
+    InputMetadataUpdatesStarted(Arc<str>),
 }
 
 pub struct EventManager {

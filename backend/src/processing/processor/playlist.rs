@@ -14,6 +14,7 @@ use crate::api::model::{
     ActiveProviderManager, EventManager, EventMessage, MetadataUpdateManager, PlaylistStorageState, ProviderIdType,
     ResolveReason, ResolveReasonSet, UpdateGuard, UpdateTask,
 };
+
 use crate::messaging::send_message;
 
 use crate::model::FetchedPlaylist;
@@ -43,7 +44,7 @@ use shared::foundation::{get_field_value, set_field_value, ValueAccessor, ValueP
 use shared::model::xtream_const::XTREAM_CLUSTER;
 use shared::model::{
     CounterModifier, FieldGetAccessor, FieldSetAccessor, InputType, ItemField, PlaylistGroup, PlaylistItem,
-    PlaylistItemType, PlaylistUpdateState, ProcessingOrder, StreamProperties, XtreamCluster,
+    PlaylistItemType, ProcessingOrder, StreamProperties, XtreamCluster,
 };
 use shared::model::{InputStats, PlaylistStats, SourceStats, TargetStats, UUIDType};
 use shared::utils::{
@@ -569,6 +570,11 @@ async fn download_input(
         if already_processed {
             // Use empty results, will load from disk below
             PlaylistDownloadResult::new(vec![], vec![], true, false)
+        } else if ctx.pre_processed_inputs.as_ref().is_some_and(|s| s.contains(&input.name)) {
+            // Input was already processed in a prior session; skip download and mark as processed
+            // for this session to avoid redundant lock acquisitions from other targets.
+            ctx.mark_input_downloaded(input.name.clone()).await;
+            PlaylistDownloadResult::new(vec![], vec![], true, false)
         } else {
             let res = playlist_download_from_input(&ctx.client, &ctx.config, input).await;
             // Mark as processed if NO critical errors?
@@ -640,6 +646,7 @@ pub struct PlaylistProcessingContext {
     // New field for STRM probes & background updates
     pub provider_manager: Option<Arc<ActiveProviderManager>>,
     pub metadata_manager: Option<Arc<MetadataUpdateManager>>,
+    pub pre_processed_inputs: Option<Arc<HashSet<Arc<str>>>>,
 }
 
 impl PlaylistProcessingContext {
@@ -1192,14 +1199,19 @@ pub async fn exec_processing(
     disabled_headers: Option<ReverseProxyDisabledHeaderConfig>,
     provider_manager: Option<Arc<ActiveProviderManager>>,
     metadata_manager: Option<Arc<MetadataUpdateManager>>,
+    pre_processed_inputs: Option<HashSet<Arc<str>>>,
+    acquired_permit: Option<crate::api::model::UpdateGuardPermit>,
 ) {
-    let _guard = if let Some(guard) = update_guard {
-        if let Some(permit) = guard.try_playlist() {
+    let _guard = if let Some(permit) = acquired_permit {
+        Some(permit)
+    } else if let Some(guard) = &update_guard {
+        let lock_result: Option<crate::api::model::UpdateGuardPermit> = guard.try_playlist();
+        if let Some(permit) = lock_result {
             Some(permit)
         } else {
             warn!("Playlist update already in progress; update skipped.");
-            if let Some(events) = event_manager.as_ref() {
-                events.send_event(EventMessage::PlaylistUpdate(PlaylistUpdateState::Failure));
+            if let Some(events) = event_manager.as_deref() {
+                events.send_event(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Failure));
             }
             return;
         }
@@ -1221,6 +1233,7 @@ pub async fn exec_processing(
         disabled_headers,
         provider_manager,
         metadata_manager,
+        pre_processed_inputs: pre_processed_inputs.map(Arc::new),
     };
 
     let start_time = Instant::now();
@@ -1242,18 +1255,18 @@ pub async fn exec_processing(
 
     // send errors
     if let Some(message) = get_errors_notify_message!(errors, 255) {
-        if let Some(events) = &event_manager {
-            events.send_event(EventMessage::PlaylistUpdate(PlaylistUpdateState::Failure));
+        if let Some(events) = event_manager.as_deref() {
+            events.send_event(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Failure));
         }
         send_message(&app_config, client, MessageContent::event_error(message)).await;
-    } else if let Some(events) = &event_manager {
-        events.send_event(EventMessage::PlaylistUpdate(PlaylistUpdateState::Success));
+    } else if let Some(events) = event_manager.as_deref() {
+        events.send_event(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Success));
     }
 
     let elapsed = start_time.elapsed().as_secs();
     let update_finished_message = format!("🌷 Update process finished! Took {elapsed} secs.");
 
-    if let Some(events) = &event_manager {
+    if let Some(events) = event_manager.as_deref() {
         events.send_event(EventMessage::PlaylistUpdateProgress(
             "Playlist Update".to_string(),
             update_finished_message.clone(),

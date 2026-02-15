@@ -246,7 +246,7 @@ async fn start_in_cli_mode(cfg: Arc<AppConfig>, targets: Arc<ProcessTargets>) {
         reqwest::Client::new()
     });
     // In CLI mode, we don't start background managers for events or providers
-    exec_processing(&client, cfg, targets, None, None, None, None, None, None).await;
+    exec_processing(&client, cfg, targets, None, None, None, None, None, None, None, None).await;
 }
 
 async fn start_in_server_mode(cfg: Arc<AppConfig>, targets: Arc<ProcessTargets>) {
