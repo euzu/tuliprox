@@ -67,7 +67,7 @@ async fn start_scheduler(client: reqwest::Client, expression: &str, app_state: A
                        let metadata_manager = Arc::clone(&app_state.metadata_manager);
                        sync_panel_api_exp_dates_on_boot(&app_state).await;
                        exec_processing(&client, app_config, Arc::clone(&targets), Some(event_manager),
-                            Some(playlist_state), Some(app_state.update_guard.clone()), disabled_headers, Some(provider_manager), Some(metadata_manager), None).await;
+                            Some(playlist_state), Some(app_state.update_guard.clone()), disabled_headers, Some(provider_manager), Some(metadata_manager), None, None).await;
                         }
                         () = cancel.cancelled() => {
                             break;

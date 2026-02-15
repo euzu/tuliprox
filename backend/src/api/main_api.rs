@@ -26,7 +26,7 @@ use arc_swap::{ArcSwap, ArcSwapOption};
 use axum::extract::connect_info::ConnectInfo;
 use axum::Router;
 use axum::{extract::Request, middleware::Next};
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use shared::error::TuliproxError;
 use shared::utils::{concat_path_leading_slash, sanitize_sensitive_info};
 use shared::{info_err, info_err_res};
@@ -139,7 +139,7 @@ fn exec_update_on_boot(
         let metadata_manager = Arc::clone(&app_state.metadata_manager);
 
         tokio::spawn(async move {
-            exec_processing(&client, app_config_clone, targets_clone, None, Some(playlist_state), update_guard, disabled_headers, Some(provider_manager), Some(metadata_manager), None).await;
+            exec_processing(&client, app_config_clone, targets_clone, None, Some(playlist_state), update_guard, disabled_headers, Some(provider_manager), Some(metadata_manager), None, None).await;
         });
     }
 }
@@ -495,7 +495,6 @@ fn exec_input_update_listener(app_state: &Arc<AppState>, targets: &Arc<ProcessTa
                 }
                 Ok(EventMessage::InputMetadataUpdatesCompleted(input_name)) => {
                     // 1. Remove this input from all active sets
-                    // We need to iterate over keys to modify values
                     let target_names: Vec<String> = active_target_inputs.keys().cloned().collect();
                     let mut targets_to_trigger = Vec::new();
 
@@ -514,9 +513,6 @@ fn exec_input_update_listener(app_state: &Arc<AppState>, targets: &Arc<ProcessTa
                     }
 
                     if !targets_to_trigger.is_empty() {
-                         // Small delay to ensure any lingering updates or file locks from the background thread are fully released
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
                         info!("Triggering playlist update for targets due to metadata change completion: {targets_to_trigger:?}");
 
                         let client = app_state.http_client.load().as_ref().clone();
@@ -527,8 +523,6 @@ fn exec_input_update_listener(app_state: &Arc<AppState>, targets: &Arc<ProcessTa
                         let sources = app_config.sources.load();
 
                         // For each target, we need to gather ALL its inputs to pass as pre_processed_inputs
-                        // This ensures that when we run exec_processing, we skip downloading ALL inputs for this target,
-                        // effectively making it a "resolve-only" / "regeneration-only" run using existing DBs.
                         let mut targets_set: HashSet<String> = HashSet::new();
                         for t in &targets_to_trigger {
                             targets_set.insert(t.clone());
@@ -551,24 +545,37 @@ fn exec_input_update_listener(app_state: &Arc<AppState>, targets: &Arc<ProcessTa
                             let update_guard = app_state.update_guard.clone();
                             let app_state_clone = app_state.clone();
 
+                            // SPAWN the trigger logic so we don't block the event loop with sleep or heavy processing setup
                             tokio::spawn(async move {
-                                // Wait for any current update to finish before starting a new one
-                                let lock = update_guard.acquire_playlist_lock().await;
-                                drop(lock);
+                                // Small delay to ensure any lingering updates or file locks from the background thread are fully released
+                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-                                exec_processing(
-                                    &client, app_config, proc_targets, Some(event_manager),
-                                    Some(playlist_state), Some(update_guard),
-                                    disabled_headers,
-                                    Some(app_state_clone.active_provider.clone()), Some(app_state_clone.metadata_manager.clone()),
-                                    Some(pre_processed_inputs),
-                                ).await;
+                                // Wait for any current update to finish before starting a new one
+                                let lock_opt = update_guard.acquire_playlist_lock().await;
+                                
+                                // Only proceed if we successfully acquired the lock (semaphore not closed)
+                                if let Some(lock) = lock_opt {
+                                    exec_processing(
+                                        &client, app_config, proc_targets, Some(event_manager),
+                                        Some(playlist_state), Some(update_guard),
+                                        disabled_headers,
+                                        Some(app_state_clone.active_provider.clone()), Some(app_state_clone.metadata_manager.clone()),
+                                        Some(pre_processed_inputs),
+                                        Some(lock), // Pass the acquired permit to stay active during processing
+                                    ).await;
+                                } else {
+                                    warn!("Skipping triggered update because shutdown signal received (lock closed)");
+                                }
                             });
                         }
                     }
                 }
-                Ok(_)
-                | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {},
+                Ok(_) => {},
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    warn!("Input update listener lagged by {skipped} messages. Resetting tracking state to avoid deadlocks.");
+                    active_target_inputs.clear();
+                    pending_targets.clear();
+                },
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
