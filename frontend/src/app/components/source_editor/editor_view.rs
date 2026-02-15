@@ -20,7 +20,7 @@ use std::{
     collections::{HashMap, HashSet},
     rc::Rc,
 };
-use wasm_bindgen::JsCast;
+use wasm_bindgen::{prelude::Closure, JsCast};
 use web_sys::{Element, HtmlElement, MouseEvent};
 use yew::{platform::spawn_local, prelude::*};
 use yew_i18n::use_translation;
@@ -73,7 +73,7 @@ impl DragState {
 #[derive(Clone, PartialEq)]
 struct SelectionState {
     is_selecting: bool,
-    select_rect_elem: Option<HtmlElement>,
+    select_rect_elem: Option<Element>,
     selection_rect: Option<(f32, f32, f32, f32)>, // x,y,w,h relative to canva;
     selection_start: Position,
     selected_blocks: HashSet<BlockId>,
@@ -85,8 +85,8 @@ impl Default for SelectionState {
     fn default() -> Self {
         Self {
             is_selecting: false,
-            selection_rect: None,
             select_rect_elem: None,
+            selection_rect: None,
             selection_start: (0.0f32, 0.0f32),
             selected_blocks: HashSet::<BlockId>::new(),
             group_initial_positions: Vec::<(BlockId, Position)>::new(),
@@ -98,10 +98,9 @@ impl Default for SelectionState {
 impl SelectionState {
     pub fn reset_selection(&mut self) {
         self.is_selecting = false;
-        if let Some(rect_elem) = &self.select_rect_elem {
-            rect_elem.style().set_property("display", "none").unwrap();
+        if let Some(rect) = &self.select_rect_elem {
+            let _ = hide_selection_rect(rect);
         }
-        self.select_rect_elem = None;
         self.selection_rect = None;
         self.selection_start = (0.0f32, 0.0f32);
         self.selected_blocks.clear();
@@ -111,10 +110,9 @@ impl SelectionState {
 
     pub fn stop_selection(&mut self) {
         self.is_selecting = false;
-        if let Some(rect_elem) = &self.select_rect_elem {
-            rect_elem.style().set_property("display", "none").unwrap();
+        if let Some(rect) = &self.select_rect_elem {
+            let _ = hide_selection_rect(rect);
         }
-        self.select_rect_elem = None;
         self.selection_rect = None;
         self.selection_start = (0.0f32, 0.0f32);
     }
@@ -164,7 +162,6 @@ struct EditorState {
     connections: Vec<Connection>,
     block_elements: HashMap<BlockId, HtmlElement>,
     connection_elements: HashMap<(BlockId, BlockId), Element>,
-    pending_line_element: Option<Element>,
     pending_line: Option<(Position, Position)>,
     pending_connection: Option<BlockId>,
     is_panning: bool,
@@ -182,7 +179,6 @@ impl Default for EditorState {
             connections: Vec::<Connection>::new(),
             block_elements: HashMap::<BlockId, HtmlElement>::new(),
             connection_elements: HashMap::<(BlockId, BlockId), Element>::new(),
-            pending_line_element: None,
             pending_line: None,
             pending_connection: None,
             is_panning: false,
@@ -191,16 +187,17 @@ impl Default for EditorState {
 }
 
 impl EditorState {
-    pub fn get_block(&self, block_id: BlockId) -> Option<&Block> { self.blocks.get(block_id as usize - 1) }
+    pub fn get_block(&self, block_id: BlockId) -> Option<&Block> {
+        block_id.checked_sub(1).and_then(|idx| self.blocks.get(idx as usize))
+    }
 
     pub fn get_block_mut(&mut self, block_id: BlockId) -> Option<&mut Block> {
-        self.blocks.get_mut(block_id as usize - 1)
+        block_id.checked_sub(1).and_then(|idx| self.blocks.get_mut(idx as usize))
     }
 
     pub fn clear_pending(&mut self) {
         self.pending_connection = None;
         self.pending_line = None;
-        self.pending_line_element = None;
     }
 }
 
@@ -320,6 +317,12 @@ pub fn SourceEditor() -> Html {
                 layout(&mut gen_blocks, &gen_connections);
                 {
                     let mut editor_state = editor_state_ref.borrow_mut();
+                    editor_state.canvas_offset = (0.0, 0.0);
+                    editor_state.pan_start = (0.0, 0.0);
+                    editor_state.drag.reset_dragging();
+                    editor_state.selection.reset_selection();
+                    editor_state.clear_pending();
+                    editor_state.is_panning = false;
                     editor_state.blocks = gen_blocks;
                     editor_state.connections = gen_connections;
                     editor_state.next_id = current_id;
@@ -336,39 +339,39 @@ pub fn SourceEditor() -> Html {
 
         Callback::from(move |block_ids: HashSet<BlockId>| {
             let mut editor_state = editor_state_ref.borrow_mut();
-            if editor_state.block_elements.is_empty() {
-                if let Some(window) = web_sys::window() {
-                    if let Some(document) = window.document() {
-                        for block_id in &block_ids {
-                            if let Some(el) = document.get_element_by_id(&format!("block-{block_id}")) {
-                                let div = el.dyn_into::<HtmlElement>().unwrap();
-                                editor_state.block_elements.insert(*block_id, div);
-                            }
+            if !editor_state.block_elements.is_empty() {
+                return;
+            }
+            let Some(window) = web_sys::window() else {
+                return;
+            };
+            let Some(document) = window.document() else {
+                return;
+            };
 
-                            // find connections
-                            let connections = {
-                                let mut connections = HashMap::new();
-                                for conn in &editor_state.connections {
-                                    if *block_id == conn.from
-                                        || *block_id == conn.to
-                                        || block_ids.contains(&conn.from)
-                                        || block_ids.contains(&conn.to)
-                                    {
-                                        if let Some(el) =
-                                            document.get_element_by_id(&format!("conn-{}-{}", conn.from, conn.to))
-                                        {
-                                            let path_el = el.dyn_into::<Element>().unwrap();
-                                            connections.insert((conn.from, conn.to), path_el);
-                                        }
-                                    }
-                                }
-                                connections
-                            };
-                            for (key, elem) in connections {
-                                editor_state.connection_elements.insert(key, elem);
+            for block_id in &block_ids {
+                if let Some(el) = document.get_element_by_id(&format!("block-{block_id}")) {
+                    if let Ok(div) = el.dyn_into::<HtmlElement>() {
+                        editor_state.block_elements.insert(*block_id, div);
+                    }
+                }
+
+                let mut connections = HashMap::new();
+                for conn in &editor_state.connections {
+                    if *block_id == conn.from
+                        || *block_id == conn.to
+                        || block_ids.contains(&conn.from)
+                        || block_ids.contains(&conn.to)
+                    {
+                        if let Some(el) = document.get_element_by_id(&format!("conn-{}-{}", conn.from, conn.to)) {
+                            if let Ok(path_el) = el.dyn_into::<Element>() {
+                                connections.insert((conn.from, conn.to), path_el);
                             }
                         }
                     }
+                }
+                for (key, elem) in connections {
+                    editor_state.connection_elements.insert(key, elem);
                 }
             }
         })
@@ -381,6 +384,8 @@ pub fn SourceEditor() -> Html {
             let mut editor_state = editor_state_ref.borrow_mut();
             let connections = editor_state.connections.clone();
             layout(&mut editor_state.blocks, &connections);
+            editor_state.canvas_offset = (0.0, 0.0);
+            editor_state.pan_start = (0.0, 0.0);
 
             force_update.set(*force_update + 1);
         })
@@ -478,7 +483,7 @@ pub fn SourceEditor() -> Html {
             spawn_local(async move {
                 let result = confirm.confirm(&translator.t("MESSAGES.CONFIRM_SOURCES_SAVE")).await;
                 if result == DialogResult::Ok {
-                    on_save.emit("dave");
+                    on_save.emit(());
                 }
             });
         })
@@ -492,7 +497,9 @@ pub fn SourceEditor() -> Html {
             editor_state_ref.borrow_mut().selection.reset_selection();
             if let Some(target) = e.target_dyn_into::<HtmlElement>() {
                 let block_type = target.get_attribute("data-block-type").unwrap_or_default();
-                e.data_transfer().unwrap().set_data("text/plain", &block_type).unwrap();
+                if let Some(data_transfer) = e.data_transfer() {
+                    let _ = data_transfer.set_data("text/plain", &block_type);
+                }
                 // Store mouse offset inside the element
                 let rect = target.get_bounding_client_rect();
                 let offset_x = e.client_x() as f32 - rect.left() as f32;
@@ -514,29 +521,31 @@ pub fn SourceEditor() -> Html {
             e.stop_propagation();
             cursor_grabbing.set(false);
             if let Some(canvas) = canvas_ref.cast::<HtmlElement>() {
-                if let Ok(data) = e.data_transfer().unwrap().get_data("text/plain") {
-                    let rect = canvas.get_bounding_client_rect();
-                    let mouse_x = e.client_x() as f32 - rect.left() as f32;
-                    let mouse_y = e.client_y() as f32 - rect.top() as f32;
-                    let ((canvas_ox, canvas_oy), (offset_x, offset_y)) = {
-                        let editor_state = editor_state_ref.borrow();
-                        (editor_state.canvas_offset, editor_state.drag.sidebar_drag_offset)
-                    };
+                if let Some(data_transfer) = e.data_transfer() {
+                    if let Ok(data) = data_transfer.get_data("text/plain") {
+                        let rect = canvas.get_bounding_client_rect();
+                        let mouse_x = e.client_x() as f32 - rect.left() as f32;
+                        let mouse_y = e.client_y() as f32 - rect.top() as f32;
+                        let ((canvas_ox, canvas_oy), (offset_x, offset_y)) = {
+                            let editor_state = editor_state_ref.borrow();
+                            (editor_state.canvas_offset, editor_state.drag.sidebar_drag_offset)
+                        };
 
-                    let block_type = BlockType::from(data.as_str());
-                    {
-                        let mut editor_state = editor_state_ref.borrow_mut();
-                        let next_id = editor_state.next_id;
-                        editor_state.blocks.push(Block {
-                            id: next_id,
-                            block_type,
-                            position: (
-                                mouse_x - offset_x - canvas_ox, // <-- subtract canvas offset
-                                mouse_y - offset_y - canvas_oy,
-                            ),
-                            instance: create_instance(block_type),
-                        });
-                        editor_state.next_id += 1;
+                        let block_type = BlockType::from(data.as_str());
+                        {
+                            let mut editor_state = editor_state_ref.borrow_mut();
+                            let next_id = editor_state.next_id;
+                            editor_state.blocks.push(Block {
+                                id: next_id,
+                                block_type,
+                                position: (
+                                    mouse_x - offset_x - canvas_ox, // <-- subtract canvas offset
+                                    mouse_y - offset_y - canvas_oy,
+                                ),
+                                instance: create_instance(block_type),
+                            });
+                            editor_state.next_id += 1;
+                        }
                     }
                 }
             }
@@ -754,42 +763,37 @@ pub fn SourceEditor() -> Html {
             }
 
             let mut moved_block_ids = HashSet::new();
-            {
-                let (anchor_x, anchor_y) = offset;
-                let dx = mouse_x - anchor_x;
-                let dy = mouse_y - anchor_y;
+            let (anchor_x, anchor_y) = offset;
+            let dx = mouse_x - anchor_x;
+            let dy = mouse_y - anchor_y;
 
-                let mut editor_state = editor_state_ref.borrow_mut();
-                for (id, (ix, iy)) in initial_positions {
-                    if let Some(b) = editor_state.get_block_mut(id) {
-                        b.position = (ix + dx, iy + dy);
-                        moved_block_ids.insert(b.id);
-                    }
+            let mut editor_state = editor_state_ref.borrow_mut();
+            for (id, (ix, iy)) in initial_positions {
+                if let Some(b) = editor_state.get_block_mut(id) {
+                    b.position = (ix + dx, iy + dy);
+                    moved_block_ids.insert(b.id);
                 }
             }
 
             if !moved_block_ids.is_empty() {
-                let editor_state = editor_state_ref.borrow();
                 let (canvas_ox, canvas_oy) = editor_state.canvas_offset;
 
                 for block_id in &moved_block_ids {
                     if let Some(div) = editor_state.block_elements.get(block_id) {
                         if let Some(block) = editor_state.get_block(*block_id) {
                             let (x, y) = block.position;
-                            div.style()
-                                .set_property(
-                                    "transform",
-                                    &format!("translate3d({}px,{}px, 0)", x + canvas_ox, y + canvas_oy),
-                                )
-                                .unwrap();
+                            let _ = div.style().set_property(
+                                "transform",
+                                &format!("translate3d({}px,{}px, 0)", x + canvas_ox, y + canvas_oy),
+                            );
                         }
                     }
                 }
 
-                let mut move_connections = HashMap::<String, (BlockId, BlockId)>::new();
+                let mut move_connections = HashMap::<(BlockId, BlockId), (BlockId, BlockId)>::new();
                 for conn in &editor_state.connections {
                     if moved_block_ids.contains(&conn.from) || moved_block_ids.contains(&conn.to) {
-                        move_connections.insert(format!("conn-{}-{}", conn.from, conn.to), (conn.from, conn.to));
+                        move_connections.insert((conn.from, conn.to), (conn.from, conn.to));
                     }
                 }
                 for (from, to) in move_connections.values() {
@@ -798,7 +802,7 @@ pub fn SourceEditor() -> Html {
                             (&editor_state.get_block(*from), &editor_state.get_block(*to))
                         {
                             let (d, _) = update_connection(canvas_ox, canvas_oy, from_block, to_block);
-                            path_el.set_attribute("d", &d).unwrap();
+                            let _ = path_el.set_attribute("d", &d);
                         }
                     }
                 }
@@ -812,6 +816,7 @@ pub fn SourceEditor() -> Html {
         let canvas_ref = canvas_ref.clone();
         let last_frame = RefCell::new(0.0);
         let move_blocks = move_blocks.clone();
+        let force_update = force_update.clone();
 
         Callback::from(move |e: MouseEvent| {
             let now = web_sys::js_sys::Date::now();
@@ -819,6 +824,7 @@ pub fn SourceEditor() -> Html {
                 return;
             }
             *last_frame.borrow_mut() = now;
+            let mut needs_render = false;
 
             let client_x = e.client_x();
             let client_y = e.client_y();
@@ -839,6 +845,7 @@ pub fn SourceEditor() -> Html {
                     editor_state.pan_start = (client_x as f32, client_y as f32);
                 };
 
+                // Keep panning smooth by moving already-rendered nodes directly.
                 move_blocks.emit((0.0, 0.0, (0.0, 0.0), initial_positions));
                 return;
             }
@@ -863,21 +870,7 @@ pub fn SourceEditor() -> Html {
                             }
                         }
                         editor_state.pending_line = Some(((from_x, from_y), snapped));
-
-                        if editor_state.pending_line_element.is_none() {
-                            if let Some(window) = web_sys::window() {
-                                if let Some(document) = window.document() {
-                                    if let Some(el) = document.get_element_by_id(PENDING_LINE) {
-                                        let line = el.dyn_into::<Element>().unwrap();
-                                        editor_state.pending_line_element = Some(line);
-                                    }
-                                }
-                            }
-                        }
-
-                        if let Some(line) = editor_state.pending_line_element.as_ref() {
-                            update_line(line, from_x, from_y, snapped.0, snapped.1);
-                        }
+                        needs_render = true;
                     }
                 }
 
@@ -917,14 +910,13 @@ pub fn SourceEditor() -> Html {
                             if let Some(window) = web_sys::window() {
                                 if let Some(document) = window.document() {
                                     if let Some(el) = document.get_element_by_id(SELECTION_RECT) {
-                                        editor_state.selection.select_rect_elem = el.dyn_into::<HtmlElement>().ok();
+                                        editor_state.selection.select_rect_elem = Some(el);
                                     }
                                 }
                             }
-                        };
-
-                        if let Some(rect_div) = editor_state.selection.select_rect_elem.as_ref() {
-                            update_selection_rect(rect_div, x, y, w, h);
+                        }
+                        if let Some(rect) = &editor_state.selection.select_rect_elem {
+                            let _ = update_selection_rect(rect, x, y, w, h);
                         }
                     }
                 }
@@ -958,6 +950,14 @@ pub fn SourceEditor() -> Html {
                 };
                 if let Some(move_it) = to_move {
                     move_blocks.emit(move_it);
+                    // Drag updates are applied directly to DOM for smoothness.
+                    // Avoid full re-render on every mouse move while dragging blocks.
+                    if !needs_render {
+                        return;
+                    }
+                }
+                if needs_render {
+                    force_update.set(*force_update + 1);
                 }
             }
         })
@@ -966,8 +966,13 @@ pub fn SourceEditor() -> Html {
     let handle_canvas_mouse_up = {
         let editor_state_ref = editor_state_ref.clone();
         let cursor_grabbing = cursor_grabbing.clone();
+        let force_update = force_update.clone();
         Callback::from(move |_e: MouseEvent| {
             let mut editor_state = editor_state_ref.borrow_mut();
+            let had_active_interaction = editor_state.is_panning
+                || editor_state.drag.block_id.is_some()
+                || editor_state.selection.is_selecting
+                || editor_state.selection.selection_rect.is_some();
             editor_state.block_elements.clear();
             editor_state.connection_elements.clear();
             // Stop any block dragging and stop panning
@@ -977,8 +982,50 @@ pub fn SourceEditor() -> Html {
             editor_state.selection.stop_selection();
             editor_state.is_panning = false;
             cursor_grabbing.set(false);
+            if had_active_interaction {
+                force_update.set(*force_update + 1);
+            }
         })
     };
+
+    // Ensure interaction state is cleaned up even when mouseup happens outside the canvas.
+    {
+        let editor_state_ref = editor_state_ref.clone();
+        let cursor_grabbing = cursor_grabbing.clone();
+        let force_update = force_update.clone();
+        use_effect(move || {
+            let handler = Closure::wrap(Box::new(move |_event: MouseEvent| {
+                let mut editor_state = editor_state_ref.borrow_mut();
+                let had_active_interaction = editor_state.is_panning
+                    || editor_state.drag.block_id.is_some()
+                    || editor_state.selection.is_selecting
+                    || editor_state.selection.selection_rect.is_some();
+                if !had_active_interaction {
+                    return;
+                }
+
+                editor_state.block_elements.clear();
+                editor_state.connection_elements.clear();
+                if editor_state.drag.block_id.is_some() {
+                    editor_state.drag.reset_dragging();
+                }
+                editor_state.selection.stop_selection();
+                editor_state.is_panning = false;
+                cursor_grabbing.set(false);
+                force_update.set(*force_update + 1);
+            }) as Box<dyn FnMut(_)>);
+
+            if let Some(window) = web_sys::window() {
+                let _ = window.add_event_listener_with_callback("mouseup", handler.as_ref().unchecked_ref());
+            }
+
+            move || {
+                if let Some(window) = web_sys::window() {
+                    let _ = window.remove_event_listener_with_callback("mouseup", handler.as_ref().unchecked_ref());
+                }
+            }
+        });
+    }
 
     let handle_canvas_right_click = {
         let editor_state_ref = editor_state_ref.clone();
@@ -1085,14 +1132,9 @@ pub fn SourceEditor() -> Html {
     let grabbed = *cursor_grabbing;
 
     let editor_state = editor_state_ref.borrow();
-    let ((canvas_off_x, canvas_off_y), select_rect_style, pending_line) = {
+    let ((canvas_off_x, canvas_off_y), pending_line) = {
         let canvas_offset = editor_state.canvas_offset; // Apply virtual canvas offset
-        let select_rect_style = editor_state
-            .selection
-            .selection_rect
-            .as_ref()
-            .map(|(x, y, w, h)| format!("left:{x}px; top:{y}px; width:{w}px; height:{h}px;"));
-        (canvas_offset, select_rect_style, editor_state.pending_line)
+        (canvas_offset, editor_state.pending_line)
     };
 
     // ----------------- Render -----------------
@@ -1174,10 +1216,16 @@ pub fn SourceEditor() -> Html {
                                 stroke-dasharray="4 2" />
                         }
                     } else { html!{} } }
-                </svg>
 
-                // Selection rectangle overlay
-                <div id={SELECTION_RECT} class="tp__source-editor__selection-rect" style={select_rect_style}></div>
+                    // Selection rectangle overlay
+                    <rect
+                        id={SELECTION_RECT}
+                        class="tp__source-editor__selection-rect-svg"
+                        x="0"
+                        y="0"
+                        width="0"
+                        height="0" />
+                </svg>
 
                 // Render blocks with canvas offset
                 { for editor_state.blocks.iter().map(|b|{
@@ -1223,20 +1271,16 @@ fn update_connection(ox: f32, oy: f32, from_block: &Block, to_block: &Block) -> 
     )
 }
 
-fn update_line(line: &Element, from_x: f32, from_y: f32, to_x: f32, to_y: f32) {
-    line.set_attribute("x1", &from_x.to_string()).unwrap();
-    line.set_attribute("y1", &from_y.to_string()).unwrap();
-    line.set_attribute("x2", &to_x.to_string()).unwrap();
-    line.set_attribute("y2", &to_y.to_string()).unwrap();
+fn hide_selection_rect(rect: &Element) -> Result<(), wasm_bindgen::JsValue> {
+    rect.set_attribute("width", "0")?;
+    rect.set_attribute("height", "0")
 }
 
-fn update_selection_rect(rect_div: &HtmlElement, x: f32, y: f32, w: f32, h: f32) {
-    let div_style = rect_div.style();
-    div_style.set_property("display", "block").unwrap();
-    div_style.set_property("left", &format!("{x}px")).unwrap();
-    div_style.set_property("top", &format!("{y}px")).unwrap();
-    div_style.set_property("width", &format!("{w}px")).unwrap();
-    div_style.set_property("height", &format!("{h}px")).unwrap();
+fn update_selection_rect(rect: &Element, x: f32, y: f32, w: f32, h: f32) -> Result<(), wasm_bindgen::JsValue> {
+    rect.set_attribute("x", &x.to_string())?;
+    rect.set_attribute("y", &y.to_string())?;
+    rect.set_attribute("width", &w.to_string())?;
+    rect.set_attribute("height", &h.to_string())
 }
 
 fn compute_normalized_selection_rect(selection_start: Position, mouse_x: f32, mouse_y: f32) -> (f32, f32, f32, f32) {

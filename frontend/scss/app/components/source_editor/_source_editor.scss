@@ -100,12 +100,11 @@
    &__connections {
    }
 
-   &__selection-rect {
-      position: absolute;
-      display: none;
-      border: 1px dashed var(--selection-area-border-color);
-      background: var(--selection-area-background-color);
-      z-index: 9999;
+   &__selection-rect-svg {
+      fill: var(--selection-area-background-color);
+      stroke: var(--selection-area-border-color);
+      stroke-width: 1px;
+      stroke-dasharray: 4 2;
       pointer-events: none;
    }
 

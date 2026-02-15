@@ -691,7 +691,8 @@ web_ui:
       - "default-src 'self'"                                        # default value
       - "script-src 'self' 'wasm-unsafe-eval' 'nonce-{nonce_b64}'"  # default value
       - "frame-ancestors 'none'"                                    # default value
-      - "style-src 'self'"
+      - "style-src 'self' 'nonce-{nonce_b64}'"
+      - "style-src-attr 'unsafe-inline'"
       - "img-src 'self' data:"
       - "font-src 'self' data:"
       - "connect-src 'self' wss:"
