@@ -123,11 +123,8 @@ pub fn SchedulesConfigView() -> Html {
         Callback::from(move |_| {
             if let Some(schedule) = (*set_selected_schedule).as_ref() {
                 let task_type = *selected_type;
-                let targets = if task_type == ScheduleTaskType::PlaylistUpdate {
-                    (*set_selected_targets).clone()
-                } else {
-                    None
-                };
+                let targets =
+                    if task_type == ScheduleTaskType::PlaylistUpdate { (*set_selected_targets).clone() } else { None };
                 match Schedule::from_str(schedule) {
                     Ok(_) => {
                         let dto = ScheduleConfigDto { schedule: schedule.clone(), task_type, targets };
