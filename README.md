@@ -421,6 +421,7 @@ schedules:
 ```
 
 The `type` attribute defines the task to be executed and defaults to `PlaylistUpdate` if omitted. Possible values:
+
 - `PlaylistUpdate`: Updates the target playlists (optionally filtered by `targets`).
 - `LibraryScan`: Triggers a scan of the local media library (requires `library` configuration to be enabled).
 
