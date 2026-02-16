@@ -1299,8 +1299,20 @@ impl InputWorker {
         match task {
             UpdateTask::ResolveVod { id, reason, .. } => {
                 let fetch_info = reason.contains(ResolveReason::Info);
+                let will_probe = reason.contains(ResolveReason::Probe);
 
-                let query_opt = Self::get_or_open_query(&input.name, app_state, XtreamCluster::Video, db_handles, failed_clusters).await;
+                // If we are going to probe, release the cached handle to avoid holding a READ lock 
+                // for along time (blocks writers) and also to avoid potential deadlocks if 
+                // the probe function itself tries to acquire a WRITE lock later.
+                if will_probe {
+                    db_handles.remove(&XtreamCluster::Video);
+                }
+
+                let query_opt = if will_probe { 
+                    None 
+                } else {
+                    Self::get_or_open_query(&input.name, app_state, XtreamCluster::Video, db_handles, failed_clusters).await
+                };
 
                 match update_vod_metadata(
                     &app_state.app_config,
@@ -1312,7 +1324,7 @@ impl InputWorker {
                     item_title,
                     false, // Batch collect
                     fetch_info,
-                    reason.contains(ResolveReason::Probe),
+                    will_probe,
                     query_opt,
                 ).await {
                     Ok(Some(props)) => {
@@ -1325,9 +1337,18 @@ impl InputWorker {
             }
             UpdateTask::ResolveSeries { id, reason, .. } => {
                 let fetch_info = reason.contains(ResolveReason::Info);
+                let will_probe = reason.contains(ResolveReason::Probe);
+
+                if will_probe {
+                    db_handles.remove(&XtreamCluster::Series);
+                }
 
                 // Get handle for Series
-                let query_opt = Self::get_or_open_query(&input.name, app_state, XtreamCluster::Series, db_handles, failed_clusters).await;
+                let query_opt = if will_probe {
+                    None
+                } else {
+                    Self::get_or_open_query(&input.name, app_state, XtreamCluster::Series, db_handles, failed_clusters).await
+                };
 
                 match update_series_metadata(
                     &app_state.app_config,
@@ -1339,7 +1360,7 @@ impl InputWorker {
                     item_title,
                     false, // Batch collect
                     fetch_info,
-                    reason.contains(ResolveReason::Probe),
+                    will_probe,
                     query_opt,
                 ).await {
                     Ok(Some(props)) => {
@@ -1351,14 +1372,15 @@ impl InputWorker {
                 }
             }
             UpdateTask::ProbeLive { id, .. } => {
-                let query_opt = Self::get_or_open_query(&input.name, app_state, XtreamCluster::Live, db_handles, failed_clusters).await;
+                // ProbeLive always probes, so we must never use a cached handle here.
+                db_handles.remove(&XtreamCluster::Live);
 
                 match update_live_stream_metadata(
                     &app_state.app_config,
                     input,
                     id.clone(),
                     false,
-                    query_opt,
+                    None,
                 ).await {
                     Ok(Some(props)) => {
                         collector.add_live(id.clone(), props);
@@ -1369,7 +1391,12 @@ impl InputWorker {
                 }
             }
             UpdateTask::ProbeStream { unique_id, url, item_type, .. } => {
-                // Generic probe doesn't support batching yet
+                // Generic probe doesn't support batching yet and always takes a WRITE lock.
+                // It can target any cluster, so we clear all handles to be safe.
+                if !db_handles.is_empty() {
+                    db_handles.clear();
+                }
+
                 update_generic_stream_metadata(
                     &app_state.app_config,
                     input.as_ref(),
