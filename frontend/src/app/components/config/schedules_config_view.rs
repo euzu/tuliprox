@@ -24,7 +24,7 @@ use yew_i18n::use_translation;
 
 const LABEL_SCHEDULE: &str = "LABEL.SCHEDULE";
 const LABEL_TARGETS: &str = "LABEL.TARGETS";
-const LABEL_TYPE: &str = "LABEL.CLUSTER"; // reusing existing "Type" label
+const LABEL_TYPE: &str = "LABEL.TYPE";
 const LABEL_ALL: &str = "LABEL.ALL";
 
 generate_form_reducer!(

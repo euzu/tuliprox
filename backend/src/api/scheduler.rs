@@ -113,9 +113,9 @@ fn run_playlist_update(client: &reqwest::Client, app_state: &Arc<AppState>, targ
 fn run_library_scan(client: &reqwest::Client, app_state: &Arc<AppState>) {
     if let Some(lib_config) = app_state.app_config.config.load().library.as_ref() {
         if lib_config.enabled {
-            if let Some(_update_guard) = app_state.update_guard.try_library() {
+            if let Some(permit) = app_state.update_guard.try_library() {
                 let event_manager = Arc::clone(&app_state.event_manager);
-                spawn_library_scan(event_manager, lib_config.clone(), client.clone(), false, "Scheduled ");
+                spawn_library_scan(event_manager, lib_config.clone(), client.clone(), false, "Scheduled ", permit);
             }
         }
     }

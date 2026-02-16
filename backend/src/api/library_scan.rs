@@ -1,4 +1,4 @@
-use crate::api::model::{EventManager, EventMessage};
+use crate::api::model::{EventManager, EventMessage, UpdateGuardPermit};
 use crate::library::LibraryProcessor;
 use crate::model::LibraryConfig;
 use log::{error, info};
@@ -11,9 +11,11 @@ pub(crate) fn spawn_library_scan(
     client: reqwest::Client,
     force_rescan: bool,
     message_prefix: &'static str,
+    permit: UpdateGuardPermit,
 ) {
     let prefix = message_prefix.to_string();
     tokio::spawn(async move {
+        let _permit = permit;
         let processor = LibraryProcessor::new(lib_config, client);
         match processor.scan(force_rescan).await {
             Ok(result) => {

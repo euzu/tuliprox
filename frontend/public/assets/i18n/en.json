@@ -350,6 +350,7 @@
     "STREAM_ID": "Stream Id",
     "SHARED": "Shared",
     "CLUSTER": "Type",
+    "TYPE": "Type",
     "USER_AGENT": "Player",
     "FORMAT": "Format",
     "DURATION": "Duration",

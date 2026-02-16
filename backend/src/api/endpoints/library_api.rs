@@ -14,7 +14,7 @@ async fn scan_library(
 ) -> axum::response::Response {
     debug!("Library scan requested (force_rescan: {})", request.force_rescan);
 
-    let Some(_update_guard) = app_state.update_guard.try_library() else {
+    let Some(permit) = app_state.update_guard.try_library() else {
         warn!("Library update already in progress; update skipped.");
         let response = LibraryScanSummary {
             status: LibraryScanSummaryStatus::Error,
@@ -47,6 +47,7 @@ async fn scan_library(
         client,
         request.force_rescan,
         "",
+        permit,
     );
 
     axum::http::StatusCode::ACCEPTED.into_response()
