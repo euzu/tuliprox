@@ -409,13 +409,20 @@ Format is
 #   sec  min   hour   day of month   month   day of week   year
 schedules:
 - schedule: "0  0  8  *  *  *  *"
+  type: PlaylistUpdate
   targets:
   - m3u
 - schedule: "0  0  10  *  *  *  *"
+  type: PlaylistUpdate
   targets:
   - xtream
 - schedule: "0  0  20  *  *  *  *"
+  type: LibraryScan
 ```
+
+The `type` attribute defines the task to be executed and defaults to `PlaylistUpdate` if omitted. Possible values:
+- `PlaylistUpdate`: Updates the target playlists (optionally filtered by `targets`).
+- `LibraryScan`: Triggers a scan of the local media library (requires `library` configuration to be enabled).
 
 At the given times the update is started. Do not start it every second or minute.
 You could be banned from your server. Twice a day should be enough.

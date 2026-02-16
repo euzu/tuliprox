@@ -17,13 +17,14 @@ use crate::{
     html_if,
 };
 use cron::Schedule;
-use shared::model::{ScheduleConfigDto, SchedulesConfigDto};
-use std::str::FromStr;
+use shared::model::{ScheduleConfigDto, ScheduleTaskType, SchedulesConfigDto};
+use std::{rc::Rc, str::FromStr};
 use yew::prelude::*;
 use yew_i18n::use_translation;
 
 const LABEL_SCHEDULE: &str = "LABEL.SCHEDULE";
 const LABEL_TARGETS: &str = "LABEL.TARGETS";
+const LABEL_TYPE: &str = "LABEL.CLUSTER"; // reusing existing "Type" label
 const LABEL_ALL: &str = "LABEL.ALL";
 
 generate_form_reducer!(
@@ -42,6 +43,7 @@ pub fn SchedulesConfigView() -> Html {
     let config_view_ctx = use_context::<ConfigViewContext>().expect("ConfigViewContext not found");
     let selected_targets = use_state(|| None::<Vec<String>>);
     let selected_schedule = use_state(|| None);
+    let selected_type = use_state(|| ScheduleTaskType::PlaylistUpdate);
 
     let all_targets = use_memo(config_ctx.config.clone(), move |config| {
         config
@@ -117,17 +119,21 @@ pub fn SchedulesConfigView() -> Html {
         let form_state = form_state.clone();
         let set_selected_targets = selected_targets.clone();
         let set_selected_schedule = selected_schedule.clone();
+        let selected_type = selected_type.clone();
         Callback::from(move |_| {
             if let Some(schedule) = (*set_selected_schedule).as_ref() {
                 let targets = (*set_selected_targets).clone();
+                let task_type = *selected_type;
                 match Schedule::from_str(schedule) {
                     Ok(_) => {
-                        let dto = ScheduleConfigDto { schedule: schedule.clone(), targets };
+                        let dto = ScheduleConfigDto { schedule: schedule.clone(), task_type, targets };
                         let mut new_schedules = form_state.data().schedules.as_ref().cloned().unwrap_or_default();
 
-                        let exists = new_schedules
-                            .iter()
-                            .any(|s| s.schedule == dto.schedule && s.targets.as_deref() == dto.targets.as_deref());
+                        let exists = new_schedules.iter().any(|s| {
+                            s.schedule == dto.schedule
+                                && s.task_type == dto.task_type
+                                && s.targets.as_deref() == dto.targets.as_deref()
+                        });
                         if exists {
                             services.toastr.warning(translate.t("MESSAGES.SCHEDULE_EXISTS"));
                         } else {
@@ -172,6 +178,7 @@ pub fn SchedulesConfigView() -> Html {
                         <tr>
                             {html_if!(deletable, {<th></th>})}
                             <th>{ translate.t(LABEL_SCHEDULE) }</th>
+                            <th>{ translate.t(LABEL_TYPE) }</th>
                             <th>{ translate.t(LABEL_TARGETS) }</th>
                         </tr>
                     </thead>
@@ -189,6 +196,10 @@ pub fn SchedulesConfigView() -> Html {
                                     </td>
                                 })}
                                 <td>{ entry.schedule.clone() }</td>
+                                <td>{ match entry.task_type {
+                                    ScheduleTaskType::PlaylistUpdate => translate.t("LABEL.PLAYLIST_UPDATE"),
+                                    ScheduleTaskType::LibraryScan => translate.t("LABEL.LIBRARY"),
+                                }}</td>
                                 <td>
                                     <div class="tp__config-view__tags">
                                     {
@@ -216,18 +227,46 @@ pub fn SchedulesConfigView() -> Html {
     };
 
     let render_edit_mode = || {
+        let set_selected_type = selected_type.clone();
+        let types = Rc::new(vec![
+            DropDownOption {
+                id: "PlaylistUpdate".to_string(),
+                label: html! { translate.t("LABEL.PLAYLIST_UPDATE") },
+                selected: *selected_type == ScheduleTaskType::PlaylistUpdate,
+            },
+            DropDownOption {
+                id: "LibraryScan".to_string(),
+                label: html! { translate.t("LABEL.LIBRARY") },
+                selected: *selected_type == ScheduleTaskType::LibraryScan,
+            },
+        ]);
+
         html! {
             <div class="tp__schedules-config-view__editor">
             {config_field_child!(translate.t(LABEL_SCHEDULE), {
                 html!{ <Input name="schedule" value={(*selected_schedule).as_ref().map_or_else(String::new, ToString::to_string)} on_change={handle_schedule_selection} /> }
             })}
-            {config_field_child!(translate.t(LABEL_TARGETS), {
-                 html!{ <Select name="target"
-                      multi_select={true}
-                      on_select={handle_target_selection}
-                      options={target_options.clone()}
+            {config_field_child!(translate.t(LABEL_TYPE), {
+                 html!{ <Select name="type"
+                      on_select={Callback::from(move |(_name, selections): (String, DropDownSelection)| if let DropDownSelection::Single(option) = selections {
+                          if option == "PlaylistUpdate" {
+                              set_selected_type.set(ScheduleTaskType::PlaylistUpdate);
+                          } else if option == "LibraryScan" {
+                              set_selected_type.set(ScheduleTaskType::LibraryScan);
+                          }
+                      })}
+                      options={types}
                   />
              }})}
+            {html_if!(*selected_type == ScheduleTaskType::PlaylistUpdate, {
+                config_field_child!(translate.t(LABEL_TARGETS), {
+                    html!{ <Select name="target"
+                        multi_select={true}
+                        on_select={handle_target_selection}
+                        options={target_options.clone()}
+                    />
+                }})
+            })}
             <IconButton name="AddSchedule" icon="ScheduleAdd" class="primary" onclick={handle_add_schedule} />
             </div>
         }
