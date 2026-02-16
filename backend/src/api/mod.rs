@@ -6,6 +6,7 @@ mod endpoints;
 pub mod main_api;
 mod config_watch;
 mod serve;
+mod library_scan;
 pub(crate) mod hdhomerun_ssdp;
 pub(crate) mod hdhomerun_proprietary;
 mod sys_usage;

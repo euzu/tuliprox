@@ -95,6 +95,7 @@ active URL of the specified provider.
   It tracks failures and prevents infinite loops by limiting attempts to the number of available URLs.
 - Added `epg_request_timeshift: [-+]hh:mm or TimeZone`, example `Europe/Paris`, `America/New_York`, `-2:30`(-2h30m), `+0:15` (15m), `2` (2h), `:30`
   (30m), `:3` (3m)
+- **Extended scheduler** to support `Local Library` scans. Scheduler can now trigger automatic library scans alongside playlist updates.
 
 ## ⚙️ New Settings
 

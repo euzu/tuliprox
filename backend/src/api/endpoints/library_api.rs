@@ -1,10 +1,11 @@
 use crate::api::model::{AppState, EventMessage};
 use axum::response::IntoResponse;
-use log::{debug, error, info, warn};
+use log::{debug, warn};
 use std::sync::Arc;
 use serde_json::json;
 use shared::model::{LibraryScanRequest, LibraryScanSummary, LibraryScanSummaryStatus, LibraryStatus};
-use crate::library::{LibraryProcessor};
+use crate::api::library_scan::spawn_library_scan;
+use crate::library::LibraryProcessor;
 
 // Triggers a library scan
 async fn scan_library(
@@ -13,7 +14,7 @@ async fn scan_library(
 ) -> axum::response::Response {
     debug!("Library scan requested (force_rescan: {})", request.force_rescan);
 
-    let Some(_update_guard) = app_state.update_guard.try_library() else {
+    let Some(permit) = app_state.update_guard.try_library() else {
         warn!("Library update already in progress; update skipped.");
         let response = LibraryScanSummary {
             status: LibraryScanSummaryStatus::Error,
@@ -38,36 +39,16 @@ async fn scan_library(
         }
     };
 
-    tokio::spawn(async move {
-        let client = app_state.http_client.load_full().as_ref().clone();
-
-        // Create processor and run scan
-        let processor = LibraryProcessor::new(lib_config, client);
-
-        match processor.scan(request.force_rescan).await {
-            Ok(result) => {
-                info!("Library scan completed successfully");
-                let response = LibraryScanSummary {
-                    status: LibraryScanSummaryStatus::Success,
-                    message: format!(
-                        "Scan completed: {} files scanned, {} added, {} updated, {} removed",
-                        result.files_scanned, result.files_added, result.files_updated, result.files_removed
-                    ),
-                    result: Some(result),
-                };
-                let _ = app_state.event_manager.send_event(EventMessage::LibraryScanProgress(response));
-            }
-            Err(err) => {
-                error!("Library scan failed: {err}");
-                let response = LibraryScanSummary {
-                    status: LibraryScanSummaryStatus::Error,
-                    message: format!("Scan failed: {err}"),
-                    result: None,
-                };
-                let _ = app_state.event_manager.send_event(EventMessage::LibraryScanProgress(response));
-            }
-        }
-    });
+    let client = app_state.http_client.load_full().as_ref().clone();
+    let event_manager = Arc::clone(&app_state.event_manager);
+    spawn_library_scan(
+        event_manager,
+        lib_config,
+        client,
+        request.force_rescan,
+        "",
+        permit,
+    );
 
     axum::http::StatusCode::ACCEPTED.into_response()
 
