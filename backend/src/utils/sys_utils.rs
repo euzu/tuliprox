@@ -6,7 +6,7 @@ use shared::utils::human_readable_byte_size;
 #[macro_export]
 macro_rules! exit {
     ($($arg:tt)*) => {{
-        error!($($arg)*);
+        log::error!($($arg)*);
         std::process::exit(1);
     }};
 }
