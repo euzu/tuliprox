@@ -10,7 +10,7 @@ use crate::repository::storage::{ensure_input_storage_path, get_file_path_for_db
 use crate::repository::storage_const;
 use crate::repository::target_id_mapping::VirtualIdRecord;
 use crate::repository::xtream_playlist_iterator::XtreamPlaylistJsonIterator;
-use crate::repository::{open_playlist_reader, LockedReceiverStream};
+use crate::repository::open_playlist_reader;
 use crate::utils::json_write_documents_to_file;
 use crate::utils::request::DynReader;
 use crate::utils::FileReadGuard;
@@ -33,6 +33,7 @@ use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 
 macro_rules! cant_write_result {
     ($path:expr, $err:expr) => {
@@ -661,9 +662,6 @@ pub async fn iter_raw_xtream_input_playlist(app_config: &AppConfig, input: &Conf
 }
 
 async fn iter_raw_xtream_playlist(app_config: &AppConfig, xtream_path: &Path) -> Option<Box<dyn Stream<Item = XtreamPlaylistItem> + Send + Unpin>> {
-    // Two read locks: iter_lock is held by LockedReceiverStream for the caller's lifetime,
-    // while bg_lock is moved into spawn_blocking to guard the on-disk read itself.
-    let iter_lock = app_config.file_locks.read_lock(xtream_path).await;
     if !file_exists_async(xtream_path).await {
         return None;
     }
@@ -684,7 +682,13 @@ async fn iter_raw_xtream_playlist(app_config: &AppConfig, xtream_path: &Path) ->
         };
 
         for entry in reader {
-            let Ok((_, item)) = entry else { break };
+            let item = match entry {
+                Ok((_, item)) => item,
+                Err(err) => {
+                    error!("Xtream playlist reader error: {err}");
+                    continue;
+                }
+            };
             if tx.blocking_send(item).is_err() {
                 break;
             }
@@ -692,7 +696,7 @@ async fn iter_raw_xtream_playlist(app_config: &AppConfig, xtream_path: &Path) ->
     });
 
     let stream: Box<dyn Stream<Item = XtreamPlaylistItem> + Send + Unpin> =
-        Box::new(LockedReceiverStream::new(rx, iter_lock));
+        Box::new(ReceiverStream::new(rx));
     Some(stream)
 }
 
@@ -1422,8 +1426,8 @@ pub async fn load_input_xtream_playlist(app_config: &Arc<AppConfig>, storage_pat
 
             // Load Items
             let file_lock = app_config.file_locks.read_lock(&xtream_path).await;
+            let xtream_display = xtream_path.display().to_string();
             let xtream_path = xtream_path.clone();
-            let xtream_path_err = xtream_path.clone();
             let items = tokio::task::spawn_blocking(move || -> Result<Vec<XtreamPlaylistItem>, TuliproxError> {
                 let _guard = file_lock;
                 let mut items = Vec::new();
@@ -1435,7 +1439,7 @@ pub async fn load_input_xtream_playlist(app_config: &Arc<AppConfig>, storage_pat
                 Ok(items)
             })
             .await
-            .map_err(|err| notify_err!("failed to read xtream playlist: {} - {err}", xtream_path_err.display()))??;
+            .map_err(|err| notify_err!("failed to read xtream playlist: {} - {err}", xtream_display))??;
 
             for item in items {
                 let cat_id = item.category_id;

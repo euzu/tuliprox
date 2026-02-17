@@ -29,9 +29,7 @@ impl XtreamPlaylistIterator {
 
         // TODO use playlist memory cache and keep sorted
 
-        if target.get_xtream_output().is_none() {
-            return info_err_res!("Unexpected: xtream output required for target {}", target.name);
-        }
+        debug_assert!(target.get_xtream_output().is_some());
         let config = app_config.config.load();
         if let Some(storage_path) = xtream_get_storage_path(&config, target.name.as_str()) {
             let xtream_path = xtream_get_file_path(&storage_path, cluster);
@@ -80,7 +78,7 @@ impl XtreamPlaylistIterator {
                         Ok((_, item)) => item,
                         Err(err) => {
                             error!("Error reading sorted index: {err}");
-                            break;
+                            continue;
                         }
                     };
 

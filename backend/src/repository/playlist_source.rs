@@ -230,13 +230,31 @@ impl PlaylistSource for XtreamDiskPlaylistSource {
 
     fn clone_box(&self) -> Box<dyn PlaylistSource> {
         let live = self.live.as_ref().and_then(|(query, guard)| {
-            query.try_clone().ok().map(|q| (q, Arc::clone(guard)))
+            match query.try_clone() {
+                Ok(q) => Some((q, Arc::clone(guard))),
+                Err(err) => {
+                    warn!("PlaylistSource::clone_box failed to clone live query: {err}");
+                    None
+                }
+            }
         });
         let vod = self.vod.as_ref().and_then(|(query, guard)| {
-            query.try_clone().ok().map(|q| (q, Arc::clone(guard)))
+            match query.try_clone() {
+                Ok(q) => Some((q, Arc::clone(guard))),
+                Err(err) => {
+                    warn!("PlaylistSource::clone_box failed to clone vod query: {err}");
+                    None
+                }
+            }
         });
         let series = self.series.as_ref().and_then(|(query, guard)| {
-            query.try_clone().ok().map(|q| (q, Arc::clone(guard)))
+            match query.try_clone() {
+                Ok(q) => Some((q, Arc::clone(guard))),
+                Err(err) => {
+                    warn!("PlaylistSource::clone_box failed to clone series query: {err}");
+                    None
+                }
+            }
         });
 
         Box::new(Self {

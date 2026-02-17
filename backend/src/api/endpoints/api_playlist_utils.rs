@@ -32,7 +32,18 @@ pub(in crate::api::endpoints) async fn get_playlist_for_target(cfg_target: Optio
                 |_pli: &M3uPlaylistItem| true
             };
 
-            let converted_stream = channel_iterator.filter(item_filter).map(UiPlaylistItem::from);
+            let converted_stream = channel_iterator.filter_map(move |res| {
+                match res {
+                    Ok(pli) => {
+                        if item_filter(&pli) {
+                            Some(Ok(UiPlaylistItem::from(pli)))
+                        } else {
+                            None
+                        }
+                    }
+                    Err(err) => Some(Err(err.to_string())),
+                }
+            });
             return stream_json_or_bin_response_stream(accept, converted_stream).into_response();
         }
     }
@@ -52,7 +63,7 @@ pub(in crate::api::endpoints) async fn get_playlist_for_input(cfg_input: Option<
             let Some(channels) = iter_raw_m3u_input_playlist(cfg, input, Some(cluster)).await else {
               return empty_json_list_response();
             };
-            let converted_stream = channels.map(UiPlaylistItem::from);
+            let converted_stream = channels.map(|res| res.map(UiPlaylistItem::from).map_err(|err| err.to_string()));
             return stream_json_or_bin_response_stream(accept, converted_stream).into_response();
         }
     }

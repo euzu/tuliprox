@@ -32,8 +32,16 @@ async fn get_categories_from_m3u_playlist(target: &ConfigTarget, config: &AppCon
     if let Some(mut iter) = iter_raw_m3u_target_playlist(config, target, None).await {
         let mut unique_groups = HashSet::new();
         while let Some(item) = iter.next().await {
-            if unique_groups.insert(item.group.clone()) {
-                groups.push(item.group.clone());
+            match item {
+                Ok(item) => {
+                    if unique_groups.insert(item.group.clone()) {
+                        groups.push(item.group.clone());
+                    }
+                }
+                Err(err) => {
+                    error!("Failed to read M3U playlist for categories: {err}");
+                    break;
+                }
             }
         }
     }

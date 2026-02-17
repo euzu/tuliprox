@@ -2845,7 +2845,10 @@ where
             let cloned = file.get_ref().try_clone()?;
             (Some(utils::file_reader(cloned)), None)
         } else {
-            (None, None)
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "No data source available to clone",
+            ));
         };
 
         Ok(Self {

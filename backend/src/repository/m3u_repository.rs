@@ -122,6 +122,29 @@ where
     Ok(())
 }
 
+fn temp_m3u_filename(path: &Path) -> PathBuf {
+    let file_name = path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
+    path.with_file_name(format!("{file_name}.tmp"))
+}
+
+async fn write_m3u_text_file_atomic<F>(
+    m3u_filename: &Path,
+    m3u_playlist: &[M3uPlaylistItem],
+    build_line: F,
+) -> Result<(), TuliproxError>
+where
+    F: FnMut(&M3uPlaylistItem) -> Result<String, TuliproxError>,
+{
+    let tmp_path = temp_m3u_filename(m3u_filename);
+    write_m3u_text_file(&tmp_path, m3u_playlist, build_line).await?;
+    await_playlist_write!(
+        fs::rename(&tmp_path, m3u_filename),
+        "Failed to replace {} - {}",
+        m3u_filename.display()
+    );
+    Ok(())
+}
+
 fn replace_m3u_url_line(line: &mut String, url: &str) {
     let trimmed = line.trim_end_matches(|c: char| c == '\n' || c.is_whitespace());
     let mut rebuilt = if let Some((meta, _old_url)) = trimmed.rsplit_once('\n') {
@@ -172,12 +195,15 @@ async fn persist_m3u_playlist_as_text(
     };
 
     if provider_input_by_name.is_empty() {
-        write_m3u_text_file(&m3u_filename, m3u_playlist, |m3u| Ok(m3u.to_m3u(target_options, false))).await?;
+        write_m3u_text_file_atomic(&m3u_filename, m3u_playlist, |m3u| Ok(m3u.to_m3u(target_options, false))).await?;
     } else {
         let provider_filename = provider_m3u_filename(&m3u_filename);
-        write_m3u_text_file(&provider_filename, m3u_playlist, |m3u| Ok(m3u.to_m3u(target_options, false))).await?;
+        let provider_tmp = temp_m3u_filename(&provider_filename);
+        let m3u_tmp = temp_m3u_filename(&m3u_filename);
 
-        write_m3u_text_file(&m3u_filename, m3u_playlist, |m3u| {
+        write_m3u_text_file(&provider_tmp, m3u_playlist, |m3u| Ok(m3u.to_m3u(target_options, false))).await?;
+
+        write_m3u_text_file(&m3u_tmp, m3u_playlist, |m3u| {
             let effective_url = if m3u.t_stream_url.is_empty() { &m3u.url } else { &m3u.t_stream_url };
             if !effective_url.starts_with(PROVIDER_SCHEME_PREFIX) {
                 return Ok(m3u.to_m3u(target_options, false));
@@ -197,6 +223,17 @@ async fn persist_m3u_playlist_as_text(
             Ok(line)
         })
         .await?;
+
+        await_playlist_write!(
+            fs::rename(&m3u_tmp, &m3u_filename),
+            "Failed to replace {} - {}",
+            m3u_filename.display()
+        );
+        await_playlist_write!(
+            fs::rename(&provider_tmp, &provider_filename),
+            "Failed to replace {} - {}",
+            provider_filename.display()
+        );
     }
 
     Ok(())
@@ -262,7 +299,7 @@ pub async fn m3u_get_item_for_stream_id(
     app_state: &AppState,
     target: &ConfigTarget,
 ) -> Result<M3uPlaylistItem, Error> {
-    if stream_id < 1 {
+    if stream_id == 0 {
         return Err(str_to_io_error("id should start with 1"));
     }
     {
@@ -300,7 +337,7 @@ pub async fn iter_raw_m3u_target_playlist(
     config: &AppConfig,
     target: &ConfigTarget,
     cluster: Option<XtreamCluster>,
-) -> Option<Box<dyn Stream<Item = M3uPlaylistItem> + Send + Unpin>> {
+) -> Option<Box<dyn Stream<Item = Result<M3uPlaylistItem, TuliproxError>> + Send + Unpin>> {
     let target_path = get_target_storage_path(&config.config.load(), target.name.as_str())?;
     let m3u_path = m3u_get_file_path_for_db(&target_path);
 
@@ -311,7 +348,7 @@ pub async fn iter_raw_m3u_input_playlist(
     app_config: &AppConfig,
     input: &ConfigInput,
     cluster: Option<XtreamCluster>,
-) -> Option<Box<dyn Stream<Item = M3uPlaylistItem> + Send + Unpin>> {
+) -> Option<Box<dyn Stream<Item = Result<M3uPlaylistItem, TuliproxError>> + Send + Unpin>> {
     let working_dir = &app_config.config.load().working_dir;
     let storage_path = get_input_storage_path(&input.name, working_dir).await.ok()?;
     let m3u_path = get_input_m3u_playlist_file_path(&storage_path, &input.name);
@@ -323,11 +360,13 @@ async fn iter_raw_m3u_playlist<SortKey, ItemKey>(
     app_config: &AppConfig,
     m3u_path: &Path,
     cluster: Option<XtreamCluster>,
-) -> Option<Box<dyn Stream<Item = M3uPlaylistItem> + Send + Unpin>>
+) -> Option<Box<dyn Stream<Item = Result<M3uPlaylistItem, TuliproxError>> + Send + Unpin>>
 where
     ItemKey: Ord + Serialize + for<'de> Deserialize<'de> + Clone + Send + Sync + 'static,
     SortKey: for<'de> Deserialize<'de> + Send + 'static,
 {
+    // Two read locks: iter_lock is held by LockedReceiverStream for the consumer lifetime,
+    // while bg_lock is moved into spawn_blocking to guard the on-disk reader.
     let iter_lock = app_config.file_locks.read_lock(m3u_path).await;
     if !file_exists_async(m3u_path).await {
         return None;
@@ -336,22 +375,36 @@ where
 
     let m3u_path = m3u_path.to_path_buf();
     let index_path = get_file_path_for_db_index(&m3u_path);
-    let (tx, rx) = mpsc::channel::<M3uPlaylistItem>(256);
+    let (tx, rx) = mpsc::channel::<Result<M3uPlaylistItem, TuliproxError>>(256);
 
     let m3u_path_for_log = m3u_path.clone();
+    let err_tx = tx.clone();
+    let join_err_tx = tx.clone();
     let handle = task::spawn_blocking(move || {
         let _guard = bg_lock;
-        let Ok(reader) = open_playlist_reader::<ItemKey, M3uPlaylistItem, SortKey>(
+        let reader = match open_playlist_reader::<ItemKey, M3uPlaylistItem, SortKey>(
             &m3u_path,
             &index_path,
             None,
-        ) else {
-            return;
+        ) {
+            Ok(reader) => reader,
+            Err(err) => {
+                let _ = err_tx.blocking_send(Err(err));
+                return;
+            }
         };
 
         for entry in reader {
-            let Ok((_, item)) = entry else { break };
-            if cluster.is_none_or(|c| item.item_type.is_cluster(c)) && tx.blocking_send(item).is_err() {
+            let item = match entry {
+                Ok((_, item)) => item,
+                Err(err) => {
+                    error!("M3U playlist reader error: {err}");
+                    continue;
+                }
+            };
+            if cluster.is_none_or(|c| item.item_type.is_cluster(c))
+                && tx.blocking_send(Ok(item)).is_err()
+            {
                 break;
             }
         }
@@ -359,10 +412,15 @@ where
     tokio::spawn(async move {
         if let Err(err) = handle.await {
             error!("M3U playlist reader task failed for {}: {err}", m3u_path_for_log.display());
+            let _ = join_err_tx.send(Err(notify_err!(
+                "M3U playlist reader task failed for {}: {err}",
+                m3u_path_for_log.display()
+            )))
+            .await;
         }
     });
 
-    let stream: Box<dyn Stream<Item = M3uPlaylistItem> + Send + Unpin> =
+    let stream: Box<dyn Stream<Item = Result<M3uPlaylistItem, TuliproxError>> + Send + Unpin> =
         Box::new(LockedReceiverStream::new(rx, iter_lock));
     Some(stream)
 }
@@ -434,4 +492,33 @@ pub async fn load_input_m3u_playlist(
     .map_err(|err| notify_err!("failed to read m3u playlist: {} - {err}", m3u_path_err.display()))??;
 
     Ok(groups)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::replace_m3u_url_line;
+
+    #[test]
+    fn replace_m3u_url_line_trims_trailing_whitespace() {
+        let mut line = "#EXTINF:-1 tvg-id=\"1\" tvg-name=\"Test\" group-title=\"G\",Title\nhttp://old\n\n  \t".to_string();
+        replace_m3u_url_line(&mut line, "http://new");
+        assert_eq!(
+            line,
+            "#EXTINF:-1 tvg-id=\"1\" tvg-name=\"Test\" group-title=\"G\",Title\nhttp://new"
+        );
+    }
+
+    #[test]
+    fn replace_m3u_url_line_handles_crlf() {
+        let mut line = "#EXTINF:-1,Title\r\nhttp://old\r\n".to_string();
+        replace_m3u_url_line(&mut line, "http://new");
+        assert_eq!(line, "#EXTINF:-1,Title\r\nhttp://new");
+    }
+
+    #[test]
+    fn replace_m3u_url_line_handles_no_metadata() {
+        let mut line = "http://old".to_string();
+        replace_m3u_url_line(&mut line, "http://new");
+        assert_eq!(line, "http://old\nhttp://new");
+    }
 }

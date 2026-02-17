@@ -69,29 +69,40 @@ fn dump_db(filename: &str, db_type: DbType) -> bool {
                 }
                 DbType::M3u => {
                     // M3U DB keys can be u32 (target playlists) or Arc<str> (input playlists).
-                    if let Ok(mut query) = BPlusTreeQuery::<u32, M3uPlaylistItem>::try_new(&path) {
-                        match query.len() {
+                    let err_u32 = match BPlusTreeQuery::<u32, M3uPlaylistItem>::try_new(&path) {
+                        Ok(mut query) => match query.len() {
                             Ok(_) => {
                                 let iterator = query.iter();
                                 return print_json_from_iter(iterator);
                             }
                             Err(err) => {
                                 error!("Failed to read M3U DB as u32 keys: {err}");
+                                Some(err.to_string())
                             }
-                        }
-                    }
+                        },
+                        Err(err) => Some(err.to_string()),
+                    };
 
-                    if let Ok(mut query) = BPlusTreeQuery::<Arc<str>, M3uPlaylistItem>::try_new(&path) {
-                        match query.len() {
+                    let err_str = match BPlusTreeQuery::<Arc<str>, M3uPlaylistItem>::try_new(&path) {
+                        Ok(mut query) => match query.len() {
                             Ok(_) => {
                                 let iterator = query.iter();
                                 return print_json_from_iter(iterator);
                             }
                             Err(err) => {
                                 error!("Failed to read M3U DB as string keys: {err}");
+                                Some(err.to_string())
                             }
-                        }
-                    }
+                        },
+                        Err(err) => Some(err.to_string()),
+                    };
+
+                    error!(
+                        "Failed to open M3U DB with any known key type at {}: u32_err={:?}, string_err={:?}",
+                        path.display(),
+                        err_u32,
+                        err_str
+                    );
                 }
                 DbType::Epg => {
                     if let Ok(mut query) = BPlusTreeQuery::<Arc<str>, EpgChannel>::try_new(&path) {

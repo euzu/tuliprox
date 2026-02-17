@@ -278,7 +278,7 @@ async fn lineup_status(
             if target.has_output(TargetType::M3u) {
                 if let Some(iter) = iter_raw_m3u_target_playlist(&cfg, &target, None).await
                 {
-                    iter.count().await
+                    iter.filter_map(|res| async move { res.ok() }).count().await
                 } else {
                     0
                 }

@@ -179,7 +179,9 @@ impl M3uPlaylistIterator {
         let index_path = get_file_path_for_db_index(&m3u_path);
         let (tx, rx) = mpsc::channel::<(M3uPlaylistItem, bool)>(256);
 
-        task::spawn_blocking(move || {
+        let m3u_path_for_log = m3u_path.clone();
+        let index_path_for_log = index_path.clone();
+        let handle = task::spawn_blocking(move || {
             let _guard = bg_lock;
             let reader = match open_playlist_reader::<u32, M3uPlaylistItem, u32>(
                 &m3u_path,
@@ -199,7 +201,7 @@ impl M3uPlaylistIterator {
                     Ok((_, item)) => item,
                     Err(err) => {
                         error!("Iterator error: {err}");
-                        break;
+                        continue;
                     }
                 };
 
@@ -228,6 +230,15 @@ impl M3uPlaylistIterator {
 
             if let Some(last) = pending {
                 let _ = tx.blocking_send((last, false));
+            }
+        });
+        tokio::spawn(async move {
+            if let Err(err) = handle.await {
+                error!(
+                    "M3U playlist iterator task failed for {} (index {}): {err}",
+                    m3u_path_for_log.display(),
+                    index_path_for_log.display()
+                );
             }
         });
 

@@ -273,12 +273,14 @@ async fn process_immediate_series_info(
             if !reasons.is_empty() {
                 if let Some(active_provider) = ctx.provider_manager.as_ref() {
                     if db_query_holder.is_none() && xtream_path.exists() {
-                        let lock = ctx.config.file_locks.read_lock(&xtream_path).await;
+                        let file_lock = ctx.config.file_locks.read_lock(&xtream_path).await;
                         let xtream_path = xtream_path.clone();
                         let query = match tokio::task::spawn_blocking(move || {
-                            BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path)
+                            let guard = file_lock;
+                            let query = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path)?;
+                            Ok::<_, std::io::Error>((query, guard))
                         }).await {
-                            Ok(Ok(query)) => Some(query),
+                            Ok(Ok((query, guard))) => Some((query, guard)),
                             Ok(Err(err)) => {
                                 error!("Failed to open BPlusTreeQuery for Series: {err}");
                                 None
@@ -289,9 +291,9 @@ async fn process_immediate_series_info(
                             }
                         };
 
-                        if let Some(query) = query {
+                        if let Some((query, guard)) = query {
                             db_query_holder = Some(Arc::new(Mutex::new(query)));
-                            _db_lock_holder = Some(lock);
+                            _db_lock_holder = Some(guard);
                         }
                     }
                     // Pass the optional reference to the query
@@ -727,14 +729,14 @@ pub async fn update_series_metadata(
                 let input_password = input.password.as_deref().unwrap_or("");
 
                 let mut probed_count = 0;
-                // let mut missing_any = false;
+                let mut missing_any = false;
 
                 for ep in episodes {
                     let missing_video = !MediaQuality::is_valid_media_info(ep.video.as_deref());
                     let missing_audio = !MediaQuality::is_valid_media_info(ep.audio.as_deref());
 
                     if missing_video || missing_audio {
-                        // missing_any = true;
+                        missing_any = true;
 
                         // Acquire Connection logic
                         let temp_handle = if active_handle.is_some() {
@@ -778,8 +780,8 @@ pub async fn update_series_metadata(
                 }
                 if probed_count > 0 {
                     info!("Probed {probed_count} episodes for Series ID {display_id}");
-                // } else if !missing_any {
-                //     debug!("Series probe skipped for ID {display_id} (all episodes already have A/V details)");
+                } else if !missing_any {
+                    debug!("Series probe skipped for ID {display_id} (all episodes already have A/V details)");
                 }
             } else {
                 debug!("Series probe skipped for ID {display_id} (no episode details available)");
