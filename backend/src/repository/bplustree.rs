@@ -2827,6 +2827,41 @@ where
         Ok(query)
     }
 
+    /// Clone an existing query without re-reading the file header.
+    /// This avoids synchronous disk initialization while still providing
+    /// an independent reader.
+    pub fn try_clone(&self) -> io::Result<Self> {
+        let (file, mmap) = if self.mmap.is_some() {
+            if self.filepath.as_os_str().is_empty() {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, "Missing filepath for mmap clone"));
+            }
+            let file = File::open(&self.filepath)?;
+            if let Some(mapped) = unsafe { Mmap::map(&file).ok() } {
+                (None, Some(mapped))
+            } else {
+                (Some(utils::file_reader(file)), None)
+            }
+        } else if let Some(file) = &self.file {
+            let cloned = file.get_ref().try_clone()?;
+            (Some(utils::file_reader(cloned)), None)
+        } else {
+            (None, None)
+        };
+
+        Ok(Self {
+            file,
+            mmap,
+            filepath: self.filepath.clone(),
+            file_identity: self.file_identity,
+            buffer: vec![0u8; PAGE_SIZE_USIZE],
+            cache: IndexMap::with_capacity(CACHE_CAPACITY),
+            node_cache: IndexMap::with_capacity(CACHE_CAPACITY),
+            root_offset: self.root_offset,
+            _marker_k: PhantomData,
+            _marker_v: PhantomData,
+        })
+    }
+
     /// Returns the filepath this query was opened from.
     pub fn filepath(&self) -> &Path {
         &self.filepath

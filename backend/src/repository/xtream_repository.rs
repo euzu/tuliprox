@@ -661,6 +661,8 @@ pub async fn iter_raw_xtream_input_playlist(app_config: &AppConfig, input: &Conf
 }
 
 async fn iter_raw_xtream_playlist(app_config: &AppConfig, xtream_path: &Path) -> Option<Box<dyn Stream<Item = XtreamPlaylistItem> + Send + Unpin>> {
+    // Two read locks: iter_lock is held by LockedReceiverStream for the caller's lifetime,
+    // while bg_lock is moved into spawn_blocking to guard the on-disk read itself.
     let iter_lock = app_config.file_locks.read_lock(xtream_path).await;
     if !file_exists_async(xtream_path).await {
         return None;

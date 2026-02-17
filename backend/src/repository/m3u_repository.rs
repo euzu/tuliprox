@@ -15,6 +15,7 @@ use crate::{
     utils::{async_file_writer, file_exists_async},
 };
 use indexmap::IndexMap;
+use log::error;
 use serde::{Deserialize, Serialize};
 use shared::{
     concat_string,
@@ -122,12 +123,22 @@ where
 }
 
 fn replace_m3u_url_line(line: &mut String, url: &str) {
-    if let Some(pos) = line.rfind('\n') {
-        line.truncate(pos + 1);
+    let trimmed = line.trim_end_matches(|c: char| c == '\n' || c.is_whitespace());
+    let mut rebuilt = if let Some((meta, _old_url)) = trimmed.rsplit_once('\n') {
+        // Preserve metadata line and a single newline separator.
+        let mut out = String::with_capacity(meta.len() + 1 + url.len());
+        out.push_str(meta);
+        out.push('\n');
+        out
     } else {
-        line.push('\n');
-    }
-    line.push_str(url);
+        let mut out = String::with_capacity(trimmed.len() + 1 + url.len());
+        out.push_str(trimmed);
+        out.push('\n');
+        out
+    };
+
+    rebuilt.push_str(url);
+    *line = rebuilt;
 }
 
 async fn persist_m3u_playlist_as_text(
@@ -327,7 +338,8 @@ where
     let index_path = get_file_path_for_db_index(&m3u_path);
     let (tx, rx) = mpsc::channel::<M3uPlaylistItem>(256);
 
-    task::spawn_blocking(move || {
+    let m3u_path_for_log = m3u_path.clone();
+    let handle = task::spawn_blocking(move || {
         let _guard = bg_lock;
         let Ok(reader) = open_playlist_reader::<ItemKey, M3uPlaylistItem, SortKey>(
             &m3u_path,
@@ -342,6 +354,11 @@ where
             if cluster.is_none_or(|c| item.item_type.is_cluster(c)) && tx.blocking_send(item).is_err() {
                 break;
             }
+        }
+    });
+    tokio::spawn(async move {
+        if let Err(err) = handle.await {
+            error!("M3U playlist reader task failed for {}: {err}", m3u_path_for_log.display());
         }
     });
 

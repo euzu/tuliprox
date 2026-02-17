@@ -229,18 +229,14 @@ impl PlaylistSource for XtreamDiskPlaylistSource {
     }
 
     fn clone_box(&self) -> Box<dyn PlaylistSource> {
-        let live_path = xtream_get_file_path(&self.storage_path, XtreamCluster::Live);
-        let vod_path = xtream_get_file_path(&self.storage_path, XtreamCluster::Video);
-        let series_path = xtream_get_file_path(&self.storage_path, XtreamCluster::Series);
-
-        let live = self.live.as_ref().and_then(|(_, guard)| {
-            BPlusTreeQuery::try_new(&live_path).ok().map(|q| (q, Arc::clone(guard)))
+        let live = self.live.as_ref().and_then(|(query, guard)| {
+            query.try_clone().ok().map(|q| (q, Arc::clone(guard)))
         });
-        let vod = self.vod.as_ref().and_then(|(_, guard)| {
-            BPlusTreeQuery::try_new(&vod_path).ok().map(|q| (q, Arc::clone(guard)))
+        let vod = self.vod.as_ref().and_then(|(query, guard)| {
+            query.try_clone().ok().map(|q| (q, Arc::clone(guard)))
         });
-        let series = self.series.as_ref().and_then(|(_, guard)| {
-            BPlusTreeQuery::try_new(&series_path).ok().map(|q| (q, Arc::clone(guard)))
+        let series = self.series.as_ref().and_then(|(query, guard)| {
+            query.try_clone().ok().map(|q| (q, Arc::clone(guard)))
         });
 
         Box::new(Self {
@@ -383,9 +379,7 @@ macro_rules! impl_single_file_disk_source {
                 }
             }
             fn clone_box(&self) -> Box<dyn PlaylistSource> {
-                let playlist = if self.playlist.is_some() && self.guard.is_some() {
-                    BPlusTreeQuery::try_new(&self.file_path).ok()
-                } else { None };
+                let playlist = self.playlist.as_ref().and_then(|query| query.try_clone().ok());
 
                 Box::new(Self {
                     app_config: Arc::clone(&self.app_config),

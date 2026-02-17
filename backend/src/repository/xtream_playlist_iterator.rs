@@ -38,6 +38,7 @@ impl XtreamPlaylistIterator {
             if !xtream_path.exists() {
                 return info_err_res!("No {cluster} entries found for target {}", &target.name);
             }
+            // Hold iter_lock for the stream lifetime (LockedReceiverStream), and bg_lock for the background reader.
             let iter_lock = app_config.file_locks.read_lock(&xtream_path).await;
             let bg_lock = app_config.file_locks.read_lock(&xtream_path).await;
 

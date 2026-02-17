@@ -41,7 +41,7 @@ pub(in crate::api::endpoints) async fn get_playlist_for_target(cfg_target: Optio
 
 
 pub(in crate::api::endpoints) async fn get_playlist_for_input(cfg_input: Option<&Arc<ConfigInput>>, cfg: &AppConfig, cluster: XtreamCluster, accept: Option<&str>) -> impl IntoResponse + Send {
-        if let Some(input) = cfg_input {
+    if let Some(input) = cfg_input {
         if matches!(input.input_type, InputType::Xtream | InputType::XtreamBatch) {
             let Some(channel_iterator) = iter_raw_xtream_input_playlist(cfg, input, cluster).await else {
               return empty_json_list_response();

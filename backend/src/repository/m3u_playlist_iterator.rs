@@ -34,6 +34,7 @@ fn build_rewritten_url(
     base_url: &str,
     username: &str,
     password: &str,
+    source_url: &str,
     m3u_pli: &M3uPlaylistItem,
     typed: bool,
     prefix_path: &str,
@@ -74,7 +75,9 @@ fn build_rewritten_url(
             )
     };
 
-    extract_extension_from_url(&m3u_pli.url).map(|ext| shared::concat_string!(&rewritten_url, &ext)).unwrap_or(rewritten_url)
+    extract_extension_from_url(source_url)
+        .map(|ext| shared::concat_string!(&rewritten_url, &ext))
+        .unwrap_or(rewritten_url)
 }
 
 fn apply_rewrite(
@@ -101,15 +104,22 @@ fn apply_rewrite(
             base_url,
             username,
             password,
+            m3u_pli.url.as_ref(),
             &m3u_pli,
             flags.contains(M3uPlaylistIteratorFlags::IncludeTypeInUrl),
             storage_const::M3U_STREAM_PATH,
         );
         let resource_url = if flags.contains(M3uPlaylistIteratorFlags::RewriteResource) {
+            let source_url = if m3u_pli.logo.is_empty() {
+                m3u_pli.logo_small.as_ref()
+            } else {
+                m3u_pli.logo.as_ref()
+            };
             Some(build_rewritten_url(
                 base_url,
                 username,
                 password,
+                source_url,
                 &m3u_pli,
                 false,
                 storage_const::M3U_RESOURCE_PATH,

@@ -485,17 +485,17 @@ fn check_resolve_tmdb(
 
 fn check_needs_probe(pli: &PlaylistItem, reasons: &mut ResolveReasonSet) {
     let needs_probe = match pli.header.additional_properties.as_ref() {
-        Some(StreamProperties::Series(series_stream_props)) => {
-            match series_stream_props.details.as_ref().and_then(|d| d.episodes.as_ref()) {
-                Some(episodes) => episodes.iter().any(|ep| {
+        Some(StreamProperties::Series(series_stream_props)) => series_stream_props
+            .details
+            .as_ref()
+            .and_then(|d| d.episodes.as_ref())
+            .is_some_and(|episodes| {
+                episodes.iter().any(|ep| {
                     let missing_video = !MediaQuality::is_valid_media_info(ep.video.as_deref());
                     let missing_audio = !MediaQuality::is_valid_media_info(ep.audio.as_deref());
                     missing_video || missing_audio
-                }),
-                None => true,
-            }
-        }
-        None => true,
+                })
+            }),
         _ => false,
     };
 
@@ -544,11 +544,15 @@ pub async fn update_series_metadata(
             let query = Arc::clone(&query);
             let item = match tokio::task::spawn_blocking(move || {
                 let mut guard = query.lock();
-                guard.query_zero_copy(&series_id).ok().flatten()
+                guard.query_zero_copy(&series_id)
             })
             .await
             {
-                Ok(item) => item,
+                Ok(Ok(item)) => item,
+                Ok(Err(err)) => {
+                    error!("Failed to query Series metadata from disk for {series_id}: {err}");
+                    None
+                }
                 Err(err) => {
                     error!("Failed to query Series metadata from disk for {series_id}: {err}");
                     None

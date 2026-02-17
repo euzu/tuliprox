@@ -68,9 +68,29 @@ fn dump_db(filename: &str, db_type: DbType) -> bool {
                     }
                 }
                 DbType::M3u => {
+                    // M3U DB keys can be u32 (target playlists) or Arc<str> (input playlists).
                     if let Ok(mut query) = BPlusTreeQuery::<u32, M3uPlaylistItem>::try_new(&path) {
-                        let iterator = query.iter();
-                        return print_json_from_iter(iterator);
+                        match query.len() {
+                            Ok(_) => {
+                                let iterator = query.iter();
+                                return print_json_from_iter(iterator);
+                            }
+                            Err(err) => {
+                                error!("Failed to read M3U DB as u32 keys: {err}");
+                            }
+                        }
+                    }
+
+                    if let Ok(mut query) = BPlusTreeQuery::<Arc<str>, M3uPlaylistItem>::try_new(&path) {
+                        match query.len() {
+                            Ok(_) => {
+                                let iterator = query.iter();
+                                return print_json_from_iter(iterator);
+                            }
+                            Err(err) => {
+                                error!("Failed to read M3U DB as string keys: {err}");
+                            }
+                        }
                     }
                 }
                 DbType::Epg => {

@@ -1706,7 +1706,7 @@ Legacy target-level resolve/probe fields are no longer supported.
 - `resolve_series`: If `true` and you have xtream input with m3u output, series metadata is resolved.
 - `resolve_vod`: If `true` and you have xtream input, VOD metadata is resolved.
 - `resolve_delay`: Delay in seconds between metadata requests (default `2`) to reduce provider ban risk.
-- `probe_delay`: Delay in seconds between probe requests (default `50`).
+- `probe_delay`: Delay in seconds between probe requests (default `2`).
 - `resolve_background`: If `true` (default), metadata jobs are queued in background. If `false`, they run blocking.
 
 For `resolve_(vod|series)` data is cached per input; only new/changed entries are updated.
