@@ -276,9 +276,9 @@ async fn lineup_status(
             cfg.get_target_for_username(&app_state.device.t_username)
         {
             if target.has_output(TargetType::M3u) {
-                if let Some((_guard, iter)) = iter_raw_m3u_target_playlist(&cfg, &target, None).await
+                if let Some(iter) = iter_raw_m3u_target_playlist(&cfg, &target, None).await
                 {
-                    iter.count()
+                    iter.count().await
                 } else {
                     0
                 }

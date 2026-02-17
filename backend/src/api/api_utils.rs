@@ -23,7 +23,7 @@ use axum::http::{header, HeaderMap, HeaderValue, Response, StatusCode};
 use axum::response::IntoResponse;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use futures::{stream, StreamExt, TryStreamExt};
+use futures::{stream, Stream, StreamExt, TryStreamExt};
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use log::{debug, error, info, log_enabled, trace, warn};
 use serde::Serialize;
@@ -1489,6 +1489,17 @@ where
     stream_json_array(data)
 }
 
+pub fn stream_json_or_bin_response_stream<P, S>(accept: Option<&str>, data: S) -> axum::response::Response
+where
+    P: serde::Serialize + Send + 'static,
+    S: Stream<Item = P> + Send + Unpin + 'static,
+{
+    if accept.is_some_and(|a| a.contains(CONTENT_TYPE_CBOR)) {
+        return stream_bin_array_stream(data);
+    }
+    stream_json_array_stream(data)
+}
+
 pub fn create_session_fingerprint(fingerprint: &Fingerprint, username: &str, virtual_id: u32) -> String {
     concat_string!(&fingerprint.key, "|", username, "|", &virtual_id.to_string())
 }
@@ -1550,6 +1561,62 @@ where
             // CBOR: end indefinite-length array
             Ok::<_, Infallible>(Bytes::from_static(&[0xff]))
         })),
+    );
+
+    try_unwrap_body!(Response::builder().header(header::CONTENT_TYPE, CONTENT_TYPE_CBOR).body(body))
+}
+
+pub fn stream_json_array_stream<P, S>(stream: S) -> axum::response::Response
+where
+    P: serde::Serialize + Send + 'static,
+    S: Stream<Item = P> + Send + Unpin + 'static,
+{
+    let stream = stream::unfold((stream, true), |(mut stream, first)| async move {
+        match stream.next().await {
+            Some(item) => {
+                let mut json = String::new();
+                if !first {
+                    json.push(',');
+                }
+                let element = serde_json::to_string(&item).ok()?;
+                json.push_str(&element);
+                Some((Ok::<Bytes, Infallible>(Bytes::from(json)), (stream, false)))
+            }
+            None => None,
+        }
+    });
+
+    let body = Body::from_stream(
+        stream::once(async { Ok::<_, Infallible>(Bytes::from_static(b"[")) })
+            .chain(stream)
+            .chain(stream::once(async { Ok::<_, Infallible>(Bytes::from_static(b"]")) })),
+    );
+
+    try_unwrap_body!(Response::builder().header(header::CONTENT_TYPE, "application/json").body(body))
+}
+
+pub fn stream_bin_array_stream<P, S>(stream: S) -> axum::response::Response
+where
+    P: serde::Serialize + Send + 'static,
+    S: Stream<Item = P> + Send + Unpin + 'static,
+{
+    let stream = stream::unfold(stream, |mut stream| async move {
+        match stream.next().await {
+            Some(item) => match bin_serialize(&item) {
+                Ok(buf) => Some((Ok::<Bytes, Infallible>(Bytes::from(buf)), stream)),
+                Err(err) => {
+                    warn!("CBOR serialization error in stream: {err}");
+                    Some((Ok::<Bytes, Infallible>(Bytes::new()), stream))
+                }
+            },
+            None => None,
+        }
+    });
+
+    let body = Body::from_stream(
+        stream::once(async { Ok::<_, Infallible>(Bytes::from_static(&[0x9f])) })
+            .chain(stream)
+            .chain(stream::once(async { Ok::<_, Infallible>(Bytes::from_static(&[0xff])) })),
     );
 
     try_unwrap_body!(Response::builder().header(header::CONTENT_TYPE, CONTENT_TYPE_CBOR).body(body))
