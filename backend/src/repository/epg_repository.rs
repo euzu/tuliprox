@@ -23,56 +23,72 @@ pub const XML_PREAMBLE: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 // // DOCTYPE via events (DO NOT USE):
 // writer.write_event_async(quick_xml::events::Event::DocType(quick_xml::events::BytesText::new(r#"tv SYSTEM "xmltv.dtd""#)))
 //     .await.map_err(|e| notify_err!("failed to write doctype: {}", e))?;
-pub fn epg_write_file(target: &ConfigTarget, epg: &Epg, path: &Path, playlist: Option<&[PlaylistGroup]>) -> Result<(), TuliproxError> {
+pub fn epg_write_file<S: std::hash::BuildHasher>(
+    target_name: &str,
+    epg: &Epg,
+    path: &Path,
+    rename_map: &HashMap<Arc<str>, Arc<str>, S>,
+) -> Result<(), TuliproxError> {
     if epg.children.is_empty() {
         return Ok(());
-    }
-
-    // If the epg titles differ from playlist, then we should use the ones from playlist
-    // Build a temporary rename map with zero allocations (uses references)
-    let mut rename_map: HashMap<&Arc<str>, &Arc<str>> = HashMap::new();
-    if let Some(pl) = playlist {
-        for group in pl {
-            for channel in &group.channels {
-                if let Some(epg_id) = &channel.header.epg_channel_id {
-                    if !epg_id.is_empty() {
-                        rename_map.insert(epg_id, &channel.header.name);
-                    }
-                }
-            }
-        }
     }
 
     let mut tree = BPlusTree::<Arc<str>, EpgChannel>::new();
     for channel in &epg.children {
         if !channel.programmes.is_empty() {
             let mut chan = (**channel).clone();
-            if let Some(&title) = rename_map.get(&chan.id) {
+            if let Some(title) = rename_map.get(&chan.id) {
                 chan.title = Some(Arc::clone(title));
             }
             chan.programmes.sort_by_key(|p| p.start);
             tree.insert(Arc::clone(&channel.id), chan);
         }
     }
-    drop(rename_map);
 
-    tree.store(path).map_err(|err| notify_err!("Failed to write epg for target {}: {} - {err}", target.name, path.display()))?;
+    tree.store(path).map_err(|err| notify_err!("Failed to write epg for target {}: {} - {err}", target_name, path.display()))?;
 
-    debug_if_enabled!("Epg for target {} written to {}", target.name, path.display());
+    debug_if_enabled!("Epg for target {} written to {}", target_name, path.display());
     Ok(())
+}
+
+fn build_epg_rename_map(playlist: Option<&[PlaylistGroup]>) -> HashMap<Arc<str>, Arc<str>> {
+    let mut rename_map = HashMap::new();
+    if let Some(pl) = playlist {
+        for group in pl {
+            for channel in &group.channels {
+                if let Some(epg_id) = &channel.header.epg_channel_id {
+                    if !epg_id.is_empty() {
+                        rename_map.insert(Arc::clone(epg_id), Arc::clone(&channel.header.name));
+                    }
+                }
+            }
+        }
+    }
+    rename_map
 }
 
 pub async fn epg_write_for_target(cfg: &Config, target: &ConfigTarget, target_path: &Path,
                                   epg: Option<&Epg>, output: &TargetOutput,
                                   playlist: Option<&[PlaylistGroup]>) -> Result<(), TuliproxError> {
     if let Some(epg_data) = epg {
+        let rename_map = Arc::new(build_epg_rename_map(playlist));
+        let epg_data = Arc::new(epg_data.clone());
         match output {
             TargetOutput::Xtream(_) => {
                 match xtream_get_storage_path(cfg, &target.name) {
                     Some(path) => {
                         let epg_path = xtream_get_epg_file_path_for_target(&path);
                         debug_if_enabled!("writing xtream epg to {}", epg_path.display());
-                        epg_write_file(target, epg_data, &epg_path, playlist)?;
+                        let target_name = target.name.clone();
+                        let target_name_err = target_name.clone();
+                        let rename_map = Arc::clone(&rename_map);
+                        let epg_data = Arc::clone(&epg_data);
+                        let epg_path = epg_path.clone();
+                        tokio::task::spawn_blocking(move || {
+                            epg_write_file(&target_name, &epg_data, &epg_path, &rename_map)
+                        })
+                        .await
+                        .map_err(|err| notify_err!("Failed to write epg for target {}: {err}", target_name_err))??;
                     }
                     None => return Err(notify_err!("failed to write epg for target: {}, storage path not found", target.name)),
                 }
@@ -80,7 +96,16 @@ pub async fn epg_write_for_target(cfg: &Config, target: &ConfigTarget, target_pa
             TargetOutput::M3u(_) => {
                 let path = m3u_get_epg_file_path_for_target(target_path);
                 debug_if_enabled!("writing m3u epg to {}", path.display());
-                epg_write_file(target, epg_data, &path, playlist)?;
+                let target_name = target.name.clone();
+                let target_name_err = target_name.clone();
+                let rename_map = Arc::clone(&rename_map);
+                let epg_data = Arc::clone(&epg_data);
+                let path = path.clone();
+                tokio::task::spawn_blocking(move || {
+                    epg_write_file(&target_name, &epg_data, &path, &rename_map)
+                })
+                .await
+                .map_err(|err| notify_err!("Failed to write epg for target {}: {err}", target_name_err))??;
             }
             TargetOutput::Strm(_) | TargetOutput::HdHomeRun(_) => {}
         }

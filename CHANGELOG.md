@@ -70,7 +70,7 @@
   connections (e.g., background tasks or standard users) when provider slots are full.
 - **Background Metadata Queue**: Metadata resolution (VOD/Series) and stream analysis are now queued per input and processed in the background when
   provider connections are idle. This prevents "No Connections" errors for active users during playlist updates.
-- **Live TV Probing**: Added support for probing Live TV streams (`probe_live`) to determine codecs and resolution. This runs as a low-priority
+- **Stream Probing**: Added support for probing streams (`probe_live|vod|series`) to determine codecs and resolution. This runs as a low-priority
   background task.
 - **Discord Notifications**: Support for Discord notifications via webhooks with optional Handlebars templates.
 - **Enhanced REST Messaging**: Support for custom HTTP methods, headers, and Handlebars templating.
@@ -104,6 +104,7 @@ active URL of the specified provider.
 - **source.yml (input options)**:
   - Added `resolve_tmdb`: Triggers TMDB lookup if ID is missing.
   - Added `probe_stream`: Triggers ffprobe if technical info is missing.
+  - Added `probe_delay`: Delay between probe tasks (default `50` seconds).
 - **source.yml (target output)**:
   - Added `probe_live`: Enables background probing for Live TV streams (default disabled).
   - Added `probe_live_interval_hours`: Sets the frequency for re-probing Live TV streams.

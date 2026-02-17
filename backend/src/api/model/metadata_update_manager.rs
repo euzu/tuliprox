@@ -10,6 +10,7 @@ use shared::error::TuliproxError;
 use shared::model::{InputType, LiveStreamProperties, PlaylistItemType, SeriesStreamProperties, UUIDType, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem};
 use shared::utils::generate_playlist_uuid;
 use std::sync::atomic::{AtomicU64, Ordering};
+use parking_lot::Mutex as ParkingMutex;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
@@ -321,7 +322,7 @@ impl MetadataUpdateManager {
 
 struct DbHandle {
     _guard: FileReadGuard,
-    query: BPlusTreeQuery<u32, XtreamPlaylistItem>,
+    query: Arc<ParkingMutex<BPlusTreeQuery<u32, XtreamPlaylistItem>>>,
 }
 
 struct InputWorker {
@@ -754,15 +755,23 @@ impl InputWorker {
             let Some(storage_path) = crate::repository::xtream_get_storage_path(config, target_name) else { continue; };
             let mapping_file = get_target_id_mapping_file(&target_path);
 
-            // Read mapping under lock and release lock immediately after opening.
-            let mapping = {
-                let _lock = app_state.app_config.file_locks.read_lock(&mapping_file).await;
-                match TargetIdMapping::new(&mapping_file, false) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        error!("Failed to open ID mapping for target {target_name}: {e}");
-                        continue;
-                    }
+            // Read mapping under lock inside spawn_blocking to avoid blocking async executor.
+            let file_lock = app_state.app_config.file_locks.read_lock(&mapping_file).await;
+            let mapping_file_clone = mapping_file.clone();
+            let mapping = match tokio::task::spawn_blocking(move || {
+                let _guard = file_lock;
+                TargetIdMapping::new(&mapping_file_clone, false)
+            })
+            .await
+            {
+                Ok(Ok(mapping)) => mapping,
+                Ok(Err(e)) => {
+                    error!("Failed to open ID mapping for target {target_name}: {e}");
+                    continue;
+                }
+                Err(err) => {
+                    error!("Failed to open ID mapping for target {target_name}: {err}");
+                    continue;
                 }
             };
 
@@ -961,19 +970,33 @@ impl InputWorker {
 
         let target_name = target.name.as_str();
         let xtream_path = xtream_get_file_path(storage_path, XtreamCluster::Video);
-        let updates = {
-            let _lock_read = app_state.app_config.file_locks.read_lock(&xtream_path).await;
-            let mut updates = Vec::with_capacity(virtual_updates.len());
-            if let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) {
-                for (virtual_id, props) in &virtual_updates {
-                    if let Ok(Some(mut item)) = query.query_zero_copy(virtual_id) {
-                        item.additional_properties =
-                            Some(shared::model::StreamProperties::Video(Box::new((*props).clone())));
-                        updates.push(item);
-                    }
+        let updates_input: Vec<(u32, VideoStreamProperties)> = virtual_updates
+            .into_iter()
+            .map(|(vid, props)| (vid, props.clone()))
+            .collect();
+
+        let file_lock = app_state.app_config.file_locks.read_lock(&xtream_path).await;
+        let xtream_path = xtream_path.clone();
+        let updates = match tokio::task::spawn_blocking(move || -> Vec<XtreamPlaylistItem> {
+            let _guard = file_lock;
+            let mut updates = Vec::with_capacity(updates_input.len());
+            let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) else {
+                return updates;
+            };
+            for (virtual_id, props) in updates_input {
+                if let Ok(Some(mut item)) = query.query_zero_copy(&virtual_id) {
+                    item.additional_properties =
+                        Some(shared::model::StreamProperties::Video(Box::new(props)));
+                    updates.push(item);
                 }
             }
             updates
+        }).await {
+            Ok(updates) => updates,
+            Err(err) => {
+                error!("Failed to read VOD updates from disk for {target_name}: {err}");
+                Vec::new()
+            }
         };
 
         if updates.is_empty() {
@@ -1007,19 +1030,33 @@ impl InputWorker {
 
         let target_name = target.name.as_str();
         let xtream_path = xtream_get_file_path(storage_path, XtreamCluster::Series);
-        let updates = {
-            let _lock_read = app_state.app_config.file_locks.read_lock(&xtream_path).await;
-            let mut updates = Vec::with_capacity(virtual_updates.len());
-            if let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) {
-                for (virtual_id, props) in &virtual_updates {
-                    if let Ok(Some(mut item)) = query.query_zero_copy(virtual_id) {
-                        item.additional_properties =
-                            Some(shared::model::StreamProperties::Series(Box::new((*props).clone())));
-                        updates.push(item);
-                    }
+        let updates_input: Vec<(u32, SeriesStreamProperties)> = virtual_updates
+            .into_iter()
+            .map(|(vid, props)| (vid, props.clone()))
+            .collect();
+
+        let file_lock = app_state.app_config.file_locks.read_lock(&xtream_path).await;
+        let xtream_path = xtream_path.clone();
+        let updates = match tokio::task::spawn_blocking(move || -> Vec<XtreamPlaylistItem> {
+            let _guard = file_lock;
+            let mut updates = Vec::with_capacity(updates_input.len());
+            let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) else {
+                return updates;
+            };
+            for (virtual_id, props) in updates_input {
+                if let Ok(Some(mut item)) = query.query_zero_copy(&virtual_id) {
+                    item.additional_properties =
+                        Some(shared::model::StreamProperties::Series(Box::new(props)));
+                    updates.push(item);
                 }
             }
             updates
+        }).await {
+            Ok(updates) => updates,
+            Err(err) => {
+                error!("Failed to read Series updates from disk for {target_name}: {err}");
+                Vec::new()
+            }
         };
 
         if updates.is_empty() {
@@ -1053,19 +1090,33 @@ impl InputWorker {
 
         let target_name = target.name.as_str();
         let xtream_path = xtream_get_file_path(storage_path, XtreamCluster::Live);
-        let updates = {
-            let _lock_read = app_state.app_config.file_locks.read_lock(&xtream_path).await;
-            let mut updates = Vec::with_capacity(virtual_updates.len());
-            if let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) {
-                for (virtual_id, props) in &virtual_updates {
-                    if let Ok(Some(mut item)) = query.query_zero_copy(virtual_id) {
-                        item.additional_properties =
-                            Some(shared::model::StreamProperties::Live(Box::new((*props).clone())));
-                        updates.push(item);
-                    }
+        let updates_input: Vec<(u32, LiveStreamProperties)> = virtual_updates
+            .into_iter()
+            .map(|(vid, props)| (vid, props.clone()))
+            .collect();
+
+        let file_lock = app_state.app_config.file_locks.read_lock(&xtream_path).await;
+        let xtream_path = xtream_path.clone();
+        let updates = match tokio::task::spawn_blocking(move || -> Vec<XtreamPlaylistItem> {
+            let _guard = file_lock;
+            let mut updates = Vec::with_capacity(updates_input.len());
+            let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) else {
+                return updates;
+            };
+            for (virtual_id, props) in updates_input {
+                if let Ok(Some(mut item)) = query.query_zero_copy(&virtual_id) {
+                    item.additional_properties =
+                        Some(shared::model::StreamProperties::Live(Box::new(props)));
+                    updates.push(item);
                 }
             }
             updates
+        }).await {
+            Ok(updates) => updates,
+            Err(err) => {
+                error!("Failed to read Live updates from disk for {target_name}: {err}");
+                Vec::new()
+            }
         };
 
         if updates.is_empty() {
@@ -1107,38 +1158,53 @@ impl InputWorker {
             }
         }
     }
-    async fn get_or_open_query<'a>(
+    async fn get_or_open_query(
         input_name: &str,
         app_state: &Arc<AppState>,
         cluster: XtreamCluster,
-        db_handles: &'a mut HashMap<XtreamCluster, DbHandle>,
+        db_handles: &mut HashMap<XtreamCluster, DbHandle>,
         failed_clusters: &mut HashSet<XtreamCluster>,
-    ) -> Option<&'a mut BPlusTreeQuery<u32, XtreamPlaylistItem>> {
+    ) -> Option<Arc<ParkingMutex<BPlusTreeQuery<u32, XtreamPlaylistItem>>>> {
         if failed_clusters.contains(&cluster) {
             return None;
         }
 
-        if let std::collections::hash_map::Entry::Vacant(e) = db_handles.entry(cluster) {
+        if let std::collections::hash_map::Entry::Vacant(entry) = db_handles.entry(cluster) {
             let working_dir = &app_state.app_config.config.load().working_dir;
             if let Ok(storage_path) = get_input_storage_path(input_name, working_dir).await {
                 let file_path = xtream_get_file_path(&storage_path, cluster);
                 if file_path.exists() {
                     let lock = app_state.app_config.file_locks.read_lock(&file_path).await;
-                    if let Ok(query) = BPlusTreeQuery::try_new(&file_path) {
-                        e.insert(DbHandle { _guard: lock, query });
+                    let file_path = file_path.clone();
+                    let query = match tokio::task::spawn_blocking(move || {
+                        BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&file_path)
+                    }).await {
+                        Ok(Ok(query)) => Some(query),
+                        Ok(Err(err)) => {
+                            error!("Failed to open BPlusTreeQuery for {cluster}: {err}");
+                            None
+                        }
+                        Err(err) => {
+                            error!("Failed to open BPlusTreeQuery for {cluster}: {err}");
+                            None
+                        }
+                    };
+
+                    if let Some(query) = query {
+                        entry.insert(DbHandle {
+                            _guard: lock,
+                            query: Arc::new(ParkingMutex::new(query)),
+                        });
                     } else {
                         failed_clusters.insert(cluster);
                     }
                 } else {
-                    // File doesn't exist, technically a failure to open but acceptable.
-                    // We don't mark as failure to allow creation if it appears, but for read logic
-                    // we could cache the non-existence if we wanted.
-                    // For now, let's strictly follow the instruction about "failure cache" for *errors* or corruption.
+                    // File doesn't exist; do not mark as failure to allow future creation.
                 }
             }
         }
 
-        db_handles.get_mut(&cluster).map(|h| &mut h.query)
+        db_handles.get(&cluster).map(|h| Arc::clone(&h.query))
     }
 
     // Helper for get_item_name with caching
@@ -1157,8 +1223,21 @@ impl InputWorker {
         };
 
         if let ProviderIdType::Id(vid) = id {
+            let stream_id = *vid;
             if let Some(query) = Self::get_or_open_query(input_name, app_state, cluster, db_handles, failed_clusters).await {
-                if let Ok(Some(item)) = query.query_zero_copy(vid) {
+                let query = Arc::clone(&query);
+                let item = match tokio::task::spawn_blocking(move || {
+                    let mut guard = query.lock();
+                    guard.query_zero_copy(&stream_id).ok().flatten()
+                }).await {
+                    Ok(item) => item,
+                    Err(err) => {
+                        error!("Failed to query item name for {stream_id}: {err}");
+                        None
+                    }
+                };
+
+                if let Some(item) = item {
                     return Some(if item.title.is_empty() { item.name.to_string() } else { item.title.to_string() });
                 }
             }

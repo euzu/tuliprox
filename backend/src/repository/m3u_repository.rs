@@ -3,6 +3,8 @@ use crate::{
     model::{AppConfig, Config, ConfigInput, ConfigTarget, M3uTargetOutput, ProxyUserCredentials},
     repository::{
         bplustree::{BPlusTree, BPlusTreeQuery},
+        open_playlist_reader,
+        LockedReceiverStream,
         m3u_playlist_iterator::M3uPlaylistM3uTextIterator,
         playlist_repository::get_input_m3u_playlist_file_path,
         storage::{get_file_path_for_db_index, get_input_storage_path, get_target_storage_path},
@@ -10,7 +12,7 @@ use crate::{
         xtream_repository::CategoryKey,
     },
     utils,
-    utils::{async_file_writer, file_exists_async, FileReadGuard},
+    utils::{async_file_writer, file_exists_async},
 };
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -26,11 +28,9 @@ use std::{
     io::Error,
     path::{Path, PathBuf},
     sync::Arc,
-    task::{Context, Poll},
-    pin::Pin,
 };
 use tokio::sync::mpsc;
-use tokio_stream::{wrappers::ReceiverStream, Stream};
+use tokio_stream::Stream;
 use tokio::{fs, io::AsyncWriteExt, task};
 
 macro_rules! cant_write_result {
@@ -329,53 +329,25 @@ where
 
     task::spawn_blocking(move || {
         let _guard = bg_lock;
-        let Ok(query) = BPlusTreeQuery::<ItemKey, M3uPlaylistItem>::try_new(&m3u_path) else { return };
+        let Ok(reader) = open_playlist_reader::<ItemKey, M3uPlaylistItem, SortKey>(
+            &m3u_path,
+            &index_path,
+            None,
+        ) else {
+            return;
+        };
 
-        if index_path.exists() {
-            if let Ok(iter) = query.disk_iter_sorted::<SortKey>() {
-                for entry in iter {
-                    let Ok((_, item)) = entry else { break };
-                    if cluster.is_none_or(|c| item.item_type.is_cluster(c)) && tx.blocking_send(item).is_err() {
-                        break;
-                    }
-                }
-            } else {
-                let Ok(fallback_query) = BPlusTreeQuery::<ItemKey, M3uPlaylistItem>::try_new(&m3u_path) else {
-                    return;
-                };
-                let iter = fallback_query.disk_iter();
-                for (_, item) in iter {
-                    if cluster.is_none_or(|c| item.item_type.is_cluster(c)) && tx.blocking_send(item).is_err() {
-                        break;
-                    }
-                }
-            }
-        } else {
-            let iter = query.disk_iter();
-            for (_, item) in iter {
-                if cluster.is_none_or(|c| item.item_type.is_cluster(c)) && tx.blocking_send(item).is_err() {
-                    break;
-                }
+        for entry in reader {
+            let Ok((_, item)) = entry else { break };
+            if cluster.is_none_or(|c| item.item_type.is_cluster(c)) && tx.blocking_send(item).is_err() {
+                break;
             }
         }
     });
 
     let stream: Box<dyn Stream<Item = M3uPlaylistItem> + Send + Unpin> =
-        Box::new(M3uChannelStream { rx: ReceiverStream::new(rx), _guard: iter_lock });
+        Box::new(LockedReceiverStream::new(rx, iter_lock));
     Some(stream)
-}
-
-struct M3uChannelStream {
-    rx: ReceiverStream<M3uPlaylistItem>,
-    _guard: FileReadGuard,
-}
-
-impl Stream for M3uChannelStream {
-    type Item = M3uPlaylistItem;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.rx).poll_next(cx)
-    }
 }
 
 pub async fn persist_input_m3u_playlist(

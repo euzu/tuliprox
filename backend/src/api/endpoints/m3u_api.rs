@@ -15,7 +15,7 @@ use crate::repository::storage_const;
 use crate::utils::debug_if_enabled;
 use axum::response::IntoResponse;
 use bytes::Bytes;
-use futures::stream;
+use futures::StreamExt;
 use log::{debug, error};
 use shared::model::{FieldGetAccessor, PlaylistEntry, PlaylistItemType, TargetType, UserConnectionPermission, XtreamCluster};
 use shared::utils::{concat_path, extract_extension_from_url, sanitize_sensitive_info, HLS_EXT};
@@ -26,12 +26,11 @@ async fn m3u_api(api_req: &UserApiRequest, app_state: &AppState) -> impl IntoRes
         Some((user, target)) => {
             match m3u_load_rewrite_playlist(&app_state.app_config, &target, &user).await {
                 Ok(m3u_iter) => {
-                    // Convert the iterator into a stream of `Bytes`
-                    let content_stream = stream::iter(m3u_iter.map(|line| {
-                        Ok::<Bytes, String>(Bytes::from(
-                            [line.clone().as_bytes(), b"\n"].concat(),
-                        ))
-                    }));
+                    // Convert the stream into a stream of `Bytes`
+                    let content_stream = m3u_iter.map(|mut line| {
+                        line.push('\n');
+                        Ok::<Bytes, String>(Bytes::from(line))
+                    });
 
                     let mut builder = axum::response::Response::builder()
                         .status(axum::http::StatusCode::OK)

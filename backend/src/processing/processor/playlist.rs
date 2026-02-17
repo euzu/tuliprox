@@ -48,12 +48,10 @@ use shared::model::{
 };
 use shared::model::{InputStats, PlaylistStats, SourceStats, TargetStats, UUIDType};
 use shared::utils::{
-    create_alias_uuid, default_as_default, default_probe_live_interval, default_resolve_delay_secs, interner_gc,
+    create_alias_uuid, default_as_default, default_probe_delay_secs, default_probe_live_interval, interner_gc,
     Internable,
 };
 use std::time::Instant;
-
-const DEFAULT_PROBE_STREAM_DELAY: u16 = 50;
 
 fn is_valid(pli: &PlaylistItem, filter: &Filter, match_as_ascii: bool) -> bool {
     let provider = ValueProvider { pli, match_as_ascii };
@@ -955,11 +953,11 @@ fn get_live_probe_interval_settings(
         return None;
     }
     target.get_xtream_output().map(|_| {
-        let (resolve_delay, input_probe_live_interval_hours) = input_options.map_or(
-            (default_resolve_delay_secs(), default_probe_live_interval()),
-            |options| (options.resolve_delay, options.probe_live_interval_hours),
+        let (probe_delay, input_probe_live_interval_hours) = input_options.map_or(
+            (default_probe_delay_secs(), default_probe_live_interval()),
+            |options| (options.probe_delay, options.probe_live_interval_hours),
         );
-        (resolve_delay, u64::from(input_probe_live_interval_hours) * 3600)
+        (probe_delay, u64::from(input_probe_live_interval_hours) * 3600)
     })
 }
 
@@ -992,6 +990,7 @@ fn provider_id_from_item(item: &PlaylistItem) -> Option<ProviderIdType> {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, fpl: &mut FetchedPlaylist<'_>) {
     let Some(mgr) = ctx.metadata_manager.as_ref() else {
         return;
@@ -1012,6 +1011,7 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
 
     let input_name = fpl.input.name.clone();
     let input_type = fpl.input.input_type;
+    let xtream_probe_handled = input_type.is_xtream() && target.get_xtream_output().is_some();
     let live_probe_settings = if probe_live_enabled {
         get_live_probe_interval_settings(target, input_type, Some(opts)).map(|(delay, interval_secs)| {
             let interval_signed = i64::try_from(interval_secs).unwrap_or(i64::MAX);
@@ -1038,14 +1038,14 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
                     continue;
                 }
 
-                if let Some((resolve_delay, interval_secs, cutoff_ts)) = live_probe_settings {
+                if let Some((probe_delay, interval_secs, cutoff_ts)) = live_probe_settings {
                     if needs_live_probe(&item, cutoff_ts) {
                         if let Some(provider_id) = provider_id_from_item(&item) {
                             if queued_live_keys.insert(provider_id.clone()) {
                                 let task = UpdateTask::ProbeLive {
                                     id: provider_id,
                                     reason: ResolveReasonSet::from_variants(&[ResolveReason::Probe]),
-                                    delay: resolve_delay,
+                                    delay: probe_delay,
                                     interval: interval_secs,
                                 };
                                 mgr.queue_task_background(input_name.clone(), task);
@@ -1062,9 +1062,17 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
                 if !probe_vod_enabled {
                     continue;
                 }
+                // Xtream outputs handle VOD probe as part of the resolve pipeline (after resolve).
+                if xtream_probe_handled {
+                    continue;
+                }
             }
             PlaylistItemType::Series | PlaylistItemType::LocalSeries => {
                 if !probe_series_enabled {
+                    continue;
+                }
+                // Xtream outputs handle Series probe as part of the resolve pipeline (after resolve).
+                if xtream_probe_handled {
                     continue;
                 }
             }
@@ -1094,7 +1102,7 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
             url: item.header.url.to_string(),
             item_type: item.header.item_type,
             reason: ResolveReasonSet::from_variants(&[ResolveReason::MissingDetails]),
-            delay: DEFAULT_PROBE_STREAM_DELAY,
+            delay: opts.probe_delay,
         };
         mgr.queue_task_background(input_name.clone(), task);
         queued_stream_count += 1;

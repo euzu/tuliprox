@@ -2993,6 +2993,10 @@ where
         BPlusTreeDiskIterator::new(self)
     }
 
+    pub(crate) fn into_sorted_parts(self) -> (PathBuf, Option<BufReader<File>>, Option<Mmap>) {
+        (self.filepath, self.file, self.mmap)
+    }
+
     /// Owned iterator that traverses the tree in order defined by a secondary sorted index.
     ///
     /// The index path is automatically derived from the tree filepath by changing
@@ -3180,16 +3184,18 @@ where
 
 /// Generic reader that can be either a sorted index iterator or a regular disk iterator.
 /// Used for fallback logic (Sorted -> Unsorted).
-pub enum PlaylistIteratorReader<V> {
-    Sorted(super::sorted_index::BPlusTreeSortedIteratorOwned<u32, V, u32>),
-    Unsorted(BPlusTreeDiskIteratorOwned<u32, V>),
+pub enum PlaylistIteratorReader<K, V, SortKey> {
+    Sorted(super::sorted_index::BPlusTreeSortedIteratorOwned<K, V, SortKey>),
+    Unsorted(BPlusTreeDiskIteratorOwned<K, V>),
 }
 
-impl<V> Iterator for PlaylistIteratorReader<V>
+impl<K, V, SortKey> Iterator for PlaylistIteratorReader<K, V, SortKey>
 where
+    K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
     V: Serialize + for<'de> Deserialize<'de> + Clone,
+    SortKey: for<'de> Deserialize<'de>,
 {
-    type Item = io::Result<(u32, V)>;
+    type Item = io::Result<(K, V)>;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self {

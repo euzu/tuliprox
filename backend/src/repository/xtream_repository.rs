@@ -10,6 +10,7 @@ use crate::repository::storage::{ensure_input_storage_path, get_file_path_for_db
 use crate::repository::storage_const;
 use crate::repository::target_id_mapping::VirtualIdRecord;
 use crate::repository::xtream_playlist_iterator::XtreamPlaylistJsonIterator;
+use crate::repository::{open_playlist_reader, LockedReceiverStream};
 use crate::utils::json_write_documents_to_file;
 use crate::utils::request::DynReader;
 use crate::utils::FileReadGuard;
@@ -30,11 +31,8 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
 
 macro_rules! cant_write_result {
     ($path:expr, $err:expr) => {
@@ -650,7 +648,7 @@ pub async fn iter_raw_xtream_target_playlist(app_config: &AppConfig, target: &Co
     let config = app_config.config.load();
     let storage_path = xtream_get_storage_path(&config, target.name.as_str())?;
     let xtream_path = xtream_get_file_path(&storage_path, cluster);
-    iter_raw_xtream_playlist::<u32, u32>(app_config, &xtream_path).await
+    iter_raw_xtream_playlist(app_config, &xtream_path).await
 }
 
 pub async fn iter_raw_xtream_input_playlist(app_config: &AppConfig, input: &ConfigInput, cluster: XtreamCluster) -> Option<Box<dyn Stream<Item = XtreamPlaylistItem> + Send + Unpin>> {
@@ -659,14 +657,10 @@ pub async fn iter_raw_xtream_input_playlist(app_config: &AppConfig, input: &Conf
     let storage_path = get_input_storage_path(&input.name, working_dir).await.ok()?;
     let xtream_path = xtream_get_file_path(&storage_path, cluster);
 
-    iter_raw_xtream_playlist::<u32, u32>(app_config, &xtream_path).await
+    iter_raw_xtream_playlist(app_config, &xtream_path).await
 }
 
-async fn iter_raw_xtream_playlist<SortKey, ItemKey>(app_config: &AppConfig, xtream_path: &Path) -> Option<Box<dyn Stream<Item = XtreamPlaylistItem> + Send + Unpin>>
-where
-    ItemKey: Ord + Serialize + for<'de> Deserialize<'de> + Clone + Send + Sync + 'static,
-    SortKey: for<'de> Deserialize<'de> + Send + 'static,
-{
+async fn iter_raw_xtream_playlist(app_config: &AppConfig, xtream_path: &Path) -> Option<Box<dyn Stream<Item = XtreamPlaylistItem> + Send + Unpin>> {
     let iter_lock = app_config.file_locks.read_lock(xtream_path).await;
     if !file_exists_async(xtream_path).await {
         return None;
@@ -679,53 +673,25 @@ where
 
     tokio::task::spawn_blocking(move || {
         let _guard = bg_lock;
-        let Ok(query) = BPlusTreeQuery::<ItemKey, XtreamPlaylistItem>::try_new(&xtream_path) else { return };
+        let Ok(reader) = open_playlist_reader::<u32, XtreamPlaylistItem, u32>(
+            &xtream_path,
+            &index_path,
+            None,
+        ) else {
+            return;
+        };
 
-        if index_path.exists() {
-            if let Ok(iter) = query.disk_iter_sorted::<SortKey>() {
-                for entry in iter {
-                    let Ok((_, item)) = entry else { break };
-                    if tx.blocking_send(item).is_err() {
-                        break;
-                    }
-                }
-            } else {
-                let Ok(fallback_query) = BPlusTreeQuery::<ItemKey, XtreamPlaylistItem>::try_new(&xtream_path) else {
-                    return;
-                };
-                let iter = fallback_query.disk_iter();
-                for (_, item) in iter {
-                    if tx.blocking_send(item).is_err() {
-                        break;
-                    }
-                }
-            }
-        } else {
-            let iter = query.disk_iter();
-            for (_, item) in iter {
-                if tx.blocking_send(item).is_err() {
-                    break;
-                }
+        for entry in reader {
+            let Ok((_, item)) = entry else { break };
+            if tx.blocking_send(item).is_err() {
+                break;
             }
         }
     });
 
     let stream: Box<dyn Stream<Item = XtreamPlaylistItem> + Send + Unpin> =
-        Box::new(XtreamChannelStream { rx: ReceiverStream::new(rx), _guard: iter_lock });
+        Box::new(LockedReceiverStream::new(rx, iter_lock));
     Some(stream)
-}
-
-struct XtreamChannelStream {
-    rx: ReceiverStream<XtreamPlaylistItem>,
-    _guard: FileReadGuard,
-}
-
-impl Stream for XtreamChannelStream {
-    type Item = XtreamPlaylistItem;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.rx).poll_next(cx)
-    }
 }
 
 pub fn playlist_iter_to_stream<I, P>(channels: Option<(FileReadGuard, I)>) -> impl Stream<Item=Result<Bytes, String>>
@@ -1069,13 +1035,31 @@ pub async fn persist_input_xtream_playlist(app_config: &Arc<AppConfig>, storage_
         let xtream_path = xtream_get_file_path(storage_path, cluster);
         if file_exists_async(&xtream_path).await {
             let file_lock = app_config.file_locks.read_lock(&xtream_path).await;
-            let stored_entries = stored_scratch.get_mut(cluster);
-            if let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) {
-                for (_, doc) in query.iter() {
-                    stored_entries.insert(doc.provider_id, doc);
+            let xtream_path = xtream_path.clone();
+            let stored_entries = match tokio::task::spawn_blocking(move || {
+                let _guard = file_lock;
+                let mut entries = IndexMap::new();
+                if let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) {
+                    for (_, doc) in query.iter() {
+                        entries.insert(doc.provider_id, doc);
+                    }
                 }
+                entries
+            })
+            .await
+            {
+                Ok(entries) => Some(entries),
+                Err(err) => {
+                    errors.push(format!(
+                        "Failed to load stored xtream playlist entries for {cluster}: {err}"
+                    ));
+                    None
+                }
+            };
+
+            if let Some(entries) = stored_entries {
+                *stored_scratch.get_mut(cluster) = entries;
             }
-            drop(file_lock);
         }
     }
 

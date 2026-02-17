@@ -1,3 +1,4 @@
+use parking_lot::Mutex;
 use std::sync::Arc;
 use shared::error::{TuliproxError};
 use crate::model::{AppConfig, ConfigInput, ConfigInputFlags};
@@ -9,12 +10,13 @@ use crate::processing::parser::xtream::create_xtream_url;
 use crate::api::model::ProviderIdType;
 
 /// Updates metadata for a single Live stream (primarily probing)
+#[allow(clippy::too_many_lines)]
 pub async fn update_live_stream_metadata(
     app_config: &Arc<AppConfig>,
     input: &ConfigInput,
     id: ProviderIdType,
     save: bool,
-    db_query: Option<&mut BPlusTreeQuery<u32, XtreamPlaylistItem>>,
+    db_query: Option<Arc<Mutex<BPlusTreeQuery<u32, XtreamPlaylistItem>>>>,
 ) -> Result<Option<LiveStreamProperties>, TuliproxError> {
     let working_dir = &app_config.config.load().working_dir;
     let storage_path = get_input_storage_path(&input.name, working_dir).await
@@ -27,24 +29,54 @@ pub async fn update_live_stream_metadata(
     let stream_id_opt = if let ProviderIdType::Id(vid) = id { Some(vid) } else { None };
 
     if let Some(stream_id) = stream_id_opt {
-        // Use provided query or open new one
         if let Some(query) = db_query {
-            if let Ok(Some(item)) = query.query_zero_copy(&stream_id) {
+            let query = Arc::clone(&query);
+            let item = match tokio::task::spawn_blocking(move || {
+                let mut guard = query.lock();
+                guard.query_zero_copy(&stream_id).ok().flatten()
+            })
+            .await
+            {
+                Ok(item) => item,
+                Err(err) => {
+                    warn!("Failed to query Live metadata from disk for {stream_id}: {err}");
+                    None
+                }
+            };
+
+            if let Some(item) = item {
                 existing_item = Some(item.clone());
                 if let Some(StreamProperties::Live(p)) = item.additional_properties.as_ref() {
-                     props = Some(*p.clone());
+                    props = Some(*p.clone());
                 }
             }
         } else {
             let xtream_path = xtream_get_file_path(&storage_path, XtreamCluster::Live);
             if xtream_path.exists() {
-                let _file_lock = app_config.file_locks.read_lock(&xtream_path).await;
-                if let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) {
-                    if let Ok(Some(item)) = query.query_zero_copy(&stream_id) {
-                        existing_item = Some(item.clone());
-                        if let Some(StreamProperties::Live(p)) = item.additional_properties.as_ref() {
-                             props = Some(*p.clone());
-                        }
+                let file_lock = app_config.file_locks.read_lock(&xtream_path).await;
+                let xtream_path = xtream_path.clone();
+                let item = match tokio::task::spawn_blocking(move || {
+                    let _guard = file_lock;
+                    let mut query = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path)?;
+                    query.query_zero_copy(&stream_id)
+                })
+                .await
+                {
+                    Ok(Ok(item)) => item,
+                    Ok(Err(err)) => {
+                        warn!("Failed to query Live metadata from disk for {stream_id}: {err}");
+                        None
+                    }
+                    Err(err) => {
+                        warn!("Failed to query Live metadata from disk for {stream_id}: {err}");
+                        None
+                    }
+                };
+
+                if let Some(item) = item {
+                    existing_item = Some(item.clone());
+                    if let Some(StreamProperties::Live(p)) = item.additional_properties.as_ref() {
+                        props = Some(*p.clone());
                     }
                 }
             }

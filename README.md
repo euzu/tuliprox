@@ -1111,7 +1111,8 @@ Each input has the following attributes:
   - `probe_vod`: `true`|`false` (default `false`) for VOD probing (requires `probe_stream` + ffprobe).
   - `probe_live`: `true`|`false` (default `false`) for background live probing.
   - `probe_live_interval_hours`: number (default `120`) re-probe interval for live channels.
-  - `resolve_delay`: seconds (default `2`) shared delay for resolve/probe metadata requests.
+  - `resolve_delay`: seconds (default `2`) shared delay for resolve metadata requests.
+  - `probe_delay`: seconds (default `2`) delay between probe tasks.
 - `aliases`  for alias definitions for the same provider with different credentials
 - `staged` for side loading processed playlists.
   If you already have a provider configured but want to load the playlist from a different source — for example,
@@ -1705,6 +1706,7 @@ Legacy target-level resolve/probe fields are no longer supported.
 - `resolve_series`: If `true` and you have xtream input with m3u output, series metadata is resolved.
 - `resolve_vod`: If `true` and you have xtream input, VOD metadata is resolved.
 - `resolve_delay`: Delay in seconds between metadata requests (default `2`) to reduce provider ban risk.
+- `probe_delay`: Delay in seconds between probe requests (default `50`).
 - `resolve_background`: If `true` (default), metadata jobs are queued in background. If `false`, they run blocking.
 
 For `resolve_(vod|series)` data is cached per input; only new/changed entries are updated.

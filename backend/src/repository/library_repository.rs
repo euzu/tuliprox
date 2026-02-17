@@ -1,6 +1,6 @@
 use crate::model::AppConfig;
 use crate::repository::bplustree::{BPlusTree, BPlusTreeQuery};
-use shared::error::{notify_err_res, TuliproxError};
+use shared::error::{notify_err, TuliproxError};
 use shared::model::{PlaylistGroup, PlaylistItem, StreamProperties, XtreamCluster, XtreamPlaylistItem};
 use std::path::Path;
 use std::sync::Arc;
@@ -9,36 +9,63 @@ use shared::model::UUIDType;
 use crate::repository::xtream_repository::CategoryKey;
 use crate::utils::file_exists_async;
 use std::collections::HashMap;
+use tokio::task;
 
-pub async fn persist_input_library_playlist(app_config: &Arc<AppConfig>, library_path: &Path, playlist: &[PlaylistGroup]) -> Result<(), TuliproxError> {
+pub async fn persist_input_library_playlist(
+    app_config: &Arc<AppConfig>,
+    library_path: &Path,
+    playlist: Vec<PlaylistGroup>,
+) -> (Vec<PlaylistGroup>, Result<(), TuliproxError>) {
     if playlist.is_empty() {
-        return Ok(());
-    }
-    let _file_lock = app_config.file_locks.write_lock(library_path).await;
-
-    // Keep previously probed technical metadata for unchanged local files.
-    let mut existing_by_uuid: HashMap<UUIDType, XtreamPlaylistItem> = HashMap::new();
-    if library_path.exists() {
-        if let Ok(mut query) = BPlusTreeQuery::<UUIDType, XtreamPlaylistItem>::try_new(library_path) {
-            for (uuid, item) in query.iter() {
-                existing_by_uuid.insert(uuid, item);
-            }
-        }
+        return (playlist, Ok(()));
     }
 
-    let mut tree = BPlusTree::new();
-    for pg in playlist {
-        for item in &pg.channels {
-            let mut xtream = XtreamPlaylistItem::from(item);
-            if let Some(existing) = existing_by_uuid.get(&item.header.uuid) {
-                preserve_local_probe_state_if_unchanged(&mut xtream, existing);
+    let file_lock = app_config.file_locks.write_lock(library_path).await;
+    let library_path = library_path.to_path_buf();
+    let library_path_err = library_path.clone();
+    let playlist = Arc::new(playlist);
+    let playlist_for_task = Arc::clone(&playlist);
+
+    let result = task::spawn_blocking(move || -> Result<(), TuliproxError> {
+        let _guard = file_lock;
+
+        // Keep previously probed technical metadata for unchanged local files.
+        let mut existing_by_uuid: HashMap<UUIDType, XtreamPlaylistItem> = HashMap::new();
+        if library_path.exists() {
+            if let Ok(mut query) = BPlusTreeQuery::<UUIDType, XtreamPlaylistItem>::try_new(&library_path) {
+                for (uuid, item) in query.iter() {
+                    existing_by_uuid.insert(uuid, item);
+                }
             }
-            tree.insert(item.header.uuid, xtream);
         }
-    }
-    match tree.store(library_path) {
-        Ok(_) => Ok(()),
-        Err(err) => notify_err_res!("failed to write local library playlist: {} - {err}", library_path.display())
+
+        let mut tree = BPlusTree::new();
+        for pg in playlist_for_task.iter() {
+            for item in &pg.channels {
+                let mut xtream = XtreamPlaylistItem::from(item);
+                if let Some(existing) = existing_by_uuid.get(&item.header.uuid) {
+                    preserve_local_probe_state_if_unchanged(&mut xtream, existing);
+                }
+                tree.insert(item.header.uuid, xtream);
+            }
+        }
+
+        tree
+            .store(&library_path)
+            .map(|_| ())
+            .map_err(|err| notify_err!("failed to write local library playlist: {} - {err}", library_path.display()))
+    })
+    .await
+    .map_err(|err| notify_err!("failed to write local library playlist: {} - {err}", library_path_err.display()));
+
+    let playlist = match Arc::try_unwrap(playlist) {
+        Ok(playlist) => playlist,
+        Err(playlist) => (*playlist).clone(),
+    };
+
+    match result {
+        Ok(res) => (playlist, res),
+        Err(err) => (playlist, Err(err)),
     }
 }
 
@@ -80,32 +107,41 @@ fn preserve_local_probe_state_if_unchanged(new_item: &mut XtreamPlaylistItem, ol
 
 
 pub async fn load_input_local_library_playlist(app_config: &Arc<AppConfig>, lib_path: &Path) -> Result<Vec<PlaylistGroup>, TuliproxError> {
-    let mut groups: IndexMap<CategoryKey, PlaylistGroup> = IndexMap::new();
-
     if file_exists_async(lib_path).await {
-        // Load Items
-        let _file_lock = app_config.file_locks.read_lock(lib_path).await;
-        if let Ok(mut query) = BPlusTreeQuery::<UUIDType, XtreamPlaylistItem>::try_new(lib_path) {
-            let mut group_cnt = 0;
-            for (_, ref item) in query.iter() {
-                let cluster = XtreamCluster::try_from(item.item_type).unwrap_or(XtreamCluster::Live);
-                let key = (cluster, item.group.clone());
-                groups.entry(key)
-                    .or_insert_with(|| {
-                        group_cnt += 1;
-                        PlaylistGroup {
-                            id: group_cnt,
-                            title: item.group.clone(),
-                            channels: Vec::new(),
-                            xtream_cluster: cluster,
-                        }
-                    })
-                    .channels.push(PlaylistItem::from(item));
+        let file_lock = app_config.file_locks.read_lock(lib_path).await;
+        let lib_path = lib_path.to_path_buf();
+        let lib_path_err = lib_path.clone();
+
+        let groups = task::spawn_blocking(move || -> Result<Vec<PlaylistGroup>, TuliproxError> {
+            let _guard = file_lock;
+            let mut groups: IndexMap<CategoryKey, PlaylistGroup> = IndexMap::new();
+            if let Ok(mut query) = BPlusTreeQuery::<UUIDType, XtreamPlaylistItem>::try_new(&lib_path) {
+                let mut group_cnt = 0;
+                for (_, ref item) in query.iter() {
+                    let cluster = XtreamCluster::try_from(item.item_type).unwrap_or(XtreamCluster::Live);
+                    let key = (cluster, item.group.clone());
+                    groups.entry(key)
+                        .or_insert_with(|| {
+                            group_cnt += 1;
+                            PlaylistGroup {
+                                id: group_cnt,
+                                title: item.group.clone(),
+                                channels: Vec::new(),
+                                xtream_cluster: cluster,
+                            }
+                        })
+                        .channels.push(PlaylistItem::from(item));
+                }
             }
-        }
+            Ok(groups.into_values().collect())
+        })
+        .await
+        .map_err(|err| notify_err!("failed to read local library playlist: {} - {err}", lib_path_err.display()))??;
+
+        return Ok(groups);
     }
 
-    Ok(groups.into_values().collect())
+    Ok(Vec::new())
 }
 
 #[cfg(test)]

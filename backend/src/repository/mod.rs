@@ -15,6 +15,7 @@ mod playlist_source;
 mod library_repository;
 mod sorted_index;
 mod alias_repository;
+mod playlist_stream;
 
 pub use storage::*;
 pub use target_id_mapping::*;
@@ -32,6 +33,7 @@ pub use sorted_index::*;
 pub use alias_repository::*;
 pub use playlist_source::*;
 pub use library_repository::*;
+pub use playlist_stream::*;
 
 #[cfg(test)]
 mod bplustree_stress;

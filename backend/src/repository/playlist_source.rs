@@ -271,7 +271,7 @@ impl PlaylistSource for XtreamDiskPlaylistSource {
 }
 
 macro_rules! impl_single_file_disk_source {
-    ($name:ident, $key_type:tt, $entry_type:tt) => {
+    ($name:ident, $key_type:ty, $entry_type:ty) => {
       paste::paste! {
           pub struct [<$name DiskPlaylistSource>] {
             app_config: Arc<AppConfig>,
@@ -414,7 +414,7 @@ macro_rules! impl_single_file_disk_source {
    };
 }
 
-impl_single_file_disk_source!(M3u, String, M3uPlaylistItem);
+impl_single_file_disk_source!(M3u, Arc<str>, M3uPlaylistItem);
 
 impl_single_file_disk_source!(LocalLibrary, UUIDType, XtreamPlaylistItem);
 
@@ -514,15 +514,25 @@ impl PlaylistSource for MemoryPlaylistSource {
 
 async fn load_bplustree_query<K, P>(app_config: &Arc<AppConfig>, file_path: &Path) -> Option<(BPlusTreeQuery<K, P>, FileReadGuard)>
 where
-    K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
+    K: Ord + Serialize + for<'de> Deserialize<'de> + Clone + Send + 'static,
     P: Serialize + for<'de> Deserialize<'de> + Clone + Send + 'static,
 {
     if file_path.exists() {
         let guard = app_config.file_locks.read_lock(file_path).await;
-        match BPlusTreeQuery::<K, P>::try_new(file_path) {
-            Ok(query) => Some((query, guard)),
+        let file_path = file_path.to_path_buf();
+        let file_path_err = file_path.clone();
+        match tokio::task::spawn_blocking(move || {
+            BPlusTreeQuery::<K, P>::try_new(&file_path).map(|query| (query, guard))
+        })
+        .await
+        {
+            Ok(Ok((query, guard))) => Some((query, guard)),
+            Ok(Err(err)) => {
+                error!("Error loading disk playlist {}: {err}", file_path_err.display());
+                None
+            }
             Err(err) => {
-                error!("Error loading disk playlist {}: {err}", file_path.display());
+                error!("Error loading disk playlist {}: {err}", file_path_err.display());
                 None
             }
         }
