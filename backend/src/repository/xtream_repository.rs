@@ -987,7 +987,7 @@ pub async fn persist_input_xtream_playlist_cluster_to_disk(
     // Explicitly release the lock (though RAII would handle it too)
     drop(swap_lock);
 
-    log::debug!("Cluster {cluster} updated and swapped successfully.");
+    log::debug!("Cluster {cluster} updated successfully.");
     Ok(())
 }
 
