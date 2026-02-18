@@ -15,10 +15,7 @@ use reqwest::redirect::Policy;
 use reqwest::StatusCode;
 use shared::error::{notify_err_res, string_to_io_error, TuliproxError};
 use shared::model::{format_elapsed_time, InputFetchMethod, DEFAULT_USER_AGENT};
-use shared::utils::{
-    filter_request_header, human_readable_byte_size, sanitize_sensitive_info, ENCODING_DEFLATE,
-    ENCODING_GZIP,
-};
+use shared::utils::{filter_request_header, human_readable_byte_size, sanitize_sensitive_info, CONTENT_TYPE_JSON, ENCODING_DEFLATE, ENCODING_GZIP};
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};
@@ -103,7 +100,7 @@ pub fn classify_content_type(headers: &[(String, String)]) -> MimeCategory {
             v if v.starts_with("video/") || v == "application/octet-stream" => MimeCategory::Video,
             v if v.contains("mpegurl") => MimeCategory::M3U8,
             v if v.starts_with("image/") => MimeCategory::Image,
-            v if v.starts_with("application/json") || v.ends_with("+json") => MimeCategory::Json,
+            v if v.starts_with(CONTENT_TYPE_JSON) || v.ends_with("+json") => MimeCategory::Json,
             v if v.starts_with("application/xml") || v.ends_with("+xml") || v == "text/xml" => MimeCategory::Xml,
             v if v.starts_with("text/") => MimeCategory::Text,
             _ => MimeCategory::Unclassified,

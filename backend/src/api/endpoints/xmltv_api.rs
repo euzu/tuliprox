@@ -150,7 +150,7 @@ async fn serve_epg_with_rewrites(
 
     let bg_lock = app_state.app_config.file_locks.read_lock(epg_path).await;
     let epg_path = epg_path.to_path_buf();
-    let (channel_tx, mut channel_rx) = mpsc::channel::<EpgChannel>(16);
+    let (channel_tx, mut channel_rx) = mpsc::channel::<EpgChannel>(256);
 
     task::spawn_blocking(move || {
         let _guard = bg_lock;

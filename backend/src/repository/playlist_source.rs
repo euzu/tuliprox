@@ -338,7 +338,6 @@ macro_rules! impl_single_file_disk_source {
                 }
             }
 
-
             fn items<'a>(&'a mut self) -> Box<dyn Iterator<Item=Cow<'a, PlaylistItem>> + Send + 'a> {
                 if let Some(pl) = self.playlist.as_mut() {
                     let iter = pl.iter().map(|(_, item)| Cow::Owned(PlaylistItem::from(&item)));

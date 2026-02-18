@@ -32,7 +32,7 @@ use shared::model::{
     Claims, InputFetchMethod, PlaylistEntry, PlaylistItemType, ProxyType, StreamChannel, TargetType,
     UserConnectionPermission, VirtualId, XtreamCluster,
 };
-use shared::utils::{bin_serialize, human_readable_kbps, trim_slash, Internable, CONTENT_TYPE_CBOR};
+use shared::utils::{bin_serialize, human_readable_kbps, trim_slash, Internable, CONTENT_TYPE_CBOR, CONTENT_TYPE_JSON};
 use shared::utils::{extract_extension_from_url, replace_url_extension, sanitize_sensitive_info, DASH_EXT, HLS_EXT};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -1529,7 +1529,7 @@ where
             .chain(stream::once(async { Ok::<_, Infallible>(Bytes::from_static(b"]")) })),
     );
 
-    try_unwrap_body!(Response::builder().header(header::CONTENT_TYPE, "application/json").body(body))
+    try_unwrap_body!(Response::builder().header(header::CONTENT_TYPE, CONTENT_TYPE_JSON).body(body))
 }
 
 pub fn stream_bin_array<P>(iter: Box<dyn Iterator<Item = P> + Send>) -> axum::response::Response
@@ -1592,7 +1592,7 @@ where
             .chain(stream::once(async { Ok::<_, Infallible>(Bytes::from_static(b"]")) })),
     );
 
-    try_unwrap_body!(Response::builder().header(header::CONTENT_TYPE, "application/json").body(body))
+    try_unwrap_body!(Response::builder().header(header::CONTENT_TYPE, CONTENT_TYPE_JSON).body(body))
 }
 
 pub fn stream_bin_array_stream<P, S>(stream: S) -> axum::response::Response
