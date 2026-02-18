@@ -75,10 +75,7 @@ fn dump_db(filename: &str, db_type: DbType) -> bool {
                                 let iterator = query.iter();
                                 return print_json_from_iter(iterator);
                             }
-                            Err(err) => {
-                                error!("Failed to read M3U DB as u32 keys: {err}");
-                                Some(err.to_string())
-                            }
+                            Err(err) => Some(err.to_string()),
                         },
                         Err(err) => Some(err.to_string()),
                     };
@@ -89,10 +86,7 @@ fn dump_db(filename: &str, db_type: DbType) -> bool {
                                 let iterator = query.iter();
                                 return print_json_from_iter(iterator);
                             }
-                            Err(err) => {
-                                error!("Failed to read M3U DB as string keys: {err}");
-                                Some(err.to_string())
-                            }
+                            Err(err) => Some(err.to_string()),
                         },
                         Err(err) => Some(err.to_string()),
                     };

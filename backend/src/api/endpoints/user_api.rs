@@ -40,7 +40,6 @@ async fn get_categories_from_m3u_playlist(target: &ConfigTarget, config: &AppCon
                 }
                 Err(err) => {
                     error!("Failed to read M3U playlist for categories: {err}");
-                    break;
                 }
             }
         }

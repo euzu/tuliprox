@@ -98,7 +98,9 @@ pub async fn serve_epg_web_ui(
         let target_name = target.name.clone();
         let (tx, rx) = mpsc::channel::<EpgChannel>(64);
 
-        task::spawn_blocking(move || {
+        let epg_path_for_log = epg_path.clone();
+        let target_name_for_log = target_name.clone();
+        let handle = task::spawn_blocking(move || {
             let _guard = bg_lock;
             let Ok(query) = BPlusTreeQuery::<Arc<str>, EpgChannel>::try_new(&epg_path) else {
                 error!("Failed to open epg db for target {} {}", target_name, epg_path.display());
@@ -108,6 +110,15 @@ pub async fn serve_epg_web_ui(
                 if tx.blocking_send(channel).is_err() {
                     break;
                 }
+            }
+        });
+        tokio::spawn(async move {
+            if let Err(err) = handle.await {
+                error!(
+                    "EPG web UI producer task failed for target {} {}: {err}",
+                    target_name_for_log,
+                    epg_path_for_log.display()
+                );
             }
         });
 
@@ -152,7 +163,8 @@ async fn serve_epg_with_rewrites(
     let epg_path = epg_path.to_path_buf();
     let (channel_tx, mut channel_rx) = mpsc::channel::<EpgChannel>(256);
 
-    task::spawn_blocking(move || {
+    let epg_path_for_log = epg_path.clone();
+    let spawn_handle = task::spawn_blocking(move || {
         let _guard = bg_lock;
         let Ok(mut query) = BPlusTreeQuery::<Arc<str>, EpgChannel>::try_new(&epg_path) else {
             error!("Failed to open BPlusTreeQuery {}", epg_path.display());
@@ -163,6 +175,14 @@ async fn serve_epg_with_rewrites(
             if channel_tx.blocking_send(channel).is_err() {
                 break;
             }
+        }
+    });
+    tokio::spawn(async move {
+        if let Err(err) = spawn_handle.await {
+            error!(
+                "EPG rewrite producer task failed for {}: {err}",
+                epg_path_for_log.display()
+            );
         }
     });
 

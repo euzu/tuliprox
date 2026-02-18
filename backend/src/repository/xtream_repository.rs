@@ -671,14 +671,25 @@ async fn iter_raw_xtream_playlist(app_config: &AppConfig, xtream_path: &Path) ->
     let index_path = get_file_path_for_db_index(&xtream_path);
     let (tx, rx) = mpsc::channel::<XtreamPlaylistItem>(256);
 
-    tokio::task::spawn_blocking(move || {
+    let xtream_path_for_log = xtream_path.clone();
+    let index_path_for_log = index_path.clone();
+    let handle = tokio::task::spawn_blocking(move || {
         let _guard = bg_lock;
-        let Ok(reader) = open_playlist_reader::<u32, XtreamPlaylistItem, u32>(
+        let reader = match open_playlist_reader::<u32, XtreamPlaylistItem, u32>(
             &xtream_path,
             &index_path,
             None,
-        ) else {
-            return;
+        ) {
+            Ok(reader) => reader,
+            Err(err) => {
+                error!(
+                    "Failed to open Xtream playlist reader {} (index {}): {err}",
+                    xtream_path.display(),
+                    index_path.display()
+                );
+                drop(tx);
+                return;
+            }
         };
 
         for entry in reader {
@@ -692,6 +703,15 @@ async fn iter_raw_xtream_playlist(app_config: &AppConfig, xtream_path: &Path) ->
             if tx.blocking_send(item).is_err() {
                 break;
             }
+        }
+    });
+    tokio::spawn(async move {
+        if let Err(err) = handle.await {
+            error!(
+                "Xtream playlist producer task failed for {} (index {}): {err}",
+                xtream_path_for_log.display(),
+                index_path_for_log.display()
+            );
         }
     });
 
