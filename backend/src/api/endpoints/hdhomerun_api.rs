@@ -98,7 +98,7 @@ fn xtream_item_to_lineup_stream<I>(
     channels: Option<I>,
 ) -> impl Stream<Item=Result<Bytes, String>>
 where
-    I: Iterator<Item=(XtreamPlaylistItem, bool)> + 'static,
+    I: Stream<Item=(XtreamPlaylistItem, bool)> + Send + Unpin + 'static,
 {
     match channels {
         Some(chans) => {
@@ -142,7 +142,7 @@ where
                     Err(_) => Ok(Bytes::from("")),
                 }
             });
-            stream::iter(mapped).left_stream()
+            mapped.left_stream()
         }
         None => stream::once(async { Ok(Bytes::from("")) }).right_stream(),
     }
@@ -150,7 +150,7 @@ where
 
 fn m3u_item_to_lineup_stream<I>(channels: Option<I>) -> impl Stream<Item=Result<Bytes, String>>
 where
-    I: Iterator<Item=(M3uPlaylistItem, bool)> + 'static,
+    I: Stream<Item=(M3uPlaylistItem, bool)> + Send + Unpin + 'static,
 {
     match channels {
         Some(chans) => {
@@ -174,7 +174,7 @@ where
                     Err(_) => Ok(Bytes::from("")),
                 }
             });
-            stream::iter(mapped).left_stream()
+            mapped.left_stream()
         }
         None => stream::once(async { Ok(Bytes::from("")) }).right_stream(),
     }
@@ -276,16 +276,22 @@ async fn lineup_status(
             cfg.get_target_for_username(&app_state.device.t_username)
         {
             if target.has_output(TargetType::M3u) {
-                if let Some((_guard, iter)) = iter_raw_m3u_target_playlist(&cfg, &target, None).await
+                if let Some(iter) = iter_raw_m3u_target_playlist(&cfg, &target, None).await
                 {
-                    iter.count()
+                    iter.filter_map(|res| async move { res.ok() }).count().await
                 } else {
                     0
                 }
             } else if target.has_output(TargetType::Xtream) {
                 let credentials = Arc::new(user);
-                let live = XtreamPlaylistIterator::new(XtreamCluster::Live, &cfg, &target, None, &credentials).await.map_or(0, std::iter::Iterator::count);
-                let vod = XtreamPlaylistIterator::new(XtreamCluster::Video, &cfg, &target, None, &credentials).await.map_or(0, std::iter::Iterator::count);
+                let live = match XtreamPlaylistIterator::new(XtreamCluster::Live, &cfg, &target, None, &credentials).await {
+                    Ok(stream) => stream.count().await,
+                    Err(_) => 0,
+                };
+                let vod = match XtreamPlaylistIterator::new(XtreamCluster::Video, &cfg, &target, None, &credentials).await {
+                    Ok(stream) => stream.count().await,
+                    Err(_) => 0,
+                };
                 live + vod
             } else {
                 0

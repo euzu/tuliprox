@@ -335,6 +335,22 @@ where
     V: for<'de> Deserialize<'de>,
     SortKey: for<'de> Deserialize<'de>,
 {
+    pub(crate) fn from_index_reader(
+        index_reader: SortedIndexReader<SortKey, K>,
+        filepath: PathBuf,
+        tree_file: Option<BufReader<File>>,
+        mmap: Option<memmap2::Mmap>,
+    ) -> Self {
+        Self {
+            index_reader,
+            tree_file,
+            mmap,
+            filepath,
+            block_cache: IndexMap::with_capacity(CACHE_CAPACITY),
+            _marker: PhantomData,
+        }
+    }
+
     /// Create a new owned sorted iterator.
     ///
     /// The index path is automatically derived from the tree filepath

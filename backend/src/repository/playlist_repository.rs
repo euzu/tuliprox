@@ -409,7 +409,8 @@ pub async fn persist_input_playlist(app_config: &Arc<AppConfig>, input: &ConfigI
                 }
             };
             let file_path = get_input_local_library_playlist_file_path(&storage_path, &input.name);
-            if let Err(err) = persist_input_library_playlist(app_config, &file_path, &playlist).await {
+            let (playlist, result) = persist_input_library_playlist(app_config, &file_path, playlist).await;
+            if let Err(err) = result {
                 return (playlist, Some(err));
             }
             (playlist, None)

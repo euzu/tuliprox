@@ -229,18 +229,32 @@ impl PlaylistSource for XtreamDiskPlaylistSource {
     }
 
     fn clone_box(&self) -> Box<dyn PlaylistSource> {
-        let live_path = xtream_get_file_path(&self.storage_path, XtreamCluster::Live);
-        let vod_path = xtream_get_file_path(&self.storage_path, XtreamCluster::Video);
-        let series_path = xtream_get_file_path(&self.storage_path, XtreamCluster::Series);
-
-        let live = self.live.as_ref().and_then(|(_, guard)| {
-            BPlusTreeQuery::try_new(&live_path).ok().map(|q| (q, Arc::clone(guard)))
+        let live = self.live.as_ref().and_then(|(query, guard)| {
+            match query.try_clone() {
+                Ok(q) => Some((q, Arc::clone(guard))),
+                Err(err) => {
+                    warn!("PlaylistSource::clone_box failed to clone live query: {err}");
+                    None
+                }
+            }
         });
-        let vod = self.vod.as_ref().and_then(|(_, guard)| {
-            BPlusTreeQuery::try_new(&vod_path).ok().map(|q| (q, Arc::clone(guard)))
+        let vod = self.vod.as_ref().and_then(|(query, guard)| {
+            match query.try_clone() {
+                Ok(q) => Some((q, Arc::clone(guard))),
+                Err(err) => {
+                    warn!("PlaylistSource::clone_box failed to clone vod query: {err}");
+                    None
+                }
+            }
         });
-        let series = self.series.as_ref().and_then(|(_, guard)| {
-            BPlusTreeQuery::try_new(&series_path).ok().map(|q| (q, Arc::clone(guard)))
+        let series = self.series.as_ref().and_then(|(query, guard)| {
+            match query.try_clone() {
+                Ok(q) => Some((q, Arc::clone(guard))),
+                Err(err) => {
+                    warn!("PlaylistSource::clone_box failed to clone series query: {err}");
+                    None
+                }
+            }
         });
 
         Box::new(Self {
@@ -271,7 +285,7 @@ impl PlaylistSource for XtreamDiskPlaylistSource {
 }
 
 macro_rules! impl_single_file_disk_source {
-    ($name:ident, $key_type:tt, $entry_type:tt) => {
+    ($name:ident, $key_type:ty, $entry_type:ty) => {
       paste::paste! {
           pub struct [<$name DiskPlaylistSource>] {
             app_config: Arc<AppConfig>,
@@ -323,7 +337,6 @@ macro_rules! impl_single_file_disk_source {
                     Box::new(std::iter::empty())
                 }
             }
-
 
             fn items<'a>(&'a mut self) -> Box<dyn Iterator<Item=Cow<'a, PlaylistItem>> + Send + 'a> {
                 if let Some(pl) = self.playlist.as_mut() {
@@ -383,9 +396,7 @@ macro_rules! impl_single_file_disk_source {
                 }
             }
             fn clone_box(&self) -> Box<dyn PlaylistSource> {
-                let playlist = if self.playlist.is_some() && self.guard.is_some() {
-                    BPlusTreeQuery::try_new(&self.file_path).ok()
-                } else { None };
+                let playlist = self.playlist.as_ref().and_then(|query| query.try_clone().ok());
 
                 Box::new(Self {
                     app_config: Arc::clone(&self.app_config),
@@ -414,7 +425,7 @@ macro_rules! impl_single_file_disk_source {
    };
 }
 
-impl_single_file_disk_source!(M3u, String, M3uPlaylistItem);
+impl_single_file_disk_source!(M3u, Arc<str>, M3uPlaylistItem);
 
 impl_single_file_disk_source!(LocalLibrary, UUIDType, XtreamPlaylistItem);
 
@@ -514,15 +525,25 @@ impl PlaylistSource for MemoryPlaylistSource {
 
 async fn load_bplustree_query<K, P>(app_config: &Arc<AppConfig>, file_path: &Path) -> Option<(BPlusTreeQuery<K, P>, FileReadGuard)>
 where
-    K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
+    K: Ord + Serialize + for<'de> Deserialize<'de> + Clone + Send + 'static,
     P: Serialize + for<'de> Deserialize<'de> + Clone + Send + 'static,
 {
     if file_path.exists() {
         let guard = app_config.file_locks.read_lock(file_path).await;
-        match BPlusTreeQuery::<K, P>::try_new(file_path) {
-            Ok(query) => Some((query, guard)),
+        let file_path = file_path.to_path_buf();
+        let file_path_err = file_path.clone();
+        match tokio::task::spawn_blocking(move || {
+            BPlusTreeQuery::<K, P>::try_new(&file_path).map(|query| (query, guard))
+        })
+        .await
+        {
+            Ok(Ok((query, guard))) => Some((query, guard)),
+            Ok(Err(err)) => {
+                error!("Error loading disk playlist {}: {err}", file_path_err.display());
+                None
+            }
             Err(err) => {
-                error!("Error loading disk playlist {}: {err}", file_path.display());
+                error!("Error loading disk playlist {}: {err}", file_path_err.display());
                 None
             }
         }

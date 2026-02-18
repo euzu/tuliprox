@@ -5,12 +5,12 @@ use crate::{
     info_err_res,
     model::EpgConfigDto,
     utils::{
-        arc_str_serde, arc_str_vec_serde, default_as_true, default_probe_live_interval, default_resolve_background,
-        default_resolve_delay_secs, default_xtream_live_stream_use_prefix, deserialize_timestamp,
-        get_credentials_from_url_str, get_trimmed_string, is_blank_optional_string, is_default_probe_live_interval,
-        is_default_resolve_delay_secs, is_false, is_true, is_zero_u16, parse_provider_scheme_url_parts,
-        sanitize_sensitive_info, serialize_option_vec_flow_map_items, trim_last_slash, Internable,
-        PROVIDER_SCHEME_PREFIX,
+        arc_str_serde, arc_str_vec_serde, default_as_true, default_probe_delay_secs, default_probe_live_interval,
+        default_resolve_background, default_resolve_delay_secs, default_xtream_live_stream_use_prefix,
+        deserialize_timestamp, get_credentials_from_url_str, get_trimmed_string, is_blank_optional_string,
+        is_default_probe_delay_secs, is_default_probe_live_interval, is_default_resolve_delay_secs, is_false, is_true,
+        is_zero_u16, parse_provider_scheme_url_parts, sanitize_sensitive_info, serialize_option_vec_flow_map_items,
+        trim_last_slash, Internable, PROVIDER_SCHEME_PREFIX,
     },
 };
 use enum_iterator::Sequence;
@@ -189,6 +189,8 @@ pub struct ConfigInputOptionsDto {
     pub probe_vod: bool,
     #[serde(default = "default_resolve_delay_secs", skip_serializing_if = "is_default_resolve_delay_secs")]
     pub resolve_delay: u16,
+    #[serde(default = "default_probe_delay_secs", skip_serializing_if = "is_default_probe_delay_secs")]
+    pub probe_delay: u16,
     #[serde(default, alias = "resolve_live", skip_serializing_if = "is_false")]
     pub probe_live: bool,
     #[serde(
@@ -214,6 +216,7 @@ impl Default for ConfigInputOptionsDto {
             probe_series: false,
             probe_vod: false,
             resolve_delay: default_resolve_delay_secs(),
+            probe_delay: default_probe_delay_secs(),
             probe_live: false,
             probe_live_interval_hours: default_probe_live_interval(),
         }
@@ -234,6 +237,7 @@ impl ConfigInputOptionsDto {
             && !self.probe_series
             && !self.probe_vod
             && is_default_resolve_delay_secs(&self.resolve_delay)
+            && is_default_probe_delay_secs(&self.probe_delay)
             && !self.probe_live
             && is_default_probe_live_interval(&self.probe_live_interval_hours)
     }
@@ -251,6 +255,7 @@ impl ConfigInputOptionsDto {
         self.probe_series = false;
         self.probe_vod = false;
         self.resolve_delay = default_resolve_delay_secs();
+        self.probe_delay = default_probe_delay_secs();
         self.probe_live = false;
         self.probe_live_interval_hours = default_probe_live_interval();
     }

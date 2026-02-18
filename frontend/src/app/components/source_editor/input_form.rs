@@ -49,6 +49,7 @@ const LABEL_RESOLVE_TMDB: &str = "LABEL.RESOLVE_TMDB";
 const LABEL_RESOLVE: &str = "LABEL.RESOLVE";
 const LABEL_PROBE: &str = "LABEL.PROBE";
 const LABEL_RESOLVE_DELAY_SEC: &str = "LABEL.RESOLVE_DELAY_SEC";
+const LABEL_PROBE_DELAY_SEC: &str = "LABEL.PROBE_DELAY_SEC";
 const LABEL_RESOLVE_BACKGROUND: &str = "LABEL.RESOLVE_BACKGROUND";
 const LABEL_PROBE_LIVE_INTERVAL_HOURS: &str = "LABEL.PROBE_LIVE_INTERVAL_HOURS";
 const LABEL_METADATA: &str = "LABEL.METADATA";
@@ -122,6 +123,7 @@ generate_form_reducer!(
       ResolveSeries => resolve_series: bool,
       ResolveVod => resolve_vod: bool,
       ResolveDelay => resolve_delay: u16,
+      ProbeDelay => probe_delay: u16,
       ProbeLive => probe_live: bool,
       ProbeVod => probe_vod: bool,
       ProbeSeries => probe_series: bool,
@@ -452,6 +454,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                     { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_SKIP_SERIES), probe_series,  ConfigInputOptionsFormAction::ProbeSeries) }
                     </div>
                     <div class="tp__config-view__cols-2">
+                    { edit_field_number_u16!(input_options_state, translate.t(LABEL_PROBE_DELAY_SEC), probe_delay,  ConfigInputOptionsFormAction::ProbeDelay) }
                     { edit_field_number_u32!(input_options_state, translate.t(LABEL_PROBE_LIVE_INTERVAL_HOURS), probe_live_interval_hours,  ConfigInputOptionsFormAction::ProbeLiveIntervalHours) }
                     </div>
                 </TitledCard>
