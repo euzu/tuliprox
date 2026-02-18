@@ -3,13 +3,13 @@ use crate::{
     model::{AppConfig, Config, ConfigInput, ConfigTarget, M3uTargetOutput, ProxyUserCredentials},
     repository::{
         bplustree::{BPlusTree, BPlusTreeQuery},
-        open_playlist_reader,
-        LockedReceiverStream,
         m3u_playlist_iterator::M3uPlaylistM3uTextIterator,
+        open_playlist_reader,
         playlist_repository::get_input_m3u_playlist_file_path,
         storage::{get_file_path_for_db_index, get_input_storage_path, get_target_storage_path},
         storage_const,
         xtream_repository::CategoryKey,
+        LockedReceiverStream,
     },
     utils,
     utils::{async_file_writer, file_exists_async},
@@ -31,8 +31,8 @@ use std::{
     sync::Arc,
 };
 use tokio::sync::mpsc;
-use tokio_stream::Stream;
 use tokio::{fs, io::AsyncWriteExt, task};
+use tokio_stream::Stream;
 
 macro_rules! cant_write_result {
     ($path:expr, $err:expr) => {
@@ -164,6 +164,14 @@ fn replace_m3u_url_line(line: &mut String, url: &str) {
     *line = rebuilt;
 }
 
+async fn cleanup_temp_file(temp_file: &Path) {
+    if let Err(err) = fs::remove_file(temp_file).await {
+        if err.kind() != std::io::ErrorKind::NotFound {
+            error!("Failed to cleanup temp file {} - {err}", temp_file.display());
+        }
+    }
+}
+
 async fn persist_m3u_playlist_as_text(
     app_config: &AppConfig,
     target: &ConfigTarget,
@@ -222,18 +230,36 @@ async fn persist_m3u_playlist_as_text(
             replace_m3u_url_line(&mut line, resolved.as_ref());
             Ok(line)
         })
-        .await?;
+            .await?;
 
-        await_playlist_write!(
-            fs::rename(&m3u_tmp, &m3u_filename),
-            "Failed to replace {} - {}",
-            m3u_filename.display()
-        );
-        await_playlist_write!(
-            fs::rename(&provider_tmp, &provider_filename),
-            "Failed to replace {} - {}",
-            provider_filename.display()
-        );
+        if let Err(rename_err) = async {
+            await_playlist_write!(
+                fs::rename(&provider_tmp, &provider_filename),
+                "Failed to replace {} - {}",
+                provider_filename.display()
+            );
+            Ok::<(), TuliproxError>(())
+        }
+            .await
+        {
+            cleanup_temp_file(&provider_tmp).await;
+            cleanup_temp_file(&m3u_tmp).await;
+            return Err(rename_err);
+        }
+
+        if let Err(rename_err) = async {
+            await_playlist_write!(
+                fs::rename(&m3u_tmp, &m3u_filename),
+                "Failed to replace {} - {}",
+                m3u_filename.display()
+            );
+            Ok::<(), TuliproxError>(())
+        }
+            .await
+        {
+            cleanup_temp_file(&m3u_tmp).await;
+            return Err(rename_err);
+        }
     }
 
     Ok(())
@@ -280,8 +306,8 @@ pub async fn m3u_write_playlist(
             .map_err(|err| cant_write_result!(&m3u_path_clone, err))?;
         Ok(())
     })
-    .await
-    .map_err(|err| notify_err!("failed to write m3u playlist: {} - {err}", m3u_path.display()))??;
+        .await
+        .map_err(|err| notify_err!("failed to write m3u playlist: {} - {err}", m3u_path.display()))??;
 
     Ok(())
 }
@@ -328,8 +354,8 @@ pub async fn m3u_get_item_for_stream_id(
                 Err(err) => Err(string_to_io_error(format!("Query failed for {stream_id}: {err}"))),
             }
         })
-        .await
-        .map_err(|err| string_to_io_error(format!("Query task failed for {stream_id}: {err}")))?
+            .await
+            .map_err(|err| string_to_io_error(format!("Query task failed for {stream_id}: {err}")))?
     }
 }
 
@@ -337,7 +363,7 @@ pub async fn iter_raw_m3u_target_playlist(
     config: &AppConfig,
     target: &ConfigTarget,
     cluster: Option<XtreamCluster>,
-) -> Option<Box<dyn Stream<Item = Result<M3uPlaylistItem, TuliproxError>> + Send + Unpin>> {
+) -> Option<Box<dyn Stream<Item=Result<M3uPlaylistItem, TuliproxError>> + Send + Unpin>> {
     let target_path = get_target_storage_path(&config.config.load(), target.name.as_str())?;
     let m3u_path = m3u_get_file_path_for_db(&target_path);
 
@@ -348,7 +374,7 @@ pub async fn iter_raw_m3u_input_playlist(
     app_config: &AppConfig,
     input: &ConfigInput,
     cluster: Option<XtreamCluster>,
-) -> Option<Box<dyn Stream<Item = Result<M3uPlaylistItem, TuliproxError>> + Send + Unpin>> {
+) -> Option<Box<dyn Stream<Item=Result<M3uPlaylistItem, TuliproxError>> + Send + Unpin>> {
     let working_dir = &app_config.config.load().working_dir;
     let storage_path = get_input_storage_path(&input.name, working_dir).await.ok()?;
     let m3u_path = get_input_m3u_playlist_file_path(&storage_path, &input.name);
@@ -360,7 +386,7 @@ async fn iter_raw_m3u_playlist<SortKey, ItemKey>(
     app_config: &AppConfig,
     m3u_path: &Path,
     cluster: Option<XtreamCluster>,
-) -> Option<Box<dyn Stream<Item = Result<M3uPlaylistItem, TuliproxError>> + Send + Unpin>>
+) -> Option<Box<dyn Stream<Item=Result<M3uPlaylistItem, TuliproxError>> + Send + Unpin>>
 where
     ItemKey: Ord + Serialize + for<'de> Deserialize<'de> + Clone + Send + Sync + 'static,
     SortKey: for<'de> Deserialize<'de> + Send + 'static,
@@ -416,11 +442,11 @@ where
                 "M3U playlist reader task failed for {}: {err}",
                 m3u_path_for_log.display()
             )))
-            .await;
+                .await;
         }
     });
 
-    let stream: Box<dyn Stream<Item = Result<M3uPlaylistItem, TuliproxError>> + Send + Unpin> =
+    let stream: Box<dyn Stream<Item=Result<M3uPlaylistItem, TuliproxError>> + Send + Unpin> =
         Box::new(LockedReceiverStream::new(rx, iter_lock));
     Some(stream)
 }
@@ -445,8 +471,8 @@ pub async fn persist_input_m3u_playlist(
         tree.store(&m3u_path_clone).map_err(|err| cant_write_result!(&m3u_path_clone, err))?;
         Ok(())
     })
-    .await
-    .map_err(|err| notify_err!("failed to write m3u playlist: {} - {err}", m3u_path.display()))??;
+        .await
+        .map_err(|err| notify_err!("failed to write m3u playlist: {} - {err}", m3u_path.display()))??;
 
     Ok(())
 }
@@ -488,8 +514,8 @@ pub async fn load_input_m3u_playlist(
         }
         Ok(groups.into_values().collect())
     })
-    .await
-    .map_err(|err| notify_err!("failed to read m3u playlist: {} - {err}", m3u_path_err.display()))??;
+        .await
+        .map_err(|err| notify_err!("failed to read m3u playlist: {} - {err}", m3u_path_err.display()))??;
 
     Ok(groups)
 }

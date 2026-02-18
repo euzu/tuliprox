@@ -55,7 +55,8 @@ impl XtreamPlaylistIterator {
             let index_path = get_file_path_for_db_index(&xtream_path);
             let (tx, rx) = mpsc::channel::<(XtreamPlaylistItem, bool)>(256);
 
-            task::spawn_blocking(move || {
+            let xtream_path_for_log = xtream_path.clone();
+            let handle = task::spawn_blocking(move || {
                 let _guard = bg_lock;
                 let reader = match open_playlist_reader::<u32, XtreamPlaylistItem, u32>(
                     &xtream_path,
@@ -95,6 +96,14 @@ impl XtreamPlaylistIterator {
 
                 if let Some(last) = pending {
                     let _ = tx.blocking_send((last, false));
+                }
+            });
+            tokio::spawn(async move {
+                if let Err(err) = handle.await {
+                    error!(
+                        "Xtream playlist iterator task failed for {} (cluster {cluster}): {err}",
+                        xtream_path_for_log.display()
+                    );
                 }
             });
 

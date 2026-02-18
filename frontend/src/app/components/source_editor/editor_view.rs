@@ -1136,6 +1136,23 @@ pub fn SourceEditor() -> Html {
         let canvas_offset = editor_state.canvas_offset; // Apply virtual canvas offset
         (canvas_offset, editor_state.pending_line)
     };
+    let (selected_input_blocks, selected_target_blocks, selected_output_blocks) = {
+        let mut inputs = HashSet::<BlockId>::new();
+        let mut targets = HashSet::<BlockId>::new();
+        let mut outputs = HashSet::<BlockId>::new();
+        for selected_id in &editor_state.selection.selected_blocks {
+            if let Some(block) = editor_state.get_block(*selected_id) {
+                if block.block_type.is_input() {
+                    inputs.insert(*selected_id);
+                } else if block.block_type.is_target() {
+                    targets.insert(*selected_id);
+                } else if block.block_type.is_output() {
+                    outputs.insert(*selected_id);
+                }
+            }
+        }
+        (inputs, targets, outputs)
+    };
 
     // ----------------- Render -----------------
     html! {
@@ -1181,10 +1198,19 @@ pub fn SourceEditor() -> Html {
                         let from_block = editor_state.get_block(c.from)?;
                         let to_block = editor_state.get_block(c.to)?;
                         let (d, (from_x, from_y, to_x, to_y)) = update_connection(canvas_off_x, canvas_off_y, from_block, to_block);
+                        let is_active_connection = selected_input_blocks.contains(&c.from)
+                            || selected_target_blocks.contains(&c.from)
+                            || selected_target_blocks.contains(&c.to)
+                            || selected_output_blocks.contains(&c.to);
+                        let connection_color = if is_active_connection {
+                            "var(--source-editor-active-line-color)"
+                        } else {
+                            "var(--source-editor-line-color)"
+                        };
 
                         Some(html! {
                             <g>
-                                <path id={format!("conn-{}-{}", c.from, c.to)} d={d} stroke="var(--source-editor-line-color)" fill="transparent" stroke-width="2"/>
+                                <path id={format!("conn-{}-{}", c.from, c.to)} d={d} stroke={connection_color} fill="transparent" stroke-width="2"/>
                                 { if *delete_mode {
                                     let mid_x = (from_x + to_x) / 2.0;
                                     let mid_y = (from_y + to_y) / 2.0;
