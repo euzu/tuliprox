@@ -184,21 +184,6 @@ fn input_extra_height(block: &Block) -> f32 {
     }
 }
 
-fn enforce_input_spacing(
-    input_ids: &[BlockId],
-    input_y: &mut HashMap<BlockId, f32>,
-    input_steps: &HashMap<BlockId, f32>,
-) {
-    let mut next_y: Option<f32> = None;
-    for input_id in input_ids {
-        let desired_y = input_y.get(input_id).copied().unwrap_or(0.0);
-        let final_y = if let Some(min_y) = next_y { desired_y.max(min_y) } else { desired_y };
-        input_y.insert(*input_id, final_y);
-        let step = input_steps.get(input_id).copied().unwrap_or(INPUT_VERTICAL_STEP_BASE);
-        next_y = Some(final_y + step);
-    }
-}
-
 fn component_sort_key(
     component: &LayoutComponent,
     input_rank: &HashMap<BlockId, usize>,
@@ -243,7 +228,6 @@ fn layout_component(
         let step = input_steps.get(input_id).copied().unwrap_or(INPUT_VERTICAL_STEP_BASE);
         next_input_y = aligned + step;
     }
-    enforce_input_spacing(&input_ids, &mut input_y, input_steps);
 
     let mut target_tops: HashMap<BlockId, f32> = HashMap::new();
     for target_id in &target_ids {
