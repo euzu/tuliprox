@@ -2827,6 +2827,44 @@ where
         Ok(query)
     }
 
+    /// Clone an existing query without re-reading the file header.
+    /// This avoids synchronous disk initialization while still providing
+    /// an independent reader.
+    pub fn try_clone(&self) -> io::Result<Self> {
+        let (file, mmap) = if self.mmap.is_some() {
+            if self.filepath.as_os_str().is_empty() {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, "Missing filepath for mmap clone"));
+            }
+            let file = File::open(&self.filepath)?;
+            if let Some(mapped) = unsafe { Mmap::map(&file).ok() } {
+                (None, Some(mapped))
+            } else {
+                (Some(utils::file_reader(file)), None)
+            }
+        } else if let Some(file) = &self.file {
+            let cloned = file.get_ref().try_clone()?;
+            (Some(utils::file_reader(cloned)), None)
+        } else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "No data source available to clone",
+            ));
+        };
+
+        Ok(Self {
+            file,
+            mmap,
+            filepath: self.filepath.clone(),
+            file_identity: self.file_identity,
+            buffer: vec![0u8; PAGE_SIZE_USIZE],
+            cache: IndexMap::with_capacity(CACHE_CAPACITY),
+            node_cache: IndexMap::with_capacity(CACHE_CAPACITY),
+            root_offset: self.root_offset,
+            _marker_k: PhantomData,
+            _marker_v: PhantomData,
+        })
+    }
+
     /// Returns the filepath this query was opened from.
     pub fn filepath(&self) -> &Path {
         &self.filepath
@@ -2991,6 +3029,10 @@ where
     /// Provides a disk-backed iterator that traverses the entire tree in order.
     pub fn iter(&mut self) -> BPlusTreeDiskIterator<'_, K, V> {
         BPlusTreeDiskIterator::new(self)
+    }
+
+    pub(crate) fn into_sorted_parts(self) -> (PathBuf, Option<BufReader<File>>, Option<Mmap>) {
+        (self.filepath, self.file, self.mmap)
     }
 
     /// Owned iterator that traverses the tree in order defined by a secondary sorted index.
@@ -3180,16 +3222,18 @@ where
 
 /// Generic reader that can be either a sorted index iterator or a regular disk iterator.
 /// Used for fallback logic (Sorted -> Unsorted).
-pub enum PlaylistIteratorReader<V> {
-    Sorted(super::sorted_index::BPlusTreeSortedIteratorOwned<u32, V, u32>),
-    Unsorted(BPlusTreeDiskIteratorOwned<u32, V>),
+pub enum PlaylistIteratorReader<K, V, SortKey> {
+    Sorted(super::sorted_index::BPlusTreeSortedIteratorOwned<K, V, SortKey>),
+    Unsorted(BPlusTreeDiskIteratorOwned<K, V>),
 }
 
-impl<V> Iterator for PlaylistIteratorReader<V>
+impl<K, V, SortKey> Iterator for PlaylistIteratorReader<K, V, SortKey>
 where
+    K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
     V: Serialize + for<'de> Deserialize<'de> + Clone,
+    SortKey: for<'de> Deserialize<'de>,
 {
-    type Item = io::Result<(u32, V)>;
+    type Item = io::Result<(K, V)>;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self {

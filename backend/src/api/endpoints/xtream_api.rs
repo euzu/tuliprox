@@ -1339,19 +1339,21 @@ async fn xtream_player_api(
     }
 }
 
-fn xtream_create_content_stream(
-    xtream_iter: impl Iterator<Item=(String, bool)>,
-) -> impl Stream<Item=Result<Bytes, String>> {
-    stream::once(async { Ok::<Bytes, String>(Bytes::from("[")) }).chain(
-        stream::iter(xtream_iter.map(move |(mut line, has_next)| {
-            if has_next {
-                line.push(',');
-            }
-            Ok::<Bytes, String>(Bytes::from(line))
-        })).chain(stream::once(async {
-            Ok::<Bytes, String>(Bytes::from("]"))
-        })),
-    )
+fn xtream_create_content_stream<S>(
+    xtream_iter: S,
+) -> impl Stream<Item=Result<Bytes, String>>
+where
+    S: Stream<Item=(String, bool)> + Send + Unpin + 'static,
+{
+    let mapped = xtream_iter.map(move |(mut line, has_next)| {
+        if has_next {
+            line.push(',');
+        }
+        Ok::<Bytes, String>(Bytes::from(line))
+    });
+    stream::once(async { Ok::<Bytes, String>(Bytes::from("[")) })
+        .chain(mapped)
+        .chain(stream::once(async { Ok::<Bytes, String>(Bytes::from("]")) }))
 }
 
 async fn xtream_player_api_get(

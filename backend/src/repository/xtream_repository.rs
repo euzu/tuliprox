@@ -6,10 +6,11 @@ use crate::model::{ConfigInput, PlaylistXtreamCategory};
 use crate::processing::parser::xtream;
 use crate::repository::bplustree::{BPlusTree, BPlusTreeQuery, BPlusTreeUpdate, FlushPolicy};
 use crate::repository::playlist_scratch::PlaylistScratch;
-use crate::repository::storage::{ensure_input_storage_path, get_input_storage_path, get_target_id_mapping_file, get_target_storage_path};
+use crate::repository::storage::{ensure_input_storage_path, get_file_path_for_db_index, get_input_storage_path, get_target_id_mapping_file, get_target_storage_path};
 use crate::repository::storage_const;
 use crate::repository::target_id_mapping::VirtualIdRecord;
 use crate::repository::xtream_playlist_iterator::XtreamPlaylistJsonIterator;
+use crate::repository::open_playlist_reader;
 use crate::utils::json_write_documents_to_file;
 use crate::utils::request::DynReader;
 use crate::utils::FileReadGuard;
@@ -31,6 +32,8 @@ use std::fs::File;
 use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 
 macro_rules! cant_write_result {
     ($path:expr, $err:expr) => {
@@ -441,15 +444,19 @@ async fn xtream_read_item_for_stream_id(
     cluster: XtreamCluster,
 ) -> Result<XtreamPlaylistItem, Error> {
     let xtream_path = xtream_get_file_path(storage_path, cluster);
-    {
-        let _file_lock = cfg.file_locks.read_lock(&xtream_path).await;
-        let mut query = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path)?;
+    let file_lock = cfg.file_locks.read_lock(&xtream_path).await;
+    let xtream_path_clone = xtream_path.clone();
+    tokio::task::spawn_blocking(move || -> Result<XtreamPlaylistItem, Error> {
+        let _guard = file_lock;
+        let mut query = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path_clone)?;
         match query.query_zero_copy(&stream_id) {
             Ok(Some(item)) => Ok(item),
             Ok(None) => Err(Error::new(ErrorKind::NotFound, format!("Item {stream_id} not found in {cluster}"))),
             Err(err) => Err(Error::other(format!("Query failed for {stream_id} in {cluster}: {err}"))),
         }
-    }
+    })
+    .await
+    .map_err(|err| Error::other(format!("Query task failed for {stream_id} in {cluster}: {err}")))?
 }
 
 async fn xtream_read_series_item_for_stream_id(
@@ -458,15 +465,19 @@ async fn xtream_read_series_item_for_stream_id(
     storage_path: &Path,
 ) -> Result<XtreamPlaylistItem, Error> {
     let xtream_path = xtream_get_file_path(storage_path, XtreamCluster::Series);
-    {
-        let _file_lock = cfg.file_locks.read_lock(&xtream_path).await;
-        let mut query = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path)?;
+    let file_lock = cfg.file_locks.read_lock(&xtream_path).await;
+    let xtream_path_clone = xtream_path.clone();
+    tokio::task::spawn_blocking(move || -> Result<XtreamPlaylistItem, Error> {
+        let _guard = file_lock;
+        let mut query = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path_clone)?;
         match query.query_zero_copy(&stream_id) {
             Ok(Some(item)) => Ok(item),
             Ok(None) => Err(Error::new(ErrorKind::NotFound, format!("Item {stream_id} not found in series"))),
             Err(err) => Err(Error::other(format!("Query failed for {stream_id} in series: {err}"))),
         }
-    }
+    })
+    .await
+    .map_err(|err| Error::other(format!("Query task failed for {stream_id} in series: {err}")))?
 }
 
 
@@ -572,14 +583,21 @@ pub async fn xtream_get_item_for_stream_id(
             xtream_read_item_for_stream_id(app_config, virtual_id, &storage_path, cluster).await
         } else {
             let target_id_mapping_file = get_target_id_mapping_file(&target_path);
-            let _file_lock = app_config.file_locks.read_lock(&target_id_mapping_file).await;
-
-            let mut target_id_mapping = BPlusTreeQuery::<u32, VirtualIdRecord>::try_new(&target_id_mapping_file).map_err(|err| string_to_io_error(format!("Could not load id mapping for target {} err:{err}", target.name)))?;
-            let mapping = match target_id_mapping.query_zero_copy(&virtual_id) {
-                Ok(Some(record)) => Ok(record),
-                Ok(None) => Err(string_to_io_error(format!("Could not find mapping for target {} and id {}", target.name, virtual_id))),
-                Err(err) => Err(string_to_io_error(format!("Query failed for id {virtual_id}: {err}"))),
-            }?;
+            let target_name = target.name.clone();
+            let file_lock = app_config.file_locks.read_lock(&target_id_mapping_file).await;
+            let target_id_mapping_file_clone = target_id_mapping_file.clone();
+            let mapping = tokio::task::spawn_blocking(move || -> Result<VirtualIdRecord, Error> {
+                let _guard = file_lock;
+                let mut target_id_mapping = BPlusTreeQuery::<u32, VirtualIdRecord>::try_new(&target_id_mapping_file_clone)
+                    .map_err(|err| string_to_io_error(format!("Could not load id mapping for target {target_name} err:{err}")))?;
+                match target_id_mapping.query_zero_copy(&virtual_id) {
+                    Ok(Some(record)) => Ok(record),
+                    Ok(None) => Err(string_to_io_error(format!("Could not find mapping for target {target_name} and id {virtual_id}"))),
+                    Err(err) => Err(string_to_io_error(format!("Query failed for id {virtual_id}: {err}"))),
+                }
+            })
+            .await
+            .map_err(|err| string_to_io_error(format!("Mapping query task failed for id {virtual_id}: {err}")))??;
             match mapping.item_type {
                 PlaylistItemType::SeriesInfo
                 | PlaylistItemType::LocalSeriesInfo => {
@@ -627,50 +645,59 @@ pub async fn xtream_load_rewrite_playlist(
     XtreamPlaylistJsonIterator::new(cluster, config, target, category_id, user).await
 }
 
-pub async fn iter_raw_xtream_target_playlist(app_config: &AppConfig, target: &ConfigTarget, cluster: XtreamCluster) -> Option<(FileReadGuard, Box<dyn Iterator<Item=XtreamPlaylistItem> + Send>)> {
+pub async fn iter_raw_xtream_target_playlist(app_config: &AppConfig, target: &ConfigTarget, cluster: XtreamCluster) -> Option<Box<dyn Stream<Item = XtreamPlaylistItem> + Send + Unpin>> {
     let config = app_config.config.load();
     let storage_path = xtream_get_storage_path(&config, target.name.as_str())?;
     let xtream_path = xtream_get_file_path(&storage_path, cluster);
-    iter_raw_xtream_playlist::<u32, u32>(app_config, &xtream_path).await
+    iter_raw_xtream_playlist(app_config, &xtream_path).await
 }
 
-pub async fn iter_raw_xtream_input_playlist(app_config: &AppConfig, input: &ConfigInput, cluster: XtreamCluster) -> Option<(FileReadGuard, Box<dyn Iterator<Item=XtreamPlaylistItem> + Send>)> {
+pub async fn iter_raw_xtream_input_playlist(app_config: &AppConfig, input: &ConfigInput, cluster: XtreamCluster) -> Option<Box<dyn Stream<Item = XtreamPlaylistItem> + Send + Unpin>> {
     let config = app_config.config.load();
     let working_dir = &config.working_dir;
     let storage_path = get_input_storage_path(&input.name, working_dir).await.ok()?;
     let xtream_path = xtream_get_file_path(&storage_path, cluster);
 
-    iter_raw_xtream_playlist::<u32, u32>(app_config, &xtream_path).await
+    iter_raw_xtream_playlist(app_config, &xtream_path).await
 }
 
-async fn iter_raw_xtream_playlist<SortKey, ItemKey>(app_config: &AppConfig, xtream_path: &Path) -> Option<(FileReadGuard, Box<dyn Iterator<Item=XtreamPlaylistItem> + Send>)>
-where
-    ItemKey: Ord + Serialize + for<'de> Deserialize<'de> + Clone + Send + Sync + 'static,
-    SortKey: for<'de> Deserialize<'de> + Send + 'static,
-{
-    let file_lock = app_config.file_locks.read_lock(xtream_path).await;
+async fn iter_raw_xtream_playlist(app_config: &AppConfig, xtream_path: &Path) -> Option<Box<dyn Stream<Item = XtreamPlaylistItem> + Send + Unpin>> {
     if !file_exists_async(xtream_path).await {
         return None;
     }
+    let bg_lock = app_config.file_locks.read_lock(xtream_path).await;
 
-    let iter: Box<dyn Iterator<Item=XtreamPlaylistItem> + Send> = {
-        match BPlusTreeQuery::<ItemKey, XtreamPlaylistItem>::try_new(xtream_path) {
-            Ok(tree) => match tree.disk_iter_sorted::<SortKey>() {
-                Ok(sorted_iter) => Box::new(sorted_iter.filter_map(Result::ok).map(|(_, v)| v)),
-                Err(_) => {
-                    match BPlusTreeQuery::<ItemKey, XtreamPlaylistItem>::try_new(xtream_path) {
-                        Ok(tree) => Box::new(tree.disk_iter().map(|(_, v)| v)),
-                        Err(_) => return None,
-                    }
+    let xtream_path = xtream_path.to_path_buf();
+    let index_path = get_file_path_for_db_index(&xtream_path);
+    let (tx, rx) = mpsc::channel::<XtreamPlaylistItem>(256);
+
+    tokio::task::spawn_blocking(move || {
+        let _guard = bg_lock;
+        let Ok(reader) = open_playlist_reader::<u32, XtreamPlaylistItem, u32>(
+            &xtream_path,
+            &index_path,
+            None,
+        ) else {
+            return;
+        };
+
+        for entry in reader {
+            let item = match entry {
+                Ok((_, item)) => item,
+                Err(err) => {
+                    error!("Xtream playlist reader error: {err}");
+                    continue;
                 }
-            }
-            Err(_) => {
-                return None
+            };
+            if tx.blocking_send(item).is_err() {
+                break;
             }
         }
-    };
+    });
 
-    Some((file_lock, iter))
+    let stream: Box<dyn Stream<Item = XtreamPlaylistItem> + Send + Unpin> =
+        Box::new(ReceiverStream::new(rx));
+    Some(stream)
 }
 
 pub fn playlist_iter_to_stream<I, P>(channels: Option<(FileReadGuard, I)>) -> impl Stream<Item=Result<Bytes, String>>
@@ -960,7 +987,7 @@ pub async fn persist_input_xtream_playlist_cluster_to_disk(
     // Explicitly release the lock (though RAII would handle it too)
     drop(swap_lock);
 
-    log::debug!("Cluster {cluster} updated and swapped successfully.");
+    log::debug!("Cluster {cluster} updated successfully.");
     Ok(())
 }
 
@@ -1014,13 +1041,31 @@ pub async fn persist_input_xtream_playlist(app_config: &Arc<AppConfig>, storage_
         let xtream_path = xtream_get_file_path(storage_path, cluster);
         if file_exists_async(&xtream_path).await {
             let file_lock = app_config.file_locks.read_lock(&xtream_path).await;
-            let stored_entries = stored_scratch.get_mut(cluster);
-            if let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) {
-                for (_, doc) in query.iter() {
-                    stored_entries.insert(doc.provider_id, doc);
+            let xtream_path = xtream_path.clone();
+            let stored_entries = match tokio::task::spawn_blocking(move || {
+                let _guard = file_lock;
+                let mut entries = IndexMap::new();
+                if let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) {
+                    for (_, doc) in query.iter() {
+                        entries.insert(doc.provider_id, doc);
+                    }
                 }
+                entries
+            })
+            .await
+            {
+                Ok(entries) => Some(entries),
+                Err(err) => {
+                    errors.push(format!(
+                        "Failed to load stored xtream playlist entries for {cluster}: {err}"
+                    ));
+                    None
+                }
+            };
+
+            if let Some(entries) = stored_entries {
+                *stored_scratch.get_mut(cluster) = entries;
             }
-            drop(file_lock);
         }
     }
 
@@ -1380,19 +1425,34 @@ pub async fn load_input_xtream_playlist(app_config: &Arc<AppConfig>, storage_pat
             }
 
             // Load Items
-            let _file_lock = app_config.file_locks.read_lock(&xtream_path).await;
-            if let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) {
-                for (_, ref item) in query.iter() {
-                    let cat_id = item.category_id;
-                    groups.entry((cluster, cat_id))
-                        .or_insert_with(|| PlaylistGroup {
-                            id: cat_id,
-                            title: "Unknown".intern(),
-                            channels: Vec::new(),
-                            xtream_cluster: cluster,
-                        })
-                        .channels.push(PlaylistItem::from(item));
+            let file_lock = app_config.file_locks.read_lock(&xtream_path).await;
+            let xtream_display = xtream_path.display().to_string();
+            let xtream_path = xtream_path.clone();
+            let items = tokio::task::spawn_blocking(move || -> Result<Vec<XtreamPlaylistItem>, TuliproxError> {
+                let _guard = file_lock;
+                let mut items = Vec::new();
+                if let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) {
+                    for (_, item) in query.iter() {
+                        items.push(item);
+                    }
                 }
+                Ok(items)
+            })
+            .await
+            .map_err(|err| notify_err!("failed to read xtream playlist: {} - {err}", xtream_display))??;
+
+            for item in items {
+                let cat_id = item.category_id;
+                groups
+                    .entry((cluster, cat_id))
+                    .or_insert_with(|| PlaylistGroup {
+                        id: cat_id,
+                        title: "Unknown".intern(),
+                        channels: Vec::new(),
+                        xtream_cluster: cluster,
+                    })
+                    .channels
+                    .push(PlaylistItem::from(&item));
             }
         }
     }

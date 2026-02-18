@@ -1,7 +1,7 @@
 use crate::app::components::{chip::convert_bool_to_chip_style, make_tags, CollapsePanel, Tag, TagList};
 use shared::{
     model::ConfigInputDto,
-    utils::{default_probe_live_interval, default_resolve_delay_secs},
+    utils::{default_probe_delay_secs, default_probe_live_interval, default_resolve_delay_secs},
 };
 use std::rc::Rc;
 use yew::prelude::*;
@@ -52,6 +52,10 @@ pub fn InputOptions(props: &InputOptionsProps) -> Html {
                         class: convert_bool_to_chip_style(false),
                         label: translate.t("LABEL.SERIES").to_string(),
                     }),
+                    Rc::new(Tag {
+                        class: convert_bool_to_chip_style(false),
+                        label: format!("{} / {}s", translate.t("LABEL.PROBE_DELAY_SEC"), default_probe_delay_secs()),
+                    }),
                 ],
             ),
             Some(options) => {
@@ -68,6 +72,7 @@ pub fn InputOptions(props: &InputOptionsProps) -> Html {
                     || options.probe_vod
                     || options.probe_live
                     || options.resolve_delay != default_resolve_delay_secs()
+                    || options.probe_delay != default_probe_delay_secs()
                     || options.probe_live_interval_hours != default_probe_live_interval();
 
                 (
@@ -108,6 +113,10 @@ pub fn InputOptions(props: &InputOptionsProps) -> Html {
                         Rc::new(Tag {
                             class: convert_bool_to_chip_style(options.probe_series),
                             label: translate.t("LABEL.SERIES").to_string(),
+                        }),
+                        Rc::new(Tag {
+                            class: convert_bool_to_chip_style(options.probe_delay != default_probe_delay_secs()),
+                            label: format!("{} / {}s", translate.t("LABEL.PROBE_DELAY_SEC"), options.probe_delay),
                         }),
                     ],
                 )

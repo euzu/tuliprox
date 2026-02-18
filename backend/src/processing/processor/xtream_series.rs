@@ -21,6 +21,7 @@ use shared::error::TuliproxError;
 use shared::model::{MediaQuality, PlaylistEntry, PlaylistItem, SeriesStreamProperties, StreamProperties, XtreamPlaylistItem, XtreamSeriesInfo};
 use shared::model::{PlaylistGroup, PlaylistItemType, XtreamCluster};
 use std::collections::HashMap;
+use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -247,7 +248,7 @@ async fn process_immediate_series_info(
 
     // Keep an optional read query open and reopen lazily only when needed.
     let xtream_path = xtream_get_file_path(&storage_path, XtreamCluster::Series);
-    let mut db_query_holder = None;
+    let mut db_query_holder: Option<Arc<Mutex<BPlusTreeQuery<u32, XtreamPlaylistItem>>>> = None;
     let mut _db_lock_holder = None;
 
     let mut groups_to_add = Vec::new();
@@ -272,14 +273,31 @@ async fn process_immediate_series_info(
             if !reasons.is_empty() {
                 if let Some(active_provider) = ctx.provider_manager.as_ref() {
                     if db_query_holder.is_none() && xtream_path.exists() {
-                        let lock = ctx.config.file_locks.read_lock(&xtream_path).await;
-                        if let Ok(query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) {
-                            db_query_holder = Some(query);
-                            _db_lock_holder = Some(lock);
+                        let file_lock = ctx.config.file_locks.read_lock(&xtream_path).await;
+                        let xtream_path = xtream_path.clone();
+                        let query = match tokio::task::spawn_blocking(move || {
+                            let guard = file_lock;
+                            let query = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path)?;
+                            Ok::<_, std::io::Error>((query, guard))
+                        }).await {
+                            Ok(Ok((query, guard))) => Some((query, guard)),
+                            Ok(Err(err)) => {
+                                error!("Failed to open BPlusTreeQuery for Series: {err}");
+                                None
+                            }
+                            Err(err) => {
+                                error!("Failed to open BPlusTreeQuery for Series: {err}");
+                                None
+                            }
+                        };
+
+                        if let Some((query, guard)) = query {
+                            db_query_holder = Some(Arc::new(Mutex::new(query)));
+                            _db_lock_holder = Some(guard);
                         }
                     }
                     // Pass the optional reference to the query
-                    let db_query_ref = db_query_holder.as_mut();
+                    let db_query_ref = db_query_holder.as_ref().map(Arc::clone);
 
                     match update_series_info_immediate(ctx, active_provider, input, pli, provider_id.clone(), &reasons, db_query_ref).await {
                         Ok(Some(updated_props)) => {
@@ -401,7 +419,7 @@ async fn update_series_info_immediate(
     pli: &PlaylistItem,
     id: ProviderIdType,
     reasons: &ResolveReasonSet,
-    db_query: Option<&mut BPlusTreeQuery<u32, XtreamPlaylistItem>>,
+    db_query: Option<Arc<Mutex<BPlusTreeQuery<u32, XtreamPlaylistItem>>>>,
 ) -> Result<Option<SeriesStreamProperties>, TuliproxError> {
     let fetch_info = reasons.contains(ResolveReason::Info);
 
@@ -431,7 +449,7 @@ fn check_resolve_reasons(
     check_resolve_tmdb(resolve_options, resolve_tmdb_enabled, pli, needs_info, &mut reasons);
 
     if resolve_options.has_flag(ResolveOptionsFlags::Probe) {
-        check_needs_probe(pli, needs_info, &mut reasons);
+        check_needs_probe(pli, &mut reasons);
     }
     reasons
 }
@@ -467,23 +485,24 @@ fn check_resolve_tmdb(
     }
 }
 
-fn check_needs_probe(pli: &mut PlaylistItem, needs_info: bool, reasons: &mut ResolveReasonSet) {
-    if !needs_info {
-        return;
-    }
-    if let Some(StreamProperties::Series(series_stream_props)) = pli.header.additional_properties.as_ref() {
-        if let Some(details) = series_stream_props.details.as_ref() {
-            if let Some(episodes) = details.episodes.as_ref() {
-                for ep in episodes {
+fn check_needs_probe(pli: &PlaylistItem, reasons: &mut ResolveReasonSet) {
+    let needs_probe = match pli.header.additional_properties.as_ref() {
+        Some(StreamProperties::Series(series_stream_props)) => series_stream_props
+            .details
+            .as_ref()
+            .and_then(|d| d.episodes.as_ref())
+            .is_some_and(|episodes| {
+                episodes.iter().any(|ep| {
                     let missing_video = !MediaQuality::is_valid_media_info(ep.video.as_deref());
                     let missing_audio = !MediaQuality::is_valid_media_info(ep.audio.as_deref());
-                    if missing_video || missing_audio {
-                        reasons.set(ResolveReason::Probe);
-                        break;
-                    }
-                }
-            }
-        }
+                    missing_video || missing_audio
+                })
+            }),
+        _ => false,
+    };
+
+    if needs_probe {
+        reasons.set(ResolveReason::Probe);
     }
 }
 
@@ -506,7 +525,7 @@ pub async fn update_series_metadata(
     save: bool,
     fetch_info: bool,
     do_probe: bool,
-    db_query: Option<&mut BPlusTreeQuery<u32, XtreamPlaylistItem>>,
+    db_query: Option<Arc<Mutex<BPlusTreeQuery<u32, XtreamPlaylistItem>>>>,
 ) -> Result<Option<SeriesStreamProperties>, TuliproxError> {
     let working_dir = &app_config.config.load().working_dir;
     let storage_path = get_input_storage_path(&input.name, working_dir).await
@@ -523,9 +542,26 @@ pub async fn update_series_metadata(
     let series_id_opt = if let ProviderIdType::Id(vid) = id { Some(vid) } else { None };
 
     if let Some(series_id) = series_id_opt {
-        // Use provided query or open new one
         if let Some(query) = db_query {
-            if let Ok(Some(item)) = query.query_zero_copy(&series_id) {
+            let query = Arc::clone(&query);
+            let item = match tokio::task::spawn_blocking(move || {
+                let mut guard = query.lock();
+                guard.query_zero_copy(&series_id)
+            })
+            .await
+            {
+                Ok(Ok(item)) => item,
+                Ok(Err(err)) => {
+                    error!("Failed to query Series metadata from disk for {series_id}: {err}");
+                    None
+                }
+                Err(err) => {
+                    error!("Failed to query Series metadata from disk for {series_id}: {err}");
+                    None
+                }
+            };
+
+            if let Some(item) = item {
                 existing_item = Some(item.clone());
                 if let Some(StreamProperties::Series(p)) = item.additional_properties.as_ref() {
                     props = Some(*p.clone());
@@ -534,13 +570,30 @@ pub async fn update_series_metadata(
         } else {
             let xtream_path = xtream_get_file_path(&storage_path, XtreamCluster::Series);
             if xtream_path.exists() {
-                let _file_lock = app_config.file_locks.read_lock(&xtream_path).await;
-                if let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) {
-                    if let Ok(Some(item)) = query.query_zero_copy(&series_id) {
-                        existing_item = Some(item.clone());
-                        if let Some(StreamProperties::Series(p)) = item.additional_properties.as_ref() {
-                            props = Some(*p.clone());
-                        }
+                let file_lock = app_config.file_locks.read_lock(&xtream_path).await;
+                let xtream_path = xtream_path.clone();
+                let item = match tokio::task::spawn_blocking(move || {
+                    let _guard = file_lock;
+                    let mut query = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path)?;
+                    query.query_zero_copy(&series_id)
+                })
+                .await
+                {
+                    Ok(Ok(item)) => item,
+                    Ok(Err(err)) => {
+                        error!("Failed to query Series metadata from disk for {series_id}: {err}");
+                        None
+                    }
+                    Err(err) => {
+                        error!("Failed to query Series metadata from disk for {series_id}: {err}");
+                        None
+                    }
+                };
+
+                if let Some(item) = item {
+                    existing_item = Some(item.clone());
+                    if let Some(StreamProperties::Series(p)) = item.additional_properties.as_ref() {
+                        props = Some(*p.clone());
                     }
                 }
             }
@@ -676,12 +729,14 @@ pub async fn update_series_metadata(
                 let input_password = input.password.as_deref().unwrap_or("");
 
                 let mut probed_count = 0;
+                let mut missing_any = false;
 
                 for ep in episodes {
                     let missing_video = !MediaQuality::is_valid_media_info(ep.video.as_deref());
                     let missing_audio = !MediaQuality::is_valid_media_info(ep.audio.as_deref());
 
                     if missing_video || missing_audio {
+                        missing_any = true;
 
                         // Acquire Connection logic
                         let temp_handle = if active_handle.is_some() {
@@ -725,8 +780,14 @@ pub async fn update_series_metadata(
                 }
                 if probed_count > 0 {
                     info!("Probed {probed_count} episodes for Series ID {display_id}");
+                } else if !missing_any {
+                    debug!("Series probe skipped for ID {display_id} (all episodes already have A/V details)");
                 }
+            } else {
+                debug!("Series probe skipped for ID {display_id} (no episode details available)");
             }
+        } else {
+            debug!("Series probe skipped for ID {display_id} (no series details available)");
         }
     }
 

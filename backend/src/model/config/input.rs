@@ -67,6 +67,7 @@ impl std::ops::BitOr<ConfigInputFlags> for ConfigInputFlagsSet {
 pub struct ConfigInputOptions {
     pub flags: ConfigInputFlagsSet,
     pub resolve_delay: u16,
+    pub probe_delay: u16,
     pub probe_live_interval_hours: u32,
 }
 
@@ -109,6 +110,7 @@ impl From<&ConfigInputOptionsDto> for ConfigInputOptions {
         Self {
             flags,
             resolve_delay: dto.resolve_delay,
+            probe_delay: dto.probe_delay,
             probe_live_interval_hours: dto.probe_live_interval_hours,
         }
     }

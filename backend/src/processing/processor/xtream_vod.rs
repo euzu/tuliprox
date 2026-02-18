@@ -18,6 +18,7 @@ use serde_json::Value;
 use shared::error::TuliproxError;
 use shared::model::{MediaQuality, PlaylistEntry, PlaylistItem, PlaylistItemType, StreamProperties, VideoStreamDetailProperties, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem, XtreamVideoInfo};
 use std::collections::HashMap;
+use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -180,7 +181,7 @@ async fn process_immediate_vod_info(ctx: &PlaylistProcessingContext, fpl: &mut F
 
     // Keep an optional read query open and reopen lazily only when needed.
     let xtream_path = xtream_get_file_path(&storage_path, XtreamCluster::Video);
-    let mut db_query_holder = None;
+    let mut db_query_holder: Option<Arc<Mutex<BPlusTreeQuery<u32, XtreamPlaylistItem>>>> = None;
     let mut _db_lock_holder = None;
 
     let mut batch: Vec<(ProviderIdType, VideoStreamProperties)> = Vec::with_capacity(BATCH_SIZE);
@@ -205,13 +206,28 @@ async fn process_immediate_vod_info(ctx: &PlaylistProcessingContext, fpl: &mut F
             if let Some(prov_mgr) = ctx.provider_manager.as_ref() {
                 if db_query_holder.is_none() && xtream_path.exists() {
                     let lock = ctx.config.file_locks.read_lock(&xtream_path).await;
-                    if let Ok(query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) {
-                        db_query_holder = Some(query);
+                    let xtream_path = xtream_path.clone();
+                    let query = match tokio::task::spawn_blocking(move || {
+                        BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path)
+                    }).await {
+                        Ok(Ok(query)) => Some(query),
+                        Ok(Err(err)) => {
+                            error!("Failed to open BPlusTreeQuery for VOD: {err}");
+                            None
+                        }
+                        Err(err) => {
+                            error!("Failed to open BPlusTreeQuery for VOD: {err}");
+                            None
+                        }
+                    };
+
+                    if let Some(query) = query {
+                        db_query_holder = Some(Arc::new(Mutex::new(query)));
                         _db_lock_holder = Some(lock);
                     }
                 }
                 // Pass the optional reference to the query
-                let db_query_ref = db_query_holder.as_mut();
+                let db_query_ref = db_query_holder.as_ref().map(Arc::clone);
 
                 match update_vod_info_immediate(ctx, prov_mgr, input, pli, provider_id.clone(), &reasons, db_query_ref).await {
                     Ok(Some(updated_props)) => {
@@ -311,17 +327,14 @@ fn check_resolve_reasons(
     // TMDB check
     check_resolve_tmdb(resolve_options, resolve_tmdb_enabled, pli, needs_info, &mut reasons);
 
-    // Probe check
+    // Probe check (independent of resolve info fetch; we still probe when A/V details are missing)
     if do_probe {
-        check_needs_probe(pli, needs_info, &mut reasons);
+        check_needs_probe(pli, &mut reasons);
     }
     reasons
 }
 
-fn check_needs_probe(pli: &PlaylistItem, needs_info: bool, reasons: &mut ResolveReasonSet) {
-    if !needs_info {
-        return;
-    }
+fn check_needs_probe(pli: &PlaylistItem, reasons: &mut ResolveReasonSet) {
     let needs_probe = match pli.header.additional_properties.as_ref() {
         Some(StreamProperties::Video(props)) => {
             let details = props.details.as_ref();
@@ -410,7 +423,7 @@ async fn update_vod_info_immediate(
     pli: &PlaylistItem,
     id: ProviderIdType,
     reasons: &ResolveReasonSet,
-    db_query: Option<&mut BPlusTreeQuery<u32, XtreamPlaylistItem>>,
+    db_query: Option<Arc<Mutex<BPlusTreeQuery<u32, XtreamPlaylistItem>>>>,
 ) -> Result<Option<VideoStreamProperties>, TuliproxError> {
     let fetch_info = reasons.contains(ResolveReason::Info);
 
@@ -449,7 +462,7 @@ pub async fn update_vod_metadata(
     save: bool,
     fetch_info: bool,
     do_probe: bool,
-    db_query: Option<&mut BPlusTreeQuery<u32, XtreamPlaylistItem>>,
+    db_query: Option<Arc<Mutex<BPlusTreeQuery<u32, XtreamPlaylistItem>>>>,
 ) -> Result<Option<VideoStreamProperties>, TuliproxError> {
     let working_dir = &app_config.config.load().working_dir;
     let storage_path = get_input_storage_path(&input.name, working_dir).await
@@ -467,9 +480,22 @@ pub async fn update_vod_metadata(
     let stream_id_opt = if let ProviderIdType::Id(vid) = id { Some(vid) } else { None };
 
     if let Some(stream_id) = stream_id_opt {
-        // Use provided query or open new one
         if let Some(query) = db_query {
-            if let Ok(Some(item)) = query.query_zero_copy(&stream_id) {
+            let query = Arc::clone(&query);
+            let item = match tokio::task::spawn_blocking(move || {
+                let mut guard = query.lock();
+                guard.query_zero_copy(&stream_id).ok().flatten()
+            })
+            .await
+            {
+                Ok(item) => item,
+                Err(err) => {
+                    error!("Failed to query VOD metadata from disk for {stream_id}: {err}");
+                    None
+                }
+            };
+
+            if let Some(item) = item {
                 existing_item = Some(item.clone());
                 if let Some(StreamProperties::Video(p)) = item.additional_properties.as_ref() {
                     props = Some(*p.clone());
@@ -478,13 +504,30 @@ pub async fn update_vod_metadata(
         } else {
             let xtream_path = xtream_get_file_path(&storage_path, XtreamCluster::Video);
             if xtream_path.exists() {
-                let _file_lock = app_config.file_locks.read_lock(&xtream_path).await;
-                if let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) {
-                    if let Ok(Some(item)) = query.query_zero_copy(&stream_id) {
-                        existing_item = Some(item.clone());
-                        if let Some(StreamProperties::Video(p)) = item.additional_properties.as_ref() {
-                            props = Some(*p.clone());
-                        }
+                let file_lock = app_config.file_locks.read_lock(&xtream_path).await;
+                let xtream_path = xtream_path.clone();
+                let item = match tokio::task::spawn_blocking(move || {
+                    let _guard = file_lock;
+                    let mut query = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path)?;
+                    query.query_zero_copy(&stream_id)
+                })
+                .await
+                {
+                    Ok(Ok(item)) => item,
+                    Ok(Err(err)) => {
+                        error!("Failed to query VOD metadata from disk for {stream_id}: {err}");
+                        None
+                    }
+                    Err(err) => {
+                        error!("Failed to query VOD metadata from disk for {stream_id}: {err}");
+                        None
+                    }
+                };
+
+                if let Some(item) = item {
+                    existing_item = Some(item.clone());
+                    if let Some(StreamProperties::Video(p)) = item.additional_properties.as_ref() {
+                        props = Some(*p.clone());
                     }
                 }
             }

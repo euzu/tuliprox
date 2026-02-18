@@ -21,6 +21,10 @@ pub fn default_as_default() -> String { "default".into() }
 // used to prevent frequent requests that could trigger a provider ban.
 pub const fn default_resolve_delay_secs() -> u16 { 2 }
 pub const fn is_default_resolve_delay_secs(v: &u16) -> bool { *v == default_resolve_delay_secs() }
+// Default delay values for probing streams (ffprobe),
+// used to avoid excessive probing under rapid playlist changes.
+pub const fn default_probe_delay_secs() -> u16 { 2 }
+pub const fn is_default_probe_delay_secs(v: &u16) -> bool { *v == default_probe_delay_secs() }
 // Default grace values to accommodate rapid channel changes and seek requests,
 // helping avoid triggering hard max_connection enforcement.
 pub const fn default_grace_period_millis() -> u64 { 2000 }

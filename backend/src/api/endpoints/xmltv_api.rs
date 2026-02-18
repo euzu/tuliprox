@@ -1,4 +1,4 @@
-use crate::api::api_utils::{empty_json_response_as_array, get_user_target, get_user_target_by_credentials, internal_server_error, resource_response, stream_json_or_bin_response, try_unwrap_body};
+use crate::api::api_utils::{empty_json_response_as_array, get_user_target, get_user_target_by_credentials, internal_server_error, resource_response, stream_json_or_bin_response_stream, try_unwrap_body};
 use crate::api::model::AppState;
 use crate::api::model::UserApiRequest;
 use crate::model::{Config, EPG_ATTRIB_ID, EPG_TAG_CHANNEL};
@@ -6,7 +6,7 @@ use crate::model::{ConfigTarget, ProxyUserCredentials, TargetOutput};
 use crate::repository::m3u_get_epg_file_path_for_target;
 use crate::repository::storage_const;
 use crate::repository::XML_PREAMBLE;
-use crate::repository::{get_target_storage_path, BPlusTreeQuery};
+use crate::repository::{get_target_storage_path, BPlusTreeQuery, LockedReceiverStream};
 use crate::repository::{xtream_get_epg_file_path_for_target, xtream_get_storage_path};
 use crate::utils;
 use crate::utils::{deobscure_text, file_exists_async, format_xmltv_time_utc, get_epg_processing_options, obscure_text, EpgProcessingOptions, EpgTimeShift};
@@ -19,6 +19,8 @@ use shared::model::{EpgChannel, EpgProgramme, ShortEpgDto, ShortEpgResultDto};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::mpsc;
+use tokio::task;
 use tokio_util::io::ReaderStream;
 
 pub fn get_empty_epg_response() -> axum::response::Response {
@@ -90,16 +92,27 @@ pub async fn serve_epg_web_ui(
     target: &Arc<ConfigTarget>,
 ) -> axum::response::Response {
     if file_exists_async(epg_path).await {
-        let _file_lock = app_state.app_config.file_locks.read_lock(epg_path).await;
-        match BPlusTreeQuery::<Arc<str>, EpgChannel>::try_new(epg_path) {
-            Ok(query) => {
-                let iterator: Box<dyn Iterator<Item=EpgChannel> + Send> = Box::new(query.disk_iter().map(|(_, v)| v));
-                return stream_json_or_bin_response(accept, iterator);
+        let iter_lock = app_state.app_config.file_locks.read_lock(epg_path).await;
+        let bg_lock = app_state.app_config.file_locks.read_lock(epg_path).await;
+        let epg_path = epg_path.to_path_buf();
+        let target_name = target.name.clone();
+        let (tx, rx) = mpsc::channel::<EpgChannel>(64);
+
+        task::spawn_blocking(move || {
+            let _guard = bg_lock;
+            let Ok(query) = BPlusTreeQuery::<Arc<str>, EpgChannel>::try_new(&epg_path) else {
+                error!("Failed to open epg db for target {} {}", target_name, epg_path.display());
+                return;
+            };
+            for (_, channel) in query.disk_iter() {
+                if tx.blocking_send(channel).is_err() {
+                    break;
+                }
             }
-            Err(err) => {
-                error!("Failed to open epg db for target {} {} - {err}", target.name, epg_path.display());
-            }
-        }
+        });
+
+        let stream = LockedReceiverStream::new(rx, iter_lock);
+        return stream_json_or_bin_response_stream(accept, stream);
     }
     try_unwrap_body!(empty_json_response_as_array())
 }
@@ -124,15 +137,6 @@ async fn serve_epg_with_rewrites(
         return get_empty_epg_response();
     }
 
-    let _file_lock = app_state.app_config.file_locks.read_lock(epg_path).await;
-    let mut query = match BPlusTreeQuery::<Arc<str>, EpgChannel>::try_new(epg_path) {
-        Ok(query) => query,
-        Err(err) => {
-            error!("Failed to open BPlusTreeQuery {} - {err}", epg_path.display());
-            return get_empty_epg_response();
-        }
-    };
-
     let epg_processing_options = get_epg_processing_options(app_state, user, target);
 
     let base_url = if !matches!(epg_processing_options.time_shift, EpgTimeShift::None) || epg_processing_options.rewrite_urls {
@@ -144,18 +148,38 @@ async fn serve_epg_with_rewrites(
 
     let limit = limit.unwrap_or_default();
 
+    let bg_lock = app_state.app_config.file_locks.read_lock(epg_path).await;
+    let epg_path = epg_path.to_path_buf();
+    let (channel_tx, mut channel_rx) = mpsc::channel::<EpgChannel>(256);
+
+    task::spawn_blocking(move || {
+        let _guard = bg_lock;
+        let Ok(mut query) = BPlusTreeQuery::<Arc<str>, EpgChannel>::try_new(&epg_path) else {
+            error!("Failed to open BPlusTreeQuery {}", epg_path.display());
+            return;
+        };
+
+        for (_, channel) in query.iter() {
+            if channel_tx.blocking_send(channel).is_err() {
+                break;
+            }
+        }
+    });
+
     let (mut tx, rx) = tokio::io::duplex(8192);
     tokio::spawn(async move {
         // Work-Around BytesText DocType escape, see below
         if let Err(err) = tx.write_all(XML_PREAMBLE.as_ref()).await {
             error!("EPG: Failed to write xml header {err}");
+            return;
         }
         if let Err(err) = tx.write_all(r#"<tv generator-info-name="X" generator-info-url="tuliprox">"#.as_bytes()).await {
             error!("EPG: Failed to write xml tv header {err}");
+            return;
         }
 
         let mut writer = quick_xml::writer::Writer::new(tx);
-        for (_, channel) in query.iter() {
+        while let Some(channel) = channel_rx.recv().await {
             let programmes = if limit > 0 {
                 channel.get_programme_with_limit(limit)
             } else {
@@ -237,20 +261,33 @@ async fn serve_epg_with_rewrites(
 }
 
 async fn get_epg_channel(app_state: &Arc<AppState>, channel_id: &Arc<str>, epg_path: &Path) -> Option<EpgChannel> {
-    let _file_lock = app_state.app_config.file_locks.read_lock(epg_path).await;
-    match BPlusTreeQuery::<Arc<str>, EpgChannel>::try_new(epg_path) {
-        Ok(mut query) => {
-            match query.query(channel_id) {
-                Ok(Some(item)) => return Some(item),
-                Ok(None) => {}
+    let file_lock = app_state.app_config.file_locks.read_lock(epg_path).await;
+    let epg_path = epg_path.to_path_buf();
+    let channel_id = Arc::clone(channel_id);
+
+    match task::spawn_blocking(move || -> Option<EpgChannel> {
+        let _guard = file_lock;
+        match BPlusTreeQuery::<Arc<str>, EpgChannel>::try_new(&epg_path) {
+            Ok(mut query) => match query.query(&channel_id) {
+                Ok(Some(item)) => Some(item),
+                Ok(None) => None,
                 Err(err) => {
                     error!("Failed to query db file {}: {err}", epg_path.display());
+                    None
                 }
+            },
+            Err(err) => {
+                error!("Failed to read db file {}: {err}", epg_path.display());
+                None
             }
         }
-        Err(err) => { error!("Failed to read db file {}: {err}", epg_path.display()); }
+    }).await {
+        Ok(result) => result,
+        Err(err) => {
+            error!("Failed to run epg query task: {err}");
+            None
+        }
     }
-    None
 }
 
 fn format_xmltv_time(ts: i64) -> String {
@@ -422,4 +459,3 @@ pub fn xmltv_api_register() -> axum::Router<Arc<AppState>> {
                axum::routing::get(epg_api_resource),
         )
 }
-

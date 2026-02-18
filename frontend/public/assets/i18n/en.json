@@ -368,6 +368,7 @@
     "ADD_WATCH": "Add Watch",
     "ADD_MAPPING": "Add Mapping",
     "RESOLVE_DELAY_SEC": "Resolve Delay (sec)",
+    "PROBE_DELAY_SEC": "Probe Delay (sec)",
     "RESOLVE_BACKGROUND": "Resolve in Background",
     "PROBE": "Probe",
     "PROBE_LIVE_INTERVAL_HOURS": "Live Interval (hour)",
