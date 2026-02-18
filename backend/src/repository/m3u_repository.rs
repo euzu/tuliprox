@@ -224,16 +224,50 @@ async fn persist_m3u_playlist_as_text(
         })
         .await?;
 
-        await_playlist_write!(
-            fs::rename(&m3u_tmp, &m3u_filename),
-            "Failed to replace {} - {}",
-            m3u_filename.display()
-        );
-        await_playlist_write!(
-            fs::rename(&provider_tmp, &provider_filename),
-            "Failed to replace {} - {}",
-            provider_filename.display()
-        );
+        let rename_result: Result<(), TuliproxError> = async {
+            await_playlist_write!(
+                fs::rename(&provider_tmp, &provider_filename),
+                "Failed to replace {} - {}",
+                provider_filename.display()
+            );
+            await_playlist_write!(
+                fs::rename(&m3u_tmp, &m3u_filename),
+                "Failed to replace {} - {}",
+                m3u_filename.display()
+            );
+            Ok(())
+        }
+        .await;
+
+        if let Err(rename_err) = rename_result {
+            if let Err(cleanup_err) = async {
+                await_playlist_write!(
+                    fs::remove_file(&provider_tmp),
+                    "Failed to cleanup temp file {} - {}",
+                    provider_tmp.display()
+                );
+                Ok::<(), TuliproxError>(())
+            }
+            .await
+            {
+                error!("{cleanup_err}");
+            }
+
+            if let Err(cleanup_err) = async {
+                await_playlist_write!(
+                    fs::remove_file(&m3u_tmp),
+                    "Failed to cleanup temp file {} - {}",
+                    m3u_tmp.display()
+                );
+                Ok::<(), TuliproxError>(())
+            }
+            .await
+            {
+                error!("{cleanup_err}");
+            }
+
+            return Err(rename_err);
+        }
     }
 
     Ok(())

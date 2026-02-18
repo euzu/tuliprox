@@ -396,7 +396,19 @@ macro_rules! impl_single_file_disk_source {
                 }
             }
             fn clone_box(&self) -> Box<dyn PlaylistSource> {
-                let playlist = self.playlist.as_ref().and_then(|query| query.try_clone().ok());
+                let playlist = self.playlist.as_ref().and_then(|query| {
+                    match query.try_clone() {
+                        Ok(cloned_query) => Some(cloned_query),
+                        Err(err) => {
+                            warn!(
+                                "PlaylistSource::clone_box failed to clone {} disk query {}: {err}",
+                                stringify!($name),
+                                self.file_path.display()
+                            );
+                            None
+                        }
+                    }
+                });
 
                 Box::new(Self {
                     app_config: Arc::clone(&self.app_config),
@@ -539,11 +551,19 @@ where
         {
             Ok(Ok((query, guard))) => Some((query, guard)),
             Ok(Err(err)) => {
-                error!("Error loading disk playlist {}: {err}", file_path_err.display());
+                error!(
+                    "I/O error loading disk playlist {} via BPlusTreeQuery::try_new: {err}",
+                    file_path_err.display()
+                );
                 None
             }
             Err(err) => {
-                error!("Error loading disk playlist {}: {err}", file_path_err.display());
+                error!(
+                    "Task/JoinError loading disk playlist {}: {err} (panic={}, cancelled={})",
+                    file_path_err.display(),
+                    err.is_panic(),
+                    err.is_cancelled()
+                );
                 None
             }
         }
