@@ -100,7 +100,19 @@ fn parse_css_color_to_rgb(value: &str) -> Option<[f32; 3]> {
                 let b = u8::from_str_radix(&hex[2..3].repeat(2), 16).ok()? as f32 / 255.0;
                 Some([r, g, b])
             }
+            4 => {
+                let r = u8::from_str_radix(&hex[0..1].repeat(2), 16).ok()? as f32 / 255.0;
+                let g = u8::from_str_radix(&hex[1..2].repeat(2), 16).ok()? as f32 / 255.0;
+                let b = u8::from_str_radix(&hex[2..3].repeat(2), 16).ok()? as f32 / 255.0;
+                Some([r, g, b])
+            }
             6 => {
+                let r = u8::from_str_radix(&hex[0..2], 16).ok()? as f32 / 255.0;
+                let g = u8::from_str_radix(&hex[2..4], 16).ok()? as f32 / 255.0;
+                let b = u8::from_str_radix(&hex[4..6], 16).ok()? as f32 / 255.0;
+                Some([r, g, b])
+            }
+            8 => {
                 let r = u8::from_str_radix(&hex[0..2], 16).ok()? as f32 / 255.0;
                 let g = u8::from_str_radix(&hex[2..4], 16).ok()? as f32 / 255.0;
                 let b = u8::from_str_radix(&hex[4..6], 16).ok()? as f32 / 255.0;
@@ -143,15 +155,28 @@ fn read_accent_colors_from_css() -> ([f32; 3], [f32; 3]) {
         return (fallback_1, fallback_2);
     };
 
+    // Prefer new particle-flow variables, but keep legacy names as fallback for existing themes.
     let accent_1 = style
-        .get_property_value("--floating-background-accent-color-1")
+        .get_property_value("--particle-flow-background-accent-color-1")
         .ok()
         .and_then(|v| parse_css_color_to_rgb(&v))
+        .or_else(|| {
+            style
+                .get_property_value("--floating-background-accent-color-1")
+                .ok()
+                .and_then(|v| parse_css_color_to_rgb(&v))
+        })
         .unwrap_or(fallback_1);
     let accent_2 = style
-        .get_property_value("--floating-background-accent-color-2")
+        .get_property_value("--particle-flow-background-accent-color-2")
         .ok()
         .and_then(|v| parse_css_color_to_rgb(&v))
+        .or_else(|| {
+            style
+                .get_property_value("--floating-background-accent-color-2")
+                .ok()
+                .and_then(|v| parse_css_color_to_rgb(&v))
+        })
         .unwrap_or(fallback_2);
 
     (accent_1, accent_2)
@@ -256,12 +281,13 @@ fn build_particles() -> Vec<ParticleState> {
     particles
 }
 
-fn update_particles(particles: &mut [ParticleState], dt: f32, time: f32) {
+fn update_particles(particles: &mut [ParticleState], density: &mut [f32], dt: f32, time: f32) {
     let wind_dir = normalize([1.0 + 0.2 * (time * 0.04).sin(), 0.18 * (time * 0.07).sin()]);
     let wind_env = 0.38 + 0.62 * (0.5 + 0.5 * (time * 0.08 + (time * 0.023).sin() * 2.0).sin());
     let expected_density = particles.len() as f32 / (DENSITY_GRID_W * DENSITY_GRID_H) as f32;
 
-    let mut density = [0.0_f32; DENSITY_GRID_W * DENSITY_GRID_H];
+    debug_assert_eq!(density.len(), DENSITY_GRID_W * DENSITY_GRID_H);
+    density.fill(0.0);
     for particle in particles.iter() {
         let (cx, cy) = pos_to_cell(particle.pos);
         density[cy * DENSITY_GRID_W + cx] += 1.0;
@@ -379,15 +405,12 @@ fn init_renderer(canvas: &HtmlCanvasElement, initial_data: &[f32]) -> Result<Ren
 
     let buffer = gl.create_buffer().ok_or_else(|| String::from("Failed to create particle buffer"))?;
     gl.bind_buffer(WebGlRenderingContext::ARRAY_BUFFER, Some(&buffer));
-
-    let byte_size = (initial_data.len() * std::mem::size_of::<f32>()) as i32;
-    gl.buffer_data_with_i32(
+    let initial_array = Float32Array::from(initial_data);
+    gl.buffer_data_with_array_buffer_view(
         WebGlRenderingContext::ARRAY_BUFFER,
-        byte_size,
+        &initial_array,
         WebGlRenderingContext::DYNAMIC_DRAW,
     );
-    let initial_array = Float32Array::from(initial_data);
-    gl.buffer_sub_data_with_i32_and_array_buffer_view(WebGlRenderingContext::ARRAY_BUFFER, 0, &initial_array);
 
     let a_pos_loc = gl.get_attrib_location(&program, "a_pos");
     if a_pos_loc < 0 {
@@ -432,6 +455,7 @@ pub fn ParticleFlowBackground() -> Html {
             };
 
             let particles = Rc::new(RefCell::new(build_particles()));
+            let density_grid = Rc::new(RefCell::new(vec![0.0_f32; DENSITY_GRID_W * DENSITY_GRID_H]));
             let gpu_data = Rc::new(RefCell::new(Vec::<f32>::with_capacity(
                 PARTICLE_COUNT as usize * PARTICLE_STRIDE_FLOATS as usize,
             )));
@@ -464,6 +488,7 @@ pub fn ParticleFlowBackground() -> Html {
             let last_ts_ref = last_ts.clone();
             let sim_time_ref = sim_time.clone();
             let particles_ref = particles.clone();
+            let density_grid_ref = density_grid.clone();
             let gpu_data_ref = gpu_data.clone();
 
             *animation.borrow_mut() = Some(Closure::wrap(Box::new(move |timestamp: f64| {
@@ -485,7 +510,8 @@ pub fn ParticleFlowBackground() -> Html {
 
                 {
                     let mut particles = particles_ref.borrow_mut();
-                    update_particles(&mut particles, dt, time);
+                    let mut density_grid = density_grid_ref.borrow_mut();
+                    update_particles(&mut particles, density_grid.as_mut_slice(), dt, time);
                     let mut gpu_data = gpu_data_ref.borrow_mut();
                     fill_gpu_data(&particles, &mut gpu_data);
                 }
@@ -579,7 +605,7 @@ pub fn ParticleFlowBackground() -> Html {
         });
     }
 
-    html! { <canvas class="tp__floating-background" ref={canvas_ref} aria-hidden="true" /> }
+    html! { <canvas class="tp__particle-flow-background" ref={canvas_ref} aria-hidden="true" /> }
 }
 
 fn compile_shader(gl: &WebGlRenderingContext, shader_type: u32, source: &str) -> Result<WebGlShader, String> {
@@ -599,9 +625,19 @@ fn compile_shader(gl: &WebGlRenderingContext, shader_type: u32, source: &str) ->
 
 fn link_program(gl: &WebGlRenderingContext, vert_source: &str, frag_source: &str) -> Result<WebGlProgram, String> {
     let vertex_shader = compile_shader(gl, WebGlRenderingContext::VERTEX_SHADER, vert_source)?;
-    let fragment_shader = compile_shader(gl, WebGlRenderingContext::FRAGMENT_SHADER, frag_source)?;
+    let fragment_shader = match compile_shader(gl, WebGlRenderingContext::FRAGMENT_SHADER, frag_source) {
+        Ok(shader) => shader,
+        Err(err) => {
+            gl.delete_shader(Some(&vertex_shader));
+            return Err(err);
+        }
+    };
 
-    let program = gl.create_program().ok_or_else(|| String::from("Failed to create program"))?;
+    let Some(program) = gl.create_program() else {
+        gl.delete_shader(Some(&vertex_shader));
+        gl.delete_shader(Some(&fragment_shader));
+        return Err(String::from("Failed to create program"));
+    };
 
     gl.attach_shader(&program, &vertex_shader);
     gl.attach_shader(&program, &fragment_shader);
@@ -610,8 +646,18 @@ fn link_program(gl: &WebGlRenderingContext, vert_source: &str, frag_source: &str
     let status = gl.get_program_parameter(&program, WebGlRenderingContext::LINK_STATUS).as_bool().unwrap_or(false);
 
     if status {
+        gl.detach_shader(&program, &vertex_shader);
+        gl.detach_shader(&program, &fragment_shader);
+        gl.delete_shader(Some(&vertex_shader));
+        gl.delete_shader(Some(&fragment_shader));
         Ok(program)
     } else {
-        Err(gl.get_program_info_log(&program).unwrap_or_else(|| String::from("Unknown link error")))
+        let error = gl.get_program_info_log(&program).unwrap_or_else(|| String::from("Unknown link error"));
+        gl.detach_shader(&program, &vertex_shader);
+        gl.detach_shader(&program, &fragment_shader);
+        gl.delete_program(Some(&program));
+        gl.delete_shader(Some(&vertex_shader));
+        gl.delete_shader(Some(&fragment_shader));
+        Err(error)
     }
 }
