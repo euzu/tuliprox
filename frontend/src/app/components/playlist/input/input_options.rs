@@ -1,4 +1,4 @@
-use crate::app::components::{chip::convert_bool_to_chip_style, make_tags, CollapsePanel, Tag, TagList};
+use crate::app::components::{chip::convert_bool_to_chip_style, make_tags, Tag, TagList};
 use shared::{
     model::ConfigInputDto,
     utils::{default_probe_delay_secs, default_probe_live_interval, default_resolve_delay_secs},
@@ -125,15 +125,12 @@ pub fn InputOptions(props: &InputOptionsProps) -> Html {
         (has_options, make_tags(&options1, &translate), make_tags(&options2, &translate), resolve_tags, probe_tags)
     });
 
-    let has_options = tags.0;
     let opts1: Vec<Rc<Tag>> = tags.1.clone();
     let opts2: Vec<Rc<Tag>> = tags.2.clone();
     let resolve: Vec<Rc<Tag>> = tags.3.clone();
     let probe: Vec<Rc<Tag>> = tags.4.clone();
 
     html! {
-        <CollapsePanel expanded={false} class={format!("tp__target-options__panel{}", if has_options { " tp__target-options__has_options"} else {""})}
-                       title={translate.t("LABEL.SETTINGS")}>
             <div class="tp__target-options">
                 <div class="tp__target-options__section">
                   <TagList tags={opts2} />
@@ -151,6 +148,5 @@ pub fn InputOptions(props: &InputOptionsProps) -> Html {
                   <TagList tags={opts1} />
                 </div>
             </div>
-        </CollapsePanel>
     }
 }

@@ -7,7 +7,10 @@ const STREAMS: &str = "streams";
 const USERS: &str = "users";
 const CONFIG: &str = "config";
 const PLAYLIST_UPDATE: &str = "playlist_update";
-const PLAYLIST_EDITOR: &str = "playlist_editor";
+const PLAYLIST_SETTINGS: &str = "PlaylistSettings";
+const PLAYLIST_SETTINGS_LOWER: &str = "playlistsettings";
+const PLAYLIST_SETTINGS_SNAKE: &str = "playlist_settings";
+const PLAYLIST_EDITOR_LEGACY: &str = "playlist_editor";
 const PLAYLIST_EXPLORER: &str = "playlist_explorer";
 const PLAYLIST_EPG: &str = "playlist_epg";
 const SOURCE_EDITOR: &str = "source_editor";
@@ -21,7 +24,7 @@ pub enum ViewType {
     Config,
     SourceEditor,
     PlaylistUpdate,
-    PlaylistEditor,
+    PlaylistSettings,
     PlaylistExplorer,
     PlaylistEpg,
 }
@@ -38,7 +41,9 @@ impl FromStr for ViewType {
             CONFIG => Ok(ViewType::Config),
             SOURCE_EDITOR => Ok(ViewType::SourceEditor),
             PLAYLIST_UPDATE => Ok(ViewType::PlaylistUpdate),
-            PLAYLIST_EDITOR => Ok(ViewType::PlaylistEditor),
+            PLAYLIST_SETTINGS_LOWER | PLAYLIST_SETTINGS_SNAKE | PLAYLIST_EDITOR_LEGACY => {
+                Ok(ViewType::PlaylistSettings)
+            }
             PLAYLIST_EXPLORER => Ok(ViewType::PlaylistExplorer),
             PLAYLIST_EPG => Ok(ViewType::PlaylistEpg),
             _ => info_err_res!("Unknown view type: {s}"),
@@ -56,7 +61,7 @@ impl fmt::Display for ViewType {
             ViewType::Config => CONFIG,
             ViewType::SourceEditor => SOURCE_EDITOR,
             ViewType::PlaylistUpdate => PLAYLIST_UPDATE,
-            ViewType::PlaylistEditor => PLAYLIST_EDITOR,
+            ViewType::PlaylistSettings => PLAYLIST_SETTINGS,
             ViewType::PlaylistExplorer => PLAYLIST_EXPLORER,
             ViewType::PlaylistEpg => PLAYLIST_EPG,
         };

@@ -102,7 +102,7 @@ pub fn TargetTable(props: &TargetTableProps) -> Html {
                                   /> },
                     2 => html! { dto.name.as_str() },
                     3 => html! { <TargetOutput target={Rc::clone(&dto)} /> },
-                    4 => html! { <TargetOptions target={Rc::clone(&dto)} /> },
+                    4 => html! { <RevealContent preview={ html!{translator.t("LABEL.SETTINGS")}}><TargetOptions target={Rc::clone(&dto)} /></RevealContent> },
                     5 => dto.sort.as_ref().map_or_else(|| html! {}, |_s| html! { <RevealContent><TargetSort target={Rc::clone(&dto)} /></RevealContent> }),
                     6 => dto.t_filter.as_ref().map_or_else(|| html! {}, |f| html! { <RevealContent preview={Some(html!{<FilterView inline={true} filter={f.clone()} />})}><FilterView pretty={true} filter={f.clone()} /></RevealContent> }),
                     7 => dto.rename.as_ref().map_or_else(|| html! {}, |_r| html! { <RevealContent><TargetRename target={Rc::clone(&dto)} /></RevealContent> }),

@@ -127,7 +127,9 @@ pub fn InputTable(props: &InputTableProps) -> Html {
                         .as_ref()
                         .map_or_else(|| html! {}, |pwd| html! { <HideContent content={pwd.to_string()}></HideContent>}),
                     7 => dto.persist.as_ref().map_or_else(|| html! {}, |p| html! {p}),
-                    8 => html! { <InputOptions input={dto.clone()} /> },
+                    8 => {
+                        html! { <RevealContent preview={ html!{translator.t("LABEL.SETTINGS")}}><InputOptions input={dto.clone()} /></RevealContent> }
+                    }
                     9 => html! { dto.priority.to_string() },
                     10 => html! { dto.max_connections.to_string() },
                     11 => html! { dto.method.to_string() },

@@ -1,4 +1,4 @@
-use crate::app::components::{CollapsePanel, HdHomeRunOutput, M3uOutput, StrmOutput, XtreamOutput};
+use crate::app::components::{HdHomeRunOutput, M3uOutput, RevealContent, StrmOutput, XtreamOutput};
 use shared::model::{ConfigTargetDto, TargetOutputDto};
 use std::rc::Rc;
 use yew::prelude::*;
@@ -19,26 +19,40 @@ pub fn TargetOutput(props: &TargetOutputProps) -> Html {
                 props.target.output.iter().map(|output: &TargetOutputDto| {
                     match output {
                     TargetOutputDto::Xtream(xc) => html! {
-                        <CollapsePanel class={format!("tp__target-output__xtream{}", if xc.has_any_option() { " tp__target-output__has_options" } else {""}) }
-                            expanded={false} title={translate.t("LABEL.XTREAM")}>
+                        <RevealContent preview={ html!{
+                            <span class={format!("tp__target-output__xtream{}", if xc.has_any_option() { " tp__target-output__has_options" } else {""})}>
+                            {translate.t("LABEL.XTREAM")}
+                            </span>
+                        }}>
                             <XtreamOutput output={xc.clone()} />
-                        </CollapsePanel>
+                        </RevealContent>
                     },
                     TargetOutputDto::M3u(m3u) => html! {
-                        <CollapsePanel class={format!("tp__target-output__m3u{}", if m3u.has_any_option() { " tp__target-output__has_options" } else {""}) }
-                            expanded={false} title={translate.t("LABEL.M3U")}>
+                        <RevealContent preview={ html!{
+                            <span class={format!("tp__target-output__m3u{}", if m3u.has_any_option() { " tp__target-output__has_options" } else {""})}>
+                            {translate.t("LABEL.M3U")}
+                            </span>
+                        }}>
                             <M3uOutput output={m3u.clone()}/>
-                        </CollapsePanel>
+                        </RevealContent>
                     },
                     TargetOutputDto::Strm(strm) => html! {
-                        <CollapsePanel class="tp__target-output__strm" expanded={false} title={translate.t("LABEL.STRM")}>
+                        <RevealContent preview={ html!{
+                            <span class={"tp__target-output__strm"}>
+                            {translate.t("LABEL.STRM")}
+                            </span>
+                        }}>
                             <StrmOutput output={strm.clone()}/>
-                        </CollapsePanel>
+                        </RevealContent>
                     },
                     TargetOutputDto::HdHomeRun(hdhr) => html! {
-                        <CollapsePanel class="tp__target-output__hdhomerun" expanded={false} title={translate.t("LABEL.HDHOMERUN")}>
+                        <RevealContent preview={ html!{
+                            <span class={"tp__target-output__hdhomerun"}>
+                            {translate.t("LABEL.HDHOMERUN")}
+                            </span>
+                        }}>
                                 <HdHomeRunOutput output={hdhr.clone()}/>
-                        </CollapsePanel>
+                        </RevealContent>
                     },
                     }
                 }).collect::<Html>()

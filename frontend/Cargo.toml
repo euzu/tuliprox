@@ -40,7 +40,8 @@ indexmap = "2.13.0"
 version = "0.3"
 features = ["Document", "Element", "Node", "Window", "HtmlCollection", "HtmlImageElement", "HtmlInputElement",
     "DomRect", "HtmlDialogElement", "CssStyleDeclaration",
-    "Event", "WebGlRenderingContext", "WebGlProgram", "WebGlShader", "WebGlBuffer", "WebGlUniformLocation",
+    "Event", "MutationObserver", "MutationObserverInit",
+    "WebGlRenderingContext", "WebGlProgram", "WebGlShader", "WebGlBuffer", "WebGlUniformLocation",
     "HtmlCanvasElement"]
 
 [dev-dependencies]

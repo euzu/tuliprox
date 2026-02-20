@@ -1,7 +1,4 @@
-use crate::app::{
-    components::{AppIcon, CollapsePanel, InputTable, PlaylistContext, PlaylistEditorPage, TargetTable, TextButton},
-    context::PlaylistEditorContext,
-};
+use crate::app::components::{AppIcon, CollapsePanel, InputTable, PlaylistContext, TargetTable};
 use yew::prelude::*;
 use yew_i18n::use_translation;
 
@@ -9,13 +6,6 @@ use yew_i18n::use_translation;
 pub fn PlaylistList() -> Html {
     let translate = use_translation();
     let playlist_ctx = use_context::<PlaylistContext>().expect("Playlist context not found");
-    let playlist_editor_ctx = use_context::<PlaylistEditorContext>().expect("PlaylistEditor context not found");
-
-    let handle_create = {
-        Callback::from(move |_| {
-            playlist_editor_ctx.active_page.set(PlaylistEditorPage::Create);
-        })
-    };
 
     let playlist_body = if let Some(data) = playlist_ctx.sources.as_ref() {
         html! {
@@ -39,10 +29,6 @@ pub fn PlaylistList() -> Html {
       <div class="tp__playlist-list tp__list-list">
         <div class="tp__playlist-list__header tp__list-list__header">
           <h1>{ translate.t("LABEL.PLAYLISTS")}</h1>
-          <TextButton class="primary" name="new_playlist"
-                icon="PlaylistAdd"
-                title={ translate.t("LABEL.NEW_PLAYLIST")}
-                onclick={handle_create}></TextButton>
         </div>
         <div class="tp__playlist-list__body tp__list-list__body">
            { playlist_body }

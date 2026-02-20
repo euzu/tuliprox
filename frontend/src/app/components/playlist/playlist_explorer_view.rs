@@ -33,7 +33,7 @@ pub fn PlaylistExplorerView() -> Html {
         let translate = translate.clone();
         use_effect_with(view_visible_dep, move |_| match *view_visible {
             PlaylistExplorerPage::SourceSelector => {
-                breadcrumbs.set(Rc::new(vec![translate.t("LABEL.PLAYLIST_EXPLORER"), translate.t("LABEL.SOURCES")]))
+                breadcrumbs.set(Rc::new(vec![translate.t("LABEL.PLAYLISTS"), translate.t("LABEL.SOURCES")]))
             }
         });
     };
