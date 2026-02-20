@@ -419,10 +419,13 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         })
     };
 
+    let library_input = input_form_state.form.input_type.is_library();
+    let xtream_input = input_form_state.form.input_type.is_xtream();
+
     let render_options = || {
         html! {
             <Card class="tp__config-view__card">
-            { html_if!(input_form_state.form.input_type.is_xtream(), {
+            { html_if!(xtream_input, {
                 <>
                 <TitledCard title={translate.t(LABEL_SKIP)}>
                   <div class="tp__config-view__cols-3">
@@ -531,15 +534,17 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                { edit_field_text!(input_form_state, translate.t(LABEL_NAME),  name, ConfigInputFormAction::Name) }
                { edit_field_bool!(input_form_state, translate.t(LABEL_ENABLED), enabled, ConfigInputFormAction::Enabled) }
                </div>
-               { edit_field_text!(input_form_state, translate.t(LABEL_URL),  url, ConfigInputFormAction::Url) }
-               <div class="tp__config-view__cols-2">
-               { edit_field_text_option!(input_form_state, translate.t(LABEL_USERNAME), username, ConfigInputFormAction::Username) }
-               { edit_field_text_option!(input_form_state, translate.t(LABEL_PASSWORD), password, ConfigInputFormAction::Password, true) }
-               { edit_field_number_u16!(input_form_state, translate.t(LABEL_MAX_CONNECTIONS), max_connections, ConfigInputFormAction::MaxConnections) }
-               { edit_field_number_i16!(input_form_state, translate.t(LABEL_PRIORITY), priority, ConfigInputFormAction::Priority) }
-               { edit_field_date!(input_form_state, translate.t(LABEL_EXP_DATE), exp_date, ConfigInputFormAction::ExpDate) }
-               { edit_field_text_option!(input_form_state, translate.t(LABEL_CACHE_DURATION), cache_duration, ConfigInputFormAction::CacheDuration) }
-               { config_field_child!(translate.t(LABEL_FETCH_METHOD), {
+               { html_if!(!library_input, {
+                <>
+                 { edit_field_text!(input_form_state, translate.t(LABEL_URL),  url, ConfigInputFormAction::Url) }
+                 <div class="tp__config-view__cols-2">
+                 { edit_field_text_option!(input_form_state, translate.t(LABEL_USERNAME), username, ConfigInputFormAction::Username) }
+                 { edit_field_text_option!(input_form_state, translate.t(LABEL_PASSWORD), password, ConfigInputFormAction::Password, true) }
+                 { edit_field_number_u16!(input_form_state, translate.t(LABEL_MAX_CONNECTIONS), max_connections, ConfigInputFormAction::MaxConnections) }
+                 { edit_field_number_i16!(input_form_state, translate.t(LABEL_PRIORITY), priority, ConfigInputFormAction::Priority) }
+                 { edit_field_date!(input_form_state, translate.t(LABEL_EXP_DATE), exp_date, ConfigInputFormAction::ExpDate) }
+                 { edit_field_text_option!(input_form_state, translate.t(LABEL_CACHE_DURATION), cache_duration, ConfigInputFormAction::CacheDuration) }
+                 { config_field_child!(translate.t(LABEL_FETCH_METHOD), {
                    html! {
                        <RadioButtonGroup
                         multi_select={false} none_allowed={false}
@@ -551,9 +556,11 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                         options={fetch_methods.clone()}
                         selected={input_method_selection}
                     />
-               }})}
-               </div>
-               { edit_field_text_option!(input_form_state, translate.t(LABEL_PERSIST), persist, ConfigInputFormAction::Persist) }
+                 }})}
+                 </div>
+                 { edit_field_text_option!(input_form_state, translate.t(LABEL_PERSIST), persist, ConfigInputFormAction::Persist) }
+                </>
+               })}
             </Card>
         }
     };
@@ -761,8 +768,6 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         })
     };
 
-    let library_input = input_form_state.form.input_type.is_library();
-
     let render_edit_mode = || {
         html! {
             <div class="tp__source-editor-form__body">
@@ -800,11 +805,11 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                     {render_alias()}
                     </Panel>
                 })}
-                <Panel value={InputFormPage::Options.to_string()} active={view_visible.to_string()}>
-                {render_options()}
-                </Panel>
                 { html_if!(!library_input, {
-                    <>
+                 <>
+                  <Panel value={InputFormPage::Options.to_string()} active={view_visible.to_string()}>
+                   {render_options()}
+                  </Panel>
                   <Panel value={InputFormPage::Staged.to_string()} active={view_visible.to_string()}>
                    {render_staged()}
                    </Panel>
