@@ -614,6 +614,10 @@ pub fn ParticleFlowBackground() -> Html {
                 MutationObserver::new(on_theme_change.as_ref().unchecked_ref()).ok().and_then(|observer| {
                     let options = MutationObserverInit::new();
                     options.set_attributes(true);
+                    let attribute_filter = Array::new();
+                    attribute_filter.push(&"class".into());
+                    attribute_filter.push(&"data-theme".into());
+                    options.set_attribute_filter(&attribute_filter.into());
                     observer.observe_with_options(&body, &options).ok()?;
                     Some(observer)
                 })

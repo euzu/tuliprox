@@ -256,6 +256,34 @@ macro_rules! sort_groups_by_source_order {
     };
 }
 
+fn compare_cached_rule_entries(
+    rules: &[PreparedRule<'_>],
+    rule_caches: &[Vec<RuleCacheEntry>],
+    left_idx: usize,
+    right_idx: usize,
+) -> Ordering {
+    for (rule, cache) in rules.iter().zip(rule_caches.iter()) {
+        let ord = compare_rule_entries(rule, &cache[left_idx], &cache[right_idx]);
+        if ord != Ordering::Equal {
+            return ord;
+        }
+    }
+
+    // Apply raw-value fallback only after all rule-level comparisons are exhausted.
+    for (rule, cache) in rules.iter().zip(rule_caches.iter()) {
+        let left = &cache[left_idx];
+        let right = &cache[right_idx];
+        if let (Some(va), Some(vb)) = (&left.value, &right.value) {
+            let fallback = apply_sort_order(rule.rule.order, va.cmp(vb));
+            if fallback != Ordering::Equal {
+                return fallback;
+            }
+        }
+    }
+
+    Ordering::Equal
+}
+
 pub(in crate::processing::processor) fn sort_playlist(
     target: &ConfigTarget,
     playlist: &mut Vec<PlaylistGroup>,
@@ -300,11 +328,9 @@ fn sort_groups(
 
     let mut group_indices: Vec<usize> = (0..groups.len()).collect();
     group_indices.sort_by(|left_idx, right_idx| {
-        for (rule, cache) in group_rules.iter().zip(rule_caches.iter()) {
-            let ord = compare_rule_entries(rule, &cache[*left_idx], &cache[*right_idx]);
-            if ord != Ordering::Equal {
-                return ord;
-            }
+        let ord = compare_cached_rule_entries(&group_rules, &rule_caches, *left_idx, *right_idx);
+        if ord != Ordering::Equal {
+            return ord;
         }
 
         let order1 = groups[*left_idx]
@@ -350,21 +376,9 @@ fn sort_channels_in_groups(
 
         let mut channel_indices: Vec<usize> = (0..group.channels.len()).collect();
         channel_indices.sort_by(|left_idx, right_idx| {
-            for (rule, cache) in channel_rules.iter().zip(rule_caches.iter()) {
-                let left = &cache[*left_idx];
-                let right = &cache[*right_idx];
-
-                let ord = compare_rule_entries(rule, left, right);
-                if ord == Ordering::Equal {
-                    if let (Some(va), Some(vb)) = (&left.value, &right.value) {
-                        let fallback = apply_sort_order(rule.rule.order, va.cmp(vb));
-                        if fallback != Ordering::Equal {
-                            return fallback;
-                        }
-                    }
-                } else {
-                    return ord;
-                }
+            let ord = compare_cached_rule_entries(&channel_rules, &rule_caches, *left_idx, *right_idx);
+            if ord != Ordering::Equal {
+                return ord;
             }
 
             group.channels[*left_idx]
@@ -379,16 +393,27 @@ fn sort_channels_in_groups(
 
 #[cfg(test)]
 mod tests {
-    use super::{compare_rule_entries, playlist_comparator, PreparedRule, RuleCacheEntry};
+    use super::{
+        compare_rule_entries, playlist_comparator, sort_channels_in_groups, sort_groups, PreparedRule, RuleCacheEntry,
+    };
     use crate::model::ConfigSortRule;
     use shared::foundation::Filter;
-    use shared::model::{ItemField, PlaylistItem, PlaylistItemHeader, SortOrder, SortTarget};
+    use shared::model::{ItemField, PlaylistGroup, PlaylistItem, PlaylistItemHeader, SortOrder, SortTarget, XtreamCluster};
     use std::cmp::Ordering;
     use std::sync::Arc;
 
+    fn make_group(id: u32, title: &str, channels: Vec<PlaylistItem>) -> PlaylistGroup {
+        PlaylistGroup {
+            id,
+            title: title.into(),
+            channels,
+            xtream_cluster: XtreamCluster::Live,
+        }
+    }
+
     #[test]
     fn test_sort() {
-        let mut channels: Vec<PlaylistItem> = vec![
+        let channels: Vec<PlaylistItem> = vec![
             ("D", "HD"),
             ("A", "FHD"),
             ("Z", "HD"),
@@ -425,19 +450,8 @@ mod tests {
             filter: Filter::default(),
         };
 
-        channels.sort_by(|a, b| {
-            let va = &a.header.title;
-            let vb = &b.header.title;
-
-            let ord =
-                playlist_comparator(channel_sort.sequence.as_ref(), channel_sort.order, va, vb);
-
-            if ord == Ordering::Equal {
-                a.header.source_ordinal.cmp(&b.header.source_ordinal)
-            } else {
-                ord
-            }
-        });
+        let mut groups = vec![make_group(1, "G1", channels)];
+        sort_channels_in_groups(groups.as_mut_slice(), &[channel_sort], false);
 
         let expected = vec![
             "Chanel K [UHD]",
@@ -454,7 +468,11 @@ mod tests {
             "Chanel T [SD]",
         ].into_iter().map(Into::into).collect::<Vec<Arc<str>>>();
 
-        let sorted = channels
+        let sorted = groups
+            .into_iter()
+            .next()
+            .expect("group should exist")
+            .channels
             .into_iter()
             .map(|pli| pli.header.title)
             .collect::<Vec<_>>();
@@ -464,7 +482,7 @@ mod tests {
 
     #[test]
     fn test_sort2() {
-        let mut channels: Vec<PlaylistItem> = vec![
+        let channels: Vec<PlaylistItem> = vec![
             "US| EAST [FHD] abc",
             "US| EAST [FHD] def",
             "US| EAST [FHD] ghi",
@@ -518,20 +536,8 @@ mod tests {
             filter: Filter::default(),
         };
 
-        channels.sort_by(|a, b| {
-            let ord = playlist_comparator(
-                channel_sort.sequence.as_ref(),
-                channel_sort.order,
-                &a.header.title,
-                &b.header.title,
-            );
-
-            if ord == Ordering::Equal {
-                a.header.source_ordinal.cmp(&b.header.source_ordinal)
-            } else {
-                ord
-            }
-        });
+        let mut groups = vec![make_group(1, "G1", channels)];
+        sort_channels_in_groups(groups.as_mut_slice(), &[channel_sort], false);
 
         let expected = vec![
             "US| EAST [UHD] m",
@@ -560,7 +566,11 @@ mod tests {
             "US| West f",
         ].into_iter().map(Into::into).collect::<Vec<Arc<str>>>();
 
-        let sorted = channels
+        let sorted = groups
+            .into_iter()
+            .next()
+            .expect("group should exist")
+            .channels
             .into_iter()
             .map(|pli| pli.header.title)
             .collect::<Vec<_>>();
@@ -646,5 +656,98 @@ mod tests {
         assert_eq!(compare_rule_entries(&prepared, &fail_filter, &pass_with_value), Ordering::Greater);
         assert_eq!(compare_rule_entries(&prepared, &pass_with_value, &pass_without_value), Ordering::Less);
         assert_eq!(compare_rule_entries(&prepared, &pass_without_value, &pass_with_value), Ordering::Greater);
+    }
+
+    #[test]
+    fn test_sort_channels_does_not_short_circuit_later_rules_with_raw_value_fallback() {
+        let channels: Vec<PlaylistItem> = vec!["A-2-x", "A-1-y"]
+            .into_iter()
+            .enumerate()
+            .map(|(i, title)| PlaylistItem {
+                header: PlaylistItemHeader {
+                    title: title.to_string().into(),
+                    source_ordinal: u32::try_from(i).unwrap(),
+                    ..Default::default()
+                },
+            })
+            .collect();
+
+        let first_rule = ConfigSortRule {
+            target: SortTarget::Channel,
+            field: ItemField::Caption,
+            order: SortOrder::Asc,
+            // Both values match the same sequence item and produce equal sequence priority.
+            sequence: Some(vec![shared::model::REGEX_CACHE.get_or_compile(r"^A-\d+-.$").unwrap()]),
+            filter: Filter::default(),
+        };
+        let second_rule = ConfigSortRule {
+            target: SortTarget::Channel,
+            field: ItemField::Caption,
+            order: SortOrder::Desc,
+            sequence: None,
+            filter: Filter::default(),
+        };
+
+        let mut groups = vec![make_group(1, "G1", channels)];
+        sort_channels_in_groups(groups.as_mut_slice(), &[first_rule, second_rule], false);
+        let sorted = groups[0]
+            .channels
+            .iter()
+            .map(|pli| pli.header.title.clone())
+            .collect::<Vec<_>>();
+
+        let expected = vec!["A-2-x", "A-1-y"]
+            .into_iter()
+            .map(Into::into)
+            .collect::<Vec<Arc<str>>>();
+        assert_eq!(expected, sorted);
+    }
+
+    #[test]
+    fn test_sort_groups_uses_raw_value_fallback_before_source_ordinal() {
+        let group_a = make_group(
+            1,
+            "A",
+            vec![PlaylistItem {
+                header: PlaylistItemHeader {
+                    title: Arc::from("A-2-x"),
+                    source_ordinal: 0,
+                    ..Default::default()
+                },
+            }],
+        );
+        let group_b = make_group(
+            2,
+            "B",
+            vec![PlaylistItem {
+                header: PlaylistItemHeader {
+                    title: Arc::from("A-1-y"),
+                    source_ordinal: 1,
+                    ..Default::default()
+                },
+            }],
+        );
+
+        let group_rule = ConfigSortRule {
+            target: SortTarget::Group,
+            field: ItemField::Caption,
+            order: SortOrder::Asc,
+            // Both groups match the same sequence item and produce equal sequence priority.
+            sequence: Some(vec![shared::model::REGEX_CACHE.get_or_compile(r"^A-\d+-.$").unwrap()]),
+            filter: Filter::default(),
+        };
+
+        let mut groups = vec![group_a, group_b];
+        sort_groups(&mut groups, &[group_rule], false);
+
+        let sorted = groups
+            .iter()
+            .map(|group| group.channels[0].header.title.clone())
+            .collect::<Vec<_>>();
+        let expected = vec!["A-1-y", "A-2-x"]
+            .into_iter()
+            .map(Into::into)
+            .collect::<Vec<Arc<str>>>();
+        assert_eq!(expected, sorted);
     }
 }
