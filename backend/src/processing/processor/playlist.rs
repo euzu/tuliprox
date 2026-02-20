@@ -558,10 +558,16 @@ async fn download_input(
 ) -> (Vec<TuliproxError>, Box<dyn PlaylistSource>, Option<TuliproxError>) {
     // Coordination Logic
     let need_download = !ctx.is_input_downloaded(&input.name).await;
+    // Keep this lock for the whole critical section (download + persist/load + mark processed)
+    // so parallel sources sharing the same input cannot observe a half-written state.
+    let _input_lock = if need_download {
+        Some(ctx.get_input_lock(&input.name).await)
+    } else {
+        None
+    };
+    let mut mark_as_processed = false;
 
     let playlist_download_result = if need_download {
-        // Acquire named lock to prevent thundering herd on same input
-        let _input_lock = ctx.get_input_lock(&input.name).await;
         // Check again after lock
         let already_processed = ctx.is_input_downloaded(&input.name).await;
 
@@ -569,17 +575,13 @@ async fn download_input(
             // Use empty results, will load from disk below
             PlaylistDownloadResult::new(vec![], vec![], true, false)
         } else if ctx.pre_processed_inputs.as_ref().is_some_and(|s| s.contains(&input.name)) {
-            // Input was already processed in a prior session; skip download and mark as processed
-            // for this session to avoid redundant lock acquisitions from other targets.
-            ctx.mark_input_downloaded(input.name.clone()).await;
+            // Input was already processed in a prior session; skip download and load from disk.
+            // Mark only after load succeeds (or fails) to avoid exposing a half-ready state.
+            mark_as_processed = true;
             PlaylistDownloadResult::new(vec![], vec![], true, false)
         } else {
-            let res = playlist_download_from_input(&ctx.client, &ctx.config, input).await;
-            // Mark as processed if NO critical errors?
-            // playlist_download_from_input returns errors but also potentially a partial playlist.
-            // If it attempted download, we consider it processed for this session.
-            ctx.mark_input_downloaded(input.name.clone()).await;
-            res
+            mark_as_processed = true;
+            playlist_download_from_input(&ctx.client, &ctx.config, input).await
         }
     } else {
         PlaylistDownloadResult::new(vec![], vec![], true, false)
@@ -595,6 +597,12 @@ async fn download_input(
         let (pl, err) = persist_input_playlist(&ctx.config, input, playlist_download_result.downloaded_playlist).await;
         (MemoryPlaylistSource::new(pl).boxed(), err)
     };
+
+    if mark_as_processed {
+        // Mark after persist/load so other workers only see this input as ready when data is usable.
+        ctx.mark_input_downloaded(input.name.clone()).await;
+    }
+
     (playlist_download_result.download_err, playlist, error)
 }
 
