@@ -212,7 +212,7 @@ pub fn Home() -> Html {
                        <Panel class="tp__full-width" value={ViewType::PlaylistUpdate.to_string()} active={view_visible.to_string()}>
                          <PlaylistUpdateView/>
                        </Panel>
-                       <Panel class="tp__full-width" value={ViewType::PlaylistEditor.to_string()} active={view_visible.to_string()}>
+                       <Panel class="tp__full-width" value={ViewType::PlaylistSettings.to_string()} active={view_visible.to_string()}>
                          <PlaylistSettingsView/>
                        </Panel>
                        <Panel class="tp__full-width" value={ViewType::PlaylistExplorer.to_string()} active={view_visible.to_string()}>

@@ -135,15 +135,15 @@ fn compare_sequence_match(a: &SequenceMatch, b: &SequenceMatch, order: SortOrder
 fn compare_rule_entries(rule: &PreparedRule, left: &RuleCacheEntry, right: &RuleCacheEntry) -> Ordering {
     match (left.filter_pass, right.filter_pass) {
         (false, false) => return Ordering::Equal,
-        (true, false) => return apply_sort_order(rule.rule.order, Ordering::Less),
-        (false, true) => return apply_sort_order(rule.rule.order, Ordering::Greater),
+        (true, false) => return Ordering::Less,
+        (false, true) => return Ordering::Greater,
         (true, true) => {}
     }
 
     match (&left.value, &right.value) {
         (None, None) => Ordering::Equal,
-        (Some(_), None) => apply_sort_order(rule.rule.order, Ordering::Less),
-        (None, Some(_)) => apply_sort_order(rule.rule.order, Ordering::Greater),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
         (Some(value_left), Some(value_right)) => {
             if rule.sequence_plan.is_some() {
                 match (&left.sequence_match, &right.sequence_match) {
@@ -379,8 +379,8 @@ fn sort_channels_in_groups(
 
 #[cfg(test)]
 mod tests {
+    use super::{compare_rule_entries, playlist_comparator, PreparedRule, RuleCacheEntry};
     use crate::model::ConfigSortRule;
-    use crate::processing::processor::sort::playlist_comparator;
     use shared::foundation::Filter;
     use shared::model::{ItemField, PlaylistItem, PlaylistItemHeader, SortOrder, SortTarget};
     use std::cmp::Ordering;
@@ -613,5 +613,38 @@ mod tests {
             .collect::<Vec<Arc<str>>>();
 
         assert_eq!(expected, sorted);
+    }
+
+    #[test]
+    fn test_compare_rule_entries_desc_filter_mismatch() {
+        let rule = ConfigSortRule {
+            target: SortTarget::Channel,
+            field: ItemField::Caption,
+            order: SortOrder::Desc,
+            sequence: Some(vec![shared::model::REGEX_CACHE.get_or_compile(r"^A-(?P<c1>\d+)$").unwrap()]),
+            filter: Filter::default(),
+        };
+
+        let prepared = PreparedRule::new(&rule);
+        let pass_with_value = RuleCacheEntry {
+            filter_pass: true,
+            value: Some(Arc::from("A-2")),
+            sequence_match: None,
+        };
+        let pass_without_value = RuleCacheEntry {
+            filter_pass: true,
+            value: None,
+            sequence_match: None,
+        };
+        let fail_filter = RuleCacheEntry {
+            filter_pass: false,
+            value: None,
+            sequence_match: None,
+        };
+
+        assert_eq!(compare_rule_entries(&prepared, &pass_with_value, &fail_filter), Ordering::Less);
+        assert_eq!(compare_rule_entries(&prepared, &fail_filter, &pass_with_value), Ordering::Greater);
+        assert_eq!(compare_rule_entries(&prepared, &pass_with_value, &pass_without_value), Ordering::Less);
+        assert_eq!(compare_rule_entries(&prepared, &pass_without_value, &pass_with_value), Ordering::Greater);
     }
 }

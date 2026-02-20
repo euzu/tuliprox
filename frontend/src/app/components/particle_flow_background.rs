@@ -156,11 +156,11 @@ fn read_theme_style() -> Option<web_sys::CssStyleDeclaration> {
         .or_else(|| document.document_element().and_then(|root| win.get_computed_style(&root).ok().flatten()))
 }
 
-fn read_accent_colors_from_css() -> ([f32; 3], [f32; 3]) {
+fn read_accent_colors_from_style(style: Option<&web_sys::CssStyleDeclaration>) -> ([f32; 3], [f32; 3]) {
     let fallback_1 = [0.45, 0.63, 0.88];
     let fallback_2 = [0.95, 0.97, 1.0];
 
-    let Some(style) = read_theme_style() else {
+    let Some(style) = style else {
         return (fallback_1, fallback_2);
     };
 
@@ -178,9 +178,9 @@ fn read_accent_colors_from_css() -> ([f32; 3], [f32; 3]) {
     (accent_1, accent_2)
 }
 
-fn read_alpha_boost_from_css() -> f32 {
+fn read_alpha_boost_from_style(style: Option<&web_sys::CssStyleDeclaration>) -> f32 {
     let fallback = 1.0_f32;
-    let Some(style) = read_theme_style() else {
+    let Some(style) = style else {
         return fallback;
     };
 
@@ -394,20 +394,24 @@ fn upload_accent_uniform(gl: &WebGlRenderingContext, location: Option<WebGlUnifo
     }
 }
 
-fn upload_alpha_boost_uniform(gl: &WebGlRenderingContext, location: Option<WebGlUniformLocation>) {
+fn upload_alpha_boost_uniform(gl: &WebGlRenderingContext, location: Option<WebGlUniformLocation>, value: f32) {
     if let Some(location) = location.as_ref() {
-        gl.uniform1f(Some(location), read_alpha_boost_from_css());
+        gl.uniform1f(Some(location), value);
     }
 }
 
-fn upload_theme_accent_uniforms(
+fn upload_theme_uniforms(
     gl: &WebGlRenderingContext,
     u_accent_1: Option<WebGlUniformLocation>,
     u_accent_2: Option<WebGlUniformLocation>,
+    u_alpha_boost: Option<WebGlUniformLocation>,
 ) {
-    let (accent_1, accent_2) = read_accent_colors_from_css();
+    let style = read_theme_style();
+    let (accent_1, accent_2) = read_accent_colors_from_style(style.as_ref());
+    let alpha_boost = read_alpha_boost_from_style(style.as_ref());
     upload_accent_uniform(gl, u_accent_1, accent_1);
     upload_accent_uniform(gl, u_accent_2, accent_2);
+    upload_alpha_boost_uniform(gl, u_alpha_boost, alpha_boost);
 }
 
 fn init_renderer(canvas: &HtmlCanvasElement, initial_data: &[f32]) -> Result<RenderRuntime, String> {
@@ -431,8 +435,7 @@ fn init_renderer(canvas: &HtmlCanvasElement, initial_data: &[f32]) -> Result<Ren
     let u_accent_2 = gl.get_uniform_location(&program, "u_accent2");
     let u_alpha_boost = gl.get_uniform_location(&program, "u_alpha_boost");
     let u_dpr = gl.get_uniform_location(&program, "u_dpr");
-    upload_theme_accent_uniforms(&gl, u_accent_1.clone(), u_accent_2.clone());
-    upload_alpha_boost_uniform(&gl, u_alpha_boost.clone());
+    upload_theme_uniforms(&gl, u_accent_1.clone(), u_accent_2.clone(), u_alpha_boost.clone());
     upload_dpr_uniform(&gl, u_dpr.clone());
 
     let buffer = gl.create_buffer().ok_or_else(|| String::from("Failed to create particle buffer"))?;
@@ -598,12 +601,12 @@ pub fn ParticleFlowBackground() -> Html {
                 Closure::<dyn FnMut(Array, MutationObserver)>::wrap(Box::new(move |_records, _observer| {
                     if let Some(runtime) = runtime_ref_theme.borrow().as_ref() {
                         runtime.gl.use_program(Some(&runtime.program));
-                        upload_theme_accent_uniforms(
+                        upload_theme_uniforms(
                             &runtime.gl,
                             runtime.u_accent_1.clone(),
                             runtime.u_accent_2.clone(),
+                            runtime.u_alpha_boost.clone(),
                         );
-                        upload_alpha_boost_uniform(&runtime.gl, runtime.u_alpha_boost.clone());
                     }
                 }));
 
