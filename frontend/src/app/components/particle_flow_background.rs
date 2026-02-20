@@ -386,9 +386,7 @@ fn init_renderer(canvas: &HtmlCanvasElement, initial_data: &[f32]) -> Result<Ren
         .or_else(|| canvas.get_context("experimental-webgl").ok().flatten())
         .ok_or_else(|| String::from("WebGL context is not available for particle flow background"))?;
 
-    let gl = context
-        .dyn_into::<WebGlRenderingContext>()
-        .map_err(|_| String::from("Failed to cast WebGL context"))?;
+    let gl = context.dyn_into::<WebGlRenderingContext>().map_err(|_| String::from("Failed to cast WebGL context"))?;
 
     let program = link_program(&gl, VERTEX_SHADER, FRAGMENT_SHADER)?;
     gl.use_program(Some(&program));
@@ -563,8 +561,8 @@ pub fn ParticleFlowBackground() -> Html {
                 event.prevent_default();
                 *runtime_ref_lost.borrow_mut() = None;
             }));
-            let _ = canvas
-                .add_event_listener_with_callback("webglcontextlost", on_context_lost.as_ref().unchecked_ref());
+            let _ =
+                canvas.add_event_listener_with_callback("webglcontextlost", on_context_lost.as_ref().unchecked_ref());
 
             let runtime_ref_restore = runtime_ref.clone();
             let canvas_restore = canvas.clone();
@@ -578,10 +576,8 @@ pub fn ParticleFlowBackground() -> Html {
                     Err(err) => log::error!("Failed to restore WebGL context: {err}"),
                 }
             }));
-            let _ = canvas.add_event_listener_with_callback(
-                "webglcontextrestored",
-                on_context_restored.as_ref().unchecked_ref(),
-            );
+            let _ = canvas
+                .add_event_listener_with_callback("webglcontextrestored", on_context_restored.as_ref().unchecked_ref());
 
             let canvas_cleanup = canvas.clone();
             Box::new(move || {
@@ -591,10 +587,8 @@ pub fn ParticleFlowBackground() -> Html {
                     }
                     let _ = win.remove_event_listener_with_callback("resize", on_resize.as_ref().unchecked_ref());
                 }
-                let _ = canvas_cleanup.remove_event_listener_with_callback(
-                    "webglcontextlost",
-                    on_context_lost.as_ref().unchecked_ref(),
-                );
+                let _ = canvas_cleanup
+                    .remove_event_listener_with_callback("webglcontextlost", on_context_lost.as_ref().unchecked_ref());
                 let _ = canvas_cleanup.remove_event_listener_with_callback(
                     "webglcontextrestored",
                     on_context_restored.as_ref().unchecked_ref(),
