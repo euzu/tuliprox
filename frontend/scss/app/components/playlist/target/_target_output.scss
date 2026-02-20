@@ -11,22 +11,22 @@
   }
 }
 
-.tp__target-output__xtream.tp__target-output__has_options .tp__collapse-panel__header {
+.tp__target-output__xtream.tp__target-output__has_options {
    color: var(--output-xtream-color);
 }
-.tp__target-output__m3u.tp__target-output__has_options .tp__collapse-panel__header {
+.tp__target-output__m3u.tp__target-output__has_options {
   color: var(--output-m3u-color);
 }
-.tp__target-output__strm .tp__collapse-panel__header {
+.tp__target-output__strm {
   color: var(--output-strm-color);
 }
-.tp__target-output__hdhomerun .tp__collapse-panel__header {
+.tp__target-output__hdhomerun  {
   color: var(--output-hdhomerun-color);
 }
-.tp__target-output__xtream .tp__collapse-panel__header,
-.tp__target-output__m3u .tp__collapse-panel__header,
-.tp__target-output__strm .tp__collapse-panel__header,
-.tp__target-output__hdhomerun .tp__collapse-panel__header {
+.tp__target-output__xtream,
+.tp__target-output__m3u,
+.tp__target-output__strm,
+.tp__target-output__hdhomerun{
   &:hover {
     color: var(--menu-button-hover-color);
   }

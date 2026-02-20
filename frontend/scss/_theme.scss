@@ -66,45 +66,46 @@
 }
 
 :root {
-  --primary-color: rgba(50, 130, 255, 0.65);
+  --primary-color: rgba(96, 165, 250, 0.72);
   /* Icy Blue */
-  --secondary-color: rgba(240, 95, 95, 0.6);
+  --secondary-color: rgba(251, 113, 133, 0.62);
   /* Soft Coral Red */
 
-  --action-item-background-color: rgba(45, 70, 120, 0.35);
+  --action-item-background-color: rgba(37, 99, 235, 0.18);
   --action-item-color: #ffffff;
 
-  --text-color: #ffffff;
-  --modest-text-color: #a7abb4;
-  --background-color: #0a0b10;
-  --floating-background-color: #071529;
-  --floating-background-accent-color-1: #6aa7ff;
-  --floating-background-accent-color-2: #7ab6ff;
-  --border-color: rgba(60, 100, 195, 0.25);
-  --input-background-color: rgba(255, 255, 255, 0);
+  --text-color: #e6edf7;
+  --modest-text-color: #9aa9bf;
+  --background-color: #0b1220;
+  --particle-flow-background-color: #070f1d;
+  --particle-flow-background-accent-color-1: #6ea8ff;
+  --particle-flow-background-accent-color-2: #9ec7ff;
+  --particle-flow-background-alpha-boost: 1.0;
+  --border-color: rgba(96, 165, 250, 0.24);
+  --input-background-color: rgba(15, 23, 42, 0.3);
   --input-border-color: var(--border-color);
-  --input-focus-border-color: rgba(80, 150, 255, 0.8);
+  --input-focus-border-color: rgba(96, 165, 250, 0.88);
   --button-background-color: var(--primary-color);
-  --menu-text-color: #e2e5ea;
-  --menu-icon-color: #8a97b1;
-  --menu-item-hover-background-color: rgba(45, 70, 120, 0.4);
+  --menu-text-color: #d8e1ef;
+  --menu-icon-color: #8ea2bf;
+  --menu-item-hover-background-color: rgba(59, 130, 246, 0.16);
   --menu-item-hover-color: #ffffff;
   --menu-text-active-color: var(--primary-color);
-  --menu-item-active-background-color: rgba(45, 70, 120, 0.55);
-  --icon-button-hover-color: #a8a8b3;
-  --card-background-color: rgba(18, 22, 33, 0.9);
+  --menu-item-active-background-color: rgba(59, 130, 246, 0.24);
+  --icon-button-hover-color: #e6edf7;
+  --card-background-color: rgba(15, 23, 42, 0.78);
   --card-color: var(--modest-text-color);
-  --sub-card-background-color: rgba(18, 22, 33, 0.8);
+  --sub-card-background-color: rgba(15, 23, 42, 0.62);
 
 
-  --text-button-background-color: rgba(50, 80, 140, 0.3);
+  --text-button-background-color: rgba(30, 64, 175, 0.28);
   --text-button-color: #ffffff;
-  --text-button-border-color: rgba(80, 120, 200, 0.3);
+  --text-button-border-color: rgba(96, 165, 250, 0.28);
   --text-button-hover-color: #ffffff;
-  --text-button-hover-background-color: rgba(50, 80, 140, 0.5);
+  --text-button-hover-background-color: rgba(37, 99, 235, 0.42);
   --text-button-primary-background-color: var(--primary-color);
   --text-button-primary-color: #ffffff;
-  --text-button-primary-hover-background-color: rgba(70, 150, 255, 0.8);
+  --text-button-primary-hover-background-color: rgba(59, 130, 246, 0.9);
   --text-button-primary-hover-color: #ffffff;
   --text-button-primary-border-color: rgba(80, 150, 255, 0.8);
   --text-button-secondary-background-color: rgba(220, 70, 70, 0.25);
@@ -113,29 +114,29 @@
   --text-button-secondary-hover-color: #ffffff;
   --text-button-secondary-border-color: rgba(220, 70, 70, 0.5);
 
-  --text-button-active-background-color: rgba(50, 180, 120, 0.6);
+  --text-button-active-background-color: rgba(34, 197, 94, 0.58);
   --text-button-active-color: #fdfdfd;
-  --text-button-active-hover-background-color: rgba(40, 150, 100, 0.75);
-  --text-button-active-hover-color: #fdfdfd;
-  --text-button-active-border-color: rgba(60, 200, 140, 0.8);
+  --text-button-active-hover-background-color: rgba(22, 163, 74, 0.72);
+  --text-button-active-hover-color: #ffffff;
+  --text-button-active-border-color: rgba(74, 222, 128, 0.82);
 
-  --toggle-switch-on-background-color: rgba(60, 200, 140, 0.7);
-  --toggle-switch-off-background-color: rgba(60, 60, 70, 0.9);
+  --toggle-switch-on-background-color: rgba(34, 197, 94, 0.72);
+  --toggle-switch-off-background-color: rgba(51, 65, 85, 0.9);
   --toggle-switch-toggle-color: #ffffff;
 
-  --table-header-background-color: rgba(40, 50, 80, 0.55);
-  --table-card-background-color: rgba(35, 35, 45, 0.55);
-  --table-alternate-background-color: rgba(30, 30, 60, 0.55);
+  --table-header-background-color: rgba(30, 41, 59, 0.62);
+  --table-card-background-color: rgba(15, 23, 42, 0.56);
+  --table-alternate-background-color: rgba(30, 41, 59, 0.42);
 
   --discord-color: #5865f2;
   --documentation-color: #2bbf5a;
   --github-color: #ffffff;
 
-  --app-header-background-color: rgba(15, 18, 26, 0.85);
-  --app-header-color: #73d6fe;
+  --app-header-background-color: rgba(7, 12, 24, 0.82);
+  --app-header-color: #93c5fd;
 
-  --pulse-color-1: #868686;
-  --pulse-color-2: #4c4c4c;
+  --pulse-color-1: #64748b;
+  --pulse-color-2: #334155;
 
   --tag-padding: 0.3rem 0.5rem;
   --tag-border-radius: 0.5rem;
@@ -171,15 +172,15 @@
   --tag-status-pending-background-color: #1e252d88;
   --tag-status-pending-border-color: #2b4c61;
 
-  --popup-background-color: rgba(30, 34, 48, 0.7);
+  --popup-background-color: rgba(15, 23, 42, 0.78);
   --popup-shadow: 0 8px 24px rgba(0, 0, 0, 0.4),
     inset 0 0 10px rgba(255, 255, 255, 0.08);
 
-  --popup-border-color: rgba(80, 100, 160, 0.25);
-  --popup-color: #ffffff;
+  --popup-border-color: rgba(96, 165, 250, 0.26);
+  --popup-color: #e6edf7;
 
-  --tooltip-background-color: rgba(30, 34, 48, 0.9);
-  --tooltip-color: #ffffff;
+  --tooltip-background-color: rgba(15, 23, 42, 0.94);
+  --tooltip-color: #e6edf7;
 
   --attention-color: #f57170;
   --warn-color: #e1b842;
@@ -198,41 +199,41 @@
   --tag-series-border-color: #6366f1;
 
   --toastr-success-color: #ffffff;
-  --toastr-success-background-color: #3fa85a88;
+  --toastr-success-background-color: #22c55e66;
   --toastr-error-color: #ffffff;
-  --toastr-error-background-color: #c03a3488;
+  --toastr-error-background-color: #ef444466;
   --toastr-info-color: #ffffff;
-  --toastr-info-background-color: #2b8ab388;
+  --toastr-info-background-color: #3b82f666;
   --toastr-warning-color: #ffffff;
-  --toastr-warning-background-color: #f6a30688;
+  --toastr-warning-background-color: #f59e0b66;
 
-  --hint-color: #888888;
-  --label-color: #74c6ff;
+  --hint-color: #7f8ea5;
+  --label-color: #8ec5ff;
 
   --playlist-color: #aeb0b2;
   --playlist-rating-color: #ffffff;
   --playlist-rating-background-color: #121621;
 
   --sidebar-toggle-color: #ffffff;
-  --sidebar-toggle-hover-color: #47495d;
-  --hover-border-color: rgba(100, 140, 255, 0.4);
+  --sidebar-toggle-hover-color: #8ea2bf;
+  --hover-border-color: rgba(96, 165, 250, 0.46);
   --spinner-color: rgba(255, 255, 255, 0.4);
-  --spinner-highlight-color: #5599f0;
+  --spinner-highlight-color: #60a5fa;
 
-  --tree-count-color: #7b7b7e;
-  --tree-hover-background-color: #004db488;
+  --tree-count-color: #7f8ea5;
+  --tree-hover-background-color: #2563eb66;
   --tree-hover-color: white;
   --tree-expander-hover-color: white;
-  --tool-button-background-color: #43434388;
+  --tool-button-background-color: #33415588;
   --tool-button-color: #fff;
   --tool-button-hover-color: #ffffff;
-  --tool-button-hover-background-color: #0c8a1388;
+  --tool-button-hover-background-color: #2563eb88;
 
-  --toolbar-background-color: #282A3688;
+  --toolbar-background-color: #1e293b88;
   --toolbar-button-hover-color: #ffffff;
-  --toolbar-button-hover-background-color: #004db488;
+  --toolbar-button-hover-background-color: #2563eb88;
 
-  --ok-color: #21e821;
+  --ok-color: #22c55e;
 
   --card-background-color-darker: rgba(22, 26, 36, 0.55);
   --card-border-color: rgba(80, 130, 255, 0.2);
@@ -244,31 +245,31 @@
   --icon-button-border-radius: 4px;
   --icon-button-background-color: var(--button-background-color);
   --icon-button-color: #ffffff;
-  --icon-button-hover-background-color: #0d6efd88;
+  --icon-button-hover-background-color: #2563eb88;
 
-  --icon-button-hover-border-color: #ced9fb;
+  --icon-button-hover-border-color: #93c5fd;
 
-  --menu-button-color: #171d31;
-  --menu-button-background-color: rgba(32, 39, 51, 0.25);
+  --menu-button-color: #d8e1ef;
+  --menu-button-background-color: rgba(30, 41, 59, 0.45);
 
-  --menu-button-hover-color: #131212;
-  --menu-button-hover-background-color: rgba(32, 39, 51, 0.8);
+  --menu-button-hover-color: #93c5fd;
+  --menu-button-hover-background-color: rgba(37, 99, 235, 0.3);
 
   --menu-button-warn-color: #b96665;
   --menu-button-warn-hover-color: #dd7573;
   --menu-button-warn-hover-background-color: #4c3434;
 
-  --scrollbar-track-color: #838383;
-  --scrollbar-handle-color: #505050;
+  --scrollbar-track-color: #334155;
+  --scrollbar-handle-color: #64748b;
 
   --tabset-background-color: rgba(68, 71, 90, 0.3);
   --tabset-border-color: #535353;
   --tab-background-color: #44475A88;
-  --tab-hover-background-color: #2bb24988;
+  --tab-hover-background-color: #2f6db788;
   --tab-hover-color: #fdfdfd;
-  --tab-active-background-color: #1a672c88;
+  --tab-active-background-color: #1f4f8f88;
   --tab-active-color: #fdfdfd;
-  --tab-active-border-color: #35934d;
+  --tab-active-border-color: #4f8ffb;
 
   --table-border-color: #44475a;
 
@@ -332,8 +333,6 @@
   --glass-background-gradient-color-2: rgba(255, 255, 255, 0.1);
   --glass-input-border-color: rgba(255, 255, 255, 0.15);
   --glass-input-background-color: rgba(0, 0, 0, 0.15);
-  --floating-particle-gradient-color-1: rgba(255, 255, 255, 0.3);
-  --floating-particle-gradient-color-2: rgba(255, 255, 255, 0);
 
   --graph-paper-line-color-1: #e0e0e030;
   --graph-paper-line-color-2: #c0c0c030;
@@ -387,84 +386,79 @@
 
   --brick-port-background-color: #587293;
   --brick-port-border-color: #ffffff;
-  --brick-port-valid-background-color: #00ff00;
+  --brick-port-valid-background-color: #22c55e;
   --brick-port-invalid-background-color: #e74c3c;
-  --source-editor-delete-color: #FF0000FF;
+  --source-editor-delete-color: #ef4444;
 
   --source-editor-line-color: #ffffff;
-  --source-editor-active-line-color: #00ff00;
+  --source-editor-active-line-color: #22c55e;
 
-  --source-editor-pending-line-color: yellow;
-  --brick-port-hover-color: yellow;
+  --source-editor-pending-line-color: #f59e0b;
+  --brick-port-hover-color: #f59e0b;
 
   --selection-area-border-color: rgba(0, 120, 215, 0.9);
   --selection-area-background-color: rgba(0, 120, 215, 0.12);
 }
 
 body[data-theme="bright"] {
-  /* Core Palette */
-  --primary-color: #3b82f6;
-  /* Modern Blue */
-  --secondary-color: #f43f5e;
-  /* Vibrant Rose */
-  --background-color: #f8fafc;
-  /* Very light slate */
-  --floating-background-color: #ffffff;
-  --floating-background-accent-color-1: #6aa7ff;
-  --floating-background-accent-color-2: #7ab6ff;
-  --text-color: #0f172a;
-  /* Slate 900 */
-  --modest-text-color: #64748b;
-  /* Slate 500 */
-  --border-color: #e2e8f0;
-  /* Slate 200 */
+
+  --primary-color: #2f6fa8;
+  --secondary-color: #d46a6a;
+  --background-color: #e9eff4;
+  --particle-flow-background-color: #edf3f8;
+  --particle-flow-background-accent-color-1: #5f8fb8;
+  --particle-flow-background-accent-color-2: #8aaecf;
+  --particle-flow-background-alpha-boost: 1.45;
+
+  --text-color: #1f2f3f;
+  --modest-text-color: #5a7084;
+  --border-color: #cfdbe6;
+
+
+  --card-color: #475569;
+  --card-background-color: #f7fbff;
+  --sub-card-background-color: #f1f6fb;
+  --card-background-color-darker: #eaf1f8;
+  --card-border-color: #cfdae6;
 
   /* Shadows & Depth */
   --popup-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.05), 0 8px 10px -6px rgba(0, 0, 0, 0.05);
   --card-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
 
   /* Menu & Navigation */
-  --menu-text-color: #334155;
-  --menu-icon-color: #444242;
-  --menu-item-hover-background-color: rgba(59, 130, 246, 0.05);
-  --menu-item-hover-color: #2563eb;
-  --menu-text-active-color: #3b82f6;
-  --menu-item-active-background-color: rgba(59, 130, 246, 0.08);
+  --menu-text-color: #30465b;
+  --menu-icon-color: #597286;
+  --menu-item-hover-background-color: rgba(47, 111, 168, 0.1);
+  --menu-item-hover-color: #2b5f8a;
+  --menu-item-active-background-color: rgba(47, 111, 168, 0.16);
+  --menu-text-active-color: #2f6fa8;
 
   --sidebar-toggle-color: #475569;
   --sidebar-toggle-hover-color: #3b82f6;
 
   /* UI Components */
-  --action-item-background-color: rgba(15, 23, 42, 0.03);
+  --action-item-background-color: rgba(37, 99, 235, 0.06);
   --action-item-color: #0f172a;
 
   --input-background-color: #ffffff;
   --input-border-color: #cbd5e1;
   --input-focus-border-color: #3b82f6;
 
-  --card-background-color: #ffffff;
-  --card-color: #475569;
-  --card-background-color-darker: #f1f5f9;
-  --card-border-color: #e2e8f0;
-  --sub-card-background-color: #f9fafb;
+  --button-background-color: #2f6fa8;
+  --icon-button-background-color: #2f6fa8;
+  --icon-button-hover-background-color: #25597e;
+  --icon-button-hover-border-color: #8fb0cb;
+  --icon-button-color: #121525;
+  --icon-button-hover-color: #0046ff;
 
-  /* Buttons */
-  --button-background-color: #3b82f6;
-  --icon-button-color: #232f54;
-  --icon-button-background-color: #3b82f6;
-  --icon-button-hover-background-color: #212020;
-  --icon-button-hover-color: #0f172a;
-  --icon-button-hover-border-color: #93c5fd;
-
-  --text-button-background-color: #f1f5f9;
-  --text-button-color: #475569;
-  --text-button-border-color: #e2e8f0;
-  --text-button-hover-background-color: #e2e8f0;
-  --text-button-hover-color: #1e293b;
-
-  --text-button-primary-background-color: #3b82f6;
+  --text-button-background-color: #e6eef6;
+  --text-button-border-color: #c7d7e5;
+  --text-button-hover-background-color: #d8e5f1;
+  --text-button-color: #3c5368;
+  --text-button-hover-color: #2c4256;
+  --text-button-primary-background-color: #2f6fa8;
+  --text-button-primary-hover-background-color: #275f90;
   --text-button-primary-color: #ffffff;
-  --text-button-primary-hover-background-color: #2563eb;
   --text-button-primary-hover-color: #ffffff;
   --text-button-primary-border-color: #3b82f6;
 
@@ -490,10 +484,10 @@ body[data-theme="bright"] {
   --checkbox-checked-background-color: #3b82f6;
 
   /* Tables */
-  --table-header-background-color: #f1f5f9;
-  --table-card-background-color: #ffffff;
-  --table-alternate-background-color: #f8fafc;
-  --table-border-color: #f1f5f9;
+  --table-header-background-color: #e4ecf4;
+  --table-card-background-color: #f7fbff;
+  --table-alternate-background-color: #f0f6fc;
+  --table-border-color: #cfdae6;
 
   /* Tags & Statuses */
   --tag-background-color: #f1f5f9;
@@ -536,29 +530,30 @@ body[data-theme="bright"] {
   --tag-series-border-color: #6366f1;
 
   /* Toastr Notifications */
-  --toastr-success-background-color: #ffffff;
-  --toastr-success-color: #15803d;
-  --toastr-error-background-color: #ffffff;
-  --toastr-error-color: #b91c1c;
-  --toastr-info-background-color: #ffffff;
-  --toastr-info-color: #1d4ed8;
-  --toastr-warning-background-color: #ffffff;
-  --toastr-warning-color: #a16207;
+  --toastr-success-background-color: #d7eadf;
+  --toastr-error-background-color: #f1dcdc;
+  --toastr-info-background-color: #dbe8f3;
+  --toastr-warning-background-color: #f3ead4;
+
+  --toastr-success-color: #166534;
+  --toastr-error-color: #991b1b;
+  --toastr-info-color: #1e40af;
+  --toastr-warning-color: #92400e;
 
   /* Popups & Tooltips */
-  --popup-background-color: #ffffff;
-  --popup-border-color: #e2e8f0;
+  --popup-background-color: #f6fafeef;
   --popup-color: #1e293b;
-  --tooltip-background-color: #1e293b;
-  --tooltip-color: #f8fafc;
+  --popup-border-color: #cfdae6;
+  --tooltip-background-color: #2a3f54;
+  --tooltip-color: #eff5fb;
 
   /* Header */
-  --app-header-background-color: #ffffff;
+  --app-header-background-color: #ffffffdd;
   --app-header-color: #2563eb;
 
   /* Utilities */
   --pulse-color-1: #e2e8f0;
-  --pulse-color-2: #f1f5f9;
+  --pulse-color-2: #edf2f7;
   --hint-color: #94a3b8;
   --label-color: #3b82f6;
   --title-label-color: #64748b;
@@ -576,14 +571,15 @@ body[data-theme="bright"] {
   --epg-program-active-time-color: #475569;
 
   /* Tabs */
-  --tabset-background-color: #f8fafc;
+  --tabset-background-color: #e6edf4;
+  --tab-background-color: #f3f8fd;
+  --tab-hover-background-color: #dce8f3;
+  --tab-hover-color: #2f6fa8;
+  --tab-active-background-color: #d1e1ef;
+  --tab-active-color: #25557e;
+  --tab-active-border-color: #4f81ad;
+
   --tabset-border-color: #e2e8f0;
-  --tab-background-color: #f1f5f9;
-  --tab-hover-background-color: #ffffff;
-  --tab-hover-color: #3b82f6;
-  --tab-active-background-color: #ffffff;
-  --tab-active-color: #3b82f6;
-  --tab-active-border-color: #3b82f6;
 
   /* Code Editor (Fancy Light) */
   --code-editor-background-color: #fdfdfd;
@@ -650,4 +646,5 @@ body[data-theme="bright"] {
   --breadcrumb-color: #64748b;
   --breadcrumb-active-background-color: #dcfce7;
   --breadcrumb-active-color: #166534;
+
 }

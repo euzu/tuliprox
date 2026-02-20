@@ -1,4 +1,4 @@
-use crate::app::components::{InputRow, PlaylistEditorPage, PlaylistExplorerPage, UserlistPage};
+use crate::app::components::{InputRow, PlaylistExplorerPage, UserlistPage};
 use shared::model::{
     ApiProxyConfigDto, AppConfigDto, ConfigTargetDto, PlaylistRequest, ProxyUserCredentialsDto, SearchRequest,
     StatusCheck, SystemInfo, UiPlaylistCategories,
@@ -11,11 +11,6 @@ type SingleSource = (Vec<Rc<InputRow>>, Vec<Rc<ConfigTargetDto>>);
 #[derive(Clone, PartialEq)]
 pub struct PlaylistContext {
     pub sources: Rc<Option<Rc<Vec<SingleSource>>>>,
-}
-
-#[derive(Clone, PartialEq)]
-pub struct PlaylistEditorContext {
-    pub active_page: UseStateHandle<PlaylistEditorPage>,
 }
 
 #[derive(Clone, PartialEq)]

@@ -2,7 +2,7 @@ use crate::{
     app::{
         components::{
             config::ConfigView, loading_indicator::BusyIndicator, theme::Theme, AppIcon, DashboardView, EpgView,
-            IconButton, InputRow, Panel, PlaylistEditorView, PlaylistExplorerView, PlaylistUpdateView, Sidebar,
+            IconButton, InputRow, Panel, PlaylistSettingsView, PlaylistExplorerView, PlaylistUpdateView, Sidebar,
             SourceEditor, StatsView, StreamsView, ToastrView, UserlistView, WebsocketStatus,
         },
         context::{ConfigContext, PlaylistContext, StatusContext},
@@ -210,16 +210,16 @@ pub fn Home() -> Html {
                           <SourceEditor/>
                        </Panel>
                        <Panel class="tp__full-width" value={ViewType::PlaylistUpdate.to_string()} active={view_visible.to_string()}>
-                        <PlaylistUpdateView/>
+                         <PlaylistUpdateView/>
                        </Panel>
                        <Panel class="tp__full-width" value={ViewType::PlaylistEditor.to_string()} active={view_visible.to_string()}>
-                        <PlaylistEditorView/>
+                         <PlaylistSettingsView/>
                        </Panel>
                        <Panel class="tp__full-width" value={ViewType::PlaylistExplorer.to_string()} active={view_visible.to_string()}>
-                        <PlaylistExplorerView/>
+                         <PlaylistExplorerView/>
                        </Panel>
                        <Panel class="tp__full-width" value={ViewType::PlaylistEpg.to_string()} active={view_visible.to_string()}>
-                        <EpgView/>
+                         <EpgView/>
                        </Panel>
                     </div>
               </div>

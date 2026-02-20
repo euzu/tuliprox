@@ -4,7 +4,7 @@ use shared::model::{PlaylistGroup, SortOrder, SortTarget};
 use std::cmp::Ordering;
 use std::sync::Arc;
 
-fn direction(order: SortOrder, ordering: Ordering) -> Ordering {
+fn apply_sort_order(order: SortOrder, ordering: Ordering) -> Ordering {
     match (order, ordering) {
         (SortOrder::None, _) | (_, Ordering::Equal) => Ordering::Equal,
         (SortOrder::Asc, o) => o,
@@ -12,6 +12,222 @@ fn direction(order: SortOrder, ordering: Ordering) -> Ordering {
     }
 }
 
+fn parse_capture_group_rank(name: &str) -> Option<u32> {
+    let suffix = name.strip_prefix('c')?;
+    if suffix.is_empty() || !suffix.bytes().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    suffix.parse::<u32>().ok()
+}
+
+#[derive(Debug)]
+struct SequencePattern {
+    regex: Arc<regex::Regex>,
+    ordered_capture_names: Vec<String>,
+}
+
+#[derive(Debug)]
+struct SequencePlan {
+    patterns: Vec<SequencePattern>,
+}
+
+impl SequencePlan {
+    fn new(sequence: &[Arc<regex::Regex>]) -> Self {
+        let patterns = sequence
+            .iter()
+            .map(|regex| {
+                let mut ordered_capture_names: Vec<(u32, String)> = regex
+                    .capture_names()
+                    .flatten()
+                    .filter_map(|name| parse_capture_group_rank(name).map(|rank| (rank, name.to_owned())))
+                    .collect();
+                ordered_capture_names.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+                SequencePattern {
+                    regex: Arc::clone(regex),
+                    ordered_capture_names: ordered_capture_names.into_iter().map(|(_, name)| name).collect(),
+                }
+            })
+            .collect();
+
+        Self { patterns }
+    }
+}
+
+#[derive(Debug)]
+enum SequenceMatch {
+    Matched { sequence_idx: usize, captures: Vec<Option<Arc<str>>> },
+    Unmatched,
+}
+
+#[derive(Debug)]
+struct PreparedRule<'a> {
+    rule: &'a ConfigSortRule,
+    sequence_plan: Option<SequencePlan>,
+}
+
+impl<'a> PreparedRule<'a> {
+    fn new(rule: &'a ConfigSortRule) -> Self {
+        let sequence_plan = rule.sequence.as_ref().map(|sequence| SequencePlan::new(sequence));
+        Self { rule, sequence_plan }
+    }
+}
+
+#[derive(Debug)]
+struct RuleCacheEntry {
+    filter_pass: bool,
+    value: Option<Arc<str>>,
+    sequence_match: Option<SequenceMatch>,
+}
+
+fn evaluate_sequence(plan: &SequencePlan, value: &str) -> SequenceMatch {
+    for (sequence_idx, pattern) in plan.patterns.iter().enumerate() {
+        if let Some(captures) = pattern.regex.captures(value) {
+            let ordered_captures = pattern
+                .ordered_capture_names
+                .iter()
+                .map(|name| captures.name(name).map(|capture| Arc::<str>::from(capture.as_str())))
+                .collect();
+            return SequenceMatch::Matched { sequence_idx, captures: ordered_captures };
+        }
+    }
+    SequenceMatch::Unmatched
+}
+
+fn compare_sequence_match(a: &SequenceMatch, b: &SequenceMatch, order: SortOrder) -> Ordering {
+    match (a, b) {
+        (
+            SequenceMatch::Matched {
+                sequence_idx: idx_a,
+                captures: captures_a,
+            },
+            SequenceMatch::Matched {
+                sequence_idx: idx_b,
+                captures: captures_b,
+            },
+        ) => {
+            // Sequence index is an explicit priority list and is never reversed by DESC.
+            let idx_ord = idx_a.cmp(idx_b);
+            if idx_ord != Ordering::Equal {
+                return idx_ord;
+            }
+
+            let capture_count = captures_a.len().max(captures_b.len());
+            for index in 0..capture_count {
+                let ord = match (captures_a.get(index), captures_b.get(index)) {
+                    (Some(Some(v1)), Some(Some(v2))) => v1.cmp(v2),
+                    (Some(Some(_)), Some(None)) => Ordering::Greater,
+                    (Some(None), Some(Some(_))) => Ordering::Less,
+                    (Some(Some(_)), None) => Ordering::Greater,
+                    (None, Some(Some(_))) => Ordering::Less,
+                    _ => Ordering::Equal,
+                };
+                if ord != Ordering::Equal {
+                    return apply_sort_order(order, ord);
+                }
+            }
+            Ordering::Equal
+        }
+        (SequenceMatch::Matched { .. }, SequenceMatch::Unmatched) => Ordering::Less,
+        (SequenceMatch::Unmatched, SequenceMatch::Matched { .. }) => Ordering::Greater,
+        (SequenceMatch::Unmatched, SequenceMatch::Unmatched) => Ordering::Equal,
+    }
+}
+
+fn compare_rule_entries(rule: &PreparedRule, left: &RuleCacheEntry, right: &RuleCacheEntry) -> Ordering {
+    match (left.filter_pass, right.filter_pass) {
+        (false, false) => return Ordering::Equal,
+        (true, false) => return apply_sort_order(rule.rule.order, Ordering::Less),
+        (false, true) => return apply_sort_order(rule.rule.order, Ordering::Greater),
+        (true, true) => {}
+    }
+
+    match (&left.value, &right.value) {
+        (None, None) => Ordering::Equal,
+        (Some(_), None) => apply_sort_order(rule.rule.order, Ordering::Less),
+        (None, Some(_)) => apply_sort_order(rule.rule.order, Ordering::Greater),
+        (Some(value_left), Some(value_right)) => {
+            if rule.sequence_plan.is_some() {
+                match (&left.sequence_match, &right.sequence_match) {
+                    (Some(seq_left), Some(seq_right)) => compare_sequence_match(seq_left, seq_right, rule.rule.order),
+                    _ => Ordering::Equal,
+                }
+            } else {
+                apply_sort_order(rule.rule.order, value_left.cmp(value_right))
+            }
+        }
+    }
+}
+
+fn build_rule_cache_entry(
+    rule: &PreparedRule,
+    item: Option<&shared::model::PlaylistItem>,
+    match_as_ascii: bool,
+) -> RuleCacheEntry {
+    let Some(item) = item else {
+        return RuleCacheEntry {
+            filter_pass: false,
+            value: None,
+            sequence_match: None,
+        };
+    };
+
+    let provider = ValueProvider { pli: item, match_as_ascii };
+    let filter_pass = rule.rule.filter.filter(&provider);
+    if !filter_pass {
+        return RuleCacheEntry {
+            filter_pass: false,
+            value: None,
+            sequence_match: None,
+        };
+    }
+
+    let value = provider.get(rule.rule.field.as_str());
+    let sequence_match = match (&rule.sequence_plan, value.as_deref()) {
+        (Some(sequence_plan), Some(value)) => Some(evaluate_sequence(sequence_plan, value)),
+        _ => None,
+    };
+
+    RuleCacheEntry {
+        filter_pass: true,
+        value,
+        sequence_match,
+    }
+}
+
+fn build_group_rule_cache(rule: &PreparedRule, groups: &[PlaylistGroup], match_as_ascii: bool) -> Vec<RuleCacheEntry> {
+    groups
+        .iter()
+        .map(|group| build_rule_cache_entry(rule, group.channels.first(), match_as_ascii))
+        .collect()
+}
+
+fn build_channel_rule_cache(
+    rule: &PreparedRule,
+    channels: &[shared::model::PlaylistItem],
+    match_as_ascii: bool,
+) -> Vec<RuleCacheEntry> {
+    channels
+        .iter()
+        .map(|channel| build_rule_cache_entry(rule, Some(channel), match_as_ascii))
+        .collect()
+}
+
+fn reorder_by_indices<T>(items: &mut Vec<T>, indices: &[usize]) {
+    debug_assert_eq!(items.len(), indices.len());
+
+    let mut original: Vec<Option<T>> = std::mem::take(items).into_iter().map(Some).collect();
+    items.reserve(indices.len());
+
+    for &idx in indices {
+        let item = original[idx]
+            .take()
+            .expect("index permutation must contain each source position exactly once");
+        items.push(item);
+    }
+}
+
+#[cfg(test)]
 fn playlist_comparator(
     sequence: Option<&Vec<Arc<regex::Regex>>>,
     order: SortOrder,
@@ -21,80 +237,14 @@ fn playlist_comparator(
     if matches!(order, SortOrder::None) {
         return Ordering::Equal;
     }
-    if let Some(regex_list) = sequence {
-        let mut match_a = None;
-        let mut match_b = None;
 
-        for (i, regex) in regex_list.iter().enumerate() {
-            if match_a.is_none() {
-                if let Some(caps) = regex.captures(value_a) {
-                    match_a = Some((i, caps));
-                }
-            }
-            if match_b.is_none() {
-                if let Some(caps) = regex.captures(value_b) {
-                    match_b = Some((i, caps));
-                }
-            }
-
-            // If both matches found → break
-            if match_a.is_some() && match_b.is_some() {
-                break;
-            }
-        }
-
-        match (match_a, match_b) {
-            (Some((idx_a, caps_a)), Some((idx_b, caps_b))) => {
-                if idx_a != idx_b {
-                    return match order {
-                        SortOrder::Asc => idx_a.cmp(&idx_b),
-                        SortOrder::Desc => idx_b.cmp(&idx_a),
-                        SortOrder::None => Ordering::Equal,
-                    };
-                }
-
-                // Same regex → sort by captures (c1, c2, …)
-                let mut named: Vec<_> = regex_list[idx_a]
-                    .capture_names()
-                    .flatten()
-                    .filter(|name| name.starts_with('c'))
-                    .collect();
-
-                named.sort_by_key(|name| name[1..].parse::<u32>().unwrap_or(0));
-
-                for name in named {
-                    let va = caps_a.name(name).map(|m| m.as_str());
-                    let vb = caps_b.name(name).map(|m| m.as_str());
-                    let o = match (va, vb) {
-                        (Some(a), Some(b)) => a.cmp(b),
-                        (Some(_), None) => Ordering::Greater,
-                        (None, Some(_)) => Ordering::Less,
-                        _ => Ordering::Equal,
-                    };
-
-                    if o != Ordering::Equal {
-                        return match order {
-                            SortOrder::Asc => o,
-                            SortOrder::Desc => o.reverse(),
-                            SortOrder::None => Ordering::Equal,
-                        };
-                    }
-                }
-
-                Ordering::Equal
-            }
-            (Some(_), None) => direction(order, Ordering::Less),
-            (None, Some(_)) => direction(order, Ordering::Greater),
-            (None, None) => Ordering::Equal,
-        }
+    if let Some(sequence) = sequence {
+        let plan = SequencePlan::new(sequence);
+        let left = evaluate_sequence(&plan, value_a);
+        let right = evaluate_sequence(&plan, value_b);
+        compare_sequence_match(&left, &right, order)
     } else {
-        // No Regex-Sequence defined → fallback
-        let o = value_a.cmp(value_b);
-        match order {
-            SortOrder::Asc => o,
-            SortOrder::Desc => o.reverse(),
-            SortOrder::None => Ordering::Equal,
-        }
+        apply_sort_order(order, value_a.cmp(value_b))
     }
 }
 
@@ -110,7 +260,7 @@ macro_rules! sort_groups_by_source_order {
 
 pub(in crate::processing::processor) fn sort_playlist(
     target: &ConfigTarget,
-    playlist: &mut [PlaylistGroup],
+    playlist: &mut Vec<PlaylistGroup>,
 ) -> bool {
     let Some(sort) = &target.sort else {
         for group in &mut *playlist {
@@ -122,14 +272,14 @@ pub(in crate::processing::processor) fn sort_playlist(
 
     let rules = &sort.rules;
     let match_as_ascii = sort.match_as_ascii;
-    sort_channels_in_groups(playlist, rules, match_as_ascii);
+    sort_channels_in_groups(playlist.as_mut_slice(), rules, match_as_ascii);
     sort_groups(playlist, rules, match_as_ascii);
 
     true
 }
 
 fn sort_groups(
-    groups: &mut [PlaylistGroup],
+    groups: &mut Vec<PlaylistGroup>,
     rules: &[ConfigSortRule],
     match_as_ascii: bool,
 ) {
@@ -137,6 +287,7 @@ fn sort_groups(
         .iter()
         .filter(|r| matches!(r.target, SortTarget::Group))
         .filter(|r| r.order != SortOrder::None)
+        .map(PreparedRule::new)
         .collect();
 
     if group_rules.is_empty() {
@@ -144,51 +295,32 @@ fn sort_groups(
         return;
     }
 
-    groups.sort_by(|a_grp, b_grp| {
-        let a_chan = a_grp.channels.first();
-        let b_chan = b_grp.channels.first();
+    let rule_caches: Vec<Vec<RuleCacheEntry>> = group_rules
+        .iter()
+        .map(|rule| build_group_rule_cache(rule, groups.as_slice(), match_as_ascii))
+        .collect();
 
-        for rule in &group_rules {
-            let (vp_a, vp_b) = match (a_chan, b_chan) {
-                (Some(a), Some(b)) => (
-                    ValueProvider { pli: a, match_as_ascii },
-                    ValueProvider { pli: b, match_as_ascii },
-                ),
-                (Some(_), None) => return direction(rule.order, Ordering::Less),
-                (None, Some(_)) => return direction(rule.order, Ordering::Greater),
-                (None, None) => continue,
-            };
-
-            let fa = rule.filter.filter(&vp_a);
-            let fb = rule.filter.filter(&vp_b);
-
-            match (fa, fb) {
-                (false, false) => continue,
-                (true, false) => return direction(rule.order, Ordering::Less),
-                (false, true) => return direction(rule.order, Ordering::Greater),
-                _ => {}
-            }
-
-            let va = vp_a.get(rule.field.as_str());
-            let vb = vp_b.get(rule.field.as_str());
-            let ord = match (va, vb) {
-                (None, None) => Ordering::Equal,
-                (Some(_), None) => direction(rule.order, Ordering::Less),
-                (None, Some(_)) => direction(rule.order, Ordering::Greater),
-                (Some(va), Some(vb)) => {
-                    playlist_comparator(rule.sequence.as_ref(), rule.order, &va, &vb)
-                }
-            };
-
+    let mut group_indices: Vec<usize> = (0..groups.len()).collect();
+    group_indices.sort_by(|left_idx, right_idx| {
+        for (rule, cache) in group_rules.iter().zip(rule_caches.iter()) {
+            let ord = compare_rule_entries(rule, &cache[*left_idx], &cache[*right_idx]);
             if ord != Ordering::Equal {
                 return ord;
             }
         }
 
-        let order1 = a_chan.as_ref().map_or(u32::MAX, |c| c.header.source_ordinal);
-        let order2 = b_chan.as_ref().map_or(u32::MAX, |c| c.header.source_ordinal);
+        let order1 = groups[*left_idx]
+            .channels
+            .first()
+            .map_or(u32::MAX, |c| c.header.source_ordinal);
+        let order2 = groups[*right_idx]
+            .channels
+            .first()
+            .map_or(u32::MAX, |c| c.header.source_ordinal);
         order1.cmp(&order2)
     });
+
+    reorder_by_indices(groups, &group_indices);
 }
 
 fn sort_channels_in_groups(
@@ -200,6 +332,7 @@ fn sort_channels_in_groups(
         .iter()
         .filter(|r| matches!(r.target, SortTarget::Channel))
         .filter(|r| r.order != SortOrder::None)
+        .map(PreparedRule::new)
         .collect();
 
     if channel_rules.is_empty() {
@@ -212,49 +345,37 @@ fn sort_channels_in_groups(
     }
 
     for group in groups {
-        group.channels.sort_by(|a, b| {
-            let vp_a = ValueProvider { pli: a, match_as_ascii };
-            let vp_b = ValueProvider { pli: b, match_as_ascii };
+        let rule_caches: Vec<Vec<RuleCacheEntry>> = channel_rules
+            .iter()
+            .map(|rule| build_channel_rule_cache(rule, &group.channels, match_as_ascii))
+            .collect();
 
-            for rule in &channel_rules {
-                let fa = rule.filter.filter(&vp_a);
-                let fb = rule.filter.filter(&vp_b);
+        let mut channel_indices: Vec<usize> = (0..group.channels.len()).collect();
+        channel_indices.sort_by(|left_idx, right_idx| {
+            for (rule, cache) in channel_rules.iter().zip(rule_caches.iter()) {
+                let left = &cache[*left_idx];
+                let right = &cache[*right_idx];
 
-                match (fa, fb) {
-                    (false, false) => continue,
-                    (true, false) => return direction(rule.order, Ordering::Less),
-                    (false, true) => return direction(rule.order, Ordering::Greater),
-                    _ => {}
-                }
-
-                let va = vp_a.get(rule.field.as_str());
-                let vb = vp_b.get(rule.field.as_str());
-
-                let ord = match (&va, &vb) {
-                    (None, None) => Ordering::Equal,
-                    (Some(_), None) => direction(rule.order, Ordering::Less),
-                    (None, Some(_)) => direction(rule.order, Ordering::Greater),
-                    (Some(va), Some(vb)) => {
-                        playlist_comparator(rule.sequence.as_ref(), rule.order, va, vb)
-                    }
-                };
-
+                let ord = compare_rule_entries(rule, left, right);
                 if ord == Ordering::Equal {
-                    if let (Some(va), Some(vb)) = (&va, &vb) {
-                        let fallback = direction(rule.order, va.cmp(vb));
+                    if let (Some(va), Some(vb)) = (&left.value, &right.value) {
+                        let fallback = apply_sort_order(rule.rule.order, va.cmp(vb));
                         if fallback != Ordering::Equal {
                             return fallback;
                         }
                     }
-                }
-
-                if ord != Ordering::Equal {
+                } else {
                     return ord;
                 }
             }
 
-            a.header.source_ordinal.cmp(&b.header.source_ordinal)
+            group.channels[*left_idx]
+                .header
+                .source_ordinal
+                .cmp(&group.channels[*right_idx].header.source_ordinal)
         });
+
+        reorder_by_indices(&mut group.channels, &channel_indices);
     }
 }
 
@@ -445,6 +566,53 @@ mod tests {
             .into_iter()
             .map(|pli| pli.header.title)
             .collect::<Vec<_>>();
+
+        assert_eq!(expected, sorted);
+    }
+
+    #[test]
+    fn test_sequence_priority_is_not_reversed_for_desc() {
+        let mut channels: Vec<PlaylistItem> = vec!["A-1", "B-9", "A-7", "B-2"]
+            .into_iter()
+            .enumerate()
+            .map(|(i, title)| PlaylistItem {
+                header: PlaylistItemHeader {
+                    title: title.to_string().into(),
+                    source_ordinal: u32::try_from(i).unwrap(),
+                    ..Default::default()
+                },
+            })
+            .collect();
+
+        let sequence = vec![
+            shared::model::REGEX_CACHE.get_or_compile(r"^A-(?P<c1>\d+)$").unwrap(),
+            shared::model::REGEX_CACHE.get_or_compile(r"^B-(?P<c1>\d+)$").unwrap(),
+        ];
+
+        channels.sort_by(|a, b| {
+            let ord = playlist_comparator(
+                Some(&sequence),
+                SortOrder::Desc,
+                &a.header.title,
+                &b.header.title,
+            );
+
+            if ord == Ordering::Equal {
+                a.header.source_ordinal.cmp(&b.header.source_ordinal)
+            } else {
+                ord
+            }
+        });
+
+        let sorted = channels
+            .into_iter()
+            .map(|pli| pli.header.title)
+            .collect::<Vec<_>>();
+
+        let expected = vec!["A-7", "A-1", "B-9", "B-2"]
+            .into_iter()
+            .map(Into::into)
+            .collect::<Vec<Arc<str>>>();
 
         assert_eq!(expected, sorted);
     }

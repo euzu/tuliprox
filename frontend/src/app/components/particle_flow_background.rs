@@ -1,10 +1,10 @@
 use fastrand::Rng;
-use js_sys::Float32Array;
+use js_sys::{Array, Float32Array};
 use std::{cell::RefCell, f32::consts::TAU, rc::Rc};
 use wasm_bindgen::{closure::Closure, JsCast};
 use web_sys::{
-    window, Event, HtmlCanvasElement, WebGlBuffer, WebGlProgram, WebGlRenderingContext, WebGlShader,
-    WebGlUniformLocation,
+    window, Element, Event, HtmlCanvasElement, WebGlBuffer, WebGlProgram, WebGlRenderingContext, WebGlShader,
+    WebGlUniformLocation, MutationObserver, MutationObserverInit,
 };
 use yew::prelude::*;
 
@@ -29,8 +29,11 @@ struct ParticleState {
 
 struct RenderRuntime {
     gl: WebGlRenderingContext,
-    _program: WebGlProgram,
+    program: WebGlProgram,
     buffer: WebGlBuffer,
+    u_accent_1: Option<WebGlUniformLocation>,
+    u_accent_2: Option<WebGlUniformLocation>,
+    u_alpha_boost: Option<WebGlUniformLocation>,
     u_dpr: Option<WebGlUniformLocation>,
 }
 
@@ -44,7 +47,7 @@ varying float v_layer;
 
 void main() {
     gl_Position = vec4(a_pos, 0.0, 1.0);
-    gl_PointSize = a_meta.x * u_dpr * (1.0 + a_meta.z * 0.38);
+    gl_PointSize = a_meta.x * u_dpr * (1.0 + a_meta.z * 0.56);
     v_alpha = a_meta.y;
     v_layer = a_meta.z;
 }
@@ -55,6 +58,7 @@ precision highp float;
 
 uniform vec3 u_accent1;
 uniform vec3 u_accent2;
+uniform float u_alpha_boost;
 
 varying float v_alpha;
 varying float v_layer;
@@ -68,7 +72,8 @@ void main() {
 
     float core = 1.0 - smoothstep(0.0, 0.32, dist);
     float halo = 1.0 - smoothstep(0.2, 0.5, dist);
-    float alpha = (core * 0.75 + halo * 0.25) * v_alpha;
+    float alpha = (core * 0.75 + halo * 0.25) * v_alpha * u_alpha_boost;
+    alpha = clamp(alpha, 0.0, 1.0);
     vec3 color = mix(u_accent1, u_accent2, clamp(v_layer * 0.35, 0.0, 1.0));
     gl_FragColor = vec4(color, alpha);
 }
@@ -140,48 +145,57 @@ fn parse_css_color_to_rgb(value: &str) -> Option<[f32; 3]> {
     Some([r, g, b])
 }
 
+fn read_theme_style() -> Option<web_sys::CssStyleDeclaration> {
+    let win = window()?;
+    let document = win.document()?;
+    document
+        .body()
+        .and_then(|body| {
+            body.dyn_into::<Element>()
+                .ok()
+                .and_then(|element| win.get_computed_style(&element).ok().flatten())
+        })
+        .or_else(|| {
+            document
+                .document_element()
+                .and_then(|root| win.get_computed_style(&root).ok().flatten())
+        })
+}
+
 fn read_accent_colors_from_css() -> ([f32; 3], [f32; 3]) {
     let fallback_1 = [0.45, 0.63, 0.88];
     let fallback_2 = [0.95, 0.97, 1.0];
 
-    let Some(win) = window() else {
-        return (fallback_1, fallback_2);
-    };
-    let Some(document) = win.document() else {
-        return (fallback_1, fallback_2);
-    };
-    let Some(root) = document.document_element() else {
-        return (fallback_1, fallback_2);
-    };
-    let Some(style) = win.get_computed_style(&root).ok().flatten() else {
+    let Some(style) = read_theme_style() else {
         return (fallback_1, fallback_2);
     };
 
-    // Prefer new particle-flow variables, but keep legacy names as fallback for existing themes.
     let accent_1 = style
         .get_property_value("--particle-flow-background-accent-color-1")
         .ok()
         .and_then(|v| parse_css_color_to_rgb(&v))
-        .or_else(|| {
-            style
-                .get_property_value("--floating-background-accent-color-1")
-                .ok()
-                .and_then(|v| parse_css_color_to_rgb(&v))
-        })
         .unwrap_or(fallback_1);
     let accent_2 = style
         .get_property_value("--particle-flow-background-accent-color-2")
         .ok()
         .and_then(|v| parse_css_color_to_rgb(&v))
-        .or_else(|| {
-            style
-                .get_property_value("--floating-background-accent-color-2")
-                .ok()
-                .and_then(|v| parse_css_color_to_rgb(&v))
-        })
         .unwrap_or(fallback_2);
 
     (accent_1, accent_2)
+}
+
+fn read_alpha_boost_from_css() -> f32 {
+    let fallback = 1.0_f32;
+    let Some(style) = read_theme_style() else {
+        return fallback;
+    };
+
+    style
+        .get_property_value("--particle-flow-background-alpha-boost")
+        .ok()
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .map(|v| v.clamp(0.0, 4.0))
+        .unwrap_or(fallback)
 }
 
 fn pos_to_cell(pos: [f32; 2]) -> (usize, usize) {
@@ -386,6 +400,22 @@ fn upload_accent_uniform(gl: &WebGlRenderingContext, location: Option<WebGlUnifo
     }
 }
 
+fn upload_alpha_boost_uniform(gl: &WebGlRenderingContext, location: Option<WebGlUniformLocation>) {
+    if let Some(location) = location.as_ref() {
+        gl.uniform1f(Some(location), read_alpha_boost_from_css());
+    }
+}
+
+fn upload_theme_accent_uniforms(
+    gl: &WebGlRenderingContext,
+    u_accent_1: Option<WebGlUniformLocation>,
+    u_accent_2: Option<WebGlUniformLocation>,
+) {
+    let (accent_1, accent_2) = read_accent_colors_from_css();
+    upload_accent_uniform(gl, u_accent_1, accent_1);
+    upload_accent_uniform(gl, u_accent_2, accent_2);
+}
+
 fn init_renderer(canvas: &HtmlCanvasElement, initial_data: &[f32]) -> Result<RenderRuntime, String> {
     let context = canvas
         .get_context("webgl")
@@ -403,12 +433,12 @@ fn init_renderer(canvas: &HtmlCanvasElement, initial_data: &[f32]) -> Result<Ren
     gl.clear_color(0.0, 0.0, 0.0, 0.0);
     resize_canvas(canvas, &gl);
 
-    let (accent_1, accent_2) = read_accent_colors_from_css();
     let u_accent_1 = gl.get_uniform_location(&program, "u_accent1");
     let u_accent_2 = gl.get_uniform_location(&program, "u_accent2");
+    let u_alpha_boost = gl.get_uniform_location(&program, "u_alpha_boost");
     let u_dpr = gl.get_uniform_location(&program, "u_dpr");
-    upload_accent_uniform(&gl, u_accent_1, accent_1);
-    upload_accent_uniform(&gl, u_accent_2, accent_2);
+    upload_theme_accent_uniforms(&gl, u_accent_1.clone(), u_accent_2.clone());
+    upload_alpha_boost_uniform(&gl, u_alpha_boost.clone());
     upload_dpr_uniform(&gl, u_dpr.clone());
 
     let buffer = gl.create_buffer().ok_or_else(|| String::from("Failed to create particle buffer"))?;
@@ -449,7 +479,15 @@ fn init_renderer(canvas: &HtmlCanvasElement, initial_data: &[f32]) -> Result<Ren
         8,
     );
 
-    Ok(RenderRuntime { gl, _program: program, buffer, u_dpr })
+    Ok(RenderRuntime {
+        gl,
+        program,
+        buffer,
+        u_accent_1,
+        u_accent_2,
+        u_alpha_boost,
+        u_dpr,
+    })
 }
 
 #[function_component]
@@ -569,6 +607,34 @@ pub fn ParticleFlowBackground() -> Html {
             }));
             let _ = win.add_event_listener_with_callback("resize", on_resize.as_ref().unchecked_ref());
 
+            let runtime_ref_theme = runtime_ref.clone();
+            let on_theme_change =
+                Closure::<dyn FnMut(Array, MutationObserver)>::wrap(Box::new(move |_records, _observer| {
+                    if let Some(runtime) = runtime_ref_theme.borrow().as_ref() {
+                        runtime.gl.use_program(Some(&runtime.program));
+                        upload_theme_accent_uniforms(
+                            &runtime.gl,
+                            runtime.u_accent_1.clone(),
+                            runtime.u_accent_2.clone(),
+                        );
+                        upload_alpha_boost_uniform(&runtime.gl, runtime.u_alpha_boost.clone());
+                    }
+                }));
+
+            let theme_observer = win
+                .document()
+                .and_then(|doc| doc.body())
+                .and_then(|body| {
+                    MutationObserver::new(on_theme_change.as_ref().unchecked_ref())
+                        .ok()
+                        .and_then(|observer| {
+                            let options = MutationObserverInit::new();
+                            options.set_attributes(true);
+                            observer.observe_with_options(&body, &options).ok()?;
+                            Some(observer)
+                        })
+                });
+
             let runtime_ref_lost = runtime_ref.clone();
             let on_context_lost = Closure::<dyn FnMut(Event)>::wrap(Box::new(move |event: Event| {
                 event.prevent_default();
@@ -600,6 +666,9 @@ pub fn ParticleFlowBackground() -> Html {
                     }
                     let _ = win.remove_event_listener_with_callback("resize", on_resize.as_ref().unchecked_ref());
                 }
+                if let Some(observer) = theme_observer.as_ref() {
+                    observer.disconnect();
+                }
                 let _ = canvas_cleanup
                     .remove_event_listener_with_callback("webglcontextlost", on_context_lost.as_ref().unchecked_ref());
                 let _ = canvas_cleanup.remove_event_listener_with_callback(
@@ -608,6 +677,7 @@ pub fn ParticleFlowBackground() -> Html {
                 );
                 *runtime_ref.borrow_mut() = None;
                 *animation.borrow_mut() = None;
+                drop(on_theme_change);
             }) as Box<dyn FnOnce()>
         });
     }

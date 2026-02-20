@@ -1,4 +1,4 @@
-use crate::app::components::{make_tags, CollapsePanel, Tag, TagList};
+use crate::app::components::{make_tags, Tag, TagList};
 use shared::model::{ClusterFlags, ConfigTargetDto};
 use std::rc::Rc;
 use yew::prelude::*;
@@ -55,13 +55,10 @@ pub fn TargetOptions(props: &TargetOptionsProps) -> Html {
         (flags.iter().any(|&v| v), make_tags(&options, &translate), make_tags(&redirect, &translate))
     });
 
-    let has_options = tags.0;
     let opts: Vec<Rc<Tag>> = (tags.1).clone();
     let redirect: Vec<Rc<Tag>> = (tags.2).clone();
 
     html! {
-        <CollapsePanel expanded={false} class={format!("tp__target-options__panel{}", if has_options { " tp__target-options__has_options"} else {""})}
-                       title={translate.t("LABEL.SETTINGS")}>
             <div class="tp__target-options">
                 <div class="tp__target-options__section">
                   <TagList tags={opts} />
@@ -71,6 +68,5 @@ pub fn TargetOptions(props: &TargetOptionsProps) -> Html {
                   <TagList tags={redirect} />
                 </div>
             </div>
-        </CollapsePanel>
     }
 }
