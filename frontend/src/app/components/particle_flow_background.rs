@@ -610,15 +610,21 @@ pub fn ParticleFlowBackground() -> Html {
                     }
                 }));
 
-            let theme_observer = win.document().and_then(|doc| doc.body()).and_then(|body| {
+            let theme_observer = win.document().and_then(|doc| {
                 MutationObserver::new(on_theme_change.as_ref().unchecked_ref()).ok().and_then(|observer| {
                     let options = MutationObserverInit::new();
                     options.set_attributes(true);
                     let attribute_filter = Array::new();
                     attribute_filter.push(&"class".into());
                     attribute_filter.push(&"data-theme".into());
-                    options.set_attribute_filter(&attribute_filter.into());
-                    observer.observe_with_options(&body, &options).ok()?;
+                    options.set_attribute_filter(&attribute_filter);
+                    // Observe both <html> and <body> to cover all theme-toggle conventions.
+                    if let Some(root) = doc.document_element() {
+                        let _ = observer.observe_with_options(&root, &options);
+                    }
+                    if let Some(body) = doc.body() {
+                        let _ = observer.observe_with_options(&body, &options);
+                    }
                     Some(observer)
                 })
             });
