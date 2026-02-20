@@ -1175,7 +1175,7 @@ epg:
 `match_threshold`is optional and if not set 80.
 `best_match_threshold` is optional and if not set 99.
 `name_prefix` can be `ignore`, `suffix`, `prefix`. For `suffix` and `prefix` you need to define a concat string.
-`strip :  ["3840p", "uhd", "fhd", "hd", "sd", "4k", "plus", "raw"]`  this is the defualt
+`strip :  ["3840p", "uhd", "fhd", "hd", "sd", "4k", "plus", "raw"]`  this is the default
 `normalize_regex: [^a-zA-Z0-9\-]`   is the default
 
 The fuzzy matching tries to guess the EPG ID for a given channel. Some keys are generated based on the channel name for similarity search.
