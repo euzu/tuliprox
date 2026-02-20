@@ -31,18 +31,20 @@ struct RenderRuntime {
     gl: WebGlRenderingContext,
     _program: WebGlProgram,
     buffer: WebGlBuffer,
+    u_dpr: Option<WebGlUniformLocation>,
 }
 
 const VERTEX_SHADER: &str = r#"
 attribute vec2 a_pos;
 attribute vec3 a_meta; // size, alpha, layer
+uniform float u_dpr;
 
 varying float v_alpha;
 varying float v_layer;
 
 void main() {
     gl_Position = vec4(a_pos, 0.0, 1.0);
-    gl_PointSize = a_meta.x * (1.0 + a_meta.z * 0.38);
+    gl_PointSize = a_meta.x * u_dpr * (1.0 + a_meta.z * 0.38);
     v_alpha = a_meta.y;
     v_layer = a_meta.z;
 }
@@ -372,6 +374,12 @@ fn resize_canvas(canvas: &HtmlCanvasElement, gl: &WebGlRenderingContext) {
     gl.viewport(0, 0, target_width as i32, target_height as i32);
 }
 
+fn upload_dpr_uniform(gl: &WebGlRenderingContext, location: Option<WebGlUniformLocation>) {
+    if let (Some(win), Some(location)) = (window(), location.as_ref()) {
+        gl.uniform1f(Some(location), win.device_pixel_ratio().max(1.0) as f32);
+    }
+}
+
 fn upload_accent_uniform(gl: &WebGlRenderingContext, location: Option<WebGlUniformLocation>, value: [f32; 3]) {
     if let Some(location) = location.as_ref() {
         gl.uniform3f(Some(location), value[0], value[1], value[2]);
@@ -398,12 +406,15 @@ fn init_renderer(canvas: &HtmlCanvasElement, initial_data: &[f32]) -> Result<Ren
     let (accent_1, accent_2) = read_accent_colors_from_css();
     let u_accent_1 = gl.get_uniform_location(&program, "u_accent1");
     let u_accent_2 = gl.get_uniform_location(&program, "u_accent2");
+    let u_dpr = gl.get_uniform_location(&program, "u_dpr");
     upload_accent_uniform(&gl, u_accent_1, accent_1);
     upload_accent_uniform(&gl, u_accent_2, accent_2);
+    upload_dpr_uniform(&gl, u_dpr.clone());
 
     let buffer = gl.create_buffer().ok_or_else(|| String::from("Failed to create particle buffer"))?;
     gl.bind_buffer(WebGlRenderingContext::ARRAY_BUFFER, Some(&buffer));
-    let initial_array = Float32Array::from(initial_data);
+    // SAFETY: `initial_data` is borrowed for the duration of this immediate upload call.
+    let initial_array = unsafe { Float32Array::view(initial_data) };
     gl.buffer_data_with_array_buffer_view(
         WebGlRenderingContext::ARRAY_BUFFER,
         &initial_array,
@@ -438,7 +449,7 @@ fn init_renderer(canvas: &HtmlCanvasElement, initial_data: &[f32]) -> Result<Ren
         8,
     );
 
-    Ok(RenderRuntime { gl, _program: program, buffer })
+    Ok(RenderRuntime { gl, _program: program, buffer, u_dpr })
 }
 
 #[function_component]
@@ -516,7 +527,8 @@ pub fn ParticleFlowBackground() -> Html {
 
                 if let Some(runtime) = runtime_ref_anim.borrow().as_ref() {
                     let frame_data = gpu_data_ref.borrow();
-                    let array = Float32Array::from(frame_data.as_slice());
+                    // SAFETY: `frame_data` is immutably borrowed and immediately consumed by WebGL upload.
+                    let array = unsafe { Float32Array::view(frame_data.as_slice()) };
                     runtime.gl.bind_buffer(WebGlRenderingContext::ARRAY_BUFFER, Some(&runtime.buffer));
                     runtime.gl.buffer_sub_data_with_i32_and_array_buffer_view(
                         WebGlRenderingContext::ARRAY_BUFFER,
@@ -552,6 +564,7 @@ pub fn ParticleFlowBackground() -> Html {
             let on_resize = Closure::<dyn FnMut()>::wrap(Box::new(move || {
                 if let Some(runtime) = runtime_ref_resize.borrow().as_ref() {
                     resize_canvas(&resize_canvas_ref, &runtime.gl);
+                    upload_dpr_uniform(&runtime.gl, runtime.u_dpr.clone());
                 }
             }));
             let _ = win.add_event_listener_with_callback("resize", on_resize.as_ref().unchecked_ref());
@@ -613,7 +626,9 @@ fn compile_shader(gl: &WebGlRenderingContext, shader_type: u32, source: &str) ->
     if status {
         Ok(shader)
     } else {
-        Err(gl.get_shader_info_log(&shader).unwrap_or_else(|| String::from("Unknown shader error")))
+        let error = gl.get_shader_info_log(&shader).unwrap_or_else(|| String::from("Unknown shader error"));
+        gl.delete_shader(Some(&shader));
+        Err(error)
     }
 }
 
