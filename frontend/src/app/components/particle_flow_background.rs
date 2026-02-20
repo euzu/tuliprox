@@ -2,7 +2,10 @@ use fastrand::Rng;
 use js_sys::Float32Array;
 use std::{cell::RefCell, f32::consts::TAU, rc::Rc};
 use wasm_bindgen::{closure::Closure, JsCast};
-use web_sys::{window, HtmlCanvasElement, WebGlProgram, WebGlRenderingContext, WebGlShader};
+use web_sys::{
+    window, Event, HtmlCanvasElement, WebGlBuffer, WebGlProgram, WebGlRenderingContext, WebGlShader,
+    WebGlUniformLocation,
+};
 use yew::prelude::*;
 
 const PARTICLE_COUNT: i32 = 520;
@@ -24,6 +27,12 @@ struct ParticleState {
     seed: f32,
 }
 
+struct RenderRuntime {
+    gl: WebGlRenderingContext,
+    _program: WebGlProgram,
+    buffer: WebGlBuffer,
+}
+
 const VERTEX_SHADER: &str = r#"
 attribute vec2 a_pos;
 attribute vec3 a_meta; // size, alpha, layer
@@ -42,6 +51,9 @@ void main() {
 const FRAGMENT_SHADER: &str = r#"
 precision highp float;
 
+uniform vec3 u_accent1;
+uniform vec3 u_accent2;
+
 varying float v_alpha;
 varying float v_layer;
 
@@ -55,7 +67,7 @@ void main() {
     float core = smoothstep(0.32, 0.0, dist);
     float halo = smoothstep(0.5, 0.2, dist);
     float alpha = (core * 0.75 + halo * 0.25) * v_alpha;
-    vec3 color = mix(vec3(0.45, 0.63, 0.88), vec3(0.95, 0.97, 1.0), v_layer * 0.35);
+    vec3 color = mix(u_accent1, u_accent2, clamp(v_layer * 0.35, 0.0, 1.0));
     gl_FragColor = vec4(color, alpha);
 }
 "#;
@@ -68,6 +80,82 @@ fn normalize(v: [f32; 2]) -> [f32; 2] {
 fn fract(v: f32) -> f32 { v - v.floor() }
 
 fn hash1(v: f32) -> f32 { fract((v.sin() * 43_758.547).abs()) }
+
+fn parse_rgb_component(component: &str) -> Option<f32> {
+    let value = component.trim();
+    if let Some(percent) = value.strip_suffix('%') {
+        percent.parse::<f32>().ok().map(|v| (v / 100.0).clamp(0.0, 1.0))
+    } else {
+        value.parse::<f32>().ok().map(|v| (v / 255.0).clamp(0.0, 1.0))
+    }
+}
+
+fn parse_css_color_to_rgb(value: &str) -> Option<[f32; 3]> {
+    let color = value.trim();
+    if let Some(hex) = color.strip_prefix('#') {
+        return match hex.len() {
+            3 => {
+                let r = u8::from_str_radix(&hex[0..1].repeat(2), 16).ok()? as f32 / 255.0;
+                let g = u8::from_str_radix(&hex[1..2].repeat(2), 16).ok()? as f32 / 255.0;
+                let b = u8::from_str_radix(&hex[2..3].repeat(2), 16).ok()? as f32 / 255.0;
+                Some([r, g, b])
+            }
+            6 => {
+                let r = u8::from_str_radix(&hex[0..2], 16).ok()? as f32 / 255.0;
+                let g = u8::from_str_radix(&hex[2..4], 16).ok()? as f32 / 255.0;
+                let b = u8::from_str_radix(&hex[4..6], 16).ok()? as f32 / 255.0;
+                Some([r, g, b])
+            }
+            _ => None,
+        };
+    }
+
+    let inner = color
+        .strip_prefix("rgb(")
+        .and_then(|s| s.strip_suffix(')'))
+        .or_else(|| color.strip_prefix("rgba(").and_then(|s| s.strip_suffix(')')))?;
+
+    let components: Vec<&str> = inner.split(',').collect();
+    if components.len() < 3 {
+        return None;
+    }
+
+    let r = parse_rgb_component(components[0])?;
+    let g = parse_rgb_component(components[1])?;
+    let b = parse_rgb_component(components[2])?;
+    Some([r, g, b])
+}
+
+fn read_accent_colors_from_css() -> ([f32; 3], [f32; 3]) {
+    let fallback_1 = [0.45, 0.63, 0.88];
+    let fallback_2 = [0.95, 0.97, 1.0];
+
+    let Some(win) = window() else {
+        return (fallback_1, fallback_2);
+    };
+    let Some(document) = win.document() else {
+        return (fallback_1, fallback_2);
+    };
+    let Some(root) = document.document_element() else {
+        return (fallback_1, fallback_2);
+    };
+    let Some(style) = win.get_computed_style(&root).ok().flatten() else {
+        return (fallback_1, fallback_2);
+    };
+
+    let accent_1 = style
+        .get_property_value("--floating-background-accent-color-1")
+        .ok()
+        .and_then(|v| parse_css_color_to_rgb(&v))
+        .unwrap_or(fallback_1);
+    let accent_2 = style
+        .get_property_value("--floating-background-accent-color-2")
+        .ok()
+        .and_then(|v| parse_css_color_to_rgb(&v))
+        .unwrap_or(fallback_2);
+
+    (accent_1, accent_2)
+}
 
 fn pos_to_cell(pos: [f32; 2]) -> (usize, usize) {
     let ux = ((pos[0] + WORLD_BOUND) / (WORLD_BOUND * 2.0)).clamp(0.0, 0.999_9);
@@ -207,12 +295,10 @@ fn update_particles(particles: &mut [ParticleState], dt: f32, time: f32) {
         target[0] += -grad_x * density_push;
         target[1] += -grad_y * density_push;
 
-        // Weak spring to each particle's home area keeps global density even over time.
         let home_pull = 0.011 + particle.layer * 0.004;
         target[0] += (particle.home[0] - particle.pos[0]) * home_pull;
         target[1] += (particle.home[1] - particle.pos[1]) * home_pull;
 
-        // Keep particles from drifting too far for too long, preserving visible density.
         let edge = particle.pos[0].abs().max(particle.pos[1].abs());
         if edge > 0.80 {
             let inward_dir = normalize([-particle.pos[0], -particle.pos[1]]);
@@ -260,6 +346,80 @@ fn resize_canvas(canvas: &HtmlCanvasElement, gl: &WebGlRenderingContext) {
     gl.viewport(0, 0, target_width as i32, target_height as i32);
 }
 
+fn upload_accent_uniform(gl: &WebGlRenderingContext, location: Option<WebGlUniformLocation>, value: [f32; 3]) {
+    if let Some(location) = location.as_ref() {
+        gl.uniform3f(Some(location), value[0], value[1], value[2]);
+    }
+}
+
+fn init_renderer(canvas: &HtmlCanvasElement, initial_data: &[f32]) -> Result<RenderRuntime, String> {
+    let context = canvas
+        .get_context("webgl")
+        .ok()
+        .flatten()
+        .or_else(|| canvas.get_context("experimental-webgl").ok().flatten())
+        .ok_or_else(|| String::from("WebGL context is not available for particle flow background"))?;
+
+    let gl = context
+        .dyn_into::<WebGlRenderingContext>()
+        .map_err(|_| String::from("Failed to cast WebGL context"))?;
+
+    let program = link_program(&gl, VERTEX_SHADER, FRAGMENT_SHADER)?;
+    gl.use_program(Some(&program));
+    gl.enable(WebGlRenderingContext::BLEND);
+    gl.blend_func(WebGlRenderingContext::SRC_ALPHA, WebGlRenderingContext::ONE_MINUS_SRC_ALPHA);
+    gl.clear_color(0.0, 0.0, 0.0, 0.0);
+    resize_canvas(canvas, &gl);
+
+    let (accent_1, accent_2) = read_accent_colors_from_css();
+    let u_accent_1 = gl.get_uniform_location(&program, "u_accent1");
+    let u_accent_2 = gl.get_uniform_location(&program, "u_accent2");
+    upload_accent_uniform(&gl, u_accent_1, accent_1);
+    upload_accent_uniform(&gl, u_accent_2, accent_2);
+
+    let buffer = gl.create_buffer().ok_or_else(|| String::from("Failed to create particle buffer"))?;
+    gl.bind_buffer(WebGlRenderingContext::ARRAY_BUFFER, Some(&buffer));
+
+    let byte_size = (initial_data.len() * std::mem::size_of::<f32>()) as i32;
+    gl.buffer_data_with_i32(
+        WebGlRenderingContext::ARRAY_BUFFER,
+        byte_size,
+        WebGlRenderingContext::DYNAMIC_DRAW,
+    );
+    let initial_array = Float32Array::from(initial_data);
+    gl.buffer_sub_data_with_i32_and_array_buffer_view(WebGlRenderingContext::ARRAY_BUFFER, 0, &initial_array);
+
+    let a_pos_loc = gl.get_attrib_location(&program, "a_pos");
+    if a_pos_loc < 0 {
+        return Err(String::from("Attribute a_pos not found"));
+    }
+    gl.enable_vertex_attrib_array(a_pos_loc as u32);
+    gl.vertex_attrib_pointer_with_i32(
+        a_pos_loc as u32,
+        2,
+        WebGlRenderingContext::FLOAT,
+        false,
+        PARTICLE_STRIDE_BYTES,
+        0,
+    );
+
+    let a_meta_loc = gl.get_attrib_location(&program, "a_meta");
+    if a_meta_loc < 0 {
+        return Err(String::from("Attribute a_meta not found"));
+    }
+    gl.enable_vertex_attrib_array(a_meta_loc as u32);
+    gl.vertex_attrib_pointer_with_i32(
+        a_meta_loc as u32,
+        3,
+        WebGlRenderingContext::FLOAT,
+        false,
+        PARTICLE_STRIDE_BYTES,
+        8,
+    );
+
+    Ok(RenderRuntime { gl, _program: program, buffer })
+}
+
 #[function_component]
 pub fn ParticleFlowBackground() -> Html {
     let canvas_ref = use_node_ref();
@@ -271,38 +431,6 @@ pub fn ParticleFlowBackground() -> Html {
                 return Box::new(|| ()) as Box<dyn FnOnce()>;
             };
 
-            let context = canvas
-                .get_context("webgl")
-                .ok()
-                .flatten()
-                .or_else(|| canvas.get_context("experimental-webgl").ok().flatten());
-            let Some(context) = context else {
-                log::error!("WebGL context is not available for floating background");
-                return Box::new(|| ()) as Box<dyn FnOnce()>;
-            };
-
-            let Ok(gl) = context.dyn_into::<WebGlRenderingContext>() else {
-                log::error!("Failed to cast WebGL context");
-                return Box::new(|| ()) as Box<dyn FnOnce()>;
-            };
-
-            let Ok(program) = link_program(&gl, VERTEX_SHADER, FRAGMENT_SHADER) else {
-                log::error!("Failed to compile/link floating background shaders");
-                return Box::new(|| ()) as Box<dyn FnOnce()>;
-            };
-
-            gl.use_program(Some(&program));
-            gl.enable(WebGlRenderingContext::BLEND);
-            gl.blend_func(WebGlRenderingContext::SRC_ALPHA, WebGlRenderingContext::ONE_MINUS_SRC_ALPHA);
-            gl.clear_color(0.0, 0.0, 0.0, 0.0);
-            resize_canvas(&canvas, &gl);
-
-            let Some(buffer) = gl.create_buffer() else {
-                log::error!("Failed to create floating background buffer");
-                return Box::new(|| ()) as Box<dyn FnOnce()>;
-            };
-            gl.bind_buffer(WebGlRenderingContext::ARRAY_BUFFER, Some(&buffer));
-
             let particles = Rc::new(RefCell::new(build_particles()));
             let gpu_data = Rc::new(RefCell::new(Vec::<f32>::with_capacity(
                 PARTICLE_COUNT as usize * PARTICLE_STRIDE_FLOATS as usize,
@@ -311,51 +439,26 @@ pub fn ParticleFlowBackground() -> Html {
                 let particles_borrow = particles.borrow();
                 let mut gpu_data_borrow = gpu_data.borrow_mut();
                 fill_gpu_data(&particles_borrow, &mut gpu_data_borrow);
-                let array = Float32Array::from(gpu_data_borrow.as_slice());
-                gl.buffer_data_with_array_buffer_view(
-                    WebGlRenderingContext::ARRAY_BUFFER,
-                    &array,
-                    WebGlRenderingContext::DYNAMIC_DRAW,
-                );
             }
 
-            let a_pos_loc = gl.get_attrib_location(&program, "a_pos");
-            if a_pos_loc < 0 {
-                log::error!("Attribute a_pos not found");
-                return Box::new(|| ()) as Box<dyn FnOnce()>;
-            }
-            gl.enable_vertex_attrib_array(a_pos_loc as u32);
-            gl.vertex_attrib_pointer_with_i32(
-                a_pos_loc as u32,
-                2,
-                WebGlRenderingContext::FLOAT,
-                false,
-                PARTICLE_STRIDE_BYTES,
-                0,
-            );
-
-            let a_meta_loc = gl.get_attrib_location(&program, "a_meta");
-            if a_meta_loc < 0 {
-                log::error!("Attribute a_meta not found");
-                return Box::new(|| ()) as Box<dyn FnOnce()>;
-            }
-            gl.enable_vertex_attrib_array(a_meta_loc as u32);
-            gl.vertex_attrib_pointer_with_i32(
-                a_meta_loc as u32,
-                3,
-                WebGlRenderingContext::FLOAT,
-                false,
-                PARTICLE_STRIDE_BYTES,
-                8,
-            );
+            let initial_runtime = {
+                let initial_data = gpu_data.borrow();
+                match init_renderer(&canvas, initial_data.as_slice()) {
+                    Ok(runtime) => runtime,
+                    Err(err) => {
+                        log::error!("{err}");
+                        return Box::new(|| ()) as Box<dyn FnOnce()>;
+                    }
+                }
+            };
+            let runtime_ref = Rc::new(RefCell::new(Some(initial_runtime)));
 
             let raf_id = Rc::new(RefCell::new(None::<i32>));
             let last_ts = Rc::new(RefCell::new(None::<f64>));
             let sim_time = Rc::new(RefCell::new(0.0_f32));
             let animation = Rc::new(RefCell::new(None::<Closure<dyn FnMut(f64)>>));
 
-            let gl_anim = gl.clone();
-            let buffer_anim = buffer.clone();
+            let runtime_ref_anim = runtime_ref.clone();
             let animation_ref = animation.clone();
             let raf_id_ref = raf_id.clone();
             let last_ts_ref = last_ts.clone();
@@ -385,17 +488,20 @@ pub fn ParticleFlowBackground() -> Html {
                     update_particles(&mut particles, dt, time);
                     let mut gpu_data = gpu_data_ref.borrow_mut();
                     fill_gpu_data(&particles, &mut gpu_data);
-                    let array = Float32Array::from(gpu_data.as_slice());
-                    gl_anim.bind_buffer(WebGlRenderingContext::ARRAY_BUFFER, Some(&buffer_anim));
-                    gl_anim.buffer_data_with_array_buffer_view(
-                        WebGlRenderingContext::ARRAY_BUFFER,
-                        &array,
-                        WebGlRenderingContext::DYNAMIC_DRAW,
-                    );
                 }
 
-                gl_anim.clear(WebGlRenderingContext::COLOR_BUFFER_BIT);
-                gl_anim.draw_arrays(WebGlRenderingContext::POINTS, 0, PARTICLE_COUNT);
+                if let Some(runtime) = runtime_ref_anim.borrow().as_ref() {
+                    let frame_data = gpu_data_ref.borrow();
+                    let array = Float32Array::from(frame_data.as_slice());
+                    runtime.gl.bind_buffer(WebGlRenderingContext::ARRAY_BUFFER, Some(&runtime.buffer));
+                    runtime.gl.buffer_sub_data_with_i32_and_array_buffer_view(
+                        WebGlRenderingContext::ARRAY_BUFFER,
+                        0,
+                        &array,
+                    );
+                    runtime.gl.clear(WebGlRenderingContext::COLOR_BUFFER_BIT);
+                    runtime.gl.draw_arrays(WebGlRenderingContext::POINTS, 0, PARTICLE_COUNT);
+                }
 
                 if let Some(win) = window() {
                     if let Some(callback) = animation_ref.borrow().as_ref() {
@@ -418,12 +524,40 @@ pub fn ParticleFlowBackground() -> Html {
             }
 
             let resize_canvas_ref = canvas.clone();
-            let resize_gl = gl.clone();
+            let runtime_ref_resize = runtime_ref.clone();
             let on_resize = Closure::<dyn FnMut()>::wrap(Box::new(move || {
-                resize_canvas(&resize_canvas_ref, &resize_gl);
+                if let Some(runtime) = runtime_ref_resize.borrow().as_ref() {
+                    resize_canvas(&resize_canvas_ref, &runtime.gl);
+                }
             }));
             let _ = win.add_event_listener_with_callback("resize", on_resize.as_ref().unchecked_ref());
 
+            let runtime_ref_lost = runtime_ref.clone();
+            let on_context_lost = Closure::<dyn FnMut(Event)>::wrap(Box::new(move |event: Event| {
+                event.prevent_default();
+                *runtime_ref_lost.borrow_mut() = None;
+            }));
+            let _ = canvas
+                .add_event_listener_with_callback("webglcontextlost", on_context_lost.as_ref().unchecked_ref());
+
+            let runtime_ref_restore = runtime_ref.clone();
+            let canvas_restore = canvas.clone();
+            let gpu_data_restore = gpu_data.clone();
+            let on_context_restored = Closure::<dyn FnMut(Event)>::wrap(Box::new(move |_event: Event| {
+                let data = gpu_data_restore.borrow();
+                match init_renderer(&canvas_restore, data.as_slice()) {
+                    Ok(runtime) => {
+                        *runtime_ref_restore.borrow_mut() = Some(runtime);
+                    }
+                    Err(err) => log::error!("Failed to restore WebGL context: {err}"),
+                }
+            }));
+            let _ = canvas.add_event_listener_with_callback(
+                "webglcontextrestored",
+                on_context_restored.as_ref().unchecked_ref(),
+            );
+
+            let canvas_cleanup = canvas.clone();
             Box::new(move || {
                 if let Some(win) = window() {
                     if let Some(id) = *raf_id.borrow() {
@@ -431,6 +565,15 @@ pub fn ParticleFlowBackground() -> Html {
                     }
                     let _ = win.remove_event_listener_with_callback("resize", on_resize.as_ref().unchecked_ref());
                 }
+                let _ = canvas_cleanup.remove_event_listener_with_callback(
+                    "webglcontextlost",
+                    on_context_lost.as_ref().unchecked_ref(),
+                );
+                let _ = canvas_cleanup.remove_event_listener_with_callback(
+                    "webglcontextrestored",
+                    on_context_restored.as_ref().unchecked_ref(),
+                );
+                *runtime_ref.borrow_mut() = None;
                 *animation.borrow_mut() = None;
             }) as Box<dyn FnOnce()>
         });

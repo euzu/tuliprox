@@ -40,8 +40,8 @@ indexmap = "2.13.0"
 version = "0.3"
 features = ["Document", "Element", "Node", "Window", "HtmlCollection", "HtmlImageElement", "HtmlInputElement",
     "DomRect", "HtmlDialogElement", "CssStyleDeclaration",
-    "WebGlRenderingContext",
-    "WebGl2RenderingContext", "WebGlProgram", "WebGlShader", "WebGlBuffer", "WebGlUniformLocation", "HtmlCanvasElement"]
+    "Event", "WebGlRenderingContext", "WebGlProgram", "WebGlShader", "WebGlBuffer", "WebGlUniformLocation",
+    "HtmlCanvasElement"]
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
