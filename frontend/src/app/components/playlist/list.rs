@@ -1,6 +1,4 @@
-use crate::app::{
-    components::{AppIcon, CollapsePanel, InputTable, PlaylistContext, TargetTable},
-};
+use crate::app::components::{AppIcon, CollapsePanel, InputTable, PlaylistContext, TargetTable};
 use yew::prelude::*;
 use yew_i18n::use_translation;
 

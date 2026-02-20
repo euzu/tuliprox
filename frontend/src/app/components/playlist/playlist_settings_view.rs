@@ -1,6 +1,4 @@
-use crate::app::{
-    components::{Breadcrumbs, PlaylistList},
-};
+use crate::app::components::{Breadcrumbs, PlaylistList};
 use std::rc::Rc;
 use yew::prelude::*;
 use yew_i18n::use_translation;

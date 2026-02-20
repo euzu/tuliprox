@@ -2,7 +2,7 @@ use crate::{
     app::{
         components::{
             config::ConfigView, loading_indicator::BusyIndicator, theme::Theme, AppIcon, DashboardView, EpgView,
-            IconButton, InputRow, Panel, PlaylistSettingsView, PlaylistExplorerView, PlaylistUpdateView, Sidebar,
+            IconButton, InputRow, Panel, PlaylistExplorerView, PlaylistSettingsView, PlaylistUpdateView, Sidebar,
             SourceEditor, StatsView, StreamsView, ToastrView, UserlistView, WebsocketStatus,
         },
         context::{ConfigContext, PlaylistContext, StatusContext},

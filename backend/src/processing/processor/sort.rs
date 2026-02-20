@@ -116,10 +116,8 @@ fn compare_sequence_match(a: &SequenceMatch, b: &SequenceMatch, order: SortOrder
             for index in 0..capture_count {
                 let ord = match (captures_a.get(index), captures_b.get(index)) {
                     (Some(Some(v1)), Some(Some(v2))) => v1.cmp(v2),
-                    (Some(Some(_)), Some(None)) => Ordering::Greater,
-                    (Some(None), Some(Some(_))) => Ordering::Less,
-                    (Some(Some(_)), None) => Ordering::Greater,
-                    (None, Some(Some(_))) => Ordering::Less,
+                    (Some(Some(_)), Some(None) | None) => Ordering::Greater,
+                    (Some(None) | None, Some(Some(_))) => Ordering::Less,
                     _ => Ordering::Equal,
                 };
                 if ord != Ordering::Equal {

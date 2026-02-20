@@ -3,8 +3,8 @@ use js_sys::{Array, Float32Array};
 use std::{cell::RefCell, f32::consts::TAU, rc::Rc};
 use wasm_bindgen::{closure::Closure, JsCast};
 use web_sys::{
-    window, Element, Event, HtmlCanvasElement, WebGlBuffer, WebGlProgram, WebGlRenderingContext, WebGlShader,
-    WebGlUniformLocation, MutationObserver, MutationObserverInit,
+    window, Element, Event, HtmlCanvasElement, MutationObserver, MutationObserverInit, WebGlBuffer, WebGlProgram,
+    WebGlRenderingContext, WebGlShader, WebGlUniformLocation,
 };
 use yew::prelude::*;
 
@@ -151,15 +151,9 @@ fn read_theme_style() -> Option<web_sys::CssStyleDeclaration> {
     document
         .body()
         .and_then(|body| {
-            body.dyn_into::<Element>()
-                .ok()
-                .and_then(|element| win.get_computed_style(&element).ok().flatten())
+            body.dyn_into::<Element>().ok().and_then(|element| win.get_computed_style(&element).ok().flatten())
         })
-        .or_else(|| {
-            document
-                .document_element()
-                .and_then(|root| win.get_computed_style(&root).ok().flatten())
-        })
+        .or_else(|| document.document_element().and_then(|root| win.get_computed_style(&root).ok().flatten()))
 }
 
 fn read_accent_colors_from_css() -> ([f32; 3], [f32; 3]) {
@@ -479,15 +473,7 @@ fn init_renderer(canvas: &HtmlCanvasElement, initial_data: &[f32]) -> Result<Ren
         8,
     );
 
-    Ok(RenderRuntime {
-        gl,
-        program,
-        buffer,
-        u_accent_1,
-        u_accent_2,
-        u_alpha_boost,
-        u_dpr,
-    })
+    Ok(RenderRuntime { gl, program, buffer, u_accent_1, u_accent_2, u_alpha_boost, u_dpr })
 }
 
 #[function_component]
@@ -621,19 +607,14 @@ pub fn ParticleFlowBackground() -> Html {
                     }
                 }));
 
-            let theme_observer = win
-                .document()
-                .and_then(|doc| doc.body())
-                .and_then(|body| {
-                    MutationObserver::new(on_theme_change.as_ref().unchecked_ref())
-                        .ok()
-                        .and_then(|observer| {
-                            let options = MutationObserverInit::new();
-                            options.set_attributes(true);
-                            observer.observe_with_options(&body, &options).ok()?;
-                            Some(observer)
-                        })
-                });
+            let theme_observer = win.document().and_then(|doc| doc.body()).and_then(|body| {
+                MutationObserver::new(on_theme_change.as_ref().unchecked_ref()).ok().and_then(|observer| {
+                    let options = MutationObserverInit::new();
+                    options.set_attributes(true);
+                    observer.observe_with_options(&body, &options).ok()?;
+                    Some(observer)
+                })
+            });
 
             let runtime_ref_lost = runtime_ref.clone();
             let on_context_lost = Closure::<dyn FnMut(Event)>::wrap(Box::new(move |event: Event| {
