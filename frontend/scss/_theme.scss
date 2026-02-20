@@ -78,6 +78,8 @@
   --modest-text-color: #a7abb4;
   --background-color: #0a0b10;
   --floating-background-color: #071529;
+  --floating-background-accent-color-1: #6aa7ff;
+  --floating-background-accent-color-2: #7ab6ff;
   --border-color: rgba(60, 100, 195, 0.25);
   --input-background-color: rgba(255, 255, 255, 0);
   --input-border-color: var(--border-color);
@@ -408,6 +410,8 @@ body[data-theme="bright"] {
   --background-color: #f8fafc;
   /* Very light slate */
   --floating-background-color: #ffffff;
+  --floating-background-accent-color-1: #6aa7ff;
+  --floating-background-accent-color-2: #7ab6ff;
   --text-color: #0f172a;
   /* Slate 900 */
   --modest-text-color: #64748b;

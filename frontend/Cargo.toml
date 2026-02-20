@@ -28,6 +28,7 @@ futures-signals = "0.3"
 futures = "0.3"
 prost = "0"
 wasm-bindgen-futures = "0"
+js-sys = "0.3"
 bytes = "1"
 regex = "1.12.3"
 base64 = "0.22.1"
@@ -37,9 +38,11 @@ indexmap = "2.13.0"
 
 [dependencies.web-sys]
 version = "0.3"
-features = ["Document", "Element", "Node", "Window", "HtmlCollection", "HtmlImageElement", "HtmlInputElement", "DomRect", "HtmlDialogElement", "CssStyleDeclaration"]
+features = ["Document", "Element", "Node", "Window", "HtmlCollection", "HtmlImageElement", "HtmlInputElement",
+    "DomRect", "HtmlDialogElement", "CssStyleDeclaration",
+    "Event", "WebGlRenderingContext", "WebGlProgram", "WebGlShader", "WebGlBuffer", "WebGlUniformLocation",
+    "HtmlCanvasElement"]
 
 [dev-dependencies]
-js-sys = "0.3"
 wasm-bindgen-test = "0.3"
 gloo-utils = "0.2"

@@ -1,5 +1,5 @@
 use crate::{
-    app::components::{floating_background::FloatingBackground, input::Input, svg_icon::AppIcon, TextButton},
+    app::components::{input::Input, svg_icon::AppIcon, ParticleFlowBackground, TextButton},
     hooks::use_service_context,
 };
 use web_sys::HtmlInputElement;
@@ -74,7 +74,7 @@ pub fn Login() -> Html {
 
     html! {
         <>
-        <FloatingBackground />
+        <ParticleFlowBackground />
         <div class="tp__login-view">
            <div class={"tp__login-view__header"}>
                 <div class={"tp__login-view__header-logo"}>{app_logo.as_ref().clone()}</div>
