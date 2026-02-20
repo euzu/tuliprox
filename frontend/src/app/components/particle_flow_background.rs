@@ -64,8 +64,8 @@ void main() {
         discard;
     }
 
-    float core = smoothstep(0.32, 0.0, dist);
-    float halo = smoothstep(0.5, 0.2, dist);
+    float core = 1.0 - smoothstep(0.0, 0.32, dist);
+    float halo = 1.0 - smoothstep(0.2, 0.5, dist);
     float alpha = (core * 0.75 + halo * 0.25) * v_alpha;
     vec3 color = mix(u_accent1, u_accent2, clamp(v_layer * 0.35, 0.0, 1.0));
     gl_FragColor = vec4(color, alpha);
