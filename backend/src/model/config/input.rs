@@ -87,6 +87,9 @@ impl ConfigInputOptions {
     pub fn has_all_flags(&self, flags: ConfigInputFlagsSet) -> bool {
         self.flags.contains_all(flags)
     }
+
+    #[inline]
+    pub fn defaults() -> &'static Self { &DEFAULT_CONFIG_INPUT_OPTIONS }
 }
 impl From<&ConfigInputOptionsDto> for ConfigInputOptions {
     fn from(dto: &ConfigInputOptionsDto) -> Self {
@@ -118,11 +121,6 @@ impl From<&ConfigInputOptionsDto> for ConfigInputOptions {
 
 static DEFAULT_CONFIG_INPUT_OPTIONS: LazyLock<ConfigInputOptions> =
     LazyLock::new(|| ConfigInputOptions::from(&ConfigInputOptionsDto::default()));
-
-impl ConfigInputOptions {
-    #[inline]
-    pub fn defaults() -> &'static Self { &DEFAULT_CONFIG_INPUT_OPTIONS }
-}
 
 pub struct InputUserInfo {
     pub base_url: String,
