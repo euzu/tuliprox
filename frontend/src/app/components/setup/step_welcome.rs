@@ -4,11 +4,13 @@ use crate::{
     hooks::use_service_context,
 };
 use yew::prelude::*;
+use yew_i18n::use_translation;
 
 #[function_component]
 pub fn WelcomeStep() -> Html {
     let setup_ctx = use_context::<SetupContext>().expect("Setup context not found");
     let services = use_service_context();
+    let translate = use_translation();
 
     let handle_next = {
         let setup_ctx = setup_ctx.clone();
@@ -35,8 +37,8 @@ pub fn WelcomeStep() -> Html {
     );
     let next_title = SetupStep::Welcome
         .next()
-        .map(|next_step| format!("Next: {}", next_step.title()))
-        .unwrap_or_else(|| "Next".to_string());
+        .map(|next_step| format!("{}: {}", translate.t("SETUP.LABEL.NEXT"), translate.t(next_step.title_key())))
+        .unwrap_or_else(|| translate.t("SETUP.LABEL.NEXT"));
 
     html! {
         <div class="tp__setup__step tp__setup__step-welcome">

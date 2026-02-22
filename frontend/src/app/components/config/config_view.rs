@@ -3,10 +3,10 @@ use crate::{
         components::{
             config::{
                 config_page::{
-                    ConfigForm, ConfigPage, LABEL_API_CONFIG, LABEL_HDHOMERUN_CONFIG, LABEL_IP_CHECK_CONFIG,
-                    LABEL_LIBRARY_CONFIG, LABEL_LOG_CONFIG, LABEL_MAIN_CONFIG, LABEL_MESSAGING_CONFIG,
-                    LABEL_PANEL_CONFIG, LABEL_PROXY_CONFIG, LABEL_REVERSE_PROXY_CONFIG, LABEL_SCHEDULES_CONFIG,
-                    LABEL_VIDEO_CONFIG, LABEL_WEB_UI_CONFIG,
+                    ConfigForm, ConfigFormSlots, ConfigPage, LABEL_API_CONFIG, LABEL_HDHOMERUN_CONFIG,
+                    LABEL_IP_CHECK_CONFIG, LABEL_LIBRARY_CONFIG, LABEL_LOG_CONFIG, LABEL_MAIN_CONFIG,
+                    LABEL_MESSAGING_CONFIG, LABEL_PANEL_CONFIG, LABEL_PROXY_CONFIG, LABEL_REVERSE_PROXY_CONFIG,
+                    LABEL_SCHEDULES_CONFIG, LABEL_VIDEO_CONFIG, LABEL_WEB_UI_CONFIG,
                 },
                 config_update::update_config,
                 config_view_context::ConfigViewContext,
@@ -21,7 +21,8 @@ use crate::{
     },
     hooks::use_service_context,
     html_if,
-    services::{SetupCompleteRequestDto, SetupWebUserCredentialDto},
+    services::{get_base_href, SetupCompleteRequestDto, SetupWebUserCredentialDto},
+    utils::set_timeout,
 };
 use log::warn;
 use shared::model::{ApiProxyConfigDto, AppConfigDto, ConfigDto, SourcesConfigDto};
@@ -45,21 +46,6 @@ const MSG_SETUP_WEBUI_PASSWORD_MIN_LENGTH: &str = "SETUP.MSG.WEBUI_PASSWORD_MIN_
 const MSG_SETUP_WEBUI_PASSWORDS_DO_NOT_MATCH: &str = "SETUP.MSG.WEBUI_PASSWORDS_DO_NOT_MATCH";
 
 const ACTION_UPDATE_GEO_IP: &str = "update_geo_ip";
-
-macro_rules! collect_modified {
-    ($forms:expr, [ $($field:ident),+ $(,)? ]) => {{
-        let mut modified = Vec::new();
-        $(
-            if let Some(form) = $forms.$field.as_ref() {
-                if form.is_modified() {
-                   modified.push(form.clone());
-                }
-            }
-        )+
-        modified
-    }};
-}
-
 fn config_form_to_config_page(form: &ConfigForm) -> ConfigPage {
     match form {
         ConfigForm::Main(_, _) => ConfigPage::Main,
@@ -81,20 +67,7 @@ fn config_form_to_config_page(form: &ConfigForm) -> ConfigPage {
 
 #[derive(Default, Debug, Clone, PartialEq)]
 struct ConfigFormState {
-    pub main: Option<ConfigForm>,
-    pub api: Option<ConfigForm>,
-    pub api_proxy: Option<ConfigForm>,
-    pub log: Option<ConfigForm>,
-    pub schedules: Option<ConfigForm>,
-    pub video: Option<ConfigForm>,
-    pub messaging: Option<ConfigForm>,
-    pub web_ui: Option<ConfigForm>,
-    pub reverse_proxy: Option<ConfigForm>,
-    pub hd_homerun: Option<ConfigForm>,
-    pub proxy: Option<ConfigForm>,
-    pub ipcheck: Option<ConfigForm>,
-    pub panel: Option<ConfigForm>,
-    pub library: Option<ConfigForm>,
+    pub slots: ConfigFormSlots,
 }
 
 #[function_component]
@@ -127,27 +100,13 @@ pub fn ConfigView() -> Html {
 
         use_memo((form_state, edit_value, translate.clone()), move |(forms, editing, translate)| {
             let forms: &ConfigFormState = forms;
-            let modified_pages = collect_modified!(
-                forms,
-                [
-                    main,
-                    api,
-                    log,
-                    schedules,
-                    video,
-                    messaging,
-                    web_ui,
-                    reverse_proxy,
-                    hd_homerun,
-                    proxy,
-                    ipcheck,
-                    panel,
-                    library
-                ]
-            )
-            .iter()
-            .map(config_form_to_config_page)
-            .collect::<Vec<ConfigPage>>();
+            let modified_pages = forms
+                .slots
+                .collect_modified_forms()
+                .into_iter()
+                .filter(|form| !matches!(form, ConfigForm::ApiProxy(_, _)))
+                .map(|form| config_form_to_config_page(&form))
+                .collect::<Vec<ConfigPage>>();
 
             let tab_configs = vec![
                 (ConfigPage::Main, LABEL_MAIN_CONFIG, html! { <MainConfigView/> }, "MainConfig"),
@@ -213,26 +172,7 @@ pub fn ConfigView() -> Html {
         let setup_password_repeat = setup_password_repeat.clone();
 
         Callback::from(move |_| {
-            let forms = &*get_form_state;
-            let modified_forms: Vec<ConfigForm> = collect_modified!(
-                forms,
-                [
-                    main,
-                    api,
-                    api_proxy,
-                    log,
-                    schedules,
-                    video,
-                    messaging,
-                    web_ui,
-                    reverse_proxy,
-                    hd_homerun,
-                    proxy,
-                    ipcheck,
-                    panel,
-                    library
-                ]
-            );
+            let modified_forms: Vec<ConfigForm> = get_form_state.slots.collect_modified_forms();
 
             if !setup_mode && modified_forms.is_empty() {
                 set_edit_mode.set(false);
@@ -314,16 +254,15 @@ pub fn ConfigView() -> Html {
                     match services.config.complete_setup(payload).await {
                         Ok(()) => {
                             set_edit_mode.set(false);
-                            let (app_config, api_proxy_config) = services.config.get_server_config().await;
-                            if app_config.is_none() {
-                                // Log but don't fail - setup succeeded; refresh is best-effort
-                                warn!("Config refresh failed");
-                            }
-                            if api_proxy_config.is_none() {
-                                // Log but don't fail - setup succeeded; refresh is best-effort
-                                warn!("ApiProxy Config refresh failed");
-                            }
                             services.toastr.success(translate.t("MESSAGES.SAVE.MAIN_CONFIG.SUCCESS"));
+                            set_timeout(
+                                move || {
+                                    if let Some(window) = web_sys::window() {
+                                        let _ = window.open_with_url_and_target(&get_base_href(), "_self");
+                                    }
+                                },
+                                500,
+                            );
                         }
                         Err(err) => {
                             services.toastr.error(format!(
@@ -439,23 +378,7 @@ pub fn ConfigView() -> Html {
         let set_form_state = form_state.clone();
         Callback::from(move |form_data: ConfigForm| {
             let mut new_state = (*set_form_state).clone();
-
-            match form_data {
-                ConfigForm::Main(_, _) => new_state.main = Some(form_data),
-                ConfigForm::Api(_, _) => new_state.api = Some(form_data),
-                ConfigForm::ApiProxy(_, _) => new_state.api_proxy = Some(form_data),
-                ConfigForm::Log(_, _) => new_state.log = Some(form_data),
-                ConfigForm::Schedules(_, _) => new_state.schedules = Some(form_data),
-                ConfigForm::Video(_, _) => new_state.video = Some(form_data),
-                ConfigForm::Messaging(_, _) => new_state.messaging = Some(form_data),
-                ConfigForm::WebUi(_, _) => new_state.web_ui = Some(form_data),
-                ConfigForm::ReverseProxy(_, _) => new_state.reverse_proxy = Some(form_data),
-                ConfigForm::HdHomerun(_, _) => new_state.hd_homerun = Some(form_data),
-                ConfigForm::Proxy(_, _) => new_state.proxy = Some(form_data),
-                ConfigForm::IpCheck(_, _) => new_state.ipcheck = Some(form_data),
-                ConfigForm::Panel(_, _) => new_state.panel = Some(form_data),
-                ConfigForm::Library(_, _) => new_state.library = Some(form_data),
-            };
+            new_state.slots.update_form(form_data);
             set_form_state.set(new_state);
         })
     };
@@ -479,7 +402,7 @@ pub fn ConfigView() -> Html {
 
     let context = ConfigViewContext {
         edit_mode: edit_mode.clone(),
-        show_restart_notice: true,
+        show_restart_notice: !setup_mode,
         on_form_change: on_form_change.clone(),
     };
 

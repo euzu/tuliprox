@@ -4,9 +4,11 @@ use super::{
 };
 use crate::app::{components::Panel, ConfigContext};
 use yew::prelude::*;
+use yew_i18n::use_translation;
 
 #[function_component]
 pub fn Setup() -> Html {
+    let translate = use_translation();
     let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");
 
     let active_step = use_state(|| SetupStep::Welcome);
@@ -103,7 +105,7 @@ pub fn Setup() -> Html {
         <ContextProvider<SetupContext> context={context}>
             <div class="tp__setup-assistant">
                 <aside class="tp__setup-sidebar">
-                    <div class="tp__setup-sidebar__title">{"Setup Steps"}</div>
+                    <div class="tp__setup-sidebar__title">{translate.t("SETUP.LABEL.STEPS")}</div>
                     <ol class="tp__setup-sidebar__list">
                         {
                             for SetupStep::all().iter().copied().map(|step| {
@@ -125,7 +127,7 @@ pub fn Setup() -> Html {
                                             onclick={onclick}
                                         >
                                             <span class="tp__setup-sidebar__index">{step.position()}</span>
-                                            <span class="tp__setup-sidebar__label">{step.title()}</span>
+                                            <span class="tp__setup-sidebar__label">{translate.t(step.title_key())}</span>
                                         </button>
                                     </li>
                                 }

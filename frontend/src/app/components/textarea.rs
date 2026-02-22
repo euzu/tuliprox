@@ -66,10 +66,10 @@ pub fn TextArea(props: &TextAreaProps) -> Html {
     };
 
     if props.collapse_on_empty {
-        let title_content = props.label.as_ref().map(|label| {
+        let title_content = props.label.as_ref().map(|_| {
             html! {
                 <FieldLabel
-                    label={label.clone()}
+                    label={label_text.clone()}
                     field_id={resolved_field_id.clone()}
                     for_id={Some(resolved_field_id.clone())}
                 />
@@ -77,7 +77,7 @@ pub fn TextArea(props: &TextAreaProps) -> Html {
         });
         return html! {
             <CollapsePanel
-                title={props.label.clone().unwrap_or_default()}
+                title={label_text.clone()}
                 title_content={title_content}
                 expanded={!props.value.is_empty()}
             >
@@ -93,7 +93,7 @@ pub fn TextArea(props: &TextAreaProps) -> Html {
             { if props.label.is_some() {
                    html! {
                        <FieldLabel
-                           label={props.label.clone().unwrap_or_default()}
+                           label={label_text.clone()}
                            field_id={resolved_field_id.clone()}
                            for_id={Some(resolved_field_id.clone())}
                        />

@@ -1,4 +1,4 @@
-use crate::app::components::config::{ConfigForm, ConfigPage};
+use crate::app::components::config::{ConfigForm, ConfigFormSlots, ConfigPage};
 use shared::model::{SourcesConfigDto, TargetUserDto};
 use std::fmt;
 use yew::UseStateHandle;
@@ -71,26 +71,25 @@ impl SetupStep {
         }
     }
 
-    pub fn title(self) -> String {
+    pub const fn title_key(self) -> &'static str {
         match self {
-            Self::Welcome => "Welcome",
-            Self::Api => "Api",
-            Self::WebUi => "WebUi",
-            Self::Main => "Main",
-            Self::Log => "Log",
-            Self::Messaging => "Messaging",
-            Self::ReverseProxy => "ReverseProxy",
-            Self::Proxy => "Proxy",
-            Self::IpCheck => "IpCheck",
-            Self::Video => "Video",
-            Self::HdHomerun => "HdHomerun",
-            Self::Library => "Library",
-            Self::Sources => "Sources",
-            Self::ApiUsers => "ApiUsers",
-            Self::Schedules => "Schedules",
-            Self::Finish => "Finish",
+            Self::Welcome => "SETUP.LABEL.WELCOME",
+            Self::Api => "SETUP.LABEL.API",
+            Self::WebUi => "SETUP.LABEL.WEB_UI",
+            Self::Main => "SETUP.LABEL.MAIN",
+            Self::Log => "SETUP.LABEL.LOG",
+            Self::Messaging => "SETUP.LABEL.MESSAGING",
+            Self::ReverseProxy => "SETUP.LABEL.REVERSE_PROXY",
+            Self::Proxy => "SETUP.LABEL.PROXY",
+            Self::IpCheck => "SETUP.LABEL.IP_CHECK",
+            Self::Video => "SETUP.LABEL.VIDEO",
+            Self::HdHomerun => "SETUP.LABEL.HDHOMERUN",
+            Self::Library => "SETUP.LABEL.LIBRARY",
+            Self::Sources => "SETUP.LABEL.SOURCES",
+            Self::ApiUsers => "SETUP.LABEL.API_USERS",
+            Self::Schedules => "SETUP.LABEL.SCHEDULES",
+            Self::Finish => "SETUP.LABEL.FINISH",
         }
-        .to_string()
     }
 
     pub fn config_page(self) -> Option<ConfigPage> {
@@ -138,71 +137,13 @@ impl fmt::Display for SetupStep {
 
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct SetupConfigFormState {
-    pub main: Option<ConfigForm>,
-    pub api: Option<ConfigForm>,
-    pub api_proxy: Option<ConfigForm>,
-    pub log: Option<ConfigForm>,
-    pub schedules: Option<ConfigForm>,
-    pub video: Option<ConfigForm>,
-    pub messaging: Option<ConfigForm>,
-    pub web_ui: Option<ConfigForm>,
-    pub reverse_proxy: Option<ConfigForm>,
-    pub hd_homerun: Option<ConfigForm>,
-    pub proxy: Option<ConfigForm>,
-    pub ipcheck: Option<ConfigForm>,
-    pub panel: Option<ConfigForm>,
-    pub library: Option<ConfigForm>,
+    pub slots: ConfigFormSlots,
 }
 
 impl SetupConfigFormState {
-    fn set_form_slot(slot: &mut Option<ConfigForm>, form: ConfigForm) {
-        if slot.as_ref().is_some_and(|existing| existing.is_modified() && !form.is_modified()) {
-            return;
-        }
-        *slot = Some(form);
-    }
+    pub fn update_form(&mut self, form: ConfigForm) { self.slots.update_form(form); }
 
-    pub fn update_form(&mut self, form: ConfigForm) {
-        match form {
-            ConfigForm::Main(_, _) => Self::set_form_slot(&mut self.main, form),
-            ConfigForm::Api(_, _) => Self::set_form_slot(&mut self.api, form),
-            ConfigForm::ApiProxy(_, _) => Self::set_form_slot(&mut self.api_proxy, form),
-            ConfigForm::Log(_, _) => Self::set_form_slot(&mut self.log, form),
-            ConfigForm::Schedules(_, _) => Self::set_form_slot(&mut self.schedules, form),
-            ConfigForm::Video(_, _) => Self::set_form_slot(&mut self.video, form),
-            ConfigForm::Messaging(_, _) => Self::set_form_slot(&mut self.messaging, form),
-            ConfigForm::WebUi(_, _) => Self::set_form_slot(&mut self.web_ui, form),
-            ConfigForm::ReverseProxy(_, _) => Self::set_form_slot(&mut self.reverse_proxy, form),
-            ConfigForm::HdHomerun(_, _) => Self::set_form_slot(&mut self.hd_homerun, form),
-            ConfigForm::Proxy(_, _) => Self::set_form_slot(&mut self.proxy, form),
-            ConfigForm::IpCheck(_, _) => Self::set_form_slot(&mut self.ipcheck, form),
-            ConfigForm::Panel(_, _) => Self::set_form_slot(&mut self.panel, form),
-            ConfigForm::Library(_, _) => Self::set_form_slot(&mut self.library, form),
-        }
-    }
-
-    fn all_slots(&self) -> [&Option<ConfigForm>; 14] {
-        [
-            &self.main,
-            &self.api,
-            &self.api_proxy,
-            &self.log,
-            &self.schedules,
-            &self.video,
-            &self.messaging,
-            &self.web_ui,
-            &self.reverse_proxy,
-            &self.hd_homerun,
-            &self.proxy,
-            &self.ipcheck,
-            &self.panel,
-            &self.library,
-        ]
-    }
-
-    pub fn collect_modified_forms(&self) -> Vec<ConfigForm> {
-        self.all_slots().into_iter().flatten().filter(|form| form.is_modified()).cloned().collect()
-    }
+    pub fn collect_modified_forms(&self) -> Vec<ConfigForm> { self.slots.collect_modified_forms() }
 }
 
 #[derive(Clone, PartialEq)]

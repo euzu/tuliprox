@@ -13,10 +13,12 @@ use crate::{
 use shared::model::TargetUserDto;
 use std::rc::Rc;
 use yew::prelude::*;
+use yew_i18n::use_translation;
 
 #[function_component]
 pub fn ApiUsersStep() -> Html {
     let step = SetupStep::ApiUsers;
+    let translate = use_translation();
     let setup_ctx = use_context::<SetupContext>().expect("Setup context not found");
     let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");
     let services = use_service_context();
@@ -84,13 +86,16 @@ pub fn ApiUsersStep() -> Html {
         })
     };
 
-    let next_title = step.next().map_or_else(|| "Next".to_string(), |next| format!("Next: {}", next.title()));
+    let next_title = step.next().map_or_else(
+        || translate.t("SETUP.LABEL.NEXT"),
+        |next| format!("{}: {}", translate.t("SETUP.LABEL.NEXT"), translate.t(next.title_key())),
+    );
 
     html! {
         <div class="tp__setup__step tp__setup__step-api-users">
             <Card>
                 <div class="tp__config-view__header">
-                    <h1>{"API Users"}</h1>
+                    <h1>{translate.t(step.title_key())}</h1>
                 </div>
                 <div class="tp__config-view__body">
                     <div class="tp__webui-config-view__info tp__config-view-page__info">
@@ -119,7 +124,7 @@ pub fn ApiUsersStep() -> Html {
                         class="secondary"
                         name="setup_api_users_previous"
                         icon="ArrowLeft"
-                        title={"Back"}
+                        title={translate.t("SETUP.LABEL.BACK")}
                         onclick={handle_previous}
                     />
                     <TextButton

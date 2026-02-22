@@ -569,7 +569,7 @@ async fn setup_complete_inner(
             }
             Err(err) => {
                 return (
-                    StatusCode::BAD_REQUEST,
+                    StatusCode::INTERNAL_SERVER_ERROR,
                     axum::Json(json!({ "error": format!("Failed to hash password for user '{username}': {err}") })),
                 )
                     .into_response();

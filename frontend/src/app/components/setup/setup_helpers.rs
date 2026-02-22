@@ -33,6 +33,12 @@ pub fn validate_credentials(username: &str, password: &str, password_repeat: Opt
     Ok(())
 }
 
+/// Pattern map for turning backend setup validation errors into user-friendly copy.
+///
+/// Important: these keyword groups are matched against normalized backend error text
+/// (see `normalize_setup_error_message`), so they depend on exact backend wording.
+/// If backend error messages change, update the `&[&str]` entries here to match the
+/// new wording, then run/extend unit tests to verify normalization + pattern matching.
 const SETUP_ERROR_PATTERNS: &[(&[&str], &str)] = &[
     (
         &["hdhomerun output is only permitted when used in combination with xtream or m3u output"],
@@ -66,6 +72,9 @@ fn matches_setup_error_pattern(message: &str, pattern_keywords: &[&str]) -> bool
 }
 
 pub fn format_setup_error_message(err: impl ToString) -> String {
+    // Keep this mapping in sync with backend setup error text. If backend wording
+    // changes, update the matching keyword slices in `SETUP_ERROR_PATTERNS` and
+    // extend tests so regressions are caught early in CI.
     let mut message = err.to_string();
     if let Some(stripped) = message.strip_prefix("Tuliprox error: ") {
         message = stripped.trim().to_string();
@@ -206,5 +215,36 @@ pub fn move_to_next_step(setup_ctx: &SetupContext, current_step: SetupStep) {
             setup_ctx.max_unlocked_step.set(next_step);
         }
         setup_ctx.active_step.set(next_step);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        format_setup_error_message, matches_setup_error_pattern, normalize_setup_error_message, SETUP_ERROR_PATTERNS,
+    };
+
+    #[test]
+    fn normalizes_and_matches_known_setup_error_pattern() {
+        let raw = "  HDHomerun   output has `use_output=xtream` and no `xtream` output defined  ";
+        let normalized = normalize_setup_error_message(raw);
+        let (keywords, _) = SETUP_ERROR_PATTERNS
+            .iter()
+            .find(|(keywords, _)| keywords.contains(&"hdhomerun output has `use_output=xtream`"))
+            .expect("Xtream setup error pattern must exist");
+
+        assert!(matches_setup_error_pattern(&normalized, keywords));
+    }
+
+    #[test]
+    fn formats_known_backend_error_to_user_friendly_message() {
+        let mapped = format_setup_error_message(
+            "Tuliprox error: HDHomerun output has `use_output=xtream` and no `xtream` output defined",
+        );
+
+        assert_eq!(
+            mapped,
+            "HDHomeRun output is configured with use_output=xtream, but this target has no Xtream output."
+        );
     }
 }
