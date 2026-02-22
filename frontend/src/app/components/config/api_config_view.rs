@@ -325,7 +325,8 @@ pub fn ApiConfigView() -> Html {
             };
 
             if server_name_exists(&form_state_api_proxy_config.form.server, &server.name, ignore_index) {
-                server_dialog_error.set(Some(format!("{} {}", translate.t(MSG_NON_UNIQUE_SERVER_NAME), server.name)));
+                let message = translate.t(MSG_NON_UNIQUE_SERVER_NAME).replace("{name}", &server.name);
+                server_dialog_error.set(Some(message));
                 return;
             }
 

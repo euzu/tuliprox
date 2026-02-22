@@ -469,6 +469,12 @@ fn create_setup_temp_path(file_path: &FsPath) -> PathBuf {
 }
 
 async fn replace_file_atomic(source: &FsPath, target: &FsPath) -> std::io::Result<()> {
+    // Windows fallback note:
+    // `rename(source, target)` may fail when `target` exists, so we try remove+rename there.
+    // That sequence is not atomic and has a TOCTOU race window if another process/thread
+    // touches `target` between the remove and rename calls. We currently accept this
+    // limitation for setup mode writes; a stricter approach would use a platform-specific
+    // atomic replacement API (for example Windows ReplaceFile) in a dedicated implementation.
     match tokio::fs::rename(source, target).await {
         Ok(()) => Ok(()),
         Err(err) => {
@@ -597,9 +603,15 @@ async fn setup_complete_inner(
         match hash_result {
             Ok(Ok(hash)) => user_lines.push(format!("{username}:{hash}")),
             Ok(Err(err)) => {
+                let err_message = err.to_string();
+                let status_code = if err_message == "Password too short min length 8" {
+                    StatusCode::BAD_REQUEST
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                };
                 return (
-                    StatusCode::BAD_REQUEST,
-                    axum::Json(json!({ "error": format!("Failed to hash password for user '{username}': {err}") })),
+                    status_code,
+                    axum::Json(json!({ "error": format!("Failed to hash password for user '{username}': {err_message}") })),
                 )
                     .into_response();
             }

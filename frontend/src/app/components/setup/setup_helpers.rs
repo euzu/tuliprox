@@ -34,7 +34,11 @@ impl ValidationError {
     }
 }
 
-pub fn validate_credentials(username: &str, password: &str, password_repeat: Option<&str>) -> Result<(), ValidationError> {
+pub fn validate_credentials(
+    username: &str,
+    password: &str,
+    password_repeat: Option<&str>,
+) -> Result<(), ValidationError> {
     if username.trim().is_empty() {
         return Err(ValidationError::MissingUsername);
     }

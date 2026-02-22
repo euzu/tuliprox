@@ -6,6 +6,12 @@ use crate::{
 use yew::prelude::*;
 use yew_i18n::use_translation;
 
+const LABEL_SETUP_WELCOME: &str = "SETUP.LABEL.WELCOME";
+const LABEL_SETUP_STEP: &str = "SETUP.LABEL.STEP";
+const LABEL_SETUP_WEBUI_USERNAME: &str = "SETUP.LABEL.WEBUI_USERNAME";
+const LABEL_SETUP_WEBUI_PASSWORD: &str = "SETUP.LABEL.WEBUI_PASSWORD";
+const LABEL_SETUP_WEBUI_PASSWORD_REPEAT: &str = "SETUP.LABEL.WEBUI_PASSWORD_REPEAT";
+
 #[function_component]
 pub fn WelcomeStep() -> Html {
     let setup_ctx = use_context::<SetupContext>().expect("Setup context not found");
@@ -32,9 +38,11 @@ pub fn WelcomeStep() -> Html {
         })
     };
     let step_message = format!(
-        "Step {}/{}: create the first WebUI user. These credentials will be written to user.txt.",
+        "{} {}/{}: {}",
+        translate.t(LABEL_SETUP_STEP),
         SetupStep::Welcome.position(),
-        SetupStep::total()
+        SetupStep::total(),
+        translate.t(SetupStep::Welcome.description_key())
     );
     let next_title = SetupStep::Welcome
         .next()
@@ -45,7 +53,7 @@ pub fn WelcomeStep() -> Html {
         <div class="tp__setup__step tp__setup__step-welcome">
             <Card>
                 <div class="tp__config-view__header">
-                    <h1>{"Initial Setup"}</h1>
+                    <h1>{translate.t(LABEL_SETUP_WELCOME)}</h1>
                 </div>
                 <div class="tp__config-view__body">
                     <div class="tp__webui-config-view__info tp__config-view-page__info">
@@ -56,7 +64,7 @@ pub fn WelcomeStep() -> Html {
                     <div class="tp__config-view-page">
                         <Input
                             name="setup_username"
-                            label={Some("WebUI Username".to_string())}
+                            label={Some(translate.t(LABEL_SETUP_WEBUI_USERNAME).to_string())}
                             value={(*setup_ctx.setup_username).clone()}
                             on_change={Some({
                                 let setup_ctx = setup_ctx.clone();
@@ -65,7 +73,7 @@ pub fn WelcomeStep() -> Html {
                         />
                         <Input
                             name="setup_password"
-                            label={Some("WebUI Password".to_string())}
+                            label={Some(translate.t(LABEL_SETUP_WEBUI_PASSWORD).to_string())}
                             hidden={true}
                             value={(*setup_ctx.setup_password).clone()}
                             on_change={Some({
@@ -75,7 +83,7 @@ pub fn WelcomeStep() -> Html {
                         />
                         <Input
                             name="setup_password_repeat"
-                            label={Some("Repeat WebUI Password".to_string())}
+                            label={Some(translate.t(LABEL_SETUP_WEBUI_PASSWORD_REPEAT).to_string())}
                             hidden={true}
                             value={(*setup_ctx.setup_password_repeat).clone()}
                             on_change={Some({

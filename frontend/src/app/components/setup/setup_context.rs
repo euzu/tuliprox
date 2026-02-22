@@ -24,6 +24,26 @@ pub enum SetupStep {
 }
 
 impl SetupStep {
+    #[cfg(test)]
+    pub const ALL_VARIANTS: [Self; 16] = [
+        Self::Welcome,
+        Self::Api,
+        Self::WebUi,
+        Self::Main,
+        Self::Log,
+        Self::Messaging,
+        Self::ReverseProxy,
+        Self::Proxy,
+        Self::IpCheck,
+        Self::Video,
+        Self::HdHomerun,
+        Self::Library,
+        Self::Sources,
+        Self::ApiUsers,
+        Self::Schedules,
+        Self::Finish,
+    ];
+
     pub const ORDER: [Self; 16] = [
         Self::Welcome,
         Self::Api,
@@ -185,10 +205,16 @@ pub struct SetupContext {
 #[cfg(test)]
 mod tests {
     use super::SetupStep;
+    use std::collections::BTreeSet;
 
     #[test]
-    fn setup_step_order_len_is_expected() {
-        const EXPECTED_SETUP_STEP_COUNT: usize = 16;
-        assert_eq!(SetupStep::ORDER.len(), EXPECTED_SETUP_STEP_COUNT);
+    fn setup_step_order_matches_all_variants_exactly_once() {
+        assert_eq!(SetupStep::ORDER.len(), SetupStep::ALL_VARIANTS.len());
+
+        let order_set: BTreeSet<SetupStep> = SetupStep::ORDER.into_iter().collect();
+        let all_variants_set: BTreeSet<SetupStep> = SetupStep::ALL_VARIANTS.into_iter().collect();
+
+        assert_eq!(order_set, all_variants_set);
+        assert_eq!(order_set.len(), SetupStep::ORDER.len());
     }
 }

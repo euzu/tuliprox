@@ -481,7 +481,7 @@
       "API_PROXY_CONFIG": {
         "SUCCESS": "ApiProxy config saved!",
         "FAIL": "Failed to save the ApiProxy config!",
-        "NON_UNIQUE_SERVER_NAME": "Server info name already exists:"
+        "NON_UNIQUE_SERVER_NAME": "Server info name \"{name}\" already exists."
       },
       "SOURCES_CONFIG": {
         "SUCCESS": "Sources config saved!",
@@ -559,54 +559,61 @@
   "SETUP": {
     "LABEL": {
       "STEPS": "Setup Steps",
+      "STEP": "Step",
       "NEXT": "Next",
       "BACK": "Back",
       "FINISH_SETUP": "Finish Setup",
       "WELCOME": "Welcome",
-      "API": "Api",
-      "WEB_UI": "WebUi",
+      "API": "API",
+      "WEB_UI": "Web-Ui",
       "MAIN": "Main",
       "LOG": "Log",
       "MESSAGING": "Messaging",
-      "REVERSE_PROXY": "ReverseProxy",
+      "REVERSE_PROXY": "Reverse Proxy",
       "PROXY": "Proxy",
       "IP_CHECK": "IpCheck",
       "VIDEO": "Video",
       "HDHOMERUN": "HdHomerun",
       "LIBRARY": "Library",
       "SOURCES": "Sources",
-      "API_USERS": "ApiUsers",
+      "API_USERS": "API Users",
       "SCHEDULES": "Schedules",
       "FINISH": "Finish",
+      "WEBUI_USER": "WebUI User",
       "WEBUI_USERNAME": "WebUI Username",
       "WEBUI_PASSWORD": "WebUI Password",
-      "WEBUI_PASSWORD_REPEAT": "Repeat WebUI Password"
+      "WEBUI_PASSWORD_REPEAT": "Repeat WebUI Password",
+      "SUBMITTING": "Submitting...",
+      "SUBMITTED": "Submitted"
     },
     "DESC": {
-      "WELCOME": "create the first WebUI user. These credentials will be written to user.txt.",
-      "API": "configure API and API proxy settings.",
-      "WEB_UI": "configure WebUI settings.",
-      "MAIN": "configure main application settings.",
-      "LOG": "configure logging settings.",
-      "MESSAGING": "configure messaging settings.",
-      "REVERSE_PROXY": "configure reverse proxy settings.",
-      "PROXY": "configure outgoing proxy settings.",
-      "IP_CHECK": "configure IP check settings.",
-      "VIDEO": "configure video settings.",
-      "HDHOMERUN": "configure HDHomeRun settings.",
-      "LIBRARY": "configure library settings.",
-      "SOURCES": "configure source inputs and mappings.",
-      "API_USERS": "configure API users and target credentials.",
-      "SCHEDULES": "configure scheduler settings.",
-      "FINISH": "review and submit the configuration.",
-      "UNKNOWN": "configure this setup step."
+      "WELCOME": "Create the first WebUI user. These credentials will be written to user.txt.",
+      "API": "Configure API and API proxy settings.",
+      "WEB_UI": "Configure WebUI settings.",
+      "MAIN": "Configure main application settings.",
+      "LOG": "Configure logging settings.",
+      "MESSAGING": "Configure messaging settings.",
+      "REVERSE_PROXY": "Configure reverse proxy settings.",
+      "PROXY": "Configure outgoing proxy settings.",
+      "IP_CHECK": "Configure IP check settings.",
+      "VIDEO": "Configure video settings.",
+      "HDHOMERUN": "Configure HDHomeRun settings.",
+      "LIBRARY": "Configure library settings.",
+      "SOURCES": "Configure source inputs and mappings.",
+      "API_USERS": "Configure API users and target credentials.",
+      "SCHEDULES": "Configure scheduler settings.",
+      "FINISH": "Review and submit the configuration.",
+      "UNKNOWN": "Configure this setup step."
     },
     "MSG": {
       "WELCOME": "Welcome to tuliprox setup. This wizard will guide you through the initial setup process.",
       "WEBUI_USERNAME_REQUIRED": "WebUI username is required",
       "WEBUI_PASSWORD_REQUIRED": "WebUI password is required",
       "WEBUI_PASSWORD_MIN_LENGTH": "WebUI password must be at least 8 characters",
-      "WEBUI_PASSWORDS_DO_NOT_MATCH": "WebUI passwords do not match"
+      "WEBUI_PASSWORDS_DO_NOT_MATCH": "WebUI passwords do not match",
+      "COMPLETE_SUCCESS": "Setup completed successfully",
+      "RESTART_TO_CONTINUE": "Restart the application to continue.",
+      "COMPLETE_RESTART_HINT": "Setup completed successfully. Restart the application/container to continue."
     }
   },
   "SOURCE_EDITOR": {

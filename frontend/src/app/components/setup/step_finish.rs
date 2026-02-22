@@ -13,6 +13,17 @@ use crate::{
 use yew::{platform::spawn_local, prelude::*};
 use yew_i18n::use_translation;
 
+const LABEL_SETUP_FINISH: &str = "SETUP.LABEL.FINISH_SETUP";
+const LABEL_SETUP_BACK: &str = "SETUP.LABEL.BACK";
+const LABEL_SETUP_STEP: &str = "SETUP.LABEL.STEP";
+const LABEL_SETUP_WEBUI_USER: &str = "SETUP.LABEL.WEBUI_USER";
+const LABEL_SETUP_API_USERS: &str = "SETUP.LABEL.API_USERS";
+const LABEL_SETUP_SUBMITTING: &str = "SETUP.LABEL.SUBMITTING";
+const LABEL_SETUP_SUBMITTED: &str = "SETUP.LABEL.SUBMITTED";
+const MSG_SETUP_COMPLETE_SUCCESS: &str = "SETUP.MSG.COMPLETE_SUCCESS";
+const MSG_SETUP_RESTART_TO_CONTINUE: &str = "SETUP.MSG.RESTART_TO_CONTINUE";
+const MSG_SETUP_COMPLETE_RESTART_HINT: &str = "SETUP.MSG.COMPLETE_RESTART_HINT";
+
 #[function_component]
 pub fn FinishStep() -> Html {
     let setup_ctx = use_context::<SetupContext>().expect("Setup context not found");
@@ -73,6 +84,7 @@ pub fn FinishStep() -> Html {
 
             let services = services.clone();
             let setup_ctx = setup_ctx.clone();
+            let translate_for_submit = translate.clone();
             spawn_local(async move {
                 let payload = SetupCompleteRequestDto {
                     app_config,
@@ -83,46 +95,53 @@ pub fn FinishStep() -> Html {
                     Ok(()) => {
                         setup_ctx.is_submitting.set(false);
                         setup_ctx.is_completed.set(true);
-                        services.toastr.success("Setup completed successfully");
-                        services.toastr.warning("Restart the application to continue.");
+                        services.toastr.success(translate_for_submit.t(MSG_SETUP_COMPLETE_SUCCESS));
+                        services.toastr.warning(translate_for_submit.t(MSG_SETUP_RESTART_TO_CONTINUE));
                     }
                     Err(err) => {
                         let message = format_setup_error_message(err.to_string());
                         setup_ctx.is_submitting.set(false);
                         setup_ctx.submit_error.set(Some(message.clone()));
-                        services.toastr.error("Setup save failed");
                         services.toastr.error(message);
                     }
                 }
             });
         })
     };
+    let step = SetupStep::Finish;
+    let step_message = format!(
+        "{} {}/{}: {}",
+        translate.t(LABEL_SETUP_STEP),
+        step.position(),
+        SetupStep::total(),
+        translate.t(step.description_key())
+    );
 
     html! {
         <div class="tp__setup__step tp__setup__step-finish">
             <Card>
                 <div class="tp__config-view__header">
-                    <h1>{"Finish Setup"}</h1>
+                    <h1>{translate.t(LABEL_SETUP_FINISH)}</h1>
                 </div>
                 <div class="tp__config-view__body">
                     <div class="tp__webui-config-view__info tp__config-view-page__info">
-                        <span class="info">{"Step 16/16: review and submit the configuration."}</span>
+                        <span class="info">{step_message}</span>
                     </div>
                     <div class="tp__config-view-page__body">
                         <div>
-                            <strong>{"WebUI User: "}</strong>
+                            <strong>{format!("{}: ", translate.t(LABEL_SETUP_WEBUI_USER))}</strong>
                             {setup_ctx.setup_username.as_str()}
                         </div>
                         <div>
-                            <strong>{"Inputs: "}</strong>
+                            <strong>{format!("{}: ", translate.t("LABEL.INPUTS"))}</strong>
                             {setup_ctx.sources.inputs.len()}
                         </div>
                         <div>
-                            <strong>{"Sources: "}</strong>
+                            <strong>{format!("{}: ", translate.t("LABEL.SOURCES"))}</strong>
                             {setup_ctx.sources.sources.len()}
                         </div>
                         <div>
-                            <strong>{"API Users: "}</strong>
+                            <strong>{format!("{}: ", translate.t(LABEL_SETUP_API_USERS))}</strong>
                             {setup_ctx.api_users.iter().map(|target_user| target_user.credentials.len()).sum::<usize>()}
                         </div>
                         {
@@ -140,9 +159,7 @@ pub fn FinishStep() -> Html {
                             if *setup_ctx.is_completed {
                                 html! {
                                     <div class="tp__webui-config-view__info tp__config-view-page__info">
-                                        <span class="info">
-                                            {"Setup completed successfully. Restart the application/container to continue."}
-                                        </span>
+                                        <span class="info">{translate.t(MSG_SETUP_COMPLETE_RESTART_HINT)}</span>
                                     </div>
                                 }
                             } else {
@@ -156,14 +173,22 @@ pub fn FinishStep() -> Html {
                         class="secondary"
                         name="setup_finish_previous"
                         icon="ArrowLeft"
-                        title={"Back"}
+                        title={translate.t(LABEL_SETUP_BACK)}
                         onclick={handle_previous}
                     />
                     <TextButton
                         class="primary"
                         name="setup_finish_submit"
                         icon="Save"
-                        title={if *setup_ctx.is_submitting { "Submitting..." } else if *setup_ctx.is_completed { "Submitted" } else { "Complete Setup" }}
+                        title={
+                            if *setup_ctx.is_submitting {
+                                translate.t(LABEL_SETUP_SUBMITTING)
+                            } else if *setup_ctx.is_completed {
+                                translate.t(LABEL_SETUP_SUBMITTED)
+                            } else {
+                                translate.t(LABEL_SETUP_FINISH)
+                            }
+                        }
                         disabled={*setup_ctx.is_submitting || *setup_ctx.is_completed}
                         onclick={handle_submit}
                     />
