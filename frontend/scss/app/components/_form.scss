@@ -56,7 +56,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.35rem;
+  gap: var(--gap-mini);
 
   label {
     @include tp-field-label-base(1);
@@ -72,6 +72,7 @@
     border: none;
     background: transparent;
     color: var(--modest-text-color);
+    fill: currentColor;
     cursor: pointer;
     border-radius: 50%;
   }

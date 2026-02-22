@@ -515,7 +515,7 @@ pub fn ApiConfigView() -> Html {
                 open={true}
                 class={Some("tp__api-server-dialog".to_string())}
                 modal={true}
-                close_on_backdrop_click={true}
+                close_on_backdrop_click={false}
                 on_close={Some(handle_server_dialog_close.clone())}
             >
                 <h2>{title}</h2>
