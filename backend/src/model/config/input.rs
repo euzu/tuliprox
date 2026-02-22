@@ -12,7 +12,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use url::Url;
 
 create_bitset!(
@@ -114,6 +114,14 @@ impl From<&ConfigInputOptionsDto> for ConfigInputOptions {
             probe_live_interval_hours: dto.probe_live_interval_hours,
         }
     }
+}
+
+static DEFAULT_CONFIG_INPUT_OPTIONS: LazyLock<ConfigInputOptions> =
+    LazyLock::new(|| ConfigInputOptions::from(&ConfigInputOptionsDto::default()));
+
+impl ConfigInputOptions {
+    #[inline]
+    pub fn defaults() -> &'static Self { &DEFAULT_CONFIG_INPUT_OPTIONS }
 }
 
 pub struct InputUserInfo {
@@ -236,7 +244,10 @@ pub struct ConfigInput {
 impl ConfigInput {
     #[inline]
     pub fn has_flag(&self, flag: ConfigInputFlags) -> bool {
-        self.options.as_ref().is_some_and(|o| o.has_flag(flag))
+        self.options
+            .as_ref()
+            .unwrap_or(ConfigInputOptions::defaults())
+            .has_flag(flag)
     }
 
     #[inline]
@@ -246,7 +257,10 @@ impl ConfigInput {
 
     #[inline]
     pub fn has_any_flags(&self, flags: ConfigInputFlagsSet) -> bool {
-        self.options.as_ref().is_some_and(|o| o.has_any_flags(flags))
+        self.options
+            .as_ref()
+            .unwrap_or(ConfigInputOptions::defaults())
+            .has_any_flags(flags)
     }
 
     #[inline]
@@ -256,7 +270,10 @@ impl ConfigInput {
 
     #[inline]
     pub fn has_all_flags(&self, flags: ConfigInputFlagsSet) -> bool {
-        self.options.as_ref().is_some_and(|o| o.has_all_flags(flags))
+        self.options
+            .as_ref()
+            .unwrap_or(ConfigInputOptions::defaults())
+            .has_all_flags(flags)
     }
 
     #[inline]
@@ -265,6 +282,10 @@ impl ConfigInput {
     }
 
     pub fn prepare(&mut self, provider_configs: &[Arc<ConfigProvider>]) -> Result<Option<PathBuf>, TuliproxError> {
+        if self.options.is_none() {
+            self.options = Some(ConfigInputOptions::defaults().clone());
+        }
+
         let mut used_provider_configs: Vec<Arc<ConfigProvider>> = vec![];
         let batch_file_path = self.prepare_batch();
         self.name = self.name.trim().intern();
@@ -487,6 +508,12 @@ impl ConfigInput {
 macros::from_impl!(ConfigInput);
 impl From<&ConfigInputDto> for ConfigInput {
     fn from(dto: &ConfigInputDto) -> Self {
+        let options = dto
+            .options
+            .as_ref()
+            .map(ConfigInputOptions::from)
+            .unwrap_or_else(|| ConfigInputOptions::defaults().clone());
+
         Self {
             id: dto.id,
             name: dto.name.clone(),
@@ -498,7 +525,7 @@ impl From<&ConfigInputDto> for ConfigInput {
             password: dto.password.clone(),
             persist: dto.persist.clone(),
             enabled: dto.enabled,
-            options: dto.options.as_ref().map(ConfigInputOptions::from),
+            options: Some(options),
             aliases: dto.aliases.as_ref().map(|list| list.iter().map(ConfigInputAlias::from).collect()),
             priority: dto.priority,
             max_connections: dto.max_connections,
