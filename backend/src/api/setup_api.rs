@@ -8,7 +8,6 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Router;
-use chrono::Local;
 use core::fmt;
 use log::{error, info, warn};
 use rand::Rng;
@@ -103,12 +102,42 @@ fn default_setup_api_server_host() -> String {
     })
 }
 
+fn parse_iana_timezone(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if value.parse::<chrono_tz::Tz>().is_ok() {
+        Some(value.to_string())
+    } else {
+        None
+    }
+}
+
 fn default_setup_timezone() -> String {
-    std::env::var("TZ")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| Local::now().format("%:z").to_string())
+    if let Ok(tz) = std::env::var("TZ") {
+        if let Some(valid_tz) = parse_iana_timezone(&tz) {
+            return valid_tz;
+        }
+        let tz = tz.trim();
+        if !tz.is_empty() {
+            warn!("Setup mode: ignoring non-IANA TZ value '{tz}'");
+        }
+    }
+
+    match iana_time_zone::get_timezone() {
+        Ok(system_tz) => {
+            if let Some(valid_tz) = parse_iana_timezone(&system_tz) {
+                return valid_tz;
+            }
+            warn!("Setup mode: detected system timezone '{system_tz}' is not a valid IANA timezone");
+        }
+        Err(err) => {
+            warn!("Setup mode: failed to resolve system timezone: {err}");
+        }
+    }
+
+    "UTC".to_string()
 }
 
 fn create_default_api_proxy_server() -> ApiProxyServerInfoDto {
@@ -418,6 +447,9 @@ fn validate_web_users(users: &[SetupWebUserCredentialDto]) -> Result<Vec<(String
         if password.is_empty() {
             return Err(format!("Password cannot be empty for user '{username}'"));
         }
+        if password.len() < 8 {
+            return Err(format!("Password for user '{username}' must be at least 8 characters"));
+        }
         if !usernames.insert(username.to_lowercase()) {
             return Err(format!("Duplicate WebUI username '{username}'"));
         }
@@ -467,6 +499,24 @@ async fn cleanup_temp_file(file_path: &FsPath) {
     if let Err(err) = tokio::fs::remove_file(file_path).await {
         if err.kind() != ErrorKind::NotFound {
             warn!("Setup mode: failed to remove temp file '{}': {err}", file_path.display());
+        }
+    }
+}
+
+enum SetupPersistAction<'a> {
+    Config(&'a ConfigDto),
+    Sources(&'a SourcesConfigDto),
+    ApiProxy(&'a ApiProxyConfigDto),
+    UserFile(&'a str),
+}
+
+impl SetupPersistAction<'_> {
+    async fn write(&self, temp_path: &FsPath) -> Result<(), String> {
+        match self {
+            Self::Config(payload) => persist_yaml_file(temp_path, *payload).await,
+            Self::Sources(payload) => persist_yaml_file(temp_path, *payload).await,
+            Self::ApiProxy(payload) => persist_yaml_file(temp_path, *payload).await,
+            Self::UserFile(content) => tokio::fs::write(temp_path, content).await.map_err(|err| err.to_string()),
         }
     }
 }
@@ -523,33 +573,19 @@ async fn setup_complete_inner(
         Err(err) => return (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": err }))).into_response(),
     };
 
-    if let Err(err) = ensure_parent_dir(&state.config_file_path).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            axum::Json(json!({ "error": format!("Failed to create parent directory for {}: {err}", state.config_file_path.display()) })),
-        )
-            .into_response();
-    }
-    if let Err(err) = ensure_parent_dir(&state.source_file_path).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            axum::Json(json!({ "error": format!("Failed to create parent directory for {}: {err}", state.source_file_path.display()) })),
-        )
-            .into_response();
-    }
-    if let Err(err) = ensure_parent_dir(&state.api_proxy_file_path).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            axum::Json(json!({ "error": format!("Failed to create parent directory for {}: {err}", state.api_proxy_file_path.display()) })),
-        )
-            .into_response();
-    }
-    if let Err(err) = ensure_parent_dir(&state.user_file_path).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            axum::Json(json!({ "error": format!("Failed to create parent directory for {}: {err}", state.user_file_path.display()) })),
-        )
-            .into_response();
+    for file_path in [
+        &state.config_file_path,
+        &state.source_file_path,
+        &state.api_proxy_file_path,
+        &state.user_file_path,
+    ] {
+        if let Err(err) = ensure_parent_dir(file_path).await {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(json!({ "error": format!("Failed to create parent directory for {}: {err}", file_path.display()) })),
+            )
+                .into_response();
+        }
     }
 
     req.app_config.sources = sanitize_sources_for_persist(req.app_config.sources.clone()).await;
@@ -578,56 +614,44 @@ async fn setup_complete_inner(
     }
 
     let user_file_content = format!("{}\n", user_lines.join("\n"));
-    let config_temp_path = create_setup_temp_path(&state.config_file_path);
-    let source_temp_path = create_setup_temp_path(&state.source_file_path);
-    let api_proxy_temp_path = create_setup_temp_path(&state.api_proxy_file_path);
-    let user_temp_path = create_setup_temp_path(&state.user_file_path);
-
-    if let Err(err) = persist_yaml_file(&config_temp_path, &req.app_config.config).await {
-        cleanup_temp_file(&config_temp_path).await;
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            axum::Json(json!({ "error": format!("Failed to write {}: {err}", state.config_file_path.display()) })),
-        )
-            .into_response();
-    }
-    if let Err(err) = persist_yaml_file(&source_temp_path, &req.app_config.sources).await {
-        cleanup_temp_file(&config_temp_path).await;
-        cleanup_temp_file(&source_temp_path).await;
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            axum::Json(json!({ "error": format!("Failed to write {}: {err}", state.source_file_path.display()) })),
-        )
-            .into_response();
-    }
-    if let Err(err) = persist_yaml_file(&api_proxy_temp_path, &api_proxy).await {
-        cleanup_temp_file(&config_temp_path).await;
-        cleanup_temp_file(&source_temp_path).await;
-        cleanup_temp_file(&api_proxy_temp_path).await;
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            axum::Json(json!({ "error": format!("Failed to write {}: {err}", state.api_proxy_file_path.display()) })),
-        )
-            .into_response();
-    }
-    if let Err(err) = tokio::fs::write(&user_temp_path, user_file_content).await {
-        cleanup_temp_file(&config_temp_path).await;
-        cleanup_temp_file(&source_temp_path).await;
-        cleanup_temp_file(&api_proxy_temp_path).await;
-        cleanup_temp_file(&user_temp_path).await;
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            axum::Json(json!({ "error": format!("Failed to write {}: {err}", state.user_file_path.display()) })),
-        )
-            .into_response();
-    }
-
-    let file_pairs = [
-        (state.config_file_path.clone(), config_temp_path.clone()),
-        (state.source_file_path.clone(), source_temp_path.clone()),
-        (state.api_proxy_file_path.clone(), api_proxy_temp_path.clone()),
-        (state.user_file_path.clone(), user_temp_path.clone()),
+    let pending_writes: Vec<(PathBuf, PathBuf, SetupPersistAction<'_>)> = vec![
+        (
+            state.config_file_path.clone(),
+            create_setup_temp_path(&state.config_file_path),
+            SetupPersistAction::Config(&req.app_config.config),
+        ),
+        (
+            state.source_file_path.clone(),
+            create_setup_temp_path(&state.source_file_path),
+            SetupPersistAction::Sources(&req.app_config.sources),
+        ),
+        (
+            state.api_proxy_file_path.clone(),
+            create_setup_temp_path(&state.api_proxy_file_path),
+            SetupPersistAction::ApiProxy(&api_proxy),
+        ),
+        (
+            state.user_file_path.clone(),
+            create_setup_temp_path(&state.user_file_path),
+            SetupPersistAction::UserFile(&user_file_content),
+        ),
     ];
+
+    for (index, (target_path, temp_path, action)) in pending_writes.iter().enumerate() {
+        if let Err(err) = action.write(temp_path).await {
+            for (_, cleanup_path, _) in pending_writes.iter().take(index + 1) {
+                cleanup_temp_file(cleanup_path).await;
+            }
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(json!({ "error": format!("Failed to write {}: {err}", target_path.display()) })),
+            )
+                .into_response();
+        }
+    }
+
+    let file_pairs: Vec<(PathBuf, PathBuf)> =
+        pending_writes.into_iter().map(|(target_path, temp_path, _)| (target_path, temp_path)).collect();
 
     let mut snapshots: Vec<Option<Vec<u8>>> = Vec::with_capacity(file_pairs.len());
     for (target, _) in &file_pairs {
@@ -635,10 +659,9 @@ async fn setup_complete_inner(
             Ok(content) => Some(content),
             Err(err) if err.kind() == ErrorKind::NotFound => None,
             Err(err) => {
-                cleanup_temp_file(&config_temp_path).await;
-                cleanup_temp_file(&source_temp_path).await;
-                cleanup_temp_file(&api_proxy_temp_path).await;
-                cleanup_temp_file(&user_temp_path).await;
+                for (_, temp_path) in &file_pairs {
+                    cleanup_temp_file(temp_path).await;
+                }
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     axum::Json(json!({ "error": format!("Failed to read current {}: {err}", target.display()) })),

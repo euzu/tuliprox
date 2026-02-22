@@ -15,13 +15,14 @@ pub fn WelcomeStep() -> Html {
     let handle_next = {
         let setup_ctx = setup_ctx.clone();
         let services = services.clone();
+        let translate = translate.clone();
         Callback::from(move |_| {
             let username = setup_ctx.setup_username.trim().to_string();
             let password = (*setup_ctx.setup_password).clone();
             let password_repeat = (*setup_ctx.setup_password_repeat).clone();
 
             if let Err(err) = validate_credentials(&username, &password, Some(&password_repeat)) {
-                services.toastr.error(err);
+                services.toastr.error(translate.t(err.i18n_key()));
                 return;
             }
 

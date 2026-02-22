@@ -25,24 +25,6 @@ pub struct ConfigStepProps {
     pub step: SetupStep,
 }
 
-fn step_description(step: SetupStep) -> &'static str {
-    match step {
-        SetupStep::Api => "configure API and API proxy settings.",
-        SetupStep::WebUi => "configure WebUI settings.",
-        SetupStep::Main => "configure main application settings.",
-        SetupStep::Log => "configure logging settings.",
-        SetupStep::Messaging => "configure messaging settings.",
-        SetupStep::ReverseProxy => "configure reverse proxy settings.",
-        SetupStep::Proxy => "configure outgoing proxy settings.",
-        SetupStep::IpCheck => "configure IP check settings.",
-        SetupStep::Video => "configure video settings.",
-        SetupStep::HdHomerun => "configure HDHomeRun settings.",
-        SetupStep::Library => "configure library settings.",
-        SetupStep::Schedules => "configure scheduler settings.",
-        _ => "",
-    }
-}
-
 fn render_config_page(step: SetupStep) -> Html {
     match step {
         SetupStep::Api => html! { <ApiConfigView/> },
@@ -64,10 +46,6 @@ fn render_config_page(step: SetupStep) -> Html {
 #[function_component]
 pub fn ConfigStep(props: &ConfigStepProps) -> Html {
     let step = props.step;
-    if step.config_page().is_none() {
-        return html! {};
-    }
-
     let translate = use_translation();
     let setup_ctx = use_context::<SetupContext>().expect("Setup context not found");
     let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");
@@ -125,41 +103,50 @@ pub fn ConfigStep(props: &ConfigStepProps) -> Html {
         |next| format!("{}: {}", translate.t("SETUP.LABEL.NEXT"), translate.t(next.title_key())),
     );
 
-    html! {
-        <ContextProvider<ConfigViewContext> context={context}>
-            <ContextProvider<ConfigContext> context={local_config_context}>
-                <div class="tp__setup__step tp__setup__step-config">
-                    <Card>
-                        <div class="tp__config-view__header">
-                            <h1>{translate.t(step.title_key())}</h1>
-                        </div>
-                        <div class="tp__config-view__body">
-                            <div class="tp__webui-config-view__info tp__config-view-page__info">
-                                <span class="info">
-                                    {format!("Step {}/{}: {}", step.position(), SetupStep::total(), step_description(step))}
-                                </span>
+    if step.config_page().is_none() {
+        html! {}
+    } else {
+        html! {
+            <ContextProvider<ConfigViewContext> context={context}>
+                <ContextProvider<ConfigContext> context={local_config_context}>
+                    <div class="tp__setup__step tp__setup__step-config">
+                        <Card>
+                            <div class="tp__config-view__header">
+                                <h1>{translate.t(step.title_key())}</h1>
                             </div>
-                            {render_config_page(step)}
-                        </div>
-                        <div class="tp__config-view__toolbar tp__form-page__toolbar">
-                            <TextButton
-                                class="secondary"
-                                name="setup_config_previous"
-                                icon="ArrowLeft"
-                                title={translate.t("SETUP.LABEL.BACK")}
-                                onclick={handle_previous}
-                            />
-                            <TextButton
-                                class="primary"
-                                name="setup_config_next"
-                                icon="ArrowRight"
-                                title={next_title}
-                                onclick={handle_next}
-                            />
-                        </div>
-                    </Card>
-                </div>
-            </ContextProvider<ConfigContext>>
-        </ContextProvider<ConfigViewContext>>
+                            <div class="tp__config-view__body">
+                                <div class="tp__webui-config-view__info tp__config-view-page__info">
+                                    <span class="info">
+                                        {format!(
+                                            "Step {}/{}: {}",
+                                            step.position(),
+                                            SetupStep::total(),
+                                            translate.t(step.description_key())
+                                        )}
+                                    </span>
+                                </div>
+                                {render_config_page(step)}
+                            </div>
+                            <div class="tp__config-view__toolbar tp__form-page__toolbar">
+                                <TextButton
+                                    class="secondary"
+                                    name="setup_config_previous"
+                                    icon="ArrowLeft"
+                                    title={translate.t("SETUP.LABEL.BACK")}
+                                    onclick={handle_previous}
+                                />
+                                <TextButton
+                                    class="primary"
+                                    name="setup_config_next"
+                                    icon="ArrowRight"
+                                    title={next_title}
+                                    onclick={handle_next}
+                                />
+                            </div>
+                        </Card>
+                    </div>
+                </ContextProvider<ConfigContext>>
+            </ContextProvider<ConfigViewContext>>
+        }
     }
 }

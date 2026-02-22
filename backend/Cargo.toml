@@ -19,6 +19,7 @@ clap = { version = "4", features = ["derive"] }
 reqwest = { version = "0", features = ["blocking", "json", "stream", "rustls-tls", "socks"] }
 url = "2.5.8"
 chrono = "0.4"
+iana-time-zone = "0.1"
 cron = "0.15"
 axum = { version = "0.8" , features = ["macros", "default", "ws"]}
 tower = "0.5"

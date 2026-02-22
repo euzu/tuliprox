@@ -582,6 +582,25 @@
       "WEBUI_PASSWORD": "WebUI Password",
       "WEBUI_PASSWORD_REPEAT": "Repeat WebUI Password"
     },
+    "DESC": {
+      "WELCOME": "create the first WebUI user. These credentials will be written to user.txt.",
+      "API": "configure API and API proxy settings.",
+      "WEB_UI": "configure WebUI settings.",
+      "MAIN": "configure main application settings.",
+      "LOG": "configure logging settings.",
+      "MESSAGING": "configure messaging settings.",
+      "REVERSE_PROXY": "configure reverse proxy settings.",
+      "PROXY": "configure outgoing proxy settings.",
+      "IP_CHECK": "configure IP check settings.",
+      "VIDEO": "configure video settings.",
+      "HDHOMERUN": "configure HDHomeRun settings.",
+      "LIBRARY": "configure library settings.",
+      "SOURCES": "configure source inputs and mappings.",
+      "API_USERS": "configure API users and target credentials.",
+      "SCHEDULES": "configure scheduler settings.",
+      "FINISH": "review and submit the configuration.",
+      "UNKNOWN": "configure this setup step."
+    },
     "MSG": {
       "WELCOME": "Welcome to tuliprox setup. This wizard will guide you through the initial setup process.",
       "WEBUI_USERNAME_REQUIRED": "WebUI username is required",

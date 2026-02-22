@@ -15,7 +15,7 @@ use crate::{
                 SchedulesConfigView, VideoConfigView, WebUiConfigView,
             },
             input::Input,
-            Card, TabItem, TabSet, TextButton,
+            validate_credentials, Card, TabItem, TabSet, TextButton,
         },
         ConfigContext,
     },
@@ -40,10 +40,6 @@ const LABEL_SETUP_FINISH: &str = "SETUP.LABEL.FINISH_SETUP";
 const LABEL_SETUP_WEBUI_USERNAME: &str = "SETUP.LABEL.WEBUI_USERNAME";
 const LABEL_SETUP_WEBUI_PASSWORD: &str = "SETUP.LABEL.WEBUI_PASSWORD";
 const LABEL_SETUP_WEBUI_PASSWORD_REPEAT: &str = "SETUP.LABEL.WEBUI_PASSWORD_REPEAT";
-const MSG_SETUP_WEBUI_USERNAME_REQUIRED: &str = "SETUP.MSG.WEBUI_USERNAME_REQUIRED";
-const MSG_SETUP_WEBUI_PASSWORD_REQUIRED: &str = "SETUP.MSG.WEBUI_PASSWORD_REQUIRED";
-const MSG_SETUP_WEBUI_PASSWORD_MIN_LENGTH: &str = "SETUP.MSG.WEBUI_PASSWORD_MIN_LENGTH";
-const MSG_SETUP_WEBUI_PASSWORDS_DO_NOT_MATCH: &str = "SETUP.MSG.WEBUI_PASSWORDS_DO_NOT_MATCH";
 
 const ACTION_UPDATE_GEO_IP: &str = "update_geo_ip";
 fn config_form_to_config_page(form: &ConfigForm) -> ConfigPage {
@@ -185,20 +181,8 @@ pub fn ConfigView() -> Html {
                 let password = setup_password.to_string();
                 let password_repeat = setup_password_repeat.to_string();
 
-                if username.is_empty() {
-                    services.toastr.error(translate.t(MSG_SETUP_WEBUI_USERNAME_REQUIRED));
-                    return;
-                }
-                if password.is_empty() {
-                    services.toastr.error(translate.t(MSG_SETUP_WEBUI_PASSWORD_REQUIRED));
-                    return;
-                }
-                if password.len() < 8 {
-                    services.toastr.error(translate.t(MSG_SETUP_WEBUI_PASSWORD_MIN_LENGTH));
-                    return;
-                }
-                if password != password_repeat {
-                    services.toastr.error(translate.t(MSG_SETUP_WEBUI_PASSWORDS_DO_NOT_MATCH));
+                if let Err(err) = validate_credentials(&username, &password, Some(&password_repeat)) {
+                    services.toastr.error(translate.t(err.i18n_key()));
                     return;
                 }
 

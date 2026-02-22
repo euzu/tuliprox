@@ -11,12 +11,14 @@ use crate::{
     services::{SetupCompleteRequestDto, SetupWebUserCredentialDto},
 };
 use yew::{platform::spawn_local, prelude::*};
+use yew_i18n::use_translation;
 
 #[function_component]
 pub fn FinishStep() -> Html {
     let setup_ctx = use_context::<SetupContext>().expect("Setup context not found");
     let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");
     let services = use_service_context();
+    let translate = use_translation();
 
     let handle_previous = {
         let setup_ctx = setup_ctx.clone();
@@ -31,6 +33,7 @@ pub fn FinishStep() -> Html {
         let setup_ctx = setup_ctx.clone();
         let config_ctx = config_ctx.clone();
         let services = services.clone();
+        let translate = translate.clone();
         Callback::from(move |_| {
             if *setup_ctx.is_submitting || *setup_ctx.is_completed {
                 return;
@@ -40,7 +43,7 @@ pub fn FinishStep() -> Html {
             let password = (*setup_ctx.setup_password).clone();
             let password_repeat = (*setup_ctx.setup_password_repeat).clone();
             if let Err(err) = validate_credentials(&username, &password, Some(&password_repeat)) {
-                services.toastr.error(err);
+                services.toastr.error(translate.t(err.i18n_key()));
                 return;
             }
 

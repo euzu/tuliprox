@@ -92,6 +92,27 @@ impl SetupStep {
         }
     }
 
+    pub const fn description_key(self) -> &'static str {
+        match self {
+            Self::Welcome => "SETUP.DESC.WELCOME",
+            Self::Api => "SETUP.DESC.API",
+            Self::WebUi => "SETUP.DESC.WEB_UI",
+            Self::Main => "SETUP.DESC.MAIN",
+            Self::Log => "SETUP.DESC.LOG",
+            Self::Messaging => "SETUP.DESC.MESSAGING",
+            Self::ReverseProxy => "SETUP.DESC.REVERSE_PROXY",
+            Self::Proxy => "SETUP.DESC.PROXY",
+            Self::IpCheck => "SETUP.DESC.IP_CHECK",
+            Self::Video => "SETUP.DESC.VIDEO",
+            Self::HdHomerun => "SETUP.DESC.HDHOMERUN",
+            Self::Library => "SETUP.DESC.LIBRARY",
+            Self::Sources => "SETUP.DESC.SOURCES",
+            Self::ApiUsers => "SETUP.DESC.API_USERS",
+            Self::Schedules => "SETUP.DESC.SCHEDULES",
+            Self::Finish => "SETUP.DESC.FINISH",
+        }
+    }
+
     pub fn config_page(self) -> Option<ConfigPage> {
         match self {
             Self::Api => Some(ConfigPage::Api),

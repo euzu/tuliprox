@@ -7,4 +7,4 @@ mod step_finish;
 mod step_sources;
 mod step_welcome;
 
-pub use self::{setup_context::*, setup_step::*};
+pub use self::{setup_context::*, setup_helpers::validate_credentials, setup_step::*};

@@ -15,19 +15,38 @@ use std::{
     sync::Arc,
 };
 
-pub fn validate_credentials(username: &str, password: &str, password_repeat: Option<&str>) -> Result<(), &'static str> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ValidationError {
+    MissingUsername,
+    MissingPassword,
+    PasswordTooShort,
+    PasswordMismatch,
+}
+
+impl ValidationError {
+    pub const fn i18n_key(self) -> &'static str {
+        match self {
+            Self::MissingUsername => "SETUP.MSG.WEBUI_USERNAME_REQUIRED",
+            Self::MissingPassword => "SETUP.MSG.WEBUI_PASSWORD_REQUIRED",
+            Self::PasswordTooShort => "SETUP.MSG.WEBUI_PASSWORD_MIN_LENGTH",
+            Self::PasswordMismatch => "SETUP.MSG.WEBUI_PASSWORDS_DO_NOT_MATCH",
+        }
+    }
+}
+
+pub fn validate_credentials(username: &str, password: &str, password_repeat: Option<&str>) -> Result<(), ValidationError> {
     if username.trim().is_empty() {
-        return Err("WebUI username is required");
+        return Err(ValidationError::MissingUsername);
     }
     if password.is_empty() {
-        return Err("WebUI password is required");
+        return Err(ValidationError::MissingPassword);
     }
     if password.len() < 8 {
-        return Err("WebUI password must be at least 8 characters");
+        return Err(ValidationError::PasswordTooShort);
     }
     if let Some(password_repeat) = password_repeat {
         if password != password_repeat {
-            return Err("WebUI passwords do not match");
+            return Err(ValidationError::PasswordMismatch);
         }
     }
     Ok(())
