@@ -36,6 +36,13 @@ const LABEL_SAVE: &str = "LABEL.SAVE";
 const LABEL_UPDATE_GEOIP: &str = "LABEL.UPDATE_GEOIP_DB";
 const LABEL_SETUP_WELCOME: &str = "SETUP.MSG.WELCOME";
 const LABEL_SETUP_FINISH: &str = "SETUP.LABEL.FINISH_SETUP";
+const LABEL_SETUP_WEBUI_USERNAME: &str = "SETUP.LABEL.WEBUI_USERNAME";
+const LABEL_SETUP_WEBUI_PASSWORD: &str = "SETUP.LABEL.WEBUI_PASSWORD";
+const LABEL_SETUP_WEBUI_PASSWORD_REPEAT: &str = "SETUP.LABEL.WEBUI_PASSWORD_REPEAT";
+const MSG_SETUP_WEBUI_USERNAME_REQUIRED: &str = "SETUP.MSG.WEBUI_USERNAME_REQUIRED";
+const MSG_SETUP_WEBUI_PASSWORD_REQUIRED: &str = "SETUP.MSG.WEBUI_PASSWORD_REQUIRED";
+const MSG_SETUP_WEBUI_PASSWORD_MIN_LENGTH: &str = "SETUP.MSG.WEBUI_PASSWORD_MIN_LENGTH";
+const MSG_SETUP_WEBUI_PASSWORDS_DO_NOT_MATCH: &str = "SETUP.MSG.WEBUI_PASSWORDS_DO_NOT_MATCH";
 
 const ACTION_UPDATE_GEO_IP: &str = "update_geo_ip";
 
@@ -239,19 +246,19 @@ pub fn ConfigView() -> Html {
                 let password_repeat = setup_password_repeat.to_string();
 
                 if username.is_empty() {
-                    services.toastr.error("WebUI username is required");
+                    services.toastr.error(translate.t(MSG_SETUP_WEBUI_USERNAME_REQUIRED));
                     return;
                 }
                 if password.is_empty() {
-                    services.toastr.error("WebUI password is required");
+                    services.toastr.error(translate.t(MSG_SETUP_WEBUI_PASSWORD_REQUIRED));
                     return;
                 }
                 if password.len() < 8 {
-                    services.toastr.error("WebUI password must be at least 8 characters");
+                    services.toastr.error(translate.t(MSG_SETUP_WEBUI_PASSWORD_MIN_LENGTH));
                     return;
                 }
                 if password != password_repeat {
-                    services.toastr.error("WebUI passwords do not match");
+                    services.toastr.error(translate.t(MSG_SETUP_WEBUI_PASSWORDS_DO_NOT_MATCH));
                     return;
                 }
 
@@ -307,10 +314,23 @@ pub fn ConfigView() -> Html {
                     match services.config.complete_setup(payload).await {
                         Ok(()) => {
                             set_edit_mode.set(false);
+                            let (app_config, api_proxy_config) = services.config.get_server_config().await;
+                            if app_config.is_none() {
+                                // Log but don't fail - setup succeeded; refresh is best-effort
+                                warn!("Config refresh failed");
+                            }
+                            if api_proxy_config.is_none() {
+                                // Log but don't fail - setup succeeded; refresh is best-effort
+                                warn!("ApiProxy Config refresh failed");
+                            }
                             services.toastr.success(translate.t("MESSAGES.SAVE.MAIN_CONFIG.SUCCESS"));
                         }
                         Err(err) => {
-                            services.toastr.error(format!("Setup save failed: {}", err));
+                            services.toastr.error(format!(
+                                "{}: {}",
+                                translate.t("MESSAGES.SAVE.MAIN_CONFIG.FAIL"),
+                                err
+                            ));
                         }
                     }
                 });
@@ -499,7 +519,7 @@ pub fn ConfigView() -> Html {
                     <div class="tp__form-page__toolbar">
                         <Input
                             name="setup_username"
-                            label={Some("WebUI Username".to_string())}
+                            label={Some(translate.t(LABEL_SETUP_WEBUI_USERNAME).to_string())}
                             value={(*setup_username).clone()}
                             on_change={Some({
                                 let setup_username = setup_username.clone();
@@ -508,7 +528,7 @@ pub fn ConfigView() -> Html {
                         />
                         <Input
                             name="setup_password"
-                            label={Some("WebUI Password".to_string())}
+                            label={Some(translate.t(LABEL_SETUP_WEBUI_PASSWORD).to_string())}
                             hidden={true}
                             value={(*setup_password).clone()}
                             on_change={Some({
@@ -518,7 +538,7 @@ pub fn ConfigView() -> Html {
                         />
                         <Input
                             name="setup_password_repeat"
-                            label={Some("Repeat WebUI Password".to_string())}
+                            label={Some(translate.t(LABEL_SETUP_WEBUI_PASSWORD_REPEAT).to_string())}
                             hidden={true}
                             value={(*setup_password_repeat).clone()}
                             on_change={Some({

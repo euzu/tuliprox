@@ -22,13 +22,9 @@ pub fn TextButton(props: &TextButtonProps) -> Html {
     let handle_click = {
         let click = props.onclick.clone();
         let name = props.name.clone();
-        let disabled = props.disabled;
         Callback::from(move |e: MouseEvent| {
             e.prevent_default();
             e.stop_propagation();
-            if disabled {
-                return;
-            }
             click.emit(name.clone());
         })
     };

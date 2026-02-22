@@ -147,13 +147,8 @@ pub fn prepare_sources(app_config: &mut AppConfigDto) -> Result<(), String> {
 }
 
 pub fn apply_setup_api_users(app_config: &mut AppConfigDto, users: &[TargetUserDto]) {
-    if app_config.api_proxy.is_none() {
-        app_config.api_proxy = Some(ApiProxyConfigDto::default());
-    }
-
-    if let Some(api_proxy) = app_config.api_proxy.as_mut() {
-        api_proxy.user = users.to_vec();
-    }
+    let api_proxy = app_config.api_proxy.get_or_insert_with(ApiProxyConfigDto::default);
+    api_proxy.user = users.to_vec();
 }
 
 pub type SetupPlaylistRows = Vec<(Vec<Rc<InputRow>>, Vec<Rc<ConfigTargetDto>>)>;

@@ -9,6 +9,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Router;
 use chrono::Local;
+use core::fmt;
 use log::{error, info, warn};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -24,16 +25,26 @@ use std::collections::HashSet;
 use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
 use std::path::{Component, Path as FsPath, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{oneshot, Mutex, RwLock};
 use tower_http::services::ServeDir;
 
 const DEFAULT_SETUP_HOST: &str = "0.0.0.0";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SetupWebUserCredentialDto {
     pub username: String,
     pub password: String,
+}
+
+impl fmt::Debug for SetupWebUserCredentialDto {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SetupWebUserCredentialDto")
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,7 +54,6 @@ pub struct SetupCompleteRequestDto {
     pub web_users: Vec<SetupWebUserCredentialDto>,
 }
 
-#[derive(Clone)]
 struct SetupModeState {
     draft: Arc<RwLock<AppConfigDto>>,
     output_dir: PathBuf,
@@ -53,6 +63,8 @@ struct SetupModeState {
     user_file_path: PathBuf,
     web_dir: PathBuf,
     missing_files: Arc<Vec<String>>,
+    completed: AtomicBool,
+    shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
 }
 
 fn detect_machine_ip() -> Option<String> {
@@ -80,9 +92,7 @@ fn detect_machine_ip() -> Option<String> {
             return Some(ip.to_string());
         }
     }
-    warn!(
-        "Setup mode: unable to detect machine IP via UDP probe targets (1.1.1.1:80, 8.8.8.8:80, 9.9.9.9:80)"
-    );
+    warn!("Setup mode: unable to detect machine IP via UDP probe targets (1.1.1.1:80, 8.8.8.8:80, 9.9.9.9:80)");
     None
 }
 
@@ -114,7 +124,6 @@ fn create_default_api_proxy_server() -> ApiProxyServerInfoDto {
 }
 
 fn create_default_config_dto() -> ConfigDto {
-
     let auth = WebAuthConfigDto {
         issuer: "tuliprox".to_string(),
         secret: generate_web_auth_secret(),
@@ -122,11 +131,7 @@ fn create_default_config_dto() -> ConfigDto {
         ..WebAuthConfigDto::default()
     };
 
-    let web_ui = WebUiConfigDto {
-        auth: Some(auth),
-        kick_secs: default_kick_secs(),
-        ..WebUiConfigDto::default()
-    };
+    let web_ui = WebUiConfigDto { auth: Some(auth), kick_secs: default_kick_secs(), ..WebUiConfigDto::default() };
 
     ConfigDto {
         api: ConfigApiDto {
@@ -238,11 +243,7 @@ fn setup_bind_values(draft: &AppConfigDto) -> (String, u16, PathBuf) {
     } else {
         draft.config.api.host.clone()
     };
-    let port = if draft.config.api.port == 0 {
-        DEFAULT_PORT
-    } else {
-        draft.config.api.port
-    };
+    let port = if draft.config.api.port == 0 { DEFAULT_PORT } else { draft.config.api.port };
     let web_root = if draft.config.api.web_root.trim().is_empty() {
         get_default_web_root_path()
     } else {
@@ -270,51 +271,35 @@ fn api_proxy_or_default(draft: &AppConfigDto) -> ApiProxyConfigDto {
     })
 }
 
-async fn setup_healthcheck(
-    State(state): State<Arc<SetupModeState>>,
-) -> impl IntoResponse + Send {
+async fn setup_healthcheck(State(state): State<Arc<SetupModeState>>) -> impl IntoResponse + Send {
     axum::Json(json!({
         "status": "setup",
         "mode": "setup",
         "missing_files": state.missing_files.as_ref(),
         "output_dir": state.output_dir.display().to_string()
     }))
-        .into_response()
+    .into_response()
 }
 
 async fn setup_token() -> impl IntoResponse + Send {
-    axum::Json(TokenResponse {
-        token: TOKEN_NO_AUTH.to_string(),
-        username: "setup".to_string(),
-    })
-        .into_response()
+    axum::Json(TokenResponse { token: TOKEN_NO_AUTH.to_string(), username: "setup".to_string() }).into_response()
 }
 
 async fn setup_token_refresh() -> impl IntoResponse + Send {
-    axum::Json(TokenResponse {
-        token: TOKEN_NO_AUTH.to_string(),
-        username: "setup".to_string(),
-    })
-        .into_response()
+    axum::Json(TokenResponse { token: TOKEN_NO_AUTH.to_string(), username: "setup".to_string() }).into_response()
 }
 
-async fn setup_get_config(
-    State(state): State<Arc<SetupModeState>>,
-) -> impl IntoResponse + Send {
+async fn setup_get_config(State(state): State<Arc<SetupModeState>>) -> impl IntoResponse + Send {
     let draft = state.draft.read().await.clone();
     axum::Json(draft).into_response()
 }
 
-async fn setup_get_api_proxy(
-    State(state): State<Arc<SetupModeState>>,
-) -> impl IntoResponse + Send {
+async fn setup_get_api_proxy(State(state): State<Arc<SetupModeState>>) -> impl IntoResponse + Send {
     let draft = state.draft.read().await.clone();
     axum::Json(api_proxy_or_default(&draft)).into_response()
 }
 
-async fn setup_config_json(
-    State(state): State<Arc<SetupModeState>>,
-) -> impl IntoResponse + Send {
+async fn setup_config_json(State(state): State<Arc<SetupModeState>>) -> impl IntoResponse + Send {
     let config_json_path = state.web_dir.join("config.json");
     match tokio::fs::read_to_string(&config_json_path).await {
         Ok(content) => {
@@ -350,16 +335,8 @@ async fn setup_config_json(
     StatusCode::INTERNAL_SERVER_ERROR.into_response()
 }
 
-async fn setup_index(
-    State(state): State<Arc<SetupModeState>>,
-) -> impl IntoResponse + Send {
-    serve_file(
-        &state.web_dir.join("index.html"),
-        mime::TEXT_HTML_UTF_8.to_string(),
-        None,
-    )
-        .await
-        .into_response()
+async fn setup_index(State(state): State<Arc<SetupModeState>>) -> impl IntoResponse + Send {
+    serve_file(&state.web_dir.join("index.html"), mime::TEXT_HTML_UTF_8.to_string(), None).await.into_response()
 }
 
 async fn setup_root_file(
@@ -371,22 +348,17 @@ async fn setup_root_file(
     }
 
     let requested_path = FsPath::new(&filename);
-    if requested_path.components().any(|component| {
-        matches!(
-            component,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_)
-        )
-    }) {
+    if requested_path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir | Component::RootDir | Component::Prefix(_)))
+    {
         return StatusCode::NOT_FOUND.into_response();
     }
 
     let canonical_web_dir = match tokio::fs::canonicalize(&state.web_dir).await {
         Ok(path) => path,
         Err(err) => {
-            error!(
-                "Setup mode: failed to canonicalize web root '{}': {err}",
-                state.web_dir.display()
-            );
+            error!("Setup mode: failed to canonicalize web root '{}': {err}", state.web_dir.display());
             return StatusCode::NOT_FOUND.into_response();
         }
     };
@@ -398,19 +370,12 @@ async fn setup_root_file(
                 return StatusCode::NOT_FOUND.into_response();
             }
             if canonical_file_path.is_file() {
-                let mime_type = mime_guess::from_path(&canonical_file_path)
-                    .first_or_octet_stream()
-                    .to_string();
-                return serve_file(&canonical_file_path, mime_type, None)
-                    .await
-                    .into_response();
+                let mime_type = mime_guess::from_path(&canonical_file_path).first_or_octet_stream().to_string();
+                return serve_file(&canonical_file_path, mime_type, None).await.into_response();
             }
         }
         Err(err) if err.kind() != ErrorKind::NotFound => {
-            warn!(
-                "Setup mode: failed to canonicalize requested file '{}': {err}",
-                file_path.display()
-            );
+            warn!("Setup mode: failed to canonicalize requested file '{}': {err}", file_path.display());
         }
         Err(_) => {}
     }
@@ -422,34 +387,21 @@ async fn api_not_found() -> impl IntoResponse + Send {
     StatusCode::NOT_FOUND.into_response()
 }
 
-async fn persist_yaml_file<T: serde::Serialize>(
-    file_path: &FsPath,
-    payload: &T,
-) -> Result<(), String> {
+async fn persist_yaml_file<T: serde::Serialize>(file_path: &FsPath, payload: &T) -> Result<(), String> {
     let mut content = String::new();
-    let options = serde_saphyr::SerializerOptions {
-        prefer_block_scalars: false,
-        ..Default::default()
-    };
-    serde_saphyr::to_fmt_writer_with_options(&mut content, payload, options)
-        .map_err(|err| err.to_string())?;
-    tokio::fs::write(file_path, content)
-        .await
-        .map_err(|err| err.to_string())
+    let options = serde_saphyr::SerializerOptions { prefer_block_scalars: false, ..Default::default() };
+    serde_saphyr::to_fmt_writer_with_options(&mut content, payload, options).map_err(|err| err.to_string())?;
+    tokio::fs::write(file_path, content).await.map_err(|err| err.to_string())
 }
 
 async fn ensure_parent_dir(file_path: &FsPath) -> Result<(), String> {
     if let Some(parent_dir) = file_path.parent() {
-        tokio::fs::create_dir_all(parent_dir)
-            .await
-            .map_err(|err| err.to_string())?;
+        tokio::fs::create_dir_all(parent_dir).await.map_err(|err| err.to_string())?;
     }
     Ok(())
 }
 
-fn validate_web_users(
-    users: &[SetupWebUserCredentialDto],
-) -> Result<Vec<(String, String)>, String> {
+fn validate_web_users(users: &[SetupWebUserCredentialDto]) -> Result<Vec<(String, String)>, String> {
     if users.is_empty() {
         return Err("At least one WebUI user is required".to_string());
     }
@@ -475,11 +427,8 @@ fn validate_web_users(
 }
 
 fn create_setup_temp_path(file_path: &FsPath) -> PathBuf {
-    let file_name = file_path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .filter(|value| !value.is_empty())
-        .unwrap_or("setup");
+    let file_name =
+        file_path.file_name().and_then(|value| value.to_str()).filter(|value| !value.is_empty()).unwrap_or("setup");
     let temp_name = format!(".{file_name}.tmp-{}-{}", std::process::id(), rand::rng().random::<u64>());
     match file_path.parent() {
         Some(parent) => parent.join(temp_name),
@@ -505,9 +454,7 @@ async fn replace_file_atomic(source: &FsPath, target: &FsPath) -> std::io::Resul
 
 async fn restore_file_snapshot(file_path: &FsPath, snapshot: Option<&[u8]>) -> Result<(), String> {
     match snapshot {
-        Some(content) => tokio::fs::write(file_path, content)
-            .await
-            .map_err(|err| err.to_string()),
+        Some(content) => tokio::fs::write(file_path, content).await.map_err(|err| err.to_string()),
         None => match tokio::fs::remove_file(file_path).await {
             Ok(()) => Ok(()),
             Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
@@ -524,40 +471,43 @@ async fn cleanup_temp_file(file_path: &FsPath) {
     }
 }
 
-#[allow(clippy::too_many_lines)]
 async fn setup_complete(
     State(state): State<Arc<SetupModeState>>,
-    axum::extract::Json(mut req): axum::extract::Json<SetupCompleteRequestDto>,
+    axum::extract::Json(req): axum::extract::Json<SetupCompleteRequestDto>,
 ) -> impl IntoResponse + Send {
+    if state.completed.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+        return (StatusCode::CONFLICT, axum::Json(json!({ "error": "Setup has already been completed" })))
+            .into_response();
+    }
+
+    let response = setup_complete_inner(state.clone(), req).await;
+    if response.status().is_success() {
+        let mut shutdown_tx = state.shutdown_tx.lock().await;
+        if let Some(tx) = shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+    } else {
+        state.completed.store(false, Ordering::Release);
+    }
+    response
+}
+
+#[allow(clippy::too_many_lines)]
+async fn setup_complete_inner(
+    state: Arc<SetupModeState>,
+    mut req: SetupCompleteRequestDto,
+) -> axum::response::Response {
     ensure_setup_defaults(&mut req.app_config.config);
 
     if let Err(err) = req.app_config.config.prepare(false) {
-        return (
-            StatusCode::BAD_REQUEST,
-            axum::Json(json!({ "error": err.to_string() })),
-        )
-            .into_response();
+        return (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": err.to_string() }))).into_response();
     }
     if !req.app_config.config.is_valid() {
-        return (
-            StatusCode::BAD_REQUEST,
-            axum::Json(json!({ "error": "Invalid config.yml content" })),
-        )
-            .into_response();
+        return (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": "Invalid config.yml content" }))).into_response();
     }
 
-    if let Err(err) = req.app_config.sources.prepare(
-        false,
-        req.app_config
-            .config
-            .get_hdhr_device_overview()
-            .as_ref(),
-    ) {
-        return (
-            StatusCode::BAD_REQUEST,
-            axum::Json(json!({ "error": err.to_string() })),
-        )
-            .into_response();
+    if let Err(err) = req.app_config.sources.prepare(false, req.app_config.config.get_hdhr_device_overview().as_ref()) {
+        return (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": err.to_string() }))).into_response();
     }
 
     let mut api_proxy = req.app_config.api_proxy.clone().unwrap_or_default();
@@ -565,22 +515,12 @@ async fn setup_complete(
         api_proxy.server.push(create_default_api_proxy_server());
     }
     if let Err(err) = api_proxy.prepare() {
-        return (
-            StatusCode::BAD_REQUEST,
-            axum::Json(json!({ "error": err.to_string() })),
-        )
-            .into_response();
+        return (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": err.to_string() }))).into_response();
     }
 
     let users = match validate_web_users(&req.web_users) {
         Ok(users) => users,
-        Err(err) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                axum::Json(json!({ "error": err })),
-            )
-                .into_response()
-        }
+        Err(err) => return (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": err }))).into_response(),
     };
 
     if let Err(err) = ensure_parent_dir(&state.config_file_path).await {
@@ -616,8 +556,7 @@ async fn setup_complete(
 
     let mut user_lines: Vec<String> = Vec::with_capacity(users.len());
     for (username, password) in users {
-        let username_for_hash = username.clone();
-        let password_for_hash = password.clone();
+        let password_for_hash = password;
         let hash_result = tokio::task::spawn_blocking(move || generate_password_from_input(&password_for_hash)).await;
         match hash_result {
             Ok(Ok(hash)) => user_lines.push(format!("{username}:{hash}")),
@@ -631,9 +570,7 @@ async fn setup_complete(
             Err(err) => {
                 return (
                     StatusCode::BAD_REQUEST,
-                    axum::Json(
-                        json!({ "error": format!("Failed to hash password for user '{username_for_hash}': {err}") }),
-                    ),
+                    axum::Json(json!({ "error": format!("Failed to hash password for user '{username}': {err}") })),
                 )
                     .into_response();
             }
@@ -704,9 +641,7 @@ async fn setup_complete(
                 cleanup_temp_file(&user_temp_path).await;
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    axum::Json(
-                        json!({ "error": format!("Failed to read current {}: {err}", target.display()) }),
-                    ),
+                    axum::Json(json!({ "error": format!("Failed to read current {}: {err}", target.display()) })),
                 )
                     .into_response();
             }
@@ -749,7 +684,7 @@ async fn setup_complete(
     axum::Json(json!({
         "message": "Setup completed successfully. Restart the application to continue."
     }))
-        .into_response()
+    .into_response()
 }
 
 fn create_cors_layer() -> tower_http::cors::CorsLayer {
@@ -767,26 +702,16 @@ fn create_cors_layer() -> tower_http::cors::CorsLayer {
 }
 
 fn create_compression_layer() -> tower_http::compression::CompressionLayer {
-    tower_http::compression::CompressionLayer::new()
-        .br(true)
-        .deflate(true)
-        .gzip(true)
-        .zstd(true)
+    tower_http::compression::CompressionLayer::new().br(true).deflate(true).gzip(true).zstd(true)
 }
 
-pub async fn start_setup_server(
-    paths: &ConfigPaths,
-    missing_files: &[String],
-) -> Result<(), TuliproxError> {
+pub async fn start_setup_server(paths: &ConfigPaths, missing_files: &[String]) -> Result<(), TuliproxError> {
     let draft = build_initial_draft(paths);
     let (host, port, web_root) = setup_bind_values(&draft);
-    let web_dir = resolve_setup_web_dir(&web_root).ok_or_else(|| {
-        info_err!(
-            "Setup mode requires a web directory. Tried '{}'",
-            web_root.display(),
-        )
-    })?;
+    let web_dir = resolve_setup_web_dir(&web_root)
+        .ok_or_else(|| info_err!("Setup mode requires a web directory. Tried '{}'", web_root.display(),))?;
 
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let state = Arc::new(SetupModeState {
         draft: Arc::new(RwLock::new(draft)),
         output_dir: PathBuf::from(&paths.config_path),
@@ -796,12 +721,11 @@ pub async fn start_setup_server(
         user_file_path: PathBuf::from(&paths.config_path).join(USER_FILE),
         web_dir: web_dir.clone(),
         missing_files: Arc::new(missing_files.to_vec()),
+        completed: AtomicBool::new(false),
+        shutdown_tx: Mutex::new(Some(shutdown_tx)),
     });
 
-    info!(
-        "Setup mode enabled. Missing required config files: {}",
-        missing_files.join(", ")
-    );
+    info!("Setup mode enabled. Missing required config files: {}", missing_files.join(", "));
     info!("Setup output directory: {}", state.output_dir.display());
     info!("Setup web root: {}", state.web_dir.display());
     info!("Setup server running: http://{host}:{port}");
@@ -837,10 +761,10 @@ pub async fn start_setup_server(
         .await
         .map_err(|err| info_err!("Failed to bind setup server to {host}:{port}: {err}"))?;
 
-    axum::serve(
-        listener,
-        router.into_make_service_with_connect_info::<SocketAddr>(),
-    )
+    axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>())
+        .with_graceful_shutdown(async move {
+            let _ = shutdown_rx.await;
+        })
         .await
         .map_err(|err| info_err!("Setup server error: {err}"))?;
     Ok(())

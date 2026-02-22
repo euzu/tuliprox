@@ -66,8 +66,21 @@ pub fn TextArea(props: &TextAreaProps) -> Html {
     };
 
     if props.collapse_on_empty {
+        let title_content = props.label.as_ref().map(|label| {
+            html! {
+                <FieldLabel
+                    label={label.clone()}
+                    field_id={resolved_field_id.clone()}
+                    for_id={Some(resolved_field_id.clone())}
+                />
+            }
+        });
         return html! {
-            <CollapsePanel title={props.label.clone().unwrap_or_default()} expanded={!props.value.is_empty()}>
+            <CollapsePanel
+                title={props.label.clone().unwrap_or_default()}
+                title_content={title_content}
+                expanded={!props.value.is_empty()}
+            >
                 <div class="tp__input">
                     { text_area }
                 </div>

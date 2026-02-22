@@ -29,7 +29,7 @@ use clap::Parser;
 use log::{error, info, warn};
 use shared::{
     model::ConfigPaths,
-    utils::{API_PROXY_FILE, CONFIG_FILE, SOURCE_FILE},
+    utils::{CONFIG_FILE, SOURCE_FILE},
 };
 use std::{fs::File, sync::Arc};
 
@@ -263,23 +263,19 @@ fn get_file_paths(args: &Args) -> ConfigPaths {
 }
 
 fn missing_required_setup_files(paths: &ConfigPaths) -> Vec<String> {
-    [
-        (CONFIG_FILE, paths.config_file_path.as_str()),
-        (SOURCE_FILE, paths.sources_file_path.as_str()),
-        (API_PROXY_FILE, paths.api_proxy_file_path.as_str()),
-    ]
-    .iter()
-    .filter_map(|(name, file_path)| {
-        let file_path = std::path::Path::new(file_path);
-        if !file_path.exists() {
-            Some(format!("{name} missing ({})", file_path.display()))
-        } else if !file_path.is_file() {
-            Some(format!("{name} exists but is not a regular file ({})", file_path.display()))
-        } else {
-            None
-        }
-    })
-    .collect()
+    [(CONFIG_FILE, paths.config_file_path.as_str()), (SOURCE_FILE, paths.sources_file_path.as_str())]
+        .iter()
+        .filter_map(|(name, file_path)| {
+            let file_path = std::path::Path::new(file_path);
+            if !file_path.exists() {
+                Some(format!("{name} missing ({})", file_path.display()))
+            } else if !file_path.is_file() {
+                Some(format!("{name} exists but is not a regular file ({})", file_path.display()))
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 async fn start_in_cli_mode(cfg: Arc<AppConfig>, targets: Arc<ProcessTargets>) {

@@ -37,6 +37,7 @@ const LABEL_API_PROXY_CONFIG: &str = "LABEL.API_PROXY_CONFIG";
 const LABEL_USE_USER_DB: &str = "LABEL.USE_USER_DB";
 const LABEL_SERVER: &str = "LABEL.SERVER";
 const LABEL_ADD_SERVER: &str = "LABEL.ADD_SERVER";
+const MSG_NON_UNIQUE_SERVER_NAME: &str = "MESSAGES.SAVE.API_PROXY_CONFIG.NON_UNIQUE_SERVER_NAME";
 
 const SERVER_HEADERS: [&str; 8] = ["EMPTY", "NAME", "PROTOCOL", "HOST", "PORT", "TIMEZONE", "MESSAGE", "PATH"];
 
@@ -306,6 +307,7 @@ pub fn ApiConfigView() -> Html {
         let server_dialog_form = server_dialog_form.clone();
         let server_dialog_error = server_dialog_error.clone();
         let form_state_api_proxy_config = form_state_api_proxy_config.clone();
+        let translate = translate.clone();
         Callback::from(move |_| {
             let Some(dialog_mode) = *server_dialog_mode else {
                 return;
@@ -323,7 +325,7 @@ pub fn ApiConfigView() -> Html {
             };
 
             if server_name_exists(&form_state_api_proxy_config.form.server, &server.name, ignore_index) {
-                server_dialog_error.set(Some(format!("Non-unique server info name found {}", server.name)));
+                server_dialog_error.set(Some(format!("{} {}", translate.t(MSG_NON_UNIQUE_SERVER_NAME), server.name)));
                 return;
             }
 
@@ -399,7 +401,10 @@ pub fn ApiConfigView() -> Html {
         let render_data_cell = render_data_cell.clone();
         let num_cols = SERVER_HEADERS.len();
         let servers = form_state_api_proxy_config.form.server.clone();
-        use_memo(servers, move |servers| TableDefinition::<ApiProxyServerInfoDto> {
+        let translation_marker = translate.t(LABEL_SERVER);
+        use_memo((servers, translation_marker), move |(servers, _translation_marker)| TableDefinition::<
+            ApiProxyServerInfoDto,
+        > {
             items: if servers.is_empty() {
                 None
             } else {

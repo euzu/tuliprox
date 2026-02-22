@@ -17,4 +17,10 @@ frontend/dist/
 # Setup mode: never ship runtime config or credentials in Docker build context
 config/*.yml
 config/*.yaml
+config/*.json
+config/*.env
+config/*.toml
+config/*.ini
+config/*.pem
+config/*.key
 config/user.txt

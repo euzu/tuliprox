@@ -72,25 +72,25 @@ impl SetupStep {
     }
 
     pub fn title(self) -> String {
-        let snake_case = self.to_string();
-        let pascal_case = snake_case
-            .split('_')
-            .filter(|segment| !segment.is_empty())
-            .map(|segment| {
-                let mut chars = segment.chars();
-                match chars.next() {
-                    Some(first) => {
-                        let mut value = String::new();
-                        value.push(first.to_ascii_uppercase());
-                        value.push_str(chars.as_str());
-                        value
-                    }
-                    None => String::new(),
-                }
-            })
-            .collect::<String>();
-
-        pascal_case.replace("Ipcheck", "IpCheck").replace("Hdhomerun", "HdHomerun")
+        match self {
+            Self::Welcome => "Welcome",
+            Self::Api => "Api",
+            Self::WebUi => "WebUi",
+            Self::Main => "Main",
+            Self::Log => "Log",
+            Self::Messaging => "Messaging",
+            Self::ReverseProxy => "ReverseProxy",
+            Self::Proxy => "Proxy",
+            Self::IpCheck => "IpCheck",
+            Self::Video => "Video",
+            Self::HdHomerun => "HdHomerun",
+            Self::Library => "Library",
+            Self::Sources => "Sources",
+            Self::ApiUsers => "ApiUsers",
+            Self::Schedules => "Schedules",
+            Self::Finish => "Finish",
+        }
+        .to_string()
     }
 
     pub fn config_page(self) -> Option<ConfigPage> {
@@ -218,4 +218,15 @@ pub struct SetupContext {
     pub is_submitting: UseStateHandle<bool>,
     pub is_completed: UseStateHandle<bool>,
     pub submit_error: UseStateHandle<Option<String>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SetupStep;
+
+    #[test]
+    fn setup_step_order_len_is_expected() {
+        const EXPECTED_SETUP_STEP_COUNT: usize = 16;
+        assert_eq!(SetupStep::ORDER.len(), EXPECTED_SETUP_STEP_COUNT);
+    }
 }

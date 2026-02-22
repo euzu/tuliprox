@@ -113,6 +113,7 @@
     "STATUS": "Status",
     "USERNAME": "Username",
     "PASSWORD": "Password",
+    "REPEAT_PASSWORD": "Repeat Password",
     "SERVER": "Server",
     "TIMEZONE": "Timezone",
     "PATH": "Path",
@@ -479,7 +480,8 @@
       },
       "API_PROXY_CONFIG": {
         "SUCCESS": "ApiProxy config saved!",
-        "FAIL": "Failed to save the ApiProxy config!"
+        "FAIL": "Failed to save the ApiProxy config!",
+        "NON_UNIQUE_SERVER_NAME": "Server info name already exists:"
       },
       "SOURCES_CONFIG": {
         "SUCCESS": "Sources config saved!",
@@ -558,10 +560,17 @@
     "LABEL": {
       "NEXT": "Next",
       "BACK": "Back",
-      "FINISH_SETUP": "Finish Setup"
+      "FINISH_SETUP": "Finish Setup",
+      "WEBUI_USERNAME": "WebUI Username",
+      "WEBUI_PASSWORD": "WebUI Password",
+      "WEBUI_PASSWORD_REPEAT": "Repeat WebUI Password"
     },
     "MSG": {
-      "WELCOME": "Welcome to tuliprox setup. This wizard will guide you through the initial setup process."
+      "WELCOME": "Welcome to tuliprox setup. This wizard will guide you through the initial setup process.",
+      "WEBUI_USERNAME_REQUIRED": "WebUI username is required",
+      "WEBUI_PASSWORD_REQUIRED": "WebUI password is required",
+      "WEBUI_PASSWORD_MIN_LENGTH": "WebUI password must be at least 8 characters",
+      "WEBUI_PASSWORDS_DO_NOT_MATCH": "WebUI passwords do not match"
     }
   },
   "SOURCE_EDITOR": {

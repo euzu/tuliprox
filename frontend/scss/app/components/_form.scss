@@ -8,7 +8,7 @@
   color: var(--text-color);
   font-size: 1.1rem;
 
-  @if $flex != null {
+  @if $flex {
     flex: $flex;
   }
 }
@@ -48,7 +48,7 @@
   }
 
   label {
-    @include tp-field-label-base();
+    @include tp-field-label-base;
   }
 }
 

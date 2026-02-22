@@ -28,6 +28,15 @@ pub fn WelcomeStep() -> Html {
             move_to_next_step(&setup_ctx, SetupStep::Welcome);
         })
     };
+    let step_message = format!(
+        "Step {}/{}: create the first WebUI user. These credentials will be written to user.txt.",
+        SetupStep::Welcome.position(),
+        SetupStep::total()
+    );
+    let next_title = SetupStep::Welcome
+        .next()
+        .map(|next_step| format!("Next: {}", next_step.title()))
+        .unwrap_or_else(|| "Next".to_string());
 
     html! {
         <div class="tp__setup__step tp__setup__step-welcome">
@@ -38,7 +47,7 @@ pub fn WelcomeStep() -> Html {
                 <div class="tp__config-view__body">
                     <div class="tp__webui-config-view__info tp__config-view-page__info">
                         <span class="info">
-                            {"Step 1/16: create the first WebUI user. These credentials will be written to user.txt."}
+                            {step_message}
                         </span>
                     </div>
                     <div class="tp__config-view-page">
@@ -78,7 +87,7 @@ pub fn WelcomeStep() -> Html {
                             class="primary"
                             name="setup_welcome_next"
                             icon="ArrowRight"
-                            title={"Next: Api"}
+                            title={next_title}
                             onclick={handle_next}
                         />
                     </div>
