@@ -611,7 +611,7 @@ pub fn ParticleFlowBackground() -> Html {
                 }));
 
             let theme_observer = win.document().and_then(|doc| {
-                MutationObserver::new(on_theme_change.as_ref().unchecked_ref()).ok().and_then(|observer| {
+                MutationObserver::new(on_theme_change.as_ref().unchecked_ref()).ok().inspect(|observer| {
                     let options = MutationObserverInit::new();
                     options.set_attributes(true);
                     let attribute_filter = Array::new();
@@ -625,7 +625,6 @@ pub fn ParticleFlowBackground() -> Html {
                     if let Some(body) = doc.body() {
                         let _ = observer.observe_with_options(&body, &options);
                     }
-                    Some(observer)
                 })
             });
 
