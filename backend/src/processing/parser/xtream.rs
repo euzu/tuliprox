@@ -244,15 +244,8 @@ where
         input.username.as_deref().unwrap_or("").to_string(),
         input.password.as_deref().unwrap_or("").to_string(),
     );
-    let (live_stream_use_prefix, live_stream_without_extension) = input.options.as_ref().map_or(
-        (false, false),
-        |o| {
-            (
-                o.has_flag(ConfigInputFlags::XtreamLiveStreamUsePrefix),
-                o.has_flag(ConfigInputFlags::XtreamLiveStreamWithoutExtension),
-            )
-        },
-    );
+    let live_stream_use_prefix = input.has_flag(ConfigInputFlags::XtreamLiveStreamUsePrefix);
+    let live_stream_without_extension = input.has_flag(ConfigInputFlags::XtreamLiveStreamWithoutExtension);
 
     // Map categories for lookup
     let group_map: IndexMap<u32, Arc<str>> = xtream_categories.iter().map(|c| (c.category_id, c.category_name.clone())).collect();

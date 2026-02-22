@@ -9,6 +9,7 @@ use crate::api::model::{ProviderAllocation, UserSession};
 use crate::auth::Fingerprint;
 use crate::model::{ConfigInput, InputSource};
 use crate::model::{ConfigTarget, ProxyUserCredentials};
+use crate::model::ConfigInputFlags;
 use crate::processing::parser::hls::{
     get_hls_session_token_and_url_from_token, rewrite_hls, RewriteHlsProps,
 };
@@ -23,6 +24,7 @@ use shared::model::{PlaylistItemType, StreamChannel, TargetType, UserConnectionP
 use shared::utils::{is_hls_url, replace_url_extension, sanitize_sensitive_info, Internable, CUSTOM_VIDEO_PREFIX, HLS_EXT};
 use std::sync::Arc;
 use crate::utils::request::is_file_url;
+use url::Url;
 
 const PLAYLIST_TEMPLATE: &str = r"#EXTM3U
 #EXT-X-VERSION:3
@@ -49,6 +51,31 @@ fn hls_response(hls_content: String) -> impl IntoResponse + Send {
         .body(hls_content))
 }
 
+fn normalize_xtream_live_hls_url(hls_url: &str, input: &ConfigInput) -> String {
+    if !input.input_type.is_xtream() || !input.has_flag(ConfigInputFlags::XtreamLiveStreamUsePrefix) {
+        return hls_url.to_string();
+    }
+
+    let (Some(username), Some(password)) = (input.username.as_deref(), input.password.as_deref()) else {
+        return hls_url.to_string();
+    };
+
+    let Ok(mut parsed) = Url::parse(hls_url) else {
+        return hls_url.to_string();
+    };
+    let Some(segments) = parsed.path_segments() else {
+        return hls_url.to_string();
+    };
+
+    let parts: Vec<&str> = segments.collect();
+    if parts.len() >= 3 && parts[0] == username && parts[1] == password {
+        parsed.set_path(&format!("/live/{}", parts.join("/")));
+        return parsed.to_string();
+    }
+
+    hls_url.to_string()
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(in crate::api) async fn handle_hls_stream_request(
     fingerprint: &Fingerprint,
@@ -65,7 +92,15 @@ pub(in crate::api) async fn handle_hls_stream_request(
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     }
 
-    let url = replace_url_extension(hls_url, HLS_EXT);
+    let normalized_hls_url = normalize_xtream_live_hls_url(hls_url, input);
+    if normalized_hls_url != hls_url {
+        debug_if_enabled!(
+            "Normalized xtream hls url from {} to {}",
+            sanitize_sensitive_info(hls_url),
+            sanitize_sensitive_info(&normalized_hls_url)
+        );
+    }
+    let url = replace_url_extension(&normalized_hls_url, HLS_EXT);
     let server_info = app_state.app_config.get_user_server_info(user);
 
     let (request_url, session_token) = match user_session {
