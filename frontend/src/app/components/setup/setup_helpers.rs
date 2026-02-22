@@ -5,17 +5,25 @@ use crate::app::{
     },
     ConfigContext,
 };
+use log::error;
 use shared::model::{
     ApiProxyConfigDto, AppConfigDto, ConfigInputDto, ConfigTargetDto, SourcesConfigDto, TargetOutputDto, TargetUserDto,
 };
-use std::{collections::HashMap, rc::Rc, sync::Arc};
+use std::{
+    collections::{hash_map::Entry, HashMap},
+    rc::Rc,
+    sync::Arc,
+};
 
 pub fn validate_credentials(username: &str, password: &str, password_repeat: Option<&str>) -> Result<(), &'static str> {
     if username.trim().is_empty() {
         return Err("WebUI username is required");
     }
-    if password.trim().is_empty() {
+    if password.is_empty() {
         return Err("WebUI password is required");
+    }
+    if password.len() < 8 {
+        return Err("WebUI password must be at least 8 characters");
     }
     if let Some(password_repeat) = password_repeat {
         if password != password_repeat {
@@ -25,27 +33,49 @@ pub fn validate_credentials(username: &str, password: &str, password_repeat: Opt
     Ok(())
 }
 
+const SETUP_ERROR_PATTERNS: &[(&[&str], &str)] = &[
+    (
+        &["hdhomerun output is only permitted when used in combination with xtream or m3u output"],
+        "HDHomeRun output requires an additional M3U or Xtream output in the same target.",
+    ),
+    (
+        &["hdhomerun output has `use_output=m3u`", "no `m3u` output defined"],
+        "HDHomeRun output is configured with use_output=m3u, but this target has no M3U output.",
+    ),
+    (
+        &["hdhomerun output has `use_output=xtream`", "no `xtream` output defined"],
+        "HDHomeRun output is configured with use_output=xtream, but this target has no Xtream output.",
+    ),
+    (&["hdhomerun output device is not defined"], "The selected HDHomeRun device is not defined in configuration."),
+    (
+        &["expected expr"],
+        "A target filter is empty or invalid. Open the target settings and set a valid filter (example: Type = live).",
+    ),
+    (
+        &["--> 1:1"],
+        "A target filter is empty or invalid. Open the target settings and set a valid filter (example: Type = live).",
+    ),
+];
+
+fn normalize_setup_error_message(message: &str) -> String {
+    message.trim().to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn matches_setup_error_pattern(message: &str, pattern_keywords: &[&str]) -> bool {
+    pattern_keywords.iter().all(|keyword| message.contains(keyword))
+}
+
 pub fn format_setup_error_message(err: impl ToString) -> String {
     let mut message = err.to_string();
     if let Some(stripped) = message.strip_prefix("Tuliprox error: ") {
         message = stripped.trim().to_string();
     }
 
-    if message.contains("HdHomeRun output is only permitted when used in combination with xtream or m3u output") {
-        return "HDHomeRun output requires an additional M3U or Xtream output in the same target.".to_string();
-    }
-    if message.contains("HdHomeRun output has `use_output=m3u` but no `m3u` output defined") {
-        return "HDHomeRun output is configured with use_output=m3u, but this target has no M3U output.".to_string();
-    }
-    if message.contains("HdHomeRun output has `use_output=xtream` but no `xtream` output defined") {
-        return "HDHomeRun output is configured with use_output=xtream, but this target has no Xtream output."
-            .to_string();
-    }
-    if message.contains("HdHomeRun output device is not defined") {
-        return "The selected HDHomeRun device is not defined in configuration.".to_string();
-    }
-    if message.contains("expected expr") || message.contains("--> 1:1") {
-        return "A target filter is empty or invalid. Open the target settings and set a valid filter (example: Type = live).".to_string();
+    let normalized_message = normalize_setup_error_message(&message);
+    for (pattern_keywords, user_message) in SETUP_ERROR_PATTERNS {
+        if matches_setup_error_pattern(&normalized_message, pattern_keywords) {
+            return (*user_message).to_string();
+        }
     }
 
     message
@@ -130,7 +160,23 @@ pub type SetupPlaylistRows = Vec<(Vec<Rc<InputRow>>, Vec<Rc<ConfigTargetDto>>)>;
 
 pub fn map_sources_to_playlist_rows(sources: &SourcesConfigDto) -> Rc<SetupPlaylistRows> {
     let mut mapped_sources = vec![];
-    let inputs_map: HashMap<Arc<str>, &ConfigInputDto> = sources.inputs.iter().map(|i| (i.name.clone(), i)).collect();
+    let mut inputs_map: HashMap<Arc<str>, &ConfigInputDto> = HashMap::with_capacity(sources.inputs.len());
+    for input in &sources.inputs {
+        match inputs_map.entry(input.name.clone()) {
+            Entry::Vacant(entry) => {
+                entry.insert(input);
+            }
+            Entry::Occupied(existing) => {
+                debug_assert!(false, "Duplicate input name found in setup sources: {}", input.name);
+                error!(
+                    "Duplicate input name in setup sources: '{}' (existing id: {}, duplicate id: {})",
+                    input.name,
+                    existing.get().id,
+                    input.id
+                );
+            }
+        }
+    }
 
     for source in &sources.sources {
         let mut inputs = vec![];

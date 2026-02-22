@@ -148,7 +148,7 @@ pub fn resolve_directory_path(input: &str) -> String {
 }
 
 pub fn file_exists(path: &str) -> bool {
-    std::path::Path::new(path).exists()
+    std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file())
 }
 
 

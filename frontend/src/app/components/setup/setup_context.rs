@@ -46,24 +46,7 @@ impl SetupStep {
     pub fn all() -> &'static [Self] { &Self::ORDER }
 
     pub fn index(self) -> usize {
-        match self {
-            Self::Welcome => 0,
-            Self::Api => 1,
-            Self::WebUi => 2,
-            Self::Main => 3,
-            Self::Log => 4,
-            Self::Messaging => 5,
-            Self::ReverseProxy => 6,
-            Self::Proxy => 7,
-            Self::IpCheck => 8,
-            Self::Video => 9,
-            Self::HdHomerun => 10,
-            Self::Library => 11,
-            Self::Sources => 12,
-            Self::ApiUsers => 13,
-            Self::Schedules => 14,
-            Self::Finish => 15,
-        }
+        Self::all().iter().position(|step| *step == self).expect("SetupStep::ORDER must include all variants")
     }
 
     pub fn position(self) -> usize { self.index() + 1 }
@@ -88,25 +71,26 @@ impl SetupStep {
         }
     }
 
-    pub fn title(self) -> &'static str {
-        match self {
-            Self::Welcome => "Welcome",
-            Self::Api => "Api",
-            Self::WebUi => "WebUi",
-            Self::Main => "Main",
-            Self::Log => "Log",
-            Self::Messaging => "Messaging",
-            Self::ReverseProxy => "ReverseProxy",
-            Self::Proxy => "Proxy",
-            Self::IpCheck => "IpCheck",
-            Self::Video => "Video",
-            Self::HdHomerun => "HdHomerun",
-            Self::Library => "Library",
-            Self::Sources => "Sources",
-            Self::ApiUsers => "ApiUsers",
-            Self::Schedules => "Schedules",
-            Self::Finish => "Finish",
-        }
+    pub fn title(self) -> String {
+        let snake_case = self.to_string();
+        let pascal_case = snake_case
+            .split('_')
+            .filter(|segment| !segment.is_empty())
+            .map(|segment| {
+                let mut chars = segment.chars();
+                match chars.next() {
+                    Some(first) => {
+                        let mut value = String::new();
+                        value.push(first.to_ascii_uppercase());
+                        value.push_str(chars.as_str());
+                        value
+                    }
+                    None => String::new(),
+                }
+            })
+            .collect::<String>();
+
+        pascal_case.replace("Ipcheck", "IpCheck").replace("Hdhomerun", "HdHomerun")
     }
 
     pub fn config_page(self) -> Option<ConfigPage> {
@@ -197,30 +181,27 @@ impl SetupConfigFormState {
         }
     }
 
+    fn all_slots(&self) -> [&Option<ConfigForm>; 14] {
+        [
+            &self.main,
+            &self.api,
+            &self.api_proxy,
+            &self.log,
+            &self.schedules,
+            &self.video,
+            &self.messaging,
+            &self.web_ui,
+            &self.reverse_proxy,
+            &self.hd_homerun,
+            &self.proxy,
+            &self.ipcheck,
+            &self.panel,
+            &self.library,
+        ]
+    }
+
     pub fn collect_modified_forms(&self) -> Vec<ConfigForm> {
-        let mut modified = Vec::new();
-        let forms = [
-            self.main.as_ref(),
-            self.api.as_ref(),
-            self.api_proxy.as_ref(),
-            self.log.as_ref(),
-            self.schedules.as_ref(),
-            self.video.as_ref(),
-            self.messaging.as_ref(),
-            self.web_ui.as_ref(),
-            self.reverse_proxy.as_ref(),
-            self.hd_homerun.as_ref(),
-            self.proxy.as_ref(),
-            self.ipcheck.as_ref(),
-            self.panel.as_ref(),
-            self.library.as_ref(),
-        ];
-        for form in forms.into_iter().flatten() {
-            if form.is_modified() {
-                modified.push(form.clone());
-            }
-        }
-        modified
+        self.all_slots().into_iter().flatten().filter(|form| form.is_modified()).cloned().collect()
     }
 }
 

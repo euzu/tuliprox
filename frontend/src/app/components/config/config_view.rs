@@ -235,8 +235,8 @@ pub fn ConfigView() -> Html {
 
             if setup_mode {
                 let username = setup_username.trim().to_string();
-                let password = setup_password.trim().to_string();
-                let password_repeat = setup_password_repeat.trim().to_string();
+                let password = setup_password.to_string();
+                let password_repeat = setup_password_repeat.to_string();
 
                 if username.is_empty() {
                     services.toastr.error("WebUI username is required");
@@ -244,6 +244,10 @@ pub fn ConfigView() -> Html {
                 }
                 if password.is_empty() {
                     services.toastr.error("WebUI password is required");
+                    return;
+                }
+                if password.len() < 8 {
+                    services.toastr.error("WebUI password must be at least 8 characters");
                     return;
                 }
                 if password != password_repeat {
@@ -306,8 +310,7 @@ pub fn ConfigView() -> Html {
                             services.toastr.success(translate.t("MESSAGES.SAVE.MAIN_CONFIG.SUCCESS"));
                         }
                         Err(err) => {
-                            services.toastr.error("Setup save failed");
-                            services.toastr.error(err.to_string());
+                            services.toastr.error(format!("Setup save failed: {}", err));
                         }
                     }
                 });

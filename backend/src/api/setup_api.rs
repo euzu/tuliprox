@@ -21,8 +21,9 @@ use shared::model::{
 };
 use shared::utils::{default_kick_secs, hex_encode, DEFAULT_PORT, DEFAULT_WORKING_DIR, USER_FILE};
 use std::collections::HashSet;
+use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
-use std::path::{Path as FsPath, PathBuf};
+use std::path::{Component, Path as FsPath, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_http::services::ServeDir;
@@ -55,6 +56,15 @@ struct SetupModeState {
 }
 
 fn detect_machine_ip() -> Option<String> {
+    let skip_ip_detect = std::env::var("SKIP_IP_DETECT")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"));
+    if skip_ip_detect {
+        info!("Setup mode: SKIP_IP_DETECT is enabled, skipping UDP host IP detection");
+        return None;
+    }
+
     for target in ["1.1.1.1:80", "8.8.8.8:80", "9.9.9.9:80"] {
         let Ok(socket) = UdpSocket::bind("0.0.0.0:0") else {
             continue;
@@ -70,11 +80,17 @@ fn detect_machine_ip() -> Option<String> {
             return Some(ip.to_string());
         }
     }
+    warn!(
+        "Setup mode: unable to detect machine IP via UDP probe targets (1.1.1.1:80, 8.8.8.8:80, 9.9.9.9:80)"
+    );
     None
 }
 
 fn default_setup_api_server_host() -> String {
-    detect_machine_ip().unwrap_or_else(|| "127.0.0.1".to_string())
+    detect_machine_ip().unwrap_or_else(|| {
+        warn!("Setup mode: falling back to 127.0.0.1 for default API server host");
+        "127.0.0.1".to_string()
+    })
 }
 
 fn default_setup_timezone() -> String {
@@ -302,7 +318,16 @@ async fn setup_config_json(
     let config_json_path = state.web_dir.join("config.json");
     match tokio::fs::read_to_string(&config_json_path).await {
         Ok(content) => {
-            let mut json_data = serde_json::from_str::<serde_json::Value>(&content).unwrap_or_else(|_| json!({}));
+            let mut json_data = match serde_json::from_str::<serde_json::Value>(&content) {
+                Ok(json_data) => json_data,
+                Err(err) => {
+                    warn!(
+                        "Setup mode: failed to parse config.json at {}: {err}. Falling back to empty object.",
+                        config_json_path.display()
+                    );
+                    json!({})
+                }
+            };
             json_data["setupMode"] = json!(true);
             match serde_json::to_string(&json_data) {
                 Ok(serialized) => {
@@ -345,12 +370,49 @@ async fn setup_root_file(
         return StatusCode::NOT_FOUND.into_response();
     }
 
+    let requested_path = FsPath::new(&filename);
+    if requested_path.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    let canonical_web_dir = match tokio::fs::canonicalize(&state.web_dir).await {
+        Ok(path) => path,
+        Err(err) => {
+            error!(
+                "Setup mode: failed to canonicalize web root '{}': {err}",
+                state.web_dir.display()
+            );
+            return StatusCode::NOT_FOUND.into_response();
+        }
+    };
+
     let file_path = state.web_dir.join(&filename);
-    if file_path.exists() && file_path.is_file() {
-        let mime_type = mime_guess::from_path(&file_path)
-            .first_or_octet_stream()
-            .to_string();
-        return serve_file(&file_path, mime_type, None).await.into_response();
+    match tokio::fs::canonicalize(&file_path).await {
+        Ok(canonical_file_path) => {
+            if !canonical_file_path.starts_with(&canonical_web_dir) {
+                return StatusCode::NOT_FOUND.into_response();
+            }
+            if canonical_file_path.is_file() {
+                let mime_type = mime_guess::from_path(&canonical_file_path)
+                    .first_or_octet_stream()
+                    .to_string();
+                return serve_file(&canonical_file_path, mime_type, None)
+                    .await
+                    .into_response();
+            }
+        }
+        Err(err) if err.kind() != ErrorKind::NotFound => {
+            warn!(
+                "Setup mode: failed to canonicalize requested file '{}': {err}",
+                file_path.display()
+            );
+        }
+        Err(_) => {}
     }
 
     setup_index(State(state)).await.into_response()
@@ -364,7 +426,13 @@ async fn persist_yaml_file<T: serde::Serialize>(
     file_path: &FsPath,
     payload: &T,
 ) -> Result<(), String> {
-    let content = serde_yaml::to_string(payload).map_err(|err| err.to_string())?;
+    let mut content = String::new();
+    let options = serde_saphyr::SerializerOptions {
+        prefer_block_scalars: false,
+        ..Default::default()
+    };
+    serde_saphyr::to_fmt_writer_with_options(&mut content, payload, options)
+        .map_err(|err| err.to_string())?;
     tokio::fs::write(file_path, content)
         .await
         .map_err(|err| err.to_string())
@@ -390,7 +458,7 @@ fn validate_web_users(
     let mut normalized = Vec::with_capacity(users.len());
     for user in users {
         let username = user.username.trim().to_string();
-        let password = user.password.trim().to_string();
+        let password = user.password.clone();
 
         if username.is_empty() {
             return Err("WebUI username cannot be empty".to_string());
@@ -404,6 +472,56 @@ fn validate_web_users(
         normalized.push((username, password));
     }
     Ok(normalized)
+}
+
+fn create_setup_temp_path(file_path: &FsPath) -> PathBuf {
+    let file_name = file_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("setup");
+    let temp_name = format!(".{file_name}.tmp-{}-{}", std::process::id(), rand::rng().random::<u64>());
+    match file_path.parent() {
+        Some(parent) => parent.join(temp_name),
+        None => PathBuf::from(temp_name),
+    }
+}
+
+async fn replace_file_atomic(source: &FsPath, target: &FsPath) -> std::io::Result<()> {
+    match tokio::fs::rename(source, target).await {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            #[cfg(windows)]
+            {
+                if target.exists() {
+                    tokio::fs::remove_file(target).await?;
+                    return tokio::fs::rename(source, target).await;
+                }
+            }
+            Err(err)
+        }
+    }
+}
+
+async fn restore_file_snapshot(file_path: &FsPath, snapshot: Option<&[u8]>) -> Result<(), String> {
+    match snapshot {
+        Some(content) => tokio::fs::write(file_path, content)
+            .await
+            .map_err(|err| err.to_string()),
+        None => match tokio::fs::remove_file(file_path).await {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err.to_string()),
+        },
+    }
+}
+
+async fn cleanup_temp_file(file_path: &FsPath) {
+    if let Err(err) = tokio::fs::remove_file(file_path).await {
+        if err.kind() != ErrorKind::NotFound {
+            warn!("Setup mode: failed to remove temp file '{}': {err}", file_path.display());
+        }
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -494,52 +612,132 @@ async fn setup_complete(
             .into_response();
     }
 
-    if let Err(err) = persist_yaml_file(&state.config_file_path, &req.app_config.config).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            axum::Json(json!({ "error": format!("Failed to write {}: {err}", state.config_file_path.display()) })),
-        )
-            .into_response();
-    }
-
     req.app_config.sources = sanitize_sources_for_persist(req.app_config.sources.clone()).await;
-
-    if let Err(err) = persist_yaml_file(&state.source_file_path, &req.app_config.sources).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            axum::Json(json!({ "error": format!("Failed to write {}: {err}", state.source_file_path.display()) })),
-        )
-            .into_response();
-    }
-
-    if let Err(err) = persist_yaml_file(&state.api_proxy_file_path, &api_proxy).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            axum::Json(json!({ "error": format!("Failed to write {}: {err}", state.api_proxy_file_path.display()) })),
-        )
-            .into_response();
-    }
 
     let mut user_lines: Vec<String> = Vec::with_capacity(users.len());
     for (username, password) in users {
-        match generate_password_from_input(&password) {
-            Ok(hash) => user_lines.push(format!("{username}:{hash}")),
-            Err(err) => {
+        let username_for_hash = username.clone();
+        let password_for_hash = password.clone();
+        let hash_result = tokio::task::spawn_blocking(move || generate_password_from_input(&password_for_hash)).await;
+        match hash_result {
+            Ok(Ok(hash)) => user_lines.push(format!("{username}:{hash}")),
+            Ok(Err(err)) => {
                 return (
                     StatusCode::BAD_REQUEST,
                     axum::Json(json!({ "error": format!("Failed to hash password for user '{username}': {err}") })),
                 )
                     .into_response();
             }
+            Err(err) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    axum::Json(
+                        json!({ "error": format!("Failed to hash password for user '{username_for_hash}': {err}") }),
+                    ),
+                )
+                    .into_response();
+            }
         }
     }
 
-    if let Err(err) = tokio::fs::write(&state.user_file_path, format!("{}\n", user_lines.join("\n"))).await {
+    let user_file_content = format!("{}\n", user_lines.join("\n"));
+    let config_temp_path = create_setup_temp_path(&state.config_file_path);
+    let source_temp_path = create_setup_temp_path(&state.source_file_path);
+    let api_proxy_temp_path = create_setup_temp_path(&state.api_proxy_file_path);
+    let user_temp_path = create_setup_temp_path(&state.user_file_path);
+
+    if let Err(err) = persist_yaml_file(&config_temp_path, &req.app_config.config).await {
+        cleanup_temp_file(&config_temp_path).await;
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(json!({ "error": format!("Failed to write {}: {err}", state.config_file_path.display()) })),
+        )
+            .into_response();
+    }
+    if let Err(err) = persist_yaml_file(&source_temp_path, &req.app_config.sources).await {
+        cleanup_temp_file(&config_temp_path).await;
+        cleanup_temp_file(&source_temp_path).await;
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(json!({ "error": format!("Failed to write {}: {err}", state.source_file_path.display()) })),
+        )
+            .into_response();
+    }
+    if let Err(err) = persist_yaml_file(&api_proxy_temp_path, &api_proxy).await {
+        cleanup_temp_file(&config_temp_path).await;
+        cleanup_temp_file(&source_temp_path).await;
+        cleanup_temp_file(&api_proxy_temp_path).await;
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(json!({ "error": format!("Failed to write {}: {err}", state.api_proxy_file_path.display()) })),
+        )
+            .into_response();
+    }
+    if let Err(err) = tokio::fs::write(&user_temp_path, user_file_content).await {
+        cleanup_temp_file(&config_temp_path).await;
+        cleanup_temp_file(&source_temp_path).await;
+        cleanup_temp_file(&api_proxy_temp_path).await;
+        cleanup_temp_file(&user_temp_path).await;
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             axum::Json(json!({ "error": format!("Failed to write {}: {err}", state.user_file_path.display()) })),
         )
             .into_response();
+    }
+
+    let file_pairs = [
+        (state.config_file_path.clone(), config_temp_path.clone()),
+        (state.source_file_path.clone(), source_temp_path.clone()),
+        (state.api_proxy_file_path.clone(), api_proxy_temp_path.clone()),
+        (state.user_file_path.clone(), user_temp_path.clone()),
+    ];
+
+    let mut snapshots: Vec<Option<Vec<u8>>> = Vec::with_capacity(file_pairs.len());
+    for (target, _) in &file_pairs {
+        let snapshot = match tokio::fs::read(target).await {
+            Ok(content) => Some(content),
+            Err(err) if err.kind() == ErrorKind::NotFound => None,
+            Err(err) => {
+                cleanup_temp_file(&config_temp_path).await;
+                cleanup_temp_file(&source_temp_path).await;
+                cleanup_temp_file(&api_proxy_temp_path).await;
+                cleanup_temp_file(&user_temp_path).await;
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    axum::Json(
+                        json!({ "error": format!("Failed to read current {}: {err}", target.display()) }),
+                    ),
+                )
+                    .into_response();
+            }
+        };
+        snapshots.push(snapshot);
+    }
+
+    let mut committed_indices: Vec<usize> = Vec::with_capacity(file_pairs.len());
+    for (index, (target, temp_path)) in file_pairs.iter().enumerate() {
+        if let Err(err) = replace_file_atomic(temp_path, target).await {
+            for committed_index in committed_indices.iter().rev() {
+                let (committed_target, _) = &file_pairs[*committed_index];
+                if let Err(restore_err) =
+                    restore_file_snapshot(committed_target, snapshots[*committed_index].as_deref()).await
+                {
+                    error!(
+                        "Setup mode: failed to rollback '{}' after write failure: {restore_err}",
+                        committed_target.display()
+                    );
+                }
+            }
+            for (_, pending_temp) in file_pairs.iter().skip(index) {
+                cleanup_temp_file(pending_temp).await;
+            }
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(json!({ "error": format!("Failed to write {}: {err}", target.display()) })),
+            )
+                .into_response();
+        }
+        committed_indices.push(index);
     }
 
     req.app_config.api_proxy = Some(api_proxy);

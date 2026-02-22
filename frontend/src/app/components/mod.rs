@@ -49,6 +49,7 @@ mod websocket_status;
 
 mod cluster_flags_input;
 mod field_explanation;
+mod field_id;
 mod filter;
 mod particle_flow_background;
 mod source_editor;
@@ -64,10 +65,10 @@ mod setup;
 pub(crate) use self::{
     accordion::*, accordion_panel::*, authentication::*, breadcrumbs::*, card::*, cell_value::*, chip::*,
     cluster_flags_input::*, collapse_panel::*, csv_table::*, custom_dialog::*, dashboard::*, drop_down_icon_button::*,
-    field_explanation::*, filter::*, hide_content::*, home::*, icon_button::*, key_value_editor::*, loading_screen::*,
-    login::*, no_content::*, panel::*, particle_flow_background::*, playlist::*, radio_button_group::*,
-    reveal_content::*, role_based_content::*, search::*, setup::*, sidebar::*, source_editor::*, svg_icon::*, table::*,
-    tabset::*, tag_list::*, text_button::*, textarea::*, title_card::*, toastr::*, toggle_switch::*, userlist::*,
-    websocket_status::*,
+    field_explanation::*, field_id::*, filter::*, hide_content::*, home::*, icon_button::*, key_value_editor::*,
+    loading_screen::*, login::*, no_content::*, panel::*, particle_flow_background::*, playlist::*,
+    radio_button_group::*, reveal_content::*, role_based_content::*, search::*, setup::*, sidebar::*, source_editor::*,
+    svg_icon::*, table::*, tabset::*, tag_list::*, text_button::*, textarea::*, title_card::*, toastr::*,
+    toggle_switch::*, userlist::*, websocket_status::*,
 };
 pub use self::{confirm_dialog::*, content_dialog::*};

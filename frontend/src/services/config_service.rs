@@ -15,15 +15,25 @@ use shared::{
 };
 use std::{
     cell::RefCell,
+    fmt,
     future::Future,
     rc::Rc,
     sync::atomic::{AtomicBool, Ordering},
 };
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Clone, serde::Serialize)]
 pub struct SetupWebUserCredentialDto {
     pub username: String,
     pub password: String,
+}
+
+impl fmt::Debug for SetupWebUserCredentialDto {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SetupWebUserCredentialDto")
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

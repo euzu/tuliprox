@@ -1,4 +1,4 @@
-use crate::app::components::{CollapsePanel, FieldLabel};
+use crate::app::components::{resolve_field_id, CollapsePanel, FieldLabel};
 use web_sys::{HtmlTextAreaElement, InputEvent, KeyboardEvent};
 use yew::{function_component, html, use_effect_with, Callback, Html, NodeRef, Properties, TargetCast};
 
@@ -29,6 +29,8 @@ pub struct TextAreaProps {
 #[function_component]
 pub fn TextArea(props: &TextAreaProps) -> Html {
     let local_ref = props.input_ref.clone().unwrap_or_default();
+    let label_text = props.label.clone().unwrap_or_default();
+    let resolved_field_id = resolve_field_id(&props.field_id, &props.name, &label_text);
 
     {
         let local_ref = local_ref.clone();
@@ -56,7 +58,7 @@ pub fn TextArea(props: &TextAreaProps) -> Html {
 
     let text_area = html! {
         <div class="tp__input-wrapper">
-            <textarea ref={local_ref} name={props.name.clone()} onkeydown={props.onkeydown.clone()}
+            <textarea id={resolved_field_id.clone()} ref={local_ref} name={props.name.clone()} onkeydown={props.onkeydown.clone()}
                 oninput={handle_oninput} placeholder={props.placeholder.clone()}
                 rows={props.rows.unwrap_or(5).to_string()} value={props.value.clone()}
             />
@@ -79,13 +81,8 @@ pub fn TextArea(props: &TextAreaProps) -> Html {
                    html! {
                        <FieldLabel
                            label={props.label.clone().unwrap_or_default()}
-                           field_id={props.field_id.clone().unwrap_or_else(|| {
-                               if props.name.trim().is_empty() {
-                                   props.label.clone().unwrap_or_default()
-                               } else {
-                                   props.name.clone()
-                               }
-                           })}
+                           field_id={resolved_field_id.clone()}
+                           for_id={Some(resolved_field_id.clone())}
                        />
                    }
                 } else { html!{} }

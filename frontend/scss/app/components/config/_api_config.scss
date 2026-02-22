@@ -39,8 +39,11 @@
 }
 
 .tp__api-server-dialog {
+  display: flex;
+  flex-flow: column;
   min-width: min(46rem, 92vw);
   max-width: min(58rem, 96vw);
+  max-height: min(80vh, 48rem);
   padding: var(--padding-default);
   box-sizing: border-box;
 
@@ -51,6 +54,8 @@
   &__body {
     display: flex;
     flex-flow: column;
+    flex: 1 1 auto;
+    min-height: 0;
     gap: var(--gap-default);
     overflow: auto;
   }

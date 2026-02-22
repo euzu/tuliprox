@@ -271,10 +271,12 @@ fn missing_required_setup_files(paths: &ConfigPaths) -> Vec<String> {
     .iter()
     .filter_map(|(name, file_path)| {
         let file_path = std::path::Path::new(file_path);
-        if file_path.exists() && file_path.is_file() {
-            None
+        if !file_path.exists() {
+            Some(format!("{name} missing ({})", file_path.display()))
+        } else if !file_path.is_file() {
+            Some(format!("{name} exists but is not a regular file ({})", file_path.display()))
         } else {
-            Some((*name).to_string())
+            None
         }
     })
     .collect()

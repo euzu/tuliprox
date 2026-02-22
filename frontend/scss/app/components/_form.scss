@@ -1,5 +1,18 @@
 @use '../../size';
 
+@mixin tp-field-label-base($flex: null) {
+  padding-left: 2px;
+  font-weight: bold;
+  white-space: nowrap;
+  vertical-align: middle;
+  color: var(--text-color);
+  font-size: 1.1rem;
+
+  @if $flex != null {
+    flex: $flex;
+  }
+}
+
 .tp__form-field {
   display: flex;
   gap: var(--gap-default);
@@ -35,12 +48,7 @@
   }
 
   label {
-    padding-left: 2px;
-    font-weight: bold;
-    white-space: nowrap;
-    vertical-align: middle;
-    color: var(--text-color);
-    font-size: 1.1rem;
+    @include tp-field-label-base();
   }
 }
 
@@ -51,13 +59,7 @@
   gap: 0.35rem;
 
   label {
-    padding-left: 2px;
-    font-weight: bold;
-    white-space: nowrap;
-    vertical-align: middle;
-    color: var(--text-color);
-    font-size: 1.1rem;
-    flex: 1;
+    @include tp-field-label-base(1);
   }
 
   &__help {

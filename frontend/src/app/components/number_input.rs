@@ -1,4 +1,4 @@
-use crate::app::components::FieldLabel;
+use crate::app::components::{resolve_field_id, FieldLabel};
 use shared::utils::{format_float_localized, parse_localized_float};
 use web_sys::{HtmlInputElement, KeyboardEvent};
 use yew::{prelude::*, TargetCast};
@@ -26,6 +26,8 @@ pub struct NumberInputProps {
 #[function_component]
 pub fn NumberInput(props: &NumberInputProps) -> Html {
     let input_ref = use_node_ref();
+    let label_text = props.label.clone().unwrap_or_default();
+    let resolved_field_id = resolve_field_id(&props.field_id, &props.name, &label_text);
 
     {
         let input_ref = input_ref.clone();
@@ -100,18 +102,14 @@ pub fn NumberInput(props: &NumberInputProps) -> Html {
                 html! {
                     <FieldLabel
                         label={label.clone()}
-                        field_id={props.field_id.clone().unwrap_or_else(|| {
-                            if props.name.trim().is_empty() {
-                                label.clone()
-                            } else {
-                                props.name.clone()
-                            }
-                        })}
+                        field_id={resolved_field_id.clone()}
+                        for_id={Some(resolved_field_id.clone())}
                     />
                 }
             } else { html!{} } }
             <div class="tp__input-wrapper">
                 <input
+                    id={resolved_field_id}
                     ref={input_ref.clone()}
                     type="text"
                     name={props.name.clone()}

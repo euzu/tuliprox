@@ -70,6 +70,88 @@ pub fn Setup() -> Html {
     };
 
     let active_step_value = (*active_step).to_string();
+    let active_panel = match *active_step {
+        SetupStep::Welcome => html! {
+            <Panel value={SetupStep::Welcome.to_string()} active={active_step_value.clone()}>
+                <WelcomeStep/>
+            </Panel>
+        },
+        SetupStep::Api => html! {
+            <Panel value={SetupStep::Api.to_string()} active={active_step_value.clone()}>
+                <ConfigStep step={SetupStep::Api}/>
+            </Panel>
+        },
+        SetupStep::WebUi => html! {
+            <Panel value={SetupStep::WebUi.to_string()} active={active_step_value.clone()}>
+                <ConfigStep step={SetupStep::WebUi}/>
+            </Panel>
+        },
+        SetupStep::Main => html! {
+            <Panel value={SetupStep::Main.to_string()} active={active_step_value.clone()}>
+                <ConfigStep step={SetupStep::Main}/>
+            </Panel>
+        },
+        SetupStep::Log => html! {
+            <Panel value={SetupStep::Log.to_string()} active={active_step_value.clone()}>
+                <ConfigStep step={SetupStep::Log}/>
+            </Panel>
+        },
+        SetupStep::Messaging => html! {
+            <Panel value={SetupStep::Messaging.to_string()} active={active_step_value.clone()}>
+                <ConfigStep step={SetupStep::Messaging}/>
+            </Panel>
+        },
+        SetupStep::ReverseProxy => html! {
+            <Panel value={SetupStep::ReverseProxy.to_string()} active={active_step_value.clone()}>
+                <ConfigStep step={SetupStep::ReverseProxy}/>
+            </Panel>
+        },
+        SetupStep::Proxy => html! {
+            <Panel value={SetupStep::Proxy.to_string()} active={active_step_value.clone()}>
+                <ConfigStep step={SetupStep::Proxy}/>
+            </Panel>
+        },
+        SetupStep::IpCheck => html! {
+            <Panel value={SetupStep::IpCheck.to_string()} active={active_step_value.clone()}>
+                <ConfigStep step={SetupStep::IpCheck}/>
+            </Panel>
+        },
+        SetupStep::Video => html! {
+            <Panel value={SetupStep::Video.to_string()} active={active_step_value.clone()}>
+                <ConfigStep step={SetupStep::Video}/>
+            </Panel>
+        },
+        SetupStep::HdHomerun => html! {
+            <Panel value={SetupStep::HdHomerun.to_string()} active={active_step_value.clone()}>
+                <ConfigStep step={SetupStep::HdHomerun}/>
+            </Panel>
+        },
+        SetupStep::Library => html! {
+            <Panel value={SetupStep::Library.to_string()} active={active_step_value.clone()}>
+                <ConfigStep step={SetupStep::Library}/>
+            </Panel>
+        },
+        SetupStep::Sources => html! {
+            <Panel value={SetupStep::Sources.to_string()} active={active_step_value.clone()}>
+                <SourcesStep/>
+            </Panel>
+        },
+        SetupStep::ApiUsers => html! {
+            <Panel value={SetupStep::ApiUsers.to_string()} active={active_step_value.clone()}>
+                <ApiUsersStep/>
+            </Panel>
+        },
+        SetupStep::Schedules => html! {
+            <Panel value={SetupStep::Schedules.to_string()} active={active_step_value.clone()}>
+                <ConfigStep step={SetupStep::Schedules}/>
+            </Panel>
+        },
+        SetupStep::Finish => html! {
+            <Panel value={SetupStep::Finish.to_string()} active={active_step_value}>
+                <FinishStep/>
+            </Panel>
+        },
+    };
 
     html! {
         <ContextProvider<SetupContext> context={context}>
@@ -106,54 +188,7 @@ pub fn Setup() -> Html {
                     </ol>
                 </aside>
                 <div class="tp__setup-content">
-                    <Panel value={SetupStep::Welcome.to_string()} active={active_step_value.clone()}>
-                        <WelcomeStep/>
-                    </Panel>
-                    <Panel value={SetupStep::Api.to_string()} active={active_step_value.clone()}>
-                        <ConfigStep step={SetupStep::Api}/>
-                    </Panel>
-                    <Panel value={SetupStep::WebUi.to_string()} active={active_step_value.clone()}>
-                        <ConfigStep step={SetupStep::WebUi}/>
-                    </Panel>
-                    <Panel value={SetupStep::Main.to_string()} active={active_step_value.clone()}>
-                        <ConfigStep step={SetupStep::Main}/>
-                    </Panel>
-                    <Panel value={SetupStep::Log.to_string()} active={active_step_value.clone()}>
-                        <ConfigStep step={SetupStep::Log}/>
-                    </Panel>
-                    <Panel value={SetupStep::Messaging.to_string()} active={active_step_value.clone()}>
-                        <ConfigStep step={SetupStep::Messaging}/>
-                    </Panel>
-                    <Panel value={SetupStep::ReverseProxy.to_string()} active={active_step_value.clone()}>
-                        <ConfigStep step={SetupStep::ReverseProxy}/>
-                    </Panel>
-                    <Panel value={SetupStep::Proxy.to_string()} active={active_step_value.clone()}>
-                        <ConfigStep step={SetupStep::Proxy}/>
-                    </Panel>
-                    <Panel value={SetupStep::IpCheck.to_string()} active={active_step_value.clone()}>
-                        <ConfigStep step={SetupStep::IpCheck}/>
-                    </Panel>
-                    <Panel value={SetupStep::Video.to_string()} active={active_step_value.clone()}>
-                        <ConfigStep step={SetupStep::Video}/>
-                    </Panel>
-                    <Panel value={SetupStep::HdHomerun.to_string()} active={active_step_value.clone()}>
-                        <ConfigStep step={SetupStep::HdHomerun}/>
-                    </Panel>
-                    <Panel value={SetupStep::Library.to_string()} active={active_step_value.clone()}>
-                        <ConfigStep step={SetupStep::Library}/>
-                    </Panel>
-                    <Panel value={SetupStep::Sources.to_string()} active={active_step_value.clone()}>
-                        <SourcesStep/>
-                    </Panel>
-                    <Panel value={SetupStep::ApiUsers.to_string()} active={active_step_value.clone()}>
-                        <ApiUsersStep/>
-                    </Panel>
-                    <Panel value={SetupStep::Schedules.to_string()} active={active_step_value.clone()}>
-                        <ConfigStep step={SetupStep::Schedules}/>
-                    </Panel>
-                    <Panel value={SetupStep::Finish.to_string()} active={active_step_value}>
-                        <FinishStep/>
-                    </Panel>
+                    {active_panel}
                 </div>
             </div>
         </ContextProvider<SetupContext>>

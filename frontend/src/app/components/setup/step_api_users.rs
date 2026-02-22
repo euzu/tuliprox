@@ -16,6 +16,7 @@ use yew::prelude::*;
 
 #[function_component]
 pub fn ApiUsersStep() -> Html {
+    let step = SetupStep::ApiUsers;
     let setup_ctx = use_context::<SetupContext>().expect("Setup context not found");
     let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");
     let services = use_service_context();
@@ -52,7 +53,7 @@ pub fn ApiUsersStep() -> Html {
 
     let handle_previous = {
         let setup_ctx = setup_ctx.clone();
-        Callback::from(move |_| move_to_previous_step(&setup_ctx, SetupStep::ApiUsers))
+        Callback::from(move |_| move_to_previous_step(&setup_ctx, step))
     };
 
     let handle_next = {
@@ -79,9 +80,11 @@ pub fn ApiUsersStep() -> Html {
             }
 
             setup_ctx.submit_error.set(None);
-            move_to_next_step(&setup_ctx, SetupStep::ApiUsers);
+            move_to_next_step(&setup_ctx, step);
         })
     };
+
+    let next_title = step.next().map_or_else(|| "Next".to_string(), |next| format!("Next: {}", next.title()));
 
     html! {
         <div class="tp__setup__step tp__setup__step-api-users">
@@ -92,7 +95,11 @@ pub fn ApiUsersStep() -> Html {
                 <div class="tp__config-view__body">
                     <div class="tp__webui-config-view__info tp__config-view-page__info">
                         <span class="info">
-                            {"Step 14/16: create API users for playlists and token-based access (api-proxy.yml)."}
+                            {format!(
+                                "Step {}/{}: create API users for playlists and token-based access (api-proxy.yml).",
+                                step.position(),
+                                SetupStep::total()
+                            )}
                         </span>
                     </div>
                     <ContextProvider<ConfigContext> context={local_config_context}>
@@ -119,7 +126,7 @@ pub fn ApiUsersStep() -> Html {
                         class="primary"
                         name="setup_api_users_next"
                         icon="ArrowRight"
-                        title={"Next: Schedules"}
+                        title={next_title}
                         onclick={handle_next}
                     />
                 </div>

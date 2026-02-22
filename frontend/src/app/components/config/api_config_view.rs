@@ -108,6 +108,18 @@ fn server_name_exists(servers: &[ApiProxyServerInfoDto], server_name: &str, igno
     })
 }
 
+fn make_field_handler<F>(server_dialog_form: &UseStateHandle<ApiProxyServerInfoDto>, updater: F) -> Callback<String>
+where
+    F: Fn(&mut ApiProxyServerInfoDto, String) + 'static,
+{
+    let server_dialog_form = server_dialog_form.clone();
+    Callback::from(move |value: String| {
+        let mut form = (*server_dialog_form).clone();
+        updater(&mut form, value);
+        server_dialog_form.set(form);
+    })
+}
+
 generate_form_reducer!(
     state: ApiConfigFormState { form: ConfigApiDto },
     action_name: ApiConfigFormAction,
@@ -277,62 +289,17 @@ pub fn ApiConfigView() -> Html {
         Callback::from(move |_| handle_server_dialog_close.emit(()))
     };
 
-    let handle_server_name_change = {
-        let server_dialog_form = server_dialog_form.clone();
-        Callback::from(move |value: String| {
-            let mut form = (*server_dialog_form).clone();
-            form.name = value;
-            server_dialog_form.set(form);
-        })
-    };
-    let handle_server_protocol_change = {
-        let server_dialog_form = server_dialog_form.clone();
-        Callback::from(move |value: String| {
-            let mut form = (*server_dialog_form).clone();
-            form.protocol = value;
-            server_dialog_form.set(form);
-        })
-    };
-    let handle_server_host_change = {
-        let server_dialog_form = server_dialog_form.clone();
-        Callback::from(move |value: String| {
-            let mut form = (*server_dialog_form).clone();
-            form.host = value;
-            server_dialog_form.set(form);
-        })
-    };
-    let handle_server_port_change = {
-        let server_dialog_form = server_dialog_form.clone();
-        Callback::from(move |value: String| {
-            let mut form = (*server_dialog_form).clone();
-            form.port = if value.trim().is_empty() { None } else { Some(value) };
-            server_dialog_form.set(form);
-        })
-    };
-    let handle_server_timezone_change = {
-        let server_dialog_form = server_dialog_form.clone();
-        Callback::from(move |value: String| {
-            let mut form = (*server_dialog_form).clone();
-            form.timezone = value;
-            server_dialog_form.set(form);
-        })
-    };
-    let handle_server_message_change = {
-        let server_dialog_form = server_dialog_form.clone();
-        Callback::from(move |value: String| {
-            let mut form = (*server_dialog_form).clone();
-            form.message = value;
-            server_dialog_form.set(form);
-        })
-    };
-    let handle_server_path_change = {
-        let server_dialog_form = server_dialog_form.clone();
-        Callback::from(move |value: String| {
-            let mut form = (*server_dialog_form).clone();
-            form.path = if value.trim().is_empty() { None } else { Some(value) };
-            server_dialog_form.set(form);
-        })
-    };
+    let handle_server_name_change = make_field_handler(&server_dialog_form, |form, value| form.name = value);
+    let handle_server_protocol_change = make_field_handler(&server_dialog_form, |form, value| form.protocol = value);
+    let handle_server_host_change = make_field_handler(&server_dialog_form, |form, value| form.host = value);
+    let handle_server_port_change = make_field_handler(&server_dialog_form, |form, value| {
+        form.port = if value.trim().is_empty() { None } else { Some(value) };
+    });
+    let handle_server_timezone_change = make_field_handler(&server_dialog_form, |form, value| form.timezone = value);
+    let handle_server_message_change = make_field_handler(&server_dialog_form, |form, value| form.message = value);
+    let handle_server_path_change = make_field_handler(&server_dialog_form, |form, value| {
+        form.path = if value.trim().is_empty() { None } else { Some(value) };
+    });
 
     let handle_server_dialog_save = {
         let server_dialog_mode = server_dialog_mode.clone();
