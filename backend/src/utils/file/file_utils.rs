@@ -2,7 +2,7 @@ use crate::utils::debug_if_enabled;
 use log::{debug, error, trace};
 use path_clean::PathClean;
 use shared::error::str_to_io_error;
-use shared::utils::{API_PROXY_FILE, CONFIG_FILE, CONFIG_PATH, MAPPING_FILE, SOURCE_FILE, USER_FILE};
+use shared::utils::{API_PROXY_FILE, CONFIG_FILE, CONFIG_PATH, DEFAULT_HOME_ENV_VAR, DEFAULT_WEB_DIR, DEFAULT_WEB_ROOT_ENV_VAR, MAPPING_FILE, SOURCE_FILE, USER_FILE};
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
@@ -56,24 +56,31 @@ pub fn get_exe_path() -> PathBuf {
     }
 }
 
-fn get_default_path(file: &str) -> String {
-    let path: PathBuf = get_exe_path();
-    let default_path = path.join(file);
-    String::from(if default_path.exists() {
-        default_path.to_str().unwrap_or(file)
-    } else {
-        file
-    })
+pub fn get_home_path() -> PathBuf {
+    std::env::var(DEFAULT_HOME_ENV_VAR)
+        .ok()
+        .filter(|p| !p.trim().is_empty())
+        .map_or_else(get_exe_path, PathBuf::from)
+}
+
+pub fn get_default_web_root_path() -> PathBuf {
+    if let Some(web_root) = env::var(DEFAULT_WEB_ROOT_ENV_VAR)
+        .ok()
+        .filter(|p| !p.trim().is_empty()) {
+        return PathBuf::from(web_root)
+    }
+    get_exe_path().join(DEFAULT_WEB_DIR)
+}
+
+
+pub fn get_default_path(file: &str) -> PathBuf {
+    let home_path =  get_home_path();
+    home_path.join(file)
 }
 
 pub fn get_default_file_path(config_path: &str, file: &str) -> String {
     let path: PathBuf = PathBuf::from(config_path);
-    let default_path = path.join(file);
-    String::from(if default_path.exists() {
-        default_path.to_str().unwrap_or(file)
-    } else {
-        file
-    })
+    path.join(file).to_str().unwrap_or(file).to_string()
 }
 
 #[inline]
@@ -83,7 +90,7 @@ pub fn get_default_user_file_path(config_path: &str) -> String {
 
 #[inline]
 pub fn get_default_config_path() -> String {
-    get_default_path(CONFIG_PATH)
+    get_default_path(CONFIG_PATH).to_str().unwrap_or(CONFIG_PATH).to_string()
 }
 
 #[inline]
@@ -139,6 +146,11 @@ pub fn resolve_directory_path(input: &str) -> String {
             |ap| String::from(ap.to_str().unwrap_or("./")),
         )
 }
+
+pub fn file_exists(path: &str) -> bool {
+    std::path::Path::new(path).exists()
+}
+
 
 pub async fn file_exists_async(path: &Path) -> bool {
     tokio::fs::try_exists(path).await.unwrap_or(false)

@@ -14,15 +14,17 @@ use crate::{
                 MainConfigView, MessagingConfigView, PanelConfigView, ProxyConfigView, ReverseProxyConfigView,
                 SchedulesConfigView, VideoConfigView, WebUiConfigView,
             },
+            input::Input,
             Card, TabItem, TabSet, TextButton,
         },
         ConfigContext,
     },
     hooks::use_service_context,
     html_if,
+    services::{SetupCompleteRequestDto, SetupWebUserCredentialDto},
 };
 use log::warn;
-use shared::model::{ApiProxyConfigDto, ConfigDto, SourcesConfigDto};
+use shared::model::{ApiProxyConfigDto, AppConfigDto, ConfigDto, SourcesConfigDto};
 use std::str::FromStr;
 use yew::{platform::spawn_local, prelude::*};
 use yew_i18n::use_translation;
@@ -32,6 +34,8 @@ const LABEL_EDIT: &str = "LABEL.EDIT";
 const LABEL_VIEW: &str = "LABEL.VIEW";
 const LABEL_SAVE: &str = "LABEL.SAVE";
 const LABEL_UPDATE_GEOIP: &str = "LABEL.UPDATE_GEOIP_DB";
+const LABEL_SETUP_WELCOME: &str = "SETUP.MSG.WELCOME";
+const LABEL_SETUP_FINISH: &str = "SETUP.LABEL.FINISH_SETUP";
 
 const ACTION_UPDATE_GEO_IP: &str = "update_geo_ip";
 
@@ -91,10 +95,14 @@ pub fn ConfigView() -> Html {
     let translate = use_translation();
     let services_ctx = use_service_context();
     let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");
+    let setup_mode = services_ctx.config.ui_config.setup_mode;
 
     let active_tab = use_state(|| ConfigPage::Main);
-    let edit_mode = use_state(|| false);
+    let edit_mode = use_state(|| setup_mode);
     let form_state = use_state(ConfigFormState::default);
+    let setup_username = use_state(|| "admin".to_string());
+    let setup_password = use_state(String::new);
+    let setup_password_repeat = use_state(String::new);
 
     let handle_tab_change = {
         let active_tab = active_tab.clone();
@@ -180,6 +188,9 @@ pub fn ConfigView() -> Html {
     let handle_config_edit = {
         let set_edit_mode = edit_mode.clone();
         Callback::from(move |_| {
+            if setup_mode {
+                return;
+            }
             set_edit_mode.set(!*set_edit_mode);
         })
     };
@@ -190,6 +201,9 @@ pub fn ConfigView() -> Html {
         let services = services_ctx.clone();
         let get_form_state = form_state.clone();
         let set_edit_mode = edit_mode.clone();
+        let setup_username = setup_username.clone();
+        let setup_password = setup_password.clone();
+        let setup_password_repeat = setup_password_repeat.clone();
 
         Callback::from(move |_| {
             let forms = &*get_form_state;
@@ -213,9 +227,90 @@ pub fn ConfigView() -> Html {
                 ]
             );
 
-            if modified_forms.is_empty() {
+            if !setup_mode && modified_forms.is_empty() {
                 set_edit_mode.set(false);
                 services.toastr.info(translate.t("MESSAGES.SAVE.NO_CHANGES"));
+                return;
+            }
+
+            if setup_mode {
+                let username = setup_username.trim().to_string();
+                let password = setup_password.trim().to_string();
+                let password_repeat = setup_password_repeat.trim().to_string();
+
+                if username.is_empty() {
+                    services.toastr.error("WebUI username is required");
+                    return;
+                }
+                if password.is_empty() {
+                    services.toastr.error("WebUI password is required");
+                    return;
+                }
+                if password != password_repeat {
+                    services.toastr.error("WebUI passwords do not match");
+                    return;
+                }
+
+                let mut app_config =
+                    config_ctx.config.as_ref().map_or_else(AppConfigDto::default, |cfg| cfg.as_ref().clone());
+                if app_config.api_proxy.is_none() {
+                    app_config.api_proxy = Some(
+                        config_ctx
+                            .api_proxy
+                            .as_ref()
+                            .map_or_else(ApiProxyConfigDto::default, |api| api.as_ref().clone()),
+                    );
+                }
+
+                let mut modified_main_forms = Vec::new();
+                for form in modified_forms {
+                    match form {
+                        ConfigForm::Panel(_, sources) => app_config.sources = sources,
+                        ConfigForm::ApiProxy(_, api_proxy) => app_config.api_proxy = Some(api_proxy),
+                        other => modified_main_forms.push(other),
+                    }
+                }
+                if !modified_main_forms.is_empty() {
+                    update_config(&mut app_config.config, modified_main_forms);
+                }
+
+                if let Err(err) = app_config.config.prepare(false) {
+                    services.toastr.error(err.to_string());
+                    return;
+                }
+                if let Err(err) =
+                    app_config.sources.prepare(false, app_config.config.get_hdhr_device_overview().as_ref())
+                {
+                    services.toastr.error(err.to_string());
+                    return;
+                }
+                if let Some(api_proxy) = app_config.api_proxy.as_mut() {
+                    if let Err(err) = api_proxy.prepare() {
+                        services.toastr.error(err.to_string());
+                        return;
+                    }
+                }
+
+                let payload = SetupCompleteRequestDto {
+                    app_config,
+                    web_users: vec![SetupWebUserCredentialDto { username, password }],
+                };
+
+                let services = services.clone();
+                let translate = translate.clone();
+                let set_edit_mode = set_edit_mode.clone();
+                spawn_local(async move {
+                    match services.config.complete_setup(payload).await {
+                        Ok(()) => {
+                            set_edit_mode.set(false);
+                            services.toastr.success(translate.t("MESSAGES.SAVE.MAIN_CONFIG.SUCCESS"));
+                        }
+                        Err(err) => {
+                            services.toastr.error("Setup save failed");
+                            services.toastr.error(err.to_string());
+                        }
+                    }
+                });
                 return;
             }
 
@@ -359,13 +454,23 @@ pub fn ConfigView() -> Html {
         })
     };
 
-    let context = ConfigViewContext { edit_mode: edit_mode.clone(), on_form_change: on_form_change.clone() };
+    let context = ConfigViewContext {
+        edit_mode: edit_mode.clone(),
+        show_restart_notice: true,
+        on_form_change: on_form_change.clone(),
+    };
 
-    let geo_ip_enabled = config_ctx.config.as_ref().is_some_and(|c| c.config.is_geoip_enabled());
+    let geo_ip_enabled = !setup_mode && config_ctx.config.as_ref().is_some_and(|c| c.config.is_geoip_enabled());
 
     html! {
         <ContextProvider<ConfigViewContext> context={context}>
         <div class="tp__config-view">
+           { html_if!(setup_mode, {
+                    <div class="tp__webui-config-view__info tp__config-view-page__info">
+                        <span class="info">{translate.t(LABEL_SETUP_WELCOME)}</span>
+                    </div>
+           })}
+
             <div class="tp__config-view__header">
                 <h1>{ translate.t(LABEL_CONFIG) } </h1>
                 <div class="tp__config-view__header-tools">
@@ -376,24 +481,59 @@ pub fn ConfigView() -> Html {
                         onclick={handle_update_content.clone()}></TextButton>
                 })}
                 </div>
-               <TextButton name="config_edit"
-                    class={ if *edit_mode { "secondary" } else { "primary" }}
-                    icon={ if *edit_mode { "Unlocked" } else { "Locked" }}
-                    title={ if *edit_mode { translate.t(LABEL_EDIT) } else { translate.t(LABEL_VIEW) }}
-                    onclick={handle_config_edit}></TextButton>
+               { html_if!(!setup_mode, {
+                   <TextButton name="config_edit"
+                        class={ if *edit_mode { "secondary" } else { "primary" }}
+                        icon={ if *edit_mode { "Unlocked" } else { "Locked" }}
+                        title={ if *edit_mode { translate.t(LABEL_EDIT) } else { translate.t(LABEL_VIEW) }}
+                        onclick={handle_config_edit}></TextButton>
+               })}
 
             </div>
             <div class="tp__config-view__body">
             <Card>
+                { html_if!(setup_mode, {
+                    <div class="tp__form-page__toolbar">
+                        <Input
+                            name="setup_username"
+                            label={Some("WebUI Username".to_string())}
+                            value={(*setup_username).clone()}
+                            on_change={Some({
+                                let setup_username = setup_username.clone();
+                                Callback::from(move |value: String| setup_username.set(value))
+                            })}
+                        />
+                        <Input
+                            name="setup_password"
+                            label={Some("WebUI Password".to_string())}
+                            hidden={true}
+                            value={(*setup_password).clone()}
+                            on_change={Some({
+                                let setup_password = setup_password.clone();
+                                Callback::from(move |value: String| setup_password.set(value))
+                            })}
+                        />
+                        <Input
+                            name="setup_password_repeat"
+                            label={Some("Repeat WebUI Password".to_string())}
+                            hidden={true}
+                            value={(*setup_password_repeat).clone()}
+                            on_change={Some({
+                                let setup_password_repeat = setup_password_repeat.clone();
+                                Callback::from(move |value: String| setup_password_repeat.set(value))
+                            })}
+                        />
+                    </div>
+                })}
                  <TabSet tabs={tabs.clone()} active_tab={Some((*active_tab).to_string())}
                      on_tab_change={Some(handle_tab_change)}
                      class="tp__config-view__tabset"/>
 
-                { html_if!(*edit_mode, {
+                { html_if!(*edit_mode || setup_mode, {
                     <div class="tp__config-view__toolbar tp__form-page__toolbar">
                      <TextButton class="primary" name="save_config"
                         icon="Save"
-                        title={ translate.t(LABEL_SAVE)}
+                        title={ if setup_mode { translate.t(LABEL_SETUP_FINISH) } else { translate.t(LABEL_SAVE) }}
                         onclick={handle_save_config}></TextButton>
                     </div>
                 })}

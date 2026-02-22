@@ -52,7 +52,7 @@ pub struct VideoConfigDto {
 
 impl VideoConfigDto {
     pub fn is_empty(&self) -> bool {
-        self.extensions.is_empty()
+        (self.extensions.is_empty() || is_default_supported_video_extensions(&self.extensions))
             && is_blank_optional_str(self.web_search.as_deref())
             && (self.download.is_none() || self.download.as_ref().is_some_and(|d| d.is_empty()))
             && !self.ffprobe_enabled

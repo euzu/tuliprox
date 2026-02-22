@@ -5,9 +5,10 @@ use log::{error, info};
 use path_clean::PathClean;
 use shared::error::TuliproxError;
 use shared::model::{ConfigDto, HdHomeRunDeviceOverview};
-use shared::utils::{default_grace_period_millis, default_grace_period_timeout_secs, set_sanitize_sensitive_info};
+use shared::utils::{default_grace_period_millis, default_grace_period_timeout_secs, set_sanitize_sensitive_info, DEFAULT_WEB_DIR};
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
+use crate::utils::get_default_path;
 
 const DEFAULT_BACKUP_DIR: &str = "backup";
 
@@ -131,7 +132,9 @@ impl Config {
     }
 
     fn prepare_api_web_root(&mut self) {
-        if !self.api.web_root.is_empty() {
+        if self.api.web_root.is_empty() {
+            self.api.web_root = get_default_path(DEFAULT_WEB_DIR).display().to_string();
+        } else {
             self.api.web_root = utils::make_absolute_path(&self.api.web_root, &self.working_dir);
         }
     }

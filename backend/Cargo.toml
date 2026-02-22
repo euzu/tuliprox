@@ -11,7 +11,8 @@ lol_html = "2.7"
 handlebars = "6"
 shared = { version = "3", path = "../shared" }
 serde = { version = "1.0", features = ["derive", "rc"] }
-serde-saphyr = "0.0.14"
+serde-saphyr = "0.0.19"
+serde_yaml = "0.9"
 serde_json = { version = "1", features = ["raw_value"] }
 quick-xml = { version = "0.39", features = ["async-tokio", "serialize"] }
 regex = "1.12"
@@ -37,7 +38,7 @@ mime = "0.3"
 log = "0.4"
 env_logger = "0.11"
 rmp-serde = "1"
-rand = "0.9"
+rand = "0.9.2"
 fastrand = "2"
 rpassword = "7.4"
 flate2 = "1.1"
@@ -71,7 +72,7 @@ socket2 = { version = "0.6", features = ["all"] }
 async-compression = { version = "0.4", features = ["tokio"] }
 chrono-tz = "0.10.4"
 zeroize = "1.8.2"
-sysinfo = { version = "0.37.2", default-features = false, features = ["system"] }
+sysinfo = { version = "0.38.2", default-features = false, features = ["system"] }
 uuid = { version = "1", features = ["v4"] }
 fancy-regex = "0.17.0"
 mime_guess = "2"

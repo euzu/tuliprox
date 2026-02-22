@@ -273,10 +273,6 @@ impl LibraryScanner {
             Err(_) => false,
         }
     }
-
-    pub async fn file_exists(path: &Path) -> bool {
-        fs::try_exists(path).await.unwrap_or(false)
-    }
 }
 
 #[cfg(test)]

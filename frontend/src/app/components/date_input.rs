@@ -1,3 +1,4 @@
+use crate::app::components::FieldLabel;
 use web_sys::HtmlInputElement;
 use yew::{function_component, html, use_effect_with, Callback, Html, NodeRef, Properties, TargetCast};
 
@@ -5,6 +6,8 @@ use yew::{function_component, html, use_effect_with, Callback, Html, NodeRef, Pr
 pub struct DateInputProps {
     #[prop_or_default]
     pub name: String,
+    #[prop_or_default]
+    pub field_id: Option<String>,
     #[prop_or_default]
     pub label: Option<String>,
     #[prop_or_default]
@@ -60,7 +63,18 @@ pub fn DateInput(props: &DateInputProps) -> Html {
     html! {
         <div class="tp__input tp__input-date">
             { if let Some(label) = &props.label {
-                html! { <label>{ label }</label> }
+                html! {
+                    <FieldLabel
+                        label={label.clone()}
+                        field_id={props.field_id.clone().unwrap_or_else(|| {
+                            if props.name.trim().is_empty() {
+                                label.clone()
+                            } else {
+                                props.name.clone()
+                            }
+                        })}
+                    />
+                }
             } else { html!{} } }
             <div class="tp__input-wrapper">
                 <input

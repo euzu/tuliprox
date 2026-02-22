@@ -135,7 +135,6 @@ impl fmt::Debug for FileLockManager {
 }
 
 // Define FileReadGuard to hold both the lock reference and the actual read guard.
-#[allow(dead_code)]
 pub struct FileReadGuard {
     _guard: OwnedRwLockReadGuard<()>,
 }
@@ -147,7 +146,6 @@ impl FileReadGuard {
 }
 
 // Define FileWriteGuard to hold both the lock reference and the actual write guard.
-#[allow(dead_code)]
 pub struct FileWriteGuard {
     _guard: OwnedRwLockWriteGuard<()>,
 }

@@ -1,10 +1,10 @@
 use crate::app::components::{InputRow, PlaylistExplorerPage, UserlistPage};
 use shared::model::{
     ApiProxyConfigDto, AppConfigDto, ConfigTargetDto, PlaylistRequest, ProxyUserCredentialsDto, SearchRequest,
-    StatusCheck, SystemInfo, UiPlaylistCategories,
+    StatusCheck, SystemInfo, TargetUserDto, UiPlaylistCategories,
 };
 use std::rc::Rc;
-use yew::UseStateHandle;
+use yew::{Callback, UseStateHandle};
 
 type SingleSource = (Vec<Rc<InputRow>>, Vec<Rc<ConfigTargetDto>>);
 
@@ -28,12 +28,44 @@ pub struct TargetUser {
 
 pub type TargetUserList = Option<Rc<Vec<Rc<TargetUser>>>>;
 
+pub fn api_proxy_users_to_target_users(users: &[TargetUserDto]) -> TargetUserList {
+    let mut flat = Vec::new();
+    for target_user in users {
+        for credentials in &target_user.credentials {
+            flat.push(Rc::new(TargetUser {
+                target: target_user.target.clone(),
+                credentials: Rc::new(credentials.clone()),
+            }));
+        }
+    }
+    Some(Rc::new(flat))
+}
+
+pub fn target_users_to_api_proxy_users(users: &TargetUserList) -> Vec<TargetUserDto> {
+    let mut grouped: Vec<TargetUserDto> = Vec::new();
+    if let Some(users) = users {
+        for user in users.iter() {
+            if let Some(target_group) = grouped.iter_mut().find(|group| group.target == user.target) {
+                target_group.credentials.push((*user.credentials).clone());
+            } else {
+                grouped.push(TargetUserDto {
+                    target: user.target.clone(),
+                    credentials: vec![(*user.credentials).clone()],
+                });
+            }
+        }
+    }
+    grouped
+}
+
 #[derive(Clone, PartialEq)]
 pub struct UserlistContext {
     pub selected_user: UseStateHandle<Option<Rc<TargetUser>>>,
     pub filtered_users: UseStateHandle<TargetUserList>,
     pub users: UseStateHandle<TargetUserList>,
     pub active_page: UseStateHandle<UserlistPage>,
+    pub local_mode: bool,
+    pub on_users_change: Option<Callback<Vec<TargetUserDto>>>,
 }
 
 impl UserlistContext {

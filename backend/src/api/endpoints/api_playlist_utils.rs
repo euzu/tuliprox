@@ -1,6 +1,7 @@
 use crate::model::{AppConfig, ConfigInput, ConfigTarget};
 use crate::utils::{m3u, xtream};
 use axum::response::IntoResponse;
+use log::warn;
 use serde_json::{json};
 use shared::model::{InputType, M3uPlaylistItem, PlaylistItemType, TargetType, UiPlaylistItem, XtreamCluster, XtreamPlaylistItem};
 use std::sync::Arc;
@@ -32,16 +33,17 @@ pub(in crate::api::endpoints) async fn get_playlist_for_target(cfg_target: Optio
                 |_pli: &M3uPlaylistItem| true
             };
 
-            let converted_stream = channel_iterator.filter_map(move |res| {
-                match res {
-                    Ok(pli) => {
-                        if item_filter(&pli) {
-                            Some(Ok(UiPlaylistItem::from(pli)))
-                        } else {
-                            None
-                        }
+            let converted_stream = channel_iterator.filter_map(move |res| match res {
+                Ok(pli) => {
+                    if item_filter(&pli) {
+                        Some(UiPlaylistItem::from(pli))
+                    } else {
+                        None
                     }
-                    Err(err) => Some(Err(err.to_string())),
+                }
+                Err(err) => {
+                    warn!("Skipping unreadable M3U target playlist entry: {err}");
+                    None
                 }
             });
             return stream_json_or_bin_response_stream(accept, converted_stream).into_response();
@@ -63,7 +65,13 @@ pub(in crate::api::endpoints) async fn get_playlist_for_input(cfg_input: Option<
             let Some(channels) = iter_raw_m3u_input_playlist(cfg, input, Some(cluster)).await else {
               return empty_json_list_response();
             };
-            let converted_stream = channels.map(|res| res.map(UiPlaylistItem::from).map_err(|err| err.to_string()));
+            let converted_stream = channels.filter_map(|res| match res {
+                Ok(pli) => Some(UiPlaylistItem::from(pli)),
+                Err(err) => {
+                    warn!("Skipping unreadable M3U input playlist entry: {err}");
+                    None
+                }
+            });
             return stream_json_or_bin_response_stream(accept, converted_stream).into_response();
         }
     }

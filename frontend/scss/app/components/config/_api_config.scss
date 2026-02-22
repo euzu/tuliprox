@@ -37,3 +37,39 @@
     }
   }
 }
+
+.tp__api-server-dialog {
+  min-width: min(46rem, 92vw);
+  max-width: min(58rem, 96vw);
+  padding: var(--padding-default);
+  box-sizing: border-box;
+
+  h2 {
+    margin: 0 0 var(--padding-small) 0;
+  }
+
+  &__body {
+    display: flex;
+    flex-flow: column;
+    gap: var(--gap-default);
+    overflow: auto;
+  }
+
+  &__grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--gap-default);
+  }
+
+  &__message {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 860px) {
+  .tp__api-server-dialog {
+    &__grid {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+}

@@ -3,14 +3,25 @@ use crate::app::{
         userlist::{edit::UserEdit, list::UserlistList, page::UserlistPage},
         Breadcrumbs, Panel, TargetUser,
     },
-    context::{ConfigContext, UserlistContext},
+    context::{api_proxy_users_to_target_users, ConfigContext, UserlistContext},
 };
+use shared::model::TargetUserDto;
 use std::rc::Rc;
 use yew::prelude::*;
 use yew_i18n::use_translation;
 
+#[derive(Properties, Clone, PartialEq, Default)]
+pub struct UserlistViewProps {
+    #[prop_or_default]
+    pub local_mode: bool,
+    #[prop_or_default]
+    pub users: Option<Vec<TargetUserDto>>,
+    #[prop_or_default]
+    pub on_users_change: Option<Callback<Vec<TargetUserDto>>>,
+}
+
 #[function_component]
-pub fn UserlistView() -> Html {
+pub fn UserlistView(props: &UserlistViewProps) -> Html {
     let translate = use_translation();
     let config_ctx = use_context::<ConfigContext>().expect("Config context not found");
 
@@ -22,31 +33,33 @@ pub fn UserlistView() -> Html {
 
     {
         let users_state = users.clone();
-        use_effect_with(config_ctx.config, move |api_cfg_opt| {
-            let new_users = api_cfg_opt.as_ref().and_then(|cfg| {
-                cfg.api_proxy.as_ref().map(|api_cfg| {
-                    let mut users_vec = Vec::new();
-                    for target in &api_cfg.user {
-                        for creds in &target.credentials {
-                            users_vec.push(Rc::new(TargetUser {
-                                target: target.target.to_string(),
-                                credentials: Rc::new(creds.clone()),
-                            }));
-                        }
-                    }
-                    Rc::new(users_vec)
-                })
-            });
-            users_state.set(new_users);
-            || ()
-        });
+        let filtered_user_state = filtered_user.clone();
+        use_effect_with(
+            (props.local_mode, props.users.clone(), config_ctx.config),
+            move |(local_mode, setup_users, api_cfg_opt)| {
+                let new_users = if *local_mode {
+                    api_proxy_users_to_target_users(setup_users.as_deref().unwrap_or_default())
+                } else {
+                    api_cfg_opt
+                        .as_ref()
+                        .and_then(|cfg| cfg.api_proxy.as_ref())
+                        .and_then(|api_cfg| api_proxy_users_to_target_users(&api_cfg.user))
+                };
+                filtered_user_state.set(None);
+                users_state.set(new_users);
+                || ()
+            },
+        );
     }
 
+    let on_users_change = props.on_users_change.clone();
     let userlist_context = UserlistContext {
         selected_user: selected_user.clone(),
         filtered_users: filtered_user.clone(),
         users: users.clone(),
         active_page: active_page.clone(),
+        local_mode: props.local_mode,
+        on_users_change,
     };
 
     let handle_breadcrumb_select = {

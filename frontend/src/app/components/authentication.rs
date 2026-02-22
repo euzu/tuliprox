@@ -22,7 +22,7 @@ pub fn Authentication(props: &AuthenticationProps) -> Html {
                 .auth
                 .auth_subscribe(&mut |success| {
                     authenticated_state.set(success);
-                    if success {
+                    if success && !services_ctx.config.ui_config.setup_mode {
                         services_ctx.websocket.connect_ws_with_backoff();
                     }
                     future::ready(())

@@ -131,8 +131,67 @@ jobs:
           chmod +x ./bin/build_docker.sh
           ./bin/build_docker.sh ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.branch || 'develop' }}
 
+      - name: Read project version
+        id: version
+        run: |
+          VERSION=$(grep -Po '^version\s*=\s*"\K[0-9\.]+' backend/Cargo.toml)
+          echo "value=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify static binary artifacts
+        run: |
+          ls -la artifacts
+          test -f "artifacts/tuliprox-v${{ steps.version.outputs.value }}-x86_64-unknown-linux-musl"
+          test -f "artifacts/tuliprox-v${{ steps.version.outputs.value }}-x86_64-unknown-linux-musl.sha256"
+          test -f "artifacts/tuliprox-v${{ steps.version.outputs.value }}-aarch64-unknown-linux-musl"
+          test -f "artifacts/tuliprox-v${{ steps.version.outputs.value }}-aarch64-unknown-linux-musl.sha256"
+          for sum_file in artifacts/*.sha256; do
+            (cd artifacts && sha256sum -c "$(basename "$sum_file")")
+          done
+
+      - name: Build release checksum notes
+        run: |
+          {
+            echo "## Static Binary Checksums"
+            echo
+            echo "The checksums below were validated in CI via \`sha256sum -c\` before upload."
+            echo
+            echo "| File | SHA256 |"
+            echo "| --- | --- |"
+            for sum_file in artifacts/*.sha256; do
+              checksum=$(awk '{print $1}' "$sum_file")
+              filename=$(awk '{print $2}' "$sum_file")
+              echo "| \`$filename\` | \`$checksum\` |"
+            done
+            echo
+            echo "Verification command after download:"
+            echo "\`\`\`bash"
+            echo "sha256sum -c *.sha256"
+            echo "\`\`\`"
+          } > artifacts/RELEASE_NOTES_SHA256.md
+
+      - name: Upload static binary artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tuliprox-static-v${{ steps.version.outputs.value }}
+          path: artifacts/*
+          if-no-files-found: error
+
       - name: Push version bump
         if: success() && steps.version_commit.outputs.did_commit == 'true'
         run: |
           # Use origin HEAD to push to the correct remote branch
           git push origin HEAD
+
+      - name: Publish static binaries to GitHub Release
+        if: success() && github.event_name == 'workflow_dispatch' && github.event.inputs.branch == 'master'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.value }}
+          name: v${{ steps.version.outputs.value }}
+          files: |
+            artifacts/tuliprox-v${{ steps.version.outputs.value }}-x86_64-unknown-linux-musl
+            artifacts/tuliprox-v${{ steps.version.outputs.value }}-x86_64-unknown-linux-musl.sha256
+            artifacts/tuliprox-v${{ steps.version.outputs.value }}-aarch64-unknown-linux-musl
+            artifacts/tuliprox-v${{ steps.version.outputs.value }}-aarch64-unknown-linux-musl.sha256
+          body_path: artifacts/RELEASE_NOTES_SHA256.md
+          generate_release_notes: true

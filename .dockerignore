@@ -13,3 +13,7 @@ frontend/node_modules/
 frontend/build/
 
 frontend/dist
+
+# Setup mode: never ship runtime config or credentials in Docker build context
+config/*.yml
+config/user.txt

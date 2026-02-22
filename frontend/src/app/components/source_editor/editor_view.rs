@@ -13,7 +13,7 @@ use crate::{
 };
 use shared::model::{
     ConfigInputDto, ConfigSourceDto, ConfigTargetDto, HdHomeRunTargetOutputDto, InputType, M3uTargetOutputDto,
-    StrmTargetOutputDto, TargetOutputDto, XtreamTargetOutputDto,
+    SourcesConfigDto, StrmTargetOutputDto, TargetOutputDto, XtreamTargetOutputDto,
 };
 use std::{
     cell::RefCell,
@@ -36,6 +36,14 @@ const LABEL_SAVE: &str = "LABEL.SAVE";
 
 type Position = (f32, f32);
 type MoveBlockParams = (f32, f32, Position, Vec<(BlockId, Position)>);
+
+#[derive(Properties, Clone, PartialEq)]
+pub struct SourceEditorProps {
+    #[prop_or_default]
+    pub on_sources_change: Option<Callback<SourcesConfigDto>>,
+    #[prop_or(true)]
+    pub show_save_button: bool,
+}
 
 #[derive(Clone, PartialEq)]
 struct DragState {
@@ -207,7 +215,11 @@ fn create_instance(block_type: BlockType) -> BlockInstance {
         BlockType::InputM3u => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::M3u))),
         BlockType::InputLibrary => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::Library))),
         BlockType::Target => {
-            let dto = ConfigTargetDto { name: String::new(), ..ConfigTargetDto::default() };
+            let dto = ConfigTargetDto {
+                name: String::new(),
+                filter: r#"Group ~ ".*""#.to_string(),
+                ..ConfigTargetDto::default()
+            };
             BlockInstance::Target(Rc::new(dto))
         }
         BlockType::OutputM3u => BlockInstance::Output(Rc::new(TargetOutputDto::M3u(M3uTargetOutputDto::default()))),
@@ -242,9 +254,68 @@ fn create_output_instance(output: &TargetOutputDto) -> (BlockInstance, BlockType
     }
 }
 
+fn editor_state_to_sources_config(base_sources: &SourcesConfigDto, editor_state: &EditorState) -> SourcesConfigDto {
+    let mut sources_config = base_sources.clone();
+    let mut gen_sources: Vec<ConfigSourceDto> = Vec::new();
+    let mut gen_inputs: Vec<ConfigInputDto> = Vec::new();
+
+    // find all input blocks first
+    let input_blocks: Vec<&Block> = editor_state.blocks.iter().filter(|b| b.block_type.is_input()).collect();
+    for block in input_blocks {
+        if let BlockInstance::Input(input) = &block.instance {
+            gen_inputs.push(input.as_ref().clone());
+        }
+    }
+
+    // each target block becomes one source entry
+    let target_blocks: Vec<&Block> = editor_state.blocks.iter().filter(|b| b.block_type.is_target()).collect();
+    for target_block in target_blocks {
+        if let BlockInstance::Target(target_dto) = &target_block.instance {
+            let mut source_dto = ConfigSourceDto { targets: vec![(**target_dto).clone()], inputs: Vec::new() };
+
+            // map incoming input links to input names
+            for conn in &editor_state.connections {
+                if conn.to == target_block.id {
+                    if let Some(input_block) = editor_state.get_block(conn.from) {
+                        if input_block.block_type.is_input() {
+                            if let BlockInstance::Input(input_dto) = &input_block.instance {
+                                source_dto.inputs.push(input_dto.name.clone());
+                            }
+                        }
+                    }
+                }
+            }
+
+            // collect all output blocks connected to this target
+            let mut outputs = Vec::new();
+            for conn in &editor_state.connections {
+                if conn.from == target_block.id {
+                    if let Some(output_block) = editor_state.get_block(conn.to) {
+                        if output_block.block_type.is_output() {
+                            if let BlockInstance::Output(output_dto) = &output_block.instance {
+                                outputs.push((**output_dto).clone());
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(target) = source_dto.targets.get_mut(0) {
+                target.output = outputs;
+            }
+
+            gen_sources.push(source_dto);
+        }
+    }
+
+    sources_config.inputs = gen_inputs;
+    sources_config.sources = gen_sources;
+    sources_config
+}
+
 // ----------------- Component -----------------
 #[function_component]
-pub fn SourceEditor() -> Html {
+pub fn SourceEditor(props: &SourceEditorProps) -> Html {
     let canvas_ref = use_node_ref();
     let playlist_ctx = use_context::<PlaylistContext>().expect("Playlist context not found");
     let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");
@@ -255,83 +326,127 @@ pub fn SourceEditor() -> Html {
     let force_update = use_state(|| 0);
     // ----------------- virtual canvas offset -----------------
     let editor_state_ref = use_mut_ref(EditorState::default);
+    let initialized_from_playlist = use_state(|| false);
+    let is_local_mode = props.on_sources_change.is_some();
     // Delete mode toggle
     let delete_mode = use_state(|| false);
     let cursor_grabbing = use_state(|| false);
+
+    let emit_sources_change = {
+        let on_sources_change = props.on_sources_change.clone();
+        let editor_state_ref = editor_state_ref.clone();
+        let config_ctx = config_ctx.clone();
+        Callback::from(move |_| {
+            if let Some(on_sources_change) = on_sources_change.as_ref() {
+                let base_sources = config_ctx.config.as_ref().map(|c| c.sources.clone()).unwrap_or_default();
+                let editor_state = editor_state_ref.borrow();
+                let dto = editor_state_to_sources_config(&base_sources, &editor_state);
+                on_sources_change.emit(dto);
+            }
+        })
+    };
 
     {
         let playlists = playlist_ctx.clone();
         let editor_state_ref = editor_state_ref.clone();
         let force_update = force_update.clone();
-        use_effect_with(playlists.sources.clone(), move |sources| {
-            if let Some(entries) = sources.as_ref() {
-                let mut current_id = 1;
-                let mut gen_blocks = Vec::new();
-                let mut gen_connections = Vec::new();
-                let mut added_inputs = HashMap::<u16, BlockId>::new();
-                for (inputs, targets) in entries.as_ref() {
-                    let mut input_ids = vec![];
-                    for input_row in inputs {
-                        match input_row.as_ref() {
-                            InputRow::Input(input_config) => {
-                                let block_id = if let Some(&existing_id) = added_inputs.get(&input_config.id) {
-                                    existing_id
-                                } else {
-                                    let id = current_id;
-                                    current_id += 1;
-                                    added_inputs.insert(input_config.id, id);
-                                    gen_blocks.push(create_block(
-                                        id,
-                                        BlockType::from(input_config.input_type),
-                                        BlockInstance::Input(input_config.clone()),
-                                    ));
-                                    id
-                                };
-                                input_ids.push(block_id);
+        let initialized_from_playlist = initialized_from_playlist.clone();
+        use_effect_with(
+            (playlists.sources.clone(), is_local_mode, *initialized_from_playlist),
+            move |(sources, local_mode, initialized)| {
+                if !(*local_mode && *initialized) {
+                    if let Some(entries) = sources.as_ref() {
+                        let mut current_id = 1;
+                        let mut gen_blocks = Vec::new();
+                        let mut gen_connections = Vec::new();
+                        let mut added_inputs = HashMap::<String, BlockId>::new();
+                        for (inputs, targets) in entries.as_ref() {
+                            let mut input_ids = vec![];
+                            for input_row in inputs {
+                                match input_row.as_ref() {
+                                    InputRow::Input(input_config) => {
+                                        let dedupe_key = if input_config.id > 0 {
+                                            Some(format!("id:{}", input_config.id))
+                                        } else if !input_config.name.is_empty() {
+                                            Some(format!("name:{}", input_config.name))
+                                        } else {
+                                            None
+                                        };
+
+                                        let block_id = if let Some(key) = dedupe_key {
+                                            if let Some(&existing_id) = added_inputs.get(&key) {
+                                                existing_id
+                                            } else {
+                                                let id = current_id;
+                                                current_id += 1;
+                                                added_inputs.insert(key, id);
+                                                gen_blocks.push(create_block(
+                                                    id,
+                                                    BlockType::from(input_config.input_type),
+                                                    BlockInstance::Input(input_config.clone()),
+                                                ));
+                                                id
+                                            }
+                                        } else {
+                                            let id = current_id;
+                                            current_id += 1;
+                                            gen_blocks.push(create_block(
+                                                id,
+                                                BlockType::from(input_config.input_type),
+                                                BlockInstance::Input(input_config.clone()),
+                                            ));
+                                            id
+                                        };
+                                        input_ids.push(block_id);
+                                    }
+                                    InputRow::Alias(_, _) => {}
+                                }
                             }
-                            InputRow::Alias(_, _) => {}
-                        }
-                    }
-                    for target_config in targets {
-                        let target_id = current_id;
-                        current_id += 1;
-                        gen_blocks.push(create_block(
-                            target_id,
-                            BlockType::Target,
-                            BlockInstance::Target(target_config.clone()),
-                        ));
-                        input_ids
-                            .iter()
-                            .for_each(|input_id| gen_connections.push(Connection { from: *input_id, to: target_id }));
+                            for target_config in targets {
+                                let target_id = current_id;
+                                current_id += 1;
+                                gen_blocks.push(create_block(
+                                    target_id,
+                                    BlockType::Target,
+                                    BlockInstance::Target(target_config.clone()),
+                                ));
+                                input_ids.iter().for_each(|input_id| {
+                                    gen_connections.push(Connection { from: *input_id, to: target_id })
+                                });
 
-                        for output in &target_config.output {
-                            let (block_instance, block_type) = create_output_instance(output);
-                            let output_id = current_id;
-                            current_id += 1;
-                            let block = create_block(output_id, block_type, block_instance);
-                            gen_blocks.push(block);
-                            gen_connections.push(Connection { from: target_id, to: output_id });
+                                for output in &target_config.output {
+                                    let (block_instance, block_type) = create_output_instance(output);
+                                    let output_id = current_id;
+                                    current_id += 1;
+                                    let block = create_block(output_id, block_type, block_instance);
+                                    gen_blocks.push(block);
+                                    gen_connections.push(Connection { from: target_id, to: output_id });
+                                }
+                            }
                         }
+                        if !gen_blocks.is_empty() {
+                            layout(&mut gen_blocks, &gen_connections);
+                        }
+                        {
+                            let mut editor_state = editor_state_ref.borrow_mut();
+                            editor_state.canvas_offset = (0.0, 0.0);
+                            editor_state.pan_start = (0.0, 0.0);
+                            editor_state.drag.reset_dragging();
+                            editor_state.selection.reset_selection();
+                            editor_state.clear_pending();
+                            editor_state.is_panning = false;
+                            editor_state.blocks = gen_blocks;
+                            editor_state.connections = gen_connections;
+                            editor_state.next_id = current_id;
+                        }
+                        force_update.set(*force_update + 1);
+                        initialized_from_playlist.set(true);
                     }
                 }
-                layout(&mut gen_blocks, &gen_connections);
-                {
-                    let mut editor_state = editor_state_ref.borrow_mut();
-                    editor_state.canvas_offset = (0.0, 0.0);
-                    editor_state.pan_start = (0.0, 0.0);
-                    editor_state.drag.reset_dragging();
-                    editor_state.selection.reset_selection();
-                    editor_state.clear_pending();
-                    editor_state.is_panning = false;
-                    editor_state.blocks = gen_blocks;
-                    editor_state.connections = gen_connections;
-                    editor_state.next_id = current_id;
-                }
-                force_update.set(*force_update + 1)
-            }
 
-            || {}
-        });
+                || {}
+            },
+        );
     }
 
     let collect_block_elements = {
@@ -397,69 +512,9 @@ pub fn SourceEditor() -> Html {
         let services = services.clone();
         let translate = translate.clone();
         Callback::from(move |_| {
-            let mut sources_config = config_ctx.config.as_ref().map(|c| c.sources.clone()).unwrap_or_default();
+            let base_sources = config_ctx.config.as_ref().map(|c| c.sources.clone()).unwrap_or_default();
             let editor_state = editor_state_ref.borrow();
-
-            // Convert diagram blocks to sources
-            let mut gen_sources: Vec<ConfigSourceDto> = Vec::new();
-            let mut gen_inputs: Vec<ConfigInputDto> = Vec::new();
-
-            //find all inputs
-            let input_blocks: Vec<&Block> = editor_state.blocks.iter().filter(|b| b.block_type.is_input()).collect();
-            for block in &input_blocks {
-                if let BlockInstance::Input(input) = &block.instance {
-                    gen_inputs.push(input.as_ref().clone());
-                }
-            }
-
-            // Find all targets
-            let target_blocks: Vec<&Block> = editor_state.blocks.iter().filter(|b| b.block_type.is_target()).collect();
-
-            for target_block in target_blocks {
-                if let BlockInstance::Target(target_dto) = &target_block.instance {
-                    let mut source_dto = ConfigSourceDto { targets: vec![(**target_dto).clone()], inputs: Vec::new() };
-
-                    // Find incoming inputs
-                    for conn in &editor_state.connections {
-                        if conn.to == target_block.id {
-                            if let Some(input_block) = editor_state.get_block(conn.from) {
-                                if input_block.block_type.is_input() {
-                                    if let BlockInstance::Input(input_dto) = &input_block.instance {
-                                        source_dto.inputs.push(input_dto.name.clone());
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Find connected outputs for this target
-                    // Actually, the current ConfigTargetDto in the diagram might already have outputs in its `output` field if we edited it there.
-                    // But in the diagram, we have separate Output blocks connected to Target.
-                    // We need to collect them.
-
-                    let mut outputs = Vec::new();
-                    for conn in &editor_state.connections {
-                        if conn.from == target_block.id {
-                            if let Some(output_block) = editor_state.get_block(conn.to) {
-                                if output_block.block_type.is_output() {
-                                    if let BlockInstance::Output(output_dto) = &output_block.instance {
-                                        outputs.push((**output_dto).clone());
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if let Some(target) = source_dto.targets.get_mut(0) {
-                        target.output = outputs;
-                    }
-
-                    gen_sources.push(source_dto);
-                }
-            }
-
-            sources_config.inputs = gen_inputs;
-            sources_config.sources = gen_sources;
+            let sources_config = editor_state_to_sources_config(&base_sources, &editor_state);
 
             let services = services.clone();
             let translate = translate.clone();
@@ -515,11 +570,13 @@ pub fn SourceEditor() -> Html {
         let editor_state_ref = editor_state_ref.clone();
         let canvas_ref = canvas_ref.clone();
         let cursor_grabbing = cursor_grabbing.clone();
+        let emit_sources_change = emit_sources_change.clone();
 
         Callback::from(move |e: DragEvent| {
             e.prevent_default();
             e.stop_propagation();
             cursor_grabbing.set(false);
+            let mut changed = false;
             if let Some(canvas) = canvas_ref.cast::<HtmlElement>() {
                 if let Some(data_transfer) = e.data_transfer() {
                     if let Ok(data) = data_transfer.get_data("text/plain") {
@@ -545,9 +602,13 @@ pub fn SourceEditor() -> Html {
                                 instance: create_instance(block_type),
                             });
                             editor_state.next_id += 1;
+                            changed = true;
                         }
                     }
                 }
+            }
+            if changed {
+                emit_sources_change.emit(());
             }
         })
     };
@@ -591,7 +652,9 @@ pub fn SourceEditor() -> Html {
     let handle_connection_drop = {
         let editor_state_ref = editor_state_ref.clone();
         let force_update = force_update.clone();
+        let emit_sources_change = emit_sources_change.clone();
         Callback::from(move |to_id: BlockId| {
+            let mut changed = false;
             let pending_connection = editor_state_ref.borrow().pending_connection;
             if let Some(from_id) = pending_connection {
                 if from_id != to_id {
@@ -610,6 +673,7 @@ pub fn SourceEditor() -> Html {
                         };
                         if let Some(con) = connection {
                             editor_state_ref.borrow_mut().connections.push(con);
+                            changed = true;
                         }
                     }
                 }
@@ -617,6 +681,9 @@ pub fn SourceEditor() -> Html {
             {
                 editor_state_ref.borrow_mut().clear_pending();
                 force_update.set(*force_update + 1);
+            }
+            if changed {
+                emit_sources_change.emit(());
             }
         })
     };
@@ -1047,10 +1114,13 @@ pub fn SourceEditor() -> Html {
     let handle_delete_block = {
         let editor_state_ref = editor_state_ref.clone();
         let force_update = force_update.clone();
+        let emit_sources_change = emit_sources_change.clone();
         Callback::from(move |block_id: BlockId| {
             let mut editor_state = editor_state_ref.borrow_mut();
+            let before_blocks = editor_state.blocks.len();
             editor_state.blocks.retain(|b| b.id != block_id);
             editor_state.connections.retain(|c| c.from != block_id && c.to != block_id);
+            let changed = before_blocks != editor_state.blocks.len();
 
             for block in editor_state.blocks.iter_mut() {
                 if block.id >= block_id {
@@ -1072,15 +1142,28 @@ pub fn SourceEditor() -> Html {
             editor_state.next_id = max_id + 1;
 
             editor_state.selection.with_cleared_blocks(block_id);
+            drop(editor_state);
             force_update.set(*force_update + 1);
+            if changed {
+                emit_sources_change.emit(());
+            }
         })
     };
 
     let handle_delete_connection = {
         let editor_state_ref = editor_state_ref.clone();
+        let force_update = force_update.clone();
+        let emit_sources_change = emit_sources_change.clone();
         Callback::from(move |(from, to): (BlockId, BlockId)| {
-            editor_state_ref.borrow_mut().connections.retain(|c| !(c.from == from && c.to == to));
+            let mut editor_state = editor_state_ref.borrow_mut();
+            let before_connections = editor_state.connections.len();
+            editor_state.connections.retain(|c| !(c.from == from && c.to == to));
+            let changed = before_connections != editor_state.connections.len();
+            drop(editor_state);
             force_update.set(*force_update + 1);
+            if changed {
+                emit_sources_change.emit(());
+            }
         })
     };
 
@@ -1102,10 +1185,12 @@ pub fn SourceEditor() -> Html {
 
     let form_changed = {
         let editor_state_ref = editor_state_ref.clone();
+        let emit_sources_change = emit_sources_change.clone();
         Callback::<(BlockId, BlockInstance)>::from(move |(block_id, instance): (BlockId, BlockInstance)| {
             if let Some(block) = editor_state_ref.borrow_mut().get_block_mut(block_id) {
                 block.instance = instance;
             }
+            emit_sources_change.emit(());
         })
     };
 
@@ -1162,11 +1247,19 @@ pub fn SourceEditor() -> Html {
                 <h1>{ translate.t(LABEL_SOURCE_EDITOR) } </h1>
                 <div class="tp__config-view__header-tools">
                 </div>
-               <TextButton name="sources_save"
-                    class={ "secondary" }
-                    icon={ "Save" }
-                    title={ translate.t(LABEL_SAVE) }
-                    onclick={handle_confirm_save.clone()}></TextButton>
+                {
+                    if props.show_save_button {
+                        html! {
+                            <TextButton name="sources_save"
+                                class={ "secondary" }
+                                icon={ "Save" }
+                                title={ translate.t(LABEL_SAVE) }
+                                onclick={handle_confirm_save.clone()}></TextButton>
+                        }
+                    } else {
+                        html! {}
+                    }
+                }
             </div>
         <div class="tp__source-editor__content">
             <SourceEditorSidebar

@@ -198,7 +198,7 @@ pub fn WebUiConfigView() -> Html {
         <div class="tp__webui-config-view tp__config-view-page">
             <div class="tp__config-view-page__title">{translate.t(LABEL_WEB_UI_CONFIG)}</div>
             {
-             html_if!(*config_view_ctx.edit_mode, {
+             html_if!(*config_view_ctx.edit_mode && config_view_ctx.show_restart_notice, {
                   <div class="tp__webui-config-view__info tp__config-view-page__info">
                     <AppIcon name="Warn"/> <span class="info">{translate.t("INFO.RESTART_TO_APPLY_CHANGES")}</span>
                   </div>

@@ -43,3 +43,56 @@
     font-size: 1.1rem;
   }
 }
+
+.tp__field-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.35rem;
+
+  label {
+    padding-left: 2px;
+    font-weight: bold;
+    white-space: nowrap;
+    vertical-align: middle;
+    color: var(--text-color);
+    font-size: 1.1rem;
+    flex: 1;
+  }
+
+  &__help {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.5rem;
+    height: 1.5rem;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: var(--modest-text-color);
+    cursor: pointer;
+    border-radius: 50%;
+  }
+
+  &__help:hover {
+    background: var(--menu-background-active-color);
+    color: var(--text-color);
+  }
+}
+
+.tp__field-explanation-dialog {
+  display: flex;
+  flex-flow: column;
+  gap: var(--gap-default);
+  min-width: min(32rem, 88vw);
+
+  h2 {
+    margin: 0;
+  }
+
+  p {
+    margin: 0;
+    white-space: pre-wrap;
+    color: var(--modest-text-color);
+  }
+}

@@ -864,12 +864,11 @@ for PLATFORM in "${!ARCHITECTURES[@]}"; do
       die "Expected binary not found: ${BIN_PATH}"
     fi
 
-    # Create staging directory and copy binaries and config files
+    # Create staging directory and copy binaries plus runtime assets
     STAGING_DIR="${TARGET_DIR}/${DIR}"
     rm -rf "${STAGING_DIR}"
     mkdir -p "${STAGING_DIR}"
     cp "${BIN_PATH}" "${STAGING_DIR}/"
-    cp "${WORKING_DIR}/config/"*.yml "${STAGING_DIR}/"
     cp -rf "${FRONTEND_BUILD_DIR}" "${STAGING_DIR}/web"
     cp -rf "${RESOURCES_DIR}"/*.ts "${STAGING_DIR}/"
 

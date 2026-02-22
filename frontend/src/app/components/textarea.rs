@@ -1,4 +1,4 @@
-use crate::app::components::CollapsePanel;
+use crate::app::components::{CollapsePanel, FieldLabel};
 use web_sys::{HtmlTextAreaElement, InputEvent, KeyboardEvent};
 use yew::{function_component, html, use_effect_with, Callback, Html, NodeRef, Properties, TargetCast};
 
@@ -6,6 +6,8 @@ use yew::{function_component, html, use_effect_with, Callback, Html, NodeRef, Pr
 pub struct TextAreaProps {
     #[prop_or_default]
     pub name: String,
+    #[prop_or_default]
+    pub field_id: Option<String>,
     #[prop_or_default]
     pub label: Option<String>,
     #[prop_or_default]
@@ -75,7 +77,16 @@ pub fn TextArea(props: &TextAreaProps) -> Html {
         <div class="tp__input">
             { if props.label.is_some() {
                    html! {
-                       <label>{props.label.clone().unwrap_or_default()}</label>
+                       <FieldLabel
+                           label={props.label.clone().unwrap_or_default()}
+                           field_id={props.field_id.clone().unwrap_or_else(|| {
+                               if props.name.trim().is_empty() {
+                                   props.label.clone().unwrap_or_default()
+                               } else {
+                                   props.name.clone()
+                               }
+                           })}
+                       />
                    }
                 } else { html!{} }
             }

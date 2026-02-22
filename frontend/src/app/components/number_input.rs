@@ -1,3 +1,4 @@
+use crate::app::components::FieldLabel;
 use shared::utils::{format_float_localized, parse_localized_float};
 use web_sys::{HtmlInputElement, KeyboardEvent};
 use yew::{prelude::*, TargetCast};
@@ -6,6 +7,8 @@ use yew::{prelude::*, TargetCast};
 pub struct NumberInputProps {
     #[prop_or_default]
     pub name: String,
+    #[prop_or_default]
+    pub field_id: Option<String>,
     #[prop_or_default]
     pub label: Option<String>,
     #[prop_or_default]
@@ -94,7 +97,18 @@ pub fn NumberInput(props: &NumberInputProps) -> Html {
     html! {
         <div class="tp__input">
             { if let Some(label) = &props.label {
-                html! { <label>{ label }</label> }
+                html! {
+                    <FieldLabel
+                        label={label.clone()}
+                        field_id={props.field_id.clone().unwrap_or_else(|| {
+                            if props.name.trim().is_empty() {
+                                label.clone()
+                            } else {
+                                props.name.clone()
+                            }
+                        })}
+                    />
+                }
             } else { html!{} } }
             <div class="tp__input-wrapper">
                 <input
