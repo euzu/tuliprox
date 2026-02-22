@@ -282,6 +282,9 @@ impl ConfigInput {
     }
 
     pub fn prepare(&mut self, provider_configs: &[Arc<ConfigProvider>]) -> Result<Option<PathBuf>, TuliproxError> {
+        // Defensive fallback: From<&ConfigInputDto> for ConfigInput sets options, but ConfigInput can
+        // still be built via Default::default(), batch/internal/test paths, so prepare() normalizes
+        // missing options with ConfigInputOptions::defaults().
         if self.options.is_none() {
             self.options = Some(ConfigInputOptions::defaults().clone());
         }
