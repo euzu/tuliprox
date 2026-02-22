@@ -511,8 +511,7 @@ impl From<&ConfigInputDto> for ConfigInput {
         let options = dto
             .options
             .as_ref()
-            .map(ConfigInputOptions::from)
-            .unwrap_or_else(|| ConfigInputOptions::defaults().clone());
+            .map_or_else(|| ConfigInputOptions::defaults().clone(), ConfigInputOptions::from);
 
         Self {
             id: dto.id,
