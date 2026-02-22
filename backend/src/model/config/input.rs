@@ -242,32 +242,26 @@ pub struct ConfigInput {
 impl ConfigInput {
     #[inline]
     pub fn has_flag(&self, flag: ConfigInputFlags) -> bool {
-        self.options
-            .as_ref()
-            .unwrap_or(ConfigInputOptions::defaults())
-            .has_flag(flag)
+        self.has_flag_or(flag, false)
     }
 
     #[inline]
-    /// Returns `default` when `self.options` is `None`; unlike `has_flag`, which uses
-    /// `ConfigInputOptions::defaults()`. For `ConfigInput::default()` without `prepare()`,
-    /// prefer this `_or` variant when an explicit fallback is required.
+    /// Returns `default` when `self.options` is `None`; unlike `has_flag`, which returns
+    /// `false` for missing options. For `ConfigInput::default()` without `prepare()`, use
+    /// this `_or` variant when an explicit fallback is required.
     pub fn has_flag_or(&self, flag: ConfigInputFlags, default: bool) -> bool {
         self.options.as_ref().map_or(default, |o| o.has_flag(flag))
     }
 
     #[inline]
     pub fn has_any_flags(&self, flags: ConfigInputFlagsSet) -> bool {
-        self.options
-            .as_ref()
-            .unwrap_or(ConfigInputOptions::defaults())
-            .has_any_flags(flags)
+        self.has_any_flags_or(flags, false)
     }
 
     #[inline]
-    /// Returns `default` when `self.options` is `None`; unlike `has_any_flags`, which uses
-    /// `ConfigInputOptions::defaults()`. For `ConfigInput::default()` without `prepare()`,
-    /// prefer this `_or` variant when an explicit fallback is required.
+    /// Returns `default` when `self.options` is `None`; unlike `has_any_flags`, which returns
+    /// `false` for missing options. For `ConfigInput::default()` without `prepare()`, use
+    /// this `_or` variant when an explicit fallback is required.
     pub fn has_any_flags_or(&self, flags: ConfigInputFlagsSet, default: bool) -> bool {
         self.options.as_ref().map_or(default, |o| o.has_any_flags(flags))
     }
