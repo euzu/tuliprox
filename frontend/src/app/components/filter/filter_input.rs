@@ -68,8 +68,11 @@ pub fn FilterInput(props: &FilterInputProps) -> Html {
         let parsed_filter = parsed_filter_state.clone();
         let templates = templates_state.clone();
         use_effect_with((*filter_state).clone(), move |flt| {
-            let parsed =
-                if let Some(new_fltr) = flt.as_ref() { get_filter(new_fltr, (*templates).as_ref()).ok() } else { None };
+            let parsed = if let Some(new_fltr) = flt.as_ref() {
+                get_filter(new_fltr, (*templates).as_deref()).ok()
+            } else {
+                None
+            };
             parsed_filter.set(parsed);
         });
     }

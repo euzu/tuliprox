@@ -169,7 +169,7 @@ pub async fn telegram_send_message(
                         continue;
                     }
 
-                    if !retriable_status {
+                    if !retriable_status || attempt == MAX_RETRIES_PER_CHUNK {
                         error!(
                             "Message chunk {}/{} wasn't sent to {chat_id} telegram api because of: {}",
                             i + 1,
@@ -261,8 +261,13 @@ fn chunk_html(text: &str, limit: usize) -> Vec<String> {
     let mut last_pos = 0;
 
     for cap in CONSTANTS.re_html_tag.captures_iter(text) {
-        let m = cap.get(0).unwrap();
-        let tag_name = cap.get(1).unwrap().as_str().to_lowercase();
+        let Some(m) = cap.get(0) else {
+            continue;
+        };
+        let Some(tag_name_match) = cap.get(1) else {
+            continue;
+        };
+        let tag_name = tag_name_match.as_str().to_lowercase();
         let full_tag = m.as_str();
         let start = m.start();
         let end = m.end();

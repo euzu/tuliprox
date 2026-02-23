@@ -216,7 +216,7 @@ pub fn ConfigView() -> Html {
                 if let Err(err) = app_config.sources.prepare(
                     false,
                     app_config.config.get_hdhr_device_overview().as_ref(),
-                    app_config.templates.as_ref().map(|defs| &defs.templates),
+                    app_config.templates.as_ref().map(|defs| defs.templates.as_slice()),
                 ) {
                     services.toastr.error(err.to_string());
                     return;
@@ -293,8 +293,10 @@ pub fn ConfigView() -> Html {
             }
 
             if let Some(sources) = modified_sources.as_mut() {
-                let global_templates =
-                    config_ctx.config.as_ref().and_then(|cfg| cfg.templates.as_ref().map(|defs| &defs.templates));
+                let global_templates = config_ctx
+                    .config
+                    .as_ref()
+                    .and_then(|cfg| cfg.templates.as_ref().map(|defs| defs.templates.as_slice()));
                 if let Err(err) = sources.prepare(false, None, global_templates) {
                     services.toastr.error(err.to_string());
                     return;

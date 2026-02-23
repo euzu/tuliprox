@@ -67,7 +67,7 @@ impl Default for XtreamTargetOutputDto {
 }
 
 impl XtreamTargetOutputDto {
-    pub fn prepare(&mut self, templates: Option<&Vec<PatternTemplate>>) -> Result<(), TuliproxError> {
+    pub fn prepare(&mut self, templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
         if let Some(raw_filter) = &self.filter {
             self.t_filter = Some(get_filter(raw_filter, templates)?);
         }
@@ -102,7 +102,7 @@ pub struct M3uTargetOutputDto {
 }
 
 impl M3uTargetOutputDto {
-    pub fn prepare(&mut self, templates: Option<&Vec<PatternTemplate>>) -> Result<(), TuliproxError> {
+    pub fn prepare(&mut self, templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
         if let Some(raw_filter) = &self.filter {
             self.t_filter = Some(get_filter(raw_filter, templates)?);
         }
@@ -146,7 +146,7 @@ pub struct StrmTargetOutputDto {
 }
 
 impl StrmTargetOutputDto {
-    pub fn prepare(&mut self, templates: Option<&Vec<PatternTemplate>>) -> Result<(), TuliproxError> {
+    pub fn prepare(&mut self, templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
         if let Some(raw_filter) = &self.filter {
             self.t_filter = Some(get_filter(raw_filter, templates)?);
         }
@@ -177,7 +177,7 @@ pub enum TargetOutputDto {
 }
 
 impl TargetOutputDto {
-    pub fn prepare(&mut self, templates: Option<&Vec<PatternTemplate>>) -> Result<(), TuliproxError> {
+    pub fn prepare(&mut self, templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
         match self {
             TargetOutputDto::Xtream(output) => output.prepare(templates),
             TargetOutputDto::M3u(output) => output.prepare(templates),
@@ -245,7 +245,7 @@ impl ConfigTargetDto {
     pub fn prepare(
         &mut self,
         id: u16,
-        templates: Option<&Vec<PatternTemplate>>,
+        templates: Option<&[PatternTemplate]>,
         hdhr_config: Option<&HdHomeRunDeviceOverview>,
     ) -> Result<(), TuliproxError> {
         self.id = id;

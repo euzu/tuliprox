@@ -792,7 +792,7 @@ async fn setup_complete_inner(
     if let Err(err) = req.app_config.sources.prepare(
         false,
         req.app_config.config.get_hdhr_device_overview().as_ref(),
-        prepared_templates.as_ref(),
+        prepared_templates.as_deref(),
     ) {
         return (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": err.to_string() }))).into_response();
     }

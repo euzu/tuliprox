@@ -649,11 +649,9 @@ pub async fn update_series_metadata(
         }
     }
 
-    let Some(mut properties) = props else {
-        return Err(shared::error::info_err!(
-            "No Series properties available after fallback creation for {display_id}"
-        ));
-    };
+    let mut properties = props.ok_or_else(|| {
+        shared::error::info_err!("No Series properties available after fallback creation for {display_id}")
+    })?;
 
     let resolve_tmdb_enabled = input.has_flag(ConfigInputFlags::ResolveTmdb);
 

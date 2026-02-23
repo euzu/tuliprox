@@ -54,7 +54,7 @@ pub fn FilterEditor(props: &FilterEditorProps) -> Html {
         let valid_filter = valid_filter_state.clone();
         use_effect_with(filter.clone(), move |flt| {
             let parsed = if let Some(new_fltr) = flt.as_ref() {
-                match get_filter(new_fltr, (*templates).as_ref()) {
+                match get_filter(new_fltr, (*templates).as_deref()) {
                     Ok(fltr) => {
                         valid_filter.set(true);
                         Some(fltr)

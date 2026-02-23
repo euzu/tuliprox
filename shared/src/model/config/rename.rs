@@ -21,7 +21,18 @@ impl PartialEq for ConfigRenameDto {
 }
 
 impl ConfigRenameDto {
-    pub fn prepare(&mut self, templates: Option<&Vec<PatternTemplate>>) -> Result<(), TuliproxError> {
+    pub fn prepare(&mut self, templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
+        if templates.is_none()
+            && self.pattern.len() >= 2
+            && self.pattern.starts_with('!')
+            && self.pattern.ends_with('!')
+        {
+            log::warn!(
+                "Rename pattern '{}' for field {:?} looks like a template placeholder, but no templates were provided. Treating it as literal regex.",
+                self.pattern,
+                self.field
+            );
+        }
         let resolved_pattern = apply_templates_to_pattern_single(&self.pattern, templates)?;
         if let Err(err) = crate::model::REGEX_CACHE.get_or_compile(&resolved_pattern) {
             return info_err_res!("can't parse regex: {} {err}", &resolved_pattern);
@@ -51,7 +62,7 @@ mod tests {
             t_pattern: None,
         };
 
-        rename.prepare(Some(&templates)).expect("rename prepare should succeed");
+        assert!(rename.prepare(Some(&templates)).is_ok());
 
         assert_eq!(rename.pattern, "!GROUP_PATTERN!");
         assert_eq!(rename.t_pattern.as_deref(), Some("US.*"));
@@ -67,7 +78,7 @@ mod tests {
             t_pattern: None,
         };
 
-        rename.prepare(None).expect("rename prepare without templates should succeed");
+        assert!(rename.prepare(None).is_ok());
 
         assert_eq!(rename.pattern, original_pattern);
         assert_eq!(rename.t_pattern.as_deref(), Some("!GROUP_PATTERN!"));

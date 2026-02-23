@@ -332,7 +332,7 @@ pub fn prepare_sources(app_config: &mut AppConfigDto) -> Result<(), String> {
         .prepare(
             false,
             app_config.config.get_hdhr_device_overview().as_ref(),
-            app_config.templates.as_ref().map(|defs| &defs.templates),
+            app_config.templates.as_ref().map(|defs| defs.templates.as_slice()),
         )
         .map_err(|err| err.to_string())
 }

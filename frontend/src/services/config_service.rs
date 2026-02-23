@@ -154,10 +154,11 @@ impl ConfigService {
 
                 for source in app_config.sources.sources.iter_mut() {
                     for target in source.targets.iter_mut() {
-                        target.t_filter = get_filter(target.filter.as_str(), templates.as_ref()).ok();
+                        let prepared_templates = templates.as_deref();
+                        target.t_filter = get_filter(target.filter.as_str(), prepared_templates).ok();
                         if let Some(sort) = target.sort.as_mut() {
                             for rule in sort.rules.iter_mut() {
-                                rule.t_filter = get_filter(&rule.filter, templates.as_ref())
+                                rule.t_filter = get_filter(&rule.filter, prepared_templates)
                                     .map_err(|e| error!("Failed to parse sort rule filter: {}", e))
                                     .ok();
                             }
@@ -166,21 +167,21 @@ impl ConfigService {
                             match output {
                                 TargetOutputDto::Xtream(o) => {
                                     o.t_filter = o.filter.as_ref().and_then(|flt| {
-                                        get_filter(flt, templates.as_ref())
+                                        get_filter(flt, prepared_templates)
                                             .map_err(|e| error!("Failed to parse Xtream output filter: {}", e))
                                             .ok()
                                     })
                                 }
                                 TargetOutputDto::M3u(o) => {
                                     o.t_filter = o.filter.as_ref().and_then(|flt| {
-                                        get_filter(flt, templates.as_ref())
+                                        get_filter(flt, prepared_templates)
                                             .map_err(|e| error!("Failed to parse M3U output filter: {}", e))
                                             .ok()
                                     })
                                 }
                                 TargetOutputDto::Strm(o) => {
                                     o.t_filter = o.filter.as_ref().and_then(|flt| {
-                                        get_filter(flt, templates.as_ref())
+                                        get_filter(flt, prepared_templates)
                                             .map_err(|e| error!("Failed to parse Strm output filter: {}", e))
                                             .ok()
                                     })
@@ -193,7 +194,7 @@ impl ConfigService {
 
                 if let Some(mappings) = app_config.mappings.as_mut() {
                     for mapping in mappings.mappings.mapping.iter_mut() {
-                        let templates = mapping.templates.as_ref();
+                        let templates = mapping.templates.as_deref();
                         if let Some(mappers) = mapping.mapper.as_mut() {
                             for mapper in mappers.iter_mut() {
                                 mapper.t_filter = get_filter(mapper.filter.as_str(), templates).ok();

@@ -200,7 +200,7 @@ fn map_channel(mut channel: PlaylistItem, mapping: &Mapping) -> (PlaylistItem, V
                                 virtual_items: vec![],
                                 match_as_ascii: mapping.match_as_ascii,
                             };
-                            script.eval(&mut accessor, templates);
+                            script.eval(&mut accessor, templates.map(Vec::as_slice));
                             virtual_items.extend(accessor.virtual_items.into_iter().map(|(_, pli)| pli));
                         }
                     }

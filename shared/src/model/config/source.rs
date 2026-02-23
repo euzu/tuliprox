@@ -48,11 +48,11 @@ impl SourcesConfigDto {
         &mut self,
         include_computed: bool,
         hdhr_config: Option<&HdHomeRunDeviceOverview>,
-        prepared_templates: Option<&Vec<PatternTemplate>>,
+        prepared_templates: Option<&[PatternTemplate]>,
     ) -> Result<(), TuliproxError> {
         let local_prepared_templates =
             if prepared_templates.is_none() { self.prepare_local_templates()? } else { None };
-        let templates_to_use = prepared_templates.or(local_prepared_templates.as_ref());
+        let templates_to_use = prepared_templates.or(local_prepared_templates.as_deref());
         let provider_names = self.prepare_providers()?;
         self.prepare_sources(include_computed, hdhr_config, &provider_names, templates_to_use)?;
         self.check_unique_target_names()?;
@@ -78,7 +78,7 @@ impl SourcesConfigDto {
         include_computed: bool,
         hdhr_config: Option<&HdHomeRunDeviceOverview>,
         provider_names: &HashSet<String>,
-        prepared_templates: Option<&Vec<PatternTemplate>>,
+        prepared_templates: Option<&[PatternTemplate]>,
     ) -> Result<(), TuliproxError> {
         // prepare sources and set id's
         let mut source_index: u16 = 0;

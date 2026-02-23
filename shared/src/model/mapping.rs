@@ -134,7 +134,7 @@ pub enum MapperOperation {
 }
 
 impl MapperOperation {
-    pub fn prepare(&mut self, templates: Option<&Vec<PatternTemplate>>) -> Result<(), TuliproxError> {
+    pub fn prepare(&mut self, templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
         match self {
             MapperOperation::Lowercase { ref field }
             | MapperOperation::Uppercase { ref field }
@@ -185,7 +185,7 @@ impl MapperDto {
     /// # Panics
     ///
     /// Will panic if default `RegEx` gets invalid
-    pub fn prepare(&mut self, templates: Option<&Vec<PatternTemplate>>) -> Result<(), TuliproxError> {
+    pub fn prepare(&mut self, templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
         self.t_filter = Some(get_filter(&self.filter, templates)?);
         let script = if templates.is_some() {
             apply_templates_to_pattern_single(&self.script, templates)?
@@ -212,7 +212,7 @@ pub struct MappingDto {
 }
 
 impl MappingDto {
-    pub fn prepare(&mut self, templates: Option<&Vec<PatternTemplate>>) -> Result<(), TuliproxError> {
+    pub fn prepare(&mut self, templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
         self.templates = templates.map(|t| t.iter().map(PatternTemplate::clone).collect::<Vec<_>>());
         if let Some(mapper_list) = &mut self.mapper {
             for mapper in mapper_list {
@@ -254,7 +254,7 @@ pub struct MappingDefinitionDto {
 }
 
 impl MappingDefinitionDto {
-    pub fn prepare(&mut self, prepared_templates: Option<&Vec<PatternTemplate>>) -> Result<(), TuliproxError> {
+    pub fn prepare(&mut self, prepared_templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
         let local_prepared_templates = if prepared_templates.is_none() {
             self.templates
                 .as_ref()
@@ -266,7 +266,7 @@ impl MappingDefinitionDto {
         } else {
             None
         };
-        let templates_to_use = prepared_templates.or(local_prepared_templates.as_ref());
+        let templates_to_use = prepared_templates.or(local_prepared_templates.as_deref());
 
         for mapping in &mut self.mapping {
             mapping.prepare(templates_to_use)?;
@@ -281,7 +281,7 @@ pub struct MappingsDto {
 }
 
 impl MappingsDto {
-    pub fn prepare(&mut self, prepared_templates: Option<&Vec<PatternTemplate>>) -> Result<(), TuliproxError> {
+    pub fn prepare(&mut self, prepared_templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
         self.mappings.prepare(prepared_templates)
     }
 }

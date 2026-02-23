@@ -37,18 +37,18 @@ impl ConfigFile {
         } else {
             None
         };
-        let (_templates, prepared_templates, _template_files_used) = read_templates(
+        let template_bundle = read_templates(
             paths.template_file_path.as_deref().or(config.template_path.as_deref()),
             true,
-            sources_inline_templates.as_ref(),
-            mapping_inline_templates.as_ref(),
+            sources_inline_templates.as_deref(),
+            mapping_inline_templates.as_deref(),
         )?;
-        Ok(prepared_templates)
+        Ok(template_bundle.prepared)
     }
 
     fn load_mapping_with_templates(
         app_state: &Arc<AppState>,
-        prepared_templates: Option<&Vec<PatternTemplate>>,
+        prepared_templates: Option<&[PatternTemplate]>,
     ) -> Result<(), TuliproxError> {
         let paths = <Arc<ArcSwap<ConfigPaths>> as Access<ConfigPaths>>::load(&app_state.app_config.paths);
         if let Some(mapping_file_path) = paths.mapping_file_path.as_ref() {
@@ -74,7 +74,7 @@ impl ConfigFile {
 
     fn load_mapping(app_state: &Arc<AppState>) -> Result<(), TuliproxError> {
         let prepared_templates = Self::load_prepared_global_templates(app_state)?;
-        Self::load_mapping_with_templates(app_state, prepared_templates.as_ref())
+        Self::load_mapping_with_templates(app_state, prepared_templates.as_deref())
     }
 
     async fn load_api_proxy(app_state: &Arc<AppState>) -> Result<(), TuliproxError> {
@@ -148,7 +148,7 @@ impl ConfigFile {
                 true,
                 true,
                 config.get_hdhr_device_overview().as_ref(),
-                prepared_templates.as_ref(),
+                prepared_templates.as_deref(),
             )?
         };
         prepare_sources_batch(&mut sources_dto, true).await?;
@@ -156,7 +156,7 @@ impl ConfigFile {
         update_app_state_sources(app_state, sources).await?;
         info!("Loaded sources file {sources_file}");
         // mappings are not stored, so we need to reload and apply them if sources change.
-        Self::load_mapping_with_templates(app_state, prepared_templates.as_ref())
+        Self::load_mapping_with_templates(app_state, prepared_templates.as_deref())
     }
 
     async fn reload_source_file(app_state: &Arc<AppState>) -> Result<(), TuliproxError> {

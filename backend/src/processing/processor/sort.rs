@@ -216,9 +216,8 @@ fn reorder_by_indices<T>(items: &mut Vec<T>, indices: &[usize]) {
         if let Some(item) = original[idx].take() {
             items.push(item);
         } else {
-            // Defensive guard: keep remaining items instead of panicking.
             log::error!("Invalid sort permutation: missing index {idx} after validation");
-           // items.extend(original.into_iter().flatten());
+            items.extend(original.into_iter().flatten());
             return;
         }
     }

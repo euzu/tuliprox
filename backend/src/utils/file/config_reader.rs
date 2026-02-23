@@ -22,6 +22,7 @@ use shared::model::{
     MsgKind, PatternTemplate, SourcesConfigDto, TargetUserDto, TemplateDefinitionDto,
 };
 use shared::utils::{CONSTANTS, TEMPLATE_FILE};
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::File;
 use std::io::{self, Read};
@@ -33,11 +34,11 @@ use shared::concat_string;
 use crate::utils::request::{is_uri};
 use url::Url;
 
-type PreparedTemplateBundle = (
-    Option<TemplateDefinitionDto>,
-    Option<Vec<PatternTemplate>>,
-    Option<Vec<String>>,
-);
+pub(crate) struct PreparedTemplateBundle {
+    pub(crate) definition: Option<TemplateDefinitionDto>,
+    pub(crate) prepared: Option<Vec<PatternTemplate>>,
+    pub(crate) files_used: Option<Vec<String>>,
+}
 
 enum EitherReader<L, R> {
     Left(L),
@@ -112,7 +113,7 @@ pub fn read_sources_file_from_path_with_templates(
     resolve_env: bool,
     include_computed: bool,
     hdhr_config: Option<&HdHomeRunDeviceOverview>,
-    prepared_templates: Option<&Vec<shared::model::PatternTemplate>>,
+    prepared_templates: Option<&[shared::model::PatternTemplate]>,
 ) -> Result<SourcesConfigDto, TuliproxError> {
     let mut sources = parse_sources_file_from_path(sources_file, resolve_env)?;
     if resolve_env {
@@ -179,47 +180,130 @@ pub fn read_config_file(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn read_templates(
     template_file_path: Option<&str>,
     resolve_env: bool,
-    sources_inline_templates: Option<&Vec<PatternTemplate>>,
-    mappings_inline_templates: Option<&Vec<PatternTemplate>>,
+    sources_inline_templates: Option<&[PatternTemplate]>,
+    mappings_inline_templates: Option<&[PatternTemplate]>,
 ) -> Result<PreparedTemplateBundle, TuliproxError> {
+    struct TemplateNameUsage {
+        count: usize,
+        sources: HashSet<String>,
+    }
+
+    fn track_template_name(
+        usage: &mut HashMap<String, TemplateNameUsage>,
+        template_name: &str,
+        source: &str,
+    ) {
+        let entry = usage
+            .entry(template_name.to_string())
+            .or_insert_with(|| TemplateNameUsage {
+                count: 0,
+                sources: HashSet::new(),
+            });
+        entry.count = entry.count.saturating_add(1);
+        entry.sources.insert(source.to_string());
+    }
+
     let mut loaded_template_files: Vec<String> = Vec::new();
     let mut merged_templates: Vec<PatternTemplate> = Vec::new();
+    let mut template_name_usage: HashMap<String, TemplateNameUsage> = HashMap::new();
 
     if let Some(path) = template_file_path {
         if let Some((template_paths, definition)) = read_templates_file(path, resolve_env)? {
+            let file_source_label = if template_paths.is_empty() {
+                format!("template file: {path}")
+            } else if template_paths.len() == 1 {
+                format!("template file: {}", template_paths[0].display())
+            } else {
+                format!(
+                    "template files: {}",
+                    template_paths
+                        .iter()
+                        .map(|template_path| template_path.display().to_string())
+                        .collect::<Vec<String>>()
+                        .join(", ")
+                )
+            };
+            for template in &definition.templates {
+                track_template_name(
+                    &mut template_name_usage,
+                    template.name.as_str(),
+                    file_source_label.as_str(),
+                );
+            }
             merged_templates.extend(definition.templates);
             loaded_template_files.extend(template_paths.iter().map(|p| p.display().to_string()));
         }
     }
 
     if let Some(templates) = sources_inline_templates {
+        for template in templates {
+            track_template_name(
+                &mut template_name_usage,
+                template.name.as_str(),
+                "source.yml inline templates",
+            );
+        }
         merged_templates.extend(templates.iter().cloned());
     }
     if let Some(templates) = mappings_inline_templates {
+        for template in templates {
+            track_template_name(
+                &mut template_name_usage,
+                template.name.as_str(),
+                "mapping.yml inline templates",
+            );
+        }
         merged_templates.extend(templates.iter().cloned());
     }
 
+    let mut duplicate_templates = template_name_usage
+        .iter()
+        .filter_map(|(name, usage)| {
+            if usage.count > 1 {
+                let mut sources = usage.sources.iter().cloned().collect::<Vec<String>>();
+                sources.sort();
+                Some(format!("{name} [{}]", sources.join(", ")))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<String>>();
+    if !duplicate_templates.is_empty() {
+        duplicate_templates.sort();
+        return info_err_res!(
+            "Duplicate template names found across merged template sources: {}",
+            duplicate_templates.join("; ")
+        );
+    }
+
+    let files_used = if loaded_template_files.is_empty() {
+        None
+    } else {
+        Some(loaded_template_files)
+    };
+
     if merged_templates.is_empty() {
-        return Ok((None, None, None));
+        return Ok(PreparedTemplateBundle {
+            definition: None,
+            prepared: None,
+            files_used,
+        });
     }
 
     let mut prepared_templates = merged_templates.clone();
     prepare_templates(&mut prepared_templates)?;
 
-    Ok((
-        Some(TemplateDefinitionDto {
+    Ok(PreparedTemplateBundle {
+        definition: Some(TemplateDefinitionDto {
             templates: merged_templates,
         }),
-        Some(prepared_templates),
-        if loaded_template_files.is_empty() {
-            None
-        } else {
-            Some(loaded_template_files)
-        },
-    ))
+        prepared: Some(prepared_templates),
+        files_used,
+    })
 }
 
 pub fn read_app_config_dto(
@@ -234,32 +318,32 @@ pub fn read_app_config_dto(
     let config = read_config_file(config_file, resolve_env, include_computed)?;
     let mut sources = parse_sources_file_from_path(&PathBuf::from(sources_file), resolve_env)?;
     let mut mappings = if let Some(mappings_file) = paths.mapping_file_path.as_ref() {
-        read_mappings_file_unprepared(mappings_file, resolve_env)
-            .unwrap_or(None)
-            .map(|(_, mapping)| mapping)
+        read_mappings_file_unprepared(mappings_file, resolve_env)?.map(|(_, mapping)| mapping)
     } else {
         None
     };
 
-    let (templates, prepared_templates, _template_files_used) = read_templates(
+    let template_bundle = read_templates(
         paths.template_file_path.as_deref().or(config.template_path.as_deref()),
         resolve_env,
-        sources.templates.as_ref(),
+        sources.templates.as_deref(),
         mappings
             .as_ref()
-            .and_then(|mapping| mapping.mappings.templates.as_ref()),
+            .and_then(|mapping| mapping.mappings.templates.as_deref()),
     )?;
+    let templates = template_bundle.definition;
+    let prepared_templates = template_bundle.prepared;
 
     if resolve_env {
         sources.prepare(
             include_computed,
             config.get_hdhr_device_overview().as_ref(),
-            prepared_templates.as_ref(),
+            prepared_templates.as_deref(),
         )?;
         if let Some(mapping) = mappings.as_mut() {
             mapping
                 .mappings
-                .prepare(prepared_templates.as_ref())?;
+                .prepare(prepared_templates.as_deref())?;
         }
     }
 
@@ -286,7 +370,7 @@ fn apply_prepared_mappings(
     mappings_file: &str,
     mapping_paths: Option<&Vec<PathBuf>>,
     mapping: &mut shared::model::MappingsDto,
-    prepared_templates: Option<&Vec<PatternTemplate>>,
+    prepared_templates: Option<&[PatternTemplate]>,
 ) {
     match mapping.mappings.prepare(prepared_templates) {
         Ok(()) => {
@@ -442,20 +526,22 @@ pub async fn read_initial_app_config(
         (None, None)
     };
 
-    let (_templates, prepared_templates, template_files_used) = read_templates(
+    let template_bundle = read_templates(
         paths.template_file_path.as_deref().or(config_dto.template_path.as_deref()),
         resolve_env,
-        sources_dto.templates.as_ref(),
+        sources_dto.templates.as_deref(),
         mappings_dto
             .as_ref()
-            .and_then(|mapping| mapping.mappings.templates.as_ref()),
+            .and_then(|mapping| mapping.mappings.templates.as_deref()),
     )?;
+    let prepared_templates = template_bundle.prepared;
+    let template_files_used = template_bundle.files_used;
 
     if resolve_env {
         sources_dto.prepare(
             include_computed,
             config_dto.get_hdhr_device_overview().as_ref(),
-            prepared_templates.as_ref(),
+            prepared_templates.as_deref(),
         )?;
     }
     sources_dto.templates = None;
@@ -488,7 +574,7 @@ pub async fn read_initial_app_config(
                 mappings_file.as_str(),
                 mapping_paths.as_ref(),
                 mapping,
-                prepared_templates.as_ref(),
+                prepared_templates.as_deref(),
             );
         } else {
             info!("Mapping file: not used");
@@ -701,29 +787,28 @@ fn build_templates_to_persist(
     };
 
     let source_inline_templates = if new_dto.templates.is_some() {
-        new_dto.templates.as_ref()
+        new_dto.templates.as_deref()
     } else {
-        existing_source_inline_templates.as_ref()
+        existing_source_inline_templates.as_deref()
     };
 
     let template_file_path = paths.template_file_path.as_deref().or(config.template_path.as_deref());
-    let template_file_exists = if let Some(path) = template_file_path {
-        read_templates_file(path, true)?.is_some()
-    } else {
-        false
-    };
-
-    let (_templates, prepared_templates, _template_files_used) = read_templates(
+    let template_bundle = read_templates(
         template_file_path,
         true,
         source_inline_templates,
-        mapping_inline_templates.as_ref(),
+        mapping_inline_templates.as_deref(),
     )?;
+    let prepared_templates = template_bundle.prepared;
+    let template_file_exists = template_bundle
+        .files_used
+        .as_ref()
+        .is_some_and(|used_files| !used_files.is_empty());
 
     new_dto.prepare(
         true,
         config.get_hdhr_device_overview().as_ref(),
-        prepared_templates.as_ref(),
+        prepared_templates.as_deref(),
     )?;
 
     if let Some(templates) =
@@ -893,9 +978,12 @@ async fn persist_single_template(prefix: &str, kind: Option<&MsgKind>, template:
 
     // Treat existing file paths as file URLs
     if tokio::fs::metadata(template).await.is_ok() {
-        return Url::from_file_path(template)
-            .map(|u| u.to_string())
-            .map_err(|()| info_err!("Failed to convert path to file URL: {template}"));
+        if let Ok(canonical_path) = tokio::fs::canonicalize(template).await {
+            if let Ok(url) = Url::from_file_path(&canonical_path) {
+                return Ok(url.to_string());
+            }
+        }
+        return Ok(template.to_string());
     }
 
     // It's a raw string, persist it
@@ -925,9 +1013,14 @@ mod tests {
     use crate::utils::resolve_env_var;
 
     #[test]
+    #[allow(clippy::manual_unwrap_or_default)]
     fn test_resolve() {
         // Use PATH which exists on both Windows and Unix
         let resolved = resolve_env_var("${env:PATH}");
-        assert_eq!(resolved, std::env::var("PATH").unwrap());
+        let expected = match std::env::var("PATH") {
+            Ok(value) => value,
+            Err(_) => String::new(),
+        };
+        assert_eq!(resolved, expected);
     }
 }

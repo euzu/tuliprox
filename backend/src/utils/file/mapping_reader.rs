@@ -136,7 +136,7 @@ pub fn read_mappings_file(mappings_file: &str, resolve_env: bool) -> Result<Opti
 pub fn read_mappings_file_with_templates(
     mappings_file: &str,
     resolve_env: bool,
-    prepared_templates: Option<&Vec<PatternTemplate>>,
+    prepared_templates: Option<&[PatternTemplate]>,
 ) -> Result<Option<(Vec<PathBuf>, MappingsDto)>, TuliproxError> {
     let maybe_result = read_mappings_file_unprepared(mappings_file, resolve_env)?;
 
