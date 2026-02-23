@@ -21,7 +21,7 @@ use shared::model::{
     TokenResponse, WebAuthConfigDto, WebUiConfigDto, TOKEN_NO_AUTH,
 };
 use shared::utils::{default_kick_secs, hex_encode, DEFAULT_PORT, DEFAULT_WORKING_DIR, USER_FILE};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
 use std::path::{Component, Path as FsPath, PathBuf};
@@ -31,6 +31,7 @@ use tokio::sync::{oneshot, Mutex, RwLock};
 use tower_http::services::ServeDir;
 
 const DEFAULT_SETUP_HOST: &str = "0.0.0.0";
+const SETUP_REDACTED_SECRET_VALUE: &str = "__TULIPROX_SETUP_REDACTED__";
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SetupWebUserCredentialDto {
@@ -301,6 +302,125 @@ fn api_proxy_or_default(draft: &AppConfigDto) -> ApiProxyConfigDto {
     })
 }
 
+fn is_setup_redacted_value(value: &str) -> bool { value == SETUP_REDACTED_SECRET_VALUE }
+
+fn redact_non_empty_secret(value: &mut String) {
+    if !value.trim().is_empty() {
+        *value = SETUP_REDACTED_SECRET_VALUE.to_string();
+    }
+}
+
+fn redact_optional_secret(value: &mut Option<String>) {
+    if value.as_ref().is_some_and(|entry| !entry.trim().is_empty()) {
+        *value = Some(SETUP_REDACTED_SECRET_VALUE.to_string());
+    }
+}
+
+fn redact_api_proxy_user_credentials(api_proxy: &mut ApiProxyConfigDto) {
+    for target in &mut api_proxy.user {
+        for user in &mut target.credentials {
+            redact_non_empty_secret(&mut user.password);
+            redact_optional_secret(&mut user.token);
+        }
+    }
+}
+
+fn redact_app_config_for_setup(mut app_config: AppConfigDto) -> AppConfigDto {
+    if let Some(web_ui) = app_config.config.web_ui.as_mut() {
+        if let Some(auth) = web_ui.auth.as_mut() {
+            redact_non_empty_secret(&mut auth.secret);
+        }
+    }
+    if let Some(api_proxy) = app_config.api_proxy.as_mut() {
+        redact_api_proxy_user_credentials(api_proxy);
+    }
+    app_config
+}
+
+fn redact_api_proxy_for_setup(mut api_proxy: ApiProxyConfigDto) -> ApiProxyConfigDto {
+    redact_api_proxy_user_credentials(&mut api_proxy);
+    api_proxy
+}
+
+fn restore_redacted_web_auth_secret(app_config: &mut AppConfigDto, draft: &AppConfigDto) {
+    let Some(web_ui) = app_config.config.web_ui.as_mut() else {
+        return;
+    };
+    let Some(auth) = web_ui.auth.as_mut() else {
+        return;
+    };
+    if !is_setup_redacted_value(&auth.secret) {
+        return;
+    }
+
+    let draft_secret = draft
+        .config
+        .web_ui
+        .as_ref()
+        .and_then(|draft_web_ui| draft_web_ui.auth.as_ref())
+        .map(|draft_auth| draft_auth.secret.trim().to_string())
+        .filter(|secret| !secret.is_empty());
+    if let Some(draft_secret) = draft_secret {
+        auth.secret = draft_secret;
+    }
+}
+
+fn restore_redacted_api_proxy_credentials(api_proxy: &mut ApiProxyConfigDto, draft_api_proxy: Option<&ApiProxyConfigDto>) {
+    let mut credentials_by_username: HashMap<String, (String, Option<String>)> = HashMap::new();
+    if let Some(draft) = draft_api_proxy {
+        for target in &draft.user {
+            for user in &target.credentials {
+                credentials_by_username
+                    .insert(user.username.clone(), (user.password.clone(), user.token.clone()));
+            }
+        }
+    }
+
+    for target in &mut api_proxy.user {
+        for user in &mut target.credentials {
+            let draft_credentials = credentials_by_username.get(&user.username);
+            if is_setup_redacted_value(&user.password) {
+                if let Some((password, _)) = draft_credentials {
+                    user.password = password.clone();
+                }
+            }
+            if user.token.as_deref().is_some_and(is_setup_redacted_value) {
+                if let Some((_, token)) = draft_credentials {
+                    user.token = token.clone();
+                }
+            }
+        }
+    }
+}
+
+fn restore_redacted_setup_values(app_config: &mut AppConfigDto, draft: &AppConfigDto) {
+    restore_redacted_web_auth_secret(app_config, draft);
+    if let Some(api_proxy) = app_config.api_proxy.as_mut() {
+        restore_redacted_api_proxy_credentials(api_proxy, draft.api_proxy.as_ref());
+    }
+}
+
+fn has_unresolved_redacted_setup_values(app_config: &AppConfigDto) -> bool {
+    if app_config
+        .config
+        .web_ui
+        .as_ref()
+        .and_then(|web_ui| web_ui.auth.as_ref())
+        .is_some_and(|auth| is_setup_redacted_value(&auth.secret))
+    {
+        return true;
+    }
+
+    app_config.api_proxy.as_ref().is_some_and(|api_proxy| {
+        api_proxy.user.iter().any(|target| {
+            target.credentials.iter().any(|user| {
+                is_setup_redacted_value(&user.password)
+                    || user.token.as_deref().is_some_and(is_setup_redacted_value)
+            })
+        })
+    })
+}
+
 async fn setup_healthcheck(State(state): State<Arc<SetupModeState>>) -> impl IntoResponse + Send {
     axum::Json(json!({
         "status": "setup",
@@ -321,12 +441,12 @@ async fn setup_token_refresh() -> impl IntoResponse + Send {
 
 async fn setup_get_config(State(state): State<Arc<SetupModeState>>) -> impl IntoResponse + Send {
     let draft = state.draft.read().await.clone();
-    axum::Json(draft).into_response()
+    axum::Json(redact_app_config_for_setup(draft)).into_response()
 }
 
 async fn setup_get_api_proxy(State(state): State<Arc<SetupModeState>>) -> impl IntoResponse + Send {
     let draft = state.draft.read().await.clone();
-    axum::Json(api_proxy_or_default(&draft)).into_response()
+    axum::Json(redact_api_proxy_for_setup(api_proxy_or_default(&draft))).into_response()
 }
 
 async fn setup_config_json(State(state): State<Arc<SetupModeState>>) -> impl IntoResponse + Send {
@@ -554,6 +674,18 @@ async fn setup_complete_inner(
     state: Arc<SetupModeState>,
     mut req: SetupCompleteRequestDto,
 ) -> axum::response::Response {
+    let draft_snapshot = state.draft.read().await.clone();
+    restore_redacted_setup_values(&mut req.app_config, &draft_snapshot);
+    if has_unresolved_redacted_setup_values(&req.app_config) {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({
+                "error": "One or more redacted secret fields could not be restored. Please re-enter secret values before saving setup."
+            })),
+        )
+            .into_response();
+    }
+
     ensure_setup_defaults(&mut req.app_config.config);
 
     if let Err(err) = req.app_config.config.prepare(false) {
@@ -807,4 +939,93 @@ pub async fn start_setup_server(paths: &ConfigPaths, missing_files: &[String]) -
         .await
         .map_err(|err| info_err!("Setup server error: {err}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        has_unresolved_redacted_setup_values, redact_app_config_for_setup, restore_redacted_setup_values,
+        SETUP_REDACTED_SECRET_VALUE,
+    };
+    use shared::model::{ApiProxyConfigDto, AppConfigDto, TargetUserDto, WebAuthConfigDto, WebUiConfigDto};
+
+    fn sample_app_config() -> AppConfigDto {
+        AppConfigDto {
+            config: shared::model::ConfigDto {
+                web_ui: Some(WebUiConfigDto {
+                    auth: Some(WebAuthConfigDto {
+                        issuer: "tuliprox".to_string(),
+                        secret: "very-secret-value".to_string(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            api_proxy: Some(ApiProxyConfigDto {
+                user: vec![TargetUserDto {
+                    target: "target-a".to_string(),
+                    credentials: vec![shared::model::ProxyUserCredentialsDto {
+                        username: "alice".to_string(),
+                        password: "alice-password".to_string(),
+                        token: Some("alice-token".to_string()),
+                        ..Default::default()
+                    }],
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn setup_redaction_masks_web_auth_and_api_proxy_credentials() {
+        let redacted = redact_app_config_for_setup(sample_app_config());
+
+        let auth_secret = redacted
+            .config
+            .web_ui
+            .as_ref()
+            .and_then(|web_ui| web_ui.auth.as_ref())
+            .map(|auth| auth.secret.as_str());
+        assert_eq!(auth_secret, Some(SETUP_REDACTED_SECRET_VALUE));
+
+        let creds = &redacted.api_proxy.expect("api_proxy should be present").user[0].credentials[0];
+        assert_eq!(creds.password, SETUP_REDACTED_SECRET_VALUE);
+        assert_eq!(creds.token.as_deref(), Some(SETUP_REDACTED_SECRET_VALUE));
+    }
+
+    #[test]
+    fn setup_restore_replaces_redacted_values_from_existing_draft() {
+        let draft = sample_app_config();
+        let mut submitted = redact_app_config_for_setup(draft.clone());
+
+        restore_redacted_setup_values(&mut submitted, &draft);
+
+        let auth_secret = submitted
+            .config
+            .web_ui
+            .as_ref()
+            .and_then(|web_ui| web_ui.auth.as_ref())
+            .map(|auth| auth.secret.as_str());
+        assert_eq!(auth_secret, Some("very-secret-value"));
+
+        let creds = &submitted.api_proxy.as_ref().expect("api_proxy should be present").user[0].credentials[0];
+        assert_eq!(creds.password, "alice-password");
+        assert_eq!(creds.token.as_deref(), Some("alice-token"));
+        assert!(!has_unresolved_redacted_setup_values(&submitted));
+    }
+
+    #[test]
+    fn setup_restore_keeps_unmatched_redacted_credentials_as_unresolved() {
+        let draft = sample_app_config();
+        let mut submitted = redact_app_config_for_setup(draft);
+        if let Some(api_proxy) = submitted.api_proxy.as_mut() {
+            api_proxy.user[0].credentials[0].username = "bob".to_string();
+        }
+
+        restore_redacted_setup_values(&mut submitted, &AppConfigDto::default());
+
+        assert!(has_unresolved_redacted_setup_values(&submitted));
+    }
 }
