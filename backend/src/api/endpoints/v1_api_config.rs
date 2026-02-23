@@ -96,7 +96,7 @@ async fn save_config_sources(
             )
                 .into_response();
         }
-    };
+    }
 
     // Reload from disk so runtime always uses fully prepared sources/mappings/templates.
     if let Err(err) = ConfigFile::load_sources(&app_state).await {
