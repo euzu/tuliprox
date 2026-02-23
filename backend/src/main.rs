@@ -27,7 +27,10 @@ use arc_swap::{access::Access, ArcSwap};
 use chrono::{DateTime, Utc};
 use clap::Parser;
 use log::{error, info, warn};
-use shared::model::ConfigPaths;
+use shared::{
+    model::ConfigPaths,
+    utils::{CONFIG_FILE, SOURCE_FILE},
+};
 use std::{fs::File, sync::Arc};
 
 #[allow(clippy::struct_excessive_bools)]
@@ -157,6 +160,21 @@ async fn main() {
     {
         info!("Build time: {bts}");
     }
+
+    if args.server {
+        let missing_files = missing_required_setup_files(&config_paths);
+        if !missing_files.is_empty() {
+            warn!(
+                "Missing required config files for normal startup ({}). Entering setup mode.",
+                missing_files.join(", ")
+            );
+            if let Err(err) = api::setup_api::start_setup_server(&config_paths, &missing_files).await {
+                exit!("Can't start setup server: {err}");
+            }
+            return;
+        }
+    }
+
     let app_config = utils::read_initial_app_config(&mut config_paths, true, true, args.server)
         .await
         .unwrap_or_else(|err| exit!("{err}"));
@@ -206,9 +224,13 @@ fn print_info(app_config: &AppConfig) {
 }
 
 fn get_file_paths(args: &Args) -> ConfigPaths {
-    let config_path: String = utils::resolve_directory_path(&resolve_env_var(
-        &args.config_path.as_ref().map_or_else(utils::get_default_config_path, ToString::to_string),
-    ));
+    let raw_path = args
+        .config_path
+        .as_ref()
+        .filter(|p| !p.trim().is_empty())
+        .map_or_else(utils::get_default_config_path, |p| resolve_env_var(p));
+    let config_path: String = utils::resolve_directory_path(&raw_path);
+
     let config_file: String = resolve_env_var(
         &args
             .config_file
@@ -238,6 +260,22 @@ fn get_file_paths(args: &Args) -> ConfigPaths {
         api_proxy_file_path: api_proxy_file,
         custom_stream_response_path: None,
     }
+}
+
+fn missing_required_setup_files(paths: &ConfigPaths) -> Vec<String> {
+    [(CONFIG_FILE, paths.config_file_path.as_str()), (SOURCE_FILE, paths.sources_file_path.as_str())]
+        .iter()
+        .filter_map(|(name, file_path)| {
+            let file_path = std::path::Path::new(file_path);
+            if !file_path.exists() {
+                Some(format!("{name} missing ({})", file_path.display()))
+            } else if !file_path.is_file() {
+                Some(format!("{name} exists but is not a regular file ({})", file_path.display()))
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 async fn start_in_cli_mode(cfg: Arc<AppConfig>, targets: Arc<ProcessTargets>) {

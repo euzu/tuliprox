@@ -1,3 +1,4 @@
+use crate::app::components::{resolve_field_id, FieldLabel};
 use shared::utils::{format_float_localized, parse_localized_float};
 use web_sys::{HtmlInputElement, KeyboardEvent};
 use yew::{prelude::*, TargetCast};
@@ -6,6 +7,8 @@ use yew::{prelude::*, TargetCast};
 pub struct NumberInputProps {
     #[prop_or_default]
     pub name: String,
+    #[prop_or_default]
+    pub field_id: Option<String>,
     #[prop_or_default]
     pub label: Option<String>,
     #[prop_or_default]
@@ -23,6 +26,8 @@ pub struct NumberInputProps {
 #[function_component]
 pub fn NumberInput(props: &NumberInputProps) -> Html {
     let input_ref = use_node_ref();
+    let label_text = props.label.clone().unwrap_or_default();
+    let resolved_field_id = resolve_field_id(&props.field_id, &props.name, &label_text);
 
     {
         let input_ref = input_ref.clone();
@@ -94,10 +99,17 @@ pub fn NumberInput(props: &NumberInputProps) -> Html {
     html! {
         <div class="tp__input">
             { if let Some(label) = &props.label {
-                html! { <label>{ label }</label> }
+                html! {
+                    <FieldLabel
+                        label={label.clone()}
+                        field_id={resolved_field_id.clone()}
+                        for_id={Some(resolved_field_id.clone())}
+                    />
+                }
             } else { html!{} } }
             <div class="tp__input-wrapper">
                 <input
+                    id={resolved_field_id}
                     ref={input_ref.clone()}
                     type="text"
                     name={props.name.clone()}

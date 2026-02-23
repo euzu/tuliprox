@@ -278,6 +278,21 @@
     gap: var(--gap-default);
     box-sizing: border-box;
   }
+  &__card-header {
+    display: flex;
+    flex-flow: row;
+    width: 100%;
+    gap: var(--gap-default);
+    box-sizing: border-box;
+    align-items: center;
+
+    &-toolbar {
+      display: flex;
+      flex-flow: row;
+      justify-content: flex-end;
+      align-items: center;
+    }
+  }
 
   &__list {
     display: flex;

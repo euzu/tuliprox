@@ -2,12 +2,14 @@ use crate::{
     app::{
         components::{
             config::ConfigView, loading_indicator::BusyIndicator, theme::Theme, AppIcon, DashboardView, EpgView,
-            IconButton, InputRow, Panel, PlaylistExplorerView, PlaylistSettingsView, PlaylistUpdateView, Sidebar,
-            SourceEditor, StatsView, StreamsView, ToastrView, UserlistView, WebsocketStatus,
+            IconButton, InputRow, Panel, ParticleFlowBackground, PlaylistExplorerView, PlaylistSettingsView,
+            PlaylistUpdateView, Setup, Sidebar, SourceEditor, StatsView, StreamsView, ToastrView, UserlistView,
+            WebsocketStatus,
         },
         context::{ConfigContext, PlaylistContext, StatusContext},
     },
     hooks::{use_server_status, use_service_context},
+    html_if,
     model::{EventMessage, ViewType},
     provider::DialogProvider,
     services::{ToastCloseMode, ToastOptions},
@@ -23,12 +25,13 @@ use yew_i18n::use_translation;
 #[function_component]
 pub fn Home() -> Html {
     let services = use_service_context();
+    let setup_mode = services.config.ui_config.setup_mode;
     let translate = use_translation();
     let config = use_state(|| None::<Rc<AppConfigDto>>);
     let api_proxy_config = use_state(|| None::<Rc<ApiProxyConfigDto>>);
     let status = use_state(|| None::<Rc<StatusCheck>>);
     let system_info = use_state(|| None::<Rc<SystemInfo>>);
-    let view_visible = use_state(|| ViewType::Dashboard);
+    let view_visible = use_state(|| if setup_mode { ViewType::Config } else { ViewType::Dashboard });
     let theme = use_state(Theme::get_current_theme);
 
     let handle_theme_switch = {
@@ -81,7 +84,7 @@ pub fn Home() -> Html {
         });
     }
 
-    let _ = use_server_status(status.clone(), system_info.clone());
+    let _ = use_server_status(status.clone(), system_info.clone(), !setup_mode);
 
     {
         // first register for config update
@@ -171,7 +174,12 @@ pub fn Home() -> Html {
             <ToastrView />
             <div class="tp__app">
                <BusyIndicator />
-               <Sidebar onview={handle_view_change}/>
+               { if setup_mode {
+                    html! {}
+                 } else {
+                    html! { <Sidebar onview={handle_view_change}/> }
+                 }
+               }
 
               <div class="tp__app-main">
                     <div class="tp__app-main__header tp__app-header">
@@ -184,43 +192,69 @@ pub fn Home() -> Html {
                             }
                         }
                         </div>
-                        <div class={"tp__app-header-toolbar"}>
-                            <WebsocketStatus/>
-                            <IconButton name="Theme" icon={if *theme == Theme::Bright {"Moon"} else {"Sun"}} onclick={handle_theme_switch} />
-                            <IconButton name="Logout" icon="Logout" onclick={handle_logout} />
-                        </div>
+                        {
+                            if setup_mode {
+                                html! {}
+                            } else {
+                                html! {
+                                    <div class={"tp__app-header-toolbar"}>
+                                        <WebsocketStatus/>
+                                        <IconButton name="Theme" icon={if *theme == Theme::Bright {"Moon"} else {"Sun"}} onclick={handle_theme_switch} />
+                                        <IconButton name="Logout" icon="Logout" onclick={handle_logout} />
+                                    </div>
+                                }
+                            }
+                        }
                     </div>
                     <div class="tp__app-main__body">
-                       <Panel class="tp__full-width" value={ViewType::Dashboard.to_string()} active={view_visible.to_string()}>
-                        <DashboardView/>
-                       </Panel>
-                       <Panel class="tp__full-width" value={ViewType::Stats.to_string()} active={view_visible.to_string()}>
-                        <StatsView/>
-                       </Panel>
-                       <Panel class="tp__full-width" value={ViewType::Streams.to_string()} active={view_visible.to_string()}>
-                        <StreamsView/>
-                       </Panel>
-                       <Panel class="tp__full-width" value={ViewType::Users.to_string()} active={view_visible.to_string()}>
-                          <UserlistView/>
-                       </Panel>
+                      { html_if!(setup_mode, { <ParticleFlowBackground /> }) }
+
                        <Panel class="tp__full-width" value={ViewType::Config.to_string()} active={view_visible.to_string()}>
-                          <ConfigView/>
+                          {
+                              if setup_mode {
+                                  html! { <Setup/> }
+                              } else {
+                                  html! { <ConfigView/> }
+                              }
+                          }
                        </Panel>
-                       <Panel class="tp__full-width tp__full-height" value={ViewType::SourceEditor.to_string()} active={view_visible.to_string()}>
-                          <SourceEditor/>
-                       </Panel>
-                       <Panel class="tp__full-width" value={ViewType::PlaylistUpdate.to_string()} active={view_visible.to_string()}>
-                         <PlaylistUpdateView/>
-                       </Panel>
-                       <Panel class="tp__full-width" value={ViewType::PlaylistSettings.to_string()} active={view_visible.to_string()}>
-                         <PlaylistSettingsView/>
-                       </Panel>
-                       <Panel class="tp__full-width" value={ViewType::PlaylistExplorer.to_string()} active={view_visible.to_string()}>
-                         <PlaylistExplorerView/>
-                       </Panel>
-                       <Panel class="tp__full-width" value={ViewType::PlaylistEpg.to_string()} active={view_visible.to_string()}>
-                         <EpgView/>
-                       </Panel>
+                       {
+                            if setup_mode {
+                                html! {}
+                            } else {
+                                html! {
+                                    <>
+                                       <Panel class="tp__full-width" value={ViewType::Dashboard.to_string()} active={view_visible.to_string()}>
+                                        <DashboardView/>
+                                       </Panel>
+                                       <Panel class="tp__full-width" value={ViewType::Stats.to_string()} active={view_visible.to_string()}>
+                                        <StatsView/>
+                                       </Panel>
+                                       <Panel class="tp__full-width" value={ViewType::Streams.to_string()} active={view_visible.to_string()}>
+                                        <StreamsView/>
+                                       </Panel>
+                                       <Panel class="tp__full-width" value={ViewType::Users.to_string()} active={view_visible.to_string()}>
+                                          <UserlistView/>
+                                       </Panel>
+                                       <Panel class="tp__full-width tp__full-height" value={ViewType::SourceEditor.to_string()} active={view_visible.to_string()}>
+                                          <SourceEditor/>
+                                       </Panel>
+                                       <Panel class="tp__full-width" value={ViewType::PlaylistUpdate.to_string()} active={view_visible.to_string()}>
+                                         <PlaylistUpdateView/>
+                                       </Panel>
+                                       <Panel class="tp__full-width" value={ViewType::PlaylistSettings.to_string()} active={view_visible.to_string()}>
+                                         <PlaylistSettingsView/>
+                                       </Panel>
+                                       <Panel class="tp__full-width" value={ViewType::PlaylistExplorer.to_string()} active={view_visible.to_string()}>
+                                         <PlaylistExplorerView/>
+                                       </Panel>
+                                       <Panel class="tp__full-width" value={ViewType::PlaylistEpg.to_string()} active={view_visible.to_string()}>
+                                         <EpgView/>
+                                       </Panel>
+                                    </>
+                                }
+                            }
+                       }
                     </div>
               </div>
             </div>

@@ -166,7 +166,14 @@ pub fn EpgSourceSelector(props: &EpgSourceSelectorProps) -> Html {
             html! {
                 <div class="tp__playlist-source-selector__source-custom">
                   <div class="tp__playlist-source-selector__source-custom-body">
-                     <Input label={translate.t("LABEL.URL")} input_ref={url_ref} name="url" autocomplete={true} onkeydown={handle_key_down} />
+                     <Input
+                         label={translate.t("LABEL.URL")}
+                         field_id={Some("PLAYLIST_EPG_SOURCE_SELECTOR_URL".to_string())}
+                         input_ref={url_ref}
+                         name="url"
+                         autocomplete={true}
+                         onkeydown={handle_key_down}
+                     />
                      <TextButton name={"custom"} title={translate.t("LABEL.DOWNLOAD")} icon={"CloudDownload"}
                        onclick={handle_custom_source}/>
                   </div>

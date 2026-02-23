@@ -13,9 +13,12 @@ use crate::{
 pub const DEFAULT_USER_AGENT: &str = "VLC/3.0.16 LibVLC/3.0.16";
 
 fn default_default_user_agent() -> Option<String> { Some(DEFAULT_USER_AGENT.to_string()) }
+fn is_none_or_empty_video(video: &Option<VideoConfigDto>) -> bool {
+    video.as_ref().is_none_or(VideoConfigDto::is_empty)
+}
 
 #[allow(clippy::struct_excessive_bools)]
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigDto {
     #[serde(default, skip_serializing_if = "is_false")]
@@ -32,7 +35,7 @@ pub struct ConfigDto {
     pub mapping_path: Option<String>,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub custom_stream_response_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "is_none_or_empty_video")]
     pub video: Option<VideoConfigDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedules: Option<Vec<ScheduleConfigDto>>,
@@ -66,6 +69,38 @@ pub struct ConfigDto {
     pub ipcheck: Option<IpCheckConfigDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library: Option<LibraryConfigDto>,
+}
+
+impl Default for ConfigDto {
+    fn default() -> Self {
+        Self {
+            process_parallel: false,
+            api: ConfigApiDto::default(),
+            working_dir: String::new(),
+            default_user_agent: default_default_user_agent(),
+            backup_dir: None,
+            user_config_dir: None,
+            mapping_path: None,
+            custom_stream_response_path: None,
+            video: None,
+            schedules: None,
+            log: None,
+            user_access_control: false,
+            connect_timeout_secs: default_connect_timeout_secs(),
+            sleep_timer_mins: None,
+            update_on_boot: false,
+            config_hot_reload: false,
+            disk_based_processing: false,
+            accept_insecure_ssl_certificates: false,
+            web_ui: None,
+            messaging: None,
+            reverse_proxy: None,
+            hdhomerun: None,
+            proxy: None,
+            ipcheck: None,
+            library: None,
+        }
+    }
 }
 
 // This MainConfigDto is a copy of ConfigDto simple fields for form editing.
@@ -179,7 +214,6 @@ impl ConfigDto {
             }
         }
 
-        self.api.prepare();
         self.prepare_web()?;
         self.prepare_hdhomerun(include_computed)?;
         self.prepare_video_config()?;
@@ -285,4 +319,46 @@ impl ConfigDto {
     }
 
     pub fn is_library_enabled(&self) -> bool { self.library.as_ref().is_some_and(|l| l.enabled) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::utils::default_supported_video_extensions;
+
+    #[test]
+    fn default_uses_connect_timeout_default_value() {
+        let cfg = ConfigDto::default();
+        assert_eq!(cfg.connect_timeout_secs, default_connect_timeout_secs());
+    }
+
+    #[test]
+    fn serializing_skips_video_for_default_values() {
+        let mut cfg = ConfigDto::default();
+        cfg.video = Some(VideoConfigDto {
+            extensions: default_supported_video_extensions(),
+            download: None,
+            web_search: None,
+            ffprobe_enabled: false,
+            ffprobe_timeout: None,
+        });
+
+        let serialized = serde_json::to_string(&cfg).expect("config serialization should succeed");
+        assert!(!serialized.contains("\"video\""), "expected no video field, got: {serialized}");
+    }
+
+    #[test]
+    fn serializing_keeps_video_for_non_default_values() {
+        let mut cfg = ConfigDto::default();
+        cfg.video = Some(VideoConfigDto {
+            extensions: default_supported_video_extensions(),
+            download: None,
+            web_search: None,
+            ffprobe_enabled: true,
+            ffprobe_timeout: None,
+        });
+
+        let serialized = serde_json::to_string(&cfg).expect("config serialization should succeed");
+        assert!(serialized.contains("\"video\""), "expected video field, got: {serialized}");
+    }
 }

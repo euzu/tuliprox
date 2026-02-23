@@ -977,13 +977,6 @@ fn alias_pool_limit_values(
     (min, max)
 }
 
-#[allow(dead_code)]
-fn alias_pool_both_auto(cfg: &PanelApiConfig) -> bool {
-    let (min, max) = alias_pool_limit_values(cfg);
-    min.is_some_and(PanelApiAliasPoolSizeValue::is_auto)
-        && max.is_some_and(PanelApiAliasPoolSizeValue::is_auto)
-}
-
 fn alias_pool_has_min(cfg: &PanelApiConfig) -> bool {
     let (min, _) = alias_pool_limit_values(cfg);
     min.is_some()
@@ -1051,7 +1044,6 @@ fn resolve_alias_pool_auto_value(app_state: &AppState, input_name: &Arc<str>) ->
     u16::try_from(enabled_users).unwrap_or(u16::MAX)
 }
 
-#[allow(dead_code)]
 pub(crate) fn target_has_alias_pool_min(app_state: &AppState, target_name: &str) -> bool {
     let sources = app_state.app_config.sources.load();
     for source in &sources.sources {
@@ -1105,7 +1097,6 @@ fn resolve_alias_pool_limits(
     Ok((min, max))
 }
 
-#[allow(dead_code)]
 fn resolve_alias_pool_min(
     app_state: &AppState,
     input_name: &Arc<str>,
@@ -1313,15 +1304,6 @@ pub(crate) fn can_provision_on_exhausted(app_state: &AppState, input: &ConfigInp
         return false;
     }
     true
-}
-
-#[allow(dead_code)]
-pub(crate) fn find_input_by_name(
-    app_state: &AppState,
-    input_name: &Arc<str>,
-) -> Option<Arc<ConfigInput>> {
-    let sources = app_state.app_config.sources.load();
-    sources.get_input_by_name(input_name).map(Arc::clone)
 }
 
 pub(crate) fn find_input_by_provider_name(

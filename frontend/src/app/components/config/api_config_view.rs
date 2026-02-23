@@ -5,9 +5,10 @@ use crate::{
                 config_page::{ConfigForm, LABEL_API_CONFIG},
                 config_view_context::ConfigViewContext,
             },
+            input::Input,
             menu_item::MenuItem,
             popup_menu::PopupMenu,
-            AppIcon, Card, NoContent, Table, TableDefinition, TextButton,
+            AppIcon, Card, CustomDialog, NoContent, Table, TableDefinition, TextButton,
         },
         context::ConfigContext,
     },
@@ -24,22 +25,23 @@ use std::{fmt::Display, rc::Rc, str::FromStr};
 use yew::prelude::*;
 use yew_i18n::use_translation;
 
+const LABEL_NAME: &str = "LABEL.NAME";
+const LABEL_PROTOCOL: &str = "LABEL.PROTOCOL";
 const LABEL_HOST: &str = "LABEL.HOST";
 const LABEL_PORT: &str = "LABEL.PORT";
+const LABEL_TIMEZONE: &str = "LABEL.TIMEZONE";
+const LABEL_MESSAGE: &str = "LABEL.MESSAGE";
+const LABEL_PATH: &str = "LABEL.PATH";
 const LABEL_WEB_ROOT: &str = "LABEL.WEB_ROOT";
 const LABEL_API_PROXY_CONFIG: &str = "LABEL.API_PROXY_CONFIG";
 const LABEL_USE_USER_DB: &str = "LABEL.USE_USER_DB";
-// const LABEL_NAME: &str = "LABEL.NAME";
-// const LABEL_PROTOCOL: &str = "LABEL.PROTOCOL";
-// const LABEL_TIMEZONE: &str = "LABEL.TIMEZONE";
-// const LABEL_MESSAGE: &str = "LABEL.MESSAGE";
-// const LABEL_PATH: &str = "LABEL.PATH";
 const LABEL_SERVER: &str = "LABEL.SERVER";
 const LABEL_ADD_SERVER: &str = "LABEL.ADD_SERVER";
+const MSG_NON_UNIQUE_SERVER_NAME: &str = "MESSAGES.SAVE.API_PROXY_CONFIG.NON_UNIQUE_SERVER_NAME";
 
 const SERVER_HEADERS: [&str; 8] = ["EMPTY", "NAME", "PROTOCOL", "HOST", "PORT", "TIMEZONE", "MESSAGE", "PATH"];
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum ServerTableAction {
     Delete,
     Edit,
@@ -72,7 +74,53 @@ impl FromStr for ServerTableAction {
     }
 }
 
-// Generate form reducer for edit mode
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum ServerDialogMode {
+    Add,
+    Edit(usize),
+}
+
+fn build_default_server(existing_servers: &[ApiProxyServerInfoDto]) -> ApiProxyServerInfoDto {
+    let mut index = existing_servers.len() + 1;
+    loop {
+        let name = format!("Server {index}");
+        if !existing_servers.iter().any(|server| server.name == name) {
+            return ApiProxyServerInfoDto {
+                name,
+                protocol: "http".to_string(),
+                host: String::new(),
+                port: None,
+                timezone: "UTC".to_string(),
+                message: "Welcome to Tuliprox".to_string(),
+                path: None,
+            };
+        }
+        index += 1;
+    }
+}
+
+fn server_name_exists(servers: &[ApiProxyServerInfoDto], server_name: &str, ignore_index: Option<usize>) -> bool {
+    servers.iter().enumerate().any(|(idx, server)| {
+        if ignore_index.is_some_and(|ignore_idx| idx == ignore_idx) {
+            false
+        } else {
+            server.name == server_name
+        }
+    })
+}
+
+fn make_field_handler<F>(server_dialog_form: &UseStateHandle<ApiProxyServerInfoDto>, updater: F) -> Callback<String>
+where
+    F: Fn(&mut ApiProxyServerInfoDto, String) + 'static,
+{
+    let server_dialog_form = server_dialog_form.clone();
+    Callback::from(move |value: String| {
+        let mut form = (*server_dialog_form).clone();
+        updater(&mut form, value);
+        server_dialog_form.set(form);
+    })
+}
+
 generate_form_reducer!(
     state: ApiConfigFormState { form: ConfigApiDto },
     action_name: ApiConfigFormAction,
@@ -97,9 +145,14 @@ pub fn ApiConfigView() -> Html {
     let translate = use_translation();
     let config_ctx = use_context::<ConfigContext>().expect("Config context not found");
     let config_view_ctx = use_context::<ConfigViewContext>().expect("ConfigViewContext not found");
+
     let popup_anchor_ref = use_state(|| None::<web_sys::Element>);
     let popup_is_open = use_state(|| false);
-    let selected_dto = use_state(|| None::<Rc<ApiProxyServerInfoDto>>);
+    let selected_server_index = use_state(|| None::<usize>);
+
+    let server_dialog_mode = use_state(|| None::<ServerDialogMode>);
+    let server_dialog_form = use_state(ApiProxyServerInfoDto::default);
+    let server_dialog_error = use_state(|| None::<String>);
 
     let form_state_api_config: UseReducerHandle<ApiConfigFormState> =
         use_reducer(|| ApiConfigFormState { form: ConfigApiDto::default(), modified: false });
@@ -128,7 +181,6 @@ pub fn ApiConfigView() -> Html {
     {
         let form_state_api_config = form_state_api_config.clone();
         let api_config = config_ctx.config.as_ref().map(|c| c.config.api.clone());
-
         let deps = (api_config, *config_view_ctx.edit_mode);
         use_effect_with(deps, move |(cfg, _mode)| {
             if let Some(api) = cfg {
@@ -137,15 +189,6 @@ pub fn ApiConfigView() -> Html {
                 form_state_api_config.dispatch(ApiConfigFormAction::SetAll(ConfigApiDto::default()));
             }
             || ()
-        });
-    }
-
-    let edit_mode_ref = use_mut_ref(|| false);
-    {
-        let mode_ref = edit_mode_ref.clone();
-        let deps = config_view_ctx.edit_mode.clone();
-        use_effect_with(deps, move |mode| {
-            *mode_ref.borrow_mut() = **mode;
         });
     }
 
@@ -163,60 +206,158 @@ pub fn ApiConfigView() -> Html {
         });
     }
 
+    let edit_mode_ref = use_mut_ref(|| false);
+    {
+        let mode_ref = edit_mode_ref.clone();
+        let deps = config_view_ctx.edit_mode.clone();
+        use_effect_with(deps, move |mode| {
+            *mode_ref.borrow_mut() = **mode;
+        });
+    }
+
+    let handle_popup_close = {
+        let popup_is_open = popup_is_open.clone();
+        Callback::from(move |()| popup_is_open.set(false))
+    };
+
+    let handle_popup_onclick = {
+        let popup_anchor_ref = popup_anchor_ref.clone();
+        let popup_is_open = popup_is_open.clone();
+        let selected_server_index = selected_server_index.clone();
+        Callback::from(move |(row, event): (usize, MouseEvent)| {
+            if let Some(target) = event.target_dyn_into::<web_sys::Element>() {
+                selected_server_index.set(Some(row));
+                popup_anchor_ref.set(Some(target));
+                popup_is_open.set(true);
+            }
+        })
+    };
+
+    let handle_menu_click = {
+        let popup_is_open = popup_is_open.clone();
+        let selected_server_index = selected_server_index.clone();
+        let form_state_api_proxy_config = form_state_api_proxy_config.clone();
+        let server_dialog_mode = server_dialog_mode.clone();
+        let server_dialog_form = server_dialog_form.clone();
+        let server_dialog_error = server_dialog_error.clone();
+        Callback::from(move |(name, _): (String, MouseEvent)| {
+            if let Ok(action) = ServerTableAction::from_str(&name) {
+                if let Some(index) = *selected_server_index {
+                    match action {
+                        ServerTableAction::Delete => {
+                            let mut servers = form_state_api_proxy_config.form.server.clone();
+                            if index < servers.len() {
+                                servers.remove(index);
+                                form_state_api_proxy_config.dispatch(ApiProxyConfigFormAction::Server(servers));
+                            }
+                        }
+                        ServerTableAction::Edit => {
+                            if let Some(server) = form_state_api_proxy_config.form.server.get(index) {
+                                server_dialog_form.set(server.clone());
+                                server_dialog_error.set(None);
+                                server_dialog_mode.set(Some(ServerDialogMode::Edit(index)));
+                            }
+                        }
+                    }
+                }
+            }
+            popup_is_open.set(false);
+        })
+    };
+
+    let handle_add_server = {
+        let form_state_api_proxy_config = form_state_api_proxy_config.clone();
+        let server_dialog_mode = server_dialog_mode.clone();
+        let server_dialog_form = server_dialog_form.clone();
+        let server_dialog_error = server_dialog_error.clone();
+        Callback::from(move |_| {
+            server_dialog_form.set(build_default_server(&form_state_api_proxy_config.form.server));
+            server_dialog_error.set(None);
+            server_dialog_mode.set(Some(ServerDialogMode::Add));
+        })
+    };
+
+    let handle_server_dialog_close = {
+        let server_dialog_mode = server_dialog_mode.clone();
+        let server_dialog_error = server_dialog_error.clone();
+        Callback::from(move |()| {
+            server_dialog_error.set(None);
+            server_dialog_mode.set(None);
+        })
+    };
+    let handle_server_dialog_cancel = {
+        let handle_server_dialog_close = handle_server_dialog_close.clone();
+        Callback::from(move |_| handle_server_dialog_close.emit(()))
+    };
+
+    let handle_server_name_change = make_field_handler(&server_dialog_form, |form, value| form.name = value);
+    let handle_server_protocol_change = make_field_handler(&server_dialog_form, |form, value| form.protocol = value);
+    let handle_server_host_change = make_field_handler(&server_dialog_form, |form, value| form.host = value);
+    let handle_server_port_change = make_field_handler(&server_dialog_form, |form, value| {
+        form.port = if value.trim().is_empty() { None } else { Some(value) };
+    });
+    let handle_server_timezone_change = make_field_handler(&server_dialog_form, |form, value| form.timezone = value);
+    let handle_server_message_change = make_field_handler(&server_dialog_form, |form, value| form.message = value);
+    let handle_server_path_change = make_field_handler(&server_dialog_form, |form, value| {
+        form.path = if value.trim().is_empty() { None } else { Some(value) };
+    });
+
+    let handle_server_dialog_save = {
+        let server_dialog_mode = server_dialog_mode.clone();
+        let server_dialog_form = server_dialog_form.clone();
+        let server_dialog_error = server_dialog_error.clone();
+        let form_state_api_proxy_config = form_state_api_proxy_config.clone();
+        let translate = translate.clone();
+        Callback::from(move |_| {
+            let Some(dialog_mode) = *server_dialog_mode else {
+                return;
+            };
+
+            let mut server = (*server_dialog_form).clone();
+            if let Err(err) = server.prepare() {
+                server_dialog_error.set(Some(err.to_string()));
+                return;
+            }
+
+            let ignore_index = match dialog_mode {
+                ServerDialogMode::Add => None,
+                ServerDialogMode::Edit(index) => Some(index),
+            };
+
+            if server_name_exists(&form_state_api_proxy_config.form.server, &server.name, ignore_index) {
+                let message = translate.t(MSG_NON_UNIQUE_SERVER_NAME).replace("{name}", &server.name);
+                server_dialog_error.set(Some(message));
+                return;
+            }
+
+            let mut servers = form_state_api_proxy_config.form.server.clone();
+            match dialog_mode {
+                ServerDialogMode::Add => servers.push(server),
+                ServerDialogMode::Edit(index) => {
+                    if let Some(server_to_update) = servers.get_mut(index) {
+                        *server_to_update = server;
+                    }
+                }
+            }
+
+            form_state_api_proxy_config.dispatch(ApiProxyConfigFormAction::Server(servers));
+            server_dialog_error.set(None);
+            server_dialog_mode.set(None);
+        })
+    };
+
     let render_header_cell = {
         let translator = translate.clone();
         Callback::<usize, Html>::from(move |col| {
             html! {
                 {
                     if col < SERVER_HEADERS.len() {
-                       translator.t(&concat_string!("LABEL.", SERVER_HEADERS[col]))
+                        translator.t(&concat_string!("LABEL.", SERVER_HEADERS[col]))
                     } else {
-                      String::new()
-                    }
-               }
-            }
-        })
-    };
-
-    let handle_popup_close = {
-        let set_is_open = popup_is_open.clone();
-        Callback::from(move |()| {
-            set_is_open.set(false);
-        })
-    };
-
-    let handle_popup_onclick = {
-        let set_selected_dto = selected_dto.clone();
-        let set_anchor_ref = popup_anchor_ref.clone();
-        let set_is_open = popup_is_open.clone();
-        Callback::from(move |(dto, event): (Rc<ApiProxyServerInfoDto>, MouseEvent)| {
-            if let Some(server) = event.target_dyn_into::<web_sys::Element>() {
-                set_selected_dto.set(Some(dto.clone()));
-                set_anchor_ref.set(Some(server));
-                set_is_open.set(true);
-            }
-        })
-    };
-
-    let handle_menu_click = {
-        let popup_is_open_state = popup_is_open.clone();
-        let selected_dto = selected_dto.clone();
-        Callback::from(move |(name, _): (String, _)| {
-            if let Ok(action) = ServerTableAction::from_str(&name) {
-                match action {
-                    ServerTableAction::Delete => {
-                        if let Some(_dto) = (*selected_dto).as_ref() {
-                            // TODO
-                        }
-                    }
-                    ServerTableAction::Edit => {
-                        if let Some(_dto) = &*selected_dto {
-                            // TODO
-                        }
+                        String::new()
                     }
                 }
             }
-            popup_is_open_state.set(false);
         })
     };
 
@@ -229,21 +370,26 @@ pub fn ApiConfigView() -> Html {
                     let popup_onclick = popup_onclick.clone();
                     let edit_mode_ref = edit_mode_ref.clone();
                     html! {
-                      <button class="tp__icon-button"
-                          onclick={Callback::from(move |event: MouseEvent| if *edit_mode_ref.borrow() {
-                            popup_onclick.emit((dto.clone(), event))})}
-                          data-row={row.to_string()}>
-                          <AppIcon name="Popup"></AppIcon>
-                      </button>
+                        <button
+                            class="tp__icon-button"
+                            onclick={Callback::from(move |event: MouseEvent| {
+                                if *edit_mode_ref.borrow() {
+                                    popup_onclick.emit((row, event));
+                                }
+                            })}
+                            data-row={row.to_string()}
+                        >
+                            <AppIcon name="Popup"/>
+                        </button>
                     }
                 }
                 "NAME" => html! {&dto.name},
                 "PROTOCOL" => html! {&dto.protocol},
                 "HOST" => html! {&dto.host},
-                "PORT" => html! {&dto.port.as_ref().map_or_else(String::new, ToString::to_string)},
+                "PORT" => html! {dto.port.as_ref().map_or_else(String::new, ToString::to_string)},
                 "TIMEZONE" => html! {&dto.timezone},
                 "MESSAGE" => html! {&dto.message},
-                "PATH" => html! {&dto.path.as_ref().map_or_else(String::new, ToString::to_string)},
+                "PATH" => html! {dto.path.as_ref().map_or_else(String::new, ToString::to_string)},
                 _ => html! {""},
             },
         )
@@ -252,213 +398,25 @@ pub fn ApiConfigView() -> Html {
     let table_definition = {
         let is_sortable = Callback::<usize, bool>::from(move |_col| false);
         let on_sort = Callback::<Option<(usize, SortOrder)>, ()>::from(move |_args| {});
-        // first register for config update
-        let render_header_cell_cb = render_header_cell.clone();
-        let render_data_cell_cb = render_data_cell.clone();
+        let render_header_cell = render_header_cell.clone();
+        let render_data_cell = render_data_cell.clone();
         let num_cols = SERVER_HEADERS.len();
-        use_memo(config_ctx.api_proxy.clone(), move |config| {
-            config.as_ref().map(|api_proxy| {
-                Rc::new(TableDefinition::<ApiProxyServerInfoDto> {
-                    items: if api_proxy.server.is_empty() {
-                        None
-                    } else {
-                        Some(Rc::new(api_proxy.server.iter().map(|s| Rc::new(s.clone())).collect()))
-                    },
-                    num_cols,
-                    is_sortable,
-                    on_sort,
-                    render_header_cell: render_header_cell_cb,
-                    render_data_cell: render_data_cell_cb,
-                })
-            })
+        let servers = form_state_api_proxy_config.form.server.clone();
+        let translation_marker = translate.t(LABEL_SERVER);
+        use_memo((servers, translation_marker), move |(servers, _translation_marker)| TableDefinition::<
+            ApiProxyServerInfoDto,
+        > {
+            items: if servers.is_empty() {
+                None
+            } else {
+                Some(Rc::new(servers.iter().map(|server| Rc::new(server.clone())).collect()))
+            },
+            num_cols,
+            is_sortable,
+            on_sort,
+            render_header_cell: render_header_cell.clone(),
+            render_data_cell: render_data_cell.clone(),
         })
-    };
-
-    // let render_server = |idx: usize, server: ApiProxyServerInfoDto, edit_mode: bool| -> Html {
-    //     let form_state_api_proxy_config = form_state_api_proxy_config.clone();
-    //     let translate = translate.clone();
-    //
-    //     let on_change = {
-    //         let form_state_api_proxy_config = form_state_api_proxy_config.clone();
-    //         Callback::from(move |new_server: ApiProxyServerInfoDto| {
-    //             let mut servers = form_state_api_proxy_config.form.server.clone();
-    //             if let Some(s) = servers.get_mut(idx) {
-    //                 *s = new_server;
-    //                 form_state_api_proxy_config.dispatch(ApiProxyConfigFormAction::Server(servers));
-    //             }
-    //         })
-    //     };
-    //
-    //     let on_remove = {
-    //         let form_state_api_proxy_config = form_state_api_proxy_config.clone();
-    //         Callback::from(move |_| {
-    //             let mut servers = form_state_api_proxy_config.form.server.clone();
-    //             servers.remove(idx);
-    //             form_state_api_proxy_config.dispatch(ApiProxyConfigFormAction::Server(servers));
-    //         })
-    //     };
-    //
-    //     html! {
-    //         <Card class="tp__api-proxy-server-card">
-    //             <div class="tp__api-proxy-server-card__header">
-    //                 <h3>{ &server.name }</h3>
-    //                 {html_if!(edit_mode, {
-    //                     <TextButton class="danger" name="delete_server" icon="Trash" title={translate.t("LABEL.DELETE")} onclick={on_remove} />
-    //                 })}
-    //             </div>
-    //             <div class="tp__api-proxy-server-card__body">
-    //                 {if edit_mode {
-    //                     let s = server.clone();
-    //                     let oc = on_change.clone();
-    //                     html! {
-    //                         <>
-    //                             <div class="tp__form-field tp__form-field__text">
-    //                                 <Input label={translate.t(LABEL_NAME)} value={s.name.clone()}
-    //                                     on_change={
-    //                                         let s = s.clone(); let oc = oc.clone();
-    //                                         Callback::from(move |v| { let mut s = s.clone(); s.name = v; oc.emit(s); })
-    //                                     } />
-    //                             </div>
-    //                             <div class="tp__form-field tp__form-field__text">
-    //                                 <Input label={translate.t(LABEL_PROTOCOL)} value={s.protocol.clone()}
-    //                                     on_change={
-    //                                         let s = s.clone(); let oc = oc.clone();
-    //                                         Callback::from(move |v| { let mut s = s.clone(); s.protocol = v; oc.emit(s); })
-    //                                     } />
-    //                             </div>
-    //                             <div class="tp__form-field tp__form-field__text">
-    //                                 <crate::app::components::input::Input label={translate.t(LABEL_HOST)} value={s.host.clone()}
-    //                                     on_change={
-    //                                         let s = s.clone(); let oc = oc.clone();
-    //                                         Callback::from(move |v| { let mut s = s.clone(); s.host = v; oc.emit(s); })
-    //                                     } />
-    //                             </div>
-    //                             <div class="tp__form-field tp__form-field__text">
-    //                                 <Input label={translate.t(LABEL_PORT)} value={s.port.clone().unwrap_or_default()}
-    //                                     on_change={
-    //                                         let s = s.clone(); let oc = oc.clone();
-    //                                         Callback::from(move |v: String| { let mut s = s.clone(); s.port = if v.is_empty() { None } else { Some(v) }; oc.emit(s); })
-    //                                     } />
-    //                             </div>
-    //                             <div class="tp__form-field tp__form-field__text">
-    //                                 <Input label={translate.t(LABEL_TIMEZONE)} value={s.timezone.clone()}
-    //                                     on_change={
-    //                                         let s = s.clone(); let oc = oc.clone();
-    //                                         Callback::from(move |v: String| { let mut s = s.clone(); s.timezone = v; oc.emit(s); })
-    //                                     } />
-    //                             </div>
-    //                             <div class="tp__form-field tp__form-field__text">
-    //                                 <crate::app::components::input::Input label={translate.t(LABEL_MESSAGE)} value={s.message.clone()}
-    //                                     on_change={
-    //                                         let s = s.clone(); let oc = oc.clone();
-    //                                         Callback::from(move |v| { let mut s = s.clone(); s.message = v; oc.emit(s); })
-    //                                     } />
-    //                             </div>
-    //                             <div class="tp__form-field tp__form-field__text">
-    //                                 <crate::app::components::input::Input label={translate.t(LABEL_PATH)} value={s.path.clone().unwrap_or_default()}
-    //                                     on_change={
-    //                                         let s = s.clone(); let oc = oc.clone();
-    //                                         Callback::from(move |v: String| { let mut s = s.clone(); s.path = if v.is_empty() { None } else { Some(v) }; oc.emit(s); })
-    //                                     } />
-    //                             </div>
-    //                         </>
-    //                     }
-    //                 } else {
-    //                     html! {
-    //                         <>
-    //                             { config_field!(server, translate.t(LABEL_NAME), name) }
-    //                             { config_field!(server, translate.t(LABEL_PROTOCOL), protocol) }
-    //                             { config_field!(server, translate.t(LABEL_HOST), host) }
-    //                             { config_field_custom!(translate.t(LABEL_PORT), server.port.clone().unwrap_or_default()) }
-    //                             { config_field!(server, translate.t(LABEL_TIMEZONE), timezone) }
-    //                             { config_field!(server, translate.t(LABEL_MESSAGE), message) }
-    //                             { config_field_custom!(translate.t(LABEL_PATH), server.path.clone().unwrap_or_default()) }
-    //                         </>
-    //                     }
-    //                 }}
-    //             </div>
-    //         </Card>
-    //     }
-    // };
-
-    let handle_add_server = {
-        let form_state_api_proxy_config = form_state_api_proxy_config.clone();
-        Callback::from(move |_| {
-            let mut servers = form_state_api_proxy_config.form.server.clone();
-            servers.push(ApiProxyServerInfoDto {
-                name: "New Server".to_string(),
-                protocol: "http".to_string(),
-                host: "".to_string(),
-                port: None,
-                timezone: "UTC".to_string(),
-                message: "Welcome to Tuliprox".to_string(),
-                path: None,
-            });
-            form_state_api_proxy_config.dispatch(ApiProxyConfigFormAction::Server(servers));
-        })
-    };
-
-    let render_edit_mode_api_proxy_config = || {
-        html! {
-            <Card class="tp__api-config-card">
-                <div class="tp__webui-config-view__info tp__config-view-page__info">
-                    <AppIcon name="Warn"/> <span class="info">{"This part is `Work in progress`. Feature is not implemented"}</span>
-                </div>
-
-                <div class="tp__config-view-page__title tp__api-config-view__section-title">{translate.t(LABEL_API_PROXY_CONFIG)}</div>
-                <div class="tp__api-config-section">
-                    { edit_field_bool!(form_state_api_proxy_config, translate.t(LABEL_USE_USER_DB), use_user_db, ApiProxyConfigFormAction::UseUserDb) }
-                </div>
-
-                <div class="tp__api-config-section-header tp__list-list__header">
-                    <div class="tp__api-config-view__section-title">{translate.t(LABEL_SERVER)}</div>
-                    <TextButton class="primary" name="add_server" icon="Add" title={translate.t(LABEL_ADD_SERVER)} onclick={handle_add_server} />
-                </div>
-                <div class="tp__api-config-view__proxy-server tp__api-config-view__proxy-server__edit">
-                {
-                    if let Some(definition) = table_definition.as_ref() {
-                            html! {
-                                <>
-                                <Table::<ApiProxyServerInfoDto> definition={definition.clone()} />
-                                <PopupMenu is_open={*popup_is_open} anchor_ref={(*popup_anchor_ref).clone()} on_close={handle_popup_close}>
-                                    <MenuItem icon="Delete" name={ServerTableAction::Delete.to_string()} label={translate.t("LABEL.DELETE")} onclick={&handle_menu_click} class="tp__delete_action"></MenuItem>
-                                    <MenuItem icon="Edit" name={ServerTableAction::Edit.to_string()} label={translate.t("LABEL.EDIT")} onclick={&handle_menu_click}></MenuItem>
-                                </PopupMenu>
-                                </>
-                            }
-                        } else {
-                            html!{}
-                        }
-                 }
-                </div>
-            </Card>
-        }
-    };
-
-    let render_view_mode_api_proxy_config = || {
-        html! {
-            <Card class="tp__api-config-card">
-
-                <div class="tp__config-view-page__title tp__api-config-view__section-title">{translate.t(LABEL_API_PROXY_CONFIG)}</div>
-                <div class="tp__api-config-section">
-                    { config_field_bool!(form_state_api_proxy_config.form, translate.t(LABEL_USE_USER_DB), use_user_db) }
-                </div>
-
-                <div class="tp__api-config-view__section-title">{translate.t(LABEL_SERVER)}</div>
-                <div class="tp__api-config-view__proxy-server tp__api-config-view__proxy-server__view">
-                    {if form_state_api_proxy_config.form.server.is_empty() {
-                        html! { <NoContent /> }
-                     } else if let Some(definition) = table_definition.as_ref() {
-                        html! {
-                            <Table::<ApiProxyServerInfoDto> definition={definition.clone()} />
-                        }
-                     } else {
-                        html!{}
-                     }
-                    }
-                </div>
-            </Card>
-        }
     };
 
     let render_view_mode_api_config = || {
@@ -473,9 +431,9 @@ pub fn ApiConfigView() -> Html {
         } else {
             html! {
                 <Card class="tp__api-config-card">
-                    { config_field_empty!(translate.t(LABEL_HOST)) }
-                    { config_field_empty!(translate.t(LABEL_PORT)) }
-                    { config_field_empty!(translate.t(LABEL_WEB_ROOT)) }
+                    { config_field_empty!(translate.t(LABEL_HOST), "CONFIG_API_HOST") }
+                    { config_field_empty!(translate.t(LABEL_PORT), "CONFIG_API_PORT") }
+                    { config_field_empty!(translate.t(LABEL_WEB_ROOT), "CONFIG_API_WEB_ROOT") }
                 </Card>
             }
         }
@@ -491,42 +449,203 @@ pub fn ApiConfigView() -> Html {
         }
     };
 
+    let render_edit_mode_api_proxy_config = || {
+        html! {
+            <Card class="tp__api-config-card">
+                <div class="tp__config-view-page__title tp__api-config-view__section-title">{translate.t(LABEL_API_PROXY_CONFIG)}</div>
+                <div class="tp__api-config-section">
+                    { edit_field_bool!(form_state_api_proxy_config, translate.t(LABEL_USE_USER_DB), use_user_db, ApiProxyConfigFormAction::UseUserDb) }
+                </div>
+
+                <div class="tp__api-config-section-header tp__list-list__header">
+                    <div class="tp__api-config-view__section-title">{translate.t(LABEL_SERVER)}</div>
+                    <TextButton class="primary" name="add_server" icon="Add" title={translate.t(LABEL_ADD_SERVER)} onclick={handle_add_server.clone()} />
+                </div>
+                <div class="tp__api-config-view__proxy-server tp__api-config-view__proxy-server__edit">
+                    <Table::<ApiProxyServerInfoDto> definition={table_definition.clone()} />
+                    <PopupMenu is_open={*popup_is_open} anchor_ref={(*popup_anchor_ref).clone()} on_close={handle_popup_close.clone()}>
+                        <MenuItem
+                            icon="Delete"
+                            name={ServerTableAction::Delete.to_string()}
+                            label={translate.t("LABEL.DELETE")}
+                            onclick={handle_menu_click.clone()}
+                            class="tp__delete_action"
+                        />
+                        <MenuItem
+                            icon="Edit"
+                            name={ServerTableAction::Edit.to_string()}
+                            label={translate.t("LABEL.EDIT")}
+                            onclick={handle_menu_click.clone()}
+                        />
+                    </PopupMenu>
+                </div>
+            </Card>
+        }
+    };
+
+    let render_view_mode_api_proxy_config = || {
+        html! {
+            <Card class="tp__api-config-card">
+                <div class="tp__config-view-page__title tp__api-config-view__section-title">{translate.t(LABEL_API_PROXY_CONFIG)}</div>
+                <div class="tp__api-config-section">
+                    { config_field_bool!(form_state_api_proxy_config.form, translate.t(LABEL_USE_USER_DB), use_user_db) }
+                </div>
+                <div class="tp__api-config-view__section-title">{translate.t(LABEL_SERVER)}</div>
+                <div class="tp__api-config-view__proxy-server tp__api-config-view__proxy-server__view">
+                    {
+                        if form_state_api_proxy_config.form.server.is_empty() {
+                            html! { <NoContent /> }
+                        } else {
+                            html! { <Table::<ApiProxyServerInfoDto> definition={table_definition.clone()} /> }
+                        }
+                    }
+                </div>
+            </Card>
+        }
+    };
+
+    let server_dialog_html = if let Some(mode) = *server_dialog_mode {
+        let title = match mode {
+            ServerDialogMode::Add => translate.t(LABEL_ADD_SERVER),
+            ServerDialogMode::Edit(_) => format!("{} {}", translate.t("LABEL.EDIT"), translate.t(LABEL_SERVER)),
+        };
+
+        html! {
+            <CustomDialog
+                open={true}
+                class={Some("tp__api-server-dialog".to_string())}
+                modal={true}
+                close_on_backdrop_click={false}
+                on_close={Some(handle_server_dialog_close.clone())}
+            >
+                <h2>{title}</h2>
+                <div class="tp__api-server-dialog__body">
+                    <div class="tp__api-server-dialog__grid">
+                        <Input
+                            name="api_proxy_server_name"
+                            field_id={Some("API_PROXY_SERVER_INFO_NAME".to_string())}
+                            label={Some(translate.t(LABEL_NAME))}
+                            value={server_dialog_form.name.clone()}
+                            on_change={Some(handle_server_name_change.clone())}
+                        />
+                        <Input
+                            name="api_proxy_server_protocol"
+                            field_id={Some("API_PROXY_SERVER_INFO_PROTOCOL".to_string())}
+                            label={Some(translate.t(LABEL_PROTOCOL))}
+                            value={server_dialog_form.protocol.clone()}
+                            on_change={Some(handle_server_protocol_change.clone())}
+                        />
+                        <Input
+                            name="api_proxy_server_host"
+                            field_id={Some("API_PROXY_SERVER_INFO_HOST".to_string())}
+                            label={Some(translate.t(LABEL_HOST))}
+                            value={server_dialog_form.host.clone()}
+                            on_change={Some(handle_server_host_change.clone())}
+                        />
+                        <Input
+                            name="api_proxy_server_port"
+                            field_id={Some("API_PROXY_SERVER_INFO_PORT".to_string())}
+                            label={Some(translate.t(LABEL_PORT))}
+                            value={server_dialog_form.port.clone().unwrap_or_default()}
+                            on_change={Some(handle_server_port_change.clone())}
+                        />
+                        <Input
+                            name="api_proxy_server_timezone"
+                            field_id={Some("API_PROXY_SERVER_INFO_TIMEZONE".to_string())}
+                            label={Some(translate.t(LABEL_TIMEZONE))}
+                            value={server_dialog_form.timezone.clone()}
+                            on_change={Some(handle_server_timezone_change.clone())}
+                        />
+                        <Input
+                            name="api_proxy_server_path"
+                            field_id={Some("API_PROXY_SERVER_INFO_PATH".to_string())}
+                            label={Some(translate.t(LABEL_PATH))}
+                            value={server_dialog_form.path.clone().unwrap_or_default()}
+                            on_change={Some(handle_server_path_change.clone())}
+                        />
+                        <div class="tp__api-server-dialog__message">
+                            <Input
+                                name="api_proxy_server_message"
+                                field_id={Some("API_PROXY_SERVER_INFO_MESSAGE".to_string())}
+                                label={Some(translate.t(LABEL_MESSAGE))}
+                                value={server_dialog_form.message.clone()}
+                                on_change={Some(handle_server_message_change.clone())}
+                            />
+                        </div>
+                    </div>
+                    {
+                        if let Some(error) = (*server_dialog_error).as_ref() {
+                            html! {
+                                <div class="tp__webui-config-view__info tp__config-view-page__info">
+                                    <span class="error">{error.clone()}</span>
+                                </div>
+                            }
+                        } else {
+                            html! {}
+                        }
+                    }
+                </div>
+                <div class="tp__dialog__toolbar">
+                    <TextButton
+                        class="secondary"
+                        name="cancel_server_dialog"
+                        icon="Cancel"
+                        title={translate.t("LABEL.CANCEL")}
+                        onclick={handle_server_dialog_cancel.clone()}
+                    />
+                    <TextButton
+                        class="primary"
+                        name="save_server_dialog"
+                        icon="Save"
+                        title={translate.t("LABEL.SAVE")}
+                        onclick={handle_server_dialog_save.clone()}
+                    />
+                </div>
+            </CustomDialog>
+        }
+    } else {
+        html! {}
+    };
+
     html! {
         <div class="tp__api-config-view tp__config-view-page">
-           <div class="tp__config-view-page__title">{translate.t(LABEL_API_CONFIG)}</div>
+            <div class="tp__config-view-page__title">{translate.t(LABEL_API_CONFIG)}</div>
             {
-             html_if!(*config_view_ctx.edit_mode, {
-                  <div class="tp__webui-config-view__info tp__config-view-page__info">
-                    <AppIcon name="Warn"/> <span class="info">{translate.t("INFO.RESTART_TO_APPLY_CHANGES")}</span>
-                  </div>
-            })}
+                html_if!(*config_view_ctx.edit_mode && config_view_ctx.show_restart_notice, {
+                    <div class="tp__webui-config-view__info tp__config-view-page__info">
+                        <AppIcon name="Warn"/>
+                        <span class="info">{translate.t("INFO.RESTART_TO_APPLY_CHANGES")}</span>
+                    </div>
+                })
+            }
             <div class="tp__api-config-view__body tp__config-view-page__body">
                 {
                     if *config_view_ctx.edit_mode {
-                      html! {
-                        <>
-                        <div class="tp__api-config-view__section tp__config-view-page__body">
-                            { render_edit_mode_api_config() }
-                        </div>
-                        <div class="tp__api-config-view__section tp__config-view-page__body">
-                            { render_edit_mode_api_proxy_config() }
-                        </div>
-                        </>
+                        html! {
+                            <>
+                                <div class="tp__api-config-view__section tp__config-view-page__body">
+                                    { render_edit_mode_api_config() }
+                                </div>
+                                <div class="tp__api-config-view__section tp__config-view-page__body">
+                                    { render_edit_mode_api_proxy_config() }
+                                </div>
+                            </>
                         }
                     } else {
                         html! {
-                        <>
-                        <div class="tp__api-config-view__section">
-                            { render_view_mode_api_config() }
-                        </div>
-                        <div class="tp__api-config-view__section">
-                            { render_view_mode_api_proxy_config() }
-                        </div>
-                        </>
+                            <>
+                                <div class="tp__api-config-view__section">
+                                    { render_view_mode_api_config() }
+                                </div>
+                                <div class="tp__api-config-view__section">
+                                    { render_view_mode_api_proxy_config() }
+                                </div>
+                            </>
                         }
                     }
                 }
             </div>
+            {server_dialog_html}
         </div>
     }
 }

@@ -35,6 +35,7 @@ DOCKER_DIR="${WORKING_DIR}/docker"
 BACKEND_DIR="${WORKING_DIR}/backend"
 FRONTEND_DIR="${WORKING_DIR}/frontend"
 FRONTEND_BUILD_DIR="${FRONTEND_DIR}/dist"
+ARTIFACT_DIR="${WORKING_DIR}/artifacts"
 
 # Config
 declare -A ARCHITECTURES=([LINUX]=x86_64-unknown-linux-musl [AARCH64]=aarch64-unknown-linux-musl)
@@ -43,6 +44,23 @@ declare -A MULTI_PLATFORM_IMAGES=([tuliprox]="scratch-final" [tuliprox-alpine]="
 # Version detection
 VERSION=$(grep -Po '^version\s*=\s*"\K[0-9\.]+' "${BACKEND_DIR}/Cargo.toml")
 echo "📦 Version: ${VERSION}"
+
+# Prepare artifact directory (clean per run to avoid stale files)
+rm -rf "${ARTIFACT_DIR}"
+mkdir -p "${ARTIFACT_DIR}"
+
+write_checksum() {
+    local file_path="$1"
+    local file_dir
+    local file_name
+    file_dir="$(dirname "${file_path}")"
+    file_name="$(basename "${file_path}")"
+    if command -v sha256sum >/dev/null 2>&1; then
+        (cd "${file_dir}" && sha256sum "${file_name}") > "${file_path}.sha256"
+    else
+        (cd "${file_dir}" && shasum -a 256 "${file_name}") > "${file_path}.sha256"
+    fi
+}
 
 # -----------------------------------------
 # 1. Frontend Build
@@ -69,8 +87,16 @@ for PLATFORM in "${!ARCHITECTURES[@]}"; do
     # Using cross for compilation
     cross build -p tuliprox --release --target "$ARCHITECTURE" --locked
 
-    cp "target/${ARCHITECTURE}/release/tuliprox" "${DOCKER_DIR}/binaries/tuliprox-${ARCHITECTURE}"
+    SOURCE_BIN_PATH="target/${ARCHITECTURE}/release/tuliprox"
+    cp "${SOURCE_BIN_PATH}" "${DOCKER_DIR}/binaries/tuliprox-${ARCHITECTURE}"
+
+    VERSIONED_ARTIFACT_PATH="${ARTIFACT_DIR}/tuliprox-v${VERSION}-${ARCHITECTURE}"
+    cp "${SOURCE_BIN_PATH}" "${VERSIONED_ARTIFACT_PATH}"
+    chmod +x "${VERSIONED_ARTIFACT_PATH}"
+    write_checksum "${VERSIONED_ARTIFACT_PATH}"
 done
+
+echo "📦 Static binaries prepared in ${ARTIFACT_DIR}"
 
 # -----------------------------------------
 # 3. Docker Build & Push (Optimized Caching)

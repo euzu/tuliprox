@@ -29,16 +29,20 @@ pub fn verify_password(hash: &str, password: &[u8]) -> bool {
     false
 }
 
+pub fn generate_password_from_input(password: &str) -> std::io::Result<String> {
+    if password.len() < 8 {
+        return Err(str_to_io_error("Password too short min length 8"));
+    }
+    hash(password.as_bytes()).map_or_else(|| Err(str_to_io_error("Failed to generate hash")), Ok)
+}
+
 pub fn generate_password() -> std::io::Result<String> {
     match rpassword::prompt_password("password> ") {
         Ok(pwd1) => {
-            if pwd1.len() < 8 {
-                return Err(str_to_io_error("Password too short min length 8"))
-            }
             match rpassword::prompt_password("retype password> ") {
                 Ok(pwd2) => {
                     if pwd1.eq(&pwd2) {
-                        hash(pwd1.as_bytes()).map_or_else(|| Err(str_to_io_error("Failed to generate hash")), Ok)
+                        generate_password_from_input(&pwd1)
                     } else {
                         Err(str_to_io_error("Passwords don't match"))
                     }
@@ -49,4 +53,3 @@ pub fn generate_password() -> std::io::Result<String> {
         Err(err) => Err(err)
     }
 }
-

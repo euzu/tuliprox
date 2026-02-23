@@ -215,7 +215,7 @@ pub fn ApiUserPlaylist() -> Html {
             </div>
 
             <div class="tp__api-user-playlist__content">
-                <div class="user-playlist__content-toolbar">
+                <div class="tp__api-user-playlist__content-toolbar">
                  <RadioButtonGroup options={playlist_types.clone()}
                                           selected={Rc::new(vec![(*active_tab).to_string()])}
                                           on_select={handle_tab_select} />

@@ -518,7 +518,13 @@ pub async fn persist_source_config(
         config.get_backup_dir().to_string()
     };
 
-    let mut source_config = doc.clone();
+    let source_config = sanitize_sources_for_persist(doc.clone()).await;
+
+    save_sources_config(&source_file, &backup_dir, &source_config).await?;
+    Ok(doc)
+}
+
+pub async fn sanitize_sources_for_persist(mut source_config: SourcesConfigDto) -> SourcesConfigDto {
     for input in &mut source_config.inputs {
         if input
             .panel_api
@@ -557,9 +563,7 @@ pub async fn persist_source_config(
             target.id = 0;
         }
     }
-
-    save_sources_config(&source_file, &backup_dir, &source_config).await?;
-    Ok(doc)
+    source_config
 }
 
 pub async fn validate_and_persist_source_config(

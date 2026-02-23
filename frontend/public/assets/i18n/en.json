@@ -15,6 +15,7 @@
     "CANCEL": "Cancel",
     "YES": "Yes",
     "CLOSE": "Close",
+    "HELP": "Help",
     "DOWNLOAD": "Download",
     "SHOW_SELECTED": "Show selected",
     "SELECT_ALL": "Select All",
@@ -112,6 +113,7 @@
     "STATUS": "Status",
     "USERNAME": "Username",
     "PASSWORD": "Password",
+    "REPEAT_PASSWORD": "Repeat Password",
     "SERVER": "Server",
     "TIMEZONE": "Timezone",
     "PATH": "Path",
@@ -234,6 +236,7 @@
     "MAPPER": "Mapper",
     "SCRIPT": "Script",
     "SCAN_DIRECTORIES": "Scan Directories",
+    "ADD_DIRECTORY": "Add Directory",
     "SUPPORTED_EXTENSIONS": "Supported Extensions",
     "METADATA": "Metadata",
     "METADATA_PATH": "Metadata Path",
@@ -478,7 +481,8 @@
       },
       "API_PROXY_CONFIG": {
         "SUCCESS": "ApiProxy config saved!",
-        "FAIL": "Failed to save the ApiProxy config!"
+        "FAIL": "Failed to save the ApiProxy config!",
+        "NON_UNIQUE_SERVER_NAME": "Server info name \"{name}\" already exists."
       },
       "SOURCES_CONFIG": {
         "SUCCESS": "Sources config saved!",
@@ -555,12 +559,62 @@
   },
   "SETUP": {
     "LABEL": {
+      "STEPS": "Setup Steps",
+      "STEP": "Step",
       "NEXT": "Next",
       "BACK": "Back",
-      "FINISH_SETUP": "Finish Setup"
+      "FINISH_SETUP": "Finish Setup",
+      "WELCOME": "Welcome",
+      "API": "API",
+      "WEB_UI": "Web-Ui",
+      "MAIN": "Main",
+      "LOG": "Log",
+      "MESSAGING": "Messaging",
+      "REVERSE_PROXY": "Reverse Proxy",
+      "PROXY": "Proxy",
+      "IP_CHECK": "IpCheck",
+      "VIDEO": "Video",
+      "HDHOMERUN": "HdHomerun",
+      "LIBRARY": "Library",
+      "SOURCES": "Sources",
+      "API_USERS": "API Users",
+      "SCHEDULES": "Schedules",
+      "FINISH": "Finish",
+      "WEBUI_USER": "WebUI User",
+      "WEBUI_USERNAME": "WebUI Username",
+      "WEBUI_PASSWORD": "WebUI Password",
+      "WEBUI_PASSWORD_REPEAT": "Repeat WebUI Password",
+      "SUBMITTING": "Submitting...",
+      "SUBMITTED": "Submitted"
+    },
+    "DESC": {
+      "WELCOME": "Create the first WebUI user. These credentials will be written to user.txt.",
+      "API": "Configure API and API proxy settings.",
+      "WEB_UI": "Configure WebUI settings.",
+      "MAIN": "Configure main application settings.",
+      "LOG": "Configure logging settings.",
+      "MESSAGING": "Configure messaging settings.",
+      "REVERSE_PROXY": "Configure reverse proxy settings.",
+      "PROXY": "Configure outgoing proxy settings.",
+      "IP_CHECK": "Configure IP check settings.",
+      "VIDEO": "Configure video settings.",
+      "HDHOMERUN": "Configure HDHomeRun settings.",
+      "LIBRARY": "Configure library settings.",
+      "SOURCES": "Configure source inputs and mappings.",
+      "API_USERS": "Configure API users and target credentials.",
+      "SCHEDULES": "Configure scheduler settings.",
+      "FINISH": "Review and submit the configuration.",
+      "UNKNOWN": "Configure this setup step."
     },
     "MSG": {
-      "WELCOME": "Welcome to tuliprox setup. This wizard will guide you through the initial setup process."
+      "WELCOME": "Welcome to tuliprox setup. This wizard will guide you through the initial setup process.",
+      "WEBUI_USERNAME_REQUIRED": "WebUI username is required",
+      "WEBUI_PASSWORD_REQUIRED": "WebUI password is required",
+      "WEBUI_PASSWORD_MIN_LENGTH": "WebUI password must be at least 8 characters",
+      "WEBUI_PASSWORDS_DO_NOT_MATCH": "WebUI passwords do not match",
+      "COMPLETE_SUCCESS": "Setup completed successfully",
+      "RESTART_TO_CONTINUE": "Restart the application to continue.",
+      "COMPLETE_RESTART_HINT": "Setup completed successfully. Restart the application/container to continue."
     }
   },
   "SOURCE_EDITOR": {
@@ -572,6 +626,366 @@
     "BRICK_OutputXtream": "Xtream",
     "BRICK_OutputHdHomeRun": "HDHR",
     "BRICK_OutputStrm": "STRM"
+  },
+  "EXPLANATION": {
+    "DEFAULT": "No dedicated explanation is available for this field yet.",
+    "API_PROXY_CONFIG": {
+      "SERVER": "Configuration value for server.",
+      "USE_USER_DB": "If enabled, API proxy users are loaded from the user database."
+    },
+    "API_PROXY_SERVER_INFO": {
+      "HOST": "Upstream host that this proxy server profile points to.",
+      "MESSAGE": "Response message returned by this proxy server profile.",
+      "NAME": "Display name used to identify this API proxy server profile.",
+      "PATH": "Optional path prefix used when routing to this proxy server profile.",
+      "PORT": "Optional upstream port used by this proxy server profile.",
+      "PROTOCOL": "Protocol used by this API proxy server endpoint (for example http or https).",
+      "TIMEZONE": "Timezone applied by this proxy server profile for time-aware responses."
+    },
+    "CACHE_CONFIG": {
+      "DIR": "Configuration value for dir.",
+      "ENABLED": "Configuration value for enabled.",
+      "SIZE": "Configuration value for size."
+    },
+    "CONFIG_API": {
+      "HOST": "Hostname or IP where the tuliprox API listens.",
+      "PORT": "TCP port where the tuliprox API listens.",
+      "WEB_ROOT": "Filesystem path that serves the frontend assets for the API endpoint."
+    },
+    "CONFIG_INPUT": {
+      "CACHE_DURATION": "Configuration value for cache duration.",
+      "ENABLED": "Configuration value for enabled.",
+      "EXP_DATE": "Configuration value for exp date.",
+      "MAX_CONNECTIONS": "Configuration value for max connections.",
+      "METHOD": "Configuration value for method.",
+      "NAME": "Human readable name for this entry.",
+      "PASSWORD": "Password or credential used for this account or service.",
+      "PERSIST": "Configuration value for persist.",
+      "PRIORITY": "Configuration value for priority.",
+      "URL": "Target URL for this setting.",
+      "USERNAME": "Login username for this account or service."
+    },
+    "CONFIG_INPUT_ALIAS": {
+      "ENABLED": "Configuration value for enabled.",
+      "EXP_DATE": "Configuration value for exp date.",
+      "MAX_CONNECTIONS": "Configuration value for max connections.",
+      "NAME": "Human readable name for this entry.",
+      "PASSWORD": "Password or credential used for this account or service.",
+      "PRIORITY": "Configuration value for priority.",
+      "URL": "Target URL for this setting.",
+      "USERNAME": "Login username for this account or service."
+    },
+    "CONFIG_INPUT_OPTIONS": {
+      "PROBE_DELAY": "Configuration value for probe delay.",
+      "PROBE_LIVE": "Configuration value for probe live.",
+      "PROBE_LIVE_INTERVAL_HOURS": "Configuration value for probe live interval hours.",
+      "PROBE_SERIES": "Configuration value for probe series.",
+      "PROBE_VOD": "Configuration value for probe vod.",
+      "RESOLVE_BACKGROUND": "Configuration value for resolve background.",
+      "RESOLVE_DELAY": "Configuration value for resolve delay.",
+      "RESOLVE_SERIES": "Configuration value for resolve series.",
+      "RESOLVE_TMDB": "Configuration value for resolve tmdb.",
+      "RESOLVE_VOD": "Configuration value for resolve vod.",
+      "XTREAM_LIVE_STREAM_USE_PREFIX": "Configuration value for xtream live stream use prefix.",
+      "XTREAM_LIVE_STREAM_WITHOUT_EXTENSION": "Configuration value for xtream live stream without extension.",
+      "XTREAM_SKIP_LIVE": "Configuration value for xtream skip live.",
+      "XTREAM_SKIP_SERIES": "Configuration value for xtream skip series.",
+      "XTREAM_SKIP_VOD": "Configuration value for xtream skip vod."
+    },
+    "CONFIG_TARGET": {
+      "ENABLED": "Configuration value for enabled.",
+      "FILTER": "Configuration value for filter.",
+      "MAPPING": "Configuration value for mapping.",
+      "NAME": "Human readable name for this entry.",
+      "PROCESSING_ORDER": "Configuration value for processing order.",
+      "USE_MEMORY_CACHE": "Configuration value for use memory cache.",
+      "WATCH": "Configuration value for watch."
+    },
+    "CONFIG_TARGET_OPTIONS": {
+      "FORCE_REDIRECT": "Configuration value for force redirect.",
+      "IGNORE_LOGO": "Configuration value for ignore logo.",
+      "REMOVE_DUPLICATES": "Configuration value for remove duplicates.",
+      "SHARE_LIVE_STREAMS": "Configuration value for share live streams."
+    },
+    "CONTENT_SECURITY_POLICY_CONFIG": {
+      "CUSTOM_ATTRIBUTES": "Configuration value for custom attributes.",
+      "ENABLED": "Configuration value for enabled."
+    },
+    "DISCORD": {
+      "TEMPLATE_MESSAGE": "Template message body for Discord notifications."
+    },
+    "DISCORD_MESSAGING_CONFIG": {
+      "TEMPLATES": "Configuration value for templates.",
+      "URL": "Target URL for this setting."
+    },
+    "EPG_SOURCE": {
+      "LOGO_OVERRIDE": "Configuration value for logo override.",
+      "PRIORITY": "Configuration value for priority.",
+      "URL": "Target URL for this setting."
+    },
+    "FAILOVER_PATTERNS": {
+      "PATTERNS": "Configuration value for patterns."
+    },
+    "GEO_IP_CONFIG": {
+      "ENABLED": "Configuration value for enabled.",
+      "URL": "Target URL for this setting."
+    },
+    "HD_HOME_RUN_CONFIG": {
+      "AUTH": "Configuration value for auth.",
+      "DEVICES": "Configuration value for devices.",
+      "ENABLED": "Configuration value for enabled.",
+      "PROPRIETARY_DISCOVERY": "Configuration value for proprietary discovery.",
+      "SSDP_DISCOVERY": "Configuration value for ssdp discovery."
+    },
+    "HD_HOME_RUN_DEVICE_CONFIG": {
+      "DEVICE_TYPE": "Configuration value for device type.",
+      "DEVICE_UDN": "Configuration value for device udn.",
+      "FIRMWARE_NAME": "Configuration value for firmware name.",
+      "FIRMWARE_VERSION": "Configuration value for firmware version.",
+      "FRIENDLY_NAME": "Configuration value for friendly name.",
+      "MANUFACTURER": "Configuration value for manufacturer.",
+      "MODEL_NAME": "Configuration value for model name.",
+      "MODEL_NUMBER": "Configuration value for model number.",
+      "NAME": "Human readable name for this entry.",
+      "PORT": "Network port used by this setting.",
+      "TUNER_COUNT": "Configuration value for tuner count."
+    },
+    "HD_HOME_RUN_TARGET_OUTPUT": {
+      "DEVICE": "Configuration value for device.",
+      "USERNAME": "Login username for this account or service.",
+      "USE_OUTPUT": "Configuration value for use output."
+    },
+    "IP_CHECK_CONFIG": {
+      "PATTERN_IPV4": "Configuration value for pattern ipv4.",
+      "PATTERN_IPV6": "Configuration value for pattern ipv6.",
+      "URL": "Target URL for this setting.",
+      "URL_IPV4": "Configuration value for url ipv4.",
+      "URL_IPV6": "Configuration value for url ipv6."
+    },
+    "LIBRARY_CONFIG": {
+      "ENABLED": "Configuration value for enabled.",
+      "SCAN_DIRECTORIES": "Configuration value for scan directories.",
+      "SUPPORTED_EXTENSIONS": "Configuration value for supported extensions."
+    },
+    "LIBRARY_METADATA_CONFIG": {
+      "FALLBACK_TO_FILENAME": "Configuration value for fallback to filename.",
+      "FORMATS": "Configuration value for formats.",
+      "PATH": "Path or path prefix used by this setting."
+    },
+    "LIBRARY_METADATA_READ_CONFIG": {
+      "JELLYFIN": "Configuration value for jellyfin.",
+      "KODI": "Configuration value for kodi.",
+      "PLEX": "Configuration value for plex."
+    },
+    "LIBRARY_PLAYLIST_CONFIG": {
+      "MOVIE_CATEGORY": "Configuration value for movie category.",
+      "SERIES_CATEGORY": "Configuration value for series category."
+    },
+    "LIBRARY_TMDB_CONFIG": {
+      "API_KEY": "Configuration value for api key.",
+      "CACHE_DURATION_DAYS": "Configuration value for cache duration days.",
+      "ENABLED": "Configuration value for enabled.",
+      "LANGUAGE": "Configuration value for language.",
+      "RATE_LIMIT_MS": "Configuration value for rate limit ms."
+    },
+    "LOG_CONFIG": {
+      "LOG_ACTIVE_USER": "Configuration value for log active user.",
+      "LOG_LEVEL": "Configuration value for log level.",
+      "SANITIZE_SENSITIVE_INFO": "Configuration value for sanitize sensitive info."
+    },
+    "M3U_TARGET_OUTPUT": {
+      "FILENAME": "Configuration value for filename.",
+      "FILTER": "Configuration value for filter.",
+      "INCLUDE_TYPE_IN_URL": "Configuration value for include type in url.",
+      "MASK_REDIRECT_URL": "Configuration value for mask redirect url."
+    },
+    "MAIN_CONFIG": {
+      "ACCEPT_INSECURE_SSL_CERTIFICATES": "Configuration value for accept insecure ssl certificates.",
+      "BACKUP_DIR": "Configuration value for backup dir.",
+      "CONFIG_HOT_RELOAD": "Configuration value for config hot reload.",
+      "CONNECT_TIMEOUT_SECS": "Maximum connect timeout in seconds.",
+      "CUSTOM_STREAM_RESPONSE_PATH": "Configuration value for custom stream response path.",
+      "DEFAULT_USER_AGENT": "Configuration value for default user agent.",
+      "DISK_BASED_PROCESSING": "Configuration value for disk based processing.",
+      "MAPPING_PATH": "Configuration value for mapping path.",
+      "PROCESS_PARALLEL": "Configuration value for process parallel.",
+      "SLEEP_TIMER_MINS": "Configuration value for sleep timer mins.",
+      "UPDATE_ON_BOOT": "Configuration value for update on boot.",
+      "USER_ACCESS_CONTROL": "Configuration value for user access control.",
+      "USER_CONFIG_DIR": "Configuration value for user config dir.",
+      "WORKING_DIR": "Base working directory used by tuliprox."
+    },
+    "MESSAGING_CONFIG": {
+      "NOTIFY_ON": "Configuration value for notify on."
+    },
+    "PANEL": {
+      "ALIAS_POOL_MAX": "Maximum alias pool size to maintain.",
+      "ALIAS_POOL_MIN": "Minimum alias pool size to keep available.",
+      "API_KEY": "API key used to authenticate requests to the panel API.",
+      "PROBE_INTERVAL": "Interval (seconds) between panel status checks.",
+      "PROVISION_COOLDOWN": "Cooldown period before retrying panel provisioning.",
+      "PROVISION_OFFSET": "Time offset used to schedule panel provisioning.",
+      "PROVISION_TIMEOUT": "Request timeout (seconds) for panel provisioning calls.",
+      "URL": "Panel API endpoint URL used for account provisioning."
+    },
+    "PLAYLIST_EPG_SOURCE_SELECTOR": {
+      "URL": "Source URL used to download EPG data."
+    },
+    "PLAYLIST_SOURCE_SELECTOR": {
+      "PASSWORD": "Source password used for loading playlists from a protected provider.",
+      "URL": "Source URL used to download playlist data.",
+      "USERNAME": "Source username used for loading playlists from a protected provider."
+    },
+    "PROXY_CONFIG": {
+      "PASSWORD": "Password or credential used for this account or service.",
+      "URL": "Target URL for this setting.",
+      "USERNAME": "Login username for this account or service."
+    },
+    "PROXY_USER_CREDENTIALS": {
+      "COMMENT": "Configuration value for comment.",
+      "EPG_REQUEST_TIMESHIFT": "Configuration value for epg request timeshift.",
+      "EPG_TIMESHIFT": "Configuration value for epg timeshift.",
+      "EXP_DATE": "Configuration value for exp date.",
+      "MAX_CONNECTIONS": "Configuration value for max connections.",
+      "PASSWORD": "Password or credential used for this account or service.",
+      "PROXY": "Configuration value for proxy.",
+      "SERVER": "Configuration value for server.",
+      "STATUS": "Configuration value for status.",
+      "TOKEN": "API token used for authentication.",
+      "UI_ENABLED": "Configuration value for ui enabled.",
+      "USERNAME": "Login username for this account or service."
+    },
+    "PUSHOVER_MESSAGING_CONFIG": {
+      "TOKEN": "API token used for authentication.",
+      "URL": "Target URL for this setting.",
+      "USER": "Configuration value for user."
+    },
+    "RATE_LIMIT_CONFIG": {
+      "BURST_SIZE": "Configuration value for burst size.",
+      "ENABLED": "Configuration value for enabled.",
+      "PERIOD_MILLIS": "Configuration value for period millis."
+    },
+    "RESOURCE_RETRY_CONFIG": {
+      "BACKOFF_MILLIS": "Configuration value for backoff millis.",
+      "BACKOFF_MULTIPLIER": "Configuration value for backoff multiplier.",
+      "MAX_ATTEMPTS": "Configuration value for max attempts."
+    },
+    "REST": {
+      "TEMPLATE_MESSAGE": "Template message body for REST notifications."
+    },
+    "REST_MESSAGING_CONFIG": {
+      "HEADERS": "Configuration value for headers.",
+      "METHOD": "Configuration value for method.",
+      "TEMPLATES": "Configuration value for templates.",
+      "URL": "Target URL for this setting."
+    },
+    "REVERSE_PROXY_CONFIG": {
+      "RESOURCE_REWRITE_DISABLED": "Configuration value for resource rewrite disabled.",
+      "REWRITE_SECRET": "Configuration value for rewrite secret."
+    },
+    "REVERSE_PROXY_DISABLED_HEADER_CONFIG": {
+      "CLOUDFLARE_HEADER": "Configuration value for cloudflare header.",
+      "CUSTOM_HEADER": "Configuration value for custom header.",
+      "REFERER_HEADER": "Configuration value for referer header.",
+      "X_HEADER": "Configuration value for x header."
+    },
+    "SCHEDULES_CONFIG": {
+      "SCHEDULES": "Configuration value for schedules."
+    },
+    "SETUP": {
+      "PASSWORD": "Password for the initial WebUI account created during setup.",
+      "PASSWORD_REPEAT": "Repeat the setup password to confirm the initial WebUI account.",
+      "USERNAME": "Username for the initial WebUI account created during setup."
+    },
+    "STAGED_INPUT": {
+      "HEADERS": "Configuration value for headers.",
+      "INPUT_TYPE": "Configuration value for input type.",
+      "METHOD": "Configuration value for method.",
+      "PASSWORD": "Password or credential used for this account or service.",
+      "URL": "Target URL for this setting.",
+      "USERNAME": "Login username for this account or service."
+    },
+    "STREAM_BUFFER_CONFIG": {
+      "ENABLED": "Configuration value for enabled.",
+      "SIZE": "Configuration value for size."
+    },
+    "STREAM_CONFIG": {
+      "GRACE_PERIOD_HOLD_STREAM": "Configuration value for grace period hold stream.",
+      "GRACE_PERIOD_MILLIS": "Configuration value for grace period millis.",
+      "GRACE_PERIOD_TIMEOUT_SECS": "Configuration value for grace period timeout secs.",
+      "RETRY": "Configuration value for retry.",
+      "SHARED_BURST_BUFFER_MB": "Configuration value for shared burst buffer mb.",
+      "THROTTLE": "Configuration value for throttle.",
+      "THROTTLE_KBPS": "Configuration value for throttle kbps."
+    },
+    "STRM_TARGET_OUTPUT": {
+      "ADD_QUALITY_TO_FILENAME": "Configuration value for add quality to filename.",
+      "CLEANUP": "Configuration value for cleanup.",
+      "DIRECTORY": "Filesystem directory used for output.",
+      "FILTER": "Configuration value for filter.",
+      "FLAT": "Configuration value for flat.",
+      "STRM_PROPS": "Configuration value for strm props.",
+      "STYLE": "Configuration value for style.",
+      "UNDERSCORE_WHITESPACE": "Configuration value for underscore whitespace.",
+      "USERNAME": "Login username for this account or service."
+    },
+    "TELEGRAM": {
+      "TEMPLATE_MESSAGE": "Template message body for Telegram notifications."
+    },
+    "TELEGRAM_MESSAGING_CONFIG": {
+      "BOT_TOKEN": "Configuration value for bot token.",
+      "CHAT_IDS": "Configuration value for chat ids.",
+      "MARKDOWN": "Configuration value for markdown.",
+      "TEMPLATES": "Configuration value for templates."
+    },
+    "TRAKT_API_CONFIG": {
+      "API_KEY": "Configuration value for api key.",
+      "URL": "Target URL for this setting.",
+      "USER_AGENT": "Configuration value for user agent.",
+      "VERSION": "Configuration value for version."
+    },
+    "TRAKT_CONFIG": {
+      "ENABLED": "Configuration value for enabled."
+    },
+    "TRAKT_LIST_CONFIG": {
+      "CATEGORY_NAME": "Configuration value for category name.",
+      "CONTENT_TYPE": "Configuration value for content type.",
+      "FUZZY_MATCH_THRESHOLD": "Configuration value for fuzzy match threshold.",
+      "LIST_SLUG": "Configuration value for list slug.",
+      "USER": "Configuration value for user."
+    },
+    "VIDEO_CONFIG": {
+      "EXTENSIONS": "Allowed file extensions for this feature.",
+      "FFPROBE_ENABLED": "Configuration value for ffprobe enabled.",
+      "FFPROBE_TIMEOUT": "Configuration value for ffprobe timeout.",
+      "WEB_SEARCH": "Configuration value for web search."
+    },
+    "VIDEO_DOWNLOAD_CONFIG": {
+      "DIRECTORY": "Filesystem directory used for output.",
+      "EPISODE_PATTERN": "Regular expression used to detect episode information.",
+      "HEADERS": "Configuration value for headers.",
+      "ORGANIZE_INTO_DIRECTORIES": "Configuration value for organize into directories."
+    },
+    "WEB_AUTH_CONFIG": {
+      "ENABLED": "Configuration value for enabled.",
+      "ISSUER": "Token issuer name used in WebUI auth tokens.",
+      "SECRET": "Signing secret used for WebUI auth tokens.",
+      "TOKEN_TTL_MINS": "Lifetime of generated auth tokens in minutes.",
+      "USERFILE": "Configuration value for userfile."
+    },
+    "WEB_UI_CONFIG": {
+      "ENABLED": "Configuration value for enabled.",
+      "KICK_SECS": "Configuration value for kick secs.",
+      "PATH": "Path or path prefix used by this setting.",
+      "PLAYER_SERVER": "Configuration value for player server.",
+      "USER_UI_ENABLED": "Configuration value for user ui enabled."
+    },
+    "XTREAM_TARGET_OUTPUT": {
+      "FILTER": "Configuration value for filter.",
+      "SKIP_LIVE_DIRECT_SOURCE": "Configuration value for skip live direct source.",
+      "SKIP_SERIES_DIRECT_SOURCE": "Configuration value for skip series direct source.",
+      "SKIP_VIDEO_DIRECT_SOURCE": "Configuration value for skip video direct source."
+    }
   },
   "COUNTRY": {
     "Loopback": "Loopback",

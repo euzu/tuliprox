@@ -90,7 +90,13 @@ impl ReverseProxyConfigDto {
     }
 
     pub(crate) fn prepare(&mut self, working_dir: &str) -> Result<(), TuliproxError> {
-        hex_to_u8_16(&self.rewrite_secret).map_err(|e| TuliproxError::new(TuliproxErrorKind::Info, e))?;
+        self.rewrite_secret = self.rewrite_secret.trim().to_string();
+        if !self.resource_rewrite_disabled {
+            if self.rewrite_secret.is_empty() {
+                return info_err_res!("rewrite_secret is required when resource rewrite is enabled");
+            }
+            hex_to_u8_16(&self.rewrite_secret).map_err(|e| TuliproxError::new(TuliproxErrorKind::Info, e))?;
+        }
 
         if let Some(stream) = self.stream.as_mut() {
             stream.prepare()?;

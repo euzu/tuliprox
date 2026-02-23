@@ -82,7 +82,7 @@ fn render_args(args: &[ExprId], script: &MapperScript, format_params: &mut Forma
 }
 
 fn render_var_access(name: &str, field: &str) -> Html {
-    html! { <span class="var-access">{ name }{ field }</span> }
+    html! { <span class="var-access">{ name }{"."}{ field }</span> }
 }
 
 fn render_field(field: &str) -> Html {

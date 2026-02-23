@@ -7,7 +7,7 @@ use crate::{
             },
             input::Input,
             select::Select,
-            Card, Chip, DropDownOption, DropDownSelection, IconButton, ToggleSwitch,
+            Card, Chip, DropDownOption, DropDownSelection, IconButton, TextButton, ToggleSwitch,
         },
         context::ConfigContext,
     },
@@ -24,6 +24,7 @@ use yew_i18n::use_translation;
 
 const LABEL_ENABLED: &str = "LABEL.ENABLED";
 const LABEL_SCAN_DIRECTORIES: &str = "LABEL.SCAN_DIRECTORIES";
+const LABEL_ADD_DIRECTORY: &str = "LABEL.ADD_DIRECTORY";
 const LABEL_SUPPORTED_EXTENSIONS: &str = "LABEL.SUPPORTED_EXTENSIONS";
 const LABEL_METADATA: &str = "LABEL.METADATA";
 const LABEL_METADATA_PATH: &str = "LABEL.METADATA_PATH";
@@ -319,8 +320,12 @@ pub fn LibraryConfigView() -> Html {
     let render_scan_directories_edit = || {
         html! {
            <Card class="tp__config-view__card">
-               <h1>{translate.t(LABEL_SCAN_DIRECTORIES)}</h1>
-               <IconButton name="Add" icon="Add" onclick={handle_add_directory} />
+                <div class="tp__library-config-view__card-header tp__config-view-page__header">
+                    <h1>{translate.t(LABEL_SCAN_DIRECTORIES)}</h1>
+                    <div class="tp__library-config-view__card-header-toolbar">
+                        <TextButton class="primary" name="add_directory" icon="Add" title={translate.t(LABEL_ADD_DIRECTORY)} onclick={handle_add_directory.clone()} />
+                    </div>
+                </div>
                 <table class="tp__config-view__table tp__table__table">
                    <thead>
                        <tr>

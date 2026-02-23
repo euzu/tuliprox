@@ -137,11 +137,11 @@ pub fn VideoConfigView() -> Html {
         html! {
           <>
             <div class="tp__video-config-view__body tp__config-view-page__body">
-              { config_field_optional!(video_state.form, translate.t(LABEL_WEB_SEARCH), web_search) }
-            </div>
-            <div class="tp__video-config-view__body tp__config-view-page__body">
               { config_field_bool!(video_state.form, translate.t(LABEL_FFPROBE_ENABLED), ffprobe_enabled) }
               { config_field_optional!(video_state.form, translate.t(LABEL_FFPROBE_TIMEOUT), ffprobe_timeout) }
+            </div>
+            <div class="tp__video-config-view__body tp__config-view-page__body">
+              { config_field_optional!(video_state.form, translate.t(LABEL_WEB_SEARCH), web_search) }
             </div>
             <div class="tp__video-config-view__body tp__config-view-page__body">
               { render_extensions(&video_state.form.extensions) }
@@ -155,12 +155,12 @@ pub fn VideoConfigView() -> Html {
         html! {
         <>
           <div class="tp__video-config-view__body tp__config-view-page__body">
-            { edit_field_text_option!(video_state, translate.t(LABEL_WEB_SEARCH), web_search, VideoConfigFormAction::WebSearch) }
-          </div>
-            <div class="tp__video-config-view__body tp__config-view-page__body">
               { edit_field_bool!(video_state, translate.t(LABEL_FFPROBE_ENABLED), ffprobe_enabled, VideoConfigFormAction::FfprobeEnabled) }
               { edit_field_number_option_u64!(video_state, translate.t(LABEL_FFPROBE_TIMEOUT), ffprobe_timeout, VideoConfigFormAction::FfprobeTimeout) }
-            </div>
+          </div>
+          <div class="tp__video-config-view__body tp__config-view-page__body">
+            { edit_field_text_option!(video_state, translate.t(LABEL_WEB_SEARCH), web_search, VideoConfigFormAction::WebSearch) }
+          </div>
           <div class="tp__video-config-view__body tp__config-view-page__body">
             <Card class="tp__config-view__card">
                 { edit_field_list!(video_state, translate.t(LABEL_EXTENSIONS), extensions, VideoConfigFormAction::Extensions, translate.t(LABEL_ADD_EXTENSION)) }

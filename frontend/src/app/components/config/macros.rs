@@ -3,7 +3,10 @@ macro_rules! config_field_optional {
     ($config:expr, $label:expr, $field:ident) => {
         html! {
             <div class="tp__form-field tp__form-field__text">
-                <label>{$label}</label>
+                <$crate::app::components::FieldLabel
+                    label={$label.to_string()}
+                    field_id={$crate::app::components::dto_field_id(&$config, stringify!($field))}
+                />
                 <span class="tp__form-field__value">
                 {
                     match $config.$field.as_ref() {
@@ -22,7 +25,10 @@ macro_rules! config_field_optional_hide {
     ($config:expr, $label:expr, $field:ident) => {
         html! {
             <div class="tp__form-field tp__form-field__text">
-                <label>{$label}</label>
+                <$crate::app::components::FieldLabel
+                    label={$label.to_string()}
+                    field_id={$crate::app::components::dto_field_id(&$config, stringify!($field))}
+                />
                 <span class="tp__form-field__value">
                     <$crate::app::components::HideContent content={$config.$field.as_ref().map_or_else(String::new, |content| content.clone())}></$crate::app::components::HideContent>
                 </span>
@@ -36,7 +42,10 @@ macro_rules! config_field_hide {
     ($config:expr, $label:expr, $field:ident) => {
         html! {
             <div class="tp__form-field tp__form-field__text">
-                <label>{$label}</label>
+                <$crate::app::components::FieldLabel
+                    label={$label.to_string()}
+                    field_id={$crate::app::components::dto_field_id(&$config, stringify!($field))}
+                />
                 <span class="tp__form-field__value">
                     <$crate::app::components::HideContent content={$config.$field.clone()}></$crate::app::components::HideContent>
                 </span>
@@ -51,7 +60,10 @@ macro_rules! config_field_bool {
         html! {
             <div class="tp__form-field tp__form-field__bool">
                 <$crate::app::components::ToggleSwitch value={$config.$field} readonly={true} />
-                <label>{$label}</label>
+                <$crate::app::components::FieldLabel
+                    label={$label.to_string()}
+                    field_id={$crate::app::components::dto_field_id(&$config, stringify!($field))}
+                />
             </div>
         }
     };
@@ -59,10 +71,24 @@ macro_rules! config_field_bool {
 
 #[macro_export]
 macro_rules! config_field_bool_empty {
+    ($label:expr, $field_id:expr) => {
+        html! {
+            <div class="tp__form-field tp__form-field__bool">
+                <$crate::app::components::FieldLabel
+                    label={$label.to_string()}
+                    field_id={$field_id.to_string()}
+                />
+                <$crate::app::components::ToggleSwitch value={false} readonly={true} />
+            </div>
+        }
+    };
     ($label:expr) => {
         html! {
             <div class="tp__form-field tp__form-field__bool">
-                <label>{$label}</label>
+                <$crate::app::components::FieldLabel
+                    label={$label.to_string()}
+                    field_id={format!("{}_BOOL", $label.to_string())}
+                />
                 <$crate::app::components::ToggleSwitch value={false} readonly={true} />
             </div>
         }
@@ -74,7 +100,10 @@ macro_rules! config_field {
     ($config:expr, $label:expr, $field:ident) => {
         html! {
             <div class="tp__form-field tp__form-field__text">
-                <label>{$label}</label>
+                <$crate::app::components::FieldLabel
+                    label={$label.to_string()}
+                    field_id={$crate::app::components::dto_field_id(&$config, stringify!($field))}
+                />
                 <span class="tp__form-field__value">{$config.$field.to_string()}</span>
             </div>
         }
@@ -86,7 +115,10 @@ macro_rules! config_field_custom {
     ($label:expr, $value:expr) => {
         html! {
             <div class="tp__form-field tp__form-field__text">
-                <label>{$label}</label>
+                <$crate::app::components::FieldLabel
+                    label={$label.to_string()}
+                    field_id={format!("CUSTOM_{}", $label.to_string())}
+                />
                 <span class="tp__form-field__value">{$value}</span>
             </div>
         }
@@ -98,7 +130,10 @@ macro_rules! config_field_custom_hide {
     ($label:expr, $value:expr) => {
         html! {
             <div class="tp__form-field tp__form-field__text">
-                <label>{$label}</label>
+                <$crate::app::components::FieldLabel
+                    label={$label.to_string()}
+                    field_id={format!("CUSTOM_{}", $label.to_string())}
+                />
                 <span class="tp__form-field__value">
                     <$crate::app::components::HideContent content={$value}></$crate::app::components::HideContent>
                 </span>
@@ -112,7 +147,10 @@ macro_rules! config_field_child {
     ($label:expr, $body:block) => {
         html! {
             <div class="tp__form-field tp__form-field__text">
-                <label>{$label}</label>
+                <$crate::app::components::FieldLabel
+                    label={$label.to_string()}
+                    field_id={format!("CHILD_{}", $label.to_string())}
+                />
                 { $body }
             </div>
         }
@@ -121,10 +159,24 @@ macro_rules! config_field_child {
 
 #[macro_export]
 macro_rules! config_field_empty {
+    ($label:expr, $field_id:expr) => {
+        html! {
+            <div class="tp__form-field tp__form-field__text">
+                <$crate::app::components::FieldLabel
+                    label={$label.to_string()}
+                    field_id={$field_id.to_string()}
+                />
+                <span class="tp__form-field__value"></span>
+            </div>
+        }
+    };
     ($label:expr) => {
         html! {
             <div class="tp__form-field tp__form-field__text">
-                <label>{$label}</label>
+                <$crate::app::components::FieldLabel
+                    label={$label.to_string()}
+                    field_id={format!("EMPTY_{}", $label.to_string())}
+                />
                 <span class="tp__form-field__value"></span>
             </div>
         }
@@ -153,6 +205,7 @@ $crate::edit_field_text_option!(@inner $instance, $label, $field, $action, $hidd
                     label={$label}
                     hidden={$hidden}
                     name={stringify!($field)}
+                    field_id={Some($crate::app::components::dto_field_id(&instance.form, stringify!($field)))}
                     autocomplete={true}
                     value={instance.form.$field.as_ref().map_or_else(String::new, |v|v.to_string())}
                     on_change={Callback::from(move |value: String| {
@@ -177,6 +230,7 @@ macro_rules! edit_field_textarea_option {
                 <$crate::app::components::TextArea
                     label={$label}
                     name={stringify!($field)}
+                    field_id={Some($crate::app::components::dto_field_id(&instance.form, stringify!($field)))}
                     value={instance.form.$field.as_ref().map_or_else(String::new, |v|v.to_string())}
                     on_change={Callback::from(move |value: String| {
                         instance.dispatch($action(if value.is_empty() {
@@ -207,6 +261,7 @@ $crate::edit_field_text!(@inner $instance, $label, $field, $action, $hidden)
                     label={$label}
                     hidden={$hidden}
                     name={stringify!($field)}
+                    field_id={Some($crate::app::components::dto_field_id(&instance.form, stringify!($field)))}
                     autocomplete={true}
                     value={instance.form.$field.to_string()}
                     on_change={Callback::from(move |value: String| {
@@ -222,13 +277,18 @@ $crate::edit_field_text!(@inner $instance, $label, $field, $action, $hidden)
 macro_rules! edit_field_bool {
     ($instance:expr, $label:expr, $field:ident, $action:path) => {{
         let instance = $instance.clone();
+        let field_id = $crate::app::components::dto_field_id(&instance.form, stringify!($field));
+        let instance_on_change = instance.clone();
         html! {
             <div class="tp__form-field tp__form-field__bool">
                 <$crate::app::components::ToggleSwitch
                      value={instance.form.$field}
                      readonly={false}
-                     on_change={Callback::from(move |value| instance.dispatch($action(value)))} />
-                <label>{$label}</label>
+                     on_change={Callback::from(move |value| instance_on_change.dispatch($action(value)))} />
+                <$crate::app::components::FieldLabel
+                    label={$label.to_string()}
+                    field_id={field_id}
+                />
             </div>
         }
     }};
@@ -243,6 +303,7 @@ macro_rules! edit_field_number {
                 <$crate::app::components::number_input::NumberInput
                     label={$label}
                     name={stringify!($field)}
+                    field_id={Some($crate::app::components::dto_field_id(&instance.form, stringify!($field)))}
                     value={instance.form.$field as i64}
                     on_change={Callback::from(move |value: Option<i64>| {
                         match value {
@@ -268,6 +329,7 @@ macro_rules! edit_field_number_u8 {
                 <$crate::app::components::number_input::NumberInput
                     label={$label}
                     name={stringify!($field)}
+                    field_id={Some($crate::app::components::dto_field_id(&instance.form, stringify!($field)))}
                     value={instance.form.$field as i64}
                     on_change={Callback::from(move |value: Option<i64>| {
                         match value {
@@ -293,6 +355,7 @@ macro_rules! edit_field_number_f64 {
                 <$crate::app::components::number_input::NumberInput
                     label={$label}
                     name={stringify!($field)}
+                    field_id={Some($crate::app::components::dto_field_id(&instance.form, stringify!($field)))}
                     float_value={Some(instance.form.$field)}
                     on_change_float={Some({
                         let instance = instance.clone();
@@ -319,6 +382,7 @@ macro_rules! edit_field_number_u16 {
                 <$crate::app::components::number_input::NumberInput
                     label={$label}
                     name={stringify!($field)}
+                    field_id={Some($crate::app::components::dto_field_id(&instance.form, stringify!($field)))}
                     value={instance.form.$field as i64}
                     on_change={Callback::from(move |value: Option<i64>| {
                         match value {
@@ -344,6 +408,7 @@ macro_rules! edit_field_number_i16 {
                 <$crate::app::components::number_input::NumberInput
                     label={$label}
                     name={stringify!($field)}
+                    field_id={Some($crate::app::components::dto_field_id(&instance.form, stringify!($field)))}
                     value={instance.form.$field as i64}
                     on_change={Callback::from(move |value: Option<i64>| {
                         match value {
@@ -369,6 +434,7 @@ macro_rules! edit_field_number_u32 {
                 <$crate::app::components::number_input::NumberInput
                     label={$label}
                     name={stringify!($field)}
+                    field_id={Some($crate::app::components::dto_field_id(&instance.form, stringify!($field)))}
                     value={instance.form.$field as i64}
                     on_change={Callback::from(move |value: Option<i64>| {
                         match value {
@@ -394,6 +460,7 @@ macro_rules! edit_field_number_u64 {
                 <$crate::app::components::number_input::NumberInput
                     label={$label}
                     name={stringify!($field)}
+                    field_id={Some($crate::app::components::dto_field_id(&instance.form, stringify!($field)))}
                     value={instance.form.$field.min(i64::MAX as u64) as i64}
                     on_change={Callback::from(move |value: Option<i64>| {
                         match value {
@@ -419,6 +486,7 @@ macro_rules! edit_field_number_usize {
                 <$crate::app::components::number_input::NumberInput
                     label={$label}
                     name={stringify!($field)}
+                    field_id={Some($crate::app::components::dto_field_id(&instance.form, stringify!($field)))}
                     value={instance.form.$field as i64}
                     on_change={Callback::from(move |value: Option<i64>| {
                         match value {
@@ -444,6 +512,7 @@ macro_rules! edit_field_number_option_u32 {
                 <$crate::app::components::number_input::NumberInput
                     label={$label}
                     name={stringify!($field)}
+                    field_id={Some($crate::app::components::dto_field_id(&instance.form, stringify!($field)))}
                     value={instance.form.$field.map(|v| v as i64)}
                     on_change={Callback::from(move |value: Option<i64>| {
                         match value {
@@ -469,6 +538,7 @@ macro_rules! edit_field_number_option_u64 {
                 <$crate::app::components::number_input::NumberInput
                     label={$label}
                     name={stringify!($field)}
+                    field_id={Some($crate::app::components::dto_field_id(&instance.form, stringify!($field)))}
                     value={instance.form.$field.map(|v:u64| v.min(i64::MAX as u64) as i64)}
                     on_change={Callback::from(move |value: Option<i64>| {
                         match value {
@@ -494,6 +564,7 @@ macro_rules! edit_field_date {
                 <$crate::app::components::date_input::DateInput
                     label={$label}
                     name={stringify!($field)}
+                    field_id={Some($crate::app::components::dto_field_id(&instance.form, stringify!($field)))}
                     value={instance.form.$field.clone()}
                     on_change={Callback::from(move |value: Option<i64>| {
                         instance.dispatch($action(value));
@@ -516,7 +587,10 @@ macro_rules! edit_field_list {
             .collect::<Vec<std::rc::Rc<$crate::app::components::Tag>>>();
         html! {
             <div class="tp__form-field tp__form-field__list">
-                <label>{$label}</label>
+                <$crate::app::components::FieldLabel
+                    label={$label.to_string()}
+                    field_id={$crate::app::components::dto_field_id(&instance.form, stringify!($field))}
+                />
                 <$crate::app::components::TagList
                      tags={tag_list}
                      placeholder={$placeholder}
@@ -541,7 +615,10 @@ macro_rules! edit_field_list_option {
         });
         html! {
             <div class="tp__form-field tp__form-field__list">
-                <label>{$label}</label>
+                <$crate::app::components::FieldLabel
+                    label={$label.to_string()}
+                    field_id={$crate::app::components::dto_field_id(&instance.form, stringify!($field))}
+                />
                 <$crate::app::components::TagList
                      tags={tag_list}
                      placeholder={$placeholder}

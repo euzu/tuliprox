@@ -1,5 +1,5 @@
 use crate::{
-    app::components::{AppIcon, IconButton},
+    app::components::{AppIcon, FieldLabel, IconButton},
     html_if,
 };
 use web_sys::{HtmlInputElement, InputEvent, KeyboardEvent, MouseEvent};
@@ -9,6 +9,8 @@ use yew::{function_component, html, use_effect_with, use_state, Callback, Html, 
 pub struct InputProps {
     #[prop_or_default]
     pub name: String,
+    #[prop_or_default]
+    pub field_id: Option<String>,
     #[prop_or_default]
     pub label: Option<String>,
     #[prop_or_default]
@@ -69,7 +71,16 @@ pub fn Input(props: &InputProps) -> Html {
         <div class="tp__input">
             { if props.label.is_some() {
                    html! {
-                       <label>{props.label.clone().unwrap_or_default()}</label>
+                       <FieldLabel
+                           label={props.label.clone().unwrap_or_default()}
+                           field_id={props.field_id.clone().unwrap_or_else(|| {
+                               if props.name.trim().is_empty() {
+                                   props.label.clone().unwrap_or_default()
+                               } else {
+                                   props.name.clone()
+                               }
+                           })}
+                       />
                    }
                 } else { html!{} }
             }

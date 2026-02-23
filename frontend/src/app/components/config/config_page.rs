@@ -136,3 +136,67 @@ impl ConfigForm {
         )
     }
 }
+
+#[derive(Default, Debug, Clone, PartialEq)]
+pub struct ConfigFormSlots {
+    pub main: Option<ConfigForm>,
+    pub api: Option<ConfigForm>,
+    pub api_proxy: Option<ConfigForm>,
+    pub log: Option<ConfigForm>,
+    pub schedules: Option<ConfigForm>,
+    pub video: Option<ConfigForm>,
+    pub messaging: Option<ConfigForm>,
+    pub web_ui: Option<ConfigForm>,
+    pub reverse_proxy: Option<ConfigForm>,
+    pub hd_homerun: Option<ConfigForm>,
+    pub proxy: Option<ConfigForm>,
+    pub ipcheck: Option<ConfigForm>,
+    pub panel: Option<ConfigForm>,
+    pub library: Option<ConfigForm>,
+}
+
+impl ConfigFormSlots {
+    fn set_form_slot(slot: &mut Option<ConfigForm>, form: ConfigForm) { *slot = Some(form); }
+
+    pub fn update_form(&mut self, form: ConfigForm) {
+        match form {
+            ConfigForm::Main(_, _) => Self::set_form_slot(&mut self.main, form),
+            ConfigForm::Api(_, _) => Self::set_form_slot(&mut self.api, form),
+            ConfigForm::ApiProxy(_, _) => Self::set_form_slot(&mut self.api_proxy, form),
+            ConfigForm::Log(_, _) => Self::set_form_slot(&mut self.log, form),
+            ConfigForm::Schedules(_, _) => Self::set_form_slot(&mut self.schedules, form),
+            ConfigForm::Video(_, _) => Self::set_form_slot(&mut self.video, form),
+            ConfigForm::Messaging(_, _) => Self::set_form_slot(&mut self.messaging, form),
+            ConfigForm::WebUi(_, _) => Self::set_form_slot(&mut self.web_ui, form),
+            ConfigForm::ReverseProxy(_, _) => Self::set_form_slot(&mut self.reverse_proxy, form),
+            ConfigForm::HdHomerun(_, _) => Self::set_form_slot(&mut self.hd_homerun, form),
+            ConfigForm::Proxy(_, _) => Self::set_form_slot(&mut self.proxy, form),
+            ConfigForm::IpCheck(_, _) => Self::set_form_slot(&mut self.ipcheck, form),
+            ConfigForm::Panel(_, _) => Self::set_form_slot(&mut self.panel, form),
+            ConfigForm::Library(_, _) => Self::set_form_slot(&mut self.library, form),
+        }
+    }
+
+    pub fn all_slots(&self) -> [&Option<ConfigForm>; 14] {
+        [
+            &self.main,
+            &self.api,
+            &self.api_proxy,
+            &self.log,
+            &self.schedules,
+            &self.video,
+            &self.messaging,
+            &self.web_ui,
+            &self.reverse_proxy,
+            &self.hd_homerun,
+            &self.proxy,
+            &self.ipcheck,
+            &self.panel,
+            &self.library,
+        ]
+    }
+
+    pub fn collect_modified_forms(&self) -> Vec<ConfigForm> {
+        self.all_slots().into_iter().flatten().filter(|form| form.is_modified()).cloned().collect()
+    }
+}

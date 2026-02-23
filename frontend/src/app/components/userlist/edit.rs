@@ -4,6 +4,7 @@ use crate::{
             userlist::proxy_user_credentials_form::ProxyUserCredentialsForm, Card, TextButton, UserlistContext,
             UserlistPage,
         },
+        context::target_users_to_api_proxy_users,
         ConfigContext, PlaylistContext, TargetUser,
     },
     hooks::use_service_context,
@@ -12,6 +13,35 @@ use shared::model::ProxyUserCredentialsDto;
 use std::rc::Rc;
 use yew::{platform::spawn_local, prelude::*};
 use yew_i18n::use_translation;
+
+fn upsert_user(
+    users: &Option<Rc<Vec<Rc<TargetUser>>>>,
+    is_update: bool,
+    target: &str,
+    user: &ProxyUserCredentialsDto,
+) -> Rc<Vec<Rc<TargetUser>>> {
+    let new_user = Rc::new(TargetUser { target: target.to_string(), credentials: Rc::new(user.clone()) });
+
+    let mut new_list = users.as_ref().map_or_else(Vec::new, |user_list| {
+        user_list
+            .iter()
+            .map(|target_user| {
+                let mut cloned_target = target_user.as_ref().clone();
+                if is_update && cloned_target.credentials.username == user.username {
+                    cloned_target.credentials = Rc::new(user.clone());
+                    cloned_target.target = target.to_string();
+                }
+                Rc::new(cloned_target)
+            })
+            .collect::<Vec<Rc<TargetUser>>>()
+    });
+
+    if !is_update {
+        new_list.push(new_user);
+    }
+
+    Rc::new(new_list)
+}
 
 #[function_component]
 pub fn UserEdit() -> Html {
@@ -44,7 +74,7 @@ pub fn UserEdit() -> Html {
 
     let handle_back = {
         let handle_cancel = handle_cancel.clone();
-        Callback::from(move |_| {
+        Callback::from(move |_name: String| {
             handle_cancel.emit(());
         })
     };
@@ -59,6 +89,19 @@ pub fn UserEdit() -> Html {
             let handleback = handleback.clone();
             let userlist = userlist.clone();
             let translate = translate.clone();
+
+            if userlist.local_mode {
+                let new_user_list = upsert_user(&userlist.users, is_update, &target, &user);
+                userlist.users.set(Some(new_user_list.clone()));
+                userlist.filtered_users.set(None);
+                if let Some(on_users_change) = userlist.on_users_change.as_ref() {
+                    on_users_change.emit(target_users_to_api_proxy_users(&Some(new_user_list)));
+                }
+                handleback.emit(String::new());
+                services.toastr.success(translate.t("MESSAGES.SAVE.USER.SUCCESS"));
+                return;
+            }
+
             spawn_local(async move {
                 let save_result = if is_update {
                     services.user.update_user(target.clone(), user.clone()).await
@@ -67,29 +110,12 @@ pub fn UserEdit() -> Html {
                 };
                 match save_result {
                     Ok(()) => {
-                        let new_user =
-                            Rc::new(TargetUser { target: target.clone(), credentials: Rc::new(user.clone()) });
-                        let new_user_list = if let Some(user_list) = userlist.users.as_ref() {
-                            let mut new_list: Vec<Rc<TargetUser>> = user_list
-                                .iter()
-                                .map(|target_user| {
-                                    let mut cloned_target = target_user.as_ref().clone();
-                                    if is_update && cloned_target.credentials.username == user.username {
-                                        cloned_target.credentials = Rc::new(user.clone());
-                                        cloned_target.target = target.clone();
-                                    }
-                                    Rc::new(cloned_target)
-                                })
-                                .collect();
-
-                            if !is_update {
-                                new_list.push(new_user);
-                            }
-                            new_list
-                        } else {
-                            vec![new_user]
-                        };
-                        userlist.users.set(Some(Rc::new(new_user_list)));
+                        let new_user_list = upsert_user(&userlist.users, is_update, &target, &user);
+                        userlist.users.set(Some(new_user_list.clone()));
+                        userlist.filtered_users.set(None);
+                        if let Some(on_users_change) = userlist.on_users_change.as_ref() {
+                            on_users_change.emit(target_users_to_api_proxy_users(&Some(new_user_list)));
+                        }
                         handleback.emit(String::new());
                         services.toastr.success(translate.t("MESSAGES.SAVE.USER.SUCCESS"));
                     }

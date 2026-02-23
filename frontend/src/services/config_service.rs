@@ -15,10 +15,32 @@ use shared::{
 };
 use std::{
     cell::RefCell,
+    fmt,
     future::Future,
     rc::Rc,
     sync::atomic::{AtomicBool, Ordering},
 };
+
+#[derive(Clone, serde::Serialize)]
+pub struct SetupWebUserCredentialDto {
+    pub username: String,
+    pub password: String,
+}
+
+impl fmt::Debug for SetupWebUserCredentialDto {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SetupWebUserCredentialDto")
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SetupCompleteRequestDto {
+    pub app_config: AppConfigDto,
+    pub web_users: Vec<SetupWebUserCredentialDto>,
+}
 
 pub struct ConfigService {
     pub ui_config: Rc<WebConfig>,
@@ -34,6 +56,7 @@ pub struct ConfigService {
     batch_input_content_path: String,
     geoip_path: String,
     library_path: String,
+    setup_complete_path: String,
     event_service: Rc<EventService>,
 }
 
@@ -55,6 +78,7 @@ impl ConfigService {
             batch_input_content_path: concat_path_leading_slash(&base_href, "api/v1/config/batchContent"),
             geoip_path: concat_path_leading_slash(&base_href, "api/v1/geoip/update"),
             library_path: concat_path_leading_slash(&base_href, "api/v1/library"),
+            setup_complete_path: concat_path_leading_slash(&base_href, "api/v1/setup/complete"),
             event_service,
         }
     }
@@ -248,5 +272,20 @@ impl ConfigService {
         let path = concat_path(&self.library_path, "scan");
         let params = LibraryScanRequest { force_rescan: false };
         request_post::<LibraryScanRequest, ()>(&path, params, None, None).await
+    }
+
+    pub async fn complete_setup(&self, payload: SetupCompleteRequestDto) -> Result<(), Error> {
+        self.event_service.set_config_change_message_blocked(true);
+        match request_post::<SetupCompleteRequestDto, ()>(&self.setup_complete_path, payload, None, None).await {
+            Ok(_) => {
+                self.event_service.set_config_change_message_blocked(false);
+                Ok(())
+            }
+            Err(err) => {
+                self.event_service.set_config_change_message_blocked(false);
+                error!("{err}");
+                Err(err)
+            }
+        }
     }
 }

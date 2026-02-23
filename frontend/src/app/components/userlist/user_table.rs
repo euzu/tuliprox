@@ -5,7 +5,7 @@ use crate::{
             HideContent, MaxConnections, ProxyTypeView, RevealContent, Table, TableDefinition, UserStatus,
             UserlistContext, UserlistPage,
         },
-        context::TargetUser,
+        context::{target_users_to_api_proxy_users, TargetUser},
         ConfigContext, TargetUserList,
     },
     hooks::use_service_context,
@@ -299,31 +299,42 @@ pub fn UserTable(props: &UserTableProps) -> Html {
                             let result = confirm.confirm(&translator.t("MESSAGES.CONFIRM_DELETE")).await;
                             if result == DialogResult::Ok {
                                 if let Some(dto) = &*selected_user {
+                                    let remove_selected_user = || {
+                                        if let Some(user_list) = userlist.users.as_ref() {
+                                            let new_list: Vec<Rc<TargetUser>> = user_list
+                                                .iter()
+                                                .filter(|target_user| {
+                                                    !(target_user.target.eq(&dto.target)
+                                                        && target_user
+                                                            .credentials
+                                                            .username
+                                                            .eq(&dto.credentials.username))
+                                                })
+                                                .map(Rc::clone)
+                                                .collect();
+                                            let new_list_rc = Rc::new(new_list);
+                                            userlist.users.set(Some(new_list_rc.clone()));
+                                            userlist.filtered_users.set(None);
+                                            if let Some(on_users_change) = userlist.on_users_change.as_ref() {
+                                                on_users_change
+                                                    .emit(target_users_to_api_proxy_users(&Some(new_list_rc)));
+                                            }
+                                            services.toastr.success(translator.t("MESSAGES.USER_DELETED"));
+                                        }
+                                    };
+
+                                    if userlist.local_mode {
+                                        remove_selected_user();
+                                        return;
+                                    }
+
                                     match services
                                         .user
                                         .delete_user(dto.target.clone(), dto.credentials.username.clone())
                                         .await
                                     {
-                                        Ok(()) => {
-                                            if let Some(user_list) = userlist.users.as_ref() {
-                                                let new_list: Vec<Rc<TargetUser>> = user_list
-                                                    .iter()
-                                                    .filter(|target_user| {
-                                                        !(target_user.target.eq(&dto.target)
-                                                            && target_user
-                                                                .credentials
-                                                                .username
-                                                                .eq(&dto.credentials.username))
-                                                    })
-                                                    .map(Rc::clone)
-                                                    .collect();
-                                                userlist.users.set(Some(Rc::new(new_list)));
-                                                services.toastr.success(translator.t("MESSAGES.USER_DELETED"));
-                                            }
-                                        }
-                                        Err(err) => {
-                                            services.toastr.error(err.to_string());
-                                        }
+                                        Ok(()) => remove_selected_user(),
+                                        Err(err) => services.toastr.error(err.to_string()),
                                     }
                                 }
                             }

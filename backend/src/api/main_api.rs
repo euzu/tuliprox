@@ -20,7 +20,7 @@ use crate::model::{AppConfig, Config, HdHomeRunFlags, Healthcheck, ProcessTarget
 use crate::processing::processor::exec_processing;
 use crate::repository::get_geoip_path;
 use crate::repository::load_playlists_into_memory_cache;
-use crate::utils::{exec_file_lock_prune, GeoIp};
+use crate::utils::{exec_file_lock_prune, get_default_web_root_path, GeoIp};
 use crate::VERSION;
 use arc_swap::{ArcSwap, ArcSwapOption};
 use axum::extract::connect_info::ConnectInfo;
@@ -40,8 +40,11 @@ use tower_governor::key_extractor::SmartIpKeyExtractor;
 use tower_http::services::ServeDir;
 
 fn get_web_dir_path(web_ui_enabled: bool, web_root: &str) -> Result<PathBuf, TuliproxError> {
-    let web_dir = web_root.to_string();
-    let web_dir_path = PathBuf::from(&web_dir);
+    let web_dir_path = if web_root.is_empty() {
+        get_default_web_root_path()
+    } else {
+        PathBuf::from(web_root)
+    };
     if web_ui_enabled && (!&web_dir_path.exists() || !&web_dir_path.is_dir()) {
         return info_err_res!("web_root does not exist or is not a directory: {}", web_dir_path.display());
     }

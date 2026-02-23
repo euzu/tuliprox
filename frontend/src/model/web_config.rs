@@ -31,4 +31,6 @@ pub struct WebConfig {
     pub ws_url: String,
     #[serde(alias = "protocolVersion")]
     pub protocol_version: u8,
+    #[serde(alias = "setupMode", default)]
+    pub setup_mode: bool,
 }

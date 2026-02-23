@@ -65,6 +65,7 @@
          }
 
          .tp__source-editor__brick {
+            color: var(--text-color);
             border: 1px solid var(--border-color);
             cursor: grab;
             padding: var(--padding-small) var(--padding-default);

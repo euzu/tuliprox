@@ -1,5 +1,6 @@
 pub mod model;
 pub mod api_utils;
+pub mod setup_api;
 mod panel_api;
 mod scheduler;
 mod endpoints;

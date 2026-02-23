@@ -4,5 +4,6 @@ use yew::{Callback, UseStateHandle};
 #[derive(Clone, PartialEq)]
 pub struct ConfigViewContext {
     pub edit_mode: UseStateHandle<bool>,
+    pub show_restart_notice: bool,
     pub on_form_change: Callback<ConfigForm>,
 }

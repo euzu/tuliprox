@@ -20,7 +20,9 @@ mod video_config_view;
 mod webui_config_view;
 
 pub use api_config_view::*;
+pub use config_page::*;
 pub use config_view::*;
+pub use config_view_context::*;
 pub use hdhomerun_config_view::*;
 pub use ipcheck_config_view::*;
 pub use library_config_view::*;

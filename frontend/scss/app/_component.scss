@@ -24,7 +24,6 @@
 @forward "components/playlist/playlist_settings_view";
 @forward "components/playlist/playlist_explorer_view";
 @forward "components/playlist/playlist_explorer";
-@forward "components/playlist/assistant/playlist_assistant";
 @forward "components/playlist/target/target_common";
 @forward "components/playlist/target/target_watch";
 @forward "components/playlist/target/target_options";
@@ -44,6 +43,7 @@
 @forward "components/playlist/playlist_processing";
 @forward "components/playlist/source_selector";
 @forward "components/playlist/playlist_update_view";
+@forward "components/setup/setup";
 @forward "components/tag_list";
 @forward "components/chip";
 @forward "components/popup_menu";
