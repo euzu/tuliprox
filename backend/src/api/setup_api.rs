@@ -2,8 +2,8 @@ use crate::api::api_utils::serve_file;
 use crate::auth::generate_password_from_input;
 use crate::model::validate_library_paths_from_dto;
 use crate::utils::{
-    file_exists, get_default_path, get_default_web_root_path, read_api_proxy_file, read_config_file, read_sources_file,
-    sanitize_sources_for_persist,
+    file_exists, get_default_path, get_default_web_root_path, read_api_proxy_file, read_config_file,
+    read_sources_file, read_templates_file, resolve_template_persist_file_path, sanitize_sources_for_persist,
 };
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -15,10 +15,11 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use shared::error::TuliproxError;
+use shared::foundation::prepare_templates;
 use shared::info_err;
 use shared::model::{
     ApiProxyConfigDto, ApiProxyServerInfoDto, AppConfigDto, ConfigApiDto, ConfigDto, ConfigPaths, SourcesConfigDto,
-    TokenResponse, WebAuthConfigDto, WebUiConfigDto, TOKEN_NO_AUTH,
+    PatternTemplate, TemplateDefinitionDto, TokenResponse, WebAuthConfigDto, WebUiConfigDto, TOKEN_NO_AUTH,
 };
 use shared::utils::{default_kick_secs, hex_encode, DEFAULT_PORT, DEFAULT_WORKING_DIR, USER_FILE};
 use std::collections::{HashMap, HashSet};
@@ -31,6 +32,7 @@ use tokio::sync::{oneshot, Mutex, RwLock};
 use tower_http::services::ServeDir;
 
 const DEFAULT_SETUP_HOST: &str = "0.0.0.0";
+const DEFAULT_SETUP_CUSTOM_STREAM_RESPONSE_PATH: &str = "./resources";
 const SETUP_REDACTED_SECRET_VALUE: &str = "__TULIPROX_SETUP_REDACTED__";
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -171,6 +173,7 @@ fn create_default_config_dto() -> ConfigDto {
             web_root: get_default_web_root_path().display().to_string(),
         },
         working_dir: get_default_path(DEFAULT_WORKING_DIR).display().to_string(),
+        custom_stream_response_path: Some(DEFAULT_SETUP_CUSTOM_STREAM_RESPONSE_PATH.to_string()),
         web_ui: Some(web_ui),
         ..ConfigDto::default()
     }
@@ -181,6 +184,7 @@ fn create_default_draft() -> AppConfigDto {
         config: create_default_config_dto(),
         sources: SourcesConfigDto::default(),
         mappings: None,
+        templates: None,
         api_proxy: Some(ApiProxyConfigDto {
             server: vec![create_default_api_proxy_server()],
             user: vec![],
@@ -202,7 +206,7 @@ fn build_initial_draft(paths: &ConfigPaths) -> AppConfigDto {
     if file_exists(&paths.sources_file_path) {
         match read_sources_file(
             paths.sources_file_path.as_str(),
-            true,
+            false,
             false,
             draft.config.get_hdhr_device_overview().as_ref(),
         ) {
@@ -246,6 +250,13 @@ fn ensure_setup_defaults(config: &mut ConfigDto) {
     }
     if config.working_dir.trim().is_empty() {
         config.working_dir = get_default_path(DEFAULT_WORKING_DIR).display().to_string();
+    }
+    if config
+        .custom_stream_response_path
+        .as_ref()
+        .is_none_or(|path| path.trim().is_empty())
+    {
+        config.custom_stream_response_path = Some(DEFAULT_SETUP_CUSTOM_STREAM_RESPONSE_PATH.to_string());
     }
 
     if config.web_ui.is_none() {
@@ -419,6 +430,69 @@ fn has_unresolved_redacted_setup_values(app_config: &AppConfigDto) -> bool {
             })
         })
     })
+}
+
+fn setup_templates_from_request(app_config: &AppConfigDto) -> Option<Vec<PatternTemplate>> {
+    app_config
+        .templates
+        .as_ref()
+        .and_then(|definition| (!definition.templates.is_empty()).then_some(definition.templates.clone()))
+}
+
+fn setup_templates_to_persist(app_config: &AppConfigDto) -> Option<TemplateDefinitionDto> {
+    if let Some(templates) = setup_templates_from_request(app_config) {
+        return Some(TemplateDefinitionDto { templates });
+    }
+    app_config
+        .sources
+        .templates
+        .as_ref()
+        .filter(|templates| !templates.is_empty())
+        .map(|templates| TemplateDefinitionDto {
+            templates: templates.clone(),
+        })
+}
+
+fn collect_setup_validation_templates(
+    app_config: &AppConfigDto,
+    template_file_path: &str,
+) -> Result<Option<Vec<PatternTemplate>>, TuliproxError> {
+    if let Some(templates) = setup_templates_from_request(app_config) {
+        return Ok(Some(templates));
+    }
+
+    let mut merged_templates: Vec<PatternTemplate> = Vec::new();
+
+    if let Some((_, definition)) = read_templates_file(template_file_path, true)? {
+        merged_templates.extend(definition.templates);
+    }
+    if let Some(templates) = app_config.sources.templates.as_ref() {
+        merged_templates.extend(templates.clone());
+    }
+    if let Some(templates) = app_config
+        .mappings
+        .as_ref()
+        .and_then(|mappings| mappings.mappings.templates.as_ref())
+    {
+        merged_templates.extend(templates.clone());
+    }
+
+    if merged_templates.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(merged_templates))
+    }
+}
+
+fn prepare_setup_validation_templates(
+    app_config: &AppConfigDto,
+    template_file_path: &str,
+) -> Result<Option<Vec<PatternTemplate>>, TuliproxError> {
+    let Some(mut templates) = collect_setup_validation_templates(app_config, template_file_path)? else {
+        return Ok(None);
+    };
+    prepare_templates(&mut templates)?;
+    Ok(Some(templates))
 }
 
 async fn setup_healthcheck(State(state): State<Arc<SetupModeState>>) -> impl IntoResponse + Send {
@@ -633,6 +707,7 @@ async fn cleanup_temp_file(file_path: &FsPath) {
 enum SetupPersistAction<'a> {
     Config(&'a ConfigDto),
     Sources(&'a SourcesConfigDto),
+    Templates(&'a TemplateDefinitionDto),
     ApiProxy(&'a ApiProxyConfigDto),
     UserFile(&'a str),
 }
@@ -642,6 +717,7 @@ impl SetupPersistAction<'_> {
         match self {
             Self::Config(payload) => persist_yaml_file(temp_path, *payload).await,
             Self::Sources(payload) => persist_yaml_file(temp_path, *payload).await,
+            Self::Templates(payload) => persist_yaml_file(temp_path, *payload).await,
             Self::ApiProxy(payload) => persist_yaml_file(temp_path, *payload).await,
             Self::UserFile(content) => tokio::fs::write(temp_path, content).await.map_err(|err| err.to_string()),
         }
@@ -698,7 +774,27 @@ async fn setup_complete_inner(
         return (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": err.to_string() }))).into_response();
     }
 
-    if let Err(err) = req.app_config.sources.prepare(false, req.app_config.config.get_hdhr_device_overview().as_ref()) {
+    let template_file_path = PathBuf::from(resolve_template_persist_file_path(
+        req.app_config.config.template_path.as_deref(),
+        state.output_dir.to_string_lossy().as_ref(),
+    ));
+    let prepared_templates =
+        match prepare_setup_validation_templates(&req.app_config, template_file_path.to_string_lossy().as_ref()) {
+            Ok(templates) => templates,
+            Err(err) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    axum::Json(json!({ "error": err.to_string() })),
+                )
+                    .into_response();
+            }
+        };
+
+    if let Err(err) = req.app_config.sources.prepare(
+        false,
+        req.app_config.config.get_hdhr_device_overview().as_ref(),
+        prepared_templates.as_ref(),
+    ) {
         return (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": err.to_string() }))).into_response();
     }
 
@@ -715,12 +811,17 @@ async fn setup_complete_inner(
         Err(err) => return (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": err }))).into_response(),
     };
 
-    for file_path in [
+    let template_definition_to_persist = setup_templates_to_persist(&req.app_config);
+    let mut persist_paths = vec![
         &state.config_file_path,
         &state.source_file_path,
         &state.api_proxy_file_path,
         &state.user_file_path,
-    ] {
+    ];
+    if template_definition_to_persist.is_some() {
+        persist_paths.push(&template_file_path);
+    }
+    for file_path in persist_paths {
         if let Err(err) = ensure_parent_dir(file_path).await {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -762,7 +863,7 @@ async fn setup_complete_inner(
     }
 
     let user_file_content = format!("{}\n", user_lines.join("\n"));
-    let pending_writes: Vec<(PathBuf, PathBuf, SetupPersistAction<'_>)> = vec![
+    let mut pending_writes: Vec<(PathBuf, PathBuf, SetupPersistAction<'_>)> = vec![
         (
             state.config_file_path.clone(),
             create_setup_temp_path(&state.config_file_path),
@@ -784,6 +885,13 @@ async fn setup_complete_inner(
             SetupPersistAction::UserFile(&user_file_content),
         ),
     ];
+    if let Some(template_definition) = template_definition_to_persist.as_ref() {
+        pending_writes.push((
+            template_file_path.clone(),
+            create_setup_temp_path(&template_file_path),
+            SetupPersistAction::Templates(template_definition),
+        ));
+    }
 
     for (index, (target_path, temp_path, action)) in pending_writes.iter().enumerate() {
         if let Err(err) = action.write(temp_path).await {

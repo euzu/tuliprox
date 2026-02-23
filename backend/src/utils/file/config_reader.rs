@@ -7,14 +7,21 @@ use crate::repository::{
 use crate::utils;
 use crate::utils::{file_exists_async, file_reader};
 use crate::utils::sys_utils::exit;
-use crate::utils::{open_file, read_mappings_file, EnvResolvingReader, FileLockManager};
+use crate::utils::{
+    open_file, read_mappings_file_unprepared, read_templates_file, EnvResolvingReader,
+    FileLockManager,
+};
 use arc_swap::{ArcSwap, ArcSwapAny};
 use chrono::Local;
 use log::{error, info, warn};
 use serde::Serialize;
 use shared::error::{info_err, info_err_res, TuliproxError};
-use shared::model::{ApiProxyConfigDto, AppConfigDto, ConfigDto, ConfigInputAliasDto, ConfigPaths, HdHomeRunDeviceOverview, InputType, MsgKind, SourcesConfigDto, TargetUserDto};
-use shared::utils::CONSTANTS;
+use shared::foundation::prepare_templates;
+use shared::model::{
+    ApiProxyConfigDto, AppConfigDto, ConfigDto, ConfigInputAliasDto, ConfigPaths, HdHomeRunDeviceOverview, InputType,
+    MsgKind, PatternTemplate, SourcesConfigDto, TargetUserDto, TemplateDefinitionDto,
+};
+use shared::utils::{CONSTANTS, TEMPLATE_FILE};
 use std::env;
 use std::fs::File;
 use std::io::{self, Read};
@@ -25,6 +32,12 @@ use tokio::sync::OnceCell;
 use shared::concat_string;
 use crate::utils::request::{is_uri};
 use url::Url;
+
+type PreparedTemplateBundle = (
+    Option<TemplateDefinitionDto>,
+    Option<Vec<PatternTemplate>>,
+    Option<Vec<String>>,
+);
 
 enum EitherReader<L, R> {
     Left(L),
@@ -71,28 +84,16 @@ pub async fn read_api_proxy_config(
     }
 }
 
-pub fn read_sources_file_from_path(
+fn parse_sources_file_from_path(
     sources_file: &Path,
     resolve_env: bool,
-    include_computed: bool,
-    hdhr_config: Option<&HdHomeRunDeviceOverview>,
 ) -> Result<SourcesConfigDto, TuliproxError> {
     match open_file(sources_file) {
         Ok(file) => {
             let maybe_sources: Result<SourcesConfigDto, _> =
                 serde_saphyr::from_reader(config_file_reader(file, resolve_env));
             match maybe_sources {
-                Ok(mut sources) => {
-                    if resolve_env {
-                        if let Err(err) = sources.prepare(include_computed, hdhr_config) {
-                            return info_err_res!(
-                                "Can't read the sources-config file: {}: {err}",
-                                sources_file.display()
-                            );
-                        }
-                    }
-                    Ok(sources)
-                }
+                Ok(sources) => Ok(sources),
                 Err(err) => info_err_res!(
                     "Can't read the sources-config file: {}: {err}",
                     sources_file.display()
@@ -106,17 +107,52 @@ pub fn read_sources_file_from_path(
     }
 }
 
+pub fn read_sources_file_from_path_with_templates(
+    sources_file: &Path,
+    resolve_env: bool,
+    include_computed: bool,
+    hdhr_config: Option<&HdHomeRunDeviceOverview>,
+    prepared_templates: Option<&Vec<shared::model::PatternTemplate>>,
+) -> Result<SourcesConfigDto, TuliproxError> {
+    let mut sources = parse_sources_file_from_path(sources_file, resolve_env)?;
+    if resolve_env {
+        if let Err(err) = sources.prepare(include_computed, hdhr_config, prepared_templates) {
+            return info_err_res!(
+                "Can't read the sources-config file: {}: {err}",
+                sources_file.display()
+            );
+        }
+    }
+    Ok(sources)
+}
+
+pub fn read_sources_file_from_path(
+    sources_file: &Path,
+    resolve_env: bool,
+    include_computed: bool,
+    hdhr_config: Option<&HdHomeRunDeviceOverview>,
+) -> Result<SourcesConfigDto, TuliproxError> {
+    read_sources_file_from_path_with_templates(
+        sources_file,
+        resolve_env,
+        include_computed,
+        hdhr_config,
+        None,
+    )
+}
+
 pub fn read_sources_file(
     sources_file: &str,
     resolve_env: bool,
     include_computed: bool,
     hdhr_config: Option<&HdHomeRunDeviceOverview>,
 ) -> Result<SourcesConfigDto, TuliproxError> {
-    read_sources_file_from_path(
+    read_sources_file_from_path_with_templates(
         &PathBuf::from(sources_file),
         resolve_env,
         include_computed,
         hdhr_config,
+        None,
     )
 }
 
@@ -143,6 +179,49 @@ pub fn read_config_file(
     }
 }
 
+pub(crate) fn read_templates(
+    template_file_path: Option<&str>,
+    resolve_env: bool,
+    sources_inline_templates: Option<&Vec<PatternTemplate>>,
+    mappings_inline_templates: Option<&Vec<PatternTemplate>>,
+) -> Result<PreparedTemplateBundle, TuliproxError> {
+    let mut loaded_template_files: Vec<String> = Vec::new();
+    let mut merged_templates: Vec<PatternTemplate> = Vec::new();
+
+    if let Some(path) = template_file_path {
+        if let Some((template_paths, definition)) = read_templates_file(path, resolve_env)? {
+            merged_templates.extend(definition.templates);
+            loaded_template_files.extend(template_paths.iter().map(|p| p.display().to_string()));
+        }
+    }
+
+    if let Some(templates) = sources_inline_templates {
+        merged_templates.extend(templates.iter().cloned());
+    }
+    if let Some(templates) = mappings_inline_templates {
+        merged_templates.extend(templates.iter().cloned());
+    }
+
+    if merged_templates.is_empty() {
+        return Ok((None, None, None));
+    }
+
+    let mut prepared_templates = merged_templates.clone();
+    prepare_templates(&mut prepared_templates)?;
+
+    Ok((
+        Some(TemplateDefinitionDto {
+            templates: merged_templates,
+        }),
+        Some(prepared_templates),
+        if loaded_template_files.is_empty() {
+            None
+        } else {
+            Some(loaded_template_files)
+        },
+    ))
+}
+
 pub fn read_app_config_dto(
     paths: &ConfigPaths,
     resolve_env: bool,
@@ -153,19 +232,42 @@ pub fn read_app_config_dto(
     let api_proxy_file = paths.api_proxy_file_path.as_str();
 
     let config = read_config_file(config_file, resolve_env, include_computed)?;
-    let sources = read_sources_file(
-        sources_file,
-        resolve_env,
-        include_computed,
-        config.get_hdhr_device_overview().as_ref(),
-    )?;
-    let mappings = if let Some(mappings_file) = paths.mapping_file_path.as_ref() {
-        read_mappings_file(mappings_file, resolve_env)
+    let mut sources = parse_sources_file_from_path(&PathBuf::from(sources_file), resolve_env)?;
+    let mut mappings = if let Some(mappings_file) = paths.mapping_file_path.as_ref() {
+        read_mappings_file_unprepared(mappings_file, resolve_env)
             .unwrap_or(None)
-            .map(|(_, mappings)| mappings)
+            .map(|(_, mapping)| mapping)
     } else {
         None
     };
+
+    let (templates, prepared_templates, _template_files_used) = read_templates(
+        paths.template_file_path.as_deref().or(config.template_path.as_deref()),
+        resolve_env,
+        sources.templates.as_ref(),
+        mappings
+            .as_ref()
+            .and_then(|mapping| mapping.mappings.templates.as_ref()),
+    )?;
+
+    if resolve_env {
+        sources.prepare(
+            include_computed,
+            config.get_hdhr_device_overview().as_ref(),
+            prepared_templates.as_ref(),
+        )?;
+        if let Some(mapping) = mappings.as_mut() {
+            mapping
+                .mappings
+                .prepare(prepared_templates.as_ref())?;
+        }
+    }
+
+    // Keep templates centralized in AppConfigDto.templates.
+    sources.templates = None;
+    if let Some(mapping) = mappings.as_mut() {
+        mapping.mappings.templates = None;
+    }
 
     let api_proxy = read_api_proxy_file(api_proxy_file, resolve_env).unwrap_or(None);
 
@@ -173,6 +275,7 @@ pub fn read_app_config_dto(
         config,
         sources,
         mappings,
+        templates,
         api_proxy,
     })
 }
@@ -276,20 +379,9 @@ pub async fn read_initial_app_config(
     let sources_file = paths.sources_file_path.as_str();
 
     let config_dto = read_config_file(config_file, resolve_env, include_computed)?;
-    let mut sources_dto = read_sources_file(
-        sources_file,
-        resolve_env,
-        include_computed,
-        config_dto.get_hdhr_device_overview().as_ref(),
-    )?;
-    prepare_sources_batch(&mut sources_dto, include_computed).await?;
-    let sources: SourcesConfig = SourcesConfig::try_from(sources_dto)?;
-    let mut config: Config = Config::from(config_dto);
-    config.prepare(config_path).await?;
-    config.update_runtime();
 
     if paths.mapping_file_path.is_none() {
-        let mut path = config.mapping_path.as_ref().map_or_else(
+        let mut path = config_dto.mapping_path.as_ref().map_or_else(
             || utils::get_default_mappings_path(config_path),
             ToString::to_string,
         );
@@ -298,6 +390,52 @@ pub async fn read_initial_app_config(
         }
         paths.mapping_file_path.replace(path);
     }
+    if paths.template_file_path.is_none() {
+        let mut path = config_dto.template_path.as_ref().map_or_else(
+            || utils::get_default_templates_path(config_path),
+            ToString::to_string,
+        );
+        if resolve_env {
+            path = resolve_env_var(&path);
+        }
+        paths.template_file_path.replace(path);
+    }
+
+    let mut sources_dto = parse_sources_file_from_path(&PathBuf::from(sources_file), resolve_env)?;
+    prepare_sources_batch(&mut sources_dto, include_computed).await?;
+
+    let (mapping_paths, mut mappings_dto) = if let Some(mappings_file) = &paths.mapping_file_path {
+        match read_mappings_file_unprepared(mappings_file.as_str(), resolve_env) {
+            Ok(Some((mapping_paths, mappings))) => (Some(mapping_paths), Some(mappings)),
+            Ok(None) => (None, None),
+            Err(err) => return Err(err),
+        }
+    } else {
+        (None, None)
+    };
+
+    let (_templates, prepared_templates, template_files_used) = read_templates(
+        paths.template_file_path.as_deref().or(config_dto.template_path.as_deref()),
+        resolve_env,
+        sources_dto.templates.as_ref(),
+        mappings_dto
+            .as_ref()
+            .and_then(|mapping| mapping.mappings.templates.as_ref()),
+    )?;
+
+    if resolve_env {
+        sources_dto.prepare(
+            include_computed,
+            config_dto.get_hdhr_device_overview().as_ref(),
+            prepared_templates.as_ref(),
+        )?;
+    }
+    sources_dto.templates = None;
+
+    let sources: SourcesConfig = SourcesConfig::try_from(sources_dto)?;
+    let mut config: Config = Config::from(config_dto);
+    config.prepare(config_path).await?;
+    config.update_runtime();
 
     let mut app_config = AppConfig {
         config: Arc::new(ArcSwap::from_pointee(config)),
@@ -315,27 +453,28 @@ pub async fn read_initial_app_config(
     //print_info(&app_config);
 
     if let Some(mappings_file) = &paths.mapping_file_path {
-        match utils::read_mappings(mappings_file.as_str(), resolve_env) {
-            Ok(Some((mapping_paths, mappings))) => {
-                app_config.set_mappings(mappings_file, &mappings);
-                paths.mapping_files_used = {
-                    let vec: Vec<String> = mapping_paths
-                        .iter()
-                        .map(|p| p.display().to_string())
-                        .collect();
-
-                    if vec.is_empty() {
-                        None
-                    } else {
-                        Some(vec)
-                    }
-                };
-                app_config.paths.store(Arc::new(paths.clone()));
+        if let Some(mapping) = mappings_dto.as_mut() {
+            if let Err(err) = mapping
+                .mappings
+                .prepare(prepared_templates.as_ref())
+            {
+                exit!("{err}");
             }
-            Ok(None) => info!("Mapping file: not used"),
-            Err(err) => exit!("{err}"),
+            let mappings: crate::model::Mappings = crate::model::Mappings::from(&*mapping);
+            app_config.set_mappings(mappings_file, &mappings);
+            paths.mapping_files_used = mapping_paths.as_ref().map(|items| {
+                items
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<String>>()
+            });
+        } else {
+            info!("Mapping file: not used");
         }
     }
+
+    paths.template_files_used = template_files_used;
+    app_config.paths.store(Arc::new(paths.clone()));
 
     if server_mode {
         match read_api_proxy_config(&app_config, resolve_env).await {
@@ -499,6 +638,14 @@ where
     write_config_file(file_path, backup_dir, config, "source.yml").await
 }
 
+pub async fn save_templates_config(
+    file_path: &str,
+    backup_dir: &str,
+    config: &TemplateDefinitionDto,
+) -> Result<(), TuliproxError> {
+    write_config_file(file_path, backup_dir, config, TEMPLATE_FILE).await
+}
+
 pub async fn persist_source_config(
     app_state: &Arc<AppState>,
     source_file_path: Option<&Path>,
@@ -525,6 +672,7 @@ pub async fn persist_source_config(
 }
 
 pub async fn sanitize_sources_for_persist(mut source_config: SourcesConfigDto) -> SourcesConfigDto {
+    source_config.templates = None;
     for input in &mut source_config.inputs {
         if input
             .panel_api
@@ -570,10 +718,82 @@ pub async fn validate_and_persist_source_config(
     app_state: &Arc<AppState>,
     dto: SourcesConfigDto,
 ) -> Result<SourcesConfigDto, TuliproxError> {
-    {
+    let templates_to_persist = {
         let mut new_dto = dto.clone();
         let config = app_state.app_config.config.load();
-        new_dto.prepare(true, config.get_hdhr_device_overview().as_ref())?;
+        let paths = app_state.app_config.paths.load();
+
+        let existing_source_inline_templates = match read_sources_file(
+            paths.sources_file_path.as_str(),
+            false,
+            false,
+            None,
+        ) {
+            Ok(existing_sources) => existing_sources.templates,
+            Err(err) => {
+                warn!(
+                    "Failed to read existing source.yml for template migration '{}': {err}",
+                    paths.sources_file_path
+                );
+                None
+            }
+        };
+
+        let mapping_inline_templates = if let Some(mapping_file_path) = paths.mapping_file_path.as_ref() {
+            read_mappings_file_unprepared(mapping_file_path, true)?
+                .map(|(_, mapping)| mapping)
+                .and_then(|mapping| mapping.mappings.templates)
+        } else {
+            None
+        };
+
+        let source_inline_templates = if new_dto.templates.is_some() {
+            new_dto.templates.as_ref()
+        } else {
+            existing_source_inline_templates.as_ref()
+        };
+
+        let template_file_path = paths.template_file_path.as_deref().or(config.template_path.as_deref());
+        let template_file_exists = if let Some(path) = template_file_path {
+            read_templates_file(path, true)?.is_some()
+        } else {
+            false
+        };
+
+        let (_templates, prepared_templates, _template_files_used) = read_templates(
+            template_file_path,
+            true,
+            source_inline_templates,
+            mapping_inline_templates.as_ref(),
+        )?;
+
+        new_dto.prepare(
+            true,
+            config.get_hdhr_device_overview().as_ref(),
+            prepared_templates.as_ref(),
+        )?;
+
+        if let Some(templates) =
+            new_dto.templates.clone().filter(|templates| !templates.is_empty())
+        {
+            Some(TemplateDefinitionDto { templates })
+        } else if !template_file_exists {
+            existing_source_inline_templates
+                .filter(|templates| !templates.is_empty())
+                .map(|templates| TemplateDefinitionDto { templates })
+        } else {
+            None
+        }
+    };
+
+    if let Some(template_definition) = templates_to_persist {
+        let config = app_state.app_config.config.load();
+        let paths = app_state.app_config.paths.load();
+        let template_file = utils::resolve_template_persist_file_path(
+            paths.template_file_path.as_deref().or(config.template_path.as_deref()),
+            &paths.config_path,
+        );
+        save_templates_config(&template_file, config.get_backup_dir().as_ref(), &template_definition).await?;
     }
 
     persist_source_config(app_state, None, dto).await

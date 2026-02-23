@@ -126,16 +126,18 @@ mod tests {
 
     #[test]
     fn update_config_keeps_library_payload_on_empty_toggle() {
-        let mut config = ConfigDto::default();
-        config.library = Some(LibraryConfigDto {
-            enabled: true,
-            scan_directories: vec![LibraryScanDirectoryDto {
+        let mut config = ConfigDto {
+            library: Some(LibraryConfigDto {
                 enabled: true,
-                path: "/media".to_string(),
+                scan_directories: vec![LibraryScanDirectoryDto {
+                    enabled: true,
+                    path: "/media".to_string(),
+                    ..Default::default()
+                }],
                 ..Default::default()
-            }],
-            ..Default::default()
-        });
+            }),
+            ..ConfigDto::default()
+        };
 
         update_config(&mut config, vec![ConfigForm::Library(true, LibraryConfigDto::default())]);
 
@@ -147,12 +149,14 @@ mod tests {
 
     #[test]
     fn update_config_keeps_hdhomerun_payload_on_empty_toggle() {
-        let mut config = ConfigDto::default();
-        config.hdhomerun = Some(HdHomeRunConfigDto {
-            enabled: true,
-            devices: vec![HdHomeRunDeviceConfigDto { name: "living_room".to_string(), ..Default::default() }],
-            ..Default::default()
-        });
+        let mut config = ConfigDto {
+            hdhomerun: Some(HdHomeRunConfigDto {
+                enabled: true,
+                devices: vec![HdHomeRunDeviceConfigDto { name: "living_room".to_string(), ..Default::default() }],
+                ..Default::default()
+            }),
+            ..ConfigDto::default()
+        };
 
         update_config(&mut config, vec![ConfigForm::HdHomerun(true, HdHomeRunConfigDto::default())]);
 
@@ -164,8 +168,10 @@ mod tests {
 
     #[test]
     fn update_config_keeps_proxy_empty_as_none() {
-        let mut config = ConfigDto::default();
-        config.proxy = Some(ProxyConfigDto { url: "http://proxy.local".to_string(), username: None, password: None });
+        let mut config = ConfigDto {
+            proxy: Some(ProxyConfigDto { url: "http://proxy.local".to_string(), username: None, password: None }),
+            ..ConfigDto::default()
+        };
 
         update_config(&mut config, vec![ConfigForm::Proxy(true, ProxyConfigDto::default())]);
 
@@ -174,24 +180,26 @@ mod tests {
 
     #[test]
     fn update_config_keeps_webui_payload_on_toggle_only() {
-        let mut config = ConfigDto::default();
-        config.web_ui = Some(WebUiConfigDto {
-            enabled: true,
-            user_ui_enabled: true,
-            path: Some("/dashboard".to_string()),
-            player_server: Some("http://player.local".to_string()),
-            auth: Some(WebAuthConfigDto {
+        let mut config = ConfigDto {
+            web_ui: Some(WebUiConfigDto {
                 enabled: true,
-                issuer: "tuliprox".to_string(),
-                secret: "top-secret".to_string(),
+                user_ui_enabled: true,
+                path: Some("/dashboard".to_string()),
+                player_server: Some("http://player.local".to_string()),
+                auth: Some(WebAuthConfigDto {
+                    enabled: true,
+                    issuer: "tuliprox".to_string(),
+                    secret: "top-secret".to_string(),
+                    ..Default::default()
+                }),
+                content_security_policy: Some(ContentSecurityPolicyConfigDto {
+                    enabled: true,
+                    custom_attributes: Some(vec!["default-src 'self'".to_string()]),
+                }),
                 ..Default::default()
             }),
-            content_security_policy: Some(ContentSecurityPolicyConfigDto {
-                enabled: true,
-                custom_attributes: Some(vec!["default-src 'self'".to_string()]),
-            }),
-            ..Default::default()
-        });
+            ..ConfigDto::default()
+        };
 
         update_config(
             &mut config,

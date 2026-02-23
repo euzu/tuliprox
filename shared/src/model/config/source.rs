@@ -48,10 +48,13 @@ impl SourcesConfigDto {
         &mut self,
         include_computed: bool,
         hdhr_config: Option<&HdHomeRunDeviceOverview>,
+        prepared_templates: Option<&Vec<PatternTemplate>>,
     ) -> Result<(), TuliproxError> {
-        let prepared_templates = self.prepare_templates()?;
+        let local_prepared_templates =
+            if prepared_templates.is_none() { self.prepare_local_templates()? } else { None };
+        let templates_to_use = prepared_templates.or(local_prepared_templates.as_ref());
         let provider_names = self.prepare_providers()?;
-        self.prepare_sources(include_computed, hdhr_config, &provider_names, prepared_templates.as_ref())?;
+        self.prepare_sources(include_computed, hdhr_config, &provider_names, templates_to_use)?;
         self.check_unique_target_names()?;
         Ok(())
     }
@@ -104,7 +107,7 @@ impl SourcesConfigDto {
         Ok(())
     }
 
-    fn prepare_templates(&self) -> Result<Option<Vec<PatternTemplate>>, TuliproxError> {
+    fn prepare_local_templates(&self) -> Result<Option<Vec<PatternTemplate>>, TuliproxError> {
         self.templates
             .as_ref()
             .map(|templates| {
@@ -189,7 +192,7 @@ mod tests {
         let original_rename_pattern =
             sources.sources[0].targets[0].rename.as_ref().expect("rename should exist")[0].pattern.clone();
 
-        sources.prepare(false, None).expect("sources prepare should succeed");
+        sources.prepare(false, None, None).expect("sources prepare should succeed");
 
         assert_eq!(sources.templates, original_templates);
         assert_eq!(sources.sources[0].targets[0].filter, original_filter);

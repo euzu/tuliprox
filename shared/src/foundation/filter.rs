@@ -12,7 +12,11 @@ use indexmap::IndexSet;
 use log::{error, log_enabled, trace, Level};
 use pest::{iterators::Pair, Parser};
 use pest_derive::Parser;
-use std::{cmp::Ordering, collections::HashMap, sync::Arc};
+use std::{
+    cmp::Ordering,
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 #[derive(Debug, Clone)]
 pub struct CompiledRegex {
@@ -471,6 +475,13 @@ fn build_dependency_graph(templates: &Vec<PatternTemplate>) -> Result<DirectedGr
 }
 
 pub fn prepare_templates(templates: &mut Vec<PatternTemplate>) -> Result<Vec<PatternTemplate>, TuliproxError> {
+    let mut seen_template_names = HashSet::with_capacity(templates.len());
+    for template in templates.iter() {
+        if !seen_template_names.insert(template.name.clone()) {
+            return info_err_res!("Duplicate template name found: {}", template.name);
+        }
+    }
+
     let graph = build_dependency_graph(templates)?;
     let mut template_values = HashMap::new();
     let mut template_map = HashMap::with_capacity(templates.len());

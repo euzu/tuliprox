@@ -1,13 +1,16 @@
 use crate::api::model::{update_app_state_config, update_app_state_sources, AppState, EventMessage};
 use crate::model::{Config, SourcesConfig};
 use crate::utils;
-use crate::utils::{prepare_sources_batch, read_config_file, read_sources_file};
+use crate::utils::{
+    read_templates, prepare_sources_batch, read_config_file, read_mappings_file_unprepared,
+    read_mappings_file_with_templates, read_sources_file, read_sources_file_from_path_with_templates,
+};
 use arc_swap::access::Access;
 use arc_swap::ArcSwap;
 use log::{debug, error, info};
 use shared::error::TuliproxError;
-use shared::model::{ConfigPaths, ConfigType};
-use std::path::Path;
+use shared::model::{ConfigPaths, ConfigType, PatternTemplate};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -15,17 +18,44 @@ pub enum ConfigFile {
     Config,
     ApiProxy,
     Mapping,
+    Template,
     Sources,
     SourceFile,
 }
 
 impl ConfigFile {
-    fn load_mapping(app_state: &Arc<AppState>) -> Result<(), TuliproxError> {
+    fn load_prepared_global_templates(app_state: &Arc<AppState>) -> Result<Option<Vec<PatternTemplate>>, TuliproxError> {
+        let paths = <Arc<ArcSwap<ConfigPaths>> as Access<ConfigPaths>>::load(&app_state.app_config.paths);
+        let config = <Arc<ArcSwap<Config>> as Access<Config>>::load(&app_state.app_config.config);
+
+        let sources_inline_templates =
+            read_sources_file(paths.sources_file_path.as_str(), false, false, None)?.templates;
+        let mapping_inline_templates = if let Some(mapping_file_path) = paths.mapping_file_path.as_ref() {
+            read_mappings_file_unprepared(mapping_file_path, true)?
+                .map(|(_, mapping)| mapping)
+                .and_then(|mapping| mapping.mappings.templates)
+        } else {
+            None
+        };
+        let (_templates, prepared_templates, _template_files_used) = read_templates(
+            paths.template_file_path.as_deref().or(config.template_path.as_deref()),
+            true,
+            sources_inline_templates.as_ref(),
+            mapping_inline_templates.as_ref(),
+        )?;
+        Ok(prepared_templates)
+    }
+
+    fn load_mapping_with_templates(
+        app_state: &Arc<AppState>,
+        prepared_templates: Option<&Vec<PatternTemplate>>,
+    ) -> Result<(), TuliproxError> {
         let paths = <Arc<ArcSwap<ConfigPaths>> as Access<ConfigPaths>>::load(&app_state.app_config.paths);
         if let Some(mapping_file_path) = paths.mapping_file_path.as_ref() {
-            match utils::read_mappings(mapping_file_path, true) {
+            match read_mappings_file_with_templates(mapping_file_path, true, prepared_templates) {
                 Ok(Some((mapping_files, mappings_cfg))) => {
-                    app_state.app_config.set_mappings(mapping_file_path, &mappings_cfg);
+                    let mappings = crate::model::Mappings::from(&mappings_cfg);
+                    app_state.app_config.set_mappings(mapping_file_path, &mappings);
                     for mapping_file in mapping_files {
                         info!("Loaded mapping file {}", mapping_file.display());
                     }
@@ -40,6 +70,11 @@ impl ConfigFile {
             }
         }
         Ok(())
+    }
+
+    fn load_mapping(app_state: &Arc<AppState>) -> Result<(), TuliproxError> {
+        let prepared_templates = Self::load_prepared_global_templates(app_state)?;
+        Self::load_mapping_with_templates(app_state, prepared_templates.as_ref())
     }
 
     async fn load_api_proxy(app_state: &Arc<AppState>) -> Result<(), TuliproxError> {
@@ -66,11 +101,14 @@ impl ConfigFile {
         let config_file = paths.config_file_path.as_str();
         let config_dto = read_config_file(config_file, true, true)?;
         let mapping_changed = paths.mapping_file_path.as_ref() != config_dto.mapping_path.as_ref();
+        let template_changed = paths.template_file_path.as_ref() != config_dto.template_path.as_ref();
         let mut config: Config = Config::from(config_dto);
         config.prepare(paths.config_path.as_str()).await?;
         update_app_state_config(app_state, config).await?;
         info!("Loaded config file {config_file}");
-        if mapping_changed {
+        if template_changed {
+            Self::load_sources(app_state).await?;
+        } else if mapping_changed {
             Self::load_mapping(app_state)?;
         }
         Ok(())
@@ -79,16 +117,23 @@ impl ConfigFile {
     pub async fn load_sources(app_state: &Arc<AppState>) -> Result<(), TuliproxError> {
         let paths = <Arc<ArcSwap<ConfigPaths>> as Access<ConfigPaths>>::load(&app_state.app_config.paths);
         let sources_file = paths.sources_file_path.as_str();
+        let prepared_templates = Self::load_prepared_global_templates(app_state)?;
         let mut sources_dto = {
             let config = <Arc<ArcSwap<Config>> as Access<Config>>::load(&app_state.app_config.config);
-            read_sources_file(sources_file, true, true, config.get_hdhr_device_overview().as_ref())?
+            read_sources_file_from_path_with_templates(
+                &PathBuf::from(sources_file),
+                true,
+                true,
+                config.get_hdhr_device_overview().as_ref(),
+                prepared_templates.as_ref(),
+            )?
         };
         prepare_sources_batch(&mut sources_dto, true).await?;
         let sources: SourcesConfig = SourcesConfig::try_from(sources_dto)?;
         update_app_state_sources(app_state, sources).await?;
         info!("Loaded sources file {sources_file}");
         // mappings are not stored, so we need to reload and apply them if sources change.
-        Self::load_mapping(app_state)
+        Self::load_mapping_with_templates(app_state, prepared_templates.as_ref())
     }
 
     async fn reload_source_file(app_state: &Arc<AppState>) -> Result<(), TuliproxError> {
@@ -107,13 +152,13 @@ impl ConfigFile {
                 ConfigFile::load_mapping(app_state)?;
                 app_state.event_manager.send_event(EventMessage::ConfigChange(ConfigType::Mapping));
             }
+            ConfigFile::Template | ConfigFile::Sources => {
+                ConfigFile::load_sources(app_state).await?;
+                app_state.event_manager.send_event(EventMessage::ConfigChange(ConfigType::Sources));
+            }
             ConfigFile::Config => {
                 ConfigFile::load_config(app_state).await?;
                 app_state.event_manager.send_event(EventMessage::ConfigChange(ConfigType::Config));
-            }
-            ConfigFile::Sources => {
-                ConfigFile::load_sources(app_state).await?;
-                app_state.event_manager.send_event(EventMessage::ConfigChange(ConfigType::Sources));
             }
             ConfigFile::SourceFile => {
                 ConfigFile::reload_source_file(app_state).await?;

@@ -12,6 +12,7 @@ pub const CONFIG_PATH: &str = "config";
 pub const CONFIG_FILE: &str = "config.yml";
 pub const SOURCE_FILE: &str = "source.yml";
 pub const MAPPING_FILE: &str = "mapping.yml";
+pub const TEMPLATE_FILE: &str = "template.yml";
 pub const API_PROXY_FILE: &str = "api-proxy.yml";
 pub const DEFAULT_WEB_DIR: &str = "web";
 pub const DEFAULT_WORKING_DIR: &str = "data";

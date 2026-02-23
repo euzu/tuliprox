@@ -8,16 +8,11 @@ use std::path::{Path, PathBuf};
 use shared::info_err;
 use shared::model::{MappingDefinitionDto, MappingDto, MappingsDto, PatternTemplate};
 
-fn read_mapping(mapping_file: &Path, resolve_var: bool, prepare_mappings: bool) -> Result<Option<MappingsDto>, TuliproxError> {
+fn read_mapping(mapping_file: &Path, resolve_var: bool) -> Result<Option<MappingsDto>, TuliproxError> {
     if let Ok(file) = open_file(mapping_file) {
         let maybe_mapping: Result<MappingsDto, _> = serde_saphyr::from_reader(config_file_reader(file, resolve_var));
         return match maybe_mapping {
-            Ok(mut mapping) => {
-                if prepare_mappings {
-                    mapping.prepare()?;
-                }
-                Ok(Some(mapping))
-            }
+            Ok(mapping) => Ok(Some(mapping)),
             Err(err) => {
                 info_err_res!("{err}")
             }
@@ -28,7 +23,7 @@ fn read_mapping(mapping_file: &Path, resolve_var: bool, prepare_mappings: bool) 
 }
 
 fn read_mappings_from_file(mappings_file: &Path, resolve_env: bool) -> Result<Option<(Vec<PathBuf>, MappingsDto)>, TuliproxError> {
-    match read_mapping(mappings_file, resolve_env, true) {
+    match read_mapping(mappings_file, resolve_env) {
         Ok(mappings) => {
             match mappings {
                 None => Ok(None),
@@ -60,7 +55,7 @@ fn merge_mappings(mappings: Vec<MappingDto>) -> Vec<MappingDto> {
 
     map.into_values().collect()
 }
-fn merge_mapping_definitions(mappings: Vec<MappingsDto>) -> Result<Option<MappingsDto>, TuliproxError> {
+fn merge_mapping_definitions(mappings: Vec<MappingsDto>) -> MappingsDto {
     let mut merged_templates: Vec<PatternTemplate> = Vec::new();
     let mut merged_mapping: Vec<MappingDto> = Vec::new();
 
@@ -72,14 +67,12 @@ fn merge_mapping_definitions(mappings: Vec<MappingsDto>) -> Result<Option<Mappin
          merged_mapping.extend(mapping.mappings.mapping);
     }
 
-    let mut result = MappingsDto {
+    MappingsDto {
         mappings: MappingDefinitionDto {
             templates: if merged_templates.is_empty() { None } else { Some(merged_templates) },
             mapping: merge_mappings(merged_mapping)
         }
-    };
-    result.prepare()?;
-    Ok(Some(result))
+    }
 }
 
 fn read_mappings_from_directory(path: &Path, resolve_env: bool) -> Result<Option<(Vec<PathBuf>, MappingsDto)>, TuliproxError> {
@@ -99,7 +92,7 @@ fn read_mappings_from_directory(path: &Path, resolve_env: bool) -> Result<Option
     let mut mappings = vec![];
     let mut loaded_mapping_files = vec![];
     for file_path in files {
-        match read_mapping(&file_path, resolve_env, false) {
+        match read_mapping(&file_path, resolve_env) {
             Ok(Some(mapping)) => {
                 loaded_mapping_files.push(file_path);
                 mappings.push(mapping);
@@ -112,14 +105,13 @@ fn read_mappings_from_directory(path: &Path, resolve_env: bool) -> Result<Option
     if mappings.is_empty() {
         return Ok(None);
     }
-    match merge_mapping_definitions(mappings) {
-        Ok(Some(merged_mappings)) => Ok(Some((loaded_mapping_files, merged_mappings))),
-        Ok(None) => Ok(None),
-        Err(err) => Err(err),
-    }
+    Ok(Some((loaded_mapping_files, merge_mapping_definitions(mappings))))
 }
 
-pub fn read_mappings_file(mappings_file: &str, resolve_env: bool) -> Result<Option<(Vec<PathBuf>, MappingsDto)>, TuliproxError> {
+pub fn read_mappings_file_unprepared(
+    mappings_file: &str,
+    resolve_env: bool,
+) -> Result<Option<(Vec<PathBuf>, MappingsDto)>, TuliproxError> {
     let path = PathBuf::from(mappings_file);
     match std::fs::metadata(&path) {
         Ok(metadata) => {
@@ -134,6 +126,25 @@ pub fn read_mappings_file(mappings_file: &str, resolve_env: bool) -> Result<Opti
         Err(_err) => {
             Ok(None)
         }
+    }
+}
+
+pub fn read_mappings_file(mappings_file: &str, resolve_env: bool) -> Result<Option<(Vec<PathBuf>, MappingsDto)>, TuliproxError> {
+    read_mappings_file_with_templates(mappings_file, resolve_env, None)
+}
+
+pub fn read_mappings_file_with_templates(
+    mappings_file: &str,
+    resolve_env: bool,
+    prepared_templates: Option<&Vec<PatternTemplate>>,
+) -> Result<Option<(Vec<PathBuf>, MappingsDto)>, TuliproxError> {
+    let maybe_result = read_mappings_file_unprepared(mappings_file, resolve_env)?;
+
+    if let Some((paths, mut dto)) = maybe_result {
+        dto.mappings.prepare(prepared_templates)?;
+        Ok(Some((paths, dto)))
+    } else {
+        Ok(None)
     }
 }
 

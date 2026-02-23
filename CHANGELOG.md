@@ -96,11 +96,18 @@ active URL of the specified provider.
 - Added `epg_request_timeshift: [-+]hh:mm or TimeZone`, example `Europe/Paris`, `America/New_York`, `-2:30`(-2h30m), `+0:15` (15m), `2` (2h), `:30`
   (30m), `:3` (3m)
 - **Extended scheduler** to support `Local Library` scans. Scheduler can now trigger automatic library scans alongside playlist updates.
+- **Centralized Pattern Templates**: Added a global template collection that is loaded from `config.yml -> template_path` (file or directory) and shared
+  across sources and mappings.
+- **Template Backward Compatibility**: Existing inline templates in `source.yml` and `mapping.yml` are still loaded and merged during read/validation.
+- **Template-Aware Hot Reload**: File watcher now tracks template files/directories and reapplies sources/mappings when templates change.
+- **Setup Validation Improvement**: Setup mode validates source configuration against the global template collection and persists template definitions
+  separately.
 
 ## ⚙️ New Settings
 
 - **config.yml**:
   - Added `video.ffprobe_enabled` (default: false) and `video.ffprobe_timeout`.
+  - Added `template_path` (optional): path to a template file (`template.yml`) or directory (`template.d` style).
 - **source.yml (input options)**:
   - Added `resolve_tmdb`: Triggers TMDB lookup if ID is missing.
   - Added `probe_stream`: Triggers ffprobe if technical info is missing.
@@ -109,6 +116,8 @@ active URL of the specified provider.
   - Added `probe_live`: Enables background probing for Live TV streams (default disabled).
   - Added `probe_live_interval_hours`: Sets the frequency for re-probing Live TV streams.
   - Added `resolve_background`: Toggles background metadata resolution (default `true`). Set to `false` for blocking, immediate resolution.
+- **CLI**:
+  - Added `-T, --template` to override `template_path` on startup.
 
 ## 🛠 Optimizations
 

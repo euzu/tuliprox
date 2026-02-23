@@ -64,17 +64,13 @@ async fn save_config_main(
 
 async fn save_config_sources(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
-    axum::extract::Json(mut sources): axum::extract::Json<SourcesConfigDto>,
+    axum::extract::Json(sources): axum::extract::Json<SourcesConfigDto>,
 ) -> impl axum::response::IntoResponse + Send {
-    if let Err(err) = sources.prepare(false, None) {
-        return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": err.to_string()}))).into_response();
-    }
-
     let sources_config = match utils::validate_and_persist_source_config(&app_state, sources).await {
         Ok(value) => value,
         Err(err) => {
             error!("Failed to save source.yml {err}");
-            return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({"error": err.to_string()}))).into_response();
+            return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": err.to_string()}))).into_response();
         }
     };
 

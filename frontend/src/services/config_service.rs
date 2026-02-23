@@ -119,7 +119,9 @@ impl ConfigService {
         let config_result = match config_response {
             Ok(Some(mut app_config)) => {
                 let templates = {
-                    if let Some(templ) = app_config.sources.templates.as_mut() {
+                    if let Some(template_definition) = app_config.templates.as_mut() {
+                        prepare_templates(&mut template_definition.templates).ok()
+                    } else if let Some(templ) = app_config.sources.templates.as_mut() {
                         prepare_templates(templ).ok()
                     } else {
                         None

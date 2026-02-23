@@ -254,18 +254,22 @@ pub struct MappingDefinitionDto {
 }
 
 impl MappingDefinitionDto {
-    pub fn prepare(&mut self) -> Result<(), TuliproxError> {
-        let prepared_templates = self
-            .templates
-            .as_ref()
-            .map(|templates| {
-                let mut cloned_templates = templates.clone();
-                prepare_templates(&mut cloned_templates)
-            })
-            .transpose()?;
+    pub fn prepare(&mut self, prepared_templates: Option<&Vec<PatternTemplate>>) -> Result<(), TuliproxError> {
+        let local_prepared_templates = if prepared_templates.is_none() {
+            self.templates
+                .as_ref()
+                .map(|templates| {
+                    let mut cloned_templates = templates.clone();
+                    prepare_templates(&mut cloned_templates)
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        let templates_to_use = prepared_templates.or(local_prepared_templates.as_ref());
 
         for mapping in &mut self.mapping {
-            mapping.prepare(prepared_templates.as_ref())?;
+            mapping.prepare(templates_to_use)?;
         }
         Ok(())
     }
@@ -277,7 +281,9 @@ pub struct MappingsDto {
 }
 
 impl MappingsDto {
-    pub fn prepare(&mut self) -> Result<(), TuliproxError> { self.mappings.prepare() }
+    pub fn prepare(&mut self, prepared_templates: Option<&Vec<PatternTemplate>>) -> Result<(), TuliproxError> {
+        self.mappings.prepare(prepared_templates)
+    }
 }
 
 #[cfg(test)]
@@ -322,7 +328,7 @@ mod tests {
         };
 
         let original_templates = mapping_definition.templates.clone();
-        mapping_definition.prepare().expect("mapping definition should prepare");
+        mapping_definition.prepare(None).expect("mapping definition should prepare");
 
         assert_eq!(mapping_definition.templates, original_templates);
     }

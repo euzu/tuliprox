@@ -49,7 +49,9 @@ pub fn FilterInput(props: &FilterInputProps) -> Html {
 
     {
         let templates = templates_state.clone();
-        let cfg_templates = config_ctx.config.as_ref().and_then(|c| c.sources.templates.clone());
+        let cfg_templates = config_ctx.config.as_ref().and_then(|c| {
+            c.templates.as_ref().map(|definition| definition.templates.clone()).or_else(|| c.sources.templates.clone())
+        });
         use_effect_with(cfg_templates, move |templ| {
             templates.set(templ.clone());
         });
