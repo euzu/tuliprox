@@ -305,6 +305,8 @@ impl AppConfig {
             self.prepare_paths();
         } else {
             self.prepare_mapping_path();
+            self.prepare_template_path();
+            self.prepare_custom_stream_response();
         }
 
         self.prepare_sources()?;
@@ -330,13 +332,29 @@ impl AppConfig {
         }
     }
 
+    fn set_template_path(&self, template_path: Option<&str>) {
+        let paths = self.paths.load_full();
+        let mut new_paths = paths.as_ref().clone();
+        let old_template_file_path = new_paths.template_file_path.as_deref();
+        if old_template_file_path != template_path {
+            new_paths.template_file_path = template_path.map(ToString::to_string);
+            self.paths.store(Arc::new(new_paths));
+        }
+    }
+
     fn prepare_mapping_path(&self) {
         let config = self.config.load();
         self.set_mapping_path(config.mapping_path.as_deref());
     }
 
+    fn prepare_template_path(&self) {
+        let config = self.config.load();
+        self.set_template_path(config.template_path.as_deref());
+    }
+
     fn prepare_paths(&self) {
         self.prepare_mapping_path();
+        self.prepare_template_path();
         self.prepare_custom_stream_response();
     }
 

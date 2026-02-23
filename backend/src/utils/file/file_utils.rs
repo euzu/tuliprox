@@ -2,7 +2,10 @@ use crate::utils::debug_if_enabled;
 use log::{debug, error, trace};
 use path_clean::PathClean;
 use shared::error::str_to_io_error;
-use shared::utils::{API_PROXY_FILE, CONFIG_FILE, CONFIG_PATH, DEFAULT_HOME_ENV_VAR, DEFAULT_WEB_DIR, DEFAULT_WEB_ROOT_ENV_VAR, MAPPING_FILE, SOURCE_FILE, USER_FILE};
+use shared::utils::{
+    API_PROXY_FILE, CONFIG_FILE, CONFIG_PATH, DEFAULT_HOME_ENV_VAR, DEFAULT_WEB_DIR, DEFAULT_WEB_ROOT_ENV_VAR,
+    MAPPING_FILE, SOURCE_FILE, TEMPLATE_FILE, USER_FILE,
+};
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
@@ -106,6 +109,37 @@ pub fn get_default_sources_file_path(config_path: &str) -> String {
 #[inline]
 pub fn get_default_mappings_path(config_path: &str) -> String {
     get_default_file_path(config_path, MAPPING_FILE)
+}
+
+#[inline]
+pub fn get_default_templates_path(config_path: &str) -> String {
+    get_default_file_path(config_path, TEMPLATE_FILE)
+}
+
+#[inline]
+pub fn resolve_template_persist_file_path(template_path: Option<&str>, config_path: &str) -> String {
+    let candidate = template_path
+        .filter(|path| !path.trim().is_empty())
+        .map_or_else(|| get_default_templates_path(config_path), ToString::to_string);
+    let path = PathBuf::from(&candidate);
+
+    if path.exists() {
+        if path.is_dir() {
+            return path.join(TEMPLATE_FILE).to_string_lossy().to_string();
+        }
+        return path.to_string_lossy().to_string();
+    }
+
+    let looks_like_directory = candidate.ends_with('/')
+        || candidate.ends_with('\\')
+        || path.extension().is_none()
+        || path.extension().is_some_and(|ext| ext == "d");
+
+    if looks_like_directory {
+        path.join(TEMPLATE_FILE).to_string_lossy().to_string()
+    } else {
+        path.to_string_lossy().to_string()
+    }
 }
 
 #[inline]

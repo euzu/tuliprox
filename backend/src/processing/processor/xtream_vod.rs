@@ -1,24 +1,29 @@
 use crate::api::model::{ActiveProviderManager, ProviderHandle};
-use crate::api::model::{ResolveReason, ResolveReasonSet, UpdateTask, ProviderIdType};
+use crate::api::model::{ProviderIdType, ResolveReason, ResolveReasonSet, UpdateTask};
 use crate::library::MetadataResolver;
-use crate::model::{ConfigInput, ConfigInputFlags};
 use crate::model::FetchedPlaylist;
 use crate::model::InputSource;
 use crate::model::{AppConfig, ConfigTarget};
+use crate::model::{ConfigInput, ConfigInputFlags};
 use crate::processing::processor::playlist::PlaylistProcessingContext;
-use crate::processing::processor::{create_resolve_options_function_for_xtream_target, ResolveOptions, ResolveOptionsFlags};
+use crate::processing::processor::{
+    create_resolve_options_function_for_xtream_target, ResolveOptions, ResolveOptionsFlags,
+};
 use crate::ptt::ptt_parse_title;
 use crate::repository::get_input_storage_path;
 use crate::repository::persist_input_vod_info;
 use crate::repository::persist_input_vod_info_batch;
 use crate::repository::{xtream_get_file_path, BPlusTreeQuery};
-use crate::utils::{trace_if_enabled, debug_if_enabled, xtream};
+use crate::utils::{debug_if_enabled, trace_if_enabled, xtream};
 use log::{debug, error, info, log_enabled, trace, warn, Level};
+use parking_lot::Mutex;
 use serde_json::Value;
 use shared::error::TuliproxError;
-use shared::model::{MediaQuality, PlaylistEntry, PlaylistItem, PlaylistItemType, StreamProperties, VideoStreamDetailProperties, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem, XtreamVideoInfo};
+use shared::model::{
+    MediaQuality, PlaylistEntry, PlaylistItem, PlaylistItemType, StreamProperties, VideoStreamDetailProperties,
+    VideoStreamProperties, XtreamCluster, XtreamPlaylistItem, XtreamVideoInfo,
+};
 use std::collections::HashMap;
-use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -47,19 +52,14 @@ pub async fn playlist_resolve_vod(
     // Determine if we need to do anything
     if !resolve_options.has_flag(ResolveOptionsFlags::Resolve)
         && !do_probe
-        && !resolve_options.has_flag(ResolveOptionsFlags::TmdbMissing) {
+        && !resolve_options.has_flag(ResolveOptionsFlags::TmdbMissing)
+    {
         return;
     }
 
     provider_fpl.source.release_resources(XtreamCluster::Video);
 
-    playlist_resolve_vod_info(
-        ctx,
-        errors,
-        fpl,
-        resolve_options,
-        do_probe,
-    ).await;
+    playlist_resolve_vod_info(ctx, errors, fpl, resolve_options, do_probe).await;
 
     if provider_fpl.is_memory() {
         sync_resolved_vod_properties(provider_fpl, fpl);
@@ -68,16 +68,11 @@ pub async fn playlist_resolve_vod(
     provider_fpl.source.obtain_resources().await;
 }
 
-fn sync_resolved_vod_properties(
-    provider_fpl: &mut FetchedPlaylist<'_>,
-    processed_fpl: &mut FetchedPlaylist<'_>,
-) {
+fn sync_resolved_vod_properties(provider_fpl: &mut FetchedPlaylist<'_>, processed_fpl: &mut FetchedPlaylist<'_>) {
     let mut resolved_vod_by_provider_id: HashMap<u32, VideoStreamProperties> = HashMap::new();
 
     for pli in processed_fpl.items() {
-        if pli.header.xtream_cluster != XtreamCluster::Video
-            || pli.header.item_type != PlaylistItemType::Video
-        {
+        if pli.header.xtream_cluster != XtreamCluster::Video || pli.header.item_type != PlaylistItemType::Video {
             continue;
         }
 
@@ -89,9 +84,7 @@ fn sync_resolved_vod_properties(
         }
 
         if let Some(StreamProperties::Video(properties)) = pli.header.additional_properties.as_ref() {
-            resolved_vod_by_provider_id
-                .entry(provider_id)
-                .or_insert_with(|| properties.as_ref().clone());
+            resolved_vod_by_provider_id.entry(provider_id).or_insert_with(|| properties.as_ref().clone());
         }
     }
 
@@ -114,8 +107,7 @@ fn sync_resolved_vod_properties(
         }
 
         if let Some(resolved) = resolved_vod_by_provider_id.get(&provider_id) {
-            source_pli.header.additional_properties =
-                Some(StreamProperties::Video(Box::new(resolved.clone())));
+            source_pli.header.additional_properties = Some(StreamProperties::Video(Box::new(resolved.clone())));
         }
     }
 }
@@ -128,11 +120,8 @@ async fn playlist_resolve_vod_info(
     resolve_options: ResolveOptions,
     do_probe: bool,
 ) {
-
     let filter = |pli: &PlaylistItem| {
-        if pli.header.xtream_cluster != XtreamCluster::Video
-            || pli.header.item_type != PlaylistItemType::Video
-        {
+        if pli.header.xtream_cluster != XtreamCluster::Video || pli.header.item_type != PlaylistItemType::Video {
             return false;
         }
         true
@@ -141,33 +130,21 @@ async fn playlist_resolve_vod_info(
     let resolve_tmdb_enabled = fpl.input.has_flag(ConfigInputFlags::ResolveTmdb);
 
     if resolve_options.has_flag(ResolveOptionsFlags::Background) && ctx.metadata_manager.is_some() {
-        queue_background_vod_info(
-            ctx,
-            fpl,
-            filter,
-            &resolve_options,
-            do_probe,
-            resolve_tmdb_enabled,
-        );
+        queue_background_vod_info(ctx, fpl, filter, &resolve_options, do_probe, resolve_tmdb_enabled);
     } else {
-        process_immediate_vod_info(
-            ctx,
-            fpl,
-            filter,
-            resolve_options,
-            do_probe,
-            resolve_tmdb_enabled,
-        )
-        .await;
+        process_immediate_vod_info(ctx, fpl, filter, resolve_options, do_probe, resolve_tmdb_enabled).await;
     }
 }
 
 #[allow(clippy::too_many_lines)]
-async fn process_immediate_vod_info(ctx: &PlaylistProcessingContext, fpl: &mut FetchedPlaylist<'_>,
-                                    filter: impl Fn(&PlaylistItem) -> bool,
-                                    resolve_options: ResolveOptions,
-                                    do_probe: bool,
-                                    resolve_tmdb_enabled: bool, ) {
+async fn process_immediate_vod_info(
+    ctx: &PlaylistProcessingContext,
+    fpl: &mut FetchedPlaylist<'_>,
+    filter: impl Fn(&PlaylistItem) -> bool,
+    resolve_options: ResolveOptions,
+    do_probe: bool,
+    resolve_tmdb_enabled: bool,
+) {
     let input = fpl.input;
     let working_dir = &ctx.config.config.load().working_dir;
 
@@ -209,7 +186,9 @@ async fn process_immediate_vod_info(ctx: &PlaylistProcessingContext, fpl: &mut F
                     let xtream_path = xtream_path.clone();
                     let query = match tokio::task::spawn_blocking(move || {
                         BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path)
-                    }).await {
+                    })
+                    .await
+                    {
                         Ok(Ok(query)) => Some(query),
                         Ok(Err(err)) => {
                             error!("Failed to open BPlusTreeQuery for VOD: {err}");
@@ -229,10 +208,13 @@ async fn process_immediate_vod_info(ctx: &PlaylistProcessingContext, fpl: &mut F
                 // Pass the optional reference to the query
                 let db_query_ref = db_query_holder.as_ref().map(Arc::clone);
 
-                match update_vod_info_immediate(ctx, prov_mgr, input, pli, provider_id.clone(), &reasons, db_query_ref).await {
+                match update_vod_info_immediate(ctx, prov_mgr, input, pli, provider_id.clone(), &reasons, db_query_ref)
+                    .await
+                {
                     Ok(Some(updated_props)) => {
                         // Update the current item in fpl
-                        pli.header.additional_properties = Some(StreamProperties::Video(Box::new(updated_props.clone())));
+                        pli.header.additional_properties =
+                            Some(StreamProperties::Video(Box::new(updated_props.clone())));
                         batch.push((provider_id.clone(), updated_props));
                         if batch.len() >= BATCH_SIZE {
                             // Release lock before persisting to avoid deadlock (persist needs write lock)
@@ -240,7 +222,8 @@ async fn process_immediate_vod_info(ctx: &PlaylistProcessingContext, fpl: &mut F
                             _db_lock_holder = None;
 
                             // Filter for u32 IDs for persistence
-                            let updates: Vec<(u32, VideoStreamProperties)> = batch.iter()
+                            let updates: Vec<(u32, VideoStreamProperties)> = batch
+                                .iter()
                                 .filter_map(|(id, props)| {
                                     if let ProviderIdType::Id(vid) = id {
                                         Some((*vid, props.clone()))
@@ -259,7 +242,9 @@ async fn process_immediate_vod_info(ctx: &PlaylistProcessingContext, fpl: &mut F
                                     XtreamCluster::Video,
                                     &input.name,
                                     updates,
-                                ).await {
+                                )
+                                .await
+                                {
                                     Ok(()) => batch.clear(),
                                     Err(err) => {
                                         error!(
@@ -298,12 +283,16 @@ async fn process_immediate_vod_info(ctx: &PlaylistProcessingContext, fpl: &mut F
         // Release lock before final persist
         _db_lock_holder = None;
 
-        let updates: Vec<(u32, VideoStreamProperties)> = batch.into_iter()
+        let updates: Vec<(u32, VideoStreamProperties)> = batch
+            .into_iter()
             .filter_map(|(id, props)| if let ProviderIdType::Id(vid) = id { Some((vid, props)) } else { None })
             .collect();
 
         if !updates.is_empty() {
-            if let Err(err) = persist_input_vod_info_batch(&ctx.config, &storage_path, XtreamCluster::Video, &input.name, updates).await {
+            if let Err(err) =
+                persist_input_vod_info_batch(&ctx.config, &storage_path, XtreamCluster::Video, &input.name, updates)
+                    .await
+            {
                 error!("Failed to persist final batch VOD info: {err}");
             }
         }
@@ -342,9 +331,7 @@ fn check_needs_probe(pli: &PlaylistItem, reasons: &mut ResolveReasonSet) {
             let missing_audio = !MediaQuality::is_valid_media_info(details.and_then(|d| d.audio.as_deref()));
             missing_video || missing_audio
         }
-        None => {
-            true
-        }
+        None => true,
         _ => false,
     };
     if needs_probe {
@@ -368,25 +355,30 @@ fn check_resolve_tmdb(
     needs_info: bool,
     reasons: &mut ResolveReasonSet,
 ) {
-    if resolve_tmdb_enabled
-        && resolve_options.has_flag(ResolveOptionsFlags::TmdbMissing)
-        && needs_info {
+    if resolve_tmdb_enabled && resolve_options.has_flag(ResolveOptionsFlags::TmdbMissing) && needs_info {
         if let Some(StreamProperties::Video(video_stream_props)) = pli.header.additional_properties.as_ref() {
             let has_tmdb = video_stream_props.tmdb.is_some();
             let has_date = video_stream_props.details.as_ref().and_then(|d| d.release_date.as_ref()).is_some();
             if !has_tmdb || !has_date {
-                if !has_tmdb { reasons.set(ResolveReason::Tmdb); }
-                if !has_date { reasons.set(ResolveReason::Date); }
+                if !has_tmdb {
+                    reasons.set(ResolveReason::Tmdb);
+                }
+                if !has_date {
+                    reasons.set(ResolveReason::Date);
+                }
             }
         }
     }
 }
 
-fn queue_background_vod_info(ctx: &PlaylistProcessingContext, fpl: &mut FetchedPlaylist<'_>,
-                             filter: impl Fn(&PlaylistItem) -> bool,
-                             resolve_options: &ResolveOptions,
-                             do_probe: bool,
-                             resolve_tmdb_enabled: bool, ) {
+fn queue_background_vod_info(
+    ctx: &PlaylistProcessingContext,
+    fpl: &mut FetchedPlaylist<'_>,
+    filter: impl Fn(&PlaylistItem) -> bool,
+    resolve_options: &ResolveOptions,
+    do_probe: bool,
+    resolve_tmdb_enabled: bool,
+) {
     let Some(mgr) = ctx.metadata_manager.as_ref() else {
         return;
     };
@@ -406,11 +398,8 @@ fn queue_background_vod_info(ctx: &PlaylistProcessingContext, fpl: &mut FetchedP
         let reasons = check_resolve_reasons(resolve_options, do_probe, resolve_tmdb_enabled, pli);
 
         if !reasons.is_empty() {
-            let task = UpdateTask::ResolveVod {
-                id: provider_id,
-                reason: reasons,
-                delay: resolve_options.resolve_delay,
-            };
+            let task =
+                UpdateTask::ResolveVod { id: provider_id, reason: reasons, delay: resolve_options.resolve_delay };
             mgr.queue_task_background(input.name.clone(), task);
         }
     }
@@ -439,9 +428,9 @@ async fn update_vod_info_immediate(
         fetch_info,
         reasons.contains(ResolveReason::Probe),
         db_query,
-    ).await
+    )
+    .await
 }
-
 
 /// Updates metadata for a single VOD item (Info + Probe).
 ///
@@ -465,7 +454,8 @@ pub async fn update_vod_metadata(
     db_query: Option<Arc<Mutex<BPlusTreeQuery<u32, XtreamPlaylistItem>>>>,
 ) -> Result<Option<VideoStreamProperties>, TuliproxError> {
     let working_dir = &app_config.config.load().working_dir;
-    let storage_path = get_input_storage_path(&input.name, working_dir).await
+    let storage_path = get_input_storage_path(&input.name, working_dir)
+        .await
         .map_err(|e| shared::error::info_err!("Storage path error: {e}"))?;
 
     // Check if we should skip based on input options
@@ -603,8 +593,9 @@ pub async fn update_vod_metadata(
         }
     }
 
-    // Now it's safe to unwrap because we handled the None case above
-    let mut properties = props.unwrap();
+    let Some(mut properties) = props else {
+        return Err(shared::error::info_err!("No VOD properties available after fallback creation for {display_id}"));
+    };
 
     let resolve_tmdb_enabled = input.has_flag(ConfigInputFlags::ResolveTmdb);
 
@@ -650,13 +641,16 @@ pub async fn update_vod_metadata(
             }
 
             // 3. API Name (fallback)
-            if (meta.is_none() || (meta.as_ref().is_some_and(|m| m.tmdb_id().is_none())))
-                && !properties.name.is_empty() {
-                let title_already_tried = if let Some(t) = title_candidate { t == properties.name.as_ref() } else { false };
+            if (meta.is_none() || (meta.as_ref().is_some_and(|m| m.tmdb_id().is_none()))) && !properties.name.is_empty()
+            {
+                let title_already_tried =
+                    if let Some(t) = title_candidate { t == properties.name.as_ref() } else { false };
 
                 if !tried_title || !title_already_tried {
                     trace!("Fallback to API Name '{}'...", properties.name);
-                    meta = meta_resolver.resolve_from_title(&properties.name, properties.tmdb, true, resolve_tmdb_enabled).await;
+                    meta = meta_resolver
+                        .resolve_from_title(&properties.name, properties.tmdb, true, resolve_tmdb_enabled)
+                        .await;
                 }
             }
 
@@ -665,7 +659,8 @@ pub async fn update_vod_metadata(
                 if let Some(o_name) = properties.details.as_ref().and_then(|d| d.o_name.as_deref()) {
                     if !o_name.is_empty() && o_name != properties.name.as_ref() {
                         trace!("Fallback to API Original Name '{o_name}'...");
-                        meta = meta_resolver.resolve_from_title(o_name, properties.tmdb, true, resolve_tmdb_enabled).await;
+                        meta =
+                            meta_resolver.resolve_from_title(o_name, properties.tmdb, true, resolve_tmdb_enabled).await;
                     }
                 }
             }
@@ -697,18 +692,26 @@ pub async fn update_vod_metadata(
             properties.details = Some(VideoStreamDetailProperties::default());
         }
 
-        let details = properties.details.as_ref().unwrap();
-        let missing_video = !MediaQuality::is_valid_media_info(details.video.as_deref());
-        let missing_audio = !MediaQuality::is_valid_media_info(details.audio.as_deref());
+        let (missing_video, missing_audio) = match properties.details.as_ref() {
+            Some(details) => (
+                !MediaQuality::is_valid_media_info(details.video.as_deref()),
+                !MediaQuality::is_valid_media_info(details.audio.as_deref()),
+            ),
+            None => (true, true),
+        };
 
         if missing_video || missing_audio {
             let input_url = input.url.as_str();
             let username = input.username.as_deref().unwrap_or("");
             let password = input.password.as_deref().unwrap_or("");
             let stream_url = crate::processing::parser::xtream::create_xtream_url(
-                XtreamCluster::Video, input_url, username, password,
+                XtreamCluster::Video,
+                input_url,
+                username,
+                password,
                 &StreamProperties::Video(Box::new(properties.clone())),
-                true, true,
+                true,
+                true,
             );
 
             let config = app_config.config.load();
@@ -732,7 +735,9 @@ pub async fn update_vod_metadata(
                     analyze_duration,
                     probe_size,
                     ffprobe_timeout,
-                ).await {
+                )
+                .await
+                {
                     if let Some(details) = properties.details.as_mut() {
                         if let Some(v) = raw_video {
                             details.video = Some(v.to_string().into());
@@ -757,9 +762,16 @@ pub async fn update_vod_metadata(
     if properties_updated || fetched_new {
         if save {
             if let Some(stream_id) = stream_id_opt {
-                persist_input_vod_info(app_config, &storage_path, XtreamCluster::Video, &input.name, stream_id, &properties)
-                    .await
-                    .map_err(|e| shared::error::info_err!("Persist error: {e}"))?;
+                persist_input_vod_info(
+                    app_config,
+                    &storage_path,
+                    XtreamCluster::Video,
+                    &input.name,
+                    stream_id,
+                    &properties,
+                )
+                .await
+                .map_err(|e| shared::error::info_err!("Persist error: {e}"))?;
             }
 
             debug_if_enabled!("Successfully updated VOD metadata for '{}' (ID: {})", display_title, display_id);

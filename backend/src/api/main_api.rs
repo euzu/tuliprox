@@ -11,7 +11,11 @@ use crate::api::endpoints::xmltv_api::xmltv_api_register;
 use crate::api::endpoints::xtream_api::xtream_api_register;
 use crate::api::hdhomerun_proprietary::spawn_proprietary_tasks;
 use crate::api::hdhomerun_ssdp::spawn_ssdp_discover_task;
-use crate::api::model::{create_cache, create_http_client, create_http_client_no_redirect, ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager, DownloadQueue, EventManager, EventMessage, HdHomerunAppState, MetadataUpdateManager, PlaylistStorageState, SharedStreamManager, UpdateGuard};
+use crate::api::model::{
+    create_cache, create_http_client, create_http_client_no_redirect, ActiveProviderManager, ActiveUserManager,
+    AppState, CancelTokens, ConnectionManager, DownloadQueue, EventManager, EventMessage, HdHomerunAppState,
+    MetadataUpdateManager, PlaylistStorageState, SharedStreamManager, UpdateGuard,
+};
 use crate::api::panel_api::sync_panel_api_exp_dates_on_boot;
 use crate::api::scheduler::{exec_interner_prune, exec_scheduler};
 use crate::api::serve::serve;
@@ -39,12 +43,10 @@ use tokio_util::sync::CancellationToken;
 use tower_governor::key_extractor::SmartIpKeyExtractor;
 use tower_http::services::ServeDir;
 
+const METADATA_TRIGGER_WAIT_CYCLE_LIMIT: u32 = 900;
+
 fn get_web_dir_path(web_ui_enabled: bool, web_root: &str) -> Result<PathBuf, TuliproxError> {
-    let web_dir_path = if web_root.is_empty() {
-        get_default_web_root_path()
-    } else {
-        PathBuf::from(web_root)
-    };
+    let web_dir_path = if web_root.is_empty() { get_default_web_root_path() } else { PathBuf::from(web_root) };
     if web_ui_enabled && (!&web_dir_path.exists() || !&web_dir_path.is_dir()) {
         return info_err_res!("web_root does not exist or is not a directory: {}", web_dir_path.display());
     }
@@ -93,7 +95,8 @@ async fn create_shared_data(
     let active_provider = Arc::new(ActiveProviderManager::new(app_config, &event_manager));
     let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
     let active_users = Arc::new(ActiveUserManager::new(&config, &geoip, &event_manager));
-    let connection_manager = Arc::new(ConnectionManager::new(&active_users, &active_provider, &shared_stream_manager, &event_manager));
+    let connection_manager =
+        Arc::new(ConnectionManager::new(&active_users, &active_provider, &shared_stream_manager, &event_manager));
 
     let client = create_http_client(app_config)?;
     let client_no_redirect = create_http_client_no_redirect(app_config)?;
@@ -121,11 +124,7 @@ async fn create_shared_data(
     })
 }
 
-fn exec_update_on_boot(
-    client: &reqwest::Client,
-    app_state: &Arc<AppState>,
-    targets: &Arc<ProcessTargets>,
-) {
+fn exec_update_on_boot(client: &reqwest::Client, app_state: &Arc<AppState>, targets: &Arc<ProcessTargets>) {
     let cfg = &app_state.app_config;
     let update_on_boot = {
         let config = cfg.config.load();
@@ -143,7 +142,20 @@ fn exec_update_on_boot(
         let event_manager = Some(Arc::clone(&app_state.event_manager));
 
         tokio::spawn(async move {
-            exec_processing(&client, app_config_clone, targets_clone, event_manager, Some(playlist_state), update_guard, disabled_headers, Some(provider_manager), Some(metadata_manager), None, None).await;
+            exec_processing(
+                &client,
+                app_config_clone,
+                targets_clone,
+                event_manager,
+                Some(playlist_state),
+                update_guard,
+                disabled_headers,
+                Some(provider_manager),
+                Some(metadata_manager),
+                None,
+                None,
+            )
+            .await;
         });
     }
 }
@@ -170,11 +182,7 @@ fn create_cors_layer() -> tower_http::cors::CorsLayer {
         .max_age(std::time::Duration::from_secs(3600))
 }
 fn create_compression_layer() -> tower_http::compression::CompressionLayer {
-    tower_http::compression::CompressionLayer::new()
-        .br(true)
-        .deflate(true)
-        .gzip(true)
-        .zstd(true)
+    tower_http::compression::CompressionLayer::new().br(true).deflate(true).gzip(true).zstd(true)
 }
 
 pub(in crate::api) fn start_hdhomerun(
@@ -190,25 +198,14 @@ pub(in crate::api) fn start_hdhomerun(
         if hdhomerun.flags.contains(HdHomeRunFlags::Enabled) {
             if hdhomerun.flags.contains(HdHomeRunFlags::SsdpDiscovery) {
                 info!("HDHomeRun SSDP discovery is enabled.");
-                spawn_ssdp_discover_task(
-                    Arc::clone(app_config),
-                    host.clone(),
-                    cancel_token.clone(),
-                );
+                spawn_ssdp_discover_task(Arc::clone(app_config), host.clone(), cancel_token.clone());
             } else {
                 info!("HDHomeRun SSDP discovery is disabled.");
             }
 
-            if hdhomerun
-                .flags
-                .contains(HdHomeRunFlags::ProprietaryDiscovery)
-            {
+            if hdhomerun.flags.contains(HdHomeRunFlags::ProprietaryDiscovery) {
                 info!("HDHomeRun proprietary discovery is enabled.");
-                spawn_proprietary_tasks(
-                    Arc::clone(app_state),
-                    host.clone(),
-                    cancel_token.clone(),
-                );
+                spawn_proprietary_tasks(Arc::clone(app_state), host.clone(), cancel_token.clone());
             } else {
                 info!("HDHomeRun proprietary discovery is disabled.");
             }
@@ -220,10 +217,7 @@ pub(in crate::api) fn start_hdhomerun(
                     let port = device.port;
                     let device_clone = Arc::new(device.clone());
                     let basic_auth = hdhomerun.flags.contains(HdHomeRunFlags::Auth);
-                    infos.push(format!(
-                        "HdHomeRun Server '{}' running: http://{host}:{port}",
-                        device.name
-                    ));
+                    infos.push(format!("HdHomeRun Server '{}' running: http://{host}:{port}", device.name));
                     let c_token = cancel_token.clone();
                     let connection_manager = Arc::clone(&app_data.connection_manager);
                     tokio::spawn(async move {
@@ -232,16 +226,13 @@ pub(in crate::api) fn start_hdhomerun(
                             .layer(create_compression_layer())
                             .merge(hdhr_api_register(basic_auth));
 
-                        let router: axum::Router<()> =
-                            router.with_state(Arc::new(HdHomerunAppState {
-                                app_state: Arc::clone(&app_data),
-                                device: Arc::clone(&device_clone),
-                                hd_scan_state: Arc::new(AtomicI8::new(-1)),
-                            }));
+                        let router: axum::Router<()> = router.with_state(Arc::new(HdHomerunAppState {
+                            app_state: Arc::clone(&app_data),
+                            device: Arc::clone(&device_clone),
+                            hd_scan_state: Arc::new(AtomicI8::new(-1)),
+                        }));
 
-                        match tokio::net::TcpListener::bind(format!("{}:{}", app_host.clone(), port))
-                            .await
-                        {
+                        match tokio::net::TcpListener::bind(format!("{}:{}", app_host.clone(), port)).await {
                             Ok(listener) => {
                                 serve(listener, router, Some(c_token), &connection_manager).await;
                             }
@@ -255,10 +246,7 @@ pub(in crate::api) fn start_hdhomerun(
 }
 
 #[allow(clippy::too_many_lines)]
-pub async fn start_server(
-    app_config: Arc<AppConfig>,
-    targets: Arc<ProcessTargets>,
-) -> Result<(), TuliproxError> {
+pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTargets>) -> Result<(), TuliproxError> {
     let mut infos = Vec::new();
     let cfg = app_config.config.load();
     let host = cfg.api.host.clone();
@@ -289,11 +277,7 @@ pub async fn start_server(
 
     let (cancel_token_scheduler, cancel_token_hdhomerun, cancel_token_file_watch) = {
         let cancel_tokens = app_state.cancel_tokens.load();
-        (
-            cancel_tokens.scheduler.clone(),
-            cancel_tokens.hdhomerun.clone(),
-            cancel_tokens.file_watch.clone(),
-        )
+        (cancel_tokens.scheduler.clone(), cancel_tokens.hdhomerun.clone(), cancel_tokens.file_watch.clone())
     };
 
     if let Err(err) = load_playlists_into_memory_cache(&app_state).await {
@@ -306,18 +290,9 @@ pub async fn start_server(
 
     sync_panel_api_exp_dates_on_boot(&app_state).await;
 
-    exec_scheduler(
-        client.as_ref(),
-        &app_state,
-        &targets,
-        &cancel_token_scheduler,
-    );
+    exec_scheduler(client.as_ref(), &app_state, &targets, &cancel_token_scheduler);
 
-    exec_update_on_boot(
-        client.as_ref(),
-        &app_state,
-        &targets,
-    );
+    exec_update_on_boot(client.as_ref(), &app_state, &targets);
 
     exec_file_lock_prune(&app_state);
 
@@ -331,12 +306,7 @@ pub async fn start_server(
         start_hdhomerun(&app_config, &app_state, &mut infos, &cancel_token_hdhomerun);
     }
 
-    let web_ui_path = cfg
-        .web_ui
-        .as_ref()
-        .and_then(|c| c.path.as_ref())
-        .cloned()
-        .unwrap_or_default();
+    let web_ui_path = cfg.web_ui.as_ref().and_then(|c| c.path.as_ref()).cloned().unwrap_or_default();
     infos.push(format!("Server running: http://{}:{}", &cfg.api.host, &cfg.api.port));
     for info in &infos {
         info!("{info}");
@@ -346,10 +316,7 @@ pub async fn start_server(
     let mut router = axum::Router::new()
         .route("/healthcheck", axum::routing::get(healthcheck))
         .nest_service("/.well-known", ServeDir::new(web_dir_path.join("static/.well-known")))
-        .merge(ws_api_register(
-            web_auth_enabled,
-            web_ui_path.as_str(),
-        ));
+        .merge(ws_api_register(web_auth_enabled, web_ui_path.as_str()));
     if web_ui_enabled {
         router = router
             .nest_service(
@@ -360,16 +327,9 @@ pub async fn start_server(
                 &concat_path_leading_slash(&web_ui_path, "assets"),
                 tower_http::services::ServeDir::new(web_dir_path.join("assets")),
             )
-            .merge(v1_api_register(
-                web_auth_enabled,
-                Arc::clone(&shared_data),
-                web_ui_path.as_str(),
-            ));
+            .merge(v1_api_register(web_auth_enabled, Arc::clone(&shared_data), web_ui_path.as_str()));
         if !web_ui_path.is_empty() {
-            router = router.merge(index_register_with_path(
-                &web_dir_path,
-                web_ui_path.as_str(),
-            ));
+            router = router.merge(index_register_with_path(&web_dir_path, web_ui_path.as_str()));
         }
     }
 
@@ -379,11 +339,7 @@ pub async fn start_server(
         .merge(xmltv_api_register())
         .merge(hls_api_register())
         .merge(cvs_api_register());
-    if let Some(rate_limiter) = cfg
-        .reverse_proxy
-        .as_ref()
-        .and_then(|r| r.rate_limit.clone())
-    {
+    if let Some(rate_limiter) = cfg.reverse_proxy.as_ref().and_then(|r| r.rate_limit.clone()) {
         api_router = add_rate_limiter(api_router, &rate_limiter);
     }
 
@@ -393,21 +349,18 @@ pub async fn start_server(
         router = router.merge(index_register_without_path(&web_dir_path));
     }
 
-    router = router
-        .layer(axum::middleware::from_fn(log_req))
-        .layer(create_cors_layer())
-        .layer(create_compression_layer());
+    router =
+        router.layer(axum::middleware::from_fn(log_req)).layer(create_cors_layer()).layer(create_compression_layer());
 
     let router: axum::Router<()> = router.with_state(shared_data.clone());
-    let listener = tokio::net::TcpListener::bind(format!("{host}:{port}")).await.map_err(|err| info_err!("Failed to bind to {host}:{port}, {err}"))?;
+    let listener = tokio::net::TcpListener::bind(format!("{host}:{port}"))
+        .await
+        .map_err(|err| info_err!("Failed to bind to {host}:{port}, {err}"))?;
     serve(listener, router, None, &shared_data.connection_manager).await;
     Ok(())
 }
 
-fn add_rate_limiter(
-    router: Router<Arc<AppState>>,
-    rate_limit_cfg: &RateLimitConfig,
-) -> Router<Arc<AppState>> {
+fn add_rate_limiter(router: Router<Arc<AppState>>, rate_limit_cfg: &RateLimitConfig) -> Router<Arc<AppState>> {
     if rate_limit_cfg.enabled {
         let governor_conf = tower_governor::governor::GovernorConfigBuilder::default()
             .key_extractor(SmartIpKeyExtractor)
@@ -448,14 +401,9 @@ async fn log_req(req: Request, next: Next) -> impl axum::response::IntoResponse 
                 .filter(|v| !v.is_empty())
                 .map(str::to_string)
         })
-        .or_else(|| {
-            req.extensions()
-                .get::<ConnectInfo<SocketAddr>>()
-                .map(|c| c.0.to_string())
-        });
+        .or_else(|| req.extensions().get::<ConnectInfo<SocketAddr>>().map(|c| c.0.to_string()));
 
-    let safe_ip = client_ip
-        .as_deref().map_or_else(|| sanitize_sensitive_info("<unknown>"), sanitize_sensitive_info);
+    let safe_ip = client_ip.as_deref().map_or_else(|| sanitize_sensitive_info("<unknown>"), sanitize_sensitive_info);
     let uri_string = uri.to_string();
     let safe_uri = sanitize_sensitive_info(&uri_string);
 
@@ -463,7 +411,7 @@ async fn log_req(req: Request, next: Next) -> impl axum::response::IntoResponse 
     next.run(req).await
 }
 
-
+#[allow(clippy::too_many_lines)]
 fn exec_input_update_listener(app_state: &Arc<AppState>, targets: &Arc<ProcessTargets>) {
     let app_state = Arc::clone(app_state);
     let targets = Arc::clone(targets);
@@ -503,7 +451,9 @@ fn exec_input_update_listener(app_state: &Arc<AppState>, targets: &Arc<ProcessTa
                     let mut targets_to_trigger = Vec::new();
 
                     for target_name in target_names {
-                        if let std::collections::hash_map::Entry::Occupied(mut entry) = active_target_inputs.entry(target_name.clone()) {
+                        if let std::collections::hash_map::Entry::Occupied(mut entry) =
+                            active_target_inputs.entry(target_name.clone())
+                        {
                             let inputs = entry.get_mut();
                             inputs.remove(input_name.as_ref());
                             if inputs.is_empty() {
@@ -550,22 +500,44 @@ fn exec_input_update_listener(app_state: &Arc<AppState>, targets: &Arc<ProcessTa
                             tokio::spawn(async move {
                                 // Small delay to ensure any lingering updates or file locks from the background thread are fully released
                                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                let mut wait_cycles: u32 = 0;
+                                loop {
+                                    // Low-priority behavior: never enqueue as a lock waiter.
+                                    // Only start when no playlist update is currently active.
+                                    if let Some(lock) = update_guard.try_playlist() {
+                                        exec_processing(
+                                            &client,
+                                            app_config,
+                                            proc_targets,
+                                            Some(event_manager),
+                                            Some(playlist_state),
+                                            Some(update_guard),
+                                            disabled_headers,
+                                            Some(app_state_clone.active_provider.clone()),
+                                            Some(app_state_clone.metadata_manager.clone()),
+                                            Some(pre_processed_inputs),
+                                            Some(lock), // Keep permit during processing
+                                        )
+                                        .await;
+                                        break;
+                                    }
 
-                                // Wait for any current update to finish before starting a new one
-                                let lock_opt = update_guard.acquire_playlist_lock().await;
-
-                                // Only proceed if we successfully acquired the lock (semaphore not closed)
-                                if let Some(lock) = lock_opt {
-                                    exec_processing(
-                                        &client, app_config, proc_targets, Some(event_manager),
-                                        Some(playlist_state), Some(update_guard),
-                                        disabled_headers,
-                                        Some(app_state_clone.active_provider.clone()), Some(app_state_clone.metadata_manager.clone()),
-                                        Some(pre_processed_inputs),
-                                        Some(lock), // Pass the acquired permit to stay active during processing
-                                    ).await;
-                                } else {
-                                    warn!("Skipping triggered update because shutdown signal received (lock closed)");
+                                    wait_cycles = wait_cycles.saturating_add(1);
+                                    if wait_cycles >= METADATA_TRIGGER_WAIT_CYCLE_LIMIT {
+                                        warn!(
+                                            "Aborting metadata-triggered update after waiting ~{}s for playlist lock ({} cycles)",
+                                            wait_cycles * 2,
+                                            wait_cycles
+                                        );
+                                        break;
+                                    }
+                                    if wait_cycles.is_multiple_of(30) {
+                                        debug!(
+                                            "Metadata-triggered update is still waiting for active playlist update to finish (waited ~{}s)",
+                                            wait_cycles * 2
+                                        );
+                                    }
+                                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                                 }
                             });
                         } else {

@@ -329,7 +329,11 @@ pub fn prepare_config_and_api_proxy(app_config: &mut AppConfigDto) -> Result<(),
 pub fn prepare_sources(app_config: &mut AppConfigDto) -> Result<(), String> {
     app_config
         .sources
-        .prepare(false, app_config.config.get_hdhr_device_overview().as_ref())
+        .prepare(
+            false,
+            app_config.config.get_hdhr_device_overview().as_ref(),
+            app_config.templates.as_ref().map(|defs| defs.templates.as_slice()),
+        )
         .map_err(|err| err.to_string())
 }
 

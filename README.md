@@ -64,6 +64,7 @@ Options:
   -c, --config <CONFIG_FILE>       The config file
   -i, --source <SOURCE_FILE>       The source config file
   -m, --mapping <MAPPING_FILE>     The mapping file
+  -T, --template <TEMPLATE_FILE>   The template file or template directory
   -t, --target <TARGET>            The target to process
   -a, --api-proxy <API_PROXY>      The user file
   -s, --server                     Run in server mode
@@ -77,7 +78,7 @@ Options:
   --dbx                            Dump database with content type: xtream
   --dbm                            Dump database with content type: m3u
   --dbe                            Dump database with content type: epg
-  --dbv                            Dump database with content type: taregt id mapping
+  --dbv                            Dump database with content type: target id mapping
 
 ```
 
@@ -101,6 +102,8 @@ Top level entries in the config files are:
 - `video` _optional_
 - `schedules` _optional_
 - `backup_dir` _optional_
+- `mapping_path` _optional_, file or directory path for mappings (`mapping.yml` by default)
+- `template_path` _optional_, file or directory path for global templates (`template.yml` by default)
 - `update_on_boot` _optional_
 - `web_ui` _optional_
 - `reverse_proxy` _optional_
@@ -135,6 +138,34 @@ If you process the same provider multiple times each thread uses a connection. K
 With this configuration, you should create a `data` directory where you execute the binary.
 
 Be aware that different configurations (e.g. user bouquets) along the playlists are stored in this directory.
+
+### 1.3.1 `mapping_path` and `template_path`
+
+Tuliprox supports centralized loading of mappings and templates via `config.yml`:
+
+- `mapping_path`: single file or directory
+- `template_path`: single file or directory
+
+Defaults:
+
+- mappings: `mapping.yml`
+- templates: `template.yml`
+
+If a path points to a directory, all `*.yml` files are loaded in **alphanumeric** order and merged.
+Template names must be unique globally.
+
+Example `template.yml`:
+
+```yaml
+templates:
+  - name: ALL_CHANNELS
+    value: Group ~ ".*"
+```
+
+CLI overrides:
+
+- `-m, --mapping` overrides `mapping_path`
+- `-T, --template` overrides `template_path`
 
 ## 1.4 Provider Failover & Rotation
 
@@ -1018,14 +1049,17 @@ sources:
 
 Has the following top level entries:
 
-- `templates` _optional_
+- `templates` _optional_ (legacy/backward-compatible; use global `template_path` for new setups)
 - `inputs`
 - `sources`
 
 ### 2.1 `templates`
 
-If you have a lot of repeats in you regexps, you can use `templates` to make your regexps cleaner.
+If you have a lot of repeats in your regexps, you can use templates to make your regexps cleaner.
 You can reference other templates in templates with `!name!`.
+
+For new configurations, prefer a centralized `template.yml` / `template.d` via `config.yml.template_path`.
+Inline `source.yml.templates` is still loaded for backward compatibility.
 
 ```yaml
 templates:
@@ -1811,7 +1845,10 @@ The files are loaded in **alphanumeric** order.
 
 The filename or path can be given as `-m` argument. (See Mappings section)
 
-Default mapping file is `maping.yml`
+Global templates can be loaded via `template_path` in `config.yml` (or CLI `-T`).
+Inline templates in `source.yml` and `mapping.yml` are still accepted for backward compatibility.
+
+Default mapping file is `mapping.yml`
 
 ## Example source.yml file
 
@@ -1930,7 +1967,7 @@ messaging:
 
 Has the root item `mappings` which has the following top level entries:
 
-- `templates` _optional_
+- `templates` _optional_ (legacy/backward-compatible; use global `template_path` for new setups)
 - `mapping` _mandatory_
 
 Instead of using a single `mapping.yml` file, you can use multiple mapping files
@@ -1942,12 +1979,15 @@ The files are loaded in **alphanumeric** order.
 
 The filename or path can be given as `-m` argument. (See Mappings section)
 
-Default mapping file is `maping.yml`
+Default mapping file is `mapping.yml`
 
 ### 3.1 `templates`
 
-If you have a lot of repeats in you regexps, you can use `templates` to make your regexps cleaner.
+If you have a lot of repeats in your regexps, you can use templates to make your regexps cleaner.
 You can reference other templates in templates with `!name!`;
+
+For new configurations, prefer centralized templates in `template.yml` / `template.d` via `template_path`.
+Inline mapping templates remain supported for backward compatibility.
 
 ```yaml
 templates:

@@ -8,6 +8,9 @@ use crate::model::{AppConfig, MessageContent, WatchChanges};
 use crate::utils;
 use crate::utils::{binary_deserialize, binary_serialize, file_exists_async};
 
+const WATCH_NOTIFICATION_LIST_LIMIT: usize = 120;
+const WATCH_NOTIFICATION_SUMMARY_THRESHOLD: usize = 500;
+
 pub async fn process_group_watch(app_config: &Arc<AppConfig>, client: &reqwest::Client, target_name: &str, pl: &PlaylistGroup) {
     let mut new_tree = BTreeSet::new();
     pl.channels.iter().for_each(|chan| {
@@ -54,9 +57,40 @@ pub async fn process_group_watch(app_config: &Arc<AppConfig>, client: &reqwest::
 }
 
 async fn handle_watch_notification(app_config: &Arc<AppConfig>, client: &reqwest::Client, added: &BTreeSet<Arc<str>>, removed: &BTreeSet<Arc<str>>, target_name: &str, group_name: &str) {
-    let added = added.iter().map(std::string::ToString::to_string).collect::<Vec<String>>();
-    let removed = removed.iter().map(std::string::ToString::to_string).collect::<Vec<String>>();
+    let added_count = added.len();
+    let removed_count = removed.len();
+    let total_changed = added_count.saturating_add(removed_count);
+
+    let mut added = added.iter().map(std::string::ToString::to_string).collect::<Vec<String>>();
+    let mut removed = removed.iter().map(std::string::ToString::to_string).collect::<Vec<String>>();
     if !added.is_empty() || !removed.is_empty() {
+        if total_changed > WATCH_NOTIFICATION_SUMMARY_THRESHOLD {
+            added = if added_count > 0 {
+                vec![format!(
+                    "{added_count} entries added. Detailed list suppressed for large update ({total_changed} total changes)."
+                )]
+            } else {
+                vec![]
+            };
+            removed = if removed_count > 0 {
+                vec![format!(
+                    "{removed_count} entries removed. Detailed list suppressed for large update ({total_changed} total changes)."
+                )]
+            } else {
+                vec![]
+            };
+        } else {
+            if added.len() > WATCH_NOTIFICATION_LIST_LIMIT {
+                let omitted = added.len() - WATCH_NOTIFICATION_LIST_LIMIT;
+                added.truncate(WATCH_NOTIFICATION_LIST_LIMIT);
+                added.push(format!("... {omitted} more added entries omitted"));
+            }
+            if removed.len() > WATCH_NOTIFICATION_LIST_LIMIT {
+                let omitted = removed.len() - WATCH_NOTIFICATION_LIST_LIMIT;
+                removed.truncate(WATCH_NOTIFICATION_LIST_LIMIT);
+                removed.push(format!("... {omitted} more removed entries omitted"));
+            }
+        }
 
         let changes = WatchChanges {
             target: target_name.to_string(),

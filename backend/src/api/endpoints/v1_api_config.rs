@@ -1,4 +1,5 @@
 use crate::api::api_utils::{internal_server_error, try_unwrap_body};
+use crate::api::config_file::ConfigFile;
 use crate::api::model::AppState;
 use crate::model::{ApiProxyConfig, InputSource, validate_library_paths_from_dto};
 use crate::utils;
@@ -64,31 +65,51 @@ async fn save_config_main(
 
 async fn save_config_sources(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
-    axum::extract::Json(mut sources): axum::extract::Json<SourcesConfigDto>,
+    axum::extract::Json(sources): axum::extract::Json<SourcesConfigDto>,
 ) -> impl axum::response::IntoResponse + Send {
-    if let Err(err) = sources.prepare(false, None) {
-        return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": err.to_string()}))).into_response();
-    }
-
-    let sources_config = match utils::validate_and_persist_source_config(&app_state, sources).await {
+    let templates_to_persist = match utils::validate_source_config_for_persist(&app_state, &sources) {
         Ok(value) => value,
         Err(err) => {
-            error!("Failed to save source.yml {err}");
-            return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({"error": err.to_string()}))).into_response();
+            error!("Failed to validate source.yml {err}");
+            return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": err.to_string()}))).into_response();
         }
     };
 
-    // update runtime
-    match crate::model::SourcesConfig::try_from(&sources_config) {
-        Ok(src) => {
-            if let Err(err) = app_state.app_config.set_sources(src) {
-                return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({"error": err.to_string()}))).into_response();
-            }
-            app_state.active_provider.update_config(&app_state.app_config).await;
-            axum::http::StatusCode::OK.into_response()
+    if let Some(template_definition) = templates_to_persist.as_ref() {
+        if let Err(err) = utils::persist_templates_config(&app_state, template_definition).await {
+            error!("Failed to save template config {err}");
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(json!({"error": err.to_string()})),
+            )
+                .into_response();
         }
-        Err(err) => (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": err.to_string()}))).into_response(),
     }
+
+    match utils::persist_source_config(&app_state, None, sources).await {
+        Ok(_) => {}
+        Err(err) => {
+            error!("Failed to persist source.yml {err}");
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(json!({"error": err.to_string()})),
+            )
+                .into_response();
+        }
+    }
+
+    // Reload from disk so runtime always uses fully prepared sources/mappings/templates.
+    if let Err(err) = ConfigFile::load_sources(&app_state).await {
+        error!("Failed to reload prepared sources after save {err}");
+        return (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(json!({"error": err.to_string()})),
+        )
+            .into_response();
+    }
+
+    app_state.active_provider.update_config(&app_state.app_config).await;
+    axum::http::StatusCode::OK.into_response()
 }
 
 

@@ -124,7 +124,7 @@ impl PartialEq for ConfigSortRuleDto {
 }
 
 impl ConfigSortRuleDto {
-    pub fn prepare(&mut self, templates: Option<&Vec<PatternTemplate>>) -> Result<(), TuliproxError> {
+    pub fn prepare(&mut self, templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
         if self.target == SortTarget::Group {
             // What the user sets is not important, we allow this but force to use Group
             if !matches!(self.field, ItemField::Group | ItemField::Title | ItemField::Name | ItemField::Caption) {
@@ -167,7 +167,7 @@ pub struct ConfigSortDto {
 }
 
 impl ConfigSortDto {
-    pub fn prepare(&mut self, templates: Option<&Vec<PatternTemplate>>) -> Result<(), TuliproxError> {
+    pub fn prepare(&mut self, templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
         handle_tuliprox_error_result_list!(
             TuliproxErrorKind::Info,
             self.rules.iter_mut().map(|rule| rule.prepare(templates))

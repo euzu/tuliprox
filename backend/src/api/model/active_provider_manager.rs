@@ -298,7 +298,8 @@ impl ActiveProviderManager {
         &self,
         input_name: &Arc<str>,
     ) -> Option<ProviderHandle> {
-        self.acquire_connection_inner(input_name, &DUMMY_ADDR, false, None, DEFAULT_PROBE_PRIORITY).await
+        // Probe is strictly low-priority and must never consume grace capacity.
+        self.acquire_connection_inner(input_name, &DUMMY_ADDR, false, Some(false), DEFAULT_PROBE_PRIORITY).await
     }
 
     // This method is used for redirects to cycle through the provider

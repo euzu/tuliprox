@@ -429,6 +429,10 @@ impl AppState {
             string_changed,
             old_config.mapping_path.as_ref(),
             config.mapping_path.as_ref()
+        ) || change_detect!(
+            string_changed,
+            old_config.template_path.as_ref(),
+            config.template_path.as_ref()
         );
 
         let geoip_enabled = config.is_geoip_enabled();

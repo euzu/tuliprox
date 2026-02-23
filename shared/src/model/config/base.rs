@@ -34,6 +34,8 @@ pub struct ConfigDto {
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub mapping_path: Option<String>,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
+    pub template_path: Option<String>,
+    #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub custom_stream_response_path: Option<String>,
     #[serde(default, skip_serializing_if = "is_none_or_empty_video")]
     pub video: Option<VideoConfigDto>,
@@ -81,6 +83,7 @@ impl Default for ConfigDto {
             backup_dir: None,
             user_config_dir: None,
             mapping_path: None,
+            template_path: None,
             custom_stream_response_path: None,
             video: None,
             schedules: None,
@@ -119,6 +122,8 @@ pub struct MainConfigDto {
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub mapping_path: Option<String>,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
+    pub template_path: Option<String>,
+    #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub custom_stream_response_path: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub user_access_control: bool,
@@ -146,6 +151,7 @@ impl Default for MainConfigDto {
             backup_dir: None,
             user_config_dir: None,
             mapping_path: None,
+            template_path: None,
             custom_stream_response_path: None,
             user_access_control: false,
             connect_timeout_secs: default_connect_timeout_secs(),
@@ -167,6 +173,7 @@ impl From<&ConfigDto> for MainConfigDto {
             backup_dir: config.backup_dir.clone(),
             user_config_dir: config.user_config_dir.clone(),
             mapping_path: config.mapping_path.clone(),
+            template_path: config.template_path.clone(),
             custom_stream_response_path: config.custom_stream_response_path.clone(),
             user_access_control: config.user_access_control,
             connect_timeout_secs: config.connect_timeout_secs,
@@ -305,6 +312,7 @@ impl ConfigDto {
         self.backup_dir = main_config.backup_dir.clone();
         self.user_config_dir = main_config.user_config_dir.clone();
         self.mapping_path = main_config.mapping_path.clone();
+        self.template_path = main_config.template_path.clone();
         self.custom_stream_response_path = main_config.custom_stream_response_path.clone();
         self.user_access_control = main_config.user_access_control;
         self.connect_timeout_secs = main_config.connect_timeout_secs;
@@ -334,14 +342,16 @@ mod tests {
 
     #[test]
     fn serializing_skips_video_for_default_values() {
-        let mut cfg = ConfigDto::default();
-        cfg.video = Some(VideoConfigDto {
-            extensions: default_supported_video_extensions(),
-            download: None,
-            web_search: None,
-            ffprobe_enabled: false,
-            ffprobe_timeout: None,
-        });
+        let cfg = ConfigDto {
+            video: Some(VideoConfigDto {
+                extensions: default_supported_video_extensions(),
+                download: None,
+                web_search: None,
+                ffprobe_enabled: false,
+                ffprobe_timeout: None,
+            }),
+            ..ConfigDto::default()
+        };
 
         let serialized = serde_json::to_string(&cfg).expect("config serialization should succeed");
         assert!(!serialized.contains("\"video\""), "expected no video field, got: {serialized}");
@@ -349,14 +359,16 @@ mod tests {
 
     #[test]
     fn serializing_keeps_video_for_non_default_values() {
-        let mut cfg = ConfigDto::default();
-        cfg.video = Some(VideoConfigDto {
-            extensions: default_supported_video_extensions(),
-            download: None,
-            web_search: None,
-            ffprobe_enabled: true,
-            ffprobe_timeout: None,
-        });
+        let cfg = ConfigDto {
+            video: Some(VideoConfigDto {
+                extensions: default_supported_video_extensions(),
+                download: None,
+                web_search: None,
+                ffprobe_enabled: true,
+                ffprobe_timeout: None,
+            }),
+            ..ConfigDto::default()
+        };
 
         let serialized = serde_json::to_string(&cfg).expect("config serialization should succeed");
         assert!(serialized.contains("\"video\""), "expected video field, got: {serialized}");

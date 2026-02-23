@@ -134,7 +134,7 @@ pub enum MapperOperation {
 }
 
 impl MapperOperation {
-    pub fn prepare(&mut self, templates: Option<&Vec<PatternTemplate>>) -> Result<(), TuliproxError> {
+    pub fn prepare(&mut self, templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
         match self {
             MapperOperation::Lowercase { ref field }
             | MapperOperation::Uppercase { ref field }
@@ -185,7 +185,7 @@ impl MapperDto {
     /// # Panics
     ///
     /// Will panic if default `RegEx` gets invalid
-    pub fn prepare(&mut self, templates: Option<&Vec<PatternTemplate>>) -> Result<(), TuliproxError> {
+    pub fn prepare(&mut self, templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
         self.t_filter = Some(get_filter(&self.filter, templates)?);
         let script = if templates.is_some() {
             apply_templates_to_pattern_single(&self.script, templates)?
@@ -212,7 +212,7 @@ pub struct MappingDto {
 }
 
 impl MappingDto {
-    pub fn prepare(&mut self, templates: Option<&Vec<PatternTemplate>>) -> Result<(), TuliproxError> {
+    pub fn prepare(&mut self, templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
         self.templates = templates.map(|t| t.iter().map(PatternTemplate::clone).collect::<Vec<_>>());
         if let Some(mapper_list) = &mut self.mapper {
             for mapper in mapper_list {
@@ -254,18 +254,22 @@ pub struct MappingDefinitionDto {
 }
 
 impl MappingDefinitionDto {
-    pub fn prepare(&mut self) -> Result<(), TuliproxError> {
-        if let Some(templates) = &mut self.templates {
-            match prepare_templates(templates) {
-                Ok(tmplts) => {
-                    self.templates = Some(tmplts);
-                }
-                Err(err) => return Err(err),
-            }
-        }
+    pub fn prepare(&mut self, prepared_templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
+        let local_prepared_templates = if prepared_templates.is_none() {
+            self.templates
+                .as_ref()
+                .map(|templates| {
+                    let mut cloned_templates = templates.clone();
+                    prepare_templates(&mut cloned_templates)
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        let templates_to_use = prepared_templates.or(local_prepared_templates.as_deref());
+
         for mapping in &mut self.mapping {
-            let template_list = self.templates.as_ref();
-            mapping.prepare(template_list)?;
+            mapping.prepare(templates_to_use)?;
         }
         Ok(())
     }
@@ -277,5 +281,55 @@ pub struct MappingsDto {
 }
 
 impl MappingsDto {
-    pub fn prepare(&mut self) -> Result<(), TuliproxError> { self.mappings.prepare() }
+    pub fn prepare(&mut self, prepared_templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
+        self.mappings.prepare(prepared_templates)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::TemplateValue;
+
+    #[test]
+    fn mapper_operation_prepare_resolves_value() {
+        let mut operation = MapperOperation::Set { field: "name".to_string(), value: "!PREFIX!".to_string() };
+
+        let templates = vec![PatternTemplate {
+            name: "PREFIX".to_string(),
+            value: TemplateValue::Single("Channel".to_string()),
+            placeholder: "!PREFIX!".to_string(),
+        }];
+
+        operation.prepare(Some(&templates)).expect("mapper operation should prepare");
+
+        match operation {
+            MapperOperation::Set { value, .. } => assert_eq!(value, "Channel"),
+            _ => panic!("expected set operation"),
+        }
+    }
+
+    #[test]
+    fn mapping_definition_prepare_keeps_templates_unresolved() {
+        let mut mapping_definition = MappingDefinitionDto {
+            templates: Some(vec![
+                PatternTemplate {
+                    name: "BASE".to_string(),
+                    value: TemplateValue::Single("news".to_string()),
+                    placeholder: String::new(),
+                },
+                PatternTemplate {
+                    name: "CHAIN".to_string(),
+                    value: TemplateValue::Single("!BASE!-live".to_string()),
+                    placeholder: String::new(),
+                },
+            ]),
+            mapping: vec![],
+        };
+
+        let original_templates = mapping_definition.templates.clone();
+        mapping_definition.prepare(None).expect("mapping definition should prepare");
+
+        assert_eq!(mapping_definition.templates, original_templates);
+    }
 }

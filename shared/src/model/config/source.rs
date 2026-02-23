@@ -48,10 +48,13 @@ impl SourcesConfigDto {
         &mut self,
         include_computed: bool,
         hdhr_config: Option<&HdHomeRunDeviceOverview>,
+        prepared_templates: Option<&[PatternTemplate]>,
     ) -> Result<(), TuliproxError> {
-        self.prepare_templates()?;
+        let local_prepared_templates =
+            if prepared_templates.is_none() { self.prepare_local_templates()? } else { None };
+        let templates_to_use = prepared_templates.or(local_prepared_templates.as_deref());
         let provider_names = self.prepare_providers()?;
-        self.prepare_sources(include_computed, hdhr_config, &provider_names)?;
+        self.prepare_sources(include_computed, hdhr_config, &provider_names, templates_to_use)?;
         self.check_unique_target_names()?;
         Ok(())
     }
@@ -75,6 +78,7 @@ impl SourcesConfigDto {
         include_computed: bool,
         hdhr_config: Option<&HdHomeRunDeviceOverview>,
         provider_names: &HashSet<String>,
+        prepared_templates: Option<&[PatternTemplate]>,
     ) -> Result<(), TuliproxError> {
         // prepare sources and set id's
         let mut source_index: u16 = 0;
@@ -96,30 +100,21 @@ impl SourcesConfigDto {
             }
 
             for target in &mut source.targets {
-                // prepare target templates
-                let prepare_result = match &self.templates {
-                    Some(templ) => target.prepare(target_index, Some(templ), hdhr_config),
-                    _ => target.prepare(target_index, None, hdhr_config),
-                };
-                prepare_result?;
+                target.prepare(target_index, prepared_templates, hdhr_config)?;
                 target_index += 1;
             }
         }
         Ok(())
     }
 
-    fn prepare_templates(&mut self) -> Result<(), TuliproxError> {
-        if let Some(templates) = &mut self.templates {
-            match prepare_templates(templates) {
-                Ok(tmplts) => {
-                    self.templates = Some(tmplts);
-                }
-                Err(err) => {
-                    return Err(err);
-                }
-            }
-        }
-        Ok(())
+    fn prepare_local_templates(&self) -> Result<Option<Vec<PatternTemplate>>, TuliproxError> {
+        self.templates
+            .as_ref()
+            .map(|templates| {
+                let mut cloned_templates = templates.clone();
+                prepare_templates(&mut cloned_templates)
+            })
+            .transpose()
     }
 
     fn check_unique_target_names(&self) -> Result<(), TuliproxError> {
@@ -141,4 +136,69 @@ impl SourcesConfigDto {
     }
 
     pub fn get_input(&self, name: &Arc<str>) -> Option<&ConfigInputDto> { self.inputs.iter().find(|i| &i.name == name) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        model::{ConfigRenameDto, ConfigTargetDto, InputType, ItemField, M3uTargetOutputDto, TargetOutputDto},
+        utils::Internable,
+    };
+
+    #[test]
+    fn prepare_keeps_template_placeholders_in_sources() {
+        let templates = vec![
+            PatternTemplate {
+                name: "BASE".to_string(),
+                value: crate::model::TemplateValue::Single(r#"Group ~ "US""#.to_string()),
+                placeholder: String::new(),
+            },
+            PatternTemplate {
+                name: "FILTER_NAME".to_string(),
+                value: crate::model::TemplateValue::Single("!BASE! AND Type = live".to_string()),
+                placeholder: String::new(),
+            },
+        ];
+
+        let mut sources = SourcesConfigDto {
+            templates: Some(templates.clone()),
+            inputs: vec![ConfigInputDto {
+                name: "input_1".intern(),
+                input_type: InputType::M3u,
+                url: "http://example.com/playlist.m3u".to_string(),
+                ..Default::default()
+            }],
+            sources: vec![ConfigSourceDto {
+                inputs: vec!["input_1".intern()],
+                targets: vec![ConfigTargetDto {
+                    name: "target_1".to_string(),
+                    filter: "!FILTER_NAME!".to_string(),
+                    output: vec![TargetOutputDto::M3u(M3uTargetOutputDto::default())],
+                    rename: Some(vec![ConfigRenameDto {
+                        field: ItemField::Name,
+                        pattern: "!BASE!".to_string(),
+                        new_name: "Renamed".to_string(),
+                        t_pattern: None,
+                    }]),
+                    ..Default::default()
+                }],
+            }],
+            ..Default::default()
+        };
+
+        let original_templates = sources.templates.clone();
+        let original_filter = sources.sources[0].targets[0].filter.clone();
+        let original_rename_pattern =
+            sources.sources[0].targets[0].rename.as_ref().expect("rename should exist")[0].pattern.clone();
+
+        sources.prepare(false, None, None).expect("sources prepare should succeed");
+
+        assert_eq!(sources.templates, original_templates);
+        assert_eq!(sources.sources[0].targets[0].filter, original_filter);
+        assert_eq!(
+            sources.sources[0].targets[0].rename.as_ref().expect("rename should exist after prepare")[0].pattern,
+            original_rename_pattern
+        );
+    }
 }

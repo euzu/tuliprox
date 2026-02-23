@@ -30,12 +30,23 @@ fn start_config_watch(
         .mapping_file_path
         .as_ref()
         .map_or_else(String::new, ToString::to_string);
-    let files = get_watch_files(app_state, &paths, mapping_file_path.as_str());
+    let template_file_path = paths
+        .template_file_path
+        .as_ref()
+        .map_or_else(String::new, ToString::to_string);
+    let files = get_watch_files(
+        app_state,
+        &paths,
+        mapping_file_path.as_str(),
+        template_file_path.as_str(),
+    );
     //
     // // Add a path to be watched. All files and directories at that path and
     // // below will be monitored for changes.
     let path = Path::new(paths.config_path.as_str());
-    let recursive_mode = if !mapping_file_path.is_empty() && utils::is_directory(&mapping_file_path)
+    let recursive_mode = if (!mapping_file_path.is_empty()
+        && utils::is_directory(&mapping_file_path))
+        || (!template_file_path.is_empty() && utils::is_directory(&template_file_path))
     {
         RecursiveMode::Recursive
     } else {
@@ -165,6 +176,7 @@ fn get_watch_files(
     app_state: &Arc<AppState>,
     paths: &ConfigPaths,
     mapping_file_path: &str,
+    template_file_path: &str,
 ) -> HashMap<PathBuf, (ConfigFile, bool)> {
     let sources =
         <Arc<ArcSwap<SourcesConfig>> as Access<SourcesConfig>>::load(&app_state.app_config.sources);
@@ -174,6 +186,7 @@ fn get_watch_files(
         (paths.config_file_path.as_str(), ConfigFile::Config),
         (paths.api_proxy_file_path.as_str(), ConfigFile::ApiProxy),
         (mapping_file_path, ConfigFile::Mapping),
+        (template_file_path, ConfigFile::Template),
         (paths.sources_file_path.as_str(), ConfigFile::Sources),
     ]
     .into_iter()

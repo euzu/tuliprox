@@ -12,7 +12,11 @@ use indexmap::IndexSet;
 use log::{error, log_enabled, trace, Level};
 use pest::{iterators::Pair, Parser};
 use pest_derive::Parser;
-use std::{cmp::Ordering, collections::HashMap, sync::Arc};
+use std::{
+    cmp::Ordering,
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 #[derive(Debug, Clone)]
 pub struct CompiledRegex {
@@ -227,10 +231,7 @@ fn get_parser_item_field(expr: &Pair<Rule>) -> Result<ItemField, TuliproxError> 
     info_err_res!("unknown field: {}", expr.as_str())
 }
 
-fn get_parser_regexp(
-    expr: &Pair<Rule>,
-    templates: Option<&Vec<PatternTemplate>>,
-) -> Result<CompiledRegex, TuliproxError> {
+fn get_parser_regexp(expr: &Pair<Rule>, templates: Option<&[PatternTemplate]>) -> Result<CompiledRegex, TuliproxError> {
     if expr.as_rule() == Rule::regexp {
         let mut parsed_text = String::from(expr.as_str());
         parsed_text.pop();
@@ -251,7 +252,7 @@ fn get_parser_regexp(
 
 fn get_parser_field_comparison(
     expr: Pair<Rule>,
-    templates: Option<&Vec<PatternTemplate>>,
+    templates: Option<&[PatternTemplate]>,
 ) -> Result<Filter, TuliproxError> {
     let mut expr_inner = expr.into_inner();
     match get_parser_item_field(&expr_inner.next().unwrap()) {
@@ -314,7 +315,7 @@ macro_rules! handle_expr {
 
 fn get_parser_expression(
     expr: Pair<Rule>,
-    templates: Option<&Vec<PatternTemplate>>,
+    templates: Option<&[PatternTemplate]>,
     errors: &mut Vec<String>,
 ) -> Result<Filter, String> {
     let mut stmts = Vec::with_capacity(128);
@@ -380,7 +381,7 @@ fn get_parser_binary_op(expr: &Pair<Rule>) -> Result<BinaryOperator, TuliproxErr
     }
 }
 
-pub fn get_filter(filter_text: &str, templates: Option<&Vec<PatternTemplate>>) -> Result<Filter, TuliproxError> {
+pub fn get_filter(filter_text: &str, templates: Option<&[PatternTemplate]>) -> Result<Filter, TuliproxError> {
     let source = apply_templates_to_pattern_single(filter_text, templates)?;
 
     match FilterParser::parse(Rule::main, &source) {
@@ -471,6 +472,13 @@ fn build_dependency_graph(templates: &Vec<PatternTemplate>) -> Result<DirectedGr
 }
 
 pub fn prepare_templates(templates: &mut Vec<PatternTemplate>) -> Result<Vec<PatternTemplate>, TuliproxError> {
+    let mut seen_template_names: HashSet<&str> = HashSet::with_capacity(templates.len());
+    for template in templates.iter() {
+        if !seen_template_names.insert(template.name.as_str()) {
+            return info_err_res!("Duplicate template name found: {}", template.name);
+        }
+    }
+
     let graph = build_dependency_graph(templates)?;
     let mut template_values = HashMap::new();
     let mut template_map = HashMap::with_capacity(templates.len());
@@ -560,7 +568,7 @@ pub fn prepare_templates(templates: &mut Vec<PatternTemplate>) -> Result<Vec<Pat
 
 pub fn apply_templates_to_pattern(
     pattern: &str,
-    templates_list: Option<&Vec<PatternTemplate>>,
+    templates_list: Option<&[PatternTemplate]>,
     allow_multi: bool,
 ) -> Result<TemplateValue, TuliproxError> {
     let mut new_pattern = TemplateValue::Single(pattern.to_string());
@@ -639,7 +647,7 @@ pub fn apply_templates_to_pattern(
 
 pub fn apply_templates_to_pattern_single(
     pattern: &str,
-    templates: Option<&Vec<PatternTemplate>>,
+    templates: Option<&[PatternTemplate]>,
 ) -> Result<String, TuliproxError> {
     match apply_templates_to_pattern(pattern, templates, false)? {
         TemplateValue::Single(value) => Ok(value),

@@ -56,6 +56,10 @@ struct Args {
     #[arg(short = 'm', long = "mapping")]
     mapping_file: Option<String>,
 
+    /// The template file
+    #[arg(short = 'T', long = "template")]
+    template_file: Option<String>,
+
     /// The target to process
     #[arg(short = 't', long)]
     target: Option<Vec<String>>,
@@ -201,10 +205,16 @@ fn print_info(app_config: &AppConfig) {
     info!("Source file: {:?}", &paths.sources_file_path);
     info!("Api Proxy File: {:?}", &paths.api_proxy_file_path);
     info!("Mapping path: {:?}", &paths.mapping_file_path.as_ref().map_or_else(|| "not used", |v| v.as_str()));
+    info!("Template path: {:?}", &paths.template_file_path.as_ref().map_or_else(|| "not used", |v| v.as_str()));
 
     if let Some(mapping_paths) = paths.mapping_files_used.as_ref() {
         for mapping_path in mapping_paths {
             info!("Mapping file loaded: {mapping_path}");
+        }
+    }
+    if let Some(template_paths) = paths.template_files_used.as_ref() {
+        for template_path in template_paths {
+            info!("Template file loaded: {template_path}");
         }
     }
 
@@ -250,6 +260,7 @@ fn get_file_paths(args: &Args) -> ConfigPaths {
             .map_or_else(|| utils::get_default_sources_file_path(&config_path), ToString::to_string),
     );
     let mappings_file = args.mapping_file.as_ref().map(|p| resolve_env_var(p));
+    let template_file = args.template_file.as_ref().map(|p| resolve_env_var(p));
 
     ConfigPaths {
         config_path,
@@ -257,6 +268,8 @@ fn get_file_paths(args: &Args) -> ConfigPaths {
         sources_file_path: sources_file,
         mapping_file_path: mappings_file, // need to be set after config read
         mapping_files_used: None,
+        template_file_path: template_file, // need to be set after config read
+        template_files_used: None,
         api_proxy_file_path: api_proxy_file,
         custom_stream_response_path: None,
     }

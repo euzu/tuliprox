@@ -7,7 +7,9 @@ use crate::model::{ConfigInput, ConfigInputFlags, InputSource};
 use crate::processing::parser::xtream::create_xtream_series_episode_url;
 use crate::processing::parser::xtream::parse_xtream_series_info;
 use crate::processing::processor::playlist::{PlaylistProcessingContext, ProcessingPipe};
-use crate::processing::processor::{create_resolve_options_function_for_xtream_target, ResolveOptions, ResolveOptionsFlags};
+use crate::processing::processor::{
+    create_resolve_options_function_for_xtream_target, ResolveOptions, ResolveOptionsFlags,
+};
 use crate::ptt::ptt_parse_title;
 use crate::repository::persists_input_series_info;
 use crate::repository::{
@@ -16,12 +18,15 @@ use crate::repository::{
 use crate::repository::{xtream_get_file_path, BPlusTreeQuery};
 use crate::utils::{debug_if_enabled, xtream};
 use log::{debug, error, info, log_enabled, trace, warn, Level};
+use parking_lot::Mutex;
 use serde_json::Value;
 use shared::error::TuliproxError;
-use shared::model::{MediaQuality, PlaylistEntry, PlaylistItem, SeriesStreamProperties, StreamProperties, XtreamPlaylistItem, XtreamSeriesInfo};
+use shared::model::{
+    MediaQuality, PlaylistEntry, PlaylistItem, SeriesStreamProperties, StreamProperties, XtreamPlaylistItem,
+    XtreamSeriesInfo,
+};
 use shared::model::{PlaylistGroup, PlaylistItemType, XtreamCluster};
 use std::collections::HashMap;
-use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -50,15 +55,7 @@ pub async fn playlist_resolve_series(
     }
     provider_fpl.source.release_resources(XtreamCluster::Series);
 
-    playlist_resolve_series_info(
-        ctx,
-        errors,
-        processed_fpl,
-        resolve_options,
-        pipe,
-        target,
-    )
-        .await;
+    playlist_resolve_series_info(ctx, errors, processed_fpl, resolve_options, pipe, target).await;
 
     if provider_fpl.is_memory() {
         sync_resolved_series_properties(provider_fpl, processed_fpl);
@@ -68,16 +65,16 @@ pub async fn playlist_resolve_series(
 }
 
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
-async fn playlist_resolve_series_info(ctx: &PlaylistProcessingContext,
-                                      _errors: &mut Vec<TuliproxError>,
-                                      fpl: &mut FetchedPlaylist<'_>,
-                                      resolve_options: ResolveOptions,
-                                      pipe: &ProcessingPipe,
-                                      target: &ConfigTarget) {
+async fn playlist_resolve_series_info(
+    ctx: &PlaylistProcessingContext,
+    _errors: &mut Vec<TuliproxError>,
+    fpl: &mut FetchedPlaylist<'_>,
+    resolve_options: ResolveOptions,
+    pipe: &ProcessingPipe,
+    target: &ConfigTarget,
+) {
     let filter = |pli: &PlaylistItem| {
-        if pli.header.xtream_cluster != XtreamCluster::Series
-            || pli.header.item_type != PlaylistItemType::SeriesInfo
-        {
+        if pli.header.xtream_cluster != XtreamCluster::Series || pli.header.item_type != PlaylistItemType::SeriesInfo {
             return false;
         }
         true
@@ -91,24 +88,9 @@ async fn playlist_resolve_series_info(ctx: &PlaylistProcessingContext,
     let resolve_tmdb_enabled = fpl.input.has_flag(ConfigInputFlags::ResolveTmdb);
 
     let groups_to_add = if resolve_options.has_flag(ResolveOptionsFlags::Background) && ctx.metadata_manager.is_some() {
-        queue_background_series_info(
-            ctx,
-            fpl,
-            filter,
-            &resolve_options,
-            skip_resolve,
-            resolve_tmdb_enabled,
-        )
+        queue_background_series_info(ctx, fpl, filter, &resolve_options, skip_resolve, resolve_tmdb_enabled)
     } else {
-        process_immediate_series_info(
-            ctx,
-            fpl,
-            filter,
-            &resolve_options,
-            skip_resolve,
-            resolve_tmdb_enabled,
-        )
-        .await
+        process_immediate_series_info(ctx, fpl, filter, &resolve_options, skip_resolve, resolve_tmdb_enabled).await
     };
 
     // Apply pipe transformations to new groups
@@ -128,16 +110,11 @@ async fn playlist_resolve_series_info(ctx: &PlaylistProcessingContext,
     }
 }
 
-fn sync_resolved_series_properties(
-    provider_fpl: &mut FetchedPlaylist<'_>,
-    processed_fpl: &mut FetchedPlaylist<'_>,
-) {
+fn sync_resolved_series_properties(provider_fpl: &mut FetchedPlaylist<'_>, processed_fpl: &mut FetchedPlaylist<'_>) {
     let mut resolved_series_by_provider_id: HashMap<u32, SeriesStreamProperties> = HashMap::new();
 
     for pli in processed_fpl.items() {
-        if pli.header.xtream_cluster != XtreamCluster::Series
-            || pli.header.item_type != PlaylistItemType::SeriesInfo
-        {
+        if pli.header.xtream_cluster != XtreamCluster::Series || pli.header.item_type != PlaylistItemType::SeriesInfo {
             continue;
         }
 
@@ -149,9 +126,7 @@ fn sync_resolved_series_properties(
         }
 
         if let Some(StreamProperties::Series(properties)) = pli.header.additional_properties.as_ref() {
-            resolved_series_by_provider_id
-                .entry(provider_id)
-                .or_insert_with(|| properties.as_ref().clone());
+            resolved_series_by_provider_id.entry(provider_id).or_insert_with(|| properties.as_ref().clone());
         }
     }
 
@@ -174,8 +149,7 @@ fn sync_resolved_series_properties(
         }
 
         if let Some(resolved) = resolved_series_by_provider_id.get(&provider_id) {
-            source_pli.header.additional_properties =
-                Some(StreamProperties::Series(Box::new(resolved.clone())));
+            source_pli.header.additional_properties = Some(StreamProperties::Series(Box::new(resolved.clone())));
         }
     }
 }
@@ -279,7 +253,9 @@ async fn process_immediate_series_info(
                             let guard = file_lock;
                             let query = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path)?;
                             Ok::<_, std::io::Error>((query, guard))
-                        }).await {
+                        })
+                        .await
+                        {
                             Ok(Ok((query, guard))) => Some((query, guard)),
                             Ok(Err(err)) => {
                                 error!("Failed to open BPlusTreeQuery for Series: {err}");
@@ -299,9 +275,20 @@ async fn process_immediate_series_info(
                     // Pass the optional reference to the query
                     let db_query_ref = db_query_holder.as_ref().map(Arc::clone);
 
-                    match update_series_info_immediate(ctx, active_provider, input, pli, provider_id.clone(), &reasons, db_query_ref).await {
+                    match update_series_info_immediate(
+                        ctx,
+                        active_provider,
+                        input,
+                        pli,
+                        provider_id.clone(),
+                        &reasons,
+                        db_query_ref,
+                    )
+                    .await
+                    {
                         Ok(Some(updated_props)) => {
-                            pli.header.additional_properties = Some(StreamProperties::Series(Box::new(updated_props.clone())));
+                            pli.header.additional_properties =
+                                Some(StreamProperties::Series(Box::new(updated_props.clone())));
                             batch.push((provider_id.clone(), updated_props));
 
                             if batch.len() >= BATCH_SIZE {
@@ -309,7 +296,8 @@ async fn process_immediate_series_info(
                                 db_query_holder = None;
                                 _db_lock_holder = None;
 
-                                let updates: Vec<(u32, SeriesStreamProperties)> = batch.iter()
+                                let updates: Vec<(u32, SeriesStreamProperties)> = batch
+                                    .iter()
                                     .filter_map(|(id, props)| {
                                         if let ProviderIdType::Id(vid) = id {
                                             Some((*vid, props.clone()))
@@ -328,7 +316,9 @@ async fn process_immediate_series_info(
                                         XtreamCluster::Series,
                                         &input.name,
                                         updates,
-                                    ).await {
+                                    )
+                                    .await
+                                    {
                                         Ok(()) => batch.clear(),
                                         Err(err) => {
                                             error!(
@@ -368,18 +358,16 @@ async fn process_immediate_series_info(
         // Release lock before final persist
         _db_lock_holder = None;
 
-        let updates: Vec<(u32, SeriesStreamProperties)> = batch.into_iter()
+        let updates: Vec<(u32, SeriesStreamProperties)> = batch
+            .into_iter()
             .filter_map(|(id, props)| if let ProviderIdType::Id(vid) = id { Some((vid, props)) } else { None })
             .collect();
 
         if !updates.is_empty() {
-            if let Err(err) = persist_input_series_info_batch(
-                &ctx.config,
-                &storage_path,
-                XtreamCluster::Series,
-                &input.name,
-                updates,
-            ).await {
+            if let Err(err) =
+                persist_input_series_info_batch(&ctx.config, &storage_path, XtreamCluster::Series, &input.name, updates)
+                    .await
+            {
                 error!("Failed to persist final batch series info: {err}");
             }
         }
@@ -400,7 +388,14 @@ fn expand_series_item(pli: &PlaylistItem, input: &ConfigInput) -> Option<Playlis
             (header.group.clone(), header.get_name())
         };
 
-        if let Some(episodes) = parse_xtream_series_info(&pli.get_uuid(), properties, &group, &series_name, input, global_release_date.as_ref()) {
+        if let Some(episodes) = parse_xtream_series_info(
+            &pli.get_uuid(),
+            properties,
+            &group,
+            &series_name,
+            input,
+            global_release_date.as_ref(),
+        ) {
             return Some(PlaylistGroup {
                 id: pli.header.category_id,
                 title: pli.header.group.clone(),
@@ -435,7 +430,8 @@ async fn update_series_info_immediate(
         fetch_info,
         reasons.contains(ResolveReason::Probe),
         db_query,
-    ).await
+    )
+    .await
 }
 
 fn check_resolve_reasons(
@@ -469,17 +465,19 @@ fn check_resolve_tmdb(
     needs_info: bool,
     reasons: &mut ResolveReasonSet,
 ) {
-    if resolve_tmdb_enabled
-        && resolve_options.has_flag(ResolveOptionsFlags::TmdbMissing)
-        && needs_info {
+    if resolve_tmdb_enabled && resolve_options.has_flag(ResolveOptionsFlags::TmdbMissing) && needs_info {
         if let Some(StreamProperties::Series(series_stream_props)) = pli.header.additional_properties.as_ref() {
             let has_tmdb = series_stream_props.tmdb.is_some();
             let has_date = series_stream_props.release_date.is_some();
             let title_present = !series_stream_props.name.is_empty() || !pli.header.title.is_empty();
 
             if title_present && (!has_tmdb || !has_date) {
-                if !has_tmdb { reasons.set(ResolveReason::Tmdb); }
-                if !has_date { reasons.set(ResolveReason::Date); }
+                if !has_tmdb {
+                    reasons.set(ResolveReason::Tmdb);
+                }
+                if !has_date {
+                    reasons.set(ResolveReason::Date);
+                }
             }
         }
     }
@@ -487,17 +485,15 @@ fn check_resolve_tmdb(
 
 fn check_needs_probe(pli: &PlaylistItem, reasons: &mut ResolveReasonSet) {
     let needs_probe = match pli.header.additional_properties.as_ref() {
-        Some(StreamProperties::Series(series_stream_props)) => series_stream_props
-            .details
-            .as_ref()
-            .and_then(|d| d.episodes.as_ref())
-            .is_some_and(|episodes| {
+        Some(StreamProperties::Series(series_stream_props)) => {
+            series_stream_props.details.as_ref().and_then(|d| d.episodes.as_ref()).is_some_and(|episodes| {
                 episodes.iter().any(|ep| {
                     let missing_video = !MediaQuality::is_valid_media_info(ep.video.as_deref());
                     let missing_audio = !MediaQuality::is_valid_media_info(ep.audio.as_deref());
                     missing_video || missing_audio
                 })
-            }),
+            })
+        }
         _ => false,
     };
 
@@ -528,7 +524,8 @@ pub async fn update_series_metadata(
     db_query: Option<Arc<Mutex<BPlusTreeQuery<u32, XtreamPlaylistItem>>>>,
 ) -> Result<Option<SeriesStreamProperties>, TuliproxError> {
     let working_dir = &app_config.config.load().working_dir;
-    let storage_path = get_input_storage_path(&input.name, working_dir).await
+    let storage_path = get_input_storage_path(&input.name, working_dir)
+        .await
         .map_err(|e| shared::error::info_err!("Storage path error: {e}"))?;
 
     if input.has_flag(ConfigInputFlags::XtreamSkipSeries) {
@@ -652,7 +649,9 @@ pub async fn update_series_metadata(
         }
     }
 
-    let mut properties = props.unwrap();
+    let mut properties = props.ok_or_else(|| {
+        shared::error::info_err!("No Series properties available after fallback creation for {display_id}")
+    })?;
 
     let resolve_tmdb_enabled = input.has_flag(ConfigInputFlags::ResolveTmdb);
 
@@ -660,7 +659,8 @@ pub async fn update_series_metadata(
     if fetch_info
         && resolve_tmdb_enabled
         && (properties.tmdb.is_none() || properties.release_date.is_none())
-        && !properties.name.is_empty() {
+        && !properties.name.is_empty()
+    {
         let config = app_config.config.load();
         let library_config = config.library.as_ref();
         let meta_resolver = MetadataResolver::new(library_config, client.clone());
@@ -689,12 +689,13 @@ pub async fn update_series_metadata(
         }
 
         // 3. API Name (fallback)
-        if (meta.is_none() || (meta.as_ref().is_some_and(|m| m.tmdb_id().is_none())))
-            && !properties.name.is_empty() {
+        if (meta.is_none() || (meta.as_ref().is_some_and(|m| m.tmdb_id().is_none()))) && !properties.name.is_empty() {
             let title_already_tried = if let Some(t) = title_candidate { t == properties.name.as_ref() } else { false };
             if !tried_title || !title_already_tried {
                 debug!("Fallback to API Name '{}'...", properties.name);
-                meta = meta_resolver.resolve_from_title(&properties.name, properties.tmdb, false, resolve_tmdb_enabled).await;
+                meta = meta_resolver
+                    .resolve_from_title(&properties.name, properties.tmdb, false, resolve_tmdb_enabled)
+                    .await;
             }
         }
 
@@ -746,11 +747,21 @@ pub async fn update_series_metadata(
                         };
 
                         if active_handle.is_some() || temp_handle.is_some() {
-                            let episode_url = create_xtream_series_episode_url(input_url, input_username, input_password, ep);
+                            let episode_url =
+                                create_xtream_series_episode_url(input_url, input_username, input_password, ep);
 
                             // Specific logging for the user to follow
-                            let missing_reason = if missing_video && missing_audio { "video/audio" } else if missing_video { "video" } else { "audio" };
-                            debug!("Probing Series Episode '{}' (S{}E{}) - Missing {}", ep.title, ep.season, ep.episode_num, missing_reason);
+                            let missing_reason = if missing_video && missing_audio {
+                                "video/audio"
+                            } else if missing_video {
+                                "video"
+                            } else {
+                                "audio"
+                            };
+                            debug!(
+                                "Probing Series Episode '{}' (S{}E{}) - Missing {}",
+                                ep.title, ep.season, ep.episode_num, missing_reason
+                            );
 
                             if let Some((_quality, raw_video, raw_audio)) = crate::utils::ffmpeg::probe_url(
                                 &episode_url,
@@ -758,7 +769,9 @@ pub async fn update_series_metadata(
                                 analyze_duration,
                                 probe_size,
                                 ffprobe_timeout,
-                            ).await {
+                            )
+                            .await
+                            {
                                 if let Some(v) = raw_video {
                                     ep.video = Some(v.to_string().into());
                                     properties_updated = true;
@@ -795,9 +808,16 @@ pub async fn update_series_metadata(
     if properties_updated || fetched_new {
         if save {
             if let Some(series_id) = series_id_opt {
-                persists_input_series_info(app_config, &storage_path, XtreamCluster::Series, &input.name, series_id, &properties)
-                    .await
-                    .map_err(|e| shared::error::info_err!("Persist error: {e}"))?;
+                persists_input_series_info(
+                    app_config,
+                    &storage_path,
+                    XtreamCluster::Series,
+                    &input.name,
+                    series_id,
+                    &properties,
+                )
+                .await
+                .map_err(|e| shared::error::info_err!("Persist error: {e}"))?;
 
                 debug_if_enabled!("Successfully updated Series metadata for ID {}", series_id);
             }

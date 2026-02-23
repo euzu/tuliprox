@@ -284,7 +284,7 @@ pub struct MapperScript {
 }
 
 impl MapperScript {
-    pub fn eval(&self, setter: &mut ValueAccessor, templates: Option<&Vec<PatternTemplate>>) {
+    pub fn eval(&self, setter: &mut ValueAccessor, templates: Option<&[PatternTemplate]>) {
         let ctx = &mut MapperContext::new(&self.expressions, templates);
         self.eval_with_context(ctx, setter);
     }
@@ -325,7 +325,7 @@ impl MapperScript {
     fn validate(
         expressions: &Vec<Expression>,
         statements: &Vec<Statement>,
-        templates: Option<&Vec<PatternTemplate>>,
+        templates: Option<&[PatternTemplate]>,
     ) -> Result<(), TuliproxError> {
         let ctx = &mut MapperContext::new(expressions, templates);
 
@@ -341,7 +341,7 @@ impl MapperScript {
         Ok(())
     }
 
-    pub fn parse(input: &str, templates: Option<&Vec<PatternTemplate>>) -> Result<Self, TuliproxError> {
+    pub fn parse(input: &str, templates: Option<&[PatternTemplate]>) -> Result<Self, TuliproxError> {
         let mut parsed = MapperParser::parse(Rule::main, input).map_err(|e| info_err!("{e}"))?;
         let program_pair = parsed.next().unwrap();
         let mut statements = Vec::new();
@@ -724,7 +724,7 @@ pub struct MapperContext<'a> {
 }
 
 impl<'a> MapperContext<'a> {
-    fn new(expressions: &'a Vec<Expression>, templates: Option<&'a Vec<PatternTemplate>>) -> Self {
+    fn new(expressions: &'a Vec<Expression>, templates: Option<&'a [PatternTemplate]>) -> Self {
         Self {
             expressions,
             variables: HashMap::new(),

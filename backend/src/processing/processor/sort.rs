@@ -97,14 +97,8 @@ fn evaluate_sequence(plan: &SequencePlan, value: &str) -> SequenceMatch {
 fn compare_sequence_match(a: &SequenceMatch, b: &SequenceMatch, order: SortOrder) -> Ordering {
     match (a, b) {
         (
-            SequenceMatch::Matched {
-                sequence_idx: idx_a,
-                captures: captures_a,
-            },
-            SequenceMatch::Matched {
-                sequence_idx: idx_b,
-                captures: captures_b,
-            },
+            SequenceMatch::Matched { sequence_idx: idx_a, captures: captures_a },
+            SequenceMatch::Matched { sequence_idx: idx_b, captures: captures_b },
         ) => {
             // Sequence index is an explicit priority list and is never reversed by DESC.
             let idx_ord = idx_a.cmp(idx_b);
@@ -163,21 +157,13 @@ fn build_rule_cache_entry(
     match_as_ascii: bool,
 ) -> RuleCacheEntry {
     let Some(item) = item else {
-        return RuleCacheEntry {
-            filter_pass: false,
-            value: None,
-            sequence_match: None,
-        };
+        return RuleCacheEntry { filter_pass: false, value: None, sequence_match: None };
     };
 
     let provider = ValueProvider { pli: item, match_as_ascii };
     let filter_pass = rule.rule.filter.filter(&provider);
     if !filter_pass {
-        return RuleCacheEntry {
-            filter_pass: false,
-            value: None,
-            sequence_match: None,
-        };
+        return RuleCacheEntry { filter_pass: false, value: None, sequence_match: None };
     }
 
     let value = provider.get(rule.rule.field.as_str());
@@ -186,18 +172,11 @@ fn build_rule_cache_entry(
         _ => None,
     };
 
-    RuleCacheEntry {
-        filter_pass: true,
-        value,
-        sequence_match,
-    }
+    RuleCacheEntry { filter_pass: true, value, sequence_match }
 }
 
 fn build_group_rule_cache(rule: &PreparedRule, groups: &[PlaylistGroup], match_as_ascii: bool) -> Vec<RuleCacheEntry> {
-    groups
-        .iter()
-        .map(|group| build_rule_cache_entry(rule, group.channels.first(), match_as_ascii))
-        .collect()
+    groups.iter().map(|group| build_rule_cache_entry(rule, group.channels.first(), match_as_ascii)).collect()
 }
 
 fn build_channel_rule_cache(
@@ -205,23 +184,42 @@ fn build_channel_rule_cache(
     channels: &[shared::model::PlaylistItem],
     match_as_ascii: bool,
 ) -> Vec<RuleCacheEntry> {
-    channels
-        .iter()
-        .map(|channel| build_rule_cache_entry(rule, Some(channel), match_as_ascii))
-        .collect()
+    channels.iter().map(|channel| build_rule_cache_entry(rule, Some(channel), match_as_ascii)).collect()
 }
 
 fn reorder_by_indices<T>(items: &mut Vec<T>, indices: &[usize]) {
-    debug_assert_eq!(items.len(), indices.len());
+    if items.len() != indices.len() {
+        log::error!(
+            "Invalid sort permutation: index length {} does not match item length {}",
+            indices.len(),
+            items.len()
+        );
+        return;
+    }
+
+    let mut seen = vec![false; items.len()];
+    for &idx in indices {
+        if idx >= items.len() {
+            log::error!("Invalid sort permutation: index {idx} out of bounds for {} items", items.len());
+            return;
+        }
+        if std::mem::replace(&mut seen[idx], true) {
+            log::error!("Invalid sort permutation: duplicate index {idx}");
+            return;
+        }
+    }
 
     let mut original: Vec<Option<T>> = std::mem::take(items).into_iter().map(Some).collect();
     items.reserve(indices.len());
 
     for &idx in indices {
-        let item = original[idx]
-            .take()
-            .expect("index permutation must contain each source position exactly once");
-        items.push(item);
+        if let Some(item) = original[idx].take() {
+            items.push(item);
+        } else {
+            log::error!("Invalid sort permutation: missing index {idx} after validation");
+            items.extend(original.into_iter().flatten());
+            return;
+        }
     }
 }
 
@@ -304,11 +302,7 @@ pub(in crate::processing::processor) fn sort_playlist(
     true
 }
 
-fn sort_groups(
-    groups: &mut Vec<PlaylistGroup>,
-    rules: &[ConfigSortRule],
-    match_as_ascii: bool,
-) {
+fn sort_groups(groups: &mut Vec<PlaylistGroup>, rules: &[ConfigSortRule], match_as_ascii: bool) {
     let group_rules: Vec<_> = rules
         .iter()
         .filter(|r| matches!(r.target, SortTarget::Group))
@@ -321,10 +315,8 @@ fn sort_groups(
         return;
     }
 
-    let rule_caches: Vec<Vec<RuleCacheEntry>> = group_rules
-        .iter()
-        .map(|rule| build_group_rule_cache(rule, groups.as_slice(), match_as_ascii))
-        .collect();
+    let rule_caches: Vec<Vec<RuleCacheEntry>> =
+        group_rules.iter().map(|rule| build_group_rule_cache(rule, groups.as_slice(), match_as_ascii)).collect();
 
     let mut group_indices: Vec<usize> = (0..groups.len()).collect();
     group_indices.sort_by(|left_idx, right_idx| {
@@ -333,25 +325,15 @@ fn sort_groups(
             return ord;
         }
 
-        let order1 = groups[*left_idx]
-            .channels
-            .first()
-            .map_or(u32::MAX, |c| c.header.source_ordinal);
-        let order2 = groups[*right_idx]
-            .channels
-            .first()
-            .map_or(u32::MAX, |c| c.header.source_ordinal);
+        let order1 = groups[*left_idx].channels.first().map_or(u32::MAX, |c| c.header.source_ordinal);
+        let order2 = groups[*right_idx].channels.first().map_or(u32::MAX, |c| c.header.source_ordinal);
         order1.cmp(&order2)
     });
 
     reorder_by_indices(groups, &group_indices);
 }
 
-fn sort_channels_in_groups(
-    groups: &mut [PlaylistGroup],
-    rules: &[ConfigSortRule],
-    match_as_ascii: bool,
-) {
+fn sort_channels_in_groups(groups: &mut [PlaylistGroup], rules: &[ConfigSortRule], match_as_ascii: bool) {
     let channel_rules: Vec<_> = rules
         .iter()
         .filter(|r| matches!(r.target, SortTarget::Channel))
@@ -361,18 +343,14 @@ fn sort_channels_in_groups(
 
     if channel_rules.is_empty() {
         for group in groups {
-            group
-                .channels
-                .sort_by_key(|a| a.header.source_ordinal);
+            group.channels.sort_by_key(|a| a.header.source_ordinal);
         }
         return;
     }
 
     for group in groups {
-        let rule_caches: Vec<Vec<RuleCacheEntry>> = channel_rules
-            .iter()
-            .map(|rule| build_channel_rule_cache(rule, &group.channels, match_as_ascii))
-            .collect();
+        let rule_caches: Vec<Vec<RuleCacheEntry>> =
+            channel_rules.iter().map(|rule| build_channel_rule_cache(rule, &group.channels, match_as_ascii)).collect();
 
         let mut channel_indices: Vec<usize> = (0..group.channels.len()).collect();
         channel_indices.sort_by(|left_idx, right_idx| {
@@ -381,10 +359,7 @@ fn sort_channels_in_groups(
                 return ord;
             }
 
-            group.channels[*left_idx]
-                .header
-                .source_ordinal
-                .cmp(&group.channels[*right_idx].header.source_ordinal)
+            group.channels[*left_idx].header.source_ordinal.cmp(&group.channels[*right_idx].header.source_ordinal)
         });
 
         reorder_by_indices(&mut group.channels, &channel_indices);
@@ -398,17 +373,14 @@ mod tests {
     };
     use crate::model::ConfigSortRule;
     use shared::foundation::Filter;
-    use shared::model::{ItemField, PlaylistGroup, PlaylistItem, PlaylistItemHeader, SortOrder, SortTarget, XtreamCluster};
+    use shared::model::{
+        ItemField, PlaylistGroup, PlaylistItem, PlaylistItemHeader, SortOrder, SortTarget, XtreamCluster,
+    };
     use std::cmp::Ordering;
     use std::sync::Arc;
 
     fn make_group(id: u32, title: &str, channels: Vec<PlaylistItem>) -> PlaylistGroup {
-        PlaylistGroup {
-            id,
-            title: title.into(),
-            channels,
-            xtream_cluster: XtreamCluster::Live,
-        }
+        PlaylistGroup { id, title: title.into(), channels, xtream_cluster: XtreamCluster::Live }
     }
 
     #[test]
@@ -427,16 +399,16 @@ mod tests {
             ("T", "SD"),
             ("A", "FHD"),
         ]
-            .into_iter()
-            .enumerate()
-            .map(|(i, (name, quality))| PlaylistItem {
-                header: PlaylistItemHeader {
-                    title: format!("Chanel {name} [{quality}]").into(),
-                    source_ordinal: u32::try_from(i).unwrap(),
-                    ..Default::default()
-                },
-            })
-            .collect();
+        .into_iter()
+        .enumerate()
+        .map(|(i, (name, quality))| PlaylistItem {
+            header: PlaylistItemHeader {
+                title: format!("Chanel {name} [{quality}]").into(),
+                source_ordinal: u32::try_from(i).unwrap(),
+                ..Default::default()
+            },
+        })
+        .collect();
 
         let channel_sort = ConfigSortRule {
             target: SortTarget::Channel,
@@ -466,7 +438,10 @@ mod tests {
             "Chanel K [HD]",
             "Chanel Z [HD]",
             "Chanel T [SD]",
-        ].into_iter().map(Into::into).collect::<Vec<Arc<str>>>();
+        ]
+        .into_iter()
+        .map(Into::into)
+        .collect::<Vec<Arc<str>>>();
 
         let sorted = groups
             .into_iter()
@@ -508,16 +483,16 @@ mod tests {
             "US| West e",
             "US| West f",
         ]
-            .into_iter()
-            .enumerate()
-            .map(|(i, name)| PlaylistItem {
-                header: PlaylistItemHeader {
-                    title: name.to_string().into(),
-                    source_ordinal: u32::try_from(i).unwrap(),
-                    ..Default::default()
-                },
-            })
-            .collect();
+        .into_iter()
+        .enumerate()
+        .map(|(i, name)| PlaylistItem {
+            header: PlaylistItemHeader {
+                title: name.to_string().into(),
+                source_ordinal: u32::try_from(i).unwrap(),
+                ..Default::default()
+            },
+        })
+        .collect();
 
         let channel_sort = ConfigSortRule {
             target: SortTarget::Channel,
@@ -564,7 +539,10 @@ mod tests {
             "US| East d",
             "US| West e",
             "US| West f",
-        ].into_iter().map(Into::into).collect::<Vec<Arc<str>>>();
+        ]
+        .into_iter()
+        .map(Into::into)
+        .collect::<Vec<Arc<str>>>();
 
         let sorted = groups
             .into_iter()
@@ -598,12 +576,7 @@ mod tests {
         ];
 
         channels.sort_by(|a, b| {
-            let ord = playlist_comparator(
-                Some(&sequence),
-                SortOrder::Desc,
-                &a.header.title,
-                &b.header.title,
-            );
+            let ord = playlist_comparator(Some(&sequence), SortOrder::Desc, &a.header.title, &b.header.title);
 
             if ord == Ordering::Equal {
                 a.header.source_ordinal.cmp(&b.header.source_ordinal)
@@ -612,15 +585,9 @@ mod tests {
             }
         });
 
-        let sorted = channels
-            .into_iter()
-            .map(|pli| pli.header.title)
-            .collect::<Vec<_>>();
+        let sorted = channels.into_iter().map(|pli| pli.header.title).collect::<Vec<_>>();
 
-        let expected = vec!["A-7", "A-1", "B-9", "B-2"]
-            .into_iter()
-            .map(Into::into)
-            .collect::<Vec<Arc<str>>>();
+        let expected = vec!["A-7", "A-1", "B-9", "B-2"].into_iter().map(Into::into).collect::<Vec<Arc<str>>>();
 
         assert_eq!(expected, sorted);
     }
@@ -636,21 +603,9 @@ mod tests {
         };
 
         let prepared = PreparedRule::new(&rule);
-        let pass_with_value = RuleCacheEntry {
-            filter_pass: true,
-            value: Some(Arc::from("A-2")),
-            sequence_match: None,
-        };
-        let pass_without_value = RuleCacheEntry {
-            filter_pass: true,
-            value: None,
-            sequence_match: None,
-        };
-        let fail_filter = RuleCacheEntry {
-            filter_pass: false,
-            value: None,
-            sequence_match: None,
-        };
+        let pass_with_value = RuleCacheEntry { filter_pass: true, value: Some(Arc::from("A-2")), sequence_match: None };
+        let pass_without_value = RuleCacheEntry { filter_pass: true, value: None, sequence_match: None };
+        let fail_filter = RuleCacheEntry { filter_pass: false, value: None, sequence_match: None };
 
         assert_eq!(compare_rule_entries(&prepared, &pass_with_value, &fail_filter), Ordering::Less);
         assert_eq!(compare_rule_entries(&prepared, &fail_filter, &pass_with_value), Ordering::Greater);
@@ -690,16 +645,9 @@ mod tests {
 
         let mut groups = vec![make_group(1, "G1", channels)];
         sort_channels_in_groups(groups.as_mut_slice(), &[first_rule, second_rule], false);
-        let sorted = groups[0]
-            .channels
-            .iter()
-            .map(|pli| pli.header.title.clone())
-            .collect::<Vec<_>>();
+        let sorted = groups[0].channels.iter().map(|pli| pli.header.title.clone()).collect::<Vec<_>>();
 
-        let expected = vec!["A-2-x", "A-1-y"]
-            .into_iter()
-            .map(Into::into)
-            .collect::<Vec<Arc<str>>>();
+        let expected = vec!["A-2-x", "A-1-y"].into_iter().map(Into::into).collect::<Vec<Arc<str>>>();
         assert_eq!(expected, sorted);
     }
 
@@ -709,22 +657,14 @@ mod tests {
             1,
             "A",
             vec![PlaylistItem {
-                header: PlaylistItemHeader {
-                    title: Arc::from("A-2-x"),
-                    source_ordinal: 0,
-                    ..Default::default()
-                },
+                header: PlaylistItemHeader { title: Arc::from("A-2-x"), source_ordinal: 0, ..Default::default() },
             }],
         );
         let group_b = make_group(
             2,
             "B",
             vec![PlaylistItem {
-                header: PlaylistItemHeader {
-                    title: Arc::from("A-1-y"),
-                    source_ordinal: 1,
-                    ..Default::default()
-                },
+                header: PlaylistItemHeader { title: Arc::from("A-1-y"), source_ordinal: 1, ..Default::default() },
             }],
         );
 
@@ -740,14 +680,8 @@ mod tests {
         let mut groups = vec![group_a, group_b];
         sort_groups(&mut groups, &[group_rule], false);
 
-        let sorted = groups
-            .iter()
-            .map(|group| group.channels[0].header.title.clone())
-            .collect::<Vec<_>>();
-        let expected = vec!["A-1-y", "A-2-x"]
-            .into_iter()
-            .map(Into::into)
-            .collect::<Vec<Arc<str>>>();
+        let sorted = groups.iter().map(|group| group.channels[0].header.title.clone()).collect::<Vec<_>>();
+        let expected = vec!["A-1-y", "A-2-x"].into_iter().map(Into::into).collect::<Vec<Arc<str>>>();
         assert_eq!(expected, sorted);
     }
 }
