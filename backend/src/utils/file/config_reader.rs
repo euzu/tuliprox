@@ -678,7 +678,7 @@ fn build_templates_to_persist(
 
     let existing_source_inline_templates = match read_sources_file(
         paths.sources_file_path.as_str(),
-        false,
+        true,
         false,
         None,
     ) {

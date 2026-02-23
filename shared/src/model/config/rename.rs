@@ -4,7 +4,7 @@ use crate::{
     model::{ItemField, PatternTemplate},
 };
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigRenameDto {
     pub field: ItemField,
@@ -12,6 +12,12 @@ pub struct ConfigRenameDto {
     pub new_name: String,
     #[serde(skip)]
     pub t_pattern: Option<String>,
+}
+
+impl PartialEq for ConfigRenameDto {
+    fn eq(&self, other: &Self) -> bool {
+        self.field == other.field && self.pattern == other.pattern && self.new_name == other.new_name
+    }
 }
 
 impl ConfigRenameDto {
@@ -49,5 +55,21 @@ mod tests {
 
         assert_eq!(rename.pattern, "!GROUP_PATTERN!");
         assert_eq!(rename.t_pattern.as_deref(), Some("US.*"));
+    }
+
+    #[test]
+    fn prepare_without_templates_keeps_pattern_value() {
+        let original_pattern = "!GROUP_PATTERN!".to_string();
+        let mut rename = ConfigRenameDto {
+            field: crate::model::ItemField::Group,
+            pattern: original_pattern.clone(),
+            new_name: "US".to_string(),
+            t_pattern: None,
+        };
+
+        rename.prepare(None).expect("rename prepare without templates should succeed");
+
+        assert_eq!(rename.pattern, original_pattern);
+        assert_eq!(rename.t_pattern.as_deref(), Some("!GROUP_PATTERN!"));
     }
 }

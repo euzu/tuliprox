@@ -1848,7 +1848,7 @@ The filename or path can be given as `-m` argument. (See Mappings section)
 Global templates can be loaded via `template_path` in `config.yml` (or CLI `-T`).
 Inline templates in `source.yml` and `mapping.yml` are still accepted for backward compatibility.
 
-Default mapping file is `maping.yml`
+Default mapping file is `mapping.yml`
 
 ## Example source.yml file
 
@@ -1979,7 +1979,7 @@ The files are loaded in **alphanumeric** order.
 
 The filename or path can be given as `-m` argument. (See Mappings section)
 
-Default mapping file is `maping.yml`
+Default mapping file is `mapping.yml`
 
 ### 3.1 `templates`
 
