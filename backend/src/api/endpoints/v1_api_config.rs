@@ -1,4 +1,5 @@
 use crate::api::api_utils::{internal_server_error, try_unwrap_body};
+use crate::api::config_file::ConfigFile;
 use crate::api::model::AppState;
 use crate::model::{ApiProxyConfig, InputSource, validate_library_paths_from_dto};
 use crate::utils;
@@ -85,8 +86,8 @@ async fn save_config_sources(
         }
     }
 
-    let sources_config = match utils::persist_source_config(&app_state, None, sources).await {
-        Ok(value) => value,
+    match utils::persist_source_config(&app_state, None, sources).await {
+        Ok(_) => {}
         Err(err) => {
             error!("Failed to persist source.yml {err}");
             return (
@@ -97,17 +98,18 @@ async fn save_config_sources(
         }
     };
 
-    // update runtime
-    match crate::model::SourcesConfig::try_from(&sources_config) {
-        Ok(src) => {
-            if let Err(err) = app_state.app_config.set_sources(src) {
-                return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({"error": err.to_string()}))).into_response();
-            }
-            app_state.active_provider.update_config(&app_state.app_config).await;
-            axum::http::StatusCode::OK.into_response()
-        }
-        Err(err) => (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": err.to_string()}))).into_response(),
+    // Reload from disk so runtime always uses fully prepared sources/mappings/templates.
+    if let Err(err) = ConfigFile::load_sources(&app_state).await {
+        error!("Failed to reload prepared sources after save {err}");
+        return (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(json!({"error": err.to_string()})),
+        )
+            .into_response();
     }
+
+    app_state.active_provider.update_config(&app_state.app_config).await;
+    axum::http::StatusCode::OK.into_response()
 }
 
 

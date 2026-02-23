@@ -800,10 +800,6 @@ fn build_templates_to_persist(
         mapping_inline_templates.as_deref(),
     )?;
     let prepared_templates = template_bundle.prepared;
-    let template_file_exists = template_bundle
-        .files_used
-        .as_ref()
-        .is_some_and(|used_files| !used_files.is_empty());
 
     new_dto.prepare(
         true,
@@ -811,16 +807,16 @@ fn build_templates_to_persist(
         prepared_templates.as_deref(),
     )?;
 
-    if let Some(templates) =
-        new_dto.templates.clone().filter(|templates| !templates.is_empty())
-    {
-        Ok(Some(TemplateDefinitionDto { templates }))
-    } else if !template_file_exists {
+    if let Some(templates) = new_dto.templates.clone() {
+        if templates.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(TemplateDefinitionDto { templates }))
+        }
+    } else {
         Ok(existing_source_inline_templates
             .filter(|templates| !templates.is_empty())
             .map(|templates| TemplateDefinitionDto { templates }))
-    } else {
-        Ok(None)
     }
 }
 

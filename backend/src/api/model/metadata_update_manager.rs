@@ -1523,9 +1523,7 @@ impl InputWorker {
         match task {
             UpdateTask::ResolveVod { id, reason, .. } => {
                 let fetch_info = reason.contains(ResolveReason::Info);
-                // Resolve tasks are independent from provider probe capacity.
-                // Probing must be executed by dedicated probe tasks only.
-                let will_probe = false;
+                let will_probe = reason.contains(ResolveReason::Probe);
 
                 // If we are going to probe, release the cached handle to avoid holding a READ lock
                 // for along time (blocks writers) and also to avoid potential deadlocks if
@@ -1566,9 +1564,7 @@ impl InputWorker {
             }
             UpdateTask::ResolveSeries { id, reason, .. } => {
                 let fetch_info = reason.contains(ResolveReason::Info);
-                // Resolve tasks are independent from provider probe capacity.
-                // Probing must be executed by dedicated probe tasks only.
-                let will_probe = false;
+                let will_probe = reason.contains(ResolveReason::Probe);
 
                 if will_probe {
                     db_handles.remove(&XtreamCluster::Series);
