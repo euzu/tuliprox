@@ -293,7 +293,9 @@ pub fn ConfigView() -> Html {
             }
 
             if let Some(sources) = modified_sources.as_mut() {
-                if let Err(err) = sources.prepare(false, None, None) {
+                let global_templates =
+                    config_ctx.config.as_ref().and_then(|cfg| cfg.templates.as_ref().map(|defs| &defs.templates));
+                if let Err(err) = sources.prepare(false, None, global_templates) {
                     services.toastr.error(err.to_string());
                     return;
                 }

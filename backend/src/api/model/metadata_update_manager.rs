@@ -709,20 +709,28 @@ impl InputWorker {
             return false;
         };
 
+        // Subscribe before checking the guard to avoid missing a PlaylistUpdate event
+        // published between the guard check and receiver subscription.
+        let mut rx = app_state.event_manager.get_event_channel();
+
         // If no update is active anymore, do not block on events.
         if let Some(guard) = app_state.update_guard.try_playlist() {
             drop(guard);
             return true;
         }
 
-        let mut rx = app_state.event_manager.get_event_channel();
         loop {
             tokio::select! {
                 () = cancel_token.cancelled() => return false,
                 recv = rx.recv() => {
                     match recv {
                         Ok(EventMessage::PlaylistUpdate(_)) => return true,
-                        Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            if let Some(guard) = app_state.update_guard.try_playlist() {
+                                drop(guard);
+                                return true;
+                            }
+                        }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => return false,
                     }
                 }

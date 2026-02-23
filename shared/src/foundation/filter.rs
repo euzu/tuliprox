@@ -475,9 +475,9 @@ fn build_dependency_graph(templates: &Vec<PatternTemplate>) -> Result<DirectedGr
 }
 
 pub fn prepare_templates(templates: &mut Vec<PatternTemplate>) -> Result<Vec<PatternTemplate>, TuliproxError> {
-    let mut seen_template_names = HashSet::with_capacity(templates.len());
+    let mut seen_template_names: HashSet<&str> = HashSet::with_capacity(templates.len());
     for template in templates.iter() {
-        if !seen_template_names.insert(template.name.clone()) {
+        if !seen_template_names.insert(template.name.as_str()) {
             return info_err_res!("Duplicate template name found: {}", template.name);
         }
     }

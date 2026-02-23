@@ -308,8 +308,9 @@ impl From<&ConfigTargetDto> for ConfigTarget {
             mapping: Arc::new(ArcSwapOption::new(None)),
             favourites: dto.favourites.as_ref().map(|f| f.iter().map(Into::into).collect()),
             processing_order: dto.processing_order,
-            watch: dto.watch.as_ref().map(|list| {
-                list.iter()
+            watch: dto.watch.as_ref().and_then(|list| {
+                let compiled: Vec<_> = list
+                    .iter()
                     .filter_map(|s| match shared::model::REGEX_CACHE.get_or_compile(s) {
                         Ok(re) => Some(re),
                         Err(e) => {
@@ -317,7 +318,12 @@ impl From<&ConfigTargetDto> for ConfigTarget {
                             None
                         }
                     })
-                    .collect()
+                    .collect();
+                if compiled.is_empty() {
+                    None
+                } else {
+                    Some(compiled)
+                }
             }),
             use_memory_cache: dto.use_memory_cache,
         }

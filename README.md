@@ -78,7 +78,7 @@ Options:
   --dbx                            Dump database with content type: xtream
   --dbm                            Dump database with content type: m3u
   --dbe                            Dump database with content type: epg
-  --dbv                            Dump database with content type: taregt id mapping
+  --dbv                            Dump database with content type: target id mapping
 
 ```
 

@@ -305,6 +305,8 @@ impl AppConfig {
             self.prepare_paths();
         } else {
             self.prepare_mapping_path();
+            self.prepare_template_path();
+            self.prepare_custom_stream_response();
         }
 
         self.prepare_sources()?;

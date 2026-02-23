@@ -43,6 +43,8 @@ use tokio_util::sync::CancellationToken;
 use tower_governor::key_extractor::SmartIpKeyExtractor;
 use tower_http::services::ServeDir;
 
+const METADATA_TRIGGER_WAIT_CYCLE_LIMIT: u32 = 900;
+
 fn get_web_dir_path(web_ui_enabled: bool, web_root: &str) -> Result<PathBuf, TuliproxError> {
     let web_dir_path = if web_root.is_empty() { get_default_web_root_path() } else { PathBuf::from(web_root) };
     if web_ui_enabled && (!&web_dir_path.exists() || !&web_dir_path.is_dir()) {
@@ -521,6 +523,14 @@ fn exec_input_update_listener(app_state: &Arc<AppState>, targets: &Arc<ProcessTa
                                     }
 
                                     wait_cycles = wait_cycles.saturating_add(1);
+                                    if wait_cycles >= METADATA_TRIGGER_WAIT_CYCLE_LIMIT {
+                                        warn!(
+                                            "Aborting metadata-triggered update after waiting ~{}s for playlist lock ({} cycles)",
+                                            wait_cycles * 2,
+                                            wait_cycles
+                                        );
+                                        break;
+                                    }
                                     if wait_cycles.is_multiple_of(30) {
                                         debug!(
                                             "Metadata-triggered update is still waiting for active playlist update to finish (waited ~{}s)",

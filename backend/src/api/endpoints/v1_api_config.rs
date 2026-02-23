@@ -66,11 +66,34 @@ async fn save_config_sources(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     axum::extract::Json(sources): axum::extract::Json<SourcesConfigDto>,
 ) -> impl axum::response::IntoResponse + Send {
-    let sources_config = match utils::validate_and_persist_source_config(&app_state, sources).await {
+    let templates_to_persist = match utils::validate_source_config_for_persist(&app_state, &sources) {
         Ok(value) => value,
         Err(err) => {
-            error!("Failed to save source.yml {err}");
+            error!("Failed to validate source.yml {err}");
             return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": err.to_string()}))).into_response();
+        }
+    };
+
+    if let Some(template_definition) = templates_to_persist.as_ref() {
+        if let Err(err) = utils::persist_templates_config(&app_state, template_definition).await {
+            error!("Failed to save template config {err}");
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(json!({"error": err.to_string()})),
+            )
+                .into_response();
+        }
+    }
+
+    let sources_config = match utils::persist_source_config(&app_state, None, sources).await {
+        Ok(value) => value,
+        Err(err) => {
+            error!("Failed to persist source.yml {err}");
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(json!({"error": err.to_string()})),
+            )
+                .into_response();
         }
     };
 

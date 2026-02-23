@@ -280,6 +280,34 @@ pub fn read_app_config_dto(
     })
 }
 
+fn apply_prepared_mappings(
+    app_config: &mut AppConfig,
+    paths: &mut ConfigPaths,
+    mappings_file: &str,
+    mapping_paths: Option<&Vec<PathBuf>>,
+    mapping: &mut shared::model::MappingsDto,
+    prepared_templates: Option<&Vec<PatternTemplate>>,
+) {
+    match mapping.mappings.prepare(prepared_templates) {
+        Ok(()) => {
+            let mappings: crate::model::Mappings = crate::model::Mappings::from(&*mapping);
+            app_config.set_mappings(mappings_file, &mappings);
+            paths.mapping_files_used = mapping_paths.map(|items| {
+                items
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<String>>()
+            });
+        }
+        Err(err) => {
+            error!(
+                "Failed to prepare mapping '{mappings_file}': {err}. Skipping mapping registration."
+            );
+            paths.mapping_files_used = None;
+        }
+    }
+}
+
 pub async fn prepare_sources_batch(
     sources: &mut SourcesConfigDto,
     include_computed: bool,
@@ -452,22 +480,16 @@ pub async fn read_initial_app_config(
     app_config.prepare(include_computed)?;
     //print_info(&app_config);
 
-    if let Some(mappings_file) = &paths.mapping_file_path {
+    if let Some(mappings_file) = paths.mapping_file_path.clone() {
         if let Some(mapping) = mappings_dto.as_mut() {
-            if let Err(err) = mapping
-                .mappings
-                .prepare(prepared_templates.as_ref())
-            {
-                exit!("{err}");
-            }
-            let mappings: crate::model::Mappings = crate::model::Mappings::from(&*mapping);
-            app_config.set_mappings(mappings_file, &mappings);
-            paths.mapping_files_used = mapping_paths.as_ref().map(|items| {
-                items
-                    .iter()
-                    .map(|p| p.display().to_string())
-                    .collect::<Vec<String>>()
-            });
+            apply_prepared_mappings(
+                &mut app_config,
+                paths,
+                mappings_file.as_str(),
+                mapping_paths.as_ref(),
+                mapping,
+                prepared_templates.as_ref(),
+            );
         } else {
             info!("Mapping file: not used");
         }
@@ -646,6 +668,97 @@ pub async fn save_templates_config(
     write_config_file(file_path, backup_dir, config, TEMPLATE_FILE).await
 }
 
+fn build_templates_to_persist(
+    app_state: &Arc<AppState>,
+    dto: &SourcesConfigDto,
+) -> Result<Option<TemplateDefinitionDto>, TuliproxError> {
+    let mut new_dto = dto.clone();
+    let config = app_state.app_config.config.load();
+    let paths = app_state.app_config.paths.load();
+
+    let existing_source_inline_templates = match read_sources_file(
+        paths.sources_file_path.as_str(),
+        false,
+        false,
+        None,
+    ) {
+        Ok(existing_sources) => existing_sources.templates,
+        Err(err) => {
+            warn!(
+                "Failed to read existing source.yml for template migration '{}': {err}",
+                paths.sources_file_path
+            );
+            None
+        }
+    };
+
+    let mapping_inline_templates = if let Some(mapping_file_path) = paths.mapping_file_path.as_ref() {
+        read_mappings_file_unprepared(mapping_file_path, true)?
+            .map(|(_, mapping)| mapping)
+            .and_then(|mapping| mapping.mappings.templates)
+    } else {
+        None
+    };
+
+    let source_inline_templates = if new_dto.templates.is_some() {
+        new_dto.templates.as_ref()
+    } else {
+        existing_source_inline_templates.as_ref()
+    };
+
+    let template_file_path = paths.template_file_path.as_deref().or(config.template_path.as_deref());
+    let template_file_exists = if let Some(path) = template_file_path {
+        read_templates_file(path, true)?.is_some()
+    } else {
+        false
+    };
+
+    let (_templates, prepared_templates, _template_files_used) = read_templates(
+        template_file_path,
+        true,
+        source_inline_templates,
+        mapping_inline_templates.as_ref(),
+    )?;
+
+    new_dto.prepare(
+        true,
+        config.get_hdhr_device_overview().as_ref(),
+        prepared_templates.as_ref(),
+    )?;
+
+    if let Some(templates) =
+        new_dto.templates.clone().filter(|templates| !templates.is_empty())
+    {
+        Ok(Some(TemplateDefinitionDto { templates }))
+    } else if !template_file_exists {
+        Ok(existing_source_inline_templates
+            .filter(|templates| !templates.is_empty())
+            .map(|templates| TemplateDefinitionDto { templates }))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn validate_source_config_for_persist(
+    app_state: &Arc<AppState>,
+    dto: &SourcesConfigDto,
+) -> Result<Option<TemplateDefinitionDto>, TuliproxError> {
+    build_templates_to_persist(app_state, dto)
+}
+
+pub async fn persist_templates_config(
+    app_state: &Arc<AppState>,
+    template_definition: &TemplateDefinitionDto,
+) -> Result<(), TuliproxError> {
+    let config = app_state.app_config.config.load();
+    let paths = app_state.app_config.paths.load();
+    let template_file = utils::resolve_template_persist_file_path(
+        paths.template_file_path.as_deref().or(config.template_path.as_deref()),
+        &paths.config_path,
+    );
+    save_templates_config(&template_file, config.get_backup_dir().as_ref(), template_definition).await
+}
+
 pub async fn persist_source_config(
     app_state: &Arc<AppState>,
     source_file_path: Option<&Path>,
@@ -718,82 +831,10 @@ pub async fn validate_and_persist_source_config(
     app_state: &Arc<AppState>,
     dto: SourcesConfigDto,
 ) -> Result<SourcesConfigDto, TuliproxError> {
-    let templates_to_persist = {
-        let mut new_dto = dto.clone();
-        let config = app_state.app_config.config.load();
-        let paths = app_state.app_config.paths.load();
+    let templates_to_persist = validate_source_config_for_persist(app_state, &dto)?;
 
-        let existing_source_inline_templates = match read_sources_file(
-            paths.sources_file_path.as_str(),
-            false,
-            false,
-            None,
-        ) {
-            Ok(existing_sources) => existing_sources.templates,
-            Err(err) => {
-                warn!(
-                    "Failed to read existing source.yml for template migration '{}': {err}",
-                    paths.sources_file_path
-                );
-                None
-            }
-        };
-
-        let mapping_inline_templates = if let Some(mapping_file_path) = paths.mapping_file_path.as_ref() {
-            read_mappings_file_unprepared(mapping_file_path, true)?
-                .map(|(_, mapping)| mapping)
-                .and_then(|mapping| mapping.mappings.templates)
-        } else {
-            None
-        };
-
-        let source_inline_templates = if new_dto.templates.is_some() {
-            new_dto.templates.as_ref()
-        } else {
-            existing_source_inline_templates.as_ref()
-        };
-
-        let template_file_path = paths.template_file_path.as_deref().or(config.template_path.as_deref());
-        let template_file_exists = if let Some(path) = template_file_path {
-            read_templates_file(path, true)?.is_some()
-        } else {
-            false
-        };
-
-        let (_templates, prepared_templates, _template_files_used) = read_templates(
-            template_file_path,
-            true,
-            source_inline_templates,
-            mapping_inline_templates.as_ref(),
-        )?;
-
-        new_dto.prepare(
-            true,
-            config.get_hdhr_device_overview().as_ref(),
-            prepared_templates.as_ref(),
-        )?;
-
-        if let Some(templates) =
-            new_dto.templates.clone().filter(|templates| !templates.is_empty())
-        {
-            Some(TemplateDefinitionDto { templates })
-        } else if !template_file_exists {
-            existing_source_inline_templates
-                .filter(|templates| !templates.is_empty())
-                .map(|templates| TemplateDefinitionDto { templates })
-        } else {
-            None
-        }
-    };
-
-    if let Some(template_definition) = templates_to_persist {
-        let config = app_state.app_config.config.load();
-        let paths = app_state.app_config.paths.load();
-        let template_file = utils::resolve_template_persist_file_path(
-            paths.template_file_path.as_deref().or(config.template_path.as_deref()),
-            &paths.config_path,
-        );
-        save_templates_config(&template_file, config.get_backup_dir().as_ref(), &template_definition).await?;
+    if let Some(template_definition) = templates_to_persist.as_ref() {
+        persist_templates_config(app_state, template_definition).await?;
     }
 
     persist_source_config(app_state, None, dto).await

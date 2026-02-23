@@ -102,6 +102,7 @@ active URL of the specified provider.
 - **Template-Aware Hot Reload**: File watcher now tracks template files/directories and reapplies sources/mappings when templates change.
 - **Setup Validation Improvement**: Setup mode validates source configuration against the global template collection and persists template definitions
   separately.
+- Added `-T, --template` to override `template_path` on startup.
 
 ## ⚙️ New Settings
 
@@ -116,8 +117,6 @@ active URL of the specified provider.
   - Added `probe_live`: Enables background probing for Live TV streams (default disabled).
   - Added `probe_live_interval_hours`: Sets the frequency for re-probing Live TV streams.
   - Added `resolve_background`: Toggles background metadata resolution (default `true`). Set to `false` for blocking, immediate resolution.
-- **CLI**:
-  - Added `-T, --template` to override `template_path` on startup.
 
 ## 🛠 Optimizations
 

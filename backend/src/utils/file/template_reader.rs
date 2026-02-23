@@ -62,7 +62,7 @@ fn read_templates_from_directory(
     };
     traverse_dir(path, &mut visit).map_err(|err| info_err!("Failed to read templates {err}"))?;
 
-    files.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+    files.sort();
 
     let mut definitions = vec![];
     let mut loaded_template_files = vec![];
@@ -96,10 +96,19 @@ pub fn read_templates_file(
             } else if metadata.is_dir() {
                 read_templates_from_directory(&path, resolve_env)
             } else {
+                warn!(
+                    "Template path exists but is neither file nor directory: {}",
+                    path.to_string_lossy()
+                );
                 Ok(None)
             }
         }
-        Err(_) => Ok(None),
+        Err(err) => {
+            warn!(
+                "Can't read template path metadata for {}: {err}",
+                path.to_string_lossy()
+            );
+            Ok(None)
+        }
     }
 }
-

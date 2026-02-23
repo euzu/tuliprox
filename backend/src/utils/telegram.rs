@@ -27,7 +27,7 @@ struct TelegramErrorResult {
     #[allow(unused)]
     pub error_code: i32,
     pub description: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub parameters: Option<TelegramErrorParameters>,
 }
 
@@ -127,23 +127,7 @@ pub async fn telegram_send_message(
                     }
 
                     let parsed_error = response.json::<TelegramErrorResult>().await.ok();
-                    if let Some(err) = parsed_error {
-                        if status == StatusCode::TOO_MANY_REQUESTS {
-                            if let Some(retry_after_secs) = extract_retry_after_secs(&err) {
-                                let wait_secs = retry_after_secs.clamp(1, RETRY_AFTER_MAX_SECS);
-                                warn!(
-                                    "Telegram rate limit for chunk {}/{} to {chat_id}: retrying in {}s (attempt {}/{})",
-                                    i + 1,
-                                    chunks.len(),
-                                    wait_secs,
-                                    attempt + 1,
-                                    MAX_RETRIES_PER_CHUNK + 1
-                                );
-                                tokio::time::sleep(tokio::time::Duration::from_secs(wait_secs)).await;
-                                continue;
-                            }
-                        }
-
+                    if let Some(err) = parsed_error.as_ref() {
                         error!(
                             "Message chunk {}/{} wasn't sent to {chat_id} telegram api because of: {}",
                             i + 1,
@@ -158,7 +142,31 @@ pub async fn telegram_send_message(
                         );
                     }
 
+                    let retriable_status =
+                        status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error();
+                    if !retriable_status {
+                        break;
+                    }
+
                     if attempt < MAX_RETRIES_PER_CHUNK {
+                        if status == StatusCode::TOO_MANY_REQUESTS {
+                            if let Some(retry_after_secs) =
+                                parsed_error.as_ref().and_then(extract_retry_after_secs)
+                            {
+                                let wait_secs = retry_after_secs.clamp(1, RETRY_AFTER_MAX_SECS);
+                                warn!(
+                                    "Telegram rate limit for chunk {}/{} to {chat_id}: retrying in {}s (attempt {}/{})",
+                                    i + 1,
+                                    chunks.len(),
+                                    wait_secs,
+                                    attempt + 1,
+                                    MAX_RETRIES_PER_CHUNK + 1
+                                );
+                                tokio::time::sleep(tokio::time::Duration::from_secs(wait_secs)).await;
+                                continue;
+                            }
+                        }
+
                         let backoff = (RETRY_BACKOFF_BASE_SECS
                             .saturating_mul(2_u64.saturating_pow(u32::from(attempt))))
                         .min(RETRY_AFTER_MAX_SECS);

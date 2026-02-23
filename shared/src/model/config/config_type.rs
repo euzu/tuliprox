@@ -6,6 +6,7 @@ pub enum ConfigType {
     Config,
     ApiProxy,
     Mapping,
+    Template,
     Sources,
 }
 
@@ -18,6 +19,7 @@ impl Display for ConfigType {
                 Self::Config => "Config",
                 Self::ApiProxy => "ApiProxy",
                 Self::Mapping => "Mapping",
+                Self::Template => "Template",
                 Self::Sources => "Sources",
             }
         )

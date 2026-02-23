@@ -457,11 +457,10 @@ fn collect_setup_validation_templates(
     app_config: &AppConfigDto,
     template_file_path: &str,
 ) -> Result<Option<Vec<PatternTemplate>>, TuliproxError> {
-    if let Some(templates) = setup_templates_from_request(app_config) {
-        return Ok(Some(templates));
-    }
-
     let mut merged_templates: Vec<PatternTemplate> = Vec::new();
+    if let Some(templates) = setup_templates_from_request(app_config) {
+        merged_templates.extend(templates);
+    }
 
     if let Some((_, definition)) = read_templates_file(template_file_path, true)? {
         merged_templates.extend(definition.templates);

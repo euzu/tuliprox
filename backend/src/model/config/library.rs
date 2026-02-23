@@ -85,7 +85,7 @@ impl LibraryConfig {
             // Resolve metadata path to absolute path based on working_dir
             let meta_path = PathBuf::from(&self.metadata.path);
             let meta_path =
-                if meta_path.is_relative() { PathBuf::from(working_dir).join(&meta_path) } else { meta_path };
+                if meta_path.is_relative() { PathBuf::from(working_dir).join(meta_path) } else { meta_path };
             self.metadata.path = meta_path.to_string_lossy().to_string();
 
             self.canonicalize_scan_directories(working_dir)?;

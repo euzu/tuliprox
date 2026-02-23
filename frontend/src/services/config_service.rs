@@ -120,9 +120,33 @@ impl ConfigService {
             Ok(Some(mut app_config)) => {
                 let templates = {
                     if let Some(template_definition) = app_config.templates.as_mut() {
-                        prepare_templates(&mut template_definition.templates).ok()
+                        match prepare_templates(&mut template_definition.templates) {
+                            Ok(prepared) => Some(prepared),
+                            Err(err) => {
+                                error!("Failed to prepare global templates: {err}");
+                                if let Some(templ) = app_config.sources.templates.as_mut() {
+                                    match prepare_templates(templ) {
+                                        Ok(prepared) => Some(prepared),
+                                        Err(fallback_err) => {
+                                            error!(
+                                                "Failed to prepare fallback source inline templates: {fallback_err}"
+                                            );
+                                            None
+                                        }
+                                    }
+                                } else {
+                                    None
+                                }
+                            }
+                        }
                     } else if let Some(templ) = app_config.sources.templates.as_mut() {
-                        prepare_templates(templ).ok()
+                        match prepare_templates(templ) {
+                            Ok(prepared) => Some(prepared),
+                            Err(err) => {
+                                error!("Failed to prepare source inline templates: {err}");
+                                None
+                            }
+                        }
                     } else {
                         None
                     }

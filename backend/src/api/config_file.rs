@@ -31,7 +31,7 @@ impl ConfigFile {
         let sources_inline_templates =
             read_sources_file(paths.sources_file_path.as_str(), false, false, None)?.templates;
         let mapping_inline_templates = if let Some(mapping_file_path) = paths.mapping_file_path.as_ref() {
-            read_mappings_file_unprepared(mapping_file_path, true)?
+            read_mappings_file_unprepared(mapping_file_path, false)?
                 .map(|(_, mapping)| mapping)
                 .and_then(|mapping| mapping.mappings.templates)
         } else {
@@ -100,8 +100,31 @@ impl ConfigFile {
         let paths = <Arc<ArcSwap<ConfigPaths>> as Access<ConfigPaths>>::load(&app_state.app_config.paths);
         let config_file = paths.config_file_path.as_str();
         let config_dto = read_config_file(config_file, true, true)?;
-        let mapping_changed = paths.mapping_file_path.as_ref() != config_dto.mapping_path.as_ref();
-        let template_changed = paths.template_file_path.as_ref() != config_dto.template_path.as_ref();
+
+        let default_mapping_path = utils::get_default_mappings_path(paths.config_path.as_str());
+        let current_mapping_path = paths
+            .mapping_file_path
+            .clone()
+            .unwrap_or_else(|| default_mapping_path.clone());
+        let next_mapping_path = config_dto
+            .mapping_path
+            .clone()
+            .filter(|path| !path.trim().is_empty())
+            .unwrap_or(default_mapping_path);
+        let mapping_changed = current_mapping_path != next_mapping_path;
+
+        let default_template_path = utils::get_default_templates_path(paths.config_path.as_str());
+        let current_template_path = paths
+            .template_file_path
+            .clone()
+            .unwrap_or_else(|| default_template_path.clone());
+        let next_template_path = config_dto
+            .template_path
+            .clone()
+            .filter(|path| !path.trim().is_empty())
+            .unwrap_or(default_template_path);
+        let template_changed = current_template_path != next_template_path;
+
         let mut config: Config = Config::from(config_dto);
         config.prepare(paths.config_path.as_str()).await?;
         update_app_state_config(app_state, config).await?;
@@ -154,7 +177,12 @@ impl ConfigFile {
             }
             ConfigFile::Template | ConfigFile::Sources => {
                 ConfigFile::load_sources(app_state).await?;
-                app_state.event_manager.send_event(EventMessage::ConfigChange(ConfigType::Sources));
+                let event_type = if matches!(self, ConfigFile::Template) {
+                    ConfigType::Template
+                } else {
+                    ConfigType::Sources
+                };
+                app_state.event_manager.send_event(EventMessage::ConfigChange(event_type));
             }
             ConfigFile::Config => {
                 ConfigFile::load_config(app_state).await?;
