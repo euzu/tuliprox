@@ -454,6 +454,7 @@ async fn create_stream_response_details(
                 stream,
                 stream_info,
                 provider_name: guard_provider_name.clone(),
+                request_url: None,
                 grace_period: grace_period_options,
                 disable_provider_grace: false,
                 reconnect_flag: None,
@@ -462,6 +463,11 @@ async fn create_stream_response_details(
         }
         ProviderStreamState::Available(_provider_name, request_url)
         | ProviderStreamState::GracePeriod(_provider_name, request_url) => {
+            debug_if_enabled!(
+                "Provider stream selection: allocated_provider={} actual_request_url={}",
+                sanitize_sensitive_info(guard_provider_name.as_deref().unwrap_or("?")),
+                sanitize_sensitive_info(request_url.as_ref())
+            );
             let parsed_url = Url::parse(&request_url);
             let ((stream, stream_info), reconnect_flag) = if let Ok(url) = parsed_url {
                 let default_user_agent = app_state.app_config.config.load().default_user_agent.clone();
@@ -522,6 +528,7 @@ async fn create_stream_response_details(
                 stream,
                 stream_info,
                 provider_name: guard_provider_name.clone(),
+                request_url: Some(request_url.clone()),
                 grace_period: grace_period_options,
                 disable_provider_grace: false,
                 reconnect_flag,
@@ -870,6 +877,16 @@ pub async fn stream_response(
             .as_ref()
             .map(|(h, sc, response_url, cvt)| (h.clone(), *sc, response_url.clone(), *cvt));
         let provider_name = stream_details.provider_name.clone();
+        let actual_request_url = stream_details
+            .request_url
+            .clone()
+            .unwrap_or_else(|| Arc::<str>::from(stream_url));
+
+        debug_if_enabled!(
+            "Provider request mapping: allocated_provider={} actual_request_url={}",
+            sanitize_sensitive_info(provider_name.as_deref().unwrap_or("?")),
+            sanitize_sensitive_info(actual_request_url.as_ref())
+        );
 
         if let Some((headers, status, _response_url, Some(CustomVideoStreamType::Provisioning))) =
             stream_details.stream_info.as_ref()
@@ -937,7 +954,7 @@ pub async fn stream_response(
             // preventing the session from being "poisoned" by a temporary redirect.
             // For everything else (Live): It continues to work as before, using the redirected URL if available,
             // which is often desirable for live streams to stay on the same edge server.
-            let session_url = if matches!(
+            let session_url: Cow<'_, str> = if matches!(
                 item_type,
                 PlaylistItemType::Catchup
                     | PlaylistItemType::Video
@@ -945,20 +962,23 @@ pub async fn stream_response(
                     | PlaylistItemType::Series
                     | PlaylistItemType::LocalSeries
             ) {
-                Cow::Borrowed(stream_url)
+                Cow::Owned(actual_request_url.to_string())
             } else {
                 provider_response
                     .as_ref()
                     .and_then(|(_, _, u, _)| u.as_ref())
-                    .map_or_else(|| Cow::Borrowed(stream_url), |url| Cow::Owned(url.to_string()))
+                    .map_or_else(|| Cow::Owned(actual_request_url.to_string()), |url| Cow::Owned(url.to_string()))
             };
             if log_enabled!(log::Level::Debug) {
-                if session_url.eq(&stream_url) {
-                    debug!("Streaming stream request from {}", sanitize_sensitive_info(stream_url));
+                if session_url.eq(actual_request_url.as_ref()) {
+                    debug!(
+                        "Streaming stream request from {}",
+                        sanitize_sensitive_info(actual_request_url.as_ref())
+                    );
                 } else {
                     debug!(
                         "Streaming stream request for {} from {}",
-                        sanitize_sensitive_info(stream_url),
+                        sanitize_sensitive_info(actual_request_url.as_ref()),
                         sanitize_sensitive_info(&session_url)
                     );
                 }
