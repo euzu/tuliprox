@@ -1,10 +1,15 @@
 use crate::model::AppConfig;
-use log::{debug, error};
+use log::{debug, error, warn};
+use reqwest::StatusCode;
+use shared::utils::CONSTANTS;
 use std::sync::Arc;
 use url::Url;
-use shared::utils::CONSTANTS;
 
 const MAX_MESSAGE_LENGTH: usize = 4000;
+const MAX_RETRIES_PER_CHUNK: u8 = 5;
+const RETRY_AFTER_MAX_SECS: u64 = 600;
+const RETRY_BACKOFF_BASE_SECS: u64 = 2;
+const CHUNK_DELAY_MS: u64 = 100;
 
 /// Requests will be sent according to bot instance.
 #[derive(Clone)]
@@ -22,6 +27,13 @@ struct TelegramErrorResult {
     #[allow(unused)]
     pub error_code: i32,
     pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parameters: Option<TelegramErrorParameters>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct TelegramErrorParameters {
+    pub retry_after: Option<u64>,
 }
 
 /// Parse mode for `sendMessage` API
@@ -67,6 +79,7 @@ pub fn telegram_create_instance(bot_token: &str, chat_id: &str) -> BotInstance {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn telegram_send_message(
     _app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
@@ -92,37 +105,122 @@ pub async fn telegram_send_message(
             chat_id: instance.chat_id.clone(),
             message_thread_id: instance.message_thread_id.clone(),
             text: chunk_text.clone(),
-            parse_mode: options
-                .map(|o| get_send_message_parse_mode_str(o.parse_mode))
-                .map(ToString::to_string),
+            parse_mode: options.map(|o| get_send_message_parse_mode_str(o.parse_mode)).map(ToString::to_string),
         };
 
-        let result = client
-            .post(url.clone())
-            .json(&request_json_obj)
-            .timeout(std::time::Duration::from_secs(30))
-            .send()
-            .await;
+        let mut delivered = false;
+        for attempt in 0..=MAX_RETRIES_PER_CHUNK {
+            let result = client
+                .post(url.clone())
+                .json(&request_json_obj)
+                .timeout(std::time::Duration::from_secs(30))
+                .send()
+                .await;
 
-        match result {
-            Ok(response) => {
-                if response.status().is_success() {
-                    debug!("Message chunk {}/{} sent successfully to {chat_id} telegram api", i + 1, chunks.len());
-                } else {
-                    match response.json::<TelegramErrorResult>().await {
-                        Ok(json) => error!("Message chunk {}/{} wasn't sent to {chat_id} telegram api because of: {}", i + 1, chunks.len(), json.description),
-                        Err(_) => error!("Message chunk {}/{} wasn't sent to {chat_id} telegram api. Telegram response could not be parsed!", i + 1, chunks.len()),
+            match result {
+                Ok(response) => {
+                    let status = response.status();
+                    if status.is_success() {
+                        debug!("Message chunk {}/{} sent successfully to {chat_id} telegram api", i + 1, chunks.len());
+                        delivered = true;
+                        break;
                     }
+
+                    let parsed_error = response.json::<TelegramErrorResult>().await.ok();
+                    if let Some(err) = parsed_error {
+                        if status == StatusCode::TOO_MANY_REQUESTS {
+                            if let Some(retry_after_secs) = extract_retry_after_secs(&err) {
+                                let wait_secs = retry_after_secs.clamp(1, RETRY_AFTER_MAX_SECS);
+                                warn!(
+                                    "Telegram rate limit for chunk {}/{} to {chat_id}: retrying in {}s (attempt {}/{})",
+                                    i + 1,
+                                    chunks.len(),
+                                    wait_secs,
+                                    attempt + 1,
+                                    MAX_RETRIES_PER_CHUNK + 1
+                                );
+                                tokio::time::sleep(tokio::time::Duration::from_secs(wait_secs)).await;
+                                continue;
+                            }
+                        }
+
+                        error!(
+                            "Message chunk {}/{} wasn't sent to {chat_id} telegram api because of: {}",
+                            i + 1,
+                            chunks.len(),
+                            err.description
+                        );
+                    } else {
+                        error!(
+                            "Message chunk {}/{} wasn't sent to {chat_id} telegram api. Telegram response could not be parsed!",
+                            i + 1,
+                            chunks.len()
+                        );
+                    }
+
+                    if attempt < MAX_RETRIES_PER_CHUNK {
+                        let backoff = (RETRY_BACKOFF_BASE_SECS
+                            .saturating_mul(2_u64.saturating_pow(u32::from(attempt))))
+                        .min(RETRY_AFTER_MAX_SECS);
+                        tokio::time::sleep(tokio::time::Duration::from_secs(backoff)).await;
+                        continue;
+                    }
+                    break;
+                }
+                Err(e) => {
+                    if attempt < MAX_RETRIES_PER_CHUNK {
+                        let backoff = (RETRY_BACKOFF_BASE_SECS
+                            .saturating_mul(2_u64.saturating_pow(u32::from(attempt))))
+                        .min(RETRY_AFTER_MAX_SECS);
+                        warn!(
+                            "Message chunk {}/{} send attempt {}/{} failed for {chat_id}: {e}; retrying in {}s",
+                            i + 1,
+                            chunks.len(),
+                            attempt + 1,
+                            MAX_RETRIES_PER_CHUNK + 1,
+                            backoff
+                        );
+                        tokio::time::sleep(tokio::time::Duration::from_secs(backoff)).await;
+                        continue;
+                    }
+                    error!(
+                        "Message chunk {}/{} wasn't sent to {chat_id} telegram api because of: {e}",
+                        i + 1,
+                        chunks.len()
+                    );
+                    break;
                 }
             }
-            Err(e) => error!("Message chunk {}/{} wasn't sent to {chat_id} telegram api because of: {e}", i + 1, chunks.len()),
+        }
+
+        if !delivered {
+            error!(
+                "Message chunk {}/{} could not be delivered to {chat_id} telegram api after retries",
+                i + 1,
+                chunks.len()
+            );
         }
 
         // Small delay between chunks to be polite to the API
         if i < chunks.len() - 1 {
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(CHUNK_DELAY_MS)).await;
         }
     }
+}
+
+fn parse_retry_after_from_description(description: &str) -> Option<u64> {
+    let lowered = description.to_ascii_lowercase();
+    let marker = "retry after ";
+    let start = lowered.find(marker)?;
+    lowered[start + marker.len()..].chars().take_while(char::is_ascii_digit).collect::<String>().parse::<u64>().ok()
+}
+
+fn extract_retry_after_secs(error: &TelegramErrorResult) -> Option<u64> {
+    error
+        .parameters
+        .as_ref()
+        .and_then(|p| p.retry_after)
+        .or_else(|| parse_retry_after_from_description(&error.description))
 }
 
 /// Chunks the message respecting the parse mode and `MAX_MESSAGE_LENGTH`.
@@ -136,13 +234,12 @@ fn chunk_message(text: &str, parse_mode: Option<SendMessageParseMode>) -> Vec<St
 
 fn chunk_plain_text(text: &str, limit: usize) -> Vec<String> {
     let chars: Vec<char> = text.chars().collect();
-    chars.chunks(limit)
-        .map(|chunk| chunk.iter().collect::<String>())
-        .collect()
+    chars.chunks(limit).map(|chunk| chunk.iter().collect::<String>()).collect()
 }
 
 // Just a basic list of void tags that don't need closing.
-const HTML_VOID_TAGS: &[&str] = &["br", "hr", "img", "input", "meta", "area", "base", "col", "embed", "link", "param", "source", "track", "wbr"];
+const HTML_VOID_TAGS: &[&str] =
+    &["br", "hr", "img", "input", "meta", "area", "base", "col", "embed", "link", "param", "source", "track", "wbr"];
 
 fn chunk_html(text: &str, limit: usize) -> Vec<String> {
     let mut chunks = Vec::new();
@@ -160,7 +257,15 @@ fn chunk_html(text: &str, limit: usize) -> Vec<String> {
 
         // Append preceding text
         let pre_text = &text[last_pos..start];
-        append_text_checking_limit(&mut chunks, &mut current_chunk, pre_text, limit, &mut open_tags, close_html_tags, open_html_tags);
+        append_text_checking_limit(
+            &mut chunks,
+            &mut current_chunk,
+            pre_text,
+            limit,
+            &mut open_tags,
+            close_html_tags,
+            open_html_tags,
+        );
 
         // Process tag
         let is_closing = full_tag.starts_with("</");
@@ -171,7 +276,7 @@ fn chunk_html(text: &str, limit: usize) -> Vec<String> {
         // For HTML tags, we generally assume they fit or trigger a split if very massive.
         let mut closing_overhead = calculate_html_closing_overhead(&open_tags);
         if !is_void && !is_closing {
-           closing_overhead += tag_name.len() + 3; // </tag>
+            closing_overhead += tag_name.len() + 3; // </tag>
         }
         if current_chunk.len() + full_tag.len() + closing_overhead > limit {
             // Force split before tag
@@ -198,7 +303,15 @@ fn chunk_html(text: &str, limit: usize) -> Vec<String> {
 
     // Append remaining text
     let remaining_text = &text[last_pos..];
-    append_text_checking_limit(&mut chunks, &mut current_chunk, remaining_text, limit, &mut open_tags, close_html_tags, open_html_tags);
+    append_text_checking_limit(
+        &mut chunks,
+        &mut current_chunk,
+        remaining_text,
+        limit,
+        &mut open_tags,
+        close_html_tags,
+        open_html_tags,
+    );
 
     if !current_chunk.is_empty() {
         // Close any remaining open tags for robustness (empty if input was valid)
@@ -422,5 +535,11 @@ mod tests {
         // open overhead is 1 (*). close overhead 1.
         // *b* is 3.
         assert!(chunks.iter().all(|c| c.len() <= 3));
+    }
+
+    #[test]
+    fn test_parse_retry_after_from_description() {
+        let retry = parse_retry_after_from_description("Too Many Requests: retry after 264");
+        assert_eq!(retry, Some(264));
     }
 }

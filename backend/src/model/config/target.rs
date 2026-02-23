@@ -3,13 +3,15 @@ use crate::model::config::trakt::TraktConfig;
 use crate::model::mapping::Mapping;
 use crate::model::{macros, ConfigRename, ConfigSort};
 use arc_swap::ArcSwapOption;
-use shared::model::{ConfigTargetDto, ConfigTargetOptions, HdHomeRunTargetOutputDto, M3uTargetOutputDto,
-                    ProcessingOrder, StrmExportStyle, StrmTargetOutputDto, TargetOutputDto, TargetType, TraktConfigDto, XtreamTargetOutputDto};
-use shared::model::PlaylistItemType;
-use std::sync::Arc;
 use shared::foundation::Filter;
 use shared::foundation::ValueProvider;
+use shared::model::PlaylistItemType;
+use shared::model::{
+    ConfigTargetDto, ConfigTargetOptions, HdHomeRunTargetOutputDto, M3uTargetOutputDto, ProcessingOrder,
+    StrmExportStyle, StrmTargetOutputDto, TargetOutputDto, TargetType, TraktConfigDto, XtreamTargetOutputDto,
+};
 use shared::{apply_flags, create_bitset};
+use std::sync::Arc;
 
 create_bitset!(u8, XtreamTargetFlags, SkipLiveDirectSource, SkipVideoDirectSource, SkipSeriesDirectSource);
 create_bitset!(u8, StrmTargetFlags, Flat, UnderscoreWhitespace, Cleanup, AddQualityToFilename);
@@ -50,11 +52,7 @@ impl From<&XtreamTargetOutputDto> for XtreamTargetOutput {
             (skip_series_direct_source, SkipSeriesDirectSource)
         );
 
-        Self {
-            flags,
-            trakt: dto.trakt.as_ref().map(Into::into),
-            filter: dto.t_filter.clone(),
-        }
+        Self { flags, trakt: dto.trakt.as_ref().map(Into::into), filter: dto.t_filter.clone() }
     }
 }
 
@@ -101,7 +99,6 @@ impl From<&M3uTargetOutput> for M3uTargetOutputDto {
         }
     }
 }
-
 
 #[derive(Debug, Clone)]
 pub struct StrmTargetOutput {
@@ -167,20 +164,12 @@ pub struct HdHomeRunTargetOutput {
 macros::from_impl!(HdHomeRunTargetOutput);
 impl From<&HdHomeRunTargetOutputDto> for HdHomeRunTargetOutput {
     fn from(dto: &HdHomeRunTargetOutputDto) -> Self {
-        Self {
-            device: dto.device.clone(),
-            username: dto.username.clone(),
-            use_output: dto.use_output,
-        }
+        Self { device: dto.device.clone(), username: dto.username.clone(), use_output: dto.use_output }
     }
 }
 impl From<&HdHomeRunTargetOutput> for HdHomeRunTargetOutputDto {
     fn from(instance: &HdHomeRunTargetOutput) -> Self {
-        Self {
-            device: instance.device.clone(),
-            username: instance.username.clone(),
-            use_output: instance.use_output,
-        }
+        Self { device: instance.device.clone(), username: instance.username.clone(), use_output: instance.use_output }
     }
 }
 
@@ -255,7 +244,9 @@ impl ConfigTarget {
     }
 
     pub(crate) fn get_hdhomerun_output(&self) -> Option<&HdHomeRunTargetOutput> {
-        if let Some(TargetOutput::HdHomeRun(output)) = self.output.iter().find(|o| matches!(o, TargetOutput::HdHomeRun(_))) {
+        if let Some(TargetOutput::HdHomeRun(output)) =
+            self.output.iter().find(|o| matches!(o, TargetOutput::HdHomeRun(_)))
+        {
             Some(output)
         } else {
             None
@@ -265,10 +256,26 @@ impl ConfigTarget {
     pub fn has_output(&self, tt: TargetType) -> bool {
         for target_output in &self.output {
             match target_output {
-                TargetOutput::Xtream(_) => { if tt == TargetType::Xtream { return true; } }
-                TargetOutput::M3u(_) => { if tt == TargetType::M3u { return true; } }
-                TargetOutput::Strm(_) => { if tt == TargetType::Strm { return true; } }
-                TargetOutput::HdHomeRun(_) => { if tt == TargetType::HdHomeRun { return true; } }
+                TargetOutput::Xtream(_) => {
+                    if tt == TargetType::Xtream {
+                        return true;
+                    }
+                }
+                TargetOutput::M3u(_) => {
+                    if tt == TargetType::M3u {
+                        return true;
+                    }
+                }
+                TargetOutput::Strm(_) => {
+                    if tt == TargetType::Strm {
+                        return true;
+                    }
+                }
+                TargetOutput::HdHomeRun(_) => {
+                    if tt == TargetType::HdHomeRun {
+                        return true;
+                    }
+                }
             }
         }
         false
@@ -294,21 +301,24 @@ impl From<&ConfigTargetDto> for ConfigTarget {
             name: dto.name.clone(),
             options: dto.options.clone(),
             sort: dto.sort.as_ref().map(Into::into),
-            filter: dto.t_filter.as_ref().unwrap().clone(),
+            filter: dto.t_filter.clone().unwrap_or_default(),
             output: dto.output.iter().map(Into::into).collect(),
             rename: dto.rename.as_ref().map(|l| l.iter().map(Into::into).collect()),
             mapping_ids: dto.mapping.clone(),
             mapping: Arc::new(ArcSwapOption::new(None)),
             favourites: dto.favourites.as_ref().map(|f| f.iter().map(Into::into).collect()),
             processing_order: dto.processing_order,
-            watch: dto.watch.as_ref().map(|list| list.iter().filter_map(|s|
-                match shared::model::REGEX_CACHE.get_or_compile(s) {
-                    Ok(re) => Some(re),
-                    Err(e) => {
-                        log::warn!("Invalid watch regex pattern '{s}': {e}");
-                        None
-                    }
-                }).collect()),
+            watch: dto.watch.as_ref().map(|list| {
+                list.iter()
+                    .filter_map(|s| match shared::model::REGEX_CACHE.get_or_compile(s) {
+                        Ok(re) => Some(re),
+                        Err(e) => {
+                            log::warn!("Invalid watch regex pattern '{s}': {e}");
+                            None
+                        }
+                    })
+                    .collect()
+            }),
             use_memory_cache: dto.use_memory_cache,
         }
     }

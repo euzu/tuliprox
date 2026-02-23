@@ -1,9 +1,9 @@
 use crate::model::macros;
-use shared::error::{TuliproxError, info_err_res};
+use shared::error::{info_err_res, TuliproxError};
 use shared::model::{ConfigDto, LibraryConfigDto, LibraryContentType, LibraryMetadataFormat};
+use shared::utils::{default_metadata_path, Internable};
 use std::path::PathBuf;
 use std::sync::Arc;
-use shared::utils::{default_metadata_path, Internable};
 
 #[derive(Debug, Clone, Default)]
 pub struct LibraryScanDirectory {
@@ -44,7 +44,6 @@ pub struct LibraryPlaylistConfig {
     pub series_category: Arc<str>,
 }
 
-
 #[derive(Debug, Clone)]
 pub struct LibraryConfig {
     pub enabled: bool,
@@ -62,11 +61,7 @@ impl LibraryConfig {
         }
 
         let scan_path = PathBuf::from(path);
-        let scan_path = if scan_path.is_relative() {
-            PathBuf::from(working_dir).join(scan_path)
-        } else {
-            scan_path
-        };
+        let scan_path = if scan_path.is_relative() { PathBuf::from(working_dir).join(scan_path) } else { scan_path };
 
         match scan_path.canonicalize() {
             Ok(path_buf) => Ok(path_buf.to_string_lossy().to_string()),
@@ -89,11 +84,8 @@ impl LibraryConfig {
 
             // Resolve metadata path to absolute path based on working_dir
             let meta_path = PathBuf::from(&self.metadata.path);
-            let meta_path = if meta_path.is_relative() {
-                PathBuf::from(working_dir).join(&meta_path)
-            } else {
-                meta_path
-            };
+            let meta_path =
+                if meta_path.is_relative() { PathBuf::from(working_dir).join(&meta_path) } else { meta_path };
             self.metadata.path = meta_path.to_string_lossy().to_string();
 
             self.canonicalize_scan_directories(working_dir)?;
@@ -112,7 +104,6 @@ macros::from_impl!(LibraryConfig);
 
 impl From<&LibraryConfigDto> for LibraryConfig {
     fn from(dto: &LibraryConfigDto) -> Self {
-
         Self {
             enabled: dto.enabled,
             scan_directories: dto
@@ -125,11 +116,7 @@ impl From<&LibraryConfigDto> for LibraryConfig {
                     recursive: d.recursive,
                 })
                 .collect(),
-            supported_extensions: dto
-                .supported_extensions
-                .iter()
-                .map(|ext| ext.to_lowercase())
-                .collect(),
+            supported_extensions: dto.supported_extensions.iter().map(|ext| ext.to_lowercase()).collect(),
             metadata: LibraryMetadataConfig {
                 path: dto.metadata.path.clone(),
                 read_existing: LibraryMetadataReadConfig {
@@ -177,31 +164,25 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn unique_missing_path() -> String {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time must be after unix epoch")
-            .as_nanos();
-        std::env::temp_dir()
-            .join(format!("tuliprox-library-missing-{nonce}"))
-            .to_string_lossy()
-            .to_string()
+        let nonce =
+            SystemTime::now().duration_since(UNIX_EPOCH).expect("system time must be after unix epoch").as_nanos();
+        std::env::temp_dir().join(format!("tuliprox-library-missing-{nonce}")).to_string_lossy().to_string()
     }
 
     #[test]
     fn validate_library_paths_rejects_missing_scan_directory() {
-        let mut cfg = ConfigDto::default();
-        cfg.working_dir = std::env::current_dir()
-            .expect("current_dir should be available")
-            .to_string_lossy()
-            .to_string();
-        cfg.library = Some(LibraryConfigDto {
-            enabled: true,
-            scan_directories: vec![LibraryScanDirectoryDto {
-                path: unique_missing_path(),
+        let cfg = ConfigDto {
+            working_dir: std::env::current_dir()
+                .expect("current_dir should be available")
+                .to_string_lossy()
+                .to_string(),
+            library: Some(LibraryConfigDto {
+                enabled: true,
+                scan_directories: vec![LibraryScanDirectoryDto { path: unique_missing_path(), ..Default::default() }],
                 ..Default::default()
-            }],
+            }),
             ..Default::default()
-        });
+        };
 
         let err = validate_library_paths_from_dto(&cfg).expect_err("missing scan directory must be rejected");
         assert!(err.to_string().contains("Failed to canonicalize directory path"));
@@ -209,40 +190,41 @@ mod tests {
 
     #[test]
     fn validate_library_paths_rejects_missing_scan_directory_even_when_disabled() {
-        let mut cfg = ConfigDto::default();
-        cfg.working_dir = std::env::current_dir()
-            .expect("current_dir should be available")
-            .to_string_lossy()
-            .to_string();
-        cfg.library = Some(LibraryConfigDto {
-            enabled: false,
-            scan_directories: vec![LibraryScanDirectoryDto {
-                path: unique_missing_path(),
+        let cfg = ConfigDto {
+            working_dir: std::env::current_dir()
+                .expect("current_dir should be available")
+                .to_string_lossy()
+                .to_string(),
+            library: Some(LibraryConfigDto {
+                enabled: false,
+                scan_directories: vec![LibraryScanDirectoryDto { path: unique_missing_path(), ..Default::default() }],
                 ..Default::default()
-            }],
+            }),
             ..Default::default()
-        });
+        };
 
-        let err =
-            validate_library_paths_from_dto(&cfg).expect_err("missing scan directory must be rejected even when disabled");
+        let err = validate_library_paths_from_dto(&cfg)
+            .expect_err("missing scan directory must be rejected even when disabled");
         assert!(err.to_string().contains("Failed to canonicalize directory path"));
     }
 
     #[test]
     fn validate_library_paths_accepts_existing_scan_directory() {
-        let mut cfg = ConfigDto::default();
-        cfg.working_dir = std::env::current_dir()
-            .expect("current_dir should be available")
-            .to_string_lossy()
-            .to_string();
-        cfg.library = Some(LibraryConfigDto {
-            enabled: true,
-            scan_directories: vec![LibraryScanDirectoryDto {
-                path: std::env::temp_dir().to_string_lossy().to_string(),
+        let cfg = ConfigDto {
+            working_dir: std::env::current_dir()
+                .expect("current_dir should be available")
+                .to_string_lossy()
+                .to_string(),
+            library: Some(LibraryConfigDto {
+                enabled: true,
+                scan_directories: vec![LibraryScanDirectoryDto {
+                    path: std::env::temp_dir().to_string_lossy().to_string(),
+                    ..Default::default()
+                }],
                 ..Default::default()
-            }],
+            }),
             ..Default::default()
-        });
+        };
 
         validate_library_paths_from_dto(&cfg).expect("existing scan directory should pass validation");
     }

@@ -1,24 +1,34 @@
 use crate::api::model::ProviderHandle;
 use crate::api::model::{AppState, EventMessage};
-use crate::processing::processor::{update_generic_stream_metadata, update_live_stream_metadata, update_series_metadata, update_vod_metadata};
+use crate::processing::processor::{
+    update_generic_stream_metadata, update_live_stream_metadata, update_series_metadata, update_vod_metadata,
+};
 use crate::utils::debug_if_enabled;
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use log::{debug, error, info, warn};
+use parking_lot::Mutex as ParkingMutex;
 use shared::create_bitset;
 use shared::error::TuliproxError;
-use shared::model::{InputType, LiveStreamProperties, PlaylistItemType, SeriesStreamProperties, UUIDType, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem};
+use shared::model::{
+    InputType, LiveStreamProperties, PlaylistItemType, SeriesStreamProperties, UUIDType, VideoStreamProperties,
+    XtreamCluster, XtreamPlaylistItem,
+};
 use shared::utils::generate_playlist_uuid;
 use std::sync::atomic::{AtomicU64, Ordering};
-use parking_lot::Mutex as ParkingMutex;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
 use crate::api::model::BatchResultCollector;
-use crate::repository::{get_input_storage_path, get_target_id_mapping_file, write_playlist_batch_item_upsert, xtream_get_file_path, BPlusTreeQuery};
-use crate::repository::{persist_input_live_info_batch, persist_input_series_info_batch, persist_input_vod_info_batch, TargetIdMapping};
+use crate::repository::{
+    get_input_storage_path, get_target_id_mapping_file, write_playlist_batch_item_upsert, xtream_get_file_path,
+    BPlusTreeQuery,
+};
+use crate::repository::{
+    persist_input_live_info_batch, persist_input_series_info_batch, persist_input_vod_info_batch, TargetIdMapping,
+};
 use crate::utils::FileReadGuard;
 use std::cmp::min;
 use std::collections::{HashMap, HashSet};
@@ -26,10 +36,13 @@ use std::collections::{HashMap, HashSet};
 const QUEUE_LOG_INTERVAL: Duration = Duration::from_secs(30);
 const PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(15);
 const MAX_RETRY_BACKOFF_SECS: u64 = 60;
+const UPDATE_IN_PROGRESS_RETRY_SECS: u64 = 2;
+const MIN_PROBE_RETRY_BASE_SECS: u16 = 5;
 
 const MAX_QUEUE_SIZE: usize = 100_000;
 const TASK_ERR_NO_CONNECTION: &str = "No connection available";
 const TASK_ERR_PREEMPTED: &str = "Task preempted";
+const TASK_ERR_UPDATE_IN_PROGRESS: &str = "Playlist update in progress";
 
 create_bitset!(u8, ResolveReason, Info, Tmdb, Date, Probe, MissingDetails);
 
@@ -69,20 +82,40 @@ impl From<String> for ProviderIdType {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum UpdateTask {
-    ResolveVod { id: ProviderIdType, reason: ResolveReasonSet, delay: u16 },
-    ResolveSeries { id: ProviderIdType, reason: ResolveReasonSet, delay: u16 },
-    ProbeLive { id: ProviderIdType, reason: ResolveReasonSet, delay: u16, interval: u64 },
+    ResolveVod {
+        id: ProviderIdType,
+        reason: ResolveReasonSet,
+        delay: u16,
+    },
+    ResolveSeries {
+        id: ProviderIdType,
+        reason: ResolveReasonSet,
+        delay: u16,
+    },
+    ProbeLive {
+        id: ProviderIdType,
+        reason: ResolveReasonSet,
+        delay: u16,
+        interval: u64,
+    },
     // Generic probe for M3U/Library/etc.
-    ProbeStream { probe_scope: Arc<str>, unique_id: String, url: String, item_type: PlaylistItemType, reason: ResolveReasonSet, delay: u16 },
+    ProbeStream {
+        probe_scope: Arc<str>,
+        unique_id: String,
+        url: String,
+        item_type: PlaylistItemType,
+        reason: ResolveReasonSet,
+        delay: u16,
+    },
 }
 
 impl UpdateTask {
     pub fn delay(&self) -> u16 {
         match self {
-            UpdateTask::ResolveVod { delay, .. } |
-            UpdateTask::ResolveSeries { delay, .. } |
-            UpdateTask::ProbeLive { delay, .. } |
-            UpdateTask::ProbeStream { delay, .. } => *delay,
+            UpdateTask::ResolveVod { delay, .. }
+            | UpdateTask::ResolveSeries { delay, .. }
+            | UpdateTask::ProbeLive { delay, .. }
+            | UpdateTask::ProbeStream { delay, .. } => *delay,
         }
     }
 }
@@ -90,10 +123,18 @@ impl UpdateTask {
 impl std::fmt::Display for UpdateTask {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            UpdateTask::ResolveVod { id, reason, delay } => write!(f, "Resolve VOD {id} (Reason: {reason}, Delay: {delay}sec)"),
-            UpdateTask::ResolveSeries { id, reason, delay } => write!(f, "Resolve Series {id} (Reason: {reason}, Delay: {delay}sec)"),
-            UpdateTask::ProbeLive { id, reason, delay, interval } => write!(f, "Probe Live {id} (Reason: {reason}, Delay: {delay}sec, Interval: {interval}secs )"),
-            UpdateTask::ProbeStream { probe_scope, unique_id, reason, delay, .. } => write!(f, "Probe Stream {probe_scope}/{unique_id} (Reason: {reason}, Delay: {delay}sec)"),
+            UpdateTask::ResolveVod { id, reason, delay } => {
+                write!(f, "Resolve VOD {id} (Reason: {reason}, Delay: {delay}sec)")
+            }
+            UpdateTask::ResolveSeries { id, reason, delay } => {
+                write!(f, "Resolve Series {id} (Reason: {reason}, Delay: {delay}sec)")
+            }
+            UpdateTask::ProbeLive { id, reason, delay, interval } => {
+                write!(f, "Probe Live {id} (Reason: {reason}, Delay: {delay}sec, Interval: {interval}secs )")
+            }
+            UpdateTask::ProbeStream { probe_scope, unique_id, reason, delay, .. } => {
+                write!(f, "Probe Stream {probe_scope}/{unique_id} (Reason: {reason}, Delay: {delay}sec)")
+            }
         }
     }
 }
@@ -150,10 +191,7 @@ struct PendingTask {
 
 impl PendingTask {
     fn new(task: UpdateTask) -> Self {
-        Self {
-            task: Mutex::new(task),
-            generation: AtomicU64::new(0),
-        }
+        Self { task: Mutex::new(task), generation: AtomicU64::new(0) }
     }
 }
 
@@ -170,6 +208,11 @@ pub struct MetadataUpdateManager {
     workers: DashMap<Arc<str>, InputWorkerContext>,
     /// Global application state (weak reference to avoid cycles)
     app_state: tokio::sync::Mutex<Option<Weak<AppState>>>,
+    /// Global gate:
+    /// - Foreground playlist updates hold WRITE lock.
+    /// - Background metadata/probe tasks hold READ lock per task.
+    ///   This guarantees that no background task runs while an update is active.
+    update_pause_gate: Arc<RwLock<()>>,
     /// Global cancellation token for shutdown
     cancel_token: CancellationToken,
 }
@@ -185,8 +228,15 @@ impl MetadataUpdateManager {
         Self {
             workers: DashMap::new(),
             app_state: tokio::sync::Mutex::new(None),
+            update_pause_gate: Arc::new(RwLock::new(())),
             cancel_token,
         }
+    }
+
+    /// Acquire exclusive gate for a foreground playlist update.
+    /// While this guard is held, background metadata/probe tasks are paused.
+    pub async fn acquire_update_pause_guard(&self) -> tokio::sync::OwnedRwLockWriteGuard<()> {
+        self.update_pause_gate.clone().write_owned().await
     }
 
     pub async fn set_app_state(&self, app_state: Weak<AppState>) {
@@ -226,10 +276,7 @@ impl MetadataUpdateManager {
                 let (tx, rx) = mpsc::channel::<TaskKey>(256);
                 let pending_tasks = Arc::new(DashMap::new());
 
-                let ctx = InputWorkerContext {
-                    sender: tx.clone(),
-                    pending_tasks: pending_tasks.clone(),
-                };
+                let ctx = InputWorkerContext { sender: tx.clone(), pending_tasks: pending_tasks.clone() };
                 entry.insert(ctx.clone());
 
                 worker_to_spawn = Some(InputWorker {
@@ -238,6 +285,7 @@ impl MetadataUpdateManager {
                     receiver: rx,
                     pending_tasks,
                     app_state_weak,
+                    update_pause_gate: Arc::clone(&self.update_pause_gate),
                     cancel_token: self.cancel_token.clone(),
                     batch_buffer: BatchResultCollector::new(),
                     db_handles: HashMap::new(),
@@ -274,14 +322,26 @@ impl MetadataUpdateManager {
             let mut merged = false;
             // Merge logic
             match (&mut *existing, task) {
-                (UpdateTask::ResolveVod { reason: r1, delay: d1, .. }, UpdateTask::ResolveVod { reason: r2, delay: d2, .. })
-                | (UpdateTask::ResolveSeries { reason: r1, delay: d1, .. }, UpdateTask::ResolveSeries { reason: r2, delay: d2, .. })
-                | (UpdateTask::ProbeStream { reason: r1, delay: d1, .. }, UpdateTask::ProbeStream { reason: r2, delay: d2, .. }) => {
+                (
+                    UpdateTask::ResolveVod { reason: r1, delay: d1, .. },
+                    UpdateTask::ResolveVod { reason: r2, delay: d2, .. },
+                )
+                | (
+                    UpdateTask::ResolveSeries { reason: r1, delay: d1, .. },
+                    UpdateTask::ResolveSeries { reason: r2, delay: d2, .. },
+                )
+                | (
+                    UpdateTask::ProbeStream { reason: r1, delay: d1, .. },
+                    UpdateTask::ProbeStream { reason: r2, delay: d2, .. },
+                ) => {
                     *r1 |= r2;
                     *d1 = min(*d1, d2);
                     merged = true;
                 }
-                (UpdateTask::ProbeLive { reason: r1, delay: d1, interval: i1, .. }, UpdateTask::ProbeLive { reason: r2, delay: d2, interval: i2, .. }) => {
+                (
+                    UpdateTask::ProbeLive { reason: r1, delay: d1, interval: i1, .. },
+                    UpdateTask::ProbeLive { reason: r2, delay: d2, interval: i2, .. },
+                ) => {
                     *r1 |= r2;
                     *d1 = min(*d1, d2);
                     *i1 = min(*i1, i2);
@@ -331,6 +391,7 @@ struct InputWorker {
     receiver: mpsc::Receiver<TaskKey>,
     pending_tasks: Arc<DashMap<TaskKey, PendingTask>>,
     app_state_weak: Option<Weak<AppState>>,
+    update_pause_gate: Arc<RwLock<()>>,
     cancel_token: CancellationToken,
     batch_buffer: BatchResultCollector,
     db_handles: HashMap<XtreamCluster, DbHandle>,
@@ -356,11 +417,7 @@ impl InputWorker {
         let mut next_task: Option<(TaskKey, UpdateTask, u64)> = None;
 
         loop {
-            let task_data = if let Some(t) = next_task.take() {
-                Some(t)
-            } else {
-                self.recv_task_fast_or_wait().await
-            };
+            let task_data = if let Some(t) = next_task.take() { Some(t) } else { self.recv_task_fast_or_wait().await };
 
             let Some((current_key, current_task, current_generation)) = task_data else { break };
 
@@ -375,9 +432,7 @@ impl InputWorker {
                     .checked_sub(QUEUE_LOG_INTERVAL + Duration::from_secs(1))
                     .unwrap_or_else(Instant::now);
                 if let Some(app_state) = app_state_weak.as_ref().and_then(Weak::upgrade) {
-                    app_state
-                        .event_manager
-                        .send_event(EventMessage::InputMetadataUpdatesStarted(input_name.clone()));
+                    app_state.event_manager.send_event(EventMessage::InputMetadataUpdatesStarted(input_name.clone()));
                 }
                 debug!("Background metadata update queue has entries for input {input_name}; starting processing");
             }
@@ -387,16 +442,22 @@ impl InputWorker {
             let mut requeue_current = false;
             let mut retry_delay_secs = 0_u64;
 
-            match Self::process_task_static(
-                &input_name,
-                app_state_weak.as_ref(),
-                &current_task,
-                &mut self.batch_buffer,
-                &mut self.db_handles,
-                &mut self.failed_clusters,
-            )
+            // Hold READ gate while executing one background task.
+            // Foreground updates acquire WRITE gate and therefore pause this path.
+            let task_result = {
+                let _task_gate_guard = self.update_pause_gate.clone().read_owned().await;
+                Self::process_task_static(
+                    &input_name,
+                    app_state_weak.as_ref(),
+                    &current_task,
+                    &mut self.batch_buffer,
+                    &mut self.db_handles,
+                    &mut self.failed_clusters,
+                )
                 .await
-            {
+            };
+
+            match task_result {
                 Ok(task_changed) => {
                     if Self::is_vod_task_key(&current_key) {
                         processed_vod_count += 1;
@@ -408,8 +469,7 @@ impl InputWorker {
                     if last_progress_log_at.elapsed() >= PROGRESS_LOG_INTERVAL {
                         // current_key is removed from pending_tasks later in this loop iteration;
                         // subtract it here so "remaining" reflects the post-success queue size.
-                        let (mut remaining_vod, mut remaining_series) =
-                            Self::queue_resolve_counts(&self.pending_tasks);
+                        let (mut remaining_vod, mut remaining_series) = Self::queue_resolve_counts(&self.pending_tasks);
                         if Self::is_vod_task_key(&current_key) {
                             remaining_vod = remaining_vod.saturating_sub(1);
                         } else if Self::is_series_task_key(&current_key) {
@@ -435,22 +495,51 @@ impl InputWorker {
                     // If this is the only queued signal, use exponential backoff.
                     // Otherwise, push to the back immediately to improve throughput/fairness.
                     if self.receiver.is_empty() {
-                        retry_delay_secs = Self::compute_retry_backoff_secs(current_task.delay(), attempts);
+                        retry_delay_secs = if Self::is_probe_task(&current_task) {
+                            Self::compute_probe_retry_backoff_secs(current_task.delay(), attempts)
+                        } else {
+                            Self::compute_retry_backoff_secs(current_task.delay(), attempts)
+                        };
                     }
 
-                    debug_if_enabled!("No provider connection for task {} on input {}, requeueing (attempt={}, retry_delay={}s, queue_len={})",
-                        current_task,
-                        &input_name,
-                        attempts,
-                        retry_delay_secs,
-                        self.receiver.len()
-                    );
+                    if Self::is_probe_task(&current_task) {
+                        debug_if_enabled!(
+                            "No provider connection for low-priority probe task {} on input {}, requeueing (attempt={}, retry_delay={}s, queue_len={})",
+                            current_task,
+                            &input_name,
+                            attempts,
+                            retry_delay_secs,
+                            self.receiver.len()
+                        );
+                    } else {
+                        debug_if_enabled!("No provider connection for task {} on input {}, requeueing (attempt={}, retry_delay={}s, queue_len={})",
+                            current_task,
+                            &input_name,
+                            attempts,
+                            retry_delay_secs,
+                            self.receiver.len()
+                        );
+                    }
+                }
+                Err(e) if e.message == TASK_ERR_UPDATE_IN_PROGRESS => {
+                    requeue_current = true;
+                    retry_attempts.remove(&current_key);
+                    let update_completed =
+                        Self::wait_for_playlist_update_completion(app_state_weak.as_ref(), &self.cancel_token).await;
+                    if !update_completed {
+                        // Fallback path (e.g. listener closed): keep retrying with a small delay.
+                        retry_delay_secs = UPDATE_IN_PROGRESS_RETRY_SECS;
+                    }
+                }
+                Err(e) if e.message == TASK_ERR_PREEMPTED => {
+                    // Preempted by a user-facing request: defer and retry later.
+                    requeue_current = true;
+                    retry_attempts.remove(&current_key);
+                    retry_delay_secs = UPDATE_IN_PROGRESS_RETRY_SECS;
                 }
                 Err(e) => {
                     retry_attempts.remove(&current_key);
-                    if e.message != TASK_ERR_PREEMPTED {
-                        error!("Task {current_task} failed for input {input_name}: {e}");
-                    }
+                    error!("Task {current_task} failed for input {input_name}: {e}");
                 }
             }
 
@@ -474,9 +563,7 @@ impl InputWorker {
                     warn!("Failed to requeue task {current_task} for input {input_name}");
                 }
             } else {
-                self
-                    .finalize_processed_task_success(&current_key, current_generation, &input_name)
-                    .await;
+                self.finalize_processed_task_success(&current_key, current_generation, &input_name).await;
 
                 // Rate limiting
                 if delay_secs > 0
@@ -499,14 +586,16 @@ impl InputWorker {
                 }
             }
 
-            let queue_has_work =
-                next_task.is_some() || !self.receiver.is_empty() || !self.pending_tasks.is_empty();
+            let queue_has_work = next_task.is_some() || !self.receiver.is_empty() || !self.pending_tasks.is_empty();
 
             if queue_has_work {
                 // Avoid O(n) queue scans per task; report queue status periodically.
                 if last_queue_log_at.elapsed() >= QUEUE_LOG_INTERVAL {
                     let queue_counts = Self::queue_resolve_counts(&self.pending_tasks);
-                    debug!("In queue to resolve vod: {}, series: {} (input: {input_name})", queue_counts.0, queue_counts.1);
+                    debug!(
+                        "In queue to resolve vod: {}, series: {} (input: {input_name})",
+                        queue_counts.0, queue_counts.1
+                    );
                     last_queue_log_at = Instant::now();
                 }
             } else {
@@ -604,9 +693,41 @@ impl InputWorker {
     fn compute_retry_backoff_secs(base_delay_secs: u16, attempts: u8) -> u64 {
         let base_delay = u64::from(base_delay_secs.max(1));
         let exp = u32::from(attempts.saturating_sub(1).min(6));
-        base_delay
-            .saturating_mul(2_u64.saturating_pow(exp))
-            .min(MAX_RETRY_BACKOFF_SECS)
+        base_delay.saturating_mul(2_u64.saturating_pow(exp)).min(MAX_RETRY_BACKOFF_SECS)
+    }
+
+    fn compute_probe_retry_backoff_secs(base_delay_secs: u16, attempts: u8) -> u64 {
+        let adjusted_base = base_delay_secs.max(MIN_PROBE_RETRY_BASE_SECS);
+        Self::compute_retry_backoff_secs(adjusted_base, attempts)
+    }
+
+    async fn wait_for_playlist_update_completion(
+        app_state_weak: Option<&Weak<AppState>>,
+        cancel_token: &CancellationToken,
+    ) -> bool {
+        let Some(app_state) = app_state_weak.and_then(Weak::upgrade) else {
+            return false;
+        };
+
+        // If no update is active anymore, do not block on events.
+        if let Some(guard) = app_state.update_guard.try_playlist() {
+            drop(guard);
+            return true;
+        }
+
+        let mut rx = app_state.event_manager.get_event_channel();
+        loop {
+            tokio::select! {
+                () = cancel_token.cancelled() => return false,
+                recv = rx.recv() => {
+                    match recv {
+                        Ok(EventMessage::PlaylistUpdate(_)) => return true,
+                        Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return false,
+                    }
+                }
+            }
+        }
     }
 
     async fn sleep_or_cancel(cancel_token: &CancellationToken, duration: Duration) -> bool {
@@ -641,13 +762,20 @@ impl InputWorker {
         matches!(key, TaskKey::Series(_) | TaskKey::SeriesStr(_))
     }
 
+    #[inline]
+    fn is_probe_task(task: &UpdateTask) -> bool {
+        matches!(task, UpdateTask::ProbeLive { .. } | UpdateTask::ProbeStream { .. })
+    }
+
     // Changed to static method
     async fn flush_batch_static(
         input_name: &str,
         app_state_weak: Option<&Weak<AppState>>,
         batch_buffer: &mut BatchResultCollector,
     ) {
-        if batch_buffer.is_empty() { return; }
+        if batch_buffer.is_empty() {
+            return;
+        }
 
         let Some(app_state) = app_state_weak.and_then(Weak::upgrade) else { return };
         let app_config = &app_state.app_config;
@@ -670,7 +798,15 @@ impl InputWorker {
                 }
 
                 if !updates.is_empty() {
-                    if let Err(e) = persist_input_vod_info_batch(app_config, &storage_path, XtreamCluster::Video, input_name, updates).await {
+                    if let Err(e) = persist_input_vod_info_batch(
+                        app_config,
+                        &storage_path,
+                        XtreamCluster::Video,
+                        input_name,
+                        updates,
+                    )
+                    .await
+                    {
                         error!("Failed to flush VOD batch for input {input_name}: {e}");
                     }
                 }
@@ -685,7 +821,15 @@ impl InputWorker {
                 }
 
                 if !updates.is_empty() {
-                    if let Err(e) = persist_input_series_info_batch(app_config, &storage_path, XtreamCluster::Series, input_name, updates).await {
+                    if let Err(e) = persist_input_series_info_batch(
+                        app_config,
+                        &storage_path,
+                        XtreamCluster::Series,
+                        input_name,
+                        updates,
+                    )
+                    .await
+                    {
                         error!("Failed to flush Series batch for input {input_name}: {e}");
                     }
                 }
@@ -700,25 +844,24 @@ impl InputWorker {
                 }
 
                 if !updates.is_empty() {
-                    if let Err(e) = persist_input_live_info_batch(app_config, &storage_path, XtreamCluster::Live, input_name, updates).await {
+                    if let Err(e) = persist_input_live_info_batch(
+                        app_config,
+                        &storage_path,
+                        XtreamCluster::Live,
+                        input_name,
+                        updates,
+                    )
+                    .await
+                    {
                         error!("Failed to flush Live batch for input {input_name}: {e}");
                     }
                 }
             }
         }
 
-        let cascade_batch = BatchResultCollector {
-            vod: vod_updates,
-            series: series_updates,
-            live: live_updates,
-        };
+        let cascade_batch = BatchResultCollector { vod: vod_updates, series: series_updates, live: live_updates };
 
-        Self::cascade_updates(
-            &app_state,
-            &app_config.config.load(),
-            input_name,
-            &cascade_batch,
-        ).await;
+        Self::cascade_updates(&app_state, &app_config.config.load(), input_name, &cascade_batch).await;
     }
 
     #[allow(clippy::too_many_lines)]
@@ -747,12 +890,18 @@ impl InputWorker {
             affected_targets
         };
 
-        if targets.is_empty() { return; }
+        if targets.is_empty() {
+            return;
+        }
 
         for target in targets {
             let target_name = &target.name;
-            let Some(target_path) = crate::repository::get_target_storage_path(config, target_name) else { continue; };
-            let Some(storage_path) = crate::repository::xtream_get_storage_path(config, target_name) else { continue; };
+            let Some(target_path) = crate::repository::get_target_storage_path(config, target_name) else {
+                continue;
+            };
+            let Some(storage_path) = crate::repository::xtream_get_storage_path(config, target_name) else {
+                continue;
+            };
             let mapping_file = get_target_id_mapping_file(&target_path);
 
             // Read mapping under lock inside spawn_blocking to avoid blocking async executor.
@@ -785,12 +934,7 @@ impl InputWorker {
                 &mut provider_virtual_ids,
                 &mut uuid_virtual_ids,
             );
-            Self::apply_vod_cascade_updates(
-                app_state,
-                &target,
-                &storage_path,
-                vod_virtual_updates,
-            ).await;
+            Self::apply_vod_cascade_updates(app_state, &target, &storage_path, vod_virtual_updates).await;
 
             let series_virtual_updates = Self::collect_series_virtual_updates(
                 &mapping,
@@ -799,12 +943,7 @@ impl InputWorker {
                 &mut provider_virtual_ids,
                 &mut uuid_virtual_ids,
             );
-            Self::apply_series_cascade_updates(
-                app_state,
-                &target,
-                &storage_path,
-                series_virtual_updates,
-            ).await;
+            Self::apply_series_cascade_updates(app_state, &target, &storage_path, series_virtual_updates).await;
 
             let live_virtual_updates = Self::collect_live_virtual_updates(
                 &mapping,
@@ -813,12 +952,7 @@ impl InputWorker {
                 &mut provider_virtual_ids,
                 &mut uuid_virtual_ids,
             );
-            Self::apply_live_cascade_updates(
-                app_state,
-                &target,
-                &storage_path,
-                live_virtual_updates,
-            ).await;
+            Self::apply_live_cascade_updates(app_state, &target, &storage_path, live_virtual_updates).await;
         }
     }
 
@@ -864,9 +998,7 @@ impl InputWorker {
                         PlaylistItemType::Video,
                         props.direct_source.as_ref(),
                     );
-                    if let Some(virtual_id) =
-                        Self::get_cached_uuid_virtual_id(mapping, uuid_virtual_ids, uuid)
-                    {
+                    if let Some(virtual_id) = Self::get_cached_uuid_virtual_id(mapping, uuid_virtual_ids, uuid) {
                         virtual_updates.insert(virtual_id, props);
                     }
                 }
@@ -899,15 +1031,8 @@ impl InputWorker {
                     }
                 }
                 ProviderIdType::Text(provider_id_text) => {
-                    let uuid = generate_playlist_uuid(
-                        input_name,
-                        provider_id_text,
-                        PlaylistItemType::Series,
-                        "",
-                    );
-                    if let Some(virtual_id) =
-                        Self::get_cached_uuid_virtual_id(mapping, uuid_virtual_ids, uuid)
-                    {
+                    let uuid = generate_playlist_uuid(input_name, provider_id_text, PlaylistItemType::Series, "");
+                    if let Some(virtual_id) = Self::get_cached_uuid_virtual_id(mapping, uuid_virtual_ids, uuid) {
                         virtual_updates.insert(virtual_id, props);
                     }
                 }
@@ -946,9 +1071,7 @@ impl InputWorker {
                         PlaylistItemType::Live,
                         props.direct_source.as_ref(),
                     );
-                    if let Some(virtual_id) =
-                        Self::get_cached_uuid_virtual_id(mapping, uuid_virtual_ids, uuid)
-                    {
+                    if let Some(virtual_id) = Self::get_cached_uuid_virtual_id(mapping, uuid_virtual_ids, uuid) {
                         virtual_updates.insert(virtual_id, props);
                     }
                 }
@@ -970,10 +1093,8 @@ impl InputWorker {
 
         let target_name = target.name.as_str();
         let xtream_path = xtream_get_file_path(storage_path, XtreamCluster::Video);
-        let updates_input: Vec<(u32, VideoStreamProperties)> = virtual_updates
-            .into_iter()
-            .map(|(vid, props)| (vid, props.clone()))
-            .collect();
+        let updates_input: Vec<(u32, VideoStreamProperties)> =
+            virtual_updates.into_iter().map(|(vid, props)| (vid, props.clone())).collect();
 
         let file_lock = app_state.app_config.file_locks.read_lock(&xtream_path).await;
         let xtream_path = xtream_path.clone();
@@ -985,13 +1106,14 @@ impl InputWorker {
             };
             for (virtual_id, props) in updates_input {
                 if let Ok(Some(mut item)) = query.query_zero_copy(&virtual_id) {
-                    item.additional_properties =
-                        Some(shared::model::StreamProperties::Video(Box::new(props)));
+                    item.additional_properties = Some(shared::model::StreamProperties::Video(Box::new(props)));
                     updates.push(item);
                 }
             }
             updates
-        }).await {
+        })
+        .await
+        {
             Ok(updates) => updates,
             Err(err) => {
                 error!("Failed to read VOD updates from disk for {target_name}: {err}");
@@ -1003,12 +1125,9 @@ impl InputWorker {
             return;
         }
 
-        if let Err(e) = write_playlist_batch_item_upsert(
-            &app_state.app_config,
-            target_name,
-            XtreamCluster::Video,
-            &updates,
-        ).await {
+        if let Err(e) =
+            write_playlist_batch_item_upsert(&app_state.app_config, target_name, XtreamCluster::Video, &updates).await
+        {
             error!("Failed to cascade VOD updates to target {target_name}: {e}");
             return;
         }
@@ -1030,10 +1149,8 @@ impl InputWorker {
 
         let target_name = target.name.as_str();
         let xtream_path = xtream_get_file_path(storage_path, XtreamCluster::Series);
-        let updates_input: Vec<(u32, SeriesStreamProperties)> = virtual_updates
-            .into_iter()
-            .map(|(vid, props)| (vid, props.clone()))
-            .collect();
+        let updates_input: Vec<(u32, SeriesStreamProperties)> =
+            virtual_updates.into_iter().map(|(vid, props)| (vid, props.clone())).collect();
 
         let file_lock = app_state.app_config.file_locks.read_lock(&xtream_path).await;
         let xtream_path = xtream_path.clone();
@@ -1045,13 +1162,14 @@ impl InputWorker {
             };
             for (virtual_id, props) in updates_input {
                 if let Ok(Some(mut item)) = query.query_zero_copy(&virtual_id) {
-                    item.additional_properties =
-                        Some(shared::model::StreamProperties::Series(Box::new(props)));
+                    item.additional_properties = Some(shared::model::StreamProperties::Series(Box::new(props)));
                     updates.push(item);
                 }
             }
             updates
-        }).await {
+        })
+        .await
+        {
             Ok(updates) => updates,
             Err(err) => {
                 error!("Failed to read Series updates from disk for {target_name}: {err}");
@@ -1063,12 +1181,9 @@ impl InputWorker {
             return;
         }
 
-        if let Err(e) = write_playlist_batch_item_upsert(
-            &app_state.app_config,
-            target_name,
-            XtreamCluster::Series,
-            &updates,
-        ).await {
+        if let Err(e) =
+            write_playlist_batch_item_upsert(&app_state.app_config, target_name, XtreamCluster::Series, &updates).await
+        {
             error!("Failed to cascade Series updates to target {target_name}: {e}");
             return;
         }
@@ -1090,10 +1205,8 @@ impl InputWorker {
 
         let target_name = target.name.as_str();
         let xtream_path = xtream_get_file_path(storage_path, XtreamCluster::Live);
-        let updates_input: Vec<(u32, LiveStreamProperties)> = virtual_updates
-            .into_iter()
-            .map(|(vid, props)| (vid, props.clone()))
-            .collect();
+        let updates_input: Vec<(u32, LiveStreamProperties)> =
+            virtual_updates.into_iter().map(|(vid, props)| (vid, props.clone())).collect();
 
         let file_lock = app_state.app_config.file_locks.read_lock(&xtream_path).await;
         let xtream_path = xtream_path.clone();
@@ -1105,13 +1218,14 @@ impl InputWorker {
             };
             for (virtual_id, props) in updates_input {
                 if let Ok(Some(mut item)) = query.query_zero_copy(&virtual_id) {
-                    item.additional_properties =
-                        Some(shared::model::StreamProperties::Live(Box::new(props)));
+                    item.additional_properties = Some(shared::model::StreamProperties::Live(Box::new(props)));
                     updates.push(item);
                 }
             }
             updates
-        }).await {
+        })
+        .await
+        {
             Ok(updates) => updates,
             Err(err) => {
                 error!("Failed to read Live updates from disk for {target_name}: {err}");
@@ -1123,12 +1237,9 @@ impl InputWorker {
             return;
         }
 
-        if let Err(e) = write_playlist_batch_item_upsert(
-            &app_state.app_config,
-            target_name,
-            XtreamCluster::Live,
-            &updates,
-        ).await {
+        if let Err(e) =
+            write_playlist_batch_item_upsert(&app_state.app_config, target_name, XtreamCluster::Live, &updates).await
+        {
             error!("Failed to cascade Live updates to target {target_name}: {e}");
             return;
         }
@@ -1178,7 +1289,9 @@ impl InputWorker {
                     let file_path = file_path.clone();
                     let query = match tokio::task::spawn_blocking(move || {
                         BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&file_path)
-                    }).await {
+                    })
+                    .await
+                    {
                         Ok(Ok(query)) => Some(query),
                         Ok(Err(err)) => {
                             error!("Failed to open BPlusTreeQuery for {cluster}: {err}");
@@ -1191,10 +1304,7 @@ impl InputWorker {
                     };
 
                     if let Some(query) = query {
-                        entry.insert(DbHandle {
-                            _guard: lock,
-                            query: Arc::new(ParkingMutex::new(query)),
-                        });
+                        entry.insert(DbHandle { _guard: lock, query: Arc::new(ParkingMutex::new(query)) });
                     } else {
                         failed_clusters.insert(cluster);
                     }
@@ -1224,12 +1334,16 @@ impl InputWorker {
 
         if let ProviderIdType::Id(vid) = id {
             let stream_id = *vid;
-            if let Some(query) = Self::get_or_open_query(input_name, app_state, cluster, db_handles, failed_clusters).await {
+            if let Some(query) =
+                Self::get_or_open_query(input_name, app_state, cluster, db_handles, failed_clusters).await
+            {
                 let query = Arc::clone(&query);
                 let item = match tokio::task::spawn_blocking(move || {
                     let mut guard = query.lock();
                     guard.query_zero_copy(&stream_id).ok().flatten()
-                }).await {
+                })
+                .await
+                {
                     Ok(item) => item,
                     Err(err) => {
                         error!("Failed to query item name for {stream_id}: {err}");
@@ -1245,6 +1359,7 @@ impl InputWorker {
         None
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn process_task_static(
         input_name: &Arc<str>,
         app_state_weak: Option<&Weak<AppState>>,
@@ -1253,9 +1368,8 @@ impl InputWorker {
         db_handles: &mut HashMap<XtreamCluster, DbHandle>,
         failed_clusters: &mut HashSet<XtreamCluster>,
     ) -> Result<bool, TuliproxError> {
-        let app_state = app_state_weak
-            .and_then(Weak::upgrade)
-            .ok_or_else(|| shared::error::info_err!("AppState not available"))?;
+        let app_state =
+            app_state_weak.and_then(Weak::upgrade).ok_or_else(|| shared::error::info_err!("AppState not available"))?;
 
         let Some(input_base) = app_state.app_config.get_input_by_name(input_name) else {
             return Err(shared::error::info_err!("Input {} not found", input_name));
@@ -1265,8 +1379,15 @@ impl InputWorker {
             return Err(shared::error::info_err!("Input {} is disabled", input_name));
         }
 
-        let needs_probe_connection =
-            Self::task_needs_provider_connection(task, input_base.input_type);
+        // Background metadata/probe tasks are low-priority.
+        // Never run them while a foreground playlist update is active.
+        if let Some(guard) = app_state.update_guard.try_playlist() {
+            drop(guard);
+        } else {
+            return Err(shared::error::info_err!("{}", TASK_ERR_UPDATE_IN_PROGRESS));
+        }
+
+        let needs_probe_connection = Self::task_needs_provider_connection(task, input_base.input_type);
 
         // Reserve provider capacity only for actual probe work (ffprobe paths).
         let provider_handle = if needs_probe_connection {
@@ -1281,9 +1402,7 @@ impl InputWorker {
 
         let item_title = Self::get_item_name_static(input_name, &app_state, task, db_handles, failed_clusters).await;
 
-        let config_to_use = provider_handle
-            .as_ref()
-            .and_then(|handle| handle.allocation.get_provider_config());
+        let config_to_use = provider_handle.as_ref().and_then(|handle| handle.allocation.get_provider_config());
         let name_display = item_title.as_deref().map_or(String::new(), |n| format!(" \"{n}\""));
 
         debug!("Processing task for {input_name}: {task}{name_display}");
@@ -1295,11 +1414,7 @@ impl InputWorker {
         // Determine input to use (may be alias)
         let input_to_use = config_to_use
             .filter(|alloc| alloc.name != input_base.name)
-            .and_then(|alloc| {
-                input_base.aliases.as_ref()?
-                    .iter()
-                    .find(|a| a.enabled && a.name == alloc.name)
-            })
+            .and_then(|alloc| input_base.aliases.as_ref()?.iter().find(|a| a.enabled && a.name == alloc.name))
             .map(|alias_def| {
                 let mut temp_input = (*input_base).clone();
                 temp_input.url.clone_from(&alias_def.url);
@@ -1331,10 +1446,32 @@ impl InputWorker {
                     }
                 }
             } else {
-                Self::execute_task_inner_static(&app_state, &client, &input_to_use, task, item_title.as_deref(), Some(handle), collector, db_handles, failed_clusters).await
+                Self::execute_task_inner_static(
+                    &app_state,
+                    &client,
+                    &input_to_use,
+                    task,
+                    item_title.as_deref(),
+                    Some(handle),
+                    collector,
+                    db_handles,
+                    failed_clusters,
+                )
+                .await
             }
         } else {
-            Self::execute_task_inner_static(&app_state, &client, &input_to_use, task, item_title.as_deref(), None, collector, db_handles, failed_clusters).await
+            Self::execute_task_inner_static(
+                &app_state,
+                &client,
+                &input_to_use,
+                task,
+                item_title.as_deref(),
+                None,
+                collector,
+                db_handles,
+                failed_clusters,
+            )
+            .await
         };
 
         if provider_handle.is_some() {
@@ -1378,19 +1515,22 @@ impl InputWorker {
         match task {
             UpdateTask::ResolveVod { id, reason, .. } => {
                 let fetch_info = reason.contains(ResolveReason::Info);
-                let will_probe = reason.contains(ResolveReason::Probe);
+                // Resolve tasks are independent from provider probe capacity.
+                // Probing must be executed by dedicated probe tasks only.
+                let will_probe = false;
 
-                // If we are going to probe, release the cached handle to avoid holding a READ lock 
-                // for along time (blocks writers) and also to avoid potential deadlocks if 
+                // If we are going to probe, release the cached handle to avoid holding a READ lock
+                // for along time (blocks writers) and also to avoid potential deadlocks if
                 // the probe function itself tries to acquire a WRITE lock later.
                 if will_probe {
                     db_handles.remove(&XtreamCluster::Video);
                 }
 
-                let query_opt = if will_probe { 
-                    None 
+                let query_opt = if will_probe {
+                    None
                 } else {
-                    Self::get_or_open_query(&input.name, app_state, XtreamCluster::Video, db_handles, failed_clusters).await
+                    Self::get_or_open_query(&input.name, app_state, XtreamCluster::Video, db_handles, failed_clusters)
+                        .await
                 };
 
                 match update_vod_metadata(
@@ -1405,7 +1545,9 @@ impl InputWorker {
                     fetch_info,
                     will_probe,
                     query_opt,
-                ).await {
+                )
+                .await
+                {
                     Ok(Some(props)) => {
                         collector.add_vod(id.clone(), props);
                         Ok(())
@@ -1416,7 +1558,9 @@ impl InputWorker {
             }
             UpdateTask::ResolveSeries { id, reason, .. } => {
                 let fetch_info = reason.contains(ResolveReason::Info);
-                let will_probe = reason.contains(ResolveReason::Probe);
+                // Resolve tasks are independent from provider probe capacity.
+                // Probing must be executed by dedicated probe tasks only.
+                let will_probe = false;
 
                 if will_probe {
                     db_handles.remove(&XtreamCluster::Series);
@@ -1426,7 +1570,8 @@ impl InputWorker {
                 let query_opt = if will_probe {
                     None
                 } else {
-                    Self::get_or_open_query(&input.name, app_state, XtreamCluster::Series, db_handles, failed_clusters).await
+                    Self::get_or_open_query(&input.name, app_state, XtreamCluster::Series, db_handles, failed_clusters)
+                        .await
                 };
 
                 match update_series_metadata(
@@ -1441,7 +1586,9 @@ impl InputWorker {
                     fetch_info,
                     will_probe,
                     query_opt,
-                ).await {
+                )
+                .await
+                {
                     Ok(Some(props)) => {
                         collector.add_series(id.clone(), props);
                         Ok(())
@@ -1454,13 +1601,7 @@ impl InputWorker {
                 // ProbeLive always probes, so we must never use a cached handle here.
                 db_handles.remove(&XtreamCluster::Live);
 
-                match update_live_stream_metadata(
-                    &app_state.app_config,
-                    input,
-                    id.clone(),
-                    false,
-                    None,
-                ).await {
+                match update_live_stream_metadata(&app_state.app_config, input, id.clone(), false, None).await {
                     Ok(Some(props)) => {
                         collector.add_live(id.clone(), props);
                         Ok(())
@@ -1484,7 +1625,8 @@ impl InputWorker {
                     *item_type,
                     &app_state.active_provider,
                     active_handle,
-                ).await
+                )
+                .await
             }
         }
     }
@@ -1553,15 +1695,10 @@ mod tests {
         assert_eq!(first_signal, TaskKey::Vod(42));
         assert!(matches!(
             rx.try_recv(),
-            Err(
-                tokio::sync::mpsc::error::TryRecvError::Empty
-                    | tokio::sync::mpsc::error::TryRecvError::Disconnected
-            )
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty | tokio::sync::mpsc::error::TryRecvError::Disconnected)
         ));
 
-        let entry = pending_tasks
-            .get(&TaskKey::Vod(42))
-            .expect("pending entry should exist");
+        let entry = pending_tasks.get(&TaskKey::Vod(42)).expect("pending entry should exist");
         assert_eq!(entry.generation.load(Ordering::Relaxed), 1);
 
         let merged = entry.task.lock().await.clone();
@@ -1599,24 +1736,17 @@ mod tests {
             receiver: rx,
             pending_tasks: pending_tasks.clone(),
             app_state_weak: None,
+            update_pause_gate: Arc::new(RwLock::new(())),
             cancel_token: CancellationToken::new(),
             batch_buffer: BatchResultCollector::new(),
             db_handles: HashMap::new(),
             failed_clusters: HashSet::new(),
         };
 
-        let requeued = worker
-            .finalize_processed_task_success(&key, 0, "input_a")
-            .await;
+        let requeued = worker.finalize_processed_task_success(&key, 0, "input_a").await;
         assert!(requeued);
         assert!(pending_tasks.contains_key(&key));
-        assert_eq!(
-            worker
-                .receiver
-                .try_recv()
-                .expect("requeued signal should be present"),
-            key
-        );
+        assert_eq!(worker.receiver.try_recv().expect("requeued signal should be present"), key);
     }
 
     #[tokio::test]
@@ -1640,21 +1770,17 @@ mod tests {
             receiver: rx,
             pending_tasks: pending_tasks.clone(),
             app_state_weak: None,
+            update_pause_gate: Arc::new(RwLock::new(())),
             cancel_token: CancellationToken::new(),
             batch_buffer: BatchResultCollector::new(),
             db_handles: HashMap::new(),
             failed_clusters: HashSet::new(),
         };
 
-        let requeued = worker
-            .finalize_processed_task_success(&key, 0, "input_b")
-            .await;
+        let requeued = worker.finalize_processed_task_success(&key, 0, "input_b").await;
         assert!(!requeued);
         assert!(!pending_tasks.contains_key(&key));
-        assert!(matches!(
-            worker.receiver.try_recv(),
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-        ));
+        assert!(matches!(worker.receiver.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)));
     }
 
     #[test]
@@ -1668,10 +1794,7 @@ mod tests {
             delay: 0,
         };
 
-        assert!(!InputWorker::task_needs_provider_connection(
-            &task,
-            InputType::Library
-        ));
+        assert!(!InputWorker::task_needs_provider_connection(&task, InputType::Library));
     }
 
     #[test]
@@ -1685,14 +1808,8 @@ mod tests {
             delay: 0,
         };
 
-        assert!(InputWorker::task_needs_provider_connection(
-            &task,
-            InputType::M3u
-        ));
-        assert!(InputWorker::task_needs_provider_connection(
-            &task,
-            InputType::Xtream
-        ));
+        assert!(InputWorker::task_needs_provider_connection(&task, InputType::M3u));
+        assert!(InputWorker::task_needs_provider_connection(&task, InputType::Xtream));
     }
 
     #[test]
@@ -1704,9 +1821,6 @@ mod tests {
             interval: 60,
         };
 
-        assert!(InputWorker::task_needs_provider_connection(
-            &task,
-            InputType::Library
-        ));
+        assert!(InputWorker::task_needs_provider_connection(&task, InputType::Library));
     }
 }

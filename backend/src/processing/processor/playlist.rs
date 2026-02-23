@@ -34,7 +34,7 @@ use crate::repository::{load_input_playlist, persist_input_playlist, persist_pla
 use crate::repository::{CategoryKey, MemoryPlaylistSource, PlaylistSource};
 use crate::utils::StepMeasure;
 use crate::utils::{debug_if_enabled, trace_if_enabled};
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use indexmap::IndexMap;
 use log::{debug, error, info, log_enabled, warn, Level};
 use shared::concat_string;
@@ -224,10 +224,10 @@ fn map_playlist(source: &mut dyn PlaylistSource, target: &ConfigTarget) -> Optio
     let mapping_binding = target.mapping.load();
     let mappings = mapping_binding.as_ref()?;
     let valid_mappings = mappings.iter().filter(|m| m.mapper.as_ref().is_some_and(|v| !v.is_empty()));
-    let iter: Box<dyn Iterator<Item=PlaylistItem>> = Box::new(source.into_items());
+    let iter: Box<dyn Iterator<Item = PlaylistItem>> = Box::new(source.into_items());
     let mapped_iter = valid_mappings.fold(iter, |iter, mapping| {
         Box::new(iter.flat_map(move |chan| map_channel_and_flatten(chan, mapping)))
-            as Box<dyn Iterator<Item=PlaylistItem>>
+            as Box<dyn Iterator<Item = PlaylistItem>>
     });
     let mut next_groups: IndexMap<CategoryKey, PlaylistGroup> = IndexMap::new();
     let mut grp_id: u32 = 0;
@@ -515,7 +515,7 @@ async fn process_source(
                         &mut errors,
                         consume_input_source,
                     )
-                        .await
+                    .await
                     {
                         Ok(()) => {
                             target_stats.push(TargetStats::success(&target.name));
@@ -560,11 +560,7 @@ async fn download_input(
     let need_download = !ctx.is_input_downloaded(&input.name).await;
     // Keep this lock for the whole critical section (download + persist/load + mark processed)
     // so parallel sources sharing the same input cannot observe a half-written state.
-    let _input_lock = if need_download {
-        Some(ctx.get_input_lock(&input.name).await)
-    } else {
-        None
-    };
+    let _input_lock = if need_download { Some(ctx.get_input_lock(&input.name).await) } else { None };
     let mut mark_as_processed = false;
 
     let playlist_download_result = if need_download {
@@ -912,7 +908,7 @@ async fn process_playlist_for_target(
             target,
             ctx.playlist_state.as_ref(),
         )
-            .await;
+        .await;
         step.stop("Persisting playlists");
         log_memory_snapshot(format!("target '{}' after_persist", target.name).as_str());
         result
@@ -961,10 +957,10 @@ fn get_live_probe_interval_settings(
         return None;
     }
     target.get_xtream_output().map(|_| {
-        let (probe_delay, input_probe_live_interval_hours) = input_options.map_or(
-            (default_probe_delay_secs(), default_probe_live_interval()),
-            |options| (options.probe_delay, options.probe_live_interval_hours),
-        );
+        let (probe_delay, input_probe_live_interval_hours) = input_options
+            .map_or((default_probe_delay_secs(), default_probe_live_interval()), |options| {
+                (options.probe_delay, options.probe_live_interval_hours)
+            });
         (probe_delay, u64::from(input_probe_live_interval_hours) * 3600)
     })
 }
@@ -1195,8 +1191,8 @@ async fn process_watch(
                 .filter(|pl| watches.iter().any(|r| r.is_match(&pl.title)))
                 .map(|pl| process_group_watch(app_config, client, &target.name, pl)),
         )
-            .for_each_concurrent(16, |f| f)
-            .await;
+        .for_each_concurrent(16, |f| f)
+        .await;
 
         true
     } else {
@@ -1218,19 +1214,25 @@ pub async fn exec_processing(
     pre_processed_inputs: Option<HashSet<Arc<str>>>,
     acquired_permit: Option<crate::api::model::UpdateGuardPermit>,
 ) {
-    let _guard = if let Some(permit) = acquired_permit {
+    let playlist_guard = if let Some(permit) = acquired_permit {
         Some(permit)
     } else if let Some(guard) = &update_guard {
-        let lock_result: Option<crate::api::model::UpdateGuardPermit> = guard.try_playlist();
-        if let Some(permit) = lock_result {
+        if let Some(permit) = guard.acquire_playlist_lock().await {
             Some(permit)
         } else {
-            warn!("Playlist update already in progress; update skipped.");
+            warn!("Playlist update lock is closed; update skipped.");
             if let Some(events) = event_manager.as_deref() {
                 events.send_event(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Failure));
             }
             return;
         }
+    } else {
+        None
+    };
+
+    // Pause background metadata/probe tasks for the full update lifecycle.
+    let _background_pause_guard = if let Some(manager) = metadata_manager.as_ref() {
+        Some(manager.acquire_update_pause_guard().await)
     } else {
         None
     };
@@ -1253,8 +1255,20 @@ pub async fn exec_processing(
     };
 
     let start_time = Instant::now();
-    let (stats, errors) = process_sources(&ctx).await;
+    let process_result = std::panic::AssertUnwindSafe(process_sources(&ctx)).catch_unwind().await;
+    let Ok((stats, errors)) = process_result else {
+        error!("Playlist processing panicked");
+        if let Some(events) = event_manager.as_deref() {
+            events.send_event(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Failure));
+        }
+        return;
+    };
     log_memory_snapshot("exec_processing after_process_sources");
+
+    // Keep the update lock only for the critical processing section.
+    drop(playlist_guard);
+    debug!("Released playlist update lock; dispatching notifications and events");
+
     // log errors
     for err in &errors {
         error!("{}", err.message);
