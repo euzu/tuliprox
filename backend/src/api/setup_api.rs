@@ -1,5 +1,6 @@
 use crate::api::api_utils::serve_file;
 use crate::auth::generate_password_from_input;
+use crate::model::validate_library_paths_from_dto;
 use crate::utils::{
     file_exists, get_default_path, get_default_web_root_path, read_api_proxy_file, read_config_file, read_sources_file,
     sanitize_sources_for_persist,
@@ -560,6 +561,9 @@ async fn setup_complete_inner(
     }
     if !req.app_config.config.is_valid() {
         return (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": "Invalid config.yml content" }))).into_response();
+    }
+    if let Err(err) = validate_library_paths_from_dto(&req.app_config.config) {
+        return (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": err.to_string() }))).into_response();
     }
 
     if let Err(err) = req.app_config.sources.prepare(false, req.app_config.config.get_hdhr_device_overview().as_ref()) {

@@ -1,6 +1,6 @@
 use crate::api::api_utils::{internal_server_error, try_unwrap_body};
 use crate::api::model::AppState;
-use crate::model::{ApiProxyConfig, InputSource};
+use crate::model::{ApiProxyConfig, InputSource, validate_library_paths_from_dto};
 use crate::utils;
 use crate::utils::request::download_text_content;
 use crate::utils::{persist_messaging_templates, prepare_sources_batch, prepare_users, read_api_proxy_file};
@@ -38,7 +38,14 @@ async fn save_config_main(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     axum::extract::Json(mut cfg): axum::extract::Json<ConfigDto>,
 ) -> impl axum::response::IntoResponse + Send {
-    if cfg.is_valid() {
+    if let Err(err) = cfg.prepare(false) {
+        return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": err.to_string()}))).into_response();
+    }
+    if !cfg.is_valid() {
+        (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": "Invalid content"}))).into_response()
+    } else if let Err(err) = validate_library_paths_from_dto(&cfg) {
+        (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": err.to_string()}))).into_response()
+    } else {
         if let Err(err) = persist_messaging_templates(&app_state, &mut cfg).await {
             error!("Failed to persist messaging templates: {err}");
             return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({"error": err.to_string()}))).into_response();
@@ -52,8 +59,6 @@ async fn save_config_main(
             return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({"error": err.to_string()}))).into_response();
         }
         axum::http::StatusCode::OK.into_response()
-    } else {
-        (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": "Invalid content"}))).into_response()
     }
 }
 

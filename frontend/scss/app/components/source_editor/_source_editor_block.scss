@@ -11,6 +11,7 @@ $port-size: 10px;
   flex-flow: column;
   align-items: center;
   background-color: transparent;
+  color: var(--text-color);
   border: none;
   min-width: $block-width;
   max-width: $block-width;
@@ -159,6 +160,7 @@ $port-size: 10px;
 }
 
 .tp__source-editor__brick {
+  color: var(--text-color);
   &-InputXtream   {
     border-color: var(--brick-input-xtream-border-color);
     background-color: var(--brick-input-xtream-background-color);

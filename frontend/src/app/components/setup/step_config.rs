@@ -55,6 +55,30 @@ pub fn ConfigStep(props: &ConfigStepProps) -> Html {
     let on_form_change = {
         let setup_ctx = setup_ctx.clone();
         Callback::from(move |form_data: ConfigForm| {
+            if !form_data.is_modified() {
+                return;
+            }
+
+            let current_slot = match &form_data {
+                ConfigForm::Main(_, _) => setup_ctx.config_forms.slots.main.as_ref(),
+                ConfigForm::Api(_, _) => setup_ctx.config_forms.slots.api.as_ref(),
+                ConfigForm::ApiProxy(_, _) => setup_ctx.config_forms.slots.api_proxy.as_ref(),
+                ConfigForm::Log(_, _) => setup_ctx.config_forms.slots.log.as_ref(),
+                ConfigForm::Schedules(_, _) => setup_ctx.config_forms.slots.schedules.as_ref(),
+                ConfigForm::Video(_, _) => setup_ctx.config_forms.slots.video.as_ref(),
+                ConfigForm::Messaging(_, _) => setup_ctx.config_forms.slots.messaging.as_ref(),
+                ConfigForm::WebUi(_, _) => setup_ctx.config_forms.slots.web_ui.as_ref(),
+                ConfigForm::ReverseProxy(_, _) => setup_ctx.config_forms.slots.reverse_proxy.as_ref(),
+                ConfigForm::HdHomerun(_, _) => setup_ctx.config_forms.slots.hd_homerun.as_ref(),
+                ConfigForm::Proxy(_, _) => setup_ctx.config_forms.slots.proxy.as_ref(),
+                ConfigForm::IpCheck(_, _) => setup_ctx.config_forms.slots.ipcheck.as_ref(),
+                ConfigForm::Panel(_, _) => setup_ctx.config_forms.slots.panel.as_ref(),
+                ConfigForm::Library(_, _) => setup_ctx.config_forms.slots.library.as_ref(),
+            };
+            if current_slot == Some(&form_data) {
+                return;
+            }
+
             let mut next_form_state = (*setup_ctx.config_forms).clone();
             next_form_state.update_form(form_data);
             setup_ctx.config_forms.set(next_form_state);

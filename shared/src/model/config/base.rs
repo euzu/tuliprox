@@ -18,7 +18,7 @@ fn is_none_or_empty_video(video: &Option<VideoConfigDto>) -> bool {
 }
 
 #[allow(clippy::struct_excessive_bools)]
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigDto {
     #[serde(default, skip_serializing_if = "is_false")]
@@ -69,6 +69,38 @@ pub struct ConfigDto {
     pub ipcheck: Option<IpCheckConfigDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library: Option<LibraryConfigDto>,
+}
+
+impl Default for ConfigDto {
+    fn default() -> Self {
+        Self {
+            process_parallel: false,
+            api: ConfigApiDto::default(),
+            working_dir: String::new(),
+            default_user_agent: default_default_user_agent(),
+            backup_dir: None,
+            user_config_dir: None,
+            mapping_path: None,
+            custom_stream_response_path: None,
+            video: None,
+            schedules: None,
+            log: None,
+            user_access_control: false,
+            connect_timeout_secs: default_connect_timeout_secs(),
+            sleep_timer_mins: None,
+            update_on_boot: false,
+            config_hot_reload: false,
+            disk_based_processing: false,
+            accept_insecure_ssl_certificates: false,
+            web_ui: None,
+            messaging: None,
+            reverse_proxy: None,
+            hdhomerun: None,
+            proxy: None,
+            ipcheck: None,
+            library: None,
+        }
+    }
 }
 
 // This MainConfigDto is a copy of ConfigDto simple fields for form editing.
@@ -293,6 +325,12 @@ impl ConfigDto {
 mod tests {
     use super::*;
     use crate::utils::default_supported_video_extensions;
+
+    #[test]
+    fn default_uses_connect_timeout_default_value() {
+        let cfg = ConfigDto::default();
+        assert_eq!(cfg.connect_timeout_secs, default_connect_timeout_secs());
+    }
 
     #[test]
     fn serializing_skips_video_for_default_values() {

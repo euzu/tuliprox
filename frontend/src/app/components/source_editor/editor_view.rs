@@ -171,6 +171,7 @@ struct EditorState {
     block_elements: HashMap<BlockId, HtmlElement>,
     connection_elements: HashMap<(BlockId, BlockId), Element>,
     pending_line: Option<(Position, Position)>,
+    pending_line_element: Option<Element>,
     pending_connection: Option<BlockId>,
     is_panning: bool,
 }
@@ -188,6 +189,7 @@ impl Default for EditorState {
             block_elements: HashMap::<BlockId, HtmlElement>::new(),
             connection_elements: HashMap::<(BlockId, BlockId), Element>::new(),
             pending_line: None,
+            pending_line_element: None,
             pending_connection: None,
             is_panning: false,
         }
@@ -206,6 +208,7 @@ impl EditorState {
     pub fn clear_pending(&mut self) {
         self.pending_connection = None;
         self.pending_line = None;
+        self.pending_line_element = None;
     }
 }
 
@@ -629,6 +632,7 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
     // ----------------- Connection logic -----------------
     let handle_connection_start = {
         let editor_state_ref = editor_state_ref.clone();
+        let force_update = force_update.clone();
         Callback::from(move |from_id: BlockId| {
             let pending_line = {
                 let editor_state = editor_state_ref.borrow();
@@ -645,6 +649,11 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                 let mut editor_state = editor_state_ref.borrow_mut();
                 editor_state.pending_connection = Some(from_id);
                 editor_state.pending_line = pending_line;
+                editor_state.pending_line_element = None;
+            }
+            if pending_line.is_some() {
+                // Render once so ports + pending line are present in DOM.
+                force_update.set(*force_update + 1);
             }
         })
     };
@@ -937,7 +946,21 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                             }
                         }
                         editor_state.pending_line = Some(((from_x, from_y), snapped));
-                        needs_render = true;
+                        if editor_state.pending_line_element.is_none() {
+                            if let Some(window) = web_sys::window() {
+                                if let Some(document) = window.document() {
+                                    if let Some(el) = document.get_element_by_id(PENDING_LINE) {
+                                        editor_state.pending_line_element = Some(el);
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(line_el) = editor_state.pending_line_element.as_ref() {
+                            let _ = update_pending_line(line_el, (from_x, from_y), snapped);
+                        } else {
+                            // Fallback for rare cases where pending line was not yet in DOM.
+                            needs_render = true;
+                        }
                     }
                 }
 
@@ -1096,10 +1119,18 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
 
     let handle_canvas_right_click = {
         let editor_state_ref = editor_state_ref.clone();
+        let force_update = force_update.clone();
         Callback::from(move |e: MouseEvent| {
             e.prevent_default(); // prevent default browser context menu
             e.stop_propagation();
+            let had_pending = {
+                let editor_state = editor_state_ref.borrow();
+                editor_state.pending_connection.is_some() || editor_state.pending_line.is_some()
+            };
             editor_state_ref.borrow_mut().clear_pending();
+            if had_pending {
+                force_update.set(*force_update + 1);
+            }
         })
     };
 
@@ -1429,4 +1460,11 @@ fn compute_port_snap_distance(
     } else {
         None
     }
+}
+
+fn update_pending_line(line: &Element, from: Position, to: Position) -> Result<(), wasm_bindgen::JsValue> {
+    line.set_attribute("x1", &from.0.to_string())?;
+    line.set_attribute("y1", &from.1.to_string())?;
+    line.set_attribute("x2", &to.0.to_string())?;
+    line.set_attribute("y2", &to.1.to_string())
 }

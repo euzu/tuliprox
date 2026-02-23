@@ -233,9 +233,9 @@ pub fn MessagingConfigView() -> Html {
         None => html! {
           <Card class="tp__config-view__card">
              <h1>{translate.t(LABEL_TELEGRAM)}</h1>
-             { config_field_empty!(translate.t(LABEL_BOT_TOKEN)) }
-             { config_field_empty!(translate.t(LABEL_CHAT_IDS)) }
-             { config_field_bool_empty!(translate.t(LABEL_MARKDOWN)) }
+             { config_field_empty!(translate.t(LABEL_BOT_TOKEN), "TELEGRAM_MESSAGING_CONFIG_BOT_TOKEN") }
+             { config_field_empty!(translate.t(LABEL_CHAT_IDS), "TELEGRAM_MESSAGING_CONFIG_CHAT_IDS") }
+             { config_field_bool_empty!(translate.t(LABEL_MARKDOWN), "TELEGRAM_MESSAGING_CONFIG_MARKDOWN") }
           </Card>
         },
     };
@@ -265,7 +265,7 @@ pub fn MessagingConfigView() -> Html {
         None => html! {
           <Card class="tp__config-view__card">
               <h1>{translate.t(LABEL_REST)}</h1>
-              { config_field_empty!(translate.t(LABEL_URL)) }
+              { config_field_empty!(translate.t(LABEL_URL), "REST_MESSAGING_CONFIG_URL") }
           </Card>
         },
     };
@@ -281,7 +281,7 @@ pub fn MessagingConfigView() -> Html {
         None => html! {
           <Card class="tp__config-view__card">
               <h1>{translate.t(LABEL_DISCORD)}</h1>
-              { config_field_empty!(translate.t(LABEL_WEBHOOK_URL)) }
+              { config_field_empty!(translate.t(LABEL_WEBHOOK_URL), "DISCORD_MESSAGING_CONFIG_URL") }
           </Card>
         },
     };
@@ -298,9 +298,9 @@ pub fn MessagingConfigView() -> Html {
         None => html! {
           <Card class="tp__config-view__card">
               <h1>{translate.t(LABEL_PUSHOVER)}</h1>
-              { config_field_empty!(translate.t(LABEL_URL)) }
-              { config_field_empty!(translate.t(LABEL_TOKEN)) }
-              { config_field_empty!(translate.t(LABEL_USER)) }
+              { config_field_empty!(translate.t(LABEL_URL), "PUSHOVER_MESSAGING_CONFIG_URL") }
+              { config_field_empty!(translate.t(LABEL_TOKEN), "PUSHOVER_MESSAGING_CONFIG_TOKEN") }
+              { config_field_empty!(translate.t(LABEL_USER), "PUSHOVER_MESSAGING_CONFIG_USER") }
           </Card>
         },
     };
@@ -366,6 +366,7 @@ pub fn MessagingConfigView() -> Html {
                             html! {
                                 <TextArea
                                     label={kind_str}
+                                    field_id={Some("TELEGRAM_TEMPLATE_MESSAGE".to_string())}
                                     value={current_val}
                                     collapse_on_empty={true}
                                     on_change={Callback::from(move |val: String| {
@@ -398,6 +399,7 @@ pub fn MessagingConfigView() -> Html {
                             html! {
                                 <TextArea
                                     label={kind_str}
+                                    field_id={Some("REST_TEMPLATE_MESSAGE".to_string())}
                                     value={current_val}
                                     collapse_on_empty={true}
                                     on_change={Callback::from(move |val: String| {
@@ -435,6 +437,7 @@ pub fn MessagingConfigView() -> Html {
                             html! {
                                 <TextArea
                                     label={kind_str}
+                                    field_id={Some("DISCORD_TEMPLATE_MESSAGE".to_string())}
                                     value={current_val}
                                     collapse_on_empty={true}
                                     on_change={Callback::from(move |val: String| {

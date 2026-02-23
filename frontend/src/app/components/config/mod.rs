@@ -21,7 +21,6 @@ mod webui_config_view;
 
 pub use api_config_view::*;
 pub use config_page::*;
-pub use config_update::*;
 pub use config_view::*;
 pub use config_view_context::*;
 pub use hdhomerun_config_view::*;

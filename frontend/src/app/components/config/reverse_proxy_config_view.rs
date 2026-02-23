@@ -197,6 +197,7 @@ pub fn ReverseProxyConfigView() -> Html {
 
     let failover_patterns_state: UseReducerHandle<FailoverPatternsFormState> =
         use_reducer(|| FailoverPatternsFormState { form: FailoverPatternsDto::default(), modified: false });
+    let last_emitted_form = use_mut_ref(|| None::<ConfigForm>);
 
     {
         let on_form_change = config_view_ctx.on_form_change.clone();
@@ -209,6 +210,7 @@ pub fn ReverseProxyConfigView() -> Html {
         let geoip_state = geoip_state.clone();
         let stream_buffer_state = stream_buffer_state.clone();
         let failover_patterns_state = failover_patterns_state.clone();
+        let last_emitted_form = last_emitted_form.clone();
 
         use_effect_with(
             (
@@ -251,7 +253,12 @@ pub fn ReverseProxyConfigView() -> Html {
                     || geoip.modified
                     || stream_buffer.modified
                     || failover_patterns.modified;
-                on_form_change.emit(ConfigForm::ReverseProxy(modified, form));
+                let next_form = ConfigForm::ReverseProxy(modified, form);
+                let mut last_form = last_emitted_form.borrow_mut();
+                if last_form.as_ref() != Some(&next_form) {
+                    on_form_change.emit(next_form.clone());
+                    *last_form = Some(next_form);
+                }
             },
         );
     }
@@ -270,49 +277,107 @@ pub fn ReverseProxyConfigView() -> Html {
         let reverse_proxy_cfg = config_ctx.config.as_ref().and_then(|c| c.config.reverse_proxy.clone());
         use_effect_with((reverse_proxy_cfg, config_view_ctx.edit_mode.clone()), move |(cfg, _mode)| {
             if let Some(rp) = cfg {
-                reverse_proxy_state.dispatch(ReverseProxyConfigFormAction::SetAll((*rp).clone()));
-                disabled_header_state.dispatch(ReverseProxyDisabledHeaderConfigFormAction::SetAll(
-                    rp.disabled_header
-                        .as_ref()
-                        .map_or_else(ReverseProxyDisabledHeaderConfigDto::default, |d| d.clone()),
-                ));
-                cache_state.dispatch(CacheConfigFormAction::SetAll(
-                    rp.cache.as_ref().map_or_else(CacheConfigDto::default, |c| c.clone()),
-                ));
-                rate_limit_state.dispatch(RateLimitConfigFormAction::SetAll(
-                    rp.rate_limit.as_ref().map_or_else(RateLimitConfigDto::default, |rl| rl.clone()),
-                ));
-                resource_retry_state.dispatch(ResourceRetryConfigFormAction::SetAll(
-                    rp.resource_retry.as_ref().map_or_else(ResourceRetryConfigDto::default, |rr| rr.clone()),
-                ));
-                stream_state.dispatch(StreamConfigFormAction::SetAll(
-                    rp.stream.as_ref().map_or_else(StreamConfigDto::default, |s| s.clone()),
-                ));
-                geoip_state.dispatch(GeoIpConfigFormAction::SetAll(
-                    rp.geoip.as_ref().map_or_else(GeoIpConfigDto::default, |s| s.clone()),
-                ));
-                stream_buffer_state.dispatch(StreamBufferConfigFormAction::SetAll(
-                    rp.stream.as_ref().and_then(|s| s.buffer.clone()).unwrap_or_default(),
-                ));
-                failover_patterns_state.dispatch(FailoverPatternsFormAction::SetAll(FailoverPatternsDto {
+                if reverse_proxy_state.form != *rp {
+                    reverse_proxy_state.dispatch(ReverseProxyConfigFormAction::SetAll((*rp).clone()));
+                }
+
+                let target_disabled_header = rp
+                    .disabled_header
+                    .as_ref()
+                    .map_or_else(ReverseProxyDisabledHeaderConfigDto::default, |d| d.clone());
+                if disabled_header_state.form != target_disabled_header {
+                    disabled_header_state
+                        .dispatch(ReverseProxyDisabledHeaderConfigFormAction::SetAll(target_disabled_header));
+                }
+
+                let target_cache = rp.cache.as_ref().map_or_else(CacheConfigDto::default, |c| c.clone());
+                if cache_state.form != target_cache {
+                    cache_state.dispatch(CacheConfigFormAction::SetAll(target_cache));
+                }
+
+                let target_rate_limit =
+                    rp.rate_limit.as_ref().map_or_else(RateLimitConfigDto::default, |rl| rl.clone());
+                if rate_limit_state.form != target_rate_limit {
+                    rate_limit_state.dispatch(RateLimitConfigFormAction::SetAll(target_rate_limit));
+                }
+
+                let target_resource_retry =
+                    rp.resource_retry.as_ref().map_or_else(ResourceRetryConfigDto::default, |rr| rr.clone());
+                if resource_retry_state.form != target_resource_retry {
+                    resource_retry_state.dispatch(ResourceRetryConfigFormAction::SetAll(target_resource_retry));
+                }
+
+                let target_stream = rp.stream.as_ref().map_or_else(StreamConfigDto::default, |s| s.clone());
+                if stream_state.form != target_stream {
+                    stream_state.dispatch(StreamConfigFormAction::SetAll(target_stream));
+                }
+
+                let target_geoip = rp.geoip.as_ref().map_or_else(GeoIpConfigDto::default, |s| s.clone());
+                if geoip_state.form != target_geoip {
+                    geoip_state.dispatch(GeoIpConfigFormAction::SetAll(target_geoip));
+                }
+
+                let target_stream_buffer = rp.stream.as_ref().and_then(|s| s.buffer.clone()).unwrap_or_default();
+                if stream_buffer_state.form != target_stream_buffer {
+                    stream_buffer_state.dispatch(StreamBufferConfigFormAction::SetAll(target_stream_buffer));
+                }
+
+                let target_failover_patterns = FailoverPatternsDto {
                     patterns: rp
                         .resource_retry
                         .as_ref()
                         .and_then(|rr| rr.failover_redirect_patterns.clone())
                         .unwrap_or_default(),
-                }));
+                };
+                if failover_patterns_state.form != target_failover_patterns {
+                    failover_patterns_state.dispatch(FailoverPatternsFormAction::SetAll(target_failover_patterns));
+                }
             } else {
-                reverse_proxy_state.dispatch(ReverseProxyConfigFormAction::SetAll(ReverseProxyConfigDto::default()));
-                disabled_header_state.dispatch(ReverseProxyDisabledHeaderConfigFormAction::SetAll(
-                    ReverseProxyDisabledHeaderConfigDto::default(),
-                ));
-                cache_state.dispatch(CacheConfigFormAction::SetAll(CacheConfigDto::default()));
-                rate_limit_state.dispatch(RateLimitConfigFormAction::SetAll(RateLimitConfigDto::default()));
-                resource_retry_state.dispatch(ResourceRetryConfigFormAction::SetAll(ResourceRetryConfigDto::default()));
-                stream_state.dispatch(StreamConfigFormAction::SetAll(StreamConfigDto::default()));
-                geoip_state.dispatch(GeoIpConfigFormAction::SetAll(GeoIpConfigDto::default()));
-                stream_buffer_state.dispatch(StreamBufferConfigFormAction::SetAll(StreamBufferConfigDto::default()));
-                failover_patterns_state.dispatch(FailoverPatternsFormAction::SetAll(FailoverPatternsDto::default()));
+                let target_reverse_proxy = ReverseProxyConfigDto::default();
+                if reverse_proxy_state.form != target_reverse_proxy {
+                    reverse_proxy_state.dispatch(ReverseProxyConfigFormAction::SetAll(target_reverse_proxy));
+                }
+
+                let target_disabled_header = ReverseProxyDisabledHeaderConfigDto::default();
+                if disabled_header_state.form != target_disabled_header {
+                    disabled_header_state
+                        .dispatch(ReverseProxyDisabledHeaderConfigFormAction::SetAll(target_disabled_header));
+                }
+
+                let target_cache = CacheConfigDto::default();
+                if cache_state.form != target_cache {
+                    cache_state.dispatch(CacheConfigFormAction::SetAll(target_cache));
+                }
+
+                let target_rate_limit = RateLimitConfigDto::default();
+                if rate_limit_state.form != target_rate_limit {
+                    rate_limit_state.dispatch(RateLimitConfigFormAction::SetAll(target_rate_limit));
+                }
+
+                let target_resource_retry = ResourceRetryConfigDto::default();
+                if resource_retry_state.form != target_resource_retry {
+                    resource_retry_state.dispatch(ResourceRetryConfigFormAction::SetAll(target_resource_retry));
+                }
+
+                let target_stream = StreamConfigDto::default();
+                if stream_state.form != target_stream {
+                    stream_state.dispatch(StreamConfigFormAction::SetAll(target_stream));
+                }
+
+                let target_geoip = GeoIpConfigDto::default();
+                if geoip_state.form != target_geoip {
+                    geoip_state.dispatch(GeoIpConfigFormAction::SetAll(target_geoip));
+                }
+
+                let target_stream_buffer = StreamBufferConfigDto::default();
+                if stream_buffer_state.form != target_stream_buffer {
+                    stream_buffer_state.dispatch(StreamBufferConfigFormAction::SetAll(target_stream_buffer));
+                }
+
+                let target_failover_patterns = FailoverPatternsDto::default();
+                if failover_patterns_state.form != target_failover_patterns {
+                    failover_patterns_state.dispatch(FailoverPatternsFormAction::SetAll(target_failover_patterns));
+                }
             }
             || ()
         });

@@ -239,12 +239,33 @@ pub fn PlaylistSourceSelector(props: &PlaylistSourceSelectorProps) -> Html {
                   {
                     html_if!(matches!(*set_custom_provider, InputType::Xtream), {
                        <>
-                        <Input label={translate.t("LABEL.USERNAME")} input_ref={username_ref} name="username" autocomplete={true} />
-                        <Input label={translate.t("LABEL.PASSWORD")} input_ref={password_ref} name="password" hidden={true} autocomplete={false} onkeydown={handle_key_down.clone()}/>
+                        <Input
+                            label={translate.t("LABEL.USERNAME")}
+                            field_id={Some("PLAYLIST_SOURCE_SELECTOR_USERNAME".to_string())}
+                            input_ref={username_ref}
+                            name="username"
+                            autocomplete={true}
+                        />
+                        <Input
+                            label={translate.t("LABEL.PASSWORD")}
+                            field_id={Some("PLAYLIST_SOURCE_SELECTOR_PASSWORD".to_string())}
+                            input_ref={password_ref}
+                            name="password"
+                            hidden={true}
+                            autocomplete={false}
+                            onkeydown={handle_key_down.clone()}
+                        />
                        </>
                       })
                   }
-                    <Input label={translate.t("LABEL.URL")} input_ref={url_ref} name="url" autocomplete={true} onkeydown={handle_key_down} />
+                    <Input
+                        label={translate.t("LABEL.URL")}
+                        field_id={Some("PLAYLIST_SOURCE_SELECTOR_URL".to_string())}
+                        input_ref={url_ref}
+                        name="url"
+                        autocomplete={true}
+                        onkeydown={handle_key_down}
+                    />
                     <TextButton name={"custom"} title={translate.t("LABEL.DOWNLOAD")} icon={"CloudDownload"}
                        onclick={handle_custom_source}/>
                   </div>

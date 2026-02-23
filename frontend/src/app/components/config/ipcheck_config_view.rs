@@ -63,11 +63,11 @@ pub fn IpCheckConfigView() -> Html {
     let render_empty = || {
         html! {
           <>
-            { config_field_empty!(translate.t(LABEL_URL)) }
-            { config_field_empty!(translate.t(LABEL_URL_IPV4)) }
-            { config_field_empty!(translate.t(LABEL_URL_IPV6)) }
-            { config_field_empty!(translate.t(LABEL_PATTERN_IPV4)) }
-            { config_field_empty!(translate.t(LABEL_PATTERN_IPV6)) }
+            { config_field_empty!(translate.t(LABEL_URL), "IP_CHECK_CONFIG_URL") }
+            { config_field_empty!(translate.t(LABEL_URL_IPV4), "IP_CHECK_CONFIG_URL_IPV4") }
+            { config_field_empty!(translate.t(LABEL_URL_IPV6), "IP_CHECK_CONFIG_URL_IPV6") }
+            { config_field_empty!(translate.t(LABEL_PATTERN_IPV4), "IP_CHECK_CONFIG_PATTERN_IPV4") }
+            { config_field_empty!(translate.t(LABEL_PATTERN_IPV6), "IP_CHECK_CONFIG_PATTERN_IPV6") }
           </>
         }
     };

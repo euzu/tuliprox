@@ -16,23 +16,60 @@ fn normalize_field_id(raw: &str) -> String {
     normalized.split('_').filter(|part| !part.is_empty()).collect::<Vec<_>>().join("_")
 }
 
-fn fallback_field_id(field_id: &str) -> Option<String> {
-    field_id.rsplit('_').next().map(normalize_field_id).filter(|fallback| fallback != field_id)
+fn field_tokens(field_id: &str) -> Vec<&str> { field_id.split('_').filter(|part| !part.is_empty()).collect::<Vec<_>>() }
+
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !values.iter().any(|existing| existing == &value) {
+        values.push(value);
+    }
+}
+
+fn explanation_key_candidates(field_id: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    push_unique(&mut keys, format!("EXPLANATION.{field_id}"));
+
+    let tokens = field_tokens(field_id);
+    if tokens.len() > 1 {
+        for split in (1..tokens.len()).rev() {
+            let prefix = tokens[..split].join("_");
+            let suffix = tokens[split..].join("_");
+            push_unique(&mut keys, format!("EXPLANATION.{prefix}.{suffix}"));
+        }
+        for start in 1..tokens.len() {
+            let suffix = tokens[start..].join("_");
+            push_unique(&mut keys, format!("EXPLANATION.{suffix}"));
+        }
+    }
+
+    push_unique(&mut keys, "EXPLANATION.DEFAULT".to_string());
+    keys
+}
+
+fn label_key_candidates(field_id: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    push_unique(&mut keys, format!("LABEL.{field_id}"));
+
+    let tokens = field_tokens(field_id);
+    if tokens.len() > 1 {
+        for start in 1..tokens.len() {
+            let suffix = tokens[start..].join("_");
+            push_unique(&mut keys, format!("LABEL.{suffix}"));
+        }
+    }
+    keys
 }
 
 pub fn show_field_explanation(field_id: &str, field_label: &str, dialog: &DialogService, translate: &YewI18n) {
     // Caller is expected to pass a normalized key-compatible field_id.
-    let primary_key = format!("EXPLANATION.{field_id}");
-    let fallback_key = fallback_field_id(field_id).map(|id| format!("EXPLANATION.{id}"));
-
-    let explanation = t_safe(translate, &primary_key)
-        .or_else(|| fallback_key.as_ref().and_then(|key| t_safe(translate, key)))
-        .or_else(|| t_safe(translate, "EXPLANATION.DEFAULT"))
+    let explanation = explanation_key_candidates(field_id)
+        .into_iter()
+        .find_map(|key| t_safe(translate, &key))
         .unwrap_or_else(|| "No explanation available for this field.".to_string());
 
     let title = if field_label.trim().is_empty() {
-        t_safe(translate, &format!("LABEL.{field_id}"))
-            .or_else(|| fallback_field_id(field_id).and_then(|id| t_safe(translate, &format!("LABEL.{id}"))))
+        label_key_candidates(field_id)
+            .into_iter()
+            .find_map(|key| t_safe(translate, &key))
             .unwrap_or_else(|| field_id.replace('_', " "))
     } else {
         field_label.to_string()
@@ -91,6 +128,10 @@ pub fn FieldLabel(props: &FieldLabelProps) -> Html {
             show_field_explanation(&field_id, &field_label, &dialog, &translate);
         })
     };
+    let handle_help_mousedown = Callback::from(move |event: MouseEvent| {
+        event.prevent_default();
+        event.stop_propagation();
+    });
     let rendered_label = if let Some(for_id) = props.for_id.as_ref().filter(|id| !id.trim().is_empty()) {
         html! { <label for={for_id.clone()}>{props.label.clone()}</label> }
     } else {
@@ -104,6 +145,7 @@ pub fn FieldLabel(props: &FieldLabelProps) -> Html {
                 class="tp__icon-button tp__field-label__help"
                 type="button"
                 title={translate.t("LABEL.HELP")}
+                onmousedown={handle_help_mousedown}
                 onclick={handle_help_click}
             >
                 <AppIcon name="QuestionMark"/>
