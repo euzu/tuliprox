@@ -14,7 +14,9 @@ pub fn TargetWatch(props: &TargetWatchProps) -> Html {
         Some(watch) => html! {
             <div class="tp__target-watch">
                 <ul>
-                    { watch.iter().map(|item| html! { <li>{ item }</li> }).collect::<Html>() }
+                    for item in watch.iter() {
+                        <li key={item.clone()}>{ item }</li>
+                    }
                 </ul>
             </div>
         },

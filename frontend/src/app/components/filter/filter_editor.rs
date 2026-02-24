@@ -97,14 +97,14 @@ pub fn FilterEditor(props: &FilterEditorProps) -> Html {
                  { if let Some(templ_vec) = &*templates_state {
                       html! {
                             for templ in templ_vec.iter() {
-                             <>
+                             <div key={templ.name.to_string()} class="tp__filter-editor__templates-template">
                                 <div class="tp__filter-editor__templates-template-name">
                                     { templ.name.to_string() }
                                 </div>
                                 <div class="tp__filter-editor__templates-template-value">
                                     { templ.value.to_string() }
                                 </div>
-                             </>
+                             </div>
                          }
                         }
                     } else {

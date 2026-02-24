@@ -69,19 +69,6 @@ pub fn IpinfoActionCard() -> Html {
         });
     }
 
-    // {
-    //     let services_ctx = services.clone();
-    //     let config_exists_state = config_exists.clone();
-    //     let _ = use_future(|| async move {
-    //         let cfg = services_ctx.config.get_server_config().await;
-    //         config_exists_state.set(if let Some(app_cfg) = &cfg {
-    //             app_cfg.config.ipcheck.is_some()
-    //         } else {
-    //             false
-    //         });
-    //     });
-    // }
-
     html! {
         <ActionCard icon="Network" classname="tp__ipinfo" title={translate.t("LABEL.IP_INFO")}
         subtitle_html={if *config_exists {

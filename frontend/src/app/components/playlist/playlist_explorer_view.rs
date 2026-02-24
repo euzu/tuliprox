@@ -15,7 +15,7 @@ use yew::prelude::*;
 #[component]
 pub fn PlaylistExplorerView() -> Html {
     let translate = use_translation();
-    let breadcrumbs = use_state(|| Rc::new(vec![translate.t("LABEL.PLAYLISTS"), translate.t("LABEL.LIST")]));
+    let breadcrumbs = use_state(|| Rc::new(vec![translate.t("LABEL.PLAYLISTS"), translate.t("LABEL.SOURCES")]));
     let active_page = use_state(|| PlaylistExplorerPage::SourceSelector);
     let playlist = use_state(|| None::<Rc<UiPlaylistCategories>>);
     let playlist_req = use_state(|| None::<PlaylistRequest>);

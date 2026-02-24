@@ -54,7 +54,7 @@ pub fn KeyValueEditor(props: &KeyValueEditorProps) -> Html {
             updated.retain(|kv| kv.key != key);
             // emit new HashMap
             let map = updated.iter().map(|kv| (kv.key.clone(), kv.value.clone())).collect::<HashMap<_, _>>();
-            on_change.emit(map.clone());
+            on_change.emit(map);
             entry_state.set(updated);
         })
     };
@@ -93,7 +93,7 @@ pub fn KeyValueEditor(props: &KeyValueEditorProps) -> Html {
                     updated.push(Rc::new(KeyValue { key: key.clone(), value: value.clone() }));
                     // emit new HashMap
                     let map = updated.iter().map(|kv| (kv.key.clone(), kv.value.clone())).collect::<HashMap<_, _>>();
-                    on_change.emit(map.clone());
+                    on_change.emit(map);
                     entry_state.set(updated);
                 }
                 new_key.set(String::new());

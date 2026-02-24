@@ -1269,6 +1269,28 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         }
         (inputs, targets, outputs)
     };
+    let render_block = |b: &Block| {
+        let port_status = get_port_status(b);
+        let mut shifted_block = b.clone();
+        let block_id = shifted_block.id;
+        shifted_block.position = (b.position.0 + canvas_off_x, b.position.1 + canvas_off_y);
+        let is_block_selected = editor_state.selection.selected_blocks.contains(&block_id);
+        html! {
+            <BlockView
+                key={block_id}
+                block={shifted_block}
+                edited={edited_block_id == block_id}
+                selected={is_block_selected}
+                delete_mode={*delete_mode}
+                delete_block={handle_delete_block.clone()}
+                port_status={port_status}
+                on_edit={handle_block_edit.clone()}
+                on_mouse_down={handle_block_mouse_down.clone()}
+                on_connection_drop={handle_connection_drop.clone()}
+                on_connection_start={handle_connection_start.clone()}
+            />
+        }
+    };
 
     // ----------------- Render -----------------
     html! {
@@ -1318,42 +1340,46 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                 <svg class={classes!("tp__source-editor__connections",
                                if grabbed {"grabbed"} else {""},
                                if editor_state.selection.is_selecting {"selection_mode"} else {""})}>
-                    { for editor_state.connections.iter().filter_map(|c| {
-                        let from_block = editor_state.get_block(c.from)?;
-                        let to_block = editor_state.get_block(c.to)?;
-                        let (d, (from_x, from_y, to_x, to_y)) = update_connection(canvas_off_x, canvas_off_y, from_block, to_block);
-                        let is_active_connection = selected_input_blocks.contains(&c.from)
-                            || selected_target_blocks.contains(&c.from)
-                            || selected_target_blocks.contains(&c.to)
-                            || selected_output_blocks.contains(&c.to);
-                        let connection_color = if is_active_connection {
-                            "var(--source-editor-active-line-color)"
-                        } else {
-                            "var(--source-editor-line-color)"
-                        };
-
-                        Some(html! {
-                            <g>
-                                <path id={format!("conn-{}-{}", c.from, c.to)} d={d} stroke={connection_color} fill="transparent" stroke-width="2"/>
-                                { if *delete_mode {
-                                    let mid_x = (from_x + to_x) / 2.0;
-                                    let mid_y = (from_y + to_y) / 2.0;
-                                    let on_delete_connection = handle_delete_connection.clone();
-                                    html! {
-                                        <circle cx={mid_x.to_string()} cy={mid_y.to_string()} r="6" fill="var(--source-editor-delete-color)" class="clickable"
-                                            onclick={
-                                                let from = c.from;
-                                                let to = c.to;
-                                                Callback::from(move |_| on_delete_connection.emit((from, to)))
-                                            }
-                                        />
-                                    }
-                                } else {
-                                    html!{}
-                                } }
-                            </g>
+                    for (c, d, from_x, from_y, to_x, to_y, connection_color) in editor_state
+                        .connections
+                        .iter()
+                        .filter_map(|c| {
+                            let from_block = editor_state.get_block(c.from)?;
+                            let to_block = editor_state.get_block(c.to)?;
+                            let (d, (from_x, from_y, to_x, to_y)) =
+                                update_connection(canvas_off_x, canvas_off_y, from_block, to_block);
+                            let is_active_connection = selected_input_blocks.contains(&c.from)
+                                || selected_target_blocks.contains(&c.from)
+                                || selected_target_blocks.contains(&c.to)
+                                || selected_output_blocks.contains(&c.to);
+                            let connection_color = if is_active_connection {
+                                "var(--source-editor-active-line-color)"
+                            } else {
+                                "var(--source-editor-line-color)"
+                            };
+                            Some((c, d, from_x, from_y, to_x, to_y, connection_color))
                         })
-                    }) }
+                    {
+                        <g>
+                            <path id={format!("conn-{}-{}", c.from, c.to)} d={d} stroke={connection_color} fill="transparent" stroke-width="2"/>
+                            { if *delete_mode {
+                                let mid_x = (from_x + to_x) / 2.0;
+                                let mid_y = (from_y + to_y) / 2.0;
+                                let on_delete_connection = handle_delete_connection.clone();
+                                html! {
+                                    <circle cx={mid_x.to_string()} cy={mid_y.to_string()} r="6" fill="var(--source-editor-delete-color)" class="clickable"
+                                        onclick={
+                                            let from = c.from;
+                                            let to = c.to;
+                                            Callback::from(move |_| on_delete_connection.emit((from, to)))
+                                        }
+                                    />
+                                }
+                            } else {
+                                html!{}
+                            } }
+                        </g>
+                    }
 
                     // Pending line straight
                     { if let Some(((x1, y1), (x2, y2))) = pending_line {
@@ -1378,27 +1404,9 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                 </svg>
 
                 // Render blocks with canvas offset
-                { for editor_state.blocks.iter().map(|b|{
-                    let port_status = get_port_status(b);
-                    let mut shifted_block = b.clone();
-                    let block_id = shifted_block.id;
-                    shifted_block.position = (b.position.0 + canvas_off_x, b.position.1 + canvas_off_y);
-                    let is_block_selected = editor_state.selection.selected_blocks.contains(&block_id);
-                    html! {
-                    <BlockView
-                        key={block_id}
-                        block={shifted_block}
-                        edited={edited_block_id == block_id}
-                        selected={is_block_selected}
-                        delete_mode={*delete_mode}
-                        delete_block={handle_delete_block.clone()}
-                        port_status={port_status}
-                        on_edit={handle_block_edit.clone()}
-                        on_mouse_down={handle_block_mouse_down.clone()}
-                        on_connection_drop={handle_connection_drop.clone()}
-                        on_connection_start={handle_connection_start.clone()}
-                    />
-                }}) }
+                for b in editor_state.blocks.iter() {
+                    { render_block(b) }
+                }
             </div>
             </div>
             <SourceEditorForm />

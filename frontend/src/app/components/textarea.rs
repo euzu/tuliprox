@@ -40,7 +40,6 @@ pub fn TextArea(props: &TextAreaProps) -> Html {
                     input.set_value(val);
                 }
             }
-            || ()
         });
     }
 

@@ -495,7 +495,7 @@ pub fn PlaylistExplorer() -> Html {
         let popup_onclick = handle_episode_popup_onclick.clone();
         let rating = chan.rating.unwrap_or_default();
         html! {
-            <span class="tp__playlist-explorer__channel tp__playlist-explorer__channel-episode">
+            <span key={chan.id.to_string()} class="tp__playlist-explorer__channel tp__playlist-explorer__channel-episode">
                 {render_channel_logo(&chan.movie_image)}
                 {
                     html_if!(rating > 0.001, {
@@ -599,16 +599,16 @@ pub fn PlaylistExplorer() -> Html {
 
             html! {
                 for (season, season_episodes) in grouped_list.iter() {
-                    <>
-                    <div class={"tp__playlist-explorer__series-info__season"}>
-                        <span class={"tp__playlist-explorer__series-info__season-title"}>{translate.t("LABEL.SEASON")} {" - "} {season}</span>
+                    <div key={format!("season-{season}")}>
+                        <div class={"tp__playlist-explorer__series-info__season"}>
+                            <span class={"tp__playlist-explorer__series-info__season-title"}>{translate.t("LABEL.SEASON")} {" - "} {season}</span>
+                        </div>
+                        <div class={"tp__playlist-explorer__group-list tp__playlist-explorer__group-list-episodes"}>
+                            for episode in season_episodes.iter() {
+                                { render_episode(episode) }
+                            }
+                        </div>
                     </div>
-                    <div class={"tp__playlist-explorer__group-list tp__playlist-explorer__group-list-episodes"}>
-                        for episode in season_episodes.iter() {
-                            { render_episode(episode) }
-                        }
-                    </div>
-                    </>
                 }
             }
         } else {

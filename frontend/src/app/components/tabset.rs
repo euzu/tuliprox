@@ -57,53 +57,54 @@ pub fn TabSet(props: &TabSetProps) -> Html {
         let tabs = props.tabs.clone();
         let active_tab_id = (*active_tab).clone();
         let handle_click = handle_tab_click.clone();
+        let render_tab_button = |tab: &TabItem| {
+            let tab_id = tab.id.clone();
+            let is_active = tab_id == active_tab_id;
+            let click_handler = handle_click.clone();
 
-        html! {
-            <div class="tp__tab-set__header">
-            {
-            tabs.iter().map(|tab| {
-                let tab_id = tab.id.clone();
-                let is_active = tab_id == active_tab_id;
-                let click_handler = handle_click.clone();
+            html! {
+                <div key={tab.id.clone()} class={classes!(
+                    "tp__tab-set__tab",
+                    if is_active { tab.active_class.as_ref().map_or("tp__tab-set__tab--active".to_string(), |s| s.clone())
+                    } else {  tab.inactive_class.as_ref().map_or_else(String::new, |s| s.clone())  }
+                )}>
+                    // Desktop: TextButton
+                    <TextButton
+                        name={tab_id.clone()}
+                        title={tab.title.clone()}
+                        icon={tab.icon.clone()}
+                        class={if is_active { "tp__tab-set__tab-desktop active" } else { "tp__tab-set__tab-desktop" }}
+                        onclick={
+                            let click_handler = click_handler.clone();
+                            Callback::from(move |name: String| {
+                                click_handler.emit(name);
+                            })
+                        }
+                    />
 
-                html! {
-                    <div key={tab.id.clone()} class={classes!(
-                        "tp__tab-set__tab",
-                        if is_active { tab.active_class.as_ref().map_or("tp__tab-set__tab--active".to_string(), |s| s.clone())
-                        } else {  tab.inactive_class.as_ref().map_or_else(String::new, |s| s.clone())  }
-                    )}>
-                        // Desktop: TextButton
-                        <TextButton
-                            name={tab_id.clone()}
-                            title={tab.title.clone()}
+                    // Mobile: IconButton
+                    <div class="tp__tab-set__tab-mobile">
+                        <IconButton
+                            name={tab_id}
                             icon={tab.icon.clone()}
-                            class={if is_active { "tp__tab-set__tab-desktop active" } else { "tp__tab-set__tab-desktop" }}
+                            class={if is_active { "active" } else { "" }}
                             onclick={
                                 let click_handler = click_handler.clone();
-                                Callback::from(move |name: String| {
+                                Callback::from(move |(name, _): (String, MouseEvent)| {
                                     click_handler.emit(name);
                                 })
                             }
                         />
-
-                        // Mobile: IconButton
-                        <div class="tp__tab-set__tab-mobile">
-                            <IconButton
-                                name={tab_id}
-                                icon={tab.icon.clone()}
-                                class={if is_active { "active" } else { "" }}
-                                onclick={
-                                    let click_handler = click_handler.clone();
-                                    Callback::from(move |(name, _): (String, MouseEvent)| {
-                                        click_handler.emit(name);
-                                    })
-                                }
-                            />
-                        </div>
                     </div>
-                }
-            }).collect::<Html>()
+                </div>
             }
+        };
+
+        html! {
+            <div class="tp__tab-set__header">
+                for tab in tabs.iter() {
+                    { render_tab_button(tab) }
+                }
             </div>
         }
     };
@@ -114,9 +115,7 @@ pub fn TabSet(props: &TabSetProps) -> Html {
 
         html! {
             <div class="tp__tab-set__body">
-            {
-            tabs.iter().map(|tab| {
-                html! {
+                for tab in tabs.iter() {
                     <Panel
                         key={tab.id.clone()}
                         class="tp__tab-set__panel"
@@ -126,8 +125,6 @@ pub fn TabSet(props: &TabSetProps) -> Html {
                         { tab.children.clone() }
                     </Panel>
                 }
-            }).collect::<Html>()
-            }
             </div>
         }
     };

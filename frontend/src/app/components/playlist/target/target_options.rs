@@ -14,7 +14,7 @@ pub struct TargetOptionsProps {
 #[component]
 pub fn TargetOptions(props: &TargetOptionsProps) -> Html {
     let translate = use_translation();
-    let tags = use_memo(props.target.clone(), |target| {
+    let tags = use_memo((props.target.clone(), translate.clone()), |(target, translate)| {
         let redirect_default = vec![(false, "LABEL.LIVE"), (false, "LABEL.VOD"), (false, "LABEL.SERIES")];
         let (flags, options, redirect) = match target.options.as_ref() {
             None => (
@@ -54,7 +54,7 @@ pub fn TargetOptions(props: &TargetOptionsProps) -> Html {
             }
         };
 
-        (flags.iter().any(|&v| v), make_tags(&options, &translate), make_tags(&redirect, &translate))
+        (flags.iter().any(|&v| v), make_tags(&options, translate), make_tags(&redirect, translate))
     });
 
     let opts: Vec<Rc<Tag>> = (tags.1).clone();

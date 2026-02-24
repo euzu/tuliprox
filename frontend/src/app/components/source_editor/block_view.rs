@@ -70,7 +70,6 @@ pub fn BlockView(props: &BlockProps) -> Html {
             if let Some(el) = block_ref.cast::<HtmlElement>() {
                 let _ = el.style().set_property("transform", &format!("translate3d({x}px, {y}px, 0)"));
             }
-            || {}
         });
     }
 

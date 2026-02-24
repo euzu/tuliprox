@@ -17,9 +17,8 @@ pub fn TargetOutput(props: &TargetOutputProps) -> Html {
 
     html! {
         <div class="tp__target-output">
-            {
-                props.target.output.iter().map(|output: &TargetOutputDto| {
-                    match output {
+            for output in props.target.output.iter() {
+                { match output {
                     TargetOutputDto::Xtream(xc) => html! {
                         <RevealContent preview={ html!{
                             <span class={format!("tp__target-output__xtream{}", if xc.has_any_option() { " tp__target-output__has_options" } else {""})}>
@@ -57,7 +56,7 @@ pub fn TargetOutput(props: &TargetOutputProps) -> Html {
                         </RevealContent>
                     },
                     }
-                }).collect::<Html>()
+                }
             }
         </div>
     }
