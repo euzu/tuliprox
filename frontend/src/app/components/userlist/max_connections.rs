@@ -6,7 +6,7 @@ pub struct MaxConnectionsProps {
     pub value: u32,
 }
 
-#[function_component]
+#[component]
 pub fn MaxConnections(props: &MaxConnectionsProps) -> Html {
     if props.value == 0 {
         html! { <span class="tp__max-connections"><AppIcon name="Unlimited" /></span> }

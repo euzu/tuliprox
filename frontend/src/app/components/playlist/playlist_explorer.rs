@@ -5,6 +5,7 @@ use crate::{
     },
     hooks::use_service_context,
     html_if,
+    i18n::use_translation,
     model::{BusyStatus, EventMessage},
     services::DialogService,
 };
@@ -20,7 +21,6 @@ use std::{collections::HashMap, fmt::Display, rc::Rc, str::FromStr};
 use wasm_bindgen::JsCast;
 use yew::{platform::spawn_local, prelude::*};
 use yew_hooks::use_clipboard;
-use yew_i18n::use_translation;
 
 const COPY_LINK_TULIPROX_VIRTUAL_ID: &str = "copy_link_tuliprox_virtual_id";
 const COPY_LINK_TULIPROX_WEBPLAYER_URL: &str = "copy_link_tuliprox_webplayer_url";
@@ -77,7 +77,7 @@ enum ExplorerLevel {
     SeriesInfo(Rc<UiPlaylistGroup>, Rc<UiPlaylistItem>, Option<Box<SeriesStreamProperties>>),
 }
 
-#[function_component]
+#[component]
 pub fn PlaylistExplorer() -> Html {
     let context = use_context::<PlaylistExplorerContext>().expect("PlaylistExplorer context not found");
     let dialog = use_context::<DialogService>().expect("Dialog service not found");
@@ -598,20 +598,18 @@ pub fn PlaylistExplorer() -> Html {
             grouped_list.sort_by_key(|(season, _)| *season);
 
             html! {
-                for grouped_list.iter().map(|(season, season_episodes)|
-                    html! {
+                for (season, season_episodes) in grouped_list.iter() {
                     <>
                     <div class={"tp__playlist-explorer__series-info__season"}>
                         <span class={"tp__playlist-explorer__series-info__season-title"}>{translate.t("LABEL.SEASON")} {" - "} {season}</span>
                     </div>
                     <div class={"tp__playlist-explorer__group-list tp__playlist-explorer__group-list-episodes"}>
-                    {
-                        for season_episodes.iter().map(render_episode)
-                    }
+                        for episode in season_episodes.iter() {
+                            { render_episode(episode) }
+                        }
                     </div>
                     </>
-                    }
-                )
+                }
             }
         } else {
             Html::default()
@@ -638,8 +636,8 @@ pub fn PlaylistExplorer() -> Html {
                   {
                     match *current_item {
                         ExplorerLevel::Categories => html!{} ,
-                        ExplorerLevel::Group(ref group) => html!{ <span>{&group.title}</span> },
-                        ExplorerLevel::SeriesInfo(_, ref pli, _) => html!{ <span>{&pli.title}</span> },
+                        ExplorerLevel::Group(ref group) => html!{ <span>{group.title.to_string()}</span> },
+                        ExplorerLevel::SeriesInfo(_, ref pli, _) => html!{ <span>{pli.title.to_string()}</span> },
                     }
                   }
                 </div>

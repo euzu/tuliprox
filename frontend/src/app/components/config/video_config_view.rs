@@ -11,11 +11,11 @@ use crate::{
     },
     config_field_bool, config_field_child, config_field_optional, edit_field_bool, edit_field_list,
     edit_field_number_option_u64, edit_field_text_option, generate_form_reducer,
+    i18n::use_translation,
 };
 use shared::model::{VideoConfigDto, VideoDownloadConfigDto};
 use std::collections::HashMap;
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
 const LABEL_DOWNLOAD: &str = "LABEL.DOWNLOAD";
 const LABEL_ORGANIZE_INTO_DIRECTORIES: &str = "LABEL.ORGANIZE_INTO_DIRECTORIES";
@@ -50,7 +50,7 @@ generate_form_reducer!(
     }
 );
 
-#[function_component]
+#[component]
 pub fn VideoConfigView() -> Html {
     let translate = use_translation();
     let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");
@@ -106,7 +106,7 @@ pub fn VideoConfigView() -> Html {
             { config_field_child!(translate.t(LABEL_EXTENSIONS), {
                html! {
                  <div class="tp__config-view__tags">
-                 { html! { for extensions.iter().map(|t| html! { <Chip label={t.clone()} /> }) } }
+                 for t in extensions.iter() { <Chip label={t.clone()} /> }
                  </div>
                 }})}
             </Card>
@@ -124,7 +124,7 @@ pub fn VideoConfigView() -> Html {
                     html! {
                         <div class="tp__config-view__tags">
                           <ul>
-                            { for download_state.form.headers.iter().map(|(k,v)| html!{ <li key={k.clone()}>{"- "}{k}{": "} {v}</li> }) }
+                            for (k, v) in download_state.form.headers.iter() { <li key={k.clone()}>{"- "}{k}{": "} {v}</li> }
                           </ul>
                         </div>
                     }

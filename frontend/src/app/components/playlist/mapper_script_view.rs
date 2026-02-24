@@ -15,7 +15,7 @@ pub struct MapperScriptViewProps {
     pub script: Option<MapperScript>,
 }
 
-#[function_component]
+#[component]
 pub fn MapperScriptView(props: &MapperScriptViewProps) -> Html {
     html! {
         <div class={classes!("tp__mapper-script", if props.inline {"tp__mapper-script__inline"} else {""} )}>
@@ -117,7 +117,7 @@ fn render_literal(literal: &str) -> Html {
 }
 
 fn render_num_literal(literal: &f64) -> Html {
-    html! { <span class="num-literal">{ literal }</span> }
+    html! { <span class="num-literal">{ *literal }</span> }
 }
 
 fn render_null_value() -> Html {

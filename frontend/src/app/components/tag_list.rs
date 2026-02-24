@@ -20,7 +20,7 @@ pub struct TagListProps {
     pub placeholder: String,
 }
 
-#[function_component]
+#[component]
 pub fn TagList(props: &TagListProps) -> Html {
     let TagListProps { tags, on_change, readonly, placeholder } = props.clone();
 

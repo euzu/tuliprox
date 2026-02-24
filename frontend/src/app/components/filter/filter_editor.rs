@@ -1,13 +1,13 @@
-use crate::app::{
-    components::{CollapsePanel, FilterView},
-    ConfigContext,
+use crate::{
+    app::{
+        components::{CollapsePanel, FilterView},
+        ConfigContext,
+    },
+    i18n::use_translation,
 };
 use shared::{foundation::get_filter, model::PatternTemplate};
 use web_sys::InputEvent;
-use yew::{
-    classes, function_component, html, use_context, use_effect_with, use_state, Callback, Html, Properties, TargetCast,
-};
-use yew_i18n::use_translation;
+use yew::{classes, component, html, use_context, use_effect_with, use_state, Callback, Html, Properties, TargetCast};
 
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct FilterEditorProps {
@@ -18,7 +18,7 @@ pub struct FilterEditorProps {
     pub on_templates_change: Callback<Option<Vec<PatternTemplate>>>,
 }
 
-#[function_component]
+#[component]
 pub fn FilterEditor(props: &FilterEditorProps) -> Html {
     let config_ctx = use_context::<ConfigContext>().expect("Config context not found");
     let translate = use_translation();
@@ -96,16 +96,16 @@ pub fn FilterEditor(props: &FilterEditorProps) -> Html {
                 <div class="tp__filter-editor__templates-content">
                  { if let Some(templ_vec) = &*templates_state {
                       html! {
-                            for templ_vec.iter().map(|templ| html! {
+                            for templ in templ_vec.iter() {
                              <>
                                 <div class="tp__filter-editor__templates-template-name">
-                                    { &templ.name }
+                                    { templ.name.to_string() }
                                 </div>
                                 <div class="tp__filter-editor__templates-template-value">
                                     { templ.value.to_string() }
                                 </div>
                              </>
-                         })
+                         }
                         }
                     } else {
                         html! {}

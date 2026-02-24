@@ -14,7 +14,7 @@ pub struct MenuItemProps {
     pub onclick: Callback<(String, MouseEvent)>,
 }
 
-#[function_component]
+#[component]
 pub fn MenuItem(props: &MenuItemProps) -> Html {
     let handle_click = {
         let click = props.onclick.clone();

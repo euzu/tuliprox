@@ -2,11 +2,13 @@ use super::{
     step_api_users::ApiUsersStep, step_config::ConfigStep, step_finish::FinishStep, step_sources::SourcesStep,
     step_welcome::WelcomeStep, SetupConfigFormState, SetupContext, SetupStep,
 };
-use crate::app::{components::Panel, ConfigContext};
+use crate::{
+    app::{components::Panel, ConfigContext},
+    i18n::use_translation,
+};
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
-#[function_component]
+#[component]
 pub fn Setup() -> Html {
     let translate = use_translation();
     let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");

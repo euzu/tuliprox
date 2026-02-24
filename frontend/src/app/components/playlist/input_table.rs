@@ -5,6 +5,7 @@ use crate::{
         TableDefinition,
     },
     html_if,
+    i18n::use_translation,
     model::DialogResult,
     services::DialogService,
 };
@@ -15,7 +16,6 @@ use shared::{
 };
 use std::{fmt::Display, rc::Rc, str::FromStr};
 use yew::{platform::spawn_local, prelude::*};
-use yew_i18n::use_translation;
 
 const HEADERS: [&str; 16] = [
     "LABEL.EMPTY",
@@ -51,7 +51,7 @@ pub struct InputTableProps {
     pub on_delete: Option<Callback<String>>,
 }
 
-#[function_component]
+#[component]
 pub fn InputTable(props: &InputTableProps) -> Html {
     let translate = use_translation();
     let dialog = use_context::<DialogService>().expect("Dialog service not found");

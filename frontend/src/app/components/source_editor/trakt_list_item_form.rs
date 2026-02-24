@@ -1,10 +1,10 @@
 use crate::{
     app::components::{select::Select, Card, DropDownOption, DropDownSelection, TextButton},
     config_field_child, edit_field_number_u8, edit_field_text, generate_form_reducer,
+    i18n::use_translation,
 };
 use shared::model::{TraktContentType, TraktListConfigDto};
-use yew::{function_component, html, use_memo, use_reducer, Callback, Html, Properties, UseReducerHandle};
-use yew_i18n::use_translation;
+use yew::{component, html, use_memo, use_reducer, Callback, Html, Properties, UseReducerHandle};
 
 const LABEL_TRAKT_USER: &str = "LABEL.TRAKT_USER";
 const LABEL_TRAKT_LIST_SLUG: &str = "LABEL.TRAKT_LIST_SLUG";
@@ -32,7 +32,7 @@ pub struct TraktListItemFormProps {
     pub initial: Option<TraktListConfigDto>,
 }
 
-#[function_component]
+#[component]
 pub fn TraktListItemForm(props: &TraktListItemFormProps) -> Html {
     let translate = use_translation();
 

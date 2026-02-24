@@ -1,10 +1,10 @@
 use crate::{
     app::components::{Card, TextButton},
     edit_field_bool, edit_field_number_i16, edit_field_text, generate_form_reducer,
+    i18n::use_translation,
 };
 use shared::model::EpgSourceDto;
-use yew::{function_component, html, use_reducer, Callback, Html, Properties, UseReducerHandle};
-use yew_i18n::use_translation;
+use yew::{component, html, use_reducer, Callback, Html, Properties, UseReducerHandle};
 
 const LABEL_EPG_SOURCE_URL: &str = "LABEL.EPG_SOURCE_URL";
 const LABEL_EPG_PRIORITY: &str = "LABEL.PRIORITY";
@@ -28,7 +28,7 @@ pub struct EpgSourceItemFormProps {
     pub initial: Option<EpgSourceDto>,
 }
 
-#[function_component]
+#[component]
 pub fn EpgSourceItemForm(props: &EpgSourceItemFormProps) -> Html {
     let translate = use_translation();
 

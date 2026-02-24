@@ -8,7 +8,7 @@ pub struct CardProps {
     pub children: Children,
 }
 
-#[function_component]
+#[component]
 pub fn Card(props: &CardProps) -> Html {
     let custom_class = use_state(String::new);
     let context = CardContext { custom_class: custom_class.clone() };

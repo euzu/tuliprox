@@ -8,7 +8,7 @@ pub struct AuthenticationProps {
     pub children: Children,
 }
 
-#[function_component]
+#[component]
 pub fn Authentication(props: &AuthenticationProps) -> Html {
     let services = use_service_context();
     let loading = use_state(|| true);

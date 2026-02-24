@@ -7,10 +7,10 @@ rust-version = "1.89.0"
 [dependencies]
 shared = { version = "3.2.103", path = "../shared" }
 chrono = "0"
-yew = "0.21"
-yew-router = "0.18"
-yew-hooks = "0.3.4"
-yew-i18n = "0.1"
+yew = "0.22"
+yew-router = "0.19"
+yew-hooks = "0.5"
+i18nrs = "0.1.9"
 serde_json = {version = "1" }
 serde = {version = "1.0", features = ["derive", "rc"] }
 wasm-bindgen = {version = "0.2", features = ["serde-serialize"]}

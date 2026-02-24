@@ -12,7 +12,7 @@ pub struct StatusCardProps {
     pub classname: String,
 }
 
-#[function_component]
+#[component]
 pub fn StatusCard(props: &StatusCardProps) -> Html {
     html! {
         <div class={classes!("tp__status-card", if props.classname.is_empty() { String::new() } else {props.classname.to_string()})}>

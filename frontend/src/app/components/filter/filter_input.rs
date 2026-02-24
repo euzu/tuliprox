@@ -20,7 +20,7 @@ pub struct FilterInputProps {
     pub on_change: Callback<Option<String>>,
 }
 
-#[function_component]
+#[component]
 pub fn FilterInput(props: &FilterInputProps) -> Html {
     let config_ctx = use_context::<ConfigContext>().expect("Config context not found");
     let dialog = use_context::<DialogService>().expect("Dialog service not found");

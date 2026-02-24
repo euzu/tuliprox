@@ -8,10 +8,10 @@ use crate::{
     },
     config_field, config_field_optional, config_field_optional_hide, edit_field_text, edit_field_text_option,
     generate_form_reducer,
+    i18n::use_translation,
 };
 use shared::model::ProxyConfigDto;
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
 const LABEL_URL: &str = "LABEL.URL";
 const LABEL_USERNAME: &str = "LABEL.USERNAME";
@@ -27,7 +27,7 @@ generate_form_reducer!(
     }
 );
 
-#[function_component]
+#[component]
 pub fn ProxyConfigView() -> Html {
     let translate = use_translation();
     let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");

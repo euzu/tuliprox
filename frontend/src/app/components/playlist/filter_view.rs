@@ -10,7 +10,7 @@ pub struct FilterViewProps {
     pub filter: Option<Filter>,
 }
 
-#[function_component]
+#[component]
 pub fn FilterView(props: &FilterViewProps) -> Html {
     html! {
         <div class={classes!("tp__filter", if props.inline {"tp__filter__inline"} else {""} )}>

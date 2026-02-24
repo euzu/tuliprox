@@ -1,14 +1,13 @@
-use crate::app::components::Chip;
+use crate::{app::components::Chip, i18n::use_translation};
 use shared::model::{ClusterFlags, ProxyType};
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct ProxyTypeViewProps {
     pub value: ProxyType,
 }
 
-#[function_component]
+#[component]
 pub fn ProxyTypeView(props: &ProxyTypeViewProps) -> Html {
     let translate = use_translation();
 

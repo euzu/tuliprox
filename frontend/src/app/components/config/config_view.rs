@@ -21,6 +21,7 @@ use crate::{
     },
     hooks::use_service_context,
     html_if,
+    i18n::use_translation,
     services::{get_base_href, SetupCompleteRequestDto, SetupWebUserCredentialDto},
     utils::set_timeout,
 };
@@ -28,7 +29,6 @@ use log::warn;
 use shared::model::{ApiProxyConfigDto, AppConfigDto, ConfigDto, SourcesConfigDto};
 use std::str::FromStr;
 use yew::{platform::spawn_local, prelude::*};
-use yew_i18n::use_translation;
 
 const LABEL_CONFIG: &str = "LABEL.CONFIG";
 const LABEL_EDIT: &str = "LABEL.EDIT";
@@ -66,7 +66,7 @@ struct ConfigFormState {
     pub slots: ConfigFormSlots,
 }
 
-#[function_component]
+#[component]
 pub fn ConfigView() -> Html {
     let translate = use_translation();
     let services_ctx = use_service_context();

@@ -1,15 +1,14 @@
-use crate::app::components::Card;
+use crate::{app::components::Card, i18n::use_translation};
 use shared::model::ConfigTargetDto;
 use std::rc::Rc;
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct TargetRenameProps {
     pub target: Rc<ConfigTargetDto>,
 }
 
-#[function_component]
+#[component]
 pub fn TargetRename(props: &TargetRenameProps) -> Html {
     let translator = use_translation();
 

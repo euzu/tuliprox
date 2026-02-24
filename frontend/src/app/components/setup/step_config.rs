@@ -15,10 +15,10 @@ use crate::{
         ConfigContext,
     },
     hooks::use_service_context,
+    i18n::use_translation,
 };
 use std::rc::Rc;
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
 #[derive(Properties, Clone, PartialEq)]
 pub struct ConfigStepProps {
@@ -43,7 +43,7 @@ fn render_config_page(step: SetupStep) -> Html {
     }
 }
 
-#[function_component]
+#[component]
 pub fn ConfigStep(props: &ConfigStepProps) -> Html {
     let step = props.step;
     let translate = use_translation();

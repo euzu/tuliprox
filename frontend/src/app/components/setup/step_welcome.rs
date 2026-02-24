@@ -2,9 +2,9 @@ use super::setup_helpers::{move_to_next_step, validate_credentials};
 use crate::{
     app::components::{input::Input, Card, SetupContext, SetupStep, TextButton},
     hooks::use_service_context,
+    i18n::use_translation,
 };
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
 const LABEL_SETUP_WELCOME: &str = "SETUP.LABEL.WELCOME";
 const LABEL_SETUP_STEP: &str = "SETUP.LABEL.STEP";
@@ -12,7 +12,7 @@ const LABEL_SETUP_WEBUI_USERNAME: &str = "SETUP.LABEL.WEBUI_USERNAME";
 const LABEL_SETUP_WEBUI_PASSWORD: &str = "SETUP.LABEL.WEBUI_PASSWORD";
 const LABEL_SETUP_WEBUI_PASSWORD_REPEAT: &str = "SETUP.LABEL.WEBUI_PASSWORD_REPEAT";
 
-#[function_component]
+#[component]
 pub fn WelcomeStep() -> Html {
     let setup_ctx = use_context::<SetupContext>().expect("Setup context not found");
     let services = use_service_context();

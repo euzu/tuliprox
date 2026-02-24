@@ -9,13 +9,13 @@ use crate::{
         context::{ConfigContext, PlaylistContext},
     },
     hooks::use_service_context,
+    i18n::use_translation,
 };
 use shared::model::TargetUserDto;
 use std::rc::Rc;
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
-#[function_component]
+#[component]
 pub fn ApiUsersStep() -> Html {
     let step = SetupStep::ApiUsers;
     let translate = use_translation();

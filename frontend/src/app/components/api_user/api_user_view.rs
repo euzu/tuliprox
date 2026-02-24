@@ -6,9 +6,9 @@ use crate::{
     hooks::use_service_context,
     provider::DialogProvider,
 };
-use yew::{function_component, html, use_state, Callback, Html};
+use yew::{component, html, use_state, Callback, Html};
 
-#[function_component]
+#[component]
 pub fn ApiUserView() -> Html {
     let services = use_service_context();
     let theme = use_state(Theme::get_current_theme);

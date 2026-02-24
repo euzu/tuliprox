@@ -9,7 +9,7 @@ pub struct BreadcrumbsProps {
     #[prop_or_default]
     pub onclick: Callback<(String, usize)>,
 }
-#[function_component]
+#[component]
 pub fn Breadcrumbs(props: &BreadcrumbsProps) -> Html {
     let len = props.items.len();
 
@@ -35,30 +35,28 @@ pub fn Breadcrumbs(props: &BreadcrumbsProps) -> Html {
     html! {
         <nav class="tp__breadcrumbs" aria-label="Breadcrumb">
             <ol>
-                { for props.items.iter().enumerate().map(|(i, item)| {
-                    html! {
-                        <li>
-                        {
-                            if i > 0 {
-                              html! { <span class="tp__breadcrumbs__icon"><AppIcon name="ChevronRight"/></span> }
-                            } else {
-                                html! {}
-                            }
+                for (i, item) in props.items.iter().enumerate() {
+                    <li>
+                    {
+                        if i > 0 {
+                          html! { <span class="tp__breadcrumbs__icon"><AppIcon name="ChevronRight"/></span> }
+                        } else {
+                            html! {}
                         }
-                        {
-                            if i < len -1 {
-                               html! { <span class="tp__breadcrumbs__selectable"
-                                data-index={i.to_string()}
-                                data-name={ item.to_string() }
-                                onclick={ handle_click.clone() }>{ &item }</span>
-                              }
-                            } else {
-                               html! { <span class="tp__breadcrumbs__active">{ &item }</span> }
-                            }
-                        }
-                        </li>
                     }
-                })}
+                    {
+                        if i < len -1 {
+                           html! { <span class="tp__breadcrumbs__selectable"
+                            data-index={i.to_string()}
+                            data-name={ item.to_string() }
+                            onclick={ handle_click.clone() }>{ item }</span>
+                          }
+                        } else {
+                           html! { <span class="tp__breadcrumbs__active">{ item }</span> }
+                        }
+                    }
+                    </li>
+                }
             </ol>
         </nav>
     }

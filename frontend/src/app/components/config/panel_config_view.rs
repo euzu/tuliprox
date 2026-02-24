@@ -12,6 +12,7 @@ use crate::{
         context::ConfigContext,
     },
     html_if,
+    i18n::use_translation,
 };
 use shared::{
     model::{
@@ -22,7 +23,6 @@ use shared::{
 };
 use std::rc::Rc;
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
 const LABEL_ENABLED: &str = "LABEL.ENABLED";
 const LABEL_URL: &str = "LABEL.URL";
@@ -508,6 +508,72 @@ fn render_param_editor(
         })
     };
 
+    let param_rows = params
+        .iter()
+        .enumerate()
+        .map(|(param_idx, p)| {
+            let on_key = {
+                let form_state = form_state.clone();
+                Callback::from(move |value: String| {
+                    form_state.dispatch(PanelConfigFormAction::SetParamKey {
+                        input_idx,
+                        section,
+                        param_idx,
+                        key: value,
+                    });
+                })
+            };
+            let on_val = {
+                let form_state = form_state.clone();
+                Callback::from(move |value: String| {
+                    form_state.dispatch(PanelConfigFormAction::SetParamValue {
+                        input_idx,
+                        section,
+                        param_idx,
+                        value,
+                    });
+                })
+            };
+            let on_remove = {
+                let form_state = form_state.clone();
+                Callback::from(move |(name, _): (String, MouseEvent)| {
+                    if name == "rm" {
+                        form_state.dispatch(PanelConfigFormAction::RemoveParam {
+                            input_idx,
+                            section,
+                            param_idx,
+                        });
+                    }
+                })
+            };
+            html! {
+                <div class={classes!(
+                    "tp__panel-api-config-view__param-row",
+                    if edit_mode { None } else { Some("tp__panel-api-config-view__param-row--view") }
+                )}>
+                    {
+                        if edit_mode {
+                            html!{
+                                <>
+                                    <Input name="key" label={Option::<String>::None} value={p.key.to_string()} placeholder={Some("key".to_string())} on_change={Some(on_key)} />
+                                    <Input name="value" label={Option::<String>::None} value={p.value.to_string()} placeholder={Some("value".to_string())} on_change={Some(on_val)} />
+                                    <IconButton name="rm" icon="Delete" class="tp__panel-api-config-view__param-remove" onclick={on_remove}/>
+                                </>
+                            }
+                        } else {
+                            html!{
+                                <div class="tp__panel-api-config-view__param-view">
+                                    <span class="k">{ p.key.to_string() }</span>
+                                    <span class="v">{ p.value.to_string() }</span>
+                                </div>
+                            }
+                        }
+                    }
+                </div>
+            }
+        })
+        .collect::<Html>();
+
     html! {
         <div class="tp__panel-api-config-view__section">
             <div class="tp__panel-api-config-view__section-header">
@@ -524,53 +590,7 @@ fn render_param_editor(
                 if params.is_empty() {
                     html!{ <div class="tp__panel-api-config-view__params-empty">{ "—" }</div> }
                 } else {
-                    html!{ for params.iter().enumerate().map(|(param_idx, p)| {
-                        let on_key = {
-                            let form_state = form_state.clone();
-                            Callback::from(move |value: String| {
-                                form_state.dispatch(PanelConfigFormAction::SetParamKey { input_idx, section, param_idx, key: value });
-                            })
-                        };
-                        let on_val = {
-                            let form_state = form_state.clone();
-                            Callback::from(move |value: String| {
-                                form_state.dispatch(PanelConfigFormAction::SetParamValue { input_idx, section, param_idx, value });
-                            })
-                        };
-                        let on_remove = {
-                            let form_state = form_state.clone();
-                            Callback::from(move |(name, _): (String, MouseEvent)| {
-                                if name == "rm" {
-                                    form_state.dispatch(PanelConfigFormAction::RemoveParam { input_idx, section, param_idx });
-                                }
-                            })
-                        };
-                        html!{
-                            <div class={classes!(
-                                "tp__panel-api-config-view__param-row",
-                                if edit_mode { None } else { Some("tp__panel-api-config-view__param-row--view") }
-                            )}>
-                                {
-                                    if edit_mode {
-                                        html!{
-                                            <>
-                                                <Input name="key" label={Option::<String>::None} value={p.key.to_string()} placeholder={Some("key".to_string())} on_change={Some(on_key)} />
-                                                <Input name="value" label={Option::<String>::None} value={p.value.to_string()} placeholder={Some("value".to_string())} on_change={Some(on_val)} />
-                                                <IconButton name="rm" icon="Delete" class="tp__panel-api-config-view__param-remove" onclick={on_remove}/>
-                                            </>
-                                        }
-                                    } else {
-                                        html!{
-                                            <div class="tp__panel-api-config-view__param-view">
-                                                <span class="k">{ &p.key }</span>
-                                                <span class="v">{ &p.value }</span>
-                                            </div>
-                                        }
-                                    }
-                                }
-                            </div>
-                        }
-                    }) }
+                    param_rows.clone()
                 }
             }
             </div>
@@ -578,7 +598,7 @@ fn render_param_editor(
     }
 }
 
-#[function_component]
+#[component]
 pub fn PanelConfigView() -> Html {
     let translate = use_translation();
     let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");
@@ -771,7 +791,7 @@ pub fn PanelConfigView() -> Html {
             <Card class="tp__config-view__card tp__panel-api-config-view__input-card">
                 <div class="tp__panel-api-config-view__input-header">
                     <div class="tp__panel-api-config-view__input-title">
-                        <h1>{ &input.name }</h1>
+                        <h1>{ input.name.to_string() }</h1>
                         <div class="tp__panel-api-config-view__input-badges">
                             <Chip label={type_label} class={Option::<String>::None}/>
                             <Chip label={credits_label} class={Some("tp__panel-api-config-view__credits-chip".to_string())}/>
@@ -868,7 +888,7 @@ pub fn PanelConfigView() -> Html {
                                     <div class="tp__panel-api-config-view__errors">
                                         <h2>{ translate.t(LABEL_VALIDATION) }</h2>
                                         <ul>
-                                            { for errors.iter().map(|e| html!{ <li>{ e }</li> }) }
+                                            for e in errors.iter() { <li>{ e }</li> }
                                         </ul>
                                     </div>
                                 })}
@@ -927,7 +947,7 @@ pub fn PanelConfigView() -> Html {
                                     <div class="tp__panel-api-config-view__errors">
                                         <h2>{ translate.t(LABEL_VALIDATION) }</h2>
                                         <ul>
-                                            { for errors.iter().map(|e| html!{ <li>{ e }</li> }) }
+                                            for e in errors.iter() { <li>{ e }</li> }
                                         </ul>
                                     </div>
                                 })}
@@ -953,7 +973,9 @@ pub fn PanelConfigView() -> Html {
                 </Card>
             </div>
             <div class="tp__panel-api-config-view__body tp__config-view-page__body">
-                { for inputs.into_iter().map(|(input_idx, inp)| render_input_card(input_idx, inp)) }
+                for (input_idx, inp) in inputs.into_iter() {
+                    { render_input_card(input_idx, inp) }
+                }
             </div>
         </div>
     }

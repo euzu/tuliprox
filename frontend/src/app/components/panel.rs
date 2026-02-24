@@ -9,7 +9,7 @@ pub struct PanelProps {
     pub class: String,
 }
 
-#[function_component]
+#[component]
 pub fn Panel(props: &PanelProps) -> Html {
     html! {
         <div class={classes!("tp__panel", props.class.to_string(), if props.value == props.active {""} else {"tp__hidden"} )}>

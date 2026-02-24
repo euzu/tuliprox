@@ -5,7 +5,7 @@ use crate::{
 use yew::prelude::*;
 use yew_router::Switch;
 
-#[function_component]
+#[component]
 pub fn RoleBasedContent() -> Html {
     let services = use_service_context();
 

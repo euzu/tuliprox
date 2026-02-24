@@ -8,7 +8,7 @@ pub struct PlaylistProcessingProps {
     pub order: ProcessingOrder,
 }
 
-#[function_component]
+#[component]
 pub fn PlaylistProcessing(props: &PlaylistProcessingProps) -> Html {
     let tags = use_memo(props.order, |order| {
         let text = match order {

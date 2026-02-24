@@ -1,14 +1,16 @@
-use crate::app::{
-    components::{
-        userlist::{edit::UserEdit, list::UserlistList, page::UserlistPage},
-        Breadcrumbs, Panel, TargetUser,
+use crate::{
+    app::{
+        components::{
+            userlist::{edit::UserEdit, list::UserlistList, page::UserlistPage},
+            Breadcrumbs, Panel, TargetUser,
+        },
+        context::{api_proxy_users_to_target_users, ConfigContext, UserlistContext},
     },
-    context::{api_proxy_users_to_target_users, ConfigContext, UserlistContext},
+    i18n::use_translation,
 };
 use shared::model::TargetUserDto;
 use std::rc::Rc;
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
 #[derive(Properties, Clone, PartialEq, Default)]
 pub struct UserlistViewProps {
@@ -20,7 +22,7 @@ pub struct UserlistViewProps {
     pub on_users_change: Option<Callback<Vec<TargetUserDto>>>,
 }
 
-#[function_component]
+#[component]
 pub fn UserlistView(props: &UserlistViewProps) -> Html {
     let translate = use_translation();
     let config_ctx = use_context::<ConfigContext>().expect("Config context not found");

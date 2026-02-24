@@ -3,16 +3,14 @@ use crate::{
     model::DialogResult,
     services::{DialogRequest, DialogService},
 };
-use yew::{
-    function_component, html, use_effect_with, use_state, Callback, Children, ContextProvider, Html, Properties,
-};
+use yew::{component, html, use_effect_with, use_state, Callback, Children, ContextProvider, Html, Properties};
 
 #[derive(Properties, PartialEq)]
 pub struct ConfirmProviderProps {
     pub children: Children,
 }
 
-#[function_component]
+#[component]
 pub fn DialogProvider(props: &ConfirmProviderProps) -> Html {
     let service = use_state(DialogService::new);
     let dialog_request = use_state(|| None::<DialogRequest>);

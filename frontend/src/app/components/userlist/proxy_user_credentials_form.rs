@@ -9,6 +9,7 @@ use crate::{
     config_field_child, config_field_custom, edit_field_bool, edit_field_date, edit_field_number, edit_field_text,
     edit_field_text_option, generate_form_reducer,
     hooks::use_service_context,
+    i18n::use_translation,
 };
 use chrono::{Duration, Utc};
 use shared::{
@@ -17,7 +18,6 @@ use shared::{
 };
 use std::rc::Rc;
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
 const DEFAULT_MAX_CONNECTIONS: u32 = 1;
 const DEFAULT_EXPIRATION_DAYS: i64 = 365;
@@ -50,7 +50,7 @@ pub struct ProxyUserCredentialsFormProps {
     pub on_cancel: Callback<()>,
 }
 
-#[function_component]
+#[component]
 pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
     let translate = use_translation();
     let service_ctx = use_service_context();

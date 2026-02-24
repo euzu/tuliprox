@@ -1,15 +1,18 @@
-use crate::app::{
-    components::{
-        playlist::playlist_explorer::PlaylistExplorer, Breadcrumbs, Panel, PlaylistExplorerPage, PlaylistSourceSelector,
+use crate::{
+    app::{
+        components::{
+            playlist::playlist_explorer::PlaylistExplorer, Breadcrumbs, Panel, PlaylistExplorerPage,
+            PlaylistSourceSelector,
+        },
+        context::PlaylistExplorerContext,
     },
-    context::PlaylistExplorerContext,
+    i18n::use_translation,
 };
 use shared::model::{PlaylistRequest, UiPlaylistCategories};
 use std::rc::Rc;
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
-#[function_component]
+#[component]
 pub fn PlaylistExplorerView() -> Html {
     let translate = use_translation();
     let breadcrumbs = use_state(|| Rc::new(vec![translate.t("LABEL.PLAYLISTS"), translate.t("LABEL.LIST")]));

@@ -7,7 +7,7 @@ pub struct TitledCardProps {
     pub children: Children,
 }
 
-#[function_component(TitledCard)]
+#[component(TitledCard)]
 pub fn titled_card(props: &TitledCardProps) -> Html {
     html! {
         <div class="tp__titled-card">

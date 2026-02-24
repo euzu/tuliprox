@@ -6,7 +6,7 @@ pub struct InputHeadersProps {
     pub headers: HashMap<String, String>,
 }
 
-#[function_component]
+#[component]
 pub fn InputHeaders(props: &InputHeadersProps) -> Html {
     if props.headers.is_empty() {
         html! {}

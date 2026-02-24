@@ -6,6 +6,7 @@ use crate::{
         ConfigContext,
     },
     hooks::use_service_context,
+    i18n::use_translation,
     services::DialogService,
     utils::t_safe,
 };
@@ -22,7 +23,6 @@ use wasm_bindgen::JsCast;
 use web_sys::Element;
 use yew::{platform::spawn_local, prelude::*};
 use yew_hooks::use_clipboard;
-use yew_i18n::use_translation;
 
 const LIVE: &str = "Live";
 const MOVIE: &str = "Movie";
@@ -79,7 +79,7 @@ pub struct StreamsTableProps {
     pub streams: Option<Vec<Rc<StreamInfo>>>,
 }
 
-#[function_component]
+#[component]
 pub fn StreamsTable(props: &StreamsTableProps) -> Html {
     let translate = use_translation();
     let service_ctx = use_service_context();

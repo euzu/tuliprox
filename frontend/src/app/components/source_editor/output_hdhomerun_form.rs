@@ -4,14 +4,13 @@ use crate::{
         SourceEditorContext, TextButton,
     },
     config_field_child, edit_field_text, generate_form_reducer,
+    i18n::use_translation,
 };
 use shared::model::{HdHomeRunTargetOutputDto, TargetOutputDto, TargetType};
 use std::rc::Rc;
 use yew::{
-    function_component, html, use_context, use_effect_with, use_memo, use_reducer, Callback, Html, Properties,
-    UseReducerHandle,
+    component, html, use_context, use_effect_with, use_memo, use_reducer, Callback, Html, Properties, UseReducerHandle,
 };
-use yew_i18n::use_translation;
 
 const LABEL_DEVICE: &str = "LABEL.DEVICE";
 const LABEL_USERNAME: &str = "LABEL.USERNAME";
@@ -33,7 +32,7 @@ pub struct HdHomeRunTargetOutputViewProps {
     pub(crate) output: Option<Rc<HdHomeRunTargetOutputDto>>,
 }
 
-#[function_component]
+#[component]
 pub fn HdHomeRunTargetOutputView(props: &HdHomeRunTargetOutputViewProps) -> Html {
     let translate = use_translation();
     let source_editor_ctx = use_context::<SourceEditorContext>().expect("SourceEditorContext not found");

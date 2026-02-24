@@ -9,6 +9,7 @@ use crate::{
         ConfigContext, TargetUserList,
     },
     hooks::use_service_context,
+    i18n::use_translation,
     model::DialogResult,
     services::DialogService,
 };
@@ -20,7 +21,6 @@ use shared::{
 use std::{cmp::Ordering, collections::HashSet, fmt::Display, rc::Rc, str::FromStr};
 use yew::{platform::spawn_local, prelude::*};
 use yew_hooks::use_clipboard;
-use yew_i18n::use_translation;
 
 const HEADERS: [&str; 16] = [
     "LABEL.EMPTY",
@@ -103,7 +103,7 @@ pub struct UserTableProps {
     pub users: TargetUserList,
 }
 
-#[function_component]
+#[component]
 pub fn UserTable(props: &UserTableProps) -> Html {
     let translate = use_translation();
     let clipboard = use_clipboard();

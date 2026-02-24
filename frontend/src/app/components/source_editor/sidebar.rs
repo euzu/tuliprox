@@ -1,6 +1,8 @@
-use crate::app::components::{source_editor::editor_model::BlockType, CollapsePanel, IconButton};
+use crate::{
+    app::components::{source_editor::editor_model::BlockType, CollapsePanel, IconButton},
+    i18n::use_translation,
+};
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
 pub const BLOCK_TYPES_INPUT: [BlockType; 3] = [BlockType::InputXtream, BlockType::InputM3u, BlockType::InputLibrary];
 
@@ -33,7 +35,7 @@ pub struct SourceEditorSidebarProps {
     pub on_layout: Callback<(String, MouseEvent)>,
 }
 
-#[function_component]
+#[component]
 pub fn SourceEditorSidebar(props: &SourceEditorSidebarProps) -> Html {
     let translate = use_translation();
 

@@ -1,6 +1,7 @@
 use crate::{
     app::components::{Breadcrumbs, EpgSourceSelector, NoContent},
     hooks::use_service_context,
+    i18n::use_translation,
     model::{BusyStatus, EventMessage},
     utils::set_timeout,
 };
@@ -14,10 +15,9 @@ use std::{cell::RefCell, rc::Rc};
 use wasm_bindgen::{prelude::Closure, JsCast};
 use web_sys::{window, HtmlElement};
 use yew::{
-    classes, function_component, html, platform::spawn_local, use_effect_with, use_memo, use_node_ref, use_state,
-    Callback, Html, UseStateHandle,
+    classes, component, html, platform::spawn_local, use_effect_with, use_memo, use_node_ref, use_state, Callback,
+    Html, UseStateHandle,
 };
-use yew_i18n::use_translation;
 
 const TIME_BLOCK_WIDTH: f64 = 210.0;
 const TIME_BLOCK_MINS: i64 = 30;
@@ -31,7 +31,7 @@ fn get_pos(secs: i64, start_mins: i64) -> i64 {
 
 type OnScrollHandle = Rc<RefCell<Option<Closure<dyn FnMut(web_sys::Event)>>>>;
 
-#[function_component]
+#[component]
 pub fn EpgView() -> Html {
     let services = use_service_context();
     let translate = use_translation();
@@ -203,7 +203,9 @@ pub fn EpgView() -> Html {
                                               } else { html!{} }
                                             }
                                         </div>
-                                        <div class="tp__epg__channel-title">{ &ch.title }</div>
+                                        <div class="tp__epg__channel-title">
+                                            { ch.title.as_ref().map(ToString::to_string).unwrap_or_default() }
+                                        </div>
                                     </div>
                                 }
                               })
@@ -254,7 +256,9 @@ pub fn EpgView() -> Html {
                                             html! {
                                             <div class={classes!("tp__epg__program", if is_active { "tp__epg__program-active" } else {""})} style={program_style} title={ p.title.as_ref().map(ToString::to_string).unwrap_or_default() }>
                                                 <div class="tp__epg__program-time">{ &pstart } {"-"} { &pend }</div>
-                                                <div class="tp__epg__program-title">{ &p.title }</div>
+                                                <div class="tp__epg__program-title">
+                                                    { p.title.as_ref().map(ToString::to_string).unwrap_or_default() }
+                                                </div>
                                             </div>
                                             }
                                         } else {

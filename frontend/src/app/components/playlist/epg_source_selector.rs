@@ -4,13 +4,13 @@ use crate::{
     },
     hooks::use_service_context,
     html_if,
+    i18n::use_translation,
     model::ExplorerSourceType,
 };
 use shared::model::PlaylistEpgRequest;
 use std::{rc::Rc, str::FromStr};
 use web_sys::HtmlInputElement;
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
 #[derive(Properties, PartialEq, Clone)]
 pub struct EpgSourceSelectorProps {
@@ -20,7 +20,7 @@ pub struct EpgSourceSelectorProps {
     pub on_select: Callback<PlaylistEpgRequest>,
 }
 
-#[function_component]
+#[component]
 pub fn EpgSourceSelector(props: &EpgSourceSelectorProps) -> Html {
     let translate = use_translation();
     let services_ctx = use_service_context();

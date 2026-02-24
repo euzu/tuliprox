@@ -4,6 +4,7 @@ use crate::{
         Panel, RadioButtonGroup, TextButton,
     },
     hooks::use_service_context,
+    i18n::use_translation,
     model::{BusyStatus, EventMessage},
 };
 use shared::{
@@ -12,7 +13,6 @@ use shared::{
 };
 use std::{cell::RefCell, collections::HashMap, fmt, rc::Rc, str::FromStr};
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum ApiUserPlaylistPage {
@@ -73,7 +73,7 @@ fn to_playlist_cluster(
     }
 }
 
-#[function_component]
+#[component]
 pub fn ApiUserPlaylist() -> Html {
     let translate = use_translation();
     let service_ctx = use_service_context();

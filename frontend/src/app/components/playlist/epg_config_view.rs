@@ -1,10 +1,10 @@
 use crate::{
     app::components::{Card, Chip, NoContent},
     config_field, config_field_bool, config_field_child, config_field_optional,
+    i18n::use_translation,
 };
 use shared::model::{EpgConfigDto, EpgSmartMatchConfigDto, EpgSourceDto};
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
 #[derive(Properties, PartialEq, Clone)]
 pub struct EpgConfigViewProps {
@@ -12,7 +12,7 @@ pub struct EpgConfigViewProps {
     pub epg: Option<EpgConfigDto>,
 }
 
-#[function_component]
+#[component]
 pub fn EpgConfigView(props: &EpgConfigViewProps) -> Html {
     let translate = use_translation();
 
@@ -31,14 +31,15 @@ pub fn EpgConfigView(props: &EpgConfigViewProps) -> Html {
                 render_empty_sources()
             } else {
                 html! {
-                  for sources.iter().map(|entry| html! {
+                  for entry in sources.iter() {
                     <Card class="tp__config-view__card">
                         <h1>{translate.t("LABEL.SOURCE")}</h1>
                         { config_field!(entry, translate.t("LABEL.URL"), url) }
                         { config_field!(entry, translate.t("LABEL.PRIORITY"), priority) }
                         { config_field_bool!(entry, translate.t("LABEL.LOGO_OVERRIDE"), logo_override) }
                     </Card>
-                })}
+                  }
+                }
             }
         } else {
             render_empty_sources()
@@ -74,9 +75,9 @@ pub fn EpgConfigView(props: &EpgConfigViewProps) -> Html {
                                             html! {}
                                         } else {
                                             html! {
-                                               for name_prefixe_seperators.iter().map(|value| html! {
+                                               for value in name_prefixe_seperators.iter() {
                                                   <Chip label={value.to_string()} />
-                                               })
+                                               }
                                             }
                                         }
                                     } else {
@@ -95,9 +96,9 @@ pub fn EpgConfigView(props: &EpgConfigViewProps) -> Html {
                                             html! {}
                                         } else {
                                             html! {
-                                               for strip.iter().map(|value| html! {
+                                               for value in strip.iter() {
                                                   <Chip label={value.clone()} />
-                                               })
+                                               }
                                             }
                                         }
                                     } else {

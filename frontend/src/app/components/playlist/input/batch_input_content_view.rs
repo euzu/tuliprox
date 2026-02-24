@@ -11,7 +11,7 @@ pub struct BatchInputContentViewProps {
     pub input: Rc<ConfigInputDto>,
 }
 
-#[function_component]
+#[component]
 pub fn BatchInputContentView(props: &BatchInputContentViewProps) -> Html {
     let services = use_service_context();
 

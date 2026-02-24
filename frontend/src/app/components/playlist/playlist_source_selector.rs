@@ -7,13 +7,13 @@ use crate::{
     },
     hooks::use_service_context,
     html_if,
+    i18n::use_translation,
     model::{BusyStatus, EventMessage, ExplorerSourceType},
 };
 use shared::model::{InputType, PlaylistRequest, PlaylistRequestM3u, PlaylistRequestXtream};
 use std::{rc::Rc, str::FromStr};
 use web_sys::HtmlInputElement;
 use yew::{platform::spawn_local, prelude::*};
-use yew_i18n::use_translation;
 
 #[derive(Properties, PartialEq, Clone)]
 pub struct PlaylistSourceSelectorProps {
@@ -25,7 +25,7 @@ pub struct PlaylistSourceSelectorProps {
     pub on_select: Option<Callback<PlaylistRequest>>,
 }
 
-#[function_component]
+#[component]
 pub fn PlaylistSourceSelector(props: &PlaylistSourceSelectorProps) -> Html {
     let translate = use_translation();
     let services_ctx = use_service_context();

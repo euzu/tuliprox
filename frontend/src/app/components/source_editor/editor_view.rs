@@ -8,6 +8,7 @@ use crate::{
         ConfigContext, PlaylistContext,
     },
     hooks::use_service_context,
+    i18n::use_translation,
     model::DialogResult,
     services::DialogService,
 };
@@ -23,7 +24,6 @@ use std::{
 use wasm_bindgen::{prelude::Closure, JsCast};
 use web_sys::{Element, HtmlElement, MouseEvent};
 use yew::{platform::spawn_local, prelude::*};
-use yew_i18n::use_translation;
 
 const PENDING_LINE: &str = "pending-line";
 const SELECTION_RECT: &str = "selection-rect";
@@ -317,7 +317,7 @@ fn editor_state_to_sources_config(base_sources: &SourcesConfigDto, editor_state:
 }
 
 // ----------------- Component -----------------
-#[function_component]
+#[component]
 pub fn SourceEditor(props: &SourceEditorProps) -> Html {
     let canvas_ref = use_node_ref();
     let playlist_ctx = use_context::<PlaylistContext>().expect("Playlist context not found");

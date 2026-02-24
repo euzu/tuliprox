@@ -24,7 +24,7 @@ pub struct KeyValueEditorProps {
     pub value_placeholder: String,
 }
 
-#[function_component]
+#[component]
 pub fn KeyValueEditor(props: &KeyValueEditorProps) -> Html {
     let KeyValueEditorProps { label, entries, on_change, readonly, key_placeholder, value_placeholder } = props.clone();
 

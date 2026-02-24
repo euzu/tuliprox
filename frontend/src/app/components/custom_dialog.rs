@@ -14,7 +14,7 @@ pub struct CustomDialogProps {
     pub on_close: Option<Callback<()>>,
 }
 
-#[function_component]
+#[component]
 pub fn CustomDialog(props: &CustomDialogProps) -> Html {
     let is_open = use_state(|| props.open);
 

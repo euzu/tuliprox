@@ -4,6 +4,7 @@ use crate::{
         DropDownOption, DropDownSelection, EditMode, FilterInput, IconButton, Panel, SourceEditorContext, TextButton,
     },
     config_field_child, edit_field_bool, edit_field_list_option, edit_field_text, generate_form_reducer,
+    i18n::use_translation,
 };
 use shared::{
     error::TuliproxError,
@@ -12,10 +13,9 @@ use shared::{
 };
 use std::{fmt::Display, rc::Rc, str::FromStr};
 use yew::{
-    function_component, html, use_context, use_effect_with, use_memo, use_reducer, use_state, Callback, Html,
-    Properties, UseReducerHandle,
+    component, html, use_context, use_effect_with, use_memo, use_reducer, use_state, Callback, Html, Properties,
+    UseReducerHandle,
 };
-use yew_i18n::use_translation;
 
 const LABEL_ENABLED: &str = "LABEL.ENABLED";
 const LABEL_NAME: &str = "LABEL.NAME";
@@ -100,7 +100,7 @@ pub struct ConfigTargetViewProps {
     pub(crate) target: Option<Rc<ConfigTargetDto>>,
 }
 
-#[function_component]
+#[component]
 pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
     let translate = use_translation();
     let source_editor_ctx = use_context::<SourceEditorContext>().expect("SourceEditorContext not found");

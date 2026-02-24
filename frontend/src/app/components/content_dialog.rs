@@ -1,9 +1,9 @@
 use crate::{
     app::components::{custom_dialog::CustomDialog, TextButton},
+    i18n::use_translation,
     model::{DialogAction, DialogActions, DialogResult},
 };
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
 #[derive(Properties, PartialEq)]
 pub struct ContentDialogProps {
@@ -14,7 +14,7 @@ pub struct ContentDialogProps {
     pub close_on_backdrop_click: bool,
 }
 
-#[function_component]
+#[component]
 pub fn ContentDialog(props: &ContentDialogProps) -> Html {
     let translate = use_translation();
     let is_open = use_state(|| true);

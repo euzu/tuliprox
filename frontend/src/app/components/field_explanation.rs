@@ -1,11 +1,11 @@
 use crate::{
     app::components::AppIcon,
+    i18n::{use_translation, YewI18n},
     model::{DialogAction, DialogActions, DialogResult},
     services::DialogService,
     utils::t_safe,
 };
 use yew::{platform::spawn_local, prelude::*};
-use yew_i18n::{use_translation, YewI18n};
 
 fn normalize_field_id(raw: &str) -> String {
     let normalized = raw
@@ -111,7 +111,7 @@ pub struct FieldLabelProps {
     pub for_id: Option<String>,
 }
 
-#[function_component]
+#[component]
 pub fn FieldLabel(props: &FieldLabelProps) -> Html {
     let dialog = use_context::<DialogService>().expect("Dialog service not found");
     let translate = use_translation();

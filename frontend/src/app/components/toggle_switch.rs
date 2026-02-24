@@ -10,7 +10,7 @@ pub struct ToggleSwitchProps {
     pub on_change: Callback<bool>,
 }
 
-#[function_component]
+#[component]
 pub fn ToggleSwitch(props: &ToggleSwitchProps) -> Html {
     let toggled = use_state(|| props.value);
 

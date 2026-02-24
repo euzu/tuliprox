@@ -10,6 +10,7 @@ use crate::{
     },
     hooks::{use_server_status, use_service_context},
     html_if,
+    i18n::use_translation,
     model::{EventMessage, ViewType},
     provider::DialogProvider,
     services::{ToastCloseMode, ToastOptions},
@@ -20,9 +21,8 @@ use shared::model::{
 };
 use std::{collections::HashMap, future, rc::Rc, sync::Arc};
 use yew::{prelude::*, suspense::use_future};
-use yew_i18n::use_translation;
 
-#[function_component]
+#[component]
 pub fn Home() -> Html {
     let services = use_service_context();
     let setup_mode = services.config.ui_config.setup_mode;

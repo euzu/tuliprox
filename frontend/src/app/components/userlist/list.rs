@@ -1,10 +1,12 @@
-use crate::app::components::{
-    userlist::user_table::UserTable, DropDownOption, Search, TextButton, UserlistContext, UserlistPage,
+use crate::{
+    app::components::{
+        userlist::user_table::UserTable, DropDownOption, Search, TextButton, UserlistContext, UserlistPage,
+    },
+    i18n::use_translation,
 };
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
-#[function_component]
+#[component]
 pub fn UserlistList() -> Html {
     let translate = use_translation();
     let userlist_ctx = use_context::<UserlistContext>().expect("Userlist context not found");

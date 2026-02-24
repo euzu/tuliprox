@@ -1,16 +1,19 @@
-use crate::app::components::{
-    Accordion, AccordionPanel, ConfigContext, FilterView, MapperCounterView, MapperScriptView, NoContent, ToggleSwitch,
+use crate::{
+    app::components::{
+        Accordion, AccordionPanel, ConfigContext, FilterView, MapperCounterView, MapperScriptView, NoContent,
+        ToggleSwitch,
+    },
+    i18n::use_translation,
 };
 use shared::model::{MapperDto, MappingCounter, MappingDto};
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
 #[derive(Properties, PartialEq, Clone)]
 pub struct PlaylistMappingsProps {
     pub mappings: Option<Vec<String>>,
 }
 
-#[function_component]
+#[component]
 pub fn PlaylistMappings(props: &PlaylistMappingsProps) -> Html {
     let translate = use_translation();
     let config_ctx = use_context::<ConfigContext>().expect("Config context not found");
@@ -61,25 +64,17 @@ pub fn PlaylistMappings(props: &PlaylistMappingsProps) -> Html {
                 </div>
                 <Accordion default_panel={None::<String>}>
                 <div class="tp__playlist-mappings__list">
-                    {
-                        for mapping.mapper.iter().flatten().enumerate().map(|(idx, mapper)| {
-                           html! {
-                              <AccordionPanel id={format!("script-{}", idx+1)} title={format!("{}-{}", translate.t("LABEL.SCRIPT"), idx+1)} >
-                                  { render_mapper(mapper) }
-                              </AccordionPanel>
-                            }
-                        })
+                    for (idx, mapper) in mapping.mapper.iter().flatten().enumerate() {
+                        <AccordionPanel id={format!("script-{}", idx+1)} title={format!("{}-{}", translate.t("LABEL.SCRIPT"), idx+1)} >
+                            { render_mapper(mapper) }
+                        </AccordionPanel>
                     }
                 </div>
                  <div class="tp__playlist-mappings__list">
-                    {
-                        for mapping.t_counter.iter().flatten().enumerate().map(|(idx, counter)| {
-                        html! {
-                            <AccordionPanel id={format!("counter-{}", idx+1)} title={format!("{}-{}", translate.t("LABEL.COUNTER"), idx+1)} >
-                              { render_counter(counter) }
-                            </AccordionPanel>
-                           }
-                        })
+                    for (idx, counter) in mapping.t_counter.iter().flatten().enumerate() {
+                        <AccordionPanel id={format!("counter-{}", idx+1)} title={format!("{}-{}", translate.t("LABEL.COUNTER"), idx+1)} >
+                            { render_counter(counter) }
+                        </AccordionPanel>
                     }
                 </div>
                 </Accordion>
@@ -91,7 +86,11 @@ pub fn PlaylistMappings(props: &PlaylistMappingsProps) -> Html {
       <div class="tp__playlist-mappings">
         {
              match (*mappings).as_ref() {
-                Some(vec) if !vec.is_empty() => html! { for vec.iter().map(render_mapping) },
+                Some(vec) if !vec.is_empty() => html! {
+                    for mapping in vec.iter() {
+                        { render_mapping(mapping) }
+                    }
+                },
                 _ => html! { <NoContent/> },
             }
         }

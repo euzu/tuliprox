@@ -1,6 +1,6 @@
 use yew::prelude::*;
 
-#[function_component]
+#[component]
 pub fn LoadingScreen() -> Html {
     html! {
         <div class={"tp__loading-screen"}>

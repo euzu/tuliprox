@@ -1,15 +1,17 @@
-use crate::app::components::{HdHomeRunOutput, M3uOutput, RevealContent, StrmOutput, XtreamOutput};
+use crate::{
+    app::components::{HdHomeRunOutput, M3uOutput, RevealContent, StrmOutput, XtreamOutput},
+    i18n::use_translation,
+};
 use shared::model::{ConfigTargetDto, TargetOutputDto};
 use std::rc::Rc;
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct TargetOutputProps {
     pub target: Rc<ConfigTargetDto>,
 }
 
-#[function_component]
+#[component]
 pub fn TargetOutput(props: &TargetOutputProps) -> Html {
     let translate = use_translation();
 

@@ -1,7 +1,7 @@
+use crate::i18n::use_translation;
 use shared::model::MappingCounter;
 use std::sync::atomic::Ordering;
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
 #[derive(Properties, PartialEq, Clone)]
 pub struct MapperCounterViewProps {
@@ -12,7 +12,7 @@ pub struct MapperCounterViewProps {
     pub counter: MappingCounter,
 }
 
-#[function_component]
+#[component]
 pub fn MapperCounterView(props: &MapperCounterViewProps) -> Html {
     let translate = use_translation();
 

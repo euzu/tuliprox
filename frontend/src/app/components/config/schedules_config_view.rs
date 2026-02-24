@@ -15,12 +15,12 @@ use crate::{
     config_field_child, generate_form_reducer,
     hooks::use_service_context,
     html_if,
+    i18n::use_translation,
 };
 use cron::Schedule;
 use shared::model::{ScheduleConfigDto, ScheduleTaskType, SchedulesConfigDto};
 use std::{rc::Rc, str::FromStr};
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
 const LABEL_SCHEDULE: &str = "LABEL.SCHEDULE";
 const LABEL_TARGETS: &str = "LABEL.TARGETS";
@@ -35,7 +35,7 @@ generate_form_reducer!(
     }
 );
 
-#[function_component]
+#[component]
 pub fn SchedulesConfigView() -> Html {
     let translate = use_translation();
     let services_ctx = use_service_context();

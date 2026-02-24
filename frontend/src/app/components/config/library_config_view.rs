@@ -13,6 +13,7 @@ use crate::{
     },
     config_field, config_field_bool, config_field_child, config_field_optional, edit_field_bool, edit_field_list,
     edit_field_number, edit_field_number_u64, edit_field_text, edit_field_text_option, generate_form_reducer,
+    i18n::use_translation,
 };
 use shared::model::{
     LibraryConfigDto, LibraryContentType, LibraryMetadataConfigDto, LibraryMetadataFormat,
@@ -20,7 +21,6 @@ use shared::model::{
 };
 use std::rc::Rc;
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
 const LABEL_ENABLED: &str = "LABEL.ENABLED";
 const LABEL_SCAN_DIRECTORIES: &str = "LABEL.SCAN_DIRECTORIES";
@@ -106,7 +106,7 @@ generate_form_reducer!(
     }
 );
 
-#[function_component]
+#[component]
 pub fn LibraryConfigView() -> Html {
     let translate = use_translation();
     let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");
@@ -288,7 +288,7 @@ pub fn LibraryConfigView() -> Html {
             { config_field_child!(translate.t(LABEL_SUPPORTED_EXTENSIONS), {
                html! {
                  <div class="tp__config-view__tags">
-                 { html! { for extensions.iter().map(|t| html! { <Chip label={t.clone()} /> }) } }
+                 for t in extensions.iter() { <Chip label={t.clone()} /> }
                  </div>
                 }})}
             </Card>
@@ -297,10 +297,10 @@ pub fn LibraryConfigView() -> Html {
 
     let render_scan_directories_view = |directories: &Vec<LibraryScanDirectoryDto>| {
         html! {
-             <>
-                <h1>{translate.t(LABEL_SCAN_DIRECTORIES)}</h1>
-                <ul>
-                { for directories.iter().map(|dir| html! {
+                <>
+                    <h1>{translate.t(LABEL_SCAN_DIRECTORIES)}</h1>
+                    <ul>
+                for dir in directories.iter() {
                     <li class="tp__library-config-view__list"><span class="tp__library-config-view__list-item">{&dir.path}</span>
                         <span>{format!("({}, {}, {}: {})",
                             if dir.enabled { translate.t("LABEL.ENABLED") } else {translate.t("LABEL.DISABLED")},
@@ -312,12 +312,44 @@ pub fn LibraryConfigView() -> Html {
                                 LibraryContentType::Series => translate.t(LABEL_SERIES),
                             })}</span>
                     </li>
-                }) }
-                </ul>
-             </>
+                }
+                    </ul>
+                 </>
         }
     };
     let render_scan_directories_edit = || {
+        let rows = form_state
+            .form
+            .scan_directories
+            .iter()
+            .enumerate()
+            .map(|(idx, dir)| {
+                let on_remove = handle_remove_directory.clone();
+                let path_change = handle_path_change.clone();
+                let enabled_change = handle_enabled_change.clone();
+                let recursive_change = handle_recursive_change.clone();
+                let type_change = handle_type_change.clone();
+                let options = Rc::new(get_content_type_options.emit(dir.content_type));
+                html! {
+                    <tr>
+                        <td>
+                            <IconButton name="Delete" icon="Delete" onclick={Callback::from(move |_| on_remove.emit(idx))} />
+                        </td>
+                        <td><Input name="path" value={dir.path.clone()} on_change={Some(Callback::from(move |value| path_change.emit((idx, value))))} /></td>
+                        <td>
+                            <Select name="type" options={options} on_select={Callback::from(move |(_, selection)| type_change.emit((idx, selection)))} />
+                        </td>
+                        <td>
+                            <ToggleSwitch value={dir.enabled} readonly={false} on_change={Callback::from(move |value| enabled_change.emit((idx, value)))} />
+                        </td>
+                        <td>
+                            <ToggleSwitch value={dir.recursive} readonly={false} on_change={Callback::from(move |value| recursive_change.emit((idx, value)))} />
+                        </td>
+                    </tr>
+                }
+            })
+            .collect::<Html>();
+
         html! {
            <Card class="tp__config-view__card">
                 <div class="tp__library-config-view__card-header tp__config-view-page__header">
@@ -337,31 +369,7 @@ pub fn LibraryConfigView() -> Html {
                        </tr>
                    </thead>
                    <tbody>
-                   { for form_state.form.scan_directories.iter().enumerate().map(|(idx, dir)| {
-                       let on_remove = handle_remove_directory.clone();
-                       let path_change = handle_path_change.clone();
-                       let enabled_change = handle_enabled_change.clone();
-                       let recursive_change = handle_recursive_change.clone();
-                       let type_change = handle_type_change.clone();
-                       let options = Rc::new(get_content_type_options.emit(dir.content_type));
-                       html! {
-                           <tr>
-                               <td>
-                                   <IconButton name="Delete" icon="Delete" onclick={Callback::from(move |_| on_remove.emit(idx))} />
-                               </td>
-                               <td><Input name="path" value={dir.path.clone()} on_change={Some(Callback::from(move |value| path_change.emit((idx, value))))} /></td>
-                               <td>
-                                  <Select name="type" options={options} on_select={Callback::from(move |(_, selection)| type_change.emit((idx, selection)))} />
-                               </td>
-                               <td>
-                                  <ToggleSwitch value={dir.enabled} readonly={false} on_change={Callback::from(move |value| enabled_change.emit((idx, value)))} />
-                               </td>
-                               <td>
-                                  <ToggleSwitch value={dir.recursive} readonly={false} on_change={Callback::from(move |value| recursive_change.emit((idx, value)))} />
-                               </td>
-                           </tr>
-                       }
-                   })}
+                       { rows }
                    </tbody>
                </table>
            </Card>
@@ -389,7 +397,7 @@ pub fn LibraryConfigView() -> Html {
                     { config_field_child!(translate.t(LABEL_FORMATS), {
                         html! {
                             <div class="tp__config-view__tags">
-                                { for metadata.formats.iter().map(|f| html! { <Chip label={format!("{f:?}")} /> }) }
+                                for f in metadata.formats.iter() { <Chip label={format!("{f:?}")} /> }
                             </div>
                         }
                     }) }
@@ -440,17 +448,23 @@ pub fn LibraryConfigView() -> Html {
                     { config_field_child!(translate.t(LABEL_FORMATS), {
                         let metadata_state = metadata_state.clone();
                         let formats = metadata_state.form.formats.clone();
+                        let format_chips = formats
+                            .iter()
+                            .map(|f| {
+                                let metadata_state = metadata_state.clone();
+                                let f = *f;
+                                html! {
+                                    <Chip label={format!("{f:?}")} on_remove={Callback::from(move |_| {
+                                        let mut updated = metadata_state.form.formats.clone();
+                                        updated.retain(|&x| x != f);
+                                        metadata_state.dispatch(LibraryMetadataConfigFormAction::Formats(updated));
+                                    })} />
+                                }
+                            })
+                            .collect::<Html>();
                         html! {
                             <div class="tp__config-view__tags">
-                                 { for formats.iter().map(|f| {
-                                     let metadata_state = metadata_state.clone();
-                                     let f = *f;
-                                     html! { <Chip label={format!("{f:?}")} on_remove={Callback::from(move |_| {
-                                         let mut updated = metadata_state.form.formats.clone();
-                                         updated.retain(|&x| x != f);
-                                         metadata_state.dispatch(LibraryMetadataConfigFormAction::Formats(updated));
-                                     })} /> }
-                                 }) }
+                                 { format_chips }
                                  if !formats.contains(&LibraryMetadataFormat::Nfo) {
                                      <IconButton name="Add" icon="Add" hint={translate.t(LABEL_ADD_FORMAT)} onclick={Callback::from(move |_| {
                                          let mut updated = metadata_state.form.formats.clone();

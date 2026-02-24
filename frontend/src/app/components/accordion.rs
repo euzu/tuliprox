@@ -14,7 +14,7 @@ pub struct AccordionProps {
     pub default_panel: Option<String>,
 }
 
-#[function_component]
+#[component]
 pub fn Accordion(props: &AccordionProps) -> Html {
     let active_panel = use_state(|| props.default_panel.clone());
     let state = AccordionState { active_panel: Rc::new(active_panel) };

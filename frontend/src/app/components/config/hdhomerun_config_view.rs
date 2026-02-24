@@ -11,11 +11,11 @@ use crate::{
         context::ConfigContext,
     },
     config_field_bool, edit_field_bool, generate_form_reducer, html_if,
+    i18n::use_translation,
 };
 use log::error;
 use shared::model::{HdHomeRunConfigDto, HdHomeRunDeviceConfigDto};
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
 const LABEL_ENABLED: &str = "LABEL.ENABLED";
 const LABEL_DEVICE_AUTH: &str = "LABEL.DEVICE_AUTH";
@@ -35,7 +35,7 @@ generate_form_reducer!(
     }
 );
 
-#[function_component]
+#[component]
 pub fn HdHomerunConfigView() -> Html {
     let translate = use_translation();
     let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");
@@ -119,10 +119,18 @@ pub fn HdHomerunConfigView() -> Html {
         if devices.is_empty() {
             render_empty()
         } else {
-            html! { for devices.iter().enumerate().map(|(idx, entry)| html! {
-                <HdHomerunDeviceView key={entry.port.to_string()} device_id={idx} device={entry.clone()}
-                edit_mode={edit_mode} on_form_change={handle_device_change.clone()} on_remove={handle_remove_device.clone()}/>
-            })}
+            html! {
+                for (idx, entry) in devices.iter().enumerate() {
+                    <HdHomerunDeviceView
+                        key={entry.port.to_string()}
+                        device_id={idx}
+                        device={entry.clone()}
+                        edit_mode={edit_mode}
+                        on_form_change={handle_device_change.clone()}
+                        on_remove={handle_remove_device.clone()}
+                    />
+                }
+            }
         }
     };
 

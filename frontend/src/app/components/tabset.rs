@@ -23,7 +23,7 @@ pub struct TabSetProps {
     pub on_tab_change: Option<Callback<String>>,
 }
 
-#[function_component]
+#[component]
 pub fn TabSet(props: &TabSetProps) -> Html {
     let active_tab = use_state(|| {
         props.active_tab.clone().or_else(|| props.tabs.first().map(|tab| tab.id.clone())).unwrap_or_default()

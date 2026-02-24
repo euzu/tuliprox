@@ -4,7 +4,7 @@ use crate::{
 };
 use std::{collections::HashSet, rc::Rc};
 use web_sys::MouseEvent;
-use yew::{classes, function_component, html, use_effect_with, use_state, Callback, Html, NodeRef, Properties};
+use yew::{classes, component, html, use_effect_with, use_state, Callback, Html, NodeRef, Properties};
 use yew_hooks::use_set;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -39,7 +39,7 @@ pub struct DropDownIconButtonProps {
     pub button_ref: Option<NodeRef>,
 }
 
-#[function_component]
+#[component]
 pub fn DropDownIconButton(props: &DropDownIconButtonProps) -> Html {
     let button_ref = props.button_ref.clone().unwrap_or_default();
     let popup_anchor_ref = use_state(|| None::<web_sys::Element>);

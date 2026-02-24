@@ -1,9 +1,9 @@
 use crate::app::components::{
     BlockInstance, ConfigInputView, ConfigOutputView, ConfigTargetView, EditMode, SourceEditorContext,
 };
-use yew::{classes, function_component, html, use_context, use_effect_with, use_state, Html};
+use yew::{classes, component, html, use_context, use_effect_with, use_state, Html};
 
-#[function_component]
+#[component]
 pub fn SourceEditorForm() -> Html {
     let source_editor_ctx = use_context::<SourceEditorContext>().expect("SourceEditorContext not found");
     let visible = use_state(|| false);

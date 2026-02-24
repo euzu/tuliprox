@@ -1,14 +1,13 @@
-use crate::app::components::Chip;
+use crate::{app::components::Chip, i18n::use_translation};
 use shared::model::InputType;
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct InputTypeViewProps {
     pub input_type: InputType,
 }
 
-#[function_component]
+#[component]
 pub fn InputTypeView(props: &InputTypeViewProps) -> Html {
     let translate = use_translation();
 

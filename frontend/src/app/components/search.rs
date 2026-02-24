@@ -27,7 +27,7 @@ pub struct SearchProps {
     pub min_length: usize,
 }
 
-#[function_component]
+#[component]
 pub fn Search(props: &SearchProps) -> Html {
     let search_fields = use_state(|| None::<Rc<Vec<String>>>);
     let input_ref = use_node_ref();
