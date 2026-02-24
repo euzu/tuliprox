@@ -395,6 +395,7 @@ fn expand_series_item(pli: &PlaylistItem, input: &ConfigInput) -> Option<Playlis
             &series_name,
             input,
             global_release_date.as_ref(),
+            pli.header.source_ordinal,
         ) {
             return Some(PlaylistGroup {
                 id: pli.header.category_id,

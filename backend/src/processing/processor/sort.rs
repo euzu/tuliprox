@@ -4,6 +4,15 @@ use shared::model::{PlaylistGroup, SortOrder, SortTarget};
 use std::cmp::Ordering;
 use std::sync::Arc;
 
+#[inline]
+fn normalized_source_ordinal(source_ordinal: u32) -> u32 {
+    if source_ordinal == 0 {
+        u32::MAX
+    } else {
+        source_ordinal
+    }
+}
+
 fn apply_sort_order(order: SortOrder, ordering: Ordering) -> Ordering {
     match (order, ordering) {
         (SortOrder::None, _) | (_, Ordering::Equal) => Ordering::Equal,
@@ -247,8 +256,16 @@ fn playlist_comparator(
 macro_rules! sort_groups_by_source_order {
     ($groups: ident) => {
         $groups.sort_by(|a, b| {
-            let order1 = a.channels.first().as_ref().map_or(u32::MAX, |c| c.header.source_ordinal);
-            let order2 = b.channels.first().as_ref().map_or(u32::MAX, |c| c.header.source_ordinal);
+            let order1 = a
+                .channels
+                .first()
+                .as_ref()
+                .map_or(u32::MAX, |c| normalized_source_ordinal(c.header.source_ordinal));
+            let order2 = b
+                .channels
+                .first()
+                .as_ref()
+                .map_or(u32::MAX, |c| normalized_source_ordinal(c.header.source_ordinal));
             order1.cmp(&order2)
         });
     };
@@ -288,7 +305,9 @@ pub(in crate::processing::processor) fn sort_playlist(
 ) -> bool {
     let Some(sort) = &target.sort else {
         for group in &mut *playlist {
-            group.channels.sort_by_key(|a| a.header.source_ordinal);
+            group
+                .channels
+                .sort_by_key(|a| normalized_source_ordinal(a.header.source_ordinal));
         }
         sort_groups_by_source_order!(playlist);
         return true;
@@ -325,8 +344,14 @@ fn sort_groups(groups: &mut Vec<PlaylistGroup>, rules: &[ConfigSortRule], match_
             return ord;
         }
 
-        let order1 = groups[*left_idx].channels.first().map_or(u32::MAX, |c| c.header.source_ordinal);
-        let order2 = groups[*right_idx].channels.first().map_or(u32::MAX, |c| c.header.source_ordinal);
+        let order1 = groups[*left_idx]
+            .channels
+            .first()
+            .map_or(u32::MAX, |c| normalized_source_ordinal(c.header.source_ordinal));
+        let order2 = groups[*right_idx]
+            .channels
+            .first()
+            .map_or(u32::MAX, |c| normalized_source_ordinal(c.header.source_ordinal));
         order1.cmp(&order2)
     });
 
@@ -343,7 +368,9 @@ fn sort_channels_in_groups(groups: &mut [PlaylistGroup], rules: &[ConfigSortRule
 
     if channel_rules.is_empty() {
         for group in groups {
-            group.channels.sort_by_key(|a| a.header.source_ordinal);
+            group
+                .channels
+                .sort_by_key(|a| normalized_source_ordinal(a.header.source_ordinal));
         }
         return;
     }
@@ -359,7 +386,8 @@ fn sort_channels_in_groups(groups: &mut [PlaylistGroup], rules: &[ConfigSortRule
                 return ord;
             }
 
-            group.channels[*left_idx].header.source_ordinal.cmp(&group.channels[*right_idx].header.source_ordinal)
+            normalized_source_ordinal(group.channels[*left_idx].header.source_ordinal)
+                .cmp(&normalized_source_ordinal(group.channels[*right_idx].header.source_ordinal))
         });
 
         reorder_by_indices(&mut group.channels, &channel_indices);

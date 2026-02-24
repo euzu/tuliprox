@@ -65,6 +65,7 @@ pub fn create_xtream_series_episode_url(url: &str, username: &str, password: &st
 pub fn parse_xtream_series_info(parent_uuid: &UUIDType, series_info: &SeriesStreamProperties, group_title: &str, series_name: &Arc<str>, input: &ConfigInput,
                                 // Add series_release_date parameter
                                 series_release_date: Option<&Arc<str>>,
+                                parent_source_ordinal: u32,
 ) -> Option<Vec<PlaylistItem>> {
     let url = input.url.as_str();
     let (username, password) = (
@@ -73,7 +74,8 @@ pub fn parse_xtream_series_info(parent_uuid: &UUIDType, series_info: &SeriesStre
     );
 
     if let Some(episodes) = series_info.details.as_ref().and_then(|d| d.episodes.as_ref()) {
-        let result: Vec<PlaylistItem> = episodes.iter().map(|episode| {
+        let base_source_ordinal = if parent_source_ordinal == 0 { 1 } else { parent_source_ordinal };
+        let result: Vec<PlaylistItem> = episodes.iter().enumerate().map(|(index, episode)| {
             let episode_id = episode.id.to_string();
             let episode_url = create_xtream_series_episode_url(url, username, password, episode);
 
@@ -100,6 +102,7 @@ pub fn parse_xtream_series_info(parent_uuid: &UUIDType, series_info: &SeriesStre
                     additional_properties: Some(StreamProperties::Episode(Box::new(episode_info))),
                     category_id: 0,
                     input_name: input.name.intern(),
+                    source_ordinal: base_source_ordinal.saturating_add(u32::try_from(index).unwrap_or(u32::MAX)),
                     ..Default::default()
                 }
             }
@@ -390,9 +393,15 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::parse_xtream_series_info;
     use crate::processing::parser::xtream::map_to_xtream_streams;
+    use crate::model::ConfigInput;
     use crate::utils::async_file_reader;
-    use shared::model::{XtreamCluster, XtreamSeriesInfo};
+    use shared::model::{
+        UUIDType,
+        SeriesStreamDetailEpisodeProperties, SeriesStreamDetailProperties, SeriesStreamProperties,
+        XtreamCluster, XtreamSeriesInfo,
+    };
     use shared::utils::Internable;
     use std::fs;
 
@@ -443,5 +452,49 @@ mod tests {
         let visitor = super::XtreamItemVisitor { on_item: &mut on_item, _marker: std::marker::PhantomData };
         serde::Deserializer::deserialize_any(&mut deserializer, visitor).unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_parse_xtream_series_info_sets_episode_source_ordinals_from_parent() {
+        let input = ConfigInput {
+            name: "input".intern(),
+            url: "http://provider.example".to_string(),
+            username: Some("user".to_string()),
+            password: Some("pass".to_string()),
+            ..ConfigInput::default()
+        };
+
+        let episode_1: SeriesStreamDetailEpisodeProperties = serde_json::from_str(
+            r#"{"id":101,"episode_num":1,"season":1,"title":"S01E01","container_extension":"mp4"}"#,
+        )
+        .unwrap();
+        let episode_2: SeriesStreamDetailEpisodeProperties = serde_json::from_str(
+            r#"{"id":102,"episode_num":2,"season":1,"title":"S01E02","container_extension":"mp4"}"#,
+        )
+        .unwrap();
+
+        let series_props = SeriesStreamProperties {
+            details: Some(SeriesStreamDetailProperties {
+                year: None,
+                seasons: None,
+                episodes: Some(vec![episode_1, episode_2]),
+            }),
+            ..SeriesStreamProperties::default()
+        };
+        let parent_uuid = UUIDType::from_valid_uuid("parent_uuid");
+
+        let episodes = parse_xtream_series_info(
+            &parent_uuid,
+            &series_props,
+            "Series Group",
+            &"Series Name".intern(),
+            &input,
+            None,
+            42,
+        )
+        .expect("episodes should be parsed");
+
+        assert_eq!(episodes[0].header.source_ordinal, 42);
+        assert_eq!(episodes[1].header.source_ordinal, 43);
     }
 }

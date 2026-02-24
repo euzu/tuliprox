@@ -762,11 +762,9 @@ fn build_templates_to_persist(
     let config = app_state.app_config.config.load();
     let paths = app_state.app_config.paths.load();
 
-    let existing_source_inline_templates = match read_sources_file(
-        paths.sources_file_path.as_str(),
+    let existing_source_inline_templates = match parse_sources_file_from_path(
+        Path::new(paths.sources_file_path.as_str()),
         true,
-        false,
-        None,
     ) {
         Ok(existing_sources) => existing_sources.templates,
         Err(err) => {

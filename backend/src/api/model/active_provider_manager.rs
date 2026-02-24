@@ -145,16 +145,28 @@ impl ActiveProviderManager {
         priority: i8,
     ) -> Option<ProviderHandle> {
         // 1. Try to acquire directly
-        let allocation = if force {
-            self.providers.force_exact_acquire_connection(provider_or_input_name).await
+        let (allow_grace, allocation) = if force {
+            (
+                true,
+                self.providers
+                    .force_exact_acquire_connection(provider_or_input_name)
+                    .await,
+            )
         } else {
             match allow_grace_override {
-                Some(allow_grace) => {
+                Some(allow_grace) => (
+                    allow_grace,
                     self.providers
-                        .acquire_connection_with_grace_override(provider_or_input_name, allow_grace)
-                        .await
-                }
-                None => self.providers.acquire_connection(provider_or_input_name).await,
+                        .acquire_connection_with_grace_override(
+                            provider_or_input_name,
+                            allow_grace,
+                        )
+                        .await,
+                ),
+                None => (
+                    true,
+                    self.providers.acquire_connection(provider_or_input_name).await,
+                ),
             }
         };
 
@@ -164,7 +176,9 @@ impl ActiveProviderManager {
 
         // 2. If exhausted, try preemption (kick lower priority connection)
         if !force {
-            if let Some(preempted_alloc) = self.try_preempt_connection(provider_or_input_name, priority).await {
+            if let Some(preempted_alloc) =
+                self.try_preempt_connection(provider_or_input_name, priority, allow_grace).await
+            {
                 return self.register_allocation(preempted_alloc, addr, priority).await;
             }
         }
@@ -195,7 +209,12 @@ impl ActiveProviderManager {
         Some(ProviderHandle::new(*addr, allocation_id, allocation, Some(cancel_token)))
     }
 
-    async fn try_preempt_connection(&self, input_name: &Arc<str>, new_priority: i8) -> Option<ProviderAllocation> {
+    async fn try_preempt_connection(
+        &self,
+        input_name: &Arc<str>,
+        new_priority: i8,
+        allow_grace: bool,
+    ) -> Option<ProviderAllocation> {
         // Victim: (addr, alloc_id, priority, created_at, is_shared)
         let mut victim: Option<(ClientConnectionId, AllocationId, i8, Instant, bool)> = None;
 
@@ -272,8 +291,11 @@ impl ActiveProviderManager {
             };
             self.release_handle(&handle).await;
 
-            // Now try acquire again
-            let allocation = self.providers.acquire_connection(input_name).await;
+            // Now try acquire again preserving the original grace policy.
+            let allocation = self
+                .providers
+                .acquire_connection_with_grace_override(input_name, allow_grace)
+                .await;
             if !matches!(allocation, ProviderAllocation::Exhausted) {
                 return Some(allocation);
             }
@@ -291,6 +313,16 @@ impl ActiveProviderManager {
     // Returns the next available provider connection
     pub async fn acquire_connection(&self, input_name: &Arc<str>, addr: &SocketAddr) -> Option<ProviderHandle> {
         self.acquire_connection_inner(input_name, addr, false, None, DEFAULT_USER_PRIORITY).await
+    }
+
+    /// Acquire a provider connection while explicitly controlling provider-side grace allocations.
+    pub async fn acquire_connection_with_grace(
+        &self,
+        input_name: &Arc<str>,
+        addr: &SocketAddr,
+        allow_grace: bool,
+    ) -> Option<ProviderHandle> {
+        self.acquire_connection_inner(input_name, addr, false, Some(allow_grace), DEFAULT_USER_PRIORITY).await
     }
 
     /// Acquire a provider connection while optionally disabling provider grace allocations.
@@ -313,6 +345,10 @@ impl ActiveProviderManager {
 
     pub async fn is_over_limit(&self, provider_name: &Arc<str>) -> bool {
         self.providers.is_over_limit(provider_name).await
+    }
+
+    pub async fn is_exhausted(&self, provider_name: &Arc<str>) -> bool {
+        self.providers.is_exhausted(provider_name).await
     }
 
     pub async fn release_connection(&self, addr: &SocketAddr) {
@@ -530,5 +566,171 @@ impl ActiveProviderManager {
 
     pub async fn get_provider_connections_count(&self) -> usize {
         self.providers.active_connection_count().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ActiveProviderManager;
+    use crate::api::model::EventManager;
+    use crate::model::{AppConfig, Config, ConfigInput, ConfigInputAlias, SourcesConfig};
+    use crate::utils::FileLockManager;
+    use arc_swap::{ArcSwap, ArcSwapOption};
+    use shared::model::{ConfigPaths, InputFetchMethod, InputType};
+    use shared::utils::Internable;
+    use std::collections::HashMap;
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    fn create_test_app_config_with_dual_provider_pool() -> AppConfig {
+        let input = Arc::new(ConfigInput {
+            id: 1,
+            name: "provider_1".intern(),
+            input_type: InputType::Xtream,
+            headers: HashMap::default(),
+            url: "http://provider-1.example".to_string(),
+            username: Some("user1".to_string()),
+            password: Some("pass1".to_string()),
+            enabled: true,
+            priority: 0,
+            max_connections: 1,
+            method: InputFetchMethod::default(),
+            aliases: Some(vec![ConfigInputAlias {
+                id: 2,
+                name: "provider_2".intern(),
+                url: "http://provider-2.example".to_string(),
+                username: Some("user2".to_string()),
+                password: Some("pass2".to_string()),
+                priority: 1,
+                max_connections: 1,
+                exp_date: None,
+                enabled: true,
+            }]),
+            ..ConfigInput::default()
+        });
+
+        let sources = SourcesConfig {
+            inputs: vec![input],
+            ..SourcesConfig::default()
+        };
+
+        AppConfig {
+            config: Arc::new(ArcSwap::from_pointee(Config::default())),
+            sources: Arc::new(ArcSwap::from_pointee(sources)),
+            hdhomerun: Arc::new(ArcSwapOption::default()),
+            api_proxy: Arc::new(ArcSwapOption::default()),
+            file_locks: Arc::new(FileLockManager::default()),
+            paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
+                config_path: String::new(),
+                config_file_path: String::new(),
+                sources_file_path: String::new(),
+                mapping_file_path: None,
+                mapping_files_used: None,
+                template_file_path: None,
+                template_files_used: None,
+                api_proxy_file_path: String::new(),
+                custom_stream_response_path: None,
+            })),
+            custom_stream_response: Arc::new(ArcSwapOption::default()),
+            access_token_secret: [0; 32],
+            encrypt_secret: [0; 16],
+            ffprobe_available: Arc::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_force_session_fallback_uses_different_provider_when_current_is_busy() {
+        let app_cfg = create_test_app_config_with_dual_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+
+        let input_name = "provider_1".intern();
+        let client_1_addr: SocketAddr = "127.0.0.1:41001".parse().unwrap();
+        let client_2_addr: SocketAddr = "127.0.0.1:41002".parse().unwrap();
+
+        // Step 1: Client1 starts movie -> provider_1
+        let first_alloc = manager.acquire_connection(&input_name, &client_1_addr).await.expect("client1 initial allocation");
+        assert_eq!(
+            first_alloc.allocation.get_provider_name().as_deref(),
+            Some(input_name.as_ref())
+        );
+
+        // Step 2: Client1 stops -> release provider_1
+        manager.release_connection(&client_1_addr).await;
+
+        // Step 3: Client2 starts live -> provider_1
+        let live_alloc = manager.acquire_connection(&input_name, &client_2_addr).await.expect("client2 live allocation");
+        let busy_provider = live_alloc.allocation.get_provider_name().expect("provider name expected");
+        assert_eq!(busy_provider.as_ref(), input_name.as_ref());
+        assert!(manager.is_exhausted(&busy_provider).await);
+
+        // Step 4: Client1 restarts same movie.
+        // This emulates force-session fallback path by acquiring without provider grace.
+        let fallback_alloc = manager
+            .acquire_connection_with_grace(&input_name, &client_1_addr, false)
+            .await
+            .expect("client1 fallback allocation without grace");
+        let fallback_provider = fallback_alloc
+            .allocation
+            .get_provider_name()
+            .expect("fallback provider expected");
+
+        assert_ne!(fallback_provider.as_ref(), busy_provider.as_ref());
+        assert_eq!(fallback_provider.as_ref(), "provider_2");
+
+        manager.release_connection(&client_1_addr).await;
+        manager.release_connection(&client_2_addr).await;
+    }
+
+    #[tokio::test]
+    async fn test_seek_reacquire_stays_on_same_provider_account_until_stop() {
+        let app_cfg = create_test_app_config_with_dual_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+
+        let input_name = "provider_1".intern();
+        let client_1_addr: SocketAddr = "127.0.0.1:42001".parse().unwrap();
+        let client_2_addr: SocketAddr = "127.0.0.1:42002".parse().unwrap();
+
+        // Initial playback for client1.
+        let first_alloc = manager
+            .acquire_connection(&input_name, &client_1_addr)
+            .await
+            .expect("client1 initial allocation");
+        let pinned_provider = first_alloc
+            .allocation
+            .get_provider_name()
+            .expect("provider name expected");
+        assert_eq!(pinned_provider.as_ref(), "provider_1");
+
+        // Another client occupies the alternate account while client1 keeps seeking.
+        let second_alloc = manager
+            .acquire_connection(&input_name, &client_2_addr)
+            .await
+            .expect("client2 allocation");
+        let second_provider = second_alloc
+            .allocation
+            .get_provider_name()
+            .expect("provider name expected");
+        assert_eq!(second_provider.as_ref(), "provider_2");
+
+        // Simulate repeated seek/range reconnects for client1:
+        // release old connection for the same client, then force exact pinned provider.
+        for _ in 0..3 {
+            manager.release_connection(&client_1_addr).await;
+            let seek_alloc = manager
+                .force_exact_acquire_connection(&pinned_provider, &client_1_addr)
+                .await
+                .expect("seek reacquire should stay on pinned provider");
+            let seek_provider = seek_alloc
+                .allocation
+                .get_provider_name()
+                .expect("provider name expected");
+            assert_eq!(seek_provider.as_ref(), pinned_provider.as_ref());
+        }
+
+        // Stream stop / cleanup.
+        manager.release_connection(&client_1_addr).await;
+        manager.release_connection(&client_2_addr).await;
     }
 }

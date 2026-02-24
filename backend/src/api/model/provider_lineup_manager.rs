@@ -882,6 +882,15 @@ impl ProviderLineupManager {
         }
     }
 
+    pub async fn is_exhausted(&self, provider_name: &Arc<str>) -> bool {
+        let providers = self.providers.load();
+        if let Some((_, config)) = Self::get_provider_config_by_name(provider_name, &providers) {
+            config.is_exhausted().await
+        } else {
+            false
+        }
+    }
+
     pub fn is_provider_for_input(&self, provider_name: &str, input_name: &str) -> bool {
         let lineups = self.providers.load();
         if let Some((lineup, _)) = Self::get_provider_config_by_name(&provider_name.into(), &lineups) {

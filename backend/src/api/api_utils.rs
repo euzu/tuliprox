@@ -325,11 +325,17 @@ async fn resolve_streaming_strategy(
     fingerprint: &Fingerprint,
     input: &ConfigInput,
     force_provider: Option<&Arc<str>>,
+    allow_provider_grace: bool,
 ) -> StreamingStrategy {
     // allocate a provider connection
     let provider_connection_handle = match force_provider {
         Some(provider) => app_state.active_provider.force_exact_acquire_connection(provider, &fingerprint.addr).await,
-        None => app_state.active_provider.acquire_connection(&input.name, &fingerprint.addr).await,
+        None => {
+            app_state
+                .active_provider
+                .acquire_connection_with_grace(&input.name, &fingerprint.addr, allow_provider_grace)
+                .await
+        }
     };
 
     // panel_api provisioning/loading is handled later in the stream creation flow
@@ -412,10 +418,11 @@ async fn create_stream_response_details(
     share_stream: bool,
     connection_permission: UserConnectionPermission,
     force_provider: Option<&Arc<str>>,
+    allow_provider_grace: bool,
     virtual_id: VirtualId,
 ) -> Result<StreamDetails, TuliproxError> {
     let mut streaming_strategy =
-        resolve_streaming_strategy(app_state, stream_url, fingerprint, input, force_provider).await;
+        resolve_streaming_strategy(app_state, stream_url, fingerprint, input, force_provider, allow_provider_grace).await;
     let mut grace_period_options = app_state.get_grace_options();
     grace_period_options.period_millis = get_grace_period_millis(
         connection_permission,
@@ -704,6 +711,18 @@ pub async fn force_provider_stream_response(
     // This is critical for users with a connection limit of 1 to avoid "Provider exhausted" or provider-side 502/509 errors during seeking.
     app_state.connection_manager.release_provider_connection(&user_session.addr).await;
 
+    let preferred_provider = if app_state.active_provider.is_exhausted(&user_session.provider).await {
+        debug_if_enabled!(
+            "Forced provider {} is exhausted for {}; acquiring next available provider instead",
+            sanitize_sensitive_info(&user_session.provider),
+            sanitize_sensitive_info(&user_session.token)
+        );
+        None
+    } else {
+        Some(&user_session.provider)
+    };
+    let allow_provider_grace = preferred_provider.is_some();
+
     let stream_details = match create_stream_response_details(
         app_state,
         &stream_options,
@@ -714,7 +733,8 @@ pub async fn force_provider_stream_response(
         item_type,
         share_stream,
         connection_permission,
-        Some(&user_session.provider),
+        preferred_provider,
+        allow_provider_grace,
         stream_channel.virtual_id,
     )
     .await
@@ -859,6 +879,7 @@ pub async fn stream_response(
         share_stream,
         connection_permission,
         None,
+        true,
         stream_channel.virtual_id,
     )
     .await
