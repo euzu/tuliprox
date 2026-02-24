@@ -105,21 +105,44 @@ pub(in crate::api) async fn handle_hls_stream_request(
 
     let (request_url, session_token) = match user_session {
         Some(session) => {
-            let handle = app_state
+            let handle = if let Some(handle) = app_state
                 .active_provider
-                .force_exact_acquire_connection(&session.provider, &fingerprint.addr)
-                .await;
+                .acquire_exact_connection_with_grace(&session.provider, &fingerprint.addr, false)
+                .await
+            {
+                Some(handle)
+            } else {
+                debug_if_enabled!(
+                    "HLS pinned provider {} unavailable for {}; falling back to lineup allocation",
+                    sanitize_sensitive_info(&session.provider),
+                    sanitize_sensitive_info(&fingerprint.addr.to_string())
+                );
+                app_state
+                    .active_provider
+                    .acquire_connection_with_grace(&input.name, &fingerprint.addr, false)
+                    .await
+            };
+
             match handle {
-                Some(provider_handle) => {
-                    match provider_handle.allocation {
-                        ProviderAllocation::Exhausted => (url, None),
-                        ProviderAllocation::Available(cfg)
-                        | ProviderAllocation::GracePeriod(cfg) => {
-                            let stream_url = get_stream_alternative_url(&url, input, &cfg);
-                            (stream_url, Some(session.token.clone()))
-                        }
+                Some(provider_handle) => match provider_handle.allocation {
+                    ProviderAllocation::Exhausted => (url, None),
+                    ProviderAllocation::Available(cfg) | ProviderAllocation::GracePeriod(cfg) => {
+                        let stream_url = get_stream_alternative_url(&url, input, &cfg);
+                        let session_token = app_state
+                            .active_users
+                            .create_user_session(
+                                user,
+                                &session.token,
+                                virtual_id,
+                                &cfg.name,
+                                &stream_url,
+                                &fingerprint.addr,
+                                connection_permission,
+                            )
+                            .await;
+                        (stream_url, Some(session_token))
                     }
-                }
+                },
                 None => (url, None),
             }
         }

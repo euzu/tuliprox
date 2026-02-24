@@ -738,6 +738,28 @@ impl ProviderLineupManager {
         allocation
     }
 
+    /// Acquire exactly the requested provider account while respecting its configured limits.
+    ///
+    /// Unlike `force_exact_acquire_connection`, this never over-allocates an exhausted account.
+    pub(crate) async fn acquire_exact_connection_with_grace_override(
+        &self,
+        provider_name: &Arc<str>,
+        allow_grace: bool,
+    ) -> ProviderAllocation {
+        let providers = self.providers.load();
+        let with_grace = allow_grace && self.grace_period_millis.load(Ordering::Acquire) > 0;
+        let allocation = match Self::get_provider_config_by_name(provider_name, &providers) {
+            None => ProviderAllocation::Exhausted,
+            Some((_lineup, config)) => {
+                config
+                    .try_allocate(with_grace, self.grace_period_timeout_secs.load(Ordering::Acquire))
+                    .await
+            }
+        };
+        Self::log_allocation(&allocation);
+        allocation
+    }
+
     // Returns the next available provider connection
     pub(crate) async fn acquire_connection(&self, input_name: &Arc<str>) -> ProviderAllocation {
         self.acquire_connection_with_grace_override(input_name, true).await

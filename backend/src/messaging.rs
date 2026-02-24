@@ -202,7 +202,15 @@ async fn send_telegram_message(app_config: &Arc<AppConfig>, client: &reqwest::Cl
 
         for chat_id in &telegram.chat_ids {
             let bot = telegram_create_instance(&telegram.bot_token, chat_id);
-            telegram_send_message(app_config, client, &bot, &message, options.as_ref()).await;
+            let send_result = telegram_send_message(app_config, client, &bot, &message, options.as_ref()).await;
+            if telegram.markdown && has_template && send_result.parse_error && !send_result.delivered {
+                // Template output can include dynamic fields that break MarkdownV2. Retry once escaped.
+                let escaped = escape_markdown_v2(&msg);
+                let escaped_options = SendMessageOption {
+                    parse_mode: SendMessageParseMode::MarkdownV2,
+                };
+                let _ = telegram_send_message(app_config, client, &bot, &escaped, Some(&escaped_options)).await;
+            }
         }
     }
 }

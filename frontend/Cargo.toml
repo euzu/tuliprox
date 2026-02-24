@@ -6,38 +6,38 @@ rust-version = "1.89.0"
 
 [dependencies]
 shared = { version = "3.2.105", path = "../shared" }
-chrono = "0"
-yew = "0.22"
-yew-router = "0.19"
-yew-hooks = "0.5"
+chrono = "0.4.44"
+yew = "0.22.0"
+yew-router = "0.19.0"
+yew-hooks = "0.5.0"
 i18nrs = "0.1.9"
-serde_json = {version = "1" }
-serde = {version = "1.0", features = ["derive", "rc"] }
-wasm-bindgen = {version = "0.2", features = ["serde-serialize"]}
-anyhow = "1"
-thiserror = "2"
+serde_json = {version = "1.0.149" }
+serde = {version = "1.0.228", features = ["derive", "rc"] }
+wasm-bindgen = {version = "0.2.112", features = ["serde-serialize"]}
+#anyhow = "1.0.102"
+thiserror = "2.0.18"
 reqwasm = {version = "0.5", features = ["json"]}
-log = "0.4"
-wasm-logger = "0.2"
-gloo-storage = "0.3"
-gloo-utils = "0.2"
-gloo-render = "0.2"
+log = "0.4.29"
+wasm-logger = "0.2.0"
+gloo-storage = "0.3.0"
+gloo-utils = "0.2.0"
+#gloo-render = "0.2.0"
 gloo-timers = { version = "0", features = ["futures"] }
-implicit-clone = "0"
-futures-signals = "0.3"
-futures = "0.3"
-prost = "0"
-wasm-bindgen-futures = "0"
-js-sys = "0.3"
-bytes = "1"
+#implicit-clone = "0.6.0"
+futures-signals = "0.3.34"
+futures = "0.3.32"
+prost = "0.14.3"
+wasm-bindgen-futures = "0.4.62"
+js-sys = "0.3.89"
+bytes = "1.11.1"
 regex = "1.12.3"
 base64 = "0.22.1"
-cron = "0.15"
+cron = "0.15.0"
 fastrand = "2.3.0"
 indexmap = "2.13.0"
 
 [dependencies.web-sys]
-version = "0.3"
+version = "0.3.89"
 features = ["Document", "Element", "Node", "Window", "HtmlCollection", "HtmlImageElement", "HtmlInputElement",
     "DomRect", "HtmlDialogElement", "CssStyleDeclaration",
     "Event", "MutationObserver", "MutationObserverInit",
@@ -45,5 +45,5 @@ features = ["Document", "Element", "Node", "Window", "HtmlCollection", "HtmlImag
     "HtmlCanvasElement"]
 
 [dev-dependencies]
-wasm-bindgen-test = "0.3"
-gloo-utils = "0.2"
+wasm-bindgen-test = "0.3.62"
+gloo-utils = "0.2.0"

@@ -328,8 +328,30 @@ async fn resolve_streaming_strategy(
     allow_provider_grace: bool,
 ) -> StreamingStrategy {
     // allocate a provider connection
+    let mut forced_provider_allocated = false;
     let provider_connection_handle = match force_provider {
-        Some(provider) => app_state.active_provider.force_exact_acquire_connection(provider, &fingerprint.addr).await,
+        Some(provider) => {
+            // First try to stay on the exact pinned provider account without over-allocating.
+            // If that account is no longer available, fall back to any available account in the same lineup.
+            if let Some(handle) = app_state
+                .active_provider
+                .acquire_exact_connection_with_grace(provider, &fingerprint.addr, allow_provider_grace)
+                .await
+            {
+                forced_provider_allocated = true;
+                Some(handle)
+            } else {
+                debug_if_enabled!(
+                    "Pinned provider {} unavailable for {}; falling back to lineup allocation",
+                    sanitize_sensitive_info(provider),
+                    sanitize_sensitive_info(&fingerprint.addr.to_string())
+                );
+                app_state
+                    .active_provider
+                    .acquire_connection_with_grace(&input.name, &fingerprint.addr, allow_provider_grace)
+                    .await
+            }
+        }
         None => {
             app_state
                 .active_provider
@@ -351,7 +373,7 @@ async fn resolve_streaming_strategy(
             ProviderAllocation::Available(ref provider_cfg) | ProviderAllocation::GracePeriod(ref provider_cfg) => {
                 // force_stream_provider means we keep the url and the provider.
                 // If force_stream_provider or the input is the same as the config we don't need to get new url
-                let (selected_provider_name, url) = if force_provider.is_some() || provider_cfg.id == input.id {
+                let (selected_provider_name, url) = if forced_provider_allocated || provider_cfg.id == input.id {
                     (input.name.clone(), stream_url.to_string())
                 } else {
                     (provider_cfg.name.clone(), get_stream_alternative_url(stream_url, input, provider_cfg))
@@ -711,17 +733,12 @@ pub async fn force_provider_stream_response(
     // This is critical for users with a connection limit of 1 to avoid "Provider exhausted" or provider-side 502/509 errors during seeking.
     app_state.connection_manager.release_provider_connection(&user_session.addr).await;
 
-    let preferred_provider = if app_state.active_provider.is_exhausted(&user_session.provider).await {
-        debug_if_enabled!(
-            "Forced provider {} is exhausted for {}; acquiring next available provider instead",
-            sanitize_sensitive_info(&user_session.provider),
-            sanitize_sensitive_info(&user_session.token)
-        );
-        None
-    } else {
-        Some(&user_session.provider)
-    };
-    let allow_provider_grace = preferred_provider.is_some();
+    // Keep seek/range reconnects on the same provider account whenever that exact account is still available.
+    // If it is not available anymore, resolve_streaming_strategy will fall back to another free account.
+    let preferred_provider = Some(&user_session.provider);
+    // Never allow provider-side grace for forced seek/session reacquire.
+    // Over-allocation here would break provider-side one-connection limits.
+    let allow_provider_grace = false;
 
     let stream_details = match create_stream_response_details(
         app_state,
