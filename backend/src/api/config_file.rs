@@ -5,7 +5,7 @@ use crate::utils::{
     read_templates, prepare_sources_batch, read_config_file, read_mappings_file_unprepared,
     read_mappings_file_with_templates, read_sources_file, read_sources_file_from_path_with_templates,
 };
-use log::{error, info};
+use log::{debug, error, info};
 use shared::error::TuliproxError;
 use shared::model::{ConfigPaths, ConfigType, PatternTemplate};
 use std::path::{Path, PathBuf};
@@ -37,7 +37,7 @@ struct PreparedSourcesReload {
 
 /// What dependent reload (if any) was prepared alongside a config change.
 enum PreparedFollowUp {
-    None,
+    Unchanged,
     Mapping(Option<PreparedMappingsReload>),
     Sources(PreparedSourcesReload),
 }
@@ -269,7 +269,7 @@ impl ConfigFile {
             )?;
             PreparedFollowUp::Mapping(prepared)
         } else {
-            PreparedFollowUp::None
+            PreparedFollowUp::Unchanged
         };
 
         let previous_config: Config = (*app_state.app_config.config.load_full()).clone();
@@ -290,7 +290,7 @@ impl ConfigFile {
         }
 
         let follow_up_result: Result<(), TuliproxError> = match follow_up {
-            PreparedFollowUp::None => Ok(()),
+            PreparedFollowUp::Unchanged => Ok(()),
             PreparedFollowUp::Mapping(prepared) => {
                 Self::apply_mapping_reload(app_state, prepared);
                 Ok(())
@@ -333,7 +333,6 @@ impl ConfigFile {
     }
 
     pub(crate) async fn reload(&self, file_path: &Path, app_state: &Arc<AppState>) -> Result<(), TuliproxError> {
-        use log::debug;
         debug!("File change detected {}", file_path.display());
         match self {
             ConfigFile::ApiProxy => {

@@ -704,4 +704,47 @@ mod tests {
         let expected = vec!["A-1-y", "A-2-x"].into_iter().map(Into::into).collect::<Vec<Arc<str>>>();
         assert_eq!(expected, sorted);
     }
+
+    #[test]
+    fn test_sort_groups_normalized_source_ordinal_tiebreaker_pushes_zero_last() {
+        let group_zero = make_group(
+            1,
+            "zero",
+            vec![PlaylistItem {
+                header: PlaylistItemHeader {
+                    title: Arc::from("Same Caption"),
+                    source_ordinal: 0,
+                    ..Default::default()
+                },
+            }],
+        );
+        let group_non_zero = make_group(
+            2,
+            "non-zero",
+            vec![PlaylistItem {
+                header: PlaylistItemHeader {
+                    title: Arc::from("Same Caption"),
+                    source_ordinal: 7,
+                    ..Default::default()
+                },
+            }],
+        );
+
+        let group_rule = ConfigSortRule {
+            target: SortTarget::Group,
+            field: ItemField::Caption,
+            order: SortOrder::Asc,
+            // Both groups have the same sequence/rule priority and same caption value.
+            sequence: Some(vec![shared::model::REGEX_CACHE.get_or_compile(r"^Same Caption$").unwrap()]),
+            filter: Filter::default(),
+        };
+
+        let mut groups = vec![group_zero, group_non_zero];
+        sort_groups(&mut groups, &[group_rule], false);
+
+        assert_eq!(groups[0].title.as_ref(), "non-zero");
+        assert_eq!(groups[0].channels[0].header.source_ordinal, 7);
+        assert_eq!(groups[1].title.as_ref(), "zero");
+        assert_eq!(groups[1].channels[0].header.source_ordinal, 0);
+    }
 }
