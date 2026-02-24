@@ -278,20 +278,43 @@ impl ActiveProviderManager {
             }
         }
 
-        if let Some((addr, alloc_id, v_prio, _, is_shared)) = victim {
+        if let Some((addr, alloc_id, v_prio, victim_created_at, is_shared)) = victim {
             debug_if_enabled!("Preempting {} connection from {} (prio={}) for higher priority request (prio={})", 
                 if is_shared { "shared" } else { "single" },
                 sanitize_sensitive_info(&addr.to_string()), v_prio, new_priority);
 
             if is_shared {
-                // Keep shared preemption behavior unchanged.
-                let handle = ProviderHandle {
-                    client_id: addr,
-                    allocation_id: alloc_id,
-                    allocation: ProviderAllocation::Exhausted,
-                    cancel_token: None,
+                let released_shared_allocation = {
+                    let mut connections = self.connections.write().await;
+                    let key = connections.shared.key_by_addr.get(&addr).cloned()?;
+
+                    // Revalidate the selected shared victim under WRITE lock to avoid evicting
+                    // a connection that gained additional listeners concurrently.
+                    let still_single = connections.shared.by_key.get(&key).is_some_and(|shared| {
+                        shared.allocation_id == alloc_id
+                            && shared.connections.len() == 1
+                            && shared.priority == v_prio
+                            && shared.created_at == victim_created_at
+                    });
+                    if !still_single {
+                        None
+                    } else if let Some(shared) = connections.shared.by_key.remove(&key) {
+                        for shared_addr in &shared.connections {
+                            connections.shared.key_by_addr.remove(shared_addr);
+                        }
+
+                        if let Some(name) = shared.allocation.get_provider_name() {
+                            if let Some(list) = connections.by_provider.get_mut(&name) {
+                                list.retain(|(_, i)| *i != shared.allocation_id);
+                            }
+                        }
+                        Some(shared.allocation)
+                    } else {
+                        None
+                    }
                 };
-                self.release_handle(&handle).await;
+                let allocation = released_shared_allocation?;
+                allocation.release().await;
             } else {
                 // Atomically remove the victim single connection and take ownership of the token.
                 // This guarantees only one concurrent preemptor can schedule delayed cancellation.
