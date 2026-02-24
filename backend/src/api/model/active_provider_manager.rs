@@ -53,6 +53,7 @@ struct SharedAllocation {
     allocation: ProviderAllocation,
     connections: HashSet<ClientConnectionId>,
     priority: i8,
+    created_at: Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -221,14 +222,15 @@ impl ActiveProviderManager {
         Some(ProviderHandle::new(*addr, allocation_id, allocation, Some(cancel_token)))
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn try_preempt_connection(
         &self,
         input_name: &Arc<str>,
         new_priority: i8,
         allow_grace: bool,
     ) -> Option<ProviderAllocation> {
-        // Victim: (addr, alloc_id, priority, created_at, is_shared, is_probe_connection)
-        let mut victim: Option<(ClientConnectionId, AllocationId, i8, Instant, bool, bool)> = None;
+        // Victim: (addr, alloc_id, priority, created_at, is_shared)
+        let mut victim: Option<(ClientConnectionId, AllocationId, i8, Instant, bool)> = None;
 
         {
             let connections = self.connections.read().await;
@@ -242,19 +244,12 @@ impl ActiveProviderManager {
                                 if info.priority > new_priority {
                                     let is_better = match victim {
                                         None => true,
-                                        Some((_, _, v_prio, v_created, _, _)) => {
+                                        Some((_, _, v_prio, v_created, _)) => {
                                             info.priority > v_prio || (info.priority == v_prio && info.created_at < v_created)
                                         }
                                     };
                                     if is_better {
-                                        victim = Some((
-                                            *addr,
-                                            *alloc_id,
-                                            info.priority,
-                                            info.created_at,
-                                            false,
-                                            info.is_probe,
-                                        ));
+                                        victim = Some((*addr, *alloc_id, info.priority, info.created_at, false));
                                     }
                                 }
                             }
@@ -269,10 +264,11 @@ impl ActiveProviderManager {
                                 {
                                     let is_better = match victim {
                                         None => true,
-                                        Some((_, _, v_prio, _, _, _)) => shared.priority > v_prio,
+                                        Some((_, _, v_prio, _, _)) => shared.priority > v_prio,
                                     };
                                     if is_better {
-                                        victim = Some((*addr, *alloc_id, shared.priority, Instant::now(), true, false));
+                                        victim =
+                                            Some((*addr, *alloc_id, shared.priority, shared.created_at, true));
                                     }
                                 }
                             }
@@ -282,23 +278,57 @@ impl ActiveProviderManager {
             }
         }
 
-        if let Some((addr, alloc_id, v_prio, _, is_shared, is_probe_connection)) = victim {
+        if let Some((addr, alloc_id, v_prio, _, is_shared)) = victim {
             debug_if_enabled!("Preempting {} connection from {} (prio={}) for higher priority request (prio={})", 
                 if is_shared { "shared" } else { "single" },
                 sanitize_sensitive_info(&addr.to_string()), v_prio, new_priority);
 
-            // Get cancel token (only for single connections)
-            let cancel_token = if is_shared {
-                None
+            if is_shared {
+                // Keep shared preemption behavior unchanged.
+                let handle = ProviderHandle {
+                    client_id: addr,
+                    allocation_id: alloc_id,
+                    allocation: ProviderAllocation::Exhausted,
+                    cancel_token: None,
+                };
+                self.release_handle(&handle).await;
             } else {
-                let connections = self.connections.read().await;
-                connections.single.get(&addr)
-                    .and_then(|map| map.get(&alloc_id))
-                    .map(|info| info.cancel_token.clone())
-            };
+                // Atomically remove the victim single connection and take ownership of the token.
+                // This guarantees only one concurrent preemptor can schedule delayed cancellation.
+                let removed_info = {
+                    let mut connections = self.connections.write().await;
 
-            if let Some(token) = cancel_token {
-                if is_probe_connection {
+                    let mut removed_info = None;
+                    let mut removed_provider_name = None;
+                    let mut remove_addr_entry = false;
+                    if let Some(per_addr) = connections.single.get_mut(&addr) {
+                        if let Some(info) = per_addr.remove(&alloc_id) {
+                            removed_provider_name = info.allocation.get_provider_name();
+                            remove_addr_entry = per_addr.is_empty();
+                            removed_info = Some(info);
+                        }
+                    }
+
+                    if remove_addr_entry {
+                        connections.single.remove(&addr);
+                    }
+                    if let Some(name) = removed_provider_name {
+                        if let Some(list) = connections.by_provider.get_mut(&name) {
+                            if let Some(idx) = list.iter().position(|(a, i)| *a == addr && *i == alloc_id) {
+                                list.remove(idx);
+                            }
+                        }
+                    }
+                    removed_info
+                };
+
+                let Some(info) = removed_info else {
+                    // Another preemptor already removed this victim.
+                    return None;
+                };
+
+                let token = info.cancel_token;
+                if info.is_probe {
                     // Probe preemption gets a short grace window, but cap detached sleep/cancel
                     // tasks so bursts cannot spawn unbounded background work.
                     if let Ok(permit) = Arc::clone(&self.preempted_grace_semaphore).try_acquire_owned() {
@@ -313,16 +343,9 @@ impl ActiveProviderManager {
                 } else {
                     token.cancel();
                 }
-            }
 
-            // Release the connection
-            let handle = ProviderHandle {
-                client_id: addr,
-                allocation_id: alloc_id,
-                allocation: ProviderAllocation::Exhausted,
-                cancel_token: None,
-            };
-            self.release_handle(&handle).await;
+                info.allocation.release().await;
+            }
 
             // Now try acquire again preserving the original grace policy.
             let allocation = self
@@ -560,7 +583,11 @@ impl ActiveProviderManager {
 
                         connections.single.remove(addr); // Map is drained/empty now
 
-                        Some(ProviderHandle::new(*addr, id, info.allocation, Some(info.cancel_token)))
+                        Some((
+                            ProviderHandle::new(*addr, id, info.allocation, Some(info.cancel_token)),
+                            info.priority,
+                            info.created_at,
+                        ))
                     } else {
                         None
                     }
@@ -569,24 +596,21 @@ impl ActiveProviderManager {
 
 
             if let Some(handle) = &handle {
-                let provider_name = handle.allocation.get_provider_name().unwrap_or_default();
+                let provider_name = handle.0.allocation.get_provider_name().unwrap_or_default();
                 debug_if_enabled!(
                     "Shared connection: promoted addr {addr} provider={} key={}",
                     sanitize_sensitive_info(&provider_name),
                     sanitize_sensitive_info(key)
                 );
-                // Get priority from the original single connection info
-                let priority = connections.single.get(addr)
-                    .and_then(|m| m.values().next())
-                    .map_or(DEFAULT_USER_PRIORITY, |info| info.priority);
 
                 connections.shared.by_key.insert(
                     key.to_string(),
                     SharedAllocation {
-                        allocation_id: handle.allocation_id,
-                        allocation: handle.allocation.clone(),
+                        allocation_id: handle.0.allocation_id,
+                        allocation: handle.0.allocation.clone(),
                         connections: HashSet::from([*addr]),
-                        priority,
+                        priority: handle.1,
+                        created_at: handle.2,
                     },
                 );
                 connections.shared.key_by_addr.insert(*addr, key.to_string());
@@ -858,12 +882,27 @@ mod tests {
             Some(input_name.as_ref())
         );
 
+        // Let the detached cancellation task start and arm its sleep timer on the paused clock.
+        tokio::task::yield_now().await;
+
         // Probe cancellation is intentionally delayed by a small grace window.
         tokio::time::advance(Duration::from_millis(100)).await;
         assert!(!probe_token.is_cancelled(), "probe token should not be cancelled immediately");
 
-        tokio::time::advance(super::PREEMPTED_PROBE_CANCEL_GRACE + Duration::from_millis(500)).await;
-        probe_token.cancelled().await;
+        let cancel_wait_timeout = super::PREEMPTED_PROBE_CANCEL_GRACE + Duration::from_millis(500);
+        let wait_token = probe_token.clone();
+        let cancel_wait = tokio::spawn(async move {
+            tokio::time::timeout(cancel_wait_timeout, wait_token.cancelled()).await
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(cancel_wait_timeout).await;
+        assert!(
+            cancel_wait
+                .await
+                .expect("cancel wait task should join")
+                .is_ok(),
+            "probe token should be cancelled before timeout after grace"
+        );
 
         manager.release_connection(&user_addr).await;
     }
