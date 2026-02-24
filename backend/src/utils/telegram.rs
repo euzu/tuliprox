@@ -111,7 +111,7 @@ pub async fn telegram_send_message(
     let mut all_delivered = true;
     let mut parse_error = false;
 
-    for (i, chunk_text) in chunks.iter().enumerate() {
+    'chunk_loop: for (i, chunk_text) in chunks.iter().enumerate() {
         let request_json_obj = RequestObj {
             chat_id: instance.chat_id.clone(),
             message_thread_id: instance.message_thread_id.clone(),
@@ -120,6 +120,7 @@ pub async fn telegram_send_message(
         };
 
         let mut delivered = false;
+        let mut parse_entities_failure = false;
         for attempt in 0..=MAX_RETRIES_PER_CHUNK {
             let result = client
                 .post(url.clone())
@@ -143,6 +144,7 @@ pub async fn telegram_send_message(
                         .map_or("Telegram response could not be parsed", |err| err.description.as_str());
                     if status == StatusCode::BAD_REQUEST && is_parse_entities_error(error_message) {
                         parse_error = true;
+                        parse_entities_failure = true;
                     }
 
                     let retriable_status =
@@ -226,6 +228,11 @@ pub async fn telegram_send_message(
                 i + 1,
                 chunks.len()
             );
+        }
+
+        // Parse-entities errors are message-format issues; stop here and let caller decide fallback strategy.
+        if parse_entities_failure {
+            break 'chunk_loop;
         }
 
         // Small delay between chunks to be polite to the API
