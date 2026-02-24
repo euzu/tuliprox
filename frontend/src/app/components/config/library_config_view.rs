@@ -454,7 +454,7 @@ pub fn LibraryConfigView() -> Html {
                                 let metadata_state = metadata_state.clone();
                                 let f = *f;
                                 html! {
-                                    <Chip label={format!("{f:?}")} on_remove={Callback::from(move |_| {
+                                    <Chip label={format!("{f:?}")} removable={true} on_remove={Callback::from(move |_| {
                                         let mut updated = metadata_state.form.formats.clone();
                                         updated.retain(|&x| x != f);
                                         metadata_state.dispatch(LibraryMetadataConfigFormAction::Formats(updated));

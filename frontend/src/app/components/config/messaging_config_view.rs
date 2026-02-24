@@ -353,7 +353,7 @@ pub fn MessagingConfigView() -> Html {
                 html! {
                     <TextArea
                         label={kind_str}
-                        field_id={Some("TELEGRAM_TEMPLATE_MESSAGE".to_string())}
+                        field_id={Some(format!("TELEGRAM_TEMPLATE_MESSAGE_{}", kind.to_string().to_uppercase()))}
                         value={current_val}
                         collapse_on_empty={true}
                         on_change={Callback::from(move |val: String| {
@@ -379,7 +379,7 @@ pub fn MessagingConfigView() -> Html {
                 html! {
                     <TextArea
                         label={kind_str}
-                        field_id={Some("REST_TEMPLATE_MESSAGE".to_string())}
+                        field_id={Some(format!("REST_TEMPLATE_MESSAGE_{}", kind.to_string().to_uppercase()))}
                         value={current_val}
                         collapse_on_empty={true}
                         on_change={Callback::from(move |val: String| {
@@ -405,7 +405,7 @@ pub fn MessagingConfigView() -> Html {
                 html! {
                     <TextArea
                         label={kind_str}
-                        field_id={Some("DISCORD_TEMPLATE_MESSAGE".to_string())}
+                        field_id={Some(format!("DISCORD_TEMPLATE_MESSAGE_{}", kind.to_string().to_uppercase()))}
                         value={current_val}
                         collapse_on_empty={true}
                         on_change={Callback::from(move |val: String| {

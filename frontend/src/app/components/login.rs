@@ -68,7 +68,6 @@ pub fn Login() -> Html {
             if let Some(input) = input_ref.cast::<HtmlInputElement>() {
                 input.focus().unwrap();
             }
-            || ()
         });
     }
 

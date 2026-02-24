@@ -32,7 +32,7 @@ pub fn EpgConfigView(props: &EpgConfigViewProps) -> Html {
             } else {
                 html! {
                   for entry in sources.iter() {
-                    <Card class="tp__config-view__card">
+                    <Card key={entry.url.to_string()} class="tp__config-view__card">
                         <h1>{translate.t("LABEL.SOURCE")}</h1>
                         { config_field!(entry, translate.t("LABEL.URL"), url) }
                         { config_field!(entry, translate.t("LABEL.PRIORITY"), priority) }
@@ -75,8 +75,8 @@ pub fn EpgConfigView(props: &EpgConfigViewProps) -> Html {
                                             html! {}
                                         } else {
                                             html! {
-                                               for value in name_prefixe_seperators.iter() {
-                                                  <Chip label={value.to_string()} />
+                                               for (idx, value) in name_prefixe_seperators.iter().enumerate() {
+                                                  <Chip key={format!("name-prefix-separator-{value}-{idx}")} label={value.to_string()} />
                                                }
                                             }
                                         }
@@ -96,8 +96,8 @@ pub fn EpgConfigView(props: &EpgConfigViewProps) -> Html {
                                             html! {}
                                         } else {
                                             html! {
-                                               for value in strip.iter() {
-                                                  <Chip label={value.clone()} />
+                                               for (idx, value) in strip.iter().enumerate() {
+                                                  <Chip key={format!("strip-{value}-{idx}")} label={value.clone()} />
                                                }
                                             }
                                         }

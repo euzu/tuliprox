@@ -261,36 +261,31 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
                     html! {
                         <div class="tp__form-list">
                             <div class="tp__form-list__items">
-                            {
-                                for (*trakt_lists_list).iter().enumerate().map(|(idx, list)| {
-                                    let content_type_str = match list.content_type {
-                                        TraktContentType::Vod => "Vod",
-                                        TraktContentType::Series => "Series",
-                                        TraktContentType::Both => "Both",
-                                    };
-                                    html! {
-                                        <div class="tp__form-list__item" key={format!("trakt-{idx}")}>
-                                            <IconButton
-                                                name={idx.to_string()}
-                                                icon="Delete"
-                                                onclick={handle_remove_trakt_list_item.clone()}/>
-                                            <div class="tp__form-list__item-content">
-                                                <span>
-                                                    <strong>{&list.user}</strong>
-                                                    {" / "}
-                                                    {&list.list_slug}
-                                                    {" - "}
-                                                    {&list.category_name}
-                                                    {" ("}
-                                                    {content_type_str}
-                                                    {", "}
-                                                    {list.fuzzy_match_threshold}
-                                                    {"%)"}
-                                                </span>
-                                            </div>
-                                        </div>
-                                    }
-                                })
+                            for item in (*trakt_lists_list).iter().enumerate() {
+                                <div class="tp__form-list__item" key={format!("trakt-{}", item.0)}>
+                                    <IconButton
+                                        name={item.0.to_string()}
+                                        icon="Delete"
+                                        onclick={handle_remove_trakt_list_item.clone()}/>
+                                    <div class="tp__form-list__item-content">
+                                        <span>
+                                            <strong>{&item.1.user}</strong>
+                                            {" / "}
+                                            {&item.1.list_slug}
+                                            {" - "}
+                                            {&item.1.category_name}
+                                            {" ("}
+                                            {match item.1.content_type {
+                                                TraktContentType::Vod => "Vod",
+                                                TraktContentType::Series => "Series",
+                                                TraktContentType::Both => "Both",
+                                            }}
+                                            {", "}
+                                            {item.1.fuzzy_match_threshold}
+                                            {"%)"}
+                                        </span>
+                                    </div>
+                                </div>
                             }
                             </div>
 

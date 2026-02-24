@@ -1,6 +1,6 @@
 use crate::app::components::AppIcon;
 use web_sys::MouseEvent;
-use yew::{classes, component, html, Callback, Html, Properties};
+use yew::prelude::*;
 
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct TextButtonProps {

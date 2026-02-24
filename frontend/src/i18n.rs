@@ -1,7 +1,37 @@
 use i18nrs::{I18n, I18nConfig, StorageType};
 use serde_json::Value;
-use std::{collections::HashMap, rc::Rc};
+use std::{
+    collections::HashMap,
+    rc::Rc,
+    sync::{Mutex, OnceLock},
+};
 use yew::prelude::*;
+
+static INTERNED_STRINGS: OnceLock<Mutex<HashMap<&'static str, &'static str>>> = OnceLock::new();
+
+fn intern_owned(cache: &mut HashMap<&'static str, &'static str>, value: String) -> &'static str {
+    let leaked = Box::leak(value.into_boxed_str());
+    cache.insert(leaked, leaked);
+    leaked
+}
+
+fn intern_static(value: &str) -> &'static str {
+    let cache = INTERNED_STRINGS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache.lock().expect("i18n intern cache poisoned");
+    if let Some(existing) = cache.get(value).copied() {
+        return existing;
+    }
+    intern_owned(&mut cache, value.to_owned())
+}
+
+fn intern_string(value: String) -> &'static str {
+    let cache = INTERNED_STRINGS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache.lock().expect("i18n intern cache poisoned");
+    if let Some(existing) = cache.get(value.as_str()).copied() {
+        return existing;
+    }
+    intern_owned(&mut cache, value)
+}
 
 #[derive(Clone)]
 pub struct YewI18n {
@@ -17,13 +47,11 @@ impl YewI18n {
         let mut serialized = HashMap::<&'static str, &'static str>::new();
         for lang in supported_languages {
             let value = translations.get(*lang).cloned().unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-            let lang_static = Box::leak((*lang).to_string().into_boxed_str());
-            let value_static = Box::leak(value.to_string().into_boxed_str());
-            serialized.insert(lang_static, value_static);
+            serialized.insert(intern_static(lang), intern_string(value.to_string()));
         }
 
         if serialized.is_empty() {
-            serialized.insert("en", "{}");
+            serialized.insert(intern_static("en"), intern_static("{}"));
         }
 
         let config = I18nConfig { translations: serialized.clone() };

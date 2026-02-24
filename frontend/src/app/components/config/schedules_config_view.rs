@@ -171,59 +171,65 @@ pub fn SchedulesConfigView() -> Html {
     };
 
     let render_view_mode = |deletable: bool| match form_state.data().schedules.as_ref() {
-        Some(schedules) => html! {
-            <Card class="tp__config-view__card">
-             <div class="tp__schedules-config-view__schedule">
-                <table class="tp__config-view__table tp__table__table ">
-                    <thead>
-                        <tr>
-                            {html_if!(deletable, {<th></th>})}
-                            <th>{ translate.t(LABEL_SCHEDULE) }</th>
-                            <th>{ translate.t(LABEL_TYPE) }</th>
-                            <th>{ translate.t(LABEL_TARGETS) }</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        { for schedules.iter().map(|entry| {
-                            let handle_remove_clone = handle_remove.clone();
-                            let schedule = entry.schedule.clone();
-                            html! {
+        Some(schedules) => {
+            let render_schedule_row = |entry: &ScheduleConfigDto| {
+                let handle_remove_clone = handle_remove.clone();
+                let schedule = entry.schedule.clone();
+                html! {
+                    <tr>
+                        { html_if!(deletable, {
+                            <td>
+                            <IconButton class="tp__schedules-config-view__delete-btn"
+                               name="RemoveSchedule" icon="Delete"
+                               onclick={Callback::from(move |_| handle_remove_clone.emit(schedule.clone()))} />
+                            </td>
+                        })}
+                        <td>{ entry.schedule.clone() }</td>
+                        <td>{ match entry.task_type {
+                            ScheduleTaskType::PlaylistUpdate => translate.t("LABEL.PLAYLIST_UPDATE"),
+                            ScheduleTaskType::LibraryScan => translate.t("LABEL.LIBRARY"),
+                        }}</td>
+                        <td>
+                            <div class="tp__config-view__tags">
+                            {
+                            match entry.targets.as_ref() {
+                                Some(targets) if !targets.is_empty() => html! {
+                                    for t in targets.iter() {
+                                        <Chip label={t.clone()} />
+                                    }
+                                },
+                                _ => html! {
+                                    <Chip label={translate.t(LABEL_ALL)} />
+                                },
+                            }
+                            }
+                         </div>
+                        </td>
+                    </tr>
+                }
+            };
+            html! {
+                <Card class="tp__config-view__card">
+                 <div class="tp__schedules-config-view__schedule">
+                    <table class="tp__config-view__table tp__table__table ">
+                        <thead>
                             <tr>
-                                { html_if!(deletable, {
-                                    <td>
-                                    <IconButton class="tp__schedules-config-view__delete-btn"
-                                       name="RemoveSchedule" icon="Delete"
-                                       onclick={Callback::from(move |_| handle_remove_clone.emit(schedule.clone()))} />
-                                    </td>
-                                })}
-                                <td>{ entry.schedule.clone() }</td>
-                                <td>{ match entry.task_type {
-                                    ScheduleTaskType::PlaylistUpdate => translate.t("LABEL.PLAYLIST_UPDATE"),
-                                    ScheduleTaskType::LibraryScan => translate.t("LABEL.LIBRARY"),
-                                }}</td>
-                                <td>
-                                    <div class="tp__config-view__tags">
-                                    {
-                                    match entry.targets.as_ref() {
-                                        Some(targets) if !targets.is_empty() => html! {
-                                            { for targets.iter().map(|t| {
-                                                html! { <Chip label={t.clone()} />
-                                            }})}
-                                        },
-                                        _ => html! {
-                                            <Chip label={translate.t(LABEL_ALL)} />
-                                        },
-                                    }
-                                    }
-                                 </div>
-                                </td>
+                                {html_if!(deletable, {<th></th>})}
+                                <th>{ translate.t(LABEL_SCHEDULE) }</th>
+                                <th>{ translate.t(LABEL_TYPE) }</th>
+                                <th>{ translate.t(LABEL_TARGETS) }</th>
                             </tr>
-                        }}) }
-                    </tbody>
-                </table>
-            </div>
-          </Card>
-        },
+                        </thead>
+                        <tbody>
+                            for entry in schedules.iter() {
+                                { render_schedule_row(entry) }
+                            }
+                        </tbody>
+                    </table>
+                </div>
+              </Card>
+            }
+        }
         None => html! { <NoContent /> },
     };
 

@@ -80,14 +80,15 @@ pub fn TagList(props: &TagListProps) -> Html {
 
     html! {
         <div class="tp__tag_list">
-            { for (*tag_state).iter().map(|tag| html! {
+            for tag in (*tag_state).iter() {
                 <Chip
+                    key={tag.label.clone()}
                     label={tag.label.clone()}
                     class={tag.class.clone()}
                     removable={!readonly}
                     on_remove={if readonly { Callback::noop() } else { on_remove.clone() }}
                 />
-            })}
+            }
             {
                 if readonly {
                     html! {}

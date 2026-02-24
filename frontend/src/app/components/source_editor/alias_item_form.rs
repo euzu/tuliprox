@@ -6,7 +6,7 @@ use crate::{
 };
 use shared::{model::ConfigInputAliasDto, utils::Internable};
 use std::sync::Arc;
-use yew::{component, html, use_reducer, Callback, Html, Properties, UseReducerHandle};
+use yew::prelude::*;
 
 const LABEL_ALIAS_NAME: &str = "LABEL.ALIAS_NAME";
 const LABEL_URL: &str = "LABEL.URL";

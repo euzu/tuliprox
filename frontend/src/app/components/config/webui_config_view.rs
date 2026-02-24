@@ -121,7 +121,6 @@ pub fn WebUiConfigView() -> Html {
                 auth_state.dispatch(WebUiAuthConfigFormAction::SetAll(WebAuthConfigDto::default()));
                 csp_state.dispatch(CspConfigFormAction::SetAll(ContentSecurityPolicyConfigDto::default()));
             }
-            || ()
         });
     }
 

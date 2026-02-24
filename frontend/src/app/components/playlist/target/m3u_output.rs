@@ -18,7 +18,7 @@ pub fn M3uOutput(props: &M3uOutputProps) -> Html {
     let tags = {
         let output = props.output.clone();
         let translate = translator.clone();
-        use_memo(output, move |output| {
+        use_memo((output, translate), move |(output, translate)| {
             vec![
                 Rc::new(Tag {
                     class: convert_bool_to_chip_style(output.include_type_in_url),

@@ -29,7 +29,6 @@ pub fn BatchInputContentView(props: &BatchInputContentViewProps) -> Html {
                 let content = services.config.get_batch_input_content(&input).await;
                 batch_content.set(content);
             });
-            || ()
         });
     }
 
