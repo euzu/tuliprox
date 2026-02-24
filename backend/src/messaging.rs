@@ -6,7 +6,7 @@ use log::{debug, error};
 use reqwest::{header, Method};
 use serde_json::json;
 use shared::model::{InputFetchMethod, MsgKind};
-use shared::utils::{json_str_to_markdown, Internable};
+use shared::utils::{escape_markdown_v2, json_str_to_markdown, Internable};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -164,6 +164,7 @@ async fn send_telegram_message(app_config: &Arc<AppConfig>, client: &reqwest::Cl
     if let Some(telegram) = &messaging.telegram {
         let kind = content.kind();
         let template = telegram.templates.get(&kind).map(String::as_str);
+        let has_template = template.is_some();
 
         let msg = if let Some(templ) = template {
             render_template(app_config, client, Some(templ), content).await
@@ -187,8 +188,12 @@ async fn send_telegram_message(app_config: &Arc<AppConfig>, client: &reqwest::Cl
                 if let Ok(md) = json_str_to_markdown(&msg) {
                     (Cow::Owned(md), Some(SendMessageOption { parse_mode: SendMessageParseMode::MarkdownV2 }))
                 } else {
-                    // If it's already rendered markdown (from template), just use it
-                    (Cow::Borrowed(&msg), Some(SendMessageOption { parse_mode: SendMessageParseMode::MarkdownV2 }))
+                    // Keep template markdown as-is, but escape plain text to avoid MarkdownV2 parse errors.
+                    if has_template {
+                        (Cow::Borrowed(&msg), Some(SendMessageOption { parse_mode: SendMessageParseMode::MarkdownV2 }))
+                    } else {
+                        (Cow::Owned(escape_markdown_v2(&msg)), Some(SendMessageOption { parse_mode: SendMessageParseMode::MarkdownV2 }))
+                    }
                 }
             } else {
                 (Cow::Borrowed(&msg), None)

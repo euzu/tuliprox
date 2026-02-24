@@ -145,7 +145,17 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
                             // Capture release date for children
                             let series_release_date = series_stream_props.release_date.clone();
 
-                            if let Some(mut episodes) = parse_xtream_series_info(&pli.get_uuid(), &series_stream_props, &group, &series_name, input, series_release_date.as_ref()) {
+                            if let Some(mut episodes) = parse_xtream_series_info(
+                                &pli.get_uuid(),
+                                &series_stream_props,
+                                &group,
+                                &series_name,
+                                input,
+                                series_release_date.as_ref(),
+                                // `pli` is `XtreamPlaylistItem`, which stores header fields flattened.
+                                // `source_ordinal` is copied from `PlaylistItemHeader.source_ordinal` on conversion.
+                                pli.source_ordinal,
+                            ) {
                                 let config = &app_state.app_config.config.load();
                                 match get_target_storage_path(config, target.name.as_str()) {
                                     None => {

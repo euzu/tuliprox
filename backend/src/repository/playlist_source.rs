@@ -1,7 +1,7 @@
 use crate::model::AppConfig;
 use crate::repository::BPlusTreeQuery;
 use crate::repository::xtream_get_file_path;
-use crate::utils::FileReadGuard;
+use crate::utils::{normalized_source_ordinal, FileReadGuard};
 use futures::future::BoxFuture;
 use indexmap::IndexMap;
 use log::{error, warn};
@@ -217,14 +217,14 @@ impl PlaylistSource for XtreamDiskPlaylistSource {
 
         // Sort channels within each group
         for group in groups_map.values_mut() {
-            group.channels.sort_by_key(|item| item.header.source_ordinal);
+            group
+                .channels
+                .sort_by_key(|item| normalized_source_ordinal(item.header.source_ordinal));
         }
 
         // Sort groups based on the source_ordinal of their first channel
         let mut groups: Vec<PlaylistGroup> = groups_map.into_values().collect();
-        groups.sort_by_key(|group| {
-            group.channels.first().map_or(u32::MAX, |c| c.header.source_ordinal)
-        });
+        groups.sort_by_key(|group| group.channels.first().map_or(u32::MAX, |c| normalized_source_ordinal(c.header.source_ordinal)));
         groups
     }
 
@@ -382,14 +382,14 @@ macro_rules! impl_single_file_disk_source {
                     }
                     // Sort channels within each group
                     for group in groups_map.values_mut() {
-                        group.channels.sort_by_key(|item| item.header.source_ordinal);
+                        group
+                            .channels
+                            .sort_by_key(|item| normalized_source_ordinal(item.header.source_ordinal));
                     }
 
                     // Sort groups based on the source_ordinal of their first channel
                     let mut groups: Vec<PlaylistGroup> = groups_map.into_values().collect();
-                    groups.sort_by_key(|group| {
-                        group.channels.first().map_or(u32::MAX, |c| c.header.source_ordinal)
-                    });
+                    groups.sort_by_key(|group| group.channels.first().map_or(u32::MAX, |c| normalized_source_ordinal(c.header.source_ordinal)));
                     groups
                 } else {
                     vec![]
@@ -527,11 +527,11 @@ impl PlaylistSource for MemoryPlaylistSource {
     fn sort_by_provider_ordinal(&mut self) {
         let playlist = Arc::make_mut(&mut self.playlist);
         for group in &mut *playlist {
-            group.channels.sort_by_key(|item| item.header.source_ordinal);
+            group
+                .channels
+                .sort_by_key(|item| normalized_source_ordinal(item.header.source_ordinal));
         }
-        playlist.sort_by_key(|group|
-            group.channels.first().map_or(u32::MAX, |c| c.header.source_ordinal)
-        );
+        playlist.sort_by_key(|group| group.channels.first().map_or(u32::MAX, |c| normalized_source_ordinal(c.header.source_ordinal)));
     }
 }
 

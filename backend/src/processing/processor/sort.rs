@@ -3,6 +3,7 @@ use shared::foundation::ValueProvider;
 use shared::model::{PlaylistGroup, SortOrder, SortTarget};
 use std::cmp::Ordering;
 use std::sync::Arc;
+use crate::utils::normalized_source_ordinal;
 
 fn apply_sort_order(order: SortOrder, ordering: Ordering) -> Ordering {
     match (order, ordering) {
@@ -247,8 +248,16 @@ fn playlist_comparator(
 macro_rules! sort_groups_by_source_order {
     ($groups: ident) => {
         $groups.sort_by(|a, b| {
-            let order1 = a.channels.first().as_ref().map_or(u32::MAX, |c| c.header.source_ordinal);
-            let order2 = b.channels.first().as_ref().map_or(u32::MAX, |c| c.header.source_ordinal);
+            let order1 = a
+                .channels
+                .first()
+                .as_ref()
+                .map_or(u32::MAX, |c| normalized_source_ordinal(c.header.source_ordinal));
+            let order2 = b
+                .channels
+                .first()
+                .as_ref()
+                .map_or(u32::MAX, |c| normalized_source_ordinal(c.header.source_ordinal));
             order1.cmp(&order2)
         });
     };
@@ -288,7 +297,9 @@ pub(in crate::processing::processor) fn sort_playlist(
 ) -> bool {
     let Some(sort) = &target.sort else {
         for group in &mut *playlist {
-            group.channels.sort_by_key(|a| a.header.source_ordinal);
+            group
+                .channels
+                .sort_by_key(|a| normalized_source_ordinal(a.header.source_ordinal));
         }
         sort_groups_by_source_order!(playlist);
         return true;
@@ -325,8 +336,14 @@ fn sort_groups(groups: &mut Vec<PlaylistGroup>, rules: &[ConfigSortRule], match_
             return ord;
         }
 
-        let order1 = groups[*left_idx].channels.first().map_or(u32::MAX, |c| c.header.source_ordinal);
-        let order2 = groups[*right_idx].channels.first().map_or(u32::MAX, |c| c.header.source_ordinal);
+        let order1 = groups[*left_idx]
+            .channels
+            .first()
+            .map_or(u32::MAX, |c| normalized_source_ordinal(c.header.source_ordinal));
+        let order2 = groups[*right_idx]
+            .channels
+            .first()
+            .map_or(u32::MAX, |c| normalized_source_ordinal(c.header.source_ordinal));
         order1.cmp(&order2)
     });
 
@@ -343,7 +360,9 @@ fn sort_channels_in_groups(groups: &mut [PlaylistGroup], rules: &[ConfigSortRule
 
     if channel_rules.is_empty() {
         for group in groups {
-            group.channels.sort_by_key(|a| a.header.source_ordinal);
+            group
+                .channels
+                .sort_by_key(|a| normalized_source_ordinal(a.header.source_ordinal));
         }
         return;
     }
@@ -359,7 +378,8 @@ fn sort_channels_in_groups(groups: &mut [PlaylistGroup], rules: &[ConfigSortRule
                 return ord;
             }
 
-            group.channels[*left_idx].header.source_ordinal.cmp(&group.channels[*right_idx].header.source_ordinal)
+            normalized_source_ordinal(group.channels[*left_idx].header.source_ordinal)
+                .cmp(&normalized_source_ordinal(group.channels[*right_idx].header.source_ordinal))
         });
 
         reorder_by_indices(&mut group.channels, &channel_indices);
@@ -683,5 +703,48 @@ mod tests {
         let sorted = groups.iter().map(|group| group.channels[0].header.title.clone()).collect::<Vec<_>>();
         let expected = vec!["A-1-y", "A-2-x"].into_iter().map(Into::into).collect::<Vec<Arc<str>>>();
         assert_eq!(expected, sorted);
+    }
+
+    #[test]
+    fn test_sort_groups_normalized_source_ordinal_tiebreaker_pushes_zero_last() {
+        let group_zero = make_group(
+            1,
+            "zero",
+            vec![PlaylistItem {
+                header: PlaylistItemHeader {
+                    title: Arc::from("Same Caption"),
+                    source_ordinal: 0,
+                    ..Default::default()
+                },
+            }],
+        );
+        let group_non_zero = make_group(
+            2,
+            "non-zero",
+            vec![PlaylistItem {
+                header: PlaylistItemHeader {
+                    title: Arc::from("Same Caption"),
+                    source_ordinal: 7,
+                    ..Default::default()
+                },
+            }],
+        );
+
+        let group_rule = ConfigSortRule {
+            target: SortTarget::Group,
+            field: ItemField::Caption,
+            order: SortOrder::Asc,
+            // Both groups have the same sequence/rule priority and same caption value.
+            sequence: Some(vec![shared::model::REGEX_CACHE.get_or_compile(r"^Same Caption$").unwrap()]),
+            filter: Filter::default(),
+        };
+
+        let mut groups = vec![group_zero, group_non_zero];
+        sort_groups(&mut groups, &[group_rule], false);
+
+        assert_eq!(groups[0].title.as_ref(), "non-zero");
+        assert_eq!(groups[0].channels[0].header.source_ordinal, 7);
+        assert_eq!(groups[1].title.as_ref(), "zero");
+        assert_eq!(groups[1].channels[0].header.source_ordinal, 0);
     }
 }

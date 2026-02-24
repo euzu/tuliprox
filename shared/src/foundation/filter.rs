@@ -381,8 +381,25 @@ fn get_parser_binary_op(expr: &Pair<Rule>) -> Result<BinaryOperator, TuliproxErr
     }
 }
 
+fn unresolved_template_placeholders(input: &str) -> Vec<String> {
+    let mut placeholders = IndexSet::new();
+    for captures in CONSTANTS.re_template_var.captures_iter(input) {
+        if let Some(inner) = captures.get(1) {
+            let value = inner.as_str();
+            if !value.is_empty() {
+                placeholders.insert(format!("!{value}!"));
+            }
+        }
+    }
+    placeholders.into_iter().collect()
+}
+
 pub fn get_filter(filter_text: &str, templates: Option<&[PatternTemplate]>) -> Result<Filter, TuliproxError> {
     let source = apply_templates_to_pattern_single(filter_text, templates)?;
+    let unresolved_placeholders = unresolved_template_placeholders(&source);
+    if !unresolved_placeholders.is_empty() {
+        return info_err_res!("Unknown template placeholder(s) in filter: {}", unresolved_placeholders.join(", "));
+    }
 
     match FilterParser::parse(Rule::main, &source) {
         Ok(pairs) => {
@@ -859,5 +876,13 @@ mod tests {
             }
             Err(e) => panic!("{e}"),
         }
+    }
+
+    #[test]
+    fn test_filter_unknown_template_placeholder_reports_error() {
+        let err = get_filter("!UNKNOWN_FILTER!", None).expect_err("unknown placeholder should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("Unknown template placeholder(s) in filter"));
+        assert!(msg.contains("!UNKNOWN_FILTER!"));
     }
 }
