@@ -524,6 +524,10 @@ impl InputWorker {
                 Err(e) if e.message == TASK_ERR_UPDATE_IN_PROGRESS => {
                     requeue_current = true;
                     retry_attempts.remove(&current_key);
+                    // Foreground update needs write access to playlist DB files.
+                    // Drop cached read handles before waiting, otherwise we can deadlock
+                    // by waiting for PlaylistUpdate completion while still blocking writers.
+                    self.release_db_handles();
                     let update_completed =
                         Self::wait_for_playlist_update_completion(app_state_weak.as_ref(), &self.cancel_token).await;
                     if !update_completed {

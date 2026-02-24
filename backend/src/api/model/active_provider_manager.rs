@@ -9,12 +9,13 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 const DEFAULT_USER_PRIORITY: i8 = -1;
 const DEFAULT_PROBE_PRIORITY: i8 = 1;
+const PREEMPTED_PROBE_CANCEL_GRACE: Duration = Duration::from_secs(2);
 static DUMMY_ADDR: LazyLock<SocketAddr> = LazyLock::new(|| "127.0.0.1:0".parse::<SocketAddr>().unwrap());
 
 pub type ClientConnectionId = SocketAddr;
@@ -278,7 +279,16 @@ impl ActiveProviderManager {
             };
 
             if let Some(token) = cancel_token {
-                token.cancel();
+                if v_prio >= DEFAULT_PROBE_PRIORITY {
+                    // Give preempted probe tasks a short grace window to finish naturally while
+                    // freeing provider capacity immediately for user-facing requests.
+                    tokio::spawn(async move {
+                        tokio::time::sleep(PREEMPTED_PROBE_CANCEL_GRACE).await;
+                        token.cancel();
+                    });
+                } else {
+                    token.cancel();
+                }
             }
 
             // Release the connection
@@ -599,6 +609,7 @@ mod tests {
     use std::collections::HashMap;
     use std::net::SocketAddr;
     use std::sync::Arc;
+    use std::time::Duration;
 
     fn create_test_app_config_with_dual_provider_pool() -> AppConfig {
         let input = Arc::new(ConfigInput {
@@ -624,6 +635,52 @@ mod tests {
                 exp_date: None,
                 enabled: true,
             }]),
+            ..ConfigInput::default()
+        });
+
+        let sources = SourcesConfig {
+            inputs: vec![input],
+            ..SourcesConfig::default()
+        };
+
+        AppConfig {
+            config: Arc::new(ArcSwap::from_pointee(Config::default())),
+            sources: Arc::new(ArcSwap::from_pointee(sources)),
+            hdhomerun: Arc::new(ArcSwapOption::default()),
+            api_proxy: Arc::new(ArcSwapOption::default()),
+            file_locks: Arc::new(FileLockManager::default()),
+            paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
+                config_path: String::new(),
+                config_file_path: String::new(),
+                sources_file_path: String::new(),
+                mapping_file_path: None,
+                mapping_files_used: None,
+                template_file_path: None,
+                template_files_used: None,
+                api_proxy_file_path: String::new(),
+                custom_stream_response_path: None,
+            })),
+            custom_stream_response: Arc::new(ArcSwapOption::default()),
+            access_token_secret: [0; 32],
+            encrypt_secret: [0; 16],
+            ffprobe_available: Arc::default(),
+        }
+    }
+
+    fn create_test_app_config_single_provider_pool() -> AppConfig {
+        let input = Arc::new(ConfigInput {
+            id: 1,
+            name: "provider_1".intern(),
+            input_type: InputType::Xtream,
+            headers: HashMap::default(),
+            url: "http://provider-1.example".to_string(),
+            username: Some("user1".to_string()),
+            password: Some("pass1".to_string()),
+            enabled: true,
+            priority: 0,
+            max_connections: 1,
+            method: InputFetchMethod::default(),
+            aliases: None,
             ..ConfigInput::default()
         });
 
@@ -780,5 +837,47 @@ mod tests {
         // Stream stop / cleanup.
         manager.release_connection(&client_1_addr).await;
         manager.release_connection(&client_2_addr).await;
+    }
+
+    #[tokio::test]
+    async fn test_probe_preemption_releases_capacity_immediately_and_cancels_after_grace() {
+        let app_cfg = create_test_app_config_single_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+
+        let input_name = "provider_1".intern();
+        let user_addr: SocketAddr = "127.0.0.1:43001".parse().unwrap();
+
+        let probe_handle = manager
+            .acquire_connection_for_probe(&input_name)
+            .await
+            .expect("probe allocation should succeed");
+        let probe_token = probe_handle
+            .cancel_token
+            .clone()
+            .expect("probe handle must carry cancel token");
+
+        // User request should preempt probe and immediately acquire released capacity.
+        let user_alloc = manager
+            .acquire_connection_with_grace(&input_name, &user_addr, false)
+            .await
+            .expect("user allocation should preempt probe");
+        assert_eq!(
+            user_alloc.allocation.get_provider_name().as_deref(),
+            Some(input_name.as_ref())
+        );
+
+        // Probe cancellation is intentionally delayed by a small grace window.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!probe_token.is_cancelled(), "probe token should not be cancelled immediately");
+
+        tokio::time::timeout(
+            super::PREEMPTED_PROBE_CANCEL_GRACE + Duration::from_millis(500),
+            probe_token.cancelled(),
+        )
+        .await
+        .expect("probe token should be cancelled after grace");
+
+        manager.release_connection(&user_addr).await;
     }
 }
