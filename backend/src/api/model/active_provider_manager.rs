@@ -13,7 +13,6 @@ use std::time::Instant;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
-const DEFAULT_FORCE_PRIORITY: i8 = -128;
 const DEFAULT_USER_PRIORITY: i8 = -1;
 const DEFAULT_PROBE_PRIORITY: i8 = 1;
 static DUMMY_ADDR: LazyLock<SocketAddr> = LazyLock::new(|| "127.0.0.1:0".parse::<SocketAddr>().unwrap());
@@ -304,10 +303,29 @@ impl ActiveProviderManager {
         None
     }
 
-    pub async fn force_exact_acquire_connection(&self, provider_name: &Arc<str>, addr: &SocketAddr) -> Option<ProviderHandle> {
-        // Force acquire always uses max priority (DEFAULT_FORCE_PRIORITY) effectively, but here we just pass DEFAULT_FORCE_PRIORITY to be safe,
-        // though `force` param in inner overrides checks anyway.
-        self.acquire_connection_inner(provider_name, addr, true, None, DEFAULT_FORCE_PRIORITY).await
+    pub async fn acquire_exact_connection_with_grace(
+        &self,
+        provider_name: &Arc<str>,
+        addr: &SocketAddr,
+        allow_grace: bool,
+    ) -> Option<ProviderHandle> {
+        let allocation = self
+            .providers
+            .acquire_exact_connection_with_grace_override(provider_name, allow_grace)
+            .await;
+        if matches!(allocation, ProviderAllocation::Exhausted) {
+            return None;
+        }
+        self.register_allocation(allocation, addr, DEFAULT_USER_PRIORITY).await
+    }
+
+    pub async fn force_exact_acquire_connection(
+        &self,
+        provider_name: &Arc<str>,
+        addr: &SocketAddr,
+    ) -> Option<ProviderHandle> {
+        // Compatibility wrapper: keep the exact-provider behavior but do not over-allocate exhausted accounts.
+        self.acquire_exact_connection_with_grace(provider_name, addr, false).await
     }
 
     // Returns the next available provider connection
@@ -636,6 +654,36 @@ mod tests {
             encrypt_secret: [0; 16],
             ffprobe_available: Arc::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn test_force_exact_acquire_does_not_overallocate_busy_provider() {
+        let app_cfg = create_test_app_config_with_dual_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+
+        let input_name = "provider_1".intern();
+        let client_1_addr: SocketAddr = "127.0.0.1:40001".parse().unwrap();
+        let client_2_addr: SocketAddr = "127.0.0.1:40002".parse().unwrap();
+
+        let first_alloc = manager
+            .acquire_connection(&input_name, &client_1_addr)
+            .await
+            .expect("client1 initial allocation");
+        let pinned_provider = first_alloc
+            .allocation
+            .get_provider_name()
+            .expect("provider name expected");
+        assert_eq!(pinned_provider.as_ref(), "provider_1");
+
+        // provider_1 has max_connections=1 and is already in use by client1
+        let forced = manager
+            .force_exact_acquire_connection(&pinned_provider, &client_2_addr)
+            .await;
+        assert!(forced.is_none(), "forced exact acquire must not over-allocate busy provider");
+
+        manager.release_connection(&client_1_addr).await;
+        manager.release_connection(&client_2_addr).await;
     }
 
     #[tokio::test]

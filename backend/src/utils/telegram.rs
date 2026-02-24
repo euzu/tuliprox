@@ -48,6 +48,12 @@ pub struct SendMessageOption {
     pub parse_mode: SendMessageParseMode,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TelegramSendResult {
+    pub delivered: bool,
+    pub parse_error: bool,
+}
+
 fn get_send_message_parse_mode_str(mode: SendMessageParseMode) -> &'static str {
     match mode {
         SendMessageParseMode::MarkdownV2 => "MarkdownV2",
@@ -86,19 +92,24 @@ pub async fn telegram_send_message(
     instance: &BotInstance,
     msg: &str,
     options: Option<&SendMessageOption>,
-) {
+) -> TelegramSendResult {
     let chat_id = instance.chat_id.clone();
     let raw_url_str = format!("https://api.telegram.org/bot{}/sendMessage", instance.bot_token);
     let url = match Url::parse(&raw_url_str) {
         Ok(url) => url,
         Err(e) => {
             error!("Message wasn't sent to {chat_id} telegram api because of: {e}");
-            return;
+            return TelegramSendResult {
+                delivered: false,
+                parse_error: false,
+            };
         }
     };
 
     let parse_mode = options.map(|o| o.parse_mode);
     let chunks = chunk_message(msg, parse_mode);
+    let mut all_delivered = true;
+    let mut parse_error = false;
 
     for (i, chunk_text) in chunks.iter().enumerate() {
         let request_json_obj = RequestObj {
@@ -126,17 +137,20 @@ pub async fn telegram_send_message(
                         break;
                     }
 
-                    let parsed_error = response.json::<TelegramErrorResult>().await.ok();
-                    let error_message = parsed_error
+                    let telegram_error = response.json::<TelegramErrorResult>().await.ok();
+                    let error_message = telegram_error
                         .as_ref()
                         .map_or("Telegram response could not be parsed", |err| err.description.as_str());
+                    if status == StatusCode::BAD_REQUEST && is_parse_entities_error(error_message) {
+                        parse_error = true;
+                    }
 
                     let retriable_status =
                         status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error();
                     if retriable_status && attempt < MAX_RETRIES_PER_CHUNK {
                         if status == StatusCode::TOO_MANY_REQUESTS {
                             if let Some(retry_after_secs) =
-                                parsed_error.as_ref().and_then(extract_retry_after_secs)
+                                telegram_error.as_ref().and_then(extract_retry_after_secs)
                             {
                                 let wait_secs = retry_after_secs.clamp(1, RETRY_AFTER_MAX_SECS);
                                 warn!(
@@ -206,6 +220,7 @@ pub async fn telegram_send_message(
         }
 
         if !delivered {
+            all_delivered = false;
             error!(
                 "Message chunk {}/{} could not be delivered to {chat_id} telegram api after retries",
                 i + 1,
@@ -218,6 +233,17 @@ pub async fn telegram_send_message(
             tokio::time::sleep(tokio::time::Duration::from_millis(CHUNK_DELAY_MS)).await;
         }
     }
+
+    TelegramSendResult {
+        delivered: all_delivered,
+        parse_error,
+    }
+}
+
+fn is_parse_entities_error(description: &str) -> bool {
+    description
+        .to_ascii_lowercase()
+        .contains("can't parse entities")
 }
 
 fn parse_retry_after_from_description(description: &str) -> Option<u64> {
