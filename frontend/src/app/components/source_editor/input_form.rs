@@ -621,7 +621,13 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                                             </div>
                                             <div class="tp__form-list__item-content">
                                                 <span class={if alias.enabled {""} else {"inactive"}}>
-                                                    <strong>{alias.name.as_ref()}</strong>{" - "}{alias.url.as_str()}
+                                                    {
+                                                        if alias.name.is_empty() {
+                                                            html! { alias.url.as_str() }
+                                                        } else {
+                                                            html! { <><strong>{alias.name.as_ref()}</strong>{" - "}{alias.url.as_str()}</> }
+                                                        }
+                                                    }
                                                 </span>
                                             </div>
                                         </div>

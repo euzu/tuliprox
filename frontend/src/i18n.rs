@@ -7,17 +7,30 @@ use std::{
 };
 use yew::prelude::*;
 
-static INTERNED_STRINGS: OnceLock<Mutex<HashMap<String, &'static str>>> = OnceLock::new();
+static INTERNED_STRINGS: OnceLock<Mutex<HashMap<&'static str, &'static str>>> = OnceLock::new();
+
+fn intern_owned(cache: &mut HashMap<&'static str, &'static str>, value: String) -> &'static str {
+    let leaked = Box::leak(value.into_boxed_str());
+    cache.insert(leaked, leaked);
+    leaked
+}
 
 fn intern_static(value: &str) -> &'static str {
     let cache = INTERNED_STRINGS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache.lock().expect("i18n intern cache poisoned");
-    if let Some(existing) = cache.get(value) {
+    if let Some(existing) = cache.get(value).copied() {
         return existing;
     }
-    let leaked = Box::leak(value.to_string().into_boxed_str());
-    cache.insert(value.to_string(), leaked);
-    leaked
+    intern_owned(&mut cache, value.to_owned())
+}
+
+fn intern_string(value: String) -> &'static str {
+    let cache = INTERNED_STRINGS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache.lock().expect("i18n intern cache poisoned");
+    if let Some(existing) = cache.get(value.as_str()).copied() {
+        return existing;
+    }
+    intern_owned(&mut cache, value)
 }
 
 #[derive(Clone)]
@@ -34,7 +47,7 @@ impl YewI18n {
         let mut serialized = HashMap::<&'static str, &'static str>::new();
         for lang in supported_languages {
             let value = translations.get(*lang).cloned().unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-            serialized.insert(intern_static(lang), intern_static(&value.to_string()));
+            serialized.insert(intern_static(lang), intern_string(value.to_string()));
         }
 
         if serialized.is_empty() {
