@@ -12,6 +12,7 @@ mod telegram;
 mod geoip;
 mod db_viewer;
 mod epg_parser;
+mod ordinal;
 pub mod ffmpeg;
 
 pub use self::binary_utils::*;
@@ -22,6 +23,7 @@ pub use self::geoip::*;
 pub use self::db_viewer::*;
 pub use shared::utils::*;
 pub use self::epg_parser::*;
+pub use self::ordinal::*;
 
 #[macro_export]
 macro_rules! debug_if_enabled {

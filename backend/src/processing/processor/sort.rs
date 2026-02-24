@@ -3,15 +3,7 @@ use shared::foundation::ValueProvider;
 use shared::model::{PlaylistGroup, SortOrder, SortTarget};
 use std::cmp::Ordering;
 use std::sync::Arc;
-
-#[inline]
-fn normalized_source_ordinal(source_ordinal: u32) -> u32 {
-    if source_ordinal == 0 {
-        u32::MAX
-    } else {
-        source_ordinal
-    }
-}
+use crate::utils::normalized_source_ordinal;
 
 fn apply_sort_order(order: SortOrder, ordering: Ordering) -> Ordering {
     match (order, ordering) {

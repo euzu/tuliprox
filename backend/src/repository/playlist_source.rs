@@ -1,7 +1,7 @@
 use crate::model::AppConfig;
 use crate::repository::BPlusTreeQuery;
 use crate::repository::xtream_get_file_path;
-use crate::utils::FileReadGuard;
+use crate::utils::{normalized_source_ordinal, FileReadGuard};
 use futures::future::BoxFuture;
 use indexmap::IndexMap;
 use log::{error, warn};
@@ -13,15 +13,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use shared::model::UUIDType;
 use shared::utils::Internable;
-
-#[inline]
-fn normalized_source_ordinal(source_ordinal: u32) -> u32 {
-    if source_ordinal == 0 {
-        u32::MAX
-    } else {
-        source_ordinal
-    }
-}
 
 pub trait PlaylistSource: Send + Sync {
     fn is_memory(&self) -> bool;

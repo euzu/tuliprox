@@ -384,9 +384,6 @@ fn get_parser_binary_op(expr: &Pair<Rule>) -> Result<BinaryOperator, TuliproxErr
 fn unresolved_template_placeholders(input: &str) -> Vec<String> {
     let mut placeholders = IndexSet::new();
     for captures in CONSTANTS.re_template_var.captures_iter(input) {
-        if captures.len() <= 1 {
-            continue;
-        }
         if let Some(inner) = captures.get(1) {
             let value = inner.as_str();
             if !value.is_empty() {

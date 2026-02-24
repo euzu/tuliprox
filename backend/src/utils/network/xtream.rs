@@ -152,6 +152,8 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
                                 &series_name,
                                 input,
                                 series_release_date.as_ref(),
+                                // `pli` is `XtreamPlaylistItem`, which stores header fields flattened.
+                                // `source_ordinal` is copied from `PlaylistItemHeader.source_ordinal` on conversion.
                                 pli.source_ordinal,
                             ) {
                                 let config = &app_state.app_config.config.load();
