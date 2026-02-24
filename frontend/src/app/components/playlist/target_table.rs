@@ -6,6 +6,7 @@ use crate::{
     },
     hooks::use_service_context,
     html_if,
+    i18n::use_translation,
     model::DialogResult,
     services::DialogService,
 };
@@ -15,7 +16,6 @@ use shared::{
 };
 use std::{fmt::Display, rc::Rc, str::FromStr};
 use yew::{platform::spawn_local, prelude::*};
-use yew_i18n::use_translation;
 
 const HEADERS: [&str; 12] = [
     "LABEL.EMPTY",
@@ -37,7 +37,7 @@ pub struct TargetTableProps {
     pub targets: Option<Vec<Rc<ConfigTargetDto>>>,
 }
 
-#[function_component]
+#[component]
 pub fn TargetTable(props: &TargetTableProps) -> Html {
     let translate = use_translation();
     let services = use_service_context();

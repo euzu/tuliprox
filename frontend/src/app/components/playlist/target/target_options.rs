@@ -1,15 +1,17 @@
-use crate::app::components::{make_tags, Tag, TagList};
+use crate::{
+    app::components::{make_tags, Tag, TagList},
+    i18n::use_translation,
+};
 use shared::model::{ClusterFlags, ConfigTargetDto};
 use std::rc::Rc;
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct TargetOptionsProps {
     pub target: Rc<ConfigTargetDto>,
 }
 
-#[function_component]
+#[component]
 pub fn TargetOptions(props: &TargetOptionsProps) -> Html {
     let translate = use_translation();
     let tags = use_memo(props.target.clone(), |target| {

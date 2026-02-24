@@ -8,11 +8,11 @@ use crate::{
         ConfigContext, PlaylistContext, TargetUser,
     },
     hooks::use_service_context,
+    i18n::use_translation,
 };
 use shared::model::ProxyUserCredentialsDto;
 use std::rc::Rc;
 use yew::{platform::spawn_local, prelude::*};
-use yew_i18n::use_translation;
 
 fn upsert_user(
     users: &Option<Rc<Vec<Rc<TargetUser>>>>,
@@ -43,7 +43,7 @@ fn upsert_user(
     Rc::new(new_list)
 }
 
-#[function_component]
+#[component]
 pub fn UserEdit() -> Html {
     let translate = use_translation();
     let services_ctx = use_service_context();

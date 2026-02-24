@@ -14,6 +14,7 @@ use crate::{
     config_field, config_field_bool, config_field_child, config_field_custom, config_field_hide, config_field_optional,
     edit_field_bool, edit_field_list, edit_field_number, edit_field_number_f64, edit_field_number_u64,
     edit_field_number_usize, edit_field_text, edit_field_text_option, generate_form_reducer,
+    i18n::use_translation,
 };
 use shared::{
     model::{
@@ -23,7 +24,6 @@ use shared::{
     utils::{default_secret, format_float_localized},
 };
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
 const LABEL_CACHE: &str = "LABEL.CACHE";
 const LABEL_ENABLED: &str = "LABEL.ENABLED";
@@ -164,7 +164,7 @@ generate_form_reducer!(
     }
 );
 
-#[function_component]
+#[component]
 pub fn ReverseProxyConfigView() -> Html {
     let translate = use_translation();
     let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");

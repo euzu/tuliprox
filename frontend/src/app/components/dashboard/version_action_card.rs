@@ -1,11 +1,11 @@
 use crate::{
     app::components::{ActionCard, TextButton},
     hooks::use_service_context,
+    i18n::use_translation,
 };
 use gloo_utils::window;
 use shared::utils::concat_path_leading_slash;
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct VersionActionProps {
@@ -13,7 +13,7 @@ pub struct VersionActionProps {
     pub build_time: String,
 }
 
-#[function_component]
+#[component]
 pub fn VersionActionCard(props: &VersionActionProps) -> Html {
     let translate = use_translation();
     let services = use_service_context();

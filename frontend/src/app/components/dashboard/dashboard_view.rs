@@ -1,14 +1,16 @@
-use crate::app::{
-    components::{
-        Card, DiscordActionCard, DocumentationActionCard, GithubActionCard, IpinfoActionCard, UserActionCard,
-        VersionActionCard,
+use crate::{
+    app::{
+        components::{
+            Card, DiscordActionCard, DocumentationActionCard, GithubActionCard, IpinfoActionCard, UserActionCard,
+            VersionActionCard,
+        },
+        context::StatusContext,
     },
-    context::StatusContext,
+    i18n::use_translation,
 };
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
-#[function_component]
+#[component]
 pub fn DashboardView() -> Html {
     let translate = use_translation();
     let status_ctx = use_context::<StatusContext>().expect("Status context not found");

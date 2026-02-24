@@ -1,6 +1,7 @@
 use crate::{
     app::components::{menu_item::MenuItem, svg_icon::AppIcon, CollapsePanel, IconButton},
     hooks::use_service_context,
+    i18n::use_translation,
     model::ViewType,
     utils::html_if,
 };
@@ -9,7 +10,6 @@ use wasm_bindgen::{closure::Closure, JsCast};
 use web_sys::window;
 use yew::prelude::*;
 use yew_hooks::use_mount;
-use yew_i18n::use_translation;
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 enum CollapseState {
@@ -25,7 +25,7 @@ pub struct SidebarProps {
     pub onview: Callback<ViewType>,
 }
 
-#[function_component]
+#[component]
 pub fn Sidebar(props: &SidebarProps) -> Html {
     let services = use_service_context();
     let translate = use_translation();

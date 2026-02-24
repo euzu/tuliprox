@@ -12,10 +12,10 @@ use crate::{
     config_field, config_field_bool, config_field_child, config_field_hide, config_field_optional, edit_field_bool,
     edit_field_list_option, edit_field_number, edit_field_number_u64, edit_field_text, edit_field_text_option,
     generate_form_reducer, html_if,
+    i18n::use_translation,
 };
 use shared::model::{ContentSecurityPolicyConfigDto, WebAuthConfigDto, WebUiConfigDto};
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
 // Labels
 const LABEL_AUTH: &str = "LABEL.AUTH";
@@ -65,7 +65,7 @@ generate_form_reducer!(
     }
 );
 
-#[function_component]
+#[component]
 pub fn WebUiConfigView() -> Html {
     let translate = use_translation();
     let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");
@@ -145,7 +145,7 @@ pub fn WebUiConfigView() -> Html {
                         <div class="tp__config-view__tags">
                             {
                                 if let Some(custom) = &csp_state.form.custom_attributes {
-                                    html! { for custom.iter().map(|a| html! { <Chip label={a.clone()} /> }) }
+                                    html! { for a in custom.iter() { <Chip label={a.clone()} /> } }
                                 } else {
                                     html! {}
                                 }

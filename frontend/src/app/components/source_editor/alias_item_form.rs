@@ -2,11 +2,11 @@ use crate::{
     app::components::{Card, TextButton},
     edit_field_bool, edit_field_date, edit_field_number_i16, edit_field_number_u16, edit_field_text,
     edit_field_text_option, generate_form_reducer,
+    i18n::use_translation,
 };
 use shared::{model::ConfigInputAliasDto, utils::Internable};
 use std::sync::Arc;
-use yew::{function_component, html, use_reducer, Callback, Html, Properties, UseReducerHandle};
-use yew_i18n::use_translation;
+use yew::{component, html, use_reducer, Callback, Html, Properties, UseReducerHandle};
 
 const LABEL_ALIAS_NAME: &str = "LABEL.ALIAS_NAME";
 const LABEL_URL: &str = "LABEL.URL";
@@ -40,7 +40,7 @@ pub struct AliasItemFormProps {
     pub initial: Option<ConfigInputAliasDto>,
 }
 
-#[function_component]
+#[component]
 pub fn AliasItemForm(props: &AliasItemFormProps) -> Html {
     let translate = use_translation();
 

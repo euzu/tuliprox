@@ -8,10 +8,10 @@ use crate::{
         ConfigContext,
     },
     hooks::use_service_context,
+    i18n::use_translation,
     services::{SetupCompleteRequestDto, SetupWebUserCredentialDto},
 };
 use yew::{platform::spawn_local, prelude::*};
-use yew_i18n::use_translation;
 
 const LABEL_SETUP_FINISH: &str = "SETUP.LABEL.FINISH_SETUP";
 const LABEL_SETUP_BACK: &str = "SETUP.LABEL.BACK";
@@ -24,7 +24,7 @@ const MSG_SETUP_COMPLETE_SUCCESS: &str = "SETUP.MSG.COMPLETE_SUCCESS";
 const MSG_SETUP_RESTART_TO_CONTINUE: &str = "SETUP.MSG.RESTART_TO_CONTINUE";
 const MSG_SETUP_COMPLETE_RESTART_HINT: &str = "SETUP.MSG.COMPLETE_RESTART_HINT";
 
-#[function_component]
+#[component]
 pub fn FinishStep() -> Html {
     let setup_ctx = use_context::<SetupContext>().expect("Setup context not found");
     let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");

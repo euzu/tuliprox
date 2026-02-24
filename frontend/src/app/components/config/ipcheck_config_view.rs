@@ -7,10 +7,10 @@ use crate::{
         context::ConfigContext,
     },
     config_field_empty, config_field_optional, edit_field_text_option, generate_form_reducer,
+    i18n::use_translation,
 };
 use shared::model::IpCheckConfigDto;
 use yew::prelude::*;
-use yew_i18n::use_translation;
 const LABEL_URL: &str = "LABEL.URL";
 const LABEL_URL_IPV4: &str = "LABEL.URL_IPV4";
 const LABEL_URL_IPV6: &str = "LABEL.URL_IPV6";
@@ -29,7 +29,7 @@ generate_form_reducer!(
     }
 );
 
-#[function_component]
+#[component]
 pub fn IpCheckConfigView() -> Html {
     let translate = use_translation();
     let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");

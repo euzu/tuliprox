@@ -3,7 +3,7 @@ use crate::{
     html_if,
 };
 use web_sys::{HtmlInputElement, InputEvent, KeyboardEvent, MouseEvent};
-use yew::{function_component, html, use_effect_with, use_state, Callback, Html, NodeRef, Properties, TargetCast};
+use yew::{component, html, use_effect_with, use_state, Callback, Html, NodeRef, Properties, TargetCast};
 
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct InputProps {
@@ -31,7 +31,7 @@ pub struct InputProps {
     pub placeholder: Option<String>,
 }
 
-#[function_component]
+#[component]
 pub fn Input(props: &InputProps) -> Html {
     let hide_content = use_state(|| props.hidden);
     let local_ref = props.input_ref.clone().unwrap_or_default();

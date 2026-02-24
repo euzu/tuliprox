@@ -10,11 +10,11 @@ use crate::{
         context::ConfigContext,
     },
     config_field_bool, config_field_child, edit_field_bool, generate_form_reducer,
+    i18n::use_translation,
 };
 use shared::model::LogConfigDto;
 use std::rc::Rc;
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
 const LABEL_LOG_LEVEL: &str = "LABEL.LOG_LEVEL";
 const LABEL_LOG_ACTIVE_USER: &str = "LABEL.LOG_ACTIVE_USER";
@@ -32,7 +32,7 @@ generate_form_reducer!(
     }
 );
 
-#[function_component]
+#[component]
 pub fn LogConfigView() -> Html {
     let translate = use_translation();
     let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");

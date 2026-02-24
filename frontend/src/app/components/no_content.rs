@@ -7,7 +7,7 @@ pub struct NoContentProps {
     pub class: String,
 }
 
-#[function_component]
+#[component]
 pub fn NoContent(props: &NoContentProps) -> Html {
     html! {
         <div class={classes!("tp__no_content", props.class.to_string())}>

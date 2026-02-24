@@ -14,6 +14,7 @@ use crate::{
     },
     config_field, config_field_bool, config_field_empty, edit_field_bool, edit_field_number_u16, edit_field_text,
     generate_form_reducer, html_if,
+    i18n::use_translation,
 };
 use shared::{
     concat_string,
@@ -23,7 +24,6 @@ use shared::{
 };
 use std::{fmt::Display, rc::Rc, str::FromStr};
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
 const LABEL_NAME: &str = "LABEL.NAME";
 const LABEL_PROTOCOL: &str = "LABEL.PROTOCOL";
@@ -140,7 +140,7 @@ generate_form_reducer!(
     }
 );
 
-#[function_component]
+#[component]
 pub fn ApiConfigView() -> Html {
     let translate = use_translation();
     let config_ctx = use_context::<ConfigContext>().expect("Config context not found");

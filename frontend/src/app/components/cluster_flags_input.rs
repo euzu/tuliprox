@@ -1,6 +1,6 @@
+use crate::i18n::use_translation;
 use shared::model::ClusterFlags;
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub enum ClusterFlagsInputMode {
@@ -20,7 +20,7 @@ pub struct ClusterFlagsInputProps {
     pub mode: ClusterFlagsInputMode,
 }
 
-#[function_component]
+#[component]
 pub fn ClusterFlagsInput(props: &ClusterFlagsInputProps) -> Html {
     let translate = use_translation();
 

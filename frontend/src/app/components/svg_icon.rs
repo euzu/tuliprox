@@ -12,7 +12,7 @@ pub struct SvgIconProps {
     #[prop_or(AttrValue::Static("0 0 24 24"))]
     pub viewport: AttrValue,
 }
-#[function_component]
+#[component]
 pub fn SvgIcon(props: &SvgIconProps) -> Html {
     // info!("SvgIcon props {:?}", props);
     html! {
@@ -31,7 +31,7 @@ pub struct AppIconProps {
     pub height: AttrValue,
 }
 
-#[function_component]
+#[component]
 pub fn AppIcon(props: &AppIconProps) -> Html {
     let icon_ctx = use_icon_context();
     let name = props.name.to_string();

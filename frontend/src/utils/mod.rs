@@ -1,9 +1,9 @@
 mod storage;
 
+use crate::i18n::YewI18n;
 pub use storage::*;
 use wasm_bindgen::{prelude::Closure, JsCast};
 use web_sys::window;
-use yew_i18n::YewI18n;
 
 #[macro_export]
 macro_rules! html_if {
@@ -29,7 +29,10 @@ where
 pub fn t_safe(i18n: &YewI18n, key: &str) -> Option<String> {
     let result = i18n.t(key);
 
-    if result.starts_with("Unable to find the key") {
+    if result.starts_with("Unable to find the key")
+        || (result.starts_with("Translation key '") && result.ends_with("' not found."))
+        || (result.starts_with("Key '") && result.contains("' not found for language '"))
+    {
         None
     } else {
         Some(result)

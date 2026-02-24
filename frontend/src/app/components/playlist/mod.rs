@@ -24,10 +24,12 @@ pub use self::{
     playlist_settings_view::*, playlist_source_selector::*, playlist_update_view::*, processing::*, target::*,
     target_table::*,
 };
-use crate::app::components::{convert_bool_to_chip_style, Tag};
 pub use crate::app::context::*;
+use crate::{
+    app::components::{convert_bool_to_chip_style, Tag},
+    i18n::YewI18n,
+};
 use std::rc::Rc;
-use yew_i18n::YewI18n;
 
 pub fn make_tags(data: &[(bool, &str)], translate: &YewI18n) -> Vec<Rc<Tag>> {
     data.iter().map(|(o, t)| Rc::new(Tag { class: convert_bool_to_chip_style(*o), label: translate.t(t) })).collect()

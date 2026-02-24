@@ -4,7 +4,7 @@ use crate::app::components::{
 };
 use shared::model::TargetOutputDto;
 use std::rc::Rc;
-use yew::{function_component, html, use_context, Html, Properties};
+use yew::{component, html, use_context, Html, Properties};
 
 #[derive(Properties, PartialEq, Clone)]
 pub struct ConfigOutputViewProps {
@@ -12,7 +12,7 @@ pub struct ConfigOutputViewProps {
     pub(crate) output: Option<Rc<TargetOutputDto>>,
 }
 
-#[function_component]
+#[component]
 pub fn ConfigOutputView(props: &ConfigOutputViewProps) -> Html {
     let source_editor_ctx = use_context::<SourceEditorContext>().expect("SourceEditorContext not found");
 

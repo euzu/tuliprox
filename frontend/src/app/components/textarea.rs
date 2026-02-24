@@ -1,6 +1,6 @@
 use crate::app::components::{resolve_field_id, CollapsePanel, FieldLabel};
 use web_sys::{HtmlTextAreaElement, InputEvent, KeyboardEvent};
-use yew::{function_component, html, use_effect_with, Callback, Html, NodeRef, Properties, TargetCast};
+use yew::{component, html, use_effect_with, Callback, Html, NodeRef, Properties, TargetCast};
 
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct TextAreaProps {
@@ -26,7 +26,7 @@ pub struct TextAreaProps {
     pub collapse_on_empty: bool,
 }
 
-#[function_component]
+#[component]
 pub fn TextArea(props: &TextAreaProps) -> Html {
     let local_ref = props.input_ref.clone().unwrap_or_default();
     let label_text = props.label.clone().unwrap_or_default();

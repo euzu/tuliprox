@@ -479,7 +479,7 @@ fn init_renderer(canvas: &HtmlCanvasElement, initial_data: &[f32]) -> Result<Ren
     Ok(RenderRuntime { gl, program, buffer, u_accent_1, u_accent_2, u_alpha_boost, u_dpr })
 }
 
-#[function_component]
+#[component]
 pub fn ParticleFlowBackground() -> Html {
     let canvas_ref = use_node_ref();
 

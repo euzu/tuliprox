@@ -1,13 +1,13 @@
 use crate::{
     app::components::{input::Input, svg_icon::AppIcon, ParticleFlowBackground, TextButton},
     hooks::use_service_context,
+    i18n::use_translation,
 };
 use web_sys::HtmlInputElement;
 use yew::prelude::*;
 use yew_hooks::use_async;
-use yew_i18n::use_translation;
 
-#[function_component]
+#[component]
 pub fn Login() -> Html {
     let services = use_service_context();
     let username_ref = use_node_ref();

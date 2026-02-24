@@ -1,18 +1,18 @@
 use crate::{
     app::components::{convert_bool_to_chip_style, FilterView, RevealContent, Tag, TagList},
     html_if,
+    i18n::use_translation,
 };
 use shared::model::StrmTargetOutputDto;
 use std::rc::Rc;
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
 #[derive(Properties, PartialEq, Clone)]
 pub struct StrmOutputProps {
     pub output: StrmTargetOutputDto,
 }
 
-#[function_component]
+#[component]
 pub fn StrmOutput(props: &StrmOutputProps) -> Html {
     let translator = use_translation();
 
@@ -57,7 +57,7 @@ pub fn StrmOutput(props: &StrmOutputProps) -> Html {
            <div class="tp__target-common__section">
                 <span class="tp__target-common__label">{translator.t("LABEL.PROPERTIES")}</span>
                 <ul>
-                    { props.output.strm_props.as_ref().iter().map(|p| html! { <li>{p}</li> }).collect::<Html>() }
+                    for p in props.output.strm_props.iter().flatten() { <li>{p}</li> }
                 </ul>
             </div>
         }) }

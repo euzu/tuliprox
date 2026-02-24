@@ -1,17 +1,17 @@
 use crate::{
     app::components::{chip::convert_bool_to_chip_style, tag_list::TagList, FilterView, RevealContent, Tag},
     html_if,
+    i18n::use_translation,
 };
 use shared::model::M3uTargetOutputDto;
 use std::rc::Rc;
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
 #[derive(Properties, PartialEq, Clone)]
 pub struct M3uOutputProps {
     pub output: M3uTargetOutputDto,
 }
-#[function_component]
+#[component]
 pub fn M3uOutput(props: &M3uOutputProps) -> Html {
     let translator = use_translation();
 

@@ -11,7 +11,7 @@ pub struct UserStatusProps {
     pub status: Option<ProxyUserStatus>,
 }
 
-#[function_component]
+#[component]
 pub fn UserStatus(props: &UserStatusProps) -> Html {
     match props.status.as_ref() {
         Some(status) => html! {

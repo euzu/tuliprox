@@ -1,6 +1,6 @@
+use crate::i18n::use_translation;
 use shared::model::{ClusterFlags, ProxyType};
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
 fn get_flags(pt: ProxyType) -> (bool, bool, bool, bool, bool) {
     match pt {
@@ -31,7 +31,7 @@ pub struct ProxyTypeInputProps {
     pub on_change: Callback<ProxyType>,
 }
 
-#[function_component]
+#[component]
 pub fn ProxyTypeInput(props: &ProxyTypeInputProps) -> Html {
     let translate = use_translation();
     let selections = get_flags(props.value);

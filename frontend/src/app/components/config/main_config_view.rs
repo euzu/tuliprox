@@ -8,10 +8,10 @@ use crate::{
     },
     config_field, config_field_bool, config_field_optional, edit_field_bool, edit_field_number,
     edit_field_number_option_u32, edit_field_text, edit_field_text_option, generate_form_reducer,
+    i18n::use_translation,
 };
 use shared::model::MainConfigDto;
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
 const LABEL_UPDATE_ON_BOOT: &str = "LABEL.UPDATE_ON_BOOT";
 const LABEL_CONFIG_HOT_RELOAD: &str = "LABEL.CONFIG_HOT_RELOAD";
@@ -51,7 +51,7 @@ generate_form_reducer!(
     }
 );
 
-#[function_component]
+#[component]
 pub fn MainConfigView() -> Html {
     let translate = use_translation();
     let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");

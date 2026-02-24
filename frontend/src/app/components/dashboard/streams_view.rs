@@ -4,13 +4,13 @@ use crate::{
         StatusContext,
     },
     hooks::use_service_context,
+    i18n::use_translation,
     model::EventMessage,
 };
 use std::rc::Rc;
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
-#[function_component]
+#[component]
 pub fn StreamsView() -> Html {
     let translate = use_translation();
     let service_ctx = use_service_context();

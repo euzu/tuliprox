@@ -6,7 +6,7 @@ use crate::{
 use yew::prelude::*;
 use yew_hooks::use_mount;
 
-#[function_component]
+#[component]
 pub fn ToastrView() -> Html {
     let service_ctx = use_service_context();
     let toasts = use_state(Vec::<Toast>::new);

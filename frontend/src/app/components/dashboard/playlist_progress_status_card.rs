@@ -1,8 +1,7 @@
-use crate::{app::components::StatusCard, hooks::use_service_context, model::EventMessage};
-use yew::{function_component, html, use_effect_with, use_state, Html};
-use yew_i18n::use_translation;
+use crate::{app::components::StatusCard, hooks::use_service_context, i18n::use_translation, model::EventMessage};
+use yew::{component, html, use_effect_with, use_state, Html};
 
-#[function_component]
+#[component]
 pub fn PlaylistProgressStatusCard() -> Html {
     let services = use_service_context();
     let translate = use_translation();

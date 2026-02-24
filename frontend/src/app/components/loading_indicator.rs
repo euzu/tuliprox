@@ -2,7 +2,7 @@ use crate::{
     hooks::use_service_context,
     model::{BusyStatus, EventMessage},
 };
-use yew::{classes, function_component, html, use_effect_with, use_mut_ref, use_state, Html, Properties};
+use yew::{classes, component, html, use_effect_with, use_mut_ref, use_state, Html, Properties};
 
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct LoadingIndicatorProps {
@@ -11,7 +11,7 @@ pub struct LoadingIndicatorProps {
     pub class: String,
 }
 
-#[function_component]
+#[component]
 pub fn LoadingIndicator(props: &LoadingIndicatorProps) -> Html {
     if !props.loading {
         html! {<div class={classes!("tp__loading-bar-placeholder", props.class.clone())}></div> }
@@ -24,7 +24,7 @@ pub fn LoadingIndicator(props: &LoadingIndicatorProps) -> Html {
     }
 }
 
-#[function_component]
+#[component]
 pub fn BusyIndicator() -> Html {
     let counter = use_mut_ref(|| 0u32);
     let loading = use_state(|| false);

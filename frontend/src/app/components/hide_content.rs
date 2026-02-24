@@ -8,7 +8,7 @@ pub struct HideContentProps {
     pub content: Html,
 }
 
-#[function_component]
+#[component]
 pub fn HideContent(props: &HideContentProps) -> Html {
     let hidden = use_state(|| true);
 

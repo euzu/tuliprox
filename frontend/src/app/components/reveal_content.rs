@@ -12,7 +12,7 @@ pub struct RevealContentProps {
     pub actions: Option<DialogActions>,
 }
 
-#[function_component]
+#[component]
 pub fn RevealContent(props: &RevealContentProps) -> Html {
     let dialog = use_context::<DialogService>().expect("Dialog service not found");
 

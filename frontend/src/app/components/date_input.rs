@@ -1,6 +1,6 @@
 use crate::app::components::FieldLabel;
 use web_sys::HtmlInputElement;
-use yew::{function_component, html, use_effect_with, Callback, Html, NodeRef, Properties, TargetCast};
+use yew::{component, html, use_effect_with, Callback, Html, NodeRef, Properties, TargetCast};
 
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct DateInputProps {
@@ -18,7 +18,7 @@ pub struct DateInputProps {
     pub on_change: Option<Callback<Option<i64>>>, // None or Some(timestamp)
 }
 
-#[function_component]
+#[component]
 pub fn DateInput(props: &DateInputProps) -> Html {
     let local_ref = props.input_ref.clone().unwrap_or_default();
 

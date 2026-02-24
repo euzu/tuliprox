@@ -6,6 +6,7 @@ use crate::{
     },
     config_field_child, edit_field_bool, edit_field_date, edit_field_number_i16, edit_field_number_u16,
     edit_field_number_u32, edit_field_text, edit_field_text_option, generate_form_reducer, html_if,
+    i18n::use_translation,
 };
 use shared::{
     error::TuliproxError,
@@ -18,10 +19,9 @@ use shared::{
 use std::{collections::HashMap, fmt::Display, rc::Rc, str::FromStr};
 use web_sys::MouseEvent;
 use yew::{
-    function_component, html, use_context, use_effect_with, use_memo, use_reducer, use_state, Callback, Html,
-    Properties, UseReducerHandle,
+    component, html, use_context, use_effect_with, use_memo, use_reducer, use_state, Callback, Html, Properties,
+    UseReducerHandle,
 };
-use yew_i18n::use_translation;
 
 const LABEL_NAME: &str = "LABEL.NAME";
 const LABEL_INPUT_TYPE: &str = "LABEL.INPUT_TYPE";
@@ -173,7 +173,7 @@ pub struct ConfigInputViewProps {
     pub(crate) on_cancel: Option<Callback<()>>,
 }
 
-#[function_component]
+#[component]
 pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     let translate = use_translation();
     let source_editor_ctx = use_context::<SourceEditorContext>();
@@ -620,7 +620,9 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                                                 onclick={handle_edit_alias_list_item.clone()}/>
                                             </div>
                                             <div class="tp__form-list__item-content">
-                                                <span class={if alias.enabled {""} else {"inactive"}}><strong>{&alias.name}</strong>{" - "}{&alias.url}</span>
+                                                <span class={if alias.enabled {""} else {"inactive"}}>
+                                                    <strong>{alias.name.to_string()}</strong>{" - "}{alias.url.to_string()}
+                                                </span>
                                             </div>
                                         </div>
                                     }

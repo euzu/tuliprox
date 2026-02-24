@@ -1,17 +1,17 @@
 use crate::{
     app::components::{Chip, HideContent, InputHeaders},
     html_if,
+    i18n::use_translation,
 };
 use shared::model::{InputType, StagedInputDto};
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct StagedInputViewProps {
     pub input: Option<StagedInputDto>,
 }
 
-#[function_component]
+#[component]
 pub fn StagedInputView(props: &StagedInputViewProps) -> Html {
     let translate = use_translation();
 

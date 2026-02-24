@@ -5,17 +5,17 @@ use crate::{
     },
     hooks::use_service_context,
     html_if,
+    i18n::use_translation,
 };
 use shared::model::ConfigTargetDto;
 use std::rc::Rc;
 use yew::{platform::spawn_local, prelude::*};
 use yew_hooks::use_list;
-use yew_i18n::use_translation;
 
 const LABEL_UPDATE_LOCAL_LIBRARY: &str = "LABEL.UPDATE_LOCAL_LIBRARY";
 const ACTION_UPDATE_LIBRARY: &str = "update_library";
 
-#[function_component]
+#[component]
 pub fn PlaylistUpdateView() -> Html {
     let translate = use_translation();
     let playlist_ctx = use_context::<PlaylistContext>().expect("Playlist context not found");

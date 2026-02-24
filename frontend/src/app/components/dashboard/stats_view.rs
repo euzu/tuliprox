@@ -1,9 +1,11 @@
-use crate::app::components::{Card, PlaylistProgressStatusCard, StatusCard, StatusContext};
+use crate::{
+    app::components::{Card, PlaylistProgressStatusCard, StatusCard, StatusContext},
+    i18n::use_translation,
+};
 use shared::utils::human_readable_byte_size;
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
-#[function_component]
+#[component]
 pub fn StatsView() -> Html {
     let translate = use_translation();
     let status_ctx = use_context::<StatusContext>().expect("Status context not found");

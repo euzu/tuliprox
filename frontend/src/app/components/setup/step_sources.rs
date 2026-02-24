@@ -13,7 +13,7 @@ use shared::model::SourcesConfigDto;
 use std::rc::Rc;
 use yew::prelude::*;
 
-#[function_component]
+#[component]
 pub fn SourcesStep() -> Html {
     let setup_ctx = use_context::<SetupContext>().expect("Setup context not found");
     let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");

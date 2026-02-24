@@ -1,10 +1,10 @@
 use crate::{
     app::components::{Block, BlockId, BlockInstance, PortStatus},
     html_if,
+    i18n::use_translation,
 };
 use web_sys::{HtmlElement, MouseEvent};
-use yew::{classes, function_component, html, use_effect_with, use_node_ref, Callback, Html, Properties, TargetCast};
-use yew_i18n::use_translation;
+use yew::{classes, component, html, use_effect_with, use_node_ref, Callback, Html, Properties, TargetCast};
 #[derive(Properties, PartialEq)]
 pub struct BlockProps {
     pub(crate) block: Block,
@@ -19,7 +19,7 @@ pub struct BlockProps {
     pub(crate) on_connection_start: Callback<BlockId>, // from_id
 }
 
-#[function_component]
+#[component]
 pub fn BlockView(props: &BlockProps) -> Html {
     let translate = use_translation();
 

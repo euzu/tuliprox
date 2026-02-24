@@ -12,6 +12,7 @@ use crate::{
     config_field, config_field_bool, config_field_bool_empty, config_field_child, config_field_custom,
     config_field_empty, config_field_hide, config_field_optional, edit_field_bool, edit_field_list, edit_field_text,
     edit_field_text_option, generate_form_reducer,
+    i18n::use_translation,
 };
 use shared::model::{
     DiscordMessagingConfigDto, MessagingConfigDto, MsgKind, PushoverMessagingConfigDto, RestMessagingConfigDto,
@@ -19,7 +20,6 @@ use shared::model::{
 };
 use std::{rc::Rc, str::FromStr};
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
 const LABEL_NOTIFY_ON: &str = "LABEL.NOTIFY_ON";
 const LABEL_TELEGRAM: &str = "LABEL.TELEGRAM";
@@ -86,7 +86,7 @@ generate_form_reducer!(
     }
 );
 
-#[function_component]
+#[component]
 pub fn MessagingConfigView() -> Html {
     let translate = use_translation();
     let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");
@@ -195,14 +195,19 @@ pub fn MessagingConfigView() -> Html {
         if templates.is_empty() {
             html! {}
         } else {
+            let template_fields = templates
+                .iter()
+                .map(|(kind, template)| {
+                    config_field_custom!(
+                        translate.t(&format!("LABEL.MSG_KIND_{}", kind.to_string().to_uppercase())),
+                        template.clone()
+                    )
+                })
+                .collect::<Html>();
             html! {
                 <div class="tp__messaging-config__templates-view">
                     <h3>{translate.t("LABEL.TEMPLATES")}</h3>
-                    { for templates.iter().map(|(kind, template)| {
-                        html! {
-                             { config_field_custom!(translate.t(&format!("LABEL.MSG_KIND_{}", kind.to_string().to_uppercase())), template.clone()) }
-                        }
-                    })}
+                    { template_fields }
                 </div>
             }
         }
@@ -220,7 +225,7 @@ pub fn MessagingConfigView() -> Html {
                               if entry.chat_ids.is_empty() {
                                   html! {}
                               } else {
-                                  html! { for entry.chat_ids.iter().map(|t| html! { <Chip label={t.clone()} /> }) }
+                                  html! { for t in entry.chat_ids.iter() { <Chip label={t.clone()} /> } }
                               }
                           }
                       </div>
@@ -253,7 +258,7 @@ pub fn MessagingConfigView() -> Html {
                               if entry.headers.is_empty() {
                                   html! {}
                               } else {
-                                  html! { for entry.headers.iter().map(|h| html! { <Chip label={h.clone()} /> }) }
+                                  html! { for h in entry.headers.iter() { <Chip label={h.clone()} /> } }
                               }
                           }
                       </div>
@@ -307,17 +312,20 @@ pub fn MessagingConfigView() -> Html {
 
     let render_view_mode = || {
         let msg_state = messaging_state.clone();
+        let notify_on_chips = notify_on_options
+            .iter()
+            .map(|t| {
+                let is_selected = msg_state.form.notify_on.contains(t);
+                let class = if is_selected { "tp__text-button primary" } else { "tp__text-button" };
+                html! { <Chip label={t.to_string()} class={class}/> }
+            })
+            .collect::<Html>();
         html! {
           <>
         <div class="tp__messaging-config-view__header tp__config-view-page__header">
           { config_field_child!(translate.t(LABEL_NOTIFY_ON), {
              html! { <div class="tp__messaging-config-view__notify-on">
-                 { for  notify_on_options.iter().map(|t| {
-                     let is_selected = msg_state.form.notify_on.contains(t);
-                      let class = if is_selected { "tp__text-button primary" } else { "tp__text-button" };
-                     html! {
-                     <Chip label={t.to_string()} class={class}/>
-                 }}) }
+                 { notify_on_chips }
                 </div>
               }
           })}
@@ -335,6 +343,84 @@ pub fn MessagingConfigView() -> Html {
     let render_edit_mode = || {
         let msg_state = messaging_state.clone();
         let notify_on_selections = Rc::new(msg_state.form.notify_on.iter().map(ToString::to_string).collect());
+        let telegram_template_fields = notify_on_options
+            .iter()
+            .map(|kind| {
+                let kind_str = translate.t(&format!("LABEL.MSG_KIND_{}", kind.to_string().to_uppercase()));
+                let current_val = telegram_state.form.templates.get(kind).cloned().unwrap_or_default();
+                let telegram_state = telegram_state.clone();
+                let kind = *kind;
+                html! {
+                    <TextArea
+                        label={kind_str}
+                        field_id={Some("TELEGRAM_TEMPLATE_MESSAGE".to_string())}
+                        value={current_val}
+                        collapse_on_empty={true}
+                        on_change={Callback::from(move |val: String| {
+                            let mut updated = telegram_state.form.templates.clone();
+                            if val.is_empty() {
+                                updated.remove(&kind);
+                            } else {
+                                updated.insert(kind, val);
+                            }
+                            telegram_state.dispatch(TelegramMessagingConfigFormAction::Templates(updated));
+                        })}
+                    />
+                }
+            })
+            .collect::<Html>();
+        let rest_template_fields = notify_on_options
+            .iter()
+            .map(|kind| {
+                let kind_str = translate.t(&format!("LABEL.MSG_KIND_{}", kind.to_string().to_uppercase()));
+                let current_val = rest_state.form.templates.get(kind).cloned().unwrap_or_default();
+                let rest_state = rest_state.clone();
+                let kind = *kind;
+                html! {
+                    <TextArea
+                        label={kind_str}
+                        field_id={Some("REST_TEMPLATE_MESSAGE".to_string())}
+                        value={current_val}
+                        collapse_on_empty={true}
+                        on_change={Callback::from(move |val: String| {
+                            let mut updated = rest_state.form.templates.clone();
+                            if val.is_empty() {
+                                updated.remove(&kind);
+                            } else {
+                                updated.insert(kind, val);
+                            }
+                            rest_state.dispatch(RestMessagingConfigFormAction::Templates(updated));
+                        })}
+                    />
+                }
+            })
+            .collect::<Html>();
+        let discord_template_fields = notify_on_options
+            .iter()
+            .map(|kind| {
+                let kind_str = translate.t(&format!("LABEL.MSG_KIND_{}", kind.to_string().to_uppercase()));
+                let current_val = discord_state.form.templates.get(kind).cloned().unwrap_or_default();
+                let discord_state = discord_state.clone();
+                let kind = *kind;
+                html! {
+                    <TextArea
+                        label={kind_str}
+                        field_id={Some("DISCORD_TEMPLATE_MESSAGE".to_string())}
+                        value={current_val}
+                        collapse_on_empty={true}
+                        on_change={Callback::from(move |val: String| {
+                            let mut updated = discord_state.form.templates.clone();
+                            if val.is_empty() {
+                                updated.remove(&kind);
+                            } else {
+                                updated.insert(kind, val);
+                            }
+                            discord_state.dispatch(DiscordMessagingConfigFormAction::Templates(updated));
+                        })}
+                    />
+                }
+            })
+            .collect::<Html>();
         html! {
             <>
             <div class="tp__messaging-config-view__header tp__config-view-page__header">
@@ -358,29 +444,7 @@ pub fn MessagingConfigView() -> Html {
                     { edit_field_bool!(telegram_state, translate.t(LABEL_MARKDOWN), markdown, TelegramMessagingConfigFormAction::Markdown) }
                     <div class="tp__messaging-config__templates">
                         <h3>{translate.t("LABEL.TEMPLATES")}</h3>
-                        { for notify_on_options.iter().map(|kind| {
-                            let kind_str = translate.t(&format!("LABEL.MSG_KIND_{}", kind.to_string().to_uppercase()));
-                            let current_val = telegram_state.form.templates.get(kind).cloned().unwrap_or_default();
-                            let telegram_state = telegram_state.clone();
-                            let kind = *kind;
-                            html! {
-                                <TextArea
-                                    label={kind_str}
-                                    field_id={Some("TELEGRAM_TEMPLATE_MESSAGE".to_string())}
-                                    value={current_val}
-                                    collapse_on_empty={true}
-                                    on_change={Callback::from(move |val: String| {
-                                        let mut updated = telegram_state.form.templates.clone();
-                                        if val.is_empty() {
-                                            updated.remove(&kind);
-                                        } else {
-                                            updated.insert(kind, val);
-                                        }
-                                        telegram_state.dispatch(TelegramMessagingConfigFormAction::Templates(updated));
-                                    })}
-                                />
-                            }
-                        })}
+                        { telegram_template_fields }
                     </div>
                 </Card>
 
@@ -391,29 +455,7 @@ pub fn MessagingConfigView() -> Html {
                     { edit_field_list!(rest_state, translate.t(LABEL_HEADERS), headers, RestMessagingConfigFormAction::Headers, translate.t(LABEL_ADD_HEADER)) }
                     <div class="tp__messaging-config__templates">
                         <h3>{translate.t("LABEL.TEMPLATES")}</h3>
-                        { for notify_on_options.iter().map(|kind| {
-                            let kind_str = translate.t(&format!("LABEL.MSG_KIND_{}", kind.to_string().to_uppercase()));
-                            let current_val = rest_state.form.templates.get(kind).cloned().unwrap_or_default();
-                            let rest_state = rest_state.clone();
-                            let kind = *kind;
-                            html! {
-                                <TextArea
-                                    label={kind_str}
-                                    field_id={Some("REST_TEMPLATE_MESSAGE".to_string())}
-                                    value={current_val}
-                                    collapse_on_empty={true}
-                                    on_change={Callback::from(move |val: String| {
-                                        let mut updated = rest_state.form.templates.clone();
-                                        if val.is_empty() {
-                                            updated.remove(&kind);
-                                        } else {
-                                            updated.insert(kind, val);
-                                        }
-                                        rest_state.dispatch(RestMessagingConfigFormAction::Templates(updated));
-                                    })}
-                                />
-                            }
-                        })}
+                        { rest_template_fields }
                     </div>
                 </Card>
 
@@ -429,29 +471,7 @@ pub fn MessagingConfigView() -> Html {
                     { edit_field_text!(discord_state, translate.t(LABEL_WEBHOOK_URL), url, DiscordMessagingConfigFormAction::Url, true) }
                     <div class="tp__messaging-config__templates">
                         <h3>{translate.t("LABEL.TEMPLATES")}</h3>
-                        { for notify_on_options.iter().map(|kind| {
-                            let kind_str = translate.t(&format!("LABEL.MSG_KIND_{}", kind.to_string().to_uppercase()));
-                            let current_val = discord_state.form.templates.get(kind).cloned().unwrap_or_default();
-                            let discord_state = discord_state.clone();
-                            let kind = *kind;
-                            html! {
-                                <TextArea
-                                    label={kind_str}
-                                    field_id={Some("DISCORD_TEMPLATE_MESSAGE".to_string())}
-                                    value={current_val}
-                                    collapse_on_empty={true}
-                                    on_change={Callback::from(move |val: String| {
-                                        let mut updated = discord_state.form.templates.clone();
-                                        if val.is_empty() {
-                                            updated.remove(&kind);
-                                        } else {
-                                            updated.insert(kind, val);
-                                        }
-                                        discord_state.dispatch(DiscordMessagingConfigFormAction::Templates(updated));
-                                    })}
-                                />
-                            }
-                        })}
+                        { discord_template_fields }
                     </div>
                 </Card>
             </div>

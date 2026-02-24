@@ -7,7 +7,7 @@ pub struct TargetWatchProps {
     pub target: Rc<ConfigTargetDto>,
 }
 
-#[function_component]
+#[component]
 pub fn TargetWatch(props: &TargetWatchProps) -> Html {
     match props.target.watch.as_ref() {
         None => html! {},

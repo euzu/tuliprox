@@ -1,9 +1,11 @@
-use crate::app::components::{Breadcrumbs, PlaylistList};
+use crate::{
+    app::components::{Breadcrumbs, PlaylistList},
+    i18n::use_translation,
+};
 use std::rc::Rc;
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
-#[function_component]
+#[component]
 pub fn PlaylistSettingsView() -> Html {
     let translate = use_translation();
     let breadcrumbs = use_state(|| Rc::new(vec![translate.t("LABEL.PLAYLISTS"), translate.t("LABEL.LIST")]));

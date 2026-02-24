@@ -1,6 +1,7 @@
 use crate::{
     app::components::{AppIcon, Card, CollapsePanel, IconButton, RadioButtonGroup},
     html_if,
+    i18n::use_translation,
 };
 use shared::{
     error::TuliproxError,
@@ -16,7 +17,6 @@ use std::{
 };
 use wasm_bindgen::JsCast;
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
 fn normalize(s: &str) -> String {
     let cleaned: String = s.chars().filter(|c| c.is_alphanumeric() || c.is_whitespace()).collect();
@@ -99,7 +99,7 @@ pub struct UserTargetPlaylistProps {
     pub on_change: Callback<Rc<RefCell<BouquetSelection>>>,
 }
 
-#[function_component]
+#[component]
 pub fn UserTargetPlaylist(props: &UserTargetPlaylistProps) -> Html {
     let translate = use_translation();
     let bouquet_selection = use_mut_ref(BouquetSelection::default);

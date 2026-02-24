@@ -6,6 +6,7 @@ use crate::{
     app::components::{Authentication, Home, LoadingScreen, Login, RoleBasedContent},
     error::Error,
     hooks::IconDefinition,
+    i18n::I18nProvider,
     model::WebConfig,
     provider::{IconContextProvider, ServiceContextProvider},
     services::request_get,
@@ -18,28 +19,7 @@ use std::{collections::HashMap, rc::Rc};
 use web_sys::window;
 use yew::prelude::*;
 use yew_hooks::{use_async_with_options, UseAsyncOptions};
-use yew_i18n::I18nProvider;
 use yew_router::prelude::*;
-
-fn flatten_json(value: &Value, prefix: String, map: &mut HashMap<String, serde_json::Value>) {
-    match value {
-        Value::Object(obj) => {
-            for (key, val) in obj {
-                let new_prefix = if prefix.is_empty() { key.clone() } else { format!("{prefix}.{key}") };
-                flatten_json(val, new_prefix, map);
-            }
-        }
-        Value::Array(arr) => {
-            for (i, val) in arr.iter().enumerate() {
-                let new_prefix = format!("{prefix}[{i}]");
-                flatten_json(val, new_prefix, map);
-            }
-        }
-        other => {
-            map.insert(prefix, other.clone());
-        }
-    }
-}
 
 /// App routes
 #[derive(Routable, Debug, Clone, PartialEq, Eq)]
@@ -61,7 +41,7 @@ pub fn switch(route: AppRoute) -> Html {
     }
 }
 
-#[function_component]
+#[component]
 pub fn App() -> Html {
     let supported_languages = vec!["en"];
     let translations_state = use_state(|| None);
@@ -85,12 +65,7 @@ pub fn App() -> Html {
                 let mut translations = HashMap::<String, serde_json::Value>::new();
                 for (lang, result) in results {
                     if let Ok(i18n) = result {
-                        let mut lang_translations = HashMap::<String, serde_json::Value>::new();
-                        if let Some(i18n) = i18n {
-                            flatten_json(&i18n, String::new(), &mut lang_translations);
-                        }
-                        let map: serde_json::Map<String, Value> = lang_translations.into_iter().collect();
-                        translations.insert(lang, Value::Object(map));
+                        translations.insert(lang, i18n.unwrap_or_else(|| Value::Object(serde_json::Map::new())));
                     }
                 }
                 trans_state.set(Some(translations));

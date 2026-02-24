@@ -3,13 +3,11 @@ use crate::{
         config::HasFormData, BlockId, BlockInstance, Card, EditMode, FilterInput, SourceEditorContext, TextButton,
     },
     config_field_child, edit_field_bool, edit_field_text_option, generate_form_reducer,
+    i18n::use_translation,
 };
 use shared::model::{M3uTargetOutputDto, TargetOutputDto};
 use std::rc::Rc;
-use yew::{
-    function_component, html, use_context, use_effect_with, use_reducer, Callback, Html, Properties, UseReducerHandle,
-};
-use yew_i18n::use_translation;
+use yew::{component, html, use_context, use_effect_with, use_reducer, Callback, Html, Properties, UseReducerHandle};
 
 const LABEL_FILENAME: &str = "LABEL.FILENAME";
 const LABEL_INCLUDE_TYPE_IN_URL: &str = "LABEL.INCLUDE_TYPE_IN_URL";
@@ -33,7 +31,7 @@ pub struct M3uTargetOutputViewProps {
     pub(crate) output: Option<Rc<M3uTargetOutputDto>>,
 }
 
-#[function_component]
+#[component]
 pub fn M3uTargetOutputView(props: &M3uTargetOutputViewProps) -> Html {
     let translate = use_translation();
     let source_editor_ctx = use_context::<SourceEditorContext>().expect("SourceEditorContext not found");

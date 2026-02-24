@@ -4,7 +4,7 @@ use yew::prelude::*;
 #[derive(Properties, PartialEq)]
 pub struct WebsocketStatusProps {}
 
-#[function_component]
+#[component]
 pub fn WebsocketStatus(_props: &WebsocketStatusProps) -> Html {
     let status = use_state(|| true);
     let services = use_service_context();

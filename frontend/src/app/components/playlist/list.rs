@@ -1,8 +1,10 @@
-use crate::app::components::{AppIcon, CollapsePanel, InputTable, PlaylistContext, TargetTable};
+use crate::{
+    app::components::{AppIcon, CollapsePanel, InputTable, PlaylistContext, TargetTable},
+    i18n::use_translation,
+};
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
-#[function_component]
+#[component]
 pub fn PlaylistList() -> Html {
     let translate = use_translation();
     let playlist_ctx = use_context::<PlaylistContext>().expect("Playlist context not found");

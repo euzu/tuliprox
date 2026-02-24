@@ -11,7 +11,7 @@ pub struct PopupMenuProps {
     pub children: Children,
 }
 
-#[function_component]
+#[component]
 pub fn PopupMenu(props: &PopupMenuProps) -> Html {
     let popup_ref = use_node_ref();
 

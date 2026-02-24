@@ -13,7 +13,7 @@ pub struct RadioButtonGroupProps {
     pub none_allowed: bool,
 }
 
-#[function_component]
+#[component]
 pub fn RadioButtonGroup(props: &RadioButtonGroupProps) -> Html {
     let selections = use_state(|| props.selected.clone());
 

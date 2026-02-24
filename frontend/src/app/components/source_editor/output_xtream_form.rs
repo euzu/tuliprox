@@ -4,6 +4,7 @@ use crate::{
         SourceEditorContext, TextButton, TitledCard, TraktListItemForm,
     },
     config_field_child, edit_field_bool, edit_field_text, generate_form_reducer,
+    i18n::use_translation,
 };
 use shared::{
     error::TuliproxError,
@@ -15,10 +16,8 @@ use shared::{
 use std::{fmt::Display, rc::Rc, str::FromStr};
 use web_sys::MouseEvent;
 use yew::{
-    function_component, html, use_context, use_effect_with, use_reducer, use_state, Callback, Html, Properties,
-    UseReducerHandle,
+    component, html, use_context, use_effect_with, use_reducer, use_state, Callback, Html, Properties, UseReducerHandle,
 };
-use yew_i18n::use_translation;
 
 const LABEL_SKIP_DIRECT_SOURCE: &str = "LABEL.SKIP_DIRECT_SOURCE";
 const LABEL_LIVE: &str = "LABEL.LIVE";
@@ -108,7 +107,7 @@ pub struct XtreamTargetOutputViewProps {
     pub(crate) output: Option<Rc<XtreamTargetOutputDto>>,
 }
 
-#[function_component]
+#[component]
 pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
     let translate = use_translation();
     let source_editor_ctx = use_context::<SourceEditorContext>().expect("SourceEditorContext not found");

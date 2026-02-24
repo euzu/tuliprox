@@ -1,13 +1,13 @@
+use crate::i18n::use_translation;
 use shared::model::HdHomeRunTargetOutputDto;
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
 #[derive(Properties, PartialEq, Clone)]
 pub struct HdHomeRunOutputProps {
     pub output: HdHomeRunTargetOutputDto,
 }
 
-#[function_component]
+#[component]
 pub fn HdHomeRunOutput(props: &HdHomeRunOutputProps) -> Html {
     let translator = use_translation();
     html! {

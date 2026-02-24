@@ -20,7 +20,7 @@ pub struct TableProps<T: PartialEq + Clone> {
     pub definition: Rc<TableDefinition<T>>,
 }
 
-#[function_component]
+#[component]
 pub fn Table<T: PartialEq + Clone>(props: &TableProps<T>) -> Html {
     let TableDefinition { items, num_cols, is_sortable, on_sort, render_header_cell, render_data_cell } =
         &*props.definition;

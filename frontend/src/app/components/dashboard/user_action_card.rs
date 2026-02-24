@@ -1,12 +1,12 @@
 use crate::{
     app::components::{ActionCard, TextButton},
     hooks::use_service_context,
+    i18n::use_translation,
 };
 use std::future;
 use yew::{prelude::*, suspense::use_future};
-use yew_i18n::use_translation;
 
-#[function_component]
+#[component]
 pub fn UserActionCard() -> Html {
     let services = use_service_context();
     let translate = use_translation();

@@ -19,7 +19,7 @@ pub struct SelectProps {
     pub multi_select: bool,
 }
 
-#[function_component]
+#[component]
 pub fn Select(props: &SelectProps) -> Html {
     let button_ref = use_node_ref();
 

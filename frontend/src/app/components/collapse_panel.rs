@@ -16,7 +16,7 @@ pub struct CollapsePanelProps {
     pub on_state_change: Callback<bool>,
 }
 
-#[function_component]
+#[component]
 pub fn CollapsePanel(props: &CollapsePanelProps) -> Html {
     let expanded = use_state(|| props.expanded);
     // let panel_ref = use_node_ref();

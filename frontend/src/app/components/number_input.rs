@@ -23,7 +23,7 @@ pub struct NumberInputProps {
     pub placeholder: String,
 }
 
-#[function_component]
+#[component]
 pub fn NumberInput(props: &NumberInputProps) -> Html {
     let input_ref = use_node_ref();
     let label_text = props.label.clone().unwrap_or_default();

@@ -1,18 +1,20 @@
-use crate::app::components::{chip::convert_bool_to_chip_style, make_tags, Tag, TagList};
+use crate::{
+    app::components::{chip::convert_bool_to_chip_style, make_tags, Tag, TagList},
+    i18n::use_translation,
+};
 use shared::{
     model::ConfigInputDto,
     utils::{default_probe_delay_secs, default_probe_live_interval, default_resolve_delay_secs},
 };
 use std::rc::Rc;
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct InputOptionsProps {
     pub input: Rc<ConfigInputDto>,
 }
 
-#[function_component]
+#[component]
 pub fn InputOptions(props: &InputOptionsProps) -> Html {
     let translate = use_translation();
     let tags = use_memo(props.input.clone(), |input| {

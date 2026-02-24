@@ -12,7 +12,7 @@ pub struct CsvTableProps {
     pub class: Option<String>,
 }
 
-#[function_component]
+#[component]
 pub fn CsvTable(props: &CsvTableProps) -> Html {
     let separator = props.separator;
 

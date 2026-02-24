@@ -1,10 +1,10 @@
 use crate::{
     app::components::{Card, CollapsePanel, TextButton},
     config_field, edit_field_number_u16, edit_field_number_u8, edit_field_text, generate_form_reducer, html_if,
+    i18n::use_translation,
 };
 use shared::model::HdHomeRunDeviceConfigDto;
 use yew::prelude::*;
-use yew_i18n::use_translation;
 
 generate_form_reducer!(
     state: HdHomeRunDeviceConfigFormState { form: Box<HdHomeRunDeviceConfigDto> },
@@ -34,7 +34,7 @@ pub struct HdHomerunDeviceViewProps {
     pub edit_mode: bool,
 }
 
-#[function_component]
+#[component]
 pub fn HdHomerunDeviceView(props: &HdHomerunDeviceViewProps) -> Html {
     let translate = use_translation();
 
