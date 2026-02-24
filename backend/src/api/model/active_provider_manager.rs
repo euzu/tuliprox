@@ -264,7 +264,11 @@ impl ActiveProviderManager {
                                 {
                                     let is_better = match victim {
                                         None => true,
-                                        Some((_, _, v_prio, _, _)) => shared.priority > v_prio,
+                                        Some((_, _, v_prio, v_created, _)) => {
+                                            shared.priority > v_prio
+                                                || (shared.priority == v_prio
+                                                    && shared.created_at < v_created)
+                                        }
                                     };
                                     if is_better {
                                         victim =
