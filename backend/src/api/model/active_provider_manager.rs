@@ -59,6 +59,7 @@ struct SharedAllocation {
 struct ActiveConnectionInfo {
     allocation: ProviderAllocation,
     priority: i8,
+    is_probe: bool,
     // Used to signal preemption to the consumer of this connection
     cancel_token: CancellationToken,
     created_at: Instant,
@@ -146,6 +147,7 @@ impl ActiveProviderManager {
         force: bool,
         allow_grace_override: Option<bool>,
         priority: i8,
+        is_probe: bool,
     ) -> Option<ProviderHandle> {
         // 1. Try to acquire directly
         let (allow_grace, allocation) = if force {
@@ -174,7 +176,7 @@ impl ActiveProviderManager {
         };
 
         if !matches!(allocation, ProviderAllocation::Exhausted) {
-            return self.register_allocation(allocation, addr, priority).await;
+            return self.register_allocation(allocation, addr, priority, is_probe).await;
         }
 
         // 2. If exhausted, try preemption (kick lower priority connection)
@@ -182,14 +184,20 @@ impl ActiveProviderManager {
             if let Some(preempted_alloc) =
                 self.try_preempt_connection(provider_or_input_name, priority, allow_grace).await
             {
-                return self.register_allocation(preempted_alloc, addr, priority).await;
+                return self.register_allocation(preempted_alloc, addr, priority, is_probe).await;
             }
         }
 
         None
     }
 
-    async fn register_allocation(&self, allocation: ProviderAllocation, addr: &SocketAddr, priority: i8) -> Option<ProviderHandle> {
+    async fn register_allocation(
+        &self,
+        allocation: ProviderAllocation,
+        addr: &SocketAddr,
+        priority: i8,
+        is_probe: bool,
+    ) -> Option<ProviderHandle> {
         let provider_name = allocation.get_provider_name().unwrap_or_default();
         let allocation_id = self.next_allocation_id.fetch_add(1, Ordering::Relaxed);
         let cancel_token = CancellationToken::new();
@@ -200,6 +208,7 @@ impl ActiveProviderManager {
         per_addr.insert(allocation_id, ActiveConnectionInfo {
             allocation: allocation.clone(),
             priority,
+            is_probe,
             cancel_token: cancel_token.clone(),
             created_at: Instant::now(),
         });
@@ -244,7 +253,7 @@ impl ActiveProviderManager {
                                             info.priority,
                                             info.created_at,
                                             false,
-                                            info.priority == DEFAULT_PROBE_PRIORITY,
+                                            info.is_probe,
                                         ));
                                     }
                                 }
@@ -341,7 +350,7 @@ impl ActiveProviderManager {
         if matches!(allocation, ProviderAllocation::Exhausted) {
             return None;
         }
-        self.register_allocation(allocation, addr, DEFAULT_USER_PRIORITY).await
+        self.register_allocation(allocation, addr, DEFAULT_USER_PRIORITY, false).await
     }
 
     pub async fn force_exact_acquire_connection(
@@ -355,7 +364,7 @@ impl ActiveProviderManager {
 
     // Returns the next available provider connection
     pub async fn acquire_connection(&self, input_name: &Arc<str>, addr: &SocketAddr) -> Option<ProviderHandle> {
-        self.acquire_connection_inner(input_name, addr, false, None, DEFAULT_USER_PRIORITY).await
+        self.acquire_connection_inner(input_name, addr, false, None, DEFAULT_USER_PRIORITY, false).await
     }
 
     /// Acquire a provider connection while explicitly controlling provider-side grace allocations.
@@ -365,7 +374,8 @@ impl ActiveProviderManager {
         addr: &SocketAddr,
         allow_grace: bool,
     ) -> Option<ProviderHandle> {
-        self.acquire_connection_inner(input_name, addr, false, Some(allow_grace), DEFAULT_USER_PRIORITY).await
+        self.acquire_connection_inner(input_name, addr, false, Some(allow_grace), DEFAULT_USER_PRIORITY, false)
+            .await
     }
 
     /// Acquire a provider connection while optionally disabling provider grace allocations.
@@ -374,7 +384,8 @@ impl ActiveProviderManager {
         input_name: &Arc<str>,
     ) -> Option<ProviderHandle> {
         // Probe is strictly low-priority and must never consume grace capacity.
-        self.acquire_connection_inner(input_name, &DUMMY_ADDR, false, Some(false), DEFAULT_PROBE_PRIORITY).await
+        self.acquire_connection_inner(input_name, &DUMMY_ADDR, false, Some(false), DEFAULT_PROBE_PRIORITY, true)
+            .await
     }
 
     // This method is used for redirects to cycle through the provider
@@ -819,7 +830,7 @@ mod tests {
         manager.release_connection(&client_2_addr).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_probe_preemption_releases_capacity_immediately_and_cancels_after_grace() {
         let app_cfg = create_test_app_config_single_provider_pool();
         let event_manager = Arc::new(EventManager::new());
@@ -848,15 +859,11 @@ mod tests {
         );
 
         // Probe cancellation is intentionally delayed by a small grace window.
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::advance(Duration::from_millis(100)).await;
         assert!(!probe_token.is_cancelled(), "probe token should not be cancelled immediately");
 
-        tokio::time::timeout(
-            super::PREEMPTED_PROBE_CANCEL_GRACE + Duration::from_millis(500),
-            probe_token.cancelled(),
-        )
-        .await
-        .expect("probe token should be cancelled after grace");
+        tokio::time::advance(super::PREEMPTED_PROBE_CANCEL_GRACE + Duration::from_millis(500)).await;
+        probe_token.cancelled().await;
 
         manager.release_connection(&user_addr).await;
     }
