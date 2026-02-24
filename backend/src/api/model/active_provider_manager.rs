@@ -10,12 +10,13 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 const DEFAULT_USER_PRIORITY: i8 = -1;
 const DEFAULT_PROBE_PRIORITY: i8 = 1;
 const PREEMPTED_PROBE_CANCEL_GRACE: Duration = Duration::from_secs(2);
+const PREEMPTED_GRACE_MAX_PENDING: usize = 64;
 static DUMMY_ADDR: LazyLock<SocketAddr> = LazyLock::new(|| "127.0.0.1:0".parse::<SocketAddr>().unwrap());
 
 pub type ClientConnectionId = SocketAddr;
@@ -83,6 +84,7 @@ pub struct ActiveProviderManager {
     providers: ProviderLineupManager,
     connections: RwLock<Connections>,
     next_allocation_id: AtomicU64,
+    preempted_grace_semaphore: Arc<Semaphore>,
 }
 
 impl ActiveProviderManager {
@@ -93,6 +95,7 @@ impl ActiveProviderManager {
             providers: ProviderLineupManager::new(inputs, grace_period_options, event_manager),
             connections: RwLock::new(Connections::default()),
             next_allocation_id: AtomicU64::new(1),
+            preempted_grace_semaphore: Arc::new(Semaphore::new(PREEMPTED_GRACE_MAX_PENDING)),
         }
     }
 
@@ -215,8 +218,8 @@ impl ActiveProviderManager {
         new_priority: i8,
         allow_grace: bool,
     ) -> Option<ProviderAllocation> {
-        // Victim: (addr, alloc_id, priority, created_at, is_shared)
-        let mut victim: Option<(ClientConnectionId, AllocationId, i8, Instant, bool)> = None;
+        // Victim: (addr, alloc_id, priority, created_at, is_shared, is_probe_connection)
+        let mut victim: Option<(ClientConnectionId, AllocationId, i8, Instant, bool, bool)> = None;
 
         {
             let connections = self.connections.read().await;
@@ -230,12 +233,19 @@ impl ActiveProviderManager {
                                 if info.priority > new_priority {
                                     let is_better = match victim {
                                         None => true,
-                                        Some((_, _, v_prio, v_created, _)) => {
+                                        Some((_, _, v_prio, v_created, _, _)) => {
                                             info.priority > v_prio || (info.priority == v_prio && info.created_at < v_created)
                                         }
                                     };
                                     if is_better {
-                                        victim = Some((*addr, *alloc_id, info.priority, info.created_at, false));
+                                        victim = Some((
+                                            *addr,
+                                            *alloc_id,
+                                            info.priority,
+                                            info.created_at,
+                                            false,
+                                            info.priority == DEFAULT_PROBE_PRIORITY,
+                                        ));
                                     }
                                 }
                             }
@@ -250,10 +260,10 @@ impl ActiveProviderManager {
                                 {
                                     let is_better = match victim {
                                         None => true,
-                                        Some((_, _, v_prio, _, _)) => shared.priority > v_prio,
+                                        Some((_, _, v_prio, _, _, _)) => shared.priority > v_prio,
                                     };
                                     if is_better {
-                                        victim = Some((*addr, *alloc_id, shared.priority, Instant::now(), true));
+                                        victim = Some((*addr, *alloc_id, shared.priority, Instant::now(), true, false));
                                     }
                                 }
                             }
@@ -263,7 +273,7 @@ impl ActiveProviderManager {
             }
         }
 
-        if let Some((addr, alloc_id, v_prio, _, is_shared)) = victim {
+        if let Some((addr, alloc_id, v_prio, _, is_shared, is_probe_connection)) = victim {
             debug_if_enabled!("Preempting {} connection from {} (prio={}) for higher priority request (prio={})", 
                 if is_shared { "shared" } else { "single" },
                 sanitize_sensitive_info(&addr.to_string()), v_prio, new_priority);
@@ -279,13 +289,18 @@ impl ActiveProviderManager {
             };
 
             if let Some(token) = cancel_token {
-                if v_prio >= DEFAULT_PROBE_PRIORITY {
-                    // Give preempted probe tasks a short grace window to finish naturally while
-                    // freeing provider capacity immediately for user-facing requests.
-                    tokio::spawn(async move {
-                        tokio::time::sleep(PREEMPTED_PROBE_CANCEL_GRACE).await;
+                if is_probe_connection {
+                    // Probe preemption gets a short grace window, but cap detached sleep/cancel
+                    // tasks so bursts cannot spawn unbounded background work.
+                    if let Ok(permit) = Arc::clone(&self.preempted_grace_semaphore).try_acquire_owned() {
+                        tokio::spawn(async move {
+                            let _permit = permit;
+                            tokio::time::sleep(PREEMPTED_PROBE_CANCEL_GRACE).await;
+                            token.cancel();
+                        });
+                    } else {
                         token.cancel();
-                    });
+                    }
                 } else {
                     token.cancel();
                 }
@@ -611,7 +626,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    fn create_test_app_config_with_dual_provider_pool() -> AppConfig {
+    fn build_test_app_config(aliases: Option<Vec<ConfigInputAlias>>, max_connections: u16) -> AppConfig {
         let input = Arc::new(ConfigInput {
             id: 1,
             name: "provider_1".intern(),
@@ -622,19 +637,9 @@ mod tests {
             password: Some("pass1".to_string()),
             enabled: true,
             priority: 0,
-            max_connections: 1,
+            max_connections,
             method: InputFetchMethod::default(),
-            aliases: Some(vec![ConfigInputAlias {
-                id: 2,
-                name: "provider_2".intern(),
-                url: "http://provider-2.example".to_string(),
-                username: Some("user2".to_string()),
-                password: Some("pass2".to_string()),
-                priority: 1,
-                max_connections: 1,
-                exp_date: None,
-                enabled: true,
-            }]),
+            aliases,
             ..ConfigInput::default()
         });
 
@@ -667,50 +672,25 @@ mod tests {
         }
     }
 
+    fn create_test_app_config_with_dual_provider_pool() -> AppConfig {
+        build_test_app_config(
+            Some(vec![ConfigInputAlias {
+                id: 2,
+                name: "provider_2".intern(),
+                url: "http://provider-2.example".to_string(),
+                username: Some("user2".to_string()),
+                password: Some("pass2".to_string()),
+                priority: 1,
+                max_connections: 1,
+                exp_date: None,
+                enabled: true,
+            }]),
+            1,
+        )
+    }
+
     fn create_test_app_config_single_provider_pool() -> AppConfig {
-        let input = Arc::new(ConfigInput {
-            id: 1,
-            name: "provider_1".intern(),
-            input_type: InputType::Xtream,
-            headers: HashMap::default(),
-            url: "http://provider-1.example".to_string(),
-            username: Some("user1".to_string()),
-            password: Some("pass1".to_string()),
-            enabled: true,
-            priority: 0,
-            max_connections: 1,
-            method: InputFetchMethod::default(),
-            aliases: None,
-            ..ConfigInput::default()
-        });
-
-        let sources = SourcesConfig {
-            inputs: vec![input],
-            ..SourcesConfig::default()
-        };
-
-        AppConfig {
-            config: Arc::new(ArcSwap::from_pointee(Config::default())),
-            sources: Arc::new(ArcSwap::from_pointee(sources)),
-            hdhomerun: Arc::new(ArcSwapOption::default()),
-            api_proxy: Arc::new(ArcSwapOption::default()),
-            file_locks: Arc::new(FileLockManager::default()),
-            paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
-                config_path: String::new(),
-                config_file_path: String::new(),
-                sources_file_path: String::new(),
-                mapping_file_path: None,
-                mapping_files_used: None,
-                template_file_path: None,
-                template_files_used: None,
-                api_proxy_file_path: String::new(),
-                custom_stream_response_path: None,
-            })),
-            custom_stream_response: Arc::new(ArcSwapOption::default()),
-            access_token_secret: [0; 32],
-            encrypt_secret: [0; 16],
-            ffprobe_available: Arc::default(),
-        }
+        build_test_app_config(None, 1)
     }
 
     #[tokio::test]
