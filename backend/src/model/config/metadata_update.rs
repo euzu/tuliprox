@@ -1,5 +1,15 @@
 use crate::model::macros;
 use shared::model::MetadataUpdateConfigDto;
+use shared::utils::{
+    default_metadata_ffprobe_analyze_duration, default_metadata_ffprobe_live_analyze_duration,
+    default_metadata_ffprobe_live_probe_size, default_metadata_ffprobe_probe_size,
+    default_metadata_max_resolve_retry_backoff, default_metadata_probe_cooldown,
+    default_metadata_probe_retry_backoff_step_1, default_metadata_probe_retry_backoff_step_2,
+    default_metadata_probe_retry_backoff_step_3, default_metadata_probe_retry_load_retry_delay,
+    default_metadata_progress_log_interval, default_metadata_queue_log_interval,
+    default_metadata_resolve_exhaustion_reset_gap, default_metadata_resolve_min_retry_base,
+    default_metadata_retry_delay, default_metadata_worker_idle_timeout, parse_size_base_2,
+};
 
 #[derive(Debug, Clone)]
 pub struct MetadataUpdateConfig {
@@ -16,7 +26,7 @@ pub struct MetadataUpdateConfig {
     pub probe_cooldown: String,
     pub probe_cooldown_secs: u64,
     pub retry_delay: String,
-    pub t_retry_delay_secs: u64,
+    pub retry_delay_secs: u64,
     pub probe_retry_load_retry_delay: String,
     pub probe_retry_load_retry_delay_secs: u64,
     pub worker_idle_timeout: String,
@@ -34,13 +44,13 @@ pub struct MetadataUpdateConfig {
     pub ffprobe_enabled: bool,
     pub ffprobe_timeout: Option<u64>,
     pub ffprobe_analyze_duration: String,
-    pub t_ffprobe_analyze_duration_micros: u64,
+    pub ffprobe_analyze_duration_micros: u64,
     pub ffprobe_probe_size: String,
-    pub t_ffprobe_probe_size_bytes: u64,
+    pub ffprobe_probe_size_bytes: u64,
     pub ffprobe_live_analyze_duration: String,
-    pub t_ffprobe_live_analyze_duration_micros: u64,
+    pub ffprobe_live_analyze_duration_micros: u64,
     pub ffprobe_live_probe_size: String,
-    pub t_ffprobe_live_probe_size_bytes: u64,
+    pub ffprobe_live_probe_size_bytes: u64,
 }
 
 impl Default for MetadataUpdateConfig {
@@ -49,47 +59,185 @@ impl Default for MetadataUpdateConfig {
 
 macros::from_impl!(MetadataUpdateConfig);
 
+fn parse_duration_secs(value: &str, require_unit: bool) -> Option<u64> {
+    if let Ok(seconds) = value.parse::<u64>() {
+        return if require_unit { None } else { Some(seconds.max(1)) };
+    }
+    if value.len() <= 1 {
+        return None;
+    }
+    let (number_part, unit_part) = value.split_at(value.len() - 1);
+    let number = number_part.parse::<u64>().ok()?;
+    let seconds = match unit_part {
+        "s" => number,
+        "m" => number.saturating_mul(60),
+        "h" => number.saturating_mul(60 * 60),
+        "d" => number.saturating_mul(24 * 60 * 60),
+        _ => return None,
+    };
+    Some(seconds.max(1))
+}
+
+fn parse_duration_or_default(value: &str, default_value: &str, require_unit: bool) -> u64 {
+    parse_duration_secs(value, require_unit)
+        .or_else(|| parse_duration_secs(default_value, require_unit))
+        .unwrap_or(1)
+}
+
+fn parse_size_or_default(value: &str, default_value: &str) -> u64 {
+    parse_size_base_2(value)
+        .ok()
+        .map(|v| v.max(1))
+        .or_else(|| parse_size_base_2(default_value).ok().map(|v| v.max(1)))
+        .unwrap_or(1)
+}
+
+struct ParsedMetadataUpdateNumbers {
+    queue_log_interval_secs: u64,
+    progress_log_interval_secs: u64,
+    max_resolve_retry_backoff_secs: u64,
+    resolve_min_retry_base_secs: u64,
+    resolve_exhaustion_reset_gap_secs: u64,
+    probe_cooldown_secs: u64,
+    retry_delay_secs: u64,
+    probe_retry_load_retry_delay_secs: u64,
+    worker_idle_timeout_secs: u64,
+    probe_retry_backoff_step_1_secs: u64,
+    probe_retry_backoff_step_2_secs: u64,
+    probe_retry_backoff_step_3_secs: u64,
+    ffprobe_analyze_duration_micros: u64,
+    ffprobe_probe_size_bytes: u64,
+    ffprobe_live_analyze_duration_micros: u64,
+    ffprobe_live_probe_size_bytes: u64,
+}
+
+fn parse_numeric_fields(cfg: &MetadataUpdateConfigDto) -> ParsedMetadataUpdateNumbers {
+    let queue_log_interval_secs =
+        parse_duration_or_default(&cfg.queue_log_interval, &default_metadata_queue_log_interval(), false);
+    let progress_log_interval_secs =
+        parse_duration_or_default(&cfg.progress_log_interval, &default_metadata_progress_log_interval(), false);
+    let max_resolve_retry_backoff_secs = parse_duration_or_default(
+        &cfg.max_resolve_retry_backoff,
+        &default_metadata_max_resolve_retry_backoff(),
+        false,
+    );
+    let resolve_min_retry_base_secs =
+        parse_duration_or_default(&cfg.resolve_min_retry_base, &default_metadata_resolve_min_retry_base(), false);
+    let resolve_exhaustion_reset_gap_secs = parse_duration_or_default(
+        &cfg.resolve_exhaustion_reset_gap,
+        &default_metadata_resolve_exhaustion_reset_gap(),
+        false,
+    );
+    let probe_cooldown_secs = parse_duration_or_default(&cfg.probe_cooldown, &default_metadata_probe_cooldown(), false);
+    let retry_delay_secs = parse_duration_or_default(&cfg.retry_delay, &default_metadata_retry_delay(), false);
+    let probe_retry_load_retry_delay_secs = parse_duration_or_default(
+        &cfg.probe_retry_load_retry_delay,
+        &default_metadata_probe_retry_load_retry_delay(),
+        false,
+    );
+    let worker_idle_timeout_secs =
+        parse_duration_or_default(&cfg.worker_idle_timeout, &default_metadata_worker_idle_timeout(), false);
+    let probe_retry_backoff_step_1_secs = parse_duration_or_default(
+        &cfg.probe_retry_backoff_step_1,
+        &default_metadata_probe_retry_backoff_step_1(),
+        false,
+    );
+    let probe_retry_backoff_step_2_secs = parse_duration_or_default(
+        &cfg.probe_retry_backoff_step_2,
+        &default_metadata_probe_retry_backoff_step_2(),
+        false,
+    );
+    let probe_retry_backoff_step_3_secs = parse_duration_or_default(
+        &cfg.probe_retry_backoff_step_3,
+        &default_metadata_probe_retry_backoff_step_3(),
+        false,
+    );
+    let ffprobe_analyze_duration_micros = parse_duration_or_default(
+        &cfg.ffprobe_analyze_duration,
+        &default_metadata_ffprobe_analyze_duration(),
+        true,
+    )
+    .saturating_mul(1_000_000);
+    let ffprobe_probe_size_bytes =
+        parse_size_or_default(&cfg.ffprobe_probe_size, &default_metadata_ffprobe_probe_size());
+    let ffprobe_live_analyze_duration_micros = parse_duration_or_default(
+        &cfg.ffprobe_live_analyze_duration,
+        &default_metadata_ffprobe_live_analyze_duration(),
+        true,
+    )
+    .saturating_mul(1_000_000);
+    let ffprobe_live_probe_size_bytes =
+        parse_size_or_default(&cfg.ffprobe_live_probe_size, &default_metadata_ffprobe_live_probe_size());
+
+    ParsedMetadataUpdateNumbers {
+        queue_log_interval_secs,
+        progress_log_interval_secs,
+        max_resolve_retry_backoff_secs,
+        resolve_min_retry_base_secs,
+        resolve_exhaustion_reset_gap_secs,
+        probe_cooldown_secs,
+        retry_delay_secs,
+        probe_retry_load_retry_delay_secs,
+        worker_idle_timeout_secs,
+        probe_retry_backoff_step_1_secs,
+        probe_retry_backoff_step_2_secs,
+        probe_retry_backoff_step_3_secs,
+        ffprobe_analyze_duration_micros,
+        ffprobe_probe_size_bytes,
+        ffprobe_live_analyze_duration_micros,
+        ffprobe_live_probe_size_bytes,
+    }
+}
+
 impl From<&MetadataUpdateConfigDto> for MetadataUpdateConfig {
     fn from(dto: &MetadataUpdateConfigDto) -> Self {
+        // ConfigDto::prepare() should already normalize/validate, but conversion stays defensive.
+        let mut normalized = dto.clone();
+        if normalized.prepare().is_err() {
+            normalized = MetadataUpdateConfigDto::default();
+            let _ = normalized.prepare();
+        }
+        let parsed = parse_numeric_fields(&normalized);
+
         Self {
-            queue_log_interval: dto.queue_log_interval.clone(),
-            queue_log_interval_secs: dto.queue_log_interval_secs,
-            progress_log_interval: dto.progress_log_interval.clone(),
-            progress_log_interval_secs: dto.progress_log_interval_secs,
-            max_resolve_retry_backoff: dto.max_resolve_retry_backoff.clone(),
-            max_resolve_retry_backoff_secs: dto.max_resolve_retry_backoff_secs,
-            resolve_min_retry_base: dto.resolve_min_retry_base.clone(),
-            resolve_min_retry_base_secs: dto.resolve_min_retry_base_secs,
-            resolve_exhaustion_reset_gap: dto.resolve_exhaustion_reset_gap.clone(),
-            resolve_exhaustion_reset_gap_secs: dto.resolve_exhaustion_reset_gap_secs,
-            probe_cooldown: dto.probe_cooldown.clone(),
-            probe_cooldown_secs: dto.probe_cooldown_secs,
-            retry_delay: dto.retry_delay.clone(),
-            t_retry_delay_secs: dto.t_retry_delay_secs,
-            probe_retry_load_retry_delay: dto.probe_retry_load_retry_delay.clone(),
-            probe_retry_load_retry_delay_secs: dto.probe_retry_load_retry_delay_secs,
-            worker_idle_timeout: dto.worker_idle_timeout.clone(),
-            worker_idle_timeout_secs: dto.worker_idle_timeout_secs,
-            probe_retry_backoff_step_1: dto.probe_retry_backoff_step_1.clone(),
-            probe_retry_backoff_step_1_secs: dto.probe_retry_backoff_step_1_secs,
-            probe_retry_backoff_step_2: dto.probe_retry_backoff_step_2.clone(),
-            probe_retry_backoff_step_2_secs: dto.probe_retry_backoff_step_2_secs,
-            probe_retry_backoff_step_3: dto.probe_retry_backoff_step_3.clone(),
-            probe_retry_backoff_step_3_secs: dto.probe_retry_backoff_step_3_secs,
-            max_attempts_resolve: dto.max_attempts_resolve,
-            max_attempts_probe: dto.max_attempts_probe,
-            backoff_jitter_percent: dto.backoff_jitter_percent,
-            max_queue_size: dto.max_queue_size,
-            ffprobe_enabled: dto.ffprobe_enabled,
-            ffprobe_timeout: dto.ffprobe_timeout,
-            ffprobe_analyze_duration: dto.ffprobe_analyze_duration.clone(),
-            t_ffprobe_analyze_duration_micros: dto.t_ffprobe_analyze_duration_micros,
-            ffprobe_probe_size: dto.ffprobe_probe_size.clone(),
-            t_ffprobe_probe_size_bytes: dto.t_ffprobe_probe_size_bytes,
-            ffprobe_live_analyze_duration: dto.ffprobe_live_analyze_duration.clone(),
-            t_ffprobe_live_analyze_duration_micros: dto.t_ffprobe_live_analyze_duration_micros,
-            ffprobe_live_probe_size: dto.ffprobe_live_probe_size.clone(),
-            t_ffprobe_live_probe_size_bytes: dto.t_ffprobe_live_probe_size_bytes,
+            queue_log_interval: normalized.queue_log_interval,
+            queue_log_interval_secs: parsed.queue_log_interval_secs,
+            progress_log_interval: normalized.progress_log_interval,
+            progress_log_interval_secs: parsed.progress_log_interval_secs,
+            max_resolve_retry_backoff: normalized.max_resolve_retry_backoff,
+            max_resolve_retry_backoff_secs: parsed.max_resolve_retry_backoff_secs,
+            resolve_min_retry_base: normalized.resolve_min_retry_base,
+            resolve_min_retry_base_secs: parsed.resolve_min_retry_base_secs,
+            resolve_exhaustion_reset_gap: normalized.resolve_exhaustion_reset_gap,
+            resolve_exhaustion_reset_gap_secs: parsed.resolve_exhaustion_reset_gap_secs,
+            probe_cooldown: normalized.probe_cooldown,
+            probe_cooldown_secs: parsed.probe_cooldown_secs,
+            retry_delay: normalized.retry_delay,
+            retry_delay_secs: parsed.retry_delay_secs,
+            probe_retry_load_retry_delay: normalized.probe_retry_load_retry_delay,
+            probe_retry_load_retry_delay_secs: parsed.probe_retry_load_retry_delay_secs,
+            worker_idle_timeout: normalized.worker_idle_timeout,
+            worker_idle_timeout_secs: parsed.worker_idle_timeout_secs,
+            probe_retry_backoff_step_1: normalized.probe_retry_backoff_step_1,
+            probe_retry_backoff_step_1_secs: parsed.probe_retry_backoff_step_1_secs,
+            probe_retry_backoff_step_2: normalized.probe_retry_backoff_step_2,
+            probe_retry_backoff_step_2_secs: parsed.probe_retry_backoff_step_2_secs,
+            probe_retry_backoff_step_3: normalized.probe_retry_backoff_step_3,
+            probe_retry_backoff_step_3_secs: parsed.probe_retry_backoff_step_3_secs,
+            max_attempts_resolve: normalized.max_attempts_resolve,
+            max_attempts_probe: normalized.max_attempts_probe,
+            backoff_jitter_percent: normalized.backoff_jitter_percent,
+            max_queue_size: normalized.max_queue_size,
+            ffprobe_enabled: normalized.ffprobe_enabled,
+            ffprobe_timeout: normalized.ffprobe_timeout,
+            ffprobe_analyze_duration: normalized.ffprobe_analyze_duration,
+            ffprobe_analyze_duration_micros: parsed.ffprobe_analyze_duration_micros,
+            ffprobe_probe_size: normalized.ffprobe_probe_size,
+            ffprobe_probe_size_bytes: parsed.ffprobe_probe_size_bytes,
+            ffprobe_live_analyze_duration: normalized.ffprobe_live_analyze_duration,
+            ffprobe_live_analyze_duration_micros: parsed.ffprobe_live_analyze_duration_micros,
+            ffprobe_live_probe_size: normalized.ffprobe_live_probe_size,
+            ffprobe_live_probe_size_bytes: parsed.ffprobe_live_probe_size_bytes,
         }
     }
 }
@@ -98,29 +246,17 @@ impl From<&MetadataUpdateConfig> for MetadataUpdateConfigDto {
     fn from(instance: &MetadataUpdateConfig) -> Self {
         Self {
             queue_log_interval: instance.queue_log_interval.clone(),
-            queue_log_interval_secs: instance.queue_log_interval_secs,
             progress_log_interval: instance.progress_log_interval.clone(),
-            progress_log_interval_secs: instance.progress_log_interval_secs,
             max_resolve_retry_backoff: instance.max_resolve_retry_backoff.clone(),
-            max_resolve_retry_backoff_secs: instance.max_resolve_retry_backoff_secs,
             resolve_min_retry_base: instance.resolve_min_retry_base.clone(),
-            resolve_min_retry_base_secs: instance.resolve_min_retry_base_secs,
             resolve_exhaustion_reset_gap: instance.resolve_exhaustion_reset_gap.clone(),
-            resolve_exhaustion_reset_gap_secs: instance.resolve_exhaustion_reset_gap_secs,
             probe_cooldown: instance.probe_cooldown.clone(),
-            probe_cooldown_secs: instance.probe_cooldown_secs,
             retry_delay: instance.retry_delay.clone(),
-            t_retry_delay_secs: instance.t_retry_delay_secs,
             probe_retry_load_retry_delay: instance.probe_retry_load_retry_delay.clone(),
-            probe_retry_load_retry_delay_secs: instance.probe_retry_load_retry_delay_secs,
             worker_idle_timeout: instance.worker_idle_timeout.clone(),
-            worker_idle_timeout_secs: instance.worker_idle_timeout_secs,
             probe_retry_backoff_step_1: instance.probe_retry_backoff_step_1.clone(),
-            probe_retry_backoff_step_1_secs: instance.probe_retry_backoff_step_1_secs,
             probe_retry_backoff_step_2: instance.probe_retry_backoff_step_2.clone(),
-            probe_retry_backoff_step_2_secs: instance.probe_retry_backoff_step_2_secs,
             probe_retry_backoff_step_3: instance.probe_retry_backoff_step_3.clone(),
-            probe_retry_backoff_step_3_secs: instance.probe_retry_backoff_step_3_secs,
             max_attempts_resolve: instance.max_attempts_resolve,
             max_attempts_probe: instance.max_attempts_probe,
             backoff_jitter_percent: instance.backoff_jitter_percent,
@@ -128,13 +264,9 @@ impl From<&MetadataUpdateConfig> for MetadataUpdateConfigDto {
             ffprobe_enabled: instance.ffprobe_enabled,
             ffprobe_timeout: instance.ffprobe_timeout,
             ffprobe_analyze_duration: instance.ffprobe_analyze_duration.clone(),
-            t_ffprobe_analyze_duration_micros: instance.t_ffprobe_analyze_duration_micros,
             ffprobe_probe_size: instance.ffprobe_probe_size.clone(),
-            t_ffprobe_probe_size_bytes: instance.t_ffprobe_probe_size_bytes,
             ffprobe_live_analyze_duration: instance.ffprobe_live_analyze_duration.clone(),
-            t_ffprobe_live_analyze_duration_micros: instance.t_ffprobe_live_analyze_duration_micros,
             ffprobe_live_probe_size: instance.ffprobe_live_probe_size.clone(),
-            t_ffprobe_live_probe_size_bytes: instance.t_ffprobe_live_probe_size_bytes,
         }
     }
 }

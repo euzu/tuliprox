@@ -40,79 +40,55 @@ pub struct MetadataUpdateConfigDto {
         skip_serializing_if = "is_default_metadata_queue_log_interval"
     )]
     pub queue_log_interval: String,
-    #[serde(skip)]
-    pub queue_log_interval_secs: u64,
     #[serde(
         default = "default_metadata_progress_log_interval",
         skip_serializing_if = "is_default_metadata_progress_log_interval"
     )]
     pub progress_log_interval: String,
-    #[serde(skip)]
-    pub progress_log_interval_secs: u64,
     #[serde(
         default = "default_metadata_max_resolve_retry_backoff",
         skip_serializing_if = "is_default_metadata_max_resolve_retry_backoff"
     )]
     pub max_resolve_retry_backoff: String,
-    #[serde(skip)]
-    pub max_resolve_retry_backoff_secs: u64,
     #[serde(
         default = "default_metadata_resolve_min_retry_base",
         skip_serializing_if = "is_default_metadata_resolve_min_retry_base"
     )]
     pub resolve_min_retry_base: String,
-    #[serde(skip)]
-    pub resolve_min_retry_base_secs: u64,
     #[serde(
         default = "default_metadata_resolve_exhaustion_reset_gap",
         skip_serializing_if = "is_default_metadata_resolve_exhaustion_reset_gap"
     )]
     pub resolve_exhaustion_reset_gap: String,
-    #[serde(skip)]
-    pub resolve_exhaustion_reset_gap_secs: u64,
     #[serde(default = "default_metadata_probe_cooldown", skip_serializing_if = "is_default_metadata_probe_cooldown")]
     pub probe_cooldown: String,
-    #[serde(skip)]
-    pub probe_cooldown_secs: u64,
     #[serde(default = "default_metadata_retry_delay", skip_serializing_if = "is_default_metadata_retry_delay")]
     pub retry_delay: String,
-    #[serde(skip)]
-    pub t_retry_delay_secs: u64,
     #[serde(
         default = "default_metadata_probe_retry_load_retry_delay",
         skip_serializing_if = "is_default_metadata_probe_retry_load_retry_delay"
     )]
     pub probe_retry_load_retry_delay: String,
-    #[serde(skip)]
-    pub probe_retry_load_retry_delay_secs: u64,
     #[serde(
         default = "default_metadata_worker_idle_timeout",
         skip_serializing_if = "is_default_metadata_worker_idle_timeout"
     )]
     pub worker_idle_timeout: String,
-    #[serde(skip)]
-    pub worker_idle_timeout_secs: u64,
     #[serde(
         default = "default_metadata_probe_retry_backoff_step_1",
         skip_serializing_if = "is_default_metadata_probe_retry_backoff_step_1"
     )]
     pub probe_retry_backoff_step_1: String,
-    #[serde(skip)]
-    pub probe_retry_backoff_step_1_secs: u64,
     #[serde(
         default = "default_metadata_probe_retry_backoff_step_2",
         skip_serializing_if = "is_default_metadata_probe_retry_backoff_step_2"
     )]
     pub probe_retry_backoff_step_2: String,
-    #[serde(skip)]
-    pub probe_retry_backoff_step_2_secs: u64,
     #[serde(
         default = "default_metadata_probe_retry_backoff_step_3",
         skip_serializing_if = "is_default_metadata_probe_retry_backoff_step_3"
     )]
     pub probe_retry_backoff_step_3: String,
-    #[serde(skip)]
-    pub probe_retry_backoff_step_3_secs: u64,
     #[serde(
         default = "default_metadata_max_attempts_resolve",
         skip_serializing_if = "is_default_metadata_max_attempts_resolve"
@@ -140,61 +116,41 @@ pub struct MetadataUpdateConfigDto {
         deserialize_with = "deserialize_as_string"
     )]
     pub ffprobe_analyze_duration: String,
-    #[serde(skip)]
-    pub t_ffprobe_analyze_duration_micros: u64,
     #[serde(
         default = "default_metadata_ffprobe_probe_size",
         skip_serializing_if = "is_default_metadata_ffprobe_probe_size",
         deserialize_with = "deserialize_as_string"
     )]
     pub ffprobe_probe_size: String,
-    #[serde(skip)]
-    pub t_ffprobe_probe_size_bytes: u64,
     #[serde(
         default = "default_metadata_ffprobe_live_analyze_duration",
         skip_serializing_if = "is_default_metadata_ffprobe_live_analyze_duration",
         deserialize_with = "deserialize_as_string"
     )]
     pub ffprobe_live_analyze_duration: String,
-    #[serde(skip)]
-    pub t_ffprobe_live_analyze_duration_micros: u64,
     #[serde(
         default = "default_metadata_ffprobe_live_probe_size",
         skip_serializing_if = "is_default_metadata_ffprobe_live_probe_size",
         deserialize_with = "deserialize_as_string"
     )]
     pub ffprobe_live_probe_size: String,
-    #[serde(skip)]
-    pub t_ffprobe_live_probe_size_bytes: u64,
 }
 
 impl Default for MetadataUpdateConfigDto {
     fn default() -> Self {
         Self {
             queue_log_interval: default_metadata_queue_log_interval(),
-            queue_log_interval_secs: 30,
             progress_log_interval: default_metadata_progress_log_interval(),
-            progress_log_interval_secs: 15,
             max_resolve_retry_backoff: default_metadata_max_resolve_retry_backoff(),
-            max_resolve_retry_backoff_secs: 60 * 60,
             resolve_min_retry_base: default_metadata_resolve_min_retry_base(),
-            resolve_min_retry_base_secs: 5,
             resolve_exhaustion_reset_gap: default_metadata_resolve_exhaustion_reset_gap(),
-            resolve_exhaustion_reset_gap_secs: 60 * 60,
             probe_cooldown: default_metadata_probe_cooldown(),
-            probe_cooldown_secs: 7 * 24 * 60 * 60,
             retry_delay: default_metadata_retry_delay(),
-            t_retry_delay_secs: 2,
             probe_retry_load_retry_delay: default_metadata_probe_retry_load_retry_delay(),
-            probe_retry_load_retry_delay_secs: 60,
             worker_idle_timeout: default_metadata_worker_idle_timeout(),
-            worker_idle_timeout_secs: 60,
             probe_retry_backoff_step_1: default_metadata_probe_retry_backoff_step_1(),
-            probe_retry_backoff_step_1_secs: 10 * 60,
             probe_retry_backoff_step_2: default_metadata_probe_retry_backoff_step_2(),
-            probe_retry_backoff_step_2_secs: 30 * 60,
             probe_retry_backoff_step_3: default_metadata_probe_retry_backoff_step_3(),
-            probe_retry_backoff_step_3_secs: 60 * 60,
             max_attempts_resolve: default_metadata_max_attempts_resolve(),
             max_attempts_probe: default_metadata_max_attempts_probe(),
             backoff_jitter_percent: default_metadata_backoff_jitter_percent(),
@@ -202,13 +158,9 @@ impl Default for MetadataUpdateConfigDto {
             ffprobe_enabled: false,
             ffprobe_timeout: None,
             ffprobe_analyze_duration: default_metadata_ffprobe_analyze_duration(),
-            t_ffprobe_analyze_duration_micros: 10_000_000,
             ffprobe_probe_size: default_metadata_ffprobe_probe_size(),
-            t_ffprobe_probe_size_bytes: 10_000_000,
             ffprobe_live_analyze_duration: default_metadata_ffprobe_live_analyze_duration(),
-            t_ffprobe_live_analyze_duration_micros: 5_000_000,
             ffprobe_live_probe_size: default_metadata_ffprobe_live_probe_size(),
-            t_ffprobe_live_probe_size_bytes: 5_000_000,
         }
     }
 }
@@ -252,70 +204,70 @@ impl MetadataUpdateConfigDto {
     }
 
     pub fn prepare(&mut self) -> Result<(), TuliproxError> {
-        self.queue_log_interval_secs =
+        let queue_log_interval_secs =
             Self::parse_and_clamp_duration(&self.queue_log_interval, MIN_DURATION_SECS, "queue_log_interval")?;
-        self.queue_log_interval = Self::canonicalize_seconds(self.queue_log_interval_secs);
+        self.queue_log_interval = Self::canonicalize_seconds(queue_log_interval_secs);
 
-        self.progress_log_interval_secs =
+        let progress_log_interval_secs =
             Self::parse_and_clamp_duration(&self.progress_log_interval, MIN_DURATION_SECS, "progress_log_interval")?;
-        self.progress_log_interval = Self::canonicalize_seconds(self.progress_log_interval_secs);
+        self.progress_log_interval = Self::canonicalize_seconds(progress_log_interval_secs);
 
-        self.max_resolve_retry_backoff_secs = Self::parse_and_clamp_duration(
+        let max_resolve_retry_backoff_secs = Self::parse_and_clamp_duration(
             &self.max_resolve_retry_backoff,
             MIN_DURATION_SECS,
             "max_resolve_retry_backoff",
         )?;
-        self.max_resolve_retry_backoff = Self::canonicalize_seconds(self.max_resolve_retry_backoff_secs);
+        self.max_resolve_retry_backoff = Self::canonicalize_seconds(max_resolve_retry_backoff_secs);
 
-        self.resolve_min_retry_base_secs =
+        let resolve_min_retry_base_secs =
             Self::parse_and_clamp_duration(&self.resolve_min_retry_base, MIN_DURATION_SECS, "resolve_min_retry_base")?;
-        self.resolve_min_retry_base = Self::canonicalize_seconds(self.resolve_min_retry_base_secs);
+        self.resolve_min_retry_base = Self::canonicalize_seconds(resolve_min_retry_base_secs);
 
-        self.resolve_exhaustion_reset_gap_secs = Self::parse_and_clamp_duration(
+        let resolve_exhaustion_reset_gap_secs = Self::parse_and_clamp_duration(
             &self.resolve_exhaustion_reset_gap,
             MIN_DURATION_SECS,
             "resolve_exhaustion_reset_gap",
         )?;
-        self.resolve_exhaustion_reset_gap = Self::canonicalize_seconds(self.resolve_exhaustion_reset_gap_secs);
+        self.resolve_exhaustion_reset_gap = Self::canonicalize_seconds(resolve_exhaustion_reset_gap_secs);
 
-        self.probe_cooldown_secs =
+        let probe_cooldown_secs =
             Self::parse_and_clamp_duration(&self.probe_cooldown, MIN_DURATION_SECS, "probe_cooldown")?;
-        self.probe_cooldown = Self::canonicalize_seconds(self.probe_cooldown_secs);
+        self.probe_cooldown = Self::canonicalize_seconds(probe_cooldown_secs);
 
-        self.t_retry_delay_secs = Self::parse_and_clamp_duration(&self.retry_delay, MIN_DURATION_SECS, "retry_delay")?;
-        self.retry_delay = Self::canonicalize_seconds(self.t_retry_delay_secs);
+        let retry_delay_secs = Self::parse_and_clamp_duration(&self.retry_delay, MIN_DURATION_SECS, "retry_delay")?;
+        self.retry_delay = Self::canonicalize_seconds(retry_delay_secs);
 
-        self.probe_retry_load_retry_delay_secs = Self::parse_and_clamp_duration(
+        let probe_retry_load_retry_delay_secs = Self::parse_and_clamp_duration(
             &self.probe_retry_load_retry_delay,
             MIN_DURATION_SECS,
             "probe_retry_load_retry_delay",
         )?;
-        self.probe_retry_load_retry_delay = Self::canonicalize_seconds(self.probe_retry_load_retry_delay_secs);
+        self.probe_retry_load_retry_delay = Self::canonicalize_seconds(probe_retry_load_retry_delay_secs);
 
-        self.worker_idle_timeout_secs =
+        let worker_idle_timeout_secs =
             Self::parse_and_clamp_duration(&self.worker_idle_timeout, MIN_DURATION_SECS, "worker_idle_timeout")?;
-        self.worker_idle_timeout = Self::canonicalize_seconds(self.worker_idle_timeout_secs);
+        self.worker_idle_timeout = Self::canonicalize_seconds(worker_idle_timeout_secs);
 
-        self.probe_retry_backoff_step_1_secs = Self::parse_and_clamp_duration(
+        let probe_retry_backoff_step_1_secs = Self::parse_and_clamp_duration(
             &self.probe_retry_backoff_step_1,
             MIN_DURATION_SECS,
             "probe_retry_backoff_step_1",
         )?;
-        self.probe_retry_backoff_step_1 = Self::canonicalize_seconds(self.probe_retry_backoff_step_1_secs);
+        self.probe_retry_backoff_step_1 = Self::canonicalize_seconds(probe_retry_backoff_step_1_secs);
 
-        self.probe_retry_backoff_step_2_secs = Self::parse_and_clamp_duration(
+        let probe_retry_backoff_step_2_secs = Self::parse_and_clamp_duration(
             &self.probe_retry_backoff_step_2,
             MIN_DURATION_SECS,
             "probe_retry_backoff_step_2",
         )?;
-        self.probe_retry_backoff_step_2 = Self::canonicalize_seconds(self.probe_retry_backoff_step_2_secs);
+        self.probe_retry_backoff_step_2 = Self::canonicalize_seconds(probe_retry_backoff_step_2_secs);
 
-        self.probe_retry_backoff_step_3_secs = Self::parse_and_clamp_duration(
+        let probe_retry_backoff_step_3_secs = Self::parse_and_clamp_duration(
             &self.probe_retry_backoff_step_3,
             MIN_DURATION_SECS,
             "probe_retry_backoff_step_3",
         )?;
-        self.probe_retry_backoff_step_3 = Self::canonicalize_seconds(self.probe_retry_backoff_step_3_secs);
+        self.probe_retry_backoff_step_3 = Self::canonicalize_seconds(probe_retry_backoff_step_3_secs);
 
         self.max_attempts_resolve = self.max_attempts_resolve.max(MIN_ATTEMPTS);
         self.max_attempts_probe = self.max_attempts_probe.max(MIN_ATTEMPTS);
@@ -329,12 +281,11 @@ impl MetadataUpdateConfigDto {
             "ffprobe_analyze_duration",
         )?;
         self.ffprobe_analyze_duration = Self::canonicalize_seconds(ffprobe_analyze_duration_secs);
-        self.t_ffprobe_analyze_duration_micros = ffprobe_analyze_duration_secs.saturating_mul(1_000_000);
 
-        self.t_ffprobe_probe_size_bytes = parse_size_base_2(&self.ffprobe_probe_size)
+        let ffprobe_probe_size_bytes = parse_size_base_2(&self.ffprobe_probe_size)
             .map_err(|err| crate::error::info_err!("Invalid size for `ffprobe_probe_size`: {err}"))?
             .max(1);
-        self.ffprobe_probe_size = Self::canonicalize_size_bytes(self.t_ffprobe_probe_size_bytes);
+        self.ffprobe_probe_size = Self::canonicalize_size_bytes(ffprobe_probe_size_bytes);
 
         let ffprobe_live_analyze_duration_secs = Self::parse_and_clamp_duration_with_required_unit(
             &self.ffprobe_live_analyze_duration,
@@ -342,12 +293,11 @@ impl MetadataUpdateConfigDto {
             "ffprobe_live_analyze_duration",
         )?;
         self.ffprobe_live_analyze_duration = Self::canonicalize_seconds(ffprobe_live_analyze_duration_secs);
-        self.t_ffprobe_live_analyze_duration_micros = ffprobe_live_analyze_duration_secs.saturating_mul(1_000_000);
 
-        self.t_ffprobe_live_probe_size_bytes = parse_size_base_2(&self.ffprobe_live_probe_size)
+        let ffprobe_live_probe_size_bytes = parse_size_base_2(&self.ffprobe_live_probe_size)
             .map_err(|err| crate::error::info_err!("Invalid size for `ffprobe_live_probe_size`: {err}"))?
             .max(1);
-        self.ffprobe_live_probe_size = Self::canonicalize_size_bytes(self.t_ffprobe_live_probe_size_bytes);
+        self.ffprobe_live_probe_size = Self::canonicalize_size_bytes(ffprobe_live_probe_size_bytes);
 
         self.clean();
 
@@ -448,9 +398,9 @@ mod tests {
 
         cfg.prepare().expect("metadata update config should parse duration values");
 
-        assert_eq!(cfg.queue_log_interval_secs, 60);
-        assert_eq!(cfg.progress_log_interval_secs, 7200);
-        assert_eq!(cfg.probe_cooldown_secs, 86_400);
+        assert_eq!(cfg.queue_log_interval, "1m");
+        assert_eq!(cfg.progress_log_interval, "2h");
+        assert_eq!(cfg.probe_cooldown, "1d");
     }
 
     #[test]
@@ -468,7 +418,7 @@ mod tests {
 
         cfg.prepare().expect("metadata update config should clamp minimum values");
 
-        assert_eq!(cfg.queue_log_interval_secs, 1);
+        assert_eq!(cfg.queue_log_interval, "1s");
         assert_eq!(cfg.max_attempts_resolve, 1);
         assert_eq!(cfg.max_attempts_probe, 1);
         assert_eq!(cfg.max_queue_size, 1);

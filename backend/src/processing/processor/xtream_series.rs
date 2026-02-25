@@ -415,6 +415,9 @@ async fn process_immediate_series_info(
                     if let Some(group_obj) = expand_series_item(retry_pli, input) {
                         groups_to_add.push(group_obj);
                     }
+                } else if let Some(group_obj) = expand_series_item(retry_pli, input) {
+                    // Fallback: retry failed (or skipped), still try to expand from cached properties.
+                    groups_to_add.push(group_obj);
                 }
             },
         );
@@ -792,8 +795,8 @@ pub async fn update_series_metadata(
                 let metadata_update = config.metadata_update.clone().unwrap_or_default();
                 let ffprobe_timeout = metadata_update.ffprobe_timeout.unwrap_or(60);
                 let user_agent = config.default_user_agent.clone();
-                let analyze_duration = metadata_update.t_ffprobe_analyze_duration_micros;
-                let probe_size = metadata_update.t_ffprobe_probe_size_bytes;
+                let analyze_duration = metadata_update.ffprobe_analyze_duration_micros;
+                let probe_size = metadata_update.ffprobe_probe_size_bytes;
 
                 let input_url = input.url.as_str();
                 let input_username = input.username.as_deref().unwrap_or("");

@@ -102,13 +102,13 @@ pub async fn update_generic_stream_metadata(
     let user_agent = config.default_user_agent.clone();
     let (analyze_duration, probe_size) = if item_type.is_live() {
         (
-            metadata_update.t_ffprobe_live_analyze_duration_micros,
-            metadata_update.t_ffprobe_live_probe_size_bytes,
+            metadata_update.ffprobe_live_analyze_duration_micros,
+            metadata_update.ffprobe_live_probe_size_bytes,
         )
     } else {
         (
-            metadata_update.t_ffprobe_analyze_duration_micros,
-            metadata_update.t_ffprobe_probe_size_bytes,
+            metadata_update.ffprobe_analyze_duration_micros,
+            metadata_update.ffprobe_probe_size_bytes,
         )
     };
 

@@ -53,7 +53,7 @@ struct MetadataUpdateRuntimeSettings {
     max_attempts_probe: u8,
     resolve_exhaustion_reset_gap_secs: i64,
     probe_cooldown_secs: i64,
-    t_retry_delay_secs: u64,
+    retry_delay_secs: u64,
     probe_retry_load_retry_delay_secs: i64,
     worker_idle_timeout_secs: u64,
     max_queue_size: usize,
@@ -98,7 +98,7 @@ impl MetadataUpdateRuntimeSettings {
             max_attempts_probe: cfg.max_attempts_probe.max(1),
             resolve_exhaustion_reset_gap_secs: to_i64(cfg.resolve_exhaustion_reset_gap_secs),
             probe_cooldown_secs: to_i64(cfg.probe_cooldown_secs),
-            t_retry_delay_secs: cfg.t_retry_delay_secs.max(1),
+            retry_delay_secs: cfg.retry_delay_secs.max(1),
             probe_retry_load_retry_delay_secs: to_i64(cfg.probe_retry_load_retry_delay_secs),
             worker_idle_timeout_secs: cfg.worker_idle_timeout_secs.max(1),
             max_queue_size: cfg.max_queue_size.max(1),
@@ -607,13 +607,31 @@ impl MetadataUpdateManager {
                 | (
                     UpdateTask::ResolveSeries { reason: r1, delay: d1, .. },
                     UpdateTask::ResolveSeries { reason: r2, delay: d2, .. },
-                )
-                | (
-                    UpdateTask::ProbeStream { reason: r1, delay: d1, .. },
-                    UpdateTask::ProbeStream { reason: r2, delay: d2, .. },
                 ) => {
                     *r1 |= r2;
                     *d1 = min(*d1, d2);
+                    merged = true;
+                }
+                (
+                    UpdateTask::ProbeStream {
+                        reason: r1,
+                        delay: d1,
+                        url: url1,
+                        item_type: item_type1,
+                        ..
+                    },
+                    UpdateTask::ProbeStream {
+                        reason: r2,
+                        delay: d2,
+                        url: url2,
+                        item_type: item_type2,
+                        ..
+                    },
+                ) => {
+                    *r1 |= r2;
+                    *d1 = min(*d1, d2);
+                    *url1 = url2;
+                    *item_type1 = item_type2;
                     merged = true;
                 }
                 (
@@ -863,7 +881,7 @@ impl InputWorker {
                             }
 
                             let retry_delay_secs =
-                                Self::compute_t_retry_delay_secs(current_task.delay(), &runtime_settings);
+                                Self::compute_retry_delay_secs(current_task.delay(), &runtime_settings);
                             let retry_delay_i64 = i64::try_from(retry_delay_secs).unwrap_or(i64::MAX);
                             schedule_requeue_at_ts = Some(now_ts.saturating_add(retry_delay_i64));
                             debug_if_enabled!(
@@ -1286,8 +1304,8 @@ impl InputWorker {
         Self::apply_jitter(without_jitter, runtime_settings.backoff_jitter_percent)
     }
 
-    fn compute_t_retry_delay_secs(base_delay_secs: u16, runtime_settings: &MetadataUpdateRuntimeSettings) -> u64 {
-        u64::from(base_delay_secs).max(runtime_settings.t_retry_delay_secs)
+    fn compute_retry_delay_secs(base_delay_secs: u16, runtime_settings: &MetadataUpdateRuntimeSettings) -> u64 {
+        u64::from(base_delay_secs).max(runtime_settings.retry_delay_secs)
     }
 
     fn compute_probe_retry_backoff_secs(attempts: u8, runtime_settings: &MetadataUpdateRuntimeSettings) -> u64 {
@@ -1351,7 +1369,9 @@ impl InputWorker {
     }
 
     fn is_transient_worker_error(message: &str) -> bool {
-        message == TASK_ERR_UPDATE_IN_PROGRESS || message == TASK_ERR_PREEMPTED
+        message == TASK_ERR_UPDATE_IN_PROGRESS
+            || message == TASK_ERR_PREEMPTED
+            || message == TASK_ERR_NO_CONNECTION
     }
 
     // Changed to static method
