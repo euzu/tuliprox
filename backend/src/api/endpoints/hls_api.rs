@@ -190,16 +190,33 @@ pub(in crate::api) async fn handle_hls_stream_request(
         default_user_agent.as_deref(),
     );
     let input_source = InputSource::from(input).with_url(request_url);
-    match request::download_text_content(
-        &app_state.app_config,
-        &app_state.http_client.load(),
-        &input_source,
-        Some(&headers),
-        None,
-        false,
-    )
+    let use_manual_redirects = {
+        let config = app_state.app_config.config.load();
+        config.proxy.is_some()
+    };
+    let download_result = if use_manual_redirects {
+        request::download_text_content_with_manual_redirects(
+            &app_state.app_config,
+            &app_state.http_client_no_redirect.load(),
+            &input_source,
+            Some(&headers),
+            None,
+            false,
+            10,
+        )
         .await
-    {
+    } else {
+        request::download_text_content(
+            &app_state.app_config,
+            &app_state.http_client.load(),
+            &input_source,
+            Some(&headers),
+            None,
+            false,
+        )
+        .await
+    };
+    match download_result {
         Ok((content, response_url)) => {
             let rewrite_hls_props = RewriteHlsProps {
                 secret: &app_state.app_config.encrypt_secret,
