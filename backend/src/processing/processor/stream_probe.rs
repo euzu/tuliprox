@@ -15,6 +15,13 @@ enum ProbeStorageKind {
     Xtream,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenericProbeOutcome {
+    Updated,
+    Noop,
+    ProbeFailed,
+}
+
 fn requires_provider_connection_for_generic_probe(input_type: InputType) -> bool {
     !matches!(input_type, InputType::Library)
 }
@@ -31,13 +38,13 @@ pub async fn update_generic_stream_metadata(
     item_type: PlaylistItemType,
     active_provider: &Arc<ActiveProviderManager>,
     active_handle: Option<&crate::api::model::ProviderHandle>,
-) -> Result<bool, TuliproxError> {
+) -> Result<GenericProbeOutcome, TuliproxError> {
     let working_dir = &app_config.config.load().working_dir;
 
     // Check if probing is enabled globally
     let ffprobe_enabled = app_config.is_ffprobe_enabled().await;
     if !ffprobe_enabled {
-        return Ok(true);
+        return Ok(GenericProbeOutcome::Noop);
     }
 
     // Determine storage file path based on input type
@@ -62,7 +69,7 @@ pub async fn update_generic_stream_metadata(
                 XtreamCluster::Series
             } else {
                 // Generic probing currently supports live/video/series payload shapes.
-                return Ok(true);
+                return Ok(GenericProbeOutcome::Noop);
             };
             (
                 xtream_get_file_path(&storage_path, cluster),
@@ -121,7 +128,7 @@ pub async fn update_generic_stream_metadata(
 
     let Some((_quality, raw_video, raw_audio)) = probe_data else {
          warn!("Probe failed or timed out for generic stream: {unique_id}");
-         return Ok(false);
+         return Ok(GenericProbeOutcome::ProbeFailed);
     };
 
     // Hold the async file lock while the blocking DB update runs in a blocking thread.
@@ -216,7 +223,11 @@ pub async fn update_generic_stream_metadata(
     .map_err(|e| shared::error::info_err!("{e}"))?;
 
     drop(file_lock);
-    Ok(updated)
+    if updated {
+        Ok(GenericProbeOutcome::Updated)
+    } else {
+        Ok(GenericProbeOutcome::Noop)
+    }
 }
 
 fn update_properties(

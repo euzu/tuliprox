@@ -24,6 +24,7 @@ use crate::{
         is_default_metadata_retry_delay, is_default_metadata_worker_idle_timeout, is_false, parse_size_base_2,
     },
 };
+use std::sync::OnceLock;
 
 const MIN_DURATION_SECS: u64 = 1;
 const MIN_ATTEMPTS: u8 = 1;
@@ -213,8 +214,13 @@ impl Default for MetadataUpdateConfigDto {
 }
 
 impl MetadataUpdateConfigDto {
+    fn defaults() -> &'static Self {
+        static DEFAULTS: OnceLock<MetadataUpdateConfigDto> = OnceLock::new();
+        DEFAULTS.get_or_init(Self::default)
+    }
+
     pub fn is_empty(&self) -> bool {
-        let defaults = Self::default();
+        let defaults = Self::defaults();
         self.queue_log_interval == defaults.queue_log_interval
             && self.progress_log_interval == defaults.progress_log_interval
             && self.max_resolve_retry_backoff == defaults.max_resolve_retry_backoff
@@ -407,8 +413,8 @@ impl MetadataUpdateConfigDto {
     }
 
     fn canonicalize_size_bytes(bytes: u64) -> String {
-        if bytes.is_multiple_of(1_099_511_628_000) {
-            format!("{}TB", bytes / 1_099_511_628_000)
+        if bytes.is_multiple_of(1_099_511_627_776) {
+            format!("{}TB", bytes / 1_099_511_627_776)
         } else if bytes.is_multiple_of(1_073_741_824) {
             format!("{}GB", bytes / 1_073_741_824)
         } else if bytes.is_multiple_of(1_048_576) {

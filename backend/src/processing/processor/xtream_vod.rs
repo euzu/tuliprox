@@ -31,6 +31,7 @@ use std::time::{Duration, Instant};
 create_resolve_options_function_for_xtream_target!(vod);
 
 const BATCH_SIZE: usize = 200;
+const RETRY_BATCH_MAX_SIZE: usize = BATCH_SIZE * 4;
 const FOREGROUND_MIN_RETRY_DELAY_SECS: u64 = 1;
 
 #[allow(clippy::too_many_lines)]
@@ -295,6 +296,7 @@ async fn process_immediate_vod_info(
             db_lock_holder: _db_lock_holder,
             batch: batch,
             batch_size: BATCH_SIZE,
+            retry_batch_max_len: RETRY_BATCH_MAX_SIZE,
             processed_count: processed_count,
             query_error_context: "VOD retry",
             reasons: |retry_pli| check_resolve_reasons(&resolve_options, do_probe, resolve_tmdb_enabled, retry_pli),

@@ -2,6 +2,7 @@ use crate::api::model::ProviderHandle;
 use crate::api::model::{AppState, EventMessage};
 use crate::processing::processor::{
     update_generic_stream_metadata, update_live_stream_metadata, update_series_metadata, update_vod_metadata,
+    GenericProbeOutcome,
 };
 use crate::utils::debug_if_enabled;
 use dashmap::mapref::entry::Entry;
@@ -699,20 +700,28 @@ impl InputWorker {
         let input_name = self.input_name.clone();
         let app_state_weak = self.app_state_weak.clone();
 
-        self.ensure_probe_retry_state_loaded(&input_name, app_state_weak.as_ref()).await;
+        let startup_runtime_settings = self.runtime_settings();
+        self.ensure_probe_retry_state_loaded(&input_name, app_state_weak.as_ref(), &startup_runtime_settings)
+            .await;
 
         // Keep one prefetched task to minimize channel waits/lock churn.
         let mut next_task: Option<(TaskKey, UpdateTask, u64)> = None;
 
         loop {
-            let task_data = if let Some(t) = next_task.take() { Some(t) } else { self.recv_task_fast_or_wait().await };
+            let task_data = if let Some(t) = next_task.take() {
+                Some(t)
+            } else {
+                let wait_runtime_settings = self.runtime_settings();
+                self.recv_task_fast_or_wait(&wait_runtime_settings).await
+            };
 
             let Some((current_key, current_task, current_generation)) = task_data else { break };
+            let runtime_settings = self.runtime_settings();
             if !self.probe_retry_loaded {
-                self.ensure_probe_retry_state_loaded(&input_name, app_state_weak.as_ref()).await;
+                self.ensure_probe_retry_state_loaded(&input_name, app_state_weak.as_ref(), &runtime_settings)
+                    .await;
             }
             let now_ts = chrono::Utc::now().timestamp();
-            let runtime_settings = self.runtime_settings();
 
             if !queue_cycle_active {
                 // First entry of a new processing cycle.
@@ -1031,8 +1040,12 @@ impl InputWorker {
         debug!("Metadata worker stopped for input {input_name}");
     }
 
-    async fn ensure_probe_retry_state_loaded(&mut self, input_name: &str, app_state_weak: Option<&Weak<AppState>>) {
-        let runtime_settings = self.runtime_settings();
+    async fn ensure_probe_retry_state_loaded(
+        &mut self,
+        input_name: &str,
+        app_state_weak: Option<&Weak<AppState>>,
+        runtime_settings: &MetadataUpdateRuntimeSettings,
+    ) {
         if self.probe_retry_loaded {
             return;
         }
@@ -1179,7 +1192,10 @@ impl InputWorker {
         false
     }
 
-    async fn recv_task_fast_or_wait(&mut self) -> Option<(TaskKey, UpdateTask, u64)> {
+    async fn recv_task_fast_or_wait(
+        &mut self,
+        runtime_settings: &MetadataUpdateRuntimeSettings,
+    ) -> Option<(TaskKey, UpdateTask, u64)> {
         // Fast path: drain immediate signals until we find a real pending task.
         loop {
             match self.receiver.try_recv() {
@@ -1201,7 +1217,6 @@ impl InputWorker {
         self.release_db_handles();
 
         loop {
-            let runtime_settings = self.runtime_settings();
             tokio::select! {
                 biased;
                 () = self.cancel_token.cancelled() => return None,
@@ -2210,7 +2225,7 @@ impl InputWorker {
                     db_handles.clear();
                 }
 
-                let updated = update_generic_stream_metadata(
+                let outcome = update_generic_stream_metadata(
                     &app_state.app_config,
                     input.as_ref(),
                     unique_id,
@@ -2221,13 +2236,12 @@ impl InputWorker {
                 )
                 .await?;
 
-                if updated {
-                    Ok(())
-                } else {
-                    Err(shared::error::info_err!(
-                        "Probe stream task produced no metadata update for {}",
+                match outcome {
+                    GenericProbeOutcome::Updated | GenericProbeOutcome::Noop => Ok(()),
+                    GenericProbeOutcome::ProbeFailed => Err(shared::error::info_err!(
+                        "Probe stream task failed for {}",
                         unique_id
-                    ))
+                    )),
                 }
             }
         }

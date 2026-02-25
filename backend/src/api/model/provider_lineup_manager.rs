@@ -740,7 +740,7 @@ impl ProviderLineupManager {
     }
 
     pub async fn force_exact_acquire_connection(&self, provider_name: &Arc<str>) -> ProviderAllocation {
-        let snapshot = self.snapshot.load();
+        let snapshot = self.snapshot.load_full();
         let allocation = match Self::get_provider_config_by_name(provider_name, &snapshot.providers) {
             None => ProviderAllocation::Exhausted, // No Name matched, we don't have this provider
             Some((_lineup, config)) => config.force_allocate().await,
@@ -757,7 +757,7 @@ impl ProviderLineupManager {
         provider_name: &Arc<str>,
         allow_grace: bool,
     ) -> ProviderAllocation {
-        let snapshot = self.snapshot.load();
+        let snapshot = self.snapshot.load_full();
         let with_grace = allow_grace && self.grace_period_millis.load(Ordering::Acquire) > 0;
         let allocation = match Self::get_provider_config_by_name(provider_name, &snapshot.providers) {
             None => ProviderAllocation::Exhausted,
@@ -785,7 +785,7 @@ impl ProviderLineupManager {
         input_name: &Arc<str>,
         allow_grace: bool,
     ) -> ProviderAllocation {
-        let snapshot = self.snapshot.load();
+        let snapshot = self.snapshot.load_full();
         let lineup_opt = Self::get_provider_config_by_name(input_name, &snapshot.providers);
         let with_grace = allow_grace && self.grace_period_millis.load(Ordering::Acquire) > 0;
         let allocation = match lineup_opt {
@@ -848,7 +848,7 @@ impl ProviderLineupManager {
     // This method is used for redirects to cycle through provider
     //
     pub async fn get_next_provider(&self, input_name: &Arc<str>) -> Option<Arc<ProviderConfig>> {
-        let snapshot = self.snapshot.load();
+        let snapshot = self.snapshot.load_full();
         match Self::get_provider_config_by_name(input_name, &snapshot.providers) {
             None => None,
             Some((lineup, _config)) => {
@@ -870,7 +870,7 @@ impl ProviderLineupManager {
                 result.insert(name.clone(), count);
             }
         };
-        let snapshot = self.snapshot.load();
+        let snapshot = self.snapshot.load_full();
         for lineup in &snapshot.providers {
             match lineup {
                 ProviderLineup::Single(provider_lineup) => {
@@ -892,7 +892,7 @@ impl ProviderLineupManager {
 
     pub async fn active_connection_count(&self) -> usize {
         let mut count = 0;
-        let snapshot = self.snapshot.load();
+        let snapshot = self.snapshot.load_full();
         for lineup in &snapshot.providers {
             match lineup {
                 ProviderLineup::Single(provider_lineup) => {
@@ -907,7 +907,7 @@ impl ProviderLineupManager {
     }
 
     pub async fn is_over_limit(&self, provider_name: &Arc<str>) -> bool {
-        let snapshot = self.snapshot.load();
+        let snapshot = self.snapshot.load_full();
         if let Some((_, config)) = Self::get_provider_config_by_name(provider_name, &snapshot.providers) {
             config.is_over_limit(self.grace_period_timeout_secs.load(Ordering::Relaxed)).await
         } else {
@@ -916,7 +916,7 @@ impl ProviderLineupManager {
     }
 
     pub async fn is_exhausted(&self, provider_name: &Arc<str>) -> bool {
-        let snapshot = self.snapshot.load();
+        let snapshot = self.snapshot.load_full();
         if let Some((_, config)) = Self::get_provider_config_by_name(provider_name, &snapshot.providers) {
             config.is_exhausted().await
         } else {

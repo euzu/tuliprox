@@ -179,7 +179,14 @@ fn apply_setup_config_forms(config: &mut shared::model::ConfigDto, forms: Vec<Co
             ConfigForm::Log(_, log_cfg) => config.log = Some(log_cfg),
             ConfigForm::Schedules(_, schedules_cfg) => config.schedules = schedules_cfg.schedules,
             ConfigForm::Video(_, video_cfg) => config.video = Some(video_cfg),
-            ConfigForm::MetadataUpdate(_, metadata_update_cfg) => config.metadata_update = Some(metadata_update_cfg),
+            ConfigForm::MetadataUpdate(_, mut metadata_update_cfg) => {
+                if metadata_update_cfg.is_empty() {
+                    config.metadata_update = None;
+                } else {
+                    metadata_update_cfg.clean();
+                    config.metadata_update = Some(metadata_update_cfg);
+                }
+            }
             ConfigForm::Messaging(_, messaging_cfg) => config.messaging = Some(messaging_cfg),
             ConfigForm::WebUi(_, web_ui_cfg) => apply_setup_webui_form(config, web_ui_cfg),
             ConfigForm::ReverseProxy(_, reverse_proxy_cfg) => config.reverse_proxy = Some(reverse_proxy_cfg),
@@ -415,8 +422,8 @@ mod tests {
     use crate::app::ConfigContext;
     use shared::model::{
         AppConfigDto, ConfigInputDto, ContentSecurityPolicyConfigDto, HdHomeRunConfigDto, HdHomeRunDeviceConfigDto,
-        LibraryConfigDto, LibraryScanDirectoryDto, ReverseProxyConfigDto, SourcesConfigDto, WebAuthConfigDto,
-        WebUiConfigDto,
+        LibraryConfigDto, LibraryScanDirectoryDto, MetadataUpdateConfigDto, ReverseProxyConfigDto, SourcesConfigDto,
+        WebAuthConfigDto, WebUiConfigDto,
     };
     use std::rc::Rc;
 
@@ -646,5 +653,33 @@ mod tests {
         assert_eq!(web_ui.path.as_deref(), Some("/dashboard"));
         assert_eq!(web_ui.player_server.as_deref(), Some("http://player.local"));
         assert_eq!(web_ui.auth.as_ref().map(|auth| auth.secret.as_str()), Some("top-secret"));
+    }
+
+    #[test]
+    fn setup_metadata_update_empty_form_clears_existing_payload() {
+        let mut app_config = AppConfigDto::default();
+        app_config.config.metadata_update =
+            Some(MetadataUpdateConfigDto { ffprobe_enabled: true, ..Default::default() });
+        let config_ctx = ConfigContext { config: Some(Rc::new(app_config)), api_proxy: None };
+        let mut form_state = crate::app::components::setup::SetupConfigFormState::default();
+        form_state.update_form(ConfigForm::MetadataUpdate(true, MetadataUpdateConfigDto::default()));
+
+        let app_cfg = build_setup_app_config(&config_ctx, &form_state, SourcesConfigDto::default());
+        assert!(app_cfg.config.metadata_update.is_none());
+    }
+
+    #[test]
+    fn setup_metadata_update_form_applies_cleaned_payload() {
+        let config_ctx = ConfigContext { config: Some(Rc::new(AppConfigDto::default())), api_proxy: None };
+        let mut form_state = crate::app::components::setup::SetupConfigFormState::default();
+        form_state.update_form(ConfigForm::MetadataUpdate(
+            true,
+            MetadataUpdateConfigDto { ffprobe_enabled: true, ffprobe_timeout: Some(60), ..Default::default() },
+        ));
+
+        let app_cfg = build_setup_app_config(&config_ctx, &form_state, SourcesConfigDto::default());
+        let metadata_update = app_cfg.config.metadata_update.expect("metadata_update config should be present");
+        assert!(metadata_update.ffprobe_enabled);
+        assert_eq!(metadata_update.ffprobe_timeout, None);
     }
 }

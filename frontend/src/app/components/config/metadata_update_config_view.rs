@@ -1,8 +1,12 @@
 use crate::{
     app::{
-        components::config::{
-            config_page::{ConfigForm, LABEL_METADATA_UPDATE_CONFIG},
-            config_view_context::ConfigViewContext,
+        components::{
+            config::{
+                config_page::{ConfigForm, LABEL_METADATA_UPDATE_CONFIG},
+                config_view_context::ConfigViewContext,
+            },
+            dto_field_id,
+            number_input::NumberInput,
         },
         context::ConfigContext,
     },
@@ -70,6 +74,7 @@ pub fn MetadataUpdateConfigView() -> Html {
     let translate = use_translation();
     let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");
     let config_view_ctx = use_context::<ConfigViewContext>().expect("ConfigViewContext not found");
+    let backoff_jitter_error: UseStateHandle<Option<String>> = use_state(|| None);
 
     let form_state: UseReducerHandle<MetadataUpdateConfigFormState> =
         use_reducer(|| MetadataUpdateConfigFormState { form: MetadataUpdateConfigDto::default(), modified: false });
@@ -88,6 +93,20 @@ pub fn MetadataUpdateConfigView() -> Html {
             config_ctx.config.as_ref().and_then(|c| c.config.metadata_update.clone()).unwrap_or_default();
         use_effect_with((metadata_update_cfg, config_view_ctx.edit_mode.clone()), move |(cfg, _mode)| {
             form_state.dispatch(MetadataUpdateConfigFormAction::SetAll(cfg.clone()));
+            || ()
+        });
+    }
+
+    {
+        let form_state = form_state.clone();
+        let backoff_jitter_error = backoff_jitter_error.clone();
+        use_effect_with(form_state.form.backoff_jitter_percent, move |value| {
+            if *value > 100 {
+                backoff_jitter_error.set(Some("Backoff jitter percent must be between 0 and 100.".to_string()));
+                form_state.dispatch(MetadataUpdateConfigFormAction::BackoffJitterPercent(100));
+            } else {
+                backoff_jitter_error.set(None);
+            }
             || ()
         });
     }
@@ -122,6 +141,12 @@ pub fn MetadataUpdateConfigView() -> Html {
     };
 
     let render_edit_mode = || {
+        let jitter_error_text = (*backoff_jitter_error).clone();
+        let jitter_error_state = backoff_jitter_error.clone();
+        let jitter_form_state = form_state.clone();
+        let jitter_label = translate.t(LABEL_BACKOFF_JITTER_PERCENT);
+        let jitter_field_id = dto_field_id(&jitter_form_state.form, "backoff_jitter_percent");
+
         html! {
             <>
                 { edit_field_bool!(form_state, translate.t(LABEL_FFPROBE_ENABLED), ffprobe_enabled, MetadataUpdateConfigFormAction::FfprobeEnabled) }
@@ -132,7 +157,38 @@ pub fn MetadataUpdateConfigView() -> Html {
                 { edit_field_text!(form_state, translate.t(LABEL_FFPROBE_LIVE_PROBE_SIZE), ffprobe_live_probe_size, MetadataUpdateConfigFormAction::FfprobeLiveProbeSize) }
                 { edit_field_number_u8!(form_state, translate.t(LABEL_MAX_ATTEMPTS_RESOLVE), max_attempts_resolve, MetadataUpdateConfigFormAction::MaxAttemptsResolve) }
                 { edit_field_number_u8!(form_state, translate.t(LABEL_MAX_ATTEMPTS_PROBE), max_attempts_probe, MetadataUpdateConfigFormAction::MaxAttemptsProbe) }
-                { edit_field_number_u8!(form_state, translate.t(LABEL_BACKOFF_JITTER_PERCENT), backoff_jitter_percent, MetadataUpdateConfigFormAction::BackoffJitterPercent) }
+                <div class="tp__form-field tp__form-field__number">
+                    <NumberInput
+                        label={Some(jitter_label)}
+                        name={"backoff_jitter_percent"}
+                        field_id={Some(jitter_field_id)}
+                        value={Some(i64::from(jitter_form_state.form.backoff_jitter_percent))}
+                        on_change={Callback::from(move |value: Option<i64>| {
+                            match value {
+                                Some(raw) if !(0..=100).contains(&raw) => {
+                                    jitter_error_state.set(Some("Backoff jitter percent must be between 0 and 100.".to_string()));
+                                }
+                                Some(raw) => {
+                                    jitter_error_state.set(None);
+                                    if let Ok(parsed) = u8::try_from(raw) {
+                                        jitter_form_state.dispatch(MetadataUpdateConfigFormAction::BackoffJitterPercent(parsed));
+                                    }
+                                }
+                                None => {
+                                    jitter_error_state.set(None);
+                                    jitter_form_state.dispatch(MetadataUpdateConfigFormAction::BackoffJitterPercent(0));
+                                }
+                            }
+                        })}
+                    />
+                    {
+                        if let Some(error_text) = jitter_error_text {
+                            html! { <div class="tp__error-text">{error_text}</div> }
+                        } else {
+                            html! {}
+                        }
+                    }
+                </div>
                 { edit_field_text!(form_state, translate.t(LABEL_RESOLVE_MIN_RETRY_BASE), resolve_min_retry_base, MetadataUpdateConfigFormAction::ResolveMinRetryBase) }
                 { edit_field_text!(form_state, translate.t(LABEL_MAX_RESOLVE_RETRY_BACKOFF), max_resolve_retry_backoff, MetadataUpdateConfigFormAction::MaxResolveRetryBackoff) }
                 { edit_field_text!(form_state, translate.t(LABEL_PROBE_RETRY_BACKOFF_STEP_1), probe_retry_backoff_step_1, MetadataUpdateConfigFormAction::ProbeRetryBackoffStep1) }

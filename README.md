@@ -429,9 +429,13 @@ metadata_update:
 - `max_queue_size` (default `100000`): Maximum pending metadata tasks per input before new tasks are rejected.
 - `ffprobe_enabled` (default `false`): Globally enables/disables FFprobe-based stream analysis.
 - `ffprobe_timeout` (default `60`): FFprobe process timeout in seconds.
-- `ffprobe_analyze_duration` (default `10s`): FFprobe `-analyzeduration` value for VOD/Series probing. Requires explicit unit suffix (`s`, `m`, `h`, `d`).
+- `ffprobe_analyze_duration` (default `10s`): FFprobe `-analyzeduration`
+  value for VOD/Series probing. Requires explicit unit suffix (`s`, `m`,
+  `h`, `d`).
 - `ffprobe_probe_size` (default `10MB`): FFprobe `-probesize` value for VOD/Series probing.
-- `ffprobe_live_analyze_duration` (default `5s`): FFprobe `-analyzeduration` value for Live probing. Requires explicit unit suffix (`s`, `m`, `h`, `d`).
+- `ffprobe_live_analyze_duration` (default `5s`): FFprobe `-analyzeduration`
+  value for Live probing. Requires explicit unit suffix (`s`, `m`, `h`,
+  `d`).
 - `ffprobe_live_probe_size` (default `5MB`): FFprobe `-probesize` value for Live probing.
 
 Duration fields support `s`, `m`, `h`, `d` (for example `30s`, `10m`, `1h`, `7d`) or plain seconds.
@@ -442,7 +446,9 @@ Size fields support `B`, `KB`, `MB`, `GB`, `TB` (for example `512KB`, `10MB`) or
 
 - `ffprobe_analyze_duration` + `ffprobe_probe_size` are the default pair for non-live probes (VOD/Series and generic non-live stream probes).
 - `ffprobe_live_analyze_duration` + `ffprobe_live_probe_size` are the live-specific pair for all live probes.
-- This split is intentional because live probing usually needs lower values (less provider load / lower latency), while VOD/Series can use higher values for better metadata extraction quality.
+- This split is intentional because live probing usually needs lower values
+  (less provider load / lower latency), while VOD/Series can use higher values
+  for better metadata extraction quality.
 
 **Glossary (`metadata_update`):**
 
@@ -451,7 +457,9 @@ Size fields support `B`, `KB`, `MB`, `GB`, `TB` (for example `512KB`, `10MB`) or
 - `Retry`: Re-attempt of a failed task.
 - `Attempt`: One execution try of a task. If it fails, the attempt counter increases.
 - `Backoff delay`: Waiting time before the next retry after a failure.
-- `Exponential backoff`: Backoff strategy where retry delay grows with each failed attempt (for example 5s, 10s, 20s, ...), up to a configured maximum.
+- `Exponential backoff`: Backoff strategy where retry delay grows with each
+  failed attempt (for example 5s, 10s, 20s, ...), up to a configured
+  maximum.
 - `Jitter`: Small random variation added to backoff delay to avoid many tasks retrying at exactly the same moment.
 - `Transient error`: Temporary failure (for example timeout, temporary no connection) that is likely to succeed on a later retry.
 - `Exhausted`: State when max attempts are reached for a task type.

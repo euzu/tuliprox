@@ -111,6 +111,10 @@ macro_rules! create_resolve_options_function_for_xtream_target {
 }
 use create_resolve_options_function_for_xtream_target;
 
+/// Foreground retry helper that retries each queued item at most once.
+///
+/// `retry_delay_secs` is applied sequentially per item, so the total wall-clock
+/// delay is roughly `retry_delay_secs * retry_item_count` plus network/DB time.
 macro_rules! process_foreground_retry_once {
     (
         ctx: $ctx:expr,
@@ -123,6 +127,7 @@ macro_rules! process_foreground_retry_once {
         db_lock_holder: $db_lock_holder:ident,
         batch: $batch:ident,
         batch_size: $batch_size:expr,
+        retry_batch_max_len: $retry_batch_max_len:expr,
         processed_count: $processed_count:ident,
         query_error_context: $query_error_context:expr,
         reasons: |$pli_reasons:ident| $reasons_expr:expr,
@@ -218,6 +223,9 @@ macro_rules! process_foreground_retry_once {
                                 let __updates: Vec<(u32, _)> = $batch
                                     .iter()
                                     .filter_map(|(__id, __props)| {
+                                        // Foreground retry batches can include text provider IDs (e.g. M3U).
+                                        // Persist batch functions for these paths are keyed by numeric Xtream IDs,
+                                        // so text IDs are intentionally skipped here.
                                         if let crate::api::model::ProviderIdType::Id(__vid) = __id {
                                             Some((*__vid, __props.clone()))
                                         } else {
@@ -237,6 +245,12 @@ macro_rules! process_foreground_retry_once {
                                         Ok(()) => $batch.clear(),
                                         Err($persist_err) => {
                                             $on_persist_error_expr;
+                                            if $batch.len() > $retry_batch_max_len {
+                                                let __drop_count = $batch.len().saturating_sub($retry_batch_max_len);
+                                                if __drop_count > 0 {
+                                                    $batch.drain(0..__drop_count);
+                                                }
+                                            }
                                         }
                                     }
                                 }

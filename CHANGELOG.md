@@ -169,7 +169,7 @@ active URL of the specified provider.
 - **Mapper View**: Updated to support new `for_each` syntax.
 - Added **Stream Buffer** settings (Enabled, Size) to Reverse Proxy configuration UI.
 - Added **TMDB** settings (Rate Limit, Cache Duration, Language) and **Metadata Formats** (NFO support) to Library configuration UI.
-- Added **Metadata Update** config tab and moved FFprobe controls from **Video** tab to the new tab.
+- Introduced the **Metadata Update** config tab, with FFprobe controls relocated from **Video** into it.
 
 ## 🚀 Performance & Stability
 
