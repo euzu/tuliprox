@@ -24,6 +24,7 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::task;
 use tokio_util::sync::CancellationToken;
+use url::Url;
 use crate::api::model::metadata_update_manager::MetadataUpdateManager;
 
 macro_rules! cancel_service {
@@ -531,20 +532,41 @@ impl AppState {
 
     pub fn should_use_manual_redirects(&self) -> bool {
         let config = self.app_config.config.load();
-        config.proxy.is_some() || proxy_env_present()
+        config
+            .proxy
+            .as_ref()
+            .is_some_and(|proxy| should_use_manual_redirect_for_proxy(proxy.url.as_str()))
+            || proxy_env_present()
     }
 }
 
 fn proxy_env_present() -> bool {
-    const ENV_KEYS: [&str; 3] = [
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-    ];
+    should_use_manual_redirects_for_env_vars(std::env::vars())
+}
 
-    std::env::vars().any(|(key, value)| {
-        ENV_KEYS.iter().any(|k| k.eq_ignore_ascii_case(&key))
-            && !value.trim().is_empty()
+fn should_use_manual_redirect_for_proxy(proxy_url: &str) -> bool {
+    Url::parse(proxy_url).is_ok_and(|url| {
+        matches!(
+            url.scheme().to_ascii_lowercase().as_str(),
+            "http" | "https"
+        )
+    })
+}
+
+fn should_use_manual_redirects_for_env_vars<I, K, V>(vars: I) -> bool
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: AsRef<str>,
+    V: AsRef<str>,
+{
+    const ENV_KEYS: [&str; 3] = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"];
+
+    vars.into_iter().any(|(key, value)| {
+        let key = key.as_ref();
+        let value = value.as_ref().trim();
+        ENV_KEYS.iter().any(|candidate| candidate.eq_ignore_ascii_case(key))
+            && !value.is_empty()
+            && should_use_manual_redirect_for_proxy(value)
     })
 }
 
@@ -588,4 +610,40 @@ pub struct HdHomerunAppState {
     pub app_state: Arc<AppState>,
     pub device: Arc<HdHomeRunDeviceConfig>,
     pub hd_scan_state: Arc<AtomicI8>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        should_use_manual_redirect_for_proxy, should_use_manual_redirects_for_env_vars,
+    };
+
+    #[test]
+    fn should_use_manual_redirect_for_proxy_only_http_or_https() {
+        assert!(should_use_manual_redirect_for_proxy("http://proxy.local:8080"));
+        assert!(should_use_manual_redirect_for_proxy("https://proxy.local:8443"));
+        assert!(!should_use_manual_redirect_for_proxy("socks5://proxy.local:1080"));
+        assert!(!should_use_manual_redirect_for_proxy("socks5h://proxy.local:1080"));
+        assert!(!should_use_manual_redirect_for_proxy("proxy.local:8080"));
+    }
+
+    #[test]
+    fn should_use_manual_redirects_for_env_vars_only_when_http_proxy_is_present() {
+        assert!(should_use_manual_redirects_for_env_vars(vec![(
+            "HTTP_PROXY".to_string(),
+            "http://proxy.local:8080".to_string(),
+        )]));
+        assert!(should_use_manual_redirects_for_env_vars(vec![(
+            "all_proxy".to_string(),
+            "https://proxy.local:8443".to_string(),
+        )]));
+        assert!(!should_use_manual_redirects_for_env_vars(vec![(
+            "ALL_PROXY".to_string(),
+            "socks5://proxy.local:1080".to_string(),
+        )]));
+        assert!(!should_use_manual_redirects_for_env_vars(vec![(
+            "NO_PROXY".to_string(),
+            "http://localhost".to_string(),
+        )]));
+    }
 }
