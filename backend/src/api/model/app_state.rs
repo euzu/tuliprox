@@ -18,6 +18,7 @@ use shared::info_err_res;
 use shared::model::UserConnectionPermission;
 use shared::utils::small_vecs_equal_unordered;
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::sync::atomic::AtomicI8;
 use std::sync::Arc;
 use std::time::Duration;
@@ -541,7 +542,7 @@ impl AppState {
 }
 
 fn proxy_env_present() -> bool {
-    should_use_manual_redirects_for_env_vars(std::env::vars())
+    should_use_manual_redirects_for_env_vars(std::env::vars_os())
 }
 
 fn should_use_manual_redirect_for_proxy(proxy_url: &str) -> bool {
@@ -556,14 +557,19 @@ fn should_use_manual_redirect_for_proxy(proxy_url: &str) -> bool {
 fn should_use_manual_redirects_for_env_vars<I, K, V>(vars: I) -> bool
 where
     I: IntoIterator<Item = (K, V)>,
-    K: AsRef<str>,
-    V: AsRef<str>,
+    K: AsRef<OsStr>,
+    V: AsRef<OsStr>,
 {
     const ENV_KEYS: [&str; 3] = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"];
 
     vars.into_iter().any(|(key, value)| {
-        let key = key.as_ref();
-        let value = value.as_ref().trim();
+        let Some(key) = key.as_ref().to_str() else {
+            return false;
+        };
+        let Some(value) = value.as_ref().to_str() else {
+            return false;
+        };
+        let value = value.trim();
         ENV_KEYS.iter().any(|candidate| candidate.eq_ignore_ascii_case(key))
             && !value.is_empty()
             && should_use_manual_redirect_for_proxy(value)
