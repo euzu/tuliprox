@@ -630,8 +630,12 @@ impl MetadataUpdateManager {
                 ) => {
                     *r1 |= r2;
                     *d1 = min(*d1, d2);
-                    *url1 = url2;
-                    *item_type1 = item_type2;
+                    // Keep the existing payload by default; only fill it from the incoming
+                    // task when the destination payload is empty.
+                    if url1.is_empty() && !url2.is_empty() {
+                        *url1 = url2;
+                        *item_type1 = item_type2;
+                    }
                     merged = true;
                 }
                 (
@@ -2351,6 +2355,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submit_task_probe_stream_merge_keeps_existing_payload_when_present() {
+        let (tx, mut rx) = mpsc::channel::<TaskKey>(8);
+        let pending_tasks = Arc::new(DashMap::new());
+        let queue_size = MetadataUpdateRuntimeSettings::default().max_queue_size;
+
+        let initial = UpdateTask::ProbeStream {
+            probe_scope: Arc::from("scope_a"),
+            unique_id: "uid_1".to_string(),
+            url: "http://old.example/stream".to_string(),
+            item_type: PlaylistItemType::Video,
+            reason: ResolveReasonSet::from_variants(&[ResolveReason::MissingDetails]),
+            delay: 10,
+        };
+        MetadataUpdateManager::submit_task(tx.clone(), pending_tasks.clone(), "input_a", queue_size, initial).await;
+
+        let merged_in = UpdateTask::ProbeStream {
+            probe_scope: Arc::from("scope_a"),
+            unique_id: "uid_1".to_string(),
+            url: "http://new.example/stream".to_string(),
+            item_type: PlaylistItemType::LocalVideo,
+            reason: ResolveReasonSet::from_variants(&[ResolveReason::Probe]),
+            delay: 2,
+        };
+        MetadataUpdateManager::submit_task(tx, pending_tasks.clone(), "input_a", queue_size, merged_in).await;
+
+        let first_signal = rx.try_recv().expect("first signal should be queued");
+        assert_eq!(
+            first_signal,
+            TaskKey::Stream {
+                scope: Arc::from("scope_a"),
+                id: Arc::from("uid_1"),
+            }
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty | tokio::sync::mpsc::error::TryRecvError::Disconnected)
+        ));
+
+        let key = TaskKey::Stream {
+            scope: Arc::from("scope_a"),
+            id: Arc::from("uid_1"),
+        };
+        let entry = pending_tasks.get(&key).expect("pending entry should exist");
+        assert_eq!(entry.generation.load(Ordering::Relaxed), 1);
+
+        let merged = entry.task.lock().clone();
+        match merged {
+            UpdateTask::ProbeStream {
+                reason,
+                delay,
+                url,
+                item_type,
+                ..
+            } => {
+                assert!(reason.contains(ResolveReason::MissingDetails));
+                assert!(reason.contains(ResolveReason::Probe));
+                assert_eq!(delay, 2);
+                assert_eq!(url, "http://old.example/stream");
+                assert_eq!(item_type, PlaylistItemType::Video);
+            }
+            other => panic!("unexpected task type after merge: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn finalize_processed_task_success_requeues_when_generation_changed() {
         let (tx, rx) = mpsc::channel::<TaskKey>(8);
         let pending_tasks = Arc::new(DashMap::new());
@@ -2515,5 +2584,13 @@ mod tests {
         assert!((480..=720).contains(&first), "expected ~10m with jitter, got {first}");
         assert!((1_440..=2_160).contains(&second), "expected ~30m with jitter, got {second}");
         assert!((2_880..=4_320).contains(&third), "expected ~60m with jitter, got {third}");
+    }
+
+    #[test]
+    fn transient_worker_errors_include_connection_unavailable() {
+        assert!(InputWorker::is_transient_worker_error(TASK_ERR_UPDATE_IN_PROGRESS));
+        assert!(InputWorker::is_transient_worker_error(TASK_ERR_PREEMPTED));
+        assert!(InputWorker::is_transient_worker_error(TASK_ERR_NO_CONNECTION));
+        assert!(!InputWorker::is_transient_worker_error("permanent error"));
     }
 }

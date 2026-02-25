@@ -9,7 +9,8 @@ use crate::processing::parser::xtream::parse_xtream_series_info;
 use crate::processing::processor::playlist::{PlaylistProcessingContext, ProcessingPipe};
 use crate::processing::processor::{
     create_resolve_options_function_for_xtream_target, process_foreground_retry_once, ResolveOptions,
-    ResolveOptionsFlags,
+    ResolveOptionsFlags, FOREGROUND_BATCH_SIZE as BATCH_SIZE, FOREGROUND_MIN_RETRY_DELAY_SECS,
+    FOREGROUND_RETRY_BATCH_MAX_SIZE as RETRY_BATCH_MAX_SIZE,
 };
 use crate::ptt::ptt_parse_title;
 use crate::repository::persists_input_series_info;
@@ -32,10 +33,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 create_resolve_options_function_for_xtream_target!(series);
-
-const BATCH_SIZE: usize = 200;
-const RETRY_BATCH_MAX_SIZE: usize = BATCH_SIZE * 4;
-const FOREGROUND_MIN_RETRY_DELAY_SECS: u64 = 1;
 
 #[allow(clippy::too_many_arguments)]
 pub async fn playlist_resolve_series(
@@ -510,7 +507,7 @@ async fn update_series_info_immediate(
 fn check_resolve_reasons(
     resolve_options: &ResolveOptions,
     resolve_tmdb_enabled: bool,
-    pli: &mut PlaylistItem,
+    pli: &PlaylistItem,
 ) -> ResolveReasonSet {
     let mut reasons = ResolveReasonSet::new();
 
@@ -523,7 +520,7 @@ fn check_resolve_reasons(
     reasons
 }
 
-fn check_needs_info(resolve_options: &ResolveOptions, pli: &mut PlaylistItem, reasons: &mut ResolveReasonSet) -> bool {
+fn check_needs_info(resolve_options: &ResolveOptions, pli: &PlaylistItem, reasons: &mut ResolveReasonSet) -> bool {
     let needs_info = resolve_options.has_flag(ResolveOptionsFlags::Resolve) && !pli.has_details();
     if needs_info {
         reasons.set(ResolveReason::Info);
@@ -534,7 +531,7 @@ fn check_needs_info(resolve_options: &ResolveOptions, pli: &mut PlaylistItem, re
 fn check_resolve_tmdb(
     resolve_options: &ResolveOptions,
     resolve_tmdb_enabled: bool,
-    pli: &mut PlaylistItem,
+    pli: &PlaylistItem,
     reasons: &mut ResolveReasonSet,
 ) {
     if resolve_tmdb_enabled && resolve_options.has_flag(ResolveOptionsFlags::TmdbMissing) {

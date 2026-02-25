@@ -8,7 +8,8 @@ use crate::model::{ConfigInput, ConfigInputFlags};
 use crate::processing::processor::playlist::PlaylistProcessingContext;
 use crate::processing::processor::{
     create_resolve_options_function_for_xtream_target, process_foreground_retry_once, ResolveOptions,
-    ResolveOptionsFlags,
+    ResolveOptionsFlags, FOREGROUND_BATCH_SIZE as BATCH_SIZE, FOREGROUND_MIN_RETRY_DELAY_SECS,
+    FOREGROUND_RETRY_BATCH_MAX_SIZE as RETRY_BATCH_MAX_SIZE,
 };
 use crate::ptt::ptt_parse_title;
 use crate::repository::get_input_storage_path;
@@ -29,10 +30,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 create_resolve_options_function_for_xtream_target!(vod);
-
-const BATCH_SIZE: usize = 200;
-const RETRY_BATCH_MAX_SIZE: usize = BATCH_SIZE * 4;
-const FOREGROUND_MIN_RETRY_DELAY_SECS: u64 = 1;
 
 #[allow(clippy::too_many_lines)]
 pub async fn playlist_resolve_vod(

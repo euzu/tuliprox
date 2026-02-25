@@ -8,6 +8,31 @@ pub fn current_time_secs() -> u64 {
 
 pub fn unix_ts_to_str(ts: i64) -> Option<String> { unix_ts_to_str_with_format(ts, "%Y-%m-%d %H:%M:%S") }
 
+/// Parse a duration string into seconds.
+///
+/// Supported formats:
+/// - plain seconds (`"30"`) when `require_unit` is `false`
+/// - suffixed units: `s`, `m`, `h`, `d` (for example `"30s"`, `"5m"`, `"1h"`, `"2d"`)
+pub fn parse_duration_seconds(value: &str, require_unit: bool) -> Option<u64> {
+    if let Ok(seconds) = value.parse::<u64>() {
+        return if require_unit { None } else { Some(seconds) };
+    }
+
+    if value.len() <= 1 {
+        return None;
+    }
+
+    let (number_part, unit_part) = value.split_at(value.len() - 1);
+    let number = number_part.parse::<u64>().ok()?;
+    match unit_part {
+        "s" => Some(number),
+        "m" => Some(number.saturating_mul(60)),
+        "h" => Some(number.saturating_mul(60 * 60)),
+        "d" => Some(number.saturating_mul(24 * 60 * 60)),
+        _ => None,
+    }
+}
+
 fn normalize_ts(ts: i64) -> Option<i64> {
     if ts >= 0 {
         // Timestamps > Jan 1, 2100 (in seconds) are assumed to be in milliseconds

@@ -9,8 +9,8 @@ use crate::{
         default_resolve_background, default_resolve_delay_secs, default_xtream_live_stream_use_prefix,
         deserialize_timestamp, get_credentials_from_url_str, get_trimmed_string, is_blank_optional_string,
         is_default_probe_delay_secs, is_default_probe_live_interval, is_default_resolve_delay_secs, is_false, is_true,
-        is_zero_u16, parse_provider_scheme_url_parts, sanitize_sensitive_info, serialize_option_vec_flow_map_items,
-        trim_last_slash, Internable, PROVIDER_SCHEME_PREFIX,
+        is_zero_u16, parse_duration_seconds, parse_provider_scheme_url_parts, sanitize_sensitive_info,
+        serialize_option_vec_flow_map_items, trim_last_slash, Internable, PROVIDER_SCHEME_PREFIX,
     },
 };
 use enum_iterator::Sequence;
@@ -509,29 +509,10 @@ impl ConfigInputDto {
     }
 
     fn parse_duration(&self, duration_str: &str) -> Result<u64, TuliproxError> {
-        Ok(match duration_str.parse::<u64>() {
-            Ok(secs) => secs,
-            Err(_) => {
-                let len = duration_str.len();
-                if len > 1 {
-                    let (num_str, unit) = duration_str.split_at(len - 1);
-                    match num_str.parse::<u64>() {
-                        Ok(val) => match unit {
-                            "s" => val,
-                            "m" => val * 60,
-                            "h" => val * 3600,
-                            "d" => val * 86400,
-                            _ => return info_err_res!("Invalid cache_duration unit in '{}': {}", self.name, unit),
-                        },
-                        Err(_) => {
-                            return info_err_res!("Invalid cache_duration format in '{}': {}", self.name, duration_str)
-                        }
-                    }
-                } else {
-                    return info_err_res!("Invalid cache_duration format in '{}'", self.name);
-                }
-            }
-        })
+        match parse_duration_seconds(duration_str, false) {
+            Some(seconds) => Ok(seconds),
+            None => info_err_res!("Invalid cache_duration format in '{}': {}", self.name, duration_str),
+        }
     }
 
     pub fn prepare_epg(&mut self, include_computed: bool) -> Result<(), TuliproxError> {

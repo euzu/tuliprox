@@ -21,7 +21,8 @@ use crate::{
         is_default_metadata_probe_retry_backoff_step_3, is_default_metadata_probe_retry_load_retry_delay,
         is_default_metadata_progress_log_interval, is_default_metadata_queue_log_interval,
         is_default_metadata_resolve_exhaustion_reset_gap, is_default_metadata_resolve_min_retry_base,
-        is_default_metadata_retry_delay, is_default_metadata_worker_idle_timeout, is_false, parse_size_base_2,
+        is_default_metadata_retry_delay, is_default_metadata_worker_idle_timeout, is_false, parse_duration_seconds,
+        parse_size_base_2,
     },
 };
 use std::sync::OnceLock;
@@ -171,31 +172,7 @@ impl MetadataUpdateConfigDto {
         DEFAULTS.get_or_init(Self::default)
     }
 
-    pub fn is_empty(&self) -> bool {
-        let defaults = Self::defaults();
-        self.queue_log_interval == defaults.queue_log_interval
-            && self.progress_log_interval == defaults.progress_log_interval
-            && self.max_resolve_retry_backoff == defaults.max_resolve_retry_backoff
-            && self.resolve_min_retry_base == defaults.resolve_min_retry_base
-            && self.resolve_exhaustion_reset_gap == defaults.resolve_exhaustion_reset_gap
-            && self.probe_cooldown == defaults.probe_cooldown
-            && self.retry_delay == defaults.retry_delay
-            && self.probe_retry_load_retry_delay == defaults.probe_retry_load_retry_delay
-            && self.worker_idle_timeout == defaults.worker_idle_timeout
-            && self.probe_retry_backoff_step_1 == defaults.probe_retry_backoff_step_1
-            && self.probe_retry_backoff_step_2 == defaults.probe_retry_backoff_step_2
-            && self.probe_retry_backoff_step_3 == defaults.probe_retry_backoff_step_3
-            && self.max_attempts_resolve == defaults.max_attempts_resolve
-            && self.max_attempts_probe == defaults.max_attempts_probe
-            && self.backoff_jitter_percent == defaults.backoff_jitter_percent
-            && self.max_queue_size == defaults.max_queue_size
-            && self.ffprobe_enabled == defaults.ffprobe_enabled
-            && self.ffprobe_timeout == defaults.ffprobe_timeout
-            && self.ffprobe_analyze_duration == defaults.ffprobe_analyze_duration
-            && self.ffprobe_probe_size == defaults.ffprobe_probe_size
-            && self.ffprobe_live_analyze_duration == defaults.ffprobe_live_analyze_duration
-            && self.ffprobe_live_probe_size == defaults.ffprobe_live_probe_size
-    }
+    pub fn is_empty(&self) -> bool { self == Self::defaults() }
 
     pub fn clean(&mut self) {
         if self.ffprobe_timeout.is_some_and(|v| v == DEFAULT_FFPROBE_TIMEOUT_SECS) {
@@ -328,26 +305,8 @@ impl MetadataUpdateConfigDto {
     }
 
     fn parse_duration(value: &str, field_name: &str) -> Result<u64, TuliproxError> {
-        if let Ok(seconds) = value.parse::<u64>() {
-            return Ok(seconds);
-        }
-
-        if value.len() <= 1 {
-            return info_err_res!("Invalid duration format for `{field_name}`: {value}");
-        }
-
-        let (number_part, unit_part) = value.split_at(value.len() - 1);
-        let number = number_part
-            .parse::<u64>()
-            .map_err(|_| crate::error::info_err!("Invalid duration value for `{field_name}`: {value}"))?;
-
-        match unit_part {
-            "s" => Ok(number),
-            "m" => Ok(number.saturating_mul(60)),
-            "h" => Ok(number.saturating_mul(60 * 60)),
-            "d" => Ok(number.saturating_mul(24 * 60 * 60)),
-            _ => info_err_res!("Invalid duration unit for `{field_name}`: {unit_part}"),
-        }
+        parse_duration_seconds(value, false)
+            .ok_or_else(|| crate::error::info_err!("Invalid duration format for `{field_name}`: {value}"))
     }
 
     fn canonicalize_seconds(seconds: u64) -> String {

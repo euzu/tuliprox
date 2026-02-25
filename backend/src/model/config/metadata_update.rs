@@ -8,7 +8,7 @@ use shared::utils::{
     default_metadata_probe_retry_backoff_step_3, default_metadata_probe_retry_load_retry_delay,
     default_metadata_progress_log_interval, default_metadata_queue_log_interval,
     default_metadata_resolve_exhaustion_reset_gap, default_metadata_resolve_min_retry_base,
-    default_metadata_retry_delay, default_metadata_worker_idle_timeout, parse_size_base_2,
+    default_metadata_retry_delay, default_metadata_worker_idle_timeout, parse_duration_seconds, parse_size_base_2,
 };
 
 #[derive(Debug, Clone)]
@@ -59,29 +59,10 @@ impl Default for MetadataUpdateConfig {
 
 macros::from_impl!(MetadataUpdateConfig);
 
-fn parse_duration_secs(value: &str, require_unit: bool) -> Option<u64> {
-    if let Ok(seconds) = value.parse::<u64>() {
-        return if require_unit { None } else { Some(seconds.max(1)) };
-    }
-    if value.len() <= 1 {
-        return None;
-    }
-    let (number_part, unit_part) = value.split_at(value.len() - 1);
-    let number = number_part.parse::<u64>().ok()?;
-    let seconds = match unit_part {
-        "s" => number,
-        "m" => number.saturating_mul(60),
-        "h" => number.saturating_mul(60 * 60),
-        "d" => number.saturating_mul(24 * 60 * 60),
-        _ => return None,
-    };
-    Some(seconds.max(1))
-}
-
 fn parse_duration_or_default(value: &str, default_value: &str, require_unit: bool) -> u64 {
-    parse_duration_secs(value, require_unit)
-        .or_else(|| parse_duration_secs(default_value, require_unit))
-        .unwrap_or(1)
+    parse_duration_seconds(value, require_unit)
+        .or_else(|| parse_duration_seconds(default_value, require_unit))
+        .map_or(1, |v| v.max(1))
 }
 
 fn parse_size_or_default(value: &str, default_value: &str) -> u64 {

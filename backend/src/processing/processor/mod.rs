@@ -43,6 +43,10 @@ impl Default for ResolveOptions {
     }
 }
 
+pub(crate) const FOREGROUND_BATCH_SIZE: usize = 200;
+pub(crate) const FOREGROUND_RETRY_BATCH_MAX_SIZE: usize = FOREGROUND_BATCH_SIZE * 4;
+pub(crate) const FOREGROUND_MIN_RETRY_DELAY_SECS: u64 = 1;
+
 
 //
 // fn get_resolve_<cluster>_options(target: &ConfigTarget, fpl: &FetchedPlaylist) -> bool
