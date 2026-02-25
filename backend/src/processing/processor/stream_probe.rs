@@ -120,6 +120,7 @@ pub async fn update_generic_stream_metadata(
         analyze_duration,
         probe_size,
         ffprobe_timeout,
+        config.proxy.as_ref(),
     ).await;
 
     if let Some(handle) = acquired_handle {

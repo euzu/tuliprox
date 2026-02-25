@@ -1,9 +1,11 @@
+use crate::model::ProxyConfig;
 use log::{debug, warn};
-use tokio::process::Command;
-use std::time::Duration;
 use serde_json::Value;
 use shared::model::MediaQuality;
 use shared::utils::sanitize_sensitive_info;
+use std::time::Duration;
+use tokio::process::Command;
+use url::Url;
 
 // Checks if ffprobe is available in the system path
 pub async fn check_ffprobe_availability() -> bool {
@@ -13,7 +15,52 @@ pub async fn check_ffprobe_availability() -> bool {
     }
 }
 
-pub async fn probe_url(url: &str, user_agent: Option<&str>, analyze_duration: u64, probe_size: u64, timeout_secs: u64) -> Option<(MediaQuality, Option<Value>, Option<Value>)> {
+fn build_ffprobe_proxy_url(proxy_cfg: &ProxyConfig) -> Option<String> {
+    let mut proxy_url = Url::parse(proxy_cfg.url.as_str()).ok()?;
+    if let Some(username) = proxy_cfg.username.as_deref() {
+        let _ = proxy_url.set_username(username);
+        if let Some(password) = proxy_cfg.password.as_deref() {
+            let _ = proxy_url.set_password(Some(password));
+        }
+    }
+    Some(proxy_url.to_string())
+}
+
+fn apply_proxy_to_ffprobe(command: &mut Command, proxy_cfg: Option<&ProxyConfig>) {
+    let Some(proxy_cfg) = proxy_cfg else {
+        return;
+    };
+
+    let Some(proxy_url) = build_ffprobe_proxy_url(proxy_cfg) else {
+        warn!(
+            "Ignoring invalid ffprobe proxy URL: {}",
+            sanitize_sensitive_info(proxy_cfg.url.as_str())
+        );
+        return;
+    };
+
+    // ffprobe is an external process and does not consume the app's reqwest proxy config.
+    // Export proxy env vars explicitly so all probe requests honor the configured upstream proxy.
+    for key in [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ] {
+        command.env(key, proxy_url.as_str());
+    }
+}
+
+pub async fn probe_url(
+    url: &str,
+    user_agent: Option<&str>,
+    analyze_duration: u64,
+    probe_size: u64,
+    timeout_secs: u64,
+    proxy_cfg: Option<&ProxyConfig>,
+) -> Option<(MediaQuality, Option<Value>, Option<Value>)> {
     // Determine timeout: Ensure it's at least as long as the analyze duration + buffer, 
     // but respect the user setting if it's longer.
     let analyze_overhead = Duration::from_micros(analyze_duration) + Duration::from_secs(5);
@@ -32,6 +79,8 @@ pub async fn probe_url(url: &str, user_agent: Option<&str>, analyze_duration: u6
         // Optimization for network streams
         .arg("-analyzeduration").arg(analyze_duration.to_string())
         .arg("-probesize").arg(probe_size.to_string());
+
+    apply_proxy_to_ffprobe(&mut command, proxy_cfg);
         
     if let Some(ua) = user_agent {
         command.arg("-user_agent").arg(ua);
@@ -111,4 +160,32 @@ pub async fn probe_url(url: &str, user_agent: Option<&str>, analyze_duration: u6
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_ffprobe_proxy_url;
+    use crate::model::ProxyConfig;
+
+    #[test]
+    fn build_ffprobe_proxy_url_injects_credentials() {
+        let proxy_cfg = ProxyConfig {
+            url: "http://proxy.local:8080".to_string(),
+            username: Some("alice".to_string()),
+            password: Some("secret".to_string()),
+        };
+        let resolved = build_ffprobe_proxy_url(&proxy_cfg).expect("proxy url should parse");
+        assert!(resolved.contains("alice:secret@proxy.local:8080"));
+    }
+
+    #[test]
+    fn build_ffprobe_proxy_url_keeps_existing_inline_credentials() {
+        let proxy_cfg = ProxyConfig {
+            url: "socks5://bob:pass@proxy.local:1080".to_string(),
+            username: None,
+            password: None,
+        };
+        let resolved = build_ffprobe_proxy_url(&proxy_cfg).expect("proxy url should parse");
+        assert!(resolved.contains("bob:pass@proxy.local:1080"));
+    }
 }

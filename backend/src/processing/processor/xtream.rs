@@ -137,6 +137,7 @@ pub async fn update_live_stream_metadata(
         analyze_duration,
         probe_size,
         ffprobe_timeout,
+        config.proxy.as_ref(),
     ).await {
         // 3. Update properties on success
         if let Some(v) = raw_video {
