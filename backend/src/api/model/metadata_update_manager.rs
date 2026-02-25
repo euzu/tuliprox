@@ -2,7 +2,7 @@ use crate::api::model::ProviderHandle;
 use crate::api::model::{AppState, EventMessage};
 use crate::processing::processor::{
     update_generic_stream_metadata, update_live_stream_metadata, update_series_metadata, update_vod_metadata,
-    GenericProbeOutcome,
+    GenericProbeOutcome, SeriesProbeSettings,
 };
 use crate::utils::debug_if_enabled;
 use dashmap::mapref::entry::Entry;
@@ -776,15 +776,14 @@ impl InputWorker {
         let mut next_task: Option<(TaskKey, UpdateTask, u64)> = None;
 
         loop {
+            let runtime_settings = self.runtime_settings();
             let task_data = if let Some(t) = next_task.take() {
                 Some(t)
             } else {
-                let wait_runtime_settings = self.runtime_settings();
-                self.recv_task_fast_or_wait(&wait_runtime_settings).await
+                self.recv_task_fast_or_wait(&runtime_settings).await
             };
 
             let Some((current_key, current_task, current_generation)) = task_data else { break };
-            let runtime_settings = self.runtime_settings();
             if !self.probe_retry_loaded {
                 self.ensure_probe_retry_state_loaded(&input_name, app_state_weak.as_ref(), &runtime_settings)
                     .await;
@@ -1063,7 +1062,8 @@ impl InputWorker {
             }
 
             let channel_has_work = next_task.is_some() || !self.receiver.is_empty();
-            let queue_completely_empty = !channel_has_work && self.pending_tasks.is_empty();
+            let queue_completely_empty =
+                !channel_has_work && self.pending_tasks.is_empty() && self.scheduled_requeues.is_empty();
 
             // Avoid O(n) queue scans per task; report queue status periodically.
             if (channel_has_work || !self.pending_tasks.is_empty())
@@ -1142,14 +1142,13 @@ impl InputWorker {
         let retry_path = storage_path.join(PROBE_RETRY_STATE_FILE);
         self.probe_retry_state_path = Some(retry_path.clone());
 
-        let loaded = match tokio::task::spawn_blocking(move || load_probe_retry_states_from_disk(&retry_path)).await {
-            Ok(Ok(states)) => states,
-            Ok(Err(err)) => {
-                warn!("Failed to load probe retry state for input {input_name}: {err}");
-                self.probe_retry_load_retry_at_ts =
-                    Some(now_ts.saturating_add(runtime_settings.probe_retry_load_retry_delay_secs));
-                return;
-            }
+        let loaded = tokio::task::spawn_blocking(move || load_probe_retry_states_from_disk(&retry_path))
+            .await
+            .map_err(|err| err.to_string())
+            .and_then(|result| result.map_err(|err| err.to_string()));
+
+        let loaded = match loaded {
+            Ok(states) => states,
             Err(err) => {
                 warn!("Failed to load probe retry state for input {input_name}: {err}");
                 self.probe_retry_load_retry_at_ts =
@@ -2232,9 +2231,12 @@ impl InputWorker {
             }
             UpdateTask::ResolveSeries { id, reason, .. } => {
                 let fetch_info = reason.contains(ResolveReason::Info);
-                let resolve_tmdb =
-                    fetch_info || reason.contains(ResolveReason::Tmdb) || reason.contains(ResolveReason::Date);
+                let resolve_tmdb = reason.contains(ResolveReason::Tmdb) || reason.contains(ResolveReason::Date);
                 let will_probe = reason.contains(ResolveReason::Probe);
+                let series_probe_settings = {
+                    let config = app_state.app_config.config.load();
+                    SeriesProbeSettings::from_metadata_update(config.metadata_update.as_ref())
+                };
 
                 if will_probe {
                     db_handles.remove(&XtreamCluster::Series);
@@ -2260,6 +2262,7 @@ impl InputWorker {
                     fetch_info,
                     resolve_tmdb,
                     will_probe,
+                    series_probe_settings,
                     query_opt,
                 )
                 .await
@@ -2301,6 +2304,8 @@ impl InputWorker {
                 if !db_handles.is_empty() {
                     db_handles.clear();
                 }
+                let task_key = TaskKey::from_task(task);
+                let probe_identifier = if unique_id.trim().is_empty() { url.as_str() } else { unique_id.as_str() };
 
                 let outcome = update_generic_stream_metadata(
                     &app_state.app_config,
@@ -2316,8 +2321,9 @@ impl InputWorker {
                 match outcome {
                     GenericProbeOutcome::Updated | GenericProbeOutcome::Noop => Ok(()),
                     GenericProbeOutcome::ProbeFailed => Err(shared::error::info_err!(
-                        "Probe stream task failed for {}",
-                        unique_id
+                        "Probe stream task failed for key {:?} ({})",
+                        task_key,
+                        probe_identifier
                     )),
                 }
             }

@@ -2,7 +2,7 @@ use crate::api::model::UpdateTask;
 use crate::api::model::{ActiveProviderManager, ProviderHandle, ProviderIdType, ResolveReason, ResolveReasonSet};
 use crate::library::MetadataResolver;
 use crate::model::FetchedPlaylist;
-use crate::model::{AppConfig, ConfigTarget};
+use crate::model::{AppConfig, ConfigTarget, MetadataUpdateConfig};
 use crate::model::{ConfigInput, ConfigInputFlags, InputSource};
 use crate::processing::parser::xtream::create_xtream_series_episode_url;
 use crate::processing::parser::xtream::parse_xtream_series_info;
@@ -33,6 +33,26 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 create_resolve_options_function_for_xtream_target!(series);
+
+#[derive(Debug, Clone, Copy)]
+pub struct SeriesProbeSettings {
+    pub timeout_secs: u64,
+    pub analyze_duration_micros: u64,
+    pub probe_size_bytes: u64,
+}
+
+impl SeriesProbeSettings {
+    pub fn from_metadata_update(metadata_update: Option<&MetadataUpdateConfig>) -> Self {
+        let defaults = MetadataUpdateConfig::default();
+        Self {
+            timeout_secs: metadata_update.and_then(|cfg| cfg.ffprobe_timeout).unwrap_or(60),
+            analyze_duration_micros: metadata_update
+                .map_or(defaults.ffprobe_analyze_duration_micros, |cfg| cfg.ffprobe_analyze_duration_micros),
+            probe_size_bytes: metadata_update
+                .map_or(defaults.ffprobe_probe_size_bytes, |cfg| cfg.ffprobe_probe_size_bytes),
+        }
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub async fn playlist_resolve_series(
@@ -230,6 +250,10 @@ async fn process_immediate_series_info(
     let mut retry_once_ids: HashSet<ProviderIdType> = HashSet::new();
     let mut processed_count = 0;
     let mut last_log_time = Instant::now();
+    let series_probe_settings = {
+        let config = ctx.config.config.load();
+        SeriesProbeSettings::from_metadata_update(config.metadata_update.as_ref())
+    };
 
     for pli in fpl.items_mut() {
         if !filter(pli) {
@@ -283,6 +307,7 @@ async fn process_immediate_series_info(
                         provider_id.clone(),
                         &reasons,
                         db_query_ref,
+                        series_probe_settings,
                     )
                     .await
                     {
@@ -389,6 +414,7 @@ async fn process_immediate_series_info(
                 provider_id,
                 reasons,
                 db_query_ref,
+                series_probe_settings,
             ),
             apply_properties: |retry_pli, updated_props| {
                 retry_pli.header.additional_properties =
@@ -469,6 +495,7 @@ fn expand_series_item(pli: &PlaylistItem, input: &ConfigInput) -> Option<Playlis
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn update_series_info_immediate(
     ctx: &PlaylistProcessingContext,
     active_provider: &Arc<ActiveProviderManager>,
@@ -477,10 +504,10 @@ async fn update_series_info_immediate(
     id: ProviderIdType,
     reasons: &ResolveReasonSet,
     db_query: Option<Arc<Mutex<BPlusTreeQuery<u32, XtreamPlaylistItem>>>>,
+    probe_settings: SeriesProbeSettings,
 ) -> Result<Option<SeriesStreamProperties>, TuliproxError> {
     let fetch_info = reasons.contains(ResolveReason::Info);
-    let resolve_tmdb =
-        fetch_info || reasons.contains(ResolveReason::Tmdb) || reasons.contains(ResolveReason::Date);
+    let resolve_tmdb = reasons.contains(ResolveReason::Tmdb) || reasons.contains(ResolveReason::Date);
 
     update_series_metadata(
         &ctx.config,
@@ -494,6 +521,7 @@ async fn update_series_info_immediate(
         fetch_info,
         resolve_tmdb,
         reasons.contains(ResolveReason::Probe),
+        probe_settings,
         db_query,
     )
     .await
@@ -515,12 +543,11 @@ fn check_resolve_reasons(
     reasons
 }
 
-fn check_needs_info(resolve_options: &ResolveOptions, pli: &PlaylistItem, reasons: &mut ResolveReasonSet) -> bool {
+fn check_needs_info(resolve_options: &ResolveOptions, pli: &PlaylistItem, reasons: &mut ResolveReasonSet) {
     let needs_info = resolve_options.has_flag(ResolveOptionsFlags::Resolve) && !pli.has_details();
     if needs_info {
         reasons.set(ResolveReason::Info);
     }
-    needs_info
 }
 
 fn check_resolve_tmdb(
@@ -530,18 +557,22 @@ fn check_resolve_tmdb(
     reasons: &mut ResolveReasonSet,
 ) {
     if resolve_tmdb_enabled && resolve_options.has_flag(ResolveOptionsFlags::TmdbMissing) {
-        if let Some(StreamProperties::Series(series_stream_props)) = pli.header.additional_properties.as_ref() {
-            let has_tmdb = series_stream_props.tmdb.is_some();
-            let has_date = series_stream_props.release_date.is_some();
-            let title_present = !series_stream_props.name.is_empty() || !pli.header.title.is_empty();
+        let (has_tmdb, has_date, title_present) = match pli.header.additional_properties.as_ref() {
+            Some(StreamProperties::Series(series_stream_props)) => (
+                series_stream_props.tmdb.is_some(),
+                series_stream_props.release_date.is_some(),
+                !series_stream_props.name.is_empty() || !pli.header.title.is_empty(),
+            ),
+            None => (false, false, !pli.header.title.is_empty()),
+            _ => return,
+        };
 
-            if title_present && (!has_tmdb || !has_date) {
-                if !has_tmdb {
-                    reasons.set(ResolveReason::Tmdb);
-                }
-                if !has_date {
-                    reasons.set(ResolveReason::Date);
-                }
+        if title_present && (!has_tmdb || !has_date) {
+            if !has_tmdb {
+                reasons.set(ResolveReason::Tmdb);
+            }
+            if !has_date {
+                reasons.set(ResolveReason::Date);
             }
         }
     }
@@ -586,6 +617,7 @@ pub async fn update_series_metadata(
     fetch_info: bool,
     resolve_tmdb: bool,
     do_probe: bool,
+    probe_settings: SeriesProbeSettings,
     db_query: Option<Arc<Mutex<BPlusTreeQuery<u32, XtreamPlaylistItem>>>>,
 ) -> Result<Option<SeriesStreamProperties>, TuliproxError> {
     let working_dir = &app_config.config.load().working_dir;
@@ -784,11 +816,7 @@ pub async fn update_series_metadata(
         if let Some(details) = properties.details.as_mut() {
             if let Some(episodes) = details.episodes.as_mut() {
                 let config = app_config.config.load();
-                let metadata_update = config.metadata_update.clone().unwrap_or_default();
-                let ffprobe_timeout = metadata_update.ffprobe_timeout.unwrap_or(60);
                 let user_agent = config.default_user_agent.clone();
-                let analyze_duration = metadata_update.ffprobe_analyze_duration_micros;
-                let probe_size = metadata_update.ffprobe_probe_size_bytes;
 
                 let input_url = input.url.as_str();
                 let input_username = input.username.as_deref().unwrap_or("");
@@ -831,9 +859,9 @@ pub async fn update_series_metadata(
                             if let Some((_quality, raw_video, raw_audio)) = crate::utils::ffmpeg::probe_url(
                                 &episode_url,
                                 user_agent.as_deref(),
-                                analyze_duration,
-                                probe_size,
-                                ffprobe_timeout,
+                                probe_settings.analyze_duration_micros,
+                                probe_settings.probe_size_bytes,
+                                probe_settings.timeout_secs,
                             )
                             .await
                             {
