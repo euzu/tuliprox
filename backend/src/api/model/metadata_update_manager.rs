@@ -17,7 +17,7 @@ use shared::model::{
     XtreamCluster, XtreamPlaylistItem,
 };
 use shared::utils::generate_playlist_uuid;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, RwLock};
@@ -385,6 +385,7 @@ struct InputWorkerContext {
     worker_id: u64,
     sender: mpsc::Sender<TaskKey>,
     pending_tasks: Arc<DashMap<TaskKey, PendingTask>>,
+    pending_task_count: Arc<AtomicUsize>,
 }
 
 struct PendingTask {
@@ -495,12 +496,14 @@ impl MetadataUpdateManager {
                 Entry::Vacant(entry) => {
                     let (tx, rx) = mpsc::channel::<TaskKey>(max_queue_size);
                     let pending_tasks = Arc::new(DashMap::new());
+                    let pending_task_count = Arc::new(AtomicUsize::new(0));
                     let worker_id = self.next_worker_id.fetch_add(1, Ordering::Relaxed);
 
                     let ctx = InputWorkerContext {
                         worker_id,
                         sender: tx.clone(),
                         pending_tasks: pending_tasks.clone(),
+                        pending_task_count: pending_task_count.clone(),
                     };
                     entry.insert(ctx.clone());
 
@@ -511,6 +514,7 @@ impl MetadataUpdateManager {
                             sender: tx,
                             receiver: rx,
                             pending_tasks,
+                            pending_task_count,
                             app_state_weak: app_state_weak.clone(),
                             update_pause_gate: Arc::clone(&self.update_pause_gate),
                             cancel_token: self.cancel_token.clone(),
@@ -549,11 +553,12 @@ impl MetadataUpdateManager {
             match Self::submit_task(
                 ctx.sender.clone(),
                 ctx.pending_tasks.clone(),
+                ctx.pending_task_count.clone(),
                 &input_name,
                 max_queue_size,
                 task_to_queue.clone(),
             )
-                .await
+            .await
             {
                 SubmitTaskResult::QueuedOrMerged => return,
                 SubmitTaskResult::QueueFull => {
@@ -589,6 +594,7 @@ impl MetadataUpdateManager {
     async fn submit_task(
         sender: mpsc::Sender<TaskKey>,
         pending_tasks: Arc<DashMap<TaskKey, PendingTask>>,
+        pending_task_count: Arc<AtomicUsize>,
         input_name: &str,
         max_queue_size: usize,
         task: UpdateTask,
@@ -597,76 +603,115 @@ impl MetadataUpdateManager {
 
         if let Some(entry) = pending_tasks.get(&key) {
             let mut existing = entry.task.lock();
-            let mut merged = false;
-            // Merge logic
-            match (&mut *existing, task) {
-                (
-                    UpdateTask::ResolveVod { reason: r1, delay: d1, .. },
-                    UpdateTask::ResolveVod { reason: r2, delay: d2, .. },
-                )
-                | (
-                    UpdateTask::ResolveSeries { reason: r1, delay: d1, .. },
-                    UpdateTask::ResolveSeries { reason: r2, delay: d2, .. },
-                ) => {
-                    *r1 |= r2;
-                    *d1 = min(*d1, d2);
-                    merged = true;
-                }
-                (
-                    UpdateTask::ProbeStream {
-                        reason: r1,
-                        delay: d1,
-                        url: url1,
-                        item_type: item_type1,
-                        ..
-                    },
-                    UpdateTask::ProbeStream {
-                        reason: r2,
-                        delay: d2,
-                        url: url2,
-                        item_type: item_type2,
-                        ..
-                    },
-                ) => {
-                    *r1 |= r2;
-                    *d1 = min(*d1, d2);
-                    // Keep the existing payload by default; only fill it from the incoming
-                    // task when the destination payload is empty.
-                    if url1.is_empty() && !url2.is_empty() {
-                        *url1 = url2;
-                        *item_type1 = item_type2;
-                    }
-                    merged = true;
-                }
-                (
-                    UpdateTask::ProbeLive { reason: r1, delay: d1, interval: i1, .. },
-                    UpdateTask::ProbeLive { reason: r2, delay: d2, interval: i2, .. },
-                ) => {
-                    *r1 |= r2;
-                    *d1 = min(*d1, d2);
-                    *i1 = min(*i1, i2);
-                    merged = true;
-                }
-                _ => {} // Mismatched types, should not happen due to TaskKey
-            }
-
-            if merged {
+            if Self::merge_task_payload(&mut existing, task) {
                 entry.generation.fetch_add(1, Ordering::Relaxed);
             }
             return SubmitTaskResult::QueuedOrMerged;
         }
 
-        if pending_tasks.len() >= max_queue_size {
+        // Lock-free admission with CAS: reserve one queue slot only if capacity allows.
+        if pending_task_count
+            .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |current| {
+                if current < max_queue_size {
+                    Some(current + 1)
+                } else {
+                    None
+                }
+            })
+            .is_err()
+        {
             return SubmitTaskResult::QueueFull;
         }
 
-        pending_tasks.insert(key.clone(), PendingTask::new(task));
+        match pending_tasks.entry(key.clone()) {
+            Entry::Occupied(entry) => {
+                // Another producer inserted this key after our fast-path `get`.
+                // Release reserved capacity and merge into the existing task.
+                Self::decrement_pending_task_count(&pending_task_count);
+                let mut existing = entry.get().task.lock();
+                if Self::merge_task_payload(&mut existing, task) {
+                    entry.get().generation.fetch_add(1, Ordering::Relaxed);
+                }
+                return SubmitTaskResult::QueuedOrMerged;
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(PendingTask::new(task));
+            }
+        }
+
         if sender.send(key.clone()).await.is_err() {
-            pending_tasks.remove(&key);
+            if pending_tasks.remove(&key).is_some() {
+                Self::decrement_pending_task_count(&pending_task_count);
+            }
             warn!("Failed to send task signal for input {input_name}");
             return SubmitTaskResult::ChannelClosed;
         }
         SubmitTaskResult::QueuedOrMerged
+    }
+
+    #[inline]
+    fn decrement_pending_task_count(pending_task_count: &AtomicUsize) {
+        // Guard against accidental underflow in edge/error paths.
+        let _ = pending_task_count.fetch_update(Ordering::AcqRel, Ordering::Relaxed, |current| {
+            current.checked_sub(1)
+        });
+    }
+
+    fn merge_task_payload(existing: &mut UpdateTask, task: UpdateTask) -> bool {
+        let mut merged = false;
+        // Merge logic
+        match (existing, task) {
+            (
+                UpdateTask::ResolveVod { reason: r1, delay: d1, .. },
+                UpdateTask::ResolveVod { reason: r2, delay: d2, .. },
+            )
+            | (
+                UpdateTask::ResolveSeries { reason: r1, delay: d1, .. },
+                UpdateTask::ResolveSeries { reason: r2, delay: d2, .. },
+            ) => {
+                *r1 |= r2;
+                *d1 = min(*d1, d2);
+                merged = true;
+            }
+            (
+                UpdateTask::ProbeStream {
+                    reason: r1,
+                    delay: d1,
+                    url: url1,
+                    item_type: item_type1,
+                    ..
+                },
+                UpdateTask::ProbeStream {
+                    reason: r2,
+                    delay: d2,
+                    url: url2,
+                    item_type: item_type2,
+                    ..
+                },
+            ) => {
+                *r1 |= r2;
+                *d1 = min(*d1, d2);
+                // Keep the existing payload by default; only fill it from the incoming
+                // task when the destination payload is empty.
+                if url1.is_empty() && !url2.is_empty() {
+                    *url1 = url2;
+                    *item_type1 = item_type2;
+                }
+                merged = true;
+            }
+            (
+                UpdateTask::ProbeLive { reason: r1, delay: d1, interval: i1, .. },
+                UpdateTask::ProbeLive { reason: r2, delay: d2, interval: i2, .. },
+            ) => {
+                *r1 |= r2;
+                *d1 = min(*d1, d2);
+                *i1 = min(*i1, i2);
+                merged = true;
+            }
+            _ => {} // Mismatched types, should not happen due to TaskKey
+        }
+
+        merged
     }
 
     /// Queue a task using the legacy API (for backward compatibility).
@@ -691,6 +736,7 @@ struct InputWorker {
     sender: mpsc::Sender<TaskKey>,
     receiver: mpsc::Receiver<TaskKey>,
     pending_tasks: Arc<DashMap<TaskKey, PendingTask>>,
+    pending_task_count: Arc<AtomicUsize>,
     app_state_weak: Option<Weak<AppState>>,
     update_pause_gate: Arc<RwLock<()>>,
     cancel_token: CancellationToken,
@@ -1159,6 +1205,7 @@ impl InputWorker {
 
         let sender = self.sender.clone();
         let pending_tasks = Arc::clone(&self.pending_tasks);
+        let pending_task_count = Arc::clone(&self.pending_task_count);
         let scheduled = Arc::clone(&self.scheduled_requeues);
         let cancel_token = self.cancel_token.clone();
         let input_name = self.input_name.clone();
@@ -1186,7 +1233,9 @@ impl InputWorker {
             }
 
             if sender.send(key.clone()).await.is_err() {
-                pending_tasks.remove(&key);
+                if pending_tasks.remove(&key).is_some() {
+                    MetadataUpdateManager::decrement_pending_task_count(&pending_task_count);
+                }
                 warn!("Failed to schedule delayed retry task for input {input_name}");
             }
         });
@@ -1204,12 +1253,16 @@ impl InputWorker {
             if latest_generation != current_generation {
                 self.pending_tasks.insert(current_key.clone(), removed_task);
                 if self.sender.send(current_key.clone()).await.is_err() {
-                    self.pending_tasks.remove(current_key);
+                    if self.pending_tasks.remove(current_key).is_some() {
+                        MetadataUpdateManager::decrement_pending_task_count(&self.pending_task_count);
+                    }
                     warn!("Failed to schedule merged task replay for input {input_name}");
                     return false;
                 }
                 return true;
             }
+            // Task finished and is not reinserted.
+            MetadataUpdateManager::decrement_pending_task_count(&self.pending_task_count);
         }
         false
     }
@@ -2317,6 +2370,7 @@ mod tests {
     async fn submit_task_merges_existing_task_and_increments_generation() {
         let (tx, mut rx) = mpsc::channel::<TaskKey>(8);
         let pending_tasks = Arc::new(DashMap::new());
+        let pending_task_count = Arc::new(AtomicUsize::new(0));
 
         let task_initial = UpdateTask::ResolveVod {
             id: ProviderIdType::Id(42),
@@ -2324,14 +2378,30 @@ mod tests {
             delay: 10,
         };
         let queue_size = MetadataUpdateRuntimeSettings::default().max_queue_size;
-        MetadataUpdateManager::submit_task(tx.clone(), pending_tasks.clone(), "input_a", queue_size, task_initial).await;
+        MetadataUpdateManager::submit_task(
+            tx.clone(),
+            pending_tasks.clone(),
+            pending_task_count.clone(),
+            "input_a",
+            queue_size,
+            task_initial,
+        )
+        .await;
 
         let task_merge = UpdateTask::ResolveVod {
             id: ProviderIdType::Id(42),
             reason: ResolveReasonSet::from_variants(&[ResolveReason::Probe]),
             delay: 2,
         };
-        MetadataUpdateManager::submit_task(tx, pending_tasks.clone(), "input_a", queue_size, task_merge).await;
+        MetadataUpdateManager::submit_task(
+            tx,
+            pending_tasks.clone(),
+            pending_task_count.clone(),
+            "input_a",
+            queue_size,
+            task_merge,
+        )
+        .await;
 
         let first_signal = rx.try_recv().expect("first signal should be queued");
         assert_eq!(first_signal, TaskKey::Vod(42));
@@ -2358,6 +2428,7 @@ mod tests {
     async fn submit_task_probe_stream_merge_keeps_existing_payload_when_present() {
         let (tx, mut rx) = mpsc::channel::<TaskKey>(8);
         let pending_tasks = Arc::new(DashMap::new());
+        let pending_task_count = Arc::new(AtomicUsize::new(0));
         let queue_size = MetadataUpdateRuntimeSettings::default().max_queue_size;
 
         let initial = UpdateTask::ProbeStream {
@@ -2368,7 +2439,15 @@ mod tests {
             reason: ResolveReasonSet::from_variants(&[ResolveReason::MissingDetails]),
             delay: 10,
         };
-        MetadataUpdateManager::submit_task(tx.clone(), pending_tasks.clone(), "input_a", queue_size, initial).await;
+        MetadataUpdateManager::submit_task(
+            tx.clone(),
+            pending_tasks.clone(),
+            pending_task_count.clone(),
+            "input_a",
+            queue_size,
+            initial,
+        )
+        .await;
 
         let merged_in = UpdateTask::ProbeStream {
             probe_scope: Arc::from("scope_a"),
@@ -2378,7 +2457,15 @@ mod tests {
             reason: ResolveReasonSet::from_variants(&[ResolveReason::Probe]),
             delay: 2,
         };
-        MetadataUpdateManager::submit_task(tx, pending_tasks.clone(), "input_a", queue_size, merged_in).await;
+        MetadataUpdateManager::submit_task(
+            tx,
+            pending_tasks.clone(),
+            pending_task_count.clone(),
+            "input_a",
+            queue_size,
+            merged_in,
+        )
+        .await;
 
         let first_signal = rx.try_recv().expect("first signal should be queued");
         assert_eq!(
@@ -2442,6 +2529,7 @@ mod tests {
             sender: tx,
             receiver: rx,
             pending_tasks: pending_tasks.clone(),
+            pending_task_count: Arc::new(AtomicUsize::new(1)),
             app_state_weak: None,
             update_pause_gate: Arc::new(RwLock::new(())),
             cancel_token: CancellationToken::new(),
@@ -2483,6 +2571,7 @@ mod tests {
             sender: tx,
             receiver: rx,
             pending_tasks: pending_tasks.clone(),
+            pending_task_count: Arc::new(AtomicUsize::new(1)),
             app_state_weak: None,
             update_pause_gate: Arc::new(RwLock::new(())),
             cancel_token: CancellationToken::new(),

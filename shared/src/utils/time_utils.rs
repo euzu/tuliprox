@@ -14,6 +14,11 @@ pub fn unix_ts_to_str(ts: i64) -> Option<String> { unix_ts_to_str_with_format(ts
 /// - plain seconds (`"30"`) when `require_unit` is `false`
 /// - suffixed units: `s`, `m`, `h`, `d` (for example `"30s"`, `"5m"`, `"1h"`, `"2d"`)
 pub fn parse_duration_seconds(value: &str, require_unit: bool) -> Option<u64> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+
     if let Ok(seconds) = value.parse::<u64>() {
         return if require_unit { None } else { Some(seconds) };
     }

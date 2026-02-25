@@ -407,13 +407,8 @@ async fn process_immediate_series_info(
             on_retry_error: |retry_pli, err| {
                 error!("Foreground retry failed for Series {}: {err}", retry_pli.header.title);
             },
-            on_after_attempt: |retry_pli, retry_succeeded| {
-                if retry_succeeded {
-                    if let Some(group_obj) = expand_series_item(retry_pli, input) {
-                        groups_to_add.push(group_obj);
-                    }
-                } else if let Some(group_obj) = expand_series_item(retry_pli, input) {
-                    // Fallback: retry failed (or skipped), still try to expand from cached properties.
+            on_after_attempt: |retry_pli, _retry_succeeded| {
+                if let Some(group_obj) = expand_series_item(retry_pli, input) {
                     groups_to_add.push(group_obj);
                 }
             },
