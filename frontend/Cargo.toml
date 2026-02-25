@@ -1,11 +1,11 @@
 [package]
 name = "frontend"
-version = "3.2.107"
+version = "3.2.108"
 edition = "2021"
 rust-version = "1.89.0"
 
 [dependencies]
-shared = { version = "3.2.107", path = "../shared" }
+shared = { version = "3.2.108", path = "../shared" }
 chrono = "0.4.44"
 yew = "0.22.0"
 yew-router = "0.19.0"
