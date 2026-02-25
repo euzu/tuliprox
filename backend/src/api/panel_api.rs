@@ -3646,7 +3646,7 @@ async fn sync_panel_api_for_input_on_boot(
     any_change
 }
 
-pub(crate) async fn sync_panel_api_exp_dates_on_boot(app_state: &Arc<AppState>) {
+pub(crate) async fn sync_panel_api_exp_dates(app_state: &Arc<AppState>) {
     let sources_file_path = app_state.app_config.paths.load().sources_file_path.clone();
     let sources_path = PathBuf::from(&sources_file_path);
     let mut any_change = false;
@@ -3665,6 +3665,10 @@ pub(crate) async fn sync_panel_api_exp_dates_on_boot(app_state: &Arc<AppState>) 
             debug_if_enabled!("panel_api boot/update reload sources failed: {}", err);
         }
     }
+}
+
+pub(crate) async fn sync_panel_api_exp_dates_on_boot(app_state: &Arc<AppState>) {
+    sync_panel_api_exp_dates(app_state).await;
 }
 
 pub(crate) async fn sync_panel_api_alias_pool_for_target(

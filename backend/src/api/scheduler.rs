@@ -1,5 +1,5 @@
 use crate::api::model::AppState;
-use crate::api::panel_api::sync_panel_api_exp_dates_on_boot;
+use crate::api::panel_api::sync_panel_api_exp_dates;
 use crate::api::library_scan::spawn_library_scan;
 use crate::model::{AppConfig, ProcessTargets, ScheduleConfig};
 use shared::model::ScheduleTaskType;
@@ -92,7 +92,7 @@ fn run_playlist_update(client: &reqwest::Client, app_state: &Arc<AppState>, targ
         let provider_manager = Arc::clone(&app_state.active_provider);
         let disabled_headers = app_state.get_disabled_headers();
         let metadata_manager = Arc::clone(&app_state.metadata_manager);
-        sync_panel_api_exp_dates_on_boot(&app_state).await;
+        sync_panel_api_exp_dates(&app_state).await;
         exec_processing(
             &client,
             app_config,
