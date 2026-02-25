@@ -15,6 +15,13 @@ enum ProbeStorageKind {
     Xtream,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenericProbeOutcome {
+    Updated,
+    Noop,
+    ProbeFailed,
+}
+
 fn requires_provider_connection_for_generic_probe(input_type: InputType) -> bool {
     !matches!(input_type, InputType::Library)
 }
@@ -31,13 +38,13 @@ pub async fn update_generic_stream_metadata(
     item_type: PlaylistItemType,
     active_provider: &Arc<ActiveProviderManager>,
     active_handle: Option<&crate::api::model::ProviderHandle>,
-) -> Result<(), TuliproxError> {
+) -> Result<GenericProbeOutcome, TuliproxError> {
     let working_dir = &app_config.config.load().working_dir;
 
     // Check if probing is enabled globally
     let ffprobe_enabled = app_config.is_ffprobe_enabled().await;
     if !ffprobe_enabled {
-        return Ok(());
+        return Ok(GenericProbeOutcome::Noop);
     }
 
     // Determine storage file path based on input type
@@ -62,7 +69,7 @@ pub async fn update_generic_stream_metadata(
                 XtreamCluster::Series
             } else {
                 // Generic probing currently supports live/video/series payload shapes.
-                return Ok(());
+                return Ok(GenericProbeOutcome::Noop);
             };
             (
                 xtream_get_file_path(&storage_path, cluster),
@@ -90,10 +97,20 @@ pub async fn update_generic_stream_metadata(
 
     let probe_url = stream_url.to_string();
     let config = app_config.config.load();
-    let ffprobe_timeout = config.video.as_ref().and_then(|v| v.ffprobe_timeout).unwrap_or(60);
+    let metadata_update = config.metadata_update.clone().unwrap_or_default();
+    let ffprobe_timeout = metadata_update.ffprobe_timeout.unwrap_or(60);
     let user_agent = config.default_user_agent.clone();
-    let analyze_duration = 10_000_000;
-    let probe_size = 10_000_000;
+    let (analyze_duration, probe_size) = if item_type.is_live() {
+        (
+            metadata_update.ffprobe_live_analyze_duration_micros,
+            metadata_update.ffprobe_live_probe_size_bytes,
+        )
+    } else {
+        (
+            metadata_update.ffprobe_analyze_duration_micros,
+            metadata_update.ffprobe_probe_size_bytes,
+        )
+    };
 
     debug_if_enabled!("Probing Generic Stream '{unique_id}'");
 
@@ -111,96 +128,106 @@ pub async fn update_generic_stream_metadata(
 
     let Some((_quality, raw_video, raw_audio)) = probe_data else {
          warn!("Probe failed or timed out for generic stream: {unique_id}");
-         return Ok(());
+         return Ok(GenericProbeOutcome::ProbeFailed);
     };
 
-    // Acquire lock and open a tree for update
-    let _file_lock = app_config.file_locks.write_lock(&db_path).await;
+    // Hold the async file lock while the blocking DB update runs in a blocking thread.
+    let file_lock = app_config.file_locks.write_lock(&db_path).await;
+    let db_path_for_update = db_path.clone();
+    let unique_id_for_update = unique_id.to_string();
+    let updated = tokio::task::spawn_blocking(move || -> Result<bool, String> {
+        let mut updated = false;
+        match storage_kind {
+            ProbeStorageKind::M3u => {
+                let key: Arc<str> = Arc::from(unique_id_for_update.as_str());
+                let mut tree_update = BPlusTreeUpdate::<Arc<str>, M3uPlaylistItem>::try_new(&db_path_for_update)
+                    .map_err(|e| format!("Failed to open M3U tree update: {e}"))?;
 
-    // Update the record in BPlusTree
-    match storage_kind {
-        ProbeStorageKind::M3u => {
-            let key: Arc<str> = unique_id.into();
-            let mut tree_update = BPlusTreeUpdate::<Arc<str>, M3uPlaylistItem>::try_new(&db_path)
-                .map_err(|e| shared::error::info_err!("Failed to open M3U tree update: {e}"))?;
+                if let Some(mut item) = tree_update.query(&key).map_err(|e| format!("Tree query error: {e}"))? {
+                    update_properties(
+                        &mut item.additional_properties,
+                        item_type,
+                        &item.name,
+                        item.virtual_id,
+                        raw_video,
+                        raw_audio,
+                    );
+                    tree_update
+                        .update(&key, item)
+                        .map_err(|e| format!("Tree update error: {e}"))?;
+                    info!("Successfully updated M3U metadata for: {unique_id_for_update}");
+                    updated = true;
+                } else {
+                    warn!("Item not found in M3U DB: {unique_id_for_update}");
+                }
+            }
+            ProbeStorageKind::Library => {
+                let mut tree_update = BPlusTreeUpdate::<UUIDType, XtreamPlaylistItem>::try_new(&db_path_for_update)
+                    .map_err(|e| format!("Failed to open Library tree update: {e}"))?;
+                let uuid = UUIDType::from_valid_uuid(&unique_id_for_update);
 
-            if let Some(mut item) = tree_update
-                .query(&key)
-                .map_err(|e| shared::error::info_err!("Tree query error: {e}"))?
-            {
-                update_properties(
-                    &mut item.additional_properties,
-                    item_type,
-                    &item.name,
-                    item.virtual_id,
-                    raw_video,
-                    raw_audio,
-                );
-                tree_update
-                    .update(&key, item)
-                    .map_err(|e| shared::error::info_err!("Tree update error: {e}"))?;
-                info!("Successfully updated M3U metadata for: {unique_id}");
-            } else {
-                warn!("Item not found in M3U DB: {unique_id}");
+                if let Some(mut item) = tree_update.query(&uuid).map_err(|e| format!("Tree query error: {e}"))? {
+                    update_properties(
+                        &mut item.additional_properties,
+                        item_type,
+                        &item.name,
+                        item.virtual_id,
+                        raw_video,
+                        raw_audio,
+                    );
+                    tree_update
+                        .update(&uuid, item)
+                        .map_err(|e| format!("Tree update error: {e}"))?;
+                    info!("Successfully updated Library metadata for: {unique_id_for_update}");
+                    updated = true;
+                } else {
+                    warn!("Item not found in Library DB: {unique_id_for_update}");
+                }
+            }
+            ProbeStorageKind::Xtream => {
+                let Ok(provider_id) = unique_id_for_update.parse::<u32>() else {
+                    warn!("Skipping xtream generic probe update with non-numeric id: {unique_id_for_update}");
+                    return Ok(false);
+                };
+
+                let mut tree_update = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::try_new(&db_path_for_update)
+                    .map_err(|e| format!("Failed to open Xtream tree update: {e}"))?;
+
+                if let Some(mut item) = tree_update
+                    .query(&provider_id)
+                    .map_err(|e| format!("Tree query error: {e}"))?
+                {
+                    update_properties(
+                        &mut item.additional_properties,
+                        item_type,
+                        &item.name,
+                        item.virtual_id,
+                        raw_video,
+                        raw_audio,
+                    );
+                    tree_update
+                        .update(&provider_id, item)
+                        .map_err(|e| format!("Tree update error: {e}"))?;
+                    info!("Successfully updated Xtream metadata for: {unique_id_for_update}");
+                    updated = true;
+                } else {
+                    warn!("Item not found in Xtream DB: {unique_id_for_update}");
+                }
             }
         }
-        ProbeStorageKind::Library => {
-            let mut tree_update = BPlusTreeUpdate::<UUIDType, XtreamPlaylistItem>::try_new(&db_path)
-                .map_err(|e| shared::error::info_err!("Failed to open Library tree update: {e}"))?;
-            let uuid = UUIDType::from_valid_uuid(unique_id);
 
-            if let Some(mut item) = tree_update
-                .query(&uuid)
-                .map_err(|e| shared::error::info_err!("Tree query error: {e}"))?
-            {
-                update_properties(
-                    &mut item.additional_properties,
-                    item_type,
-                    &item.name,
-                    item.virtual_id,
-                    raw_video,
-                    raw_audio,
-                );
-                tree_update
-                    .update(&uuid, item)
-                    .map_err(|e| shared::error::info_err!("Tree update error: {e}"))?;
-                info!("Successfully updated Library metadata for: {unique_id}");
-            } else {
-                warn!("Item not found in Library DB: {unique_id}");
-            }
-        }
-        ProbeStorageKind::Xtream => {
-            let Ok(provider_id) = unique_id.parse::<u32>() else {
-                warn!("Skipping xtream generic probe update with non-numeric id: {unique_id}");
-                return Ok(());
-            };
+        Ok(updated)
+    })
+    .await
+    .map_err(|e| shared::error::info_err!("Failed to join generic probe DB update task: {e}"))?
+    .map_err(|e| shared::error::info_err!("{e}"))?;
 
-            let mut tree_update = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::try_new(&db_path)
-                .map_err(|e| shared::error::info_err!("Failed to open Xtream tree update: {e}"))?;
-
-            if let Some(mut item) = tree_update
-                .query(&provider_id)
-                .map_err(|e| shared::error::info_err!("Tree query error: {e}"))?
-            {
-                update_properties(
-                    &mut item.additional_properties,
-                    item_type,
-                    &item.name,
-                    item.virtual_id,
-                    raw_video,
-                    raw_audio,
-                );
-                tree_update
-                    .update(&provider_id, item)
-                    .map_err(|e| shared::error::info_err!("Tree update error: {e}"))?;
-                info!("Successfully updated Xtream metadata for: {unique_id}");
-            } else {
-                warn!("Item not found in Xtream DB: {unique_id}");
-            }
-        }
+    drop(file_lock);
+    if updated {
+        Ok(GenericProbeOutcome::Updated)
+    } else {
+        Ok(GenericProbeOutcome::Noop)
     }
-
-    Ok(())
 }
 
 fn update_properties(

@@ -59,12 +59,29 @@ fn label_key_candidates(field_id: &str) -> Vec<String> {
     keys
 }
 
+fn explanation_paragraphs(explanation: &str) -> Vec<String> {
+    let normalized = explanation.replace("\r\n", "\n");
+    let mut paragraphs = normalized
+        .split("\n\n")
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+
+    if paragraphs.is_empty() {
+        paragraphs.push(explanation.to_string());
+    }
+
+    paragraphs
+}
+
 pub fn show_field_explanation(field_id: &str, field_label: &str, dialog: &DialogService, translate: &YewI18n) {
     // Caller is expected to pass a normalized key-compatible field_id.
     let explanation = explanation_key_candidates(field_id)
         .into_iter()
         .find_map(|key| t_safe(translate, &key))
         .unwrap_or_else(|| "No explanation available for this field.".to_string());
+    let explanation_paragraphs = explanation_paragraphs(&explanation);
 
     let title = if field_label.trim().is_empty() {
         label_key_candidates(field_id)
@@ -93,7 +110,9 @@ pub fn show_field_explanation(field_id: &str, field_label: &str, dialog: &Dialog
                 html! {
                     <div class="tp__field-explanation-dialog">
                         <h2>{title}</h2>
-                        <p>{explanation}</p>
+                        {for explanation_paragraphs.into_iter().map(|paragraph| {
+                            html! { <p style="white-space: pre-wrap;">{paragraph}</p> }
+                        })}
                     </div>
                 },
                 Some(actions),

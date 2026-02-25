@@ -103,11 +103,16 @@ active URL of the specified provider.
 - **Setup Validation Improvement**: Setup mode validates source configuration against the global template collection and persists template definitions
   separately.
 - Added `-T, --template` to override `template_path` on startup.
+- **Metadata Update Runtime Config**: Metadata worker intervals, retry/backoff limits, queue sizing, and probe cooldowns are now configurable through
+  a dedicated `metadata_update` config block.
 
 ## ⚙️ New Settings
 
 - **config.yml**:
-  - Added `video.ffprobe_enabled` (default: false) and `video.ffprobe_timeout`.
+  - Added `metadata_update` (optional) with queue/retry/backoff/cooldown/worker-timeout fields (duration syntax: `60`, `10m`, `1h`, `7d`).
+  - Added `metadata_update.ffprobe_enabled` (default: false), `metadata_update.ffprobe_timeout`, and ffprobe probe/analyze size settings.
+  - `metadata_update.ffprobe_analyze_duration` and `metadata_update.ffprobe_live_analyze_duration` now require explicit unit suffixes (`s|m|h|d`).
+  - FFprobe settings are now configured under `metadata_update` (not under `video` anymore).
   - Added `template_path` (optional): path to a template file (`template.yml`) or directory (`template.d` style).
 - **source.yml (input options)**:
   - Added `resolve_tmdb`: Triggers TMDB lookup if ID is missing.
@@ -164,6 +169,7 @@ active URL of the specified provider.
 - **Mapper View**: Updated to support new `for_each` syntax.
 - Added **Stream Buffer** settings (Enabled, Size) to Reverse Proxy configuration UI.
 - Added **TMDB** settings (Rate Limit, Cache Duration, Language) and **Metadata Formats** (NFO support) to Library configuration UI.
+- Introduced the **Metadata Update** config tab, with FFprobe controls relocated from **Video** into it.
 
 ## 🚀 Performance & Stability
 

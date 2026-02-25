@@ -243,7 +243,7 @@ impl ConfigFile {
         let template_changed = current_template_path != next_template_path;
 
         let mut config: Config = Config::from(config_dto);
-        config.prepare(paths.config_path.as_str()).await?;
+        config.prepare(paths.config_path.as_str())?;
 
         // Compute effective runtime paths for the NEW config before apply.
         // This ensures prepare-phase reads/validates against the same files that will be active after apply.

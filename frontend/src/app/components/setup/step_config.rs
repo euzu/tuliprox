@@ -66,6 +66,7 @@ pub fn ConfigStep(props: &ConfigStepProps) -> Html {
                 ConfigForm::Log(_, _) => setup_ctx.config_forms.slots.log.as_ref(),
                 ConfigForm::Schedules(_, _) => setup_ctx.config_forms.slots.schedules.as_ref(),
                 ConfigForm::Video(_, _) => setup_ctx.config_forms.slots.video.as_ref(),
+                ConfigForm::MetadataUpdate(_, _) => setup_ctx.config_forms.slots.metadata_update.as_ref(),
                 ConfigForm::Messaging(_, _) => setup_ctx.config_forms.slots.messaging.as_ref(),
                 ConfigForm::WebUi(_, _) => setup_ctx.config_forms.slots.web_ui.as_ref(),
                 ConfigForm::ReverseProxy(_, _) => setup_ctx.config_forms.slots.reverse_proxy.as_ref(),

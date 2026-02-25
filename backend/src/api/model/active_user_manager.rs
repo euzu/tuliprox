@@ -123,9 +123,9 @@ impl ActiveUserManager {
         if is_log_user_enabled {
             let last_user_count = self.last_logged_user_count.load(Ordering::Relaxed);
             let last_connection_count = self.last_logged_user_connection_count.load(Ordering::Relaxed);
-            if last_user_count != user_count && last_connection_count != user_connection_count {
-                self.last_logged_user_count.store(last_user_count, Ordering::Relaxed);
-                self.last_logged_user_connection_count.store(last_connection_count, Ordering::Relaxed);
+            if last_user_count != user_count || last_connection_count != user_connection_count {
+                self.last_logged_user_count.store(user_count, Ordering::Relaxed);
+                self.last_logged_user_connection_count.store(user_connection_count, Ordering::Relaxed);
                 info!("Active Users: {user_count}, Active User Connections: {user_connection_count}");
             }
         }
@@ -325,7 +325,6 @@ impl ActiveUserManager {
                     session_token,
                 );
 
-                user_connections.key_by_addr.insert(fingerprint.addr, username.to_string());
                 let total_active = user_connections.key_by_addr.len();
 
                 if let Some(connection_data) = user_connections.by_key.get_mut(username) {
@@ -529,15 +528,22 @@ impl ActiveUserManager {
             let ts = gc_ts.load(Ordering::Acquire);
             let now = current_time_secs();
 
-            if now - ts > USER_GC_TTL {
+            if now.saturating_sub(ts) > USER_GC_TTL
+                && gc_ts
+                    .compare_exchange(ts, now, Ordering::AcqRel, Ordering::Relaxed)
+                    .is_ok()
+            {
                 if let Ok(mut user_connections) = self.connections.try_write() {
                     user_connections.kicked.retain(|_, (expires_at, _)| *expires_at > now);
-                    user_connections.by_key.retain(|_k, v| now - v.ts < USER_CON_TTL && v.connections > 0);
+                    user_connections
+                        .by_key
+                        .retain(|_k, v| now.saturating_sub(v.ts) < USER_CON_TTL && v.connections > 0);
                     for connection_data in user_connections.by_key.values_mut() {
-                        connection_data.sessions.retain(|s| now - s.ts < USER_CON_TTL);
+                        connection_data.sessions.retain(|s| now.saturating_sub(s.ts) < USER_CON_TTL);
                     }
-
-                    gc_ts.store(now, Ordering::Release);
+                } else {
+                    // Lock contention: release the GC claim so a subsequent caller can retry immediately.
+                    let _ = gc_ts.compare_exchange(now, ts, Ordering::AcqRel, Ordering::Relaxed);
                 }
             }
         }

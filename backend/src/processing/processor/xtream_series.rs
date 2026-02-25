@@ -2,13 +2,15 @@ use crate::api::model::UpdateTask;
 use crate::api::model::{ActiveProviderManager, ProviderHandle, ProviderIdType, ResolveReason, ResolveReasonSet};
 use crate::library::MetadataResolver;
 use crate::model::FetchedPlaylist;
-use crate::model::{AppConfig, ConfigTarget};
+use crate::model::{AppConfig, ConfigTarget, MetadataUpdateConfig};
 use crate::model::{ConfigInput, ConfigInputFlags, InputSource};
 use crate::processing::parser::xtream::create_xtream_series_episode_url;
 use crate::processing::parser::xtream::parse_xtream_series_info;
 use crate::processing::processor::playlist::{PlaylistProcessingContext, ProcessingPipe};
 use crate::processing::processor::{
-    create_resolve_options_function_for_xtream_target, ResolveOptions, ResolveOptionsFlags,
+    create_resolve_options_function_for_xtream_target, process_foreground_retry_once, ResolveOptions,
+    ResolveOptionsFlags, FOREGROUND_BATCH_SIZE as BATCH_SIZE, FOREGROUND_MIN_RETRY_DELAY_SECS,
+    FOREGROUND_RETRY_BATCH_MAX_SIZE as RETRY_BATCH_MAX_SIZE,
 };
 use crate::ptt::ptt_parse_title;
 use crate::repository::persists_input_series_info;
@@ -26,13 +28,31 @@ use shared::model::{
     XtreamSeriesInfo,
 };
 use shared::model::{PlaylistGroup, PlaylistItemType, XtreamCluster};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 create_resolve_options_function_for_xtream_target!(series);
 
-const BATCH_SIZE: usize = 100;
+#[derive(Debug, Clone, Copy)]
+pub struct SeriesProbeSettings {
+    pub timeout_secs: u64,
+    pub analyze_duration_micros: u64,
+    pub probe_size_bytes: u64,
+}
+
+impl SeriesProbeSettings {
+    pub fn from_metadata_update(metadata_update: Option<&MetadataUpdateConfig>) -> Self {
+        let defaults = MetadataUpdateConfig::default();
+        Self {
+            timeout_secs: metadata_update.and_then(|cfg| cfg.ffprobe_timeout).unwrap_or(60),
+            analyze_duration_micros: metadata_update
+                .map_or(defaults.ffprobe_analyze_duration_micros, |cfg| cfg.ffprobe_analyze_duration_micros),
+            probe_size_bytes: metadata_update
+                .map_or(defaults.ffprobe_probe_size_bytes, |cfg| cfg.ffprobe_probe_size_bytes),
+        }
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub async fn playlist_resolve_series(
@@ -227,8 +247,13 @@ async fn process_immediate_series_info(
 
     let mut groups_to_add = Vec::new();
     let mut batch: Vec<(ProviderIdType, SeriesStreamProperties)> = Vec::with_capacity(BATCH_SIZE);
+    let mut retry_once_ids: HashSet<ProviderIdType> = HashSet::new();
     let mut processed_count = 0;
     let mut last_log_time = Instant::now();
+    let series_probe_settings = {
+        let config = ctx.config.config.load();
+        SeriesProbeSettings::from_metadata_update(config.metadata_update.as_ref())
+    };
 
     for pli in fpl.items_mut() {
         if !filter(pli) {
@@ -240,6 +265,7 @@ async fn process_immediate_series_info(
         } else {
             ProviderIdType::from(&*pli.header.id)
         };
+        let mut defer_expand = false;
 
         if !skip_resolve {
             let reasons = check_resolve_reasons(resolve_options, resolve_tmdb_enabled, pli);
@@ -250,13 +276,11 @@ async fn process_immediate_series_info(
                         let file_lock = ctx.config.file_locks.read_lock(&xtream_path).await;
                         let xtream_path = xtream_path.clone();
                         let query = match tokio::task::spawn_blocking(move || {
-                            let guard = file_lock;
-                            let query = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path)?;
-                            Ok::<_, std::io::Error>((query, guard))
+                            BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path)
                         })
                         .await
                         {
-                            Ok(Ok((query, guard))) => Some((query, guard)),
+                            Ok(Ok(query)) => Some((query, file_lock)),
                             Ok(Err(err)) => {
                                 error!("Failed to open BPlusTreeQuery for Series: {err}");
                                 None
@@ -283,6 +307,7 @@ async fn process_immediate_series_info(
                         provider_id.clone(),
                         &reasons,
                         db_query_ref,
+                        series_probe_settings,
                     )
                     .await
                     {
@@ -338,20 +363,82 @@ async fn process_immediate_series_info(
                         Ok(None) => {}
                         Err(e) => {
                             error!("Failed to update Series metadata for {}: {e}", pli.header.title);
+                            retry_once_ids.insert(provider_id.clone());
+                            defer_expand = true;
                         }
                     }
                 }
             }
         }
 
-        if let Some(group_obj) = expand_series_item(pli, input) {
-            groups_to_add.push(group_obj);
+        if !defer_expand {
+            if let Some(group_obj) = expand_series_item(pli, input) {
+                groups_to_add.push(group_obj);
+            }
         }
 
         if log_enabled!(Level::Info) && last_log_time.elapsed().as_secs() >= 30 {
             info!("resolved {processed_count} series info");
             last_log_time = Instant::now();
         }
+    }
+
+    if !retry_once_ids.is_empty() {
+        let retry_delay_secs = u64::from(resolve_options.resolve_delay).max(FOREGROUND_MIN_RETRY_DELAY_SECS);
+        process_foreground_retry_once!(
+            ctx: ctx,
+            fpl: fpl,
+            filter: filter,
+            retry_once_ids: retry_once_ids,
+            retry_delay_secs: retry_delay_secs,
+            xtream_path: xtream_path,
+            db_query_holder: db_query_holder,
+            db_lock_holder: _db_lock_holder,
+            batch: batch,
+            batch_size: BATCH_SIZE,
+            retry_batch_max_len: RETRY_BATCH_MAX_SIZE,
+            processed_count: processed_count,
+            query_error_context: "Series retry",
+            reasons: |retry_pli| {
+                if skip_resolve {
+                    ResolveReasonSet::new()
+                } else {
+                    check_resolve_reasons(resolve_options, resolve_tmdb_enabled, retry_pli)
+                }
+            },
+            update: |active_provider, retry_pli, provider_id, reasons, db_query_ref| update_series_info_immediate(
+                ctx,
+                active_provider,
+                input,
+                retry_pli,
+                provider_id,
+                reasons,
+                db_query_ref,
+                series_probe_settings,
+            ),
+            apply_properties: |retry_pli, updated_props| {
+                retry_pli.header.additional_properties =
+                    Some(StreamProperties::Series(Box::new(updated_props.clone())));
+            },
+            persist: |updates| persist_input_series_info_batch(
+                &ctx.config,
+                &storage_path,
+                XtreamCluster::Series,
+                &input.name,
+                updates,
+            ),
+            on_persist_error: |err| {
+                error!("persist_input_series_info_batch failed for Series retry on input '{}'. Error: {}", input.name, err);
+            },
+            on_retry_error: |retry_pli, err| {
+                error!("Foreground retry failed for Series {}: {err}", retry_pli.header.title);
+            },
+            on_after_attempt: |retry_pli, _retry_succeeded| {
+                if let Some(group_obj) = expand_series_item(retry_pli, input) {
+                    groups_to_add.push(group_obj);
+                }
+            },
+        );
     }
 
     if !batch.is_empty() {
@@ -408,6 +495,7 @@ fn expand_series_item(pli: &PlaylistItem, input: &ConfigInput) -> Option<Playlis
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn update_series_info_immediate(
     ctx: &PlaylistProcessingContext,
     active_provider: &Arc<ActiveProviderManager>,
@@ -416,8 +504,10 @@ async fn update_series_info_immediate(
     id: ProviderIdType,
     reasons: &ResolveReasonSet,
     db_query: Option<Arc<Mutex<BPlusTreeQuery<u32, XtreamPlaylistItem>>>>,
+    probe_settings: SeriesProbeSettings,
 ) -> Result<Option<SeriesStreamProperties>, TuliproxError> {
     let fetch_info = reasons.contains(ResolveReason::Info);
+    let resolve_tmdb = reasons.contains(ResolveReason::Tmdb) || reasons.contains(ResolveReason::Date);
 
     update_series_metadata(
         &ctx.config,
@@ -429,7 +519,9 @@ async fn update_series_info_immediate(
         Some(&pli.header.title),
         false, // save (we batch in caller)
         fetch_info,
+        resolve_tmdb,
         reasons.contains(ResolveReason::Probe),
+        probe_settings,
         db_query,
     )
     .await
@@ -438,12 +530,12 @@ async fn update_series_info_immediate(
 fn check_resolve_reasons(
     resolve_options: &ResolveOptions,
     resolve_tmdb_enabled: bool,
-    pli: &mut PlaylistItem,
+    pli: &PlaylistItem,
 ) -> ResolveReasonSet {
     let mut reasons = ResolveReasonSet::new();
 
-    let needs_info = check_needs_info(resolve_options, pli, &mut reasons);
-    check_resolve_tmdb(resolve_options, resolve_tmdb_enabled, pli, needs_info, &mut reasons);
+    check_needs_info(resolve_options, pli, &mut reasons);
+    check_resolve_tmdb(resolve_options, resolve_tmdb_enabled, pli, &mut reasons);
 
     if resolve_options.has_flag(ResolveOptionsFlags::Probe) {
         check_needs_probe(pli, &mut reasons);
@@ -451,34 +543,36 @@ fn check_resolve_reasons(
     reasons
 }
 
-fn check_needs_info(resolve_options: &ResolveOptions, pli: &mut PlaylistItem, reasons: &mut ResolveReasonSet) -> bool {
+fn check_needs_info(resolve_options: &ResolveOptions, pli: &PlaylistItem, reasons: &mut ResolveReasonSet) {
     let needs_info = resolve_options.has_flag(ResolveOptionsFlags::Resolve) && !pli.has_details();
     if needs_info {
         reasons.set(ResolveReason::Info);
     }
-    needs_info
 }
 
 fn check_resolve_tmdb(
     resolve_options: &ResolveOptions,
     resolve_tmdb_enabled: bool,
-    pli: &mut PlaylistItem,
-    needs_info: bool,
+    pli: &PlaylistItem,
     reasons: &mut ResolveReasonSet,
 ) {
-    if resolve_tmdb_enabled && resolve_options.has_flag(ResolveOptionsFlags::TmdbMissing) && needs_info {
-        if let Some(StreamProperties::Series(series_stream_props)) = pli.header.additional_properties.as_ref() {
-            let has_tmdb = series_stream_props.tmdb.is_some();
-            let has_date = series_stream_props.release_date.is_some();
-            let title_present = !series_stream_props.name.is_empty() || !pli.header.title.is_empty();
+    if resolve_tmdb_enabled && resolve_options.has_flag(ResolveOptionsFlags::TmdbMissing) {
+        let (has_tmdb, has_date, title_present) = match pli.header.additional_properties.as_ref() {
+            Some(StreamProperties::Series(series_stream_props)) => (
+                series_stream_props.tmdb.is_some(),
+                series_stream_props.release_date.is_some(),
+                !series_stream_props.name.is_empty() || !pli.header.title.is_empty(),
+            ),
+            None => (false, false, !pli.header.title.is_empty()),
+            _ => return,
+        };
 
-            if title_present && (!has_tmdb || !has_date) {
-                if !has_tmdb {
-                    reasons.set(ResolveReason::Tmdb);
-                }
-                if !has_date {
-                    reasons.set(ResolveReason::Date);
-                }
+        if title_present && (!has_tmdb || !has_date) {
+            if !has_tmdb {
+                reasons.set(ResolveReason::Tmdb);
+            }
+            if !has_date {
+                reasons.set(ResolveReason::Date);
             }
         }
     }
@@ -502,15 +596,15 @@ fn check_needs_probe(pli: &PlaylistItem, reasons: &mut ResolveReasonSet) {
         reasons.set(ResolveReason::Probe);
     }
 }
-
 /// Updates metadata for a single Series (Info + Episodes Probe) and persists it.
 ///
 /// # Arguments
 /// * `save` - If true, persists changes to the input database immediately (Instant strategy).
 ///   If false, returns the properties so the caller can batch persist them (Bundled strategy).
 /// * `fetch_info` - If true, fetches details from Provider API. If false, uses existing/dummy data.
+/// * `resolve_tmdb` - If true, resolves missing TMDB/date metadata from available titles.
 /// * `db_query` - Optional pre-opened DB handle to avoid re-opening file.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::fn_params_excessive_bools)]
 pub async fn update_series_metadata(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
@@ -521,7 +615,9 @@ pub async fn update_series_metadata(
     playlist_title: Option<&str>,
     save: bool,
     fetch_info: bool,
+    resolve_tmdb: bool,
     do_probe: bool,
+    probe_settings: SeriesProbeSettings,
     db_query: Option<Arc<Mutex<BPlusTreeQuery<u32, XtreamPlaylistItem>>>>,
 ) -> Result<Option<SeriesStreamProperties>, TuliproxError> {
     let working_dir = &app_config.config.load().working_dir;
@@ -568,10 +664,9 @@ pub async fn update_series_metadata(
         } else {
             let xtream_path = xtream_get_file_path(&storage_path, XtreamCluster::Series);
             if xtream_path.exists() {
-                let file_lock = app_config.file_locks.read_lock(&xtream_path).await;
+                let _file_lock = app_config.file_locks.read_lock(&xtream_path).await;
                 let xtream_path = xtream_path.clone();
                 let item = match tokio::task::spawn_blocking(move || {
-                    let _guard = file_lock;
                     let mut query = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path)?;
                     query.query_zero_copy(&series_id)
                 })
@@ -657,7 +752,7 @@ pub async fn update_series_metadata(
     let resolve_tmdb_enabled = input.has_flag(ConfigInputFlags::ResolveTmdb);
 
     // 2. Resolve TMDB/Date if missing
-    if fetch_info
+    if resolve_tmdb
         && resolve_tmdb_enabled
         && (properties.tmdb.is_none() || properties.release_date.is_none())
         && !properties.name.is_empty()
@@ -721,10 +816,7 @@ pub async fn update_series_metadata(
         if let Some(details) = properties.details.as_mut() {
             if let Some(episodes) = details.episodes.as_mut() {
                 let config = app_config.config.load();
-                let ffprobe_timeout = config.video.as_ref().and_then(|v| v.ffprobe_timeout).unwrap_or(60);
                 let user_agent = config.default_user_agent.clone();
-                let analyze_duration = 10_000_000;
-                let probe_size = 10_000_000;
 
                 let input_url = input.url.as_str();
                 let input_username = input.username.as_deref().unwrap_or("");
@@ -767,9 +859,9 @@ pub async fn update_series_metadata(
                             if let Some((_quality, raw_video, raw_audio)) = crate::utils::ffmpeg::probe_url(
                                 &episode_url,
                                 user_agent.as_deref(),
-                                analyze_duration,
-                                probe_size,
-                                ffprobe_timeout,
+                                probe_settings.analyze_duration_micros,
+                                probe_settings.probe_size_bytes,
+                                probe_settings.timeout_secs,
                             )
                             .await
                             {

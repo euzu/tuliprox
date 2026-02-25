@@ -2,8 +2,8 @@ use shared::{
     error::{info_err_res, TuliproxError},
     model::{
         ApiProxyConfigDto, ConfigApiDto, HdHomeRunConfigDto, IpCheckConfigDto, LibraryConfigDto, LogConfigDto,
-        MainConfigDto, MessagingConfigDto, ProxyConfigDto, ReverseProxyConfigDto, SchedulesConfigDto, SourcesConfigDto,
-        VideoConfigDto, WebUiConfigDto,
+        MainConfigDto, MessagingConfigDto, MetadataUpdateConfigDto, ProxyConfigDto, ReverseProxyConfigDto,
+        SchedulesConfigDto, SourcesConfigDto, VideoConfigDto, WebUiConfigDto,
     },
 };
 use std::{fmt, str::FromStr};
@@ -21,6 +21,7 @@ pub const LABEL_IP_CHECK_CONFIG: &str = "LABEL.IP_CHECK_CONFIG";
 pub const LABEL_VIDEO_CONFIG: &str = "LABEL.VIDEO_CONFIG";
 pub const LABEL_PANEL_CONFIG: &str = "LABEL.PANEL_CONFIG";
 pub const LABEL_LIBRARY_CONFIG: &str = "LABEL.LIBRARY_CONFIG";
+pub const LABEL_METADATA_UPDATE_CONFIG: &str = "LABEL.METADATA_UPDATE_CONFIG";
 
 const MAIN_PAGE: &str = "main";
 const API_PAGE: &str = "api";
@@ -33,6 +34,7 @@ const HDHOMERUN_PAGE: &str = "hdhomerun";
 const PROXY_PAGE: &str = "proxy";
 const IPCHECK_PAGE: &str = "ipcheck";
 const VIDEO_PAGE: &str = "video";
+const METADATA_UPDATE_PAGE: &str = "metadata_update";
 const PANEL_PAGE: &str = "panel";
 const LIBRARY_PAGE: &str = "library";
 
@@ -43,6 +45,7 @@ pub enum ConfigPage {
     Log,
     Schedules,
     Video,
+    MetadataUpdate,
     Messaging,
     WebUi,
     ReverseProxy,
@@ -63,6 +66,7 @@ impl FromStr for ConfigPage {
             LOG_PAGE => Ok(ConfigPage::Log),
             SCHEDULES_PAGE => Ok(ConfigPage::Schedules),
             VIDEO_PAGE => Ok(ConfigPage::Video),
+            METADATA_UPDATE_PAGE => Ok(ConfigPage::MetadataUpdate),
             MESSAGING_PAGE => Ok(ConfigPage::Messaging),
             WEBUI_PAGE => Ok(ConfigPage::WebUi),
             REVERSE_PROXY_PAGE => Ok(ConfigPage::ReverseProxy),
@@ -84,6 +88,7 @@ impl fmt::Display for ConfigPage {
             ConfigPage::Log => LOG_PAGE,
             ConfigPage::Schedules => SCHEDULES_PAGE,
             ConfigPage::Video => VIDEO_PAGE,
+            ConfigPage::MetadataUpdate => METADATA_UPDATE_PAGE,
             ConfigPage::Messaging => MESSAGING_PAGE,
             ConfigPage::WebUi => WEBUI_PAGE,
             ConfigPage::ReverseProxy => REVERSE_PROXY_PAGE,
@@ -105,6 +110,7 @@ pub enum ConfigForm {
     Log(bool, LogConfigDto),
     Schedules(bool, SchedulesConfigDto),
     Video(bool, VideoConfigDto),
+    MetadataUpdate(bool, MetadataUpdateConfigDto),
     Messaging(bool, MessagingConfigDto),
     WebUi(bool, WebUiConfigDto),
     ReverseProxy(bool, ReverseProxyConfigDto),
@@ -125,6 +131,7 @@ impl ConfigForm {
                 | ConfigForm::Log(true, _)
                 | ConfigForm::Schedules(true, _)
                 | ConfigForm::Video(true, _)
+                | ConfigForm::MetadataUpdate(true, _)
                 | ConfigForm::Messaging(true, _)
                 | ConfigForm::WebUi(true, _)
                 | ConfigForm::ReverseProxy(true, _)
@@ -145,6 +152,7 @@ pub struct ConfigFormSlots {
     pub log: Option<ConfigForm>,
     pub schedules: Option<ConfigForm>,
     pub video: Option<ConfigForm>,
+    pub metadata_update: Option<ConfigForm>,
     pub messaging: Option<ConfigForm>,
     pub web_ui: Option<ConfigForm>,
     pub reverse_proxy: Option<ConfigForm>,
@@ -166,6 +174,7 @@ impl ConfigFormSlots {
             ConfigForm::Log(_, _) => Self::set_form_slot(&mut self.log, form),
             ConfigForm::Schedules(_, _) => Self::set_form_slot(&mut self.schedules, form),
             ConfigForm::Video(_, _) => Self::set_form_slot(&mut self.video, form),
+            ConfigForm::MetadataUpdate(_, _) => Self::set_form_slot(&mut self.metadata_update, form),
             ConfigForm::Messaging(_, _) => Self::set_form_slot(&mut self.messaging, form),
             ConfigForm::WebUi(_, _) => Self::set_form_slot(&mut self.web_ui, form),
             ConfigForm::ReverseProxy(_, _) => Self::set_form_slot(&mut self.reverse_proxy, form),
@@ -177,7 +186,7 @@ impl ConfigFormSlots {
         }
     }
 
-    pub fn all_slots(&self) -> [&Option<ConfigForm>; 14] {
+    pub fn all_slots(&self) -> [&Option<ConfigForm>; 15] {
         [
             &self.main,
             &self.api,
@@ -185,6 +194,7 @@ impl ConfigFormSlots {
             &self.log,
             &self.schedules,
             &self.video,
+            &self.metadata_update,
             &self.messaging,
             &self.web_ui,
             &self.reverse_proxy,

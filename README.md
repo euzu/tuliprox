@@ -100,6 +100,7 @@ Top level entries in the config files are:
 - `process_parallel` _optional_
 - `messaging`  _optional_
 - `video` _optional_
+- `metadata_update` _optional_
 - `schedules` _optional_
 - `backup_dir` _optional_
 - `mapping_path` _optional_, file or directory path for mappings (`mapping.yml` by default)
@@ -359,14 +360,10 @@ It has 2 entries `extensions` and `download`.
     Example: `.*(?P<episode>[Ss]\\d{1,2}(.*?)[Ee]\\d{1,2}).*`
 - `web_search` is _optional_
 - `download.episode_pattern` to remove episode suffix from titles.
-- `ffprobe_enabled`: _optional_ (default `false`). Enable or disable FFprobe analysis for streams globally.
-- `ffprobe_timeout`: _optional_ (default `60`). Timeout in seconds for FFprobe analysis.
 
 ```yaml
 video:
   web_search: 'https://www.imdb.com/search/title/?title={}'
-  ffprobe_enabled: true
-  ffprobe_timeout: 60
   extensions:
     - mkv
     - mp4
@@ -380,12 +377,104 @@ video:
     episode_pattern: '.*(?P<episode>[Ss]\\d{1,2}(.*?)[Ee]\\d{1,2}).*'
 ```
 
-### 1.5a Video Analysis & Metadata Fallback
+### 1.5a `metadata_update`
+
+`metadata_update` is optional and controls retry/backoff behavior for the metadata worker queue and global FFprobe behavior.
+
+Duration fields use the same format as `cache_duration`: plain seconds (`60`) or suffixed values (`10m`, `1h`, `7d`).
+
+```yaml
+metadata_update:
+  queue_log_interval: 30s
+  progress_log_interval: 15s
+  max_resolve_retry_backoff: 1h
+  resolve_min_retry_base: 5s
+  max_attempts_resolve: 3
+  max_attempts_probe: 3
+  resolve_exhaustion_reset_gap: 1h
+  probe_cooldown: 7d
+  retry_delay: 2s
+  probe_retry_load_retry_delay: 1m
+  worker_idle_timeout: 1m
+  probe_retry_backoff_step_1: 10m
+  probe_retry_backoff_step_2: 30m
+  probe_retry_backoff_step_3: 1h
+  backoff_jitter_percent: 20
+  max_queue_size: 100000
+  ffprobe_enabled: true
+  ffprobe_timeout: 60
+  ffprobe_analyze_duration: 10s
+  ffprobe_probe_size: 10MB
+  ffprobe_live_analyze_duration: 5s
+  ffprobe_live_probe_size: 5MB
+```
+
+**Field Reference (`metadata_update`):**
+
+- `queue_log_interval` (default `30s`): Interval for queue size/status log output of the metadata worker.
+- `progress_log_interval` (default `15s`): Interval for progress log output while metadata tasks are being processed.
+- `max_resolve_retry_backoff` (default `1h`): Upper limit for resolve retry backoff delay.
+- `resolve_min_retry_base` (default `5s`): Minimum base delay for resolve retries before exponential backoff is applied.
+- `max_attempts_resolve` (default `3`): Maximum resolve attempts before a resolve task is treated as exhausted for the current cycle.
+- `max_attempts_probe` (default `3`): Maximum probe attempts before probe cooldown is activated.
+- `resolve_exhaustion_reset_gap` (default `1h`): Time gap after a completed update cycle after which exhausted resolve states are reset.
+- `probe_cooldown` (default `7d`): Cooldown duration after probe attempts are exhausted; probe retries are skipped during this period.
+- `retry_delay` (default `2s`): Minimum retry delay for transient worker errors (for example temporary connection/resource issues).
+- `probe_retry_load_retry_delay` (default `1m`): Delay before re-attempting to load persisted probe retry state after a load failure.
+- `worker_idle_timeout` (default `1m`): Idle timeout for metadata worker shutdown when there is no immediate work.
+- `probe_retry_backoff_step_1` (default `10m`): Probe backoff delay for attempt 1.
+- `probe_retry_backoff_step_2` (default `30m`): Probe backoff delay for attempt 2.
+- `probe_retry_backoff_step_3` (default `1h`): Probe backoff delay for attempt 3 and higher.
+- `backoff_jitter_percent` (default `20`): Random jitter percentage applied to resolve/probe retry backoff to avoid synchronized retries.
+- `max_queue_size` (default `100000`): Maximum pending metadata tasks per input before new tasks are rejected.
+- `ffprobe_enabled` (default `false`): Globally enables/disables FFprobe-based stream analysis.
+- `ffprobe_timeout` (default `60`): FFprobe process timeout in seconds.
+- `ffprobe_analyze_duration` (default `10s`): FFprobe `-analyzeduration`
+  value for VOD/Series probing. Requires explicit unit suffix (`s`, `m`,
+  `h`, `d`).
+- `ffprobe_probe_size` (default `10MB`): FFprobe `-probesize` value for VOD/Series probing.
+- `ffprobe_live_analyze_duration` (default `5s`): FFprobe `-analyzeduration`
+  value for Live probing. Requires explicit unit suffix (`s`, `m`, `h`,
+  `d`).
+- `ffprobe_live_probe_size` (default `5MB`): FFprobe `-probesize` value for Live probing.
+
+Duration fields support `s`, `m`, `h`, `d` (for example `30s`, `10m`, `1h`, `7d`) or plain seconds.
+Exception: `ffprobe_analyze_duration` and `ffprobe_live_analyze_duration` require explicit unit suffix.
+Size fields support `B`, `KB`, `MB`, `GB`, `TB` (for example `512KB`, `10MB`) or plain bytes.
+
+**Why are there 4 FFprobe fields?**
+
+- `ffprobe_analyze_duration` + `ffprobe_probe_size` are the default pair for non-live probes (VOD/Series and generic non-live stream probes).
+- `ffprobe_live_analyze_duration` + `ffprobe_live_probe_size` are the live-specific pair for all live probes.
+- This split is intentional because live probing usually needs lower values
+  (less provider load / lower latency), while VOD/Series can use higher values
+  for better metadata extraction quality.
+
+**Glossary (`metadata_update`):**
+
+- `Resolve task`: A metadata job that fetches or enriches item metadata (for example VOD/Series details, TMDB ID, dates).
+- `Probe task`: A technical analysis job that inspects stream properties with FFprobe (codec, resolution, audio tracks).
+- `Retry`: Re-attempt of a failed task.
+- `Attempt`: One execution try of a task. If it fails, the attempt counter increases.
+- `Backoff delay`: Waiting time before the next retry after a failure.
+- `Exponential backoff`: Backoff strategy where retry delay grows with each
+  failed attempt (for example 5s, 10s, 20s, ...), up to a configured
+  maximum.
+- `Jitter`: Small random variation added to backoff delay to avoid many tasks retrying at exactly the same moment.
+- `Transient error`: Temporary failure (for example timeout, temporary no connection) that is likely to succeed on a later retry.
+- `Exhausted`: State when max attempts are reached for a task type.
+- `Cooldown`: Skip period after exhaustion (used for probe tasks) where retries are paused until the cooldown expires.
+- `Update cycle`: One full metadata processing run for an input, from first queued item until queue idle/completion.
+- `Resolve exhaustion reset gap`: Time window after which exhausted resolve states are cleared for the next meaningful update cycle.
+- `Pending queue`: In-memory list of metadata tasks waiting to be processed by the worker.
+- `Worker idle timeout`: Time without immediate work after which a worker may stop and release resources.
+
+### 1.5b Video Analysis & Metadata Fallback
 
 Tuliprox can automatically analyze streams using `ffprobe` to determine resolution, codecs, and audio channels. It also fetches missing metadata
 (TMDB ID, Release Date) if the provider does not supply them.
 
-This feature is enabled globally in `video` configuration but must be activated per input options.
+This feature is enabled globally in `metadata_update` configuration but must be activated per input options.
 
 **Input Config (`source.yml`):**
 

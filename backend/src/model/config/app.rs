@@ -1,5 +1,9 @@
 use crate::api::model::TransportStreamBuffer;
-use crate::model::{ApiProxyConfig, ApiProxyServerInfo, Config, ConfigInput, ConfigInputOptions, ConfigTarget, CustomStreamResponse, GracePeriodOptions, HdHomeRunConfig, HdHomeRunFlags, Mappings, ProxyUserCredentials, ReverseProxyDisabledHeaderConfig, SourcesConfig, TargetOutput};
+use crate::model::{
+    ApiProxyConfig, ApiProxyServerInfo, Config, ConfigInput, ConfigInputOptions, ConfigTarget, CustomStreamResponse,
+    GracePeriodOptions, HdHomeRunConfig, HdHomeRunFlags, Mappings, ProxyUserCredentials,
+    ReverseProxyDisabledHeaderConfig, SourcesConfig, TargetOutput,
+};
 use crate::utils;
 use crate::utils::ffmpeg::check_ffprobe_availability;
 use arc_swap::{ArcSwap, ArcSwapOption};
@@ -448,7 +452,10 @@ impl AppConfig {
     }
 
     pub async fn is_ffprobe_enabled(&self) -> bool {
-        let ffprobe_enabled_in_config = self.config.load().video.as_ref().is_some_and(|v| v.ffprobe_enabled);
+        let ffprobe_enabled_in_config = {
+            let config = self.config.load();
+            config.metadata_update.as_ref().is_some_and(|metadata| metadata.ffprobe_enabled)
+        };
         if !ffprobe_enabled_in_config {
             return false;
         }

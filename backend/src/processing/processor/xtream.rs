@@ -7,7 +7,7 @@ use crate::repository::{get_input_storage_path, persist_input_live_info, BPlusTr
 use crate::utils::{debug_if_enabled};
 use log::{debug, warn};
 use crate::processing::parser::xtream::create_xtream_url;
-use crate::api::model::ProviderIdType;
+use crate::api::model::{ActiveProviderManager, ProviderHandle, ProviderIdType};
 
 /// Updates metadata for a single Live stream (primarily probing)
 #[allow(clippy::too_many_lines)]
@@ -17,6 +17,8 @@ pub async fn update_live_stream_metadata(
     id: ProviderIdType,
     save: bool,
     db_query: Option<Arc<Mutex<BPlusTreeQuery<u32, XtreamPlaylistItem>>>>,
+    _active_handle: Option<&ProviderHandle>,
+    _active_provider: &Arc<ActiveProviderManager>,
 ) -> Result<Option<LiveStreamProperties>, TuliproxError> {
     let working_dir = &app_config.config.load().working_dir;
     let storage_path = get_input_storage_path(&input.name, working_dir).await
@@ -114,10 +116,11 @@ pub async fn update_live_stream_metadata(
         use_prefix, no_ext
     );
     let config = app_config.config.load();
-    let ffprobe_timeout = config.video.as_ref().and_then(|v| v.ffprobe_timeout).unwrap_or(60);
+    let metadata_update = config.metadata_update.clone().unwrap_or_default();
+    let ffprobe_timeout = metadata_update.ffprobe_timeout.unwrap_or(60);
     let user_agent = config.default_user_agent.clone();
-    let analyze_duration = 5_000_000;
-    let probe_size = 5_000_000;
+    let analyze_duration = metadata_update.ffprobe_live_analyze_duration_micros;
+    let probe_size = metadata_update.ffprobe_live_probe_size_bytes;
 
     let display_id = stream_id_opt.map_or_else(|| "StringID".to_string(), |v| v.to_string());
     debug!("Probing Live Stream ID {} for input {}", display_id, input.name);

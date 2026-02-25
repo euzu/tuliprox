@@ -70,6 +70,7 @@ struct ActiveConnectionInfo {
 struct SharedConnections {
     by_key: HashMap<String, SharedAllocation>,
     key_by_addr: HashMap<ClientConnectionId, String>,
+    shared_by_allocation_id: HashMap<AllocationId, String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -303,6 +304,10 @@ impl ActiveProviderManager {
                     if !still_single {
                         None
                     } else if let Some(shared) = connections.shared.by_key.remove(&key) {
+                        connections
+                            .shared
+                            .shared_by_allocation_id
+                            .remove(&shared.allocation_id);
                         for shared_addr in &shared.connections {
                             connections.shared.key_by_addr.remove(shared_addr);
                         }
@@ -329,6 +334,12 @@ impl ActiveProviderManager {
                     let mut removed_provider_name = None;
                     let mut remove_addr_entry = false;
                     if let Some(per_addr) = connections.single.get_mut(&addr) {
+                        if let Some(info) = per_addr.get(&alloc_id) {
+                            // Revalidate victim selection under write lock.
+                            if info.priority != v_prio || info.created_at != victim_created_at {
+                                return None;
+                            }
+                        }
                         if let Some(info) = per_addr.remove(&alloc_id) {
                             removed_provider_name = info.allocation.get_provider_name();
                             remove_addr_entry = per_addr.is_empty();
@@ -511,6 +522,15 @@ impl ActiveProviderManager {
             if shared.connections.is_empty() {
                 // If this was the last user of the shared allocation:
                 connections.shared.by_key.remove(&key);
+                connections
+                    .shared
+                    .shared_by_allocation_id
+                    .remove(&shared.allocation_id);
+                if let Some(name) = shared.allocation.get_provider_name() {
+                    if let Some(list) = connections.by_provider.get_mut(&name) {
+                        list.retain(|(_, i)| *i != shared.allocation_id);
+                    }
+                }
                 Some(shared.allocation)
             } else {
                 // Update the entry back with the remaining connections
@@ -556,20 +576,20 @@ impl ActiveProviderManager {
 
             if released.is_none() {
                 // Try removing from Shared
-                let mut remove_key: Option<String> = None;
-                // TODO O(n) over all keys, maybe better approach ist to use a Hashmap shared_by_allocation_id: HashMap<AllocationId, String>
-                for (key, shared) in &connections.shared.by_key {
-                    if shared.allocation_id == handle.allocation_id {
-                        remove_key = Some(key.clone());
-                        break;
-                    }
-                }
-
-                if let Some(key) = remove_key {
+                if let Some(key) = connections
+                    .shared
+                    .shared_by_allocation_id
+                    .remove(&handle.allocation_id)
+                {
                     if let Some(shared) = connections.shared.by_key.remove(&key) {
                         released = Some(shared.allocation);
                         for addr in shared.connections {
                             connections.shared.key_by_addr.remove(&addr);
+                        }
+                        if let Some(name) = released.as_ref().and_then(ProviderAllocation::get_provider_name) {
+                            if let Some(list) = connections.by_provider.get_mut(&name) {
+                                list.retain(|(_, i)| *i != handle.allocation_id);
+                            }
                         }
                     }
                 }
@@ -641,6 +661,10 @@ impl ActiveProviderManager {
                     },
                 );
                 connections.shared.key_by_addr.insert(*addr, key.to_string());
+                connections
+                    .shared
+                    .shared_by_allocation_id
+                    .insert(handle.0.allocation_id, key.to_string());
             }
             extras
         };

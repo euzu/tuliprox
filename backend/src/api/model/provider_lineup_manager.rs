@@ -507,10 +507,15 @@ impl MultiProviderLineup {
 pub(in crate::api::model) struct ProviderLineupManager {
     grace_period_millis: AtomicU64,
     grace_period_timeout_secs: AtomicU64,
-    inputs: Arc<ArcSwap<Vec<Arc<ConfigInput>>>>,
-    providers: Arc<ArcSwap<Vec<ProviderLineup>>>,
+    snapshot: Arc<ArcSwap<LineupSnapshot>>,
     provider_connections: DashMap<Arc<str>, Arc<RwLock<ProviderConfigConnection>>>,
     event_manager: Arc<EventManager>,
+}
+
+#[derive(Debug)]
+struct LineupSnapshot {
+    inputs: Vec<Arc<ConfigInput>>,
+    providers: Vec<ProviderLineup>,
 }
 
 impl ProviderLineupManager {
@@ -523,8 +528,10 @@ impl ProviderLineupManager {
         Self {
             grace_period_millis: AtomicU64::new(grace_period_options.period_millis),
             grace_period_timeout_secs: AtomicU64::new(grace_period_options.timeout_secs),
-            inputs: Arc::new(ArcSwap::from_pointee(inputs)),
-            providers: Arc::new(ArcSwap::from_pointee(lineups)),
+            snapshot: Arc::new(ArcSwap::from_pointee(LineupSnapshot {
+                inputs,
+                providers: lineups,
+            })),
             provider_connections,
             event_manager: Arc::clone(event_manager),
         }
@@ -592,12 +599,12 @@ impl ProviderLineupManager {
     }
 
     fn has_changed(&self, new_inputs: &[Arc<ConfigInput>]) -> bool {
-        let old_inputs = self.inputs.load();
-        if old_inputs.len() != new_inputs.len() {
+        let snapshot = self.snapshot.load();
+        if snapshot.inputs.len() != new_inputs.len() {
             return true;
         }
         for new_input in new_inputs {
-            let Some(old_input) = old_inputs.iter().find(|i| i.name == new_input.name) else {
+            let Some(old_input) = snapshot.inputs.iter().find(|i| i.name == new_input.name) else {
                 return true;
             };
 
@@ -625,8 +632,10 @@ impl ProviderLineupManager {
         debug_if_enabled!("inputs {}", sanitize_sensitive_info(&display_vec(&new_inputs)));
         debug_if_enabled!("lineup {}", sanitize_sensitive_info(&display_vec(&new_lineups)));
 
-        self.inputs.store(Arc::new(new_inputs));
-        self.providers.store(Arc::new(new_lineups));
+        self.snapshot.store(Arc::new(LineupSnapshot {
+            inputs: new_inputs,
+            providers: new_lineups,
+        }));
     }
 
     pub async fn reconcile_connections(&self, mut counts: HashMap<Arc<str>, usize>) {
@@ -648,6 +657,8 @@ impl ProviderLineupManager {
         }
 
         // 2. Handle new providers that weren't in the registry yet (e.g. newly added/renamed).
+        // Same lock-ordering rule as Phase 1: clone the Arc<RwLock<_>> out of DashMap first,
+        // then await on the provider RwLock without holding any DashMap shard lock.
         for (name, count) in counts {
             let conn_lock = self.provider_connections
                 .entry(name)
@@ -676,8 +687,8 @@ impl ProviderLineupManager {
         // deterministic check: Is the name still in any current lineup?
         let current_names: std::collections::HashSet<Arc<str>> = {
             let mut names = std::collections::HashSet::new();
-            let lineups = self.providers.load();
-            for lineup in lineups.iter() {
+            let snapshot = self.snapshot.load();
+            for lineup in &snapshot.providers {
                 match lineup {
                     ProviderLineup::Single(s) => { names.insert(s.provider.name.clone()); }
                     ProviderLineup::Multi(m) => {
@@ -729,8 +740,8 @@ impl ProviderLineupManager {
     }
 
     pub async fn force_exact_acquire_connection(&self, provider_name: &Arc<str>) -> ProviderAllocation {
-        let providers = self.providers.load();
-        let allocation = match Self::get_provider_config_by_name(provider_name, &providers) {
+        let snapshot = self.snapshot.load_full();
+        let allocation = match Self::get_provider_config_by_name(provider_name, &snapshot.providers) {
             None => ProviderAllocation::Exhausted, // No Name matched, we don't have this provider
             Some((_lineup, config)) => config.force_allocate().await,
         };
@@ -746,9 +757,9 @@ impl ProviderLineupManager {
         provider_name: &Arc<str>,
         allow_grace: bool,
     ) -> ProviderAllocation {
-        let providers = self.providers.load();
+        let snapshot = self.snapshot.load_full();
         let with_grace = allow_grace && self.grace_period_millis.load(Ordering::Acquire) > 0;
-        let allocation = match Self::get_provider_config_by_name(provider_name, &providers) {
+        let allocation = match Self::get_provider_config_by_name(provider_name, &snapshot.providers) {
             None => ProviderAllocation::Exhausted,
             Some((_lineup, config)) => {
                 config
@@ -774,8 +785,8 @@ impl ProviderLineupManager {
         input_name: &Arc<str>,
         allow_grace: bool,
     ) -> ProviderAllocation {
-        let providers = self.providers.load();
-        let lineup_opt = Self::get_provider_config_by_name(input_name, &providers);
+        let snapshot = self.snapshot.load_full();
+        let lineup_opt = Self::get_provider_config_by_name(input_name, &snapshot.providers);
         let with_grace = allow_grace && self.grace_period_millis.load(Ordering::Acquire) > 0;
         let allocation = match lineup_opt {
             None => ProviderAllocation::Exhausted, // No Name matched, we don't have this provider
@@ -837,8 +848,8 @@ impl ProviderLineupManager {
     // This method is used for redirects to cycle through provider
     //
     pub async fn get_next_provider(&self, input_name: &Arc<str>) -> Option<Arc<ProviderConfig>> {
-        let providers = self.providers.load();
-        match Self::get_provider_config_by_name(input_name, &providers) {
+        let snapshot = self.snapshot.load_full();
+        match Self::get_provider_config_by_name(input_name, &snapshot.providers) {
             None => None,
             Some((lineup, _config)) => {
                 let cfg = lineup.get_next(self.grace_period_timeout_secs.load(Ordering::Relaxed)).await;
@@ -859,8 +870,8 @@ impl ProviderLineupManager {
                 result.insert(name.clone(), count);
             }
         };
-        let providers = self.providers.load();
-        for lineup in providers.iter() {
+        let snapshot = self.snapshot.load_full();
+        for lineup in &snapshot.providers {
             match lineup {
                 ProviderLineup::Single(provider_lineup) => {
                     let connections = provider_lineup.provider.get_current_connections().await;
@@ -881,8 +892,8 @@ impl ProviderLineupManager {
 
     pub async fn active_connection_count(&self) -> usize {
         let mut count = 0;
-        let providers = self.providers.load();
-        for lineup in providers.iter() {
+        let snapshot = self.snapshot.load_full();
+        for lineup in &snapshot.providers {
             match lineup {
                 ProviderLineup::Single(provider_lineup) => {
                     count += provider_lineup.provider.get_current_connections().await;
@@ -896,8 +907,8 @@ impl ProviderLineupManager {
     }
 
     pub async fn is_over_limit(&self, provider_name: &Arc<str>) -> bool {
-        let providers = self.providers.load();
-        if let Some((_, config)) = Self::get_provider_config_by_name(provider_name, &providers) {
+        let snapshot = self.snapshot.load_full();
+        if let Some((_, config)) = Self::get_provider_config_by_name(provider_name, &snapshot.providers) {
             config.is_over_limit(self.grace_period_timeout_secs.load(Ordering::Relaxed)).await
         } else {
             false
@@ -905,8 +916,8 @@ impl ProviderLineupManager {
     }
 
     pub async fn is_exhausted(&self, provider_name: &Arc<str>) -> bool {
-        let providers = self.providers.load();
-        if let Some((_, config)) = Self::get_provider_config_by_name(provider_name, &providers) {
+        let snapshot = self.snapshot.load_full();
+        if let Some((_, config)) = Self::get_provider_config_by_name(provider_name, &snapshot.providers) {
             config.is_exhausted().await
         } else {
             false
@@ -914,8 +925,10 @@ impl ProviderLineupManager {
     }
 
     pub fn is_provider_for_input(&self, provider_name: &str, input_name: &str) -> bool {
-        let lineups = self.providers.load();
-        if let Some((lineup, _)) = Self::get_provider_config_by_name(&provider_name.into(), &lineups) {
+        let snapshot = self.snapshot.load();
+        if let Some((lineup, _)) =
+            Self::get_provider_config_by_name(&provider_name.into(), &snapshot.providers)
+        {
              match lineup {
                  ProviderLineup::Single(_) => return input_name == provider_name,
                  ProviderLineup::Multi(m) => return m.name.as_ref() == input_name,

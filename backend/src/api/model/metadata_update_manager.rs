@@ -2,12 +2,14 @@ use crate::api::model::ProviderHandle;
 use crate::api::model::{AppState, EventMessage};
 use crate::processing::processor::{
     update_generic_stream_metadata, update_live_stream_metadata, update_series_metadata, update_vod_metadata,
+    GenericProbeOutcome, SeriesProbeSettings,
 };
 use crate::utils::debug_if_enabled;
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use log::{debug, error, info, warn};
 use parking_lot::Mutex as ParkingMutex;
+use serde::{Deserialize, Serialize};
 use shared::create_bitset;
 use shared::error::TuliproxError;
 use shared::model::{
@@ -15,16 +17,16 @@ use shared::model::{
     XtreamCluster, XtreamPlaylistItem,
 };
 use shared::utils::generate_playlist_uuid;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 
 use crate::api::model::BatchResultCollector;
 use crate::repository::{
     get_input_storage_path, get_target_id_mapping_file, write_playlist_batch_item_upsert, xtream_get_file_path,
-    BPlusTreeQuery,
+    BPlusTree, BPlusTreeQuery, BPlusTreeUpdate,
 };
 use crate::repository::{
     persist_input_live_info_batch, persist_input_series_info_batch, persist_input_vod_info_batch, TargetIdMapping,
@@ -32,17 +34,81 @@ use crate::repository::{
 use crate::utils::FileReadGuard;
 use std::cmp::min;
 use std::collections::{HashMap, HashSet};
+use std::io;
+use std::path::{Path, PathBuf};
+use crate::model::MetadataUpdateConfig;
 
-const QUEUE_LOG_INTERVAL: Duration = Duration::from_secs(30);
-const PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(15);
-const MAX_RETRY_BACKOFF_SECS: u64 = 60;
-const UPDATE_IN_PROGRESS_RETRY_SECS: u64 = 2;
-const MIN_PROBE_RETRY_BASE_SECS: u16 = 5;
-
-const MAX_QUEUE_SIZE: usize = 100_000;
+const PROBE_RETRY_STATE_FILE: &str = "probe_retry_state.db";
 const TASK_ERR_NO_CONNECTION: &str = "No connection available";
 const TASK_ERR_PREEMPTED: &str = "Task preempted";
 const TASK_ERR_UPDATE_IN_PROGRESS: &str = "Playlist update in progress";
+
+#[derive(Debug, Clone)]
+struct MetadataUpdateRuntimeSettings {
+    queue_log_interval: Duration,
+    progress_log_interval: Duration,
+    max_resolve_retry_backoff_secs: u64,
+    resolve_min_retry_base_secs: u64,
+    max_attempts_resolve: u8,
+    max_attempts_probe: u8,
+    resolve_exhaustion_reset_gap_secs: i64,
+    probe_cooldown_secs: i64,
+    retry_delay_secs: u64,
+    probe_retry_load_retry_delay_secs: i64,
+    worker_idle_timeout_secs: u64,
+    max_queue_size: usize,
+    probe_retry_backoff_step_1_secs: u64,
+    probe_retry_backoff_step_2_secs: u64,
+    probe_retry_backoff_step_3_secs: u64,
+    backoff_jitter_percent: u8,
+}
+
+impl Default for MetadataUpdateRuntimeSettings {
+    fn default() -> Self {
+        let defaults = MetadataUpdateConfig::default();
+        Self::from_metadata_update(&defaults)
+    }
+}
+
+impl MetadataUpdateRuntimeSettings {
+    fn from_app_state(app_state_weak: Option<&Weak<AppState>>) -> Self {
+        let metadata_update = app_state_weak.and_then(Weak::upgrade).map_or_else(
+            MetadataUpdateConfig::default,
+            |app_state| {
+                app_state
+                    .app_config
+                    .config
+                    .load()
+                    .metadata_update
+                    .as_ref()
+                    .map_or_else(MetadataUpdateConfig::default, Clone::clone)
+            },
+        );
+        Self::from_metadata_update(&metadata_update)
+    }
+
+    fn from_metadata_update(cfg: &MetadataUpdateConfig) -> Self {
+        let to_i64 = |v: u64| i64::try_from(v.max(1)).unwrap_or(i64::MAX);
+        Self {
+            queue_log_interval: Duration::from_secs(cfg.queue_log_interval_secs.max(1)),
+            progress_log_interval: Duration::from_secs(cfg.progress_log_interval_secs.max(1)),
+            max_resolve_retry_backoff_secs: cfg.max_resolve_retry_backoff_secs.max(1),
+            resolve_min_retry_base_secs: cfg.resolve_min_retry_base_secs.max(1),
+            max_attempts_resolve: cfg.max_attempts_resolve.max(1),
+            max_attempts_probe: cfg.max_attempts_probe.max(1),
+            resolve_exhaustion_reset_gap_secs: to_i64(cfg.resolve_exhaustion_reset_gap_secs),
+            probe_cooldown_secs: to_i64(cfg.probe_cooldown_secs),
+            retry_delay_secs: cfg.retry_delay_secs.max(1),
+            probe_retry_load_retry_delay_secs: to_i64(cfg.probe_retry_load_retry_delay_secs),
+            worker_idle_timeout_secs: cfg.worker_idle_timeout_secs.max(1),
+            max_queue_size: cfg.max_queue_size.max(1),
+            probe_retry_backoff_step_1_secs: cfg.probe_retry_backoff_step_1_secs.max(1),
+            probe_retry_backoff_step_2_secs: cfg.probe_retry_backoff_step_2_secs.max(1),
+            probe_retry_backoff_step_3_secs: cfg.probe_retry_backoff_step_3_secs.max(1),
+            backoff_jitter_percent: cfg.backoff_jitter_percent.min(95),
+        }
+    }
+}
 
 create_bitset!(u8, ResolveReason, Info, Tmdb, Date, Probe, MissingDetails);
 
@@ -176,22 +242,163 @@ impl TaskKey {
     }
 }
 
+#[derive(Debug, Clone)]
+struct RetryState {
+    attempts: u8,
+    next_allowed_at_ts: i64,
+    cooldown_until_ts: Option<i64>,
+    last_error: Option<String>,
+}
+
+impl RetryState {
+    fn new() -> Self {
+        Self {
+            attempts: 0,
+            next_allowed_at_ts: 0,
+            cooldown_until_ts: None,
+            last_error: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+enum ProbeRetryDbKey {
+    LiveId(u32),
+    LiveText(String),
+    Stream { scope: String, id: String },
+}
+
+impl ProbeRetryDbKey {
+    fn from_task_key(task_key: &TaskKey) -> Option<Self> {
+        match task_key {
+            TaskKey::Live(id) => Some(Self::LiveId(*id)),
+            TaskKey::LiveStr(id) => Some(Self::LiveText(id.as_ref().to_owned())),
+            TaskKey::Stream { scope, id } => Some(Self::Stream {
+                scope: scope.as_ref().to_owned(),
+                id: id.as_ref().to_owned(),
+            }),
+            _ => None,
+        }
+    }
+
+    fn into_task_key(self) -> TaskKey {
+        match self {
+            Self::LiveId(id) => TaskKey::Live(id),
+            Self::LiveText(id) => TaskKey::LiveStr(Arc::from(id)),
+            Self::Stream { scope, id } => TaskKey::Stream {
+                scope: Arc::from(scope),
+                id: Arc::from(id),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProbeRetryDbValue {
+    attempts: u8,
+    next_allowed_at_ts: i64,
+    cooldown_until_ts: Option<i64>,
+    last_error: Option<String>,
+    updated_at_ts: i64,
+}
+
+impl ProbeRetryDbValue {
+    fn from_retry_state(state: &RetryState, updated_at_ts: i64) -> Self {
+        Self {
+            attempts: state.attempts,
+            next_allowed_at_ts: state.next_allowed_at_ts,
+            cooldown_until_ts: state.cooldown_until_ts,
+            last_error: state.last_error.clone(),
+            updated_at_ts,
+        }
+    }
+
+    fn cleared(updated_at_ts: i64) -> Self {
+        Self {
+            attempts: 0,
+            next_allowed_at_ts: 0,
+            cooldown_until_ts: None,
+            last_error: None,
+            updated_at_ts,
+        }
+    }
+
+    fn into_retry_state(self) -> Option<RetryState> {
+        if self.attempts == 0 && self.next_allowed_at_ts <= 0 && self.cooldown_until_ts.is_none() {
+            return None;
+        }
+        Some(RetryState {
+            attempts: self.attempts,
+            next_allowed_at_ts: self.next_allowed_at_ts,
+            cooldown_until_ts: self.cooldown_until_ts,
+            last_error: self.last_error,
+        })
+    }
+}
+
+fn ensure_probe_retry_db(path: &Path) -> io::Result<()> {
+    if path.exists() {
+        return Ok(());
+    }
+    let mut tree = BPlusTree::<ProbeRetryDbKey, ProbeRetryDbValue>::new();
+    tree.store(path).map(|_| ())
+}
+
+fn load_probe_retry_states_from_disk(path: &Path) -> io::Result<HashMap<TaskKey, RetryState>> {
+    ensure_probe_retry_db(path)?;
+
+    let mut result = HashMap::new();
+    let mut query = BPlusTreeQuery::<ProbeRetryDbKey, ProbeRetryDbValue>::try_new(path)?;
+    for (key, value) in query.iter() {
+        if let Some(state) = value.into_retry_state() {
+            result.insert(key.into_task_key(), state);
+        }
+    }
+
+    Ok(result)
+}
+
+fn persist_probe_retry_state_to_disk(path: &Path, task_key: &TaskKey, state: Option<&RetryState>) -> io::Result<()> {
+    let Some(db_key) = ProbeRetryDbKey::from_task_key(task_key) else {
+        return Ok(());
+    };
+
+    ensure_probe_retry_db(path)?;
+
+    let now_ts = chrono::Utc::now().timestamp();
+    let value = match state {
+        Some(s) => ProbeRetryDbValue::from_retry_state(s, now_ts),
+        None => ProbeRetryDbValue::cleared(now_ts),
+    };
+
+    let mut update = BPlusTreeUpdate::<ProbeRetryDbKey, ProbeRetryDbValue>::try_new_with_backoff(path)?;
+    update
+        .upsert_batch(&[(&db_key, &value)])
+        .map_err(|e| io::Error::other(format!("persist probe retry state failed: {e}")))?;
+    Ok(())
+}
+
 /// Per-input worker context. Each input has its own worker
 /// that processes tasks sequentially with rate limiting.
 #[derive(Clone)]
 struct InputWorkerContext {
+    worker_id: u64,
     sender: mpsc::Sender<TaskKey>,
     pending_tasks: Arc<DashMap<TaskKey, PendingTask>>,
+    pending_task_count: Arc<AtomicUsize>,
 }
 
 struct PendingTask {
-    task: Mutex<UpdateTask>,
+    task: ParkingMutex<UpdateTask>,
     generation: AtomicU64,
 }
 
 impl PendingTask {
     fn new(task: UpdateTask) -> Self {
-        Self { task: Mutex::new(task), generation: AtomicU64::new(0) }
+        Self {
+            task: ParkingMutex::new(task),
+            generation: AtomicU64::new(0),
+        }
     }
 }
 
@@ -202,7 +409,7 @@ impl PendingTask {
 /// - Tasks for the SAME input are processed sequentially with rate limiting (defined per task)
 /// - Tasks for DIFFERENT inputs run in parallel
 /// - Workers are spawned on-demand when first task arrives for an input
-/// - Workers terminate when their channel is empty and no more senders exist
+/// - Workers terminate after an idle timeout and are respawned on demand
 pub struct MetadataUpdateManager {
     /// Per-input worker senders. Worker is spawned when entry is created.
     workers: DashMap<Arc<str>, InputWorkerContext>,
@@ -215,12 +422,21 @@ pub struct MetadataUpdateManager {
     update_pause_gate: Arc<RwLock<()>>,
     /// Global cancellation token for shutdown
     cancel_token: CancellationToken,
+    /// Monotonic worker generation id used to avoid removing a newly spawned worker context.
+    next_worker_id: AtomicU64,
 }
 
 impl Default for MetadataUpdateManager {
     fn default() -> Self {
         Self::new(CancellationToken::new())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubmitTaskResult {
+    QueuedOrMerged,
+    QueueFull,
+    ChannelClosed,
 }
 
 impl MetadataUpdateManager {
@@ -230,6 +446,7 @@ impl MetadataUpdateManager {
             app_state: tokio::sync::Mutex::new(None),
             update_pause_gate: Arc::new(RwLock::new(())),
             cancel_token,
+            next_worker_id: AtomicU64::new(1),
         }
     }
 
@@ -267,105 +484,234 @@ impl MetadataUpdateManager {
             let guard = self.app_state.lock().await;
             guard.clone()
         };
+        let runtime_settings = MetadataUpdateRuntimeSettings::from_app_state(app_state_weak.as_ref());
+        let max_queue_size = runtime_settings.max_queue_size;
 
-        // Atomically ensure there is exactly one worker context per input.
-        let mut worker_to_spawn: Option<InputWorker> = None;
-        let ctx = match self.workers.entry(input_name.clone()) {
-            Entry::Occupied(entry) => entry.get().clone(),
-            Entry::Vacant(entry) => {
-                let (tx, rx) = mpsc::channel::<TaskKey>(256);
-                let pending_tasks = Arc::new(DashMap::new());
+        let task_to_queue = task;
+        for attempt in 0..2 {
+            // Atomically ensure there is exactly one worker context per input.
+            let mut worker_to_spawn: Option<(u64, InputWorker)> = None;
+            let ctx = match self.workers.entry(input_name.clone()) {
+                Entry::Occupied(entry) => entry.get().clone(),
+                Entry::Vacant(entry) => {
+                    let (tx, rx) = mpsc::channel::<TaskKey>(max_queue_size);
+                    let pending_tasks = Arc::new(DashMap::new());
+                    let pending_task_count = Arc::new(AtomicUsize::new(0));
+                    let worker_id = self.next_worker_id.fetch_add(1, Ordering::Relaxed);
 
-                let ctx = InputWorkerContext { sender: tx.clone(), pending_tasks: pending_tasks.clone() };
-                entry.insert(ctx.clone());
+                    let ctx = InputWorkerContext {
+                        worker_id,
+                        sender: tx.clone(),
+                        pending_tasks: pending_tasks.clone(),
+                        pending_task_count: pending_task_count.clone(),
+                    };
+                    entry.insert(ctx.clone());
 
-                worker_to_spawn = Some(InputWorker {
-                    input_name: input_name.clone(),
-                    sender: tx,
-                    receiver: rx,
-                    pending_tasks,
-                    app_state_weak,
-                    update_pause_gate: Arc::clone(&self.update_pause_gate),
-                    cancel_token: self.cancel_token.clone(),
-                    batch_buffer: BatchResultCollector::new(),
-                    db_handles: HashMap::new(),
-                    failed_clusters: HashSet::new(),
+                    worker_to_spawn = Some((
+                        worker_id,
+                        InputWorker {
+                            input_name: input_name.clone(),
+                            sender: tx,
+                            receiver: rx,
+                            pending_tasks,
+                            pending_task_count,
+                            app_state_weak: app_state_weak.clone(),
+                            update_pause_gate: Arc::clone(&self.update_pause_gate),
+                            cancel_token: self.cancel_token.clone(),
+                            batch_buffer: BatchResultCollector::new(),
+                            db_handles: HashMap::new(),
+                            failed_clusters: HashSet::new(),
+                            retry_states: HashMap::new(),
+                            resolve_exhausted: HashMap::new(),
+                            last_cycle_completed_at_ts: None,
+                            probe_retry_state_path: None,
+                            probe_retry_loaded: false,
+                            probe_retry_load_retry_at_ts: None,
+                            scheduled_requeues: Arc::new(DashMap::new()),
+                        },
+                    ));
+
+                    ctx
+                }
+            };
+
+            if let Some((worker_id, worker)) = worker_to_spawn {
+                let workers_ref = self.workers.clone();
+                let input_name_for_cleanup = input_name.clone();
+                tokio::spawn(async move {
+                    worker.run().await;
+
+                    // Cleanup only if this exact worker context is still active.
+                    if let Entry::Occupied(entry) = workers_ref.entry(input_name_for_cleanup.clone()) {
+                        if entry.get().worker_id == worker_id {
+                            entry.remove();
+                        }
+                    }
                 });
-
-                ctx
             }
-        };
 
-        if let Some(worker) = worker_to_spawn {
-            let workers_ref = self.workers.clone();
-            let input_name_for_cleanup = input_name.clone();
-            tokio::spawn(async move {
-                worker.run().await;
-                // Cleanup: remove self from workers map when done
-                workers_ref.remove(&input_name_for_cleanup);
-            });
+            match Self::submit_task(
+                ctx.sender.clone(),
+                ctx.pending_tasks.clone(),
+                ctx.pending_task_count.clone(),
+                &input_name,
+                max_queue_size,
+                task_to_queue.clone(),
+            )
+            .await
+            {
+                SubmitTaskResult::QueuedOrMerged => return,
+                SubmitTaskResult::QueueFull => {
+                    warn!("Metadata queue full for input {input_name}, dropping task");
+                    return;
+                }
+                SubmitTaskResult::ChannelClosed => {
+                    debug_if_enabled!(
+                        "Detected closed metadata worker channel for input {}, recreating worker context (attempt {})",
+                        input_name,
+                        attempt + 1
+                    );
+                    Self::remove_worker_context_if_id(&self.workers, &input_name, ctx.worker_id);
+                }
+            }
         }
 
-        Self::submit_task(ctx.sender.clone(), ctx.pending_tasks.clone(), &input_name, task).await;
+        warn!("Failed to queue metadata task for input {input_name} after worker recovery attempts: {task_to_queue}");
+    }
+
+    fn remove_worker_context_if_id(
+        workers: &DashMap<Arc<str>, InputWorkerContext>,
+        input_name: &Arc<str>,
+        worker_id: u64,
+    ) {
+        if let Entry::Occupied(entry) = workers.entry(input_name.clone()) {
+            if entry.get().worker_id == worker_id {
+                entry.remove();
+            }
+        }
     }
 
     async fn submit_task(
         sender: mpsc::Sender<TaskKey>,
         pending_tasks: Arc<DashMap<TaskKey, PendingTask>>,
+        pending_task_count: Arc<AtomicUsize>,
         input_name: &str,
+        max_queue_size: usize,
         task: UpdateTask,
-    ) {
+    ) -> SubmitTaskResult {
         let key = TaskKey::from_task(&task);
 
         if let Some(entry) = pending_tasks.get(&key) {
-            let mut existing = entry.task.lock().await;
-            let mut merged = false;
-            // Merge logic
-            match (&mut *existing, task) {
-                (
-                    UpdateTask::ResolveVod { reason: r1, delay: d1, .. },
-                    UpdateTask::ResolveVod { reason: r2, delay: d2, .. },
-                )
-                | (
-                    UpdateTask::ResolveSeries { reason: r1, delay: d1, .. },
-                    UpdateTask::ResolveSeries { reason: r2, delay: d2, .. },
-                )
-                | (
-                    UpdateTask::ProbeStream { reason: r1, delay: d1, .. },
-                    UpdateTask::ProbeStream { reason: r2, delay: d2, .. },
-                ) => {
-                    *r1 |= r2;
-                    *d1 = min(*d1, d2);
-                    merged = true;
-                }
-                (
-                    UpdateTask::ProbeLive { reason: r1, delay: d1, interval: i1, .. },
-                    UpdateTask::ProbeLive { reason: r2, delay: d2, interval: i2, .. },
-                ) => {
-                    *r1 |= r2;
-                    *d1 = min(*d1, d2);
-                    *i1 = min(*i1, i2);
-                    merged = true;
-                }
-                _ => {} // Mismatched types, should not happen due to TaskKey
-            }
-
-            if merged {
+            let mut existing = entry.task.lock();
+            if Self::merge_task_payload(&mut existing, task) {
                 entry.generation.fetch_add(1, Ordering::Relaxed);
             }
-            return;
+            return SubmitTaskResult::QueuedOrMerged;
         }
 
-        if pending_tasks.len() >= MAX_QUEUE_SIZE {
-            warn!("Metadata queue full for input {input_name}, dropping task");
-            return;
+        // Lock-free admission with CAS: reserve one queue slot only if capacity allows.
+        if pending_task_count
+            .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |current| {
+                if current < max_queue_size {
+                    Some(current + 1)
+                } else {
+                    None
+                }
+            })
+            .is_err()
+        {
+            return SubmitTaskResult::QueueFull;
         }
 
-        pending_tasks.insert(key.clone(), PendingTask::new(task));
+        match pending_tasks.entry(key.clone()) {
+            Entry::Occupied(entry) => {
+                // Another producer inserted this key after our fast-path `get`.
+                // Release reserved capacity and merge into the existing task.
+                Self::decrement_pending_task_count(&pending_task_count);
+                let mut existing = entry.get().task.lock();
+                if Self::merge_task_payload(&mut existing, task) {
+                    entry.get().generation.fetch_add(1, Ordering::Relaxed);
+                }
+                return SubmitTaskResult::QueuedOrMerged;
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(PendingTask::new(task));
+            }
+        }
+
         if sender.send(key.clone()).await.is_err() {
-            pending_tasks.remove(&key);
+            if pending_tasks.remove(&key).is_some() {
+                Self::decrement_pending_task_count(&pending_task_count);
+            }
             warn!("Failed to send task signal for input {input_name}");
+            return SubmitTaskResult::ChannelClosed;
         }
+        SubmitTaskResult::QueuedOrMerged
+    }
+
+    #[inline]
+    fn decrement_pending_task_count(pending_task_count: &AtomicUsize) {
+        // Guard against accidental underflow in edge/error paths.
+        let _ = pending_task_count.fetch_update(Ordering::AcqRel, Ordering::Relaxed, |current| {
+            current.checked_sub(1)
+        });
+    }
+
+    fn merge_task_payload(existing: &mut UpdateTask, task: UpdateTask) -> bool {
+        let mut merged = false;
+        // Merge logic
+        match (existing, task) {
+            (
+                UpdateTask::ResolveVod { reason: r1, delay: d1, .. },
+                UpdateTask::ResolveVod { reason: r2, delay: d2, .. },
+            )
+            | (
+                UpdateTask::ResolveSeries { reason: r1, delay: d1, .. },
+                UpdateTask::ResolveSeries { reason: r2, delay: d2, .. },
+            ) => {
+                *r1 |= r2;
+                *d1 = min(*d1, d2);
+                merged = true;
+            }
+            (
+                UpdateTask::ProbeStream {
+                    reason: r1,
+                    delay: d1,
+                    url: url1,
+                    item_type: item_type1,
+                    ..
+                },
+                UpdateTask::ProbeStream {
+                    reason: r2,
+                    delay: d2,
+                    url: url2,
+                    item_type: item_type2,
+                    ..
+                },
+            ) => {
+                *r1 |= r2;
+                *d1 = min(*d1, d2);
+                // Keep the existing payload by default; only fill it from the incoming
+                // task when the destination payload is empty.
+                if url1.is_empty() && !url2.is_empty() {
+                    *url1 = url2;
+                    *item_type1 = item_type2;
+                }
+                merged = true;
+            }
+            (
+                UpdateTask::ProbeLive { reason: r1, delay: d1, interval: i1, .. },
+                UpdateTask::ProbeLive { reason: r2, delay: d2, interval: i2, .. },
+            ) => {
+                *r1 |= r2;
+                *d1 = min(*d1, d2);
+                *i1 = min(*i1, i2);
+                merged = true;
+            }
+            _ => {} // Mismatched types, should not happen due to TaskKey
+        }
+
+        merged
     }
 
     /// Queue a task using the legacy API (for backward compatibility).
@@ -390,12 +736,22 @@ struct InputWorker {
     sender: mpsc::Sender<TaskKey>,
     receiver: mpsc::Receiver<TaskKey>,
     pending_tasks: Arc<DashMap<TaskKey, PendingTask>>,
+    pending_task_count: Arc<AtomicUsize>,
     app_state_weak: Option<Weak<AppState>>,
     update_pause_gate: Arc<RwLock<()>>,
     cancel_token: CancellationToken,
     batch_buffer: BatchResultCollector,
     db_handles: HashMap<XtreamCluster, DbHandle>,
     failed_clusters: HashSet<XtreamCluster>,
+    retry_states: HashMap<TaskKey, RetryState>,
+    resolve_exhausted: HashMap<TaskKey, i64>,
+    last_cycle_completed_at_ts: Option<i64>,
+    probe_retry_state_path: Option<PathBuf>,
+    probe_retry_loaded: bool,
+    probe_retry_load_retry_at_ts: Option<i64>,
+    // Shared with detached delayed requeue tasks spawned in `schedule_requeue_at`.
+    // A plain HashMap cannot be moved safely into those `'static` tasks.
+    scheduled_requeues: Arc<DashMap<TaskKey, i64>>,
 }
 
 impl InputWorker {
@@ -405,7 +761,6 @@ impl InputWorker {
 
         let mut processed_vod_count: usize = 0;
         let mut processed_series_count: usize = 0;
-        let mut retry_attempts: HashMap<TaskKey, u8> = HashMap::new();
         let mut last_queue_log_at = Instant::now();
         let mut last_progress_log_at = Instant::now();
         let mut queue_cycle_active = false;
@@ -413,13 +768,27 @@ impl InputWorker {
         let input_name = self.input_name.clone();
         let app_state_weak = self.app_state_weak.clone();
 
+        let startup_runtime_settings = self.runtime_settings();
+        self.ensure_probe_retry_state_loaded(&input_name, app_state_weak.as_ref(), &startup_runtime_settings)
+            .await;
+
         // Keep one prefetched task to minimize channel waits/lock churn.
         let mut next_task: Option<(TaskKey, UpdateTask, u64)> = None;
 
         loop {
-            let task_data = if let Some(t) = next_task.take() { Some(t) } else { self.recv_task_fast_or_wait().await };
+            let runtime_settings = self.runtime_settings();
+            let task_data = if let Some(t) = next_task.take() {
+                Some(t)
+            } else {
+                self.recv_task_fast_or_wait(&runtime_settings).await
+            };
 
             let Some((current_key, current_task, current_generation)) = task_data else { break };
+            if !self.probe_retry_loaded {
+                self.ensure_probe_retry_state_loaded(&input_name, app_state_weak.as_ref(), &runtime_settings)
+                    .await;
+            }
+            let now_ts = chrono::Utc::now().timestamp();
 
             if !queue_cycle_active {
                 // First entry of a new processing cycle.
@@ -429,146 +798,250 @@ impl InputWorker {
                 last_progress_log_at = Instant::now();
                 // Emit queue logs promptly for the new cycle.
                 last_queue_log_at = Instant::now()
-                    .checked_sub(QUEUE_LOG_INTERVAL + Duration::from_secs(1))
+                    .checked_sub(runtime_settings.queue_log_interval + Duration::from_secs(1))
                     .unwrap_or_else(Instant::now);
                 if let Some(app_state) = app_state_weak.as_ref().and_then(Weak::upgrade) {
                     app_state.event_manager.send_event(EventMessage::InputMetadataUpdatesStarted(input_name.clone()));
+                }
+                if self
+                    .last_cycle_completed_at_ts
+                    .is_some_and(|last| now_ts.saturating_sub(last) >= runtime_settings.resolve_exhaustion_reset_gap_secs)
+                {
+                    self.resolve_exhausted.clear();
                 }
                 debug!("Background metadata update queue has entries for input {input_name}; starting processing");
             }
 
             let delay_secs = current_task.delay();
+            let mut schedule_requeue_at_ts: Option<i64> = None;
+            let mut remove_current_task = false;
+            let mut apply_rate_limit = false;
+            let mut probe_persist_state: Option<Option<RetryState>> = None;
+            let mut skip_execution = false;
 
-            let mut requeue_current = false;
-            let mut retry_delay_secs = 0_u64;
+            if Self::is_resolve_task(&current_task) && self.resolve_exhausted.contains_key(&current_key) {
+                debug_if_enabled!(
+                    "Skipping exhausted resolve task for input {}: {} (reset window: {}s)",
+                    input_name,
+                    current_task,
+                    runtime_settings.resolve_exhaustion_reset_gap_secs
+                );
+                self.scheduled_requeues.remove(&current_key);
+                remove_current_task = true;
+                skip_execution = true;
+            }
 
-            // Hold READ gate while executing one background task.
-            // Foreground updates acquire WRITE gate and therefore pause this path.
-            let task_result = {
-                let _task_gate_guard = self.update_pause_gate.clone().read_owned().await;
-                Self::process_task_static(
-                    &input_name,
-                    app_state_weak.as_ref(),
-                    &current_task,
-                    &mut self.batch_buffer,
-                    &mut self.db_handles,
-                    &mut self.failed_clusters,
-                )
-                .await
-            };
-
-            match task_result {
-                Ok(task_changed) => {
-                    if Self::is_vod_task_key(&current_key) {
-                        processed_vod_count += 1;
-                    } else if Self::is_series_task_key(&current_key) {
-                        processed_series_count += 1;
+            if !skip_execution {
+                let mut clear_probe_state = false;
+                if let Some(state) = self.retry_states.get(&current_key) {
+                    if let Some(cooldown_until_ts) = state.cooldown_until_ts {
+                        if now_ts < cooldown_until_ts {
+                            debug_if_enabled!(
+                                "Skipping probe task in cooldown for input {}: {} (cooldown_until={})",
+                                input_name,
+                                current_task,
+                                cooldown_until_ts
+                            );
+                            self.scheduled_requeues.remove(&current_key);
+                            remove_current_task = true;
+                            skip_execution = true;
+                        } else if Self::is_probe_task(&current_task) {
+                            clear_probe_state = true;
+                        }
                     }
-                    debug!("Processed metadata task for input {input_name}: {current_task} (changed={task_changed})");
-                    retry_attempts.remove(&current_key);
-                    if last_progress_log_at.elapsed() >= PROGRESS_LOG_INTERVAL {
-                        // current_key is removed from pending_tasks later in this loop iteration;
-                        // subtract it here so "remaining" reflects the post-success queue size.
-                        let (mut remaining_vod, mut remaining_series) = Self::queue_resolve_counts(&self.pending_tasks);
+
+                    if !skip_execution && state.next_allowed_at_ts > now_ts {
+                        schedule_requeue_at_ts = Some(state.next_allowed_at_ts);
+                        skip_execution = true;
+                    }
+                }
+
+                if clear_probe_state {
+                    self.retry_states.remove(&current_key);
+                    probe_persist_state = Some(None);
+                }
+            }
+
+            if !skip_execution {
+                // Hold READ gate while executing one background task.
+                // Foreground updates acquire WRITE gate and therefore pause this path.
+                let task_result = {
+                    let _task_gate_guard = if let Ok(guard) = self.update_pause_gate.clone().try_read_owned() {
+                        guard
+                    } else {
+                        // Foreground update contention detected.
+                        // Drop cached file read handles before blocking on the gate to avoid AB-BA deadlocks.
+                        self.release_db_handles();
+                        self.update_pause_gate.clone().read_owned().await
+                    };
+                    Self::process_task_static(
+                        &input_name,
+                        app_state_weak.as_ref(),
+                        &current_task,
+                        &mut self.batch_buffer,
+                        &mut self.db_handles,
+                        &mut self.failed_clusters,
+                    )
+                    .await
+                };
+
+                match task_result {
+                    Ok(task_changed) => {
                         if Self::is_vod_task_key(&current_key) {
-                            remaining_vod = remaining_vod.saturating_sub(1);
+                            processed_vod_count += 1;
                         } else if Self::is_series_task_key(&current_key) {
-                            remaining_series = remaining_series.saturating_sub(1);
+                            processed_series_count += 1;
+                        }
+                        debug!("Processed metadata task for input {input_name}: {current_task} (changed={task_changed})");
+                        self.retry_states.remove(&current_key);
+                        self.resolve_exhausted.remove(&current_key);
+                        self.scheduled_requeues.remove(&current_key);
+                        if Self::is_probe_task(&current_task) {
+                            probe_persist_state = Some(None);
                         }
 
-                        let total_vod = processed_vod_count.saturating_add(remaining_vod);
-                        let total_series = processed_series_count.saturating_add(remaining_series);
-                        let resolved_total = processed_vod_count.saturating_add(processed_series_count);
-                        let total_resolve = total_vod.saturating_add(total_series);
+                        if last_progress_log_at.elapsed() >= runtime_settings.progress_log_interval {
+                            // current_key is removed from pending_tasks later in this loop iteration;
+                            // subtract it here so "remaining" reflects the post-success queue size.
+                            let (mut remaining_vod, mut remaining_series) = Self::queue_resolve_counts(&self.pending_tasks);
+                            if Self::is_vod_task_key(&current_key) {
+                                remaining_vod = remaining_vod.saturating_sub(1);
+                            } else if Self::is_series_task_key(&current_key) {
+                                remaining_series = remaining_series.saturating_sub(1);
+                            }
 
-                        info!("Background metadata update: {resolved_total} / {total_resolve} resolved for input {input_name} (vod: {processed_vod_count}/{total_vod}, series: {processed_series_count}/{total_series})");
-                        last_progress_log_at = Instant::now();
+                            let total_vod = processed_vod_count.saturating_add(remaining_vod);
+                            let total_series = processed_series_count.saturating_add(remaining_series);
+                            let resolved_total = processed_vod_count.saturating_add(processed_series_count);
+                            let total_resolve = total_vod.saturating_add(total_series);
+
+                            info!("Background metadata update: {resolved_total} / {total_resolve} resolved for input {input_name} (vod: {processed_vod_count}/{total_vod}, series: {processed_series_count}/{total_series})");
+                            last_progress_log_at = Instant::now();
+                        }
+
+                        remove_current_task = true;
+                        apply_rate_limit = true;
                     }
-                }
-                Err(e) if e.message == TASK_ERR_NO_CONNECTION => {
-                    requeue_current = true;
+                    Err(e) => {
+                        if Self::is_transient_worker_error(&e.message) {
+                            if e.message == TASK_ERR_UPDATE_IN_PROGRESS {
+                                // Drop cached readers quickly so foreground writer can progress.
+                                self.release_db_handles();
+                            }
 
-                    let entry = retry_attempts.entry(current_key.clone()).or_insert(0);
-                    *entry = entry.saturating_add(1);
-                    let attempts = *entry;
-
-                    // If this is the only queued signal, use exponential backoff.
-                    // Otherwise, push to the back immediately to improve throughput/fairness.
-                    if self.receiver.is_empty() {
-                        retry_delay_secs = if Self::is_probe_task(&current_task) {
-                            Self::compute_probe_retry_backoff_secs(current_task.delay(), attempts)
+                            let retry_delay_secs =
+                                Self::compute_retry_delay_secs(current_task.delay(), &runtime_settings);
+                            let retry_delay_i64 = i64::try_from(retry_delay_secs).unwrap_or(i64::MAX);
+                            schedule_requeue_at_ts = Some(now_ts.saturating_add(retry_delay_i64));
+                            debug_if_enabled!(
+                                "Transient task deferral for input {}: {} (retry_in={}s, err={})",
+                                input_name,
+                                current_task,
+                                retry_delay_secs,
+                                e.message
+                            );
                         } else {
-                            Self::compute_retry_backoff_secs(current_task.delay(), attempts)
-                        };
-                    }
+                            let is_probe_task = Self::is_probe_task(&current_task);
+                            let max_attempts = if is_probe_task {
+                                runtime_settings.max_attempts_probe
+                            } else {
+                                runtime_settings.max_attempts_resolve
+                            };
 
-                    if Self::is_probe_task(&current_task) {
-                        debug_if_enabled!(
-                            "No provider connection for low-priority probe task {} on input {}, requeueing (attempt={}, retry_delay={}s, queue_len={})",
-                            current_task,
-                            &input_name,
-                            attempts,
-                            retry_delay_secs,
-                            self.receiver.len()
-                        );
-                    } else {
-                        debug_if_enabled!("No provider connection for task {} on input {}, requeueing (attempt={}, retry_delay={}s, queue_len={})",
-                            current_task,
-                            &input_name,
-                            attempts,
-                            retry_delay_secs,
-                            self.receiver.len()
-                        );
+                            let state_after_update = {
+                                let state = self
+                                    .retry_states
+                                    .entry(current_key.clone())
+                                    .or_insert_with(RetryState::new);
+                                state.attempts = state.attempts.saturating_add(1);
+                                state.last_error = Some(e.message.clone());
+
+                                if state.attempts < max_attempts {
+                                    let backoff_secs = if is_probe_task {
+                                        Self::compute_probe_retry_backoff_secs(state.attempts, &runtime_settings)
+                                    } else {
+                                        Self::compute_resolve_retry_backoff_secs(
+                                            current_task.delay(),
+                                            state.attempts,
+                                            &runtime_settings,
+                                        )
+                                    };
+                                    let backoff_i64 = i64::try_from(backoff_secs).unwrap_or(i64::MAX);
+                                    state.next_allowed_at_ts = now_ts.saturating_add(backoff_i64);
+                                    state.cooldown_until_ts = None;
+                                } else if is_probe_task {
+                                    state.cooldown_until_ts =
+                                        Some(now_ts.saturating_add(runtime_settings.probe_cooldown_secs));
+                                    state.next_allowed_at_ts = state.cooldown_until_ts.unwrap_or(now_ts);
+                                }
+
+                                state.clone()
+                            };
+
+                            let attempts = state_after_update.attempts;
+
+                            if attempts >= max_attempts {
+                                self.scheduled_requeues.remove(&current_key);
+                                if is_probe_task {
+                                    remove_current_task = true;
+                                    probe_persist_state = Some(Some(state_after_update.clone()));
+                                    debug_if_enabled!(
+                                        "Probe task exhausted for input {}: {} (attempts={}, cooldown_until={:?})",
+                                        input_name,
+                                        current_task,
+                                        state_after_update.attempts,
+                                        state_after_update.cooldown_until_ts
+                                    );
+                                } else {
+                                    self.resolve_exhausted.insert(current_key.clone(), now_ts);
+                                    self.retry_states.remove(&current_key);
+                                    remove_current_task = true;
+                                    debug_if_enabled!(
+                                        "Resolve task exhausted for input {}: {} (attempts={})",
+                                        input_name,
+                                        current_task,
+                                        attempts
+                                    );
+                                }
+                            } else {
+                                schedule_requeue_at_ts = Some(state_after_update.next_allowed_at_ts);
+                                if is_probe_task {
+                                    probe_persist_state = Some(Some(state_after_update.clone()));
+                                }
+                                debug_if_enabled!(
+                                    "Task failed for input {}, scheduling retry: {} (attempt={}, next_allowed_at={}, err={})",
+                                    input_name,
+                                    current_task,
+                                    attempts,
+                                    state_after_update.next_allowed_at_ts,
+                                    e.message
+                                );
+                            }
+                        }
                     }
                 }
-                Err(e) if e.message == TASK_ERR_UPDATE_IN_PROGRESS => {
-                    requeue_current = true;
-                    retry_attempts.remove(&current_key);
-                    // Foreground update needs write access to playlist DB files.
-                    // Drop cached read handles before waiting, otherwise we can deadlock
-                    // by waiting for PlaylistUpdate completion while still blocking writers.
-                    self.release_db_handles();
-                    let update_completed =
-                        Self::wait_for_playlist_update_completion(app_state_weak.as_ref(), &self.cancel_token).await;
-                    if !update_completed {
-                        // Fallback path (e.g. listener closed): keep retrying with a small delay.
-                        retry_delay_secs = UPDATE_IN_PROGRESS_RETRY_SECS;
-                    }
-                }
-                Err(e) if e.message == TASK_ERR_PREEMPTED => {
-                    // Preempted by a user-facing request: defer and retry later.
-                    requeue_current = true;
-                    retry_attempts.remove(&current_key);
-                    retry_delay_secs = UPDATE_IN_PROGRESS_RETRY_SECS;
-                }
-                Err(e) => {
-                    retry_attempts.remove(&current_key);
-                    error!("Task {current_task} failed for input {input_name}: {e}");
-                }
+            }
+
+            if let Some(state) = probe_persist_state {
+                self.persist_probe_retry_state(&current_key, state.as_ref()).await;
             }
 
             // Check and flush batch
             if self.batch_buffer.should_flush() {
                 self.release_db_handles();
+                let _gate_guard = self.update_pause_gate.clone().read_owned().await;
                 Self::flush_batch_static(&input_name, app_state_weak.as_ref(), &mut self.batch_buffer).await;
             }
 
-            if requeue_current {
-                if retry_delay_secs > 0
-                    && Self::sleep_or_cancel(&self.cancel_token, Duration::from_secs(retry_delay_secs)).await
-                {
-                    break;
-                }
+            if let Some(retry_at_ts) = schedule_requeue_at_ts {
+                self.schedule_requeue_at(current_key.clone(), retry_at_ts);
+            }
 
-                if self.sender.send(current_key.clone()).await.is_err() {
-                    // Channel closed, drop the pending task key to avoid leaks.
-                    self.pending_tasks.remove(&current_key);
-                    retry_attempts.remove(&current_key);
-                    warn!("Failed to requeue task {current_task} for input {input_name}");
-                }
-            } else {
+            if remove_current_task {
                 self.finalize_processed_task_success(&current_key, current_generation, &input_name).await;
+            }
 
+            if apply_rate_limit {
                 // Rate limiting
                 if delay_secs > 0
                     && Self::sleep_or_cancel(&self.cancel_token, Duration::from_secs(u64::from(delay_secs))).await
@@ -577,57 +1050,194 @@ impl InputWorker {
                 }
             }
 
-            // Try to get the next task immediately to keep locks open
+            // Try to get the next task immediately to keep locks open.
+            // Ignore phantom signals (channel key without pending map entry).
             if next_task.is_none() {
-                match self.receiver.try_recv() {
-                    Ok(key) => {
-                        next_task = self.load_task_snapshot(key).await;
-                    }
-                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                while let Ok(key) = self.receiver.try_recv() {
+                    if let Some(snapshot) = self.load_task_snapshot(key) {
+                        next_task = Some(snapshot);
                         break;
                     }
-                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
                 }
             }
 
-            let queue_has_work = next_task.is_some() || !self.receiver.is_empty() || !self.pending_tasks.is_empty();
+            let channel_has_work = next_task.is_some() || !self.receiver.is_empty();
+            let queue_completely_empty =
+                !channel_has_work && self.pending_tasks.is_empty() && self.scheduled_requeues.is_empty();
 
-            if queue_has_work {
-                // Avoid O(n) queue scans per task; report queue status periodically.
-                if last_queue_log_at.elapsed() >= QUEUE_LOG_INTERVAL {
-                    let queue_counts = Self::queue_resolve_counts(&self.pending_tasks);
-                    debug!(
-                        "In queue to resolve vod: {}, series: {} (input: {input_name})",
-                        queue_counts.0, queue_counts.1
-                    );
-                    last_queue_log_at = Instant::now();
-                }
-            } else {
-                // Queue is drained: flush remaining batched updates immediately.
-                if !self.batch_buffer.is_empty() {
-                    self.release_db_handles();
-                    Self::flush_batch_static(&input_name, app_state_weak.as_ref(), &mut self.batch_buffer).await;
-                }
+            // Avoid O(n) queue scans per task; report queue status periodically.
+            if (channel_has_work || !self.pending_tasks.is_empty())
+                && last_queue_log_at.elapsed() >= runtime_settings.queue_log_interval
+            {
+                let queue_counts = Self::queue_resolve_counts(&self.pending_tasks);
+                debug!(
+                    "In queue to resolve vod: {}, series: {} (input: {input_name})",
+                    queue_counts.0, queue_counts.1
+                );
+                last_queue_log_at = Instant::now();
+            }
 
-                if queue_cycle_active {
-                    info!("All pending metadata resolves completed for input {input_name}");
-                    if let Some(app_state) = app_state_weak.as_ref().and_then(Weak::upgrade) {
-                        app_state
-                            .event_manager
-                            .send_event(EventMessage::InputMetadataUpdatesCompleted(input_name.clone()));
-                    }
-                    queue_cycle_active = false;
-                    processed_vod_count = 0;
-                    processed_series_count = 0;
+            // If no immediate work is available, flush buffered results now even when delayed retries remain pending.
+            if !channel_has_work && !self.batch_buffer.is_empty() {
+                self.release_db_handles();
+                let _gate_guard = self.update_pause_gate.clone().read_owned().await;
+                Self::flush_batch_static(&input_name, app_state_weak.as_ref(), &mut self.batch_buffer).await;
+            }
+
+            if queue_cycle_active && queue_completely_empty {
+                info!("All pending metadata resolves completed for input {input_name}");
+                if let Some(app_state) = app_state_weak.as_ref().and_then(Weak::upgrade) {
+                    app_state
+                        .event_manager
+                        .send_event(EventMessage::InputMetadataUpdatesCompleted(input_name.clone()));
                 }
+                self.last_cycle_completed_at_ts = Some(chrono::Utc::now().timestamp());
+                queue_cycle_active = false;
+                processed_vod_count = 0;
+                processed_series_count = 0;
             }
         }
 
         // Final flush
         self.release_db_handles();
-        Self::flush_batch_static(&input_name, app_state_weak.as_ref(), &mut self.batch_buffer).await;
+        if !self.batch_buffer.is_empty() {
+            let _gate_guard = self.update_pause_gate.clone().read_owned().await;
+            Self::flush_batch_static(&input_name, app_state_weak.as_ref(), &mut self.batch_buffer).await;
+        }
 
         debug!("Metadata worker stopped for input {input_name}");
+    }
+
+    async fn ensure_probe_retry_state_loaded(
+        &mut self,
+        input_name: &str,
+        app_state_weak: Option<&Weak<AppState>>,
+        runtime_settings: &MetadataUpdateRuntimeSettings,
+    ) {
+        if self.probe_retry_loaded {
+            return;
+        }
+        let now_ts = chrono::Utc::now().timestamp();
+        if self
+            .probe_retry_load_retry_at_ts
+            .is_some_and(|retry_at_ts| now_ts < retry_at_ts)
+        {
+            return;
+        }
+
+        let Some(app_state) = app_state_weak.and_then(Weak::upgrade) else {
+            self.probe_retry_load_retry_at_ts =
+                Some(now_ts.saturating_add(runtime_settings.probe_retry_load_retry_delay_secs));
+            return;
+        };
+
+        let working_dir = app_state.app_config.config.load().working_dir.clone();
+        let Ok(storage_path) = get_input_storage_path(input_name, &working_dir).await else {
+            warn!("Could not resolve storage path for probe retry state on input {input_name}");
+            self.probe_retry_load_retry_at_ts =
+                Some(now_ts.saturating_add(runtime_settings.probe_retry_load_retry_delay_secs));
+            return;
+        };
+
+        let retry_path = storage_path.join(PROBE_RETRY_STATE_FILE);
+        self.probe_retry_state_path = Some(retry_path.clone());
+
+        let loaded = tokio::task::spawn_blocking(move || load_probe_retry_states_from_disk(&retry_path))
+            .await
+            .map_err(|err| err.to_string())
+            .and_then(|result| result.map_err(|err| err.to_string()));
+
+        let loaded = match loaded {
+            Ok(states) => states,
+            Err(err) => {
+                warn!("Failed to load probe retry state for input {input_name}: {err}");
+                self.probe_retry_load_retry_at_ts =
+                    Some(now_ts.saturating_add(runtime_settings.probe_retry_load_retry_delay_secs));
+                return;
+            }
+        };
+
+        // Intentionally do not resurrect pending probe tasks solely from persisted retry state.
+        // The persisted state is applied once the corresponding task is naturally queued again
+        // (for example by the next playlist update), because state alone does not contain the
+        // full `UpdateTask` payload for all variants.
+        for (key, state) in loaded {
+            self.retry_states.insert(key, state);
+        }
+        self.probe_retry_loaded = true;
+        self.probe_retry_load_retry_at_ts = None;
+    }
+
+    async fn persist_probe_retry_state(&self, key: &TaskKey, state: Option<&RetryState>) {
+        let Some(path) = self.probe_retry_state_path.clone() else {
+            return;
+        };
+
+        let key = key.clone();
+        let state = state.cloned();
+        let input_name = self.input_name.clone();
+        let persist_result = tokio::task::spawn_blocking(move || {
+            persist_probe_retry_state_to_disk(&path, &key, state.as_ref())
+        })
+        .await;
+
+        match persist_result {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => warn!("Failed to persist probe retry state for input {input_name}: {err}"),
+            Err(err) => warn!("Failed to persist probe retry state for input {input_name}: {err}"),
+        }
+    }
+
+    fn schedule_requeue_at(&self, key: TaskKey, retry_at_ts: i64) {
+        let now_ts = chrono::Utc::now().timestamp();
+        let retry_at_ts = retry_at_ts.max(now_ts);
+
+        if self
+            .scheduled_requeues
+            .get(&key)
+            .is_some_and(|existing| *existing == retry_at_ts)
+        {
+            return;
+        }
+
+        self.scheduled_requeues.insert(key.clone(), retry_at_ts);
+
+        let sender = self.sender.clone();
+        let pending_tasks = Arc::clone(&self.pending_tasks);
+        let pending_task_count = Arc::clone(&self.pending_task_count);
+        let scheduled = Arc::clone(&self.scheduled_requeues);
+        let cancel_token = self.cancel_token.clone();
+        let input_name = self.input_name.clone();
+
+        tokio::spawn(async move {
+            let delay_secs = retry_at_ts.saturating_sub(chrono::Utc::now().timestamp());
+            if delay_secs > 0 {
+                let delay = Duration::from_secs(u64::try_from(delay_secs).unwrap_or(u64::MAX));
+                tokio::select! {
+                    () = cancel_token.cancelled() => return,
+                    () = tokio::time::sleep(delay) => {}
+                }
+            }
+
+            let should_send = scheduled
+                .get(&key)
+                .is_some_and(|scheduled_at| *scheduled_at == retry_at_ts);
+            if !should_send {
+                return;
+            }
+            scheduled.remove(&key);
+
+            if !pending_tasks.contains_key(&key) {
+                return;
+            }
+
+            if sender.send(key.clone()).await.is_err() {
+                if pending_tasks.remove(&key).is_some() {
+                    MetadataUpdateManager::decrement_pending_task_count(&pending_task_count);
+                }
+                warn!("Failed to schedule delayed retry task for input {input_name}");
+            }
+        });
     }
 
     async fn finalize_processed_task_success(
@@ -642,47 +1252,90 @@ impl InputWorker {
             if latest_generation != current_generation {
                 self.pending_tasks.insert(current_key.clone(), removed_task);
                 if self.sender.send(current_key.clone()).await.is_err() {
-                    self.pending_tasks.remove(current_key);
+                    if self.pending_tasks.remove(current_key).is_some() {
+                        MetadataUpdateManager::decrement_pending_task_count(&self.pending_task_count);
+                    }
                     warn!("Failed to schedule merged task replay for input {input_name}");
                     return false;
                 }
                 return true;
             }
+            // Task finished and is not reinserted.
+            MetadataUpdateManager::decrement_pending_task_count(&self.pending_task_count);
         }
         false
     }
 
-    async fn recv_task_fast_or_wait(&mut self) -> Option<(TaskKey, UpdateTask, u64)> {
-        match self.receiver.try_recv() {
-            Ok(key) => {
-                return self.load_task_snapshot(key).await;
+    async fn recv_task_fast_or_wait(
+        &mut self,
+        runtime_settings: &MetadataUpdateRuntimeSettings,
+    ) -> Option<(TaskKey, UpdateTask, u64)> {
+        // Fast path: drain immediate signals until we find a real pending task.
+        loop {
+            match self.receiver.try_recv() {
+                Ok(key) => {
+                    if let Some(snapshot) = self.load_task_snapshot(key) {
+                        return Some(snapshot);
+                    }
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    return None;
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                    break;
+                }
             }
-            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                return None;
-            }
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
         }
 
         // When idle, release read handles to avoid writer starvation.
         self.release_db_handles();
 
-        tokio::select! {
-            biased;
-            () = self.cancel_token.cancelled() => None,
-            res = self.receiver.recv() => {
-                match res {
-                    Some(key) => self.load_task_snapshot(key).await,
-                    None => None,
+        loop {
+            tokio::select! {
+                biased;
+                () = self.cancel_token.cancelled() => return None,
+                res = tokio::time::timeout(Duration::from_secs(runtime_settings.worker_idle_timeout_secs), self.receiver.recv()) => {
+                    match res {
+                        Ok(Some(key)) => {
+                            if let Some(snapshot) = self.load_task_snapshot(key) {
+                                return Some(snapshot);
+                            }
+                        }
+                        Ok(None) => return None,
+                        Err(_) => {
+                            loop {
+                                match self.receiver.try_recv() {
+                                    Ok(key) => {
+                                        if let Some(snapshot) = self.load_task_snapshot(key) {
+                                            return Some(snapshot);
+                                        }
+                                    }
+                                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => return None,
+                                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                                }
+                            }
+                            if self.pending_tasks.is_empty()
+                                && self.receiver.is_empty()
+                                && self.scheduled_requeues.is_empty()
+                            {
+                                return None;
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 
-    async fn load_task_snapshot(&self, key: TaskKey) -> Option<(TaskKey, UpdateTask, u64)> {
+    fn load_task_snapshot(&self, key: TaskKey) -> Option<(TaskKey, UpdateTask, u64)> {
         let entry = self.pending_tasks.get(&key)?;
         let generation = entry.generation.load(Ordering::Relaxed);
-        let task = entry.task.lock().await.clone();
+        let task = entry.task.lock().clone();
         Some((key, task, generation))
+    }
+
+    fn runtime_settings(&self) -> MetadataUpdateRuntimeSettings {
+        MetadataUpdateRuntimeSettings::from_app_state(self.app_state_weak.as_ref())
     }
 
     fn release_db_handles(&mut self) {
@@ -694,52 +1347,39 @@ impl InputWorker {
         }
     }
 
-    fn compute_retry_backoff_secs(base_delay_secs: u16, attempts: u8) -> u64 {
-        let base_delay = u64::from(base_delay_secs.max(1));
+    fn compute_resolve_retry_backoff_secs(
+        base_delay_secs: u16,
+        attempts: u8,
+        runtime_settings: &MetadataUpdateRuntimeSettings,
+    ) -> u64 {
+        let base_delay = u64::from(base_delay_secs).max(runtime_settings.resolve_min_retry_base_secs);
         let exp = u32::from(attempts.saturating_sub(1).min(6));
-        base_delay.saturating_mul(2_u64.saturating_pow(exp)).min(MAX_RETRY_BACKOFF_SECS)
+        let without_jitter = base_delay
+            .saturating_mul(2_u64.saturating_pow(exp))
+            .min(runtime_settings.max_resolve_retry_backoff_secs);
+        Self::apply_jitter(without_jitter, runtime_settings.backoff_jitter_percent)
     }
 
-    fn compute_probe_retry_backoff_secs(base_delay_secs: u16, attempts: u8) -> u64 {
-        let adjusted_base = base_delay_secs.max(MIN_PROBE_RETRY_BASE_SECS);
-        Self::compute_retry_backoff_secs(adjusted_base, attempts)
+    fn compute_retry_delay_secs(base_delay_secs: u16, runtime_settings: &MetadataUpdateRuntimeSettings) -> u64 {
+        u64::from(base_delay_secs).max(runtime_settings.retry_delay_secs)
     }
 
-    async fn wait_for_playlist_update_completion(
-        app_state_weak: Option<&Weak<AppState>>,
-        cancel_token: &CancellationToken,
-    ) -> bool {
-        let Some(app_state) = app_state_weak.and_then(Weak::upgrade) else {
-            return false;
+    fn compute_probe_retry_backoff_secs(attempts: u8, runtime_settings: &MetadataUpdateRuntimeSettings) -> u64 {
+        let base_secs = match attempts {
+            1 => runtime_settings.probe_retry_backoff_step_1_secs,
+            2 => runtime_settings.probe_retry_backoff_step_2_secs,
+            _ => runtime_settings.probe_retry_backoff_step_3_secs,
         };
+        Self::apply_jitter(base_secs, runtime_settings.backoff_jitter_percent)
+    }
 
-        // Subscribe before checking the guard to avoid missing a PlaylistUpdate event
-        // published between the guard check and receiver subscription.
-        let mut rx = app_state.event_manager.get_event_channel();
-
-        // If no update is active anymore, do not block on events.
-        if let Some(guard) = app_state.update_guard.try_playlist() {
-            drop(guard);
-            return true;
-        }
-
-        loop {
-            tokio::select! {
-                () = cancel_token.cancelled() => return false,
-                recv = rx.recv() => {
-                    match recv {
-                        Ok(EventMessage::PlaylistUpdate(_)) => return true,
-                        Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            if let Some(guard) = app_state.update_guard.try_playlist() {
-                                drop(guard);
-                                return true;
-                            }
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return false,
-                    }
-                }
-            }
-        }
+    fn apply_jitter(base_secs: u64, jitter_percent: u8) -> u64 {
+        let jitter_percent = i64::from(jitter_percent);
+        let jitter_percent = fastrand::i64(-jitter_percent..=jitter_percent);
+        let base_i64 = i64::try_from(base_secs).unwrap_or(i64::MAX);
+        let jitter_delta = base_i64.saturating_mul(jitter_percent).saturating_div(100);
+        let jittered = base_i64.saturating_add(jitter_delta);
+        u64::try_from(jittered.max(1)).unwrap_or(1)
     }
 
     async fn sleep_or_cancel(cancel_token: &CancellationToken, duration: Duration) -> bool {
@@ -777,6 +1417,17 @@ impl InputWorker {
     #[inline]
     fn is_probe_task(task: &UpdateTask) -> bool {
         matches!(task, UpdateTask::ProbeLive { .. } | UpdateTask::ProbeStream { .. })
+    }
+
+    #[inline]
+    fn is_resolve_task(task: &UpdateTask) -> bool {
+        matches!(task, UpdateTask::ResolveVod { .. } | UpdateTask::ResolveSeries { .. })
+    }
+
+    fn is_transient_worker_error(message: &str) -> bool {
+        message == TASK_ERR_UPDATE_IN_PROGRESS
+            || message == TASK_ERR_PREEMPTED
+            || message == TASK_ERR_NO_CONNECTION
     }
 
     // Changed to static method
@@ -916,23 +1567,24 @@ impl InputWorker {
             };
             let mapping_file = get_target_id_mapping_file(&target_path);
 
-            // Read mapping under lock inside spawn_blocking to avoid blocking async executor.
-            let file_lock = app_state.app_config.file_locks.read_lock(&mapping_file).await;
-            let mapping_file_clone = mapping_file.clone();
-            let mapping = match tokio::task::spawn_blocking(move || {
-                let _guard = file_lock;
-                TargetIdMapping::new(&mapping_file_clone, false)
-            })
-            .await
-            {
-                Ok(Ok(mapping)) => mapping,
-                Ok(Err(e)) => {
-                    error!("Failed to open ID mapping for target {target_name}: {e}");
-                    continue;
-                }
-                Err(err) => {
-                    error!("Failed to open ID mapping for target {target_name}: {err}");
-                    continue;
+            let mapping = {
+                // Scope read lock strictly to mapping load.
+                let _file_lock = app_state.app_config.file_locks.read_lock(&mapping_file).await;
+                let mapping_file_clone = mapping_file.clone();
+                match tokio::task::spawn_blocking(move || {
+                    TargetIdMapping::new(&mapping_file_clone, false)
+                })
+                .await
+                {
+                    Ok(Ok(mapping)) => mapping,
+                    Ok(Err(e)) => {
+                        error!("Failed to open ID mapping for target {target_name}: {e}");
+                        continue;
+                    }
+                    Err(err) => {
+                        error!("Failed to open ID mapping for target {target_name}: {err}");
+                        continue;
+                    }
                 }
             };
 
@@ -1108,28 +1760,30 @@ impl InputWorker {
         let updates_input: Vec<(u32, VideoStreamProperties)> =
             virtual_updates.into_iter().map(|(vid, props)| (vid, props.clone())).collect();
 
-        let file_lock = app_state.app_config.file_locks.read_lock(&xtream_path).await;
-        let xtream_path = xtream_path.clone();
-        let updates = match tokio::task::spawn_blocking(move || -> Vec<XtreamPlaylistItem> {
-            let _guard = file_lock;
-            let mut updates = Vec::with_capacity(updates_input.len());
-            let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) else {
-                return updates;
-            };
-            for (virtual_id, props) in updates_input {
-                if let Ok(Some(mut item)) = query.query_zero_copy(&virtual_id) {
-                    item.additional_properties = Some(shared::model::StreamProperties::Video(Box::new(props)));
-                    updates.push(item);
+        let updates = {
+            // Scope read lock to read-only query phase so write phase can acquire lock.
+            let _file_lock = app_state.app_config.file_locks.read_lock(&xtream_path).await;
+            let xtream_path_clone = xtream_path.clone();
+            match tokio::task::spawn_blocking(move || -> Vec<XtreamPlaylistItem> {
+                let mut updates = Vec::with_capacity(updates_input.len());
+                let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path_clone) else {
+                    return updates;
+                };
+                for (virtual_id, props) in updates_input {
+                    if let Ok(Some(mut item)) = query.query_zero_copy(&virtual_id) {
+                        item.additional_properties = Some(shared::model::StreamProperties::Video(Box::new(props)));
+                        updates.push(item);
+                    }
                 }
-            }
-            updates
-        })
-        .await
-        {
-            Ok(updates) => updates,
-            Err(err) => {
-                error!("Failed to read VOD updates from disk for {target_name}: {err}");
-                Vec::new()
+                updates
+            })
+            .await
+            {
+                Ok(updates) => updates,
+                Err(err) => {
+                    error!("Failed to read VOD updates from disk for {target_name}: {err}");
+                    Vec::new()
+                }
             }
         };
 
@@ -1164,28 +1818,30 @@ impl InputWorker {
         let updates_input: Vec<(u32, SeriesStreamProperties)> =
             virtual_updates.into_iter().map(|(vid, props)| (vid, props.clone())).collect();
 
-        let file_lock = app_state.app_config.file_locks.read_lock(&xtream_path).await;
-        let xtream_path = xtream_path.clone();
-        let updates = match tokio::task::spawn_blocking(move || -> Vec<XtreamPlaylistItem> {
-            let _guard = file_lock;
-            let mut updates = Vec::with_capacity(updates_input.len());
-            let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) else {
-                return updates;
-            };
-            for (virtual_id, props) in updates_input {
-                if let Ok(Some(mut item)) = query.query_zero_copy(&virtual_id) {
-                    item.additional_properties = Some(shared::model::StreamProperties::Series(Box::new(props)));
-                    updates.push(item);
+        let updates = {
+            // Scope read lock to read-only query phase so write phase can acquire lock.
+            let _file_lock = app_state.app_config.file_locks.read_lock(&xtream_path).await;
+            let xtream_path_clone = xtream_path.clone();
+            match tokio::task::spawn_blocking(move || -> Vec<XtreamPlaylistItem> {
+                let mut updates = Vec::with_capacity(updates_input.len());
+                let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path_clone) else {
+                    return updates;
+                };
+                for (virtual_id, props) in updates_input {
+                    if let Ok(Some(mut item)) = query.query_zero_copy(&virtual_id) {
+                        item.additional_properties = Some(shared::model::StreamProperties::Series(Box::new(props)));
+                        updates.push(item);
+                    }
                 }
-            }
-            updates
-        })
-        .await
-        {
-            Ok(updates) => updates,
-            Err(err) => {
-                error!("Failed to read Series updates from disk for {target_name}: {err}");
-                Vec::new()
+                updates
+            })
+            .await
+            {
+                Ok(updates) => updates,
+                Err(err) => {
+                    error!("Failed to read Series updates from disk for {target_name}: {err}");
+                    Vec::new()
+                }
             }
         };
 
@@ -1220,28 +1876,30 @@ impl InputWorker {
         let updates_input: Vec<(u32, LiveStreamProperties)> =
             virtual_updates.into_iter().map(|(vid, props)| (vid, props.clone())).collect();
 
-        let file_lock = app_state.app_config.file_locks.read_lock(&xtream_path).await;
-        let xtream_path = xtream_path.clone();
-        let updates = match tokio::task::spawn_blocking(move || -> Vec<XtreamPlaylistItem> {
-            let _guard = file_lock;
-            let mut updates = Vec::with_capacity(updates_input.len());
-            let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) else {
-                return updates;
-            };
-            for (virtual_id, props) in updates_input {
-                if let Ok(Some(mut item)) = query.query_zero_copy(&virtual_id) {
-                    item.additional_properties = Some(shared::model::StreamProperties::Live(Box::new(props)));
-                    updates.push(item);
+        let updates = {
+            // Scope read lock to read-only query phase so write phase can acquire lock.
+            let _file_lock = app_state.app_config.file_locks.read_lock(&xtream_path).await;
+            let xtream_path_clone = xtream_path.clone();
+            match tokio::task::spawn_blocking(move || -> Vec<XtreamPlaylistItem> {
+                let mut updates = Vec::with_capacity(updates_input.len());
+                let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path_clone) else {
+                    return updates;
+                };
+                for (virtual_id, props) in updates_input {
+                    if let Ok(Some(mut item)) = query.query_zero_copy(&virtual_id) {
+                        item.additional_properties = Some(shared::model::StreamProperties::Live(Box::new(props)));
+                        updates.push(item);
+                    }
                 }
-            }
-            updates
-        })
-        .await
-        {
-            Ok(updates) => updates,
-            Err(err) => {
-                error!("Failed to read Live updates from disk for {target_name}: {err}");
-                Vec::new()
+                updates
+            })
+            .await
+            {
+                Ok(updates) => updates,
+                Err(err) => {
+                    error!("Failed to read Live updates from disk for {target_name}: {err}");
+                    Vec::new()
+                }
             }
         };
 
@@ -1508,11 +2166,13 @@ impl InputWorker {
             UpdateTask::ProbeLive { .. } => true,
             // Local library probing is fully local and must not depend on provider capacity.
             UpdateTask::ProbeStream { .. } => !matches!(input_type, InputType::Library),
-            UpdateTask::ResolveVod { .. } | UpdateTask::ResolveSeries { .. } => false,
+            UpdateTask::ResolveVod { reason, .. } | UpdateTask::ResolveSeries { reason, .. } => {
+                reason.contains(ResolveReason::Probe)
+            }
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     async fn execute_task_inner_static(
         app_state: &Arc<AppState>,
         client: &reqwest::Client,
@@ -1527,6 +2187,8 @@ impl InputWorker {
         match task {
             UpdateTask::ResolveVod { id, reason, .. } => {
                 let fetch_info = reason.contains(ResolveReason::Info);
+                let resolve_tmdb =
+                    fetch_info || reason.contains(ResolveReason::Tmdb) || reason.contains(ResolveReason::Date);
                 let will_probe = reason.contains(ResolveReason::Probe);
 
                 // If we are going to probe, release the cached handle to avoid holding a READ lock
@@ -1553,6 +2215,7 @@ impl InputWorker {
                     item_title,
                     false, // Batch collect
                     fetch_info,
+                    resolve_tmdb,
                     will_probe,
                     query_opt,
                 )
@@ -1568,7 +2231,12 @@ impl InputWorker {
             }
             UpdateTask::ResolveSeries { id, reason, .. } => {
                 let fetch_info = reason.contains(ResolveReason::Info);
+                let resolve_tmdb = reason.contains(ResolveReason::Tmdb) || reason.contains(ResolveReason::Date);
                 let will_probe = reason.contains(ResolveReason::Probe);
+                let series_probe_settings = {
+                    let config = app_state.app_config.config.load();
+                    SeriesProbeSettings::from_metadata_update(config.metadata_update.as_ref())
+                };
 
                 if will_probe {
                     db_handles.remove(&XtreamCluster::Series);
@@ -1592,7 +2260,9 @@ impl InputWorker {
                     item_title,
                     false, // Batch collect
                     fetch_info,
+                    resolve_tmdb,
                     will_probe,
+                    series_probe_settings,
                     query_opt,
                 )
                 .await
@@ -1609,7 +2279,17 @@ impl InputWorker {
                 // ProbeLive always probes, so we must never use a cached handle here.
                 db_handles.remove(&XtreamCluster::Live);
 
-                match update_live_stream_metadata(&app_state.app_config, input, id.clone(), false, None).await {
+                match update_live_stream_metadata(
+                    &app_state.app_config,
+                    input,
+                    id.clone(),
+                    false,
+                    None,
+                    active_handle,
+                    &app_state.active_provider,
+                )
+                .await
+                {
                     Ok(Some(props)) => {
                         collector.add_live(id.clone(), props);
                         Ok(())
@@ -1624,8 +2304,10 @@ impl InputWorker {
                 if !db_handles.is_empty() {
                     db_handles.clear();
                 }
+                let task_key = TaskKey::from_task(task);
+                let probe_identifier = if unique_id.trim().is_empty() { url.as_str() } else { unique_id.as_str() };
 
-                update_generic_stream_metadata(
+                let outcome = update_generic_stream_metadata(
                     &app_state.app_config,
                     input.as_ref(),
                     unique_id,
@@ -1634,7 +2316,16 @@ impl InputWorker {
                     &app_state.active_provider,
                     active_handle,
                 )
-                .await
+                .await?;
+
+                match outcome {
+                    GenericProbeOutcome::Updated | GenericProbeOutcome::Noop => Ok(()),
+                    GenericProbeOutcome::ProbeFailed => Err(shared::error::info_err!(
+                        "Probe stream task failed for key {:?} ({})",
+                        task_key,
+                        probe_identifier
+                    )),
+                }
             }
         }
     }
@@ -1643,6 +2334,7 @@ impl InputWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
     use tokio::sync::mpsc;
 
     #[tokio::test]
@@ -1684,20 +2376,38 @@ mod tests {
     async fn submit_task_merges_existing_task_and_increments_generation() {
         let (tx, mut rx) = mpsc::channel::<TaskKey>(8);
         let pending_tasks = Arc::new(DashMap::new());
+        let pending_task_count = Arc::new(AtomicUsize::new(0));
 
         let task_initial = UpdateTask::ResolveVod {
             id: ProviderIdType::Id(42),
             reason: ResolveReasonSet::from_variants(&[ResolveReason::Info]),
             delay: 10,
         };
-        MetadataUpdateManager::submit_task(tx.clone(), pending_tasks.clone(), "input_a", task_initial).await;
+        let queue_size = MetadataUpdateRuntimeSettings::default().max_queue_size;
+        MetadataUpdateManager::submit_task(
+            tx.clone(),
+            pending_tasks.clone(),
+            pending_task_count.clone(),
+            "input_a",
+            queue_size,
+            task_initial,
+        )
+        .await;
 
         let task_merge = UpdateTask::ResolveVod {
             id: ProviderIdType::Id(42),
             reason: ResolveReasonSet::from_variants(&[ResolveReason::Probe]),
             delay: 2,
         };
-        MetadataUpdateManager::submit_task(tx, pending_tasks.clone(), "input_a", task_merge).await;
+        MetadataUpdateManager::submit_task(
+            tx,
+            pending_tasks.clone(),
+            pending_task_count.clone(),
+            "input_a",
+            queue_size,
+            task_merge,
+        )
+        .await;
 
         let first_signal = rx.try_recv().expect("first signal should be queued");
         assert_eq!(first_signal, TaskKey::Vod(42));
@@ -1709,12 +2419,94 @@ mod tests {
         let entry = pending_tasks.get(&TaskKey::Vod(42)).expect("pending entry should exist");
         assert_eq!(entry.generation.load(Ordering::Relaxed), 1);
 
-        let merged = entry.task.lock().await.clone();
+        let merged = entry.task.lock().clone();
         match merged {
             UpdateTask::ResolveVod { reason, delay, .. } => {
                 assert!(reason.contains(ResolveReason::Info));
                 assert!(reason.contains(ResolveReason::Probe));
                 assert_eq!(delay, 2);
+            }
+            other => panic!("unexpected task type after merge: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn submit_task_probe_stream_merge_keeps_existing_payload_when_present() {
+        let (tx, mut rx) = mpsc::channel::<TaskKey>(8);
+        let pending_tasks = Arc::new(DashMap::new());
+        let pending_task_count = Arc::new(AtomicUsize::new(0));
+        let queue_size = MetadataUpdateRuntimeSettings::default().max_queue_size;
+
+        let initial = UpdateTask::ProbeStream {
+            probe_scope: Arc::from("scope_a"),
+            unique_id: "uid_1".to_string(),
+            url: "http://old.example/stream".to_string(),
+            item_type: PlaylistItemType::Video,
+            reason: ResolveReasonSet::from_variants(&[ResolveReason::MissingDetails]),
+            delay: 10,
+        };
+        MetadataUpdateManager::submit_task(
+            tx.clone(),
+            pending_tasks.clone(),
+            pending_task_count.clone(),
+            "input_a",
+            queue_size,
+            initial,
+        )
+        .await;
+
+        let merged_in = UpdateTask::ProbeStream {
+            probe_scope: Arc::from("scope_a"),
+            unique_id: "uid_1".to_string(),
+            url: "http://new.example/stream".to_string(),
+            item_type: PlaylistItemType::LocalVideo,
+            reason: ResolveReasonSet::from_variants(&[ResolveReason::Probe]),
+            delay: 2,
+        };
+        MetadataUpdateManager::submit_task(
+            tx,
+            pending_tasks.clone(),
+            pending_task_count.clone(),
+            "input_a",
+            queue_size,
+            merged_in,
+        )
+        .await;
+
+        let first_signal = rx.try_recv().expect("first signal should be queued");
+        assert_eq!(
+            first_signal,
+            TaskKey::Stream {
+                scope: Arc::from("scope_a"),
+                id: Arc::from("uid_1"),
+            }
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty | tokio::sync::mpsc::error::TryRecvError::Disconnected)
+        ));
+
+        let key = TaskKey::Stream {
+            scope: Arc::from("scope_a"),
+            id: Arc::from("uid_1"),
+        };
+        let entry = pending_tasks.get(&key).expect("pending entry should exist");
+        assert_eq!(entry.generation.load(Ordering::Relaxed), 1);
+
+        let merged = entry.task.lock().clone();
+        match merged {
+            UpdateTask::ProbeStream {
+                reason,
+                delay,
+                url,
+                item_type,
+                ..
+            } => {
+                assert!(reason.contains(ResolveReason::MissingDetails));
+                assert!(reason.contains(ResolveReason::Probe));
+                assert_eq!(delay, 2);
+                assert_eq!(url, "http://old.example/stream");
+                assert_eq!(item_type, PlaylistItemType::Video);
             }
             other => panic!("unexpected task type after merge: {other:?}"),
         }
@@ -1743,12 +2535,20 @@ mod tests {
             sender: tx,
             receiver: rx,
             pending_tasks: pending_tasks.clone(),
+            pending_task_count: Arc::new(AtomicUsize::new(1)),
             app_state_weak: None,
             update_pause_gate: Arc::new(RwLock::new(())),
             cancel_token: CancellationToken::new(),
             batch_buffer: BatchResultCollector::new(),
             db_handles: HashMap::new(),
             failed_clusters: HashSet::new(),
+            retry_states: HashMap::new(),
+            resolve_exhausted: HashMap::new(),
+            last_cycle_completed_at_ts: None,
+            probe_retry_state_path: None,
+            probe_retry_loaded: false,
+            probe_retry_load_retry_at_ts: None,
+            scheduled_requeues: Arc::new(DashMap::new()),
         };
 
         let requeued = worker.finalize_processed_task_success(&key, 0, "input_a").await;
@@ -1777,12 +2577,20 @@ mod tests {
             sender: tx,
             receiver: rx,
             pending_tasks: pending_tasks.clone(),
+            pending_task_count: Arc::new(AtomicUsize::new(1)),
             app_state_weak: None,
             update_pause_gate: Arc::new(RwLock::new(())),
             cancel_token: CancellationToken::new(),
             batch_buffer: BatchResultCollector::new(),
             db_handles: HashMap::new(),
             failed_clusters: HashSet::new(),
+            retry_states: HashMap::new(),
+            resolve_exhausted: HashMap::new(),
+            last_cycle_completed_at_ts: None,
+            probe_retry_state_path: None,
+            probe_retry_loaded: false,
+            probe_retry_load_retry_at_ts: None,
+            scheduled_requeues: Arc::new(DashMap::new()),
         };
 
         let requeued = worker.finalize_processed_task_success(&key, 0, "input_b").await;
@@ -1830,5 +2638,54 @@ mod tests {
         };
 
         assert!(InputWorker::task_needs_provider_connection(&task, InputType::Library));
+    }
+
+    #[test]
+    fn probe_retry_state_disk_roundtrip() {
+        let dir = tempdir().expect("tempdir should be created");
+        let path = dir.path().join("probe_retry_state.db");
+        let key = TaskKey::Stream {
+            scope: Arc::from("input_a"),
+            id: Arc::from("stream_1"),
+        };
+        let state = RetryState {
+            attempts: 3,
+            next_allowed_at_ts: 1_700_000_000,
+            cooldown_until_ts: Some(1_700_086_400),
+            last_error: Some("probe timeout".to_string()),
+        };
+
+        persist_probe_retry_state_to_disk(&path, &key, Some(&state))
+            .expect("state persistence should succeed");
+        let loaded = load_probe_retry_states_from_disk(&path).expect("state load should succeed");
+        let loaded_state = loaded.get(&key).expect("probe key should be present");
+
+        assert_eq!(loaded_state.attempts, 3);
+        assert_eq!(loaded_state.cooldown_until_ts, Some(1_700_086_400));
+        assert_eq!(loaded_state.last_error.as_deref(), Some("probe timeout"));
+
+        persist_probe_retry_state_to_disk(&path, &key, None).expect("state clear should succeed");
+        let cleared = load_probe_retry_states_from_disk(&path).expect("state reload should succeed");
+        assert!(!cleared.contains_key(&key));
+    }
+
+    #[test]
+    fn probe_backoff_steps_follow_expected_windows() {
+        let runtime_settings = MetadataUpdateRuntimeSettings::default();
+        let first = InputWorker::compute_probe_retry_backoff_secs(1, &runtime_settings);
+        let second = InputWorker::compute_probe_retry_backoff_secs(2, &runtime_settings);
+        let third = InputWorker::compute_probe_retry_backoff_secs(3, &runtime_settings);
+
+        assert!((480..=720).contains(&first), "expected ~10m with jitter, got {first}");
+        assert!((1_440..=2_160).contains(&second), "expected ~30m with jitter, got {second}");
+        assert!((2_880..=4_320).contains(&third), "expected ~60m with jitter, got {third}");
+    }
+
+    #[test]
+    fn transient_worker_errors_include_connection_unavailable() {
+        assert!(InputWorker::is_transient_worker_error(TASK_ERR_UPDATE_IN_PROGRESS));
+        assert!(InputWorker::is_transient_worker_error(TASK_ERR_PREEMPTED));
+        assert!(InputWorker::is_transient_worker_error(TASK_ERR_NO_CONNECTION));
+        assert!(!InputWorker::is_transient_worker_error("permanent error"));
     }
 }

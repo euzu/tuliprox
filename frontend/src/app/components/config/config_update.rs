@@ -100,6 +100,9 @@ pub fn update_config(config: &mut ConfigDto, forms: Vec<ConfigForm>) {
                 }
             }
             ConfigForm::Video(_, mut video_cfg) => set_config_field!(config, video_cfg, video),
+            ConfigForm::MetadataUpdate(_, mut metadata_update_cfg) => {
+                set_config_field!(config, metadata_update_cfg, metadata_update)
+            }
             ConfigForm::Messaging(_, mut messaging_cfg) => set_config_field!(config, messaging_cfg, messaging),
             ConfigForm::WebUi(_, web_ui_cfg) => update_webui_field(config, web_ui_cfg),
             ConfigForm::ReverseProxy(_, mut reverse_proxy_cfg) => {
@@ -121,7 +124,7 @@ mod tests {
     use crate::app::components::config::config_page::ConfigForm;
     use shared::model::{
         ConfigDto, ContentSecurityPolicyConfigDto, HdHomeRunConfigDto, HdHomeRunDeviceConfigDto, LibraryConfigDto,
-        LibraryScanDirectoryDto, ProxyConfigDto, WebAuthConfigDto, WebUiConfigDto,
+        LibraryScanDirectoryDto, MetadataUpdateConfigDto, ProxyConfigDto, WebAuthConfigDto, WebUiConfigDto,
     };
 
     #[test]
@@ -221,5 +224,34 @@ mod tests {
         assert_eq!(web_ui.path.as_deref(), Some("/dashboard"));
         assert_eq!(web_ui.player_server.as_deref(), Some("http://player.local"));
         assert_eq!(web_ui.auth.as_ref().map(|auth| auth.secret.as_str()), Some("top-secret"));
+    }
+
+    #[test]
+    fn update_config_metadata_update_empty_form_clears_config() {
+        let mut config = ConfigDto::default();
+
+        update_config(&mut config, vec![ConfigForm::MetadataUpdate(true, MetadataUpdateConfigDto::default())]);
+
+        assert!(config.metadata_update.is_none());
+    }
+
+    #[test]
+    fn update_config_metadata_update_applies_and_cleans_payload() {
+        let mut config = ConfigDto::default();
+        let mut metadata_cfg = MetadataUpdateConfigDto {
+            ffprobe_enabled: true,
+            ffprobe_timeout: Some(60),
+            ..MetadataUpdateConfigDto::default()
+        };
+
+        assert!(!metadata_cfg.is_empty());
+        metadata_cfg.clean();
+        assert_eq!(metadata_cfg.ffprobe_timeout, None);
+
+        update_config(&mut config, vec![ConfigForm::MetadataUpdate(true, metadata_cfg)]);
+
+        let stored = config.metadata_update.as_ref().expect("metadata_update config should be set");
+        assert!(stored.ffprobe_enabled);
+        assert_eq!(stored.ffprobe_timeout, None);
     }
 }

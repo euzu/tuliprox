@@ -2,7 +2,8 @@ use crate::{
     error::{TuliproxError, TuliproxErrorKind},
     model::{
         ConfigApiDto, HdHomeRunConfigDto, IpCheckConfigDto, LibraryConfigDto, LogConfigDto, MessagingConfigDto,
-        ProxyConfigDto, ReverseProxyConfigDto, ScheduleConfigDto, VideoConfigDto, WebUiConfigDto,
+        MetadataUpdateConfigDto, ProxyConfigDto, ReverseProxyConfigDto, ScheduleConfigDto, VideoConfigDto,
+        WebUiConfigDto,
     },
     utils::{
         default_connect_timeout_secs, default_supported_video_extensions, is_blank_optional_string,
@@ -15,6 +16,9 @@ pub const DEFAULT_USER_AGENT: &str = "VLC/3.0.16 LibVLC/3.0.16";
 fn default_default_user_agent() -> Option<String> { Some(DEFAULT_USER_AGENT.to_string()) }
 fn is_none_or_empty_video(video: &Option<VideoConfigDto>) -> bool {
     video.as_ref().is_none_or(VideoConfigDto::is_empty)
+}
+fn is_none_or_empty_metadata_update(metadata_update: &Option<MetadataUpdateConfigDto>) -> bool {
+    metadata_update.as_ref().is_none_or(MetadataUpdateConfigDto::is_empty)
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -39,6 +43,8 @@ pub struct ConfigDto {
     pub custom_stream_response_path: Option<String>,
     #[serde(default, skip_serializing_if = "is_none_or_empty_video")]
     pub video: Option<VideoConfigDto>,
+    #[serde(default, skip_serializing_if = "is_none_or_empty_metadata_update")]
+    pub metadata_update: Option<MetadataUpdateConfigDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedules: Option<Vec<ScheduleConfigDto>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -86,6 +92,7 @@ impl Default for ConfigDto {
             template_path: None,
             custom_stream_response_path: None,
             video: None,
+            metadata_update: None,
             schedules: None,
             log: None,
             user_access_control: false,
@@ -224,6 +231,7 @@ impl ConfigDto {
         self.prepare_web()?;
         self.prepare_hdhomerun(include_computed)?;
         self.prepare_video_config()?;
+        self.prepare_metadata_update_config()?;
 
         if let Some(reverse_proxy) = self.reverse_proxy.as_mut() {
             reverse_proxy.prepare(&self.working_dir)?;
@@ -265,8 +273,6 @@ impl ConfigDto {
                     extensions: default_supported_video_extensions(),
                     download: None,
                     web_search: None,
-                    ffprobe_enabled: false,
-                    ffprobe_timeout: None,
                 });
             }
             Some(video) => match video.prepare() {
@@ -274,6 +280,20 @@ impl ConfigDto {
                 Err(err) => return Err(err),
             },
         }
+        Ok(())
+    }
+
+    fn prepare_metadata_update_config(&mut self) -> Result<(), TuliproxError> {
+        let mut metadata_update = self.metadata_update.clone().unwrap_or_default();
+
+        metadata_update.prepare()?;
+
+        if metadata_update.is_empty() {
+            self.metadata_update = None;
+        } else {
+            self.metadata_update = Some(metadata_update);
+        }
+
         Ok(())
     }
 
@@ -333,6 +353,7 @@ impl ConfigDto {
 mod tests {
     use super::*;
     use crate::utils::default_supported_video_extensions;
+    use serde_json::json;
 
     #[test]
     fn default_uses_connect_timeout_default_value() {
@@ -347,8 +368,6 @@ mod tests {
                 extensions: default_supported_video_extensions(),
                 download: None,
                 web_search: None,
-                ffprobe_enabled: false,
-                ffprobe_timeout: None,
             }),
             ..ConfigDto::default()
         };
@@ -363,14 +382,33 @@ mod tests {
             video: Some(VideoConfigDto {
                 extensions: default_supported_video_extensions(),
                 download: None,
-                web_search: None,
-                ffprobe_enabled: true,
-                ffprobe_timeout: None,
+                web_search: Some("https://example.org?q={}".to_string()),
             }),
             ..ConfigDto::default()
         };
 
         let serialized = serde_json::to_string(&cfg).expect("config serialization should succeed");
         assert!(serialized.contains("\"video\""), "expected video field, got: {serialized}");
+    }
+
+    #[test]
+    fn deserializing_rejects_legacy_video_ffprobe_fields() {
+        let raw = json!({
+            "api": {
+                "host": "127.0.0.1",
+                "port": 8901,
+                "web_root": "./web"
+            },
+            "working_dir": ".",
+            "video": {
+                "extensions": ["mp4"],
+                "ffprobe_enabled": true
+            }
+        });
+
+        let result: Result<ConfigDto, _> = serde_json::from_value(raw);
+        assert!(result.is_err(), "legacy ffprobe field under video must fail");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("ffprobe_enabled"), "unexpected error text: {err}");
     }
 }
