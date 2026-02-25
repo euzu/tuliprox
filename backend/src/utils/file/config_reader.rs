@@ -548,7 +548,7 @@ pub async fn read_initial_app_config(
 
     let sources: SourcesConfig = SourcesConfig::try_from(sources_dto)?;
     let mut config: Config = Config::from(config_dto);
-    config.prepare(config_path).await?;
+    config.prepare(config_path)?;
     config.update_runtime();
 
     let mut app_config = AppConfig {

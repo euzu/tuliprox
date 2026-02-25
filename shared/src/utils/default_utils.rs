@@ -123,6 +123,69 @@ pub const fn is_default_probe_live_interval(v: &u32) -> bool { *v == default_pro
 pub const fn default_resolve_background() -> bool { true }
 pub const fn default_xtream_live_stream_use_prefix() -> bool { true }
 
+pub fn default_metadata_queue_log_interval() -> String { "30s".to_string() }
+pub fn is_default_metadata_queue_log_interval(v: &String) -> bool { *v == default_metadata_queue_log_interval() }
+pub fn default_metadata_progress_log_interval() -> String { "15s".to_string() }
+pub fn is_default_metadata_progress_log_interval(v: &String) -> bool { *v == default_metadata_progress_log_interval() }
+pub fn default_metadata_max_resolve_retry_backoff() -> String { "1h".to_string() }
+pub fn is_default_metadata_max_resolve_retry_backoff(v: &String) -> bool {
+    *v == default_metadata_max_resolve_retry_backoff()
+}
+pub fn default_metadata_resolve_min_retry_base() -> String { "5s".to_string() }
+pub fn is_default_metadata_resolve_min_retry_base(v: &String) -> bool {
+    *v == default_metadata_resolve_min_retry_base()
+}
+pub fn default_metadata_resolve_exhaustion_reset_gap() -> String { "1h".to_string() }
+pub fn is_default_metadata_resolve_exhaustion_reset_gap(v: &String) -> bool {
+    *v == default_metadata_resolve_exhaustion_reset_gap()
+}
+pub fn default_metadata_probe_cooldown() -> String { "7d".to_string() }
+pub fn is_default_metadata_probe_cooldown(v: &String) -> bool { *v == default_metadata_probe_cooldown() }
+pub fn default_metadata_retry_delay() -> String { "2s".to_string() }
+pub fn is_default_metadata_retry_delay(v: &String) -> bool { *v == default_metadata_retry_delay() }
+pub fn default_metadata_probe_retry_load_retry_delay() -> String { "1m".to_string() }
+pub fn is_default_metadata_probe_retry_load_retry_delay(v: &String) -> bool {
+    *v == default_metadata_probe_retry_load_retry_delay()
+}
+pub fn default_metadata_worker_idle_timeout() -> String { "1m".to_string() }
+pub fn is_default_metadata_worker_idle_timeout(v: &String) -> bool { *v == default_metadata_worker_idle_timeout() }
+pub fn default_metadata_probe_retry_backoff_step_1() -> String { "10m".to_string() }
+pub fn is_default_metadata_probe_retry_backoff_step_1(v: &String) -> bool {
+    *v == default_metadata_probe_retry_backoff_step_1()
+}
+pub fn default_metadata_probe_retry_backoff_step_2() -> String { "30m".to_string() }
+pub fn is_default_metadata_probe_retry_backoff_step_2(v: &String) -> bool {
+    *v == default_metadata_probe_retry_backoff_step_2()
+}
+pub fn default_metadata_probe_retry_backoff_step_3() -> String { "1h".to_string() }
+pub fn is_default_metadata_probe_retry_backoff_step_3(v: &String) -> bool {
+    *v == default_metadata_probe_retry_backoff_step_3()
+}
+pub const fn default_metadata_max_attempts_resolve() -> u8 { 3 }
+pub const fn is_default_metadata_max_attempts_resolve(v: &u8) -> bool { *v == default_metadata_max_attempts_resolve() }
+pub const fn default_metadata_max_attempts_probe() -> u8 { 3 }
+pub const fn is_default_metadata_max_attempts_probe(v: &u8) -> bool { *v == default_metadata_max_attempts_probe() }
+pub const fn default_metadata_backoff_jitter_percent() -> u8 { 20 }
+pub const fn is_default_metadata_backoff_jitter_percent(v: &u8) -> bool {
+    *v == default_metadata_backoff_jitter_percent()
+}
+pub const fn default_metadata_max_queue_size() -> usize { 100_000 }
+pub const fn is_default_metadata_max_queue_size(v: &usize) -> bool { *v == default_metadata_max_queue_size() }
+pub fn default_metadata_ffprobe_analyze_duration() -> String { "10s".to_string() }
+pub fn is_default_metadata_ffprobe_analyze_duration(v: &String) -> bool {
+    *v == default_metadata_ffprobe_analyze_duration()
+}
+pub fn default_metadata_ffprobe_probe_size() -> String { "10MB".to_string() }
+pub fn is_default_metadata_ffprobe_probe_size(v: &String) -> bool { *v == default_metadata_ffprobe_probe_size() }
+pub fn default_metadata_ffprobe_live_analyze_duration() -> String { "5s".to_string() }
+pub fn is_default_metadata_ffprobe_live_analyze_duration(v: &String) -> bool {
+    *v == default_metadata_ffprobe_live_analyze_duration()
+}
+pub fn default_metadata_ffprobe_live_probe_size() -> String { "5MB".to_string() }
+pub fn is_default_metadata_ffprobe_live_probe_size(v: &String) -> bool {
+    *v == default_metadata_ffprobe_live_probe_size()
+}
+
 //////////////////////////////
 // HDHomerun Device Defaults
 //////////////////////////////

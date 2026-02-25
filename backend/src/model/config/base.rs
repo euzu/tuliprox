@@ -1,5 +1,8 @@
-use crate::model::{macros, ConfigApi, LibraryConfig, ReverseProxyConfig, ReverseProxyDisabledHeaderConfig, ScheduleConfig};
-use crate::model::{HdHomeRunConfig, HdHomeRunFlags, IpCheckConfig, LogConfig, MessagingConfig, ProxyConfig, VideoConfig, WebUiConfig};
+use crate::model::{
+    macros, ConfigApi, HdHomeRunConfig, HdHomeRunFlags, IpCheckConfig, LibraryConfig, LogConfig, MetadataUpdateConfig,
+    MessagingConfig, ProxyConfig, ReverseProxyConfig, ReverseProxyDisabledHeaderConfig, ScheduleConfig, VideoConfig,
+    WebUiConfig,
+};
 use crate::utils;
 use log::{error, info};
 use path_clean::PathClean;
@@ -72,6 +75,7 @@ pub struct Config {
     pub template_path: Option<String>,
     pub custom_stream_response_path: Option<String>,
     pub video: Option<VideoConfig>,
+    pub metadata_update: Option<MetadataUpdateConfig>,
     pub schedules: Option<Vec<ScheduleConfig>>,
     pub log: Option<LogConfig>,
     pub user_access_control: bool,
@@ -91,7 +95,7 @@ pub struct Config {
 }
 
 impl Config {
-    pub async fn prepare(&mut self, config_path: &str) -> Result<(), TuliproxError> {
+    pub fn prepare(&mut self, config_path: &str) -> Result<(), TuliproxError> {
         let work_dir = &self.working_dir;
         self.working_dir = utils::resolve_directory_path(work_dir);
 
@@ -110,7 +114,7 @@ impl Config {
         }
 
         if let Some(video) = self.video.as_mut() {
-            video.prepare().await;
+            video.prepare();
         }
 
         Ok(())
@@ -194,6 +198,7 @@ impl From<&ConfigDto> for Config {
             template_path: dto.template_path.clone(),
             custom_stream_response_path: dto.custom_stream_response_path.clone(),
             video: dto.video.as_ref().map(Into::into),
+            metadata_update: dto.metadata_update.as_ref().map(Into::into),
             schedules: dto.schedules.as_ref().map(|s| s.iter().map(Into::into).collect()),
             log: dto.log.as_ref().map(Into::into),
             user_access_control: dto.user_access_control,

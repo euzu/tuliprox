@@ -179,6 +179,7 @@ fn apply_setup_config_forms(config: &mut shared::model::ConfigDto, forms: Vec<Co
             ConfigForm::Log(_, log_cfg) => config.log = Some(log_cfg),
             ConfigForm::Schedules(_, schedules_cfg) => config.schedules = schedules_cfg.schedules,
             ConfigForm::Video(_, video_cfg) => config.video = Some(video_cfg),
+            ConfigForm::MetadataUpdate(_, metadata_update_cfg) => config.metadata_update = Some(metadata_update_cfg),
             ConfigForm::Messaging(_, messaging_cfg) => config.messaging = Some(messaging_cfg),
             ConfigForm::WebUi(_, web_ui_cfg) => apply_setup_webui_form(config, web_ui_cfg),
             ConfigForm::ReverseProxy(_, reverse_proxy_cfg) => config.reverse_proxy = Some(reverse_proxy_cfg),

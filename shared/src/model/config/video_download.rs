@@ -44,10 +44,6 @@ pub struct VideoConfigDto {
     pub download: Option<VideoDownloadConfigDto>,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub web_search: Option<String>,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub ffprobe_enabled: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ffprobe_timeout: Option<u64>,
 }
 
 impl VideoConfigDto {
@@ -55,8 +51,6 @@ impl VideoConfigDto {
         (self.extensions.is_empty() || is_default_supported_video_extensions(&self.extensions))
             && is_blank_optional_str(self.web_search.as_deref())
             && (self.download.is_none() || self.download.as_ref().is_some_and(|d| d.is_empty()))
-            && !self.ffprobe_enabled
-            && self.ffprobe_timeout.is_none()
     }
 
     pub fn clean(&mut self) {

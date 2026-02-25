@@ -10,7 +10,7 @@ use crate::{
         context::ConfigContext,
     },
     config_field_bool, config_field_child, config_field_optional, edit_field_bool, edit_field_list,
-    edit_field_number_option_u64, edit_field_text_option, generate_form_reducer,
+    edit_field_text_option, generate_form_reducer,
     i18n::use_translation,
 };
 use shared::model::{VideoConfigDto, VideoDownloadConfigDto};
@@ -25,8 +25,6 @@ const LABEL_HEADERS: &str = "LABEL.HEADERS";
 const LABEL_EXTENSIONS: &str = "LABEL.EXTENSIONS";
 const LABEL_WEB_SEARCH: &str = "LABEL.WEB_SEARCH";
 const LABEL_ADD_EXTENSION: &str = "LABEL.ADD_EXTENSION";
-const LABEL_FFPROBE_ENABLED: &str = "LABEL.FFPROBE_ENABLED";
-const LABEL_FFPROBE_TIMEOUT: &str = "LABEL.FFPROBE_TIMEOUT";
 
 generate_form_reducer!(
     state: VideoDownloadConfigFormState { form: VideoDownloadConfigDto },
@@ -45,8 +43,6 @@ generate_form_reducer!(
     fields {
         WebSearch => web_search: Option<String>,
         Extensions => extensions: Vec<String>,
-        FfprobeEnabled => ffprobe_enabled: bool,
-        FfprobeTimeout => ffprobe_timeout: Option<u64>,
     }
 );
 
@@ -137,10 +133,6 @@ pub fn VideoConfigView() -> Html {
         html! {
           <>
             <div class="tp__video-config-view__body tp__config-view-page__body">
-              { config_field_bool!(video_state.form, translate.t(LABEL_FFPROBE_ENABLED), ffprobe_enabled) }
-              { config_field_optional!(video_state.form, translate.t(LABEL_FFPROBE_TIMEOUT), ffprobe_timeout) }
-            </div>
-            <div class="tp__video-config-view__body tp__config-view-page__body">
               { config_field_optional!(video_state.form, translate.t(LABEL_WEB_SEARCH), web_search) }
             </div>
             <div class="tp__video-config-view__body tp__config-view-page__body">
@@ -154,10 +146,6 @@ pub fn VideoConfigView() -> Html {
     let render_edit_mode = || {
         html! {
         <>
-          <div class="tp__video-config-view__body tp__config-view-page__body">
-              { edit_field_bool!(video_state, translate.t(LABEL_FFPROBE_ENABLED), ffprobe_enabled, VideoConfigFormAction::FfprobeEnabled) }
-              { edit_field_number_option_u64!(video_state, translate.t(LABEL_FFPROBE_TIMEOUT), ffprobe_timeout, VideoConfigFormAction::FfprobeTimeout) }
-          </div>
           <div class="tp__video-config-view__body tp__config-view-page__body">
             { edit_field_text_option!(video_state, translate.t(LABEL_WEB_SEARCH), web_search, VideoConfigFormAction::WebSearch) }
           </div>

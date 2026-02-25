@@ -100,6 +100,9 @@ pub fn update_config(config: &mut ConfigDto, forms: Vec<ConfigForm>) {
                 }
             }
             ConfigForm::Video(_, mut video_cfg) => set_config_field!(config, video_cfg, video),
+            ConfigForm::MetadataUpdate(_, mut metadata_update_cfg) => {
+                set_config_field!(config, metadata_update_cfg, metadata_update)
+            }
             ConfigForm::Messaging(_, mut messaging_cfg) => set_config_field!(config, messaging_cfg, messaging),
             ConfigForm::WebUi(_, web_ui_cfg) => update_webui_field(config, web_ui_cfg),
             ConfigForm::ReverseProxy(_, mut reverse_proxy_cfg) => {

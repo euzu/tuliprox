@@ -7,7 +7,8 @@ use crate::model::{AppConfig, ConfigTarget};
 use crate::model::{ConfigInput, ConfigInputFlags};
 use crate::processing::processor::playlist::PlaylistProcessingContext;
 use crate::processing::processor::{
-    create_resolve_options_function_for_xtream_target, ResolveOptions, ResolveOptionsFlags,
+    create_resolve_options_function_for_xtream_target, process_foreground_retry_once, ResolveOptions,
+    ResolveOptionsFlags,
 };
 use crate::ptt::ptt_parse_title;
 use crate::repository::get_input_storage_path;
@@ -23,13 +24,14 @@ use shared::model::{
     MediaQuality, PlaylistEntry, PlaylistItem, PlaylistItemType, StreamProperties, VideoStreamDetailProperties,
     VideoStreamProperties, XtreamCluster, XtreamPlaylistItem, XtreamVideoInfo,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 create_resolve_options_function_for_xtream_target!(vod);
 
 const BATCH_SIZE: usize = 200;
+const FOREGROUND_MIN_RETRY_DELAY_SECS: u64 = 1;
 
 #[allow(clippy::too_many_lines)]
 pub async fn playlist_resolve_vod(
@@ -162,6 +164,7 @@ async fn process_immediate_vod_info(
     let mut _db_lock_holder = None;
 
     let mut batch: Vec<(ProviderIdType, VideoStreamProperties)> = Vec::with_capacity(BATCH_SIZE);
+    let mut retry_once_ids: HashSet<ProviderIdType> = HashSet::new();
     let mut processed_count = 0;
     let mut last_log_time = Instant::now();
 
@@ -267,6 +270,7 @@ async fn process_immediate_vod_info(
                     Ok(None) => {}
                     Err(e) => {
                         error!("Failed to update VOD metadata for {}: {e}", pli.header.title);
+                        retry_once_ids.insert(provider_id.clone());
                     }
                 }
             }
@@ -276,6 +280,51 @@ async fn process_immediate_vod_info(
             info!("resolved {processed_count} vod info");
             last_log_time = Instant::now();
         }
+    }
+
+    if !retry_once_ids.is_empty() {
+        let retry_delay_secs = u64::from(resolve_options.resolve_delay).max(FOREGROUND_MIN_RETRY_DELAY_SECS);
+        process_foreground_retry_once!(
+            ctx: ctx,
+            fpl: fpl,
+            filter: filter,
+            retry_once_ids: retry_once_ids,
+            retry_delay_secs: retry_delay_secs,
+            xtream_path: xtream_path,
+            db_query_holder: db_query_holder,
+            db_lock_holder: _db_lock_holder,
+            batch: batch,
+            batch_size: BATCH_SIZE,
+            processed_count: processed_count,
+            query_error_context: "VOD retry",
+            reasons: |retry_pli| check_resolve_reasons(&resolve_options, do_probe, resolve_tmdb_enabled, retry_pli),
+            update: |active_provider, retry_pli, provider_id, reasons, db_query_ref| update_vod_info_immediate(
+                ctx,
+                active_provider,
+                input,
+                retry_pli,
+                provider_id,
+                reasons,
+                db_query_ref,
+            ),
+            apply_properties: |retry_pli, updated_props| {
+                retry_pli.header.additional_properties = Some(StreamProperties::Video(Box::new(updated_props.clone())));
+            },
+            persist: |updates| persist_input_vod_info_batch(
+                &ctx.config,
+                &storage_path,
+                XtreamCluster::Video,
+                &input.name,
+                updates,
+            ),
+            on_persist_error: |err| {
+                error!("persist_input_vod_info_batch failed for VOD retry on input '{}'. Error: {err}", input.name);
+            },
+            on_retry_error: |retry_pli, err| {
+                error!("Foreground retry failed for VOD {}: {err}", retry_pli.header.title);
+            },
+            on_after_attempt: |_retry_pli, _retry_succeeded| {},
+        );
     }
 
     // Flush the remaining batch if bundled strategy
@@ -312,9 +361,9 @@ fn check_resolve_reasons(
     // Check if we need to do anything for this item
     let mut reasons = ResolveReasonSet::default();
 
-    let needs_info = check_needs_info(resolve_options, pli, &mut reasons);
+    check_needs_info(resolve_options, pli, &mut reasons);
     // TMDB check
-    check_resolve_tmdb(resolve_options, resolve_tmdb_enabled, pli, needs_info, &mut reasons);
+    check_resolve_tmdb(resolve_options, resolve_tmdb_enabled, pli, &mut reasons);
 
     // Probe check (independent of resolve info fetch; we still probe when A/V details are missing)
     if do_probe {
@@ -352,10 +401,9 @@ fn check_resolve_tmdb(
     resolve_options: &ResolveOptions,
     resolve_tmdb_enabled: bool,
     pli: &PlaylistItem,
-    needs_info: bool,
     reasons: &mut ResolveReasonSet,
 ) {
-    if resolve_tmdb_enabled && resolve_options.has_flag(ResolveOptionsFlags::TmdbMissing) && needs_info {
+    if resolve_tmdb_enabled && resolve_options.has_flag(ResolveOptionsFlags::TmdbMissing) {
         if let Some(StreamProperties::Video(video_stream_props)) = pli.header.additional_properties.as_ref() {
             let has_tmdb = video_stream_props.tmdb.is_some();
             let has_date = video_stream_props.details.as_ref().and_then(|d| d.release_date.as_ref()).is_some();
@@ -415,6 +463,8 @@ async fn update_vod_info_immediate(
     db_query: Option<Arc<Mutex<BPlusTreeQuery<u32, XtreamPlaylistItem>>>>,
 ) -> Result<Option<VideoStreamProperties>, TuliproxError> {
     let fetch_info = reasons.contains(ResolveReason::Info);
+    let resolve_tmdb =
+        fetch_info || reasons.contains(ResolveReason::Tmdb) || reasons.contains(ResolveReason::Date);
 
     update_vod_metadata(
         &ctx.config,
@@ -426,6 +476,7 @@ async fn update_vod_info_immediate(
         Some(&pli.header.title),
         false,
         fetch_info,
+        resolve_tmdb,
         reasons.contains(ResolveReason::Probe),
         db_query,
     )
@@ -438,8 +489,9 @@ async fn update_vod_info_immediate(
 /// * `save` - If true, persists changes to the input database immediately (Instant strategy).
 ///   If false, returns the properties so the caller can batch persist them (Bundled strategy).
 /// * `fetch_info` - If true, fetches details from Provider API. If false, uses existing/dummy data.
+/// * `resolve_tmdb` - If true, resolves missing TMDB/date metadata from available titles.
 /// * `db_query` - Optional pre-opened DB handle to avoid re-opening file.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::fn_params_excessive_bools)]
 pub async fn update_vod_metadata(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
@@ -450,6 +502,7 @@ pub async fn update_vod_metadata(
     playlist_title: Option<&str>,
     save: bool,
     fetch_info: bool,
+    resolve_tmdb: bool,
     do_probe: bool,
     db_query: Option<Arc<Mutex<BPlusTreeQuery<u32, XtreamPlaylistItem>>>>,
 ) -> Result<Option<VideoStreamProperties>, TuliproxError> {
@@ -494,10 +547,9 @@ pub async fn update_vod_metadata(
         } else {
             let xtream_path = xtream_get_file_path(&storage_path, XtreamCluster::Video);
             if xtream_path.exists() {
-                let file_lock = app_config.file_locks.read_lock(&xtream_path).await;
+                let _file_lock = app_config.file_locks.read_lock(&xtream_path).await;
                 let xtream_path = xtream_path.clone();
                 let item = match tokio::task::spawn_blocking(move || {
-                    let _guard = file_lock;
                     let mut query = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path)?;
                     query.query_zero_copy(&stream_id)
                 })
@@ -603,7 +655,7 @@ pub async fn update_vod_metadata(
     let missing_tmdb = properties.tmdb.is_none();
     let missing_date = properties.details.as_ref().and_then(|d| d.release_date.as_ref()).is_none();
 
-    if fetch_info && resolve_tmdb_enabled && (missing_tmdb || missing_date) {
+    if resolve_tmdb && resolve_tmdb_enabled && (missing_tmdb || missing_date) {
         // Try local parsing first
         if missing_date && !properties.name.is_empty() {
             let meta_parse = ptt_parse_title(&properties.name);
@@ -715,10 +767,11 @@ pub async fn update_vod_metadata(
             );
 
             let config = app_config.config.load();
-            let ffprobe_timeout = config.video.as_ref().and_then(|v| v.ffprobe_timeout).unwrap_or(60);
+            let metadata_update = config.metadata_update.clone().unwrap_or_default();
+            let ffprobe_timeout = metadata_update.ffprobe_timeout.unwrap_or(60);
             let user_agent = config.default_user_agent.clone();
-            let analyze_duration = 10_000_000;
-            let probe_size = 10_000_000;
+            let analyze_duration = metadata_update.t_ffprobe_analyze_duration_micros;
+            let probe_size = metadata_update.t_ffprobe_probe_size_bytes;
 
             // Acquire Connection logic
             let temp_handle = if active_handle.is_some() {
