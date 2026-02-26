@@ -115,7 +115,7 @@ async fn send_burst_buffer(
             return;
         }
         if let Err(err) = client_tx.send(buf.as_ref().clone()).await {
-            warn!("Error sending burst-buffer chunk to client: {err}");
+            debug!("Failed sending burst-buffer chunk to client: {err}");
             return; // stop on send error
         }
     }
