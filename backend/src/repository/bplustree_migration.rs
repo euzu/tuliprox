@@ -1,5 +1,6 @@
 use super::bplustree::{MAGIC, STORAGE_VERSION};
 use fs2::FileExt as _;
+use log::warn;
 use std::{
     collections::{HashSet, VecDeque},
     ffi::OsStr,
@@ -58,7 +59,7 @@ impl BPlusTreeStartupMigrator {
                 stats.scanned_files = stats.scanned_files.saturating_add(1);
                 match Self::migrate_file_if_needed(&file)? {
                     FileMigrationOutcome::NotBPlusTree => {}
-                    FileMigrationOutcome::AlreadyCurrent => {
+                    FileMigrationOutcome::AlreadyCurrent | FileMigrationOutcome::Locked => {
                         stats.bplustree_files = stats.bplustree_files.saturating_add(1);
                     }
                     FileMigrationOutcome::Migrated => {
@@ -288,7 +289,13 @@ impl BPlusTreeStartupMigrator {
         }
 
         let mut file = OpenOptions::new().read(true).write(true).open(path)?;
-        file.try_lock_exclusive()?;
+        if let Err(err) = file.try_lock_exclusive() {
+            if err.kind() == io::ErrorKind::WouldBlock {
+                warn!("Skipping B+Tree migration for locked file {}: {}", path.display(), err);
+                return Ok(FileMigrationOutcome::Locked);
+            }
+            return Err(err);
+        }
 
         // Re-read header after lock to guard against concurrent updates between
         // the read-only probe and write phase.
@@ -352,6 +359,7 @@ impl BPlusTreeStartupMigrator {
 enum FileMigrationOutcome {
     NotBPlusTree,
     AlreadyCurrent,
+    Locked,
     Migrated,
 }
 
