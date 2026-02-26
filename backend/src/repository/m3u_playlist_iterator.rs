@@ -30,6 +30,7 @@ pub struct M3uPlaylistIterator {
     inner: LockedReceiverStream<(M3uPlaylistItem, bool)>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_rewritten_url(
     base_url: &str,
     username: &str,
@@ -38,6 +39,7 @@ fn build_rewritten_url(
     m3u_pli: &M3uPlaylistItem,
     typed: bool,
     prefix_path: &str,
+    append_extension: bool,
 ) -> String {
     // Build URL efficiently with a single allocation using concat_string! macro
     let stream_type: &str = if typed {
@@ -75,9 +77,13 @@ fn build_rewritten_url(
             )
     };
 
-    extract_extension_from_url(source_url)
-        .map(|ext| shared::concat_string!(&rewritten_url, &ext))
-        .unwrap_or(rewritten_url)
+    if append_extension {
+        extract_extension_from_url(source_url)
+            .map(|ext| shared::concat_string!(&rewritten_url, &ext))
+            .unwrap_or(rewritten_url)
+    } else {
+        rewritten_url
+    }
 }
 
 fn apply_rewrite(
@@ -108,6 +114,7 @@ fn apply_rewrite(
             &m3u_pli,
             flags.contains(M3uPlaylistIteratorFlags::IncludeTypeInUrl),
             storage_const::M3U_STREAM_PATH,
+            true,
         );
         let resource_url = if flags.contains(M3uPlaylistIteratorFlags::RewriteResource) {
             let source_url = if m3u_pli.logo.is_empty() {
@@ -123,6 +130,7 @@ fn apply_rewrite(
                 &m3u_pli,
                 false,
                 storage_const::M3U_RESOURCE_PATH,
+                false,
             ))
         } else {
             None
