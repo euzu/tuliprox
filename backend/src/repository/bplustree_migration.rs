@@ -129,7 +129,7 @@ impl BPlusTreeStartupMigrator {
             }
 
             for candidate in [root.join(&marker_name), root.join(&marker_name_alt)] {
-                if keep_marker_path.is_some_and(|keep| keep == candidate.as_path()) {
+                if keep_marker_path.is_some_and(|keep| Self::marker_paths_match(keep, candidate.as_path())) {
                     continue;
                 }
                 match std::fs::remove_file(&candidate) {
@@ -141,6 +141,34 @@ impl BPlusTreeStartupMigrator {
         }
 
         Ok(())
+    }
+
+    fn marker_paths_match(keep_marker_path: &Path, candidate: &Path) -> bool {
+        if keep_marker_path == candidate {
+            return true;
+        }
+
+        if let (Ok(keep_canon), Ok(candidate_canon)) =
+            (std::fs::canonicalize(keep_marker_path), std::fs::canonicalize(candidate))
+        {
+            return keep_canon == candidate_canon;
+        }
+
+        let (Some(keep_name), Some(candidate_name)) = (keep_marker_path.file_name(), candidate.file_name()) else {
+            return false;
+        };
+        if keep_name != candidate_name {
+            return false;
+        }
+
+        let (Some(keep_parent), Some(candidate_parent)) = (keep_marker_path.parent(), candidate.parent()) else {
+            return false;
+        };
+
+        match (std::fs::canonicalize(keep_parent), std::fs::canonicalize(candidate_parent)) {
+            (Ok(keep_parent_canon), Ok(candidate_parent_canon)) => keep_parent_canon == candidate_parent_canon,
+            _ => false,
+        }
     }
 
     fn collect_db_files_for_root(root: &Path) -> io::Result<Vec<PathBuf>> {
