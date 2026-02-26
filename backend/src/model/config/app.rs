@@ -454,7 +454,7 @@ impl AppConfig {
     pub async fn is_ffprobe_enabled(&self) -> bool {
         let ffprobe_enabled_in_config = {
             let config = self.config.load();
-            config.metadata_update.as_ref().is_some_and(|metadata| metadata.ffprobe_enabled)
+            config.metadata_update.as_ref().is_some_and(|metadata| metadata.ffprobe.enabled)
         };
         if !ffprobe_enabled_in_config {
             return false;

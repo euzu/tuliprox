@@ -4,7 +4,7 @@ use crate::library::metadata::{MediaMetadata, MetadataSource, MovieMetadata, Ser
 use crate::library::scanner::ScannedMediaFile;
 use crate::library::tmdb_client::TmdbClient;
 use crate::library::{MediaGroup, MetadataStorage};
-use crate::model::LibraryConfig;
+use crate::model::{LibraryConfig, MetadataUpdateConfig};
 use crate::ptt::{ptt_parse_title, PttMetadata};
 
 // Metadata resolver that tries multiple sources to get video metadata
@@ -15,28 +15,38 @@ pub struct MetadataResolver {
 
 impl MetadataResolver {
     // Creates a new metadata resolver from configuration
-    pub fn new(config: Option<&LibraryConfig>, client: reqwest::Client) -> Self {
-        let storage = match config {
+    pub fn new(
+        library_config: Option<&LibraryConfig>,
+        metadata_update_config: Option<&MetadataUpdateConfig>,
+        client: reqwest::Client,
+    ) -> Self {
+        let storage = match library_config {
             None => None,
             Some(c) => {
                 let storage_path = std::path::PathBuf::from(&c.metadata.path);
                 Some(MetadataStorage::new(storage_path))
             }
         };
-        Self::from_config(config, client, storage)
+        Self::from_config(library_config, metadata_update_config, client, storage)
     }
 
-    pub fn from_config(config: Option<&LibraryConfig>, client: reqwest::Client, storage: Option<MetadataStorage>) -> Self {
-        let tmdb_client = config.filter(|c| c.metadata.tmdb.enabled)
+    pub fn from_config(
+        library_config: Option<&LibraryConfig>,
+        metadata_update_config: Option<&MetadataUpdateConfig>,
+        client: reqwest::Client,
+        storage: Option<MetadataStorage>,
+    ) -> Self {
+        let tmdb_client = metadata_update_config
+            .filter(|c| c.tmdb.enabled)
             .zip(storage)
             .map(|(c, s)|{
-            let api_key = c.metadata.tmdb.api_key.as_ref().map_or_else(|| TMDB_API_KEY.to_string(), ToString::to_string);
-            TmdbClient::new(api_key, c.metadata.tmdb.rate_limit_ms, client, s)
+            let api_key = c.tmdb.api_key.as_ref().map_or_else(|| TMDB_API_KEY.to_string(), ToString::to_string);
+            TmdbClient::new(api_key, c.tmdb.rate_limit_ms, client, s)
         });
 
         Self {
             tmdb_client,
-            fallback_to_filename: config.is_some_and(|c|c.metadata.fallback_to_filename),
+            fallback_to_filename: library_config.is_some_and(|c|c.metadata.fallback_to_filename),
         }
     }
 
@@ -196,13 +206,15 @@ impl MetadataResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{LibraryMetadataConfig, LibraryMetadataReadConfig, LibraryPlaylistConfig, LibraryTmdbConfig};
+    use crate::model::{
+        LibraryMetadataConfig, LibraryMetadataReadConfig, LibraryPlaylistConfig, MetadataUpdateConfig, TmdbConfig,
+    };
     use std::path::PathBuf;
     use std::time::Duration;
     use shared::utils::Internable;
     use crate::library::{MediaClassification, MediaClassifier};
 
-    fn create_test_config(tmdb_enabled: bool, fallback_filename: bool) -> LibraryConfig {
+    fn create_test_library_config(fallback_filename: bool) -> LibraryConfig {
         LibraryConfig {
             enabled: true,
             scan_directories: vec![],
@@ -214,17 +226,6 @@ mod tests {
                     jellyfin: true,
                     plex: true,
                 },
-                tmdb: LibraryTmdbConfig {
-                    enabled: tmdb_enabled,
-                    api_key: if tmdb_enabled {
-                        Some("test_key".to_string())
-                    } else {
-                        None
-                    },
-                    rate_limit_ms: 250,
-                    cache_duration_days: 0,
-                    language: "en-US".to_string(),
-                },
                 fallback_to_filename: fallback_filename,
                 formats: vec![],
             },
@@ -232,6 +233,24 @@ mod tests {
                 movie_category: "Movies".intern(),
                 series_category: "Series".intern(),
             },
+        }
+    }
+
+    fn create_test_metadata_update_config(tmdb_enabled: bool) -> MetadataUpdateConfig {
+        MetadataUpdateConfig {
+            tmdb: TmdbConfig {
+                enabled: tmdb_enabled,
+                api_key: if tmdb_enabled {
+                    Some("test_key".to_string())
+                } else {
+                    None
+                },
+                rate_limit_ms: 250,
+                cache_duration_days: 0,
+                language: "en-US".to_string(),
+                ..TmdbConfig::default()
+            },
+            ..MetadataUpdateConfig::default()
         }
     }
 
@@ -248,13 +267,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_from_filename_movie() {
-        let config = create_test_config(false, true);
+        let library_config = create_test_library_config(true);
+        let metadata_update_config = create_test_metadata_update_config(false);
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(30))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
-        let resolver = MetadataResolver::from_config(Some(&config), client, Some(MetadataStorage::new(PathBuf::from("/tmp"))));
+        let resolver = MetadataResolver::from_config(
+            Some(&library_config),
+            Some(&metadata_update_config),
+            client,
+            Some(MetadataStorage::new(PathBuf::from("/tmp"))),
+        );
         let file = create_test_file("The.Matrix.1999.1080p.mkv");
         let metadata = match MediaClassifier::classify(&file) {
             MediaClassification::Movie { metadata, .. } | MediaClassification::Series { metadata, .. } => metadata,
@@ -275,13 +300,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_from_title_stream() {
-        let config = create_test_config(false, true);
+        let library_config = create_test_library_config(true);
+        let metadata_update_config = create_test_metadata_update_config(false);
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(30))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
-        let resolver = MetadataResolver::from_config(Some(&config), client, Some(MetadataStorage::new(PathBuf::from("/tmp"))));
+        let resolver = MetadataResolver::from_config(
+            Some(&library_config),
+            Some(&metadata_update_config),
+            client,
+            Some(MetadataStorage::new(PathBuf::from("/tmp"))),
+        );
         
         let metadata = resolver.resolve_from_title("Inception.2010", None, true, true).await;
         assert!(metadata.is_some());
@@ -302,8 +333,14 @@ mod tests {
             .timeout(Duration::from_secs(30))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
-        let config = create_test_config(false, false);
-        let resolver = MetadataResolver::from_config(Some(&config), client, Some(MetadataStorage::new(PathBuf::from("/tmp"))));
+        let library_config = create_test_library_config(false);
+        let metadata_update_config = create_test_metadata_update_config(false);
+        let resolver = MetadataResolver::from_config(
+            Some(&library_config),
+            Some(&metadata_update_config),
+            client,
+            Some(MetadataStorage::new(PathBuf::from("/tmp"))),
+        );
         let file = create_test_file("343jfkjh4789dkjfh934z3.Movie.mkv");
         let metadata = match MediaClassifier::classify(&file) {
             MediaClassification::Movie { metadata, .. } | MediaClassification::Series { metadata, .. } => metadata,

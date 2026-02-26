@@ -658,8 +658,9 @@ mod tests {
     #[test]
     fn setup_metadata_update_empty_form_clears_existing_payload() {
         let mut app_config = AppConfigDto::default();
-        app_config.config.metadata_update =
-            Some(MetadataUpdateConfigDto { ffprobe_enabled: true, ..Default::default() });
+        let mut metadata_update = MetadataUpdateConfigDto::default();
+        metadata_update.ffprobe.enabled = true;
+        app_config.config.metadata_update = Some(metadata_update);
         let config_ctx = ConfigContext { config: Some(Rc::new(app_config)), api_proxy: None };
         let mut form_state = crate::app::components::setup::SetupConfigFormState::default();
         form_state.update_form(ConfigForm::MetadataUpdate(true, MetadataUpdateConfigDto::default()));
@@ -672,14 +673,14 @@ mod tests {
     fn setup_metadata_update_form_applies_cleaned_payload() {
         let config_ctx = ConfigContext { config: Some(Rc::new(AppConfigDto::default())), api_proxy: None };
         let mut form_state = crate::app::components::setup::SetupConfigFormState::default();
-        form_state.update_form(ConfigForm::MetadataUpdate(
-            true,
-            MetadataUpdateConfigDto { ffprobe_enabled: true, ffprobe_timeout: Some(60), ..Default::default() },
-        ));
+        let mut metadata_update = MetadataUpdateConfigDto::default();
+        metadata_update.ffprobe.enabled = true;
+        metadata_update.ffprobe.timeout = Some(60);
+        form_state.update_form(ConfigForm::MetadataUpdate(true, metadata_update));
 
         let app_cfg = build_setup_app_config(&config_ctx, &form_state, SourcesConfigDto::default());
         let metadata_update = app_cfg.config.metadata_update.expect("metadata_update config should be present");
-        assert!(metadata_update.ffprobe_enabled);
-        assert_eq!(metadata_update.ffprobe_timeout, None);
+        assert!(metadata_update.ffprobe.enabled);
+        assert_eq!(metadata_update.ffprobe.timeout, None);
     }
 }

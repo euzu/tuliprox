@@ -4,7 +4,7 @@ use crate::library::metadata_resolver::MetadataResolver;
 use crate::library::metadata_storage::MetadataStorage;
 use crate::library::scanner::LibraryScanner;
 use crate::library::{MediaGroup, MediaGrouper};
-use crate::model::{AppConfig, LibraryConfig};
+use crate::model::{AppConfig, LibraryConfig, MetadataUpdateConfig};
 use log::{debug, error, info, warn};
 use shared::model::{LibraryMetadataFormat, LibraryScanResult};
 use std::collections::HashMap;
@@ -34,15 +34,19 @@ impl LibraryProcessor {
             error!("Failed to create HTTP client for LibraryProcessor, skipping library scan. Please check your configuration.");
             return None;
         };
-        app_config.config.load().library.as_ref().map(|lib_cfg| Self::new(lib_cfg.clone(), client))
+        let config = app_config.config.load();
+        config
+            .library
+            .as_ref()
+            .map(|lib_cfg| Self::new(lib_cfg.clone(), config.metadata_update.as_ref(), client))
     }
 
     // Creates a new Library processor with the given configuration
-    pub fn new(config: LibraryConfig, client: reqwest::Client) -> Self {
+    pub fn new(config: LibraryConfig, metadata_update_config: Option<&MetadataUpdateConfig>, client: reqwest::Client) -> Self {
         let storage_path = std::path::PathBuf::from(&config.metadata.path);
         let scanner = LibraryScanner::new(config.clone());
         let storage = MetadataStorage::new(storage_path);
-        let resolver = MetadataResolver::from_config(Some(&config), client, Some(storage.clone()));
+        let resolver = MetadataResolver::from_config(Some(&config), metadata_update_config, client, Some(storage.clone()));
 
         Self {
             config,

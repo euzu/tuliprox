@@ -17,7 +17,6 @@ pub struct LibraryScanDirectory {
 pub struct LibraryMetadataConfig {
     pub path: String,
     pub read_existing: LibraryMetadataReadConfig,
-    pub tmdb: LibraryTmdbConfig,
     pub fallback_to_filename: bool,
     pub formats: Vec<LibraryMetadataFormat>,
 }
@@ -27,15 +26,6 @@ pub struct LibraryMetadataReadConfig {
     pub kodi: bool,
     pub jellyfin: bool,
     pub plex: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct LibraryTmdbConfig {
-    pub enabled: bool,
-    pub api_key: Option<String>,
-    pub rate_limit_ms: u64,
-    pub cache_duration_days: u32,
-    pub language: String,
 }
 
 #[derive(Debug, Clone)]
@@ -123,13 +113,6 @@ impl From<&LibraryConfigDto> for LibraryConfig {
                     kodi: dto.metadata.read_existing.kodi,
                     jellyfin: dto.metadata.read_existing.jellyfin,
                     plex: dto.metadata.read_existing.plex,
-                },
-                tmdb: LibraryTmdbConfig {
-                    enabled: dto.metadata.tmdb.enabled,
-                    api_key: dto.metadata.tmdb.api_key.clone(),
-                    rate_limit_ms: dto.metadata.tmdb.rate_limit_ms,
-                    cache_duration_days: dto.metadata.tmdb.cache_duration_days,
-                    language: dto.metadata.tmdb.language.clone(),
                 },
                 fallback_to_filename: dto.metadata.fallback_to_filename,
                 formats: dto.metadata.formats.clone(),

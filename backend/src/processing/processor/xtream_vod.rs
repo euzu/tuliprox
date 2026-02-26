@@ -676,7 +676,8 @@ pub async fn update_vod_metadata(
         if missing_tmdb || still_missing_date {
             let config = app_config.config.load();
             let library_config = config.library.as_ref();
-            let meta_resolver = MetadataResolver::new(library_config, client.clone());
+            let metadata_update_config = config.metadata_update.as_ref();
+            let meta_resolver = MetadataResolver::new(library_config, metadata_update_config, client.clone());
 
             let mut meta = None;
             let mut tried_title = false;
@@ -767,10 +768,10 @@ pub async fn update_vod_metadata(
 
             let config = app_config.config.load();
             let metadata_update = config.metadata_update.clone().unwrap_or_default();
-            let ffprobe_timeout = metadata_update.ffprobe_timeout.unwrap_or(60);
+            let ffprobe_timeout = metadata_update.ffprobe.timeout.unwrap_or(60);
             let user_agent = config.default_user_agent.clone();
-            let analyze_duration = metadata_update.ffprobe_analyze_duration_micros;
-            let probe_size = metadata_update.ffprobe_probe_size_bytes;
+            let analyze_duration = metadata_update.ffprobe.analyze_duration_micros;
+            let probe_size = metadata_update.ffprobe.probe_size_bytes;
 
             // Acquire Connection logic
             let temp_handle = if active_handle.is_some() {

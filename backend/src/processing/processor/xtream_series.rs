@@ -45,11 +45,11 @@ impl SeriesProbeSettings {
     pub fn from_metadata_update(metadata_update: Option<&MetadataUpdateConfig>) -> Self {
         let defaults = MetadataUpdateConfig::default();
         Self {
-            timeout_secs: metadata_update.and_then(|cfg| cfg.ffprobe_timeout).unwrap_or(60),
+            timeout_secs: metadata_update.and_then(|cfg| cfg.ffprobe.timeout).unwrap_or(60),
             analyze_duration_micros: metadata_update
-                .map_or(defaults.ffprobe_analyze_duration_micros, |cfg| cfg.ffprobe_analyze_duration_micros),
+                .map_or(defaults.ffprobe.analyze_duration_micros, |cfg| cfg.ffprobe.analyze_duration_micros),
             probe_size_bytes: metadata_update
-                .map_or(defaults.ffprobe_probe_size_bytes, |cfg| cfg.ffprobe_probe_size_bytes),
+                .map_or(defaults.ffprobe.probe_size_bytes, |cfg| cfg.ffprobe.probe_size_bytes),
         }
     }
 }
@@ -759,7 +759,8 @@ pub async fn update_series_metadata(
     {
         let config = app_config.config.load();
         let library_config = config.library.as_ref();
-        let meta_resolver = MetadataResolver::new(library_config, client.clone());
+        let metadata_update_config = config.metadata_update.as_ref();
+        let meta_resolver = MetadataResolver::new(library_config, metadata_update_config, client.clone());
 
         let mut meta = None;
         let mut tried_title = false;

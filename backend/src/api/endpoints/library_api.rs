@@ -26,16 +26,19 @@ async fn scan_library(
     };
 
     // Check if Library is enabled
-    let lib_config = match app_state.app_config.config.load().library.as_ref() {
-        Some(config) if config.enabled => config.clone(),
-        _ => {
-            let response = LibraryScanSummary {
-                status: LibraryScanSummaryStatus::Error,
-                message: "Library is not enabled".to_string(),
-                result: None,
-            };
-            let _ = app_state.event_manager.send_event(EventMessage::LibraryScanProgress(response));
-            return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": "Library is not enabled".to_string()}))).into_response();
+    let (lib_config, metadata_update_config) = {
+        let config = app_state.app_config.config.load();
+        match config.library.as_ref() {
+            Some(lib) if lib.enabled => (lib.clone(), config.metadata_update.clone()),
+            _ => {
+                let response = LibraryScanSummary {
+                    status: LibraryScanSummaryStatus::Error,
+                    message: "Library is not enabled".to_string(),
+                    result: None,
+                };
+                let _ = app_state.event_manager.send_event(EventMessage::LibraryScanProgress(response));
+                return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": "Library is not enabled".to_string()}))).into_response();
+            }
         }
     };
 
@@ -44,6 +47,7 @@ async fn scan_library(
     spawn_library_scan(
         event_manager,
         lib_config,
+        metadata_update_config,
         client,
         request.force_rescan,
         "",
@@ -59,11 +63,12 @@ async fn get_library_status(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
 ) -> axum::response::Response {
 
-    if let Some(config) = app_state.app_config.config.load().library.as_ref() {
+    let config_snapshot = app_state.app_config.config.load();
+    if let Some(config) = config_snapshot.library.as_ref() {
         if config.enabled {
             let client = app_state.http_client.load_full().as_ref().clone();
             // Get statistics from processor
-            let processor = LibraryProcessor::new(config.clone(), client);
+            let processor = LibraryProcessor::new(config.clone(), config_snapshot.metadata_update.as_ref(), client);
             let entries = processor.get_all_entries().await;
 
             let movies = entries

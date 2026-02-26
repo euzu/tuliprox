@@ -18,9 +18,9 @@ use shared::model::{
 };
 use shared::utils::generate_playlist_uuid;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, RwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 use crate::api::model::BatchResultCollector;
@@ -38,10 +38,40 @@ use std::io;
 use std::path::{Path, PathBuf};
 use crate::model::MetadataUpdateConfig;
 
-const PROBE_RETRY_STATE_FILE: &str = "probe_retry_state.db";
+const METADATA_RETRY_STATE_FILE: &str = "metadata_retry_state.db";
 const TASK_ERR_NO_CONNECTION: &str = "No connection available";
 const TASK_ERR_PREEMPTED: &str = "Task preempted";
 const TASK_ERR_UPDATE_IN_PROGRESS: &str = "Playlist update in progress";
+const BLOCKING_DB_MIN_CONCURRENCY: usize = 4;
+const BLOCKING_DB_MAX_CONCURRENCY: usize = 32;
+const RETRY_STATE_PRUNE_INTERVAL_SECS: i64 = 300;
+const RETRY_STATE_MIN_TTL_SECS: i64 = 86_400;
+const RUNTIME_SETTINGS_REFRESH_INTERVAL_SECS: u64 = 60;
+
+fn metadata_blocking_concurrency_limit() -> usize {
+    let parallelism =
+        std::thread::available_parallelism().map_or(BLOCKING_DB_MIN_CONCURRENCY, std::num::NonZeroUsize::get);
+    parallelism
+        .saturating_mul(2)
+        .clamp(BLOCKING_DB_MIN_CONCURRENCY, BLOCKING_DB_MAX_CONCURRENCY)
+}
+
+fn metadata_blocking_semaphore() -> &'static Semaphore {
+    static BLOCKING_SEMAPHORE: OnceLock<Semaphore> = OnceLock::new();
+    BLOCKING_SEMAPHORE.get_or_init(|| Semaphore::new(metadata_blocking_concurrency_limit()))
+}
+
+async fn spawn_blocking_limited<F, R>(task: F) -> Result<R, tokio::task::JoinError>
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    // Throttle B+Tree and file-heavy blocking tasks to avoid saturating Tokio's blocking pool.
+    let permit = metadata_blocking_semaphore().acquire().await.ok();
+    let result = tokio::task::spawn_blocking(task).await;
+    drop(permit);
+    result
+}
 
 #[derive(Debug, Clone)]
 struct MetadataUpdateRuntimeSettings {
@@ -53,8 +83,9 @@ struct MetadataUpdateRuntimeSettings {
     max_attempts_probe: u8,
     resolve_exhaustion_reset_gap_secs: i64,
     probe_cooldown_secs: i64,
+    tmdb_cooldown_secs: i64,
     retry_delay_secs: u64,
-    probe_retry_load_retry_delay_secs: i64,
+    metadata_retry_load_retry_delay_secs: i64,
     worker_idle_timeout_secs: u64,
     max_queue_size: usize,
     probe_retry_backoff_step_1_secs: u64,
@@ -90,22 +121,23 @@ impl MetadataUpdateRuntimeSettings {
     fn from_metadata_update(cfg: &MetadataUpdateConfig) -> Self {
         let to_i64 = |v: u64| i64::try_from(v.max(1)).unwrap_or(i64::MAX);
         Self {
-            queue_log_interval: Duration::from_secs(cfg.queue_log_interval_secs.max(1)),
-            progress_log_interval: Duration::from_secs(cfg.progress_log_interval_secs.max(1)),
-            max_resolve_retry_backoff_secs: cfg.max_resolve_retry_backoff_secs.max(1),
-            resolve_min_retry_base_secs: cfg.resolve_min_retry_base_secs.max(1),
-            max_attempts_resolve: cfg.max_attempts_resolve.max(1),
-            max_attempts_probe: cfg.max_attempts_probe.max(1),
-            resolve_exhaustion_reset_gap_secs: to_i64(cfg.resolve_exhaustion_reset_gap_secs),
-            probe_cooldown_secs: to_i64(cfg.probe_cooldown_secs),
+            queue_log_interval: Duration::from_secs(cfg.log.queue_interval_secs.max(1)),
+            progress_log_interval: Duration::from_secs(cfg.log.progress_interval_secs.max(1)),
+            max_resolve_retry_backoff_secs: cfg.resolve.max_retry_backoff_secs.max(1),
+            resolve_min_retry_base_secs: cfg.resolve.min_retry_base_secs.max(1),
+            max_attempts_resolve: cfg.resolve.max_attempts.max(1),
+            max_attempts_probe: cfg.probe.max_attempts.max(1),
+            resolve_exhaustion_reset_gap_secs: to_i64(cfg.resolve.exhaustion_reset_gap_secs),
+            probe_cooldown_secs: to_i64(cfg.probe.cooldown_secs),
+            tmdb_cooldown_secs: to_i64(cfg.tmdb.cooldown_secs),
             retry_delay_secs: cfg.retry_delay_secs.max(1),
-            probe_retry_load_retry_delay_secs: to_i64(cfg.probe_retry_load_retry_delay_secs),
+            metadata_retry_load_retry_delay_secs: to_i64(cfg.probe.retry_load_retry_delay_secs),
             worker_idle_timeout_secs: cfg.worker_idle_timeout_secs.max(1),
             max_queue_size: cfg.max_queue_size.max(1),
-            probe_retry_backoff_step_1_secs: cfg.probe_retry_backoff_step_1_secs.max(1),
-            probe_retry_backoff_step_2_secs: cfg.probe_retry_backoff_step_2_secs.max(1),
-            probe_retry_backoff_step_3_secs: cfg.probe_retry_backoff_step_3_secs.max(1),
-            backoff_jitter_percent: cfg.backoff_jitter_percent.min(95),
+            probe_retry_backoff_step_1_secs: cfg.probe.retry_backoff_step_1_secs.max(1),
+            probe_retry_backoff_step_2_secs: cfg.probe.retry_backoff_step_2_secs.max(1),
+            probe_retry_backoff_step_3_secs: cfg.probe.retry_backoff_step_3_secs.max(1),
+            backoff_jitter_percent: cfg.probe.backoff_jitter_percent.min(95),
         }
     }
 }
@@ -261,28 +293,102 @@ impl RetryState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetryDomain {
+    Resolve,
+    Probe,
+    Tmdb,
+}
+
+#[derive(Debug, Clone, Default)]
+struct TaskRetryState {
+    resolve: Option<RetryState>,
+    probe: Option<RetryState>,
+    tmdb: Option<RetryState>,
+    updated_at_ts: i64,
+}
+
+impl TaskRetryState {
+    fn is_empty(&self) -> bool { self.resolve.is_none() && self.probe.is_none() && self.tmdb.is_none() }
+
+    fn touch(&mut self, now_ts: i64) {
+        self.updated_at_ts = now_ts.max(1);
+    }
+
+    fn max_domain_timestamp(&self) -> i64 {
+        let domain_max = |state: &RetryState| state.next_allowed_at_ts.max(state.cooldown_until_ts.unwrap_or(0));
+        self.resolve
+            .as_ref()
+            .map_or(0, domain_max)
+            .max(self.probe.as_ref().map_or(0, domain_max))
+            .max(self.tmdb.as_ref().map_or(0, domain_max))
+    }
+
+    fn is_stale(&self, now_ts: i64, ttl_secs: i64) -> bool {
+        let ttl_secs = ttl_secs.max(1);
+        let anchor_ts = self.updated_at_ts.max(self.max_domain_timestamp());
+        now_ts >= anchor_ts.saturating_add(ttl_secs)
+    }
+
+    fn get(&self, domain: RetryDomain) -> Option<&RetryState> {
+        match domain {
+            RetryDomain::Resolve => self.resolve.as_ref(),
+            RetryDomain::Probe => self.probe.as_ref(),
+            RetryDomain::Tmdb => self.tmdb.as_ref(),
+        }
+    }
+
+    fn get_mut_or_insert(&mut self, domain: RetryDomain) -> &mut RetryState {
+        let slot = match domain {
+            RetryDomain::Resolve => &mut self.resolve,
+            RetryDomain::Probe => &mut self.probe,
+            RetryDomain::Tmdb => &mut self.tmdb,
+        };
+        slot.get_or_insert_with(RetryState::new)
+    }
+
+    fn clear_domain(&mut self, domain: RetryDomain) {
+        match domain {
+            RetryDomain::Resolve => self.resolve = None,
+            RetryDomain::Probe => self.probe = None,
+            RetryDomain::Tmdb => self.tmdb = None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-enum ProbeRetryDbKey {
+enum MetadataRetryDbKey {
+    VodId(u32),
+    VodText(String),
+    SeriesId(u32),
+    SeriesText(String),
     LiveId(u32),
     LiveText(String),
     Stream { scope: String, id: String },
 }
 
-impl ProbeRetryDbKey {
-    fn from_task_key(task_key: &TaskKey) -> Option<Self> {
+impl MetadataRetryDbKey {
+    fn from_task_key(task_key: &TaskKey) -> Self {
         match task_key {
-            TaskKey::Live(id) => Some(Self::LiveId(*id)),
-            TaskKey::LiveStr(id) => Some(Self::LiveText(id.as_ref().to_owned())),
-            TaskKey::Stream { scope, id } => Some(Self::Stream {
+            TaskKey::Vod(id) => Self::VodId(*id),
+            TaskKey::VodStr(id) => Self::VodText(id.as_ref().to_owned()),
+            TaskKey::Series(id) => Self::SeriesId(*id),
+            TaskKey::SeriesStr(id) => Self::SeriesText(id.as_ref().to_owned()),
+            TaskKey::Live(id) => Self::LiveId(*id),
+            TaskKey::LiveStr(id) => Self::LiveText(id.as_ref().to_owned()),
+            TaskKey::Stream { scope, id } => Self::Stream {
                 scope: scope.as_ref().to_owned(),
                 id: id.as_ref().to_owned(),
-            }),
-            _ => None,
+            },
         }
     }
 
     fn into_task_key(self) -> TaskKey {
         match self {
+            Self::VodId(id) => TaskKey::Vod(id),
+            Self::VodText(id) => TaskKey::VodStr(Arc::from(id)),
+            Self::SeriesId(id) => TaskKey::Series(id),
+            Self::SeriesText(id) => TaskKey::SeriesStr(Arc::from(id)),
             Self::LiveId(id) => TaskKey::Live(id),
             Self::LiveText(id) => TaskKey::LiveStr(Arc::from(id)),
             Self::Stream { scope, id } => TaskKey::Stream {
@@ -294,32 +400,20 @@ impl ProbeRetryDbKey {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ProbeRetryDbValue {
+struct RetryStateDbValue {
     attempts: u8,
     next_allowed_at_ts: i64,
     cooldown_until_ts: Option<i64>,
     last_error: Option<String>,
-    updated_at_ts: i64,
 }
 
-impl ProbeRetryDbValue {
-    fn from_retry_state(state: &RetryState, updated_at_ts: i64) -> Self {
+impl RetryStateDbValue {
+    fn from_retry_state(state: &RetryState) -> Self {
         Self {
             attempts: state.attempts,
             next_allowed_at_ts: state.next_allowed_at_ts,
             cooldown_until_ts: state.cooldown_until_ts,
             last_error: state.last_error.clone(),
-            updated_at_ts,
-        }
-    }
-
-    fn cleared(updated_at_ts: i64) -> Self {
-        Self {
-            attempts: 0,
-            next_allowed_at_ts: 0,
-            cooldown_until_ts: None,
-            last_error: None,
-            updated_at_ts,
         }
     }
 
@@ -336,21 +430,65 @@ impl ProbeRetryDbValue {
     }
 }
 
-fn ensure_probe_retry_db(path: &Path) -> io::Result<()> {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MetadataRetryDbValue {
+    resolve: Option<RetryStateDbValue>,
+    probe: Option<RetryStateDbValue>,
+    tmdb: Option<RetryStateDbValue>,
+    updated_at_ts: i64,
+}
+
+impl MetadataRetryDbValue {
+    fn from_task_retry_state(state: &TaskRetryState, updated_at_ts: i64) -> Self {
+        Self {
+            resolve: state.resolve.as_ref().map(RetryStateDbValue::from_retry_state),
+            probe: state.probe.as_ref().map(RetryStateDbValue::from_retry_state),
+            tmdb: state.tmdb.as_ref().map(RetryStateDbValue::from_retry_state),
+            updated_at_ts,
+        }
+    }
+
+    fn cleared(updated_at_ts: i64) -> Self {
+        Self {
+            resolve: None,
+            probe: None,
+            tmdb: None,
+            updated_at_ts,
+        }
+    }
+
+    fn into_task_retry_state(self) -> Option<TaskRetryState> {
+        let mut state = TaskRetryState {
+            resolve: self.resolve.and_then(RetryStateDbValue::into_retry_state),
+            probe: self.probe.and_then(RetryStateDbValue::into_retry_state),
+            tmdb: self.tmdb.and_then(RetryStateDbValue::into_retry_state),
+            updated_at_ts: self.updated_at_ts,
+        };
+        if state.is_empty() {
+            return None;
+        }
+        if state.updated_at_ts <= 0 {
+            state.updated_at_ts = state.max_domain_timestamp();
+        }
+        Some(state)
+    }
+}
+
+fn ensure_metadata_retry_db(path: &Path) -> io::Result<()> {
     if path.exists() {
         return Ok(());
     }
-    let mut tree = BPlusTree::<ProbeRetryDbKey, ProbeRetryDbValue>::new();
+    let mut tree = BPlusTree::<MetadataRetryDbKey, MetadataRetryDbValue>::new();
     tree.store(path).map(|_| ())
 }
 
-fn load_probe_retry_states_from_disk(path: &Path) -> io::Result<HashMap<TaskKey, RetryState>> {
-    ensure_probe_retry_db(path)?;
+fn load_metadata_retry_states_from_disk(path: &Path) -> io::Result<HashMap<TaskKey, TaskRetryState>> {
+    ensure_metadata_retry_db(path)?;
 
     let mut result = HashMap::new();
-    let mut query = BPlusTreeQuery::<ProbeRetryDbKey, ProbeRetryDbValue>::try_new(path)?;
+    let mut query = BPlusTreeQuery::<MetadataRetryDbKey, MetadataRetryDbValue>::try_new(path)?;
     for (key, value) in query.iter() {
-        if let Some(state) = value.into_retry_state() {
+        if let Some(state) = value.into_task_retry_state() {
             result.insert(key.into_task_key(), state);
         }
     }
@@ -358,23 +496,21 @@ fn load_probe_retry_states_from_disk(path: &Path) -> io::Result<HashMap<TaskKey,
     Ok(result)
 }
 
-fn persist_probe_retry_state_to_disk(path: &Path, task_key: &TaskKey, state: Option<&RetryState>) -> io::Result<()> {
-    let Some(db_key) = ProbeRetryDbKey::from_task_key(task_key) else {
-        return Ok(());
-    };
+fn persist_metadata_retry_state_to_disk(path: &Path, task_key: &TaskKey, state: Option<&TaskRetryState>) -> io::Result<()> {
+    let db_key = MetadataRetryDbKey::from_task_key(task_key);
 
-    ensure_probe_retry_db(path)?;
+    ensure_metadata_retry_db(path)?;
 
     let now_ts = chrono::Utc::now().timestamp();
     let value = match state {
-        Some(s) => ProbeRetryDbValue::from_retry_state(s, now_ts),
-        None => ProbeRetryDbValue::cleared(now_ts),
+        Some(s) => MetadataRetryDbValue::from_task_retry_state(s, now_ts),
+        None => MetadataRetryDbValue::cleared(now_ts),
     };
 
-    let mut update = BPlusTreeUpdate::<ProbeRetryDbKey, ProbeRetryDbValue>::try_new_with_backoff(path)?;
+    let mut update = BPlusTreeUpdate::<MetadataRetryDbKey, MetadataRetryDbValue>::try_new_with_backoff(path)?;
     update
         .upsert_batch(&[(&db_key, &value)])
-        .map_err(|e| io::Error::other(format!("persist probe retry state failed: {e}")))?;
+        .map_err(|e| io::Error::other(format!("persist metadata retry state failed: {e}")))?;
     Ok(())
 }
 
@@ -451,7 +587,7 @@ impl MetadataUpdateManager {
     }
 
     /// Acquire exclusive gate for a foreground playlist update.
-    /// While this guard is held, background metadata/probe tasks are paused.
+    /// While this guard is held, background workers wait before starting heavy metadata/probe steps.
     pub async fn acquire_update_pause_guard(&self) -> tokio::sync::OwnedRwLockWriteGuard<()> {
         self.update_pause_gate.clone().write_owned().await
     }
@@ -478,6 +614,7 @@ impl MetadataUpdateManager {
     /// # Arguments
     /// * `input_name` - The input this task belongs to
     /// * `task` - The task to process
+    #[allow(clippy::too_many_lines)]
     pub async fn queue_task(&self, input_name: Arc<str>, task: UpdateTask) {
         // Read app state once and reuse for worker creation when needed.
         let app_state_weak = {
@@ -488,7 +625,8 @@ impl MetadataUpdateManager {
         let max_queue_size = runtime_settings.max_queue_size;
 
         let task_to_queue = task;
-        for attempt in 0..2 {
+        let mut channel_closed_attempt: u32 = 0;
+        loop {
             // Atomically ensure there is exactly one worker context per input.
             let mut worker_to_spawn: Option<(u64, InputWorker)> = None;
             let ctx = match self.workers.entry(input_name.clone()) {
@@ -524,9 +662,10 @@ impl MetadataUpdateManager {
                             retry_states: HashMap::new(),
                             resolve_exhausted: HashMap::new(),
                             last_cycle_completed_at_ts: None,
-                            probe_retry_state_path: None,
-                            probe_retry_loaded: false,
-                            probe_retry_load_retry_at_ts: None,
+                            metadata_retry_state_path: None,
+                            metadata_retry_loaded: false,
+                            metadata_retry_load_retry_at_ts: None,
+                            last_retry_state_prune_at_ts: None,
                             scheduled_requeues: Arc::new(DashMap::new()),
                         },
                     ));
@@ -566,17 +705,34 @@ impl MetadataUpdateManager {
                     return;
                 }
                 SubmitTaskResult::ChannelClosed => {
+                    channel_closed_attempt = channel_closed_attempt.saturating_add(1);
+                    if channel_closed_attempt.is_multiple_of(10) {
+                        warn!(
+                            "Metadata enqueue channel still closed for input {input_name} after {channel_closed_attempt} retries; continuing recovery"
+                        );
+                    }
                     debug_if_enabled!(
                         "Detected closed metadata worker channel for input {}, recreating worker context (attempt {})",
                         input_name,
-                        attempt + 1
+                        channel_closed_attempt
                     );
                     Self::remove_worker_context_if_id(&self.workers, &input_name, ctx.worker_id);
+                    let exp = channel_closed_attempt.saturating_sub(1).min(6);
+                    let factor = 1_u64.checked_shl(exp).unwrap_or(u64::MAX);
+                    let backoff_ms = 25_u64.saturating_mul(factor).min(2_000);
+                    let backoff = Duration::from_millis(backoff_ms);
+                    tokio::select! {
+                        () = self.cancel_token.cancelled() => {
+                            warn!(
+                                "Aborting metadata task enqueue for input {input_name} because cancellation was requested: {task_to_queue}"
+                            );
+                            return;
+                        }
+                        () = tokio::time::sleep(backoff) => {}
+                    }
                 }
             }
         }
-
-        warn!("Failed to queue metadata task for input {input_name} after worker recovery attempts: {task_to_queue}");
     }
 
     fn remove_worker_context_if_id(
@@ -658,7 +814,7 @@ impl MetadataUpdateManager {
     }
 
     fn merge_task_payload(existing: &mut UpdateTask, task: UpdateTask) -> bool {
-        let mut merged = false;
+        let mut changed = false;
         // Merge logic
         match (existing, task) {
             (
@@ -669,9 +825,11 @@ impl MetadataUpdateManager {
                 UpdateTask::ResolveSeries { reason: r1, delay: d1, .. },
                 UpdateTask::ResolveSeries { reason: r2, delay: d2, .. },
             ) => {
+                let previous_reason = *r1;
+                let previous_delay = *d1;
                 *r1 |= r2;
                 *d1 = min(*d1, d2);
-                merged = true;
+                changed = *r1 != previous_reason || *d1 != previous_delay;
             }
             (
                 UpdateTask::ProbeStream {
@@ -689,6 +847,10 @@ impl MetadataUpdateManager {
                     ..
                 },
             ) => {
+                let previous_reason = *r1;
+                let previous_delay = *d1;
+                let previous_url = url1.clone();
+                let previous_item_type = *item_type1;
                 *r1 |= r2;
                 *d1 = min(*d1, d2);
                 // Keep the existing payload by default; only fill it from the incoming
@@ -697,21 +859,27 @@ impl MetadataUpdateManager {
                     *url1 = url2;
                     *item_type1 = item_type2;
                 }
-                merged = true;
+                changed = *r1 != previous_reason
+                    || *d1 != previous_delay
+                    || *url1 != previous_url
+                    || *item_type1 != previous_item_type;
             }
             (
                 UpdateTask::ProbeLive { reason: r1, delay: d1, interval: i1, .. },
                 UpdateTask::ProbeLive { reason: r2, delay: d2, interval: i2, .. },
             ) => {
+                let previous_reason = *r1;
+                let previous_delay = *d1;
+                let previous_interval = *i1;
                 *r1 |= r2;
                 *d1 = min(*d1, d2);
                 *i1 = min(*i1, i2);
-                merged = true;
+                changed = *r1 != previous_reason || *d1 != previous_delay || *i1 != previous_interval;
             }
             _ => {} // Mismatched types, should not happen due to TaskKey
         }
 
-        merged
+        changed
     }
 
     /// Queue a task using the legacy API (for backward compatibility).
@@ -743,15 +911,22 @@ struct InputWorker {
     batch_buffer: BatchResultCollector,
     db_handles: HashMap<XtreamCluster, DbHandle>,
     failed_clusters: HashSet<XtreamCluster>,
-    retry_states: HashMap<TaskKey, RetryState>,
+    retry_states: HashMap<TaskKey, TaskRetryState>,
     resolve_exhausted: HashMap<TaskKey, i64>,
     last_cycle_completed_at_ts: Option<i64>,
-    probe_retry_state_path: Option<PathBuf>,
-    probe_retry_loaded: bool,
-    probe_retry_load_retry_at_ts: Option<i64>,
+    metadata_retry_state_path: Option<PathBuf>,
+    metadata_retry_loaded: bool,
+    metadata_retry_load_retry_at_ts: Option<i64>,
+    last_retry_state_prune_at_ts: Option<i64>,
     // Shared with detached delayed requeue tasks spawned in `schedule_requeue_at`.
     // A plain HashMap cannot be moved safely into those `'static` tasks.
     scheduled_requeues: Arc<DashMap<TaskKey, i64>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProcessTaskOutcome {
+    task_changed: bool,
+    tmdb_pending: bool,
 }
 
 impl InputWorker {
@@ -768,15 +943,21 @@ impl InputWorker {
         let input_name = self.input_name.clone();
         let app_state_weak = self.app_state_weak.clone();
 
-        let startup_runtime_settings = self.runtime_settings();
-        self.ensure_probe_retry_state_loaded(&input_name, app_state_weak.as_ref(), &startup_runtime_settings)
+        let mut runtime_settings = self.runtime_settings();
+        let mut last_runtime_settings_refresh_at = Instant::now();
+        self.ensure_metadata_retry_state_loaded(&input_name, app_state_weak.as_ref(), &runtime_settings)
             .await;
 
         // Keep one prefetched task to minimize channel waits/lock churn.
         let mut next_task: Option<(TaskKey, UpdateTask, u64)> = None;
 
         loop {
-            let runtime_settings = self.runtime_settings();
+            if last_runtime_settings_refresh_at.elapsed()
+                >= Duration::from_secs(RUNTIME_SETTINGS_REFRESH_INTERVAL_SECS)
+            {
+                runtime_settings = self.runtime_settings();
+                last_runtime_settings_refresh_at = Instant::now();
+            }
             let task_data = if let Some(t) = next_task.take() {
                 Some(t)
             } else {
@@ -784,11 +965,12 @@ impl InputWorker {
             };
 
             let Some((current_key, current_task, current_generation)) = task_data else { break };
-            if !self.probe_retry_loaded {
-                self.ensure_probe_retry_state_loaded(&input_name, app_state_weak.as_ref(), &runtime_settings)
+            if !self.metadata_retry_loaded {
+                self.ensure_metadata_retry_state_loaded(&input_name, app_state_weak.as_ref(), &runtime_settings)
                     .await;
             }
             let now_ts = chrono::Utc::now().timestamp();
+            self.prune_retry_tracking_maps_if_needed(now_ts, &runtime_settings).await;
 
             if !queue_cycle_active {
                 // First entry of a new processing cycle.
@@ -816,14 +998,15 @@ impl InputWorker {
             let mut schedule_requeue_at_ts: Option<i64> = None;
             let mut remove_current_task = false;
             let mut apply_rate_limit = false;
-            let mut probe_persist_state: Option<Option<RetryState>> = None;
+            let mut metadata_persist_state: Option<Option<TaskRetryState>> = None;
             let mut skip_execution = false;
+            let mut task_for_execution = current_task.clone();
 
-            if Self::is_resolve_task(&current_task) && self.resolve_exhausted.contains_key(&current_key) {
+            if Self::is_resolve_task(&task_for_execution) && self.resolve_exhausted.contains_key(&current_key) {
                 debug_if_enabled!(
                     "Skipping exhausted resolve task for input {}: {} (reset window: {}s)",
                     input_name,
-                    current_task,
+                    task_for_execution,
                     runtime_settings.resolve_exhaustion_reset_gap_secs
                 );
                 self.scheduled_requeues.remove(&current_key);
@@ -832,73 +1015,185 @@ impl InputWorker {
             }
 
             if !skip_execution {
-                let mut clear_probe_state = false;
-                if let Some(state) = self.retry_states.get(&current_key) {
-                    if let Some(cooldown_until_ts) = state.cooldown_until_ts {
-                        if now_ts < cooldown_until_ts {
-                            debug_if_enabled!(
-                                "Skipping probe task in cooldown for input {}: {} (cooldown_until={})",
-                                input_name,
-                                current_task,
-                                cooldown_until_ts
-                            );
-                            self.scheduled_requeues.remove(&current_key);
-                            remove_current_task = true;
+                let active_retry_domain = Self::retry_domain_for_task(&task_for_execution);
+                let mut clear_active_retry_state = false;
+                let mut clear_tmdb_state = false;
+
+                if let Some(state_bundle) = self.retry_states.get(&current_key) {
+                    if let Some(active_state) = state_bundle.get(active_retry_domain) {
+                        if active_retry_domain == RetryDomain::Probe {
+                            if let Some(cooldown_until_ts) = active_state.cooldown_until_ts {
+                                if now_ts < cooldown_until_ts {
+                                    debug_if_enabled!(
+                                        "Skipping probe task in cooldown for input {}: {} (cooldown_until={})",
+                                        input_name,
+                                        task_for_execution,
+                                        cooldown_until_ts
+                                    );
+                                    self.scheduled_requeues.remove(&current_key);
+                                    remove_current_task = true;
+                                    skip_execution = true;
+                                } else {
+                                    clear_active_retry_state = true;
+                                }
+                            }
+                        }
+
+                        if !skip_execution && active_state.next_allowed_at_ts > now_ts {
+                            schedule_requeue_at_ts = Some(active_state.next_allowed_at_ts);
                             skip_execution = true;
-                        } else if Self::is_probe_task(&current_task) {
-                            clear_probe_state = true;
                         }
                     }
 
-                    if !skip_execution && state.next_allowed_at_ts > now_ts {
-                        schedule_requeue_at_ts = Some(state.next_allowed_at_ts);
-                        skip_execution = true;
+                    if !skip_execution {
+                        if let Some(tmdb_state) = state_bundle.get(RetryDomain::Tmdb) {
+                            if let Some(cooldown_until_ts) = tmdb_state.cooldown_until_ts {
+                                if now_ts < cooldown_until_ts {
+                                    if let Some(stripped_task) = Self::strip_tmdb_reasons(&task_for_execution) {
+                                        debug_if_enabled!(
+                                            "TMDB cooldown active for input {}: {} (cooldown_until={}), continuing with non-TMDB reasons",
+                                            input_name,
+                                            task_for_execution,
+                                            cooldown_until_ts
+                                        );
+                                        task_for_execution = stripped_task;
+                                    } else {
+                                        debug_if_enabled!(
+                                            "Skipping TMDB-only task in cooldown for input {}: {} (cooldown_until={})",
+                                            input_name,
+                                            task_for_execution,
+                                            cooldown_until_ts
+                                        );
+                                        self.scheduled_requeues.remove(&current_key);
+                                        remove_current_task = true;
+                                        skip_execution = true;
+                                    }
+                                } else {
+                                    clear_tmdb_state = true;
+                                }
+                            }
+                        }
                     }
                 }
 
-                if clear_probe_state {
-                    self.retry_states.remove(&current_key);
-                    probe_persist_state = Some(None);
+                if clear_active_retry_state || clear_tmdb_state {
+                    let mut should_remove_retry_entry = false;
+                    let mut state_after_clear: Option<TaskRetryState> = None;
+
+                    if let Some(state_bundle) = self.retry_states.get_mut(&current_key) {
+                        if clear_active_retry_state {
+                            state_bundle.clear_domain(active_retry_domain);
+                        }
+                        if clear_tmdb_state {
+                            state_bundle.clear_domain(RetryDomain::Tmdb);
+                        }
+                        if state_bundle.is_empty() {
+                            should_remove_retry_entry = true;
+                        } else {
+                            state_bundle.touch(now_ts);
+                            state_after_clear = Some(state_bundle.clone());
+                        }
+                    }
+
+                    if should_remove_retry_entry {
+                        self.retry_states.remove(&current_key);
+                    }
+                    metadata_persist_state = Some(state_after_clear);
                 }
             }
 
             if !skip_execution {
-                // Hold READ gate while executing one background task.
-                // Foreground updates acquire WRITE gate and therefore pause this path.
-                let task_result = {
-                    let _task_gate_guard = if let Ok(guard) = self.update_pause_gate.clone().try_read_owned() {
-                        guard
-                    } else {
-                        // Foreground update contention detected.
-                        // Drop cached file read handles before blocking on the gate to avoid AB-BA deadlocks.
-                        self.release_db_handles();
-                        self.update_pause_gate.clone().read_owned().await
-                    };
-                    Self::process_task_static(
-                        &input_name,
-                        app_state_weak.as_ref(),
-                        &current_task,
-                        &mut self.batch_buffer,
-                        &mut self.db_handles,
-                        &mut self.failed_clusters,
-                    )
-                    .await
-                };
+                if !self.wait_for_update_pause_window().await {
+                    break;
+                }
+                let task_result = Self::process_task_static(
+                    &input_name,
+                    app_state_weak.as_ref(),
+                    &task_for_execution,
+                    &mut self.batch_buffer,
+                    &mut self.db_handles,
+                    &mut self.failed_clusters,
+                )
+                .await;
 
                 match task_result {
-                    Ok(task_changed) => {
+                    Ok(task_outcome) => {
                         if Self::is_vod_task_key(&current_key) {
                             processed_vod_count += 1;
                         } else if Self::is_series_task_key(&current_key) {
                             processed_series_count += 1;
                         }
-                        debug!("Processed metadata task for input {input_name}: {current_task} (changed={task_changed})");
-                        self.retry_states.remove(&current_key);
+                        debug!(
+                            "Processed metadata task for input {input_name}: {task_for_execution} (changed={}, tmdb_pending={})",
+                            task_outcome.task_changed,
+                            task_outcome.tmdb_pending
+                        );
+
+                        let active_retry_domain = Self::retry_domain_for_task(&task_for_execution);
+                        let task_has_tmdb_reason = Self::task_has_tmdb_reason(&task_for_execution);
+                        let mut should_remove_retry_entry = false;
+                        let mut state_after_success: Option<TaskRetryState> = None;
+
+                        if let Some(state_bundle) = self.retry_states.get_mut(&current_key) {
+                            state_bundle.clear_domain(active_retry_domain);
+                            if task_has_tmdb_reason {
+                                if task_outcome.tmdb_pending {
+                                    let cooldown_until_ts = now_ts.saturating_add(runtime_settings.tmdb_cooldown_secs);
+                                    let tmdb_state = state_bundle.get_mut_or_insert(RetryDomain::Tmdb);
+                                    tmdb_state.attempts = 0;
+                                    tmdb_state.next_allowed_at_ts = cooldown_until_ts;
+                                    tmdb_state.cooldown_until_ts = Some(cooldown_until_ts);
+                                    tmdb_state.last_error =
+                                        Some("TMDB lookup completed without matching result".to_string());
+                                    debug_if_enabled!(
+                                        "TMDB resolve produced no match for input {}: {} (cooldown_until={})",
+                                        input_name,
+                                        task_for_execution,
+                                        cooldown_until_ts
+                                    );
+                                } else {
+                                    state_bundle.clear_domain(RetryDomain::Tmdb);
+                                }
+                            }
+
+                            if state_bundle.is_empty() {
+                                should_remove_retry_entry = true;
+                            } else {
+                                state_bundle.touch(now_ts);
+                                state_after_success = Some(state_bundle.clone());
+                            }
+                        } else if task_has_tmdb_reason && task_outcome.tmdb_pending {
+                            let cooldown_until_ts = now_ts.saturating_add(runtime_settings.tmdb_cooldown_secs);
+                            let state_bundle = TaskRetryState {
+                                resolve: None,
+                                probe: None,
+                                tmdb: Some(RetryState {
+                                    attempts: 0,
+                                    next_allowed_at_ts: cooldown_until_ts,
+                                    cooldown_until_ts: Some(cooldown_until_ts),
+                                    last_error: Some("TMDB lookup completed without matching result".to_string()),
+                                }),
+                                updated_at_ts: now_ts.max(1),
+                            };
+                            self.retry_states.insert(current_key.clone(), state_bundle.clone());
+                            state_after_success = Some(state_bundle);
+                            debug_if_enabled!(
+                                "TMDB resolve produced no match for input {}: {} (cooldown_until={})",
+                                input_name,
+                                task_for_execution,
+                                cooldown_until_ts
+                            );
+                        }
+
+                        if should_remove_retry_entry {
+                            self.retry_states.remove(&current_key);
+                        }
+                        if should_remove_retry_entry || state_after_success.is_some() {
+                            metadata_persist_state = Some(state_after_success);
+                        }
+
                         self.resolve_exhausted.remove(&current_key);
                         self.scheduled_requeues.remove(&current_key);
-                        if Self::is_probe_task(&current_task) {
-                            probe_persist_state = Some(None);
-                        }
 
                         if last_progress_log_at.elapsed() >= runtime_settings.progress_log_interval {
                             // current_key is removed from pending_tasks later in this loop iteration;
@@ -936,82 +1231,96 @@ impl InputWorker {
                             debug_if_enabled!(
                                 "Transient task deferral for input {}: {} (retry_in={}s, err={})",
                                 input_name,
-                                current_task,
+                                task_for_execution,
                                 retry_delay_secs,
                                 e.message
                             );
                         } else {
-                            let is_probe_task = Self::is_probe_task(&current_task);
-                            let max_attempts = if is_probe_task {
+                            let retry_domain = Self::retry_domain_for_task(&task_for_execution);
+                            let max_attempts = if retry_domain == RetryDomain::Probe {
                                 runtime_settings.max_attempts_probe
                             } else {
                                 runtime_settings.max_attempts_resolve
                             };
 
-                            let state_after_update = {
-                                let state = self
-                                    .retry_states
-                                    .entry(current_key.clone())
-                                    .or_insert_with(RetryState::new);
-                                state.attempts = state.attempts.saturating_add(1);
-                                state.last_error = Some(e.message.clone());
+                            let (state_after_update, state_bundle_after_update) = {
+                                let state_bundle = self.retry_states.entry(current_key.clone()).or_default();
+                                let state_after_update = {
+                                    let state = state_bundle.get_mut_or_insert(retry_domain);
+                                    state.attempts = state.attempts.saturating_add(1);
+                                    state.last_error = Some(e.message.clone());
 
-                                if state.attempts < max_attempts {
-                                    let backoff_secs = if is_probe_task {
-                                        Self::compute_probe_retry_backoff_secs(state.attempts, &runtime_settings)
-                                    } else {
-                                        Self::compute_resolve_retry_backoff_secs(
-                                            current_task.delay(),
-                                            state.attempts,
-                                            &runtime_settings,
-                                        )
-                                    };
-                                    let backoff_i64 = i64::try_from(backoff_secs).unwrap_or(i64::MAX);
-                                    state.next_allowed_at_ts = now_ts.saturating_add(backoff_i64);
-                                    state.cooldown_until_ts = None;
-                                } else if is_probe_task {
-                                    state.cooldown_until_ts =
-                                        Some(now_ts.saturating_add(runtime_settings.probe_cooldown_secs));
-                                    state.next_allowed_at_ts = state.cooldown_until_ts.unwrap_or(now_ts);
-                                }
+                                    if state.attempts < max_attempts {
+                                        let backoff_secs = if retry_domain == RetryDomain::Probe {
+                                            Self::compute_probe_retry_backoff_secs(state.attempts, &runtime_settings)
+                                        } else {
+                                            Self::compute_resolve_retry_backoff_secs(
+                                                task_for_execution.delay(),
+                                                state.attempts,
+                                                &runtime_settings,
+                                            )
+                                        };
+                                        let backoff_i64 = i64::try_from(backoff_secs).unwrap_or(i64::MAX);
+                                        state.next_allowed_at_ts = now_ts.saturating_add(backoff_i64);
+                                        state.cooldown_until_ts = None;
+                                    } else if retry_domain == RetryDomain::Probe {
+                                        state.cooldown_until_ts =
+                                            Some(now_ts.saturating_add(runtime_settings.probe_cooldown_secs));
+                                        state.next_allowed_at_ts = state.cooldown_until_ts.unwrap_or(now_ts);
+                                    }
+                                    state.clone()
+                                };
+                                state_bundle.touch(now_ts);
 
-                                state.clone()
+                                (state_after_update, state_bundle.clone())
                             };
 
                             let attempts = state_after_update.attempts;
 
                             if attempts >= max_attempts {
                                 self.scheduled_requeues.remove(&current_key);
-                                if is_probe_task {
+                                if retry_domain == RetryDomain::Probe {
                                     remove_current_task = true;
-                                    probe_persist_state = Some(Some(state_after_update.clone()));
+                                    metadata_persist_state = Some(Some(state_bundle_after_update.clone()));
                                     debug_if_enabled!(
                                         "Probe task exhausted for input {}: {} (attempts={}, cooldown_until={:?})",
                                         input_name,
-                                        current_task,
+                                        task_for_execution,
                                         state_after_update.attempts,
                                         state_after_update.cooldown_until_ts
                                     );
                                 } else {
                                     self.resolve_exhausted.insert(current_key.clone(), now_ts);
-                                    self.retry_states.remove(&current_key);
+                                    let mut should_remove_retry_entry = false;
+                                    let mut state_after_clear: Option<TaskRetryState> = None;
+                                    if let Some(state_bundle) = self.retry_states.get_mut(&current_key) {
+                                        state_bundle.clear_domain(retry_domain);
+                                        if state_bundle.is_empty() {
+                                            should_remove_retry_entry = true;
+                                        } else {
+                                            state_bundle.touch(now_ts);
+                                            state_after_clear = Some(state_bundle.clone());
+                                        }
+                                    }
+                                    if should_remove_retry_entry {
+                                        self.retry_states.remove(&current_key);
+                                    }
+                                    metadata_persist_state = Some(state_after_clear);
                                     remove_current_task = true;
                                     debug_if_enabled!(
                                         "Resolve task exhausted for input {}: {} (attempts={})",
                                         input_name,
-                                        current_task,
+                                        task_for_execution,
                                         attempts
                                     );
                                 }
                             } else {
                                 schedule_requeue_at_ts = Some(state_after_update.next_allowed_at_ts);
-                                if is_probe_task {
-                                    probe_persist_state = Some(Some(state_after_update.clone()));
-                                }
+                                metadata_persist_state = Some(Some(state_bundle_after_update));
                                 debug_if_enabled!(
                                     "Task failed for input {}, scheduling retry: {} (attempt={}, next_allowed_at={}, err={})",
                                     input_name,
-                                    current_task,
+                                    task_for_execution,
                                     attempts,
                                     state_after_update.next_allowed_at_ts,
                                     e.message
@@ -1022,14 +1331,16 @@ impl InputWorker {
                 }
             }
 
-            if let Some(state) = probe_persist_state {
-                self.persist_probe_retry_state(&current_key, state.as_ref()).await;
+            if let Some(state) = metadata_persist_state {
+                self.persist_metadata_retry_state(&current_key, state.as_ref()).await;
             }
 
             // Check and flush batch
             if self.batch_buffer.should_flush() {
                 self.release_db_handles();
-                let _gate_guard = self.update_pause_gate.clone().read_owned().await;
+                if !self.wait_for_update_pause_window().await {
+                    break;
+                }
                 Self::flush_batch_static(&input_name, app_state_weak.as_ref(), &mut self.batch_buffer).await;
             }
 
@@ -1080,7 +1391,9 @@ impl InputWorker {
             // If no immediate work is available, flush buffered results now even when delayed retries remain pending.
             if !channel_has_work && !self.batch_buffer.is_empty() {
                 self.release_db_handles();
-                let _gate_guard = self.update_pause_gate.clone().read_owned().await;
+                if !self.wait_for_update_pause_window().await {
+                    break;
+                }
                 Self::flush_batch_static(&input_name, app_state_weak.as_ref(), &mut self.batch_buffer).await;
             }
 
@@ -1100,49 +1413,48 @@ impl InputWorker {
 
         // Final flush
         self.release_db_handles();
-        if !self.batch_buffer.is_empty() {
-            let _gate_guard = self.update_pause_gate.clone().read_owned().await;
+        if !self.batch_buffer.is_empty() && self.wait_for_update_pause_window().await {
             Self::flush_batch_static(&input_name, app_state_weak.as_ref(), &mut self.batch_buffer).await;
         }
 
         debug!("Metadata worker stopped for input {input_name}");
     }
 
-    async fn ensure_probe_retry_state_loaded(
+    async fn ensure_metadata_retry_state_loaded(
         &mut self,
         input_name: &str,
         app_state_weak: Option<&Weak<AppState>>,
         runtime_settings: &MetadataUpdateRuntimeSettings,
     ) {
-        if self.probe_retry_loaded {
+        if self.metadata_retry_loaded {
             return;
         }
         let now_ts = chrono::Utc::now().timestamp();
         if self
-            .probe_retry_load_retry_at_ts
+            .metadata_retry_load_retry_at_ts
             .is_some_and(|retry_at_ts| now_ts < retry_at_ts)
         {
             return;
         }
 
         let Some(app_state) = app_state_weak.and_then(Weak::upgrade) else {
-            self.probe_retry_load_retry_at_ts =
-                Some(now_ts.saturating_add(runtime_settings.probe_retry_load_retry_delay_secs));
+            self.metadata_retry_load_retry_at_ts =
+                Some(now_ts.saturating_add(runtime_settings.metadata_retry_load_retry_delay_secs));
             return;
         };
 
         let working_dir = app_state.app_config.config.load().working_dir.clone();
         let Ok(storage_path) = get_input_storage_path(input_name, &working_dir).await else {
-            warn!("Could not resolve storage path for probe retry state on input {input_name}");
-            self.probe_retry_load_retry_at_ts =
-                Some(now_ts.saturating_add(runtime_settings.probe_retry_load_retry_delay_secs));
+            warn!("Could not resolve storage path for metadata retry state on input {input_name}");
+            self.metadata_retry_load_retry_at_ts =
+                Some(now_ts.saturating_add(runtime_settings.metadata_retry_load_retry_delay_secs));
             return;
         };
 
-        let retry_path = storage_path.join(PROBE_RETRY_STATE_FILE);
-        self.probe_retry_state_path = Some(retry_path.clone());
+        let retry_path = storage_path.join(METADATA_RETRY_STATE_FILE);
+        self.metadata_retry_state_path = Some(retry_path.clone());
 
-        let loaded = tokio::task::spawn_blocking(move || load_probe_retry_states_from_disk(&retry_path))
+        let loaded = spawn_blocking_limited(move || load_metadata_retry_states_from_disk(&retry_path))
             .await
             .map_err(|err| err.to_string())
             .and_then(|result| result.map_err(|err| err.to_string()));
@@ -1150,41 +1462,43 @@ impl InputWorker {
         let loaded = match loaded {
             Ok(states) => states,
             Err(err) => {
-                warn!("Failed to load probe retry state for input {input_name}: {err}");
-                self.probe_retry_load_retry_at_ts =
-                    Some(now_ts.saturating_add(runtime_settings.probe_retry_load_retry_delay_secs));
+                warn!("Failed to load metadata retry state for input {input_name}: {err}");
+                self.metadata_retry_load_retry_at_ts =
+                    Some(now_ts.saturating_add(runtime_settings.metadata_retry_load_retry_delay_secs));
                 return;
             }
         };
 
-        // Intentionally do not resurrect pending probe tasks solely from persisted retry state.
+        // Intentionally do not resurrect pending tasks solely from persisted retry state.
         // The persisted state is applied once the corresponding task is naturally queued again
         // (for example by the next playlist update), because state alone does not contain the
         // full `UpdateTask` payload for all variants.
         for (key, state) in loaded {
             self.retry_states.insert(key, state);
         }
-        self.probe_retry_loaded = true;
-        self.probe_retry_load_retry_at_ts = None;
+        self.prune_retry_tracking_maps(now_ts, runtime_settings).await;
+        self.last_retry_state_prune_at_ts = Some(now_ts);
+        self.metadata_retry_loaded = true;
+        self.metadata_retry_load_retry_at_ts = None;
     }
 
-    async fn persist_probe_retry_state(&self, key: &TaskKey, state: Option<&RetryState>) {
-        let Some(path) = self.probe_retry_state_path.clone() else {
+    async fn persist_metadata_retry_state(&self, key: &TaskKey, state: Option<&TaskRetryState>) {
+        let Some(path) = self.metadata_retry_state_path.clone() else {
             return;
         };
 
         let key = key.clone();
         let state = state.cloned();
         let input_name = self.input_name.clone();
-        let persist_result = tokio::task::spawn_blocking(move || {
-            persist_probe_retry_state_to_disk(&path, &key, state.as_ref())
+        let persist_result = spawn_blocking_limited(move || {
+            persist_metadata_retry_state_to_disk(&path, &key, state.as_ref())
         })
         .await;
 
         match persist_result {
             Ok(Ok(())) => {}
-            Ok(Err(err)) => warn!("Failed to persist probe retry state for input {input_name}: {err}"),
-            Err(err) => warn!("Failed to persist probe retry state for input {input_name}: {err}"),
+            Ok(Err(err)) => warn!("Failed to persist metadata retry state for input {input_name}: {err}"),
+            Err(err) => warn!("Failed to persist metadata retry state for input {input_name}: {err}"),
         }
     }
 
@@ -1338,6 +1652,94 @@ impl InputWorker {
         MetadataUpdateRuntimeSettings::from_app_state(self.app_state_weak.as_ref())
     }
 
+    async fn wait_for_update_pause_window(&mut self) -> bool {
+        if let Ok(guard) = self.update_pause_gate.clone().try_read_owned() {
+            drop(guard);
+            return true;
+        }
+
+        // Foreground writer is active or queued. Release cached handles before waiting to avoid AB-BA patterns.
+        self.release_db_handles();
+        tokio::select! {
+            () = self.cancel_token.cancelled() => false,
+            guard = self.update_pause_gate.clone().read_owned() => {
+                drop(guard);
+                true
+            }
+        }
+    }
+
+    fn retry_state_ttl_secs(runtime_settings: &MetadataUpdateRuntimeSettings) -> i64 {
+        let max_resolve_backoff = i64::try_from(runtime_settings.max_resolve_retry_backoff_secs).unwrap_or(i64::MAX);
+        runtime_settings
+            .tmdb_cooldown_secs
+            .max(runtime_settings.probe_cooldown_secs)
+            .max(runtime_settings.resolve_exhaustion_reset_gap_secs)
+            .max(max_resolve_backoff)
+            .saturating_mul(6)
+            .max(RETRY_STATE_MIN_TTL_SECS)
+    }
+
+    fn resolve_exhausted_ttl_secs(runtime_settings: &MetadataUpdateRuntimeSettings) -> i64 {
+        runtime_settings
+            .resolve_exhaustion_reset_gap_secs
+            .saturating_mul(6)
+            .max(RETRY_STATE_MIN_TTL_SECS)
+    }
+
+    async fn prune_retry_tracking_maps_if_needed(
+        &mut self,
+        now_ts: i64,
+        runtime_settings: &MetadataUpdateRuntimeSettings,
+    ) {
+        let due = self
+            .last_retry_state_prune_at_ts
+            .is_none_or(|last| now_ts.saturating_sub(last) >= RETRY_STATE_PRUNE_INTERVAL_SECS);
+        if !due {
+            return;
+        }
+        self.last_retry_state_prune_at_ts = Some(now_ts);
+        self.prune_retry_tracking_maps(now_ts, runtime_settings).await;
+    }
+
+    async fn prune_retry_tracking_maps(&mut self, now_ts: i64, runtime_settings: &MetadataUpdateRuntimeSettings) {
+        let retry_state_ttl_secs = Self::retry_state_ttl_secs(runtime_settings);
+        let resolve_exhausted_ttl_secs = Self::resolve_exhausted_ttl_secs(runtime_settings);
+        let stale_retry_keys: Vec<TaskKey> = self
+            .retry_states
+            .iter()
+            .filter_map(|(key, state)| {
+                if state.is_stale(now_ts, retry_state_ttl_secs) {
+                    Some(key.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for key in stale_retry_keys {
+            if self.retry_states.remove(&key).is_some() {
+                debug_if_enabled!("Pruned stale metadata retry state for input {}: {:?}", self.input_name, key);
+                self.persist_metadata_retry_state(&key, None).await;
+            }
+        }
+
+        let stale_resolve_exhausted_keys: Vec<TaskKey> = self
+            .resolve_exhausted
+            .iter()
+            .filter_map(|(key, exhausted_at_ts)| {
+                if now_ts.saturating_sub(*exhausted_at_ts) >= resolve_exhausted_ttl_secs {
+                    Some(key.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for key in stale_resolve_exhausted_keys {
+            self.resolve_exhausted.remove(&key);
+        }
+    }
+
     fn release_db_handles(&mut self) {
         if !self.db_handles.is_empty() {
             self.db_handles.clear();
@@ -1420,8 +1822,61 @@ impl InputWorker {
     }
 
     #[inline]
+    fn retry_domain_for_task(task: &UpdateTask) -> RetryDomain {
+        if Self::is_probe_task(task) {
+            RetryDomain::Probe
+        } else {
+            RetryDomain::Resolve
+        }
+    }
+
+    #[inline]
     fn is_resolve_task(task: &UpdateTask) -> bool {
         matches!(task, UpdateTask::ResolveVod { .. } | UpdateTask::ResolveSeries { .. })
+    }
+
+    #[inline]
+    fn task_has_tmdb_reason(task: &UpdateTask) -> bool {
+        match task {
+            UpdateTask::ResolveVod { reason, .. } | UpdateTask::ResolveSeries { reason, .. } => {
+                reason.contains(ResolveReason::Tmdb) || reason.contains(ResolveReason::Date)
+            }
+            _ => false,
+        }
+    }
+
+    fn strip_tmdb_reasons(task: &UpdateTask) -> Option<UpdateTask> {
+        match task {
+            UpdateTask::ResolveVod { id, reason, delay } => {
+                let mut next_reason = *reason;
+                next_reason.unset(ResolveReason::Tmdb);
+                next_reason.unset(ResolveReason::Date);
+                if next_reason.is_empty() {
+                    None
+                } else {
+                    Some(UpdateTask::ResolveVod {
+                        id: id.clone(),
+                        reason: next_reason,
+                        delay: *delay,
+                    })
+                }
+            }
+            UpdateTask::ResolveSeries { id, reason, delay } => {
+                let mut next_reason = *reason;
+                next_reason.unset(ResolveReason::Tmdb);
+                next_reason.unset(ResolveReason::Date);
+                if next_reason.is_empty() {
+                    None
+                } else {
+                    Some(UpdateTask::ResolveSeries {
+                        id: id.clone(),
+                        reason: next_reason,
+                        delay: *delay,
+                    })
+                }
+            }
+            _ => Some(task.clone()),
+        }
     }
 
     fn is_transient_worker_error(message: &str) -> bool {
@@ -1571,7 +2026,7 @@ impl InputWorker {
                 // Scope read lock strictly to mapping load.
                 let _file_lock = app_state.app_config.file_locks.read_lock(&mapping_file).await;
                 let mapping_file_clone = mapping_file.clone();
-                match tokio::task::spawn_blocking(move || {
+                match spawn_blocking_limited(move || {
                     TargetIdMapping::new(&mapping_file_clone, false)
                 })
                 .await
@@ -1764,7 +2219,7 @@ impl InputWorker {
             // Scope read lock to read-only query phase so write phase can acquire lock.
             let _file_lock = app_state.app_config.file_locks.read_lock(&xtream_path).await;
             let xtream_path_clone = xtream_path.clone();
-            match tokio::task::spawn_blocking(move || -> Vec<XtreamPlaylistItem> {
+            match spawn_blocking_limited(move || -> Vec<XtreamPlaylistItem> {
                 let mut updates = Vec::with_capacity(updates_input.len());
                 let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path_clone) else {
                     return updates;
@@ -1822,7 +2277,7 @@ impl InputWorker {
             // Scope read lock to read-only query phase so write phase can acquire lock.
             let _file_lock = app_state.app_config.file_locks.read_lock(&xtream_path).await;
             let xtream_path_clone = xtream_path.clone();
-            match tokio::task::spawn_blocking(move || -> Vec<XtreamPlaylistItem> {
+            match spawn_blocking_limited(move || -> Vec<XtreamPlaylistItem> {
                 let mut updates = Vec::with_capacity(updates_input.len());
                 let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path_clone) else {
                     return updates;
@@ -1880,7 +2335,7 @@ impl InputWorker {
             // Scope read lock to read-only query phase so write phase can acquire lock.
             let _file_lock = app_state.app_config.file_locks.read_lock(&xtream_path).await;
             let xtream_path_clone = xtream_path.clone();
-            match tokio::task::spawn_blocking(move || -> Vec<XtreamPlaylistItem> {
+            match spawn_blocking_limited(move || -> Vec<XtreamPlaylistItem> {
                 let mut updates = Vec::with_capacity(updates_input.len());
                 let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path_clone) else {
                     return updates;
@@ -1957,7 +2412,7 @@ impl InputWorker {
                 if file_path.exists() {
                     let lock = app_state.app_config.file_locks.read_lock(&file_path).await;
                     let file_path = file_path.clone();
-                    let query = match tokio::task::spawn_blocking(move || {
+                    let query = match spawn_blocking_limited(move || {
                         BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&file_path)
                     })
                     .await
@@ -2008,7 +2463,7 @@ impl InputWorker {
                 Self::get_or_open_query(input_name, app_state, cluster, db_handles, failed_clusters).await
             {
                 let query = Arc::clone(&query);
-                let item = match tokio::task::spawn_blocking(move || {
+                let item = match spawn_blocking_limited(move || {
                     let mut guard = query.lock();
                     guard.query_zero_copy(&stream_id).ok().flatten()
                 })
@@ -2029,6 +2484,19 @@ impl InputWorker {
         None
     }
 
+    fn vod_tmdb_pending_for_reason(props: &VideoStreamProperties, reason: ResolveReasonSet) -> bool {
+        let tmdb_missing = reason.contains(ResolveReason::Tmdb) && props.tmdb.is_none();
+        let date_missing =
+            reason.contains(ResolveReason::Date) && props.details.as_ref().and_then(|d| d.release_date.as_ref()).is_none();
+        tmdb_missing || date_missing
+    }
+
+    fn series_tmdb_pending_for_reason(props: &SeriesStreamProperties, reason: ResolveReasonSet) -> bool {
+        let tmdb_missing = reason.contains(ResolveReason::Tmdb) && props.tmdb.is_none();
+        let date_missing = reason.contains(ResolveReason::Date) && props.release_date.is_none();
+        tmdb_missing || date_missing
+    }
+
     #[allow(clippy::too_many_lines)]
     async fn process_task_static(
         input_name: &Arc<str>,
@@ -2037,7 +2505,7 @@ impl InputWorker {
         collector: &mut BatchResultCollector,
         db_handles: &mut HashMap<XtreamCluster, DbHandle>,
         failed_clusters: &mut HashSet<XtreamCluster>,
-    ) -> Result<bool, TuliproxError> {
+    ) -> Result<ProcessTaskOutcome, TuliproxError> {
         let app_state =
             app_state_weak.and_then(Weak::upgrade).ok_or_else(|| shared::error::info_err!("AppState not available"))?;
 
@@ -2155,7 +2623,30 @@ impl InputWorker {
                     UpdateTask::ProbeLive { .. } => collector.live.len() > pre_live_updates,
                     UpdateTask::ProbeStream { .. } => true,
                 };
-                Ok(task_changed)
+                let tmdb_pending = match task {
+                    UpdateTask::ResolveVod { reason, .. } => {
+                        if reason.contains(ResolveReason::Tmdb) || reason.contains(ResolveReason::Date) {
+                            collector
+                                .vod
+                                .get(pre_vod_updates)
+                                .is_none_or(|(_, props)| Self::vod_tmdb_pending_for_reason(props, *reason))
+                        } else {
+                            false
+                        }
+                    }
+                    UpdateTask::ResolveSeries { reason, .. } => {
+                        if reason.contains(ResolveReason::Tmdb) || reason.contains(ResolveReason::Date) {
+                            collector
+                                .series
+                                .get(pre_series_updates)
+                                .is_none_or(|(_, props)| Self::series_tmdb_pending_for_reason(props, *reason))
+                        } else {
+                            false
+                        }
+                    }
+                    UpdateTask::ProbeLive { .. } | UpdateTask::ProbeStream { .. } => false,
+                };
+                Ok(ProcessTaskOutcome { task_changed, tmdb_pending })
             }
             Err(e) => Err(e),
         }
@@ -2431,6 +2922,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submit_task_identical_resolve_merge_keeps_generation() {
+        let (tx, mut rx) = mpsc::channel::<TaskKey>(8);
+        let pending_tasks = Arc::new(DashMap::new());
+        let pending_task_count = Arc::new(AtomicUsize::new(0));
+        let queue_size = MetadataUpdateRuntimeSettings::default().max_queue_size;
+
+        let initial = UpdateTask::ResolveVod {
+            id: ProviderIdType::Id(42),
+            reason: ResolveReasonSet::from_variants(&[ResolveReason::Tmdb]),
+            delay: 10,
+        };
+        MetadataUpdateManager::submit_task(
+            tx.clone(),
+            pending_tasks.clone(),
+            pending_task_count.clone(),
+            "input_a",
+            queue_size,
+            initial,
+        )
+        .await;
+
+        let identical_merge = UpdateTask::ResolveVod {
+            id: ProviderIdType::Id(42),
+            reason: ResolveReasonSet::from_variants(&[ResolveReason::Tmdb]),
+            delay: 10,
+        };
+        MetadataUpdateManager::submit_task(
+            tx,
+            pending_tasks.clone(),
+            pending_task_count.clone(),
+            "input_a",
+            queue_size,
+            identical_merge,
+        )
+        .await;
+
+        let first_signal = rx.try_recv().expect("first signal should be queued");
+        assert_eq!(first_signal, TaskKey::Vod(42));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty | tokio::sync::mpsc::error::TryRecvError::Disconnected)
+        ));
+
+        let entry = pending_tasks.get(&TaskKey::Vod(42)).expect("pending entry should exist");
+        assert_eq!(entry.generation.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
     async fn submit_task_probe_stream_merge_keeps_existing_payload_when_present() {
         let (tx, mut rx) = mpsc::channel::<TaskKey>(8);
         let pending_tasks = Arc::new(DashMap::new());
@@ -2545,9 +3084,10 @@ mod tests {
             retry_states: HashMap::new(),
             resolve_exhausted: HashMap::new(),
             last_cycle_completed_at_ts: None,
-            probe_retry_state_path: None,
-            probe_retry_loaded: false,
-            probe_retry_load_retry_at_ts: None,
+            metadata_retry_state_path: None,
+            metadata_retry_loaded: false,
+            metadata_retry_load_retry_at_ts: None,
+            last_retry_state_prune_at_ts: None,
             scheduled_requeues: Arc::new(DashMap::new()),
         };
 
@@ -2587,9 +3127,10 @@ mod tests {
             retry_states: HashMap::new(),
             resolve_exhausted: HashMap::new(),
             last_cycle_completed_at_ts: None,
-            probe_retry_state_path: None,
-            probe_retry_loaded: false,
-            probe_retry_load_retry_at_ts: None,
+            metadata_retry_state_path: None,
+            metadata_retry_loaded: false,
+            metadata_retry_load_retry_at_ts: None,
+            last_retry_state_prune_at_ts: None,
             scheduled_requeues: Arc::new(DashMap::new()),
         };
 
@@ -2641,31 +3182,76 @@ mod tests {
     }
 
     #[test]
-    fn probe_retry_state_disk_roundtrip() {
+    fn strip_tmdb_reasons_returns_none_for_tmdb_only_resolve_task() {
+        let task = UpdateTask::ResolveVod {
+            id: ProviderIdType::Id(100),
+            reason: ResolveReasonSet::from_variants(&[ResolveReason::Tmdb, ResolveReason::Date]),
+            delay: 5,
+        };
+
+        assert!(InputWorker::strip_tmdb_reasons(&task).is_none());
+    }
+
+    #[test]
+    fn strip_tmdb_reasons_keeps_non_tmdb_reasons() {
+        let task = UpdateTask::ResolveSeries {
+            id: ProviderIdType::Id(5),
+            reason: ResolveReasonSet::from_variants(&[ResolveReason::Tmdb, ResolveReason::Probe, ResolveReason::Info]),
+            delay: 1,
+        };
+
+        let stripped = InputWorker::strip_tmdb_reasons(&task).expect("task should keep non-tmdb reasons");
+        match stripped {
+            UpdateTask::ResolveSeries { reason, .. } => {
+                assert!(!reason.contains(ResolveReason::Tmdb));
+                assert!(!reason.contains(ResolveReason::Date));
+                assert!(reason.contains(ResolveReason::Probe));
+                assert!(reason.contains(ResolveReason::Info));
+            }
+            other => panic!("unexpected task type after strip: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn metadata_retry_state_disk_roundtrip() {
         let dir = tempdir().expect("tempdir should be created");
-        let path = dir.path().join("probe_retry_state.db");
+        let path = dir.path().join("metadata_retry_state.db");
         let key = TaskKey::Stream {
             scope: Arc::from("input_a"),
             id: Arc::from("stream_1"),
         };
-        let state = RetryState {
-            attempts: 3,
-            next_allowed_at_ts: 1_700_000_000,
-            cooldown_until_ts: Some(1_700_086_400),
-            last_error: Some("probe timeout".to_string()),
+        let state = TaskRetryState {
+            resolve: None,
+            probe: Some(RetryState {
+                attempts: 3,
+                next_allowed_at_ts: 1_700_000_000,
+                cooldown_until_ts: Some(1_700_086_400),
+                last_error: Some("probe timeout".to_string()),
+            }),
+            tmdb: Some(RetryState {
+                attempts: 0,
+                next_allowed_at_ts: 1_700_172_800,
+                cooldown_until_ts: Some(1_700_172_800),
+                last_error: Some("tmdb no match".to_string()),
+            }),
+            updated_at_ts: 1_700_000_000,
         };
 
-        persist_probe_retry_state_to_disk(&path, &key, Some(&state))
+        persist_metadata_retry_state_to_disk(&path, &key, Some(&state))
             .expect("state persistence should succeed");
-        let loaded = load_probe_retry_states_from_disk(&path).expect("state load should succeed");
+        let loaded = load_metadata_retry_states_from_disk(&path).expect("state load should succeed");
         let loaded_state = loaded.get(&key).expect("probe key should be present");
 
-        assert_eq!(loaded_state.attempts, 3);
-        assert_eq!(loaded_state.cooldown_until_ts, Some(1_700_086_400));
-        assert_eq!(loaded_state.last_error.as_deref(), Some("probe timeout"));
+        let loaded_probe = loaded_state.probe.as_ref().expect("probe retry state should be present");
+        assert_eq!(loaded_probe.attempts, 3);
+        assert_eq!(loaded_probe.cooldown_until_ts, Some(1_700_086_400));
+        assert_eq!(loaded_probe.last_error.as_deref(), Some("probe timeout"));
+        let loaded_tmdb = loaded_state.tmdb.as_ref().expect("tmdb retry state should be present");
+        assert_eq!(loaded_tmdb.cooldown_until_ts, Some(1_700_172_800));
+        assert_eq!(loaded_tmdb.last_error.as_deref(), Some("tmdb no match"));
 
-        persist_probe_retry_state_to_disk(&path, &key, None).expect("state clear should succeed");
-        let cleared = load_probe_retry_states_from_disk(&path).expect("state reload should succeed");
+        persist_metadata_retry_state_to_disk(&path, &key, None).expect("state clear should succeed");
+        let cleared = load_metadata_retry_states_from_disk(&path).expect("state reload should succeed");
         assert!(!cleared.contains_key(&key));
     }
 

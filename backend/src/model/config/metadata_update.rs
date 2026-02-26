@@ -1,5 +1,7 @@
 use crate::model::macros;
-use shared::model::MetadataUpdateConfigDto;
+use shared::model::{
+    FfprobeConfigDto, MetadataLogConfigDto, MetadataUpdateConfigDto, ProbeConfigDto, ResolveConfigDto, TmdbConfigDto,
+};
 use shared::utils::{
     default_metadata_ffprobe_analyze_duration, default_metadata_ffprobe_live_analyze_duration,
     default_metadata_ffprobe_live_probe_size, default_metadata_ffprobe_probe_size,
@@ -7,54 +9,88 @@ use shared::utils::{
     default_metadata_probe_retry_backoff_step_1, default_metadata_probe_retry_backoff_step_2,
     default_metadata_probe_retry_backoff_step_3, default_metadata_probe_retry_load_retry_delay,
     default_metadata_progress_log_interval, default_metadata_queue_log_interval,
-    default_metadata_resolve_exhaustion_reset_gap, default_metadata_resolve_min_retry_base,
-    default_metadata_retry_delay, default_metadata_worker_idle_timeout, parse_duration_seconds, parse_size_base_2,
+    default_metadata_resolve_exhaustion_reset_gap, default_metadata_resolve_min_retry_base, default_metadata_retry_delay,
+    default_metadata_tmdb_cooldown, default_metadata_worker_idle_timeout, parse_duration_seconds, parse_size_base_2,
 };
 
 #[derive(Debug, Clone)]
 pub struct MetadataUpdateConfig {
-    pub queue_log_interval: String,
-    pub queue_log_interval_secs: u64,
-    pub progress_log_interval: String,
-    pub progress_log_interval_secs: u64,
-    pub max_resolve_retry_backoff: String,
-    pub max_resolve_retry_backoff_secs: u64,
-    pub resolve_min_retry_base: String,
-    pub resolve_min_retry_base_secs: u64,
-    pub resolve_exhaustion_reset_gap: String,
-    pub resolve_exhaustion_reset_gap_secs: u64,
-    pub probe_cooldown: String,
-    pub probe_cooldown_secs: u64,
+    pub log: MetadataLogConfig,
+    pub resolve: ResolveConfig,
+    pub probe: ProbeConfig,
+    pub ffprobe: FfprobeConfig,
+    pub tmdb: TmdbConfig,
     pub retry_delay: String,
     pub retry_delay_secs: u64,
-    pub probe_retry_load_retry_delay: String,
-    pub probe_retry_load_retry_delay_secs: u64,
     pub worker_idle_timeout: String,
     pub worker_idle_timeout_secs: u64,
-    pub probe_retry_backoff_step_1: String,
-    pub probe_retry_backoff_step_1_secs: u64,
-    pub probe_retry_backoff_step_2: String,
-    pub probe_retry_backoff_step_2_secs: u64,
-    pub probe_retry_backoff_step_3: String,
-    pub probe_retry_backoff_step_3_secs: u64,
-    pub max_attempts_resolve: u8,
-    pub max_attempts_probe: u8,
-    pub backoff_jitter_percent: u8,
     pub max_queue_size: usize,
-    pub ffprobe_enabled: bool,
-    pub ffprobe_timeout: Option<u64>,
-    pub ffprobe_analyze_duration: String,
-    pub ffprobe_analyze_duration_micros: u64,
-    pub ffprobe_probe_size: String,
-    pub ffprobe_probe_size_bytes: u64,
-    pub ffprobe_live_analyze_duration: String,
-    pub ffprobe_live_analyze_duration_micros: u64,
-    pub ffprobe_live_probe_size: String,
-    pub ffprobe_live_probe_size_bytes: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct MetadataLogConfig {
+    pub queue_interval: String,
+    pub queue_interval_secs: u64,
+    pub progress_interval: String,
+    pub progress_interval_secs: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolveConfig {
+    pub max_retry_backoff: String,
+    pub max_retry_backoff_secs: u64,
+    pub min_retry_base: String,
+    pub min_retry_base_secs: u64,
+    pub exhaustion_reset_gap: String,
+    pub exhaustion_reset_gap_secs: u64,
+    pub max_attempts: u8,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProbeConfig {
+    pub cooldown: String,
+    pub cooldown_secs: u64,
+    pub retry_load_retry_delay: String,
+    pub retry_load_retry_delay_secs: u64,
+    pub retry_backoff_step_1: String,
+    pub retry_backoff_step_1_secs: u64,
+    pub retry_backoff_step_2: String,
+    pub retry_backoff_step_2_secs: u64,
+    pub retry_backoff_step_3: String,
+    pub retry_backoff_step_3_secs: u64,
+    pub max_attempts: u8,
+    pub backoff_jitter_percent: u8,
+}
+
+#[derive(Debug, Clone)]
+pub struct FfprobeConfig {
+    pub enabled: bool,
+    pub timeout: Option<u64>,
+    pub analyze_duration: String,
+    pub analyze_duration_micros: u64,
+    pub probe_size: String,
+    pub probe_size_bytes: u64,
+    pub live_analyze_duration: String,
+    pub live_analyze_duration_micros: u64,
+    pub live_probe_size: String,
+    pub live_probe_size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TmdbConfig {
+    pub enabled: bool,
+    pub api_key: Option<String>,
+    pub rate_limit_ms: u64,
+    pub cache_duration_days: u32,
+    pub language: String,
+    pub cooldown: String,
+    pub cooldown_secs: u64,
 }
 
 impl Default for MetadataUpdateConfig {
-    fn default() -> Self { Self::from(&MetadataUpdateConfigDto::default()) }
+    fn default() -> Self {
+        Self::from(&MetadataUpdateConfigDto::default())
+    }
 }
 
 macros::from_impl!(MetadataUpdateConfig);
@@ -73,103 +109,6 @@ fn parse_size_or_default(value: &str, default_value: &str) -> u64 {
         .unwrap_or(1)
 }
 
-struct ParsedMetadataUpdateNumbers {
-    queue_log_interval_secs: u64,
-    progress_log_interval_secs: u64,
-    max_resolve_retry_backoff_secs: u64,
-    resolve_min_retry_base_secs: u64,
-    resolve_exhaustion_reset_gap_secs: u64,
-    probe_cooldown_secs: u64,
-    retry_delay_secs: u64,
-    probe_retry_load_retry_delay_secs: u64,
-    worker_idle_timeout_secs: u64,
-    probe_retry_backoff_step_1_secs: u64,
-    probe_retry_backoff_step_2_secs: u64,
-    probe_retry_backoff_step_3_secs: u64,
-    ffprobe_analyze_duration_micros: u64,
-    ffprobe_probe_size_bytes: u64,
-    ffprobe_live_analyze_duration_micros: u64,
-    ffprobe_live_probe_size_bytes: u64,
-}
-
-fn parse_numeric_fields(cfg: &MetadataUpdateConfigDto) -> ParsedMetadataUpdateNumbers {
-    let queue_log_interval_secs =
-        parse_duration_or_default(&cfg.queue_log_interval, &default_metadata_queue_log_interval(), false);
-    let progress_log_interval_secs =
-        parse_duration_or_default(&cfg.progress_log_interval, &default_metadata_progress_log_interval(), false);
-    let max_resolve_retry_backoff_secs = parse_duration_or_default(
-        &cfg.max_resolve_retry_backoff,
-        &default_metadata_max_resolve_retry_backoff(),
-        false,
-    );
-    let resolve_min_retry_base_secs =
-        parse_duration_or_default(&cfg.resolve_min_retry_base, &default_metadata_resolve_min_retry_base(), false);
-    let resolve_exhaustion_reset_gap_secs = parse_duration_or_default(
-        &cfg.resolve_exhaustion_reset_gap,
-        &default_metadata_resolve_exhaustion_reset_gap(),
-        false,
-    );
-    let probe_cooldown_secs = parse_duration_or_default(&cfg.probe_cooldown, &default_metadata_probe_cooldown(), false);
-    let retry_delay_secs = parse_duration_or_default(&cfg.retry_delay, &default_metadata_retry_delay(), false);
-    let probe_retry_load_retry_delay_secs = parse_duration_or_default(
-        &cfg.probe_retry_load_retry_delay,
-        &default_metadata_probe_retry_load_retry_delay(),
-        false,
-    );
-    let worker_idle_timeout_secs =
-        parse_duration_or_default(&cfg.worker_idle_timeout, &default_metadata_worker_idle_timeout(), false);
-    let probe_retry_backoff_step_1_secs = parse_duration_or_default(
-        &cfg.probe_retry_backoff_step_1,
-        &default_metadata_probe_retry_backoff_step_1(),
-        false,
-    );
-    let probe_retry_backoff_step_2_secs = parse_duration_or_default(
-        &cfg.probe_retry_backoff_step_2,
-        &default_metadata_probe_retry_backoff_step_2(),
-        false,
-    );
-    let probe_retry_backoff_step_3_secs = parse_duration_or_default(
-        &cfg.probe_retry_backoff_step_3,
-        &default_metadata_probe_retry_backoff_step_3(),
-        false,
-    );
-    let ffprobe_analyze_duration_micros = parse_duration_or_default(
-        &cfg.ffprobe_analyze_duration,
-        &default_metadata_ffprobe_analyze_duration(),
-        true,
-    )
-    .saturating_mul(1_000_000);
-    let ffprobe_probe_size_bytes =
-        parse_size_or_default(&cfg.ffprobe_probe_size, &default_metadata_ffprobe_probe_size());
-    let ffprobe_live_analyze_duration_micros = parse_duration_or_default(
-        &cfg.ffprobe_live_analyze_duration,
-        &default_metadata_ffprobe_live_analyze_duration(),
-        true,
-    )
-    .saturating_mul(1_000_000);
-    let ffprobe_live_probe_size_bytes =
-        parse_size_or_default(&cfg.ffprobe_live_probe_size, &default_metadata_ffprobe_live_probe_size());
-
-    ParsedMetadataUpdateNumbers {
-        queue_log_interval_secs,
-        progress_log_interval_secs,
-        max_resolve_retry_backoff_secs,
-        resolve_min_retry_base_secs,
-        resolve_exhaustion_reset_gap_secs,
-        probe_cooldown_secs,
-        retry_delay_secs,
-        probe_retry_load_retry_delay_secs,
-        worker_idle_timeout_secs,
-        probe_retry_backoff_step_1_secs,
-        probe_retry_backoff_step_2_secs,
-        probe_retry_backoff_step_3_secs,
-        ffprobe_analyze_duration_micros,
-        ffprobe_probe_size_bytes,
-        ffprobe_live_analyze_duration_micros,
-        ffprobe_live_probe_size_bytes,
-    }
-}
-
 impl From<&MetadataUpdateConfigDto> for MetadataUpdateConfig {
     fn from(dto: &MetadataUpdateConfigDto) -> Self {
         // ConfigDto::prepare() should already normalize/validate, but conversion stays defensive.
@@ -178,47 +117,26 @@ impl From<&MetadataUpdateConfigDto> for MetadataUpdateConfig {
             normalized = MetadataUpdateConfigDto::default();
             let _ = normalized.prepare();
         }
-        let parsed = parse_numeric_fields(&normalized);
 
         Self {
-            queue_log_interval: normalized.queue_log_interval,
-            queue_log_interval_secs: parsed.queue_log_interval_secs,
-            progress_log_interval: normalized.progress_log_interval,
-            progress_log_interval_secs: parsed.progress_log_interval_secs,
-            max_resolve_retry_backoff: normalized.max_resolve_retry_backoff,
-            max_resolve_retry_backoff_secs: parsed.max_resolve_retry_backoff_secs,
-            resolve_min_retry_base: normalized.resolve_min_retry_base,
-            resolve_min_retry_base_secs: parsed.resolve_min_retry_base_secs,
-            resolve_exhaustion_reset_gap: normalized.resolve_exhaustion_reset_gap,
-            resolve_exhaustion_reset_gap_secs: parsed.resolve_exhaustion_reset_gap_secs,
-            probe_cooldown: normalized.probe_cooldown,
-            probe_cooldown_secs: parsed.probe_cooldown_secs,
+            log: MetadataLogConfig::from(&normalized.log),
+            resolve: ResolveConfig::from(&normalized.resolve),
+            probe: ProbeConfig::from(&normalized.probe),
+            ffprobe: FfprobeConfig::from(&normalized.ffprobe),
+            tmdb: TmdbConfig::from(&normalized.tmdb),
+            retry_delay_secs: parse_duration_or_default(
+                &normalized.retry_delay,
+                &default_metadata_retry_delay(),
+                false,
+            ),
             retry_delay: normalized.retry_delay,
-            retry_delay_secs: parsed.retry_delay_secs,
-            probe_retry_load_retry_delay: normalized.probe_retry_load_retry_delay,
-            probe_retry_load_retry_delay_secs: parsed.probe_retry_load_retry_delay_secs,
+            worker_idle_timeout_secs: parse_duration_or_default(
+                &normalized.worker_idle_timeout,
+                &default_metadata_worker_idle_timeout(),
+                false,
+            ),
             worker_idle_timeout: normalized.worker_idle_timeout,
-            worker_idle_timeout_secs: parsed.worker_idle_timeout_secs,
-            probe_retry_backoff_step_1: normalized.probe_retry_backoff_step_1,
-            probe_retry_backoff_step_1_secs: parsed.probe_retry_backoff_step_1_secs,
-            probe_retry_backoff_step_2: normalized.probe_retry_backoff_step_2,
-            probe_retry_backoff_step_2_secs: parsed.probe_retry_backoff_step_2_secs,
-            probe_retry_backoff_step_3: normalized.probe_retry_backoff_step_3,
-            probe_retry_backoff_step_3_secs: parsed.probe_retry_backoff_step_3_secs,
-            max_attempts_resolve: normalized.max_attempts_resolve,
-            max_attempts_probe: normalized.max_attempts_probe,
-            backoff_jitter_percent: normalized.backoff_jitter_percent,
-            max_queue_size: normalized.max_queue_size,
-            ffprobe_enabled: normalized.ffprobe_enabled,
-            ffprobe_timeout: normalized.ffprobe_timeout,
-            ffprobe_analyze_duration: normalized.ffprobe_analyze_duration,
-            ffprobe_analyze_duration_micros: parsed.ffprobe_analyze_duration_micros,
-            ffprobe_probe_size: normalized.ffprobe_probe_size,
-            ffprobe_probe_size_bytes: parsed.ffprobe_probe_size_bytes,
-            ffprobe_live_analyze_duration: normalized.ffprobe_live_analyze_duration,
-            ffprobe_live_analyze_duration_micros: parsed.ffprobe_live_analyze_duration_micros,
-            ffprobe_live_probe_size: normalized.ffprobe_live_probe_size,
-            ffprobe_live_probe_size_bytes: parsed.ffprobe_live_probe_size_bytes,
+            max_queue_size: normalized.max_queue_size.max(1),
         }
     }
 }
@@ -226,28 +144,198 @@ impl From<&MetadataUpdateConfigDto> for MetadataUpdateConfig {
 impl From<&MetadataUpdateConfig> for MetadataUpdateConfigDto {
     fn from(instance: &MetadataUpdateConfig) -> Self {
         Self {
-            queue_log_interval: instance.queue_log_interval.clone(),
-            progress_log_interval: instance.progress_log_interval.clone(),
-            max_resolve_retry_backoff: instance.max_resolve_retry_backoff.clone(),
-            resolve_min_retry_base: instance.resolve_min_retry_base.clone(),
-            resolve_exhaustion_reset_gap: instance.resolve_exhaustion_reset_gap.clone(),
-            probe_cooldown: instance.probe_cooldown.clone(),
+            log: MetadataLogConfigDto::from(&instance.log),
+            resolve: ResolveConfigDto::from(&instance.resolve),
+            probe: ProbeConfigDto::from(&instance.probe),
+            ffprobe: FfprobeConfigDto::from(&instance.ffprobe),
+            tmdb: TmdbConfigDto::from(&instance.tmdb),
             retry_delay: instance.retry_delay.clone(),
-            probe_retry_load_retry_delay: instance.probe_retry_load_retry_delay.clone(),
             worker_idle_timeout: instance.worker_idle_timeout.clone(),
-            probe_retry_backoff_step_1: instance.probe_retry_backoff_step_1.clone(),
-            probe_retry_backoff_step_2: instance.probe_retry_backoff_step_2.clone(),
-            probe_retry_backoff_step_3: instance.probe_retry_backoff_step_3.clone(),
-            max_attempts_resolve: instance.max_attempts_resolve,
-            max_attempts_probe: instance.max_attempts_probe,
-            backoff_jitter_percent: instance.backoff_jitter_percent,
             max_queue_size: instance.max_queue_size,
-            ffprobe_enabled: instance.ffprobe_enabled,
-            ffprobe_timeout: instance.ffprobe_timeout,
-            ffprobe_analyze_duration: instance.ffprobe_analyze_duration.clone(),
-            ffprobe_probe_size: instance.ffprobe_probe_size.clone(),
-            ffprobe_live_analyze_duration: instance.ffprobe_live_analyze_duration.clone(),
-            ffprobe_live_probe_size: instance.ffprobe_live_probe_size.clone(),
+        }
+    }
+}
+
+impl From<&MetadataLogConfigDto> for MetadataLogConfig {
+    fn from(dto: &MetadataLogConfigDto) -> Self {
+        Self {
+            queue_interval_secs: parse_duration_or_default(
+                &dto.queue_interval,
+                &default_metadata_queue_log_interval(),
+                false,
+            ),
+            queue_interval: dto.queue_interval.clone(),
+            progress_interval_secs: parse_duration_or_default(
+                &dto.progress_interval,
+                &default_metadata_progress_log_interval(),
+                false,
+            ),
+            progress_interval: dto.progress_interval.clone(),
+        }
+    }
+}
+
+impl From<&MetadataLogConfig> for MetadataLogConfigDto {
+    fn from(instance: &MetadataLogConfig) -> Self {
+        Self {
+            queue_interval: instance.queue_interval.clone(),
+            progress_interval: instance.progress_interval.clone(),
+        }
+    }
+}
+
+impl From<&ResolveConfigDto> for ResolveConfig {
+    fn from(dto: &ResolveConfigDto) -> Self {
+        Self {
+            max_retry_backoff_secs: parse_duration_or_default(
+                &dto.max_retry_backoff,
+                &default_metadata_max_resolve_retry_backoff(),
+                false,
+            ),
+            max_retry_backoff: dto.max_retry_backoff.clone(),
+            min_retry_base_secs: parse_duration_or_default(
+                &dto.min_retry_base,
+                &default_metadata_resolve_min_retry_base(),
+                false,
+            ),
+            min_retry_base: dto.min_retry_base.clone(),
+            exhaustion_reset_gap_secs: parse_duration_or_default(
+                &dto.exhaustion_reset_gap,
+                &default_metadata_resolve_exhaustion_reset_gap(),
+                false,
+            ),
+            exhaustion_reset_gap: dto.exhaustion_reset_gap.clone(),
+            max_attempts: dto.max_attempts.max(1),
+        }
+    }
+}
+
+impl From<&ResolveConfig> for ResolveConfigDto {
+    fn from(instance: &ResolveConfig) -> Self {
+        Self {
+            max_retry_backoff: instance.max_retry_backoff.clone(),
+            min_retry_base: instance.min_retry_base.clone(),
+            exhaustion_reset_gap: instance.exhaustion_reset_gap.clone(),
+            max_attempts: instance.max_attempts,
+        }
+    }
+}
+
+impl From<&ProbeConfigDto> for ProbeConfig {
+    fn from(dto: &ProbeConfigDto) -> Self {
+        Self {
+            cooldown_secs: parse_duration_or_default(&dto.cooldown, &default_metadata_probe_cooldown(), false),
+            cooldown: dto.cooldown.clone(),
+            retry_load_retry_delay_secs: parse_duration_or_default(
+                &dto.retry_load_retry_delay,
+                &default_metadata_probe_retry_load_retry_delay(),
+                false,
+            ),
+            retry_load_retry_delay: dto.retry_load_retry_delay.clone(),
+            retry_backoff_step_1_secs: parse_duration_or_default(
+                &dto.retry_backoff_step_1,
+                &default_metadata_probe_retry_backoff_step_1(),
+                false,
+            ),
+            retry_backoff_step_1: dto.retry_backoff_step_1.clone(),
+            retry_backoff_step_2_secs: parse_duration_or_default(
+                &dto.retry_backoff_step_2,
+                &default_metadata_probe_retry_backoff_step_2(),
+                false,
+            ),
+            retry_backoff_step_2: dto.retry_backoff_step_2.clone(),
+            retry_backoff_step_3_secs: parse_duration_or_default(
+                &dto.retry_backoff_step_3,
+                &default_metadata_probe_retry_backoff_step_3(),
+                false,
+            ),
+            retry_backoff_step_3: dto.retry_backoff_step_3.clone(),
+            max_attempts: dto.max_attempts.max(1),
+            backoff_jitter_percent: dto.backoff_jitter_percent.min(95),
+        }
+    }
+}
+
+impl From<&ProbeConfig> for ProbeConfigDto {
+    fn from(instance: &ProbeConfig) -> Self {
+        Self {
+            cooldown: instance.cooldown.clone(),
+            retry_load_retry_delay: instance.retry_load_retry_delay.clone(),
+            retry_backoff_step_1: instance.retry_backoff_step_1.clone(),
+            retry_backoff_step_2: instance.retry_backoff_step_2.clone(),
+            retry_backoff_step_3: instance.retry_backoff_step_3.clone(),
+            max_attempts: instance.max_attempts,
+            backoff_jitter_percent: instance.backoff_jitter_percent,
+        }
+    }
+}
+
+impl From<&FfprobeConfigDto> for FfprobeConfig {
+    fn from(dto: &FfprobeConfigDto) -> Self {
+        Self {
+            enabled: dto.enabled,
+            timeout: dto.timeout,
+            analyze_duration_micros: parse_duration_or_default(
+                &dto.analyze_duration,
+                &default_metadata_ffprobe_analyze_duration(),
+                true,
+            )
+            .saturating_mul(1_000_000),
+            analyze_duration: dto.analyze_duration.clone(),
+            probe_size_bytes: parse_size_or_default(&dto.probe_size, &default_metadata_ffprobe_probe_size()),
+            probe_size: dto.probe_size.clone(),
+            live_analyze_duration_micros: parse_duration_or_default(
+                &dto.live_analyze_duration,
+                &default_metadata_ffprobe_live_analyze_duration(),
+                true,
+            )
+            .saturating_mul(1_000_000),
+            live_analyze_duration: dto.live_analyze_duration.clone(),
+            live_probe_size_bytes: parse_size_or_default(
+                &dto.live_probe_size,
+                &default_metadata_ffprobe_live_probe_size(),
+            ),
+            live_probe_size: dto.live_probe_size.clone(),
+        }
+    }
+}
+
+impl From<&FfprobeConfig> for FfprobeConfigDto {
+    fn from(instance: &FfprobeConfig) -> Self {
+        Self {
+            enabled: instance.enabled,
+            timeout: instance.timeout,
+            analyze_duration: instance.analyze_duration.clone(),
+            probe_size: instance.probe_size.clone(),
+            live_analyze_duration: instance.live_analyze_duration.clone(),
+            live_probe_size: instance.live_probe_size.clone(),
+        }
+    }
+}
+
+impl From<&TmdbConfigDto> for TmdbConfig {
+    fn from(dto: &TmdbConfigDto) -> Self {
+        Self {
+            enabled: dto.enabled,
+            api_key: dto.api_key.clone(),
+            rate_limit_ms: dto.rate_limit_ms,
+            cache_duration_days: dto.cache_duration_days,
+            language: dto.language.clone(),
+            cooldown_secs: parse_duration_or_default(&dto.cooldown, &default_metadata_tmdb_cooldown(), false),
+            cooldown: dto.cooldown.clone(),
+        }
+    }
+}
+
+impl From<&TmdbConfig> for TmdbConfigDto {
+    fn from(instance: &TmdbConfig) -> Self {
+        Self {
+            enabled: instance.enabled,
+            api_key: instance.api_key.clone(),
+            rate_limit_ms: instance.rate_limit_ms,
+            cache_duration_days: instance.cache_duration_days,
+            language: instance.language.clone(),
+            cooldown: instance.cooldown.clone(),
         }
     }
 }
