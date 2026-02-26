@@ -18,6 +18,7 @@ use crate::repository::{
     get_input_storage_path, persist_input_series_info_batch, MemoryPlaylistSource, PlaylistSource,
 };
 use crate::repository::{xtream_get_file_path, BPlusTreeQuery};
+use crate::utils::ffmpeg::{ProbeFailureKind, ProbeUrlOutcome};
 use crate::utils::{debug_if_enabled, xtream};
 use log::{debug, error, info, log_enabled, trace, warn, Level};
 use parking_lot::Mutex;
@@ -695,6 +696,7 @@ pub async fn update_series_metadata(
 
     let mut fetched_new = false;
     let mut properties_updated = false;
+    let mut probe_failure: Option<ProbeFailureKind> = None;
 
     let display_id = series_id_opt.map_or_else(|| "StringID".to_string(), |v| v.to_string());
 
@@ -861,7 +863,7 @@ pub async fn update_series_metadata(
                                 ep.title, ep.season, ep.episode_num, missing_reason
                             );
 
-                            if let Some((_quality, raw_video, raw_audio)) = crate::utils::ffmpeg::probe_url(
+                            match crate::utils::ffmpeg::probe_url(
                                 &episode_url,
                                 user_agent.as_deref(),
                                 probe_settings.analyze_duration_micros,
@@ -870,15 +872,25 @@ pub async fn update_series_metadata(
                             )
                             .await
                             {
-                                if let Some(v) = raw_video {
-                                    ep.video = Some(v.to_string().into());
-                                    properties_updated = true;
+                                ProbeUrlOutcome::Success(_quality, raw_video, raw_audio) => {
+                                    if let Some(v) = raw_video {
+                                        ep.video = Some(v.to_string().into());
+                                        properties_updated = true;
+                                    }
+                                    if let Some(a) = raw_audio {
+                                        ep.audio = Some(a.to_string().into());
+                                        properties_updated = true;
+                                    }
+                                    probed_count += 1;
                                 }
-                                if let Some(a) = raw_audio {
-                                    ep.audio = Some(a.to_string().into());
-                                    properties_updated = true;
+                                ProbeUrlOutcome::Failed(ProbeFailureKind::NotFound) => {
+                                    probe_failure = Some(ProbeFailureKind::NotFound);
                                 }
-                                probed_count += 1;
+                                ProbeUrlOutcome::Failed(ProbeFailureKind::Other) => {
+                                    if probe_failure.is_none() {
+                                        probe_failure = Some(ProbeFailureKind::Other);
+                                    }
+                                }
                             }
 
                             if let Some(h) = temp_handle {
@@ -899,6 +911,19 @@ pub async fn update_series_metadata(
             }
         } else {
             debug!("Series probe skipped for ID {display_id} (no series details available)");
+        }
+    }
+
+    let probe_only_unresolved = do_probe && !fetch_info && !resolve_tmdb && !properties_updated && !fetched_new;
+    if probe_only_unresolved {
+        if let Some(kind) = probe_failure {
+            let err = match kind {
+                ProbeFailureKind::NotFound => {
+                    shared::error::info_err!("Probe failed with 404 Not Found for Series {display_id}")
+                }
+                ProbeFailureKind::Other => shared::error::info_err!("Probe failed for Series {display_id}"),
+            };
+            return Err(err);
         }
     }
 

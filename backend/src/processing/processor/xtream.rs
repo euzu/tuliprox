@@ -5,6 +5,7 @@ use crate::model::{AppConfig, ConfigInput, ConfigInputFlags};
 use shared::model::{LiveStreamProperties, StreamProperties, XtreamCluster, XtreamPlaylistItem};
 use crate::repository::{get_input_storage_path, persist_input_live_info, BPlusTreeQuery, xtream_get_file_path};
 use crate::utils::{debug_if_enabled};
+use crate::utils::ffmpeg::{ProbeFailureKind, ProbeUrlOutcome};
 use log::{debug, warn};
 use crate::processing::parser::xtream::create_xtream_url;
 use crate::api::model::{ActiveProviderManager, ProviderHandle, ProviderIdType};
@@ -131,27 +132,36 @@ pub async fn update_live_stream_metadata(
     properties.last_probed_timestamp = Some(now);
 
     let mut success = false;
-    if let Some((_quality, raw_video, raw_audio)) = crate::utils::ffmpeg::probe_url(
+    match crate::utils::ffmpeg::probe_url(
         &stream_url,
         user_agent.as_deref(),
         analyze_duration,
         probe_size,
         ffprobe_timeout,
-    ).await {
-        // 3. Update properties on success
-        if let Some(v) = raw_video {
-            properties.video = Some(v.to_string().into());
+    )
+    .await
+    {
+        ProbeUrlOutcome::Success(_quality, raw_video, raw_audio) => {
+            // 3. Update properties on success
+            if let Some(v) = raw_video {
+                properties.video = Some(v.to_string().into());
+            }
+            if let Some(a) = raw_audio {
+                properties.audio = Some(a.to_string().into());
+            }
+            properties.last_success_timestamp = Some(now);
+            success = true;
+
+            debug_if_enabled!("Successfully probed Live Stream ID {}", display_id);
         }
-        if let Some(a) = raw_audio {
-            properties.audio = Some(a.to_string().into());
+        ProbeUrlOutcome::Failed(ProbeFailureKind::NotFound) => {
+            warn!("Live stream probe target returned 404 for ID {} (Input: {})", display_id, input.name);
+            return Err(shared::error::info_err!("Probe failed with 404 Not Found for stream {display_id}"));
         }
-        properties.last_success_timestamp = Some(now);
-        success = true;
-        
-        debug_if_enabled!("Successfully probed Live Stream ID {}", display_id);
-    } else {
-        warn!("Probe failed for Live Stream ID {} (Input: {})", display_id, input.name);
-        // We still persist the updated last_probed_timestamp so we don't retry immediately
+        ProbeUrlOutcome::Failed(ProbeFailureKind::Other) => {
+            warn!("Probe failed for Live Stream ID {} (Input: {})", display_id, input.name);
+            // We still persist the updated last_probed_timestamp so we don't retry immediately
+        }
     }
 
     // 4. Persist

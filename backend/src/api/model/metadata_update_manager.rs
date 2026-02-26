@@ -794,13 +794,21 @@ impl MetadataUpdateManager {
         task: UpdateTask,
     ) -> SubmitTaskResult {
         let key = TaskKey::from_task(&task);
+        let task_to_submit = task;
 
         if let Some(entry) = pending_tasks.get(&key) {
-            let mut existing = entry.task.lock();
-            if Self::merge_task_payload(&mut existing, task) {
-                entry.generation.fetch_add(1, Ordering::Relaxed);
+            if sender.is_closed() {
+                drop(entry);
+                if pending_tasks.remove(&key).is_some() {
+                    Self::decrement_pending_task_count(&pending_task_count);
+                }
+            } else {
+                let mut existing = entry.task.lock();
+                if Self::merge_task_payload(&mut existing, task_to_submit) {
+                    entry.generation.fetch_add(1, Ordering::Relaxed);
+                }
+                return SubmitTaskResult::QueuedOrMerged;
             }
-            return SubmitTaskResult::QueuedOrMerged;
         }
 
         // Lock-free admission with CAS: reserve one queue slot only if capacity allows.
@@ -817,19 +825,28 @@ impl MetadataUpdateManager {
             return SubmitTaskResult::QueueFull;
         }
 
-        match pending_tasks.entry(key.clone()) {
-            Entry::Occupied(entry) => {
-                // Another producer inserted this key after our fast-path `get`.
-                // Release reserved capacity and merge into the existing task.
-                Self::decrement_pending_task_count(&pending_task_count);
-                let mut existing = entry.get().task.lock();
-                if Self::merge_task_payload(&mut existing, task) {
-                    entry.get().generation.fetch_add(1, Ordering::Relaxed);
+        loop {
+            match pending_tasks.entry(key.clone()) {
+                Entry::Occupied(entry) => {
+                    // Another producer inserted this key after our fast-path `get`.
+                    if sender.is_closed() {
+                        entry.remove();
+                        Self::decrement_pending_task_count(&pending_task_count);
+                        continue;
+                    }
+
+                    // Release reserved capacity and merge into the existing task.
+                    Self::decrement_pending_task_count(&pending_task_count);
+                    let mut existing = entry.get().task.lock();
+                    if Self::merge_task_payload(&mut existing, task_to_submit) {
+                        entry.get().generation.fetch_add(1, Ordering::Relaxed);
+                    }
+                    return SubmitTaskResult::QueuedOrMerged;
                 }
-                return SubmitTaskResult::QueuedOrMerged;
-            }
-            Entry::Vacant(entry) => {
-                entry.insert(PendingTask::new(task));
+                Entry::Vacant(entry) => {
+                    entry.insert(PendingTask::new(task_to_submit));
+                    break;
+                }
             }
         }
 
@@ -1258,7 +1275,54 @@ impl InputWorker {
                         apply_rate_limit = true;
                     }
                     Err(e) => {
-                        if Self::is_transient_worker_error(&e.message) {
+                        if Self::is_permanent_not_found_error(&e.message) {
+                            let retry_domain = Self::retry_domain_for_task(&task_for_execution);
+                            self.scheduled_requeues.remove(&current_key);
+                            if retry_domain == RetryDomain::Probe {
+                                let cooldown_until_ts = now_ts.saturating_add(runtime_settings.probe_cooldown_secs);
+                                let state_bundle_after_update = {
+                                    let state_bundle = self.retry_states.entry(current_key.clone()).or_default();
+                                    let state = state_bundle.get_mut_or_insert(RetryDomain::Probe);
+                                    state.attempts = runtime_settings.max_attempts_probe;
+                                    state.next_allowed_at_ts = cooldown_until_ts;
+                                    state.cooldown_until_ts = Some(cooldown_until_ts);
+                                    state.last_error = Some(e.message.clone());
+                                    state_bundle.touch(now_ts);
+                                    state_bundle.clone()
+                                };
+                                metadata_persist_state = Some(Some(state_bundle_after_update));
+                                remove_current_task = true;
+                                debug_if_enabled!(
+                                    "Probe task entered cooldown after permanent not-found for input {}: {} (cooldown_until={})",
+                                    input_name,
+                                    task_for_execution,
+                                    cooldown_until_ts
+                                );
+                            } else {
+                                self.resolve_exhausted.insert(current_key.clone(), now_ts);
+                                let mut should_remove_retry_entry = false;
+                                let mut state_after_clear: Option<TaskRetryState> = None;
+                                if let Some(state_bundle) = self.retry_states.get_mut(&current_key) {
+                                    state_bundle.clear_domain(retry_domain);
+                                    if state_bundle.is_empty() {
+                                        should_remove_retry_entry = true;
+                                    } else {
+                                        state_bundle.touch(now_ts);
+                                        state_after_clear = Some(state_bundle.clone());
+                                    }
+                                }
+                                if should_remove_retry_entry {
+                                    self.retry_states.remove(&current_key);
+                                }
+                                metadata_persist_state = Some(state_after_clear);
+                                remove_current_task = true;
+                                debug_if_enabled!(
+                                    "Resolve task marked exhausted after permanent not-found for input {}: {}",
+                                    input_name,
+                                    task_for_execution
+                                );
+                            }
+                        } else if Self::is_transient_worker_error(&e.message) {
                             if e.message == TASK_ERR_UPDATE_IN_PROGRESS {
                                 // Drop cached readers quickly so foreground writer can progress.
                                 self.release_db_handles();
@@ -1862,8 +1926,21 @@ impl InputWorker {
     }
 
     #[inline]
+    fn is_probe_only_resolve_task(task: &UpdateTask) -> bool {
+        match task {
+            UpdateTask::ResolveVod { reason, .. } | UpdateTask::ResolveSeries { reason, .. } => {
+                reason.contains(ResolveReason::Probe)
+                    && !reason.contains(ResolveReason::Info)
+                    && !reason.contains(ResolveReason::Tmdb)
+                    && !reason.contains(ResolveReason::Date)
+            }
+            _ => false,
+        }
+    }
+
+    #[inline]
     fn retry_domain_for_task(task: &UpdateTask) -> RetryDomain {
-        if Self::is_probe_task(task) {
+        if Self::is_probe_task(task) || Self::is_probe_only_resolve_task(task) {
             RetryDomain::Probe
         } else {
             RetryDomain::Resolve
@@ -1923,6 +2000,12 @@ impl InputWorker {
         message == TASK_ERR_UPDATE_IN_PROGRESS
             || message == TASK_ERR_PREEMPTED
             || message == TASK_ERR_NO_CONNECTION
+    }
+
+    #[inline]
+    fn is_permanent_not_found_error(message: &str) -> bool {
+        let normalized = message.to_ascii_lowercase();
+        normalized.contains("404") || normalized.contains("not found")
     }
 
     // Changed to static method
@@ -3092,6 +3175,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submit_task_with_closed_sender_does_not_report_merged_for_existing_pending_entry() {
+        let (tx, rx) = mpsc::channel::<TaskKey>(8);
+        drop(rx);
+
+        let pending_tasks = Arc::new(DashMap::new());
+        let pending_task_count = Arc::new(AtomicUsize::new(1));
+        let key = TaskKey::Vod(42);
+        let existing_task = UpdateTask::ResolveVod {
+            id: ProviderIdType::Id(42),
+            reason: ResolveReasonSet::from_variants(&[ResolveReason::Info]),
+            delay: 10,
+        };
+        pending_tasks.insert(key.clone(), PendingTask::new(existing_task));
+
+        let incoming_task = UpdateTask::ResolveVod {
+            id: ProviderIdType::Id(42),
+            reason: ResolveReasonSet::from_variants(&[ResolveReason::Probe]),
+            delay: 2,
+        };
+
+        let result = MetadataUpdateManager::submit_task(
+            tx,
+            pending_tasks.clone(),
+            pending_task_count.clone(),
+            "input_a",
+            MetadataUpdateRuntimeSettings::default().max_queue_size,
+            incoming_task,
+        )
+        .await;
+
+        assert_eq!(result, SubmitTaskResult::ChannelClosed);
+        assert!(!pending_tasks.contains_key(&key));
+        assert_eq!(pending_task_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
     async fn finalize_processed_task_success_requeues_when_generation_changed() {
         let (tx, rx) = mpsc::channel::<TaskKey>(8);
         let pending_tasks = Arc::new(DashMap::new());
@@ -3313,5 +3432,25 @@ mod tests {
         assert!(InputWorker::is_transient_worker_error(TASK_ERR_PREEMPTED));
         assert!(InputWorker::is_transient_worker_error(TASK_ERR_NO_CONNECTION));
         assert!(!InputWorker::is_transient_worker_error("permanent error"));
+    }
+
+    #[test]
+    fn retry_domain_uses_probe_for_probe_only_resolve_tasks() {
+        let task = UpdateTask::ResolveVod {
+            id: ProviderIdType::Id(7),
+            reason: ResolveReasonSet::from_variants(&[ResolveReason::Probe]),
+            delay: 0,
+        };
+        assert_eq!(InputWorker::retry_domain_for_task(&task), RetryDomain::Probe);
+    }
+
+    #[test]
+    fn retry_domain_keeps_resolve_for_mixed_resolve_tasks() {
+        let task = UpdateTask::ResolveSeries {
+            id: ProviderIdType::Id(11),
+            reason: ResolveReasonSet::from_variants(&[ResolveReason::Probe, ResolveReason::Info]),
+            delay: 0,
+        };
+        assert_eq!(InputWorker::retry_domain_for_task(&task), RetryDomain::Resolve);
     }
 }
