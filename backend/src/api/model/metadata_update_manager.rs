@@ -2007,7 +2007,36 @@ impl InputWorker {
     #[inline]
     fn is_permanent_not_found_error(message: &str) -> bool {
         let normalized = message.to_ascii_lowercase();
-        normalized.contains("404") || normalized.contains("not found")
+        Self::contains_standalone_fragment(&normalized, "404")
+            || Self::contains_standalone_fragment(&normalized, "not found")
+    }
+
+    #[inline]
+    fn is_word_byte(byte: u8) -> bool {
+        byte.is_ascii_alphanumeric() || byte == b'_'
+    }
+
+    fn contains_standalone_fragment(haystack: &str, fragment: &str) -> bool {
+        if fragment.is_empty() || haystack.len() < fragment.len() {
+            return false;
+        }
+
+        let bytes = haystack.as_bytes();
+        let mut search_from = 0usize;
+
+        while let Some(relative_idx) = haystack[search_from..].find(fragment) {
+            let start = search_from + relative_idx;
+            let end = start + fragment.len();
+            let before_is_word = start > 0 && Self::is_word_byte(bytes[start - 1]);
+            let after_is_word = end < bytes.len() && Self::is_word_byte(bytes[end]);
+
+            if !before_is_word && !after_is_word {
+                return true;
+            }
+            search_from = end;
+        }
+
+        false
     }
 
     // Changed to static method
@@ -3434,6 +3463,20 @@ mod tests {
         assert!(InputWorker::is_transient_worker_error(TASK_ERR_PREEMPTED));
         assert!(InputWorker::is_transient_worker_error(TASK_ERR_NO_CONNECTION));
         assert!(!InputWorker::is_transient_worker_error("permanent error"));
+    }
+
+    #[test]
+    fn permanent_not_found_error_matches_standalone_markers() {
+        assert!(InputWorker::is_permanent_not_found_error("HTTP 404 Not Found"));
+        assert!(InputWorker::is_permanent_not_found_error("probe failed: 404: stream unavailable"));
+        assert!(InputWorker::is_permanent_not_found_error("resource not found on provider"));
+    }
+
+    #[test]
+    fn permanent_not_found_error_ignores_partial_markers() {
+        assert!(!InputWorker::is_permanent_not_found_error("error code 1404 while probing"));
+        assert!(!InputWorker::is_permanent_not_found_error("status404unexpected"));
+        assert!(!InputWorker::is_permanent_not_found_error("movie not foundry metadata mismatch"));
     }
 
     #[test]
