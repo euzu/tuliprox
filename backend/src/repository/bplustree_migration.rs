@@ -335,13 +335,12 @@ impl BPlusTreeStartupMigrator {
             return Err(io::Error::new(io::ErrorKind::InvalidData, format!("Metadata too large: {metadata_len}")));
         }
 
-        let has_flags = (raw & HEADER_FLAG_HAS_METADATA_FLAGS) != 0;
-        if has_flags {
-            return Ok(false);
-        }
-
         let mut normalized = metadata_len | HEADER_FLAG_HAS_METADATA_FLAGS;
         normalized &= !HEADER_FLAG_HAS_TOMBSTONES;
+
+        if normalized == raw {
+            return Ok(false);
+        }
 
         file.seek(SeekFrom::Start(METADATA_LEN_OFFSET))?;
         file.write_all(&normalized.to_le_bytes())?;
