@@ -1,12 +1,13 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-use crate::api::model::{CustomVideoStreamType, ProviderHandle, StreamError};
+use crate::{
+    api::model::{CustomVideoStreamType, ProviderHandle, StreamError},
+    model::GracePeriodOptions,
+    tools::atomic_once_flag::AtomicOnceFlag,
+};
 use axum::http::StatusCode;
 use bytes::Bytes;
 use futures::stream::BoxStream;
+use std::{collections::HashMap, sync::Arc};
 use url::Url;
-use crate::model::GracePeriodOptions;
-use crate::tools::atomic_once_flag::AtomicOnceFlag;
 
 pub type BoxedProviderStream = BoxStream<'static, Result<Bytes, StreamError>>;
 pub type ProviderStreamHeader = Vec<(String, String)>;
@@ -50,14 +51,10 @@ impl StreamDetails {
         }
     }
     #[inline]
-    pub fn has_stream(&self) -> bool {
-        self.stream.is_some()
-    }
+    pub fn has_stream(&self) -> bool { self.stream.is_some() }
 
     #[inline]
-    pub fn has_grace_period(&self) -> bool {
-        self.grace_period.period_millis > 0
-    }
+    pub fn has_grace_period(&self) -> bool { self.grace_period.period_millis > 0 }
 }
 
 pub struct StreamingStrategy {

@@ -1,51 +1,44 @@
-use crate::api::config_file::ConfigFile;
-use crate::api::model::{AppState, EventMessage};
-use crate::model::{Config, SourcesConfig};
-use crate::utils;
-use crate::utils::is_directory;
-use arc_swap::access::Access;
-use arc_swap::ArcSwap;
+use crate::{
+    api::{
+        config_file::ConfigFile,
+        model::{AppState, EventMessage},
+    },
+    model::{Config, SourcesConfig},
+    utils,
+    utils::is_directory,
+};
+use arc_swap::{access::Access, ArcSwap};
 use log::{error, info};
-use notify::event::{AccessKind, AccessMode};
-use notify::{recommended_watcher, EventKind, RecursiveMode, Watcher};
-use shared::error::{TuliproxError, TuliproxErrorKind};
-use shared::model::ConfigPaths;
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use notify::{
+    event::{AccessKind, AccessMode},
+    recommended_watcher, EventKind, RecursiveMode, Watcher,
+};
+use shared::{
+    error::{TuliproxError, TuliproxErrorKind},
+    model::ConfigPaths,
+};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tokio_util::sync::CancellationToken;
 
 #[allow(clippy::too_many_lines)]
-fn start_config_watch(
-    app_state: &Arc<AppState>,
-    cancel_token: &CancellationToken,
-) -> Result<(), TuliproxError> {
+fn start_config_watch(app_state: &Arc<AppState>, cancel_token: &CancellationToken) -> Result<(), TuliproxError> {
     // let (tx, mut rx) = mpsc::channel::<notify::Result<Event>>(100);
     let (std_tx, std_rx) = std::sync::mpsc::channel();
     let (tx, mut rx) = tokio::sync::mpsc::channel(100);
 
-    let paths =
-        <Arc<ArcSwap<ConfigPaths>> as Access<ConfigPaths>>::load(&app_state.app_config.paths);
-    let mapping_file_path = paths
-        .mapping_file_path
-        .as_ref()
-        .map_or_else(String::new, ToString::to_string);
-    let template_file_path = paths
-        .template_file_path
-        .as_ref()
-        .map_or_else(String::new, ToString::to_string);
-    let files = get_watch_files(
-        app_state,
-        &paths,
-        mapping_file_path.as_str(),
-        template_file_path.as_str(),
-    );
+    let paths = <Arc<ArcSwap<ConfigPaths>> as Access<ConfigPaths>>::load(&app_state.app_config.paths);
+    let mapping_file_path = paths.mapping_file_path.as_ref().map_or_else(String::new, ToString::to_string);
+    let template_file_path = paths.template_file_path.as_ref().map_or_else(String::new, ToString::to_string);
+    let files = get_watch_files(app_state, &paths, mapping_file_path.as_str(), template_file_path.as_str());
     //
     // // Add a path to be watched. All files and directories at that path and
     // // below will be monitored for changes.
     let path = Path::new(paths.config_path.as_str());
-    let recursive_mode = if (!mapping_file_path.is_empty()
-        && utils::is_directory(&mapping_file_path))
+    let recursive_mode = if (!mapping_file_path.is_empty() && utils::is_directory(&mapping_file_path))
         || (!template_file_path.is_empty() && utils::is_directory(&template_file_path))
     {
         RecursiveMode::Recursive
@@ -64,16 +57,10 @@ fn start_config_watch(
     });
 
     let mut watcher = recommended_watcher(std_tx).map_err(|err| {
-        TuliproxError::new(
-            TuliproxErrorKind::Info,
-            format!("Failed to init config file watcher {err}"),
-        )
+        TuliproxError::new(TuliproxErrorKind::Info, format!("Failed to init config file watcher {err}"))
     })?;
     watcher.watch(path, recursive_mode).map_err(|err| {
-        TuliproxError::new(
-            TuliproxErrorKind::Info,
-            format!("Failed to start config file watcher {err}"),
-        )
+        TuliproxError::new(TuliproxErrorKind::Info, format!("Failed to start config file watcher {err}"))
     })?;
     info!("Watching config file changes {}", path.display());
 
@@ -92,8 +79,7 @@ fn start_config_watch(
 
         let _keep_watcher_alive = watcher;
 
-        let mut debounce_timer =
-            Box::pin(tokio::time::sleep(tokio::time::Duration::from_millis(0)));
+        let mut debounce_timer = Box::pin(tokio::time::sleep(tokio::time::Duration::from_millis(0)));
         let mut timer_active = false;
         let mut pending_configs: HashMap<ConfigFile, PathBuf> = HashMap::new();
 
@@ -178,8 +164,7 @@ fn get_watch_files(
     mapping_file_path: &str,
     template_file_path: &str,
 ) -> HashMap<PathBuf, (ConfigFile, bool)> {
-    let sources =
-        <Arc<ArcSwap<SourcesConfig>> as Access<SourcesConfig>>::load(&app_state.app_config.sources);
+    let sources = <Arc<ArcSwap<SourcesConfig>> as Access<SourcesConfig>>::load(&app_state.app_config.sources);
     let input_files_paths = sources.get_input_files();
     let mut files = HashMap::new();
     [

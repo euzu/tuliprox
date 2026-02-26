@@ -869,6 +869,7 @@ pub async fn update_series_metadata(
                                 probe_settings.analyze_duration_micros,
                                 probe_settings.probe_size_bytes,
                                 probe_settings.timeout_secs,
+                                config.proxy.as_ref(),
                             )
                             .await
                             {

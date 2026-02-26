@@ -139,6 +139,7 @@ pub async fn update_live_stream_metadata(
         analyze_duration,
         probe_size,
         ffprobe_timeout,
+        config.proxy.as_ref(),
     )
     .await
     {

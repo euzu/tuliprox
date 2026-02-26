@@ -1,26 +1,32 @@
-use crate::api::model::BoxedProviderStream;
-use crate::api::model::StreamError;
-use crate::api::model::TimedClientStream;
-use crate::api::model::TransportStreamBuffer;
-use crate::api::model::{AppState, ConnectionManager, CustomVideoStreamType, ProviderHandle, StreamDetails};
-use crate::api::panel_api::{can_provision_on_exhausted, find_input_by_provider_name, run_panel_api_provisioning_probe};
-use crate::auth::Fingerprint;
-use crate::model::{ConfigInput, ProxyUserCredentials};
-use crate::tools::atomic_once_flag::AtomicOnceFlag;
-use crate::utils::debug_if_enabled;
-use axum::http::header::USER_AGENT;
-use axum::http::HeaderMap;
+use crate::{
+    api::{
+        model::{
+            AppState, BoxedProviderStream, ConnectionManager, CustomVideoStreamType, ProviderHandle, StreamDetails,
+            StreamError, TimedClientStream, TransportStreamBuffer,
+        },
+        panel_api::{can_provision_on_exhausted, find_input_by_provider_name, run_panel_api_provisioning_probe},
+    },
+    auth::Fingerprint,
+    model::{ConfigInput, ProxyUserCredentials},
+    tools::atomic_once_flag::AtomicOnceFlag,
+    utils::debug_if_enabled,
+};
+use axum::http::{header::USER_AGENT, HeaderMap};
 use bytes::Bytes;
-use futures::task::AtomicWaker;
-use futures::Stream;
-use futures::StreamExt;
+use futures::{task::AtomicWaker, Stream, StreamExt};
 use log::{debug, error, info};
-use shared::model::{StreamChannel, UserConnectionPermission, VirtualId};
-use shared::utils::sanitize_sensitive_info;
-use std::pin::Pin;
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::Arc;
-use std::task::{Context, Poll};
+use shared::{
+    model::{StreamChannel, UserConnectionPermission, VirtualId},
+    utils::sanitize_sensitive_info,
+};
+use std::{
+    pin::Pin,
+    sync::{
+        atomic::{AtomicU8, Ordering},
+        Arc,
+    },
+    task::{Context, Poll},
+};
 
 const INNER_STREAM: u8 = 0_u8;
 const USER_EXHAUSTED_STREAM: u8 = 1_u8;
@@ -253,15 +259,9 @@ pub(crate) async fn create_active_client_stream(
     }
     let grant_user_grace_period = connection_permission == UserConnectionPermission::GracePeriod;
     let username = user.username.as_str();
-    let provider_name = stream_details
-        .provider_name
-        .as_ref()
-        .map_or_else(String::new, ToString::to_string);
+    let provider_name = stream_details.provider_name.as_ref().map_or_else(String::new, ToString::to_string);
 
-    let user_agent = req_headers
-        .get(USER_AGENT)
-        .map(|h| String::from_utf8_lossy(h.as_bytes()))
-        .unwrap_or_default();
+    let user_agent = req_headers.get(USER_AGENT).map(|h| String::from_utf8_lossy(h.as_bytes())).unwrap_or_default();
 
     let virtual_id = stream_channel.virtual_id;
     app_state
@@ -277,36 +277,17 @@ pub(crate) async fn create_active_client_stream(
         )
         .await;
     if let Some((_, _, _m_, Some(cvt))) = stream_details.stream_info.as_ref() {
-        app_state
-            .connection_manager
-            .update_stream_detail(&fingerprint.addr, *cvt)
-            .await;
+        app_state.connection_manager.update_stream_detail(&fingerprint.addr, *cvt).await;
     }
 
     let provisioning_info = resolve_grace_period_provisioning(app_state, &stream_details);
     let has_provisioning = provisioning_info.is_some();
     let hold_stream = stream_details.grace_period.hold_stream;
 
-    let (grace_stop_flag, waker) = if grant_user_grace_period
-        || (stream_details.has_grace_period() && stream_details.provider_name.is_some())
-    {
-        let waker = Arc::new(AtomicWaker::new());
-        let flag = stream_grace_period(
-            app_state,
-            &stream_details,
-            grant_user_grace_period,
-            user,
-            fingerprint,
-            virtual_id,
-            provisioning_info,
-            Some(Arc::clone(&waker)),
-            hold_stream,
-        );
-        let maybe_waker = flag.as_ref().map(|_| waker);
-        (flag, maybe_waker)
-    } else {
-        (
-            stream_grace_period(
+    let (grace_stop_flag, waker) =
+        if grant_user_grace_period || (stream_details.has_grace_period() && stream_details.provider_name.is_some()) {
+            let waker = Arc::new(AtomicWaker::new());
+            let flag = stream_grace_period(
                 app_state,
                 &stream_details,
                 grant_user_grace_period,
@@ -314,12 +295,27 @@ pub(crate) async fn create_active_client_stream(
                 fingerprint,
                 virtual_id,
                 provisioning_info,
-                None,
+                Some(Arc::clone(&waker)),
                 hold_stream,
-            ),
-            None,
-        )
-    };
+            );
+            let maybe_waker = flag.as_ref().map(|_| waker);
+            (flag, maybe_waker)
+        } else {
+            (
+                stream_grace_period(
+                    app_state,
+                    &stream_details,
+                    grant_user_grace_period,
+                    user,
+                    fingerprint,
+                    virtual_id,
+                    provisioning_info,
+                    None,
+                    hold_stream,
+                ),
+                None,
+            )
+        };
 
     let cfg = &app_state.app_config;
     let custom_response = cfg.custom_stream_response.load();
@@ -335,10 +331,7 @@ pub(crate) async fn create_active_client_stream(
     let stream = match stream_details.stream.take() {
         None => {
             let provider_handle = stream_details.provider_handle.take();
-            app_state
-                .connection_manager
-                .release_provider_handle(provider_handle)
-                .await;
+            app_state.connection_manager.release_provider_handle(provider_handle).await;
             futures::stream::empty::<Result<Bytes, StreamError>>().boxed()
         }
         Some(stream) => {
@@ -346,11 +339,9 @@ pub(crate) async fn create_active_client_stream(
             match config.sleep_timer_mins {
                 None => stream,
                 Some(mins) => {
-                    let secs =
-                        u32::try_from((u64::from(mins) * 60).min(u64::from(u32::MAX))).unwrap_or(0);
+                    let secs = u32::try_from((u64::from(mins) * 60).min(u64::from(u32::MAX))).unwrap_or(0);
                     if secs > 0 {
-                        TimedClientStream::new(app_state, stream, secs, fingerprint.addr, virtual_id)
-                            .boxed()
+                        TimedClientStream::new(app_state, stream, secs, fingerprint.addr, virtual_id).boxed()
                     } else {
                         stream
                     }
@@ -385,8 +376,7 @@ fn resolve_grace_period_provisioning(
         return None;
     }
     let provider_name = stream_details.provider_name.as_deref();
-    let input =
-        provider_name.and_then(|name| find_input_by_provider_name(app_state.as_ref(), name))?;
+    let input = provider_name.and_then(|name| find_input_by_provider_name(app_state.as_ref(), name))?;
     if !can_provision_on_exhausted(app_state, &input) {
         return None;
     }
@@ -431,7 +421,7 @@ fn stream_grace_period(
     debug!("hold stream {hold_stream}");
 
     if provider_grace_check.is_some() || user_grace_check.is_some() {
-        let stream_strategy_flag = Arc::new(AtomicU8::new(if hold_stream {GRACE_PENDING} else {INNER_STREAM}));
+        let stream_strategy_flag = Arc::new(AtomicU8::new(if hold_stream { GRACE_PENDING } else { INNER_STREAM }));
         let stream_strategy_flag_copy = Arc::clone(&stream_strategy_flag);
         let grace_period_millis = stream_details.grace_period.period_millis;
 
@@ -450,10 +440,7 @@ fn stream_grace_period(
                 if active_connections > max_connections {
                     stream_strategy_flag_copy.store(USER_EXHAUSTED_STREAM, Ordering::Release);
                     connection_manager
-                        .update_stream_detail(
-                            &fingerprint.addr,
-                            CustomVideoStreamType::UserConnectionsExhausted,
-                        )
+                        .update_stream_detail(&fingerprint.addr, CustomVideoStreamType::UserConnectionsExhausted)
                         .await;
                     // Release the shared stream subscription to stop the subscriber loop
                     connection_manager.shared_stream_manager.release_connection(&fingerprint.addr, true).await;
@@ -468,10 +455,7 @@ fn stream_grace_period(
                         if let Some(provisioning_info) = provisioning_info {
                             stream_strategy_flag_copy.store(PROVISIONING_STREAM, Ordering::Release);
                             connection_manager
-                                .update_stream_detail(
-                                    &fingerprint.addr,
-                                    CustomVideoStreamType::Provisioning,
-                                )
+                                .update_stream_detail(&fingerprint.addr, CustomVideoStreamType::Provisioning)
                                 .await;
                             debug_if_enabled!(
                                 "Provider grace period exhausted; provisioning for active clients: {provider_name}"
@@ -481,20 +465,15 @@ fn stream_grace_period(
                             let stop_signal = provisioning_info.stop_signal;
                             let addr = fingerprint.addr;
                             tokio::spawn(async move {
-                                if let Err(err) = run_panel_api_provisioning_probe(
-                                    app_state,
-                                    input,
-                                    stop_signal,
-                                    addr,
-                                    virtual_id,
-                                )
-                                    .await {
+                                if let Err(err) =
+                                    run_panel_api_provisioning_probe(app_state, input, stop_signal, addr, virtual_id)
+                                        .await
+                                {
                                     error!("Error running Probe: {err:?}");
                                 }
                             });
                         } else {
-                            stream_strategy_flag_copy
-                                .store(PROVIDER_EXHAUSTED_STREAM, Ordering::Release);
+                            stream_strategy_flag_copy.store(PROVIDER_EXHAUSTED_STREAM, Ordering::Release);
                             connection_manager
                                 .update_stream_detail(
                                     &fingerprint.addr,

@@ -1,8 +1,8 @@
 use crate::api::model::StreamError;
 use bytes::Bytes;
 use futures::Stream;
-use std::future::Future;
 use std::{
+    future::Future,
     pin::Pin,
     task::{Context, Poll},
     time::Duration,
@@ -19,18 +19,14 @@ impl<S> ThrottledStream<S> {
     #[allow(clippy::cast_precision_loss)]
     pub fn new(inner: S, throttle_kbps: usize) -> Self {
         assert!(throttle_kbps > 0, "Rate must be greater than 0");
-        let rate_bytes_per_sec = (throttle_kbps as f64) *  1000.0 / 8.0;
-        Self {
-            inner,
-            rate_bytes_per_sec,
-            next_delay: None,
-        }
+        let rate_bytes_per_sec = (throttle_kbps as f64) * 1000.0 / 8.0;
+        Self { inner, rate_bytes_per_sec, next_delay: None }
     }
 }
 
 impl<S> Stream for ThrottledStream<S>
 where
-    S: Stream<Item=Result<Bytes, StreamError>> + Unpin,
+    S: Stream<Item = Result<Bytes, StreamError>> + Unpin,
 {
     type Item = Result<Bytes, StreamError>;
 

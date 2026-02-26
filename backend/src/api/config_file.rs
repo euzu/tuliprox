@@ -1,15 +1,21 @@
-use crate::api::model::{update_app_state_config, update_app_state_sources, AppState, EventMessage};
-use crate::model::{Config, Mappings, SourcesConfig};
-use crate::utils;
-use crate::utils::{
-    read_templates, prepare_sources_batch, read_config_file, read_mappings_file_unprepared,
-    read_mappings_file_with_templates, read_sources_file, read_sources_file_from_path_with_templates,
+use crate::{
+    api::model::{update_app_state_config, update_app_state_sources, AppState, EventMessage},
+    model::{Config, Mappings, SourcesConfig},
+    utils,
+    utils::{
+        prepare_sources_batch, read_config_file, read_mappings_file_unprepared, read_mappings_file_with_templates,
+        read_sources_file, read_sources_file_from_path_with_templates, read_templates,
+    },
 };
 use log::{debug, error, info};
-use shared::error::TuliproxError;
-use shared::model::{ConfigPaths, ConfigType, PatternTemplate};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use shared::{
+    error::TuliproxError,
+    model::{ConfigPaths, ConfigType, PatternTemplate},
+};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ConfigFile {
@@ -48,7 +54,9 @@ impl ConfigFile {
     // -----------------------------------------------------------------
 
     /// Load and merge global templates using the current app state.
-    fn load_prepared_global_templates(app_state: &Arc<AppState>) -> Result<Option<Vec<PatternTemplate>>, TuliproxError> {
+    fn load_prepared_global_templates(
+        app_state: &Arc<AppState>,
+    ) -> Result<Option<Vec<PatternTemplate>>, TuliproxError> {
         let paths = app_state.app_config.paths.load();
         let config = app_state.app_config.config.load();
         Self::load_prepared_global_templates_with_config(&paths, &config)
@@ -107,14 +115,9 @@ impl ConfigFile {
         }
     }
 
-    fn apply_mapping_reload(
-        app_state: &Arc<AppState>,
-        prepared_mapping: Option<PreparedMappingsReload>,
-    ) {
+    fn apply_mapping_reload(app_state: &Arc<AppState>, prepared_mapping: Option<PreparedMappingsReload>) {
         if let Some(prepared_mapping) = prepared_mapping {
-            app_state
-                .app_config
-                .set_mappings(prepared_mapping.mapping_file_path.as_str(), &prepared_mapping.mappings);
+            app_state.app_config.set_mappings(prepared_mapping.mapping_file_path.as_str(), &prepared_mapping.mappings);
             for mapping_file in prepared_mapping.mapping_files {
                 info!("Loaded mapping file {}", mapping_file.display());
             }
@@ -126,8 +129,7 @@ impl ConfigFile {
         prepared_templates: Option<&[PatternTemplate]>,
     ) -> Result<(), TuliproxError> {
         let paths = app_state.app_config.paths.load();
-        let prepared_mapping =
-            Self::prepare_mapping_reload(paths.mapping_file_path.as_deref(), prepared_templates)?;
+        let prepared_mapping = Self::prepare_mapping_reload(paths.mapping_file_path.as_deref(), prepared_templates)?;
         Self::apply_mapping_reload(app_state, prepared_mapping);
         Ok(())
     }
@@ -219,27 +221,15 @@ impl ConfigFile {
         let config_dto = read_config_file(config_file.as_str(), true, true)?;
 
         let default_mapping_path = utils::get_default_mappings_path(paths.config_path.as_str());
-        let current_mapping_path = paths
-            .mapping_file_path
-            .clone()
-            .unwrap_or_else(|| default_mapping_path.clone());
-        let next_mapping_path = config_dto
-            .mapping_path
-            .clone()
-            .filter(|path| !path.trim().is_empty())
-            .unwrap_or(default_mapping_path);
+        let current_mapping_path = paths.mapping_file_path.clone().unwrap_or_else(|| default_mapping_path.clone());
+        let next_mapping_path =
+            config_dto.mapping_path.clone().filter(|path| !path.trim().is_empty()).unwrap_or(default_mapping_path);
         let mapping_changed = current_mapping_path != next_mapping_path;
 
         let default_template_path = utils::get_default_templates_path(paths.config_path.as_str());
-        let current_template_path = paths
-            .template_file_path
-            .clone()
-            .unwrap_or_else(|| default_template_path.clone());
-        let next_template_path = config_dto
-            .template_path
-            .clone()
-            .filter(|path| !path.trim().is_empty())
-            .unwrap_or(default_template_path);
+        let current_template_path = paths.template_file_path.clone().unwrap_or_else(|| default_template_path.clone());
+        let next_template_path =
+            config_dto.template_path.clone().filter(|path| !path.trim().is_empty()).unwrap_or(default_template_path);
         let template_changed = current_template_path != next_template_path;
 
         let mut config: Config = Config::from(config_dto);
@@ -261,8 +251,7 @@ impl ConfigFile {
             PreparedFollowUp::Sources(prepared)
         } else if mapping_changed {
             // Only mapping path changed; templates are the same → load templates once.
-            let prepared_templates =
-                Self::load_prepared_global_templates_with_config(&effective_paths, &config)?;
+            let prepared_templates = Self::load_prepared_global_templates_with_config(&effective_paths, &config)?;
             let prepared = Self::prepare_mapping_reload(
                 effective_paths.mapping_file_path.as_deref(),
                 prepared_templates.as_deref(),
@@ -345,11 +334,8 @@ impl ConfigFile {
             }
             ConfigFile::Template | ConfigFile::Sources => {
                 ConfigFile::load_sources(app_state).await?;
-                let event_type = if matches!(self, ConfigFile::Template) {
-                    ConfigType::Template
-                } else {
-                    ConfigType::Sources
-                };
+                let event_type =
+                    if matches!(self, ConfigFile::Template) { ConfigType::Template } else { ConfigType::Sources };
                 app_state.event_manager.send_event(EventMessage::ConfigChange(event_type));
             }
             ConfigFile::Config => {

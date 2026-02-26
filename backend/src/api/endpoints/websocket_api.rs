@@ -1,13 +1,22 @@
-use crate::api::endpoints::v1_api::create_status_check;
-use crate::api::model::AppState;
-use crate::api::model::EventMessage;
-use crate::auth::{verify_token_admin, verify_token_user};
-use axum::extract::ws::CloseFrame;
-use axum::{extract::ws::{Message, WebSocket, WebSocketUpgrade},response::IntoResponse};
+use crate::{
+    api::{
+        endpoints::v1_api::create_status_check,
+        model::{AppState, EventMessage},
+    },
+    auth::{verify_token_admin, verify_token_user},
+};
+use axum::{
+    extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
+    response::IntoResponse,
+};
 use log::{error, trace};
-use shared::model::{ProtocolHandler, ProtocolHandlerMemory, ProtocolMessage, UserCommand, UserRole, WsCloseCode, PROTOCOL_VERSION};
+use shared::{
+    model::{
+        ProtocolHandler, ProtocolHandlerMemory, ProtocolMessage, UserCommand, UserRole, WsCloseCode, PROTOCOL_VERSION,
+    },
+    utils::{concat_path_leading_slash, default_kick_secs},
+};
 use std::sync::Arc;
-use shared::utils::{concat_path_leading_slash, default_kick_secs};
 
 // WebSocket upgrade handler
 async fn websocket_handler(
@@ -29,15 +38,10 @@ async fn websocket_handler_auth(
 
 pub fn ws_api_register(web_auth_enabled: bool, web_ui_path: &str) -> axum::Router<Arc<AppState>> {
     if web_auth_enabled {
-        axum::Router::new().route(
-            &concat_path_leading_slash(web_ui_path, "ws"),
-            axum::routing::get(websocket_handler_auth),
-        )
+        axum::Router::new()
+            .route(&concat_path_leading_slash(web_ui_path, "ws"), axum::routing::get(websocket_handler_auth))
     } else {
-        axum::Router::new().route(
-            &concat_path_leading_slash(web_ui_path, "ws"),
-            axum::routing::get(websocket_handler),
-        )
+        axum::Router::new().route(&concat_path_leading_slash(web_ui_path, "ws"), axum::routing::get(websocket_handler))
     }
 }
 
@@ -62,17 +66,10 @@ fn get_secret_key(app_state: &AppState, auth: bool) -> Option<Vec<u8>> {
         return None;
     }
 
-    app_state
-        .app_config
-        .config
-        .load()
-        .web_ui
-        .as_ref()
-        .and_then(|c| c.auth.as_ref())
-        .map(|c| {
-            let secret_key: &[u8] = c.secret.as_ref();
-            secret_key.to_vec()
-        })
+    app_state.app_config.config.load().web_ui.as_ref().and_then(|c| c.auth.as_ref()).map(|c| {
+        let secret_key: &[u8] = c.secret.as_ref();
+        secret_key.to_vec()
+    })
 }
 
 async fn handle_handshake(msg: Message, socket: &mut WebSocket, version: u8) -> Result<(), String> {
@@ -80,10 +77,7 @@ async fn handle_handshake(msg: Message, socket: &mut WebSocket, version: u8) -> 
         if bytes.len() == 1 {
             let client_version = bytes[0];
             if client_version == version {
-                socket
-                    .send(Message::binary(bytes))
-                    .await
-                    .map_err(|e| e.to_string())?;
+                socket.send(Message::binary(bytes)).await.map_err(|e| e.to_string())?;
                 return Ok(());
             }
             error!("Protocol Version mismatch: server={version}, client={client_version}");
@@ -110,19 +104,19 @@ async fn handle_protocol_message(
     if let Message::Binary(bytes) = msg {
         match ProtocolMessage::from_bytes(bytes) {
             Ok(ProtocolMessage::Auth(auth_token)) => {
-                 mem.token = None;
-                 if !auth_required || verify_auth_admin_token(&auth_token, secret_key) {
-                     mem.role = UserRole::Admin;
-                     mem.token = Some(auth_token);
-                     Some(ProtocolMessage::Authorized)
-                 } else if verify_auth_user_token(&auth_token, secret_key) {
-                     mem.role = UserRole::User;
-                     mem.token = Some(auth_token);
-                     Some(ProtocolMessage::Authorized)
-                 } else {
-                     Some(ProtocolMessage::Unauthorized)
-                 }
-            },
+                mem.token = None;
+                if !auth_required || verify_auth_admin_token(&auth_token, secret_key) {
+                    mem.role = UserRole::Admin;
+                    mem.token = Some(auth_token);
+                    Some(ProtocolMessage::Authorized)
+                } else if verify_auth_user_token(&auth_token, secret_key) {
+                    mem.role = UserRole::User;
+                    mem.token = Some(auth_token);
+                    Some(ProtocolMessage::Authorized)
+                } else {
+                    Some(ProtocolMessage::Unauthorized)
+                }
+            }
             Ok(ProtocolMessage::StatusRequest(auth_token)) => {
                 if !auth_required || verify_auth_admin_token(&auth_token, secret_key) {
                     mem.role = UserRole::Admin;
@@ -132,7 +126,7 @@ async fn handle_protocol_message(
                 } else {
                     Some(ProtocolMessage::Unauthorized)
                 }
-            },
+            }
             Ok(ProtocolMessage::UserAction(cmd)) => {
                 if let Some(token) = mem.token.as_ref() {
                     if !auth_required || verify_auth_admin_token(token, secret_key) {
@@ -143,7 +137,7 @@ async fn handle_protocol_message(
                 } else {
                     Some(ProtocolMessage::UserActionResponse(false))
                 }
-            },
+            }
             Ok(ProtocolMessage::ActiveProviderCountRequest(auth_token)) => {
                 if !auth_required || verify_auth_admin_token(&auth_token, secret_key) {
                     mem.role = UserRole::Admin;
@@ -153,16 +147,14 @@ async fn handle_protocol_message(
                 } else {
                     Some(ProtocolMessage::Unauthorized)
                 }
-            },
+            }
             Ok(_) => {
                 trace!("Unexpected protocol message after handshake");
                 None
             }
             Err(e) => {
                 error!("Invalid websocket message: {e}");
-                Some(ProtocolMessage::Error(format!(
-                    "Invalid websocket message: {e}"
-                )))
+                Some(ProtocolMessage::Error(format!("Invalid websocket message: {e}")))
             }
         }
     } else {
@@ -193,39 +185,31 @@ async fn handle_incoming_message(
                 Some(protocol_msg) => {
                     let bytes = match protocol_msg.to_bytes() {
                         Ok(bytes) => bytes,
-                        Err(err) => ProtocolMessage::Error(err.to_string())
-                            .to_bytes()
-                            .map_err(|e| e.to_string())?,
+                        Err(err) => ProtocolMessage::Error(err.to_string()).to_bytes().map_err(|e| e.to_string())?,
                     };
-                    Ok(socket
-                        .send(Message::Binary(bytes))
-                        .await
-                        .map_err(|e| e.to_string())?)
+                    Ok(socket.send(Message::Binary(bytes)).await.map_err(|e| e.to_string())?)
                 }
             }
         }
     }
 }
 
-async fn handle_event_message(socket: &mut WebSocket, event: EventMessage, handler: &ProtocolHandler) -> Result<(), String> {
+async fn handle_event_message(
+    socket: &mut WebSocket,
+    event: EventMessage,
+    handler: &ProtocolHandler,
+) -> Result<(), String> {
     match handler {
-        ProtocolHandler::Version(_) => {},
+        ProtocolHandler::Version(_) => {}
         ProtocolHandler::Default(mem) => {
             if mem.role.is_admin() {
                 match event {
                     EventMessage::ServerError(error) => {
-                        let msg = ProtocolMessage::ServerError(error)
-                            .to_bytes()
-                            .map_err(|e| e.to_string())?;
-                        socket
-                            .send(Message::Binary(msg))
-                            .await
-                            .map_err(|e| format!("Server Error event: {e} "))?;
+                        let msg = ProtocolMessage::ServerError(error).to_bytes().map_err(|e| e.to_string())?;
+                        socket.send(Message::Binary(msg)).await.map_err(|e| format!("Server Error event: {e} "))?;
                     }
                     EventMessage::ActiveUser(event) => {
-                        let msg = ProtocolMessage::ActiveUserResponse(event)
-                            .to_bytes()
-                            .map_err(|e| e.to_string())?;
+                        let msg = ProtocolMessage::ActiveUserResponse(event).to_bytes().map_err(|e| e.to_string())?;
                         socket
                             .send(Message::Binary(msg))
                             .await
@@ -241,22 +225,17 @@ async fn handle_event_message(socket: &mut WebSocket, event: EventMessage, handl
                             .map_err(|e| format!("Provider connection change event: {e} "))?;
                     }
                     EventMessage::ConfigChange(config) => {
-                        let msg = ProtocolMessage::ConfigChangeResponse(config)
-                            .to_bytes()
-                            .map_err(|e| e.to_string())?;
+                        let msg =
+                            ProtocolMessage::ConfigChangeResponse(config).to_bytes().map_err(|e| e.to_string())?;
                         socket
                             .send(Message::Binary(msg))
                             .await
                             .map_err(|e| format!("Configuration files change event: {e} "))?;
                     }
                     EventMessage::PlaylistUpdate(state) => {
-                        let msg = ProtocolMessage::PlaylistUpdateResponse(state)
-                            .to_bytes()
-                            .map_err(|e| e.to_string())?;
-                        socket
-                            .send(Message::Binary(msg))
-                            .await
-                            .map_err(|e| format!("Playlist update event: {e} "))?;
+                        let msg =
+                            ProtocolMessage::PlaylistUpdateResponse(state).to_bytes().map_err(|e| e.to_string())?;
+                        socket.send(Message::Binary(msg)).await.map_err(|e| format!("Playlist update event: {e} "))?;
                     }
                     EventMessage::PlaylistUpdateProgress(target, msg) => {
                         let msg = ProtocolMessage::PlaylistUpdateProgressResponse(target, msg)
@@ -268,13 +247,9 @@ async fn handle_event_message(socket: &mut WebSocket, event: EventMessage, handl
                             .map_err(|e| format!("Playlist update progress event: {e} "))?;
                     }
                     EventMessage::SystemInfoUpdate(system_info) => {
-                        let msg = ProtocolMessage::SystemInfoResponse(system_info)
-                            .to_bytes()
-                            .map_err(|e| e.to_string())?;
-                        socket
-                            .send(Message::Binary(msg))
-                            .await
-                            .map_err(|e| format!("System info event: {e} "))?;
+                        let msg =
+                            ProtocolMessage::SystemInfoResponse(system_info).to_bytes().map_err(|e| e.to_string())?;
+                        socket.send(Message::Binary(msg)).await.map_err(|e| format!("System info event: {e} "))?;
                     }
                     EventMessage::LibraryScanProgress(summary) => {
                         let msg = ProtocolMessage::LibraryScanProgressResponse(summary)
@@ -330,7 +305,8 @@ async fn handle_user_action(app_state: &Arc<AppState>, cmd: UserCommand) -> bool
     match cmd {
         UserCommand::Kick(addr, virtual_id, _secs) => {
             // secs could be later used for different kick configurations. Currently, we only have 1.
-            let kick_secs = app_state.app_config.config.load().web_ui.as_ref().map_or_else(default_kick_secs, |wc| wc.kick_secs);
+            let kick_secs =
+                app_state.app_config.config.load().web_ui.as_ref().map_or_else(default_kick_secs, |wc| wc.kick_secs);
             app_state.connection_manager.kick_connection(&addr, virtual_id, kick_secs).await
         }
     }

@@ -1,9 +1,11 @@
 use crate::model::{AppConfig, HdHomeRunDeviceConfig, HdHomeRunFlags};
-use socket2::{Domain, Protocol, Socket, Type};
-use std::net::{Ipv4Addr, SocketAddr, UdpSocket as StdUdpSocket};
-use std::sync::Arc;
-use std::time::Duration;
 use log::{error, info, trace};
+use socket2::{Domain, Protocol, Socket, Type};
+use std::{
+    net::{Ipv4Addr, SocketAddr, UdpSocket as StdUdpSocket},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::net::UdpSocket;
 use tokio_util::sync::CancellationToken;
 
@@ -36,27 +38,29 @@ async fn ssdp_task_loop(socket: UdpSocket, app_config: Arc<AppConfig>, server_ho
         };
 
         let request = String::from_utf8_lossy(&buf[..len]);
-        if !request.starts_with("M-SEARCH") { continue; }
+        if !request.starts_with("M-SEARCH") {
+            continue;
+        }
         let req = request.to_ascii_lowercase();
-        if !req.contains(r#"man: "ssdp:discover""#) { continue; }
+        if !req.contains(r#"man: "ssdp:discover""#) {
+            continue;
+        }
         // Extract ST and MX (defaults)
-        let st = req.lines()
+        let st = req
+            .lines()
             .find_map(|l| l.strip_prefix("st:").map(|v| v.trim().to_string()))
             .unwrap_or_else(|| "ssdp:all".to_string());
-        let mx: u64 = req.lines()
-            .find_map(|l| l.strip_prefix("mx:").and_then(|v| v.trim().parse().ok()))
-            .unwrap_or(1);
+        let mx: u64 = req.lines().find_map(|l| l.strip_prefix("mx:").and_then(|v| v.trim().parse().ok())).unwrap_or(1);
         // Normalize to the set we support
-        let supported = [
-            "urn:schemas-upnp-org:device:mediaserver:1",
-            "upnp:rootdevice",
-            "ssdp:all",
-        ];
-        if !supported.contains(&st.as_str()) { continue; }
+        let supported = ["urn:schemas-upnp-org:device:mediaserver:1", "upnp:rootdevice", "ssdp:all"];
+        if !supported.contains(&st.as_str()) {
+            continue;
+        }
         // Randomized delay per MX
-        let delay_ms = (fastrand::u64(0..=mx*1000)).min(2000);
-        if delay_ms > 0 { tokio::time::sleep(Duration::from_millis(delay_ms)).await; }
-
+        let delay_ms = (fastrand::u64(0..=mx * 1000)).min(2000);
+        if delay_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        }
 
         trace!("Received HDHomeRun M-SEARCH from {remote_addr}");
         let hdhomerun_guard = app_config.hdhomerun.load();
@@ -87,9 +91,13 @@ pub fn spawn_ssdp_discover_task(app_config: Arc<AppConfig>, server_host: String,
                 return;
             }
         };
-        if let Err(e) = std_socket.set_reuse_address(true) { error!("Failed to set reuse_address on SSDP socket: {e}"); }
+        if let Err(e) = std_socket.set_reuse_address(true) {
+            error!("Failed to set reuse_address on SSDP socket: {e}");
+        }
         #[cfg(not(windows))]
-        if let Err(e) = std_socket.set_reuse_port(true) { error!("Failed to set reuse_port on SSDP socket: {e}"); }
+        if let Err(e) = std_socket.set_reuse_port(true) {
+            error!("Failed to set reuse_port on SSDP socket: {e}");
+        }
         if let Err(e) = std_socket.bind(&addr.into()) {
             error!("Failed to bind SSDP socket to {addr}: {e}");
             return;

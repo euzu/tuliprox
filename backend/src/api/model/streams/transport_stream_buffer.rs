@@ -1,11 +1,13 @@
 use bytes::{Bytes, BytesMut};
 use futures::task::AtomicWaker;
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use std::task::Waker;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    task::Waker,
+};
 
-const MAX_PCR: u64 = 1 << 42;        // 42 bit PCR cycle
-const MAX_PTS_DTS: u64 = 1 << 33;    // 33 bit PTS/DTS cycle
+const MAX_PCR: u64 = 1 << 42; // 42 bit PCR cycle
+const MAX_PTS_DTS: u64 = 1 << 33; // 33 bit PTS/DTS cycle
 
 const TS_PACKET_SIZE: usize = 188;
 const SYNC_BYTE: u8 = 0x47;
@@ -196,7 +198,13 @@ pub fn extract_pts_dts_indices_with_continuity(ts_data: &[u8]) -> TsInfoExtracti
 }
 
 /// Replace PTS and DTS timestamps in the TS packet slice
-fn replace_pts_dts(packet_slice: &[u8], pts_index: usize, dts_index: Option<usize>, new_presentation_ts: u64, new_decoding_ts: u64) -> Vec<u8> {
+fn replace_pts_dts(
+    packet_slice: &[u8],
+    pts_index: usize,
+    dts_index: Option<usize>,
+    new_presentation_ts: u64,
+    new_decoding_ts: u64,
+) -> Vec<u8> {
     let new_presentation_ts_bytes = encode_timestamp(new_presentation_ts);
 
     let mut new_packet = Vec::with_capacity(packet_slice.len());
@@ -266,7 +274,7 @@ pub fn calculate_duration_ticks(buffer: &[u8], packet_indices: &PacketIndices) -
     let mut last_pts: Option<u64> = None;
     let mut count = 0;
 
-    // We already calculated average diff/duration in `extract_pts_dts_indices_with_continuity` 
+    // We already calculated average diff/duration in `extract_pts_dts_indices_with_continuity`
     // but we didn't expose it. We can re-estimate it here or assume a default.
     // However, packet_indices stores `diff` in the tuple! `(pts, dts, diff)`.
     // But only for the first packet of a frame?
@@ -418,12 +426,16 @@ impl TransportStreamBuffer {
         }
     }
 
-    pub fn register_waker(&self, waker: &Waker) {
-        self.waker.register(waker);
-    }
+    pub fn register_waker(&self, waker: &Waker) { self.waker.register(waker); }
 
     /// Generates a Discontinuity packet for the given packet/PID state.
-    fn generate_discontinuity_packet(_pid: u16, new_packet: &[u8], cc: u8, first_pcr: Option<u64>, timestamp_offset: u64) -> Vec<u8> {
+    fn generate_discontinuity_packet(
+        _pid: u16,
+        new_packet: &[u8],
+        cc: u8,
+        first_pcr: Option<u64>,
+        timestamp_offset: u64,
+    ) -> Vec<u8> {
         let mut pkt = vec![0xFF; TS_PACKET_SIZE];
         pkt[0] = SYNC_BYTE;
         pkt[1] = new_packet[1] & 0x1F;
@@ -537,7 +549,13 @@ impl TransportStreamBuffer {
 
                 *discontinuity_sent = true;
 
-                let extra = Self::generate_discontinuity_packet(pid, &new_packet, extra_packet_cc, self.first_pcr, self.timestamp_offset);
+                let extra = Self::generate_discontinuity_packet(
+                    pid,
+                    &new_packet,
+                    extra_packet_cc,
+                    self.first_pcr,
+                    self.timestamp_offset,
+                );
                 bytes.extend_from_slice(&extra);
             } else {
                 // Payload packet gets current counter (N)
@@ -582,7 +600,8 @@ impl TransportStreamBuffer {
                 let orig_presentation_ts = decode_timestamp(&new_packet[pts_offset..pts_offset + 5]);
                 let new_presentation_ts = (orig_presentation_ts + self.timestamp_offset) % MAX_PTS_DTS;
 
-                let replaced = replace_pts_dts(&new_packet, pts_offset, dts_offset, new_presentation_ts, new_decoding_ts);
+                let replaced =
+                    replace_pts_dts(&new_packet, pts_offset, dts_offset, new_presentation_ts, new_decoding_ts);
                 new_packet = replaced;
             }
 

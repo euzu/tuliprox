@@ -1,21 +1,17 @@
-use crate::api::model::StreamError;
-use crate::api::model::TransportStreamBuffer;
+use crate::api::model::{StreamError, TransportStreamBuffer};
 use bytes::Bytes;
 use futures::Stream;
-use std::pin::Pin;
-use std::task::{Context, Poll};
-
+use std::{
+    pin::Pin,
+    task::{Context, Poll},
+};
 
 pub struct CustomVideoStream {
     buffer: TransportStreamBuffer,
 }
 
 impl CustomVideoStream {
-    pub fn new(buffer: TransportStreamBuffer) -> Self {
-        Self {
-            buffer
-        }
-    }
+    pub fn new(buffer: TransportStreamBuffer) -> Self { Self { buffer } }
 }
 
 impl Stream for CustomVideoStream {

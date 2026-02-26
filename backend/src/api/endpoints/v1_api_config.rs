@@ -1,19 +1,30 @@
-use crate::api::api_utils::{internal_server_error, try_unwrap_body};
-use crate::api::config_file::ConfigFile;
-use crate::api::model::AppState;
-use crate::model::{ApiProxyConfig, InputSource, validate_library_paths_from_dto};
-use crate::utils;
-use crate::utils::request::download_text_content;
-use crate::utils::{persist_messaging_templates, prepare_sources_batch, prepare_users, read_api_proxy_file};
-use axum::response::IntoResponse;
-use axum::Router;
+use crate::{
+    api::{
+        api_utils::{internal_server_error, try_unwrap_body},
+        config_file::ConfigFile,
+        model::AppState,
+    },
+    model::{validate_library_paths_from_dto, ApiProxyConfig, InputSource},
+    utils,
+    utils::{
+        persist_messaging_templates, prepare_sources_batch, prepare_users, read_api_proxy_file,
+        request::download_text_content,
+    },
+};
+use axum::{response::IntoResponse, Router};
 use log::error;
 use serde_json::json;
-use shared::error::TuliproxError;
-use shared::model::{ApiProxyConfigDto, ConfigDto, SourcesConfigDto};
+use shared::{
+    error::TuliproxError,
+    model::{ApiProxyConfigDto, ConfigDto, SourcesConfigDto},
+};
 use std::sync::Arc;
 
-pub(in crate::api::endpoints) async fn intern_save_config_api_proxy(backup_dir: &str, api_proxy: &ApiProxyConfigDto, file_path: &str) -> Option<TuliproxError> {
+pub(in crate::api::endpoints) async fn intern_save_config_api_proxy(
+    backup_dir: &str,
+    api_proxy: &ApiProxyConfigDto,
+    file_path: &str,
+) -> Option<TuliproxError> {
     match utils::save_api_proxy(file_path, backup_dir, api_proxy).await {
         Ok(()) => {}
         Err(err) => {
@@ -49,7 +60,8 @@ async fn save_config_main(
     } else {
         if let Err(err) = persist_messaging_templates(&app_state, &mut cfg).await {
             error!("Failed to persist messaging templates: {err}");
-            return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({"error": err.to_string()}))).into_response();
+            return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({"error": err.to_string()})))
+                .into_response();
         }
 
         let paths = app_state.app_config.paths.load();
@@ -57,7 +69,8 @@ async fn save_config_main(
         let config = app_state.app_config.config.load();
         let backup_dir = config.get_backup_dir();
         if let Some(err) = intern_save_config_main(file_path, backup_dir.as_ref(), &cfg).await {
-            return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({"error": err.to_string()}))).into_response();
+            return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({"error": err.to_string()})))
+                .into_response();
         }
         axum::http::StatusCode::OK.into_response()
     }
@@ -71,17 +84,15 @@ async fn save_config_sources(
         Ok(value) => value,
         Err(err) => {
             error!("Failed to validate source.yml {err}");
-            return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": err.to_string()}))).into_response();
+            return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": err.to_string()})))
+                .into_response();
         }
     };
 
     if let Some(template_definition) = templates_to_persist.as_ref() {
         if let Err(err) = utils::persist_templates_config(&app_state, template_definition).await {
             error!("Failed to save template config {err}");
-            return (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(json!({"error": err.to_string()})),
-            )
+            return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({"error": err.to_string()})))
                 .into_response();
         }
     }
@@ -90,10 +101,7 @@ async fn save_config_sources(
         Ok(_) => {}
         Err(err) => {
             error!("Failed to persist source.yml {err}");
-            return (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(json!({"error": err.to_string()})),
-            )
+            return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({"error": err.to_string()})))
                 .into_response();
         }
     }
@@ -101,10 +109,7 @@ async fn save_config_sources(
     // Reload from disk so runtime always uses fully prepared sources/mappings/templates.
     if let Err(err) = ConfigFile::load_sources(&app_state).await {
         error!("Failed to reload prepared sources after save {err}");
-        return (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            axum::Json(json!({"error": err.to_string()})),
-        )
+        return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({"error": err.to_string()})))
             .into_response();
     }
 
@@ -112,9 +117,8 @@ async fn save_config_sources(
     axum::http::StatusCode::OK.into_response()
 }
 
-
 async fn get_config_api_proxy_config(
-    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>
+    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
 ) -> impl IntoResponse + Send {
     let paths = app_state.app_config.paths.load();
     let api_proxy_file_path = paths.api_proxy_file_path.as_str();
@@ -139,14 +143,14 @@ async fn save_config_api_proxy_config(
 ) -> impl IntoResponse + Send {
     for server_info in &mut req_api_proxy.server {
         if !server_info.validate() {
-            return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": "Invalid content"}))).into_response();
+            return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": "Invalid content"})))
+                .into_response();
         }
     }
 
     // TODO if hot reload is on, it is loaded twice, avoid this
     // Build the updated config without mutating global state yet
-    let base = app_state.app_config.api_proxy.load()
-        .as_deref().cloned().unwrap_or_default();
+    let base = app_state.app_config.api_proxy.load().as_deref().cloned().unwrap_or_default();
     let updated_api_proxy = ApiProxyConfig {
         use_user_db: req_api_proxy.use_user_db,
         server: req_api_proxy.server.iter().map(Into::into).collect(),
@@ -157,21 +161,23 @@ async fn save_config_api_proxy_config(
     let backup_dir = config.get_backup_dir();
     let paths = app_state.app_config.paths.load();
 
-    if let Some(err) = intern_save_config_api_proxy(backup_dir.as_ref(), &ApiProxyConfigDto::from(&updated_api_proxy), paths.api_proxy_file_path.as_str()).await {
-        return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({"error": err.to_string()}))).into_response();
+    if let Some(err) = intern_save_config_api_proxy(
+        backup_dir.as_ref(),
+        &ApiProxyConfigDto::from(&updated_api_proxy),
+        paths.api_proxy_file_path.as_str(),
+    )
+    .await
+    {
+        return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({"error": err.to_string()})))
+            .into_response();
     }
     // Persist succeeded — now update in‑memory state
-    app_state
-        .app_config
-        .api_proxy
-        .store(Some(Arc::new(updated_api_proxy)));
+    app_state.app_config.api_proxy.store(Some(Arc::new(updated_api_proxy)));
 
     axum::http::StatusCode::OK.into_response()
 }
 
-async fn config(
-    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
-) -> impl IntoResponse + Send {
+async fn config(axum::extract::State(app_state): axum::extract::State<Arc<AppState>>) -> impl IntoResponse + Send {
     let paths = app_state.app_config.paths.load();
     match utils::read_app_config_dto(&paths, true, false) {
         Ok(mut app_config) => {
@@ -208,7 +214,7 @@ async fn config_batch_content(
                 None,
                 false,
             )
-                .await
+            .await
             {
                 Ok((content, _path)) => {
                     // Return CSV with explicit content-type
@@ -224,9 +230,9 @@ async fn config_batch_content(
             };
         }
     }
-    (axum::http::StatusCode::NOT_FOUND, axum::Json(json!({"error": "Input not found or batch URL missing"}))).into_response()
+    (axum::http::StatusCode::NOT_FOUND, axum::Json(json!({"error": "Input not found or batch URL missing"})))
+        .into_response()
 }
-
 
 pub fn v1_api_config_register(router: Router<Arc<AppState>>) -> axum::Router<Arc<AppState>> {
     router

@@ -1,8 +1,10 @@
+use crate::{
+    model::ConfigTarget,
+    repository::{BPlusTree, VirtualIdRecord},
+};
+use shared::model::{M3uPlaylistItem, PlaylistItem, VirtualId, XtreamCluster, XtreamPlaylistItem};
 use std::collections::HashMap;
 use tokio::sync::RwLock;
-use shared::model::{M3uPlaylistItem, PlaylistItem, VirtualId, XtreamCluster, XtreamPlaylistItem};
-use crate::model::ConfigTarget;
-use crate::repository::{BPlusTree, VirtualIdRecord};
 
 pub struct PlaylistXtreamStorage {
     pub live: BPlusTree<u32, XtreamPlaylistItem>,
@@ -30,12 +32,7 @@ pub struct PlaylistStorageState {
 }
 
 impl PlaylistStorageState {
-
-    pub(crate) fn new() -> Self {
-        Self {
-            data: RwLock::new(HashMap::new()),
-        }
-    }
+    pub(crate) fn new() -> Self { Self { data: RwLock::new(HashMap::new()) } }
 
     pub async fn update_target_id_mapping(&self, target: &ConfigTarget, mapping: Vec<VirtualIdRecord>) {
         if target.use_memory_cache {
@@ -57,8 +54,9 @@ impl PlaylistStorageState {
                         match pli.xtream_cluster {
                             XtreamCluster::Live => &mut xtream.live,
                             XtreamCluster::Video => &mut xtream.vod,
-                            XtreamCluster::Series =>  &mut xtream.series,
-                        }.insert(pli.virtual_id, pli.clone());
+                            XtreamCluster::Series => &mut xtream.series,
+                        }
+                        .insert(pli.virtual_id, pli.clone());
                     }
                 }
             }
@@ -73,8 +71,9 @@ impl PlaylistStorageState {
                         match pli.header.xtream_cluster {
                             XtreamCluster::Live => &mut xtream.live,
                             XtreamCluster::Video => &mut xtream.vod,
-                            XtreamCluster::Series =>  &mut xtream.series,
-                        }.insert(pli.header.virtual_id, XtreamPlaylistItem::from(&pli));
+                            XtreamCluster::Series => &mut xtream.series,
+                        }
+                        .insert(pli.header.virtual_id, XtreamPlaylistItem::from(&pli));
                     }
                 }
             }
@@ -88,11 +87,7 @@ impl PlaylistStorageState {
                 storage.id_mapping = Some(id_mapping);
             }
             std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert(TargetPlaylistStorage {
-                    xtream: None,
-                    m3u: None,
-                    id_mapping: Some(id_mapping),
-                });
+                entry.insert(TargetPlaylistStorage { xtream: None, m3u: None, id_mapping: Some(id_mapping) });
             }
         }
     }
