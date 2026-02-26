@@ -1,7 +1,8 @@
-use crate::repository::storage::get_file_path_for_db_index;
-use crate::utils;
-use crate::utils::{binary_deserialize, binary_serialize, binary_serialize_into};
-
+use crate::{
+    repository::storage::get_file_path_for_db_index,
+    utils,
+    utils::{binary_deserialize, binary_serialize, binary_serialize_into},
+};
 use fs2::FileExt as _;
 use indexmap::IndexMap;
 use log::error;
@@ -9,15 +10,22 @@ use memmap2::Mmap;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use shared::error::{string_to_io_error, to_io_error};
-use std::ffi::OsString;
-use std::fs::{File, Metadata, OpenOptions};
-use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
-use std::marker::PhantomData;
-use std::mem::size_of;
 #[cfg(unix)]
 use std::os::unix::fs::{FileExt, MetadataExt};
-use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::{
+    ffi::OsString,
+    fs::{File, Metadata, OpenOptions},
+    io::{self, BufReader, Read, Seek, SeekFrom, Write},
+    marker::PhantomData,
+    mem::size_of,
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    thread::JoinHandle,
+    time::{Duration, Instant, UNIX_EPOCH},
+};
 use tempfile::NamedTempFile;
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::CloseHandle;
@@ -34,8 +42,35 @@ pub(crate) const STORAGE_VERSION: u32 = 2;
 const HEADER_SIZE: u64 = PAGE_SIZE as u64;
 const ROOT_OFFSET_POS: u64 = 8;
 const METADATA_OFFSET_POS: u64 = 16;
+const METADATA_DATA_START_POS: usize = 20;
 // Reserve space for metadata (e.g. 4096 - 16 = 4080 bytes max, but let's be safe)
 const METADATA_MAX_SIZE: usize = 4000;
+const HEADER_FLAG_HAS_METADATA_FLAGS: u32 = 1 << 31;
+const HEADER_FLAG_HAS_TOMBSTONES: u32 = 1 << 30;
+const HEADER_METADATA_LEN_MASK: u32 = !(HEADER_FLAG_HAS_METADATA_FLAGS | HEADER_FLAG_HAS_TOMBSTONES);
+
+#[inline]
+const fn encode_metadata_len_with_flags(metadata_len: u32, has_tombstones: bool) -> u32 {
+    let mut encoded = metadata_len | HEADER_FLAG_HAS_METADATA_FLAGS;
+    if has_tombstones {
+        encoded |= HEADER_FLAG_HAS_TOMBSTONES;
+    }
+    encoded
+}
+
+#[inline]
+const fn decode_metadata_len_and_flags(raw: u32) -> (u32, bool) {
+    let metadata_len = raw & HEADER_METADATA_LEN_MASK;
+    let has_metadata_flags = (raw & HEADER_FLAG_HAS_METADATA_FLAGS) != 0;
+    let has_tombstones = if has_metadata_flags {
+        (raw & HEADER_FLAG_HAS_TOMBSTONES) != 0
+    } else {
+        // Legacy v2 files (without header flags) are treated conservatively:
+        // assume tombstones may exist until a rewrite/compact writes proper flags.
+        true
+    };
+    (metadata_len, has_tombstones)
+}
 
 const POINTER_SIZE: usize = 8;
 const INFO_SIZE: usize = 12; // (u64, u32)
@@ -79,7 +114,10 @@ const MAGIC_METADATA_TARGET_ID_MAPPING: u8 = 0x01;
     │ MAGIC [4B: "BTRE"]                                          │
     │ VERSION [4B: u32]                                           │
     │ ROOT_OFFSET [8B: u64]                                       │
-    │ METADATA_LEN [4B: u32]                                      │
+    │ METADATA_LEN_FLAGS [4B: u32]                                │
+    │   bit31: metadata flags initialized                         │
+    │   bit30: has_tombstones                                     │
+    │   bits0..29: metadata length                                │
     │ METADATA [variable, up to 4000B]                            │
     │ [padding to PAGE_SIZE]                                      │
     └─────────────────────────────────────────────────────────────┘
@@ -174,14 +212,7 @@ impl PageHeader {
         let free_end = u16::from_le_bytes(buf[6..8].try_into().map_err(|_| PageError::Corrupted)?);
         let right_sibling = u64::from_le_bytes(buf[8..16].try_into().map_err(|_| PageError::Corrupted)?);
 
-        Ok(Self {
-            page_type,
-            cell_count,
-            free_start,
-            free_end,
-            right_sibling,
-            checksum: 0,
-        })
+        Ok(Self { page_type, cell_count, free_start, free_end, right_sibling, checksum: 0 })
     }
 }
 
@@ -219,9 +250,7 @@ impl std::error::Error for PageError {
 }
 
 impl From<io::Error> for PageError {
-    fn from(err: io::Error) -> Self {
-        PageError::Io(err)
-    }
+    fn from(err: io::Error) -> Self { PageError::Io(err) }
 }
 
 /// Error types for B+Tree operations that distinguish between different failure modes.
@@ -259,11 +288,8 @@ impl std::error::Error for BPlusTreeError {
 }
 
 impl From<io::Error> for BPlusTreeError {
-    fn from(err: io::Error) -> Self {
-        BPlusTreeError::Io(err)
-    }
+    fn from(err: io::Error) -> Self { BPlusTreeError::Io(err) }
 }
-
 
 impl BPlusTreeError {
     pub fn to_io(self) -> io::Error {
@@ -275,7 +301,6 @@ impl BPlusTreeError {
     }
 }
 
-
 impl From<PageError> for BPlusTreeError {
     fn from(err: PageError) -> Self {
         match err {
@@ -285,7 +310,6 @@ impl From<PageError> for BPlusTreeError {
         }
     }
 }
-
 
 impl<'a> SlottedPage<'a> {
     pub fn new(data: &'a mut [u8], page_type: PageType) -> Result<Self, PageError> {
@@ -397,20 +421,28 @@ impl<'a> SlottedPage<'a> {
         }
         let slot_pos = PAGE_HEADER_SIZE_USIZE + (index * SLOT_SIZE);
         // Safe slice access
-        if slot_pos + 2 > self.data.len() { return None; }
+        if slot_pos + 2 > self.data.len() {
+            return None;
+        }
         let offset = u16::from_le_bytes(self.data[slot_pos..slot_pos + 2].try_into().ok()?);
 
         // Bounds check for length header
-        if (offset as usize) + 4 > self.data.len() { return None; }
+        if (offset as usize) + 4 > self.data.len() {
+            return None;
+        }
         let len = u32::from_le_bytes(self.data[offset as usize..offset as usize + 4].try_into().ok()?) as usize;
 
-        if (offset as usize) + 4 + len > self.data.len() { return None; }
+        if (offset as usize) + 4 + len > self.data.len() {
+            return None;
+        }
         Some(&self.data[offset as usize..offset as usize + 4 + len])
     }
 
     pub fn get_cell_offset(&self, index: usize) -> Option<u16> {
         let slot_pos = PAGE_HEADER_SIZE_USIZE + (index * SLOT_SIZE);
-        if slot_pos + 2 > self.data.len() { return None; }
+        if slot_pos + 2 > self.data.len() {
+            return None;
+        }
         Some(u16::from_le_bytes(self.data[slot_pos..slot_pos + 2].try_into().ok()?))
     }
 
@@ -470,8 +502,12 @@ impl<'a> SlottedPage<'a> {
             return Ok(None);
         }
 
-        if split_idx >= count { split_idx = count.saturating_sub(1); }
-        if split_idx == 0 && count > 1 { split_idx = 1; }
+        if split_idx >= count {
+            split_idx = count.saturating_sub(1);
+        }
+        if split_idx == 0 && count > 1 {
+            split_idx = 1;
+        }
 
         let mut new_buffer = vec![0u8; PAGE_SIZE_USIZE];
         {
@@ -495,14 +531,10 @@ impl<'a> SlottedPage<'a> {
 }
 
 #[inline]
-fn u32_from_bytes(bytes: &[u8]) -> io::Result<u32> {
-    Ok(u32::from_le_bytes(bytes.try_into().map_err(to_io_error)?))
-}
+fn u32_from_bytes(bytes: &[u8]) -> io::Result<u32> { Ok(u32::from_le_bytes(bytes.try_into().map_err(to_io_error)?)) }
 
 #[inline]
-fn u64_from_bytes(bytes: &[u8]) -> io::Result<u64> {
-    Ok(u64::from_le_bytes(bytes.try_into().map_err(to_io_error)?))
-}
+fn u64_from_bytes(bytes: &[u8]) -> io::Result<u64> { Ok(u64::from_le_bytes(bytes.try_into().map_err(to_io_error)?)) }
 
 #[inline]
 fn get_entry_index_upper_bound<K>(keys: &[K], key: &K) -> usize
@@ -545,28 +577,19 @@ fn parse_msgpack_array_header(bytes: &[u8]) -> Option<MsgPackArrayHeader> {
 
     // fixarray (0x90-0x9f): count in low 4 bits
     if (0x90..=0x9f).contains(&first) {
-        return Some(MsgPackArrayHeader {
-            count: (first & 0x0f) as usize,
-            header_size: 1,
-        });
+        return Some(MsgPackArrayHeader { count: (first & 0x0f) as usize, header_size: 1 });
     }
 
     // array16 (0xdc): next 2 bytes are big-endian count
     if first == 0xdc && bytes.len() >= 3 {
         let count = u16::from_be_bytes([bytes[1], bytes[2]]) as usize;
-        return Some(MsgPackArrayHeader {
-            count,
-            header_size: 3,
-        });
+        return Some(MsgPackArrayHeader { count, header_size: 3 });
     }
 
     // array32 (0xdd): next 4 bytes are big-endian count
     if first == 0xdd && bytes.len() >= 5 {
         let count = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
-        return Some(MsgPackArrayHeader {
-            count,
-            header_size: 5,
-        });
+        return Some(MsgPackArrayHeader { count, header_size: 5 });
     }
 
     None
@@ -632,23 +655,43 @@ impl MsgPackScannable for u32 {
 
         let first = bytes[0];
 
-        if first <= 0x7f { return Some(1); }      // fixint
-        if first == 0xcc { return Some(2); }      // uint8
-        if first == 0xcd { return Some(3); }      // uint16
-        if first == 0xce { return Some(5); }      // uint32
-        if first == 0xcf { return Some(9); }      // uint64
+        if first <= 0x7f {
+            return Some(1);
+        } // fixint
+        if first == 0xcc {
+            return Some(2);
+        } // uint8
+        if first == 0xcd {
+            return Some(3);
+        } // uint16
+        if first == 0xce {
+            return Some(5);
+        } // uint32
+        if first == 0xcf {
+            return Some(9);
+        } // uint64
 
         // Negative fixint (0xe0-0xff)
-        if first >= 0xe0 { return Some(1); }
+        if first >= 0xe0 {
+            return Some(1);
+        }
 
         // int8 (0xd0)
-        if first == 0xd0 { return Some(2); }
+        if first == 0xd0 {
+            return Some(2);
+        }
         // int16 (0xd1)
-        if first == 0xd1 { return Some(3); }
+        if first == 0xd1 {
+            return Some(3);
+        }
         // int32 (0xd2)
-        if first == 0xd2 { return Some(5); }
+        if first == 0xd2 {
+            return Some(5);
+        }
         // int64 (0xd3)
-        if first == 0xd3 { return Some(9); }
+        if first == 0xd3 {
+            return Some(9);
+        }
 
         None
     }
@@ -805,10 +848,7 @@ struct ZeroCopyScanResult {
 /// - `pointers_len`: 4 bytes (`LEN_SIZE`)
 /// - pointers: `pointers_len` bytes (`MessagePack` array of u64)
 #[inline]
-fn scan_internal_node_zero_copy<K: MsgPackScannable>(
-    node_bytes: &[u8],
-    search_key: &K,
-) -> Option<ZeroCopyScanResult> {
+fn scan_internal_node_zero_copy<K: MsgPackScannable>(node_bytes: &[u8], search_key: &K) -> Option<ZeroCopyScanResult> {
     if node_bytes.len() < FLAG_SIZE + LEN_SIZE {
         return None;
     }
@@ -816,9 +856,8 @@ fn scan_internal_node_zero_copy<K: MsgPackScannable>(
     let is_leaf = node_bytes[0] == 1;
 
     // Read keys_len
-    let keys_len = u32::from_le_bytes(
-        node_bytes[FLAG_SIZE..=LEN_SIZE].try_into().ok()?
-    ) as usize;
+    let keys_len_end = FLAG_SIZE + LEN_SIZE;
+    let keys_len = u32::from_le_bytes(node_bytes[FLAG_SIZE..keys_len_end].try_into().ok()?) as usize;
 
     let keys_start = FLAG_SIZE + LEN_SIZE;
     let keys_end = keys_start + keys_len;
@@ -830,11 +869,7 @@ fn scan_internal_node_zero_copy<K: MsgPackScannable>(
     if is_leaf {
         // For leaf nodes, we can't use zero-copy for the full query
         // (need to return keys for binary search). Just return that it's a leaf.
-        return Some(ZeroCopyScanResult {
-            is_leaf: true,
-            child_idx: 0,
-            pointers_start: 0,
-        });
+        return Some(ZeroCopyScanResult { is_leaf: true, child_idx: 0, pointers_start: 0 });
     }
 
     // Scan keys to find child index
@@ -842,19 +877,13 @@ fn scan_internal_node_zero_copy<K: MsgPackScannable>(
     let child_idx = find_child_index_zero_copy(keys_bytes, search_key)?;
 
     // Read pointers_len
-    let _pointers_len = u32::from_le_bytes(
-        node_bytes[keys_end..keys_end + LEN_SIZE].try_into().ok()?
-    ) as usize;
+    let _pointers_len = u32::from_le_bytes(node_bytes[keys_end..keys_end + LEN_SIZE].try_into().ok()?) as usize;
 
     let pointers_start = keys_end + LEN_SIZE;
 
     // Parse pointer count from MessagePack array header
 
-    Some(ZeroCopyScanResult {
-        is_leaf: false,
-        child_idx,
-        pointers_start,
-    })
+    Some(ZeroCopyScanResult { is_leaf: false, child_idx, pointers_start })
 }
 
 /// Read a specific child pointer from the pointers array without full deserialization.
@@ -889,11 +918,21 @@ fn skip_msgpack_u64(bytes: &[u8]) -> Option<usize> {
 
     let first = bytes[0];
 
-    if first <= 0x7f { return Some(1); }      // fixint
-    if first == 0xcc { return Some(2); }      // uint8
-    if first == 0xcd { return Some(3); }      // uint16
-    if first == 0xce { return Some(5); }      // uint32
-    if first == 0xcf { return Some(9); }      // uint64
+    if first <= 0x7f {
+        return Some(1);
+    } // fixint
+    if first == 0xcc {
+        return Some(2);
+    } // uint8
+    if first == 0xcd {
+        return Some(3);
+    } // uint16
+    if first == 0xce {
+        return Some(5);
+    } // uint32
+    if first == 0xcf {
+        return Some(9);
+    } // uint64
 
     None
 }
@@ -930,12 +969,28 @@ fn read_msgpack_u64(bytes: &[u8]) -> Option<u64> {
     // uint64 (0xcf)
     if first == 0xcf && bytes.len() >= 9 {
         return Some(u64::from_be_bytes([
-            bytes[1], bytes[2], bytes[3], bytes[4],
-            bytes[5], bytes[6], bytes[7], bytes[8],
+            bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8],
         ]));
     }
 
     None
+}
+
+#[inline]
+const fn msgpack_array_header_len(count: usize) -> usize {
+    if count <= 0x0f {
+        1
+    } else if count <= u16::MAX as usize {
+        3
+    } else {
+        5
+    }
+}
+
+#[inline]
+const fn msgpack_u64_array_upper_bound_len(count: usize) -> usize {
+    // Worst-case per u64: marker + 8 bytes payload.
+    msgpack_array_header_len(count) + count.saturating_mul(9)
 }
 
 // Adaptively compress value bytes if beneficial.
@@ -957,7 +1012,6 @@ fn compress_if_beneficial(raw_bytes: &[u8]) -> (u8, Vec<u8>) {
         (COMPRESSION_FLAG_NONE, raw_bytes.to_vec())
     }
 }
-
 
 /// Represents how a value is stored on disk
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -991,18 +1045,10 @@ struct ValueInfo {
 
 impl ValueInfo {
     #[inline]
-    const fn tombstone() -> Self {
-        Self {
-            mode: ValueStorageMode::Tombstone,
-            length: 0,
-            cache: Mutex::new(None),
-        }
-    }
+    const fn tombstone() -> Self { Self { mode: ValueStorageMode::Tombstone, length: 0, cache: Mutex::new(None) } }
 
     #[inline]
-    const fn is_tombstone(&self) -> bool {
-        matches!(self.mode, ValueStorageMode::Tombstone)
-    }
+    const fn is_tombstone(&self) -> bool { matches!(self.mode, ValueStorageMode::Tombstone) }
 }
 
 impl Clone for ValueInfo {
@@ -1041,24 +1087,14 @@ where
 {
     #[inline]
     const fn new(is_leaf: bool) -> Self {
-        Self {
-            is_leaf,
-            keys: vec![],
-            children: vec![],
-            value_info: vec![],
-            values: vec![],
-        }
+        Self { is_leaf, keys: vec![], children: vec![], value_info: vec![], values: vec![] }
     }
 
     #[inline]
-    fn is_overflow(&self, order: usize) -> bool {
-        self.keys.len() > order
-    }
+    fn is_overflow(&self, order: usize) -> bool { self.keys.len() > order }
 
     #[inline]
-    const fn get_median_index(order: usize) -> usize {
-        order >> 1
-    }
+    const fn get_median_index(order: usize) -> usize { order >> 1 }
 
     fn find_leaf_entry(node: &Self) -> Option<&K> {
         if node.is_leaf {
@@ -1077,9 +1113,7 @@ where
         self.children.get(self.get_entry_index_upper_bound(key))?.query(key)
     }
 
-    fn get_entry_index_upper_bound(&self, key: &K) -> usize {
-        get_entry_index_upper_bound::<K>(&self.keys, key)
-    }
+    fn get_entry_index_upper_bound(&self, key: &K) -> usize { get_entry_index_upper_bound::<K>(&self.keys, key) }
 
     fn insert(&mut self, key: K, v: V, inner_order: usize, leaf_order: usize) -> Option<Self> {
         if self.is_leaf {
@@ -1231,11 +1265,9 @@ where
             size += LEN_SIZE + serial_buf.len();
         } else {
             // Internal node: pointer length + pointers
-            // We use current children count for estimate
-            serial_buf.clear();
-            let pointer_vec = vec![0u64; self.children.len()]; // Allocation here :( 
-            binary_serialize_into(&mut *serial_buf, &pointer_vec)?;
-            size += LEN_SIZE + serial_buf.len();
+            // Pointer encoding is variable-length. Using small placeholder values
+            // can underestimate node size and cause offset overlap.
+            size += LEN_SIZE + msgpack_u64_array_upper_bound_len(self.children.len());
         }
 
         // Round up to block size
@@ -1292,7 +1324,9 @@ where
             Ok(offset + (blocks as u64 * PAGE_SIZE_USIZE as u64))
         } else {
             let ptr_count = self.children.len();
-            let ptr_encoded_size = 8 + 8 * ptr_count; // Estimation
+            // Conservative upper bound for MessagePack-encoded Vec<u64>.
+            // Must not underestimate, otherwise child blocks can overlap.
+            let ptr_encoded_size = msgpack_u64_array_upper_bound_len(ptr_count);
 
             let content_size = FLAG_SIZE + LEN_SIZE + keys_len as usize + LEN_SIZE + ptr_encoded_size;
             let blocks_needed = content_size.div_ceil(PAGE_SIZE_USIZE);
@@ -1520,11 +1554,16 @@ where
                     if node.is_leaf {
                         node.serialize_to_block(file, buffer, &mut serial_buf, node_offset)?;
                     } else {
-                        let child_offsets: Vec<u64> = node.children.iter()
-                            .map(|c| node_offset_map[&std::ptr::from_ref(c)])
-                            .collect();
+                        let child_offsets: Vec<u64> =
+                            node.children.iter().map(|c| node_offset_map[&std::ptr::from_ref(c)]).collect();
 
-                        node.serialize_internal_with_offsets(file, buffer, &mut serial_buf, node_offset, &child_offsets)?;
+                        node.serialize_internal_with_offsets(
+                            file,
+                            buffer,
+                            &mut serial_buf,
+                            node_offset,
+                            &child_offsets,
+                        )?;
                         for child in &node.children {
                             next_level.push(child);
                         }
@@ -1550,9 +1589,7 @@ where
 
                             match info.mode {
                                 ValueStorageMode::Packed(block_offset, index) => {
-                                    pack_blocks.entry(block_offset)
-                                        .or_default()
-                                        .push((index, serial_buf.clone()));
+                                    pack_blocks.entry(block_offset).or_default().push((index, serial_buf.clone()));
                                 }
                                 ValueStorageMode::Single(block_offset) => {
                                     // Write single value with compression format
@@ -1586,9 +1623,8 @@ where
                             values.sort_by_key(|(idx, _)| *idx);
 
                             // Convert to slice references
-                            let value_refs: Vec<(u16, &[u8])> = values.iter()
-                                .map(|(idx, bytes)| (*idx, bytes.as_slice()))
-                                .collect();
+                            let value_refs: Vec<(u16, &[u8])> =
+                                values.iter().map(|(idx, bytes)| (*idx, bytes.as_slice())).collect();
 
                             Self::write_packed_block(file, buffer, block_offset, &value_refs)?;
                         }
@@ -1753,7 +1789,8 @@ where
         nested: bool,
     ) -> io::Result<(Self, Option<Vec<u64>>)> {
         let start = usize::try_from(offset).map_err(to_io_error)?;
-        let header_end = start.checked_add(FLAG_SIZE + LEN_SIZE)
+        let header_end = start
+            .checked_add(FLAG_SIZE + LEN_SIZE)
             .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "Mmap offset overflow"))?;
         // Basic safety check for mmap bounds
         if header_end > mmap.len() {
@@ -1895,8 +1932,9 @@ where
             let cache_guard = info.cache.lock();
             if let Some(CacheData::Compressed(flag, payload)) = cache_guard.as_ref() {
                 if *flag == COMPRESSION_FLAG_LZ4 {
-                    let decompressed = lz4_flex::decompress_size_prepended(payload)
-                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("LZ4 cache decompression failed: {e}")))?;
+                    let decompressed = lz4_flex::decompress_size_prepended(payload).map_err(|e| {
+                        io::Error::new(io::ErrorKind::InvalidData, format!("LZ4 cache decompression failed: {e}"))
+                    })?;
                     return binary_deserialize(&decompressed);
                 }
                 return binary_deserialize(payload);
@@ -1922,8 +1960,9 @@ where
 
                 // Decompress for result
                 let data = if flag == COMPRESSION_FLAG_LZ4 {
-                    lz4_flex::decompress_size_prepended(&payload)
-                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("LZ4 decompression failed: {e}")))?
+                    lz4_flex::decompress_size_prepended(&payload).map_err(|e| {
+                        io::Error::new(io::ErrorKind::InvalidData, format!("LZ4 decompression failed: {e}"))
+                    })?
                 } else {
                     payload.clone()
                 };
@@ -1936,10 +1975,9 @@ where
             ValueStorageMode::Packed(block_offset, index) => {
                 Self::load_value_from_packed_block(file, block_offset, index, info.length, &info.cache)
             }
-            ValueStorageMode::Tombstone => Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "value was deleted (tombstone)",
-            )),
+            ValueStorageMode::Tombstone => {
+                Err(io::Error::new(io::ErrorKind::NotFound, "value was deleted (tombstone)"))
+            }
         }
     }
 
@@ -1967,7 +2005,7 @@ where
     ) -> io::Result<V> {
         // Read count
         if block_buffer.len() < 4 {
-             return Err(io::Error::new(io::ErrorKind::InvalidData, "Packed block too small"));
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "Packed block too small"));
         }
         let mut pos = 4;
 
@@ -2002,10 +2040,7 @@ where
             pos += len;
         }
 
-        Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("Value index {value_index} not found in packed block"),
-        ))
+        Err(io::Error::new(io::ErrorKind::InvalidData, format!("Value index {value_index} not found in packed block")))
     }
 }
 
@@ -2085,9 +2120,7 @@ where
     K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
     V: Serialize + for<'de> Deserialize<'de> + Clone,
 {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 impl<K, V> BPlusTree<K, V>
@@ -2107,9 +2140,7 @@ where
     }
 
     /// Helper to access metadata
-    pub fn get_metadata(&self) -> &BPlusTreeMetadata {
-        &self.metadata
-    }
+    pub fn get_metadata(&self) -> &BPlusTreeMetadata { &self.metadata }
 
     /// Helper to set metadata
     pub fn set_metadata(&mut self, data: BPlusTreeMetadata) {
@@ -2117,13 +2148,9 @@ where
         self.dirty = true;
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.root.keys.is_empty()
-    }
+    pub fn is_empty(&self) -> bool { self.root.keys.is_empty() }
 
-    pub fn len(&self) -> usize {
-        self.root.len()
-    }
+    pub fn len(&self) -> usize { self.root.len() }
 
     pub fn insert(&mut self, key: K, value: V) {
         self.dirty = true;
@@ -2134,11 +2161,8 @@ where
         }
 
         if let Some(node) = self.root.insert(key, value, self.inner_order, self.leaf_order) {
-            let child_key_opt = if node.is_leaf {
-                node.keys.first()
-            } else {
-                BPlusTreeNode::<K, V>::find_leaf_entry(&node)
-            };
+            let child_key_opt =
+                if node.is_leaf { node.keys.first() } else { BPlusTreeNode::<K, V>::find_leaf_entry(&node) };
 
             if let Some(child_key) = child_key_opt {
                 let mut new_root = BPlusTreeNode::<K, V>::new(false);
@@ -2153,9 +2177,7 @@ where
         }
     }
 
-    pub fn query(&self, key: &K) -> Option<&V> {
-        self.root.query(key)
-    }
+    pub fn query(&self, key: &K) -> Option<&V> { self.root.query(key) }
 
     pub fn store(&mut self, filepath: &Path) -> io::Result<u64> {
         if self.dirty {
@@ -2177,11 +2199,7 @@ where
     /// ```ignore
     /// tree.store_with_index(&db_path, |v| v.name.clone())?;
     /// ```
-    pub fn store_with_index<SortKey, F>(
-        &mut self,
-        filepath: &Path,
-        sort_key_extractor: F,
-    ) -> io::Result<u64>
+    pub fn store_with_index<SortKey, F>(&mut self, filepath: &Path, sort_key_extractor: F) -> io::Result<u64>
     where
         SortKey: Ord + Serialize,
         F: Fn(&V) -> SortKey,
@@ -2208,10 +2226,7 @@ where
 
         // Collect (sort_key, primary_key, location) and sort
         let mut sorted_entries: Vec<(SortKey, K, super::sorted_index::ValueLocation)> =
-            entries_with_locations
-                .into_iter()
-                .map(|(k, v, loc)| (sort_key_extractor(&v), k, loc))
-                .collect();
+            entries_with_locations.into_iter().map(|(k, v, loc)| (sort_key_extractor(&v), k, loc)).collect();
 
         // Sort by sort key
         sorted_entries.sort_by(|a, b| a.0.cmp(&b.0));
@@ -2239,13 +2254,15 @@ where
         header[8..16].copy_from_slice(&HEADER_SIZE.to_le_bytes());
 
         let meta_bytes = self.metadata.to_bytes();
-        if meta_bytes.len() > METADATA_MAX_SIZE || 20 + meta_bytes.len() > PAGE_SIZE_USIZE {
+        if meta_bytes.len() > METADATA_MAX_SIZE || METADATA_DATA_START_POS + meta_bytes.len() > PAGE_SIZE_USIZE {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "Metadata too large for header page"));
         }
+        let metadata_len =
+            u32::try_from(meta_bytes.len()).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        let metadata_len_with_flags = encode_metadata_len_with_flags(metadata_len, false);
+        header[16..20].copy_from_slice(&metadata_len_with_flags.to_le_bytes());
         if !meta_bytes.is_empty() {
-            let len = u32::try_from(meta_bytes.len()).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-            header[16..20].copy_from_slice(&len.to_le_bytes());
-            header[20..20 + meta_bytes.len()].copy_from_slice(&meta_bytes);
+            header[METADATA_DATA_START_POS..METADATA_DATA_START_POS + meta_bytes.len()].copy_from_slice(&meta_bytes);
         }
 
         file.write_all(&header)?;
@@ -2263,7 +2280,10 @@ where
                 file.flush()?;
                 drop(file);
                 if let Err(err) = utils::rename_or_copy(tempfile.path(), filepath, false) {
-                    return Err(string_to_io_error(format!("Temp file rename/copy did not work {} {err}", tempfile.path().to_string_lossy())));
+                    return Err(string_to_io_error(format!(
+                        "Temp file rename/copy did not work {} {err}",
+                        tempfile.path().to_string_lossy()
+                    )));
                 }
                 self.dirty = false;
                 Ok(root_offset)
@@ -2305,8 +2325,8 @@ where
 
                 let node_offset = current_offset;
                 let mut serial_buf = Vec::new();
-                current_offset = node.serialize_internal_with_offsets(file, write_buffer, &mut serial_buf, node_offset, &pointers)?;
-
+                current_offset =
+                    node.serialize_internal_with_offsets(file, write_buffer, &mut serial_buf, node_offset, &pointers)?;
 
                 if let Some((k, _)) = chunk.first() {
                     parent_level_pointers.push((k.clone(), node_offset));
@@ -2322,11 +2342,10 @@ where
         }
     }
 
-
     pub fn load(filepath: &Path) -> io::Result<Self> {
         let file = File::open(filepath)?;
         let mmap = unsafe { Mmap::map(&file)? };
-        
+
         if mmap.len() < PAGE_SIZE_USIZE {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "File too small"));
         }
@@ -2343,12 +2362,13 @@ where
         let root_offset = u64_from_bytes(&header[8..16])?;
 
         // Read metadata
-        let metadata_len = u32_from_bytes(&header[16..20])?;
+        let metadata_len_raw = u32_from_bytes(&header[16..20])?;
+        let (metadata_len, _) = decode_metadata_len_and_flags(metadata_len_raw);
         let metadata = if metadata_len > 0 {
-            if (20 + metadata_len as usize) > PAGE_SIZE_USIZE {
+            if (METADATA_DATA_START_POS + metadata_len as usize) > PAGE_SIZE_USIZE {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "Metadata length exceeds header page size"));
             }
-            header[20..(20 + metadata_len as usize)].to_vec()
+            header[METADATA_DATA_START_POS..(METADATA_DATA_START_POS + metadata_len as usize)].to_vec()
         } else {
             Vec::new()
         };
@@ -2358,13 +2378,7 @@ where
         let (root, _) = BPlusTreeNode::<K, V>::deserialize_from_mmap(&mmap, &mut cursor, root_offset, true)?;
 
         let (inner_order, leaf_order) = calc_order::<K>();
-        Ok(Self {
-            root,
-            inner_order,
-            leaf_order,
-            metadata: BPlusTreeMetadata::from_bytes(&metadata),
-            dirty: false,
-        })
+        Ok(Self { root, inner_order, leaf_order, metadata: BPlusTreeMetadata::from_bytes(&metadata), dirty: false })
     }
 
     /// Find the largest key <= `key` in the in-memory tree and return references to (key, value).
@@ -2423,18 +2437,16 @@ where
 
         if node.is_leaf {
             return match node.keys.binary_search(key) {
-                Ok(idx) => {
-                    match node.value_info.get(idx) {
-                        Some(info) => {
-                            if info.is_tombstone() {
-                                return Ok(None);
-                            }
-                            let value = BPlusTreeNode::<K, V>::load_value_from_info(file, info)?;
-                            Ok(Some(value))
+                Ok(idx) => match node.value_info.get(idx) {
+                    Some(info) => {
+                        if info.is_tombstone() {
+                            return Ok(None);
                         }
-                        None => Ok(None),
+                        let value = BPlusTreeNode::<K, V>::load_value_from_info(file, info)?;
+                        Ok(Some(value))
                     }
-                }
+                    None => Ok(None),
+                },
                 Err(_) => Ok(None),
             };
         }
@@ -2452,6 +2464,63 @@ where
     }
 }
 
+fn query_tree_contains_live_key<K, V, R: Read + Seek>(
+    file: &mut R,
+    buffer: &mut Vec<u8>,
+    cache: &mut IndexMap<u64, Vec<u8>>,
+    key: &K,
+    start_offset: u64,
+    has_tombstones: bool,
+) -> Result<bool, BPlusTreeError>
+where
+    K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
+    V: Serialize + for<'de> Deserialize<'de> + Clone,
+{
+    let mut offset = start_offset;
+    loop {
+        let (node, pointers) = if let Some(data) = cache.shift_remove(&offset) {
+            let res = BPlusTreeNode::<K, V>::deserialize_from_block_slice(&data, None, file, false)
+                .map_err(BPlusTreeError::from)?;
+            cache.insert(offset, data);
+            res
+        } else {
+            match BPlusTreeNode::<K, V>::deserialize_from_block(file, buffer, offset, false) {
+                Ok((node, pointers)) => {
+                    if cache.len() >= CACHE_CAPACITY {
+                        cache.shift_remove_index(0);
+                    }
+                    cache.insert(offset, buffer.to_owned());
+                    (node, pointers)
+                }
+                Err(err) => return Err(BPlusTreeError::from(err)),
+            }
+        };
+
+        if node.is_leaf {
+            return Ok(match node.keys.binary_search(key) {
+                Ok(idx) => {
+                    if has_tombstones {
+                        node.value_info.get(idx).is_some_and(|info| !info.is_tombstone())
+                    } else {
+                        node.value_info.get(idx).is_some()
+                    }
+                }
+                Err(_) => false,
+            });
+        }
+
+        let child_idx = get_entry_index_upper_bound::<K>(&node.keys, key);
+        if let Some(child_offsets) = pointers {
+            if let Some(child_offset) = child_offsets.get(child_idx) {
+                offset = *child_offset;
+            } else {
+                return Ok(false);
+            }
+        } else {
+            return Ok(false);
+        }
+    }
+}
 
 fn query_tree_le<K, V, R: Read + Seek>(
     file: &mut R,
@@ -2593,10 +2662,7 @@ where
     Ok(count)
 }
 
-fn count_items_mmap<K, V>(
-    mmap: &[u8],
-    start_offset: u64,
-) -> Result<usize, BPlusTreeError>
+fn count_items_mmap<K, V>(mmap: &[u8], start_offset: u64) -> Result<usize, BPlusTreeError>
 where
     K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
     V: Serialize + for<'de> Deserialize<'de> + Clone,
@@ -2650,18 +2716,16 @@ where
 
         if node.is_leaf {
             return match node.keys.binary_search(key) {
-                Ok(idx) => {
-                    match node.value_info.get(idx) {
-                        Some(info) => {
-                            if info.is_tombstone() {
-                                return Ok(None);
-                            }
-                            let value = BPlusTreeNode::<K, V>::load_value_from_info(cursor, info)?;
-                            Ok(Some(value))
+                Ok(idx) => match node.value_info.get(idx) {
+                    Some(info) => {
+                        if info.is_tombstone() {
+                            return Ok(None);
                         }
-                        None => Ok(None),
+                        let value = BPlusTreeNode::<K, V>::load_value_from_info(cursor, info)?;
+                        Ok(Some(value))
                     }
-                }
+                    None => Ok(None),
+                },
                 Err(_) => Ok(None),
             };
         }
@@ -2675,6 +2739,63 @@ where
             }
         } else {
             return Ok(None);
+        }
+    }
+}
+
+fn query_tree_mmap_contains_live_key<K, V>(
+    mmap: &[u8],
+    cursor: &mut io::Cursor<&[u8]>,
+    node_cache: &mut NodeCache<K, V>,
+    key: &K,
+    start_offset: u64,
+    has_tombstones: bool,
+) -> Result<bool, BPlusTreeError>
+where
+    K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
+    V: Serialize + for<'de> Deserialize<'de> + Clone,
+{
+    let mut offset = start_offset;
+    loop {
+        if !node_cache.contains_key(&offset) {
+            let (node, pointers) = BPlusTreeNode::<K, V>::deserialize_from_mmap(mmap, cursor, offset, false)?;
+            if node_cache.len() >= CACHE_CAPACITY {
+                node_cache.shift_remove_index(0);
+            }
+            node_cache.insert(offset, (node, pointers));
+        }
+
+        if let Some(idx) = node_cache.get_index_of(&offset) {
+            let len = node_cache.len();
+            if len > 1 {
+                node_cache.move_index(idx, len - 1);
+            }
+        }
+
+        let (node, pointers) = &node_cache[&offset];
+
+        if node.is_leaf {
+            return Ok(match node.keys.binary_search(key) {
+                Ok(idx) => {
+                    if has_tombstones {
+                        node.value_info.get(idx).is_some_and(|info| !info.is_tombstone())
+                    } else {
+                        node.value_info.get(idx).is_some()
+                    }
+                }
+                Err(_) => false,
+            });
+        }
+
+        let child_idx = get_entry_index_upper_bound::<K>(&node.keys, key);
+        if let Some(child_offsets) = pointers {
+            if let Some(child_offset) = child_offsets.get(child_idx) {
+                offset = *child_offset;
+            } else {
+                return Ok(false);
+            }
+        } else {
+            return Ok(false);
         }
     }
 }
@@ -2701,8 +2822,8 @@ where
     let mut offset = start_offset;
 
     loop {
-        let node_start = usize::try_from(offset)
-            .map_err(|e| BPlusTreeError::Corrupted(format!("Invalid offset: {e}")))?;
+        let node_start =
+            usize::try_from(offset).map_err(|e| BPlusTreeError::Corrupted(format!("Invalid offset: {e}")))?;
 
         if node_start >= mmap.len() {
             return Err(BPlusTreeError::Corrupted("Offset out of bounds".into()));
@@ -2717,18 +2838,16 @@ where
                 let (node, _) = BPlusTreeNode::<K, V>::deserialize_from_mmap(mmap, cursor, offset, false)?;
 
                 return match node.keys.binary_search(key) {
-                    Ok(idx) => {
-                        match node.value_info.get(idx) {
-                            Some(info) => {
-                                if info.is_tombstone() {
-                                    return Ok(None);
-                                }
-                                let value = BPlusTreeNode::<K, V>::load_value_from_info(cursor, info)?;
-                                Ok(Some(value))
+                    Ok(idx) => match node.value_info.get(idx) {
+                        Some(info) => {
+                            if info.is_tombstone() {
+                                return Ok(None);
                             }
-                            None => Ok(None),
+                            let value = BPlusTreeNode::<K, V>::load_value_from_info(cursor, info)?;
+                            Ok(Some(value))
                         }
-                    }
+                        None => Ok(None),
+                    },
                     Err(_) => Ok(None),
                 };
             }
@@ -2747,18 +2866,16 @@ where
 
         if node.is_leaf {
             return match node.keys.binary_search(key) {
-                Ok(idx) => {
-                    match node.value_info.get(idx) {
-                        Some(info) => {
-                            if info.is_tombstone() {
-                                return Ok(None);
-                            }
-                            let value = BPlusTreeNode::<K, V>::load_value_from_info(cursor, info)?;
-                            Ok(Some(value))
+                Ok(idx) => match node.value_info.get(idx) {
+                    Some(info) => {
+                        if info.is_tombstone() {
+                            return Ok(None);
                         }
-                        None => Ok(None),
+                        let value = BPlusTreeNode::<K, V>::load_value_from_info(cursor, info)?;
+                        Ok(Some(value))
                     }
-                }
+                    None => Ok(None),
+                },
                 Err(_) => Ok(None),
             };
         }
@@ -2851,7 +2968,6 @@ where
     }
 }
 
-
 /// `BPlusTreeQuery` performs on-disk queries without loading the entire tree into memory.
 /// For frequent queries, consider using `BPlusTree::load()` instead, which loads the full tree into memory
 /// at the cost of higher memory usage.
@@ -2892,6 +3008,7 @@ pub struct BPlusTreeQuery<K, V> {
     mmap: Option<Mmap>,
     filepath: PathBuf,
     file_identity: Option<FileIdentity>,
+    has_tombstones: bool,
     buffer: Vec<u8>,
     cache: IndexMap<u64, Vec<u8>>,
     node_cache: NodeCache<K, V>,
@@ -2918,7 +3035,7 @@ where
         let mmap = unsafe { Mmap::map(&file).ok() };
 
         // Verify Header
-        let mut header = [0u8; 16];
+        let mut header = [0u8; METADATA_DATA_START_POS];
         #[cfg(unix)]
         file.read_exact_at(&mut header, 0)?;
         #[cfg(not(unix))]
@@ -2931,17 +3048,33 @@ where
         if &header[0..4] != MAGIC {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid magic number"));
         }
-        let version = u32::from_le_bytes(header[4..8].try_into().map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid version slice"))?);
+        let version = u32::from_le_bytes(
+            header[4..8].try_into().map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid version slice"))?,
+        );
         if version != STORAGE_VERSION {
             return Err(io::Error::new(io::ErrorKind::InvalidData, format!("Unsupported storage version: {version}")));
         }
-        let root_offset = u64::from_le_bytes(header[8..16].try_into().map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid root offset slice"))?);
+        let root_offset = u64::from_le_bytes(
+            header[8..16]
+                .try_into()
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid root offset slice"))?,
+        );
+        let metadata_len_raw = u32::from_le_bytes(
+            header[16..20]
+                .try_into()
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid metadata length slice"))?,
+        );
+        let (metadata_len, has_tombstones) = decode_metadata_len_and_flags(metadata_len_raw);
+        if metadata_len as usize > METADATA_MAX_SIZE {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, format!("Metadata too large: {metadata_len}")));
+        }
 
         Ok(Self {
             file: if mmap.is_some() { None } else { Some(utils::file_reader(file)) },
             mmap,
             filepath: PathBuf::new(),
             file_identity,
+            has_tombstones,
             buffer: vec![0u8; PAGE_SIZE_USIZE],
             cache: IndexMap::with_capacity(CACHE_CAPACITY),
             node_cache: IndexMap::with_capacity(CACHE_CAPACITY),
@@ -2976,10 +3109,7 @@ where
             let cloned = file.get_ref().try_clone()?;
             (Some(utils::file_reader(cloned)), None)
         } else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "No data source available to clone",
-            ));
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "No data source available to clone"));
         };
 
         Ok(Self {
@@ -2987,6 +3117,7 @@ where
             mmap,
             filepath: self.filepath.clone(),
             file_identity: self.file_identity,
+            has_tombstones: self.has_tombstones,
             buffer: vec![0u8; PAGE_SIZE_USIZE],
             cache: IndexMap::with_capacity(CACHE_CAPACITY),
             node_cache: IndexMap::with_capacity(CACHE_CAPACITY),
@@ -2997,32 +3128,45 @@ where
     }
 
     /// Returns the filepath this query was opened from.
-    pub fn filepath(&self) -> &Path {
-        &self.filepath
-    }
+    pub fn filepath(&self) -> &Path { &self.filepath }
 
-    fn read_root_offset_from_file(file: &File) -> io::Result<u64> {
-        let mut root_buf = [0u8; size_of::<u64>()];
+    fn read_root_offset_and_tombstone_flag_from_file(file: &File) -> io::Result<(u64, bool)> {
+        let mut root_and_metadata_len = [0u8; size_of::<u64>() + size_of::<u32>()];
         #[cfg(unix)]
-        file.read_exact_at(&mut root_buf, ROOT_OFFSET_POS)?;
+        file.read_exact_at(&mut root_and_metadata_len, ROOT_OFFSET_POS)?;
         #[cfg(not(unix))]
         {
             let mut f = file;
             let current_pos = f.stream_position()?;
             f.seek(SeekFrom::Start(ROOT_OFFSET_POS))?;
-            f.read_exact(&mut root_buf)?;
+            f.read_exact(&mut root_and_metadata_len)?;
             f.seek(SeekFrom::Start(current_pos))?;
         }
-        Ok(u64::from_le_bytes(root_buf))
+        let root_offset = u64::from_le_bytes(
+            root_and_metadata_len[0..8]
+                .try_into()
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid root offset bytes"))?,
+        );
+        let metadata_len_raw = u32::from_le_bytes(
+            root_and_metadata_len[8..12]
+                .try_into()
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid metadata length bytes"))?,
+        );
+        let (metadata_len, has_tombstones) = decode_metadata_len_and_flags(metadata_len_raw);
+        if metadata_len as usize > METADATA_MAX_SIZE {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, format!("Metadata too large: {metadata_len}")));
+        }
+
+        Ok((root_offset, has_tombstones))
     }
 
     fn refresh_root_offset(&mut self) -> io::Result<()> {
-        let new_root_offset = if self.mmap.is_some() && !self.filepath.as_os_str().is_empty() {
+        let (new_root_offset, new_has_tombstones) = if self.mmap.is_some() && !self.filepath.as_os_str().is_empty() {
             let file = File::open(&self.filepath)?;
             let metadata = file.metadata()?;
             let current_identity = FileIdentity::from_metadata(&metadata);
             let remap_required = self.file_identity != Some(current_identity);
-            let root_offset = Self::read_root_offset_from_file(&file)?;
+            let (root_offset, has_tombstones) = Self::read_root_offset_and_tombstone_flag_from_file(&file)?;
 
             if remap_required {
                 if let Some(remapped) = unsafe { Mmap::map(&file).ok() } {
@@ -3037,28 +3181,47 @@ where
             }
 
             self.file_identity = Some(current_identity);
-            root_offset
+            (root_offset, has_tombstones)
         } else if let Some(mmap) = &self.mmap {
-            let start = usize::try_from(ROOT_OFFSET_POS)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Invalid root offset position: {e}")))?;
-            let end = start
+            let start = usize::try_from(ROOT_OFFSET_POS).map_err(|e| {
+                io::Error::new(io::ErrorKind::InvalidData, format!("Invalid root offset position: {e}"))
+            })?;
+            let root_end = start
                 .checked_add(size_of::<u64>())
                 .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid root offset range"))?;
             let root_bytes = mmap
-                .get(start..end)
+                .get(start..root_end)
                 .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Header too small"))?;
-            let bytes: [u8; size_of::<u64>()] = root_bytes
+            let root_offset_bytes: [u8; size_of::<u64>()] = root_bytes
                 .try_into()
                 .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid root offset bytes"))?;
-            u64::from_le_bytes(bytes)
+            let metadata_len_start = usize::try_from(METADATA_OFFSET_POS)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Invalid metadata position: {e}")))?;
+            let metadata_len_end = metadata_len_start
+                .checked_add(size_of::<u32>())
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid metadata length range"))?;
+            let metadata_len_bytes = mmap
+                .get(metadata_len_start..metadata_len_end)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Header too small for metadata length"))?;
+            let metadata_len_raw = u32::from_le_bytes(
+                metadata_len_bytes
+                    .try_into()
+                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid metadata length bytes"))?,
+            );
+            let (metadata_len, has_tombstones) = decode_metadata_len_and_flags(metadata_len_raw);
+            if metadata_len as usize > METADATA_MAX_SIZE {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, format!("Metadata too large: {metadata_len}")));
+            }
+            (u64::from_le_bytes(root_offset_bytes), has_tombstones)
         } else if let Some(file) = &mut self.file {
-            Self::read_root_offset_from_file(file.get_ref())?
+            Self::read_root_offset_and_tombstone_flag_from_file(file.get_ref())?
         } else {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "No data source available"));
         };
 
-        if new_root_offset != self.root_offset {
+        if new_root_offset != self.root_offset || new_has_tombstones != self.has_tombstones {
             self.root_offset = new_root_offset;
+            self.has_tombstones = new_has_tombstones;
             self.cache.clear();
             self.node_cache.clear();
         }
@@ -3073,6 +3236,34 @@ where
             query_tree_mmap(mmap, &mut cursor, &mut self.node_cache, key, self.root_offset)
         } else if let Some(file) = &mut self.file {
             query_tree(file, &mut self.buffer, &mut self.cache, key, self.root_offset)
+        } else {
+            Err(BPlusTreeError::InvalidStructure("No data source available".into()))
+        }
+    }
+
+    pub const fn has_tombstones(&self) -> bool { self.has_tombstones }
+
+    pub fn contains_live_key(&mut self, key: &K) -> Result<bool, BPlusTreeError> {
+        self.refresh_root_offset().map_err(BPlusTreeError::Io)?;
+        if let Some(mmap) = &self.mmap {
+            let mut cursor = io::Cursor::new(mmap.as_ref());
+            query_tree_mmap_contains_live_key(
+                mmap,
+                &mut cursor,
+                &mut self.node_cache,
+                key,
+                self.root_offset,
+                self.has_tombstones,
+            )
+        } else if let Some(file) = &mut self.file {
+            query_tree_contains_live_key::<K, V, _>(
+                file,
+                &mut self.buffer,
+                &mut self.cache,
+                key,
+                self.root_offset,
+                self.has_tombstones,
+            )
         } else {
             Err(BPlusTreeError::InvalidStructure("No data source available".into()))
         }
@@ -3156,11 +3347,8 @@ where
         Ok(node.is_leaf && node.keys.is_empty())
     }
 
-
     /// Provides a disk-backed iterator that traverses the entire tree in order.
-    pub fn iter(&mut self) -> BPlusTreeDiskIterator<'_, K, V> {
-        BPlusTreeDiskIterator::new(self)
-    }
+    pub fn iter(&mut self) -> BPlusTreeDiskIterator<'_, K, V> { BPlusTreeDiskIterator::new(self) }
 
     pub(crate) fn into_sorted_parts(self) -> (PathBuf, Option<BufReader<File>>, Option<Mmap>) {
         (self.filepath, self.file, self.mmap)
@@ -3174,19 +3362,33 @@ where
     ///
     /// This iterator reads values directly from stored offsets in O(1) time,
     /// avoiding O(log n) tree traversal per item.
-    pub fn disk_iter_sorted<SortKey>(self) -> io::Result<super::sorted_index::BPlusTreeSortedIteratorOwned<K, V, SortKey>>
+    pub fn disk_iter_sorted<SortKey>(
+        self,
+    ) -> io::Result<super::sorted_index::BPlusTreeSortedIteratorOwned<K, V, SortKey>>
     where
         SortKey: for<'de> Deserialize<'de>,
     {
-        super::sorted_index::BPlusTreeSortedIteratorOwned::<K, V, SortKey>::new_hybrid(self.filepath.clone(), self.file, self.mmap)
+        super::sorted_index::BPlusTreeSortedIteratorOwned::<K, V, SortKey>::new_hybrid(
+            self.filepath.clone(),
+            self.file,
+            self.mmap,
+        )
     }
 
     /// Owned iterator with explicit index path.
-    pub fn disk_iter_sorted_with_path<SortKey>(self, index_path: &Path) -> io::Result<super::sorted_index::BPlusTreeSortedIteratorOwned<K, V, SortKey>>
+    pub fn disk_iter_sorted_with_path<SortKey>(
+        self,
+        index_path: &Path,
+    ) -> io::Result<super::sorted_index::BPlusTreeSortedIteratorOwned<K, V, SortKey>>
     where
         SortKey: for<'de> Deserialize<'de>,
     {
-        super::sorted_index::BPlusTreeSortedIteratorOwned::<K, V, SortKey>::with_index_path_hybrid(self.filepath.clone(), self.file, self.mmap, index_path)
+        super::sorted_index::BPlusTreeSortedIteratorOwned::<K, V, SortKey>::with_index_path_hybrid(
+            self.filepath.clone(),
+            self.file,
+            self.mmap,
+            index_path,
+        )
     }
 
     /// Traverses the tree and calls the provided closure for each leaf's keys and values.
@@ -3205,9 +3407,11 @@ where
 
     /// Collects all entries with their value locations.
     /// Used for building sorted indexes that need direct value access.
+    #[allow(clippy::too_many_lines)]
     pub fn collect_with_locations(&mut self) -> io::Result<Vec<(K, V, super::sorted_index::ValueLocation)>> {
         let mut result = Vec::new();
         let mut stack = vec![self.root_offset];
+        let has_tombstones = self.has_tombstones;
 
         while let Some(offset) = stack.pop() {
             let (node, pointers) = if let Some(mmap) = &self.mmap {
@@ -3222,30 +3426,86 @@ where
             if node.is_leaf {
                 if let Some(mmap) = &self.mmap {
                     let mut cursor = io::Cursor::new(mmap.as_ref());
-                    for (key, info) in node.keys.into_iter().zip(node.value_info.iter()) {
-                        if info.is_tombstone() {
-                            continue;
+                    if has_tombstones {
+                        for (key, info) in node.keys.into_iter().zip(node.value_info.iter()) {
+                            if info.is_tombstone() {
+                                continue;
+                            }
+                            let value = BPlusTreeNode::<K, V>::load_value_from_info(&mut cursor, info)?;
+                            let location = match info.mode {
+                                ValueStorageMode::Single(offset) => {
+                                    super::sorted_index::ValueLocation::Single { offset, length: info.length }
+                                }
+                                ValueStorageMode::Packed(block_offset, index) => {
+                                    super::sorted_index::ValueLocation::Packed {
+                                        block_offset,
+                                        index,
+                                        length: info.length,
+                                    }
+                                }
+                                ValueStorageMode::Tombstone => continue,
+                            };
+                            result.push((key, value, location));
                         }
-                        let value = BPlusTreeNode::<K, V>::load_value_from_info(&mut cursor, info)?;
-                        let location = match info.mode {
-                            ValueStorageMode::Single(offset) => super::sorted_index::ValueLocation::Single { offset, length: info.length },
-                            ValueStorageMode::Packed(block_offset, index) => super::sorted_index::ValueLocation::Packed { block_offset, index, length: info.length },
-                            ValueStorageMode::Tombstone => continue,
-                        };
-                        result.push((key, value, location));
+                    } else {
+                        for (key, info) in node.keys.into_iter().zip(node.value_info.iter()) {
+                            let value = BPlusTreeNode::<K, V>::load_value_from_info(&mut cursor, info)?;
+                            let location = match info.mode {
+                                ValueStorageMode::Single(offset) => {
+                                    super::sorted_index::ValueLocation::Single { offset, length: info.length }
+                                }
+                                ValueStorageMode::Packed(block_offset, index) => {
+                                    super::sorted_index::ValueLocation::Packed {
+                                        block_offset,
+                                        index,
+                                        length: info.length,
+                                    }
+                                }
+                                ValueStorageMode::Tombstone => continue,
+                            };
+                            result.push((key, value, location));
+                        }
                     }
                 } else if let Some(file) = &mut self.file {
-                    for (key, info) in node.keys.into_iter().zip(node.value_info.iter()) {
-                        if info.is_tombstone() {
-                            continue;
+                    if has_tombstones {
+                        for (key, info) in node.keys.into_iter().zip(node.value_info.iter()) {
+                            if info.is_tombstone() {
+                                continue;
+                            }
+                            let value = BPlusTreeNode::<K, V>::load_value_from_info(file, info)?;
+                            let location = match info.mode {
+                                ValueStorageMode::Single(offset) => {
+                                    super::sorted_index::ValueLocation::Single { offset, length: info.length }
+                                }
+                                ValueStorageMode::Packed(block_offset, index) => {
+                                    super::sorted_index::ValueLocation::Packed {
+                                        block_offset,
+                                        index,
+                                        length: info.length,
+                                    }
+                                }
+                                ValueStorageMode::Tombstone => continue,
+                            };
+                            result.push((key, value, location));
                         }
-                        let value = BPlusTreeNode::<K, V>::load_value_from_info(file, info)?;
-                        let location = match info.mode {
-                            ValueStorageMode::Single(offset) => super::sorted_index::ValueLocation::Single { offset, length: info.length },
-                            ValueStorageMode::Packed(block_offset, index) => super::sorted_index::ValueLocation::Packed { block_offset, index, length: info.length },
-                            ValueStorageMode::Tombstone => continue,
-                        };
-                        result.push((key, value, location));
+                    } else {
+                        for (key, info) in node.keys.into_iter().zip(node.value_info.iter()) {
+                            let value = BPlusTreeNode::<K, V>::load_value_from_info(file, info)?;
+                            let location = match info.mode {
+                                ValueStorageMode::Single(offset) => {
+                                    super::sorted_index::ValueLocation::Single { offset, length: info.length }
+                                }
+                                ValueStorageMode::Packed(block_offset, index) => {
+                                    super::sorted_index::ValueLocation::Packed {
+                                        block_offset,
+                                        index,
+                                        length: info.length,
+                                    }
+                                }
+                                ValueStorageMode::Tombstone => continue,
+                            };
+                            result.push((key, value, location));
+                        }
                     }
                 }
             } else if let Some(ptrs) = pointers {
@@ -3258,11 +3518,8 @@ where
     }
 
     /// Provides an owned disk-backed iterator.
-    pub fn disk_iter(self) -> BPlusTreeDiskIteratorOwned<K, V> {
-        BPlusTreeDiskIteratorOwned::new(self)
-    }
+    pub fn disk_iter(self) -> BPlusTreeDiskIteratorOwned<K, V> { BPlusTreeDiskIteratorOwned::new(self) }
 }
-
 
 pub struct BPlusTreeDiskIteratorOwned<K, V> {
     query: BPlusTreeQuery<K, V>,
@@ -3279,18 +3536,10 @@ where
 {
     fn new(query: BPlusTreeQuery<K, V>) -> Self {
         let root_offset = query.root_offset;
-        Self {
-            query,
-            stack: vec![(root_offset, 0)],
-            leaf_keys: Vec::new(),
-            leaf_values: Vec::new(),
-            leaf_idx: 0,
-        }
+        Self { query, stack: vec![(root_offset, 0)], leaf_keys: Vec::new(), leaf_values: Vec::new(), leaf_idx: 0 }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.stack.is_empty() && self.leaf_idx >= self.leaf_keys.len()
-    }
+    pub fn is_empty(&self) -> bool { self.stack.is_empty() && self.leaf_idx >= self.leaf_keys.len() }
 
     fn next_leaf(&mut self) -> io::Result<Option<(Vec<K>, Vec<V>)>> {
         loop {
@@ -3308,24 +3557,41 @@ where
             if node.is_leaf {
                 let mut keys = Vec::with_capacity(node.keys.len());
                 let mut vals = Vec::with_capacity(node.value_info.len());
+                let has_tombstones = self.query.has_tombstones;
                 if let Some(mmap) = &self.query.mmap {
                     let mut cursor = io::Cursor::new(mmap.as_ref());
-                    for (key, value_info) in node.keys.iter().zip(node.value_info.iter()) {
-                        if value_info.is_tombstone() {
-                            continue;
+                    if has_tombstones {
+                        for (key, value_info) in node.keys.iter().zip(node.value_info.iter()) {
+                            if value_info.is_tombstone() {
+                                continue;
+                            }
+                            let v = BPlusTreeNode::<K, V>::load_value_from_info(&mut cursor, value_info)?;
+                            keys.push(key.clone());
+                            vals.push(v);
                         }
-                        let v = BPlusTreeNode::<K, V>::load_value_from_info(&mut cursor, value_info)?;
-                        keys.push(key.clone());
-                        vals.push(v);
+                    } else {
+                        for (key, value_info) in node.keys.iter().zip(node.value_info.iter()) {
+                            let v = BPlusTreeNode::<K, V>::load_value_from_info(&mut cursor, value_info)?;
+                            keys.push(key.clone());
+                            vals.push(v);
+                        }
                     }
                 } else if let Some(file) = &mut self.query.file {
-                    for (key, value_info) in node.keys.iter().zip(node.value_info.iter()) {
-                        if value_info.is_tombstone() {
-                            continue;
+                    if has_tombstones {
+                        for (key, value_info) in node.keys.iter().zip(node.value_info.iter()) {
+                            if value_info.is_tombstone() {
+                                continue;
+                            }
+                            let v = BPlusTreeNode::<K, V>::load_value_from_info(file, value_info)?;
+                            keys.push(key.clone());
+                            vals.push(v);
                         }
-                        let v = BPlusTreeNode::<K, V>::load_value_from_info(file, value_info)?;
-                        keys.push(key.clone());
-                        vals.push(v);
+                    } else {
+                        for (key, value_info) in node.keys.iter().zip(node.value_info.iter()) {
+                            let v = BPlusTreeNode::<K, V>::load_value_from_info(file, value_info)?;
+                            keys.push(key.clone());
+                            vals.push(v);
+                        }
                     }
                 }
                 return Ok(Some((keys, vals)));
@@ -3406,18 +3672,10 @@ where
 {
     fn new(query: &'a mut BPlusTreeQuery<K, V>) -> Self {
         let root_offset = query.root_offset;
-        Self {
-            query,
-            stack: vec![(root_offset, 0)],
-            leaf_keys: Vec::new(),
-            leaf_values: Vec::new(),
-            leaf_idx: 0,
-        }
+        Self { query, stack: vec![(root_offset, 0)], leaf_keys: Vec::new(), leaf_values: Vec::new(), leaf_idx: 0 }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.stack.is_empty() && self.leaf_idx >= self.leaf_keys.len()
-    }
+    pub fn is_empty(&self) -> bool { self.stack.is_empty() && self.leaf_idx >= self.leaf_keys.len() }
 
     /// Internal method to load the next leaf and return its content.
     fn next_leaf(&mut self) -> io::Result<Option<(Vec<K>, Vec<V>)>> {
@@ -3436,24 +3694,41 @@ where
             if node.is_leaf {
                 let mut keys = Vec::with_capacity(node.keys.len());
                 let mut vals = Vec::with_capacity(node.value_info.len());
+                let has_tombstones = self.query.has_tombstones;
                 if let Some(mmap) = &self.query.mmap {
                     let mut cursor = io::Cursor::new(mmap.as_ref());
-                    for (key, value_info) in node.keys.iter().zip(node.value_info.iter()) {
-                        if value_info.is_tombstone() {
-                            continue;
+                    if has_tombstones {
+                        for (key, value_info) in node.keys.iter().zip(node.value_info.iter()) {
+                            if value_info.is_tombstone() {
+                                continue;
+                            }
+                            let v = BPlusTreeNode::<K, V>::load_value_from_info(&mut cursor, value_info)?;
+                            keys.push(key.clone());
+                            vals.push(v);
                         }
-                        let v = BPlusTreeNode::<K, V>::load_value_from_info(&mut cursor, value_info)?;
-                        keys.push(key.clone());
-                        vals.push(v);
+                    } else {
+                        for (key, value_info) in node.keys.iter().zip(node.value_info.iter()) {
+                            let v = BPlusTreeNode::<K, V>::load_value_from_info(&mut cursor, value_info)?;
+                            keys.push(key.clone());
+                            vals.push(v);
+                        }
                     }
                 } else if let Some(file) = &mut self.query.file {
-                    for (key, value_info) in node.keys.iter().zip(node.value_info.iter()) {
-                        if value_info.is_tombstone() {
-                            continue;
+                    if has_tombstones {
+                        for (key, value_info) in node.keys.iter().zip(node.value_info.iter()) {
+                            if value_info.is_tombstone() {
+                                continue;
+                            }
+                            let v = BPlusTreeNode::<K, V>::load_value_from_info(file, value_info)?;
+                            keys.push(key.clone());
+                            vals.push(v);
                         }
-                        let v = BPlusTreeNode::<K, V>::load_value_from_info(file, value_info)?;
-                        keys.push(key.clone());
-                        vals.push(v);
+                    } else {
+                        for (key, value_info) in node.keys.iter().zip(node.value_info.iter()) {
+                            let v = BPlusTreeNode::<K, V>::load_value_from_info(file, value_info)?;
+                            keys.push(key.clone());
+                            vals.push(v);
+                        }
                     }
                 }
                 return Ok(Some((keys, vals)));
@@ -3502,11 +3777,11 @@ where
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlushPolicy {
-    /// Flush and sync after every update (safest, default)
+    /// Flush and `sync_all` after each write operation (safest, slowest).
     Immediate,
-    /// Flush and sync only at the end of a batch operations
+    /// Flush after writes; call `commit()` (or a background commit loop) to `sync_all`.
     Batch,
-    /// Do not sync automatically (fastest, relies on OS or manual sync)
+    /// Flush only. Never call `sync_all` automatically.
     None,
 }
 
@@ -3523,6 +3798,7 @@ pub struct BPlusTreeUpdate<K, V> {
     serial_buffer: Vec<u8>, // Reusable buffer for serialization
     cache: IndexMap<u64, Vec<u8>>,
     root_offset: u64,
+    has_tombstones: bool,
     inner_order: usize,
     leaf_order: usize,
     flush_policy: FlushPolicy,
@@ -3581,7 +3857,10 @@ where
 {
     pub fn try_new(filepath: &Path) -> io::Result<Self> {
         if !filepath.exists() {
-            return Err(io::Error::new(io::ErrorKind::NotFound, format!("File not found {}", filepath.to_str().unwrap_or("?"))));
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("File not found {}", filepath.to_str().unwrap_or("?")),
+            ));
         }
         // Acquire lock first
         let lock = FileLock::try_lock(filepath)?;
@@ -3589,7 +3868,7 @@ where
         let f = utils::open_read_write_file(filepath)?;
 
         // Verify Header
-        let mut header = [0u8; 16];
+        let mut header = [0u8; METADATA_DATA_START_POS];
         #[cfg(unix)]
         f.read_exact_at(&mut header, 0)?;
         #[cfg(not(unix))]
@@ -3602,11 +3881,26 @@ where
         if &header[0..4] != MAGIC {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid magic number"));
         }
-        let version = u32::from_le_bytes(header[4..8].try_into().map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid version slice"))?);
+        let version = u32::from_le_bytes(
+            header[4..8].try_into().map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid version slice"))?,
+        );
         if version != STORAGE_VERSION {
             return Err(io::Error::new(io::ErrorKind::InvalidData, format!("Unsupported storage version: {version}")));
         }
-        let root_offset = u64::from_le_bytes(header[8..16].try_into().map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid root offset slice"))?);
+        let root_offset = u64::from_le_bytes(
+            header[8..16]
+                .try_into()
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid root offset slice"))?,
+        );
+        let metadata_len_raw = u32::from_le_bytes(
+            header[16..20]
+                .try_into()
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid metadata length slice"))?,
+        );
+        let (metadata_len, has_tombstones) = decode_metadata_len_and_flags(metadata_len_raw);
+        if metadata_len as usize > METADATA_MAX_SIZE {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, format!("Metadata too large: {metadata_len}")));
+        }
         let (inner_order, leaf_order) = calc_order::<K>();
 
         let file = utils::file_reader(f);
@@ -3618,6 +3912,7 @@ where
             serial_buffer: Vec::with_capacity(PAGE_SIZE_USIZE),
             cache: IndexMap::with_capacity(CACHE_CAPACITY),
             root_offset,
+            has_tombstones,
             inner_order,
             leaf_order,
             flush_policy: FlushPolicy::Immediate,
@@ -3670,9 +3965,13 @@ where
         }
     }
 
-    pub fn set_flush_policy(&mut self, policy: FlushPolicy) {
-        self.flush_policy = policy;
-    }
+    pub fn set_flush_policy(&mut self, policy: FlushPolicy) { self.flush_policy = policy; }
+
+    #[inline]
+    const fn should_sync_on_write(&self) -> bool { matches!(self.flush_policy, FlushPolicy::Immediate) }
+
+    #[inline]
+    const fn should_sync_on_commit(&self) -> bool { !matches!(self.flush_policy, FlushPolicy::None) }
 
     /// Prepares a batch by cloning keys and serializing values eagerly.
     ///
@@ -3694,20 +3993,18 @@ where
     }
 
     fn capture_batch_rollback_state(&self) -> io::Result<BatchRollbackState> {
-        Ok(BatchRollbackState {
-            file_len: self.file.get_ref().metadata()?.len(),
-            root_offset: self.root_offset,
-        })
+        Ok(BatchRollbackState { file_len: self.file.get_ref().metadata()?.len(), root_offset: self.root_offset })
     }
 
     fn rollback_batch_state(&mut self, state: BatchRollbackState) -> io::Result<()> {
+        let should_sync = self.should_sync_on_commit();
         {
             let file = self.file.get_mut();
             file.seek(SeekFrom::Start(ROOT_OFFSET_POS))?;
             file.write_all(&state.root_offset.to_le_bytes())?;
             file.flush()?;
             file.set_len(state.file_len)?;
-            if self.flush_policy != FlushPolicy::None {
+            if should_sync {
                 file.sync_all()?;
             }
         }
@@ -3719,15 +4016,35 @@ where
         Ok(())
     }
 
-    /// Helper to access metadata
-    pub fn get_metadata(&mut self) -> io::Result<BPlusTreeMetadata> {
+    fn read_metadata_len_from_header(&mut self) -> io::Result<u32> {
         self.file.seek(SeekFrom::Start(METADATA_OFFSET_POS))?;
         let mut len_buf = [0u8; 4];
-        if self.file.read_exact(&mut len_buf).is_err() {
-            return Ok(BPlusTreeMetadata::Empty);
+        self.file.read_exact(&mut len_buf)?;
+        let (metadata_len, _) = decode_metadata_len_and_flags(u32::from_le_bytes(len_buf));
+        if metadata_len as usize > METADATA_MAX_SIZE {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, format!("Metadata too large: {metadata_len}")));
         }
-        let len = u32::from_le_bytes(len_buf);
-        if len == 0 || len as usize > METADATA_MAX_SIZE {
+        Ok(metadata_len)
+    }
+
+    fn write_metadata_len_with_current_flags(&mut self, metadata_len: u32) -> io::Result<()> {
+        if metadata_len as usize > METADATA_MAX_SIZE {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("Metadata too large: {metadata_len}")));
+        }
+
+        let metadata_len_with_flags = encode_metadata_len_with_flags(metadata_len, self.has_tombstones);
+        self.file.seek(SeekFrom::Start(METADATA_OFFSET_POS))?;
+        self.file.get_mut().write_all(&metadata_len_with_flags.to_le_bytes())?;
+        self.file.seek_relative(0)?;
+        Ok(())
+    }
+
+    /// Helper to access metadata
+    pub fn get_metadata(&mut self) -> io::Result<BPlusTreeMetadata> {
+        let Ok(len) = self.read_metadata_len_from_header() else {
+            return Ok(BPlusTreeMetadata::Empty);
+        };
+        if len == 0 {
             return Ok(BPlusTreeMetadata::Empty);
         }
         let mut buf = vec![0u8; len as usize];
@@ -3740,13 +4057,19 @@ where
     pub fn set_metadata(&mut self, data: &BPlusTreeMetadata) -> io::Result<()> {
         let bytes = data.to_bytes();
         if bytes.len() > METADATA_MAX_SIZE {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("Metadata too large: {} > {}", bytes.len(), METADATA_MAX_SIZE)));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("Metadata too large: {} > {}", bytes.len(), METADATA_MAX_SIZE),
+            ));
         }
 
         self.file.seek(SeekFrom::Start(METADATA_OFFSET_POS))?;
         {
             let file = self.file.get_mut();
-            file.write_all(&u32::try_from(bytes.len()).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?.to_le_bytes())?;
+            let metadata_len =
+                u32::try_from(bytes.len()).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+            let metadata_len_with_flags = encode_metadata_len_with_flags(metadata_len, self.has_tombstones);
+            file.write_all(&metadata_len_with_flags.to_le_bytes())?;
             file.write_all(&bytes)?;
             file.flush()?; // Ensure it hits disk
         }
@@ -3763,12 +4086,8 @@ where
 
     pub fn is_empty(&mut self) -> Result<bool, BPlusTreeError> {
         let mut reader = utils::file_reader(&mut self.file);
-        let (node, _) = BPlusTreeNode::<K, V>::deserialize_from_block(
-            &mut reader,
-            &mut self.read_buffer,
-            self.root_offset,
-            false,
-        )?;
+        let (node, _) =
+            BPlusTreeNode::<K, V>::deserialize_from_block(&mut reader, &mut self.read_buffer, self.root_offset, false)?;
         Ok(node.is_leaf && node.keys.is_empty())
     }
 
@@ -3779,7 +4098,6 @@ where
     pub fn query_le(&mut self, key: &K) -> Result<Option<V>, BPlusTreeError> {
         query_tree_le(&mut self.file, &mut self.read_buffer, &mut self.cache, key, self.root_offset)
     }
-
 
     pub fn update(&mut self, key: &K, value: V) -> Result<u64, BPlusTreeError> {
         let refs = [(key, &value)];
@@ -3795,7 +4113,7 @@ where
         }
 
         self.file.get_mut().flush().map_err(BPlusTreeError::Io)?;
-        if self.flush_policy != FlushPolicy::None {
+        if self.should_sync_on_write() {
             self.file.get_mut().sync_all().map_err(BPlusTreeError::Io)?;
         }
 
@@ -3816,7 +4134,8 @@ where
         items: &[(&K, &V)],
         allow_in_place: bool,
     ) -> Result<u64, BPlusTreeError> {
-        let (mut node, pointers_opt) = BPlusTreeNode::<K, V>::deserialize_from_block(&mut self.file, &mut self.read_buffer, offset, false)?;
+        let (mut node, pointers_opt) =
+            BPlusTreeNode::<K, V>::deserialize_from_block(&mut self.file, &mut self.read_buffer, offset, false)?;
 
         if node.is_leaf {
             // Track which items need the traditional COW approach (value grew beyond allocated space)
@@ -3829,7 +4148,8 @@ where
                     Ok(idx) => {
                         if allow_in_place {
                             // Try in-place update first
-                            let result = self.try_update_value_in_place(value, &node.value_info[idx])
+                            let result = self
+                                .try_update_value_in_place(value, &node.value_info[idx])
                                 .map_err(BPlusTreeError::Io)?;
 
                             match result {
@@ -3869,17 +4189,15 @@ where
             // Handle COW items - need to write new value blocks
             for (idx, _key, value) in needs_cow {
                 let (val_off, val_len) = self.insert_value_to_disk(value).map_err(BPlusTreeError::Io)?;
-                node.value_info[idx] = ValueInfo {
-                    mode: ValueStorageMode::Single(val_off),
-                    length: val_len,
-                    cache: Mutex::new(None),
-                };
+                node.value_info[idx] =
+                    ValueInfo { mode: ValueStorageMode::Single(val_off), length: val_len, cache: Mutex::new(None) };
             }
 
             let new_offset = self.write_node(&node).map_err(BPlusTreeError::Io)?;
             Ok(new_offset)
         } else {
-            let mut pointers = pointers_opt.ok_or_else(|| BPlusTreeError::InvalidStructure("Internal node missing pointers".into()))?;
+            let mut pointers = pointers_opt
+                .ok_or_else(|| BPlusTreeError::InvalidStructure("Internal node missing pointers".into()))?;
             let mut any_child_changed = false;
 
             let mut current_idx = 0;
@@ -3888,7 +4206,9 @@ where
                 let child_idx = get_entry_index_upper_bound::<K>(&node.keys, first_key_in_group);
 
                 let mut group_end = current_idx + 1;
-                while group_end < items.len() && get_entry_index_upper_bound::<K>(&node.keys, items[group_end].0) == child_idx {
+                while group_end < items.len()
+                    && get_entry_index_upper_bound::<K>(&node.keys, items[group_end].0) == child_idx
+                {
                     group_end += 1;
                 }
 
@@ -3940,7 +4260,7 @@ where
             }
 
             self.file.get_mut().flush().map_err(BPlusTreeError::Io)?;
-            if self.flush_policy != FlushPolicy::None {
+            if self.should_sync_on_write() {
                 self.file.get_mut().sync_all().map_err(BPlusTreeError::Io)?;
             }
             Ok(new_root_offset)
@@ -3960,12 +4280,8 @@ where
     }
 
     fn delete_batch_recursive(&mut self, offset: u64, keys: &[&K]) -> io::Result<(u64, usize)> {
-        let (mut node, pointers_opt) = BPlusTreeNode::<K, V>::deserialize_from_block(
-            &mut self.file,
-            &mut self.read_buffer,
-            offset,
-            false,
-        )?;
+        let (mut node, pointers_opt) =
+            BPlusTreeNode::<K, V>::deserialize_from_block(&mut self.file, &mut self.read_buffer, offset, false)?;
 
         if node.is_leaf {
             let mut deleted = 0usize;
@@ -3997,9 +4313,7 @@ where
             let child_idx = get_entry_index_upper_bound::<K>(&node.keys, first_key_in_group);
 
             let mut group_end = current_idx + 1;
-            while group_end < keys.len()
-                && get_entry_index_upper_bound::<K>(&node.keys, keys[group_end]) == child_idx
-            {
+            while group_end < keys.len() && get_entry_index_upper_bound::<K>(&node.keys, keys[group_end]) == child_idx {
                 group_end += 1;
             }
 
@@ -4048,8 +4362,14 @@ where
                 self.root_offset = new_root_offset;
             }
 
+            if deleted > 0 {
+                self.has_tombstones = true;
+                let metadata_len = self.read_metadata_len_from_header()?;
+                self.write_metadata_len_with_current_flags(metadata_len)?;
+            }
+
             self.file.get_mut().flush()?;
-            if self.flush_policy != FlushPolicy::None {
+            if self.should_sync_on_write() {
                 self.file.get_mut().sync_all()?;
             }
 
@@ -4068,7 +4388,6 @@ where
             }
         }
     }
-
 
     /// Try to update a value in-place if possible.
     /// Returns:
@@ -4109,7 +4428,7 @@ where
                 }
 
                 // Invalidate BufReader cache since we bypassed it to write
-                self.file.stream_position()?;  // alias for seek(SeekFrom::Current(0))
+                self.file.stream_position()?; // alias for seek(SeekFrom::Current(0))
 
                 Ok(InPlaceUpdateResult::Success)
             }
@@ -4197,7 +4516,7 @@ where
                 // Update the value data in the buffer
                 block_buffer[pos..pos + len].copy_from_slice(new_value_bytes);
 
-                // Write the entire block back (optimization: we could write just the slice, 
+                // Write the entire block back (optimization: we could write just the slice,
                 // but we already have the whole block in-memory here and write_all(4KB) is fast)
                 self.file.seek(SeekFrom::Start(block_offset))?;
                 self.file.get_mut().write_all(&block_buffer)?;
@@ -4214,10 +4533,7 @@ where
             pos += len;
         }
 
-        Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("Value index {value_index} not found in packed block"),
-        ))
+        Err(io::Error::new(io::ErrorKind::InvalidData, format!("Value index {value_index} not found in packed block")))
     }
 
     /// Insert or update multiple items in batch (upsert). If a key exists, it will be updated;
@@ -4255,16 +4571,17 @@ where
         self.file.get_mut().seek(SeekFrom::End(0))?;
         let offset = self.file.get_mut().stream_position()?;
         self.serial_buffer.clear();
-        node.serialize_internal_with_offsets(self.file.get_mut(), &mut self.write_buffer, &mut self.serial_buffer, offset, pointers)?;
+        node.serialize_internal_with_offsets(
+            self.file.get_mut(),
+            &mut self.write_buffer,
+            &mut self.serial_buffer,
+            offset,
+            pointers,
+        )?;
         Ok(offset)
     }
 
-
-    fn upsert_batch_recursive(
-        &mut self,
-        offset: u64,
-        items: &[(&K, &V)],
-    ) -> io::Result<(u64, Vec<(K, u64)>)> {
+    fn upsert_batch_recursive(&mut self, offset: u64, items: &[(&K, &V)]) -> io::Result<(u64, Vec<(K, u64)>)> {
         let (mut node, pointers_opt) = BPlusTreeNode::<K, V>::deserialize_from_block(
             &mut self.file,
             &mut self.read_buffer,
@@ -4275,7 +4592,8 @@ where
         if node.is_leaf {
             for (key, value) in items {
                 let (val_off, val_len) = self.insert_value_to_disk(value)?;
-                let new_info = ValueInfo { mode: ValueStorageMode::Single(val_off), length: val_len, cache: Mutex::new(None) };
+                let new_info =
+                    ValueInfo { mode: ValueStorageMode::Single(val_off), length: val_len, cache: Mutex::new(None) };
 
                 match node.keys.binary_search(key) {
                     Ok(idx) => {
@@ -4311,12 +4629,15 @@ where
                 let child_idx = get_entry_index_upper_bound::<K>(&node.keys, first_key_in_group);
 
                 let mut group_end = current_idx + 1;
-                while group_end < items.len() && get_entry_index_upper_bound::<K>(&node.keys, items[group_end].0) == child_idx {
+                while group_end < items.len()
+                    && get_entry_index_upper_bound::<K>(&node.keys, items[group_end].0) == child_idx
+                {
                     group_end += 1;
                 }
 
                 let sub_items = &items[current_idx..group_end];
-                let (new_child_offset, child_promotions) = self.upsert_batch_recursive(pointers[child_idx], sub_items)?;
+                let (new_child_offset, child_promotions) =
+                    self.upsert_batch_recursive(pointers[child_idx], sub_items)?;
                 pointers[child_idx] = new_child_offset;
 
                 for (median_key, right_child_offset) in child_promotions {
@@ -4397,7 +4718,7 @@ where
             self.file.get_mut().seek(SeekFrom::Start(ROOT_OFFSET_POS))?;
             self.file.get_mut().write_all(&current_root.to_le_bytes())?;
             self.file.get_mut().flush()?;
-            if self.flush_policy != FlushPolicy::None {
+            if self.should_sync_on_write() {
                 self.file.get_mut().sync_all()?;
             }
 
@@ -4438,10 +4759,7 @@ where
     ///
     /// # Returns
     /// The final root offset after all upserts, or an error if any operation fails
-    pub fn upsert_batch_preserialized(
-        &mut self,
-        items: Vec<(K, Vec<u8>)>,
-    ) -> io::Result<u64> {
+    pub fn upsert_batch_preserialized(&mut self, items: Vec<(K, Vec<u8>)>) -> io::Result<u64> {
         if items.is_empty() {
             return Ok(self.root_offset);
         }
@@ -4450,12 +4768,10 @@ where
         let result = (|| -> io::Result<u64> {
             // // Sort by key for efficient batch insertion
             let mut sorted_items = items;
-         sorted_items.sort_by(|a, b| a.0.cmp(&b.0));
+            sorted_items.sort_by(|a, b| a.0.cmp(&b.0));
 
-            let (mut current_root, promotions) = self.upsert_batch_preserialized_recursive(
-                self.root_offset,
-                &sorted_items,
-            )?;
+            let (mut current_root, promotions) =
+                self.upsert_batch_preserialized_recursive(self.root_offset, &sorted_items)?;
 
             // Handle promotions (splits) using a balanced approach
             current_root = self.build_higher_levels(current_root, promotions)?;
@@ -4463,7 +4779,7 @@ where
             self.file.get_mut().seek(SeekFrom::Start(ROOT_OFFSET_POS))?;
             self.file.get_mut().write_all(&current_root.to_le_bytes())?;
             self.file.get_mut().flush()?;
-            if self.flush_policy != FlushPolicy::None {
+            if self.should_sync_on_write() {
                 self.file.get_mut().sync_all()?;
             }
 
@@ -4486,7 +4802,7 @@ where
 
     pub fn commit(&mut self) -> io::Result<()> {
         self.file.get_mut().flush()?;
-        if self.flush_policy != FlushPolicy::None {
+        if self.should_sync_on_commit() {
             self.file.get_mut().sync_all()?;
         }
         Ok(())
@@ -4510,11 +4826,8 @@ where
             for (key, value_bytes) in items {
                 // Write pre-serialized value to disk with compression
                 let (val_off, val_len) = self.insert_preserialized_value_to_disk(value_bytes)?;
-                let new_info = ValueInfo {
-                    mode: ValueStorageMode::Single(val_off),
-                    length: val_len,
-                    cache: Mutex::new(None),
-                };
+                let new_info =
+                    ValueInfo { mode: ValueStorageMode::Single(val_off), length: val_len, cache: Mutex::new(None) };
 
                 match node.keys.binary_search(key) {
                     Ok(idx) => {
@@ -4616,7 +4929,7 @@ where
                 if src.seek(SeekFrom::Start(METADATA_OFFSET_POS)).is_ok() {
                     let mut lbuf = [0u8; 4];
                     if src.read_exact(&mut lbuf).is_ok() {
-                        let l = u32::from_le_bytes(lbuf);
+                        let (l, _) = decode_metadata_len_and_flags(u32::from_le_bytes(lbuf));
                         if l > 0 && l as usize <= METADATA_MAX_SIZE {
                             let mut b = vec![0u8; l as usize];
                             if src.read_exact(&mut b).is_ok() {
@@ -4640,11 +4953,11 @@ where
         header[4..8].copy_from_slice(&STORAGE_VERSION.to_le_bytes());
         // Root offset placeholder (will be filled later)
         // Root offset placeholder (will be filled later)
+        let metadata_len = u32::try_from(metadata.len()).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let metadata_len_with_flags = encode_metadata_len_with_flags(metadata_len, false);
+        header[16..20].copy_from_slice(&metadata_len_with_flags.to_le_bytes());
         if !metadata.is_empty() {
-            let len = u32::try_from(metadata.len()).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            // Ensure we check max size?
-            header[16..20].copy_from_slice(&len.to_le_bytes());
-            header[20..20 + metadata.len()].copy_from_slice(&metadata);
+            header[METADATA_DATA_START_POS..METADATA_DATA_START_POS + metadata.len()].copy_from_slice(&metadata);
         }
         temp_file.write_all(&header)?;
 
@@ -4684,7 +4997,12 @@ where
                     let node_offset = current_offset;
                     // Created temporary scratch buffer for serialization
                     let mut serial_buf = Vec::new();
-                    current_offset = current_leaf.serialize_to_block(&mut write_buffer, &mut node_buffer, &mut serial_buf, node_offset)?;
+                    current_offset = current_leaf.serialize_to_block(
+                        &mut write_buffer,
+                        &mut node_buffer,
+                        &mut serial_buf,
+                        node_offset,
+                    )?;
                     leaf_pointers.push((first_key, node_offset));
                     current_leaf = BPlusTreeNode::new(true);
                 }
@@ -4695,7 +5013,12 @@ where
                 let first_key = current_leaf.keys[0].clone();
                 let node_offset = current_offset;
                 let mut serial_buf = Vec::new(); // Recyle? No loop here.
-                current_offset = current_leaf.serialize_to_block(&mut write_buffer, &mut node_buffer, &mut serial_buf, node_offset)?;
+                current_offset = current_leaf.serialize_to_block(
+                    &mut write_buffer,
+                    &mut node_buffer,
+                    &mut serial_buf,
+                    node_offset,
+                )?;
                 leaf_pointers.push((first_key, node_offset));
             }
             write_buffer.flush()?;
@@ -4704,7 +5027,8 @@ where
         // 3. Build Internal Levels
         let tree = BPlusTree::<K, V>::new();
         let mut node_buffer = vec![0u8; PAGE_SIZE_USIZE];
-        let root_offset = tree.build_levels_from_pointers(&mut temp_file, leaf_pointers, current_offset, &mut node_buffer)?;
+        let root_offset =
+            tree.build_levels_from_pointers(&mut temp_file, leaf_pointers, current_offset, &mut node_buffer)?;
 
         // 4. Update Header
         temp_file.seek(SeekFrom::Start(ROOT_OFFSET_POS))?;
@@ -4718,6 +5042,7 @@ where
 
         // 6. Refresh state
         self.root_offset = root_offset;
+        self.has_tombstones = false;
         let file = utils::open_read_write_file(filepath)?;
         self.file = utils::file_reader(file);
         self.cache.clear();
@@ -4731,7 +5056,11 @@ where
 /// This wrapper does not implement write-ahead logging (WAL) semantics or
 /// crash-recovery replay. It only serializes access through a shared updater.
 pub struct BPlusTreeSerialWriter<K, V> {
-    updater: Mutex<BPlusTreeUpdate<K, V>>,
+    updater: Arc<Mutex<BPlusTreeUpdate<K, V>>>,
+    flush_policy: FlushPolicy,
+    dirty: Arc<AtomicBool>,
+    background_commit_shutdown: Arc<AtomicBool>,
+    background_commit_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl<K, V> BPlusTreeSerialWriter<K, V>
@@ -4743,12 +5072,20 @@ where
         let mut updater = BPlusTreeUpdate::<K, V>::try_new_with_backoff(filepath)?;
         updater.set_flush_policy(flush_policy);
         Ok(Self {
-            updater: Mutex::new(updater),
+            updater: Arc::new(Mutex::new(updater)),
+            flush_policy,
+            dirty: Arc::new(AtomicBool::new(false)),
+            background_commit_shutdown: Arc::new(AtomicBool::new(false)),
+            background_commit_handle: Mutex::new(None),
         })
     }
 
     pub fn upsert_prepared(&self, items: Vec<(K, Vec<u8>)>) -> io::Result<u64> {
-        self.updater.lock().upsert_batch_encoded(items)
+        let result = self.updater.lock().upsert_batch_encoded(items);
+        if result.is_ok() {
+            self.mark_dirty_after_write();
+        }
+        result
     }
 
     pub fn upsert(&self, items: &[(&K, &V)]) -> io::Result<u64> {
@@ -4756,13 +5093,94 @@ where
         self.upsert_prepared(prepared)
     }
 
+    #[inline]
+    fn mark_dirty_after_write(&self) {
+        match self.flush_policy {
+            FlushPolicy::Batch => self.dirty.store(true, Ordering::Release),
+            FlushPolicy::Immediate | FlushPolicy::None => self.dirty.store(false, Ordering::Release),
+        }
+    }
+
+    pub fn start_background_commit(&self, interval: Duration) -> io::Result<()> {
+        if self.flush_policy != FlushPolicy::Batch {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "background commit requires FlushPolicy::Batch"));
+        }
+        if interval.is_zero() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "background commit interval must be > 0"));
+        }
+
+        let mut handle_slot = self.background_commit_handle.lock();
+        if handle_slot.is_some() {
+            return Ok(());
+        }
+
+        self.background_commit_shutdown.store(false, Ordering::Release);
+        let updater = Arc::clone(&self.updater);
+        let dirty = Arc::clone(&self.dirty);
+        let shutdown = Arc::clone(&self.background_commit_shutdown);
+
+        let handle = std::thread::Builder::new()
+            .name("bplustree-commit".to_string())
+            .spawn(move || {
+                while !shutdown.load(Ordering::Acquire) {
+                    std::thread::park_timeout(interval);
+                    if shutdown.load(Ordering::Acquire) {
+                        break;
+                    }
+                    if !dirty.swap(false, Ordering::AcqRel) {
+                        continue;
+                    }
+                    if let Err(err) = updater.lock().commit() {
+                        error!("Background B+Tree commit failed: {err}");
+                        dirty.store(true, Ordering::Release);
+                    }
+                }
+
+                if dirty.swap(false, Ordering::AcqRel) {
+                    if let Err(err) = updater.lock().commit() {
+                        error!("Final background B+Tree commit failed during shutdown: {err}");
+                    }
+                }
+            })
+            .map_err(io::Error::other)?;
+        *handle_slot = Some(handle);
+        Ok(())
+    }
+
+    pub fn stop_background_commit(&self) -> io::Result<()> {
+        self.background_commit_shutdown.store(true, Ordering::Release);
+        if let Some(handle) = self.background_commit_handle.lock().take() {
+            handle.thread().unpark();
+            handle.join().map_err(|_| io::Error::other("background B+Tree commit thread panicked"))?;
+        }
+        Ok(())
+    }
+
+    /// Explicit durability barrier.
+    pub fn flush_now(&self) -> io::Result<()> { self.commit() }
+
     pub fn commit(&self) -> io::Result<()> {
-        self.updater.lock().commit()
+        let result = self.updater.lock().commit();
+        if result.is_ok() {
+            self.dirty.store(false, Ordering::Release);
+        }
+        result
     }
 
     /// Alias for `commit()`.
     pub fn shutdown(&self) -> io::Result<()> {
+        self.stop_background_commit()?;
         self.commit()
+    }
+}
+
+impl<K, V> Drop for BPlusTreeSerialWriter<K, V> {
+    fn drop(&mut self) {
+        self.background_commit_shutdown.store(true, Ordering::Release);
+        if let Some(handle) = self.background_commit_handle.lock().take() {
+            handle.thread().unpark();
+            let _ = handle.join();
+        }
     }
 }
 
@@ -4783,12 +5201,7 @@ where
 {
     pub fn new(tree: &'a BPlusTree<K, V>) -> Self {
         let stack = vec![&tree.root];
-        Self {
-            stack,
-            current_keys: None,
-            current_values: None,
-            index: 0,
-        }
+        Self { stack, current_keys: None, current_values: None, index: 0 }
     }
 }
 
@@ -4838,9 +5251,7 @@ where
     K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
     V: Serialize + for<'de> Deserialize<'de> + Clone,
 {
-    pub fn iter(&self) -> BPlusTreeIterator<'_, K, V> {
-        BPlusTreeIterator::new(self)
-    }
+    pub fn iter(&self) -> BPlusTreeIterator<'_, K, V> { BPlusTreeIterator::new(self) }
 }
 
 impl<'a, K, V> IntoIterator for &'a BPlusTree<K, V>
@@ -4851,27 +5262,18 @@ where
     type Item = (&'a K, &'a V);
     type IntoIter = BPlusTreeIterator<'a, K, V>;
 
-    fn into_iter(self) -> Self::IntoIter {
-        self.iter()
-    }
+    fn into_iter(self) -> Self::IntoIter { self.iter() }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde::de::Deserializer;
-    use serde::ser::Error as SerError;
-    use serde::Serializer;
-    use tempfile::tempdir;
-
-    use parking_lot::Mutex;
-    use std::collections::HashSet;
-    use std::io;
-
     use crate::repository::bplustree::{BPlusTree, BPlusTreeQuery, BPlusTreeUpdate};
-    use serde::{Deserialize, Serialize};
+    use parking_lot::Mutex;
+    use serde::{de::Deserializer, ser::Error as SerError, Deserialize, Serialize, Serializer};
     use shared::utils::generate_random_string;
-
+    use std::{collections::HashSet, io};
+    use tempfile::tempdir;
 
     #[cfg(unix)]
     #[allow(dead_code)]
@@ -4939,19 +5341,9 @@ mod tests {
     }
 
     impl FailingValue {
-        fn ok(payload: impl Into<String>) -> Self {
-            Self {
-                payload: payload.into(),
-                fail_serialize: false,
-            }
-        }
+        fn ok(payload: impl Into<String>) -> Self { Self { payload: payload.into(), fail_serialize: false } }
 
-        fn failing(payload: impl Into<String>) -> Self {
-            Self {
-                payload: payload.into(),
-                fail_serialize: true,
-            }
-        }
+        fn failing(payload: impl Into<String>) -> Self { Self { payload: payload.into(), fail_serialize: true } }
     }
 
     impl Serialize for FailingValue {
@@ -4983,17 +5375,13 @@ mod tests {
         assert!(!process_is_alive(u32::MAX));
     }
 
-
     #[test]
     fn insert_test() -> io::Result<()> {
         let test_size = 500;
         let content = generate_random_string(1024);
         let mut tree = BPlusTree::<u32, Record>::new();
         for i in 0u32..=test_size {
-            tree.insert(i, Record {
-                id: i,
-                data: format!("{content} {i}"),
-            });
+            tree.insert(i, Record { id: i, data: format!("{content} {i}") });
         }
 
         // // Traverse the tree
@@ -5012,10 +5400,7 @@ mod tests {
         for i in 0u32..=test_size {
             let found = tree.query(&i);
             assert!(found.is_some(), "{content} {i} not found");
-            assert!(found.unwrap().eq(&Record {
-                id: i,
-                data: format!("{content} {i}"),
-            }), "{content} {i} not found");
+            assert!(found.unwrap().eq(&Record { id: i, data: format!("{content} {i}") }), "{content} {i} not found");
         }
 
         let mut tree_query: BPlusTreeQuery<u32, Record> = BPlusTreeQuery::try_new(&filepath)?;
@@ -5023,20 +5408,14 @@ mod tests {
             let found = tree_query.query(&i).expect("Query failed");
             assert!(found.is_some(), "{content} {i} not found");
             let entry = found.unwrap();
-            assert!(entry.eq(&Record {
-                id: i,
-                data: format!("{content} {i}"),
-            }), "{content} {i} not found");
+            assert!(entry.eq(&Record { id: i, data: format!("{content} {i}") }), "{content} {i} not found");
         }
 
         let mut tree_update: BPlusTreeUpdate<u32, Record> = BPlusTreeUpdate::try_new(&filepath)?;
 
         for i in 0u32..=test_size {
             if let Ok(Some(record)) = tree_update.query(&i) {
-                let new_record = Record {
-                    id: record.id,
-                    data: format!("{content} {}", record.id + 9000),
-                };
+                let new_record = Record { id: record.id, data: format!("{content} {}", record.id + 9000) };
                 tree_update.update(&i, new_record).map_err(BPlusTreeError::to_io)?;
             } else {
                 panic!("{content} {i} not found");
@@ -5050,32 +5429,22 @@ mod tests {
             let found = tree_query.query(&i).expect("Query failed");
             assert!(found.is_some(), "{content} {i} not found");
             let entry = found.unwrap();
-            let expected = Record {
-                id: i,
-                data: format!("{content} {}", i + 9000),
-            };
+            let expected = Record { id: i, data: format!("{content} {}", i + 9000) };
             assert!(entry.eq(&expected), "Entry not equal {entry:?} != {expected:?}");
         }
 
         Ok(())
     }
 
-
     #[test]
     fn insert_duplicate_test() {
         let content = "Entry";
         let mut tree = BPlusTree::<u32, Record>::new();
         for i in 0u32..=500 {
-            tree.insert(i, Record {
-                id: i,
-                data: format!("{content} {i}"),
-            });
+            tree.insert(i, Record { id: i, data: format!("{content} {i}") });
         }
         for i in 0u32..=500 {
-            tree.insert(i, Record {
-                id: i,
-                data: format!("{content} {}", i + 1),
-            });
+            tree.insert(i, Record { id: i, data: format!("{content} {}", i + 1) });
         }
 
         tree.traverse(|keys, values| {
@@ -5101,10 +5470,7 @@ mod tests {
         let r1_new = Record { id: 1, data: "updated 1".to_string() };
         let r3_new = Record { id: 3, data: "new 3".to_string() };
 
-        update.upsert_batch(&[
-            (&1, &r1_new),
-            (&3, &r3_new),
-        ])?;
+        update.upsert_batch(&[(&1, &r1_new), (&3, &r3_new)])?;
 
         // 3. Verify with query
         let mut query = BPlusTreeQuery::<u32, Record>::try_new(&filepath)?;
@@ -5125,10 +5491,7 @@ mod tests {
         assert!(tree.is_empty());
 
         for i in 1..=test_size {
-            tree.insert(i, Record {
-                id: i,
-                data: format!("data {i}"),
-            });
+            tree.insert(i, Record { id: i, data: format!("data {i}") });
             assert_eq!(tree.len(), i as usize);
             assert!(!tree.is_empty());
         }
@@ -5151,24 +5514,18 @@ mod tests {
         assert_eq!(update.len().expect("Update len failed after update"), test_size as usize);
 
         // Insert new key - length should increase
-        update.upsert_batch(&[
-            (&(test_size + 1), &Record { id: test_size + 1, data: "new".to_string() })
-        ])?;
+        update.upsert_batch(&[(&(test_size + 1), &Record { id: test_size + 1, data: "new".to_string() })])?;
         assert_eq!(update.len().expect("Update len failed after insert"), (test_size + 1) as usize);
 
         Ok(())
     }
-
 
     #[test]
     fn iterator_test() -> io::Result<()> {
         let mut tree = BPlusTree::<u32, Record>::new();
         let mut entry_set = HashSet::new();
         for i in 0u32..=500 {
-            tree.insert(i, Record {
-                id: i,
-                data: format!("Entry {i}"),
-            });
+            tree.insert(i, Record { id: i, data: format!("Entry {i}") });
             entry_set.insert(i);
         }
         let tempdir = tempfile::tempdir()?;
@@ -5204,7 +5561,9 @@ mod tests {
         let mut tree_update = BPlusTreeUpdate::<u32, Record>::try_new(&filepath)?;
         for i in 0u32..100 {
             if i % 2 == 0 {
-                tree_update.update(&i, Record { id: i, data: format!("UpdatedContent {i}") }).map_err(BPlusTreeError::to_io)?;
+                tree_update
+                    .update(&i, Record { id: i, data: format!("UpdatedContent {i}") })
+                    .map_err(BPlusTreeError::to_io)?;
             }
         }
 
@@ -5224,9 +5583,17 @@ mod tests {
         let mut count = 0;
         for (key, value) in &reloaded_tree {
             if *key % 2 == 0 {
-                assert_eq!(value.data, format!("UpdatedContent {key}"), "Iterator returned wrong value for updated key {key}");
+                assert_eq!(
+                    value.data,
+                    format!("UpdatedContent {key}"),
+                    "Iterator returned wrong value for updated key {key}"
+                );
             } else {
-                assert_eq!(value.data, format!("{content} {key}"), "Iterator returned wrong value for original key {key}");
+                assert_eq!(
+                    value.data,
+                    format!("{content} {key}"),
+                    "Iterator returned wrong value for original key {key}"
+                );
             }
             count += 1;
         }
@@ -5258,12 +5625,17 @@ mod tests {
         let mut tree_update = BPlusTreeUpdate::<u32, Record>::try_new(&filepath)?;
         let same_size_padding: String = generate_random_string(400);
         for i in 0u32..10 {
-            tree_update.update(&i, Record { id: i, data: format!("{same_size_padding}{i}") }).map_err(BPlusTreeError::to_io)?;
+            tree_update
+                .update(&i, Record { id: i, data: format!("{same_size_padding}{i}") })
+                .map_err(BPlusTreeError::to_io)?;
         }
 
         let size_after_same_update = std::fs::metadata(&filepath)?.len();
         // With in-place update optimization, same-size updates should NOT grow the file
-        assert_eq!(size_after_same_update, initial_size, "Same-size updates should happen in-place without file growth");
+        assert_eq!(
+            size_after_same_update, initial_size,
+            "Same-size updates should happen in-place without file growth"
+        );
         drop(tree_update);
 
         // Reload and verify the in-place updates worked
@@ -5279,17 +5651,24 @@ mod tests {
         let mut tree_update = BPlusTreeUpdate::<u32, Record>::try_new(&filepath)?;
         let smaller_padding: String = generate_random_string(200);
         for i in 0u32..10 {
-            tree_update.update(&i, Record { id: i, data: format!("{smaller_padding}{i}") }).map_err(BPlusTreeError::to_io)?;
+            tree_update
+                .update(&i, Record { id: i, data: format!("{smaller_padding}{i}") })
+                .map_err(BPlusTreeError::to_io)?;
         }
 
         let size_after_smaller_update = std::fs::metadata(&filepath)?.len();
-        assert_eq!(size_after_smaller_update, initial_size, "Smaller updates should happen in-place without file growth");
+        assert_eq!(
+            size_after_smaller_update, initial_size,
+            "Smaller updates should happen in-place without file growth"
+        );
 
         // Update with larger size data - should trigger COW and file growth
         // 5000 chars is much larger than the original ~400 byte allocation
         let larger_padding: String = generate_random_string(5000);
         for i in 0u32..1 {
-            tree_update.update(&i, Record { id: i, data: format!("{larger_padding}{i}") }).map_err(BPlusTreeError::to_io)?;
+            tree_update
+                .update(&i, Record { id: i, data: format!("{larger_padding}{i}") })
+                .map_err(BPlusTreeError::to_io)?;
         }
 
         let size_after_larger_update = std::fs::metadata(&filepath)?.len();
@@ -5335,7 +5714,9 @@ mod tests {
 
         // 2. Multiple Updates (COW)
         for i in (0..test_size).step_by(10) {
-            tree_update.update(&i, Record { id: i, data: format!("UpdatedContent {i}") }).map_err(BPlusTreeError::to_io)?;
+            tree_update
+                .update(&i, Record { id: i, data: format!("UpdatedContent {i}") })
+                .map_err(BPlusTreeError::to_io)?;
         }
 
         // 3. Verify Query Integrity (Must return NEW values)
@@ -5346,7 +5727,9 @@ mod tests {
 
         // 4. Verify Query Integrity for non-updated keys (Must return OLD values)
         for i in (1..test_size).step_by(11) {
-            if i % 10 == 0 { continue; } // skip updated ones
+            if i % 10 == 0 {
+                continue;
+            } // skip updated ones
             let val = tree_update.query(&i).expect("Query failed").expect("Should find original key");
             assert_eq!(val.data, format!("Content {i}"));
         }
@@ -5444,10 +5827,7 @@ mod tests {
 
         // Create initial tree
         for i in 0u32..50 {
-            tree.insert(i, Record {
-                id: i,
-                data: format!("Initial {i}"),
-            });
+            tree.insert(i, Record { id: i, data: format!("Initial {i}") });
         }
         tree.store(&filepath)?;
         drop(tree);
@@ -5461,9 +5841,7 @@ mod tests {
             .map(|i| (i, Record { id: i, data: format!("BatchUpdated {i}") }))
             .collect();
 
-        let update_refs: Vec<(&u32, &Record)> = updates.iter()
-            .map(|(k, v)| (k, v))
-            .collect();
+        let update_refs: Vec<(&u32, &Record)> = updates.iter().map(|(k, v)| (k, v)).collect();
 
         tree_update.update_batch(&update_refs).map_err(BPlusTreeError::to_io)?;
         drop(tree_update);
@@ -5490,10 +5868,7 @@ mod tests {
 
         // Create initial tree
         for i in 0u32..10 {
-            tree.insert(i, Record {
-                id: i,
-                data: format!("Initial {i}"),
-            });
+            tree.insert(i, Record { id: i, data: format!("Initial {i}") });
         }
         tree.store(&filepath)?;
         drop(tree);
@@ -5530,10 +5905,7 @@ mod tests {
 
         let size_before = std::fs::metadata(&filepath)?.len();
         let mut updater = BPlusTreeUpdate::<u32, String>::try_new(&filepath)?;
-        let batch_updates = [
-            (0u32, "X".repeat(6_000)),
-            (u32::MAX, "missing".to_string()),
-        ];
+        let batch_updates = [(0u32, "X".repeat(6_000)), (u32::MAX, "missing".to_string())];
         let refs: Vec<(&u32, &String)> = batch_updates.iter().map(|(k, v)| (k, v)).collect();
         let result = updater.update_batch(&refs);
         assert!(matches!(result, Err(BPlusTreeError::KeyNotFound)));
@@ -5569,10 +5941,7 @@ mod tests {
         drop(tree);
 
         let mut batch_updater = BPlusTreeUpdate::<u32, String>::try_new(&filepath)?;
-        let update_items = [
-            (1u32, updated.clone()),
-            (u32::MAX, "missing".to_string()),
-        ];
+        let update_items = [(1u32, updated.clone()), (u32::MAX, "missing".to_string())];
         let refs: Vec<(&u32, &String)> = update_items.iter().map(|(k, v)| (k, v)).collect();
 
         let result = batch_updater.update_batch(&refs);
@@ -5598,10 +5967,7 @@ mod tests {
 
         let size_before = std::fs::metadata(&filepath)?.len();
         let mut updater = BPlusTreeUpdate::<u32, FailingValue>::try_new(&filepath)?;
-        let batch = [
-            (1u32, FailingValue::ok("updated")),
-            (2u32, FailingValue::failing("boom")),
-        ];
+        let batch = [(1u32, FailingValue::ok("updated")), (2u32, FailingValue::failing("boom"))];
         let refs: Vec<(&u32, &FailingValue)> = batch.iter().map(|(k, v)| (k, v)).collect();
         assert!(updater.upsert_batch(&refs).is_err());
         drop(updater);
@@ -5627,10 +5993,7 @@ mod tests {
 
         // Create initial tree
         for i in 0..test_size {
-            tree.insert(i, Record {
-                id: i,
-                data: format!("Initial {i}"),
-            });
+            tree.insert(i, Record { id: i, data: format!("Initial {i}") });
         }
         tree.store(&filepath)?;
         drop(tree);
@@ -5643,9 +6006,7 @@ mod tests {
             .map(|i| (i, Record { id: i, data: format!("BatchUpdated {i}") }))
             .collect();
 
-        let update_refs: Vec<(&u32, &Record)> = updates.iter()
-            .map(|(k, v)| (k, v))
-            .collect();
+        let update_refs: Vec<(&u32, &Record)> = updates.iter().map(|(k, v)| (k, v)).collect();
 
         // Perform batch update
         tree_update.update_batch(&update_refs).map_err(BPlusTreeError::to_io)?;
@@ -5676,10 +6037,7 @@ mod tests {
         // Create initial tree with larger data
         let large_data = "x".repeat(1000);
         for i in 0u32..100 {
-            tree.insert(i, Record {
-                id: i,
-                data: large_data.clone(),
-            });
+            tree.insert(i, Record { id: i, data: large_data.clone() });
         }
         tree.store(&filepath)?;
         drop(tree);
@@ -5688,13 +6046,10 @@ mod tests {
 
         // Batch update with smaller data
         let small_data = "y".repeat(50);
-        let updates: Vec<(u32, Record)> = (0u32..100)
-            .map(|i| (i, Record { id: i, data: small_data.clone() }))
-            .collect();
+        let updates: Vec<(u32, Record)> =
+            (0u32..100).map(|i| (i, Record { id: i, data: small_data.clone() })).collect();
 
-        let update_refs: Vec<(&u32, &Record)> = updates.iter()
-            .map(|(k, v)| (k, v))
-            .collect();
+        let update_refs: Vec<(&u32, &Record)> = updates.iter().map(|(k, v)| (k, v)).collect();
 
         tree_update.update_batch(&update_refs).map_err(BPlusTreeError::to_io)?;
 
@@ -5704,8 +6059,7 @@ mod tests {
         tree_update.compact(&filepath)?;
 
         let size_after_compact = std::fs::metadata(&filepath)?.len();
-        assert!(size_after_compact < size_before_compact,
-                "Compaction should reduce file size after batch update");
+        assert!(size_after_compact < size_before_compact, "Compaction should reduce file size after batch update");
 
         // Verify all data is correct after compaction
         drop(tree_update);
@@ -5717,7 +6071,6 @@ mod tests {
 
         Ok(())
     }
-
 
     #[test]
     fn compact_reopen_test() -> io::Result<()> {
@@ -5750,7 +6103,10 @@ mod tests {
 
         assert!(tree_check.query(&1).map_err(BPlusTreeError::to_io)?.is_some(), "Should have key 1");
         assert!(tree_check.query(&2).map_err(BPlusTreeError::to_io)?.is_some(), "Should have key 2");
-        assert!(tree_check.query(&3).map_err(BPlusTreeError::to_io)?.is_some(), "Should have key 3 - if missing, file handle wasn't updated");
+        assert!(
+            tree_check.query(&3).map_err(BPlusTreeError::to_io)?.is_some(),
+            "Should have key 3 - if missing, file handle wasn't updated"
+        );
 
         Ok(())
     }
@@ -5797,10 +6153,7 @@ mod tests {
 
         // Create initial tree with keys 0-49
         for i in 0u32..50 {
-            tree.insert(i, Record {
-                id: i,
-                data: format!("Initial {i}"),
-            });
+            tree.insert(i, Record { id: i, data: format!("Initial {i}") });
         }
         tree.store(&filepath)?;
         drop(tree);
@@ -5820,9 +6173,7 @@ mod tests {
             updates.push((i, Record { id: i, data: format!("Inserted {i}") }));
         }
 
-        let update_refs: Vec<(&u32, &Record)> = updates.iter()
-            .map(|(k, v)| (k, v))
-            .collect();
+        let update_refs: Vec<(&u32, &Record)> = updates.iter().map(|(k, v)| (k, v)).collect();
 
         tree_update.upsert_batch(&update_refs)?;
         drop(tree_update);
@@ -5859,10 +6210,7 @@ mod tests {
 
         // Create initial tree with unrelated keys
         for i in 0u32..10 {
-            tree.insert(i, Record {
-                id: i,
-                data: format!("Initial {i}"),
-            });
+            tree.insert(i, Record { id: i, data: format!("Initial {i}") });
         }
         tree.store(&filepath)?;
         drop(tree);
@@ -5870,13 +6218,10 @@ mod tests {
         let mut tree_update = BPlusTreeUpdate::<u32, Record>::try_new(&filepath)?;
 
         // Upsert all new keys (100-149)
-        let updates: Vec<(u32, Record)> = (100u32..150)
-            .map(|i| (i, Record { id: i, data: format!("New {i}") }))
-            .collect();
+        let updates: Vec<(u32, Record)> =
+            (100u32..150).map(|i| (i, Record { id: i, data: format!("New {i}") })).collect();
 
-        let update_refs: Vec<(&u32, &Record)> = updates.iter()
-            .map(|(k, v)| (k, v))
-            .collect();
+        let update_refs: Vec<(&u32, &Record)> = updates.iter().map(|(k, v)| (k, v)).collect();
 
         tree_update.upsert_batch(&update_refs)?;
         drop(tree_update);
@@ -5907,10 +6252,7 @@ mod tests {
 
         // Create initial tree
         for i in 0u32..100 {
-            tree.insert(i, Record {
-                id: i,
-                data: format!("Initial {i}"),
-            });
+            tree.insert(i, Record { id: i, data: format!("Initial {i}") });
         }
         tree.store(&filepath)?;
         drop(tree);
@@ -5918,13 +6260,10 @@ mod tests {
         let mut tree_update = BPlusTreeUpdate::<u32, Record>::try_new(&filepath)?;
 
         // Upsert all existing keys (should behave like update)
-        let updates: Vec<(u32, Record)> = (0u32..100)
-            .map(|i| (i, Record { id: i, data: format!("Updated {i}") }))
-            .collect();
+        let updates: Vec<(u32, Record)> =
+            (0u32..100).map(|i| (i, Record { id: i, data: format!("Updated {i}") })).collect();
 
-        let update_refs: Vec<(&u32, &Record)> = updates.iter()
-            .map(|(k, v)| (k, v))
-            .collect();
+        let update_refs: Vec<(&u32, &Record)> = updates.iter().map(|(k, v)| (k, v)).collect();
 
         tree_update.upsert_batch(&update_refs)?;
         drop(tree_update);
@@ -5961,8 +6300,7 @@ mod tests {
         // Expected size without packing:
         // 1000 items * 4096 bytes/block = 4,096,000 bytes (~4MB)
         // Plus internal nodes
-        let unpacked_size_estimate =
-            u64::from(count) * u64::try_from(super::PAGE_SIZE_USIZE).unwrap();
+        let unpacked_size_estimate = u64::from(count) * u64::try_from(super::PAGE_SIZE_USIZE).unwrap();
 
         println!("File size with packing: {file_size} bytes");
         println!("Estimated unpacked size: {unpacked_size_estimate} bytes");
@@ -6035,10 +6373,7 @@ mod tests {
         let val1 = "A".repeat(10000);
         let val2 = "B".repeat(10000);
 
-        let updates = [
-            (1, val1.clone()),
-            (2, val2.clone()),
-        ];
+        let updates = [(1, val1.clone()), (2, val2.clone())];
 
         let update_refs: Vec<(&u32, &String)> = updates.iter().map(|(k, v)| (k, v)).collect();
         tree_update.upsert_batch(&update_refs)?;
@@ -6099,12 +6434,8 @@ mod tests {
         let mut tree_update = BPlusTreeUpdate::<u32, String>::try_new(&filepath)?;
 
         // Batch contains same key multiple times
-        let updates = [
-            (1, "First".to_string()),
-            (1, "Second".to_string()),
-            (2, "Two".to_string()),
-            (1, "Third".to_string()),
-        ];
+        let updates =
+            [(1, "First".to_string()), (1, "Second".to_string()), (2, "Two".to_string()), (1, "Third".to_string())];
 
         let update_refs: Vec<(&u32, &String)> = updates.iter().map(|(k, v)| (k, v)).collect();
         tree_update.upsert_batch(&update_refs)?;
@@ -6224,9 +6555,37 @@ mod tests {
     }
 
     #[test]
+    fn test_store_and_query_many_variable_string_keys() -> io::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let filepath = tempdir.path().join("tree_many_variable_string_keys.bin");
+
+        let count = 40_000usize;
+        let mut tree = BPlusTree::<String, String>::new();
+        for i in 0..count {
+            let key_suffix_len = 10 + (i % 97);
+            let key = format!("k{i:06}_{}", "x".repeat(key_suffix_len));
+            tree.insert(key, format!("v{i:06}"));
+        }
+
+        tree.store(&filepath)?;
+        drop(tree);
+
+        let mut query = BPlusTreeQuery::<String, String>::try_new(&filepath)?;
+        for i in (0..count).step_by(17) {
+            let key_suffix_len = 10 + (i % 97);
+            let key = format!("k{i:06}_{}", "x".repeat(key_suffix_len));
+            assert_eq!(query.query(&key).map_err(super::BPlusTreeError::to_io)?, Some(format!("v{i:06}")));
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn test_node_serialization_overhead() -> io::Result<()> {
-        use crate::utils::binary_serialize;
-        use crate::repository::bplustree::{ValueInfo, ValueStorageMode, PAGE_SIZE_USIZE};
+        use crate::{
+            repository::bplustree::{ValueInfo, ValueStorageMode, PAGE_SIZE_USIZE},
+            utils::binary_serialize,
+        };
 
         // Simulate a leaf node with u32 keys and ValueInfo
         let key_counts = [10, 30, 50, 80, 100];
@@ -6250,9 +6609,39 @@ mod tests {
 
             println!(
                 "Keys={}: keys_bytes={}, info_bytes={}, total={}, fits_in_block={}",
-                count, keys_serialized.len(), info_serialized.len(), total, fits_in_block
+                count,
+                keys_serialized.len(),
+                info_serialized.len(),
+                total,
+                fits_in_block
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_internal_node_size_estimate_never_underestimates_msgpack_pointers() -> io::Result<()> {
+        // Many children force pointer encoding overhead to dominate.
+        // This guards against size underestimation in internal-node layout.
+        let key_count = 599usize;
+        let mut node = BPlusTreeNode::<String, u32>::new(false);
+        node.keys = (0..key_count).map(|i| format!("k{i:04}")).collect();
+        node.children = (0..=key_count).map(|_| BPlusTreeNode::<String, u32>::new(true)).collect();
+
+        let mut serial_buf = Vec::new();
+        let estimated_size = node.calculate_serialized_size(&mut serial_buf)?;
+
+        let mut file = tempfile::tempfile()?;
+        let mut buffer = Vec::new();
+        let base = u64::from(u32::MAX) + 1_000_000;
+        let child_offsets: Vec<u64> = (0..node.children.len()).map(|i| base + (i as u64) * 10_000).collect();
+        let actual_size =
+            node.serialize_internal_with_offsets(&mut file, &mut buffer, &mut serial_buf, 0, &child_offsets)?;
+
+        assert!(
+            estimated_size >= actual_size,
+            "internal node size estimate underflowed: estimated={estimated_size}, actual={actual_size}"
+        );
         Ok(())
     }
 
@@ -6358,6 +6747,70 @@ mod tests {
     }
 
     #[test]
+    fn serial_writer_batch_marks_dirty_and_commit_clears_dirty() -> io::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let filepath = tempdir.path().join("serial_writer_dirty.bin");
+
+        let mut tree = BPlusTree::<u32, String>::new();
+        tree.store(&filepath)?;
+
+        let writer = BPlusTreeSerialWriter::<u32, String>::new(&filepath, FlushPolicy::Batch)?;
+        let key = 7u32;
+        let value = "value_7".to_string();
+        writer.upsert(&[(&key, &value)])?;
+        assert!(writer.dirty.load(Ordering::Acquire));
+
+        writer.commit()?;
+        assert!(!writer.dirty.load(Ordering::Acquire));
+
+        writer.shutdown()?;
+        Ok(())
+    }
+
+    #[test]
+    fn serial_writer_background_commit_requires_batch_policy() -> io::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let filepath = tempdir.path().join("serial_writer_bg_policy.bin");
+
+        let mut tree = BPlusTree::<u32, String>::new();
+        tree.store(&filepath)?;
+
+        let writer = BPlusTreeSerialWriter::<u32, String>::new(&filepath, FlushPolicy::Immediate)?;
+        let result = writer.start_background_commit(Duration::from_millis(10));
+        assert!(result.is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn serial_writer_background_commit_flushes_batch_writes() -> io::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let filepath = tempdir.path().join("serial_writer_bg_flush.bin");
+
+        let mut tree = BPlusTree::<u32, String>::new();
+        tree.store(&filepath)?;
+
+        let writer = BPlusTreeSerialWriter::<u32, String>::new(&filepath, FlushPolicy::Batch)?;
+        writer.start_background_commit(Duration::from_millis(10))?;
+
+        let key = 3u32;
+        let value = "batch_value".to_string();
+        writer.upsert(&[(&key, &value)])?;
+        assert!(writer.dirty.load(Ordering::Acquire));
+
+        for _ in 0..40 {
+            if !writer.dirty.load(Ordering::Acquire) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!writer.dirty.load(Ordering::Acquire));
+
+        writer.shutdown()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_cache_population_and_reuse() -> io::Result<()> {
         let tempdir = tempfile::tempdir()?;
         let filepath = tempdir.path().join("tree_cache.bin");
@@ -6404,8 +6857,7 @@ mod tests {
 
     #[test]
     fn test_concurrent_cache_access() -> io::Result<()> {
-        use std::sync::Arc;
-        use std::thread;
+        use std::{sync::Arc, thread};
 
         let tempdir = tempfile::tempdir()?;
         let filepath = tempdir.path().join("tree_concurrent.bin");
@@ -6417,10 +6869,10 @@ mod tests {
         }
         tree.store(&filepath)?;
 
-        // We test concurrent READS on BPlusTreeQuery. 
-        // Note: BPlusTreeQuery::query requires &mut self for buffer management, 
+        // We test concurrent READS on BPlusTreeQuery.
+        // Note: BPlusTreeQuery::query requires &mut self for buffer management,
         // so we use a Mutex to protect it. While this serializes the query() calls,
-        // it still tests thread-safety of the shared ValueInfo Mutexes internally 
+        // it still tests thread-safety of the shared ValueInfo Mutexes internally
         // if they were somehow shared (though they currently aren't).
         let query = Arc::new(parking_lot::Mutex::new(super::BPlusTreeQuery::<u32, String>::try_new(&filepath)?));
 
@@ -6710,6 +7162,72 @@ mod tests {
     }
 
     #[test]
+    fn test_sorted_index_iterator_skips_tombstoned_entries_without_rebuild() -> io::Result<()> {
+        let tempdir = tempdir()?;
+        let filepath = tempdir.path().join("sorted_index_tombstone_skip.bin");
+
+        let mut tree = BPlusTree::<u32, Record>::new();
+        for i in 0..120u32 {
+            tree.insert(i, Record { id: i, data: format!("val_{i}") });
+        }
+        tree.store_with_index(&filepath, |record| record.id)?;
+        drop(tree);
+
+        let deleted_keys: Vec<u32> = (0..120u32).filter(|key| key % 4 == 0).collect();
+        let delete_refs: Vec<&u32> = deleted_keys.iter().collect();
+        let mut updater = BPlusTreeUpdate::<u32, Record>::try_new(&filepath)?;
+        let deleted = updater.delete_batch(&delete_refs)?;
+        assert_eq!(deleted, deleted_keys.len());
+        drop(updater);
+
+        let query = BPlusTreeQuery::<u32, Record>::try_new(&filepath)?;
+        let sorted_iter = query.disk_iter_sorted::<u32>()?;
+        let sorted_keys: Vec<u32> =
+            sorted_iter.map(|entry| entry.map(|(key, _)| key)).collect::<io::Result<Vec<u32>>>()?;
+
+        assert_eq!(sorted_keys.len(), 120usize - deleted_keys.len());
+        for key in &sorted_keys {
+            assert_ne!(key % 4, 0, "tombstoned key must be skipped in sorted iterator");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_tombstone_header_flag_transitions_on_delete_and_compact() -> io::Result<()> {
+        let tempdir = tempdir()?;
+        let filepath = tempdir.path().join("tombstone_header_flag.bin");
+
+        let mut tree = BPlusTree::<u32, String>::new();
+        for i in 0..64u32 {
+            tree.insert(i, format!("val_{i}"));
+        }
+        tree.store(&filepath)?;
+        drop(tree);
+
+        let query_before = BPlusTreeQuery::<u32, String>::try_new(&filepath)?;
+        assert!(!query_before.has_tombstones());
+
+        let mut updater = BPlusTreeUpdate::<u32, String>::try_new(&filepath)?;
+        let delete_key = 3u32;
+        let deleted = updater.delete(&delete_key)?;
+        assert!(deleted);
+        drop(updater);
+
+        let query_after_delete = BPlusTreeQuery::<u32, String>::try_new(&filepath)?;
+        assert!(query_after_delete.has_tombstones());
+
+        let mut updater_for_compact = BPlusTreeUpdate::<u32, String>::try_new(&filepath)?;
+        updater_for_compact.compact(&filepath)?;
+        drop(updater_for_compact);
+
+        let query_after_compact = BPlusTreeQuery::<u32, String>::try_new(&filepath)?;
+        assert!(!query_after_compact.has_tombstones());
+
+        Ok(())
+    }
+
+    #[test]
     fn test_query_le_skips_tombstones_across_leaves() -> io::Result<()> {
         let tempdir = tempdir()?;
         let filepath = tempdir.path().join("query_le_tombstone.bin");
@@ -6912,14 +7430,11 @@ mod tests {
         // Manually serialize records
         let r1 = Record { id: 1, data: "preserialized_1".to_string() };
         let r2 = Record { id: 2, data: "preserialized_2".to_string() };
-        
+
         let r1_bytes = binary_serialize(&r1)?;
         let r2_bytes = binary_serialize(&r2)?;
 
-        update.upsert_batch_preserialized(vec![
-            (1, r1_bytes),
-            (2, r2_bytes),
-        ])?;
+        update.upsert_batch_preserialized(vec![(1, r1_bytes), (2, r2_bytes)])?;
 
         // Verify with query
         let mut query = BPlusTreeQuery::<u32, Record>::try_new(&filepath)?;
@@ -6929,14 +7444,11 @@ mod tests {
         // Test mixed: existing and new
         let r1_new = Record { id: 1, data: "updated_preserialized_1".to_string() };
         let r3 = Record { id: 3, data: "new_preserialized_3".to_string() };
-        
+
         let r1_new_bytes = binary_serialize(&r1_new)?;
         let r3_bytes = binary_serialize(&r3)?;
 
-        update.upsert_batch_preserialized(vec![
-            (1, r1_new_bytes),
-            (3, r3_bytes),
-        ])?;
+        update.upsert_batch_preserialized(vec![(1, r1_new_bytes), (3, r3_bytes)])?;
 
         let mut query2 = BPlusTreeQuery::<u32, Record>::try_new(&filepath)?;
         assert_eq!(query2.query(&1).unwrap(), Some(r1_new));

@@ -21,7 +21,7 @@ use crate::{
     library::LibraryProcessor,
     model::{AppConfig, Config, Healthcheck, HealthcheckConfig, ProcessTargets, SourcesConfig},
     processing::processor::exec_processing,
-    repository::migrate_bplustree_databases,
+    repository::migrate_bplustree_databases_with_marker,
     utils::{config_file_reader, db_viewer, init_logger, request::create_client, resolve_env_var},
 };
 use arc_swap::{access::Access, ArcSwap};
@@ -218,23 +218,25 @@ fn run_startup_bplustree_migration(config_paths: &ConfigPaths) {
     let mut roots: Vec<PathBuf> = vec![PathBuf::from(&config_paths.config_path)];
     let working_dir = PathBuf::from(config_dto.working_dir);
     if !roots.iter().any(|root| root == &working_dir) {
-        roots.push(working_dir);
+        roots.push(working_dir.clone());
     }
 
-    match migrate_bplustree_databases(&roots) {
+    match migrate_bplustree_databases_with_marker(&roots, &working_dir) {
         Ok(stats) => {
-            if stats.migrated_files > 0 {
+            if stats.skipped_by_marker {
+                info!("B+Tree startup migration skipped (marker already present)");
+            } else if stats.migrated_files > 0 {
                 info!(
                     "B+Tree startup migration completed: migrated {} file(s) ({} B+Tree files checked, {} .db files scanned)",
                     stats.migrated_files,
                     stats.bplustree_files,
                     stats.scanned_files
                 );
-            } else {
-                info!(
-                    "B+Tree startup migration check completed: {} B+Tree files already current ({} .db files scanned)",
-                    stats.bplustree_files, stats.scanned_files
-                );
+                //} else {
+                //    info!(
+                //       "B+Tree startup migration check completed: {} B+Tree files already current ({} .db files scanned)",
+                //        stats.bplustree_files, stats.scanned_files
+                //   );
             }
         }
         Err(err) => {
