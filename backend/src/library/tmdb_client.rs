@@ -9,7 +9,10 @@ use log::{debug, error, warn};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use shared::utils::sanitize_sensitive_info;
-use std::collections::HashSet;
+use std::{
+    collections::{HashSet, VecDeque},
+    hash::Hash,
+};
 use tokio::time::{sleep, Duration, Instant};
 use url::Url;
 
@@ -20,15 +23,68 @@ const MAX_FETCHED_CACHE_ENTRIES: usize = 10_000;
 /// Minimum Jaro-Winkler score required to accept a TMDB search result.
 const TMDB_MATCH_THRESHOLD: f64 = 0.9;
 
+#[derive(Debug)]
+struct BoundedSet<T>
+where
+    T: Eq + Hash + Clone,
+{
+    entries: HashSet<T>,
+    insertion_order: VecDeque<T>,
+    capacity: usize,
+}
+
+impl<T> BoundedSet<T>
+where
+    T: Eq + Hash + Clone,
+{
+    fn new(capacity: usize) -> Self {
+        Self { entries: HashSet::new(), insertion_order: VecDeque::new(), capacity: capacity.max(1) }
+    }
+
+    fn contains(&self, value: &T) -> bool { self.entries.contains(value) }
+
+    /// Inserts `value` and evicts a single oldest entry when full.
+    /// Returns `true` if an eviction happened.
+    fn insert(&mut self, value: T) -> bool {
+        if self.entries.contains(&value) {
+            return false;
+        }
+
+        let evicted = self.evict_one_if_full();
+        self.entries.insert(value.clone());
+        self.insertion_order.push_back(value);
+        evicted
+    }
+
+    fn evict_one_if_full(&mut self) -> bool {
+        if self.entries.len() < self.capacity {
+            return false;
+        }
+
+        while let Some(oldest) = self.insertion_order.pop_front() {
+            if self.entries.remove(&oldest) {
+                return true;
+            }
+        }
+
+        if let Some(any_existing) = self.entries.iter().next().cloned() {
+            self.entries.remove(&any_existing);
+            return true;
+        }
+
+        false
+    }
+}
+
 // TMDB API client with rate limiting
 pub struct TmdbClient {
     api_key: String,
     client: reqwest::Client,
     rate_limit_ms: u64,
     storage: MetadataStorage,
-    fetched_movie_metadata: tokio::sync::RwLock<HashSet<u32>>,
-    fetched_series_metadata: tokio::sync::RwLock<HashSet<u32>>,
-    fetched_series_key: tokio::sync::RwLock<HashSet<String>>,
+    fetched_movie_metadata: tokio::sync::RwLock<BoundedSet<u32>>,
+    fetched_series_metadata: tokio::sync::RwLock<BoundedSet<u32>>,
+    fetched_series_key: tokio::sync::RwLock<BoundedSet<String>>,
     next_request_slot: tokio::sync::Mutex<Instant>,
 }
 
@@ -40,9 +96,9 @@ impl TmdbClient {
             client,
             rate_limit_ms,
             storage,
-            fetched_movie_metadata: tokio::sync::RwLock::new(HashSet::new()),
-            fetched_series_metadata: tokio::sync::RwLock::new(HashSet::new()),
-            fetched_series_key: tokio::sync::RwLock::new(HashSet::new()),
+            fetched_movie_metadata: tokio::sync::RwLock::new(BoundedSet::new(MAX_FETCHED_CACHE_ENTRIES)),
+            fetched_series_metadata: tokio::sync::RwLock::new(BoundedSet::new(MAX_FETCHED_CACHE_ENTRIES)),
+            fetched_series_key: tokio::sync::RwLock::new(BoundedSet::new(MAX_FETCHED_CACHE_ENTRIES)),
             next_request_slot: tokio::sync::Mutex::new(Instant::now()),
         }
     }
@@ -127,29 +183,23 @@ impl TmdbClient {
 
     async fn remember_movie_metadata(&self, movie_id: u32) {
         let mut fetched = self.fetched_movie_metadata.write().await;
-        if fetched.len() >= MAX_FETCHED_CACHE_ENTRIES {
-            debug!("TMDB movie metadata cache reached limit ({MAX_FETCHED_CACHE_ENTRIES}), clearing.");
-            fetched.clear();
+        if fetched.insert(movie_id) {
+            debug!("TMDB movie metadata cache reached limit ({MAX_FETCHED_CACHE_ENTRIES}), evicted one oldest entry.");
         }
-        fetched.insert(movie_id);
     }
 
     async fn remember_series_metadata(&self, series_id: u32) {
         let mut fetched = self.fetched_series_metadata.write().await;
-        if fetched.len() >= MAX_FETCHED_CACHE_ENTRIES {
-            debug!("TMDB series metadata cache reached limit ({MAX_FETCHED_CACHE_ENTRIES}), clearing.");
-            fetched.clear();
+        if fetched.insert(series_id) {
+            debug!("TMDB series metadata cache reached limit ({MAX_FETCHED_CACHE_ENTRIES}), evicted one oldest entry.");
         }
-        fetched.insert(series_id);
     }
 
     async fn remember_series_key(&self, key: String) {
         let mut fetched = self.fetched_series_key.write().await;
-        if fetched.len() >= MAX_FETCHED_CACHE_ENTRIES {
-            debug!("TMDB series key cache reached limit ({MAX_FETCHED_CACHE_ENTRIES}), clearing.");
-            fetched.clear();
+        if fetched.insert(key) {
+            debug!("TMDB series key cache reached limit ({MAX_FETCHED_CACHE_ENTRIES}), evicted one oldest entry.");
         }
-        fetched.insert(key);
     }
 
     // Searches for a movie by title and optional year
@@ -351,9 +401,6 @@ impl TmdbClient {
             return Ok(None);
         };
 
-        // Mark series as fetched
-        self.remember_series_metadata(series_id).await;
-
         // Deserialize TMDB series info into struct
         let mut series: TmdbSeriesInfoDetails = serde_json::from_slice(series_content.as_ref())
             .map_err(|e| format!("Failed to parse TMDB series details: {e}"))?;
@@ -436,6 +483,7 @@ impl TmdbClient {
             warn!("Failed to cache raw TMDB series info: {err}");
         }
 
+        self.remember_series_metadata(series_id).await;
         Ok(Some(MediaMetadata::Series(series.to_meta_data())))
     }
 
