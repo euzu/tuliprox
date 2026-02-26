@@ -34,6 +34,7 @@ const PLAYLIST_TEMPLATE: &str = r"#EXTM3U
 {url}
 #EXT-X-ENDLIST
 ";
+const MAX_MANUAL_REDIRECTS: usize = 10;
 
 #[derive(Debug, Deserialize)]
 struct HlsApiPathParams {
@@ -199,7 +200,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
             Some(&headers),
             None,
             false,
-            10,
+            MAX_MANUAL_REDIRECTS,
         )
         .await
     } else {

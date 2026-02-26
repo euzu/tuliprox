@@ -1,7 +1,7 @@
 use crate::api::api_utils::{create_api_proxy_user, json_or_bin_response};
 use crate::api::endpoints::api_playlist_utils::{get_playlist_for_custom_provider, get_playlist_for_input, get_playlist_for_target};
 use crate::api::endpoints::extract_accept_header::ExtractAcceptHeader;
-use crate::api::model::AppState;
+use crate::api::model::{AppState, EventMessage};
 use crate::api::panel_api::sync_panel_api_exp_dates;
 use crate::auth::create_access_token;
 use crate::model::{parse_xmltv_for_web_ui_from_url, ConfigInput, ConfigInputFlags, ConfigInputFlagsSet, ConfigInputOptions};
@@ -81,20 +81,7 @@ async fn playlist_update(
                 async move {
                     let Some(lock) = update_guard.acquire_playlist_lock().await else {
                         warn!("Playlist update lock is closed; update skipped.");
-                        exec_processing(
-                            &http_client,
-                            app_config,
-                            valid_targets,
-                            Some(event_manager),
-                            Some(playlist_state),
-                            Some(update_guard),
-                            disabled_headers,
-                            Some(provider_manager),
-                            Some(metadata_manager),
-                            None,
-                            None,
-                        )
-                        .await;
+                        event_manager.send_event(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Failure));
                         return;
                     };
 
