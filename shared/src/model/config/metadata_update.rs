@@ -431,9 +431,14 @@ impl TmdbConfigDto {
     }
 
     fn clean(&mut self) {
-        if self.api_key.as_ref().is_some_and(|api_key| api_key == TMDB_API_KEY) {
-            self.api_key = None;
-        }
+        self.api_key = self.api_key.take().and_then(|api_key| {
+            let trimmed = api_key.trim();
+            if trimmed.is_empty() || trimmed == TMDB_API_KEY {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
     }
 
     fn prepare(&mut self) -> Result<(), TuliproxError> {

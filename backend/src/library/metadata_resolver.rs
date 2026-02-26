@@ -36,13 +36,22 @@ impl MetadataResolver {
         client: reqwest::Client,
         storage: Option<MetadataStorage>,
     ) -> Self {
-        let tmdb_client = metadata_update_config
-            .filter(|c| c.tmdb.enabled)
-            .zip(storage)
-            .map(|(c, s)|{
-            let api_key = c.tmdb.api_key.as_ref().map_or_else(|| TMDB_API_KEY.to_string(), ToString::to_string);
-            TmdbClient::new(api_key, c.tmdb.rate_limit_ms, client, s)
-        });
+        let tmdb_client = match metadata_update_config.filter(|config| config.tmdb.enabled) {
+            Some(config) => {
+                if let Some(tmdb_storage) = storage {
+                    let api_key = config
+                        .tmdb
+                        .api_key
+                        .as_ref()
+                        .map_or_else(|| TMDB_API_KEY.to_string(), ToString::to_string);
+                    Some(TmdbClient::new(api_key, config.tmdb.rate_limit_ms, client, tmdb_storage))
+                } else {
+                    warn!("TMDB is enabled but metadata storage is unavailable; TMDB resolver is disabled.");
+                    None
+                }
+            }
+            None => None,
+        };
 
         Self {
             tmdb_client,

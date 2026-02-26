@@ -1,6 +1,6 @@
 use crate::api::model::{ActiveProviderManager, ProviderHandle};
 use crate::api::model::{ProviderIdType, ResolveReason, ResolveReasonSet, UpdateTask};
-use crate::library::MetadataResolver;
+use crate::library::{MetadataResolver, MetadataStorage};
 use crate::model::FetchedPlaylist;
 use crate::model::InputSource;
 use crate::model::{AppConfig, ConfigTarget};
@@ -677,7 +677,11 @@ pub async fn update_vod_metadata(
             let config = app_config.config.load();
             let library_config = config.library.as_ref();
             let metadata_update_config = config.metadata_update.as_ref();
-            let meta_resolver = MetadataResolver::new(library_config, metadata_update_config, client.clone());
+            let tmdb_storage = metadata_update_config
+                .filter(|cfg| cfg.tmdb.enabled)
+                .map(|_| MetadataStorage::new(storage_path.clone()));
+            let meta_resolver =
+                MetadataResolver::from_config(library_config, metadata_update_config, client.clone(), tmdb_storage);
 
             let mut meta = None;
             let mut tried_title = false;

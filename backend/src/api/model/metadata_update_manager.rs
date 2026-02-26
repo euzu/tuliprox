@@ -448,15 +448,6 @@ impl MetadataRetryDbValue {
         }
     }
 
-    fn cleared(updated_at_ts: i64) -> Self {
-        Self {
-            resolve: None,
-            probe: None,
-            tmdb: None,
-            updated_at_ts,
-        }
-    }
-
     fn into_task_retry_state(self) -> Option<TaskRetryState> {
         let mut state = TaskRetryState {
             resolve: self.resolve.and_then(RetryStateDbValue::into_retry_state),
@@ -482,15 +473,53 @@ fn ensure_metadata_retry_db(path: &Path) -> io::Result<()> {
     tree.store(path).map(|_| ())
 }
 
+fn rebuild_metadata_retry_db(path: &Path, remove_key: Option<&MetadataRetryDbKey>) -> io::Result<()> {
+    ensure_metadata_retry_db(path)?;
+
+    let mut keep_entries: Vec<(MetadataRetryDbKey, MetadataRetryDbValue)> = Vec::new();
+    let mut changed = false;
+    {
+        let mut query = BPlusTreeQuery::<MetadataRetryDbKey, MetadataRetryDbValue>::try_new(path)?;
+        for (key, value) in query.iter() {
+            if remove_key.is_some_and(|target| target == &key) {
+                changed = true;
+                continue;
+            }
+            if value.clone().into_task_retry_state().is_none() {
+                changed = true;
+                continue;
+            }
+            keep_entries.push((key, value));
+        }
+    }
+
+    if !changed {
+        return Ok(());
+    }
+
+    let mut tree = BPlusTree::<MetadataRetryDbKey, MetadataRetryDbValue>::new();
+    for (key, value) in keep_entries {
+        tree.insert(key, value);
+    }
+    tree.store(path).map(|_| ())
+}
+
 fn load_metadata_retry_states_from_disk(path: &Path) -> io::Result<HashMap<TaskKey, TaskRetryState>> {
     ensure_metadata_retry_db(path)?;
 
     let mut result = HashMap::new();
+    let mut has_tombstones = false;
     let mut query = BPlusTreeQuery::<MetadataRetryDbKey, MetadataRetryDbValue>::try_new(path)?;
     for (key, value) in query.iter() {
-        if let Some(state) = value.into_task_retry_state() {
+        if let Some(state) = value.clone().into_task_retry_state() {
             result.insert(key.into_task_key(), state);
+        } else {
+            has_tombstones = true;
         }
+    }
+    drop(query);
+    if has_tombstones {
+        rebuild_metadata_retry_db(path, None)?;
     }
 
     Ok(result)
@@ -501,10 +530,9 @@ fn persist_metadata_retry_state_to_disk(path: &Path, task_key: &TaskKey, state: 
 
     ensure_metadata_retry_db(path)?;
 
-    let now_ts = chrono::Utc::now().timestamp();
     let value = match state {
-        Some(s) => MetadataRetryDbValue::from_task_retry_state(s, now_ts),
-        None => MetadataRetryDbValue::cleared(now_ts),
+        Some(s) => MetadataRetryDbValue::from_task_retry_state(s, chrono::Utc::now().timestamp()),
+        None => return rebuild_metadata_retry_db(path, Some(&db_key)),
     };
 
     let mut update = BPlusTreeUpdate::<MetadataRetryDbKey, MetadataRetryDbValue>::try_new_with_backoff(path)?;
@@ -1103,18 +1131,20 @@ impl InputWorker {
             }
 
             if !skip_execution {
-                if !self.wait_for_update_pause_window().await {
-                    break;
-                }
-                let task_result = Self::process_task_static(
-                    &input_name,
-                    app_state_weak.as_ref(),
-                    &task_for_execution,
-                    &mut self.batch_buffer,
-                    &mut self.db_handles,
-                    &mut self.failed_clusters,
-                )
-                .await;
+                let task_result = {
+                    let Some(_pause_guard) = self.wait_for_update_pause_window().await else {
+                        break;
+                    };
+                    Self::process_task_static(
+                        &input_name,
+                        app_state_weak.as_ref(),
+                        &task_for_execution,
+                        &mut self.batch_buffer,
+                        &mut self.db_handles,
+                        &mut self.failed_clusters,
+                    )
+                    .await
+                };
 
                 match task_result {
                     Ok(task_outcome) => {
@@ -1338,9 +1368,9 @@ impl InputWorker {
             // Check and flush batch
             if self.batch_buffer.should_flush() {
                 self.release_db_handles();
-                if !self.wait_for_update_pause_window().await {
+                let Some(_pause_guard) = self.wait_for_update_pause_window().await else {
                     break;
-                }
+                };
                 Self::flush_batch_static(&input_name, app_state_weak.as_ref(), &mut self.batch_buffer).await;
             }
 
@@ -1391,9 +1421,9 @@ impl InputWorker {
             // If no immediate work is available, flush buffered results now even when delayed retries remain pending.
             if !channel_has_work && !self.batch_buffer.is_empty() {
                 self.release_db_handles();
-                if !self.wait_for_update_pause_window().await {
+                let Some(_pause_guard) = self.wait_for_update_pause_window().await else {
                     break;
-                }
+                };
                 Self::flush_batch_static(&input_name, app_state_weak.as_ref(), &mut self.batch_buffer).await;
             }
 
@@ -1413,8 +1443,10 @@ impl InputWorker {
 
         // Final flush
         self.release_db_handles();
-        if !self.batch_buffer.is_empty() && self.wait_for_update_pause_window().await {
-            Self::flush_batch_static(&input_name, app_state_weak.as_ref(), &mut self.batch_buffer).await;
+        if !self.batch_buffer.is_empty() {
+            if let Some(_pause_guard) = self.wait_for_update_pause_window().await {
+                Self::flush_batch_static(&input_name, app_state_weak.as_ref(), &mut self.batch_buffer).await;
+            }
         }
 
         debug!("Metadata worker stopped for input {input_name}");
@@ -1652,19 +1684,17 @@ impl InputWorker {
         MetadataUpdateRuntimeSettings::from_app_state(self.app_state_weak.as_ref())
     }
 
-    async fn wait_for_update_pause_window(&mut self) -> bool {
+    async fn wait_for_update_pause_window(&mut self) -> Option<tokio::sync::OwnedRwLockReadGuard<()>> {
         if let Ok(guard) = self.update_pause_gate.clone().try_read_owned() {
-            drop(guard);
-            return true;
+            return Some(guard);
         }
 
         // Foreground writer is active or queued. Release cached handles before waiting to avoid AB-BA patterns.
         self.release_db_handles();
         tokio::select! {
-            () = self.cancel_token.cancelled() => false,
+            () = self.cancel_token.cancelled() => None,
             guard = self.update_pause_gate.clone().read_owned() => {
-                drop(guard);
-                true
+                Some(guard)
             }
         }
     }

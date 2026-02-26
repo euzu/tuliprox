@@ -200,9 +200,9 @@ pub fn MetadataUpdateConfigView() -> Html {
         let probe_state = probe_state.clone();
         let backoff_jitter_error = backoff_jitter_error.clone();
         use_effect_with(probe_state.form.backoff_jitter_percent, move |value| {
-            if *value > 100 {
-                backoff_jitter_error.set(Some("Backoff jitter percent must be between 0 and 100.".to_string()));
-                probe_state.dispatch(ProbeConfigFormAction::BackoffJitterPercent(100));
+            if *value > 95 {
+                backoff_jitter_error.set(Some("Backoff jitter percent must be between 0 and 95.".to_string()));
+                probe_state.dispatch(ProbeConfigFormAction::BackoffJitterPercent(95));
             } else {
                 backoff_jitter_error.set(None);
             }
@@ -338,8 +338,8 @@ pub fn MetadataUpdateConfigView() -> Html {
                             value={Some(i64::from(jitter_probe_state.form.backoff_jitter_percent))}
                             on_change={Callback::from(move |value: Option<i64>| {
                                 match value {
-                                    Some(raw) if !(0..=100).contains(&raw) => {
-                                        jitter_error_state.set(Some("Backoff jitter percent must be between 0 and 100.".to_string()));
+                                    Some(raw) if !(0..=95).contains(&raw) => {
+                                        jitter_error_state.set(Some("Backoff jitter percent must be between 0 and 95.".to_string()));
                                     }
                                     Some(raw) => {
                                         jitter_error_state.set(None);

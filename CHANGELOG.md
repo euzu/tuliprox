@@ -16,6 +16,8 @@
   - `threads` attribute in `config.yml` renamed to `process_parallel` (boolean).
   - Added mandatory `rewrite_secret` to `reverse_proxy` config for stable resource URLs.
   - Removed `forced_retry_interval_secs`.
+  - FFprobe settings moved from `video.*` to `metadata_update.ffprobe.*`.
+  - `metadata_update.ffprobe.analyze_duration` and `metadata_update.ffprobe.live_analyze_duration` now require explicit unit suffixes (`s|m|h|d`).
 - **Input Batch Changes**: `name` attribute is now mandatory for input type batch to ensure stable playlist UUIDs.
 - **Favorites Redesign**: Replaced implicit `create_alias` with explicit `add_favourite(group_name)` script function.
   - **EpgSmartMatch**: Field `name_prefix` syntax needs to be changed from  `name_prefix: !suffix "."` to `name_prefix: { suffix: "." }`.
@@ -105,7 +107,7 @@ active URL of the specified provider.
 - Added `-T, --template` to override `template_path` on startup.
 - **Metadata Update Runtime Config**: Metadata worker intervals, retry/backoff limits, queue sizing, and probe cooldowns are now configurable through
   a dedicated `metadata_update` config block.
-- **Unified Metadata Retry State**: Replaced probe-only retry persistence with a single `metadata_retry_state.db` per input. One bundled record per
+- **Unified Metadata Retry State**: Replaced probe-only retry persistence with a single `metadata_retry_state.db` per input. A single record per
   item now stores retry/cooldown state for `resolve`, `probe`, and `tmdb`.
 - **TMDB No-Match Cooldown**: Added explicit TMDB cooldown handling. When TMDB resolve completes successfully but returns no match, TMDB reasons are
   suppressed for that item during cooldown to prevent endless requeue loops.

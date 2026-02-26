@@ -459,7 +459,7 @@ metadata_update:
   `d`).
 - `ffprobe.live_probe_size` (default `5MB`): FFprobe `-probesize` value for Live probing.
 
-** Explanations:**
+**Explanations:**
 
 - `retry_delay`: Minimum waiting time before a task is retried after a temporary problem. Prevents very fast retry loops.
 - `worker_idle_timeout`: How long a metadata worker stays alive with no new work before it can stop and free resources.

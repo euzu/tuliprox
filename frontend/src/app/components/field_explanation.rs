@@ -114,7 +114,7 @@ pub fn show_field_explanation(field_id: &str, field_label: &str, dialog: &Dialog
                         </div>
                         <div class="tp__field-explanation-dialog__body">
                             {for explanation_paragraphs.into_iter().map(|paragraph| {
-                                html! { <p style="white-space: pre-wrap;">{paragraph}</p> }
+                                html! { <p>{paragraph}</p> }
                             })}
                         </div>
                     </div>
