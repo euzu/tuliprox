@@ -12,6 +12,8 @@ use url::Url;
 // TODO make this configurable in Library tmdb config
 const TMDB_API_BASE_URL: &str = "https://api.themoviedb.org/3";
 const MAX_RETRIES: u32 = 3;
+/// Minimum Jaro-Winkler score required to accept a TMDB search result.
+const TMDB_MATCH_THRESHOLD: f64 = 0.9;
 
 // TMDB API client with rate limiting
 pub struct TmdbClient {
@@ -93,11 +95,11 @@ impl TmdbClient {
         let valid_id = tmdb_id.filter(|&id| id > 0);
 
         if let Some(id) = valid_id {
-            debug!("TMDB search movie: {title} ({year_display}) [ID: {id}]");
+            debug!("TMDB search movie by ID: {title} ({year_display}) [ID: {id}]");
             return self.fetch_movie_details(id).await;
         }
 
-        debug!("TMDB search movie: {title} ({year_display})");
+        debug!("TMDB search movie by title: {title} ({year_display})");
 
         // Build search URL
         let url = self.build_movie_search_url(title, year)?;
@@ -106,17 +108,21 @@ impl TmdbClient {
         let search_result: Option<TmdbSearchResponse> = self.execute_request(url.to_string()).await?;
 
         if let Some(search) = search_result {
-            // If results are found, use the ID of the first result to fetch full metadata
-            if let Some(movie) = search.results.first() {
-                if movie.id == 0 {
-                    debug!("TMDB returned ID 0 for movie search: {title}");
-                    Ok(None)
-                } else {
-                    self.fetch_movie_details(movie.id).await
+            let query_lower = title.to_lowercase();
+            let candidates: Vec<(u32, &str, &str)> = search.results.iter()
+                .filter(|m| m.id > 0)
+                .map(|m| (m.id, m.title.as_str(), m.original_title.as_str()))
+                .collect();
+
+            match Self::best_match_by_title(&query_lower, &candidates) {
+                Some((score, movie_id)) => {
+                    debug!("TMDB movie best match for '{title}': ID {movie_id} (score {score:.2})");
+                    self.fetch_movie_details(movie_id).await
                 }
-            } else {
-                debug!("No TMDB results for movie: {title}");
-                Ok(None)
+                None => {
+                    debug!("TMDB movie search for '{title}': no result met threshold {TMDB_MATCH_THRESHOLD:.2}");
+                    Ok(None)
+                }
             }
         } else {
             Ok(None)
@@ -242,25 +248,46 @@ impl TmdbClient {
             }
         }
 
-        debug!("TMDB search series: {title}");
+        debug!("TMDB search series by title: {title}");
 
         let search_result: Option<TmdbTvSearchResponse> = self.execute_request(url.to_string()).await?;
 
         if let Some(search) = search_result {
-            if let Some(series) = search.results.first() {
-                if series.id == 0 {
-                    debug!("TMDB returned ID 0 for series search: {title}");
-                    Ok(None)
-                } else {
-                    self.fetch_series_details(series.id).await
+            let query_lower = title.to_lowercase();
+            let candidates: Vec<(u32, &str, &str)> = search.results.iter()
+                .filter(|s| s.id > 0)
+                .map(|s| (s.id, s.name.as_str(), s.original_name.as_str()))
+                .collect();
+
+            match Self::best_match_by_title(&query_lower, &candidates) {
+                Some((score, series_id)) => {
+                    debug!("TMDB series best match for '{title}': ID {series_id} (score {score:.2})");
+                    self.fetch_series_details(series_id).await
                 }
-            } else {
-                debug!("No TMDB results for series: {title}");
-                Ok(None)
+                None => {
+                    debug!("TMDB series search for '{title}': no result met threshold {TMDB_MATCH_THRESHOLD:.2}");
+                    Ok(None)
+                }
             }
         } else {
             Ok(None)
         }
+    }
+
+    /// Selects the best matching candidate by Jaro-Winkler similarity.
+    ///
+    /// Compares `query` (already lowercased) against both the primary title and
+    /// the original title of every candidate, takes the maximum score, and returns
+    /// `Some((score, id))` only when the best score is >= `TMDB_MATCH_THRESHOLD`.
+    fn best_match_by_title(query: &str, candidates: &[(u32, &str, &str)]) -> Option<(f64, u32)> {
+        candidates.iter()
+            .map(|&(id, title, original_title)| {
+                let score = strsim::jaro_winkler(query, &title.to_lowercase())
+                    .max(strsim::jaro_winkler(query, &original_title.to_lowercase()));
+                (score, id)
+            })
+            .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+            .filter(|&(score, _)| score >= TMDB_MATCH_THRESHOLD)
     }
 
     // Fetches detailed TV series information
