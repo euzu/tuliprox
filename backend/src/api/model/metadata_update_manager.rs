@@ -1070,17 +1070,22 @@ impl InputWorker {
             }
 
             if !skip_execution {
-                let active_retry_domain = Self::retry_domain_for_task(&task_for_execution);
-                let mut clear_active_retry_state = false;
                 let mut clear_tmdb_state = false;
-
                 if let Some(state_bundle) = self.retry_states.get(&current_key) {
-                    if let Some(active_state) = state_bundle.get(active_retry_domain) {
-                        if active_retry_domain == RetryDomain::Probe {
-                            if let Some(cooldown_until_ts) = active_state.cooldown_until_ts {
-                                if now_ts < cooldown_until_ts {
+                    if let Some(tmdb_state) = state_bundle.get(RetryDomain::Tmdb) {
+                        if let Some(cooldown_until_ts) = tmdb_state.cooldown_until_ts {
+                            if now_ts < cooldown_until_ts {
+                                if let Some(stripped_task) = Self::strip_tmdb_reasons(&task_for_execution) {
                                     debug_if_enabled!(
-                                        "Skipping probe task in cooldown for input {}: {} (cooldown_until={})",
+                                        "TMDB cooldown active for input {}: {} (cooldown_until={}), continuing with non-TMDB reasons",
+                                        input_name,
+                                        task_for_execution,
+                                        cooldown_until_ts
+                                    );
+                                    task_for_execution = stripped_task;
+                                } else {
+                                    debug_if_enabled!(
+                                        "Skipping TMDB-only task in cooldown for input {}: {} (cooldown_until={})",
                                         input_name,
                                         task_for_execution,
                                         cooldown_until_ts
@@ -1088,33 +1093,25 @@ impl InputWorker {
                                     self.scheduled_requeues.remove(&current_key);
                                     remove_current_task = true;
                                     skip_execution = true;
-                                } else {
-                                    clear_active_retry_state = true;
                                 }
+                            } else {
+                                clear_tmdb_state = true;
                             }
                         }
-
-                        if !skip_execution && active_state.next_allowed_at_ts > now_ts {
-                            schedule_requeue_at_ts = Some(active_state.next_allowed_at_ts);
-                            skip_execution = true;
-                        }
                     }
+                }
 
-                    if !skip_execution {
-                        if let Some(tmdb_state) = state_bundle.get(RetryDomain::Tmdb) {
-                            if let Some(cooldown_until_ts) = tmdb_state.cooldown_until_ts {
-                                if now_ts < cooldown_until_ts {
-                                    if let Some(stripped_task) = Self::strip_tmdb_reasons(&task_for_execution) {
+                let active_retry_domain = Self::retry_domain_for_task(&task_for_execution);
+                let mut clear_active_retry_state = false;
+
+                if !skip_execution {
+                    if let Some(state_bundle) = self.retry_states.get(&current_key) {
+                        if let Some(active_state) = state_bundle.get(active_retry_domain) {
+                            if active_retry_domain == RetryDomain::Probe {
+                                if let Some(cooldown_until_ts) = active_state.cooldown_until_ts {
+                                    if now_ts < cooldown_until_ts {
                                         debug_if_enabled!(
-                                            "TMDB cooldown active for input {}: {} (cooldown_until={}), continuing with non-TMDB reasons",
-                                            input_name,
-                                            task_for_execution,
-                                            cooldown_until_ts
-                                        );
-                                        task_for_execution = stripped_task;
-                                    } else {
-                                        debug_if_enabled!(
-                                            "Skipping TMDB-only task in cooldown for input {}: {} (cooldown_until={})",
+                                            "Skipping probe task in cooldown for input {}: {} (cooldown_until={})",
                                             input_name,
                                             task_for_execution,
                                             cooldown_until_ts
@@ -1122,10 +1119,15 @@ impl InputWorker {
                                         self.scheduled_requeues.remove(&current_key);
                                         remove_current_task = true;
                                         skip_execution = true;
+                                    } else {
+                                        clear_active_retry_state = true;
                                     }
-                                } else {
-                                    clear_tmdb_state = true;
                                 }
+                            }
+
+                            if !skip_execution && active_state.next_allowed_at_ts > now_ts {
+                                schedule_requeue_at_ts = Some(active_state.next_allowed_at_ts);
+                                skip_execution = true;
                             }
                         }
                     }

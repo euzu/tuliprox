@@ -132,6 +132,7 @@ pub async fn update_live_stream_metadata(
     properties.last_probed_timestamp = Some(now);
 
     let mut success = false;
+    let mut not_found = false;
     match crate::utils::ffmpeg::probe_url(
         &stream_url,
         user_agent.as_deref(),
@@ -156,7 +157,7 @@ pub async fn update_live_stream_metadata(
         }
         ProbeUrlOutcome::Failed(ProbeFailureKind::NotFound) => {
             warn!("Live stream probe target returned 404 for ID {} (Input: {})", display_id, input.name);
-            return Err(shared::error::info_err!("Probe failed with 404 Not Found for stream {display_id}"));
+            not_found = true;
         }
         ProbeUrlOutcome::Failed(ProbeFailureKind::Other) => {
             warn!("Probe failed for Live Stream ID {} (Input: {})", display_id, input.name);
@@ -174,6 +175,9 @@ pub async fn update_live_stream_metadata(
     }
     
     if !success {
+        if not_found {
+            return Err(shared::error::info_err!("Probe failed with 404 Not Found for stream {display_id}"));
+        }
         // Return error to propagate failure up to task manager/logs
         return Err(shared::error::info_err!("Probe failed for stream {display_id}"));
     }
