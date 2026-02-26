@@ -7,6 +7,17 @@ use std::time::Duration;
 use tokio::process::Command;
 use url::Url;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeFailureKind {
+    NotFound,
+    Other,
+}
+
+pub enum ProbeUrlOutcome {
+    Success(MediaQuality, Option<Value>, Option<Value>),
+    Failed(ProbeFailureKind),
+}
+
 // Checks if ffprobe is available in the system path
 pub async fn check_ffprobe_availability() -> bool {
     match Command::new("ffprobe").arg("-version").output().await {
@@ -53,6 +64,11 @@ fn apply_proxy_to_ffprobe(command: &mut Command, proxy_cfg: Option<&ProxyConfig>
     }
 }
 
+fn is_not_found_probe_error(stderr: &str) -> bool {
+    let normalized = stderr.to_ascii_lowercase();
+    normalized.contains("404") || normalized.contains("not found")
+}
+
 pub async fn probe_url(
     url: &str,
     user_agent: Option<&str>,
@@ -60,7 +76,7 @@ pub async fn probe_url(
     probe_size: u64,
     timeout_secs: u64,
     proxy_cfg: Option<&ProxyConfig>,
-) -> Option<(MediaQuality, Option<Value>, Option<Value>)> {
+) -> ProbeUrlOutcome {
     // Determine timeout: Ensure it's at least as long as the analyze duration + buffer, 
     // but respect the user setting if it's longer.
     let analyze_overhead = Duration::from_micros(analyze_duration) + Duration::from_secs(5);
@@ -95,7 +111,10 @@ pub async fn probe_url(
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 debug!("ffprobe failed for {}: {}", sanitize_sensitive_info(url), sanitize_sensitive_info(&stderr));
-                return None;
+                if is_not_found_probe_error(&stderr) {
+                    return ProbeUrlOutcome::Failed(ProbeFailureKind::NotFound);
+                }
+                return ProbeUrlOutcome::Failed(ProbeFailureKind::Other);
             }
 
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -143,7 +162,7 @@ pub async fn probe_url(
                      if video_info.is_some() || audio_info.is_some() {
                          let mq = MediaQuality::from_ffprobe_info(audio_info.as_deref(), video_info.as_deref());
                          if let Some(quality) = mq {
-                             return Some((quality, raw_video_json, raw_audio_json));
+                             return ProbeUrlOutcome::Success(quality, raw_video_json, raw_audio_json);
                          }
                      }
                  }
@@ -159,7 +178,7 @@ pub async fn probe_url(
         }
     }
 
-    None
+    ProbeUrlOutcome::Failed(ProbeFailureKind::Other)
 }
 
 #[cfg(test)]

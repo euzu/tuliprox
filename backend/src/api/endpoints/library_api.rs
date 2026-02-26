@@ -40,10 +40,12 @@ async fn scan_library(
     };
 
     let client = app_state.http_client.load_full().as_ref().clone();
+    let metadata_update = app_state.app_config.config.load().metadata_update.clone();
     let event_manager = Arc::clone(&app_state.event_manager);
     spawn_library_scan(
         event_manager,
         lib_config,
+        metadata_update,
         client,
         request.force_rescan,
         "",

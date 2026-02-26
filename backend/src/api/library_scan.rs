@@ -1,6 +1,6 @@
 use crate::api::model::{EventManager, EventMessage, UpdateGuardPermit};
 use crate::library::LibraryProcessor;
-use crate::model::LibraryConfig;
+use crate::model::{LibraryConfig, MetadataUpdateConfig};
 use log::{error, info};
 use shared::model::{LibraryScanSummary, LibraryScanSummaryStatus};
 use std::sync::Arc;
@@ -8,6 +8,7 @@ use std::sync::Arc;
 pub(crate) fn spawn_library_scan(
     event_manager: Arc<EventManager>,
     lib_config: LibraryConfig,
+    _metadata_update: Option<MetadataUpdateConfig>,
     client: reqwest::Client,
     force_rescan: bool,
     message_prefix: &'static str,
