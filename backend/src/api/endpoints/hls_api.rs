@@ -190,10 +190,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
         default_user_agent.as_deref(),
     );
     let input_source = InputSource::from(input).with_url(request_url);
-    let use_manual_redirects = {
-        let config = app_state.app_config.config.load();
-        config.proxy.is_some()
-    };
+    let use_manual_redirects = app_state.should_use_manual_redirects();
     let download_result = if use_manual_redirects {
         request::download_text_content_with_manual_redirects(
             &app_state.app_config,
