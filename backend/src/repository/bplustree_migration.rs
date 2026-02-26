@@ -144,6 +144,11 @@ impl BPlusTreeStartupMigrator {
     }
 
     fn write_migration_marker(marker_path: &Path) -> io::Result<()> {
+        if let Some(parent) = marker_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
         let mut file = OpenOptions::new().create(true).write(true).truncate(true).open(marker_path)?;
         file.write_all(format!("migrated_to={STORAGE_VERSION}\n").as_bytes())?;
         file.flush()?;
@@ -152,16 +157,14 @@ impl BPlusTreeStartupMigrator {
     }
 
     fn migrate_file_if_needed(path: &Path) -> io::Result<FileMigrationOutcome> {
-        let mut file = OpenOptions::new().read(true).write(true).open(path)?;
-        file.try_lock_exclusive()?;
-
-        let file_len = file.metadata()?.len();
+        let mut read_file = OpenOptions::new().read(true).open(path)?;
+        let file_len = read_file.metadata()?.len();
         if file_len < 8 {
             return Ok(FileMigrationOutcome::NotBPlusTree);
         }
 
         let mut header = [0u8; 8];
-        file.read_exact(&mut header)?;
+        read_file.read_exact(&mut header)?;
         if &header[0..4] != MAGIC {
             return Ok(FileMigrationOutcome::NotBPlusTree);
         }
@@ -171,19 +174,49 @@ impl BPlusTreeStartupMigrator {
         if version == STORAGE_VERSION {
             return Ok(FileMigrationOutcome::AlreadyCurrent);
         }
-        if version == LEGACY_STORAGE_VERSION {
-            file.seek(SeekFrom::Start(4))?;
-            file.write_all(&STORAGE_VERSION.to_le_bytes())?;
-            let _flags_written = Self::normalize_metadata_flags(&mut file)?;
-            file.flush()?;
-            file.sync_data()?;
-            return Ok(FileMigrationOutcome::Migrated);
+        if version != LEGACY_STORAGE_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Unsupported B+Tree storage version {version} in {} (expected {STORAGE_VERSION})",
+                    path.display()
+                ),
+            ));
         }
 
-        Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("Unsupported B+Tree storage version {version} in {} (expected {STORAGE_VERSION})", path.display()),
-        ))
+        let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+        file.try_lock_exclusive()?;
+
+        // Re-read header after lock to guard against concurrent updates between
+        // the read-only probe and write phase.
+        file.seek(SeekFrom::Start(0))?;
+        let mut locked_header = [0u8; 8];
+        file.read_exact(&mut locked_header)?;
+        if &locked_header[0..4] != MAGIC {
+            return Ok(FileMigrationOutcome::NotBPlusTree);
+        }
+        let locked_version = u32::from_le_bytes(
+            locked_header[4..8].try_into().map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?,
+        );
+        if locked_version == STORAGE_VERSION {
+            return Ok(FileMigrationOutcome::AlreadyCurrent);
+        }
+        if locked_version != LEGACY_STORAGE_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Unsupported B+Tree storage version {locked_version} in {} (expected {STORAGE_VERSION})",
+                    path.display()
+                ),
+            ));
+        }
+
+        file.seek(SeekFrom::Start(4))?;
+        file.write_all(&STORAGE_VERSION.to_le_bytes())?;
+        let _flags_written = Self::normalize_metadata_flags(&mut file)?;
+        file.flush()?;
+        file.sync_data()?;
+        Ok(FileMigrationOutcome::Migrated)
     }
 
     fn normalize_metadata_flags(file: &mut std::fs::File) -> io::Result<bool> {

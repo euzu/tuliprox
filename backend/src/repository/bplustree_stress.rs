@@ -308,13 +308,12 @@ fn stress_test_bplustree() {
         let wal_writer = Arc::clone(&wal_writer);
         let small_payload_local = small_payload.clone();
         let large_payload_local = large_payload.clone();
-        writer_handles.push(thread::spawn(move || -> (u64, u64, u64, Duration) {
+        writer_handles.push(thread::spawn(move || -> (u64, u64, Duration) {
             let mut prng_state =
                 0xD6E8_FEB8_6659_FD93u64 ^ ((writer_id as u64 + 1).wrapping_mul(0x94D0_49BB_1331_11EB));
             barrier.wait();
             let started = Instant::now();
 
-            let retries = 0u64;
             let mut applied_batches = 0u64;
             let mut applied_updates = 0u64;
 
@@ -335,7 +334,7 @@ fn stress_test_bplustree() {
                 applied_updates += writer_batch_size as u64;
             }
 
-            (applied_updates, applied_batches, retries, started.elapsed())
+            (applied_updates, applied_batches, started.elapsed())
         }));
     }
 
@@ -358,14 +357,12 @@ fn stress_test_bplustree() {
 
     let mut total_writer_updates = 0u64;
     let mut total_writer_batches = 0u64;
-    let mut total_writer_retries = 0u64;
     let mut total_writer_time = Duration::ZERO;
     let mut max_writer_duration = Duration::ZERO;
     for handle in writer_handles {
-        let (updates, batches, retries, elapsed) = handle.join().unwrap();
+        let (updates, batches, elapsed) = handle.join().unwrap();
         total_writer_updates += updates;
         total_writer_batches += batches;
-        total_writer_retries += retries;
         total_writer_time += elapsed;
         if elapsed > max_writer_duration {
             max_writer_duration = elapsed;
@@ -389,7 +386,7 @@ fn stress_test_bplustree() {
     .unwrap();
     writeln!(
         log_file,
-        "Writer Updates: {total_writer_updates} (batches: {total_writer_batches}), Throughput: {:.0} updates/sec, Avg Latency: {:.2}us/update, Lock Retries: {total_writer_retries} (single-writer queue), Slowest Writer: {max_writer_duration:.2?}",
+        "Writer Updates: {total_writer_updates} (batches: {total_writer_batches}), Throughput: {:.0} updates/sec, Avg Latency: {:.2}us/update, Slowest Writer: {max_writer_duration:.2?}",
         total_writer_updates as f64 / concurrent_duration.as_secs_f64(),
         writer_avg_latency_us
     )
