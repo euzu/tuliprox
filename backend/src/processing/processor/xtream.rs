@@ -118,10 +118,10 @@ pub async fn update_live_stream_metadata(
     );
     let config = app_config.config.load();
     let metadata_update = config.metadata_update.clone().unwrap_or_default();
-    let ffprobe_timeout = metadata_update.ffprobe_timeout.unwrap_or(60);
+    let ffprobe_timeout = metadata_update.ffprobe.timeout.unwrap_or(60);
     let user_agent = config.default_user_agent.clone();
-    let analyze_duration = metadata_update.ffprobe_live_analyze_duration_micros;
-    let probe_size = metadata_update.ffprobe_live_probe_size_bytes;
+    let analyze_duration = metadata_update.ffprobe.live_analyze_duration_micros;
+    let probe_size = metadata_update.ffprobe.live_probe_size_bytes;
 
     let display_id = stream_id_opt.map_or_else(|| "StringID".to_string(), |v| v.to_string());
     debug!("Probing Live Stream ID {} for input {}", display_id, input.name);
@@ -140,7 +140,9 @@ pub async fn update_live_stream_metadata(
         probe_size,
         ffprobe_timeout,
         config.proxy.as_ref(),
-    ).await {
+    )
+    .await
+    {
         ProbeUrlOutcome::Success(_quality, raw_video, raw_audio) => {
             // 3. Update properties on success
             if let Some(v) = raw_video {

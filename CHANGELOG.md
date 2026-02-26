@@ -16,6 +16,8 @@
   - `threads` attribute in `config.yml` renamed to `process_parallel` (boolean).
   - Added mandatory `rewrite_secret` to `reverse_proxy` config for stable resource URLs.
   - Removed `forced_retry_interval_secs`.
+  - FFprobe settings moved from `video.*` to `metadata_update.ffprobe.*`.
+  - `metadata_update.ffprobe.analyze_duration` and `metadata_update.ffprobe.live_analyze_duration` now require explicit unit suffixes (`s|m|h|d`).
 - **Input Batch Changes**: `name` attribute is now mandatory for input type batch to ensure stable playlist UUIDs.
 - **Favorites Redesign**: Replaced implicit `create_alias` with explicit `add_favourite(group_name)` script function.
   - **EpgSmartMatch**: Field `name_prefix` syntax needs to be changed from  `name_prefix: !suffix "."` to `name_prefix: { suffix: "." }`.
@@ -105,14 +107,19 @@ active URL of the specified provider.
 - Added `-T, --template` to override `template_path` on startup.
 - **Metadata Update Runtime Config**: Metadata worker intervals, retry/backoff limits, queue sizing, and probe cooldowns are now configurable through
   a dedicated `metadata_update` config block.
+- **Unified Metadata Retry State**: Replaced probe-only retry persistence with a single `metadata_retry_state.db` per input. A single record per
+  item now stores retry/cooldown state for `resolve`, `probe`, and `tmdb`.
+- **TMDB No-Match Cooldown**: Added explicit TMDB cooldown handling. When TMDB resolve completes successfully but returns no match, TMDB reasons are
+  suppressed for that item during cooldown to prevent endless requeue loops.
 
 ## ⚙️ New Settings
 
 - **config.yml**:
-  - Added `metadata_update` (optional) with queue/retry/backoff/cooldown/worker-timeout fields (duration syntax: `60`, `10m`, `1h`, `7d`).
-  - Added `metadata_update.ffprobe_enabled` (default: false), `metadata_update.ffprobe_timeout`, and ffprobe probe/analyze size settings.
-  - `metadata_update.ffprobe_analyze_duration` and `metadata_update.ffprobe_live_analyze_duration` now require explicit unit suffixes (`s|m|h|d`).
-  - FFprobe settings are now configured under `metadata_update` (not under `video` anymore).
+  - Added `metadata_update` (optional) with grouped sections: `log`, `resolve`, `probe`, `ffprobe`, `tmdb`.
+  - Added `metadata_update.tmdb.cooldown` (default `7d`) for successful TMDB no-match cooldown behavior.
+  - Added `metadata_update.ffprobe.enabled` (default: false), `metadata_update.ffprobe.timeout`, and ffprobe probe/analyze size settings.
+  - `metadata_update.ffprobe.analyze_duration` and `metadata_update.ffprobe.live_analyze_duration` require explicit unit suffixes (`s|m|h|d`).
+  - FFprobe settings are configured under `metadata_update.ffprobe` (not under `video`).
   - Added `template_path` (optional): path to a template file (`template.yml`) or directory (`template.d` style).
 - **source.yml (input options)**:
   - Added `resolve_tmdb`: Triggers TMDB lookup if ID is missing.

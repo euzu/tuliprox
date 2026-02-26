@@ -385,67 +385,119 @@ Duration fields use the same format as `cache_duration`: plain seconds (`60`) or
 
 ```yaml
 metadata_update:
-  queue_log_interval: 30s
-  progress_log_interval: 15s
-  max_resolve_retry_backoff: 1h
-  resolve_min_retry_base: 5s
-  max_attempts_resolve: 3
-  max_attempts_probe: 3
-  resolve_exhaustion_reset_gap: 1h
-  probe_cooldown: 7d
+  log:
+    queue_interval: 30s
+    progress_interval: 15s
+  resolve:
+    max_retry_backoff: 1h
+    min_retry_base: 5s
+    max_attempts: 3
+    exhaustion_reset_gap: 1h
+  probe:
+    cooldown: 7d
+    retry_load_retry_delay: 1m
+    retry_backoff_step_1: 10m
+    retry_backoff_step_2: 30m
+    retry_backoff_step_3: 1h
+    max_attempts: 3
+    backoff_jitter_percent: 20
+  tmdb:
+    enabled: true
+    # api_key: "..." # Optional, fallback is internal default placeholder
+    rate_limit_ms: 250
+    cache_duration_days: 0
+    language: en-US
+    cooldown: 7d
+  ffprobe:
+    enabled: true
+    timeout: 60
+    analyze_duration: 10s
+    probe_size: 10MB
+    live_analyze_duration: 5s
+    live_probe_size: 5MB
   retry_delay: 2s
-  probe_retry_load_retry_delay: 1m
   worker_idle_timeout: 1m
-  probe_retry_backoff_step_1: 10m
-  probe_retry_backoff_step_2: 30m
-  probe_retry_backoff_step_3: 1h
-  backoff_jitter_percent: 20
   max_queue_size: 100000
-  ffprobe_enabled: true
-  ffprobe_timeout: 60
-  ffprobe_analyze_duration: 10s
-  ffprobe_probe_size: 10MB
-  ffprobe_live_analyze_duration: 5s
-  ffprobe_live_probe_size: 5MB
 ```
 
 **Field Reference (`metadata_update`):**
 
-- `queue_log_interval` (default `30s`): Interval for queue size/status log output of the metadata worker.
-- `progress_log_interval` (default `15s`): Interval for progress log output while metadata tasks are being processed.
-- `max_resolve_retry_backoff` (default `1h`): Upper limit for resolve retry backoff delay.
-- `resolve_min_retry_base` (default `5s`): Minimum base delay for resolve retries before exponential backoff is applied.
-- `max_attempts_resolve` (default `3`): Maximum resolve attempts before a resolve task is treated as exhausted for the current cycle.
-- `max_attempts_probe` (default `3`): Maximum probe attempts before probe cooldown is activated.
-- `resolve_exhaustion_reset_gap` (default `1h`): Time gap after a completed update cycle after which exhausted resolve states are reset.
-- `probe_cooldown` (default `7d`): Cooldown duration after probe attempts are exhausted; probe retries are skipped during this period.
+**Group overview:**
+
+- `resolve`: Controls retries for metadata lookup tasks (for example title/date/TMDB resolution).
+- `probe`: Controls retries and cooldown for technical stream probing tasks.
+- `ffprobe`: Controls how deep and how long FFprobe inspects streams.
+- `tmdb`: Controls TMDB API usage, language, caching, and no-match cooldown behavior.
+- `log`: Controls how often metadata queue/progress messages are written to logs.
+
+- `log.queue_interval` (default `30s`): Interval for queue size/status log output of the metadata worker.
+- `log.progress_interval` (default `15s`): Interval for progress log output while metadata tasks are being processed.
+- `resolve.max_retry_backoff` (default `1h`): Upper limit for resolve retry backoff delay.
+- `resolve.min_retry_base` (default `5s`): Minimum base delay for resolve retries before exponential backoff is applied.
+- `resolve.max_attempts` (default `3`): Maximum resolve attempts before a resolve task is treated as exhausted for the current cycle.
+- `resolve.exhaustion_reset_gap` (default `1h`): Time gap after a completed update cycle after which exhausted resolve states are reset.
+- `probe.max_attempts` (default `3`): Maximum probe attempts before probe cooldown is activated.
+- `probe.cooldown` (default `7d`): Cooldown duration after probe attempts are exhausted; probe retries are skipped during this period.
+- `probe.retry_load_retry_delay` (default `1m`): Delay before re-attempting to load persisted metadata retry state after a load failure.
+- `probe.retry_backoff_step_1` (default `10m`): Probe backoff delay for attempt 1.
+- `probe.retry_backoff_step_2` (default `30m`): Probe backoff delay for attempt 2.
+- `probe.retry_backoff_step_3` (default `1h`): Probe backoff delay for attempt 3 and higher.
+- `probe.backoff_jitter_percent` (default `20`): Random jitter percentage applied to resolve/probe retry backoff to avoid synchronized retries.
+- `tmdb.cooldown` (default `7d`): Cooldown duration after a TMDB lookup completed successfully but returned no match.
+- `tmdb.enabled` / `tmdb.api_key` / `tmdb.rate_limit_ms` / `tmdb.cache_duration_days` / `tmdb.language`: TMDB resolver settings.
 - `retry_delay` (default `2s`): Minimum retry delay for transient worker errors (for example temporary connection/resource issues).
-- `probe_retry_load_retry_delay` (default `1m`): Delay before re-attempting to load persisted probe retry state after a load failure.
 - `worker_idle_timeout` (default `1m`): Idle timeout for metadata worker shutdown when there is no immediate work.
-- `probe_retry_backoff_step_1` (default `10m`): Probe backoff delay for attempt 1.
-- `probe_retry_backoff_step_2` (default `30m`): Probe backoff delay for attempt 2.
-- `probe_retry_backoff_step_3` (default `1h`): Probe backoff delay for attempt 3 and higher.
-- `backoff_jitter_percent` (default `20`): Random jitter percentage applied to resolve/probe retry backoff to avoid synchronized retries.
 - `max_queue_size` (default `100000`): Maximum pending metadata tasks per input before new tasks are rejected.
-- `ffprobe_enabled` (default `false`): Globally enables/disables FFprobe-based stream analysis.
-- `ffprobe_timeout` (default `60`): FFprobe process timeout in seconds.
-- `ffprobe_analyze_duration` (default `10s`): FFprobe `-analyzeduration`
+- `ffprobe.enabled` (default `false`): Globally enables/disables FFprobe-based stream analysis.
+- `ffprobe.timeout` (default `60`): FFprobe process timeout in seconds.
+- `ffprobe.analyze_duration` (default `10s`): FFprobe `-analyzeduration`
   value for VOD/Series probing. Requires explicit unit suffix (`s`, `m`,
   `h`, `d`).
-- `ffprobe_probe_size` (default `10MB`): FFprobe `-probesize` value for VOD/Series probing.
-- `ffprobe_live_analyze_duration` (default `5s`): FFprobe `-analyzeduration`
+- `ffprobe.probe_size` (default `10MB`): FFprobe `-probesize` value for VOD/Series probing.
+- `ffprobe.live_analyze_duration` (default `5s`): FFprobe `-analyzeduration`
   value for Live probing. Requires explicit unit suffix (`s`, `m`, `h`,
   `d`).
-- `ffprobe_live_probe_size` (default `5MB`): FFprobe `-probesize` value for Live probing.
+- `ffprobe.live_probe_size` (default `5MB`): FFprobe `-probesize` value for Live probing.
+
+**Explanations:**
+
+- `retry_delay`: Minimum waiting time before a task is retried after a temporary problem. Prevents very fast retry loops.
+- `worker_idle_timeout`: How long a metadata worker stays alive with no new work before it can stop and free resources.
+- `max_queue_size`: Safety limit for how many metadata tasks are kept in memory at once.
+- `log.queue_interval`: How often Tuliprox writes queue status logs.
+- `log.progress_interval`: How often Tuliprox writes progress logs while tasks are running.
+- `resolve.max_retry_backoff`: Longest wait time between repeated resolve retries.
+- `resolve.min_retry_base`: Smallest wait time before a resolve retry is allowed.
+- `resolve.max_attempts`: How many resolve tries are allowed for one item in one update cycle.
+- `resolve.exhaustion_reset_gap`: How long Tuliprox waits before exhausted resolve items can start a fresh retry cycle.
+- `probe.cooldown`: Pause period after probe retries are exhausted; item probing is skipped during that time.
+- `probe.retry_load_retry_delay`: Wait time before retrying to read saved retry-state data after a load error.
+- `probe.retry_backoff_step_1`: Wait time after the first probe failure.
+- `probe.retry_backoff_step_2`: Wait time after the second probe failure.
+- `probe.retry_backoff_step_3`: Wait time after the third and later probe failures.
+- `probe.max_attempts`: How many probe tries are allowed before cooldown starts.
+- `probe.backoff_jitter_percent`: Adds small random spread to retry timing so many tasks do not retry at the exact same second.
+- `ffprobe.enabled`: Turns technical stream analysis on or off.
+- `ffprobe.timeout`: Maximum runtime of one FFprobe call. Leave empty for default (`60`).
+- `ffprobe.analyze_duration`: How much playback time FFprobe may inspect for VOD/Series.
+- `ffprobe.probe_size`: How much data FFprobe may read for VOD/Series.
+- `ffprobe.live_analyze_duration`: How much playback time FFprobe may inspect for live streams.
+- `ffprobe.live_probe_size`: How much data FFprobe may read for live streams.
+- `tmdb.enabled`: Enables TMDB metadata lookups.
+- `tmdb.api_key`: Optional own TMDB API key.
+- `tmdb.rate_limit_ms`: Minimum wait between TMDB requests (higher is gentler for the API).
+- `tmdb.cache_duration_days`: How long TMDB results are cached before refresh.
+- `tmdb.language`: Preferred language for TMDB metadata.
+- `tmdb.cooldown`: Pause after a successful TMDB lookup with no match, to avoid endless retries.
 
 Duration fields support `s`, `m`, `h`, `d` (for example `30s`, `10m`, `1h`, `7d`) or plain seconds.
-Exception: `ffprobe_analyze_duration` and `ffprobe_live_analyze_duration` require explicit unit suffix.
+Exception: `ffprobe.analyze_duration` and `ffprobe.live_analyze_duration` require explicit unit suffix.
 Size fields support `B`, `KB`, `MB`, `GB`, `TB` (for example `512KB`, `10MB`) or plain bytes.
 
 **Why are there 4 FFprobe fields?**
 
-- `ffprobe_analyze_duration` + `ffprobe_probe_size` are the default pair for non-live probes (VOD/Series and generic non-live stream probes).
-- `ffprobe_live_analyze_duration` + `ffprobe_live_probe_size` are the live-specific pair for all live probes.
+- `ffprobe.analyze_duration` + `ffprobe.probe_size` are the default pair for non-live probes (VOD/Series and generic non-live stream probes).
+- `ffprobe.live_analyze_duration` + `ffprobe.live_probe_size` are the live-specific pair for all live probes.
 - This split is intentional because live probing usually needs lower values
   (less provider load / lower latency), while VOD/Series can use higher values
   for better metadata extraction quality.
@@ -454,6 +506,7 @@ Size fields support `B`, `KB`, `MB`, `GB`, `TB` (for example `512KB`, `10MB`) or
 
 - `Resolve task`: A metadata job that fetches or enriches item metadata (for example VOD/Series details, TMDB ID, dates).
 - `Probe task`: A technical analysis job that inspects stream properties with FFprobe (codec, resolution, audio tracks).
+- `TMDB cooldown`: Per-item cooldown that is set when TMDB lookup finished successfully but returned no match.
 - `Retry`: Re-attempt of a failed task.
 - `Attempt`: One execution try of a task. If it fails, the attempt counter increases.
 - `Backoff delay`: Waiting time before the next retry after a failure.
@@ -466,6 +519,9 @@ Size fields support `B`, `KB`, `MB`, `GB`, `TB` (for example `512KB`, `10MB`) or
 - `Cooldown`: Skip period after exhaustion (used for probe tasks) where retries are paused until the cooldown expires.
 - `Update cycle`: One full metadata processing run for an input, from first queued item until queue idle/completion.
 - `Resolve exhaustion reset gap`: Time window after which exhausted resolve states are cleared for the next meaningful update cycle.
+
+Retry/cooldown state is persisted per input in `metadata_retry_state.db` and keeps one bundled record per item key (`resolve`, `probe`, `tmdb`).
+
 - `Pending queue`: In-memory list of metadata tasks waiting to be processed by the worker.
 - `Worker idle timeout`: Time without immediate work after which a worker may stop and release resources.
 
@@ -1080,10 +1136,6 @@ library:
       kodi: true
       jellyfin: false
       plex: false
-    tmdb:
-      enabled: true
-      # api_key: "4219e299c89411838049ab0dab19ebd5" # Get your API key from https://www.themoviedb.org/settings/api
-      rate_limit_ms: 250  # Milliseconds between API calls (default: 250ms)
     fallback_to_filename: true
     formats:
       - "nfo"  # Optionally write Kodi-compatible NFO files
@@ -1091,6 +1143,8 @@ library:
     movie_category: "Local Movies"
     series_category: "Local Series"
 ```
+
+TMDB resolver settings for library enrichment are configured globally under `metadata_update.tmdb`.
 
 **CLI Usage**:
 

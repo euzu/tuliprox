@@ -1,6 +1,6 @@
 use crate::api::model::{ActiveProviderManager, ProviderHandle};
 use crate::api::model::{ProviderIdType, ResolveReason, ResolveReasonSet, UpdateTask};
-use crate::library::MetadataResolver;
+use crate::library::{MetadataResolver, MetadataStorage};
 use crate::model::FetchedPlaylist;
 use crate::model::InputSource;
 use crate::model::{AppConfig, ConfigTarget};
@@ -678,7 +678,12 @@ pub async fn update_vod_metadata(
         if missing_tmdb || still_missing_date {
             let config = app_config.config.load();
             let library_config = config.library.as_ref();
-            let meta_resolver = MetadataResolver::new(library_config, client.clone());
+            let metadata_update_config = config.metadata_update.as_ref();
+            let tmdb_storage = metadata_update_config
+                .filter(|cfg| cfg.tmdb.enabled)
+                .map(|_| MetadataStorage::new(storage_path.clone()));
+            let meta_resolver =
+                MetadataResolver::from_config(library_config, metadata_update_config, client.clone(), tmdb_storage);
 
             let mut meta = None;
             let mut tried_title = false;
@@ -769,10 +774,10 @@ pub async fn update_vod_metadata(
 
             let config = app_config.config.load();
             let metadata_update = config.metadata_update.clone().unwrap_or_default();
-            let ffprobe_timeout = metadata_update.ffprobe_timeout.unwrap_or(60);
+            let ffprobe_timeout = metadata_update.ffprobe.timeout.unwrap_or(60);
             let user_agent = config.default_user_agent.clone();
-            let analyze_duration = metadata_update.ffprobe_analyze_duration_micros;
-            let probe_size = metadata_update.ffprobe_probe_size_bytes;
+            let analyze_duration = metadata_update.ffprobe.analyze_duration_micros;
+            let probe_size = metadata_update.ffprobe.probe_size_bytes;
 
             // Acquire Connection logic
             let temp_handle = if active_handle.is_some() {
@@ -781,39 +786,39 @@ pub async fn update_vod_metadata(
                 active_provider.acquire_connection_for_probe(&input.name).await
             };
 
-            if active_handle.is_some() || temp_handle.is_some() {
-                debug_if_enabled!("Probing VOD '{}' (ID: {})", display_title, display_id);
-                match crate::utils::ffmpeg::probe_url(
-                    &stream_url,
-                    user_agent.as_deref(),
-                    analyze_duration,
-                    probe_size,
-                    ffprobe_timeout,
-                    config.proxy.as_ref(),
-                )
-                .await
-                {
-                    ProbeUrlOutcome::Success(_quality, raw_video, raw_audio) => {
-                        if let Some(details) = properties.details.as_mut() {
-                            if let Some(v) = raw_video {
-                                details.video = Some(v.to_string().into());
-                                properties_updated = true;
+                if active_handle.is_some() || temp_handle.is_some() {
+                    debug_if_enabled!("Probing VOD '{}' (ID: {})", display_title, display_id);
+                    match crate::utils::ffmpeg::probe_url(
+                        &stream_url,
+                        user_agent.as_deref(),
+                        analyze_duration,
+                        probe_size,
+                        ffprobe_timeout,
+                        config.proxy.as_ref(),
+                    )
+                    .await
+                    {
+                        ProbeUrlOutcome::Success(_quality, raw_video, raw_audio) => {
+                            if let Some(details) = properties.details.as_mut() {
+                                if let Some(v) = raw_video {
+                                    details.video = Some(v.to_string().into());
+                                    properties_updated = true;
+                                }
+                                if let Some(a) = raw_audio {
+                                    details.audio = Some(a.to_string().into());
+                                    properties_updated = true;
+                                }
                             }
-                            if let Some(a) = raw_audio {
-                                details.audio = Some(a.to_string().into());
-                                properties_updated = true;
+                        }
+                        ProbeUrlOutcome::Failed(ProbeFailureKind::NotFound) => {
+                            probe_failure = Some(ProbeFailureKind::NotFound);
+                        }
+                        ProbeUrlOutcome::Failed(ProbeFailureKind::Other) => {
+                            if probe_failure.is_none() {
+                                probe_failure = Some(ProbeFailureKind::Other);
                             }
                         }
                     }
-                    ProbeUrlOutcome::Failed(ProbeFailureKind::NotFound) => {
-                        probe_failure = Some(ProbeFailureKind::NotFound);
-                    }
-                    ProbeUrlOutcome::Failed(ProbeFailureKind::Other) => {
-                        if probe_failure.is_none() {
-                            probe_failure = Some(ProbeFailureKind::Other);
-                        }
-                    }
-                }
                 if let Some(h) = temp_handle {
                     active_provider.release_handle(&h).await;
                 }

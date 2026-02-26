@@ -99,17 +99,17 @@ pub async fn update_generic_stream_metadata(
     let probe_url = stream_url.to_string();
     let config = app_config.config.load();
     let metadata_update = config.metadata_update.clone().unwrap_or_default();
-    let ffprobe_timeout = metadata_update.ffprobe_timeout.unwrap_or(60);
+    let ffprobe_timeout = metadata_update.ffprobe.timeout.unwrap_or(60);
     let user_agent = config.default_user_agent.clone();
     let (analyze_duration, probe_size) = if item_type.is_live() {
         (
-            metadata_update.ffprobe_live_analyze_duration_micros,
-            metadata_update.ffprobe_live_probe_size_bytes,
+            metadata_update.ffprobe.live_analyze_duration_micros,
+            metadata_update.ffprobe.live_probe_size_bytes,
         )
     } else {
         (
-            metadata_update.ffprobe_analyze_duration_micros,
-            metadata_update.ffprobe_probe_size_bytes,
+            metadata_update.ffprobe.analyze_duration_micros,
+            metadata_update.ffprobe.probe_size_bytes,
         )
     };
 

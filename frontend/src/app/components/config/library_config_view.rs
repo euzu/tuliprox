@@ -11,13 +11,13 @@ use crate::{
         },
         context::ConfigContext,
     },
-    config_field, config_field_bool, config_field_child, config_field_optional, edit_field_bool, edit_field_list,
-    edit_field_number, edit_field_number_u64, edit_field_text, edit_field_text_option, generate_form_reducer,
+    config_field, config_field_bool, config_field_child, edit_field_bool, edit_field_list, edit_field_text,
+    generate_form_reducer,
     i18n::use_translation,
 };
 use shared::model::{
     LibraryConfigDto, LibraryContentType, LibraryMetadataConfigDto, LibraryMetadataFormat,
-    LibraryMetadataReadConfigDto, LibraryPlaylistConfigDto, LibraryScanDirectoryDto, LibraryTmdbConfigDto,
+    LibraryMetadataReadConfigDto, LibraryPlaylistConfigDto, LibraryScanDirectoryDto,
 };
 use std::rc::Rc;
 use yew::prelude::*;
@@ -31,8 +31,6 @@ const LABEL_METADATA_PATH: &str = "LABEL.METADATA_PATH";
 const LABEL_PLAYLIST: &str = "LABEL.PLAYLIST";
 const LABEL_MOVIE_CATEGORY: &str = "LABEL.MOVIE_CATEGORY";
 const LABEL_SERIES_CATEGORY: &str = "LABEL.SERIES_CATEGORY";
-const LABEL_TMDB: &str = "LABEL.TMDB";
-const LABEL_API_KEY: &str = "LABEL.API_KEY";
 const LABEL_READ_EXISTING: &str = "LABEL.READ_EXISTING";
 const LABEL_KODI: &str = "LABEL.KODI";
 const LABEL_JELLYFIN: &str = "LABEL.JELLYFIN";
@@ -45,9 +43,6 @@ const LABEL_CONTENT_TYPE: &str = "LABEL.CONTENT_TYPE";
 const LABEL_AUTO: &str = "LABEL.AUTO";
 const LABEL_MOVIE: &str = "LABEL.MOVIE";
 const LABEL_SERIES: &str = "LABEL.SERIES";
-const LABEL_RATE_LIMIT_MS: &str = "LABEL.RATE_LIMIT_MS";
-const LABEL_CACHE_DURATION_DAYS: &str = "LABEL.CACHE_DURATION_DAYS";
-const LABEL_LANGUAGE: &str = "LABEL.LANGUAGE";
 const LABEL_FORMATS: &str = "LABEL.FORMATS";
 const LABEL_ADD_FORMAT: &str = "LABEL.ADD_FORMAT";
 
@@ -94,18 +89,6 @@ generate_form_reducer!(
     }
 );
 
-generate_form_reducer!(
-    state: LibraryTmdbConfigFormState { form: LibraryTmdbConfigDto },
-    action_name: LibraryTmdbConfigFormAction,
-    fields {
-        Enabled => enabled: bool,
-        ApiKey => api_key: Option<String>,
-        RateLimitMs => rate_limit_ms: u64,
-        CacheDurationDays => cache_duration_days: u32,
-        Language => language: String,
-    }
-);
-
 #[component]
 pub fn LibraryConfigView() -> Html {
     let translate = use_translation();
@@ -125,15 +108,11 @@ pub fn LibraryConfigView() -> Html {
         LibraryMetadataReadConfigFormState { form: LibraryMetadataReadConfigDto::default(), modified: false }
     });
 
-    let tmdb_state: UseReducerHandle<LibraryTmdbConfigFormState> =
-        use_reducer(|| LibraryTmdbConfigFormState { form: LibraryTmdbConfigDto::default(), modified: false });
-
     {
         let form_state = form_state.clone();
         let playlist_state = playlist_state.clone();
         let metadata_state = metadata_state.clone();
         let metadata_read_state = metadata_read_state.clone();
-        let tmdb_state = tmdb_state.clone();
 
         let library_cfg = config_ctx.config.as_ref().and_then(|c| c.config.library.clone());
         use_effect_with((library_cfg, config_view_ctx.edit_mode.clone()), move |(library_cfg, _mode)| {
@@ -143,14 +122,12 @@ pub fn LibraryConfigView() -> Html {
                 metadata_state.dispatch(LibraryMetadataConfigFormAction::SetAll(library.metadata.clone()));
                 metadata_read_state
                     .dispatch(LibraryMetadataReadConfigFormAction::SetAll(library.metadata.read_existing.clone()));
-                tmdb_state.dispatch(LibraryTmdbConfigFormAction::SetAll(library.metadata.tmdb.clone()));
             } else {
                 form_state.dispatch(LibraryConfigFormAction::SetAll(LibraryConfigDto::default()));
                 playlist_state.dispatch(LibraryPlaylistConfigFormAction::SetAll(LibraryPlaylistConfigDto::default()));
                 metadata_state.dispatch(LibraryMetadataConfigFormAction::SetAll(LibraryMetadataConfigDto::default()));
                 metadata_read_state
                     .dispatch(LibraryMetadataReadConfigFormAction::SetAll(LibraryMetadataReadConfigDto::default()));
-                tmdb_state.dispatch(LibraryTmdbConfigFormAction::SetAll(LibraryTmdbConfigDto::default()));
             }
             || ()
         });
@@ -162,19 +139,15 @@ pub fn LibraryConfigView() -> Html {
         let playlist_state = playlist_state.clone();
         let metadata_state = metadata_state.clone();
         let metadata_read_state = metadata_read_state.clone();
-        let tmdb_state = tmdb_state.clone();
 
         use_effect_with(
-            (form_state, playlist_state, metadata_state, metadata_read_state, tmdb_state),
-            move |(form, playlist, metadata, metadata_read, tmdb)| {
+            (form_state, playlist_state, metadata_state, metadata_read_state),
+            move |(form, playlist, metadata, metadata_read)| {
                 let mut new_form = form.form.clone();
                 new_form.playlist = playlist.form.clone();
                 new_form.metadata = metadata.form.clone();
                 new_form.metadata.read_existing = metadata_read.form.clone();
-                new_form.metadata.tmdb = tmdb.form.clone();
-
-                let modified =
-                    form.modified || playlist.modified || metadata.modified || metadata_read.modified || tmdb.modified;
+                let modified = form.modified || playlist.modified || metadata.modified || metadata_read.modified;
 
                 on_form_change.emit(ConfigForm::Library(modified, new_form));
             },
@@ -379,7 +352,6 @@ pub fn LibraryConfigView() -> Html {
     let render_view_mode = || {
         let metadata = &metadata_state.form;
         let playlist = &playlist_state.form;
-        let tmdb = &tmdb_state.form;
         let read_existing = &metadata_read_state.form;
 
         html! {
@@ -408,15 +380,6 @@ pub fn LibraryConfigView() -> Html {
                     { config_field_bool!(read_existing, translate.t(LABEL_KODI), kodi) }
                     { config_field_bool!(read_existing, translate.t(LABEL_JELLYFIN), jellyfin) }
                     { config_field_bool!(read_existing, translate.t(LABEL_PLEX), plex) }
-                </Card>
-
-                <Card class="tp__config-view__card">
-                    <h1>{translate.t(LABEL_TMDB)}</h1>
-                    { config_field_bool!(tmdb, translate.t(LABEL_ENABLED), enabled) }
-                    { config_field_optional!(tmdb, translate.t(LABEL_API_KEY), api_key) }
-                    { config_field!(tmdb, translate.t(LABEL_RATE_LIMIT_MS), rate_limit_ms) }
-                    { config_field!(tmdb, translate.t(LABEL_CACHE_DURATION_DAYS), cache_duration_days) }
-                    { config_field!(tmdb, translate.t(LABEL_LANGUAGE), language) }
                 </Card>
 
                 <Card class="tp__config-view__card">
@@ -483,15 +446,6 @@ pub fn LibraryConfigView() -> Html {
                     { edit_field_bool!(metadata_read_state, translate.t(LABEL_JELLYFIN), jellyfin, LibraryMetadataReadConfigFormAction::Jellyfin) }
                     { edit_field_bool!(metadata_read_state, translate.t(LABEL_PLEX), plex, LibraryMetadataReadConfigFormAction::Plex) }
                 </Card>
-
-                 <Card class="tp__config-view__card">
-                    <h1>{translate.t(LABEL_TMDB)}</h1>
-                    { edit_field_bool!(tmdb_state, translate.t(LABEL_ENABLED), enabled, LibraryTmdbConfigFormAction::Enabled) }
-                    { edit_field_text_option!(tmdb_state, translate.t(LABEL_API_KEY), api_key, LibraryTmdbConfigFormAction::ApiKey, true) }
-                    { edit_field_number_u64!(tmdb_state, translate.t(LABEL_RATE_LIMIT_MS), rate_limit_ms, LibraryTmdbConfigFormAction::RateLimitMs) }
-                    { edit_field_number!(tmdb_state, translate.t(LABEL_CACHE_DURATION_DAYS), cache_duration_days, LibraryTmdbConfigFormAction::CacheDurationDays) }
-                    { edit_field_text!(tmdb_state, translate.t(LABEL_LANGUAGE), language, LibraryTmdbConfigFormAction::Language) }
-                 </Card>
 
                  <Card class="tp__config-view__card">
                     <h1>{translate.t(LABEL_PLAYLIST)}</h1>

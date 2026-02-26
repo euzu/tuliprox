@@ -3,10 +3,8 @@ use crate::{
     info_err_res,
     utils::{
         default_as_true, default_metadata_path, default_movie_category, default_series_category,
-        default_storage_formats, default_supported_library_extensions, default_tmdb_api_key,
-        default_tmdb_cache_duration_days, default_tmdb_language, default_tmdb_rate_limit_ms,
-        is_default_supported_library_extensions, is_default_tmdb_cache_duration_days, is_default_tmdb_language,
-        is_default_tmdb_rate_limit_ms, is_tmdb_default_api_key, is_true, TMDB_API_KEY,
+        default_storage_formats, default_supported_library_extensions, is_default_supported_library_extensions,
+        is_true,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -77,8 +75,6 @@ pub struct LibraryMetadataConfigDto {
     pub path: String,
     #[serde(default)]
     pub read_existing: LibraryMetadataReadConfigDto,
-    #[serde(default)]
-    pub tmdb: LibraryTmdbConfigDto,
     #[serde(default = "default_as_true")]
     pub fallback_to_filename: bool,
     #[serde(default = "default_storage_formats", skip_serializing_if = "Vec::is_empty")]
@@ -90,14 +86,12 @@ impl LibraryMetadataConfigDto {
         self.fallback_to_filename
             && self.path == default_metadata_path()
             && self.read_existing.is_empty()
-            && self.tmdb.is_empty()
             && self.formats.is_empty()
     }
     pub fn clean(&mut self) {
         if self.path.trim().is_empty() {
             self.path = default_metadata_path();
         }
-        self.tmdb.clean();
     }
 }
 
@@ -114,36 +108,6 @@ pub struct LibraryMetadataReadConfigDto {
 
 impl LibraryMetadataReadConfigDto {
     pub fn is_empty(&self) -> bool { self.kodi && self.jellyfin && self.plex }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-#[serde(deny_unknown_fields)]
-pub struct LibraryTmdbConfigDto {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default = "default_tmdb_api_key", skip_serializing_if = "is_tmdb_default_api_key")]
-    pub api_key: Option<String>,
-    #[serde(default = "default_tmdb_rate_limit_ms", skip_serializing_if = "is_default_tmdb_rate_limit_ms")]
-    pub rate_limit_ms: u64,
-    #[serde(default = "default_tmdb_cache_duration_days", skip_serializing_if = "is_default_tmdb_cache_duration_days")]
-    pub cache_duration_days: u32,
-    #[serde(default = "default_tmdb_language", skip_serializing_if = "is_default_tmdb_language")]
-    pub language: String,
-}
-
-impl LibraryTmdbConfigDto {
-    pub fn is_empty(&self) -> bool {
-        !self.enabled
-            && self.api_key.as_ref().is_none_or(|api_key| api_key == TMDB_API_KEY)
-            && self.rate_limit_ms == default_tmdb_rate_limit_ms()
-            && self.cache_duration_days == default_tmdb_cache_duration_days()
-            && self.language == default_tmdb_language()
-    }
-    pub fn clean(&mut self) {
-        if self.api_key.as_ref().is_some_and(|api_key| api_key == TMDB_API_KEY) {
-            self.api_key = None;
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

@@ -141,6 +141,8 @@ pub fn is_default_metadata_resolve_exhaustion_reset_gap(v: &String) -> bool {
 }
 pub fn default_metadata_probe_cooldown() -> String { "7d".to_string() }
 pub fn is_default_metadata_probe_cooldown(v: &String) -> bool { *v == default_metadata_probe_cooldown() }
+pub fn default_metadata_tmdb_cooldown() -> String { "7d".to_string() }
+pub fn is_default_metadata_tmdb_cooldown(v: &String) -> bool { *v == default_metadata_tmdb_cooldown() }
 pub fn default_metadata_retry_delay() -> String { "2s".to_string() }
 pub fn is_default_metadata_retry_delay(v: &String) -> bool { *v == default_metadata_retry_delay() }
 pub fn default_metadata_probe_retry_load_retry_delay() -> String { "1m".to_string() }

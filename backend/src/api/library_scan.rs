@@ -8,7 +8,7 @@ use std::sync::Arc;
 pub(crate) fn spawn_library_scan(
     event_manager: Arc<EventManager>,
     lib_config: LibraryConfig,
-    _metadata_update: Option<MetadataUpdateConfig>,
+    metadata_update_config: Option<MetadataUpdateConfig>,
     client: reqwest::Client,
     force_rescan: bool,
     message_prefix: &'static str,
@@ -17,7 +17,7 @@ pub(crate) fn spawn_library_scan(
     let prefix = message_prefix.to_string();
     tokio::spawn(async move {
         let _permit = permit;
-        let processor = LibraryProcessor::new(lib_config, client);
+        let processor = LibraryProcessor::new(lib_config, metadata_update_config.as_ref(), client);
         match processor.scan(force_rescan).await {
             Ok(result) => {
                 info!("{prefix}Library scan completed successfully");
