@@ -1,12 +1,13 @@
-use std::collections::VecDeque;
-use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
-use tokio::sync::{RwLock, Mutex};
-use std::sync::Arc;
+use crate::model::VideoDownloadConfig;
 use serde::{Deserialize, Serialize};
-
-use crate::model::{VideoDownloadConfig};
-use shared::utils::{CONSTANTS, FILENAME_TRIM_PATTERNS, hash_string_as_hex, deunicode_string};
+use shared::utils::{deunicode_string, hash_string_as_hex, CONSTANTS, FILENAME_TRIM_PATTERNS};
+use std::{
+    collections::VecDeque,
+    ffi::OsStr,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+use tokio::sync::{Mutex, RwLock};
 
 /// File-Download information.
 #[derive(Clone)]
@@ -59,7 +60,6 @@ fn get_download_directory(download_cfg: &VideoDownloadConfig, filestem: &str) ->
 }
 
 impl FileDownload {
-
     // TODO read header size info  and restart support
     // "content-type" => ".../..."
     // "content-length" => "1975828544"
@@ -69,12 +69,17 @@ impl FileDownload {
     pub fn new(req_url: &str, req_filename: &str, download_cfg: &VideoDownloadConfig) -> Option<Self> {
         match reqwest::Url::parse(req_url) {
             Ok(url) => {
-                let tmp_filename = CONSTANTS.re_filename.replace_all(&deunicode_string(req_filename)
-                    .replace(' ', "_"), "")
+                let tmp_filename = CONSTANTS
+                    .re_filename
+                    .replace_all(&deunicode_string(req_filename).replace(' ', "_"), "")
                     .replace("__", "_")
                     .replace("_-_", "-");
                 let filename_path = Path::new(&tmp_filename);
-                let file_stem = filename_path.file_stem().and_then(OsStr::to_str).unwrap_or("").trim_matches(FILENAME_TRIM_PATTERNS);
+                let file_stem = filename_path
+                    .file_stem()
+                    .and_then(OsStr::to_str)
+                    .unwrap_or("")
+                    .trim_matches(FILENAME_TRIM_PATTERNS);
                 let file_ext = filename_path.extension().and_then(OsStr::to_str).unwrap_or("");
 
                 let mut filename = format!("{file_stem}.{file_ext}");
@@ -102,7 +107,7 @@ impl FileDownload {
                     error: None,
                 })
             }
-            Err(_) => None
+            Err(_) => None,
         }
     }
 }
@@ -114,9 +119,7 @@ pub struct DownloadQueue {
 }
 
 impl Default for DownloadQueue {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 impl DownloadQueue {
@@ -128,7 +131,6 @@ impl DownloadQueue {
         }
     }
 }
-
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct FileDownloadRequest {

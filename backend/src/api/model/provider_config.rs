@@ -1,16 +1,13 @@
-use std::fmt;
-use crate::model::{is_input_expired, ConfigInput, ConfigInputAlias, InputUserInfo};
+use crate::{
+    api::model::ProviderAllocation,
+    model::{is_input_expired, ConfigInput, ConfigInputAlias, InputUserInfo},
+    utils::debug_if_enabled,
+};
 use jsonwebtoken::get_current_timestamp;
-use log::{debug};
-use std::ops::Deref;
-use std::sync::{Arc};
+use log::debug;
+use shared::{model::InputType, utils::sanitize_sensitive_info, write_if_some};
+use std::{fmt, ops::Deref, sync::Arc};
 use tokio::sync::RwLock;
-use shared::model::InputType;
-use shared::utils::sanitize_sensitive_info;
-use shared::write_if_some;
-use crate::api::model::ProviderAllocation;
-use crate::utils::debug_if_enabled;
-
 
 pub type ProviderConnectionChangeCallback = Arc<dyn Fn(&Arc<str>, usize) + Send + Sync>;
 
@@ -69,9 +66,7 @@ impl fmt::Display for ProviderConfig {
 }
 
 impl fmt::Debug for ProviderConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{self}")
-    }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "{self}") }
 }
 
 impl PartialEq for ProviderConfig {
@@ -85,7 +80,7 @@ impl PartialEq for ProviderConfig {
             && self.max_connections == other.max_connections
             && self.priority == other.priority
             && self.exp_date == other.exp_date
-           // Note: self.connection is skipped
+        // Note: self.connection is skipped
     }
 }
 
@@ -101,7 +96,11 @@ macro_rules! modify_connections {
 }
 
 impl ProviderConfig {
-    pub fn new(cfg: &ConfigInput, connection: Arc<RwLock<ProviderConfigConnection>>, on_connection_change: ProviderConnectionChangeCallback) -> Self {
+    pub fn new(
+        cfg: &ConfigInput,
+        connection: Arc<RwLock<ProviderConfigConnection>>,
+        on_connection_change: ProviderConnectionChangeCallback,
+    ) -> Self {
         let panel_api_enabled = cfg.panel_api.as_ref().is_some_and(|panel_api| panel_api.enabled);
         // Logic change: panel api accounts are not considering unlimited provider access!
         let effective_max_connections = if panel_api_enabled && cfg.max_connections == 0 {
@@ -124,7 +123,7 @@ impl ProviderConfig {
             priority: cfg.priority,
             exp_date: cfg.exp_date,
             connection,
-            on_connection_change
+            on_connection_change,
         }
     }
 
@@ -160,14 +159,10 @@ impl ProviderConfig {
     }
 
     #[inline]
-    pub fn max_connections(&self) -> usize {
-        self.max_connections
-    }
+    pub fn max_connections(&self) -> usize { self.max_connections }
 
     #[inline]
-    pub(crate) fn exp_date(&self) -> Option<i64> {
-        self.exp_date
-    }
+    pub(crate) fn exp_date(&self) -> Option<i64> { self.exp_date }
 
     pub fn get_user_info(&self) -> Option<InputUserInfo> {
         InputUserInfo::new(self.input_type, self.username.as_deref(), self.password.as_deref(), &self.url)
@@ -244,8 +239,9 @@ impl ProviderConfig {
             }
 
             let now = get_current_timestamp();
-            if guard.granted_grace  && now - guard.grace_ts <= grace_period_timeout_secs {
-                if guard.current_connections > self.max_connections && now - guard.grace_ts <= grace_period_timeout_secs {
+            if guard.granted_grace && now - guard.grace_ts <= grace_period_timeout_secs {
+                if guard.current_connections > self.max_connections && now - guard.grace_ts <= grace_period_timeout_secs
+                {
                     // Grace timeout still active, deny connection
                     debug!("Provider access denied, grace exhausted, too many connections: {}", self.name);
                     return ProviderConfigAllocation::Exhausted;
@@ -290,7 +286,10 @@ impl ProviderConfig {
             if guard.granted_grace {
                 if connections > self.max_connections && now - guard.grace_ts <= grace_period_timeout_secs {
                     // Grace timeout still active, deny connection
-                    debug!("Provider access denied, grace exhausted, too many connections, no connection available: {}", self.name);
+                    debug!(
+                        "Provider access denied, grace exhausted, too many connections, no connection available: {}",
+                        self.name
+                    );
                     return false;
                 }
                 // Grace timeout expired, reset grace counters
@@ -314,14 +313,10 @@ impl ProviderConfig {
     }
 
     #[inline]
-    pub(crate) async fn get_current_connections(&self) -> usize {
-        self.connection.read().await.current_connections
-    }
+    pub(crate) async fn get_current_connections(&self) -> usize { self.connection.read().await.current_connections }
 
     #[inline]
-    pub(crate) fn get_priority(&self) -> i16 {
-        self.priority
-    }
+    pub(crate) fn get_priority(&self) -> i16 { self.priority }
 }
 
 #[derive(Clone, Debug)]
@@ -330,17 +325,11 @@ pub(in crate::api::model) struct ProviderConfigWrapper {
 }
 
 impl fmt::Display for ProviderConfigWrapper {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.inner)
-    }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "{}", self.inner) }
 }
 
 impl ProviderConfigWrapper {
-    pub fn new(cfg: ProviderConfig) -> Self {
-        Self {
-            inner: Arc::new(cfg)
-        }
-    }
+    pub fn new(cfg: ProviderConfig) -> Self { Self { inner: Arc::new(cfg) } }
 
     pub async fn force_allocate(&self) -> ProviderAllocation {
         if self.inner.force_allocate().await {
@@ -368,7 +357,5 @@ impl ProviderConfigWrapper {
 impl Deref for ProviderConfigWrapper {
     type Target = ProviderConfig;
 
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
+    fn deref(&self) -> &Self::Target { &self.inner }
 }

@@ -1,20 +1,23 @@
-use crate::api::api_utils::try_unwrap_body;
-use crate::api::api_utils::{get_user_target_by_username, get_username_from_auth_header};
-use crate::api::model::AppState;
-use crate::auth::validator_user;
-use crate::auth::AuthBearer;
-use crate::model::PlaylistXtreamCategory;
-use crate::model::{AppConfig, ConfigTarget};
-use crate::repository::{iter_raw_m3u_target_playlist, load_user_bouquet_as_json, save_user_bouquet};
-use crate::repository::xtream_get_playlist_categories;
+use crate::{
+    api::{
+        api_utils::{get_user_target_by_username, get_username_from_auth_header, try_unwrap_body},
+        model::AppState,
+    },
+    auth::{validator_user, AuthBearer},
+    model::{AppConfig, ConfigTarget, PlaylistXtreamCategory},
+    repository::{
+        iter_raw_m3u_target_playlist, load_user_bouquet_as_json, save_user_bouquet, xtream_get_playlist_categories,
+    },
+};
 use axum::response::IntoResponse;
 use bytes::Bytes;
 use futures::{stream, StreamExt};
 use log::error;
-use shared::model::{PlaylistBouquetDto, TargetType, XtreamCluster};
-use std::collections::HashSet;
-use std::sync::Arc;
-use shared::utils::concat_path_leading_slash;
+use shared::{
+    model::{PlaylistBouquetDto, TargetType, XtreamCluster},
+    utils::concat_path_leading_slash,
+};
+use std::{collections::HashSet, sync::Arc};
 
 fn get_categories_from_xtream(categories: Option<Vec<PlaylistXtreamCategory>>) -> Vec<String> {
     let mut groups: Vec<String> = Vec::new();
@@ -25,7 +28,6 @@ fn get_categories_from_xtream(categories: Option<Vec<PlaylistXtreamCategory>>) -
     }
     groups
 }
-
 
 async fn get_categories_from_m3u_playlist(target: &ConfigTarget, config: &AppConfig) -> Vec<Arc<str>> {
     let mut groups = Vec::new();
@@ -59,16 +61,28 @@ async fn playlist_categories(
             let target_name = &target.name;
             let xtream_stream = if target.has_output(TargetType::Xtream) {
                 let config = &app_state.app_config.config.load();
-                let live_categories = get_categories_from_xtream(xtream_get_playlist_categories(config, target_name, XtreamCluster::Live).await);
-                let vod_categories = get_categories_from_xtream(xtream_get_playlist_categories(config, target_name, XtreamCluster::Video).await);
-                let series_categories = get_categories_from_xtream(xtream_get_playlist_categories(config, target_name, XtreamCluster::Series).await);
+                let live_categories = get_categories_from_xtream(
+                    xtream_get_playlist_categories(config, target_name, XtreamCluster::Live).await,
+                );
+                let vod_categories = get_categories_from_xtream(
+                    xtream_get_playlist_categories(config, target_name, XtreamCluster::Video).await,
+                );
+                let series_categories = get_categories_from_xtream(
+                    xtream_get_playlist_categories(config, target_name, XtreamCluster::Series).await,
+                );
                 stream::iter(vec![
                     Ok::<Bytes, String>(Bytes::from(r#"{"live": "#)),
-                    Ok::<Bytes, String>(Bytes::from(serde_json::to_string(&live_categories).unwrap_or("[]".to_string()))),
+                    Ok::<Bytes, String>(Bytes::from(
+                        serde_json::to_string(&live_categories).unwrap_or("[]".to_string()),
+                    )),
                     Ok::<Bytes, String>(Bytes::from(r#", "vod": "#.to_string())),
-                    Ok::<Bytes, String>(Bytes::from(serde_json::to_string(&vod_categories).unwrap_or("[]".to_string()))),
+                    Ok::<Bytes, String>(Bytes::from(
+                        serde_json::to_string(&vod_categories).unwrap_or("[]".to_string()),
+                    )),
                     Ok::<Bytes, String>(Bytes::from(r#", "series": "#)),
-                    Ok::<Bytes, String>(Bytes::from(serde_json::to_string(&series_categories).unwrap_or("[]".to_string()))),
+                    Ok::<Bytes, String>(Bytes::from(
+                        serde_json::to_string(&series_categories).unwrap_or("[]".to_string()),
+                    )),
                     Ok::<Bytes, String>(Bytes::from(r"}")),
                 ])
             } else {
@@ -79,7 +93,9 @@ async fn playlist_categories(
                 let live_categories = get_categories_from_m3u_playlist(&target, &app_state.app_config).await;
                 stream::iter(vec![
                     Ok::<Bytes, String>(Bytes::from(r#"{"live": "#)),
-                    Ok::<Bytes, String>(Bytes::from(serde_json::to_string(&live_categories).unwrap_or("[]".to_string()))),
+                    Ok::<Bytes, String>(Bytes::from(
+                        serde_json::to_string(&live_categories).unwrap_or("[]".to_string()),
+                    )),
                     Ok::<Bytes, String>(Bytes::from(r#","vod":[],"series":[]}"#)),
                 ])
             } else {
@@ -140,9 +156,11 @@ async fn playlist_bouquet(
             return try_unwrap_body!(axum::response::Response::builder()
                 .status(axum::http::StatusCode::OK)
                 .header("Content-Type", mime::APPLICATION_JSON.to_string())
-                .body(axum::body::Body::from(format!(r#"{{"xtream": {}, "m3u": {} }}"#,
+                .body(axum::body::Body::from(format!(
+                    r#"{{"xtream": {}, "m3u": {} }}"#,
                     xtream.unwrap_or("null".to_string()),
-                    m3u.unwrap_or("null".to_string())))));
+                    m3u.unwrap_or("null".to_string())
+                ))));
         }
     }
     try_unwrap_body!(axum::response::Response::builder()
@@ -152,16 +170,14 @@ async fn playlist_bouquet(
 }
 
 pub fn user_api_register(app_state: Arc<AppState>, web_ui_path: &str) -> axum::Router<Arc<AppState>> {
-    axum::Router::new()
-        .nest(
-            &concat_path_leading_slash(web_ui_path, "/api/v1/user"),
-            axum::Router::new()
-                .route("/playlist/categories", axum::routing::get(playlist_categories))
-                .route("/playlist/bouquet", axum::routing::get(playlist_bouquet))
-                .route("/playlist/bouquet", axum::routing::post(save_playlist_bouquet))
-                .route_layer(axum::middleware::from_fn_with_state(app_state, validator_user)),
-        )
-
+    axum::Router::new().nest(
+        &concat_path_leading_slash(web_ui_path, "/api/v1/user"),
+        axum::Router::new()
+            .route("/playlist/categories", axum::routing::get(playlist_categories))
+            .route("/playlist/bouquet", axum::routing::get(playlist_bouquet))
+            .route("/playlist/bouquet", axum::routing::post(save_playlist_bouquet))
+            .route_layer(axum::middleware::from_fn_with_state(app_state, validator_user)),
+    )
 
     // cfg.service(web::scope("/api/v1/user")
     //     .wrap(HttpAuthentication::with_fn(validator_user))

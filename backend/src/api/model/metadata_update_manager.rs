@@ -1,42 +1,43 @@
-use crate::api::model::ProviderHandle;
-use crate::api::model::{AppState, EventMessage};
-use crate::processing::processor::{
-    update_generic_stream_metadata, update_live_stream_metadata, update_series_metadata, update_vod_metadata,
-    GenericProbeOutcome, SeriesProbeSettings,
+use crate::{
+    api::model::{AppState, BatchResultCollector, EventMessage, ProviderHandle},
+    model::MetadataUpdateConfig,
+    processing::processor::{
+        update_generic_stream_metadata, update_live_stream_metadata, update_series_metadata, update_vod_metadata,
+        GenericProbeOutcome, SeriesProbeSettings,
+    },
+    repository::{
+        get_input_storage_path, get_target_id_mapping_file, persist_input_live_info_batch,
+        persist_input_series_info_batch, persist_input_vod_info_batch, write_playlist_batch_item_upsert,
+        xtream_get_file_path, BPlusTree, BPlusTreeQuery, BPlusTreeUpdate, TargetIdMapping,
+    },
+    utils::{debug_if_enabled, FileReadGuard},
 };
-use crate::utils::debug_if_enabled;
-use dashmap::mapref::entry::Entry;
-use dashmap::DashMap;
+use dashmap::{mapref::entry::Entry, DashMap};
 use log::{debug, error, info, warn};
 use parking_lot::Mutex as ParkingMutex;
 use serde::{Deserialize, Serialize};
-use shared::create_bitset;
-use shared::error::TuliproxError;
-use shared::model::{
-    InputType, LiveStreamProperties, PlaylistItemType, SeriesStreamProperties, UUIDType, VideoStreamProperties,
-    XtreamCluster, XtreamPlaylistItem,
+use shared::{
+    create_bitset,
+    error::TuliproxError,
+    model::{
+        InputType, LiveStreamProperties, PlaylistItemType, SeriesStreamProperties, UUIDType, VideoStreamProperties,
+        XtreamCluster, XtreamPlaylistItem,
+    },
+    utils::generate_playlist_uuid,
 };
-use shared::utils::generate_playlist_uuid;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock, Weak};
-use std::time::{Duration, Instant};
+use std::{
+    cmp::min,
+    collections::{HashMap, HashSet},
+    io,
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+        Arc, OnceLock, Weak,
+    },
+    time::{Duration, Instant},
+};
 use tokio::sync::{mpsc, RwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
-
-use crate::api::model::BatchResultCollector;
-use crate::repository::{
-    get_input_storage_path, get_target_id_mapping_file, write_playlist_batch_item_upsert, xtream_get_file_path,
-    BPlusTree, BPlusTreeQuery, BPlusTreeUpdate,
-};
-use crate::repository::{
-    persist_input_live_info_batch, persist_input_series_info_batch, persist_input_vod_info_batch, TargetIdMapping,
-};
-use crate::utils::FileReadGuard;
-use std::cmp::min;
-use std::collections::{HashMap, HashSet};
-use std::io;
-use std::path::{Path, PathBuf};
-use crate::model::MetadataUpdateConfig;
 
 const METADATA_RETRY_STATE_FILE: &str = "metadata_retry_state.db";
 const TASK_ERR_NO_CONNECTION: &str = "No connection available";
@@ -51,9 +52,7 @@ const RUNTIME_SETTINGS_REFRESH_INTERVAL_SECS: u64 = 60;
 fn metadata_blocking_concurrency_limit() -> usize {
     let parallelism =
         std::thread::available_parallelism().map_or(BLOCKING_DB_MIN_CONCURRENCY, std::num::NonZeroUsize::get);
-    parallelism
-        .saturating_mul(2)
-        .clamp(BLOCKING_DB_MIN_CONCURRENCY, BLOCKING_DB_MAX_CONCURRENCY)
+    parallelism.saturating_mul(2).clamp(BLOCKING_DB_MIN_CONCURRENCY, BLOCKING_DB_MAX_CONCURRENCY)
 }
 
 fn metadata_blocking_semaphore() -> &'static Semaphore {
@@ -103,9 +102,8 @@ impl Default for MetadataUpdateRuntimeSettings {
 
 impl MetadataUpdateRuntimeSettings {
     fn from_app_state(app_state_weak: Option<&Weak<AppState>>) -> Self {
-        let metadata_update = app_state_weak.and_then(Weak::upgrade).map_or_else(
-            MetadataUpdateConfig::default,
-            |app_state| {
+        let metadata_update =
+            app_state_weak.and_then(Weak::upgrade).map_or_else(MetadataUpdateConfig::default, |app_state| {
                 app_state
                     .app_config
                     .config
@@ -113,8 +111,7 @@ impl MetadataUpdateRuntimeSettings {
                     .metadata_update
                     .as_ref()
                     .map_or_else(MetadataUpdateConfig::default, Clone::clone)
-            },
-        );
+            });
         Self::from_metadata_update(&metadata_update)
     }
 
@@ -161,21 +158,15 @@ impl std::fmt::Display for ProviderIdType {
 }
 
 impl From<u32> for ProviderIdType {
-    fn from(id: u32) -> Self {
-        ProviderIdType::Id(id)
-    }
+    fn from(id: u32) -> Self { ProviderIdType::Id(id) }
 }
 
 impl From<&str> for ProviderIdType {
-    fn from(s: &str) -> Self {
-        ProviderIdType::Text(Arc::from(s))
-    }
+    fn from(s: &str) -> Self { ProviderIdType::Text(Arc::from(s)) }
 }
 
 impl From<String> for ProviderIdType {
-    fn from(s: String) -> Self {
-        ProviderIdType::Text(Arc::from(s.as_str()))
-    }
+    fn from(s: String) -> Self { ProviderIdType::Text(Arc::from(s.as_str())) }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -283,14 +274,7 @@ struct RetryState {
 }
 
 impl RetryState {
-    fn new() -> Self {
-        Self {
-            attempts: 0,
-            next_allowed_at_ts: 0,
-            cooldown_until_ts: None,
-            last_error: None,
-        }
-    }
+    fn new() -> Self { Self { attempts: 0, next_allowed_at_ts: 0, cooldown_until_ts: None, last_error: None } }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -311,9 +295,7 @@ struct TaskRetryState {
 impl TaskRetryState {
     fn is_empty(&self) -> bool { self.resolve.is_none() && self.probe.is_none() && self.tmdb.is_none() }
 
-    fn touch(&mut self, now_ts: i64) {
-        self.updated_at_ts = now_ts.max(1);
-    }
+    fn touch(&mut self, now_ts: i64) { self.updated_at_ts = now_ts.max(1); }
 
     fn max_domain_timestamp(&self) -> i64 {
         let domain_max = |state: &RetryState| state.next_allowed_at_ts.max(state.cooldown_until_ts.unwrap_or(0));
@@ -376,10 +358,9 @@ impl MetadataRetryDbKey {
             TaskKey::SeriesStr(id) => Self::SeriesText(id.as_ref().to_owned()),
             TaskKey::Live(id) => Self::LiveId(*id),
             TaskKey::LiveStr(id) => Self::LiveText(id.as_ref().to_owned()),
-            TaskKey::Stream { scope, id } => Self::Stream {
-                scope: scope.as_ref().to_owned(),
-                id: id.as_ref().to_owned(),
-            },
+            TaskKey::Stream { scope, id } => {
+                Self::Stream { scope: scope.as_ref().to_owned(), id: id.as_ref().to_owned() }
+            }
         }
     }
 
@@ -391,10 +372,7 @@ impl MetadataRetryDbKey {
             Self::SeriesText(id) => TaskKey::SeriesStr(Arc::from(id)),
             Self::LiveId(id) => TaskKey::Live(id),
             Self::LiveText(id) => TaskKey::LiveStr(Arc::from(id)),
-            Self::Stream { scope, id } => TaskKey::Stream {
-                scope: Arc::from(scope),
-                id: Arc::from(id),
-            },
+            Self::Stream { scope, id } => TaskKey::Stream { scope: Arc::from(scope), id: Arc::from(id) },
         }
     }
 }
@@ -448,15 +426,6 @@ impl MetadataRetryDbValue {
         }
     }
 
-    fn cleared(updated_at_ts: i64) -> Self {
-        Self {
-            resolve: None,
-            probe: None,
-            tmdb: None,
-            updated_at_ts,
-        }
-    }
-
     fn into_task_retry_state(self) -> Option<TaskRetryState> {
         let mut state = TaskRetryState {
             resolve: self.resolve.and_then(RetryStateDbValue::into_retry_state),
@@ -482,73 +451,51 @@ fn ensure_metadata_retry_db(path: &Path) -> io::Result<()> {
     tree.store(path).map(|_| ())
 }
 
-fn rebuild_metadata_retry_db(path: &Path, remove_key: Option<&MetadataRetryDbKey>) -> io::Result<()> {
-    ensure_metadata_retry_db(path)?;
-
-    let mut keep_entries: Vec<(MetadataRetryDbKey, MetadataRetryDbValue)> = Vec::new();
-    let mut changed = false;
-    {
-        let mut query = BPlusTreeQuery::<MetadataRetryDbKey, MetadataRetryDbValue>::try_new(path)?;
-        for (key, value) in query.iter() {
-            if remove_key.is_some_and(|target| target == &key) {
-                changed = true;
-                continue;
-            }
-            if value.clone().into_task_retry_state().is_none() {
-                changed = true;
-                continue;
-            }
-            keep_entries.push((key, value));
-        }
-    }
-
-    if !changed {
-        return Ok(());
-    }
-
-    let mut tree = BPlusTree::<MetadataRetryDbKey, MetadataRetryDbValue>::new();
-    for (key, value) in keep_entries {
-        tree.insert(key, value);
-    }
-    tree.store(path).map(|_| ())
-}
-
 fn load_metadata_retry_states_from_disk(path: &Path) -> io::Result<HashMap<TaskKey, TaskRetryState>> {
     ensure_metadata_retry_db(path)?;
 
     let mut result = HashMap::new();
-    let mut has_tombstones = false;
+    let mut stale_keys: Vec<MetadataRetryDbKey> = Vec::new();
     let mut query = BPlusTreeQuery::<MetadataRetryDbKey, MetadataRetryDbValue>::try_new(path)?;
     for (key, value) in query.iter() {
         if let Some(state) = value.clone().into_task_retry_state() {
             result.insert(key.into_task_key(), state);
         } else {
-            has_tombstones = true;
+            stale_keys.push(key);
         }
     }
     drop(query);
-    if has_tombstones {
-        rebuild_metadata_retry_db(path, None)?;
+
+    if !stale_keys.is_empty() {
+        let delete_refs: Vec<&MetadataRetryDbKey> = stale_keys.iter().collect();
+        let mut update = BPlusTreeUpdate::<MetadataRetryDbKey, MetadataRetryDbValue>::try_new_with_backoff(path)?;
+        update
+            .delete_batch(&delete_refs)
+            .map_err(|e| io::Error::other(format!("cleanup metadata retry tombstones failed: {e}")))?;
     }
 
     Ok(result)
 }
 
-fn persist_metadata_retry_state_to_disk(path: &Path, task_key: &TaskKey, state: Option<&TaskRetryState>) -> io::Result<()> {
+fn persist_metadata_retry_state_to_disk(
+    path: &Path,
+    task_key: &TaskKey,
+    state: Option<&TaskRetryState>,
+) -> io::Result<()> {
     let db_key = MetadataRetryDbKey::from_task_key(task_key);
 
     ensure_metadata_retry_db(path)?;
 
-    let now_ts = chrono::Utc::now().timestamp();
-    let value = match state {
-        Some(s) => MetadataRetryDbValue::from_task_retry_state(s, now_ts),
-        None => MetadataRetryDbValue::cleared(now_ts),
-    };
-
     let mut update = BPlusTreeUpdate::<MetadataRetryDbKey, MetadataRetryDbValue>::try_new_with_backoff(path)?;
-    update
-        .upsert_batch(&[(&db_key, &value)])
-        .map_err(|e| io::Error::other(format!("persist metadata retry state failed: {e}")))?;
+    if let Some(retry_state) = state {
+        let now_ts = chrono::Utc::now().timestamp();
+        let value = MetadataRetryDbValue::from_task_retry_state(retry_state, now_ts);
+        update
+            .upsert_batch(&[(&db_key, &value)])
+            .map_err(|e| io::Error::other(format!("persist metadata retry state failed: {e}")))?;
+    } else {
+        update.delete(&db_key).map_err(|e| io::Error::other(format!("delete metadata retry state failed: {e}")))?;
+    }
     Ok(())
 }
 
@@ -568,12 +515,7 @@ struct PendingTask {
 }
 
 impl PendingTask {
-    fn new(task: UpdateTask) -> Self {
-        Self {
-            task: ParkingMutex::new(task),
-            generation: AtomicU64::new(0),
-        }
-    }
+    fn new(task: UpdateTask) -> Self { Self { task: ParkingMutex::new(task), generation: AtomicU64::new(0) } }
 }
 
 /// Manager for background metadata resolution tasks.
@@ -601,9 +543,7 @@ pub struct MetadataUpdateManager {
 }
 
 impl Default for MetadataUpdateManager {
-    fn default() -> Self {
-        Self::new(CancellationToken::new())
-    }
+    fn default() -> Self { Self::new(CancellationToken::new()) }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -863,9 +803,7 @@ impl MetadataUpdateManager {
     #[inline]
     fn decrement_pending_task_count(pending_task_count: &AtomicUsize) {
         // Guard against accidental underflow in edge/error paths.
-        let _ = pending_task_count.fetch_update(Ordering::AcqRel, Ordering::Relaxed, |current| {
-            current.checked_sub(1)
-        });
+        let _ = pending_task_count.fetch_update(Ordering::AcqRel, Ordering::Relaxed, |current| current.checked_sub(1));
     }
 
     fn merge_task_payload(existing: &mut UpdateTask, task: UpdateTask) -> bool {
@@ -887,20 +825,8 @@ impl MetadataUpdateManager {
                 changed = *r1 != previous_reason || *d1 != previous_delay;
             }
             (
-                UpdateTask::ProbeStream {
-                    reason: r1,
-                    delay: d1,
-                    url: url1,
-                    item_type: item_type1,
-                    ..
-                },
-                UpdateTask::ProbeStream {
-                    reason: r2,
-                    delay: d2,
-                    url: url2,
-                    item_type: item_type2,
-                    ..
-                },
+                UpdateTask::ProbeStream { reason: r1, delay: d1, url: url1, item_type: item_type1, .. },
+                UpdateTask::ProbeStream { reason: r2, delay: d2, url: url2, item_type: item_type2, .. },
             ) => {
                 let previous_reason = *r1;
                 let previous_delay = *d1;
@@ -944,9 +870,7 @@ impl MetadataUpdateManager {
     }
 
     /// Get the number of active workers (for monitoring/debugging)
-    pub fn active_worker_count(&self) -> usize {
-        self.workers.len()
-    }
+    pub fn active_worker_count(&self) -> usize { self.workers.len() }
 }
 
 struct DbHandle {
@@ -1000,15 +924,13 @@ impl InputWorker {
 
         let mut runtime_settings = self.runtime_settings();
         let mut last_runtime_settings_refresh_at = Instant::now();
-        self.ensure_metadata_retry_state_loaded(&input_name, app_state_weak.as_ref(), &runtime_settings)
-            .await;
+        self.ensure_metadata_retry_state_loaded(&input_name, app_state_weak.as_ref(), &runtime_settings).await;
 
         // Keep one prefetched task to minimize channel waits/lock churn.
         let mut next_task: Option<(TaskKey, UpdateTask, u64)> = None;
 
         loop {
-            if last_runtime_settings_refresh_at.elapsed()
-                >= Duration::from_secs(RUNTIME_SETTINGS_REFRESH_INTERVAL_SECS)
+            if last_runtime_settings_refresh_at.elapsed() >= Duration::from_secs(RUNTIME_SETTINGS_REFRESH_INTERVAL_SECS)
             {
                 runtime_settings = self.runtime_settings();
                 last_runtime_settings_refresh_at = Instant::now();
@@ -1021,8 +943,7 @@ impl InputWorker {
 
             let Some((current_key, current_task, current_generation)) = task_data else { break };
             if !self.metadata_retry_loaded {
-                self.ensure_metadata_retry_state_loaded(&input_name, app_state_weak.as_ref(), &runtime_settings)
-                    .await;
+                self.ensure_metadata_retry_state_loaded(&input_name, app_state_weak.as_ref(), &runtime_settings).await;
             }
             let now_ts = chrono::Utc::now().timestamp();
             self.prune_retry_tracking_maps_if_needed(now_ts, &runtime_settings).await;
@@ -1040,10 +961,9 @@ impl InputWorker {
                 if let Some(app_state) = app_state_weak.as_ref().and_then(Weak::upgrade) {
                     app_state.event_manager.send_event(EventMessage::InputMetadataUpdatesStarted(input_name.clone()));
                 }
-                if self
-                    .last_cycle_completed_at_ts
-                    .is_some_and(|last| now_ts.saturating_sub(last) >= runtime_settings.resolve_exhaustion_reset_gap_secs)
-                {
+                if self.last_cycle_completed_at_ts.is_some_and(|last| {
+                    now_ts.saturating_sub(last) >= runtime_settings.resolve_exhaustion_reset_gap_secs
+                }) {
                     self.resolve_exhausted.clear();
                 }
                 debug!("Background metadata update queue has entries for input {input_name}; starting processing");
@@ -1257,7 +1177,8 @@ impl InputWorker {
                         if last_progress_log_at.elapsed() >= runtime_settings.progress_log_interval {
                             // current_key is removed from pending_tasks later in this loop iteration;
                             // subtract it here so "remaining" reflects the post-success queue size.
-                            let (mut remaining_vod, mut remaining_series) = Self::queue_resolve_counts(&self.pending_tasks);
+                            let (mut remaining_vod, mut remaining_series) =
+                                Self::queue_resolve_counts(&self.pending_tasks);
                             if Self::is_vod_task_key(&current_key) {
                                 remaining_vod = remaining_vod.saturating_sub(1);
                             } else if Self::is_series_task_key(&current_key) {
@@ -1388,12 +1309,15 @@ impl InputWorker {
                                 if retry_domain == RetryDomain::Probe {
                                     remove_current_task = true;
                                     metadata_persist_state = Some(Some(state_bundle_after_update.clone()));
+                                    let cooldown_until = state_after_update
+                                        .cooldown_until_ts
+                                        .map_or_else(|| "none".to_string(), |ts| ts.to_string());
                                     debug_if_enabled!(
-                                        "Probe task exhausted for input {}: {} (attempts={}, cooldown_until={:?})",
+                                        "Probe task exhausted for input {}: {} (attempts={}, cooldown_until={})",
                                         input_name,
                                         task_for_execution,
                                         state_after_update.attempts,
-                                        state_after_update.cooldown_until_ts
+                                        cooldown_until
                                     );
                                 } else {
                                     self.resolve_exhausted.insert(current_key.clone(), now_ts);
@@ -1487,10 +1411,7 @@ impl InputWorker {
                 && last_queue_log_at.elapsed() >= runtime_settings.queue_log_interval
             {
                 let queue_counts = Self::queue_resolve_counts(&self.pending_tasks);
-                debug!(
-                    "In queue to resolve vod: {}, series: {} (input: {input_name})",
-                    queue_counts.0, queue_counts.1
-                );
+                debug!("In queue to resolve vod: {}, series: {} (input: {input_name})", queue_counts.0, queue_counts.1);
                 last_queue_log_at = Instant::now();
             }
 
@@ -1506,9 +1427,7 @@ impl InputWorker {
             if queue_cycle_active && queue_completely_empty {
                 info!("All pending metadata resolves completed for input {input_name}");
                 if let Some(app_state) = app_state_weak.as_ref().and_then(Weak::upgrade) {
-                    app_state
-                        .event_manager
-                        .send_event(EventMessage::InputMetadataUpdatesCompleted(input_name.clone()));
+                    app_state.event_manager.send_event(EventMessage::InputMetadataUpdatesCompleted(input_name.clone()));
                 }
                 self.last_cycle_completed_at_ts = Some(chrono::Utc::now().timestamp());
                 queue_cycle_active = false;
@@ -1538,10 +1457,7 @@ impl InputWorker {
             return;
         }
         let now_ts = chrono::Utc::now().timestamp();
-        if self
-            .metadata_retry_load_retry_at_ts
-            .is_some_and(|retry_at_ts| now_ts < retry_at_ts)
-        {
+        if self.metadata_retry_load_retry_at_ts.is_some_and(|retry_at_ts| now_ts < retry_at_ts) {
             return;
         }
 
@@ -1598,10 +1514,8 @@ impl InputWorker {
         let key = key.clone();
         let state = state.cloned();
         let input_name = self.input_name.clone();
-        let persist_result = spawn_blocking_limited(move || {
-            persist_metadata_retry_state_to_disk(&path, &key, state.as_ref())
-        })
-        .await;
+        let persist_result =
+            spawn_blocking_limited(move || persist_metadata_retry_state_to_disk(&path, &key, state.as_ref())).await;
 
         match persist_result {
             Ok(Ok(())) => {}
@@ -1614,11 +1528,7 @@ impl InputWorker {
         let now_ts = chrono::Utc::now().timestamp();
         let retry_at_ts = retry_at_ts.max(now_ts);
 
-        if self
-            .scheduled_requeues
-            .get(&key)
-            .is_some_and(|existing| *existing == retry_at_ts)
-        {
+        if self.scheduled_requeues.get(&key).is_some_and(|existing| *existing == retry_at_ts) {
             return;
         }
 
@@ -1641,9 +1551,7 @@ impl InputWorker {
                 }
             }
 
-            let should_send = scheduled
-                .get(&key)
-                .is_some_and(|scheduled_at| *scheduled_at == retry_at_ts);
+            let should_send = scheduled.get(&key).is_some_and(|scheduled_at| *scheduled_at == retry_at_ts);
             if !should_send {
                 return;
             }
@@ -1787,10 +1695,7 @@ impl InputWorker {
     }
 
     fn resolve_exhausted_ttl_secs(runtime_settings: &MetadataUpdateRuntimeSettings) -> i64 {
-        runtime_settings
-            .resolve_exhaustion_reset_gap_secs
-            .saturating_mul(6)
-            .max(RETRY_STATE_MIN_TTL_SECS)
+        runtime_settings.resolve_exhaustion_reset_gap_secs.saturating_mul(6).max(RETRY_STATE_MIN_TTL_SECS)
     }
 
     async fn prune_retry_tracking_maps_if_needed(
@@ -1814,13 +1719,15 @@ impl InputWorker {
         let stale_retry_keys: Vec<TaskKey> = self
             .retry_states
             .iter()
-            .filter_map(|(key, state)| {
-                if state.is_stale(now_ts, retry_state_ttl_secs) {
-                    Some(key.clone())
-                } else {
-                    None
-                }
-            })
+            .filter_map(
+                |(key, state)| {
+                    if state.is_stale(now_ts, retry_state_ttl_secs) {
+                        Some(key.clone())
+                    } else {
+                        None
+                    }
+                },
+            )
             .collect();
 
         for key in stale_retry_keys {
@@ -1862,9 +1769,8 @@ impl InputWorker {
     ) -> u64 {
         let base_delay = u64::from(base_delay_secs).max(runtime_settings.resolve_min_retry_base_secs);
         let exp = u32::from(attempts.saturating_sub(1).min(6));
-        let without_jitter = base_delay
-            .saturating_mul(2_u64.saturating_pow(exp))
-            .min(runtime_settings.max_resolve_retry_backoff_secs);
+        let without_jitter =
+            base_delay.saturating_mul(2_u64.saturating_pow(exp)).min(runtime_settings.max_resolve_retry_backoff_secs);
         Self::apply_jitter(without_jitter, runtime_settings.backoff_jitter_percent)
     }
 
@@ -1913,14 +1819,10 @@ impl InputWorker {
     }
 
     #[inline]
-    fn is_vod_task_key(key: &TaskKey) -> bool {
-        matches!(key, TaskKey::Vod(_) | TaskKey::VodStr(_))
-    }
+    fn is_vod_task_key(key: &TaskKey) -> bool { matches!(key, TaskKey::Vod(_) | TaskKey::VodStr(_)) }
 
     #[inline]
-    fn is_series_task_key(key: &TaskKey) -> bool {
-        matches!(key, TaskKey::Series(_) | TaskKey::SeriesStr(_))
-    }
+    fn is_series_task_key(key: &TaskKey) -> bool { matches!(key, TaskKey::Series(_) | TaskKey::SeriesStr(_)) }
 
     #[inline]
     fn is_probe_task(task: &UpdateTask) -> bool {
@@ -1973,11 +1875,7 @@ impl InputWorker {
                 if next_reason.is_empty() {
                     None
                 } else {
-                    Some(UpdateTask::ResolveVod {
-                        id: id.clone(),
-                        reason: next_reason,
-                        delay: *delay,
-                    })
+                    Some(UpdateTask::ResolveVod { id: id.clone(), reason: next_reason, delay: *delay })
                 }
             }
             UpdateTask::ResolveSeries { id, reason, delay } => {
@@ -1987,11 +1885,7 @@ impl InputWorker {
                 if next_reason.is_empty() {
                     None
                 } else {
-                    Some(UpdateTask::ResolveSeries {
-                        id: id.clone(),
-                        reason: next_reason,
-                        delay: *delay,
-                    })
+                    Some(UpdateTask::ResolveSeries { id: id.clone(), reason: next_reason, delay: *delay })
                 }
             }
             _ => Some(task.clone()),
@@ -1999,9 +1893,7 @@ impl InputWorker {
     }
 
     fn is_transient_worker_error(message: &str) -> bool {
-        message == TASK_ERR_UPDATE_IN_PROGRESS
-            || message == TASK_ERR_PREEMPTED
-            || message == TASK_ERR_NO_CONNECTION
+        message == TASK_ERR_UPDATE_IN_PROGRESS || message == TASK_ERR_PREEMPTED || message == TASK_ERR_NO_CONNECTION
     }
 
     #[inline]
@@ -2012,9 +1904,7 @@ impl InputWorker {
     }
 
     #[inline]
-    fn is_word_byte(byte: u8) -> bool {
-        byte.is_ascii_alphanumeric() || byte == b'_'
-    }
+    fn is_word_byte(byte: u8) -> bool { byte.is_ascii_alphanumeric() || byte == b'_' }
 
     fn contains_standalone_fragment(haystack: &str, fragment: &str) -> bool {
         if fragment.is_empty() || haystack.len() < fragment.len() {
@@ -2180,11 +2070,7 @@ impl InputWorker {
                 // Scope read lock strictly to mapping load.
                 let _file_lock = app_state.app_config.file_locks.read_lock(&mapping_file).await;
                 let mapping_file_clone = mapping_file.clone();
-                match spawn_blocking_limited(move || {
-                    TargetIdMapping::new(&mapping_file_clone, false)
-                })
-                .await
-                {
+                match spawn_blocking_limited(move || TargetIdMapping::new(&mapping_file_clone, false)).await {
                     Ok(Ok(mapping)) => mapping,
                     Ok(Err(e)) => {
                         error!("Failed to open ID mapping for target {target_name}: {e}");
@@ -2640,8 +2526,8 @@ impl InputWorker {
 
     fn vod_tmdb_pending_for_reason(props: &VideoStreamProperties, reason: ResolveReasonSet) -> bool {
         let tmdb_missing = reason.contains(ResolveReason::Tmdb) && props.tmdb.is_none();
-        let date_missing =
-            reason.contains(ResolveReason::Date) && props.details.as_ref().and_then(|d| d.release_date.as_ref()).is_none();
+        let date_missing = reason.contains(ResolveReason::Date)
+            && props.details.as_ref().and_then(|d| d.release_date.as_ref()).is_none();
         tmdb_missing || date_missing
     }
 
@@ -3167,34 +3053,19 @@ mod tests {
         .await;
 
         let first_signal = rx.try_recv().expect("first signal should be queued");
-        assert_eq!(
-            first_signal,
-            TaskKey::Stream {
-                scope: Arc::from("scope_a"),
-                id: Arc::from("uid_1"),
-            }
-        );
+        assert_eq!(first_signal, TaskKey::Stream { scope: Arc::from("scope_a"), id: Arc::from("uid_1") });
         assert!(matches!(
             rx.try_recv(),
             Err(tokio::sync::mpsc::error::TryRecvError::Empty | tokio::sync::mpsc::error::TryRecvError::Disconnected)
         ));
 
-        let key = TaskKey::Stream {
-            scope: Arc::from("scope_a"),
-            id: Arc::from("uid_1"),
-        };
+        let key = TaskKey::Stream { scope: Arc::from("scope_a"), id: Arc::from("uid_1") };
         let entry = pending_tasks.get(&key).expect("pending entry should exist");
         assert_eq!(entry.generation.load(Ordering::Relaxed), 1);
 
         let merged = entry.task.lock().clone();
         match merged {
-            UpdateTask::ProbeStream {
-                reason,
-                delay,
-                url,
-                item_type,
-                ..
-            } => {
+            UpdateTask::ProbeStream { reason, delay, url, item_type, .. } => {
                 assert!(reason.contains(ResolveReason::MissingDetails));
                 assert!(reason.contains(ResolveReason::Probe));
                 assert_eq!(delay, 2);
@@ -3406,10 +3277,7 @@ mod tests {
     fn metadata_retry_state_disk_roundtrip() {
         let dir = tempdir().expect("tempdir should be created");
         let path = dir.path().join("metadata_retry_state.db");
-        let key = TaskKey::Stream {
-            scope: Arc::from("input_a"),
-            id: Arc::from("stream_1"),
-        };
+        let key = TaskKey::Stream { scope: Arc::from("input_a"), id: Arc::from("stream_1") };
         let state = TaskRetryState {
             resolve: None,
             probe: Some(RetryState {
@@ -3427,8 +3295,7 @@ mod tests {
             updated_at_ts: 1_700_000_000,
         };
 
-        persist_metadata_retry_state_to_disk(&path, &key, Some(&state))
-            .expect("state persistence should succeed");
+        persist_metadata_retry_state_to_disk(&path, &key, Some(&state)).expect("state persistence should succeed");
         let loaded = load_metadata_retry_states_from_disk(&path).expect("state load should succeed");
         let loaded_state = loaded.get(&key).expect("probe key should be present");
 

@@ -1,16 +1,20 @@
-use crate::api::model::{BoxedProviderStream, StreamError, STREAM_IDLE_TIMEOUT};
-use crate::tools::atomic_once_flag::AtomicOnceFlag;
-use futures::{stream::Stream, task::{Context, Poll}, StreamExt};
-use log::{debug};
-use std::{
-    cmp::max,
-    pin::Pin,
-    sync::Arc,
+use crate::{
+    api::model::{BoxedProviderStream, StreamError, STREAM_IDLE_TIMEOUT},
+    tools::atomic_once_flag::AtomicOnceFlag,
 };
-use tokio::select;
-use tokio::sync::mpsc::{channel, Sender};
+use futures::{
+    stream::Stream,
+    task::{Context, Poll},
+    StreamExt,
+};
+use log::debug;
+use std::{cmp::max, pin::Pin, sync::Arc};
+use tokio::{
+    select,
+    sync::mpsc::{channel, Sender},
+    time::{sleep, Duration, Instant},
+};
 use tokio_stream::wrappers::ReceiverStream;
-use tokio::time::{sleep, Duration, Instant};
 
 pub const CHANNEL_SIZE: usize = 1024;
 
@@ -20,14 +24,16 @@ pub(in crate::api::model) struct BufferedStream {
 }
 
 impl BufferedStream {
-    pub fn new(stream: BoxedProviderStream, buffer_size: usize, client_close_signal: Arc<AtomicOnceFlag>, _url: &str) -> Self {
+    pub fn new(
+        stream: BoxedProviderStream,
+        buffer_size: usize,
+        client_close_signal: Arc<AtomicOnceFlag>,
+        _url: &str,
+    ) -> Self {
         // TODO make channel_size  based on bytes not entries
         let (tx, rx) = channel(max(buffer_size, CHANNEL_SIZE));
         tokio::spawn(Self::buffer_stream(tx, stream, Arc::clone(&client_close_signal)));
-        Self {
-            stream: ReceiverStream::new(rx),
-            close_signal: client_close_signal,
-        }
+        Self { stream: ReceiverStream::new(rx), close_signal: client_close_signal }
     }
 
     async fn buffer_stream(

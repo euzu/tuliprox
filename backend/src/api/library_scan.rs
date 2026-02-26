@@ -1,6 +1,8 @@
-use crate::api::model::{EventManager, EventMessage, UpdateGuardPermit};
-use crate::library::LibraryProcessor;
-use crate::model::{LibraryConfig, MetadataUpdateConfig};
+use crate::{
+    api::model::{EventManager, EventMessage, UpdateGuardPermit},
+    library::LibraryProcessor,
+    model::{LibraryConfig, MetadataUpdateConfig},
+};
 use log::{error, info};
 use shared::model::{LibraryScanSummary, LibraryScanSummaryStatus};
 use std::sync::Arc;
@@ -25,10 +27,7 @@ pub(crate) fn spawn_library_scan(
                     status: LibraryScanSummaryStatus::Success,
                     message: format!(
                         "{prefix}Scan completed: {} files scanned, {} added, {} updated, {} removed",
-                        result.files_scanned,
-                        result.files_added,
-                        result.files_updated,
-                        result.files_removed
+                        result.files_scanned, result.files_added, result.files_updated, result.files_removed
                     ),
                     result: Some(result),
                 };

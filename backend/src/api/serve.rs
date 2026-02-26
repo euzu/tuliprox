@@ -1,70 +1,58 @@
-use axum::body::Body;
-use axum::extract::Request;
-use axum::response::Response;
+use crate::api::model::ConnectionManager;
+use axum::{body::Body, extract::Request, response::Response};
 use futures::FutureExt;
 use hyper::body::Incoming;
-use hyper_util::rt::{TokioExecutor, TokioIo};
-use hyper_util::server::conn::auto::Builder;
-use hyper_util::service::TowerToHyperService;
+use hyper_util::{
+    rt::{TokioExecutor, TokioIo},
+    server::conn::auto::Builder,
+    service::TowerToHyperService,
+};
 use log::{debug, error, trace};
 use socket2::{SockRef, TcpKeepalive};
-use std::convert::Infallible;
-use std::fmt::Debug;
-use std::net::SocketAddr;
-use std::pin::pin;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{convert::Infallible, fmt::Debug, net::SocketAddr, pin::pin, sync::Arc, time::Duration};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tower::{Service, ServiceExt};
-use crate::api::model::{ConnectionManager};
 
 #[derive(Debug)]
-struct IncomingStream
-{
+struct IncomingStream {
     remote_addr: SocketAddr,
 }
 
 impl IncomingStream {
     /// Returns the remote address that this stream is bound to.
-    pub fn remote_addr(&self) -> &SocketAddr {
-        &self.remote_addr
-    }
+    pub fn remote_addr(&self) -> &SocketAddr { &self.remote_addr }
 }
 
 impl axum::extract::connect_info::Connected<IncomingStream> for SocketAddr {
-    fn connect_info(target: IncomingStream) -> SocketAddr {
-        *target.remote_addr()
-    }
+    fn connect_info(target: IncomingStream) -> SocketAddr { *target.remote_addr() }
 }
 
-pub async fn serve(listener: tokio::net::TcpListener,
-                   router: axum::Router<()>,
-                   cancel_token: Option<CancellationToken>,
-                   connection_manager: &Arc<ConnectionManager>) {
+pub async fn serve(
+    listener: tokio::net::TcpListener,
+    router: axum::Router<()>,
+    cancel_token: Option<CancellationToken>,
+    connection_manager: &Arc<ConnectionManager>,
+) {
     let (signal_tx, _signal_rx) = watch::channel(());
     let mut make_service = router.into_make_service_with_connect_info::<SocketAddr>();
 
     match cancel_token {
-        Some(token) => {
-            loop {
-                tokio::select! {
-                    () = token.cancelled() => {
-                        break;
-                    }
-                    accept_result = listener.accept() => {
-                        let Ok((socket, remote_addr)) = accept_result else { continue };
-                        handle_connection(&mut make_service, &signal_tx, socket, remote_addr, Arc::clone(connection_manager)).await;
-                    }
+        Some(token) => loop {
+            tokio::select! {
+                () = token.cancelled() => {
+                    break;
+                }
+                accept_result = listener.accept() => {
+                    let Ok((socket, remote_addr)) = accept_result else { continue };
+                    handle_connection(&mut make_service, &signal_tx, socket, remote_addr, Arc::clone(connection_manager)).await;
                 }
             }
-        }
-        None => {
-            loop {
-                let Ok((socket, remote_addr)) = listener.accept().await else { continue };
-                handle_connection(&mut make_service, &signal_tx, socket, remote_addr, Arc::clone(connection_manager)).await;
-            }
-        }
+        },
+        None => loop {
+            let Ok((socket, remote_addr)) = listener.accept().await else { continue };
+            handle_connection(&mut make_service, &signal_tx, socket, remote_addr, Arc::clone(connection_manager)).await;
+        },
     }
 }
 
@@ -74,14 +62,15 @@ async fn handle_connection<M, S>(
     socket: tokio::net::TcpStream,
     remote_addr: SocketAddr,
     connection_manager: Arc<ConnectionManager>,
-)
-where
-    M: for<'a> Service<IncomingStream, Error=Infallible, Response=S> + Send + 'static,
+) where
+    M: for<'a> Service<IncomingStream, Error = Infallible, Response = S> + Send + 'static,
     for<'a> <M as Service<IncomingStream>>::Future: Send,
-    S: Service<Request, Response=Response, Error=Infallible> + Clone + Send + 'static,
+    S: Service<Request, Response = Response, Error = Infallible> + Clone + Send + 'static,
     S::Future: Send,
 {
-    let Ok(tcp_stream_std) = socket.into_std() else { return; };
+    let Ok(tcp_stream_std) = socket.into_std() else {
+        return;
+    };
     //tcp_stream_std.set_nonblocking(true).ok(); // this is not necessary
 
     // Configure keep alive with socket2
@@ -91,7 +80,8 @@ where
     let keep_alive_interval = 5;
 
     let mut keepalive = TcpKeepalive::new();
-    keepalive = keepalive.with_time(Duration::from_secs(keep_alive_first_probe)) // Time until the first keepalive probe (idle time)
+    keepalive = keepalive
+        .with_time(Duration::from_secs(keep_alive_first_probe)) // Time until the first keepalive probe (idle time)
         .with_interval(Duration::from_secs(keep_alive_interval)); // Interval between keep alives
     #[cfg(not(target_os = "windows"))]
     {
@@ -103,15 +93,14 @@ where
         error!("Failed to set keepalive for {remote_addr}: {e}");
     }
 
-    let Ok(socket) = tokio::net::TcpStream::from_std(tcp_stream_std) else { return; };
+    let Ok(socket) = tokio::net::TcpStream::from_std(tcp_stream_std) else {
+        return;
+    };
 
     let io = TokioIo::new(socket);
     trace!("connection {remote_addr:?} accepted");
 
-    make_service
-        .ready()
-        .await
-        .unwrap_or_else(|err| match err {});
+    make_service.ready().await.unwrap_or_else(|err| match err {});
 
     let tower_service = make_service
         .call(IncomingStream {

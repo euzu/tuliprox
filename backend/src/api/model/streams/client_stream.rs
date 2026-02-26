@@ -1,15 +1,20 @@
-use crate::api::model::BoxedProviderStream;
-use crate::api::model::StreamError;
-use crate::tools::atomic_once_flag::AtomicOnceFlag;
-use crate::utils::trace_if_enabled;
+use crate::{
+    api::model::{BoxedProviderStream, StreamError},
+    tools::atomic_once_flag::AtomicOnceFlag,
+    utils::trace_if_enabled,
+};
 use bytes::Bytes;
 use futures::Stream;
 use log::trace;
 use shared::utils::sanitize_sensitive_info;
-use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::task::Poll;
+use std::{
+    pin::Pin,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    task::Poll,
+};
 
 /// This stream counts the send bytes for reconnecting to the actual position and
 /// sets the `close_signal`  if the client drops the connection.
@@ -22,17 +27,19 @@ pub(in crate::api::model) struct ClientStream {
 }
 
 impl ClientStream {
-    pub(crate) fn new(inner: BoxedProviderStream, close_signal: Arc<AtomicOnceFlag>, total_bytes: Arc<Option<AtomicUsize>>, url: &str) -> Self {
+    pub(crate) fn new(
+        inner: BoxedProviderStream,
+        close_signal: Arc<AtomicOnceFlag>,
+        total_bytes: Arc<Option<AtomicUsize>>,
+        url: &str,
+    ) -> Self {
         Self { inner, close_signal, total_bytes, url: url.to_string() }
     }
 }
 impl Stream for ClientStream {
     type Item = Result<Bytes, StreamError>;
 
-    fn poll_next(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> Poll<Option<Self::Item>> {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Option<Self::Item>> {
         if self.close_signal.is_active() {
             match Pin::as_mut(&mut self.inner).poll_next(cx) {
                 Poll::Ready(Some(Ok(bytes))) => {
@@ -41,7 +48,7 @@ impl Stream for ClientStream {
                         // Empty payload signals upstream closure; notify and let consumer see final chunk
                         self.close_signal.notify();
                     } else if let Some(counter) = self.total_bytes.as_ref() {
-                      counter.fetch_add(bytes.len(), Ordering::AcqRel);
+                        counter.fetch_add(bytes.len(), Ordering::AcqRel);
                     }
 
                     Poll::Ready(Some(Ok(bytes)))
@@ -62,7 +69,6 @@ impl Stream for ClientStream {
         }
     }
 }
-
 
 impl Drop for ClientStream {
     fn drop(&mut self) {

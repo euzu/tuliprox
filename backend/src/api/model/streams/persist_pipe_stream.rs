@@ -1,16 +1,16 @@
-use crate::api::model::{StreamError, STREAM_IDLE_TIMEOUT};
-use crate::utils::request::DynReader;
-use crate::utils::{async_file_writer, IO_BUFFER_SIZE};
+use crate::{
+    api::model::{StreamError, STREAM_IDLE_TIMEOUT},
+    utils::{async_file_writer, debug_if_enabled, request::DynReader, IO_BUFFER_SIZE},
+};
 use bytes::Bytes;
 use log::{debug, error};
-use std::path::Path;
-use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::select;
-use tokio_stream::wrappers::ReceiverStream;
-use tokio_stream::StreamExt;
-use tokio::time::{sleep, Duration, Instant};
-use crate::utils::debug_if_enabled;
+use std::{path::Path, sync::Arc};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    select,
+    time::{sleep, Duration, Instant},
+};
+use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 
 pub fn tee_stream<S, W>(
     mut stream: S,
@@ -19,7 +19,7 @@ pub fn tee_stream<S, W>(
     callback: Arc<dyn Fn(usize) + Send + Sync>,
 ) -> ReceiverStream<Result<Bytes, StreamError>>
 where
-    S: tokio_stream::Stream<Item=Result<Bytes, StreamError>> + Send + Unpin + 'static,
+    S: tokio_stream::Stream<Item = Result<Bytes, StreamError>> + Send + Unpin + 'static,
     W: tokio::io::AsyncWrite + Send + Unpin + 'static,
 {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, StreamError>>(32);

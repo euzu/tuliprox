@@ -1,26 +1,28 @@
-use crate::api::model::{AppState, STREAM_IDLE_TIMEOUT};
-use crate::api::model::{ActiveProviderManager, ProviderHandle, StreamError};
-use crate::model::Config;
-use crate::utils::debug_if_enabled;
+use crate::{
+    api::model::{
+        streams::buffered_stream::CHANNEL_SIZE, ActiveProviderManager, AppState, BoxedProviderStream, ProviderHandle,
+        StreamError, STREAM_IDLE_TIMEOUT,
+    },
+    model::Config,
+    utils::{debug_if_enabled, trace_if_enabled},
+};
 use bytes::Bytes;
-use futures::stream::BoxStream;
-use futures::{Stream, StreamExt};
-use std::collections::{HashMap, VecDeque};
-use std::fmt;
-use std::fmt::{Debug, Formatter};
-use std::net::SocketAddr;
-use std::sync::Arc;
-
-use crate::api::model::streams::buffered_stream::CHANNEL_SIZE;
-use crate::api::model::BoxedProviderStream;
-use crate::utils::trace_if_enabled;
+use futures::{stream::BoxStream, Stream, StreamExt};
 use log::{debug, trace, warn};
 use shared::utils::sanitize_sensitive_info;
-use std::pin::Pin;
-use std::task::{Context, Poll};
-use tokio::sync::mpsc::Sender;
-use tokio::sync::{mpsc, RwLock};
-use tokio::time::{sleep, Duration, Instant};
+use std::{
+    collections::{HashMap, VecDeque},
+    fmt,
+    fmt::{Debug, Formatter},
+    net::SocketAddr,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+};
+use tokio::{
+    sync::{mpsc, mpsc::Sender, RwLock},
+    time::{sleep, Duration, Instant},
+};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 
@@ -37,7 +39,7 @@ struct ReceiverStreamWrapper<S> {
 
 impl<S> Stream for ReceiverStreamWrapper<S>
 where
-    S: Stream<Item=Bytes> + Unpin,
+    S: Stream<Item = Bytes> + Unpin,
 {
     type Item = Result<Bytes, StreamError>;
 
@@ -66,7 +68,6 @@ fn convert_stream(stream: BoxStream<Bytes>) -> BoxStream<Result<Bytes, StreamErr
 
 type SubscriberId = SocketAddr;
 
-
 struct BurstBuffer {
     buffer: VecDeque<Arc<Bytes>>,
     buffer_size: usize,
@@ -85,16 +86,10 @@ impl Debug for BurstBuffer {
 
 impl BurstBuffer {
     pub fn new(buf_size: usize) -> Self {
-        Self {
-            buffer: VecDeque::with_capacity(buf_size),
-            buffer_size: buf_size,
-            current_bytes: 0,
-        }
+        Self { buffer: VecDeque::with_capacity(buf_size), buffer_size: buf_size, current_bytes: 0 }
     }
 
-    pub fn snapshot(&self) -> VecDeque<Arc<Bytes>> {
-        self.buffer.iter().cloned().collect::<VecDeque<Arc<Bytes>>>()
-    }
+    pub fn snapshot(&self) -> VecDeque<Arc<Bytes>> { self.buffer.iter().cloned().collect::<VecDeque<Arc<Bytes>>>() }
 
     pub fn push(&mut self, packet: Arc<Bytes>) {
         while self.current_bytes + packet.len() > self.buffer_size {
@@ -110,13 +105,15 @@ impl BurstBuffer {
     }
 }
 
-
 async fn send_burst_buffer(
     start_buffer: &VecDeque<Arc<Bytes>>,
     client_tx: &Sender<Bytes>,
-    cancellation_token: &CancellationToken) {
+    cancellation_token: &CancellationToken,
+) {
     for buf in start_buffer {
-        if cancellation_token.is_cancelled() { return; }
+        if cancellation_token.is_cancelled() {
+            return;
+        }
         if let Err(err) = client_tx.send(buf.as_ref().clone()).await {
             warn!("Error sending burst-buffer chunk to client: {err}");
             return; // stop on send error
@@ -140,8 +137,12 @@ pub struct SharedStreamState {
 }
 
 impl SharedStreamState {
-    fn new(headers: Vec<(String, String)>, buf_size: usize,
-           provider_guard: Option<ProviderHandle>, min_burst_buffer_size: usize) -> Self {
+    fn new(
+        headers: Vec<(String, String)>,
+        buf_size: usize,
+        provider_guard: Option<ProviderHandle>,
+        min_burst_buffer_size: usize,
+    ) -> Self {
         let (broadcaster, _) = tokio::sync::broadcast::channel(buf_size);
         // TODO channel size versus byte size,  channels are chunk sized, burst_buffer byte sized
         let burst_buffer_size_in_bytes = min_burst_buffer_size.max(buf_size * 1024 * 12);
@@ -157,7 +158,11 @@ impl SharedStreamState {
         }
     }
 
-    async fn subscribe(&self, addr: &SocketAddr, manager: Arc<SharedStreamManager>) -> (BoxedProviderStream, Option<Arc<str>>) {
+    async fn subscribe(
+        &self,
+        addr: &SocketAddr,
+        manager: Arc<SharedStreamManager>,
+    ) -> (BoxedProviderStream, Option<Arc<str>>) {
         let (client_tx, client_rx) = mpsc::channel(self.buf_size);
         let mut broadcast_rx = self.broadcaster.subscribe();
         let cancel_token = CancellationToken::new();
@@ -170,8 +175,11 @@ impl SharedStreamState {
         {
             let mut subs = self.subscribers.write().await;
             subs.insert(*addr, cancel_token.clone());
-            debug_if_enabled!("Shared stream subscriber added {}; total subscribers={}",
-                sanitize_sensitive_info(&addr.to_string()), subs.len());
+            debug_if_enabled!(
+                "Shared stream subscriber added {}; total subscribers={}",
+                sanitize_sensitive_info(&addr.to_string()),
+                subs.len()
+            );
         }
 
         let client_tx_clone = client_tx.clone();
@@ -196,61 +204,61 @@ impl SharedStreamState {
             let mut loop_cnt = 0;
             loop {
                 tokio::select! {
-                biased;
+                    biased;
 
-                    // canceled
-                () = cancel_token.cancelled() => {
-                    debug!("Client disconnected from shared stream: {address}");
-                    break;
-                }
-
-                    // timeout handling
-                () = sleep(Duration::from_secs(1)) => {
-                    if last_active.elapsed() > timeout_duration {
-                        debug!("Client timed out due to inactivity: {address}");
-                        cancel_token.cancel();
+                        // canceled
+                    () = cancel_token.cancelled() => {
+                        debug!("Client disconnected from shared stream: {address}");
                         break;
                     }
-                }
 
-                // receive broadcast data
-                result = broadcast_rx.recv() => {
-                    match result {
-                        Ok(data) => {
-                            // If the client press pause, skip
-                            if client_tx_clone.is_closed() {
-                                continue;
-                            }
-
-                            if let Err(err) = client_tx.send(data).await {
-                                debug!("Shared stream client send error: {address} {err}");
-                                break;
-                            }
-                            loop_cnt += 1;
-                            last_active = Instant::now();
-
-                            if loop_cnt >= yield_counter {
-                                tokio::task::yield_now().await;
-                                loop_cnt = 0;
-                            }
+                        // timeout handling
+                    () = sleep(Duration::from_secs(1)) => {
+                        if last_active.elapsed() > timeout_duration {
+                            debug!("Client timed out due to inactivity: {address}");
+                            cancel_token.cancel();
+                            break;
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                            if last_lag_log.elapsed() > Duration::from_secs(5) {
-                                let buffered_bytes = {
-                                    let buffer = burst_buffer_for_log.read().await;
-                                    buffer.current_bytes
-                                };
-                                warn!("Shared stream client lagged behind {address}. Skipped {skipped} messages (buffered {buffered_bytes} bytes, yield counter {yield_counter})");
-                                last_lag_log = Instant::now();
+                    }
+
+                    // receive broadcast data
+                    result = broadcast_rx.recv() => {
+                        match result {
+                            Ok(data) => {
+                                // If the client press pause, skip
+                                if client_tx_clone.is_closed() {
+                                    continue;
+                                }
+
+                                if let Err(err) = client_tx.send(data).await {
+                                    debug!("Shared stream client send error: {address} {err}");
+                                    break;
+                                }
+                                loop_cnt += 1;
+                                last_active = Instant::now();
+
+                                if loop_cnt >= yield_counter {
+                                    tokio::task::yield_now().await;
+                                    loop_cnt = 0;
+                                }
                             }
-                            // Sleep to prevent CPU spin when client is persistently lagging behind.
-                            // This provides backpressure for slow clients that can't keep up.
-                            sleep(Duration::from_millis(50)).await;
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                                if last_lag_log.elapsed() > Duration::from_secs(5) {
+                                    let buffered_bytes = {
+                                        let buffer = burst_buffer_for_log.read().await;
+                                        buffer.current_bytes
+                                    };
+                                    warn!("Shared stream client lagged behind {address}. Skipped {skipped} messages (buffered {buffered_bytes} bytes, yield counter {yield_counter})");
+                                    last_lag_log = Instant::now();
+                                }
+                                // Sleep to prevent CPU spin when client is persistently lagging behind.
+                                // This provides backpressure for slow clients that can't keep up.
+                                sleep(Duration::from_millis(50)).await;
+                            }
+                            Err(_) => break,
                         }
-                        Err(_) => break,
                     }
                 }
-            }
             }
 
             manager.release_connection(&address, false).await;
@@ -262,14 +270,9 @@ impl SharedStreamState {
         (convert_stream(ReceiverStream::new(client_rx).boxed()), provider)
     }
 
-    fn broadcast<S, E>(
-        &self,
-        stream_url: &str,
-        bytes_stream: S,
-        shared_streams: Arc<SharedStreamManager>,
-    )
+    fn broadcast<S, E>(&self, stream_url: &str, bytes_stream: S, shared_streams: Arc<SharedStreamManager>)
     where
-        S: Stream<Item=Result<Bytes, E>> + Unpin + 'static + Send,
+        S: Stream<Item = Result<Bytes, E>> + Unpin + 'static + Send,
         E: std::fmt::Debug + Send,
     {
         let mut source_stream = Box::pin(bytes_stream);
@@ -286,61 +289,64 @@ impl SharedStreamState {
 
             loop {
                 tokio::select! {
-                  biased;
+                   biased;
 
-                  () = stop_token.cancelled() => {
-                       debug_if_enabled!("No shared stream subscribers left. Closing shared provider stream {}", sanitize_sensitive_info(&streaming_url));
+                   () = stop_token.cancelled() => {
+                        debug_if_enabled!("No shared stream subscribers left. Closing shared provider stream {}", sanitize_sensitive_info(&streaming_url));
+                         break;
+                   },
+
+                   () = &mut idle => {
+                        debug!("shared stream idle for too long, closing");
+                         stop_token.cancel();
                         break;
-                  },
+                   }
 
-                  () = &mut idle => {
-                       debug!("shared stream idle for too long, closing");
-                        stop_token.cancel();
-                       break;
-                  }
+                   chunk = source_stream.next() => {
+                      idle.as_mut().reset(Instant::now() + idle_timeout);
+                      match chunk {
+                         Some(Ok(data)) => {
+                           let arc_data = Arc::new(data);
+                           {
+                             let mut buffer = burst_buffer.write().await;
+                             buffer.push(arc_data.clone());
+                           }
 
-                  chunk = source_stream.next() => {
-                     idle.as_mut().reset(Instant::now() + idle_timeout);
-                     match chunk {
-                        Some(Ok(data)) => {
-                          let arc_data = Arc::new(data);
-                          {
-                            let mut buffer = burst_buffer.write().await;
-                            buffer.push(arc_data.clone());
-                          }
+                           match sender.send(arc_data.as_ref().clone()) {
+                             Ok(clients) =>  {
+                                 if clients == 0 {
+                                    debug_if_enabled!("No shared stream subscribers closing {}", sanitize_sensitive_info(&streaming_url));
+                                    break;
+                                 }
+                                 counter += 1;
+                                 if counter >= YIELD_COUNTER {
+                                     tokio::task::yield_now().await;
+                                     counter = 0;
+                                 }
+                             }
+                             Err(_e) => {
+                                    debug_if_enabled!("Shared stream send error,no subscribers closing {}", sanitize_sensitive_info(&streaming_url));
+                                    break;
+                             }
+                           }
+                         }
+                         Some(Err(e)) => {
+                             trace!("Shared stream received error: {e:?}");
+                             tokio::task::yield_now().await;
 
-                          match sender.send(arc_data.as_ref().clone()) {
-                            Ok(clients) =>  {
-                                if clients == 0 {
-                                   debug_if_enabled!("No shared stream subscribers closing {}", sanitize_sensitive_info(&streaming_url));
-                                   break;
-                                }
-                                counter += 1;
-                                if counter >= YIELD_COUNTER {
-                                    tokio::task::yield_now().await;
-                                    counter = 0;
-                                }
-                            }
-                            Err(_e) => {
-                                   debug_if_enabled!("Shared stream send error,no subscribers closing {}", sanitize_sensitive_info(&streaming_url));
-                                   break;
-                            }
-                          }
-                        }
-                        Some(Err(e)) => {
-                            trace!("Shared stream received error: {e:?}");
-                            tokio::task::yield_now().await;
-
-                        }
-                        None => {
-                            debug_if_enabled!("Source stream ended. Closing shared provider stream {}", sanitize_sensitive_info(&streaming_url));
-                            break;
-                        }
-                    }
-                  },
-               }
+                         }
+                         None => {
+                             debug_if_enabled!("Source stream ended. Closing shared provider stream {}", sanitize_sensitive_info(&streaming_url));
+                             break;
+                         }
+                     }
+                   },
+                }
             }
-            debug_if_enabled!("Shared stream exhausted. Closing shared provider stream {}", sanitize_sensitive_info(&streaming_url));
+            debug_if_enabled!(
+                "Shared stream exhausted. Closing shared provider stream {}",
+                sanitize_sensitive_info(&streaming_url)
+            );
             shared_streams.unregister(&streaming_url, false).await;
         });
     }
@@ -350,7 +356,6 @@ impl SharedStreamState {
 struct SharedStreamsRegister {
     by_key: HashMap<String, Arc<SharedStreamState>>,
     key_by_addr: HashMap<SubscriberId, String>,
-
 }
 
 pub struct SharedStreamManager {
@@ -360,10 +365,7 @@ pub struct SharedStreamManager {
 
 impl SharedStreamManager {
     pub(crate) fn new(provider_manager: Arc<ActiveProviderManager>) -> Self {
-        Self {
-            provider_manager,
-            shared_streams: RwLock::new(SharedStreamsRegister::default()),
-        }
+        Self { provider_manager, shared_streams: RwLock::new(SharedStreamsRegister::default()) }
     }
 
     pub async fn get_shared_state(&self, stream_url: &str) -> Option<Arc<SharedStreamState>> {
@@ -378,7 +380,8 @@ impl SharedStreamManager {
         let shared_state_opt = {
             let mut shared_streams = self.shared_streams.write().await;
 
-            let remove_keys: Vec<SocketAddr> = shared_streams.key_by_addr
+            let remove_keys: Vec<SocketAddr> = shared_streams
+                .key_by_addr
                 .iter()
                 .filter_map(|(addr, url)| if url == stream_url { Some(*addr) } else { None })
                 .collect();
@@ -427,15 +430,18 @@ impl SharedStreamManager {
                 (tx, is_empty, subs.len())
             };
 
-            debug_if_enabled!("Shared stream subscriber removed {}; remaining subscribers={remaining}", sanitize_sensitive_info(&addr.to_string()));
+            debug_if_enabled!(
+                "Shared stream subscriber removed {}; remaining subscribers={remaining}",
+                sanitize_sensitive_info(&addr.to_string())
+            );
 
             if is_empty {
                 if let Some(url) = stream_url.as_ref() {
                     debug_if_enabled!(
-                      "No subscribers remain for {} after removing {}",
-                      sanitize_sensitive_info(url),
-                      sanitize_sensitive_info(&addr.to_string())
-                );
+                        "No subscribers remain for {} after removing {}",
+                        sanitize_sensitive_info(url),
+                        sanitize_sensitive_info(&addr.to_string())
+                    );
                     self.unregister(url, send_stop_signal).await;
                 }
             }
@@ -463,21 +469,26 @@ impl SharedStreamManager {
         };
 
         if let Some(shared_state) = shared_state_opt {
-            debug_if_enabled!("Responding to existing shared client stream {} {}",
-                sanitize_sensitive_info(&addr.to_string()), sanitize_sensitive_info(stream_url));
+            debug_if_enabled!(
+                "Responding to existing shared client stream {} {}",
+                sanitize_sensitive_info(&addr.to_string()),
+                sanitize_sensitive_info(stream_url)
+            );
             Some(shared_state.subscribe(addr, manager).await)
         } else {
             None
         }
     }
 
-
     async fn register(&self, addr: &SocketAddr, stream_url: &str, shared_state: Arc<SharedStreamState>) {
         let mut shared_streams = self.shared_streams.write().await;
         shared_streams.by_key.insert(stream_url.to_string(), shared_state);
         shared_streams.key_by_addr.insert(*addr, stream_url.to_string());
-        debug_if_enabled!("Registered shared stream {} for initial subscriber {}",
-            sanitize_sensitive_info(stream_url), sanitize_sensitive_info(&addr.to_string()));
+        debug_if_enabled!(
+            "Registered shared stream {} for initial subscriber {}",
+            sanitize_sensitive_info(stream_url),
+            sanitize_sensitive_info(&addr.to_string())
+        );
     }
 
     pub(crate) async fn register_shared_stream<S, E>(
@@ -487,9 +498,10 @@ impl SharedStreamManager {
         addr: &SocketAddr,
         headers: Vec<(String, String)>,
         buffer_size: usize,
-        provider_handle: Option<ProviderHandle>) -> Option<(BoxedProviderStream, Option<Arc<str>>)>
+        provider_handle: Option<ProviderHandle>,
+    ) -> Option<(BoxedProviderStream, Option<Arc<str>>)>
     where
-        S: Stream<Item=Result<Bytes, E>> + Unpin + 'static + Send,
+        S: Stream<Item = Result<Bytes, E>> + Unpin + 'static + Send,
         E: std::fmt::Debug + Send,
     {
         let buf_size = CHANNEL_SIZE.max(buffer_size);

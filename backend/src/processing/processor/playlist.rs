@@ -1,57 +1,61 @@
-use crate::model::{
-    AppConfig, ConfigFavourites, ConfigInput, ConfigRename, MessageContent, ReverseProxyDisabledHeaderConfig, TVGuide,
+use crate::{
+    api::{
+        model::{
+            ActiveProviderManager, AppState, EventManager, EventMessage, MetadataUpdateManager, PlaylistStorageState,
+            ProviderIdType, ResolveReason, ResolveReasonSet, UpdateGuard, UpdateTask,
+        },
+        sync_panel_api_exp_dates,
+    },
+    messaging::send_message,
+    model::{
+        AppConfig, ConfigFavourites, ConfigInput, ConfigInputFlags, ConfigInputOptions, ConfigRename, ConfigTarget,
+        FetchedPlaylist, Mapping, MessageContent, ProcessTargets, ReverseProxyDisabledHeaderConfig, TVGuide,
+    },
+    processing::{
+        input_cache,
+        input_cache::ClusterState,
+        parser::xmltv::flatten_tvguide,
+        playlist_watch::process_group_watch,
+        processor::{
+            epg::process_playlist_epg, library, sort::sort_playlist, trakt::process_trakt_categories_for_target,
+            xtream_series::playlist_resolve_series, xtream_vod::playlist_resolve_vod,
+        },
+    },
+    repository::{
+        load_input_playlist, persist_input_playlist, persist_playlist, CategoryKey, MemoryPlaylistSource,
+        PlaylistSource,
+    },
+    utils::{
+        debug_if_enabled, epg, log_memory_snapshot, m3u, trace_if_enabled, xtream, StepMeasure, StepMeasureCallback,
+    },
 };
-use crate::utils::xtream;
-use crate::utils::{epg, StepMeasureCallback};
-use crate::utils::{log_memory_snapshot, m3u};
-use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
-use std::sync::{Arc, Weak};
-use tokio::sync::{Mutex, OwnedRwLockWriteGuard, RwLock};
-use tokio::task::JoinSet;
-
-use crate::api::model::{
-    ActiveProviderManager, EventManager, EventMessage, MetadataUpdateManager, PlaylistStorageState, ProviderIdType,
-    ResolveReason, ResolveReasonSet, UpdateGuard, UpdateTask,
-};
-
-use crate::messaging::send_message;
-
-use crate::model::FetchedPlaylist;
-use crate::model::Mapping;
-use crate::model::{ConfigInputFlags, ConfigInputOptions, ConfigTarget, ProcessTargets};
-use crate::processing::input_cache;
-use crate::processing::input_cache::ClusterState;
-use crate::processing::parser::xmltv::flatten_tvguide;
-use crate::processing::playlist_watch::process_group_watch;
-use crate::processing::processor::epg::process_playlist_epg;
-use crate::processing::processor::library;
-use crate::processing::processor::sort::sort_playlist;
-use crate::processing::processor::trakt::process_trakt_categories_for_target;
-use crate::processing::processor::xtream_series::playlist_resolve_series;
-use crate::processing::processor::xtream_vod::playlist_resolve_vod;
-use crate::repository::{load_input_playlist, persist_input_playlist, persist_playlist};
-use crate::repository::{CategoryKey, MemoryPlaylistSource, PlaylistSource};
-use crate::utils::StepMeasure;
-use crate::utils::{debug_if_enabled, trace_if_enabled};
 use futures::{FutureExt, StreamExt};
 use indexmap::IndexMap;
 use log::{debug, error, info, log_enabled, warn, Level};
-use shared::concat_string;
-use shared::error::{get_errors_notify_message, notify_err, TuliproxError};
-use shared::foundation::Filter;
-use shared::foundation::{get_field_value, set_field_value, ValueAccessor, ValueProvider};
-use shared::model::xtream_const::XTREAM_CLUSTER;
-use shared::model::{
-    CounterModifier, FieldGetAccessor, FieldSetAccessor, InputType, ItemField, PlaylistGroup, PlaylistItem,
-    PlaylistItemType, ProcessingOrder, StreamProperties, XtreamCluster,
+use shared::{
+    concat_string,
+    error::{get_errors_notify_message, notify_err, TuliproxError},
+    foundation::{get_field_value, set_field_value, Filter, ValueAccessor, ValueProvider},
+    model::{
+        xtream_const::XTREAM_CLUSTER, CounterModifier, FieldGetAccessor, FieldSetAccessor, InputStats, InputType,
+        ItemField, PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistStats, ProcessingOrder, SourceStats,
+        StreamProperties, TargetStats, UUIDType, XtreamCluster,
+    },
+    utils::{
+        create_alias_uuid, default_as_default, default_probe_delay_secs, default_probe_live_interval, interner_gc,
+        Internable,
+    },
 };
-use shared::model::{InputStats, PlaylistStats, SourceStats, TargetStats, UUIDType};
-use shared::utils::{
-    create_alias_uuid, default_as_default, default_probe_delay_secs, default_probe_live_interval, interner_gc,
-    Internable,
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    sync::{Arc, Weak},
+    time::Instant,
 };
-use std::time::Instant;
+use tokio::{
+    sync::{Mutex, OwnedRwLockWriteGuard, RwLock},
+    task::JoinSet,
+};
 
 fn is_valid(pli: &PlaylistItem, filter: &Filter, match_as_ascii: bool) -> bool {
     let provider = ValueProvider { pli, match_as_ascii };
@@ -1206,6 +1210,7 @@ pub async fn exec_processing(
     app_config: Arc<AppConfig>,
     targets: Arc<ProcessTargets>,
     event_manager: Option<Arc<EventManager>>,
+    app_state: Option<Arc<AppState>>,
     playlist_state: Option<Arc<PlaylistStorageState>>,
     update_guard: Option<UpdateGuard>,
     disabled_headers: Option<ReverseProxyDisabledHeaderConfig>,
@@ -1229,6 +1234,12 @@ pub async fn exec_processing(
     } else {
         None
     };
+
+    if playlist_guard.is_some() {
+        if let Some(state) = app_state.as_ref() {
+            sync_panel_api_exp_dates(state).await;
+        }
+    }
 
     // Pause background metadata/probe tasks for the full update lifecycle.
     let _background_pause_guard = if let Some(manager) = metadata_manager.as_ref() {
