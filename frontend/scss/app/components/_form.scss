@@ -86,16 +86,19 @@
 .tp__field-explanation-dialog {
   display: flex;
   flex-flow: column;
-  gap: var(--gap-default);
+  gap: var(--gap-large);
   min-width: min(32rem, 88vw);
 
-  h2 {
-    margin: 0;
+  &__header {
+    h2 {
+      color: var(--modest-text-color);
+      margin: 0;
+    }
   }
 
-  p {
-    margin: 0;
-    white-space: pre-wrap;
-    color: var(--modest-text-color);
+  &__body {
+    p {
+      white-space: pre-wrap;
+    }
   }
 }

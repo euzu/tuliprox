@@ -1,6 +1,6 @@
 use crate::api::model::{ActiveProviderManager, ProviderHandle};
 use crate::api::model::{ProviderIdType, ResolveReason, ResolveReasonSet, UpdateTask};
-use crate::library::MetadataResolver;
+use crate::library::{MetadataResolver, MetadataStorage};
 use crate::model::FetchedPlaylist;
 use crate::model::InputSource;
 use crate::model::{AppConfig, ConfigTarget};
@@ -16,6 +16,7 @@ use crate::repository::get_input_storage_path;
 use crate::repository::persist_input_vod_info;
 use crate::repository::persist_input_vod_info_batch;
 use crate::repository::{xtream_get_file_path, BPlusTreeQuery};
+use crate::utils::ffmpeg::{ProbeFailureKind, ProbeUrlOutcome};
 use crate::utils::{debug_if_enabled, trace_if_enabled, xtream};
 use log::{debug, error, info, log_enabled, trace, warn, Level};
 use parking_lot::Mutex;
@@ -577,6 +578,7 @@ pub async fn update_vod_metadata(
 
     let mut fetched_new = false;
     let mut properties_updated = false;
+    let mut probe_failure: Option<ProbeFailureKind> = None;
 
     // Determine the title to use for logging and fallback.
     // Cloning here to satisfy borrow checker when 'props' is mutated later.
@@ -676,7 +678,12 @@ pub async fn update_vod_metadata(
         if missing_tmdb || still_missing_date {
             let config = app_config.config.load();
             let library_config = config.library.as_ref();
-            let meta_resolver = MetadataResolver::new(library_config, client.clone());
+            let metadata_update_config = config.metadata_update.as_ref();
+            let tmdb_storage = metadata_update_config
+                .filter(|cfg| cfg.tmdb.enabled)
+                .map(|_| MetadataStorage::new(storage_path.clone()));
+            let meta_resolver =
+                MetadataResolver::from_config(library_config, metadata_update_config, client.clone(), tmdb_storage);
 
             let mut meta = None;
             let mut tried_title = false;
@@ -767,10 +774,10 @@ pub async fn update_vod_metadata(
 
             let config = app_config.config.load();
             let metadata_update = config.metadata_update.clone().unwrap_or_default();
-            let ffprobe_timeout = metadata_update.ffprobe_timeout.unwrap_or(60);
+            let ffprobe_timeout = metadata_update.ffprobe.timeout.unwrap_or(60);
             let user_agent = config.default_user_agent.clone();
-            let analyze_duration = metadata_update.ffprobe_analyze_duration_micros;
-            let probe_size = metadata_update.ffprobe_probe_size_bytes;
+            let analyze_duration = metadata_update.ffprobe.analyze_duration_micros;
+            let probe_size = metadata_update.ffprobe.probe_size_bytes;
 
             // Acquire Connection logic
             let temp_handle = if active_handle.is_some() {
@@ -779,34 +786,57 @@ pub async fn update_vod_metadata(
                 active_provider.acquire_connection_for_probe(&input.name).await
             };
 
-            if active_handle.is_some() || temp_handle.is_some() {
-                debug_if_enabled!("Probing VOD '{}' (ID: {})", display_title, display_id);
-                if let Some((_quality, raw_video, raw_audio)) = crate::utils::ffmpeg::probe_url(
-                    &stream_url,
-                    user_agent.as_deref(),
-                    analyze_duration,
-                    probe_size,
-                    ffprobe_timeout,
-                )
-                .await
-                {
-                    if let Some(details) = properties.details.as_mut() {
-                        if let Some(v) = raw_video {
-                            details.video = Some(v.to_string().into());
-                            properties_updated = true;
+                if active_handle.is_some() || temp_handle.is_some() {
+                    debug_if_enabled!("Probing VOD '{}' (ID: {})", display_title, display_id);
+                    match crate::utils::ffmpeg::probe_url(
+                        &stream_url,
+                        user_agent.as_deref(),
+                        analyze_duration,
+                        probe_size,
+                        ffprobe_timeout,
+                    )
+                    .await
+                    {
+                        ProbeUrlOutcome::Success(_quality, raw_video, raw_audio) => {
+                            if let Some(details) = properties.details.as_mut() {
+                                if let Some(v) = raw_video {
+                                    details.video = Some(v.to_string().into());
+                                    properties_updated = true;
+                                }
+                                if let Some(a) = raw_audio {
+                                    details.audio = Some(a.to_string().into());
+                                    properties_updated = true;
+                                }
+                            }
                         }
-                        if let Some(a) = raw_audio {
-                            details.audio = Some(a.to_string().into());
-                            properties_updated = true;
+                        ProbeUrlOutcome::Failed(ProbeFailureKind::NotFound) => {
+                            probe_failure = Some(ProbeFailureKind::NotFound);
+                        }
+                        ProbeUrlOutcome::Failed(ProbeFailureKind::Other) => {
+                            if probe_failure.is_none() {
+                                probe_failure = Some(ProbeFailureKind::Other);
+                            }
                         }
                     }
-                }
                 if let Some(h) = temp_handle {
                     active_provider.release_handle(&h).await;
                 }
             } else {
                 warn!("Skipping probe for VOD {display_id} due to connection limits");
             }
+        }
+    }
+
+    let probe_only_unresolved = do_probe && !fetch_info && !resolve_tmdb && !properties_updated && !fetched_new;
+    if probe_only_unresolved {
+        if let Some(kind) = probe_failure {
+            let err = match kind {
+                ProbeFailureKind::NotFound => {
+                    shared::error::info_err!("Probe failed with 404 Not Found for VOD {display_id}")
+                }
+                ProbeFailureKind::Other => shared::error::info_err!("Probe failed for VOD {display_id}"),
+            };
+            return Err(err);
         }
     }
 

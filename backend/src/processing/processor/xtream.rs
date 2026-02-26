@@ -5,6 +5,7 @@ use crate::model::{AppConfig, ConfigInput, ConfigInputFlags};
 use shared::model::{LiveStreamProperties, StreamProperties, XtreamCluster, XtreamPlaylistItem};
 use crate::repository::{get_input_storage_path, persist_input_live_info, BPlusTreeQuery, xtream_get_file_path};
 use crate::utils::{debug_if_enabled};
+use crate::utils::ffmpeg::{ProbeFailureKind, ProbeUrlOutcome};
 use log::{debug, warn};
 use crate::processing::parser::xtream::create_xtream_url;
 use crate::api::model::{ActiveProviderManager, ProviderHandle, ProviderIdType};
@@ -117,10 +118,10 @@ pub async fn update_live_stream_metadata(
     );
     let config = app_config.config.load();
     let metadata_update = config.metadata_update.clone().unwrap_or_default();
-    let ffprobe_timeout = metadata_update.ffprobe_timeout.unwrap_or(60);
+    let ffprobe_timeout = metadata_update.ffprobe.timeout.unwrap_or(60);
     let user_agent = config.default_user_agent.clone();
-    let analyze_duration = metadata_update.ffprobe_live_analyze_duration_micros;
-    let probe_size = metadata_update.ffprobe_live_probe_size_bytes;
+    let analyze_duration = metadata_update.ffprobe.live_analyze_duration_micros;
+    let probe_size = metadata_update.ffprobe.live_probe_size_bytes;
 
     let display_id = stream_id_opt.map_or_else(|| "StringID".to_string(), |v| v.to_string());
     debug!("Probing Live Stream ID {} for input {}", display_id, input.name);
@@ -131,27 +132,37 @@ pub async fn update_live_stream_metadata(
     properties.last_probed_timestamp = Some(now);
 
     let mut success = false;
-    if let Some((_quality, raw_video, raw_audio)) = crate::utils::ffmpeg::probe_url(
+    let mut not_found = false;
+    match crate::utils::ffmpeg::probe_url(
         &stream_url,
         user_agent.as_deref(),
         analyze_duration,
         probe_size,
         ffprobe_timeout,
-    ).await {
-        // 3. Update properties on success
-        if let Some(v) = raw_video {
-            properties.video = Some(v.to_string().into());
+    )
+    .await
+    {
+        ProbeUrlOutcome::Success(_quality, raw_video, raw_audio) => {
+            // 3. Update properties on success
+            if let Some(v) = raw_video {
+                properties.video = Some(v.to_string().into());
+            }
+            if let Some(a) = raw_audio {
+                properties.audio = Some(a.to_string().into());
+            }
+            properties.last_success_timestamp = Some(now);
+            success = true;
+
+            debug_if_enabled!("Successfully probed Live Stream ID {}", display_id);
         }
-        if let Some(a) = raw_audio {
-            properties.audio = Some(a.to_string().into());
+        ProbeUrlOutcome::Failed(ProbeFailureKind::NotFound) => {
+            warn!("Live stream probe target returned 404 for ID {} (Input: {})", display_id, input.name);
+            not_found = true;
         }
-        properties.last_success_timestamp = Some(now);
-        success = true;
-        
-        debug_if_enabled!("Successfully probed Live Stream ID {}", display_id);
-    } else {
-        warn!("Probe failed for Live Stream ID {} (Input: {})", display_id, input.name);
-        // We still persist the updated last_probed_timestamp so we don't retry immediately
+        ProbeUrlOutcome::Failed(ProbeFailureKind::Other) => {
+            warn!("Probe failed for Live Stream ID {} (Input: {})", display_id, input.name);
+            // We still persist the updated last_probed_timestamp so we don't retry immediately
+        }
     }
 
     // 4. Persist
@@ -164,6 +175,9 @@ pub async fn update_live_stream_metadata(
     }
     
     if !success {
+        if not_found {
+            return Err(shared::error::info_err!("Probe failed with 404 Not Found for stream {display_id}"));
+        }
         // Return error to propagate failure up to task manager/logs
         return Err(shared::error::info_err!("Probe failed for stream {display_id}"));
     }

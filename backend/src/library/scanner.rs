@@ -279,7 +279,7 @@ impl LibraryScanner {
 mod tests {
     use shared::utils::Internable;
     use super::*;
-    use crate::model::{LibraryMetadataConfig, LibraryMetadataReadConfig, LibraryPlaylistConfig, LibraryTmdbConfig};
+    use crate::model::{LibraryMetadataConfig, LibraryMetadataReadConfig, LibraryPlaylistConfig};
 
     fn create_test_config() -> LibraryConfig {
         LibraryConfig {
@@ -296,13 +296,6 @@ mod tests {
                     kodi: false,
                     jellyfin: false,
                     plex: false,
-                },
-                tmdb: LibraryTmdbConfig {
-                    enabled: false,
-                    api_key: Some(String::new()),
-                    rate_limit_ms: 250,
-                    cache_duration_days: 0,
-                    language: String::new(),
                 },
                 fallback_to_filename: true,
                 formats: vec![],

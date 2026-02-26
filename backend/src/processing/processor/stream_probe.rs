@@ -3,6 +3,7 @@ use crate::model::ConfigInput;
 use crate::model::{AppConfig};
 use crate::repository::{get_input_m3u_playlist_file_path, get_input_storage_path, get_input_local_library_playlist_file_path, xtream_get_file_path, BPlusTreeUpdate};
 use crate::utils::{debug_if_enabled, ffmpeg};
+use crate::utils::ffmpeg::{ProbeFailureKind, ProbeUrlOutcome};
 use log::{info, warn};
 use shared::error::TuliproxError;
 use shared::model::{EpisodeStreamProperties, InputType, PlaylistItemType, StreamProperties, VideoStreamDetailProperties, VideoStreamProperties, LiveStreamProperties, M3uPlaylistItem, XtreamCluster, XtreamPlaylistItem};
@@ -98,17 +99,17 @@ pub async fn update_generic_stream_metadata(
     let probe_url = stream_url.to_string();
     let config = app_config.config.load();
     let metadata_update = config.metadata_update.clone().unwrap_or_default();
-    let ffprobe_timeout = metadata_update.ffprobe_timeout.unwrap_or(60);
+    let ffprobe_timeout = metadata_update.ffprobe.timeout.unwrap_or(60);
     let user_agent = config.default_user_agent.clone();
     let (analyze_duration, probe_size) = if item_type.is_live() {
         (
-            metadata_update.ffprobe_live_analyze_duration_micros,
-            metadata_update.ffprobe_live_probe_size_bytes,
+            metadata_update.ffprobe.live_analyze_duration_micros,
+            metadata_update.ffprobe.live_probe_size_bytes,
         )
     } else {
         (
-            metadata_update.ffprobe_analyze_duration_micros,
-            metadata_update.ffprobe_probe_size_bytes,
+            metadata_update.ffprobe.analyze_duration_micros,
+            metadata_update.ffprobe.probe_size_bytes,
         )
     };
 
@@ -126,9 +127,16 @@ pub async fn update_generic_stream_metadata(
         active_provider.release_handle(&handle).await;
     }
 
-    let Some((_quality, raw_video, raw_audio)) = probe_data else {
-         warn!("Probe failed or timed out for generic stream: {unique_id}");
-         return Ok(GenericProbeOutcome::ProbeFailed);
+    let (raw_video, raw_audio) = match probe_data {
+        ProbeUrlOutcome::Success(_quality, raw_video, raw_audio) => (raw_video, raw_audio),
+        ProbeUrlOutcome::Failed(ProbeFailureKind::NotFound) => {
+            warn!("Probe target not found (404) for generic stream: {unique_id}");
+            return Err(shared::error::info_err!("Probe target returned 404 Not Found for stream {unique_id}"));
+        }
+        ProbeUrlOutcome::Failed(ProbeFailureKind::Other) => {
+            warn!("Probe failed or timed out for generic stream: {unique_id}");
+            return Ok(GenericProbeOutcome::ProbeFailed);
+        }
     };
 
     // Hold the async file lock while the blocking DB update runs in a blocking thread.
