@@ -504,8 +504,35 @@ impl AppState {
 
 fn proxy_env_present() -> bool { should_use_manual_redirects_for_env_vars(std::env::vars_os()) }
 
+fn parse_proxy_url_with_http_fallback(proxy_url: &str) -> Option<Url> {
+    let trimmed = proxy_url.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Ok(url) = Url::parse(trimmed) {
+        if matches!(url.scheme().to_ascii_lowercase().as_str(), "http" | "https") {
+            return Some(url);
+        }
+        if trimmed.contains("://") {
+            return None;
+        }
+    }
+
+    if trimmed.contains("://") {
+        return None;
+    }
+    if trimmed.starts_with('/') || trimmed.starts_with('\\') {
+        return None;
+    }
+
+    Url::parse(format!("http://{trimmed}").as_str()).ok()
+}
+
 fn should_use_manual_redirect_for_proxy(proxy_url: &str) -> bool {
-    Url::parse(proxy_url).is_ok_and(|url| matches!(url.scheme().to_ascii_lowercase().as_str(), "http" | "https"))
+    parse_proxy_url_with_http_fallback(proxy_url).is_some_and(|url| {
+        matches!(url.scheme().to_ascii_lowercase().as_str(), "http" | "https") && url.host_str().is_some()
+    })
 }
 
 fn should_use_manual_redirects_for_env_vars<I, K, V>(vars: I) -> bool
@@ -578,9 +605,12 @@ mod tests {
     fn should_use_manual_redirect_for_proxy_only_http_or_https() {
         assert!(should_use_manual_redirect_for_proxy("http://proxy.local:8080"));
         assert!(should_use_manual_redirect_for_proxy("https://proxy.local:8443"));
+        assert!(should_use_manual_redirect_for_proxy("proxy.local:8080"));
+        assert!(should_use_manual_redirect_for_proxy("127.0.0.1:8888"));
         assert!(!should_use_manual_redirect_for_proxy("socks5://proxy.local:1080"));
         assert!(!should_use_manual_redirect_for_proxy("socks5h://proxy.local:1080"));
-        assert!(!should_use_manual_redirect_for_proxy("proxy.local:8080"));
+        assert!(!should_use_manual_redirect_for_proxy("://invalid"));
+        assert!(!should_use_manual_redirect_for_proxy("/tmp/proxy.socket"));
     }
 
     #[test]
@@ -592,6 +622,10 @@ mod tests {
         assert!(should_use_manual_redirects_for_env_vars(vec![(
             "all_proxy".to_string(),
             "https://proxy.local:8443".to_string(),
+        )]));
+        assert!(should_use_manual_redirects_for_env_vars(vec![(
+            "HTTP_PROXY".to_string(),
+            "127.0.0.1:8888".to_string(),
         )]));
         assert!(!should_use_manual_redirects_for_env_vars(vec![(
             "ALL_PROXY".to_string(),
