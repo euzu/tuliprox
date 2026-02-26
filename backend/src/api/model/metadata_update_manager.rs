@@ -448,15 +448,6 @@ impl MetadataRetryDbValue {
         }
     }
 
-    fn cleared(updated_at_ts: i64) -> Self {
-        Self {
-            resolve: None,
-            probe: None,
-            tmdb: None,
-            updated_at_ts,
-        }
-    }
-
     fn into_task_retry_state(self) -> Option<TaskRetryState> {
         let mut state = TaskRetryState {
             resolve: self.resolve.and_then(RetryStateDbValue::into_retry_state),
@@ -482,53 +473,27 @@ fn ensure_metadata_retry_db(path: &Path) -> io::Result<()> {
     tree.store(path).map(|_| ())
 }
 
-fn rebuild_metadata_retry_db(path: &Path, remove_key: Option<&MetadataRetryDbKey>) -> io::Result<()> {
-    ensure_metadata_retry_db(path)?;
-
-    let mut keep_entries: Vec<(MetadataRetryDbKey, MetadataRetryDbValue)> = Vec::new();
-    let mut changed = false;
-    {
-        let mut query = BPlusTreeQuery::<MetadataRetryDbKey, MetadataRetryDbValue>::try_new(path)?;
-        for (key, value) in query.iter() {
-            if remove_key.is_some_and(|target| target == &key) {
-                changed = true;
-                continue;
-            }
-            if value.clone().into_task_retry_state().is_none() {
-                changed = true;
-                continue;
-            }
-            keep_entries.push((key, value));
-        }
-    }
-
-    if !changed {
-        return Ok(());
-    }
-
-    let mut tree = BPlusTree::<MetadataRetryDbKey, MetadataRetryDbValue>::new();
-    for (key, value) in keep_entries {
-        tree.insert(key, value);
-    }
-    tree.store(path).map(|_| ())
-}
-
 fn load_metadata_retry_states_from_disk(path: &Path) -> io::Result<HashMap<TaskKey, TaskRetryState>> {
     ensure_metadata_retry_db(path)?;
 
     let mut result = HashMap::new();
-    let mut has_tombstones = false;
+    let mut stale_keys: Vec<MetadataRetryDbKey> = Vec::new();
     let mut query = BPlusTreeQuery::<MetadataRetryDbKey, MetadataRetryDbValue>::try_new(path)?;
     for (key, value) in query.iter() {
         if let Some(state) = value.clone().into_task_retry_state() {
             result.insert(key.into_task_key(), state);
         } else {
-            has_tombstones = true;
+            stale_keys.push(key);
         }
     }
     drop(query);
-    if has_tombstones {
-        rebuild_metadata_retry_db(path, None)?;
+
+    if !stale_keys.is_empty() {
+        let delete_refs: Vec<&MetadataRetryDbKey> = stale_keys.iter().collect();
+        let mut update = BPlusTreeUpdate::<MetadataRetryDbKey, MetadataRetryDbValue>::try_new_with_backoff(path)?;
+        update
+            .delete_batch(&delete_refs)
+            .map_err(|e| io::Error::other(format!("cleanup metadata retry tombstones failed: {e}")))?;
     }
 
     Ok(result)
@@ -539,16 +504,18 @@ fn persist_metadata_retry_state_to_disk(path: &Path, task_key: &TaskKey, state: 
 
     ensure_metadata_retry_db(path)?;
 
-    let now_ts = chrono::Utc::now().timestamp();
-    let value = match state {
-        Some(s) => MetadataRetryDbValue::from_task_retry_state(s, now_ts),
-        None => MetadataRetryDbValue::cleared(now_ts),
-    };
-
     let mut update = BPlusTreeUpdate::<MetadataRetryDbKey, MetadataRetryDbValue>::try_new_with_backoff(path)?;
-    update
-        .upsert_batch(&[(&db_key, &value)])
-        .map_err(|e| io::Error::other(format!("persist metadata retry state failed: {e}")))?;
+    if let Some(retry_state) = state {
+        let now_ts = chrono::Utc::now().timestamp();
+        let value = MetadataRetryDbValue::from_task_retry_state(retry_state, now_ts);
+        update
+            .upsert_batch(&[(&db_key, &value)])
+            .map_err(|e| io::Error::other(format!("persist metadata retry state failed: {e}")))?;
+    } else {
+        update
+            .delete(&db_key)
+            .map_err(|e| io::Error::other(format!("delete metadata retry state failed: {e}")))?;
+    }
     Ok(())
 }
 
