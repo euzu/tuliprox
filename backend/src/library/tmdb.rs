@@ -35,6 +35,8 @@ pub struct TmdbSearchResponse {
 #[derive(Debug, Deserialize)]
 pub struct TmdbMovieSearchResult {
     pub(crate) id: u32,
+    pub(crate) title: String,
+    pub(crate) original_title: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -45,6 +47,8 @@ pub struct TmdbTvSearchResponse {
 #[derive(Debug, Deserialize)]
 pub struct TmdbTvSearchResult {
     pub(crate) id: u32,
+    pub(crate) name: String,
+    pub(crate) original_name: String,
 }
 
 
