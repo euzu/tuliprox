@@ -168,6 +168,10 @@ impl MetadataStorage {
         self.store_file(content, file_path).await
     }
 
+    pub async fn read_tmdb_movie_info(&self, movie_id: u32) -> std::io::Result<Vec<u8>> {
+        fs::read(self.get_tmdb_movie_data_file_path(movie_id)).await
+    }
+
     // write raw tmdb series info
     pub async fn store_tmdb_series_info(&self, series_id: u32, content: &[u8]) -> std::io::Result<PathBuf> {
         let file_path = self.get_tmdb_series_data_file_path(series_id);
@@ -175,12 +179,16 @@ impl MetadataStorage {
         self.store_file(content, file_path).await
     }
 
+    pub async fn read_tmdb_series_info(&self, series_id: u32) -> std::io::Result<Vec<u8>> {
+        fs::read(self.get_tmdb_series_data_file_path(series_id)).await
+    }
+
     async fn store_file(&self, content: &[u8], file_path: PathBuf) -> std::io::Result<PathBuf> {
         // Ensure parent directory exists - unconditionally
         if let Some(parent) = file_path.parent() {
              fs::create_dir_all(parent).await?;
         }
-        
+
         let mut file = fs::File::create(&file_path).await?;
         file.write_all(content).await?;
         file.flush().await?;

@@ -13,16 +13,19 @@ use std::{
     collections::{HashSet, VecDeque},
     hash::Hash,
 };
-use tokio::time::{sleep, Duration, Instant};
+use tokio::time::{sleep, timeout, Duration, Instant};
 use url::Url;
 
 // TODO make this configurable in Library tmdb config
 const TMDB_API_BASE_URL: &str = "https://api.themoviedb.org/3";
 const MAX_RETRIES: u32 = 3;
+const REQUEST_TIMEOUT_SECS: u64 = 30;
 const MAX_FETCHED_CACHE_ENTRIES: usize = 10_000;
 /// Minimum Jaro-Winkler score required to accept a TMDB search result.
 const TMDB_MATCH_THRESHOLD: f64 = 0.9;
 
+/// Bounded set with insertion-order (FIFO) eviction.
+/// This is intentionally not LRU: `contains()` does not refresh recency.
 #[derive(Debug)]
 struct BoundedSet<T>
 where
@@ -84,7 +87,6 @@ pub struct TmdbClient {
     storage: MetadataStorage,
     fetched_movie_metadata: tokio::sync::RwLock<BoundedSet<u32>>,
     fetched_series_metadata: tokio::sync::RwLock<BoundedSet<u32>>,
-    fetched_series_key: tokio::sync::RwLock<BoundedSet<String>>,
     next_request_slot: tokio::sync::Mutex<Instant>,
 }
 
@@ -98,7 +100,6 @@ impl TmdbClient {
             storage,
             fetched_movie_metadata: tokio::sync::RwLock::new(BoundedSet::new(MAX_FETCHED_CACHE_ENTRIES)),
             fetched_series_metadata: tokio::sync::RwLock::new(BoundedSet::new(MAX_FETCHED_CACHE_ENTRIES)),
-            fetched_series_key: tokio::sync::RwLock::new(BoundedSet::new(MAX_FETCHED_CACHE_ENTRIES)),
             next_request_slot: tokio::sync::Mutex::new(Instant::now()),
         }
     }
@@ -124,44 +125,81 @@ impl TmdbClient {
     /// Applies shared rate-limiting and retry logic.
     async fn execute_raw_request(&self, url: &str) -> Result<Option<bytes::Bytes>, String> {
         let safe_url = sanitize_sensitive_info(url);
+        let request_timeout = Duration::from_secs(REQUEST_TIMEOUT_SECS);
         let mut attempt = 0;
         loop {
             attempt += 1;
             self.reserve_rate_limit_slot().await;
-            match self.client.get(url).send().await {
-                Ok(response) => {
-                    let status = response.status();
-                    if status.is_success() {
-                        return response
-                            .bytes()
-                            .await
-                            .map(Some)
-                            .map_err(|err| format!("Failed to read TMDB response body: {err}"));
-                    }
-
-                    if status == reqwest::StatusCode::NOT_FOUND {
-                        return Ok(None);
-                    }
-
-                    let retryable = status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS;
-                    if retryable && attempt < MAX_RETRIES {
-                        warn!("TMDB API error ({status}) for {safe_url}, retrying {attempt}/{MAX_RETRIES}");
+            let response = match timeout(request_timeout, self.client.get(url).send()).await {
+                Ok(Ok(response)) => response,
+                Ok(Err(err)) => {
+                    if attempt < MAX_RETRIES {
+                        warn!(
+                            "TMDB request failed for {safe_url}: {err}, retrying {attempt}/{MAX_RETRIES}"
+                        );
                         sleep(Duration::from_millis(500 * u64::from(attempt))).await;
                         continue;
                     }
-
-                    error!("TMDB API error ({status}) for {safe_url}");
-                    return Err(format!("TMDB API error: {status}"));
+                    return Err(format!("TMDB API request failed after {MAX_RETRIES} attempts: {err}"));
                 }
-                Err(e) => {
+                Err(_) => {
                     if attempt < MAX_RETRIES {
-                        warn!("TMDB request failed for {safe_url}: {e}, retrying {attempt}/{MAX_RETRIES}");
+                        warn!(
+                            "TMDB request timed out for {safe_url} (attempt {attempt}/{MAX_RETRIES}), retrying"
+                        );
                         sleep(Duration::from_millis(500 * u64::from(attempt))).await;
-                    } else {
-                        return Err(format!("TMDB API request failed after {MAX_RETRIES} attempts: {e}"));
+                        continue;
+                    }
+                    return Err(format!(
+                        "TMDB API request timed out after {MAX_RETRIES} attempts for {safe_url}"
+                    ));
+                }
+            };
+
+            let status = response.status();
+            if status.is_success() {
+                match timeout(request_timeout, response.bytes()).await {
+                    Ok(Ok(content)) => return Ok(Some(content)),
+                    Ok(Err(err)) => {
+                        if attempt < MAX_RETRIES {
+                            warn!(
+                                "Failed to read TMDB response body for {safe_url}: {err}, retrying {attempt}/{MAX_RETRIES}"
+                            );
+                            sleep(Duration::from_millis(500 * u64::from(attempt))).await;
+                            continue;
+                        }
+                        return Err(format!(
+                            "Failed to read TMDB response body after {MAX_RETRIES} attempts for {safe_url}: {err}"
+                        ));
+                    }
+                    Err(_) => {
+                        if attempt < MAX_RETRIES {
+                            warn!(
+                                "Timed out reading TMDB response body for {safe_url} (attempt {attempt}/{MAX_RETRIES}), retrying"
+                            );
+                            sleep(Duration::from_millis(500 * u64::from(attempt))).await;
+                            continue;
+                        }
+                        return Err(format!(
+                            "Timed out reading TMDB response body after {MAX_RETRIES} attempts for {safe_url}"
+                        ));
                     }
                 }
             }
+
+            if status == reqwest::StatusCode::NOT_FOUND {
+                return Ok(None);
+            }
+
+            let retryable = status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS;
+            if retryable && attempt < MAX_RETRIES {
+                warn!("TMDB API error ({status}) for {safe_url}, retrying {attempt}/{MAX_RETRIES}");
+                sleep(Duration::from_millis(500 * u64::from(attempt))).await;
+                continue;
+            }
+
+            error!("TMDB API error ({status}) for {safe_url}");
+            return Err(format!("TMDB API error: {status}"));
         }
     }
 
@@ -175,8 +213,9 @@ impl TmdbClient {
         match serde_json::from_slice::<T>(&content) {
             Ok(data) => Ok(Some(data)),
             Err(e) => {
-                warn!("Failed to parse TMDB response from {safe_url}: {e}");
-                Err(e.to_string())
+                let message = format!("Failed to parse TMDB response from {safe_url}: {e}");
+                warn!("{message}");
+                Err(message)
             }
         }
     }
@@ -192,13 +231,6 @@ impl TmdbClient {
         let mut fetched = self.fetched_series_metadata.write().await;
         if fetched.insert(series_id) {
             debug!("TMDB series metadata cache reached limit ({MAX_FETCHED_CACHE_ENTRIES}), evicted one oldest entry.");
-        }
-    }
-
-    async fn remember_series_key(&self, key: String) {
-        let mut fetched = self.fetched_series_key.write().await;
-        if fetched.insert(key) {
-            debug!("TMDB series key cache reached limit ({MAX_FETCHED_CACHE_ENTRIES}), evicted one oldest entry.");
         }
     }
 
@@ -262,6 +294,17 @@ impl TmdbClient {
         Ok(url)
     }
 
+    fn build_movie_details_url(&self, movie_id: u32) -> Result<Url, String> {
+        let mut url = Url::parse(&format!("{TMDB_API_BASE_URL}/movie/{movie_id}"))
+            .map_err(|e| format!("Failed to parse URL for TMDB movie details: {e}"))?;
+        {
+            let mut q = url.query_pairs_mut();
+            q.append_pair("api_key", &self.api_key);
+            q.append_pair("append_to_response", "credits,videos,external_ids");
+        }
+        Ok(url)
+    }
+
     // Fetches detailed movie information
     async fn fetch_movie_details(&self, movie_id: u32) -> Result<Option<MediaMetadata>, String> {
         if movie_id == 0 {
@@ -269,15 +312,19 @@ impl TmdbClient {
         }
 
         if self.fetched_movie_metadata.read().await.contains(&movie_id) {
-            return Ok(None);
+            match self.storage.read_tmdb_movie_info(movie_id).await {
+                Ok(content_bytes) => match serde_json::from_slice::<TmdbMovieDetails>(&content_bytes) {
+                    Ok(details) => return Ok(Some(MediaMetadata::Movie(details.to_meta_data()))),
+                    Err(err) => warn!("Failed to parse cached TMDB movie details for {movie_id}: {err}"),
+                },
+                Err(err) => warn!("Failed to read cached TMDB movie info for {movie_id}: {err}"),
+            }
+            // Fallthrough to fetch if cache read or parse fails
         }
 
-        let url = format!(
-            "{TMDB_API_BASE_URL}/movie/{movie_id}?api_key={}&append_to_response=credits,videos,external_ids",
-            self.api_key
-        );
+        let url = self.build_movie_details_url(movie_id)?;
 
-        let Some(content_bytes) = self.execute_raw_request(&url).await? else {
+        let Some(content_bytes) = self.execute_raw_request(url.as_str()).await? else {
             warn!("TMDB Movie ID {movie_id} not found");
             return Ok(None);
         };
@@ -300,7 +347,6 @@ impl TmdbClient {
         title: &str,
         year: Option<u32>,
     ) -> Result<Option<MediaMetadata>, String> {
-        let key = format!("{title}-{tmdb_id:?}-{year:?}");
 
         if let Some(id) = tmdb_id {
             debug!("Searching TMDB for series: {title} [ID: {id}]");
@@ -308,24 +354,14 @@ impl TmdbClient {
             debug!("Searching TMDB for series: {title}");
         }
 
-        if self.fetched_series_key.read().await.contains(&key) {
-            return Ok(None);
-        }
-
         // Validate ID is not 0
         let valid_id = tmdb_id.filter(|&id| id > 0);
 
-        let result = if let Some(series_id) = valid_id {
+        if let Some(series_id) = valid_id {
             self.fetch_series_details(series_id).await
         } else {
             self.search_series_by_title(title, year).await
-        };
-
-        if result.as_ref().is_ok_and(Option::is_some) {
-            self.remember_series_key(key).await;
         }
-
-        result
     }
 
     async fn search_series_by_title(&self, title: &str, year: Option<u32>) -> Result<Option<MediaMetadata>, String> {
@@ -387,16 +423,26 @@ impl TmdbClient {
     pub async fn fetch_series_details(&self, series_id: u32) -> Result<Option<MediaMetadata>, String> {
         // Skip if metadata already fetched
         if self.fetched_series_metadata.read().await.contains(&series_id) {
-            return Ok(None);
+            match self.storage.read_tmdb_series_info(series_id).await {
+                Ok(content_bytes) => match serde_json::from_slice::<TmdbSeriesInfoDetails>(&content_bytes) {
+                    Ok(details) => return Ok(Some(MediaMetadata::Series(details.to_meta_data()))),
+                    Err(err) => warn!("Failed to parse cached TMDB series details for {series_id}: {err}"),
+                },
+                Err(err) => warn!("Failed to read cached TMDB series info for {series_id}: {err}"),
+            }
+            // Fallthrough to fetch if cache read or parse fails
         }
 
         // Fetch series info from TMDB API
-        let url = format!(
-            "{TMDB_API_BASE_URL}/tv/{series_id}?api_key={}&append_to_response=credits,videos,external_ids",
-            self.api_key
-        );
+        let mut url = Url::parse(&format!("{TMDB_API_BASE_URL}/tv/{series_id}"))
+            .map_err(|e| format!("Failed to parse URL for TMDB series details: {e}"))?;
+        {
+            let mut q = url.query_pairs_mut();
+            q.append_pair("api_key", &self.api_key);
+            q.append_pair("append_to_response", "credits,videos,external_ids");
+        }
 
-        let Some(series_content) = self.execute_raw_request(&url).await? else {
+        let Some(series_content) = self.execute_raw_request(url.as_str()).await? else {
             warn!("TMDB Series ID {series_id} not found");
             return Ok(None);
         };
@@ -509,12 +555,22 @@ impl TmdbClient {
         series_id: u32,
         season: u32,
     ) -> (Option<TmdbSeriesInfoSeasonDetails>, Option<bytes::Bytes>) {
-        let url = format!(
-            "{TMDB_API_BASE_URL}/tv/{series_id}/season/{season}?api_key={}&append_to_response=credits",
-            self.api_key
-        );
+        let url = match Url::parse(&format!("{TMDB_API_BASE_URL}/tv/{series_id}/season/{season}")) {
+            Ok(mut u) => {
+                {
+                    let mut q = u.query_pairs_mut();
+                    q.append_pair("api_key", &self.api_key);
+                    q.append_pair("append_to_response", "credits");
+                }
+                u
+            }
+            Err(e) => {
+                error!("Failed to parse TMDB season URL for {series_id} S{season}: {e}");
+                return (None, None);
+            }
+        };
 
-        match self.execute_raw_request(&url).await {
+        match self.execute_raw_request(url.as_str()).await {
             Ok(Some(bytes)) => match serde_json::from_slice::<TmdbSeriesInfoSeasonDetails>(bytes.as_ref()) {
                 Ok(details) => (Some(details), Some(bytes)),
                 Err(e) => {
