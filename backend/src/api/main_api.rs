@@ -132,7 +132,7 @@ async fn create_shared_data(
     })
 }
 
-fn exec_update_on_boot(client: &reqwest::Client, app_state: &Arc<AppState>, targets: &Arc<ProcessTargets>) {
+fn exec_update_on_boot(client: &reqwest::Client, app_state: &Arc<AppState>, targets: &Arc<ProcessTargets>) -> bool {
     let cfg = &app_state.app_config;
     let update_on_boot = {
         let config = cfg.config.load();
@@ -167,7 +167,9 @@ fn exec_update_on_boot(client: &reqwest::Client, app_state: &Arc<AppState>, targ
             )
             .await;
         });
+        return true;
     }
+    false
 }
 
 fn is_web_auth_enabled(cfg: &Arc<Config>, web_ui_enabled: bool) -> bool {
@@ -298,11 +300,11 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
 
     let client = shared_data.http_client.load();
 
-    sync_panel_api_exp_dates_on_boot(&app_state).await;
+    if !exec_update_on_boot(client.as_ref(), &app_state, &targets) {
+        sync_panel_api_exp_dates_on_boot(&app_state).await;
+    }
 
     exec_scheduler(client.as_ref(), &app_state, &targets, &cancel_token_scheduler);
-
-    exec_update_on_boot(client.as_ref(), &app_state, &targets);
 
     exec_file_lock_prune(&app_state);
 
