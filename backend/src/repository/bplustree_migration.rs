@@ -16,6 +16,8 @@ const HEADER_FLAG_HAS_TOMBSTONES: u32 = 1 << 30;
 const HEADER_METADATA_LEN_MASK: u32 = !(HEADER_FLAG_HAS_METADATA_FLAGS | HEADER_FLAG_HAS_TOMBSTONES);
 const MARKER_FILE_PREFIX: &str = ".db_mergeto";
 const LEGACY_MARKER_FILE_PREFIX_ALT: &str = ".db_mergedto";
+const MARKER_VERSION_KEY: &str = "migrated_to";
+const MARKER_ROOTS_FINGERPRINT_KEY: &str = "roots_fingerprint";
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct BPlusTreeMigrationStats {
@@ -41,21 +43,16 @@ impl BPlusTreeStartupMigrator {
     pub fn run(&self) -> io::Result<BPlusTreeMigrationStats> {
         let mut stats = BPlusTreeMigrationStats::default();
         self.cleanup_legacy_root_markers(self.migration_marker_path.as_deref())?;
-        if self.migration_marker_path.as_ref().is_some_and(|path| path.exists()) {
-            stats.skipped_by_marker = true;
-            return Ok(stats);
+        let resolved_roots = Self::resolve_scan_roots(&self.roots);
+        let roots_fingerprint = Self::roots_fingerprint(&resolved_roots);
+        if let Some(marker_path) = &self.migration_marker_path {
+            if Self::marker_matches(marker_path, &roots_fingerprint)? {
+                stats.skipped_by_marker = true;
+                return Ok(stats);
+            }
         }
 
-        let mut visited_roots: HashSet<PathBuf> = HashSet::new();
-
-        for root in &self.roots {
-            if !root.exists() || !root.is_dir() {
-                continue;
-            }
-            if !visited_roots.insert(root.clone()) {
-                continue;
-            }
-
+        for root in &resolved_roots {
             let files = Self::collect_db_files_for_root(root)?;
             for file in files {
                 stats.scanned_files = stats.scanned_files.saturating_add(1);
@@ -73,10 +70,49 @@ impl BPlusTreeStartupMigrator {
         }
 
         if let Some(marker_path) = &self.migration_marker_path {
-            Self::write_migration_marker(marker_path)?;
+            Self::write_migration_marker(marker_path, &roots_fingerprint)?;
         }
 
         Ok(stats)
+    }
+
+    fn resolve_scan_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
+        let mut resolved: Vec<PathBuf> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+
+        for root in roots {
+            if !root.exists() || !root.is_dir() {
+                continue;
+            }
+            let resolved_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+            let key = resolved_root.to_string_lossy().into_owned();
+            if seen.insert(key) {
+                resolved.push(resolved_root);
+            }
+        }
+
+        resolved
+    }
+
+    fn roots_fingerprint(roots: &[PathBuf]) -> String {
+        const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+        const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+        let mut canonical_entries: Vec<String> = roots.iter().map(|path| path.to_string_lossy().into_owned()).collect();
+        canonical_entries.sort_unstable();
+        canonical_entries.dedup();
+
+        let mut hash = FNV_OFFSET_BASIS;
+        for entry in &canonical_entries {
+            for byte in entry.as_bytes() {
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(FNV_PRIME);
+            }
+            hash ^= 0xff;
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+
+        format!("{hash:016x}")
     }
 
     fn cleanup_legacy_root_markers(&self, keep_marker_path: Option<&Path>) -> io::Result<()> {
@@ -143,14 +179,53 @@ impl BPlusTreeStartupMigrator {
         Ok(files)
     }
 
-    fn write_migration_marker(marker_path: &Path) -> io::Result<()> {
+    fn marker_matches(marker_path: &Path, expected_fingerprint: &str) -> io::Result<bool> {
+        let Some(stored_fingerprint) = Self::read_migration_marker_fingerprint(marker_path)? else {
+            return Ok(false);
+        };
+        Ok(stored_fingerprint == expected_fingerprint)
+    }
+
+    fn read_migration_marker_fingerprint(marker_path: &Path) -> io::Result<Option<String>> {
+        let content = match std::fs::read_to_string(marker_path) {
+            Ok(content) => content,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err),
+        };
+
+        let mut marker_version: Option<String> = None;
+        let mut roots_fingerprint: Option<String> = None;
+
+        for line in content.lines() {
+            if let Some(value) = line.strip_prefix(MARKER_VERSION_KEY).and_then(|rest| rest.strip_prefix('=')) {
+                marker_version = Some(value.trim().to_string());
+                continue;
+            }
+            if let Some(value) = line.strip_prefix(MARKER_ROOTS_FINGERPRINT_KEY).and_then(|rest| rest.strip_prefix('='))
+            {
+                roots_fingerprint = Some(value.trim().to_string());
+            }
+        }
+
+        let expected_version = STORAGE_VERSION.to_string();
+        if marker_version.as_deref() != Some(expected_version.as_str()) {
+            return Ok(None);
+        }
+
+        Ok(roots_fingerprint.filter(|value| !value.is_empty()))
+    }
+
+    fn write_migration_marker(marker_path: &Path, roots_fingerprint: &str) -> io::Result<()> {
         if let Some(parent) = marker_path.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent)?;
             }
         }
         let mut file = OpenOptions::new().create(true).write(true).truncate(true).open(marker_path)?;
-        file.write_all(format!("migrated_to={STORAGE_VERSION}\n").as_bytes())?;
+        file.write_all(
+            format!("{MARKER_VERSION_KEY}={STORAGE_VERSION}\n{MARKER_ROOTS_FINGERPRINT_KEY}={roots_fingerprint}\n")
+                .as_bytes(),
+        )?;
         file.flush()?;
         file.sync_data()?;
         Ok(())
@@ -211,9 +286,11 @@ impl BPlusTreeStartupMigrator {
             ));
         }
 
+        let _flags_written = Self::normalize_metadata_flags(&mut file)?;
+        file.sync_data()?;
+
         file.seek(SeekFrom::Start(4))?;
         file.write_all(&STORAGE_VERSION.to_le_bytes())?;
-        let _flags_written = Self::normalize_metadata_flags(&mut file)?;
         file.flush()?;
         file.sync_data()?;
         Ok(FileMigrationOutcome::Migrated)
@@ -274,6 +351,11 @@ mod tests {
     use super::*;
     use std::io::Read;
     use tempfile::tempdir;
+
+    fn test_roots_fingerprint(roots: &[PathBuf]) -> String {
+        let resolved = BPlusTreeStartupMigrator::resolve_scan_roots(roots);
+        BPlusTreeStartupMigrator::roots_fingerprint(&resolved)
+    }
 
     #[test]
     fn startup_migrator_upgrades_legacy_bplustree_files() -> io::Result<()> {
@@ -378,9 +460,11 @@ mod tests {
         drop(file);
 
         let marker = bplustree_migration_marker_path(temp.path());
-        BPlusTreeStartupMigrator::write_migration_marker(&marker)?;
+        let roots = [temp.path().to_path_buf()];
+        let fingerprint = test_roots_fingerprint(&roots);
+        BPlusTreeStartupMigrator::write_migration_marker(&marker, &fingerprint)?;
 
-        let stats = migrate_bplustree_databases_with_marker(&[temp.path().to_path_buf()], temp.path())?;
+        let stats = migrate_bplustree_databases_with_marker(&roots, temp.path())?;
         assert_eq!(stats.scanned_files, 0);
         assert_eq!(stats.bplustree_files, 0);
         assert_eq!(stats.migrated_files, 0);
@@ -403,19 +487,45 @@ mod tests {
         let temp_other = tempdir()?;
         let marker_dir = temp_root.path();
         let global_marker = bplustree_migration_marker_path(marker_dir);
-        BPlusTreeStartupMigrator::write_migration_marker(&global_marker)?;
+        let roots = [marker_dir.to_path_buf(), temp_other.path().to_path_buf()];
+        let fingerprint = test_roots_fingerprint(&roots);
+        BPlusTreeStartupMigrator::write_migration_marker(&global_marker, &fingerprint)?;
 
         let legacy_per_root_marker = temp_other.path().join(format!("{MARKER_FILE_PREFIX}{STORAGE_VERSION}"));
-        BPlusTreeStartupMigrator::write_migration_marker(&legacy_per_root_marker)?;
+        BPlusTreeStartupMigrator::write_migration_marker(&legacy_per_root_marker, "legacy")?;
         assert!(legacy_per_root_marker.exists());
 
-        let stats = migrate_bplustree_databases_with_marker(
-            &[marker_dir.to_path_buf(), temp_other.path().to_path_buf()],
-            marker_dir,
-        )?;
+        let stats = migrate_bplustree_databases_with_marker(&roots, marker_dir)?;
         assert!(stats.skipped_by_marker);
         assert!(!legacy_per_root_marker.exists());
         assert!(global_marker.exists());
+
+        Ok(())
+    }
+
+    #[test]
+    fn startup_migrator_does_not_skip_when_marker_fingerprint_differs() -> io::Result<()> {
+        let temp_a = tempdir()?;
+        let temp_b = tempdir()?;
+        let db_path = temp_a.path().join("legacy.db");
+
+        let mut file = OpenOptions::new().create(true).truncate(true).read(true).write(true).open(&db_path)?;
+        let mut header = [0u8; 4096];
+        header[0..4].copy_from_slice(MAGIC);
+        header[4..8].copy_from_slice(&LEGACY_STORAGE_VERSION.to_le_bytes());
+        file.write_all(&header)?;
+        file.flush()?;
+        drop(file);
+
+        let marker = bplustree_migration_marker_path(temp_a.path());
+        let old_roots = [temp_a.path().to_path_buf()];
+        let old_fingerprint = test_roots_fingerprint(&old_roots);
+        BPlusTreeStartupMigrator::write_migration_marker(&marker, &old_fingerprint)?;
+
+        let current_roots = [temp_a.path().to_path_buf(), temp_b.path().to_path_buf()];
+        let stats = migrate_bplustree_databases_with_marker(&current_roots, temp_a.path())?;
+        assert!(!stats.skipped_by_marker);
+        assert_eq!(stats.migrated_files, 1);
 
         Ok(())
     }
