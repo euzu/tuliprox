@@ -448,6 +448,15 @@ impl MetadataRetryDbValue {
         }
     }
 
+    fn cleared(updated_at_ts: i64) -> Self {
+        Self {
+            resolve: None,
+            probe: None,
+            tmdb: None,
+            updated_at_ts,
+        }
+    }
+
     fn into_task_retry_state(self) -> Option<TaskRetryState> {
         let mut state = TaskRetryState {
             resolve: self.resolve.and_then(RetryStateDbValue::into_retry_state),
@@ -530,9 +539,10 @@ fn persist_metadata_retry_state_to_disk(path: &Path, task_key: &TaskKey, state: 
 
     ensure_metadata_retry_db(path)?;
 
+    let now_ts = chrono::Utc::now().timestamp();
     let value = match state {
-        Some(s) => MetadataRetryDbValue::from_task_retry_state(s, chrono::Utc::now().timestamp()),
-        None => return rebuild_metadata_retry_db(path, Some(&db_key)),
+        Some(s) => MetadataRetryDbValue::from_task_retry_state(s, now_ts),
+        None => MetadataRetryDbValue::cleared(now_ts),
     };
 
     let mut update = BPlusTreeUpdate::<MetadataRetryDbKey, MetadataRetryDbValue>::try_new_with_backoff(path)?;
