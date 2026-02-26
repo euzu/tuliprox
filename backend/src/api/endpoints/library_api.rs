@@ -1,11 +1,15 @@
-use crate::api::model::{AppState, EventMessage};
+use crate::{
+    api::{
+        library_scan::spawn_library_scan,
+        model::{AppState, EventMessage},
+    },
+    library::LibraryProcessor,
+};
 use axum::response::IntoResponse;
 use log::{debug, warn};
-use std::sync::Arc;
 use serde_json::json;
 use shared::model::{LibraryScanRequest, LibraryScanSummary, LibraryScanSummaryStatus, LibraryStatus};
-use crate::api::library_scan::spawn_library_scan;
-use crate::library::LibraryProcessor;
+use std::sync::Arc;
 
 // Triggers a library scan
 async fn scan_library(
@@ -22,7 +26,11 @@ async fn scan_library(
             result: None,
         };
         let _ = app_state.event_manager.send_event(EventMessage::LibraryScanProgress(response));
-        return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": "Library update already in progress.".to_string()}))).into_response();
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": "Library update already in progress.".to_string()})),
+        )
+            .into_response();
     };
 
     // Check if Library is enabled
@@ -37,32 +45,26 @@ async fn scan_library(
                     result: None,
                 };
                 let _ = app_state.event_manager.send_event(EventMessage::LibraryScanProgress(response));
-                return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": "Library is not enabled".to_string()}))).into_response();
+                return (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    axum::Json(json!({"error": "Library is not enabled".to_string()})),
+                )
+                    .into_response();
             }
         }
     };
 
     let client = app_state.http_client.load_full().as_ref().clone();
     let event_manager = Arc::clone(&app_state.event_manager);
-    spawn_library_scan(
-        event_manager,
-        lib_config,
-        metadata_update_config,
-        client,
-        request.force_rescan,
-        "",
-        permit,
-    );
+    spawn_library_scan(event_manager, lib_config, metadata_update_config, client, request.force_rescan, "", permit);
 
     axum::http::StatusCode::ACCEPTED.into_response()
-
 }
 
 /// Gets Library status
 async fn get_library_status(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
 ) -> axum::response::Response {
-
     let config_snapshot = app_state.app_config.config.load();
     if let Some(config) = config_snapshot.library.as_ref() {
         if config.enabled {
@@ -71,14 +73,8 @@ async fn get_library_status(
             let processor = LibraryProcessor::new(config.clone(), config_snapshot.metadata_update.as_ref(), client);
             let entries = processor.get_all_entries().await;
 
-            let movies = entries
-                .iter()
-                .filter(|e| e.metadata.is_movie())
-                .count();
-            let series = entries
-                .iter()
-                .filter(|e| e.metadata.is_series())
-                .count();
+            let movies = entries.iter().filter(|e| e.metadata.is_movie()).count();
+            let series = entries.iter().filter(|e| e.metadata.is_series()).count();
 
             let response = LibraryStatus {
                 enabled: true,
@@ -94,9 +90,7 @@ async fn get_library_status(
 
     let response = LibraryStatus::default();
     axum::Json(response).into_response()
-
 }
-
 
 /// Registers Library API routes
 pub fn library_api_register(router: axum::Router<Arc<AppState>>) -> axum::Router<Arc<AppState>> {

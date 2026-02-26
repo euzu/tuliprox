@@ -1,16 +1,21 @@
-use crate::api::config_file::ConfigFile;
-use crate::api::model::{
-    create_panel_api_provisioning_stream_with_stop, create_provider_connections_exhausted_stream,
-    AppState, StreamDetails,
-};
-use crate::model::{is_input_expired, ConfigInput, ConfigInputAlias, GracePeriodOptions, PanelApiConfig, PanelApiQueryParam, ProxyUserCredentials};
-use crate::repository::{
-    csv_patch_batch_append, csv_patch_batch_remove_expired, csv_patch_batch_sort_by_exp_date,
-    csv_patch_batch_update_credentials, csv_patch_batch_update_exp_date, get_csv_file_path,
-};
-use crate::tools::atomic_once_flag::AtomicOnceFlag;
-use crate::utils::{
-    debug_if_enabled, format_http_status, persist_source_config, read_sources_file_from_path,
+use crate::{
+    api::{
+        config_file::ConfigFile,
+        model::{
+            create_panel_api_provisioning_stream_with_stop, create_provider_connections_exhausted_stream, AppState,
+            StreamDetails,
+        },
+    },
+    model::{
+        is_input_expired, ConfigInput, ConfigInputAlias, GracePeriodOptions, PanelApiConfig, PanelApiQueryParam,
+        ProxyUserCredentials,
+    },
+    repository::{
+        csv_patch_batch_append, csv_patch_batch_remove_expired, csv_patch_batch_sort_by_exp_date,
+        csv_patch_batch_update_credentials, csv_patch_batch_update_exp_date, get_csv_file_path,
+    },
+    tools::atomic_once_flag::AtomicOnceFlag,
+    utils::{debug_if_enabled, format_http_status, persist_source_config, read_sources_file_from_path},
 };
 use axum::http::{Method, StatusCode};
 use chrono::{NaiveDateTime, TimeZone};
@@ -19,20 +24,26 @@ use jsonwebtoken::get_current_timestamp;
 use log::{error, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use shared::concat_string;
-use shared::create_bitset;
-use shared::error::{info_err, info_err_res, TuliproxError};
-use shared::model::{
-    ConfigInputAliasDto, InputType, PanelApiAliasPoolSizeValue,
-    PanelApiProvisioningMethod, ProxyUserStatus, SourcesConfigDto, VirtualId,
+use shared::{
+    concat_string, create_bitset,
+    error::{info_err, info_err_res, TuliproxError},
+    model::{
+        ConfigInputAliasDto, InputType, PanelApiAliasPoolSizeValue, PanelApiProvisioningMethod, ProxyUserStatus,
+        SourcesConfigDto, VirtualId,
+    },
+    utils::{
+        get_base_url_from_str, get_credentials_from_url, get_credentials_from_url_str, get_i64_from_serde_value,
+        get_string_from_serde_value, parse_timestamp, sanitize_sensitive_info, Internable,
+    },
 };
-use shared::utils::{get_base_url_from_str, get_credentials_from_url, get_credentials_from_url_str, get_i64_from_serde_value, get_string_from_serde_value, parse_timestamp, sanitize_sensitive_info, Internable};
-use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::{
+    cmp::Ordering,
+    collections::{HashMap, HashSet},
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use url::Url;
 
 #[derive(Debug, Clone)]
@@ -79,10 +90,7 @@ fn parse_boolish(value: &Value) -> bool {
     match value {
         Value::Bool(b) => *b,
         Value::Number(n) => n.as_i64().unwrap_or(0) != 0,
-        Value::String(s) => matches!(
-            s.trim().to_lowercase().as_str(),
-            "true" | "1" | "yes" | "y" | "ok"
-        ),
+        Value::String(s) => matches!(s.trim().to_lowercase().as_str(), "true" | "1" | "yes" | "y" | "ok"),
         _ => false,
     }
 }
@@ -140,11 +148,7 @@ fn parse_panel_expire_with_tz(value: &str, tz: Tz) -> Option<i64> {
     if let Ok(ts) = value.parse::<i64>() {
         return Some(ts);
     }
-    let value = if is_date_only_yyyy_mm_dd(value) {
-        format!("{value} 00:00:00")
-    } else {
-        value.to_string()
-    };
+    let value = if is_date_only_yyyy_mm_dd(value) { format!("{value} 00:00:00") } else { value.to_string() };
     let dt = NaiveDateTime::parse_from_str(&value, "%Y-%m-%d %H:%M:%S").ok()?;
     match tz.from_local_datetime(&dt) {
         chrono::LocalResult::Single(local_dt) => Some(local_dt.timestamp()),
@@ -162,10 +166,9 @@ fn normalize_panel_expire(value: &str, ctx: Option<&PanelApiTimeContext>) -> Opt
     }
     match ctx.expire_mode {
         PanelApiExpireMode::UtcString => parse_panel_expire_utc(value),
-        PanelApiExpireMode::ServerTzString => ctx
-            .server_tz
-            .and_then(|tz| parse_panel_expire_with_tz(value, tz))
-            .or_else(|| parse_panel_expire_utc(value)),
+        PanelApiExpireMode::ServerTzString => {
+            ctx.server_tz.and_then(|tz| parse_panel_expire_with_tz(value, tz)).or_else(|| parse_panel_expire_utc(value))
+        }
     }
 }
 
@@ -173,8 +176,7 @@ fn is_input_expired_at(exp_date: Option<i64>, now: u64) -> bool {
     let Some(exp_date) = exp_date else {
         return false;
     };
-    u64::try_from(exp_date)
-        .map_or(true, |exp_ts| exp_ts <= now)
+    u64::try_from(exp_date).map_or(true, |exp_ts| exp_ts <= now)
 }
 
 fn is_expiring_with_offset_at(exp_date: Option<i64>, offset_secs: u64, now: u64) -> bool {
@@ -198,19 +200,9 @@ fn first_json_object(value: &Value) -> Option<&serde_json::Map<String, Value>> {
     }
 }
 
-fn extract_username_password_from_json(
-    obj: &serde_json::Map<String, Value>,
-) -> Option<(String, String)> {
-    let username = obj
-        .get("username")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-    let password = obj
-        .get("password")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
+fn extract_username_password_from_json(obj: &serde_json::Map<String, Value>) -> Option<(String, String)> {
+    let username = obj.get("username").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty());
+    let password = obj.get("password").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty());
     match (username, password) {
         (Some(u), Some(p)) => Some((u.to_string(), p.to_string())),
         _ => None,
@@ -218,10 +210,7 @@ fn extract_username_password_from_json(
 }
 
 fn validate_type_is_m3u(params: &[PanelApiQueryParam]) -> Result<(), TuliproxError> {
-    let typ = params
-        .iter()
-        .find(|p| p.key.trim().eq_ignore_ascii_case("type"))
-        .map(|p| p.value.trim().to_string());
+    let typ = params.iter().find(|p| p.key.trim().eq_ignore_ascii_case("type")).map(|p| p.value.trim().to_string());
     let typ_str = typ.as_deref().unwrap_or_default();
     if typ_str.trim().eq_ignore_ascii_case("m3u") {
         Ok(())
@@ -233,32 +222,19 @@ fn validate_type_is_m3u(params: &[PanelApiQueryParam]) -> Result<(), TuliproxErr
 }
 
 fn require_api_key_param(params: &[PanelApiQueryParam], section: &str) -> Result<(), TuliproxError> {
-    let api_key = params
-        .iter()
-        .find(|p| p.key.trim().eq_ignore_ascii_case("api_key"));
+    let api_key = params.iter().find(|p| p.key.trim().eq_ignore_ascii_case("api_key"));
     let Some(api_key) = api_key else {
-        return info_err_res!(
-            "panel_api: {section} must contain query param 'api_key' (use value 'auto')"
-        );
+        return info_err_res!("panel_api: {section} must contain query param 'api_key' (use value 'auto')");
     };
     if api_key.value.trim().is_empty() {
-        return info_err_res!(
-            "panel_api: {section} query param 'api_key' must not be empty (use value 'auto')"
-        );
+        return info_err_res!("panel_api: {section} query param 'api_key' must not be empty (use value 'auto')");
     }
     Ok(())
 }
 
-fn require_username_password_params_auto(
-    params: &[PanelApiQueryParam],
-    section: &str,
-) -> Result<(), TuliproxError> {
-    let username = params
-        .iter()
-        .find(|p| p.key.trim().eq_ignore_ascii_case("username"));
-    let password = params
-        .iter()
-        .find(|p| p.key.trim().eq_ignore_ascii_case("password"));
+fn require_username_password_params_auto(params: &[PanelApiQueryParam], section: &str) -> Result<(), TuliproxError> {
+    let username = params.iter().find(|p| p.key.trim().eq_ignore_ascii_case("username"));
+    let password = params.iter().find(|p| p.key.trim().eq_ignore_ascii_case("password"));
     if username.is_none() || password.is_none() {
         return info_err_res!(
             "panel_api: {section} must contain query params 'username' and 'password' (use value 'auto')"
@@ -277,10 +253,7 @@ fn require_username_password_params_auto(
 fn validate_client_new_params(params: &[PanelApiQueryParam]) -> Result<(), TuliproxError> {
     require_api_key_param(params, "query_parameter.client_new")?;
     validate_type_is_m3u(params)?;
-    if params
-        .iter()
-        .any(|p| p.key.trim().eq_ignore_ascii_case("user"))
-    {
+    if params.iter().any(|p| p.key.trim().eq_ignore_ascii_case("user")) {
         return info_err_res!("panel_api: client_new must not contain query param 'user'");
     }
     Ok(())
@@ -301,47 +274,27 @@ fn validate_client_info_params(params: &[PanelApiQueryParam]) -> Result<(), Tuli
 
 fn validate_account_info_params(params: &[PanelApiQueryParam]) -> Result<(), TuliproxError> {
     require_api_key_param(params, "query_parameter.account_info")?;
-    let has_user = params
-        .iter()
-        .any(|p| p.key.trim().eq_ignore_ascii_case("username"));
-    let has_pass = params
-        .iter()
-        .any(|p| p.key.trim().eq_ignore_ascii_case("password"));
+    let has_user = params.iter().any(|p| p.key.trim().eq_ignore_ascii_case("username"));
+    let has_pass = params.iter().any(|p| p.key.trim().eq_ignore_ascii_case("password"));
     if has_user || has_pass {
         require_username_password_params_auto(params, "query_parameter.account_info")?;
     }
     Ok(())
 }
 
-fn validate_client_adult_content_params(
-    params: &[PanelApiQueryParam],
-) -> Result<(), TuliproxError> {
+fn validate_client_adult_content_params(params: &[PanelApiQueryParam]) -> Result<(), TuliproxError> {
     require_api_key_param(params, "query_parameter.client_adult_content")?;
-    let has_user = params
-        .iter()
-        .any(|p| p.key.trim().eq_ignore_ascii_case("username"));
-    let has_pass = params
-        .iter()
-        .any(|p| p.key.trim().eq_ignore_ascii_case("password"));
+    let has_user = params.iter().any(|p| p.key.trim().eq_ignore_ascii_case("username"));
+    let has_pass = params.iter().any(|p| p.key.trim().eq_ignore_ascii_case("password"));
     if has_user || has_pass {
         require_username_password_params_auto(params, "query_parameter.client_adult_content")?;
     }
     Ok(())
 }
 
-create_bitset!(
-    u8,
-    PanelApiOptionalFlags,
-    AccountInfo,
-    ClientNew,
-    ClientRenew,
-    AdultContent
-);
+create_bitset!(u8, PanelApiOptionalFlags, AccountInfo, ClientNew, ClientRenew, AdultContent);
 
-fn resolve_panel_api_optional_flags(
-    cfg: &PanelApiConfig,
-    input_name: &str,
-) -> PanelApiOptionalFlagsSet {
+fn resolve_panel_api_optional_flags(cfg: &PanelApiConfig, input_name: &str) -> PanelApiOptionalFlagsSet {
     let mut flags = PanelApiOptionalFlagsSet::new();
     if !cfg.query_parameter.account_info.is_empty() {
         flags.set(PanelApiOptionalFlags::AccountInfo);
@@ -358,28 +311,16 @@ fn resolve_panel_api_optional_flags(
 
     let name = sanitize_sensitive_info(input_name);
     if !flags.contains(PanelApiOptionalFlags::ClientRenew) {
-        debug_if_enabled!(
-            "panel_api request for client_renew disabled due to missing arguments for {}",
-            name
-        );
+        debug_if_enabled!("panel_api request for client_renew disabled due to missing arguments for {}", name);
     }
     if !flags.contains(PanelApiOptionalFlags::ClientNew) {
-        debug_if_enabled!(
-            "panel_api request for client_new disabled due to missing arguments for {}",
-            name
-        );
+        debug_if_enabled!("panel_api request for client_new disabled due to missing arguments for {}", name);
     }
     if !flags.contains(PanelApiOptionalFlags::AdultContent) {
-        debug_if_enabled!(
-            "panel_api request for client_adult_content disabled due to missing arguments for {}",
-            name
-        );
+        debug_if_enabled!("panel_api request for client_adult_content disabled due to missing arguments for {}", name);
     }
     if !flags.contains(PanelApiOptionalFlags::AccountInfo) {
-        debug_if_enabled!(
-            "panel_api request for account_info disabled due to missing arguments for {}",
-            name
-        );
+        debug_if_enabled!("panel_api request for account_info disabled due to missing arguments for {}", name);
     }
     flags
 }
@@ -410,12 +351,9 @@ fn parse_panel_api_provisioning_offset_secs(offset: &str) -> Result<u64, Tulipro
             "panel_api.provisioning.offset must be a number with optional suffix s/m/h/d (e.g. 30m, 12h), got '{raw}'"
         );
     }
-    let value: u64 = num_part
-        .parse()
-        .map_err(|_| info_err!("panel_api.provisioning.offset is not a valid number: '{raw}'"))?;
-    value
-        .checked_mul(multiplier)
-        .ok_or_else(|| info_err!("panel_api.provisioning.offset is too large: '{raw}'"))
+    let value: u64 =
+        num_part.parse().map_err(|_| info_err!("panel_api.provisioning.offset is not a valid number: '{raw}'"))?;
+    value.checked_mul(multiplier).ok_or_else(|| info_err!("panel_api.provisioning.offset is too large: '{raw}'"))
 }
 
 fn validate_panel_api_config(cfg: &PanelApiConfig) -> Result<(), TuliproxError> {
@@ -459,9 +397,7 @@ fn validate_panel_api_config(cfg: &PanelApiConfig) -> Result<(), TuliproxError> 
     let max = max_val.and_then(PanelApiAliasPoolSizeValue::as_number);
     if let (Some(min), Some(max)) = (min, max) {
         if min > max {
-            return info_err_res!(
-                "panel_api.alias_pool.size.min must be <= panel_api.alias_pool.size.max"
-            );
+            return info_err_res!("panel_api.alias_pool.size.min must be <= panel_api.alias_pool.size.max");
         }
     }
     if cfg.provisioning.probe_interval_sec == 0 {
@@ -488,9 +424,7 @@ fn resolve_query_params(
         if value.eq_ignore_ascii_case("auto") {
             if key.eq_ignore_ascii_case("api_key") {
                 let Some(k) = api_key.filter(|s| !s.trim().is_empty()) else {
-                    return info_err_res!(
-                        "panel_api: query param {key} uses 'auto' but panel_api.api_key is missing"
-                    );
+                    return info_err_res!("panel_api: query param {key} uses 'auto' but panel_api.api_key is missing");
                 };
                 value = k.to_string();
             } else if key.eq_ignore_ascii_case("username") {
@@ -514,12 +448,8 @@ fn resolve_query_params(
     Ok(out)
 }
 
-fn build_panel_url(
-    base_url: &str,
-    query_params: &[(String, String)],
-) -> Result<Url, TuliproxError> {
-    let mut url =
-        Url::parse(base_url).map_err(|e| info_err!("panel_api: invalid url {base_url}: {e}"))?;
+fn build_panel_url(base_url: &str, query_params: &[(String, String)]) -> Result<Url, TuliproxError> {
+    let mut url = Url::parse(base_url).map_err(|e| info_err!("panel_api: invalid url {base_url}: {e}"))?;
     {
         let mut pairs = url.query_pairs_mut();
         for (k, v) in query_params {
@@ -531,11 +461,9 @@ fn build_panel_url(
 
 fn sanitize_panel_api_json_for_log(value: &Value, sanitize_sensitive: bool) -> Value {
     match value {
-        Value::Array(arr) => Value::Array(
-            arr.iter()
-                .map(|v| sanitize_panel_api_json_for_log(v, sanitize_sensitive))
-                .collect(),
-        ),
+        Value::Array(arr) => {
+            Value::Array(arr.iter().map(|v| sanitize_panel_api_json_for_log(v, sanitize_sensitive)).collect())
+        }
         Value::Object(obj) => {
             let mut out = serde_json::Map::with_capacity(obj.len());
             for (k, v) in obj {
@@ -554,17 +482,11 @@ fn sanitize_panel_api_json_for_log(value: &Value, sanitize_sensitive: bool) -> V
                 }
                 if k.eq_ignore_ascii_case("url") {
                     if let Some(s) = v.as_str() {
-                        out.insert(
-                            k.clone(),
-                            Value::String(sanitize_sensitive_info(s).into_owned()),
-                        );
+                        out.insert(k.clone(), Value::String(sanitize_sensitive_info(s).into_owned()));
                         continue;
                     }
                 }
-                out.insert(
-                    k.clone(),
-                    sanitize_panel_api_json_for_log(v, sanitize_sensitive),
-                );
+                out.insert(k.clone(), sanitize_panel_api_json_for_log(v, sanitize_sensitive));
             }
             Value::Object(out)
         }
@@ -583,19 +505,10 @@ async fn panel_get_json(app_state: &AppState, url: Url) -> Result<Value, Tulipro
         .await
         .map_err(|e| info_err!("panel_api request failed: {e}"))?;
     let status = resp.status();
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| info_err!("panel_api read response failed: {e}"))?;
-    let json: Value = serde_json::from_str(&body)
-        .map_err(|e| info_err!("panel_api invalid json (http {status}): {e}"))?;
-    let sanitize_sensitive = app_state
-        .app_config
-        .config
-        .load()
-        .log
-        .as_ref()
-        .is_none_or(|l| l.sanitize_sensitive_info);
+    let body = resp.text().await.map_err(|e| info_err!("panel_api read response failed: {e}"))?;
+    let json: Value =
+        serde_json::from_str(&body).map_err(|e| info_err!("panel_api invalid json (http {status}): {e}"))?;
+    let sanitize_sensitive = app_state.app_config.config.load().log.as_ref().is_none_or(|l| l.sanitize_sensitive_info);
     let json_for_log = sanitize_panel_api_json_for_log(&json, sanitize_sensitive);
     if let Ok(json_str) = serde_json::to_string(&json_for_log) {
         debug_if_enabled!(
@@ -618,19 +531,10 @@ async fn user_api_get_json(app_state: &AppState, url: Url) -> Result<Value, Tuli
         .await
         .map_err(|e| info_err!("panel_api user_api request failed: {e}"))?;
     let status = resp.status();
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| info_err!("panel_api user_api read response failed: {e}"))?;
-    let json: Value = serde_json::from_str(&body)
-        .map_err(|e| info_err!("panel_api user_api invalid json (http {status}): {e}"))?;
-    let sanitize_sensitive = app_state
-        .app_config
-        .config
-        .load()
-        .log
-        .as_ref()
-        .is_none_or(|l| l.sanitize_sensitive_info);
+    let body = resp.text().await.map_err(|e| info_err!("panel_api user_api read response failed: {e}"))?;
+    let json: Value =
+        serde_json::from_str(&body).map_err(|e| info_err!("panel_api user_api invalid json (http {status}): {e}"))?;
+    let sanitize_sensitive = app_state.app_config.config.load().log.as_ref().is_none_or(|l| l.sanitize_sensitive_info);
     let json_for_log = sanitize_panel_api_json_for_log(&json, sanitize_sensitive);
     if let Ok(json_str) = serde_json::to_string(&json_for_log) {
         debug_if_enabled!(
@@ -647,11 +551,7 @@ async fn panel_client_new(
     cfg: &PanelApiConfig,
 ) -> Result<(String, String, Option<String>), TuliproxError> {
     validate_client_new_params(&cfg.query_parameter.client_new)?;
-    let params = resolve_query_params(
-        &cfg.query_parameter.client_new,
-        cfg.api_key.as_deref(),
-        None,
-    )?;
+    let params = resolve_query_params(&cfg.query_parameter.client_new, cfg.api_key.as_deref(), None)?;
     let url = build_panel_url(cfg.url.as_ref(), &params)?;
     let json = panel_get_json(app_state, url).await?;
     let Some(obj) = first_json_object(&json) else {
@@ -680,11 +580,8 @@ async fn panel_client_renew(
     password: &str,
 ) -> Result<(), TuliproxError> {
     validate_client_renew_params(&cfg.query_parameter.client_renew)?;
-    let params = resolve_query_params(
-        &cfg.query_parameter.client_renew,
-        cfg.api_key.as_deref(),
-        Some((username, password)),
-    )?;
+    let params =
+        resolve_query_params(&cfg.query_parameter.client_renew, cfg.api_key.as_deref(), Some((username, password)))?;
     let url = build_panel_url(cfg.url.as_ref(), &params)?;
     let json = panel_get_json(app_state, url).await?;
     let Some(obj) = first_json_object(&json) else {
@@ -704,11 +601,8 @@ async fn panel_client_info_raw(
     password: &str,
 ) -> Result<Option<String>, TuliproxError> {
     validate_client_info_params(&cfg.query_parameter.client_info)?;
-    let params = resolve_query_params(
-        &cfg.query_parameter.client_info,
-        cfg.api_key.as_deref(),
-        Some((username, password)),
-    )?;
+    let params =
+        resolve_query_params(&cfg.query_parameter.client_info, cfg.api_key.as_deref(), Some((username, password)))?;
     let url = build_panel_url(cfg.url.as_ref(), &params)?;
     let json = panel_get_json(app_state, url).await?;
     let Some(obj) = first_json_object(&json) else {
@@ -718,12 +612,7 @@ async fn panel_client_info_raw(
     if !status_ok {
         return info_err_res!("panel_api: client_info status=false");
     }
-    let expire = obj
-        .get("expire")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .trim()
-        .to_string();
+    let expire = obj.get("expire").and_then(|v| v.as_str()).unwrap_or_default().trim().to_string();
     if expire.is_empty() {
         Ok(None)
     } else {
@@ -739,22 +628,18 @@ async fn panel_client_info(
     time_ctx: Option<&PanelApiTimeContext>,
 ) -> Result<Option<i64>, TuliproxError> {
     let expire = panel_client_info_raw(app_state, cfg, username, password).await?;
-    Ok(expire
-        .as_deref()
-        .and_then(|value| normalize_panel_expire(value, time_ctx)))
+    Ok(expire.as_deref().and_then(|value| normalize_panel_expire(value, time_ctx)))
 }
 
 async fn fetch_root_user_api_info(
     app_state: &Arc<AppState>,
     input: &ConfigInput,
 ) -> Result<Option<UserApiAccountInfo>, TuliproxError> {
-
-
     let Some((username, password)) = extract_account_creds_from_input(input) else {
-      return Ok(None);
+        return Ok(None);
     };
 
-    let resolved_url =  input.resolve()?;
+    let resolved_url = input.resolve()?;
     let base_url = get_base_url_from_str(&resolved_url).unwrap_or_else(|| resolved_url.to_string());
 
     let Ok(mut url) = Url::parse(base_url.as_str()) else {
@@ -780,25 +665,15 @@ async fn fetch_root_user_api_info(
         }
     };
 
-    let exp_date = json
-        .get("user_info")
-        .and_then(|v| v.get("exp_date"))
-        .and_then(get_i64_from_serde_value);
-    let server_now_ts = json
-        .get("server_info")
-        .and_then(|v| v.get("timestamp_now"))
-        .and_then(get_i64_from_serde_value);
+    let exp_date = json.get("user_info").and_then(|v| v.get("exp_date")).and_then(get_i64_from_serde_value);
+    let server_now_ts = json.get("server_info").and_then(|v| v.get("timestamp_now")).and_then(get_i64_from_serde_value);
     let server_tz = json
         .get("server_info")
         .and_then(|v| v.get("timezone"))
         .and_then(get_string_from_serde_value)
         .and_then(|tz| tz.parse::<Tz>().ok());
 
-    Ok(Some(UserApiAccountInfo {
-        exp_date,
-        server_now_ts,
-        server_tz,
-    }))
+    Ok(Some(UserApiAccountInfo { exp_date, server_now_ts, server_tz }))
 }
 
 fn resolve_panel_expire_mode(
@@ -815,9 +690,7 @@ fn resolve_panel_expire_mode(
     let utc_ts = parse_panel_expire_utc(panel_expire);
     let tz_ts = server_tz.and_then(|tz| parse_panel_expire_with_tz(panel_expire, tz));
     let Some(utc_ts) = utc_ts else {
-        return tz_ts.map_or(PanelApiExpireMode::UtcString, |_| {
-            PanelApiExpireMode::ServerTzString
-        });
+        return tz_ts.map_or(PanelApiExpireMode::UtcString, |_| PanelApiExpireMode::ServerTzString);
     };
     let Some(tz_ts) = tz_ts else {
         return PanelApiExpireMode::UtcString;
@@ -851,9 +724,7 @@ fn apply_clock_skew(now: u64, skew_secs: i64) -> u64 {
 
 fn panel_api_time_cache_path(app_state: &AppState) -> PathBuf {
     let paths = app_state.app_config.paths.load();
-    PathBuf::from(&paths.config_path)
-        .join("panel-api")
-        .join("panel_api_time_cache.json")
+    PathBuf::from(&paths.config_path).join("panel-api").join("panel_api_time_cache.json")
 }
 
 async fn load_panel_api_time_cache(app_state: &AppState, cache_path: &Path) -> PanelApiTimeCache {
@@ -875,9 +746,7 @@ async fn persist_panel_api_time_cache(
     cache: &PanelApiTimeCache,
 ) -> Result<(), TuliproxError> {
     if let Some(parent) = cache_path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| info_err!("panel_api: failed to create cache dir: {e}"))?;
+        tokio::fs::create_dir_all(parent).await.map_err(|e| info_err!("panel_api: failed to create cache dir: {e}"))?;
     }
     let content = serde_json::to_string_pretty(cache).map_err(|e| info_err!("panel_api: {e}"))?;
     let _lock = app_state.app_config.file_locks.write_lock(cache_path).await;
@@ -887,9 +756,7 @@ async fn persist_panel_api_time_cache(
     Ok(())
 }
 
-fn parse_cached_tz(tz: Option<String>) -> Option<Tz> {
-    tz.and_then(|name| name.parse::<Tz>().ok())
-}
+fn parse_cached_tz(tz: Option<String>) -> Option<Tz> { tz.and_then(|name| name.parse::<Tz>().ok()) }
 
 async fn panel_account_info(
     app_state: &AppState,
@@ -900,11 +767,7 @@ async fn panel_account_info(
         return Ok(None);
     }
     validate_account_info_params(&cfg.query_parameter.account_info)?;
-    let params = resolve_query_params(
-        &cfg.query_parameter.account_info,
-        cfg.api_key.as_deref(),
-        creds,
-    )?;
+    let params = resolve_query_params(&cfg.query_parameter.account_info, cfg.api_key.as_deref(), creds)?;
     let url = build_panel_url(cfg.url.as_ref(), &params)?;
     let json = panel_get_json(app_state, url).await?;
     let Some(obj) = first_json_object(&json) else {
@@ -929,17 +792,11 @@ async fn panel_client_adult_content(
         return Ok(());
     }
     validate_client_adult_content_params(&cfg.query_parameter.client_adult_content)?;
-    let params = resolve_query_params(
-        &cfg.query_parameter.client_adult_content,
-        cfg.api_key.as_deref(),
-        creds,
-    )?;
+    let params = resolve_query_params(&cfg.query_parameter.client_adult_content, cfg.api_key.as_deref(), creds)?;
     let url = build_panel_url(cfg.url.as_ref(), &params)?;
     let json = panel_get_json(app_state, url).await?;
     let Some(obj) = first_json_object(&json) else {
-        return info_err_res!(
-            "panel_api: client_adult_content response is not a JSON object/array"
-        );
+        return info_err_res!("panel_api: client_adult_content response is not a JSON object/array");
     };
     let status_ok = obj.get("status").is_some_and(parse_boolish);
     if !status_ok {
@@ -957,9 +814,7 @@ fn extract_account_creds_from_input(input: &ConfigInput) -> Option<(String, Stri
     Url::parse(input.url.as_str()).ok().and_then(|u| {
         let (uu, pp) = get_credentials_from_url(&u);
         match (uu, pp) {
-            (Some(uu), Some(pp)) if !uu.trim().is_empty() && !pp.trim().is_empty() => {
-                Some((uu, pp))
-            }
+            (Some(uu), Some(pp)) if !uu.trim().is_empty() && !pp.trim().is_empty() => Some((uu, pp)),
             _ => None,
         }
     })
@@ -967,10 +822,7 @@ fn extract_account_creds_from_input(input: &ConfigInput) -> Option<(String, Stri
 
 fn alias_pool_limit_values(
     cfg: &PanelApiConfig,
-) -> (
-    Option<&PanelApiAliasPoolSizeValue>,
-    Option<&PanelApiAliasPoolSizeValue>,
-) {
+) -> (Option<&PanelApiAliasPoolSizeValue>, Option<&PanelApiAliasPoolSizeValue>) {
     let size = cfg.alias_pool.as_ref().and_then(|p| p.size.as_ref());
     let min = size.and_then(|s| s.min.as_ref());
     let max = size.and_then(|s| s.max.as_ref());
@@ -982,10 +834,7 @@ fn alias_pool_has_min(cfg: &PanelApiConfig) -> bool {
     min.is_some()
 }
 
-fn resolve_alias_pool_limit_value(
-    value: Option<&PanelApiAliasPoolSizeValue>,
-    auto_value: Option<u16>,
-) -> Option<u16> {
+fn resolve_alias_pool_limit_value(value: Option<&PanelApiAliasPoolSizeValue>, auto_value: Option<u16>) -> Option<u16> {
     match value {
         Some(PanelApiAliasPoolSizeValue::Number(v)) => Some(*v),
         Some(PanelApiAliasPoolSizeValue::Auto(_)) => auto_value,
@@ -1024,18 +873,8 @@ fn count_enabled_proxy_users(app_state: &AppState, input_name: &Arc<str>) -> usi
     api_proxy
         .user
         .iter()
-        .filter(|target_user| {
-            target_names
-                .iter()
-                .any(|target| target.eq_ignore_ascii_case(&target_user.target))
-        })
-        .map(|target_user| {
-            target_user
-                .credentials
-                .iter()
-                .filter(|cred| is_proxy_user_enabled(cred))
-                .count()
-        })
+        .filter(|target_user| target_names.iter().any(|target| target.eq_ignore_ascii_case(&target_user.target)))
+        .map(|target_user| target_user.credentials.iter().filter(|cred| is_proxy_user_enabled(cred)).count())
         .sum()
 }
 
@@ -1047,10 +886,7 @@ fn resolve_alias_pool_auto_value(app_state: &AppState, input_name: &Arc<str>) ->
 pub(crate) fn target_has_alias_pool_min(app_state: &AppState, target_name: &str) -> bool {
     let sources = app_state.app_config.sources.load();
     for source in &sources.sources {
-        let target_match = source
-            .targets
-            .iter()
-            .any(|target| target.name.eq_ignore_ascii_case(target_name));
+        let target_match = source.targets.iter().any(|target| target.name.eq_ignore_ascii_case(target_name));
         if !target_match {
             continue;
         }
@@ -1089,40 +925,25 @@ fn resolve_alias_pool_limits(
     };
     if let (Some(min), Some(max)) = (min, max) {
         if min > max {
-            return info_err_res!(
-                "panel_api.alias_pool.size.min must be <= panel_api.alias_pool.size.max"
-            );
+            return info_err_res!("panel_api.alias_pool.size.min must be <= panel_api.alias_pool.size.max");
         }
     }
     Ok((min, max))
 }
 
-fn resolve_alias_pool_min(
-    app_state: &AppState,
-    input_name: &Arc<str>,
-    cfg: &PanelApiConfig,
-) -> Option<u16> {
+fn resolve_alias_pool_min(app_state: &AppState, input_name: &Arc<str>, cfg: &PanelApiConfig) -> Option<u16> {
     let (min_val, _) = alias_pool_limit_values(cfg);
     let min_val = min_val?;
-    let auto_value = min_val
-        .is_auto()
-        .then(|| resolve_alias_pool_auto_value(app_state, input_name));
+    let auto_value = min_val.is_auto().then(|| resolve_alias_pool_auto_value(app_state, input_name));
     resolve_alias_pool_limit_value(Some(min_val), auto_value)
 }
 
-fn alias_pool_remove_expired(cfg: &PanelApiConfig) -> bool {
-    cfg.alias_pool.as_ref().is_some_and(|p| p.remove_expired)
-}
+fn alias_pool_remove_expired(cfg: &PanelApiConfig) -> bool { cfg.alias_pool.as_ref().is_some_and(|p| p.remove_expired) }
 
 fn collect_accounts(input: &ConfigInput) -> Vec<AccountCredentials> {
     let mut out = Vec::new();
     if let Some((u, p)) = extract_account_creds_from_input(input) {
-        out.push(AccountCredentials {
-            name: input.name.clone(),
-            username: u,
-            password: p,
-            exp_date: input.exp_date,
-        });
+        out.push(AccountCredentials { name: input.name.clone(), username: u, password: p, exp_date: input.exp_date });
     }
     if let Some(aliases) = input.aliases.as_ref() {
         for a in aliases {
@@ -1163,9 +984,7 @@ fn aliases_need_sort_config(aliases: &[ConfigInputAlias]) -> bool {
     if aliases.len() < 2 {
         return false;
     }
-    aliases
-        .windows(2)
-        .any(|pair| compare_alias_exp_date_config(&pair[0], &pair[1]) == Ordering::Greater)
+    aliases.windows(2).any(|pair| compare_alias_exp_date_config(&pair[0], &pair[1]) == Ordering::Greater)
 }
 
 fn sort_aliases_by_exp_date(aliases: &mut Vec<ConfigInputAliasDto>) -> bool {
@@ -1184,11 +1003,8 @@ fn sort_aliases_by_exp_date(aliases: &mut Vec<ConfigInputAliasDto>) -> bool {
 
 fn sort_account_aliases_keep_root_first(accounts: &mut Vec<AccountCredentials>, root_name: &str) {
     let root = accounts.iter().find(|acct| acct.name.as_ref() == root_name).cloned();
-    let mut aliases: Vec<AccountCredentials> = accounts
-        .iter()
-        .filter(|acct| acct.name.as_ref() != root_name)
-        .cloned()
-        .collect();
+    let mut aliases: Vec<AccountCredentials> =
+        accounts.iter().filter(|acct| acct.name.as_ref() != root_name).cloned().collect();
     aliases.sort_by(compare_account_exp_date);
     accounts.clear();
     if let Some(root) = root {
@@ -1197,51 +1013,28 @@ fn sort_account_aliases_keep_root_first(accounts: &mut Vec<AccountCredentials>, 
     accounts.extend(aliases);
 }
 
-fn is_account_valid(exp_date: Option<i64>) -> bool {
-    exp_date.is_some() && !is_input_expired(exp_date)
-}
+fn is_account_valid(exp_date: Option<i64>) -> bool { exp_date.is_some() && !is_input_expired(exp_date) }
 
 fn count_valid_accounts(accounts: &[AccountCredentials]) -> usize {
-    accounts
-        .iter()
-        .filter(|acct| is_account_valid(acct.exp_date))
-        .count()
+    accounts.iter().filter(|acct| is_account_valid(acct.exp_date)).count()
 }
 
 fn root_counts_towards_pool(accounts: &[AccountCredentials], input_name: &Arc<str>) -> bool {
-    accounts
-        .iter()
-        .find(|acct| &acct.name == input_name)
-        .is_some_and(|acct| is_account_valid(acct.exp_date))
+    accounts.iter().find(|acct| &acct.name == input_name).is_some_and(|acct| is_account_valid(acct.exp_date))
 }
 
 fn count_valid_accounts_at(accounts: &[AccountCredentials], now: u64) -> usize {
+    accounts.iter().filter(|acct| acct.exp_date.is_some() && !is_input_expired_at(acct.exp_date, now)).count()
+}
+
+fn count_valid_alias_accounts_at(accounts: &[AccountCredentials], input_name: &Arc<str>, now: u64) -> usize {
     accounts
         .iter()
-        .filter(|acct| acct.exp_date.is_some() && !is_input_expired_at(acct.exp_date, now))
+        .filter(|acct| &acct.name != input_name && acct.exp_date.is_some() && !is_input_expired_at(acct.exp_date, now))
         .count()
 }
 
-fn count_valid_alias_accounts_at(
-    accounts: &[AccountCredentials],
-    input_name: &Arc<str>,
-    now: u64,
-) -> usize {
-    accounts
-        .iter()
-        .filter(|acct| {
-            &acct.name != input_name
-                && acct.exp_date.is_some()
-                && !is_input_expired_at(acct.exp_date, now)
-        })
-        .count()
-}
-
-fn root_counts_towards_pool_at(
-    accounts: &[AccountCredentials],
-    input_name: &Arc<str>,
-    now: u64,
-) -> bool {
+fn root_counts_towards_pool_at(accounts: &[AccountCredentials], input_name: &Arc<str>, now: u64) -> bool {
     accounts
         .iter()
         .find(|acct| &acct.name == input_name)
@@ -1294,10 +1087,7 @@ pub(crate) fn can_provision_on_exhausted(app_state: &AppState, input: &ConfigInp
         return false;
     }
     if let Err(err) = validate_panel_api_config(panel_cfg) {
-        debug_if_enabled!(
-            "panel_api config invalid: {}",
-            sanitize_sensitive_info(err.to_string().as_str())
-        );
+        debug_if_enabled!("panel_api config invalid: {}", sanitize_sensitive_info(err.to_string().as_str()));
         return false;
     }
     if is_alias_pool_max_reached(app_state, input) {
@@ -1306,20 +1096,13 @@ pub(crate) fn can_provision_on_exhausted(app_state: &AppState, input: &ConfigInp
     true
 }
 
-pub(crate) fn find_input_by_provider_name(
-    app_state: &AppState,
-    provider_name: &str,
-) -> Option<Arc<ConfigInput>> {
+pub(crate) fn find_input_by_provider_name(app_state: &AppState, provider_name: &str) -> Option<Arc<ConfigInput>> {
     let sources = app_state.app_config.sources.load();
     for input in &sources.inputs {
         if &*input.name == provider_name {
             return Some(Arc::clone(input));
         }
-        if input
-            .aliases
-            .as_ref()
-            .is_some_and(|aliases| aliases.iter().any(|alias| &*alias.name == provider_name))
-        {
+        if input.aliases.as_ref().is_some_and(|aliases| aliases.iter().any(|alias| &*alias.name == provider_name)) {
             return Some(Arc::clone(input));
         }
     }
@@ -1364,7 +1147,7 @@ async fn patch_source_yml_add_alias(
         enabled: true,
     };
 
-   input.upsert_alias(alias)?;
+    input.upsert_alias(alias)?;
 
     persist_source_config(app_state, Some(source_file_path), sources).await?;
     Ok(())
@@ -1414,10 +1197,7 @@ fn update_url_query_credentials_if_present(url: &mut String, username: &str, pas
     let Ok(mut parsed) = Url::parse(url.as_str()) else {
         return;
     };
-    let mut pairs: Vec<(String, String)> = parsed
-        .query_pairs()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect();
+    let mut pairs: Vec<(String, String)> = parsed.query_pairs().map(|(k, v)| (k.to_string(), v.to_string())).collect();
     let mut has_user = false;
     let mut has_pass = false;
     for (k, v) in &mut pairs {
@@ -1448,10 +1228,7 @@ fn update_url_query_credentials_if_present(url: &mut String, username: &str, pas
 }
 
 #[allow(clippy::too_many_lines)]
-fn apply_sources_yml_patches(
-    doc: &mut SourcesConfigDto,
-    patches: &[SourcesYmlPatch],
-) -> Result<bool, TuliproxError> {
+fn apply_sources_yml_patches(doc: &mut SourcesConfigDto, patches: &[SourcesYmlPatch]) -> Result<bool, TuliproxError> {
     if patches.is_empty() {
         return Ok(false);
     }
@@ -1477,13 +1254,10 @@ fn apply_sources_yml_patches(
 
     for patch in patches {
         match patch {
-            SourcesYmlPatch::UpdatePanelApiCredits {
-                input_name,
-                credits,
-            } => {
-                let idx = *inputs_by_name.get(input_name.as_ref()).ok_or_else(|| {
-                    info_err!("panel_api: could not find input '{input_name}' in source.yml")
-                })?;
+            SourcesYmlPatch::UpdatePanelApiCredits { input_name, credits } => {
+                let idx = *inputs_by_name
+                    .get(input_name.as_ref())
+                    .ok_or_else(|| info_err!("panel_api: could not find input '{input_name}' in source.yml"))?;
                 let Some(panel_api) = doc.inputs[idx].panel_api.as_mut() else {
                     return Err(info_err!(
                         "panel_api: could not find panel_api for input '{input_name}' in source.yml"
@@ -1495,29 +1269,22 @@ fn apply_sources_yml_patches(
                 }
             }
             SourcesYmlPatch::SortAliases { input_name } => {
-                let idx = *inputs_by_name.get(input_name.as_ref()).ok_or_else(|| {
-                    info_err!("panel_api: could not find input '{input_name}' in source.yml")
-                })?;
+                let idx = *inputs_by_name
+                    .get(input_name.as_ref())
+                    .ok_or_else(|| info_err!("panel_api: could not find input '{input_name}' in source.yml"))?;
                 let Some(aliases) = doc.inputs[idx].aliases.as_mut() else {
                     continue;
                 };
                 if sort_aliases_by_exp_date(aliases) {
-                    alias_indices[idx] = aliases
-                        .iter()
-                        .enumerate()
-                        .map(|(idx, alias)| (alias.name.clone(), idx))
-                        .collect();
+                    alias_indices[idx] =
+                        aliases.iter().enumerate().map(|(idx, alias)| (alias.name.clone(), idx)).collect();
                     changed = true;
                 }
             }
-            SourcesYmlPatch::UpdateExpDate {
-                input_name,
-                account_name,
-                exp_date,
-            } => {
-                let idx = *inputs_by_name.get(input_name.as_ref()).ok_or_else(|| {
-                    info_err!("panel_api: could not find input '{input_name}' in source.yml")
-                })?;
+            SourcesYmlPatch::UpdateExpDate { input_name, account_name, exp_date } => {
+                let idx = *inputs_by_name
+                    .get(input_name.as_ref())
+                    .ok_or_else(|| info_err!("panel_api: could not find input '{input_name}' in source.yml"))?;
                 if account_name == input_name {
                     if doc.inputs[idx].exp_date != Some(*exp_date) {
                         doc.inputs[idx].exp_date = Some(*exp_date);
@@ -1542,15 +1309,10 @@ fn apply_sources_yml_patches(
                     changed = true;
                 }
             }
-            SourcesYmlPatch::UpdateRootCredentials {
-                input_name,
-                username,
-                password,
-                exp_date,
-            } => {
-                let idx = *inputs_by_name.get(input_name.as_ref()).ok_or_else(|| {
-                    info_err!("panel_api: could not find input '{input_name}' in source.yml")
-                })?;
+            SourcesYmlPatch::UpdateRootCredentials { input_name, username, password, exp_date } => {
+                let idx = *inputs_by_name
+                    .get(input_name.as_ref())
+                    .ok_or_else(|| info_err!("panel_api: could not find input '{input_name}' in source.yml"))?;
                 let input = &mut doc.inputs[idx];
                 let exp_date_changed = exp_date.is_some() && input.exp_date != *exp_date;
                 if input.username.as_deref() != Some(username.as_str())
@@ -1568,16 +1330,10 @@ fn apply_sources_yml_patches(
                     changed = true;
                 }
             }
-            SourcesYmlPatch::UpdateAliasCredentials {
-                input_name,
-                alias_name,
-                username,
-                password,
-                exp_date,
-            } => {
-                let idx = *inputs_by_name.get(input_name.as_ref()).ok_or_else(|| {
-                    info_err!("panel_api: could not find input '{input_name}' in source.yml")
-                })?;
+            SourcesYmlPatch::UpdateAliasCredentials { input_name, alias_name, username, password, exp_date } => {
+                let idx = *inputs_by_name
+                    .get(input_name.as_ref())
+                    .ok_or_else(|| info_err!("panel_api: could not find input '{input_name}' in source.yml"))?;
                 let Some(alias_idx) = alias_indices[idx].get(alias_name).copied() else {
                     return Err(info_err!(
                         "panel_api: could not find alias '{alias_name}' under input '{input_name}' in source.yml"
@@ -1603,23 +1359,15 @@ fn apply_sources_yml_patches(
                     changed = true;
                 }
             }
-            SourcesYmlPatch::AddAlias {
-                input_name,
-                alias_name,
-                base_url,
-                username,
-                password,
-                exp_date,
-            } => {
-                let idx = *inputs_by_name.get(input_name).ok_or_else(|| {
-                    info_err!("panel_api: could not find input '{input_name}' in source.yml")
-                })?;
+            SourcesYmlPatch::AddAlias { input_name, alias_name, base_url, username, password, exp_date } => {
+                let idx = *inputs_by_name
+                    .get(input_name)
+                    .ok_or_else(|| info_err!("panel_api: could not find input '{input_name}' in source.yml"))?;
                 let input_type = doc.inputs[idx].input_type;
                 let aliases = doc.inputs[idx].aliases.get_or_insert_with(Vec::new);
 
-                let next_index = u16::try_from(aliases.len()).map_err(|_| {
-                    info_err!("panel_api: cannot add alias for '{input_name}': alias id overflow")
-                })?;
+                let next_index = u16::try_from(aliases.len())
+                    .map_err(|_| info_err!("panel_api: cannot add alias for '{input_name}': alias id overflow"))?;
 
                 let mut alias = ConfigInputAliasDto {
                     id: 0,
@@ -1639,20 +1387,17 @@ fn apply_sources_yml_patches(
                 changed = true;
             }
             SourcesYmlPatch::RemoveExpiredAliases { input_name } => {
-                let idx = *inputs_by_name.get(input_name).ok_or_else(|| {
-                    info_err!("panel_api: could not find input '{input_name}' in source.yml")
-                })?;
+                let idx = *inputs_by_name
+                    .get(input_name)
+                    .ok_or_else(|| info_err!("panel_api: could not find input '{input_name}' in source.yml"))?;
                 let Some(aliases) = doc.inputs[idx].aliases.as_mut() else {
                     continue;
                 };
                 let before = aliases.len();
                 aliases.retain(|a| !is_input_expired(a.exp_date));
                 if aliases.len() != before {
-                    alias_indices[idx] = aliases
-                        .iter()
-                        .enumerate()
-                        .map(|(idx, alias)| (alias.name.clone(), idx))
-                        .collect();
+                    alias_indices[idx] =
+                        aliases.iter().enumerate().map(|(idx, alias)| (alias.name.clone(), idx)).collect();
                     changed = true;
                 }
             }
@@ -1737,11 +1482,7 @@ fn derive_unique_alias_name(existing: &[Arc<str>], input_name: &Arc<str>, userna
     base
 }
 
-fn derive_unique_alias_name_set(
-    existing: &HashSet<Arc<str>>,
-    input_name: &Arc<str>,
-    username: &str,
-) -> String {
+fn derive_unique_alias_name_set(existing: &HashSet<Arc<str>>, input_name: &Arc<str>, username: &str) -> String {
     let base = format!("{input_name}-{username}");
     if !existing.contains(base.as_str()) {
         return base;
@@ -1798,16 +1539,11 @@ async fn try_renew_expired_account(
     let mut candidates = collect_accounts(input);
     for acct in &mut candidates {
         if treat_missing_exp_date_as_expired && acct.exp_date.is_none() {
-            acct.exp_date = panel_client_info(
-                app_state,
-                panel_cfg,
-                acct.username.as_str(),
-                acct.password.as_str(),
-                None,
-            )
-            .await
-            .ok()
-            .flatten();
+            acct.exp_date =
+                panel_client_info(app_state, panel_cfg, acct.username.as_str(), acct.password.as_str(), None)
+                    .await
+                    .ok()
+                    .flatten();
         }
     }
     candidates.sort_by_key(|a| a.exp_date.unwrap_or(i64::MAX));
@@ -1819,14 +1555,7 @@ async fn try_renew_expired_account(
         if !expired {
             continue;
         }
-        match panel_client_renew(
-            app_state,
-            panel_cfg,
-            acct.username.as_str(),
-            acct.password.as_str(),
-        )
-        .await
-        {
+        match panel_client_renew(app_state, panel_cfg, acct.username.as_str(), acct.password.as_str()).await {
             Ok(()) => {
                 if adult_enabled {
                     if let Err(err) = panel_client_adult_content(
@@ -1843,23 +1572,17 @@ async fn try_renew_expired_account(
                         );
                     }
                 }
-                let refreshed_exp = panel_client_info(
-                    app_state,
-                    panel_cfg,
-                    acct.username.as_str(),
-                    acct.password.as_str(),
-                    None,
-                )
-                .await
-                .ok()
-                .flatten();
+                let refreshed_exp =
+                    panel_client_info(app_state, panel_cfg, acct.username.as_str(), acct.password.as_str(), None)
+                        .await
+                        .ok()
+                        .flatten();
 
                 if let Some(new_exp) = refreshed_exp.or(acct.exp_date) {
                     if is_batch {
                         let batch_url = input.t_batch_url.as_deref().unwrap_or_default();
                         if let Ok(csv_path) = get_csv_file_path(batch_url) {
-                            let _csv_lock =
-                                app_state.app_config.file_locks.write_lock(&csv_path).await;
+                            let _csv_lock = app_state.app_config.file_locks.write_lock(&csv_path).await;
                             if let Err(err) = csv_patch_batch_update_exp_date(
                                 input.input_type,
                                 &csv_path,
@@ -1870,31 +1593,16 @@ async fn try_renew_expired_account(
                             )
                             .await
                             {
-                                debug_if_enabled!(
-                                    "panel_api failed to persist renew exp_date to csv: {}",
-                                    err
-                                );
+                                debug_if_enabled!("panel_api failed to persist renew exp_date to csv: {}", err);
                             }
                         }
                     } else {
-                        let _src_lock = app_state
-                            .app_config
-                            .file_locks
-                            .write_lock(sources_path)
-                            .await;
-                        if let Err(err) = patch_source_yml_update_exp_date(
-                            app_state,
-                            sources_path,
-                            &input.name,
-                            &acct.name,
-                            new_exp,
-                        )
-                        .await
+                        let _src_lock = app_state.app_config.file_locks.write_lock(sources_path).await;
+                        if let Err(err) =
+                            patch_source_yml_update_exp_date(app_state, sources_path, &input.name, &acct.name, new_exp)
+                                .await
                         {
-                            debug_if_enabled!(
-                                "panel_api failed to persist renew exp_date to source.yml: {}",
-                                err
-                            );
+                            debug_if_enabled!("panel_api failed to persist renew exp_date to source.yml: {}", err);
                         }
                     }
                 }
@@ -1937,8 +1645,7 @@ async fn try_create_new_account(
     match panel_client_new(app_state, panel_cfg).await {
         Ok((username, password, base_url_from_resp)) => {
             let base_url = base_url_from_resp.unwrap_or_else(|| input.url.clone());
-            let base_url =
-                get_base_url_from_str(base_url.as_str()).unwrap_or_else(|| base_url.clone());
+            let base_url = get_base_url_from_str(base_url.as_str()).unwrap_or_else(|| base_url.clone());
 
             let mut existing_names: Vec<Arc<str>> = vec![input.name.clone()];
             if let Some(aliases) = input.aliases.as_ref() {
@@ -1947,10 +1654,7 @@ async fn try_create_new_account(
             let alias_name = derive_unique_alias_name(&existing_names, &input.name, &username);
 
             if adult_enabled {
-                if let Err(err) =
-                    panel_client_adult_content(app_state, panel_cfg, Some((&username, &password)))
-                        .await
-                {
+                if let Err(err) = panel_client_adult_content(app_state, panel_cfg, Some((&username, &password))).await {
                     debug_if_enabled!(
                         "panel_api client_adult_content failed for {}: {}",
                         sanitize_sensitive_info(&alias_name),
@@ -1959,10 +1663,7 @@ async fn try_create_new_account(
                 }
             }
 
-            let exp_date = panel_client_info(app_state, panel_cfg, &username, &password, None)
-                .await
-                .ok()
-                .flatten();
+            let exp_date = panel_client_info(app_state, panel_cfg, &username, &password, None).await.ok().flatten();
 
             if is_batch {
                 let batch_url = input.t_batch_url.as_deref().unwrap_or_default();
@@ -1999,11 +1700,7 @@ async fn try_create_new_account(
                     }
                 }
             } else {
-                let _src_lock = app_state
-                    .app_config
-                    .file_locks
-                    .write_lock(sources_path)
-                    .await;
+                let _src_lock = app_state.app_config.file_locks.write_lock(sources_path).await;
                 if let Err(err) = patch_source_yml_add_alias(
                     app_state,
                     sources_path,
@@ -2030,10 +1727,7 @@ async fn try_create_new_account(
             Some(PanelApiProvisionOutcome::Created { username, password })
         }
         Err(err) => {
-            debug_if_enabled!(
-                "panel_api client_new failed: {}",
-                sanitize_sensitive_info(err.to_string().as_str())
-            );
+            debug_if_enabled!("panel_api client_new failed: {}", sanitize_sensitive_info(err.to_string().as_str()));
             None
         }
     }
@@ -2065,17 +1759,11 @@ pub async fn try_provision_account_on_exhausted(
         return None;
     }
 
-    let _input_lock = app_state
-        .app_config
-        .file_locks
-        .write_lock_str(format!("panel_api:{}", input.name).as_str())
-        .await;
+    let _input_lock =
+        app_state.app_config.file_locks.write_lock_str(format!("panel_api:{}", input.name).as_str()).await;
 
     if let Err(err) = validate_panel_api_config(panel_cfg) {
-        debug_if_enabled!(
-            "panel_api config invalid: {}",
-            sanitize_sensitive_info(err.to_string().as_str())
-        );
+        debug_if_enabled!("panel_api config invalid: {}", sanitize_sensitive_info(err.to_string().as_str()));
         return None;
     }
     if is_alias_pool_max_reached(app_state, input) {
@@ -2089,23 +1777,12 @@ pub async fn try_provision_account_on_exhausted(
         input.aliases.as_ref().map_or(0, Vec::len)
     );
 
-    let is_batch = input
-        .t_batch_url
-        .as_ref()
-        .is_some_and(|u| !u.trim().is_empty());
+    let is_batch = input.t_batch_url.as_ref().is_some_and(|u| !u.trim().is_empty());
     let sources_file_path = app_state.app_config.paths.load().sources_file_path.clone();
     let sources_path = PathBuf::from(&sources_file_path);
 
-    if let Some(outcome) = try_renew_expired_account(
-        app_state,
-        input,
-        panel_cfg,
-        is_batch,
-        sources_path.as_path(),
-        true,
-        optional,
-    )
-    .await
+    if let Some(outcome) =
+        try_renew_expired_account(app_state, input, panel_cfg, is_batch, sources_path.as_path(), true, optional).await
     {
         debug_if_enabled!(
             "panel_api: provisioning succeeded via client_renew for input {}",
@@ -2113,23 +1790,11 @@ pub async fn try_provision_account_on_exhausted(
         );
         return Some(outcome);
     }
-    let created = try_create_new_account(
-        app_state,
-        input,
-        panel_cfg,
-        is_batch,
-        sources_path.as_path(),
-        optional,
-    )
-    .await;
+    let created = try_create_new_account(app_state, input, panel_cfg, is_batch, sources_path.as_path(), optional).await;
     debug_if_enabled!(
         "panel_api: provisioning via client_new for input {} => {}",
         sanitize_sensitive_info(&input.name),
-        if created.is_some() {
-            "success"
-        } else {
-            "failed"
-        }
+        if created.is_some() { "success" } else { "failed" }
     );
     created
 }
@@ -2160,14 +1825,11 @@ async fn ensure_alias_pool_min(
 
     let mut changed = false;
     let mut provisioned = 0_u16;
-    let max_pool = resolve_alias_pool_limits(app_state.as_ref(), &input.name, panel_cfg)
-        .ok()
-        .and_then(|(_, max)| max);
+    let max_pool = resolve_alias_pool_limits(app_state.as_ref(), &input.name, panel_cfg).ok().and_then(|(_, max)| max);
     let mut existing_names: HashSet<Arc<str>> = accounts.iter().map(|a| a.name.clone()).collect();
     let max_attempts = usize::from(min_pool).saturating_add(10);
     for _ in 0..max_attempts {
-        let current_valid =
-            count_valid_alias_accounts_at(accounts, &input.name, effective_now);
+        let current_valid = count_valid_alias_accounts_at(accounts, &input.name, effective_now);
         if current_valid >= usize::from(min_pool) {
             break;
         }
@@ -2180,9 +1842,7 @@ async fn ensure_alias_pool_min(
         let expired_index = accounts
             .iter()
             .enumerate()
-            .filter(|(_, acct)| {
-                acct.name != input.name && is_input_expired_at(acct.exp_date, effective_now)
-            })
+            .filter(|(_, acct)| acct.name != input.name && is_input_expired_at(acct.exp_date, effective_now))
             .min_by_key(|(_, acct)| acct.exp_date.unwrap_or(i64::MAX))
             .map(|(idx, _)| idx);
 
@@ -2192,13 +1852,8 @@ async fn ensure_alias_pool_min(
                 break;
             };
             if renew_enabled {
-                match panel_client_renew(
-                    app_state.as_ref(),
-                    panel_cfg,
-                    acct.username.as_str(),
-                    acct.password.as_str(),
-                )
-                .await
+                match panel_client_renew(app_state.as_ref(), panel_cfg, acct.username.as_str(), acct.password.as_str())
+                    .await
                 {
                     Ok(()) => {
                         provisioned = provisioned.saturating_add(1);
@@ -2235,8 +1890,7 @@ async fn ensure_alias_pool_min(
                                 acct_mut.exp_date = Some(new_exp);
                             }
                             if let Some(csv_path) = csv_path {
-                                let _csv_lock =
-                                    app_state.app_config.file_locks.write_lock(csv_path).await;
+                                let _csv_lock = app_state.app_config.file_locks.write_lock(csv_path).await;
                                 if let Err(err) = csv_patch_batch_update_exp_date(
                                     input.input_type,
                                     csv_path,
@@ -2247,10 +1901,7 @@ async fn ensure_alias_pool_min(
                                 )
                                 .await
                                 {
-                                    debug_if_enabled!(
-                                        "panel_api failed to persist renew exp_date to csv: {}",
-                                        err
-                                    );
+                                    debug_if_enabled!("panel_api failed to persist renew exp_date to csv: {}", err);
                                 } else {
                                     changed = true;
                                 }
@@ -2282,20 +1933,14 @@ async fn ensure_alias_pool_min(
         match panel_client_new(app_state.as_ref(), panel_cfg).await {
             Ok((username, password, base_url_from_resp)) => {
                 let base_url = base_url_from_resp.unwrap_or_else(|| input.url.clone());
-                let base_url =
-                    get_base_url_from_str(base_url.as_str()).unwrap_or_else(|| base_url.clone());
+                let base_url = get_base_url_from_str(base_url.as_str()).unwrap_or_else(|| base_url.clone());
 
-                let alias_name =
-                    derive_unique_alias_name_set(&existing_names, &input.name, &username);
+                let alias_name = derive_unique_alias_name_set(&existing_names, &input.name, &username);
                 existing_names.insert(alias_name.clone().into());
 
                 if adult_enabled {
-                    if let Err(err) = panel_client_adult_content(
-                        app_state.as_ref(),
-                        panel_cfg,
-                        Some((&username, &password)),
-                    )
-                    .await
+                    if let Err(err) =
+                        panel_client_adult_content(app_state.as_ref(), panel_cfg, Some((&username, &password))).await
                     {
                         debug_if_enabled!(
                             "panel_api client_adult_content failed for {}: {}",
@@ -2305,16 +1950,10 @@ async fn ensure_alias_pool_min(
                     }
                 }
 
-                let exp_date = panel_client_info(
-                    app_state.as_ref(),
-                    panel_cfg,
-                    &username,
-                    &password,
-                    time_ctx,
-                )
-                .await
-                .ok()
-                .flatten();
+                let exp_date = panel_client_info(app_state.as_ref(), panel_cfg, &username, &password, time_ctx)
+                    .await
+                    .ok()
+                    .flatten();
 
                 accounts.push(AccountCredentials {
                     name: alias_name.clone().into(),
@@ -2361,10 +2000,7 @@ async fn ensure_alias_pool_min(
                 }
             }
             Err(err) => {
-                debug_if_enabled!(
-                    "panel_api client_new failed: {}",
-                    sanitize_sensitive_info(err.to_string().as_str())
-                );
+                debug_if_enabled!("panel_api client_new failed: {}", sanitize_sensitive_info(err.to_string().as_str()));
                 break;
             }
         }
@@ -2397,23 +2033,12 @@ async fn sync_panel_api_for_input_on_boot(
     let optional = resolve_panel_api_optional_flags(panel_cfg, &input.name);
 
     let input_name = &input.name;
-    let _input_lock = app_state
-        .app_config
-        .file_locks
-        .write_lock_str(format!("panel_api:{input_name}").as_str())
-        .await;
+    let _input_lock = app_state.app_config.file_locks.write_lock_str(format!("panel_api:{input_name}").as_str()).await;
 
     let mut any_change = false;
-    let is_batch = input
-        .t_batch_url
-        .as_ref()
-        .is_some_and(|u| !u.trim().is_empty());
+    let is_batch = input.t_batch_url.as_ref().is_some_and(|u| !u.trim().is_empty());
     let batch_url = input.t_batch_url.as_deref().unwrap_or_default();
-    let csv_path = if is_batch {
-        get_csv_file_path(batch_url).ok()
-    } else {
-        None
-    };
+    let csv_path = if is_batch { get_csv_file_path(batch_url).ok() } else { None };
     let mut sources_yml_patches: Vec<SourcesYmlPatch> = Vec::new();
     let mut pending_sources_yml = false;
 
@@ -2432,14 +2057,9 @@ async fn sync_panel_api_for_input_on_boot(
 
     if panel_cfg.alias_pool.is_some()
         && csv_path.is_none()
-        && input
-            .aliases
-            .as_ref()
-            .is_some_and(|aliases| aliases_need_sort_config(aliases))
+        && input.aliases.as_ref().is_some_and(|aliases| aliases_need_sort_config(aliases))
     {
-        sources_yml_patches.push(SourcesYmlPatch::SortAliases {
-            input_name: input.name.clone(),
-        });
+        sources_yml_patches.push(SourcesYmlPatch::SortAliases { input_name: input.name.clone() });
         pending_sources_yml = true;
     }
 
@@ -2453,27 +2073,22 @@ async fn sync_panel_api_for_input_on_boot(
             (None, None, None)
         };
 
-        let panel_expire_raw = match panel_client_info_raw(
-            app_state.as_ref(),
-            panel_cfg,
-            root_username.as_str(),
-            root_password.as_str(),
-        )
-        .await
-        {
-            Ok(expire) => expire,
-            Err(err) => {
-                debug_if_enabled!(
-                    "panel_api root client_info (raw) failed for {}: {}",
-                    sanitize_sensitive_info(&input.name),
-                    sanitize_sensitive_info(err.to_string().as_str())
-                );
-                None
-            }
-        };
+        let panel_expire_raw =
+            match panel_client_info_raw(app_state.as_ref(), panel_cfg, root_username.as_str(), root_password.as_str())
+                .await
+            {
+                Ok(expire) => expire,
+                Err(err) => {
+                    debug_if_enabled!(
+                        "panel_api root client_info (raw) failed for {}: {}",
+                        sanitize_sensitive_info(&input.name),
+                        sanitize_sensitive_info(err.to_string().as_str())
+                    );
+                    None
+                }
+            };
 
-        let mut expire_mode =
-            resolve_panel_expire_mode(root_exp_date, panel_expire_raw.as_deref(), server_tz);
+        let mut expire_mode = resolve_panel_expire_mode(root_exp_date, panel_expire_raw.as_deref(), server_tz);
         let mut server_tz = server_tz;
         let mut skew_secs = skew_secs.or_else(|| cached_entry.as_ref().and_then(|e| e.skew_secs));
 
@@ -2489,23 +2104,14 @@ async fn sync_panel_api_for_input_on_boot(
             }
         }
 
-        time_ctx = Some(PanelApiTimeContext {
-            expire_mode,
-            server_tz,
-        });
+        time_ctx = Some(PanelApiTimeContext { expire_mode, server_tz });
         effective_now = apply_clock_skew(get_current_timestamp(), skew_secs.unwrap_or_default());
 
         time_cache.inputs.insert(
             input.name.to_string(),
-            PanelApiTimeCacheEntry {
-                expire_mode,
-                server_tz: server_tz.map(|tz| tz.name().to_string()),
-                skew_secs,
-            },
+            PanelApiTimeCacheEntry { expire_mode, server_tz: server_tz.map(|tz| tz.name().to_string()), skew_secs },
         );
-        if let Err(err) =
-            persist_panel_api_time_cache(app_state.as_ref(), &cache_path, &time_cache).await
-        {
+        if let Err(err) = persist_panel_api_time_cache(app_state.as_ref(), &cache_path, &time_cache).await {
             debug_if_enabled!(
                 "panel_api failed to persist time cache for {}: {}",
                 sanitize_sensitive_info(&input.name),
@@ -2523,14 +2129,8 @@ async fn sync_panel_api_for_input_on_boot(
         );
     } else if let Some(cached) = cached_entry.as_ref() {
         let server_tz = parse_cached_tz(cached.server_tz.clone());
-        time_ctx = Some(PanelApiTimeContext {
-            expire_mode: cached.expire_mode,
-            server_tz,
-        });
-        effective_now = apply_clock_skew(
-            get_current_timestamp(),
-            cached.skew_secs.unwrap_or_default(),
-        );
+        time_ctx = Some(PanelApiTimeContext { expire_mode: cached.expire_mode, server_tz });
+        effective_now = apply_clock_skew(get_current_timestamp(), cached.skew_secs.unwrap_or_default());
         let server_tz_name = server_tz.as_ref().map_or("none", |tz| Tz::name(*tz));
         debug_if_enabled!(
             "panel_api time context fallback for input {}: expire_mode={:?}, tz={}, skew_secs={}",
@@ -2547,25 +2147,20 @@ async fn sync_panel_api_for_input_on_boot(
     }
 
     for acct in &mut accounts {
-        let new_exp = match panel_client_info(
-            app_state.as_ref(),
-            panel_cfg,
-            &acct.username,
-            &acct.password,
-            time_ctx.as_ref(),
-        )
-        .await
-        {
-            Ok(v) => v,
-            Err(err) => {
-                debug_if_enabled!(
-                    "panel_api client_info failed for {}: {}",
-                    sanitize_sensitive_info(&acct.name),
-                    sanitize_sensitive_info(err.to_string().as_str())
-                );
-                None
-            }
-        };
+        let new_exp =
+            match panel_client_info(app_state.as_ref(), panel_cfg, &acct.username, &acct.password, time_ctx.as_ref())
+                .await
+            {
+                Ok(v) => v,
+                Err(err) => {
+                    debug_if_enabled!(
+                        "panel_api client_info failed for {}: {}",
+                        sanitize_sensitive_info(&acct.name),
+                        sanitize_sensitive_info(err.to_string().as_str())
+                    );
+                    None
+                }
+            };
         let Some(new_exp) = new_exp else {
             continue;
         };
@@ -2585,10 +2180,7 @@ async fn sync_panel_api_for_input_on_boot(
             )
             .await
             {
-                debug_if_enabled!(
-                    "panel_api boot sync failed to persist exp_date to csv: {}",
-                    err
-                );
+                debug_if_enabled!("panel_api boot sync failed to persist exp_date to csv: {}", err);
                 continue;
             }
             any_change = true;
@@ -2626,19 +2218,16 @@ async fn sync_panel_api_for_input_on_boot(
         let root_exp_date = accounts[root_idx].exp_date;
         let root_exp_missing = root_exp_date.is_none();
         let root_expired = match root_exp_date {
-            Some(ts) => u64::try_from(ts)
-                .map_or(true, |exp_ts| exp_ts <= now),
+            Some(ts) => u64::try_from(ts).map_or(true, |exp_ts| exp_ts <= now),
             None => false,
         };
         let root_expiring = match root_exp_date {
-            Some(ts) => u64::try_from(ts)
-                .map_or(true, |exp_ts| exp_ts > now && exp_ts <= offset_deadline),
+            Some(ts) => u64::try_from(ts).map_or(true, |exp_ts| exp_ts > now && exp_ts <= offset_deadline),
             None => false,
         };
         let should_refresh_root = root_exp_missing || root_expired || root_expiring;
 
-        let root_exp_display =
-            root_exp_date.map_or_else(|| "None".to_string(), |ts| ts.to_string());
+        let root_exp_display = root_exp_date.map_or_else(|| "None".to_string(), |ts| ts.to_string());
         debug_if_enabled!(
             "panel_api boot/update root status for input {} (offset={}s): exp_date={}, expired={}, expiring(offset)={}",
             sanitize_sensitive_info(&input.name),
@@ -2654,12 +2243,12 @@ async fn sync_panel_api_for_input_on_boot(
                 let old_password = accounts[root_idx].password.clone();
 
                 debug_if_enabled!(
-                "panel_api boot/update refreshing root account {} for input {} (exp_date={}, offset={}s)",
-                sanitize_sensitive_info(&old_username),
-                sanitize_sensitive_info(&input.name),
-                root_exp_display,
-                offset_secs
-            );
+                    "panel_api boot/update refreshing root account {} for input {} (exp_date={}, offset={}s)",
+                    sanitize_sensitive_info(&old_username),
+                    sanitize_sensitive_info(&input.name),
+                    root_exp_display,
+                    offset_secs
+                );
 
                 let (active_username, active_password, creds_changed) = if renew_enabled {
                     match panel_client_renew(
@@ -2686,14 +2275,12 @@ async fn sync_panel_api_for_input_on_boot(
                                         provisioned_root = 1;
                                         // Variant B: if the old root is still valid but within offset window,
                                         // keep it as a new alias entry so we don't lose usable credentials.
-                                        let park_old_root_as_alias = root_expiring
-                                            && !root_expired
-                                            && root_exp_date.is_some();
+                                        let park_old_root_as_alias =
+                                            root_expiring && !root_expired && root_exp_date.is_some();
 
                                         if park_old_root_as_alias {
-                                            let base_url =
-                                                get_base_url_from_str(input.url.as_str())
-                                                    .unwrap_or_else(|| input.url.clone());
+                                            let base_url = get_base_url_from_str(input.url.as_str())
+                                                .unwrap_or_else(|| input.url.clone());
                                             let alias_name = derive_unique_alias_name_set(
                                                 &existing_names,
                                                 &input.name,
@@ -2702,19 +2289,15 @@ async fn sync_panel_api_for_input_on_boot(
                                             existing_names.insert(alias_name.clone().into());
 
                                             if let Some(csv_path) = csv_path.as_ref() {
-                                                let batch_type =
-                                                    if input.input_type == InputType::Xtream {
-                                                        InputType::XtreamBatch
-                                                    } else if input.input_type == InputType::M3u {
-                                                        InputType::M3uBatch
-                                                    } else {
-                                                        input.input_type
-                                                    };
-                                                let _csv_lock = app_state
-                                                    .app_config
-                                                    .file_locks
-                                                    .write_lock(csv_path)
-                                                    .await;
+                                                let batch_type = if input.input_type == InputType::Xtream {
+                                                    InputType::XtreamBatch
+                                                } else if input.input_type == InputType::M3u {
+                                                    InputType::M3uBatch
+                                                } else {
+                                                    input.input_type
+                                                };
+                                                let _csv_lock =
+                                                    app_state.app_config.file_locks.write_lock(csv_path).await;
                                                 if let Err(err) = csv_patch_batch_append(
                                                     csv_path,
                                                     batch_type,
@@ -2735,16 +2318,14 @@ async fn sync_panel_api_for_input_on_boot(
                                                     any_change = true;
                                                 }
                                             } else {
-                                                sources_yml_patches.push(
-                                                    SourcesYmlPatch::AddAlias {
-                                                        input_name: input.name.clone(),
-                                                        alias_name: alias_name.clone().into(),
-                                                        base_url,
-                                                        username: old_username.clone(),
-                                                        password: old_password.clone(),
-                                                        exp_date: root_exp_date,
-                                                    },
-                                                );
+                                                sources_yml_patches.push(SourcesYmlPatch::AddAlias {
+                                                    input_name: input.name.clone(),
+                                                    alias_name: alias_name.clone().into(),
+                                                    base_url,
+                                                    username: old_username.clone(),
+                                                    password: old_password.clone(),
+                                                    exp_date: root_exp_date,
+                                                });
                                                 pending_sources_yml = true;
                                             }
 
@@ -2763,11 +2344,7 @@ async fn sync_panel_api_for_input_on_boot(
                                         }
 
                                         if let Some(csv_path) = csv_path.as_ref() {
-                                            let _csv_lock = app_state
-                                                .app_config
-                                                .file_locks
-                                                .write_lock(csv_path)
-                                                .await;
+                                            let _csv_lock = app_state.app_config.file_locks.write_lock(csv_path).await;
                                             if let Err(err) = csv_patch_batch_update_credentials(
                                                 input.input_type,
                                                 csv_path,
@@ -2789,14 +2366,12 @@ async fn sync_panel_api_for_input_on_boot(
                                                 any_change = true;
                                             }
                                         } else {
-                                            sources_yml_patches.push(
-                                                SourcesYmlPatch::UpdateRootCredentials {
-                                                    input_name: input.name.clone(),
-                                                    username: new_username.clone(),
-                                                    password: new_password.clone(),
-                                                    exp_date: None,
-                                                },
-                                            );
+                                            sources_yml_patches.push(SourcesYmlPatch::UpdateRootCredentials {
+                                                input_name: input.name.clone(),
+                                                username: new_username.clone(),
+                                                password: new_password.clone(),
+                                                exp_date: None,
+                                            });
                                             pending_sources_yml = true;
                                         }
 
@@ -2822,17 +2397,13 @@ async fn sync_panel_api_for_input_on_boot(
                     match panel_client_new(app_state.as_ref(), panel_cfg).await {
                         Ok((new_username, new_password, _base_url_from_resp)) => {
                             provisioned_root = 1;
-                            let park_old_root_as_alias =
-                                root_expiring && !root_expired && root_exp_date.is_some();
+                            let park_old_root_as_alias = root_expiring && !root_expired && root_exp_date.is_some();
 
                             if park_old_root_as_alias {
-                                let base_url = get_base_url_from_str(input.url.as_str())
-                                    .unwrap_or_else(|| input.url.clone());
-                                let alias_name = derive_unique_alias_name_set(
-                                    &existing_names,
-                                    &input.name,
-                                    old_username.as_str(),
-                                );
+                                let base_url =
+                                    get_base_url_from_str(input.url.as_str()).unwrap_or_else(|| input.url.clone());
+                                let alias_name =
+                                    derive_unique_alias_name_set(&existing_names, &input.name, old_username.as_str());
                                 existing_names.insert(alias_name.clone().into());
 
                                 if let Some(csv_path) = csv_path.as_ref() {
@@ -2843,8 +2414,7 @@ async fn sync_panel_api_for_input_on_boot(
                                     } else {
                                         input.input_type
                                     };
-                                    let _csv_lock =
-                                        app_state.app_config.file_locks.write_lock(csv_path).await;
+                                    let _csv_lock = app_state.app_config.file_locks.write_lock(csv_path).await;
                                     if let Err(err) = csv_patch_batch_append(
                                         csv_path,
                                         batch_type,
@@ -2857,10 +2427,10 @@ async fn sync_panel_api_for_input_on_boot(
                                     .await
                                     {
                                         debug_if_enabled!(
-                                        "panel_api boot/update failed to park old root as csv alias {}: {}",
-                                        sanitize_sensitive_info(&alias_name),
-                                        err
-                                    );
+                                            "panel_api boot/update failed to park old root as csv alias {}: {}",
+                                            sanitize_sensitive_info(&alias_name),
+                                            err
+                                        );
                                     } else {
                                         any_change = true;
                                     }
@@ -2891,8 +2461,7 @@ async fn sync_panel_api_for_input_on_boot(
                             }
 
                             if let Some(csv_path) = csv_path.as_ref() {
-                                let _csv_lock =
-                                    app_state.app_config.file_locks.write_lock(csv_path).await;
+                                let _csv_lock = app_state.app_config.file_locks.write_lock(csv_path).await;
                                 if let Err(err) = csv_patch_batch_update_credentials(
                                     input.input_type,
                                     csv_path,
@@ -2978,9 +2547,9 @@ async fn sync_panel_api_for_input_on_boot(
                 .await;
                 if !ready {
                     debug_if_enabled!(
-                    "panel_api boot/update probe timeout for root {}; skipping exp_date refresh",
-                    sanitize_sensitive_info(&input.name)
-                );
+                        "panel_api boot/update probe timeout for root {}; skipping exp_date refresh",
+                        sanitize_sensitive_info(&input.name)
+                    );
                 } else if let Some(new_exp) = refreshed_exp {
                     if let Some(csv_path) = csv_path.as_ref() {
                         let _csv_lock = app_state.app_config.file_locks.write_lock(csv_path).await;
@@ -3009,10 +2578,10 @@ async fn sync_panel_api_for_input_on_boot(
                         };
                         if let Err(err) = result {
                             debug_if_enabled!(
-                            "panel_api boot/update failed to persist root exp_date to csv for {}: {}",
-                            sanitize_sensitive_info(&input.name),
-                            err
-                        );
+                                "panel_api boot/update failed to persist root exp_date to csv for {}: {}",
+                                sanitize_sensitive_info(&input.name),
+                                err
+                            );
                         } else {
                             accounts[root_idx].exp_date = Some(new_exp);
                             any_change = true;
@@ -3055,23 +2624,16 @@ async fn sync_panel_api_for_input_on_boot(
     let offset_deadline = now.saturating_add(offset_secs);
     let root_valid = root_counts_towards_pool_at(&accounts, &input.name, now);
     let desired_aliases = min_pool.filter(|m| *m > 0).map_or_else(
-        || {
-            u16::try_from(accounts.iter().filter(|a| a.name != input.name).count())
-                .unwrap_or(u16::MAX)
-        },
+        || u16::try_from(accounts.iter().filter(|a| a.name != input.name).count()).unwrap_or(u16::MAX),
         |min_pool| min_pool.saturating_sub(u16::from(root_valid)),
     );
 
     let expiring_aliases = accounts
         .iter()
-        .filter(|a| {
-            a.name != input.name && is_expiring_with_offset_at(a.exp_date, offset_secs, now)
-        })
+        .filter(|a| a.name != input.name && is_expiring_with_offset_at(a.exp_date, offset_secs, now))
         .count();
-    let expired_aliases = accounts
-        .iter()
-        .filter(|a| a.name != input.name && is_input_expired_at(a.exp_date, now))
-        .count();
+    let expired_aliases =
+        accounts.iter().filter(|a| a.name != input.name && is_input_expired_at(a.exp_date, now)).count();
 
     let valid_aliases_beyond_offset = accounts
         .iter()
@@ -3083,8 +2645,7 @@ async fn sync_panel_api_for_input_on_boot(
                 return false;
             }
             match a.exp_date {
-                Some(ts) => u64::try_from(ts)
-                    .is_ok_and(|exp_ts| exp_ts > offset_deadline),
+                Some(ts) => u64::try_from(ts).is_ok_and(|exp_ts| exp_ts > offset_deadline),
                 None => false,
             }
         })
@@ -3108,8 +2669,7 @@ async fn sync_panel_api_for_input_on_boot(
                 }
                 match a.exp_date {
                     None => true,
-                    Some(ts) => u64::try_from(ts)
-                        .map_or(true, |exp_ts| exp_ts <= offset_deadline),
+                    Some(ts) => u64::try_from(ts).map_or(true, |exp_ts| exp_ts <= offset_deadline),
                 }
             })
             .map(|(idx, _)| idx)
@@ -3123,28 +2683,17 @@ async fn sync_panel_api_for_input_on_boot(
             }
         });
 
-        let valid_aliases_beyond_offset_u16 =
-            u16::try_from(valid_aliases_beyond_offset).unwrap_or(u16::MAX);
-        let needed_refresh_aliases_u16 =
-            desired_aliases_u16.saturating_sub(valid_aliases_beyond_offset_u16);
-        let planned_refresh_aliases = refresh_candidates
-            .len()
-            .min(usize::from(needed_refresh_aliases_u16));
-        let refresh_plan: Vec<usize> = refresh_candidates
-            .into_iter()
-            .take(planned_refresh_aliases)
-            .collect();
+        let valid_aliases_beyond_offset_u16 = u16::try_from(valid_aliases_beyond_offset).unwrap_or(u16::MAX);
+        let needed_refresh_aliases_u16 = desired_aliases_u16.saturating_sub(valid_aliases_beyond_offset_u16);
+        let planned_refresh_aliases = refresh_candidates.len().min(usize::from(needed_refresh_aliases_u16));
+        let refresh_plan: Vec<usize> = refresh_candidates.into_iter().take(planned_refresh_aliases).collect();
         (refresh_plan, planned_refresh_aliases)
     } else {
         (Vec::new(), 0)
     };
 
     let log_pool = alias_pool_has_min(panel_cfg);
-    let enabled_users = if log_pool {
-        count_enabled_proxy_users(app_state.as_ref(), &input.name)
-    } else {
-        0
-    };
+    let enabled_users = if log_pool { count_enabled_proxy_users(app_state.as_ref(), &input.name) } else { 0 };
     if log_pool {
         debug_if_enabled!(
             "panel_api boot/update provisioning aliases for input {} (offset={}s): desired={}, valid_beyond_offset={}, expiring(offset)={}, expired={}, refresh_planned(offset)={}, missing={}",
@@ -3189,13 +2738,7 @@ async fn sync_panel_api_for_input_on_boot(
         );
 
         let (active_username, active_password, creds_changed) = if renew_enabled {
-            match panel_client_renew(
-                app_state.as_ref(),
-                panel_cfg,
-                old_username.as_str(),
-                old_password.as_str(),
-            )
-            .await
+            match panel_client_renew(app_state.as_ref(), panel_cfg, old_username.as_str(), old_password.as_str()).await
             {
                 Ok(()) => {
                     provisioned_aliases = provisioned_aliases.saturating_add(1);
@@ -3210,16 +2753,12 @@ async fn sync_panel_api_for_input_on_boot(
                     if new_enabled {
                         match panel_client_new(app_state.as_ref(), panel_cfg).await {
                             Ok((new_username, new_password, base_url_from_resp)) => {
+                                let base_url = base_url_from_resp.unwrap_or_else(|| input.url.clone());
                                 let base_url =
-                                    base_url_from_resp.unwrap_or_else(|| input.url.clone());
-                                let base_url = get_base_url_from_str(base_url.as_str())
-                                    .unwrap_or_else(|| base_url.clone());
+                                    get_base_url_from_str(base_url.as_str()).unwrap_or_else(|| base_url.clone());
 
-                                let alias_name = derive_unique_alias_name_set(
-                                    &existing_names,
-                                    &input.name,
-                                    &new_username,
-                                );
+                                let alias_name =
+                                    derive_unique_alias_name_set(&existing_names, &input.name, &new_username);
                                 existing_names.insert(alias_name.clone().into());
 
                                 if adult_enabled {
@@ -3257,8 +2796,7 @@ async fn sync_panel_api_for_input_on_boot(
                                     } else {
                                         input.input_type
                                     };
-                                    let _csv_lock =
-                                        app_state.app_config.file_locks.write_lock(csv_path).await;
+                                    let _csv_lock = app_state.app_config.file_locks.write_lock(csv_path).await;
                                     if let Err(err) = csv_patch_batch_append(
                                         csv_path,
                                         batch_type,
@@ -3316,11 +2854,9 @@ async fn sync_panel_api_for_input_on_boot(
             match panel_client_new(app_state.as_ref(), panel_cfg).await {
                 Ok((new_username, new_password, base_url_from_resp)) => {
                     let base_url = base_url_from_resp.unwrap_or_else(|| input.url.clone());
-                    let base_url = get_base_url_from_str(base_url.as_str())
-                        .unwrap_or_else(|| base_url.clone());
+                    let base_url = get_base_url_from_str(base_url.as_str()).unwrap_or_else(|| base_url.clone());
 
-                    let alias_name =
-                        derive_unique_alias_name_set(&existing_names, &input.name, &new_username);
+                    let alias_name = derive_unique_alias_name_set(&existing_names, &input.name, &new_username);
                     existing_names.insert(alias_name.clone().into());
 
                     if adult_enabled {
@@ -3570,28 +3106,21 @@ async fn sync_panel_api_for_input_on_boot(
             match csv_patch_batch_remove_expired(input.input_type, csv_path).await {
                 Ok(true) => any_change = true,
                 Ok(false) => {}
-                Err(err) => debug_if_enabled!(
-                    "panel_api boot sync failed to remove expired csv accounts: {}",
-                    err
-                ),
+                Err(err) => debug_if_enabled!("panel_api boot sync failed to remove expired csv accounts: {}", err),
             }
         } else {
-            sources_yml_patches.push(SourcesYmlPatch::RemoveExpiredAliases {
-                input_name: input.name.clone(),
-            });
+            sources_yml_patches.push(SourcesYmlPatch::RemoveExpiredAliases { input_name: input.name.clone() });
             pending_sources_yml = true;
         }
     }
 
     if optional.contains(PanelApiOptionalFlags::AccountInfo) {
-        let creds = accounts
-            .first()
-            .map(|acct| (acct.username.as_str(), acct.password.as_str()));
+        let creds = accounts.first().map(|acct| (acct.username.as_str(), acct.password.as_str()));
         match panel_account_info(app_state.as_ref(), panel_cfg, creds).await {
             Ok(Some(credits)) => {
                 let normalized = credits.trim().to_string();
                 if !normalized.is_empty()
-                    /* && panel_cfg.credits.as_deref().map(str::trim) != Some(normalized.as_str()) */
+                /* && panel_cfg.credits.as_deref().map(str::trim) != Some(normalized.as_str()) */
                 {
                     sources_yml_patches.push(SourcesYmlPatch::UpdatePanelApiCredits {
                         input_name: input.name.clone(),
@@ -3627,19 +3156,11 @@ async fn sync_panel_api_for_input_on_boot(
     }
 
     if pending_sources_yml {
-        let _src_lock = app_state
-            .app_config
-            .file_locks
-            .write_lock(sources_path)
-            .await;
-        match persist_sources_yml_with_patches(app_state, sources_path, &sources_yml_patches).await
-        {
+        let _src_lock = app_state.app_config.file_locks.write_lock(sources_path).await;
+        match persist_sources_yml_with_patches(app_state, sources_path, &sources_yml_patches).await {
             Ok(true) => any_change = true,
             Ok(false) => {}
-            Err(err) => debug_if_enabled!(
-                "panel_api boot sync failed to persist source.yml patches: {}",
-                err
-            ),
+            Err(err) => debug_if_enabled!("panel_api boot sync failed to persist source.yml patches: {}", err),
         }
     }
 
@@ -3671,20 +3192,14 @@ pub(crate) async fn sync_panel_api_exp_dates_on_boot(app_state: &Arc<AppState>) 
     sync_panel_api_exp_dates(app_state).await;
 }
 
-pub(crate) async fn sync_panel_api_alias_pool_for_target(
-    app_state: &Arc<AppState>,
-    target_name: &str,
-) {
+pub(crate) async fn sync_panel_api_alias_pool_for_target(app_state: &Arc<AppState>, target_name: &str) {
     let sources_file_path = app_state.app_config.paths.load().sources_file_path.clone();
     let sources_path = PathBuf::from(&sources_file_path);
     let mut any_change = false;
 
     let sources = app_state.app_config.sources.load();
     for source in &sources.sources {
-        let target_match = source
-            .targets
-            .iter()
-            .any(|target| target.name.eq_ignore_ascii_case(target_name));
+        let target_match = source.targets.iter().any(|target| target.name.eq_ignore_ascii_case(target_name));
         if !target_match {
             continue;
         }
@@ -3732,12 +3247,7 @@ fn provisioning_method_to_reqwest(method: PanelApiProvisioningMethod) -> Method 
     }
 }
 
-fn build_player_api_action_url(
-    base_url: &str,
-    username: &str,
-    password: &str,
-    action: &str,
-) -> Option<Url> {
+fn build_player_api_action_url(base_url: &str, username: &str, password: &str, action: &str) -> Option<Url> {
     let url = Url::parse(base_url).ok()?;
     let host = url.host_str()?;
     let scheme = url.scheme();
@@ -3772,21 +3282,10 @@ impl PanelApiProbeTarget {
     }
 }
 
-fn build_panel_api_probe_targets(
-    input: &ConfigInput,
-    username: &str,
-    password: &str,
-) -> Vec<PanelApiProbeTarget> {
+fn build_panel_api_probe_targets(input: &ConfigInput, username: &str, password: &str) -> Vec<PanelApiProbeTarget> {
     let mut targets = Vec::new();
-    for action in [
-        "client_info",
-        "get_live_categories",
-        "get_series_categories",
-        "get_vod_categories",
-    ] {
-        if let Some(url) =
-            build_player_api_action_url(input.url.as_str(), username, password, action)
-        {
+    for action in ["client_info", "get_live_categories", "get_series_categories", "get_vod_categories"] {
+        if let Some(url) = build_player_api_action_url(input.url.as_str(), username, password, action) {
             targets.push(PanelApiProbeTarget::PlayerApi { action, url });
         }
     }
@@ -3847,18 +3346,11 @@ async fn probe_panel_api_test_url(
 ) -> Result<StatusCode, reqwest::Error> {
     let client = app_state.http_client.load();
     let request_method = provisioning_method_to_reqwest(method);
-    let response = client
-        .request(request_method, test_url.clone())
-        .send()
-        .await?;
+    let response = client.request(request_method, test_url.clone()).send().await?;
     Ok(response.status())
 }
 
-async fn apply_provisioning_cooldown(
-    panel_cfg: &PanelApiConfig,
-    account_name: &str,
-    input_name: &Arc<str>,
-) {
+async fn apply_provisioning_cooldown(panel_cfg: &PanelApiConfig, account_name: &str, input_name: &Arc<str>) {
     let cooldown_secs = panel_cfg.provisioning.cooldown_sec;
     if cooldown_secs == 0 {
         return;
@@ -3894,11 +3386,7 @@ async fn wait_for_panel_api_account_ready(
         return false;
     }
 
-    let targets_list = probe_targets
-        .iter()
-        .map(PanelApiProbeTarget::action)
-        .collect::<Vec<_>>()
-        .join(",");
+    let targets_list = probe_targets.iter().map(PanelApiProbeTarget::action).collect::<Vec<_>>().join(",");
     debug_if_enabled!(
         "panel_api probe start for {} (input={} timeout={}s interval={}s method={}) targets={}",
         sanitize_sensitive_info(account_name),
@@ -3916,8 +3404,7 @@ async fn wait_for_panel_api_account_ready(
     loop {
         attempt += 1;
         debug_if_enabled!("panel_api probe attempt {}", attempt);
-        if probe_panel_api_targets(app_state, probe_method, &probe_targets, &mut done_targets).await
-        {
+        if probe_panel_api_targets(app_state, probe_method, &probe_targets, &mut done_targets).await {
             apply_provisioning_cooldown(panel_cfg, account_name, &input.name).await;
             return true;
         }
@@ -3930,11 +3417,7 @@ async fn wait_for_panel_api_account_ready(
             return false;
         }
         let remaining = deadline.checked_duration_since(now).unwrap_or_default();
-        let sleep_for = if remaining < probe_delay {
-            remaining
-        } else {
-            probe_delay
-        };
+        let sleep_for = if remaining < probe_delay { remaining } else { probe_delay };
         tokio::time::sleep(sleep_for).await;
     }
 }
@@ -3953,10 +3436,7 @@ pub(crate) async fn run_panel_api_provisioning_probe(
             sanitize_sensitive_info(&input.name)
         );
         stop_signal.notify();
-        let _ = app_state
-            .connection_manager
-            .kick_connection(&addr, virtual_id, 0)
-            .await;
+        let _ = app_state.connection_manager.kick_connection(&addr, virtual_id, 0).await;
         return Ok(());
     };
     if !panel_cfg.enabled {
@@ -3965,10 +3445,7 @@ pub(crate) async fn run_panel_api_provisioning_probe(
             sanitize_sensitive_info(&input.name)
         );
         stop_signal.notify();
-        let _ = app_state
-            .connection_manager
-            .kick_connection(&addr, virtual_id, 0)
-            .await;
+        let _ = app_state.connection_manager.kick_connection(&addr, virtual_id, 0).await;
         return Ok(());
     }
     if panel_cfg.url.trim().is_empty() {
@@ -3977,10 +3454,7 @@ pub(crate) async fn run_panel_api_provisioning_probe(
             sanitize_sensitive_info(&input.name)
         );
         stop_signal.notify();
-        let _ = app_state
-            .connection_manager
-            .kick_connection(&addr, virtual_id, 0)
-            .await;
+        let _ = app_state.connection_manager.kick_connection(&addr, virtual_id, 0).await;
         return Ok(());
     }
 
@@ -4027,10 +3501,7 @@ pub(crate) async fn run_panel_api_provisioning_probe(
             sanitize_sensitive_info(&input.name),
             sanitize_sensitive_info(addr.to_string().as_str())
         );
-        let _ = app_state
-            .connection_manager
-            .kick_connection(&addr, virtual_id, 0)
-            .await;
+        let _ = app_state.connection_manager.kick_connection(&addr, virtual_id, 0).await;
         return Ok(());
     };
 
@@ -4045,10 +3516,7 @@ pub(crate) async fn run_panel_api_provisioning_probe(
             sanitize_sensitive_info(&input.name)
         );
         stop_signal.notify();
-        let _ = app_state
-            .connection_manager
-            .kick_connection(&addr, virtual_id, 0)
-            .await;
+        let _ = app_state.connection_manager.kick_connection(&addr, virtual_id, 0).await;
         return Ok(());
     };
 
@@ -4090,11 +3558,7 @@ pub(crate) async fn run_panel_api_provisioning_probe(
             break;
         }
         let remaining = deadline.checked_duration_since(now).unwrap_or_default();
-        let sleep_for = if remaining < probe_delay {
-            remaining
-        } else {
-            probe_delay
-        };
+        let sleep_for = if remaining < probe_delay { remaining } else { probe_delay };
         tokio::time::sleep(sleep_for).await;
     }
 
@@ -4117,10 +3581,7 @@ pub(crate) async fn run_panel_api_provisioning_probe(
         sanitize_sensitive_info(&input.name),
         sanitize_sensitive_info(addr.to_string().as_str())
     );
-    let _ = app_state
-        .connection_manager
-        .kick_connection(&addr, virtual_id, 0)
-        .await;
+    let _ = app_state.connection_manager.kick_connection(&addr, virtual_id, 0).await;
     Ok(())
 }
 
@@ -4134,19 +3595,15 @@ pub fn create_panel_api_provisioning_stream_details(
 ) -> StreamDetails {
     let stop_signal = Arc::new(AtomicOnceFlag::new());
     let headers = [("connection".to_string(), "close".to_string())];
-    let (stream, stream_info) = create_panel_api_provisioning_stream_with_stop(
-        &app_state.app_config,
-        &headers,
-        Arc::clone(&stop_signal),
-    );
+    let (stream, stream_info) =
+        create_panel_api_provisioning_stream_with_stop(&app_state.app_config, &headers, Arc::clone(&stop_signal));
 
     if stream.is_none() {
         debug_if_enabled!(
             "panel_api provisioning stream missing; falling back to provider exhausted for input {}",
             sanitize_sensitive_info(&input.name)
         );
-        let (stream, stream_info) =
-            create_provider_connections_exhausted_stream(&app_state.app_config, &[]);
+        let (stream, stream_info) = create_provider_connections_exhausted_stream(&app_state.app_config, &[]);
         return StreamDetails {
             stream,
             stream_info,
@@ -4163,14 +3620,9 @@ pub fn create_panel_api_provisioning_stream_details(
     let input_clone = input.clone();
     let stop_clone = Arc::clone(&stop_signal);
     tokio::spawn(async move {
-        if let Err(err) = run_panel_api_provisioning_probe(
-            app_state_clone,
-            input_clone,
-            stop_clone,
-            addr,
-            virtual_id,
-        )
-        .await {
+        if let Err(err) =
+            run_panel_api_provisioning_probe(app_state_clone, input_clone, stop_clone, addr, virtual_id).await
+        {
             error!("Error running Probe: {err:?}");
         }
     });

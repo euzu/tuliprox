@@ -1,32 +1,40 @@
-use crate::api::config_watch::exec_config_watch;
-use crate::api::model::UpdateGuard;
-use crate::api::model::{ActiveProviderManager, ConnectionManager, EventManager, PlaylistStorage, PlaylistStorageState, SharedStreamManager};
-use crate::api::model::{ActiveUserManager, DownloadQueue};
-use crate::api::scheduler::exec_scheduler;
-use crate::model::{AppConfig, Config, ConfigTarget, GracePeriodOptions, HdHomeRunConfig, HdHomeRunDeviceConfig, ProcessTargets, ReverseProxyDisabledHeaderConfig, ScheduleConfig, SourcesConfig};
-use crate::repository::get_geoip_path;
-use crate::repository::load_target_into_memory_cache;
-use crate::tools::lru_cache::LRUResourceCache;
-use crate::utils::request::{create_client, create_client_with_redirect};
-use crate::utils::GeoIp;
+use crate::{
+    api::{
+        config_watch::exec_config_watch,
+        model::{
+            metadata_update_manager::MetadataUpdateManager, ActiveProviderManager, ActiveUserManager,
+            ConnectionManager, DownloadQueue, EventManager, PlaylistStorage, PlaylistStorageState, SharedStreamManager,
+            UpdateGuard,
+        },
+        scheduler::exec_scheduler,
+    },
+    model::{
+        AppConfig, Config, ConfigTarget, GracePeriodOptions, HdHomeRunConfig, HdHomeRunDeviceConfig, ProcessTargets,
+        ReverseProxyDisabledHeaderConfig, ScheduleConfig, SourcesConfig,
+    },
+    repository::{get_geoip_path, load_target_into_memory_cache},
+    tools::lru_cache::LRUResourceCache,
+    utils::{
+        request::{create_client, create_client_with_redirect},
+        GeoIp,
+    },
+};
 use arc_swap::{ArcSwap, ArcSwapOption};
 use log::{error, info};
 use reqwest::Client;
-use shared::create_bitset;
-use shared::error::TuliproxError;
-use shared::info_err_res;
-use shared::model::UserConnectionPermission;
-use shared::utils::small_vecs_equal_unordered;
-use std::collections::HashMap;
-use std::ffi::OsStr;
-use std::sync::atomic::AtomicI8;
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::Mutex;
-use tokio::task;
+use shared::{
+    create_bitset, error::TuliproxError, info_err_res, model::UserConnectionPermission,
+    utils::small_vecs_equal_unordered,
+};
+use std::{
+    collections::HashMap,
+    ffi::OsStr,
+    sync::{atomic::AtomicI8, Arc},
+    time::Duration,
+};
+use tokio::{sync::Mutex, task};
 use tokio_util::sync::CancellationToken;
 use url::Url;
-use crate::api::model::metadata_update_manager::MetadataUpdateManager;
 
 macro_rules! cancel_service {
     ($field: ident, $flag:expr, $changes:expr, $cancel_tokens:expr) => {
@@ -69,9 +77,7 @@ pub(in crate::api) struct UpdateChanges {
 }
 
 impl UpdateChanges {
-    pub(in crate::api) fn modified(&self) -> bool {
-        !self.flags.is_empty()
-    }
+    pub(in crate::api) fn modified(&self) -> bool { !self.flags.is_empty() }
 
     fn set_flag_if(&mut self, condition: bool, flag: UpdateChangesFlags) {
         if condition {
@@ -80,10 +86,7 @@ impl UpdateChanges {
     }
 }
 
-async fn update_target_caches(
-    app_state: &Arc<AppState>,
-    target_changes: Option<&HashMap<String, TargetChanges>>,
-) {
+async fn update_target_caches(app_state: &Arc<AppState>, target_changes: Option<&HashMap<String, TargetChanges>>) {
     if let Some(target_changes) = target_changes {
         let mut to_remove = Vec::new();
         for target in target_changes.values() {
@@ -114,19 +117,13 @@ async fn update_target_caches(
     }
 }
 
-pub async fn update_app_state_config(
-    app_state: &Arc<AppState>,
-    config: Config,
-) -> Result<(), TuliproxError> {
+pub async fn update_app_state_config(app_state: &Arc<AppState>, config: Config) -> Result<(), TuliproxError> {
     let updates = app_state.set_config(config).await?;
     restart_services(app_state, &updates);
     Ok(())
 }
 
-pub async fn update_app_state_sources(
-    app_state: &Arc<AppState>,
-    sources: SourcesConfig,
-) -> Result<(), TuliproxError> {
+pub async fn update_app_state_sources(app_state: &Arc<AppState>, sources: SourcesConfig) -> Result<(), TuliproxError> {
     let targets = sources.validate_targets(Some(&app_state.forced_targets.load().target_names))?;
     app_state.forced_targets.store(Arc::new(targets));
     let updates = app_state.set_sources(sources).await?;
@@ -153,11 +150,7 @@ fn cancel_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
     let hdhomerun = cancel_service!(hdhomerun, UpdateChangesFlags::Hdhomerun, changes, cancel_tokens);
     let file_watch = cancel_service!(file_watch, UpdateChangesFlags::FileWatch, changes, cancel_tokens);
 
-    let tokens = CancelTokens {
-        scheduler,
-        hdhomerun,
-        file_watch,
-    };
+    let tokens = CancelTokens { scheduler, hdhomerun, file_watch };
 
     app_state.cancel_tokens.store(Arc::new(tokens));
 }
@@ -211,9 +204,7 @@ pub fn create_http_client(app_config: &AppConfig) -> Result<Client, TuliproxErro
 /// Fails if proxy configuration is present but the client cannot be built.
 ///
 /// Handling Streaming and Proxy with http/2 is hard, so we strictly use only http/1.1
-pub fn create_http_client_no_redirect(
-    app_config: &AppConfig,
-) -> Result<Client, TuliproxError> {
+pub fn create_http_client_no_redirect(app_config: &AppConfig) -> Result<Client, TuliproxError> {
     let builder = create_client_with_redirect(app_config, reqwest::redirect::Policy::none()).http1_only();
     let config = app_config.config.load();
     build_http_client_with_fallback(
@@ -245,9 +236,7 @@ fn build_http_client_with_fallback(
     let proxy_configured = config.proxy.is_some();
 
     if config.connect_timeout_secs > 0 {
-        builder = builder.connect_timeout(Duration::from_secs(
-            u64::from(config.connect_timeout_secs),
-        ));
+        builder = builder.connect_timeout(Duration::from_secs(u64::from(config.connect_timeout_secs)));
     }
 
     if let Ok(client) = builder.build() {
@@ -264,17 +253,13 @@ fn build_http_client_with_fallback(
 }
 
 pub fn create_cache(config: &Config) -> Option<Arc<Mutex<LRUResourceCache>>> {
-    let lru_cache = config
-        .reverse_proxy
-        .as_ref()
-        .and_then(|r| r.cache.as_ref())
-        .and_then(|c| {
-            if c.enabled {
-                Some(LRUResourceCache::new(c.size, c.dir.as_str()))
-            } else {
-                None
-            }
-        });
+    let lru_cache = config.reverse_proxy.as_ref().and_then(|r| r.cache.as_ref()).and_then(|c| {
+        if c.enabled {
+            Some(LRUResourceCache::new(c.size, c.dir.as_str()))
+        } else {
+            None
+        }
+    });
     let cache_enabled = lru_cache.is_some();
     if cache_enabled {
         info!("Scanning cache");
@@ -398,7 +383,10 @@ impl AppState {
         Ok(())
     }
 
-    pub(in crate::api::model) async fn set_sources(&self, sources: SourcesConfig) -> Result<UpdateChanges, TuliproxError> {
+    pub(in crate::api::model) async fn set_sources(
+        &self,
+        sources: SourcesConfig,
+    ) -> Result<UpdateChanges, TuliproxError> {
         let changes = self.detect_changes_for_sources(&sources);
         self.app_config.set_sources(sources)?;
         self.active_provider.update_config(&self.app_config).await;
@@ -411,14 +399,8 @@ impl AppState {
         self.active_users.user_connections(username).await
     }
 
-    pub async fn get_connection_permission(
-        &self,
-        username: &str,
-        max_connections: u32,
-    ) -> UserConnectionPermission {
-        self.active_users
-            .connection_permission(username, max_connections)
-            .await
+    pub async fn get_connection_permission(&self, username: &str, max_connections: u32) -> UserConnectionPermission {
+        self.active_users.connection_permission(username, max_connections).await
     }
 
     fn detect_changes_for_config(&self, config: &Config) -> UpdateChanges {
@@ -427,23 +409,14 @@ impl AppState {
             change_detect!(schedules_changed, old_config.schedules.as_ref(), config.schedules.as_ref());
         let changed_hdhomerun =
             change_detect!(hdhomerun_changed, old_config.hdhomerun.as_ref(), config.hdhomerun.as_ref());
-        let changed_file_watch = change_detect!(
-            string_changed,
-            old_config.mapping_path.as_ref(),
-            config.mapping_path.as_ref()
-        ) || change_detect!(
-            string_changed,
-            old_config.template_path.as_ref(),
-            config.template_path.as_ref()
-        );
+        let changed_file_watch =
+            change_detect!(string_changed, old_config.mapping_path.as_ref(), config.mapping_path.as_ref())
+                || change_detect!(string_changed, old_config.template_path.as_ref(), config.template_path.as_ref());
 
         let geoip_enabled = config.is_geoip_enabled();
         let geoip_enabled_old = old_config.is_geoip_enabled();
 
-        let mut changes = UpdateChanges {
-            flags: UpdateChangesFlagsSet::new(),
-            targets: None,
-        };
+        let mut changes = UpdateChanges { flags: UpdateChangesFlagsSet::new(), targets: None };
         changes.set_flag_if(changed_schedules, UpdateChangesFlags::Scheduler);
         changes.set_flag_if(changed_hdhomerun, UpdateChangesFlags::Hdhomerun);
         changes.set_flag_if(changed_file_watch, UpdateChangesFlags::FileWatch);
@@ -495,12 +468,8 @@ impl AppState {
                         Some(changes) => {
                             changes.status = TargetStatus::Keep;
                             changes.cache_status = match (changes.cache_status, target.use_memory_cache) {
-                                (TargetCacheState::UnchangedFalse, true) => {
-                                    TargetCacheState::ChangedToTrue
-                                }
-                                (TargetCacheState::UnchangedTrue, false) => {
-                                    TargetCacheState::ChangedToFalse
-                                }
+                                (TargetCacheState::UnchangedFalse, true) => TargetCacheState::ChangedToTrue,
+                                (TargetCacheState::UnchangedTrue, false) => TargetCacheState::ChangedToFalse,
                                 (x, _) => x,
                             };
                         }
@@ -511,10 +480,7 @@ impl AppState {
             (file_watch_changed, target_changes)
         };
 
-        let mut changes = UpdateChanges {
-            flags: UpdateChangesFlagsSet::new(),
-            targets: Some(target_changes),
-        };
+        let mut changes = UpdateChanges { flags: UpdateChangesFlagsSet::new(), targets: Some(target_changes) };
         changes.set_flag_if(file_watch_changed, UpdateChangesFlags::FileWatch);
         changes
     }
@@ -527,31 +493,19 @@ impl AppState {
         self.app_config.get_disabled_headers()
     }
 
-    pub fn get_grace_options(&self) -> GracePeriodOptions {
-        self.app_config.get_grace_options()
-    }
+    pub fn get_grace_options(&self) -> GracePeriodOptions { self.app_config.get_grace_options() }
 
     pub fn should_use_manual_redirects(&self) -> bool {
         let config = self.app_config.config.load();
-        config
-            .proxy
-            .as_ref()
-            .is_some_and(|proxy| should_use_manual_redirect_for_proxy(proxy.url.as_str()))
+        config.proxy.as_ref().is_some_and(|proxy| should_use_manual_redirect_for_proxy(proxy.url.as_str()))
             || proxy_env_present()
     }
 }
 
-fn proxy_env_present() -> bool {
-    should_use_manual_redirects_for_env_vars(std::env::vars_os())
-}
+fn proxy_env_present() -> bool { should_use_manual_redirects_for_env_vars(std::env::vars_os()) }
 
 fn should_use_manual_redirect_for_proxy(proxy_url: &str) -> bool {
-    Url::parse(proxy_url).is_ok_and(|url| {
-        matches!(
-            url.scheme().to_ascii_lowercase().as_str(),
-            "http" | "https"
-        )
-    })
+    Url::parse(proxy_url).is_ok_and(|url| matches!(url.scheme().to_ascii_lowercase().as_str(), "http" | "https"))
 }
 
 fn should_use_manual_redirects_for_env_vars<I, K, V>(vars: I) -> bool
@@ -607,9 +561,7 @@ fn hdhomerun_changed(a: &HdHomeRunConfig, b: &HdHomeRunConfig) -> bool {
     false
 }
 
-fn string_changed(a: &str, b: &str) -> bool {
-    a != b
-}
+fn string_changed(a: &str, b: &str) -> bool { a != b }
 
 #[derive(Clone)]
 pub struct HdHomerunAppState {
@@ -620,9 +572,7 @@ pub struct HdHomerunAppState {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        should_use_manual_redirect_for_proxy, should_use_manual_redirects_for_env_vars,
-    };
+    use super::{should_use_manual_redirect_for_proxy, should_use_manual_redirects_for_env_vars};
 
     #[test]
     fn should_use_manual_redirect_for_proxy_only_http_or_https() {

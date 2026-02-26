@@ -1,16 +1,22 @@
-use crate::api::model::AppState;
-use crate::model::{AppConfig, HdHomeRunDeviceConfig, HdHomeRunFlags};
+use crate::{
+    api::model::AppState,
+    model::{AppConfig, HdHomeRunDeviceConfig, HdHomeRunFlags},
+};
 use bytes::{Buf, BufMut, BytesMut};
 use log::{error, info, trace};
-use std::collections::HashMap;
-use std::io::Cursor;
-use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, UdpSocket};
-use tokio_util::sync::CancellationToken;
 use shared::utils::Internable;
+use std::{
+    collections::HashMap,
+    io::Cursor,
+    net::{Ipv4Addr, SocketAddr},
+    sync::Arc,
+    time::Duration,
+};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, UdpSocket},
+};
+use tokio_util::sync::CancellationToken;
 
 const HDHR_PROPRIETARY_PORT: u16 = 65001;
 
@@ -81,36 +87,18 @@ fn build_discover_response(device: &HdHomeRunDeviceConfig, server_host: &str) ->
 
     let device_id = u32::from_str_radix(&device.device_id, 16).unwrap_or(0);
 
-    write_tlv_u32(
-        &mut payload,
-        packet::HDHOMERUN_TAG_DEVICE_TYPE,
-        packet::HDHOMERUN_DEVICE_TYPE_TUNER,
-    );
-    write_tlv_u32(
-        &mut payload,
-        packet::HDHOMERUN_TAG_DEVICE_ID,
-        device_id,
-    );
-    write_tlv_str(
-        &mut payload,
-        packet::HDHOMERUN_TAG_BASE_URL,
-        &base_url,
-    );
-    write_tlv_u8(
-        &mut payload,
-        packet::HDHOMERUN_TAG_TUNER_COUNT,
-        device.tuner_count,
-    );
-    write_tlv_str(
-        &mut payload,
-        packet::HDHOMERUN_TAG_LINEUP_URL,
-        &lineup_url,
-    );
+    write_tlv_u32(&mut payload, packet::HDHOMERUN_TAG_DEVICE_TYPE, packet::HDHOMERUN_DEVICE_TYPE_TUNER);
+    write_tlv_u32(&mut payload, packet::HDHOMERUN_TAG_DEVICE_ID, device_id);
+    write_tlv_str(&mut payload, packet::HDHOMERUN_TAG_BASE_URL, &base_url);
+    write_tlv_u8(&mut payload, packet::HDHOMERUN_TAG_TUNER_COUNT, device.tuner_count);
+    write_tlv_str(&mut payload, packet::HDHOMERUN_TAG_LINEUP_URL, &lineup_url);
 
     let mut response = BytesMut::new();
     response.put_u16(packet::HDHOMERUN_TYPE_DISCOVER_RSP);
     //response.put_u16(u16::try_from(payload.len()).unwrap_or(0));
-    if let Ok(n) = u16::try_from(payload.len()) { response.put_u16(n) } else {
+    if let Ok(n) = u16::try_from(payload.len()) {
+        response.put_u16(n);
+    } else {
         error!("HDHR response payload too large ({} bytes)", payload.len());
         return Vec::new();
     }
@@ -149,24 +137,24 @@ fn parse_tlv(cursor: &mut Cursor<&[u8]>) -> HashMap<u8, Vec<u8>> {
         // }
         // let len = u16::from_be_bytes(len_buf) as usize;
 
-         // Variable-length TLV decoding
-         let mut first_len_byte = [0u8; 1];
-         if std::io::Read::read_exact(cursor, &mut first_len_byte).is_err() {
-              break;
-         }
-         let len = if first_len_byte[0] & 0x80 == 0 {
-             // Single-byte length (≤127)
-             first_len_byte[0] as usize
-         } else {
-             // Two-byte length (≥128)
-             let mut second_len_byte = [0u8; 1];
-             if std::io::Read::read_exact(cursor, &mut second_len_byte).is_err() {
-                 break;
-             }
-             let low_bits = (first_len_byte[0] & 0x7F) as usize;
-             let high_bits = (second_len_byte[0] as usize) << 7;
-             low_bits | high_bits
-         };
+        // Variable-length TLV decoding
+        let mut first_len_byte = [0u8; 1];
+        if std::io::Read::read_exact(cursor, &mut first_len_byte).is_err() {
+            break;
+        }
+        let len = if first_len_byte[0] & 0x80 == 0 {
+            // Single-byte length (≤127)
+            first_len_byte[0] as usize
+        } else {
+            // Two-byte length (≥128)
+            let mut second_len_byte = [0u8; 1];
+            if std::io::Read::read_exact(cursor, &mut second_len_byte).is_err() {
+                break;
+            }
+            let low_bits = (first_len_byte[0] & 0x7F) as usize;
+            let high_bits = (second_len_byte[0] as usize) << 7;
+            low_bits | high_bits
+        };
 
         // Check for incomplete TLV
         let remaining = cursor.get_ref().len() as u64 - cursor.position();
@@ -185,11 +173,7 @@ fn parse_tlv(cursor: &mut Cursor<&[u8]>) -> HashMap<u8, Vec<u8>> {
     tags
 }
 
-async fn proprietary_discover_loop(
-    socket: UdpSocket,
-    app_config: Arc<AppConfig>,
-    server_host: String,
-) {
+async fn proprietary_discover_loop(socket: UdpSocket, app_config: Arc<AppConfig>, server_host: String) {
     let mut buf = [0; 1024];
     loop {
         let (len, remote_addr) = match socket.recv_from(&mut buf).await {
@@ -248,13 +232,16 @@ async fn proprietary_discover_loop(
                             if should_reply {
                                 let response = build_discover_response(device, &server_host);
                                 if response.is_empty() {
-                                   error!("Failed to build discovery response for device '{}'", device.name);
-                                   continue;
+                                    error!("Failed to build discovery response for device '{}'", device.name);
+                                    continue;
                                 }
                                 if let Err(e) = socket.send_to(&response, remote_addr).await {
                                     error!("Failed to send proprietary discovery response to {remote_addr}: {e}");
                                 } else {
-                                    trace!("Sent proprietary discovery response for device '{}' to {remote_addr}", device.name);
+                                    trace!(
+                                        "Sent proprietary discovery response for device '{}' to {remote_addr}",
+                                        device.name
+                                    );
                                 }
                             }
                         }
@@ -267,11 +254,7 @@ async fn proprietary_discover_loop(
 
 // --- TCP Get/Set Logic ---
 
-async fn handle_tcp_connection(
-    mut stream: tokio::net::TcpStream,
-    _addr: SocketAddr,
-    app_state: Arc<AppState>,
-) {
+async fn handle_tcp_connection(mut stream: tokio::net::TcpStream, _addr: SocketAddr, app_state: Arc<AppState>) {
     let mut buf = [0; 1024];
     loop {
         match stream.read(&mut buf).await {
@@ -332,19 +315,11 @@ async fn process_getset_request(request: &[u8], app_state: &Arc<AppState>) -> Ve
         trace!("Received GET/SET for: {name}");
 
         let name_str = name.trim_end_matches('\0');
-        write_tlv_str(
-            &mut response_payload,
-            packet::HDHOMERUN_TAG_GETSET_NAME,
-            name_str,
-        );
+        write_tlv_str(&mut response_payload, packet::HDHOMERUN_TAG_GETSET_NAME, name_str);
 
         match name_str {
             "/sys/model" => {
-                write_tlv_str(
-                    &mut response_payload,
-                    packet::HDHOMERUN_TAG_GETSET_VALUE,
-                    "hdhomerun4_atsc",
-                );
+                write_tlv_str(&mut response_payload, packet::HDHOMERUN_TAG_GETSET_VALUE, "hdhomerun4_atsc");
             }
             s if s.starts_with("/tuner") && s.ends_with("/status") => {
                 let rest = &s[6..];
@@ -356,11 +331,7 @@ async fn process_getset_request(request: &[u8], app_state: &Arc<AppState>) -> Ve
                     } else {
                         "ch=none lock=none ss=0 snq=0 seq=0 bps=0 pps=0".to_string()
                     };
-                    write_tlv_str(
-                        &mut response_payload,
-                        packet::HDHOMERUN_TAG_GETSET_VALUE,
-                        &status_str,
-                    );
+                    write_tlv_str(&mut response_payload, packet::HDHOMERUN_TAG_GETSET_VALUE, &status_str);
                 }
             }
             s if s.starts_with("/tuner") && s.ends_with("/vchannel") => {
@@ -373,11 +344,7 @@ async fn process_getset_request(request: &[u8], app_state: &Arc<AppState>) -> Ve
                     } else {
                         "none".intern()
                     };
-                    write_tlv_str(
-                        &mut response_payload,
-                        packet::HDHOMERUN_TAG_GETSET_VALUE,
-                        &vchannel,
-                    );
+                    write_tlv_str(&mut response_payload, packet::HDHOMERUN_TAG_GETSET_VALUE, &vchannel);
                 }
             }
             s if s.starts_with("/tuner") && s.ends_with("/lockkey") => {
@@ -385,7 +352,7 @@ async fn process_getset_request(request: &[u8], app_state: &Arc<AppState>) -> Ve
                 write_tlv_str(&mut response_payload, packet::HDHOMERUN_TAG_ERROR_MESSAGE, err_msg);
             }
             _ => {
-                write_tlv_str(&mut response_payload,packet::HDHOMERUN_TAG_GETSET_VALUE,"");
+                write_tlv_str(&mut response_payload, packet::HDHOMERUN_TAG_GETSET_VALUE, "");
             }
         }
     }
@@ -406,10 +373,7 @@ async fn process_getset_request(request: &[u8], app_state: &Arc<AppState>) -> Ve
     response.to_vec()
 }
 
-async fn proprietary_tcp_listener_loop(
-    app_state: Arc<AppState>,
-    cancel_token: CancellationToken,
-) {
+async fn proprietary_tcp_listener_loop(app_state: Arc<AppState>, cancel_token: CancellationToken) {
     let addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, HDHR_PROPRIETARY_PORT));
     let listener = match TcpListener::bind(addr).await {
         Ok(l) => l,
@@ -439,11 +403,7 @@ async fn proprietary_tcp_listener_loop(
     }
 }
 
-pub fn spawn_proprietary_tasks(
-    app_state: Arc<AppState>,
-    server_host: String,
-    cancel_token: CancellationToken,
-) {
+pub fn spawn_proprietary_tasks(app_state: Arc<AppState>, server_host: String, cancel_token: CancellationToken) {
     let app_config = Arc::clone(&app_state.app_config);
     let cancel_token_udp = cancel_token.clone();
 

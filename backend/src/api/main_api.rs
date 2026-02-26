@@ -1,44 +1,54 @@
-use crate::api::api_utils::{get_build_time, get_server_time};
-use crate::api::config_watch::exec_config_watch;
-use crate::api::endpoints::custom_video_stream_api::cvs_api_register;
-use crate::api::endpoints::hdhomerun_api::hdhr_api_register;
-use crate::api::endpoints::hls_api::hls_api_register;
-use crate::api::endpoints::m3u_api::m3u_api_register;
-use crate::api::endpoints::v1_api::v1_api_register;
-use crate::api::endpoints::web_index::{index_register_with_path, index_register_without_path};
-use crate::api::endpoints::websocket_api::ws_api_register;
-use crate::api::endpoints::xmltv_api::xmltv_api_register;
-use crate::api::endpoints::xtream_api::xtream_api_register;
-use crate::api::hdhomerun_proprietary::spawn_proprietary_tasks;
-use crate::api::hdhomerun_ssdp::spawn_ssdp_discover_task;
-use crate::api::model::{
-    create_cache, create_http_client, create_http_client_no_redirect, ActiveProviderManager, ActiveUserManager,
-    AppState, CancelTokens, ConnectionManager, DownloadQueue, EventManager, EventMessage, HdHomerunAppState,
-    MetadataUpdateManager, PlaylistStorageState, SharedStreamManager, UpdateGuard,
+use crate::{
+    api::{
+        api_utils::{get_build_time, get_server_time},
+        config_watch::exec_config_watch,
+        endpoints::{
+            custom_video_stream_api::cvs_api_register,
+            hdhomerun_api::hdhr_api_register,
+            hls_api::hls_api_register,
+            m3u_api::m3u_api_register,
+            v1_api::v1_api_register,
+            web_index::{index_register_with_path, index_register_without_path},
+            websocket_api::ws_api_register,
+            xmltv_api::xmltv_api_register,
+            xtream_api::xtream_api_register,
+        },
+        hdhomerun_proprietary::spawn_proprietary_tasks,
+        hdhomerun_ssdp::spawn_ssdp_discover_task,
+        model::{
+            create_cache, create_http_client, create_http_client_no_redirect, ActiveProviderManager, ActiveUserManager,
+            AppState, CancelTokens, ConnectionManager, DownloadQueue, EventManager, EventMessage, HdHomerunAppState,
+            MetadataUpdateManager, PlaylistStorageState, SharedStreamManager, UpdateGuard,
+        },
+        panel_api::sync_panel_api_exp_dates_on_boot,
+        scheduler::{exec_interner_prune, exec_scheduler},
+        serve::serve,
+        sys_usage::exec_system_usage,
+    },
+    model::{AppConfig, Config, HdHomeRunFlags, Healthcheck, ProcessTargets, RateLimitConfig},
+    processing::processor::exec_processing,
+    repository::{get_geoip_path, load_playlists_into_memory_cache},
+    utils::{exec_file_lock_prune, get_default_web_root_path, GeoIp},
+    VERSION,
 };
-use crate::api::panel_api::sync_panel_api_exp_dates_on_boot;
-use crate::api::scheduler::{exec_interner_prune, exec_scheduler};
-use crate::api::serve::serve;
-use crate::api::sys_usage::exec_system_usage;
-use crate::model::{AppConfig, Config, HdHomeRunFlags, Healthcheck, ProcessTargets, RateLimitConfig};
-use crate::processing::processor::exec_processing;
-use crate::repository::get_geoip_path;
-use crate::repository::load_playlists_into_memory_cache;
-use crate::utils::{exec_file_lock_prune, get_default_web_root_path, GeoIp};
-use crate::VERSION;
 use arc_swap::{ArcSwap, ArcSwapOption};
-use axum::extract::connect_info::ConnectInfo;
-use axum::Router;
-use axum::{extract::Request, middleware::Next};
+use axum::{
+    extract::{connect_info::ConnectInfo, Request},
+    middleware::Next,
+    Router,
+};
 use log::{debug, error, info, warn};
-use shared::error::TuliproxError;
-use shared::utils::{concat_path_leading_slash, sanitize_sensitive_info};
-use shared::{info_err, info_err_res};
-use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::sync::atomic::AtomicI8;
-use std::sync::Arc;
+use shared::{
+    error::TuliproxError,
+    info_err, info_err_res,
+    utils::{concat_path_leading_slash, sanitize_sensitive_info},
+};
+use std::{
+    collections::{HashMap, HashSet},
+    net::SocketAddr,
+    path::PathBuf,
+    sync::{atomic::AtomicI8, Arc},
+};
 use tokio_util::sync::CancellationToken;
 use tower_governor::key_extractor::SmartIpKeyExtractor;
 use tower_http::services::ServeDir;
@@ -62,9 +72,7 @@ fn create_healthcheck() -> Healthcheck {
     }
 }
 
-async fn healthcheck() -> impl axum::response::IntoResponse {
-    axum::Json(create_healthcheck())
-}
+async fn healthcheck() -> impl axum::response::IntoResponse { axum::Json(create_healthcheck()) }
 
 async fn create_shared_data(
     app_config: &Arc<AppConfig>,
@@ -140,6 +148,7 @@ fn exec_update_on_boot(client: &reqwest::Client, app_state: &Arc<AppState>, targ
         let provider_manager = Arc::clone(&app_state.active_provider);
         let metadata_manager = Arc::clone(&app_state.metadata_manager);
         let event_manager = Some(Arc::clone(&app_state.event_manager));
+        let app_state_clone = Arc::clone(app_state);
 
         tokio::spawn(async move {
             exec_processing(
@@ -147,6 +156,7 @@ fn exec_update_on_boot(client: &reqwest::Client, app_state: &Arc<AppState>, targ
                 app_config_clone,
                 targets_clone,
                 event_manager,
+                Some(app_state_clone),
                 Some(playlist_state),
                 update_guard,
                 disabled_headers,
@@ -510,6 +520,7 @@ fn exec_input_update_listener(app_state: &Arc<AppState>, targets: &Arc<ProcessTa
                                             app_config,
                                             proc_targets,
                                             Some(event_manager),
+                                            Some(app_state_clone.clone()),
                                             Some(playlist_state),
                                             Some(update_guard),
                                             disabled_headers,

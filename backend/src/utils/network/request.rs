@@ -1,31 +1,44 @@
-use crate::api::model::persist_pipe_stream::tee_dyn_reader;
-use crate::api::model::{AppState, STREAM_IDLE_TIMEOUT};
-use crate::model::{
-    resolve_provider_scheme_url_with_provider, AppConfig, Config, ConfigInput, ConfigProvider,
-    InputSource, ResourceRetryConfig, ReverseProxyDisabledHeaderConfig,
+use crate::{
+    api::model::{persist_pipe_stream::tee_dyn_reader, AppState, STREAM_IDLE_TIMEOUT},
+    model::{
+        resolve_provider_scheme_url_with_provider, AppConfig, Config, ConfigInput, ConfigProvider, InputSource,
+        ResourceRetryConfig, ReverseProxyDisabledHeaderConfig,
+    },
+    utils::{
+        async_file_reader, async_file_writer,
+        compression::compression_utils::{is_deflate, is_gzip},
+        debug_if_enabled, get_file_path, persist_file,
+    },
 };
-use crate::utils::compression::compression_utils::{is_deflate, is_gzip};
-use crate::utils::{async_file_reader, async_file_writer, debug_if_enabled};
-use crate::utils::{get_file_path, persist_file};
 use futures::{StreamExt, TryStreamExt};
 use log::{debug, error, log_enabled, trace, warn, Level};
-use reqwest::header::CONTENT_ENCODING;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-use reqwest::redirect::Policy;
-use reqwest::StatusCode;
-use shared::error::{notify_err_res, string_to_io_error, TuliproxError};
-use shared::model::{format_elapsed_time, InputFetchMethod, DEFAULT_USER_AGENT};
-use shared::utils::{filter_request_header, human_readable_byte_size, sanitize_sensitive_info, CONTENT_TYPE_JSON, ENCODING_DEFLATE, ENCODING_GZIP};
-use std::collections::HashMap;
-use std::io::{Error, ErrorKind};
-use std::path::{Path, PathBuf};
-use std::pin::Pin;
-use std::sync::{Arc, Once};
-use std::time::Duration;
 use regex::Regex;
-use tokio::fs::File;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt};
-use tokio::time::sleep;
+use reqwest::{
+    header::{HeaderMap, HeaderName, HeaderValue, CONTENT_ENCODING},
+    redirect::Policy,
+    StatusCode,
+};
+use shared::{
+    error::{notify_err_res, string_to_io_error, TuliproxError},
+    model::{format_elapsed_time, InputFetchMethod, DEFAULT_USER_AGENT},
+    utils::{
+        filter_request_header, human_readable_byte_size, sanitize_sensitive_info, CONTENT_TYPE_JSON, ENCODING_DEFLATE,
+        ENCODING_GZIP,
+    },
+};
+use std::{
+    collections::HashMap,
+    io::{Error, ErrorKind},
+    path::{Path, PathBuf},
+    pin::Pin,
+    sync::{Arc, Once},
+    time::Duration,
+};
+use tokio::{
+    fs::File,
+    io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt},
+    time::sleep,
+};
 use tokio_util::io::StreamReader;
 use url::Url;
 
@@ -92,11 +105,9 @@ pub enum MimeCategory {
 }
 
 pub fn classify_content_type(headers: &[(String, String)]) -> MimeCategory {
-    headers.iter()
-        .find_map(|(k, v)| {
-            (k == axum::http::header::CONTENT_TYPE.as_str()).then_some(v)
-        })
-        .map_or(MimeCategory::Unknown, |v| match v.to_lowercase().as_str() {
+    headers.iter().find_map(|(k, v)| (k == axum::http::header::CONTENT_TYPE.as_str()).then_some(v)).map_or(
+        MimeCategory::Unknown,
+        |v| match v.to_lowercase().as_str() {
             v if v.starts_with("video/") || v == "application/octet-stream" => MimeCategory::Video,
             v if v.contains("mpegurl") => MimeCategory::M3U8,
             v if v.starts_with("image/") => MimeCategory::Image,
@@ -104,7 +115,8 @@ pub fn classify_content_type(headers: &[(String, String)]) -> MimeCategory {
             v if v.starts_with("application/xml") || v.ends_with("+xml") || v == "text/xml" => MimeCategory::Xml,
             v if v.starts_with("text/") => MimeCategory::Text,
             _ => MimeCategory::Unclassified,
-        })
+        },
+    )
 }
 
 pub fn format_http_status(status: StatusCode) -> String {
@@ -127,10 +139,7 @@ pub fn content_type_from_ext(ext: &str) -> &'static str {
     }
 }
 
-fn resolve_provider_url_for_attempt(
-    url: &Url,
-    provider: Option<&Arc<ConfigProvider>>,
-) -> Url {
+fn resolve_provider_url_for_attempt(url: &Url, provider: Option<&Arc<ConfigProvider>>) -> Url {
     let Some(provider) = provider else {
         return url.clone();
     };
@@ -148,7 +157,6 @@ fn resolve_provider_url_for_attempt(
         }
     }
 }
-
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
 pub fn calculate_retry_backoff(base_delay_ms: u64, multiplier: f64, attempt: u32) -> u64 {
@@ -176,19 +184,16 @@ pub async fn send_with_retry_and_provider(
     mut send: impl FnMut(&Url) -> reqwest::RequestBuilder,
 ) -> Result<reqwest::Response, std::io::Error> {
     let config = app_config.config.load();
-    let (max_attempts, backoff_ms, backoff_multiplier, failover_patterns) = config
-        .reverse_proxy
-        .as_ref()
-        .map_or_else(
-            || {
-                let (a, b, c) = ResourceRetryConfig::get_default_retry_values();
-                (a, b, c, ResourceRetryConfig::default().failover_redirect_patterns)
-            },
-            |rp| {
-                let (a, b, c) = rp.resource_retry.get_retry_values();
-                (a, b, c, rp.resource_retry.failover_redirect_patterns.clone())
-            },
-        );
+    let (max_attempts, backoff_ms, backoff_multiplier, failover_patterns) = config.reverse_proxy.as_ref().map_or_else(
+        || {
+            let (a, b, c) = ResourceRetryConfig::get_default_retry_values();
+            (a, b, c, ResourceRetryConfig::default().failover_redirect_patterns)
+        },
+        |rp| {
+            let (a, b, c) = rp.resource_retry.get_retry_values();
+            (a, b, c, rp.resource_retry.failover_redirect_patterns.clone())
+        },
+    );
     drop(config);
 
     let idle_timeout = Duration::from_secs(STREAM_IDLE_TIMEOUT);
@@ -197,13 +202,11 @@ pub async fn send_with_retry_and_provider(
 
     // Record the starting URL index for full-cycle detection.
     // This allows us to try all URLs even when starting from a non-zero index.
-    let (start_index, max_provider_attempts) = provider
-        .as_ref()
-        .map_or((0, 0), |p| (p.get_current_index(), p.urls.len()));
+    let (start_index, max_provider_attempts) =
+        provider.as_ref().map_or((0, 0), |p| (p.get_current_index(), p.urls.len()));
     let mut provider_attempts = usize::from(max_provider_attempts > 0);
 
     'provider_loop: loop {
-
         // 2. Retry loop for the current URL
         for attempt in 0..max_attempts {
             let resolved_url = resolve_provider_url_for_attempt(url, provider);
@@ -330,10 +333,12 @@ fn is_failover_redirect(url: &Url, patterns: &[Arc<Regex>]) -> bool {
 
 /// Helper to handle sleep duration for retries, respecting Retry-After headers
 async fn perform_backoff(attempt: u32, ms: u64, mult: f64, response: &reqwest::Response) {
-    let wait_dur = response.headers()
+    let wait_dur = response
+        .headers()
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.parse::<u64>().ok()).map_or_else(|| Duration::from_millis(calculate_retry_backoff(ms, mult, attempt)), Duration::from_secs);
+        .and_then(|s| s.parse::<u64>().ok())
+        .map_or_else(|| Duration::from_millis(calculate_retry_backoff(ms, mult, attempt)), Duration::from_secs);
 
     tokio::time::sleep(wait_dur).await;
 }
@@ -353,19 +358,15 @@ pub async fn get_input_epg_content_as_file(
         sanitize_sensitive_info(url_str)
     );
     if url_str.parse::<url::Url>().is_ok() {
-        match download_epg_content_as_file(
-            app_config,
-            client,
-            input,
-            headers,
-            url_str,
-            persist_filepath,
-        )
-            .await
-        {
+        match download_epg_content_as_file(app_config, client, input, headers, url_str, persist_filepath).await {
             Ok(content) => Ok(content),
             Err(e) => {
-                error!("can't download input {} epg url: {}  => {}", input.name, sanitize_sensitive_info(url_str), sanitize_sensitive_info(e.to_string().as_str()));
+                error!(
+                    "can't download input {} epg url: {}  => {}",
+                    input.name,
+                    sanitize_sensitive_info(url_str),
+                    sanitize_sensitive_info(e.to_string().as_str())
+                );
                 notify_err_res!("Failed to download")
             }
         }
@@ -389,11 +390,14 @@ pub async fn get_input_epg_content_as_file(
             None => None,
         };
 
-        result.map_or_else(|| {
-            let msg = format!("can't read input url: {}", sanitize_sensitive_info(url_str));
-            error!("{msg}");
-            notify_err_res!("{msg}")
-        }, Ok)
+        result.map_or_else(
+            || {
+                let msg = format!("can't read input url: {}", sanitize_sensitive_info(url_str));
+                error!("{msg}");
+                notify_err_res!("{msg}")
+            },
+            Ok,
+        )
     }
 }
 
@@ -411,19 +415,14 @@ pub async fn get_input_text_content(
     );
 
     if input.url.parse::<url::Url>().is_ok() {
-        match download_text_content(
-            &app_state.app_config,
-            client,
-            input,
-            None,
-            persist_filepath,
-            false,
-        )
-            .await
-        {
+        match download_text_content(&app_state.app_config, client, input, None, persist_filepath, false).await {
             Ok((content, _response_url)) => Ok(content),
             Err(e) => {
-                error!("Failed to download input '{}': {}", &input.name, sanitize_sensitive_info(e.to_string().as_str()));
+                error!(
+                    "Failed to download input '{}': {}",
+                    &input.name,
+                    sanitize_sensitive_info(e.to_string().as_str())
+                );
                 notify_err_res!("Failed to download")
             }
         }
@@ -451,11 +450,14 @@ pub async fn get_input_text_content(
             }
             None => None,
         };
-        result.map_or_else(|| {
-            let msg = format!("can't read input url: {}", sanitize_sensitive_info(&input.url));
-            error!("{msg}");
-            notify_err_res!("{msg}")
-        }, Ok)
+        result.map_or_else(
+            || {
+                let msg = format!("can't read input url: {}", sanitize_sensitive_info(&input.url));
+                error!("{msg}");
+                notify_err_res!("{msg}")
+            },
+            Ok,
+        )
     }
 }
 
@@ -473,14 +475,7 @@ pub async fn get_input_text_content_as_stream(
     );
 
     if input.url.parse::<url::Url>().is_ok() {
-        match download_text_content_as_stream(
-            app_config,
-            client,
-            input,
-            persist_filepath,
-        )
-            .await
-        {
+        match download_text_content_as_stream(app_config, client, input, persist_filepath).await {
             Ok((content, _response_url)) => Ok(content),
             Err(e) => {
                 error!(
@@ -502,13 +497,10 @@ pub async fn get_input_text_content_as_stream(
                                     content,
                                     &path,
                                     Some(Arc::new(|size| {
-                                        debug_if_enabled!(
-                                            "Persisted {} bytes",
-                                            human_readable_byte_size(size as u64)
-                                        );
+                                        debug_if_enabled!("Persisted {} bytes", human_readable_byte_size(size as u64));
                                     })),
                                 )
-                                    .await;
+                                .await;
                                 Some(tee)
                             } else {
                                 Some(content)
@@ -524,11 +516,14 @@ pub async fn get_input_text_content_as_stream(
             }
             None => None,
         };
-        result.map_or_else(|| {
-            let msg = format!("can't read input url: {}", sanitize_sensitive_info(&input.url));
-            error!("{msg}");
-            notify_err_res!("{msg}")
-        }, Ok)
+        result.map_or_else(
+            || {
+                let msg = format!("can't read input url: {}", sanitize_sensitive_info(&input.url));
+                error!("{msg}");
+                notify_err_res!("{msg}")
+            },
+            Ok,
+        )
     }
 }
 
@@ -553,12 +548,7 @@ pub fn get_client_request<S: ::std::hash::BuildHasher + Default>(
             client.post(url.clone()).form(&params)
         }
     };
-    let headers = get_request_headers(
-        headers,
-        custom_headers,
-        disabled_headers,
-        default_user_agent,
-    );
+    let headers = get_request_headers(headers, custom_headers, disabled_headers, default_user_agent);
     request.headers(headers)
 }
 
@@ -575,15 +565,11 @@ pub fn get_request_headers<S: ::std::hash::BuildHasher + Default>(
     // These should have the highest priority.
     if let Some(req_headers) = request_headers {
         for (key, value) in req_headers {
-            if let (Ok(key), Ok(value)) = (
-                HeaderName::from_bytes(key.as_bytes()),
-                HeaderValue::from_bytes(value.as_bytes()),
-            ) {
+            if let (Ok(key), Ok(value)) =
+                (HeaderName::from_bytes(key.as_bytes()), HeaderValue::from_bytes(value.as_bytes()))
+            {
                 if filter_request_header(key.as_str()) {
-                    if disabled_headers
-                        .as_ref()
-                        .is_some_and(|d| d.should_remove(key.as_str()))
-                    {
+                    if disabled_headers.as_ref().is_some_and(|d| d.should_remove(key.as_str())) {
                         continue;
                     }
                     if key == axum::http::header::USER_AGENT {
@@ -601,16 +587,10 @@ pub fn get_request_headers<S: ::std::hash::BuildHasher + Default>(
         for (key, value) in custom {
             let key_lc = key.to_lowercase();
             if filter_request_header(key_lc.as_str()) {
-                if disabled_headers
-                    .as_ref()
-                    .is_some_and(|d| d.should_remove(key_lc.as_str()))
-                {
+                if disabled_headers.as_ref().is_some_and(|d| d.should_remove(key_lc.as_str())) {
                     continue;
                 }
-                if let (Ok(name), Ok(val)) = (
-                    HeaderName::from_bytes(key.as_bytes()),
-                    HeaderValue::from_bytes(value),
-                ) {
+                if let (Ok(name), Ok(val)) = (HeaderName::from_bytes(key.as_bytes()), HeaderValue::from_bytes(value)) {
                     // Only insert if not already present (config takes precedence)
                     if !headers.contains_key(&name) {
                         if name == axum::http::header::USER_AGENT {
@@ -624,15 +604,8 @@ pub fn get_request_headers<S: ::std::hash::BuildHasher + Default>(
     }
 
     if log_enabled!(Level::Trace) {
-        let he: HashMap<String, String> = headers
-            .iter()
-            .map(|(k, v)| {
-                (
-                    k.to_string(),
-                    String::from_utf8_lossy(v.as_bytes()).to_string(),
-                )
-            })
-            .collect();
+        let he: HashMap<String, String> =
+            headers.iter().map(|(k, v)| (k.to_string(), String::from_utf8_lossy(v.as_bytes()).to_string())).collect();
         if !he.is_empty() {
             trace!("Request headers {he:?}");
         }
@@ -661,10 +634,7 @@ pub fn get_request_headers<S: ::std::hash::BuildHasher + Default>(
 pub async fn get_local_file_content(file_path: &Path) -> Result<String, std::io::Error> {
     // open file
     let file = File::open(file_path).await.map_err(|err| {
-        std::io::Error::new(
-            ErrorKind::NotFound,
-            format!("Failed to open file: {}, {err:?}", file_path.display()),
-        )
+        std::io::Error::new(ErrorKind::NotFound, format!("Failed to open file: {}, {err:?}", file_path.display()))
     })?;
 
     let mut buf_reader = async_file_reader(file);
@@ -693,15 +663,10 @@ pub async fn get_local_file_content(file_path: &Path) -> Result<String, std::io:
     Ok(decoded)
 }
 
-pub async fn get_local_file_content_as_stream(
-    file_path: &Path,
-) -> Result<DynReader, std::io::Error> {
+pub async fn get_local_file_content_as_stream(file_path: &Path) -> Result<DynReader, std::io::Error> {
     // open file
     let file = File::open(file_path).await.map_err(|err| {
-        std::io::Error::new(
-            ErrorKind::NotFound,
-            format!("Failed to open file: {}, {err:?}", file_path.display()),
-        )
+        std::io::Error::new(ErrorKind::NotFound, format!("Failed to open file: {}, {err:?}", file_path.display()))
     })?;
 
     let mut buf_reader = async_file_reader(file);
@@ -712,9 +677,7 @@ pub async fn get_local_file_content_as_stream(
 
     if is_gzipped {
         // use Async Gzip Decoder
-        Ok(Box::pin(
-            async_compression::tokio::bufread::GzipDecoder::new(buf_reader),
-        ))
+        Ok(Box::pin(async_compression::tokio::bufread::GzipDecoder::new(buf_reader)))
     } else {
         Ok(Box::pin(buf_reader))
     }
@@ -728,11 +691,8 @@ pub async fn get_remote_content_as_file(
     url: &Url,
     file_path: &Path,
 ) -> Result<PathBuf, std::io::Error> {
-    let custom_headers = headers.map(|h| {
-        h.iter()
-            .map(|(k, v)| (k.as_str().to_string(), v.as_bytes().to_vec()))
-            .collect::<HashMap<_, _>>()
-    });
+    let custom_headers = headers
+        .map(|h| h.iter().map(|(k, v)| (k.as_str().to_string(), v.as_bytes().to_vec())).collect::<HashMap<_, _>>());
 
     let config = app_config.config.load();
     let default_user_agent = config.default_user_agent.clone();
@@ -740,33 +700,25 @@ pub async fn get_remote_content_as_file(
 
     let provider_config = input.get_resolve_provider(url.as_str());
 
-    let response = send_with_retry_and_provider(
-        app_config,
-        url,
-        provider_config.as_ref(),
-        false,
-        |resolved_url| {
-            get_client_request(
-                client,
-                input.method,
-                Some(&input.headers),
-                resolved_url,
-                custom_headers.as_ref(),
-                None,
-                default_user_agent.as_deref(),
-            )
-        },
-    )
-        .await?;
+    let response = send_with_retry_and_provider(app_config, url, provider_config.as_ref(), false, |resolved_url| {
+        get_client_request(
+            client,
+            input.method,
+            Some(&input.headers),
+            resolved_url,
+            custom_headers.as_ref(),
+            None,
+            default_user_agent.as_deref(),
+        )
+    })
+    .await?;
 
     let start_time = tokio::time::Instant::now();
     let mut writer = async_file_writer(File::create(file_path).await?);
 
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let bytes = chunk.map_err(|e| {
-            string_to_io_error(format!("Failed to read chunk: {e}"))
-        })?;
+        let bytes = chunk.map_err(|e| string_to_io_error(format!("Failed to read chunk: {e}")))?;
         writer.write_all(&bytes).await?;
     }
 
@@ -813,17 +765,12 @@ pub async fn get_remote_content_as_file(
 
 pub type DynReader = Pin<Box<dyn AsyncRead + Send>>;
 
-async fn build_decoded_stream_reader(
-    response: reqwest::Response,
-) -> Result<DynReader, std::io::Error> {
+async fn build_decoded_stream_reader(response: reqwest::Response) -> Result<DynReader, std::io::Error> {
     let headers = response.headers();
     let header_value = headers.get(CONTENT_ENCODING);
-    let mut encoding = header_value
-        .and_then(|h| h.to_str().ok())
-        .map(ToString::to_string);
+    let mut encoding = header_value.and_then(|h| h.to_str().ok()).map(ToString::to_string);
 
-    let stream_reader =
-        StreamReader::new(response.bytes_stream().map_err(std::io::Error::other));
+    let stream_reader = StreamReader::new(response.bytes_stream().map_err(std::io::Error::other));
     let mut buf_reader = async_file_reader(stream_reader);
 
     let peek = buf_reader.fill_buf().await?;
@@ -836,27 +783,16 @@ async fn build_decoded_stream_reader(
         }
     }
 
-    let reader: DynReader = if encoding
-        .as_ref()
-        .is_some_and(|e| e.eq_ignore_ascii_case(ENCODING_GZIP))
-    {
-        Box::pin(async_compression::tokio::bufread::GzipDecoder::new(
-            buf_reader,
-        ))
-    } else if encoding
-        .as_ref()
-        .is_some_and(|e| e.eq_ignore_ascii_case(ENCODING_DEFLATE))
-    {
-        Box::pin(async_compression::tokio::bufread::ZlibDecoder::new(
-            buf_reader,
-        ))
+    let reader: DynReader = if encoding.as_ref().is_some_and(|e| e.eq_ignore_ascii_case(ENCODING_GZIP)) {
+        Box::pin(async_compression::tokio::bufread::GzipDecoder::new(buf_reader))
+    } else if encoding.as_ref().is_some_and(|e| e.eq_ignore_ascii_case(ENCODING_DEFLATE)) {
+        Box::pin(async_compression::tokio::bufread::ZlibDecoder::new(buf_reader))
     } else {
         Box::pin(buf_reader)
     };
 
     Ok(reader)
 }
-
 
 #[allow(clippy::implicit_hasher)]
 pub async fn get_remote_content_as_stream(
@@ -866,11 +802,8 @@ pub async fn get_remote_content_as_stream(
     headers: Option<&HeaderMap>,
     url: &Url,
 ) -> Result<(DynReader, String), Error> {
-    let custom_headers = headers.map(|h| {
-        h.iter()
-            .map(|(k, v)| (k.as_str().to_string(), v.as_bytes().to_vec()))
-            .collect::<HashMap<_, _>>()
-    });
+    let custom_headers = headers
+        .map(|h| h.iter().map(|(k, v)| (k.as_str().to_string(), v.as_bytes().to_vec())).collect::<HashMap<_, _>>());
 
     let config = app_config.config.load();
     let default_user_agent = config.default_user_agent.clone();
@@ -886,32 +819,21 @@ pub async fn get_remote_content_as_stream(
 
     let headers: HashMap<String, String> = merged
         .iter()
-        .map(|(k, v)| {
-            (
-                k.as_str().to_string(),
-                String::from_utf8_lossy(v.as_bytes()).to_string(),
-            )
-        })
+        .map(|(k, v)| (k.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).to_string()))
         .collect();
 
-    let response = send_with_retry_and_provider(
-        app_config,
-        url,
-        input.get_provider(),
-        false,
-        |resolved_url| {
-            get_client_request(
-                client,
-                input.method,
-                Some(&headers),
-                resolved_url,
-                None,
-                None,
-                default_user_agent.as_deref(),
-            )
-        },
-    )
-        .await?;
+    let response = send_with_retry_and_provider(app_config, url, input.get_provider(), false, |resolved_url| {
+        get_client_request(
+            client,
+            input.method,
+            Some(&headers),
+            resolved_url,
+            None,
+            None,
+            default_user_agent.as_deref(),
+        )
+    })
+    .await?;
 
     let response_url = response.url().to_string();
 
@@ -926,13 +848,7 @@ async fn get_remote_content(
     headers: Option<&HeaderMap>,
     url: &Url,
 ) -> Result<(String, String), Error> {
-    let (mut stream, response_url) = get_remote_content_as_stream(
-        app_config,
-        client,
-        input,
-        headers,
-        url,
-    )
+    let (mut stream, response_url) = get_remote_content_as_stream(app_config, client, input, headers, url)
         .await
         .map_err(|e| string_to_io_error(format!("Failed to read content: {e}")))?;
     let mut content = String::new();
@@ -951,11 +867,8 @@ async fn get_remote_content_with_manual_redirects(
     url: &Url,
     max_redirects: usize,
 ) -> Result<(String, String), Error> {
-    let custom_headers = headers.map(|h| {
-        h.iter()
-            .map(|(k, v)| (k.as_str().to_string(), v.as_bytes().to_vec()))
-            .collect::<HashMap<_, _>>()
-    });
+    let custom_headers = headers
+        .map(|h| h.iter().map(|(k, v)| (k.as_str().to_string(), v.as_bytes().to_vec())).collect::<HashMap<_, _>>());
 
     let config = app_config.config.load();
     let default_user_agent = config.default_user_agent.clone();
@@ -971,35 +884,27 @@ async fn get_remote_content_with_manual_redirects(
 
     let headers: HashMap<String, String> = merged
         .iter()
-        .map(|(k, v)| {
-            (
-                k.as_str().to_string(),
-                String::from_utf8_lossy(v.as_bytes()).to_string(),
-            )
-        })
+        .map(|(k, v)| (k.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).to_string()))
         .collect();
 
     let mut current_url = url.clone();
+    let mut current_headers = headers;
     let mut remaining_redirects = max_redirects;
     loop {
-        let response = send_with_retry_and_provider(
-            app_config,
-            &current_url,
-            input.get_provider(),
-            true,
-            |resolved_url| {
+        let response =
+            send_with_retry_and_provider(app_config, &current_url, input.get_provider(), true, |resolved_url| {
                 get_client_request(
                     client,
                     input.method,
-                    Some(&headers),
+                    Some(&current_headers),
                     resolved_url,
                     None,
                     None,
                     default_user_agent.as_deref(),
                 )
-            },
-        )
-        .await?;
+            })
+            .await?;
+        let response_base_url = response.url().clone();
 
         if response.status().is_redirection() {
             if remaining_redirects == 0 {
@@ -1021,16 +926,17 @@ async fn get_remote_content_with_manual_redirects(
                     sanitize_sensitive_info(current_url.as_str())
                 )));
             };
-            let next_url = current_url
-                .join(location_str)
-                .or_else(|_| Url::parse(location_str))
-                .map_err(|_| {
+            let next_url =
+                response_base_url.join(location_str).or_else(|_| Url::parse(location_str)).map_err(|_| {
                     string_to_io_error(format!(
                         "Redirect response contains invalid location URL for {}",
                         sanitize_sensitive_info(current_url.as_str())
                     ))
                 })?;
 
+            if !same_origin(&response_base_url, &next_url) {
+                strip_sensitive_headers_for_cross_origin_redirect(&mut current_headers);
+            }
             current_url = next_url;
             remaining_redirects = remaining_redirects.saturating_sub(1);
             continue;
@@ -1045,6 +951,21 @@ async fn get_remote_content_with_manual_redirects(
             .map_err(|e| string_to_io_error(format!("Failed to read content: {e}")))?;
         return Ok((content, response_url));
     }
+}
+
+fn same_origin(lhs: &Url, rhs: &Url) -> bool {
+    lhs.scheme().eq_ignore_ascii_case(rhs.scheme())
+        && lhs.host_str() == rhs.host_str()
+        && lhs.port_or_known_default() == rhs.port_or_known_default()
+}
+
+fn strip_sensitive_headers_for_cross_origin_redirect(headers: &mut HashMap<String, String>) {
+    headers.retain(|key, _| {
+        !key.eq_ignore_ascii_case("authorization")
+            && !key.eq_ignore_ascii_case("cookie")
+            && !key.eq_ignore_ascii_case("proxy-authorization")
+            && !key.eq_ignore_ascii_case("host")
+    });
 }
 
 async fn download_epg_content_as_file(
@@ -1068,22 +989,15 @@ async fn download_epg_content_as_file(
                     if file_path.exists() {
                         Ok(file_path)
                     } else {
-                        Err(Error::new(
-                            ErrorKind::NotFound,
-                            format!("Unknown file {}", file_path.display()),
-                        ))
+                        Err(Error::new(ErrorKind::NotFound, format!("Unknown file {}", file_path.display())))
                     }
                 },
             )
         } else {
-            get_remote_content_as_file(app_config, client, input, headers, &url, persist_filepath)
-                .await
+            get_remote_content_as_file(app_config, client, input, headers, &url, persist_filepath).await
         }
     } else {
-        Err(Error::new(
-            ErrorKind::Unsupported,
-            format!("Malformed URL {}", sanitize_sensitive_info(url_str)),
-        ))
+        Err(Error::new(ErrorKind::Unsupported, format!("Malformed URL {}", sanitize_sensitive_info(url_str))))
     }
 }
 
@@ -1099,23 +1013,11 @@ pub async fn download_text_content(
     let result = if let Ok(url) = input.url.parse::<url::Url>() {
         let result = if url.scheme() == "file" {
             match url.to_file_path() {
-                Ok(file_path) => get_local_file_content(&file_path)
-                    .await
-                    .map(|c| (c, url.to_string())),
-                Err(()) => Err(string_to_io_error(format!(
-                    "Unknown file {}",
-                    sanitize_sensitive_info(&input.url)
-                ))),
+                Ok(file_path) => get_local_file_content(&file_path).await.map(|c| (c, url.to_string())),
+                Err(()) => Err(string_to_io_error(format!("Unknown file {}", sanitize_sensitive_info(&input.url)))),
             }
         } else {
-            get_remote_content(
-                app_config,
-                client,
-                input,
-                headers,
-                &url,
-            )
-                .await
+            get_remote_content(app_config, client, input, headers, &url).await
         };
         match result {
             Ok((content, response_url)) => {
@@ -1127,17 +1029,10 @@ pub async fn download_text_content(
             Err(err) => Err(err),
         }
     } else {
-        Err(string_to_io_error(format!(
-            "Malformed URL {}",
-            sanitize_sensitive_info(&input.url)
-        )))
+        Err(string_to_io_error(format!("Malformed URL {}", sanitize_sensitive_info(&input.url))))
     };
 
-    let level = if trace_log {
-        log::Level::Trace
-    } else {
-        log::Level::Debug
-    };
+    let level = if trace_log { log::Level::Trace } else { log::Level::Debug };
     if log_enabled!(level) {
         if let Ok((_content, response_url)) = result.as_ref() {
             log::log!(
@@ -1165,24 +1060,11 @@ pub async fn download_text_content_with_manual_redirects(
     let result = if let Ok(url) = input.url.parse::<url::Url>() {
         let result = if url.scheme() == "file" {
             match url.to_file_path() {
-                Ok(file_path) => get_local_file_content(&file_path)
-                    .await
-                    .map(|c| (c, url.to_string())),
-                Err(()) => Err(string_to_io_error(format!(
-                    "Unknown file {}",
-                    sanitize_sensitive_info(&input.url)
-                ))),
+                Ok(file_path) => get_local_file_content(&file_path).await.map(|c| (c, url.to_string())),
+                Err(()) => Err(string_to_io_error(format!("Unknown file {}", sanitize_sensitive_info(&input.url)))),
             }
         } else {
-            get_remote_content_with_manual_redirects(
-                app_config,
-                client,
-                input,
-                headers,
-                &url,
-                max_redirects,
-            )
-            .await
+            get_remote_content_with_manual_redirects(app_config, client, input, headers, &url, max_redirects).await
         };
         match result {
             Ok((content, response_url)) => {
@@ -1194,17 +1076,10 @@ pub async fn download_text_content_with_manual_redirects(
             Err(err) => Err(err),
         }
     } else {
-        Err(string_to_io_error(format!(
-            "Malformed URL {}",
-            sanitize_sensitive_info(&input.url)
-        )))
+        Err(string_to_io_error(format!("Malformed URL {}", sanitize_sensitive_info(&input.url))))
     };
 
-    let level = if trace_log {
-        log::Level::Trace
-    } else {
-        log::Level::Debug
-    };
+    let level = if trace_log { log::Level::Trace } else { log::Level::Debug };
     if log_enabled!(level) {
         if let Ok((_content, response_url)) = result.as_ref() {
             log::log!(
@@ -1228,23 +1103,11 @@ pub async fn download_text_content_as_stream(
     if let Ok(url) = input.url.parse::<url::Url>() {
         let result = if url.scheme() == "file" {
             match url.to_file_path() {
-                Ok(file_path) => get_local_file_content_as_stream(&file_path)
-                    .await
-                    .map(|c| (c, url.to_string())),
-                Err(()) => Err(string_to_io_error(format!(
-                    "Unknown file {}",
-                    sanitize_sensitive_info(&input.url)
-                ))),
+                Ok(file_path) => get_local_file_content_as_stream(&file_path).await.map(|c| (c, url.to_string())),
+                Err(()) => Err(string_to_io_error(format!("Unknown file {}", sanitize_sensitive_info(&input.url)))),
             }
         } else {
-            get_remote_content_as_stream(
-                app_config,
-                client,
-                input,
-                None,
-                &url,
-            )
-                .await
+            get_remote_content_as_stream(app_config, client, input, None, &url).await
         };
         match result {
             Ok((content, response_url)) => {
@@ -1256,7 +1119,7 @@ pub async fn download_text_content_as_stream(
                             debug!("Persisted {size} bytes");
                         })),
                     )
-                        .await;
+                    .await;
                     Ok((tee_reader, response_url))
                 } else {
                     Ok((content, response_url))
@@ -1265,10 +1128,7 @@ pub async fn download_text_content_as_stream(
             Err(err) => Err(err),
         }
     } else {
-        Err(string_to_io_error(format!(
-            "Malformed URL {}",
-            sanitize_sensitive_info(&input.url)
-        )))
+        Err(string_to_io_error(format!("Malformed URL {}", sanitize_sensitive_info(&input.url))))
     }
 }
 
@@ -1279,20 +1139,8 @@ async fn download_json_content(
     persist_filepath: Option<PathBuf>,
     trace_log: bool,
 ) -> Result<serde_json::Value, Error> {
-    debug_if_enabled!(
-        "Downloading json content from {}",
-        sanitize_sensitive_info(&input.url)
-    );
-    match download_text_content(
-        app_config,
-        client,
-        input,
-        None,
-        persist_filepath,
-        trace_log,
-    )
-        .await
-    {
+    debug_if_enabled!("Downloading json content from {}", sanitize_sensitive_info(&input.url));
+    match download_text_content(app_config, client, input, None, persist_filepath, trace_log).await {
         Ok((content, _response_url)) => match serde_json::from_str::<serde_json::Value>(&content) {
             Ok(value) => Ok(value),
             Err(err) => Err(string_to_io_error(format!("Failed to parse json {err}"))),
@@ -1308,15 +1156,7 @@ pub async fn get_input_json_content(
     persist_filepath: Option<PathBuf>,
     trace_log: bool,
 ) -> Result<serde_json::Value, TuliproxError> {
-    match download_json_content(
-        app_config,
-        client,
-        input,
-        persist_filepath,
-        trace_log,
-    )
-        .await
-    {
+    match download_json_content(app_config, client, input, persist_filepath, trace_log).await {
         Ok(content) => Ok(content),
         Err(e) => notify_err_res!(
             "can't download input {}, => {}",
@@ -1332,18 +1172,8 @@ async fn download_json_content_as_stream(
     input: &InputSource,
     persist_filepath: Option<PathBuf>,
 ) -> Result<DynReader, Error> {
-    debug_if_enabled!(
-        "Downloading json content as stream from {}",
-        sanitize_sensitive_info(&input.url)
-    );
-    match download_text_content_as_stream(
-        app_config,
-        client,
-        input,
-        persist_filepath,
-    )
-        .await
-    {
+    debug_if_enabled!("Downloading json content as stream from {}", sanitize_sensitive_info(&input.url));
+    match download_text_content_as_stream(app_config, client, input, persist_filepath).await {
         Ok((reader, _response_url)) => Ok(reader),
         Err(err) => Err(err),
     }
@@ -1355,14 +1185,7 @@ pub async fn get_input_json_content_as_stream(
     input: &InputSource,
     persist_filepath: Option<PathBuf>,
 ) -> Result<DynReader, TuliproxError> {
-    match download_json_content_as_stream(
-        app_config,
-        client,
-        input,
-        persist_filepath,
-    )
-        .await
-    {
+    match download_json_content_as_stream(app_config, client, input, persist_filepath).await {
         Ok(stream) => Ok(stream),
         Err(e) => notify_err_res!(
             "can't download input {} => {}",
@@ -1403,9 +1226,7 @@ pub fn create_client_with_redirect(cfg: &AppConfig, redirect_policy: Policy) -> 
                     }
                     "http" | "https" => match reqwest::Proxy::all(url.as_str()) {
                         Ok(p) => {
-                            if let (Some(username), Some(password)) =
-                                (&proxy_cfg.username, &proxy_cfg.password)
-                            {
+                            if let (Some(username), Some(password)) = (&proxy_cfg.username, &proxy_cfg.password) {
                                 client = client.proxy(p.basic_auth(username, password));
                             } else {
                                 client = client.proxy(p);
@@ -1425,11 +1246,7 @@ pub fn create_client_with_redirect(cfg: &AppConfig, redirect_policy: Policy) -> 
     }
 
     if let Some(rp_config) = config.reverse_proxy.as_ref() {
-        if rp_config
-            .disabled_header
-            .as_ref()
-            .is_some_and(|d| d.referer_header)
-        {
+        if rp_config.disabled_header.as_ref().is_some_and(|d| d.referer_header) {
             client = client.referer(false);
         }
     }
@@ -1456,14 +1273,14 @@ pub fn parse_range(range: &str) -> Option<(u64, Option<u64>)> {
     Some((start, end))
 }
 
-pub fn is_file_url(url: &str) -> bool {
-    Url::parse(url)
-        .is_ok_and(|u| u.scheme().eq_ignore_ascii_case("file"))
-}
+pub fn is_file_url(url: &str) -> bool { Url::parse(url).is_ok_and(|u| u.scheme().eq_ignore_ascii_case("file")) }
 
 pub fn is_uri(url: &str) -> bool {
-    Url::parse(url)
-        .is_ok_and(|u| u.scheme().eq_ignore_ascii_case("file") || u.scheme().eq_ignore_ascii_case("http") || u.scheme().eq_ignore_ascii_case("https"))
+    Url::parse(url).is_ok_and(|u| {
+        u.scheme().eq_ignore_ascii_case("file")
+            || u.scheme().eq_ignore_ascii_case("http")
+            || u.scheme().eq_ignore_ascii_case("https")
+    })
 }
 
 /// Checks if a status code or error indicates a need for failover
@@ -1495,7 +1312,10 @@ pub fn should_trigger_failover(status: StatusCode) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::{same_origin, strip_sensitive_headers_for_cross_origin_redirect};
     use shared::utils::{get_base_url_from_str, replace_url_extension, sanitize_sensitive_info};
+    use std::collections::HashMap;
+    use url::Url;
 
     #[test]
     fn test_url_mask() {
@@ -1509,22 +1329,10 @@ mod tests {
     fn test_replace_ext() {
         let tests = [
             ("http://hello.world.com", "http://hello.world.com"),
-            (
-                "http://hello.world.com/123",
-                "http://hello.world.com/123.mp4",
-            ),
-            (
-                "http://hello.world.com/123.ts?hello=world",
-                "http://hello.world.com/123.mp4?hello=world",
-            ),
-            (
-                "http://hello.world.com/123?hello=world",
-                "http://hello.world.com/123.mp4?hello=world",
-            ),
-            (
-                "http://hello.world.com/123#hello=world",
-                "http://hello.world.com/123.mp4#hello=world",
-            ),
+            ("http://hello.world.com/123", "http://hello.world.com/123.mp4"),
+            ("http://hello.world.com/123.ts?hello=world", "http://hello.world.com/123.mp4?hello=world"),
+            ("http://hello.world.com/123?hello=world", "http://hello.world.com/123.mp4?hello=world"),
+            ("http://hello.world.com/123#hello=world", "http://hello.world.com/123.mp4#hello=world"),
         ];
 
         for (test, expect) in &tests {
@@ -1543,50 +1351,65 @@ mod tests {
     fn test_get_request_headers_prioritization() {
         use super::{get_request_headers, DEFAULT_USER_AGENT};
         use axum::http::header::USER_AGENT;
-        use std::collections::HashMap;
 
         // Case 1: No headers provided -> Default UA
-        let headers =
-            get_request_headers::<std::collections::hash_map::RandomState>(None, None, None, None);
+        let headers = get_request_headers::<std::collections::hash_map::RandomState>(None, None, None, None);
         assert_eq!(headers.get(USER_AGENT).unwrap(), DEFAULT_USER_AGENT);
 
         // Case 2: No headers provided but config default UA set -> Config default UA
-        let headers = get_request_headers::<std::collections::hash_map::RandomState>(
-            None,
-            None,
-            None,
-            Some("Config-Default-UA"),
-        );
+        let headers =
+            get_request_headers::<std::collections::hash_map::RandomState>(None, None, None, Some("Config-Default-UA"));
         assert_eq!(headers.get(USER_AGENT).unwrap(), "Config-Default-UA");
 
         // Case 3: Only client header -> Client UA (overrides config default UA)
         let mut client_headers = HashMap::new();
         client_headers.insert("User-Agent".to_string(), b"Client-UA".to_vec());
-        let headers =
-            get_request_headers(None, Some(&client_headers), None, Some("Config-Default-UA"));
+        let headers = get_request_headers(None, Some(&client_headers), None, Some("Config-Default-UA"));
         assert_eq!(headers.get(USER_AGENT).unwrap(), "Client-UA");
 
         // Case 4: Both config and client -> Config UA overrides
         let mut config_headers = HashMap::new();
         config_headers.insert("User-Agent".to_string(), "Config-UA".to_string());
-        let headers = get_request_headers(
-            Some(&config_headers),
-            Some(&client_headers),
-            None,
-            Some("Config-Default-UA"),
-        );
+        let headers =
+            get_request_headers(Some(&config_headers), Some(&client_headers), None, Some("Config-Default-UA"));
         assert_eq!(headers.get(USER_AGENT).unwrap(), "Config-UA");
 
         // Case 5: Other headers also prioritized
         config_headers.insert("X-Test".to_string(), "From-Config".to_string());
         let mut client_headers = HashMap::new();
         client_headers.insert("X-Test".to_string(), b"From-Client".to_vec());
-        let headers = get_request_headers(
-            Some(&config_headers),
-            Some(&client_headers),
-            None,
-            Some("Config-Default-UA"),
-        );
+        let headers =
+            get_request_headers(Some(&config_headers), Some(&client_headers), None, Some("Config-Default-UA"));
         assert_eq!(headers.get("X-Test").unwrap(), "From-Config");
+    }
+
+    #[test]
+    fn test_same_origin_checks_scheme_host_and_port() {
+        let a = Url::parse("https://example.com/path").expect("url parse should work");
+        let b = Url::parse("https://example.com/other").expect("url parse should work");
+        let c = Url::parse("http://example.com/other").expect("url parse should work");
+        let d = Url::parse("https://example.com:8443/other").expect("url parse should work");
+
+        assert!(same_origin(&a, &b));
+        assert!(!same_origin(&a, &c));
+        assert!(!same_origin(&a, &d));
+    }
+
+    #[test]
+    fn test_cross_origin_redirect_strips_sensitive_headers() {
+        let mut headers = HashMap::new();
+        headers.insert("Authorization".to_string(), "Bearer test".to_string());
+        headers.insert("Cookie".to_string(), "sid=123".to_string());
+        headers.insert("Proxy-Authorization".to_string(), "Basic abc".to_string());
+        headers.insert("Host".to_string(), "old.host".to_string());
+        headers.insert("X-Test".to_string(), "ok".to_string());
+
+        strip_sensitive_headers_for_cross_origin_redirect(&mut headers);
+
+        assert!(!headers.contains_key("Authorization"));
+        assert!(!headers.contains_key("Cookie"));
+        assert!(!headers.contains_key("Proxy-Authorization"));
+        assert!(!headers.contains_key("Host"));
+        assert_eq!(headers.get("X-Test").map(String::as_str), Some("ok"));
     }
 }

@@ -1,10 +1,10 @@
-use axum::extract::FromRequestParts;
-use axum::http::request::Parts;
-use axum::http::StatusCode;
+use axum::{
+    extract::FromRequestParts,
+    http::{request::Parts, StatusCode},
+};
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct ExtractAcceptHeader(pub Option<String>);
-
 
 impl<B> FromRequestParts<B> for ExtractAcceptHeader
 where

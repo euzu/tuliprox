@@ -26,7 +26,7 @@
 //! > **Important**: The index is tightly coupled to the B+Tree file structure.
 //! > It must be rebuilt after any operation that changes value offsets (e.g., `compact()`).
 
-use crate::repository::bplustree::{COMPRESSION_FLAG_LZ4, PAGE_SIZE_USIZE};
+use crate::repository::bplustree::{BPlusTreeQuery, COMPRESSION_FLAG_LZ4, PAGE_SIZE_USIZE};
 use crate::repository::storage::get_file_path_for_db_index;
 use crate::utils::{binary_deserialize, binary_serialize};
 use indexmap::IndexMap;
@@ -228,7 +228,11 @@ where
             ));
         }
 
-        let version = u32::from_le_bytes(header[4..8].try_into().unwrap_or_default());
+        let version = u32::from_le_bytes(
+            header[4..8]
+                .try_into()
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Invalid version bytes: {e}")))?,
+        );
         if version != VERSION {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -324,6 +328,7 @@ pub struct BPlusTreeSortedIteratorOwned<K, V, SortKey> {
     mmap: Option<memmap2::Mmap>,
     filepath: PathBuf,
     block_cache: IndexMap<u64, Vec<u8>>,
+    live_key_query: Option<BPlusTreeQuery<K, V>>,
     _marker: PhantomData<V>,
 }
 
@@ -347,6 +352,7 @@ where
             mmap,
             filepath,
             block_cache: IndexMap::with_capacity(CACHE_CAPACITY),
+            live_key_query: None,
             _marker: PhantomData,
         }
     }
@@ -364,6 +370,7 @@ where
             mmap: None,
             filepath,
             block_cache: IndexMap::with_capacity(CACHE_CAPACITY),
+            live_key_query: None,
             _marker: PhantomData,
         })
     }
@@ -381,6 +388,7 @@ where
             mmap,
             filepath,
             block_cache: IndexMap::with_capacity(CACHE_CAPACITY),
+            live_key_query: None,
             _marker: PhantomData,
         })
     }
@@ -398,6 +406,7 @@ where
             mmap: None,
             filepath,
             block_cache: IndexMap::with_capacity(CACHE_CAPACITY),
+            live_key_query: None,
             _marker: PhantomData,
         })
     }
@@ -415,6 +424,7 @@ where
             mmap,
             filepath,
             block_cache: IndexMap::with_capacity(CACHE_CAPACITY),
+            live_key_query: None,
             _marker: PhantomData,
         })
     }
@@ -562,7 +572,10 @@ where
             }
         }
 
-        let block_buffer = self.block_cache.get(&block_offset).unwrap();
+        let block_buffer = self
+            .block_cache
+            .get(&block_offset)
+            .ok_or_else(|| io::Error::other("Packed block missing from cache"))?;
 
         // Read count (first 4 bytes)
         let count = u32::from_le_bytes(block_buffer[0..4].try_into().map_err(|e| {
@@ -612,28 +625,66 @@ where
             format!("Value index {value_index} not found in packed block (count: {count})"),
         ))
     }
+
+}
+
+impl<K, V, SortKey> BPlusTreeSortedIteratorOwned<K, V, SortKey>
+where
+    K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
+    V: Serialize + for<'de> Deserialize<'de> + Clone,
+    SortKey: for<'de> Deserialize<'de>,
+{
+    fn ensure_live_key_query(&mut self) -> io::Result<()> {
+        if self.live_key_query.is_some() || self.filepath.as_os_str().is_empty() {
+            return Ok(());
+        }
+
+        let query = BPlusTreeQuery::<K, V>::try_new(&self.filepath)?;
+        self.live_key_query = Some(query);
+        Ok(())
+    }
+
+    fn is_live_key(&mut self, key: &K) -> io::Result<bool> {
+        self.ensure_live_key_query()?;
+        if let Some(query) = &mut self.live_key_query {
+            if !query.has_tombstones() {
+                return Ok(true);
+            }
+            return query
+                .contains_live_key(key)
+                .map_err(|err| io::Error::other(format!("sorted iterator live-key check failed: {err}")));
+        }
+
+        Ok(true)
+    }
 }
 
 impl<K, V, SortKey> Iterator for BPlusTreeSortedIteratorOwned<K, V, SortKey>
 where
-    K: for<'de> Deserialize<'de> + Clone,
-    V: for<'de> Deserialize<'de>,
+    K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
+    V: Serialize + for<'de> Deserialize<'de> + Clone,
     SortKey: for<'de> Deserialize<'de>,
 {
     type Item = io::Result<(K, V)>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        // Get next entry from index
-        let entry = match self.index_reader.read_next() {
-            Ok(Some(entry)) => entry,
-            Ok(None) => return None,
-            Err(e) => return Some(Err(e)),
-        };
+        loop {
+            let entry = match self.index_reader.read_next() {
+                Ok(Some(entry)) => entry,
+                Ok(None) => return None,
+                Err(e) => return Some(Err(e)),
+            };
 
-        // Read value from tree file using the stored location
-        match self.read_value(entry.location) {
-            Ok(value) => Some(Ok((entry.primary_key, value))),
-            Err(e) => Some(Err(e)),
+            match self.is_live_key(&entry.primary_key) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(e) => return Some(Err(e)),
+            }
+
+            match self.read_value(entry.location) {
+                Ok(value) => return Some(Ok((entry.primary_key, value))),
+                Err(e) => return Some(Err(e)),
+            }
         }
     }
 }

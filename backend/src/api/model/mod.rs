@@ -1,37 +1,28 @@
+mod active_provider_manager;
+mod active_user_manager;
 mod app_state;
-mod request;
+mod connection_manager;
 mod download;
-mod xtream;
+mod event_manager;
+mod metadata_update_manager;
 mod model_utils;
+mod playlist_mem_cache;
+mod provider_config;
+mod provider_lineup_manager;
+mod request;
+mod stream;
 mod stream_error;
 mod streams;
-mod active_user_manager;
-mod active_provider_manager;
-mod stream;
-mod provider_config;
-mod event_manager;
-mod playlist_mem_cache;
-mod provider_lineup_manager;
-mod connection_manager;
 mod update_guard;
-mod metadata_update_manager;
+mod xtream;
 
-pub use self::active_provider_manager::*;
-pub(in crate::api) use self::active_user_manager::*;
-pub use self::app_state::*;
-pub use self::connection_manager::*;
-pub(in crate::api) use self::download::*;
-pub use self::event_manager::*;
-pub(in crate::api) use self::model_utils::*;
-pub use self::playlist_mem_cache::*;
-pub(in crate::api) use self::provider_config::*;
-pub use self::provider_lineup_manager::*;
-pub(in crate::api) use self::request::*;
-pub use self::stream::*;
-pub(in crate::api) use self::stream_error::*;
 pub(crate) use self::streams::*;
-pub(in crate::api) use self::xtream::*;
-pub use self::update_guard::*;
-pub use self::metadata_update_manager::*;
+pub use self::{
+    active_provider_manager::*, app_state::*, connection_manager::*, event_manager::*, metadata_update_manager::*,
+    playlist_mem_cache::*, provider_lineup_manager::*, stream::*, update_guard::*,
+};
+pub(in crate::api) use self::{
+    active_user_manager::*, download::*, model_utils::*, provider_config::*, request::*, stream_error::*, xtream::*,
+};
 mod batch_result_collector;
 pub use self::batch_result_collector::*;

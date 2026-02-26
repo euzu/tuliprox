@@ -1,33 +1,43 @@
-use crate::api::api_utils::serve_file;
-use crate::auth::generate_password_from_input;
-use crate::model::validate_library_paths_from_dto;
-use crate::utils::{
-    file_exists, get_default_path, get_default_web_root_path, read_api_proxy_file, read_config_file,
-    read_sources_file, read_templates_file, resolve_template_persist_file_path, sanitize_sources_for_persist,
+use crate::{
+    api::api_utils::serve_file,
+    auth::generate_password_from_input,
+    model::validate_library_paths_from_dto,
+    utils::{
+        file_exists, get_default_path, get_default_web_root_path, read_api_proxy_file, read_config_file,
+        read_sources_file, read_templates_file, resolve_template_persist_file_path, sanitize_sources_for_persist,
+    },
 };
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
-use axum::Router;
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    response::IntoResponse,
+    Router,
+};
 use core::fmt;
 use log::{error, info, warn};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use shared::error::TuliproxError;
-use shared::foundation::prepare_templates;
-use shared::info_err;
-use shared::model::{
-    ApiProxyConfigDto, ApiProxyServerInfoDto, AppConfigDto, ConfigApiDto, ConfigDto, ConfigPaths, SourcesConfigDto,
-    PatternTemplate, TemplateDefinitionDto, TokenResponse, WebAuthConfigDto, WebUiConfigDto, TOKEN_NO_AUTH,
+use shared::{
+    error::TuliproxError,
+    foundation::prepare_templates,
+    info_err,
+    model::{
+        ApiProxyConfigDto, ApiProxyServerInfoDto, AppConfigDto, ConfigApiDto, ConfigDto, ConfigPaths, PatternTemplate,
+        SourcesConfigDto, TemplateDefinitionDto, TokenResponse, WebAuthConfigDto, WebUiConfigDto, TOKEN_NO_AUTH,
+    },
+    utils::{default_kick_secs, hex_encode, DEFAULT_PORT, DEFAULT_WORKING_DIR, USER_FILE},
 };
-use shared::utils::{default_kick_secs, hex_encode, DEFAULT_PORT, DEFAULT_WORKING_DIR, USER_FILE};
-use std::collections::{HashMap, HashSet};
-use std::io::ErrorKind;
-use std::net::{SocketAddr, UdpSocket};
-use std::path::{Component, Path as FsPath, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    io::ErrorKind,
+    net::{SocketAddr, UdpSocket},
+    path::{Component, Path as FsPath, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 use tokio::sync::{oneshot, Mutex, RwLock};
 use tower_http::services::ServeDir;
 
@@ -251,11 +261,7 @@ fn ensure_setup_defaults(config: &mut ConfigDto) {
     if config.working_dir.trim().is_empty() {
         config.working_dir = get_default_path(DEFAULT_WORKING_DIR).display().to_string();
     }
-    if config
-        .custom_stream_response_path
-        .as_ref()
-        .is_none_or(|path| path.trim().is_empty())
-    {
+    if config.custom_stream_response_path.as_ref().is_none_or(|path| path.trim().is_empty()) {
         config.custom_stream_response_path = Some(DEFAULT_SETUP_CUSTOM_STREAM_RESPONSE_PATH.to_string());
     }
 
@@ -376,13 +382,15 @@ fn restore_redacted_web_auth_secret(app_config: &mut AppConfigDto, draft: &AppCo
     }
 }
 
-fn restore_redacted_api_proxy_credentials(api_proxy: &mut ApiProxyConfigDto, draft_api_proxy: Option<&ApiProxyConfigDto>) {
+fn restore_redacted_api_proxy_credentials(
+    api_proxy: &mut ApiProxyConfigDto,
+    draft_api_proxy: Option<&ApiProxyConfigDto>,
+) {
     let mut credentials_by_username: HashMap<String, (String, Option<String>)> = HashMap::new();
     if let Some(draft) = draft_api_proxy {
         for target in &draft.user {
             for user in &target.credentials {
-                credentials_by_username
-                    .insert(user.username.clone(), (user.password.clone(), user.token.clone()));
+                credentials_by_username.insert(user.username.clone(), (user.password.clone(), user.token.clone()));
             }
         }
     }
@@ -425,8 +433,7 @@ fn has_unresolved_redacted_setup_values(app_config: &AppConfigDto) -> bool {
     app_config.api_proxy.as_ref().is_some_and(|api_proxy| {
         api_proxy.user.iter().any(|target| {
             target.credentials.iter().any(|user| {
-                is_setup_redacted_value(&user.password)
-                    || user.token.as_deref().is_some_and(is_setup_redacted_value)
+                is_setup_redacted_value(&user.password) || user.token.as_deref().is_some_and(is_setup_redacted_value)
             })
         })
     })
@@ -448,9 +455,7 @@ fn setup_templates_to_persist(app_config: &AppConfigDto) -> Option<TemplateDefin
         .templates
         .as_ref()
         .filter(|templates| !templates.is_empty())
-        .map(|templates| TemplateDefinitionDto {
-            templates: templates.clone(),
-        })
+        .map(|templates| TemplateDefinitionDto { templates: templates.clone() })
 }
 
 fn collect_setup_validation_templates(
@@ -468,11 +473,7 @@ fn collect_setup_validation_templates(
     if let Some(templates) = app_config.sources.templates.as_ref() {
         merged_templates.extend(templates.clone());
     }
-    if let Some(templates) = app_config
-        .mappings
-        .as_ref()
-        .and_then(|mappings| mappings.mappings.templates.as_ref())
-    {
+    if let Some(templates) = app_config.mappings.as_ref().and_then(|mappings| mappings.mappings.templates.as_ref()) {
         merged_templates.extend(templates.clone());
     }
 
@@ -606,9 +607,7 @@ async fn setup_root_file(
     setup_index(State(state)).await.into_response()
 }
 
-async fn api_not_found() -> impl IntoResponse + Send {
-    StatusCode::NOT_FOUND.into_response()
-}
+async fn api_not_found() -> impl IntoResponse + Send { StatusCode::NOT_FOUND.into_response() }
 
 async fn persist_yaml_file<T: serde::Serialize>(file_path: &FsPath, payload: &T) -> Result<(), String> {
     let mut content = String::new();
@@ -781,11 +780,7 @@ async fn setup_complete_inner(
         match prepare_setup_validation_templates(&req.app_config, template_file_path.to_string_lossy().as_ref()) {
             Ok(templates) => templates,
             Err(err) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    axum::Json(json!({ "error": err.to_string() })),
-                )
-                    .into_response();
+                return (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": err.to_string() }))).into_response();
             }
         };
 
@@ -811,12 +806,8 @@ async fn setup_complete_inner(
     };
 
     let template_definition_to_persist = setup_templates_to_persist(&req.app_config);
-    let mut persist_paths = vec![
-        &state.config_file_path,
-        &state.source_file_path,
-        &state.api_proxy_file_path,
-        &state.user_file_path,
-    ];
+    let mut persist_paths =
+        vec![&state.config_file_path, &state.source_file_path, &state.api_proxy_file_path, &state.user_file_path];
     if template_definition_to_persist.is_some() {
         persist_paths.push(&template_file_path);
     }
@@ -824,7 +815,9 @@ async fn setup_complete_inner(
         if let Err(err) = ensure_parent_dir(file_path).await {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(json!({ "error": format!("Failed to create parent directory for {}: {err}", file_path.display()) })),
+                axum::Json(
+                    json!({ "error": format!("Failed to create parent directory for {}: {err}", file_path.display()) }),
+                ),
             )
                 .into_response();
         }
@@ -847,7 +840,9 @@ async fn setup_complete_inner(
                 };
                 return (
                     status_code,
-                    axum::Json(json!({ "error": format!("Failed to hash password for user '{username}': {err_message}") })),
+                    axum::Json(
+                        json!({ "error": format!("Failed to hash password for user '{username}': {err_message}") }),
+                    ),
                 )
                     .into_response();
             }
@@ -1089,12 +1084,8 @@ mod tests {
     fn setup_redaction_masks_web_auth_and_api_proxy_credentials() {
         let redacted = redact_app_config_for_setup(sample_app_config());
 
-        let auth_secret = redacted
-            .config
-            .web_ui
-            .as_ref()
-            .and_then(|web_ui| web_ui.auth.as_ref())
-            .map(|auth| auth.secret.as_str());
+        let auth_secret =
+            redacted.config.web_ui.as_ref().and_then(|web_ui| web_ui.auth.as_ref()).map(|auth| auth.secret.as_str());
         assert_eq!(auth_secret, Some(SETUP_REDACTED_SECRET_VALUE));
 
         let creds = &redacted.api_proxy.expect("api_proxy should be present").user[0].credentials[0];
@@ -1109,12 +1100,8 @@ mod tests {
 
         restore_redacted_setup_values(&mut submitted, &draft);
 
-        let auth_secret = submitted
-            .config
-            .web_ui
-            .as_ref()
-            .and_then(|web_ui| web_ui.auth.as_ref())
-            .map(|auth| auth.secret.as_str());
+        let auth_secret =
+            submitted.config.web_ui.as_ref().and_then(|web_ui| web_ui.auth.as_ref()).map(|auth| auth.secret.as_str());
         assert_eq!(auth_secret, Some("very-secret-value"));
 
         let creds = &submitted.api_proxy.as_ref().expect("api_proxy should be present").user[0].credentials[0];

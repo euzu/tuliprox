@@ -1,28 +1,43 @@
-use crate::api::api_utils::{get_headers_from_request, StreamOptions};
-use crate::api::model::{get_response_headers, AppState, CustomVideoStreamType};
-use crate::api::model::StreamError;
-use crate::api::model::{create_channel_unavailable_stream, get_header_filter_for_item_type};
-use crate::api::model::{BoxedProviderStream, ProviderStreamFactoryResponse};
-use crate::model::{ConfigProvider, ReverseProxyDisabledHeaderConfig};
-use crate::tools::atomic_once_flag::AtomicOnceFlag;
-use crate::utils::debug_if_enabled;
-use crate::utils::request::{classify_content_type, get_request_headers, MimeCategory, send_with_retry_and_provider};
-use futures::stream::{self};
-use futures::{StreamExt, TryStreamExt};
+use crate::{
+    api::{
+        api_utils::{get_headers_from_request, StreamOptions},
+        model::{
+            create_channel_unavailable_stream, get_header_filter_for_item_type, get_response_headers,
+            streams::{buffered_stream::BufferedStream, client_stream::ClientStream},
+            AppState, BoxedProviderStream, CustomVideoStreamType, ProviderStreamFactoryResponse, StreamError,
+        },
+    },
+    model::{ConfigProvider, ReverseProxyDisabledHeaderConfig},
+    tools::atomic_once_flag::AtomicOnceFlag,
+    utils::{
+        debug_if_enabled,
+        request::{classify_content_type, get_request_headers, send_with_retry_and_provider, MimeCategory},
+    },
+};
+use futures::{
+    stream::{self},
+    StreamExt, TryStreamExt,
+};
 use log::{debug, log_enabled, warn};
-use reqwest::header::{HeaderMap, RANGE};
-use reqwest::StatusCode;
-use shared::create_bitset;
-use shared::model::{PlaylistItemType, DEFAULT_USER_AGENT};
-use shared::utils::{filter_request_header, sanitize_sensitive_info};
-use std::collections::HashMap;
-use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use reqwest::{
+    header::{HeaderMap, RANGE},
+    StatusCode,
+};
+use shared::{
+    create_bitset,
+    model::{PlaylistItemType, DEFAULT_USER_AGENT},
+    utils::{filter_request_header, sanitize_sensitive_info},
+};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::{Duration, Instant},
+};
 use url::Url;
-use crate::api::model::streams::buffered_stream::BufferedStream;
-use crate::api::model::streams::client_stream::ClientStream;
 
 const RETRY_SECONDS: u64 = 5;
 const ERR_MAX_RETRY_COUNT: u32 = 5;
@@ -64,23 +79,14 @@ impl ProviderStreamFactoryOptions {
         disabled_headers: Option<&ReverseProxyDisabledHeaderConfig>,
         default_user_agent: Option<&str>,
     ) -> Self {
-        let buffer_size = if stream_options.buffer_enabled {
-            stream_options.buffer_size
-        } else {
-            0
-        };
+        let buffer_size = if stream_options.buffer_enabled { stream_options.buffer_size } else { 0 };
         let filter_header = get_header_filter_for_item_type(item_type);
         let mut req_headers = get_headers_from_request(req_headers, &filter_header);
         let requested_range = get_request_range_start_bytes(&req_headers);
         req_headers.remove("range");
 
         // We merge configured input headers with the headers from the request.
-        let headers = get_request_headers(
-            input_headers,
-            Some(&req_headers),
-            disabled_headers,
-            default_user_agent,
-        );
+        let headers = get_request_headers(input_headers, Some(&req_headers), disabled_headers, default_user_agent);
 
         let default_user_agent = default_user_agent
             .and_then(|ua| {
@@ -126,71 +132,43 @@ impl ProviderStreamFactoryOptions {
         }
     }
 
-    pub fn set_provider(&mut self, provider: Option<Arc<ConfigProvider>>) {
-        self.provider = provider;
-    }
+    pub fn set_provider(&mut self, provider: Option<Arc<ConfigProvider>>) { self.provider = provider; }
 
-    pub fn get_provider(&self) -> Option<&Arc<ConfigProvider>> {
-        self.provider.as_ref()
-    }
+    pub fn get_provider(&self) -> Option<&Arc<ConfigProvider>> { self.provider.as_ref() }
 
     #[inline]
-    fn is_piped(&self) -> bool {
-        self.flags.contains(ProviderStreamFactoryFlags::PipeStream)
-    }
+    fn is_piped(&self) -> bool { self.flags.contains(ProviderStreamFactoryFlags::PipeStream) }
 
     #[inline]
-    fn is_buffer_enabled(&self) -> bool {
-        self.flags.contains(ProviderStreamFactoryFlags::BufferEnabled)
-    }
+    fn is_buffer_enabled(&self) -> bool { self.flags.contains(ProviderStreamFactoryFlags::BufferEnabled) }
 
     #[inline]
-    fn is_shared_stream(&self) -> bool {
-        self.flags.contains(ProviderStreamFactoryFlags::ShareStream)
-    }
+    fn is_shared_stream(&self) -> bool { self.flags.contains(ProviderStreamFactoryFlags::ShareStream) }
 
     #[inline]
-    pub(crate) fn get_buffer_size(&self) -> usize {
-        self.buffer_size
-    }
+    pub(crate) fn get_buffer_size(&self) -> usize { self.buffer_size }
 
     #[inline]
-    pub fn get_reconnect_flag_clone(&self) -> Arc<AtomicOnceFlag> {
-        Arc::clone(&self.reconnect_flag)
-    }
+    pub fn get_reconnect_flag_clone(&self) -> Arc<AtomicOnceFlag> { Arc::clone(&self.reconnect_flag) }
 
     #[inline]
-    pub fn cancel_reconnect(&self) {
-        self.reconnect_flag.notify();
-    }
+    pub fn cancel_reconnect(&self) { self.reconnect_flag.notify(); }
 
     #[inline]
-    pub fn get_url(&self) -> &Url {
-        &self.url
-    }
+    pub fn get_url(&self) -> &Url { &self.url }
 
     #[inline]
-    pub fn get_url_as_str(&self) -> &str {
-        self.url.as_str()
-    }
+    pub fn get_url_as_str(&self) -> &str { self.url.as_str() }
 
     #[inline]
-    pub fn should_reconnect(&self) -> bool {
-        self.flags
-            .contains(ProviderStreamFactoryFlags::ReconnectEnabled)
-    }
+    pub fn should_reconnect(&self) -> bool { self.flags.contains(ProviderStreamFactoryFlags::ReconnectEnabled) }
 
     #[inline]
-    pub fn get_headers(&self) -> &HeaderMap {
-        &self.headers
-    }
+    pub fn get_headers(&self) -> &HeaderMap { &self.headers }
 
     #[inline]
     pub fn get_total_bytes_send(&self) -> Option<usize> {
-        self.range_bytes
-            .as_ref()
-            .as_ref()
-            .map(|atomic| atomic.load(Ordering::Acquire))
+        self.range_bytes.as_ref().as_ref().map(|atomic| atomic.load(Ordering::Acquire))
     }
 
     // pub fn get_range_bytes(&self) -> &Arc<Option<AtomicUsize>> {
@@ -198,20 +176,13 @@ impl ProviderStreamFactoryOptions {
     // }
 
     #[inline]
-    pub fn get_range_bytes_clone(&self) -> Arc<Option<AtomicUsize>> {
-        Arc::clone(&self.range_bytes)
-    }
+    pub fn get_range_bytes_clone(&self) -> Arc<Option<AtomicUsize>> { Arc::clone(&self.range_bytes) }
 
     #[inline]
-    pub fn should_continue(&self) -> bool {
-        self.reconnect_flag.is_active()
-    }
+    pub fn should_continue(&self) -> bool { self.reconnect_flag.is_active() }
 
     #[inline]
-    pub fn was_range_requested(&self) -> bool {
-        self.flags.contains(ProviderStreamFactoryFlags::RangeRequested)
-    }
-
+    pub fn was_range_requested(&self) -> bool { self.flags.contains(ProviderStreamFactoryFlags::RangeRequested) }
 }
 
 fn get_request_range_start_bytes(req_headers: &HashMap<String, Vec<u8>>) -> Option<usize> {
@@ -264,15 +235,12 @@ fn prepare_client(
 
     remove_sensitive_headers_on_cross_origin(&mut headers, original_url, url_override);
     prepare_default_headers(&mut headers, stream_options);
-    let partial = prepare_partial_request_headers(&mut headers, stream_options,  range_start);
+    let partial = prepare_partial_request_headers(&mut headers, stream_options, range_start);
 
     if log_enabled!(log::Level::Debug) {
         let message = format!(
             "Stream requested with headers: {:?}",
-            headers
-                .iter()
-                .map(|header| (header.0, String::from_utf8_lossy(header.1.as_ref())))
-                .collect::<Vec<_>>()
+            headers.iter().map(|header| (header.0, String::from_utf8_lossy(header.1.as_ref()))).collect::<Vec<_>>()
         );
         debug!("{}", sanitize_sensitive_info(&message));
     }
@@ -291,11 +259,9 @@ fn remove_sensitive_headers_on_cross_origin(
         return;
     };
 
-    let cross_origin =
-        override_url.scheme() != original_url.scheme()
-            || override_url.host_str() != original_url.host_str()
-            || override_url.port_or_known_default()
-            != original_url.port_or_known_default();
+    let cross_origin = override_url.scheme() != original_url.scheme()
+        || override_url.host_str() != original_url.host_str()
+        || override_url.port_or_known_default() != original_url.port_or_known_default();
 
     if !cross_origin {
         return;
@@ -308,10 +274,7 @@ fn remove_sensitive_headers_on_cross_origin(
 fn prepare_default_headers(headers: &mut axum::http::HeaderMap, stream_options: &ProviderStreamFactoryOptions) {
     // Force Connection: close so the provider releases its slot immediately when the stream ends.
     // This prevents 509 errors from providers counting idle pooled connections against limits.
-    headers.insert(
-        axum::http::header::CONNECTION,
-        axum::http::header::HeaderValue::from_static("close"),
-    );
+    headers.insert(axum::http::header::CONNECTION, axum::http::header::HeaderValue::from_static("close"));
 
     if !headers.contains_key(axum::http::header::USER_AGENT) {
         headers.insert(
@@ -324,7 +287,11 @@ fn prepare_default_headers(headers: &mut axum::http::HeaderMap, stream_options: 
     }
 }
 
-fn prepare_partial_request_headers(headers: &mut HeaderMap, stream_options: &ProviderStreamFactoryOptions, range_start: Option<usize>) -> bool {
+fn prepare_partial_request_headers(
+    headers: &mut HeaderMap,
+    stream_options: &ProviderStreamFactoryOptions,
+    range_start: Option<usize>,
+) -> bool {
     if let Some(range) = range_start {
         if range > 0 || stream_options.was_range_requested() {
             let range_header = format!("bytes={range}-");
@@ -341,25 +308,14 @@ fn prepare_partial_request_headers(headers: &mut HeaderMap, stream_options: &Pro
 }
 
 fn collect_debug_headers(headers: &HeaderMap) -> Vec<(String, String)> {
-    const HEADER_NAMES: [&str; 8] = [
-        "proxy-authenticate",
-        "via",
-        "server",
-        "location",
-        "x-cache",
-        "x-cache-status",
-        "x-served-by",
-        "x-proxy-id",
-    ];
+    const HEADER_NAMES: [&str; 8] =
+        ["proxy-authenticate", "via", "server", "location", "x-cache", "x-cache-status", "x-served-by", "x-proxy-id"];
 
     HEADER_NAMES
         .iter()
         .filter_map(|name| {
             headers.get_all(*name).iter().next().map(|value| {
-                let value = value
-                    .to_str()
-                    .unwrap_or("<binary>")
-                    .to_string();
+                let value = value.to_str().unwrap_or("<binary>").to_string();
                 ((*name).to_string(), value)
             })
         })
@@ -381,8 +337,9 @@ async fn send_with_manual_redirects(
             &current_url,
             provider.as_ref(),
             true,
-            |resolved_url| prepare_client(request_client, stream_options, Some(resolved_url)).0
-        ).await;
+            |resolved_url| prepare_client(request_client, stream_options, Some(resolved_url)).0,
+        )
+        .await;
 
         let response = match result {
             Ok(resp) => resp,
@@ -408,9 +365,7 @@ async fn send_with_manual_redirects(
             let Ok(location_str) = location.to_str() else {
                 return Ok(response);
             };
-            let next_url = current_url
-                .join(location_str)
-                .or_else(|_| Url::parse(location_str));
+            let next_url = current_url.join(location_str).or_else(|_| Url::parse(location_str));
             let Ok(next_url) = next_url else {
                 return Ok(response);
             };
@@ -436,16 +391,11 @@ async fn provider_stream_request(
         let url = stream_options.get_url();
         let provider = stream_options.get_provider().cloned();
 
-        send_with_retry_and_provider(
-            &app_state.app_config,
-            url,
-            provider.as_ref(),
-            false,
-            |resolved_url| {
-                let (client, _partial_content) = prepare_client(request_client, stream_options, Some(resolved_url));
-                client
-            }
-        ).await
+        send_with_retry_and_provider(&app_state.app_config, url, provider.as_ref(), false, |resolved_url| {
+            let (client, _partial_content) = prepare_client(request_client, stream_options, Some(resolved_url));
+            client
+        })
+        .await
     };
     match response_result {
         Ok(mut response) => {
@@ -453,9 +403,8 @@ async fn provider_stream_request(
             let response_url = response.url().clone();
             if log_enabled!(log::Level::Debug) && !status.is_success() {
                 let debug_headers = collect_debug_headers(response.headers());
-                let message = format!(
-                    "Provider response error: status={status}, url={response_url}, headers={debug_headers:?}"
-                );
+                let message =
+                    format!("Provider response error: status={status}, url={response_url}, headers={debug_headers:?}");
                 debug!("{}", sanitize_sensitive_info(&message));
             }
             if status.is_success() {
@@ -471,16 +420,10 @@ async fn provider_stream_request(
                         debug!("{}", sanitize_sensitive_info(&message));
                     }
 
-                    let response_headers: Vec<(String, String)> =
-                        get_response_headers(response.headers());
+                    let response_headers: Vec<(String, String)> = get_response_headers(response.headers());
                     //let url = stream_options.get_url();
                     // debug!("First  headers {headers:?} {} {}", sanitize_sensitive_info(url.as_str()));
-                    Some((
-                        response_headers,
-                        response.status(),
-                        Some(response.url().clone()),
-                        None,
-                    ))
+                    Some((response_headers, response.status(), Some(response.url().clone()), None))
                 };
 
                 let provider_stream = response
@@ -501,9 +444,7 @@ async fn provider_stream_request(
                     | StatusCode::UNAUTHORIZED
                     | StatusCode::PROXY_AUTHENTICATION_REQUIRED
                     | StatusCode::METHOD_NOT_ALLOWED
-                    | StatusCode::BAD_REQUEST => {
-                        handle_channel_unavailable_stream(app_state, stream_options).await
-                    }
+                    | StatusCode::BAD_REQUEST => handle_channel_unavailable_stream(app_state, stream_options).await,
                     _ => Err(status),
                 };
             }
@@ -513,9 +454,7 @@ async fn provider_stream_request(
                     StatusCode::INTERNAL_SERVER_ERROR
                     | StatusCode::BAD_GATEWAY
                     | StatusCode::SERVICE_UNAVAILABLE
-                    | StatusCode::GATEWAY_TIMEOUT => {
-                        handle_channel_unavailable_stream(app_state, stream_options).await
-                    }
+                    | StatusCode::GATEWAY_TIMEOUT => handle_channel_unavailable_stream(app_state, stream_options).await,
                     _ => Err(status),
                 };
             }
@@ -528,16 +467,21 @@ async fn provider_stream_request(
     }
 }
 
-async fn handle_channel_unavailable_stream(app_state: &Arc<AppState>,
-                                               stream_options: &ProviderStreamFactoryOptions
+async fn handle_channel_unavailable_stream(
+    app_state: &Arc<AppState>,
+    stream_options: &ProviderStreamFactoryOptions,
 ) -> Result<Option<ProviderStreamFactoryResponse>, StatusCode> {
-    app_state.connection_manager.update_stream_detail(&stream_options.addr, CustomVideoStreamType::ChannelUnavailable).await;
+    app_state
+        .connection_manager
+        .update_stream_detail(&stream_options.addr, CustomVideoStreamType::ChannelUnavailable)
+        .await;
     app_state.connection_manager.release_provider_connection(&stream_options.addr).await;
 
-    if let (Some(boxed_provider_stream), response_info) =
-        create_channel_unavailable_stream(&app_state.app_config,&get_response_headers(stream_options.get_headers()),
-                                          StatusCode::SERVICE_UNAVAILABLE)
-    {
+    if let (Some(boxed_provider_stream), response_info) = create_channel_unavailable_stream(
+        &app_state.app_config,
+        &get_response_headers(stream_options.get_headers()),
+        StatusCode::SERVICE_UNAVAILABLE,
+    ) {
         Ok(Some((boxed_provider_stream, response_info)))
     } else {
         Err(StatusCode::SERVICE_UNAVAILABLE)
@@ -561,18 +505,34 @@ async fn get_provider_stream(
             }
             Ok(None) => {
                 if connect_err > ERR_MAX_RETRY_COUNT {
-                    warn!("The stream could be unavailable. {}", sanitize_sensitive_info(stream_options.get_url().as_str()));
+                    warn!(
+                        "The stream could be unavailable. {}",
+                        sanitize_sensitive_info(stream_options.get_url().as_str())
+                    );
                     break;
                 }
             }
             Err(status) => {
                 debug!("Provider stream response error status response : {status}");
-                if matches!(status, StatusCode::FORBIDDEN | StatusCode::SERVICE_UNAVAILABLE | StatusCode::UNAUTHORIZED | StatusCode::PROXY_AUTHENTICATION_REQUIRED | StatusCode::RANGE_NOT_SATISFIABLE) {
-                    warn!("The stream could be unavailable. ({status}) {}",sanitize_sensitive_info(stream_options.get_url().as_str()));
+                if matches!(
+                    status,
+                    StatusCode::FORBIDDEN
+                        | StatusCode::SERVICE_UNAVAILABLE
+                        | StatusCode::UNAUTHORIZED
+                        | StatusCode::PROXY_AUTHENTICATION_REQUIRED
+                        | StatusCode::RANGE_NOT_SATISFIABLE
+                ) {
+                    warn!(
+                        "The stream could be unavailable. ({status}) {}",
+                        sanitize_sensitive_info(stream_options.get_url().as_str())
+                    );
                     break;
                 }
                 if connect_err > ERR_MAX_RETRY_COUNT {
-                    warn!("The stream could be unavailable. ({status}) {}",sanitize_sensitive_info(stream_options.get_url().as_str()));
+                    warn!(
+                        "The stream could be unavailable. ({status}) {}",
+                        sanitize_sensitive_info(stream_options.get_url().as_str())
+                    );
                     break;
                 }
             }
@@ -604,27 +564,19 @@ pub async fn create_provider_stream(
     stream_options: ProviderStreamFactoryOptions,
 ) -> Option<ProviderStreamFactoryResponse> {
     let client_stream_factory = |stream, reconnect_flag, range_cnt| {
-        let stream = if !stream_options.is_piped()
-            && stream_options.is_buffer_enabled()
-            && !stream_options.is_shared_stream()
-        {
-            BufferedStream::new(
-                stream,
-                stream_options.get_buffer_size(),
-                stream_options.get_reconnect_flag_clone(),
-                stream_options.get_url_as_str(),
-            )
-            .boxed()
-        } else {
-            stream
-        };
-        ClientStream::new(
-            stream,
-            reconnect_flag,
-            range_cnt,
-            stream_options.get_url_as_str(),
-        )
-        .boxed()
+        let stream =
+            if !stream_options.is_piped() && stream_options.is_buffer_enabled() && !stream_options.is_shared_stream() {
+                BufferedStream::new(
+                    stream,
+                    stream_options.get_buffer_size(),
+                    stream_options.get_reconnect_flag_clone(),
+                    stream_options.get_url_as_str(),
+                )
+                .boxed()
+            } else {
+                stream
+            };
+        ClientStream::new(stream, reconnect_flag, range_cnt, stream_options.get_url_as_str()).boxed()
     };
 
     match get_provider_stream(app_state, client, &stream_options).await {
@@ -653,7 +605,10 @@ pub async fn create_provider_stream(
                             match get_provider_stream(&app_state_clone, &client, &stream_opts).await {
                                 Ok(Some((stream, _info))) => Some((stream, ())),
                                 Ok(None) => {
-                                    app_state_clone.connection_manager.release_provider_connection(&stream_opts.addr).await;
+                                    app_state_clone
+                                        .connection_manager
+                                        .release_provider_connection(&stream_opts.addr)
+                                        .await;
                                     continue_streaming.notify();
                                     if let (Some(boxed_provider_stream), _response_info) =
                                         create_channel_unavailable_stream(
@@ -667,7 +622,10 @@ pub async fn create_provider_stream(
                                     None
                                 }
                                 Err(status) => {
-                                    app_state_clone.connection_manager.release_provider_connection(&stream_opts.addr).await;
+                                    app_state_clone
+                                        .connection_manager
+                                        .release_provider_connection(&stream_opts.addr)
+                                        .await;
                                     continue_streaming.notify();
                                     if let (Some(boxed_provider_stream), _response_info) =
                                         create_channel_unavailable_stream(
@@ -728,19 +686,15 @@ pub async fn create_provider_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shared::model::PlaylistItemType;
     use axum::http::HeaderMap;
+    use shared::model::PlaylistItemType;
 
     #[test]
     fn test_provider_stream_factory_options_range_logic() {
         let addr = "127.0.0.1:8080".parse().unwrap();
         let stream_url = Url::parse("http://example.com/stream").unwrap();
-        let stream_options = StreamOptions {
-            stream_retry: true,
-            buffer_enabled: true,
-            buffer_size: 1024,
-            pipe_provider_stream: false,
-        };
+        let stream_options =
+            StreamOptions { stream_retry: true, buffer_enabled: true, buffer_size: 1024, pipe_provider_stream: false };
         let disabled_headers = None;
 
         // Case 1: VOD, no initial range requested
@@ -806,6 +760,6 @@ mod tests {
             None,
         );
         assert!(!options.was_range_requested()); // Stripped by filter
-        assert_eq!(options.get_total_bytes_send(), None); 
+        assert_eq!(options.get_total_bytes_send(), None);
     }
 }

@@ -1,10 +1,7 @@
-use std::sync::Arc;
-use sysinfo::{
-    MemoryRefreshKind, Pid, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System
-};
+use crate::api::model::AppState;
 use shared::model::SystemInfo;
-use crate::api::model::{AppState};
-
+use std::sync::Arc;
+use sysinfo::{MemoryRefreshKind, Pid, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
 
 pub fn exec_system_usage(app_state: &Arc<AppState>) -> tokio::task::JoinHandle<()> {
     let state = Arc::clone(app_state);
@@ -14,11 +11,7 @@ pub fn exec_system_usage(app_state: &Arc<AppState>) -> tokio::task::JoinHandle<(
 
         let refresh_kind = RefreshKind::nothing()
             .with_memory(MemoryRefreshKind::nothing().with_ram())
-            .with_processes(
-                ProcessRefreshKind::nothing()
-                    .with_cpu()
-                    .with_memory()
-            );
+            .with_processes(ProcessRefreshKind::nothing().with_cpu().with_memory());
 
         let mut sys = System::new_with_specifics(refresh_kind);
         loop {

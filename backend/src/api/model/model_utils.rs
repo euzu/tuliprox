@@ -1,19 +1,18 @@
-use reqwest::{StatusCode};
-use std::collections::{HashSet};
-use std::str::FromStr;
-use reqwest::header::HeaderMap;
-use shared::utils::{filter_response_header};
+use reqwest::{header::HeaderMap, StatusCode};
+use shared::utils::filter_response_header;
+use std::{collections::HashSet, str::FromStr};
 
 pub fn get_response_headers(headers: &HeaderMap) -> Vec<(String, String)> {
-    headers.iter()
+    headers
+        .iter()
         .filter(|(key, _)| filter_response_header(key.as_str()))
-        .filter_map(|(key, value)| {
-            value.to_str().ok().map(|v| (key.to_string(), v.to_string()))
-        })
+        .filter_map(|(key, value)| value.to_str().ok().map(|v| (key.to_string(), v.to_string())))
         .collect()
 }
 
-pub fn get_stream_response_with_headers(custom: Option<(Vec<(String, String)>, StatusCode)>) ->  (axum::http::StatusCode, axum::http::HeaderMap) {
+pub fn get_stream_response_with_headers(
+    custom: Option<(Vec<(String, String)>, StatusCode)>,
+) -> (axum::http::StatusCode, axum::http::HeaderMap) {
     let mut headers = HeaderMap::new();
     let mut added_headers: HashSet<String> = HashSet::new();
     let mut status = StatusCode::OK;
@@ -21,20 +20,22 @@ pub fn get_stream_response_with_headers(custom: Option<(Vec<(String, String)>, S
     if let Some((custom_headers, status_code)) = custom {
         status = status_code;
         for (key, value) in custom_headers {
-            if let (Ok(name), Ok(val)) = (axum::http::HeaderName::from_str(&key), axum::http::HeaderValue::from_str(&value)) {
+            if let (Ok(name), Ok(val)) =
+                (axum::http::HeaderName::from_str(&key), axum::http::HeaderValue::from_str(&value))
+            {
                 headers.insert(name.clone(), val);
                 added_headers.insert(key);
             }
         }
     }
 
-    let default_headers = vec![
-        ("content-type", "application/octet-stream"),
-    ];
+    let default_headers = vec![("content-type", "application/octet-stream")];
 
     for (key, value) in default_headers {
         if !added_headers.contains(key) {
-            if let (Ok(name), Ok(val)) = (axum::http::HeaderName::from_str(key), axum::http::HeaderValue::from_str(value)) {
+            if let (Ok(name), Ok(val)) =
+                (axum::http::HeaderName::from_str(key), axum::http::HeaderValue::from_str(value))
+            {
                 headers.insert(name, val);
             }
         }

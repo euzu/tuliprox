@@ -1,22 +1,31 @@
-use crate::api::api_utils::{create_api_proxy_user, json_or_bin_response};
-use crate::api::endpoints::api_playlist_utils::{get_playlist_for_custom_provider, get_playlist_for_input, get_playlist_for_target};
-use crate::api::endpoints::extract_accept_header::ExtractAcceptHeader;
-use crate::api::model::{AppState, EventMessage};
-use crate::api::panel_api::sync_panel_api_exp_dates;
-use crate::auth::create_access_token;
-use crate::model::{parse_xmltv_for_web_ui_from_url, ConfigInput, ConfigInputFlags, ConfigInputFlagsSet, ConfigInputOptions};
-use axum::response::IntoResponse;
-use axum::{Router};
-use log::{debug, error, warn};
+use crate::{
+    api::{
+        api_utils::{create_api_proxy_user, json_or_bin_response},
+        endpoints::{
+            api_playlist_utils::{get_playlist_for_custom_provider, get_playlist_for_input, get_playlist_for_target},
+            extract_accept_header::ExtractAcceptHeader,
+            xmltv_api::serve_epg_web_ui,
+            xtream_api::xtream_get_stream_info_response,
+        },
+        model::AppState,
+    },
+    auth::create_access_token,
+    model::{parse_xmltv_for_web_ui_from_url, ConfigInput, ConfigInputFlags, ConfigInputFlagsSet, ConfigInputOptions},
+    processing::processor::exec_processing,
+    repository::xtream_get_item_for_stream_id,
+};
+use axum::{response::IntoResponse, Router};
+use log::{debug, error};
 use serde_json::json;
-use shared::model::{InputType, PlaylistEpgRequest, PlaylistRequest, ProxyType, TargetType, UiPlaylistItem, WebplayerUrlRequest, XtreamCluster};
-use shared::utils::{sanitize_sensitive_info, Internable};
+use shared::{
+    model::{
+        InputType, PlaylistEpgRequest, PlaylistRequest, ProxyType, TargetType, UiPlaylistItem, WebplayerUrlRequest,
+        XtreamCluster,
+    },
+    utils::{sanitize_sensitive_info, Internable},
+};
 use std::sync::Arc;
 use url::Url;
-use crate::api::endpoints::xmltv_api::{serve_epg_web_ui};
-use crate::api::endpoints::xtream_api::xtream_get_stream_info_response;
-use crate::processing::processor::exec_processing;
-use crate::repository::xtream_get_item_for_stream_id;
 
 fn create_config_input_for_m3u(url: &str) -> ConfigInput {
     ConfigInput {
@@ -79,16 +88,21 @@ async fn playlist_update(
             let update_guard = app_state.update_guard.clone();
             tokio::spawn({
                 async move {
-                    let Some(lock) = update_guard.acquire_playlist_lock().await else {
-                        warn!("Playlist update lock is closed; update skipped.");
-                        event_manager.send_event(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Failure));
-                        return;
-                    };
-
-                    sync_panel_api_exp_dates(&app_state).await;
-                    exec_processing(&http_client, app_config, valid_targets, Some(event_manager),
-                                    Some(playlist_state), Some(update_guard),
-                                    disabled_headers, Some(provider_manager), Some(metadata_manager), None, Some(lock)).await;
+                    exec_processing(
+                        &http_client,
+                        app_config,
+                        valid_targets,
+                        Some(event_manager),
+                        Some(app_state.clone()),
+                        Some(playlist_state),
+                        Some(update_guard),
+                        disabled_headers,
+                        Some(provider_manager),
+                        Some(metadata_manager),
+                        None,
+                        None,
+                    )
+                    .await;
                 }
             });
             axum::http::StatusCode::ACCEPTED.into_response()
@@ -109,34 +123,60 @@ async fn playlist_content(
     let _config = app_state.app_config.config.load();
     let client = app_state.http_client.load();
     match playlist_req {
-        PlaylistRequest::Target(target_id) => {
-            get_playlist_for_target(app_state.app_config.get_target_by_id(*target_id).as_deref(), &app_state.app_config, cluster, accept.as_deref()).await.into_response()
-        }
-        PlaylistRequest::Input(input_id) => {
-            get_playlist_for_input(app_state.app_config.get_input_by_id(*input_id).as_ref(), &app_state.app_config, cluster, accept.as_deref()).await.into_response()
-        }
-        PlaylistRequest::CustomXtream(xtream) => {
-            match Url::parse(&xtream.url) {
-                Ok(parsed) if parsed.scheme() == "http" || parsed.scheme() == "https" => {
-                    let input = Arc::new(create_config_input_for_xtream(&xtream.username, &xtream.password, &xtream.url));
-                    get_playlist_for_custom_provider(client.as_ref(), Some(&input), &app_state.app_config, cluster, accept.as_deref()).await.into_response()
-                }
-                _ => {
-                    (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": "Invalid url scheme; only http/https are allowed"}))).into_response()
-                }
+        PlaylistRequest::Target(target_id) => get_playlist_for_target(
+            app_state.app_config.get_target_by_id(*target_id).as_deref(),
+            &app_state.app_config,
+            cluster,
+            accept.as_deref(),
+        )
+        .await
+        .into_response(),
+        PlaylistRequest::Input(input_id) => get_playlist_for_input(
+            app_state.app_config.get_input_by_id(*input_id).as_ref(),
+            &app_state.app_config,
+            cluster,
+            accept.as_deref(),
+        )
+        .await
+        .into_response(),
+        PlaylistRequest::CustomXtream(xtream) => match Url::parse(&xtream.url) {
+            Ok(parsed) if parsed.scheme() == "http" || parsed.scheme() == "https" => {
+                let input = Arc::new(create_config_input_for_xtream(&xtream.username, &xtream.password, &xtream.url));
+                get_playlist_for_custom_provider(
+                    client.as_ref(),
+                    Some(&input),
+                    &app_state.app_config,
+                    cluster,
+                    accept.as_deref(),
+                )
+                .await
+                .into_response()
             }
-        }
-        PlaylistRequest::CustomM3u(m3u) => {
-            match Url::parse(&m3u.url) {
-                Ok(parsed) if parsed.scheme() == "http" || parsed.scheme() == "https" => {
-                    let input = Arc::new(create_config_input_for_m3u(&m3u.url));
-                    get_playlist_for_custom_provider(client.as_ref(), Some(&input), &app_state.app_config, cluster, accept.as_deref()).await.into_response()
-                }
-                _ => {
-                    (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": "Invalid url scheme; only http/https are allowed"}))).into_response()
-                }
+            _ => (
+                axum::http::StatusCode::BAD_REQUEST,
+                axum::Json(json!({"error": "Invalid url scheme; only http/https are allowed"})),
+            )
+                .into_response(),
+        },
+        PlaylistRequest::CustomM3u(m3u) => match Url::parse(&m3u.url) {
+            Ok(parsed) if parsed.scheme() == "http" || parsed.scheme() == "https" => {
+                let input = Arc::new(create_config_input_for_m3u(&m3u.url));
+                get_playlist_for_custom_provider(
+                    client.as_ref(),
+                    Some(&input),
+                    &app_state.app_config,
+                    cluster,
+                    accept.as_deref(),
+                )
+                .await
+                .into_response()
             }
-        }
+            _ => (
+                axum::http::StatusCode::BAD_REQUEST,
+                axum::Json(json!({"error": "Invalid url scheme; only http/https are allowed"})),
+            )
+                .into_response(),
+        },
     }
 }
 
@@ -147,14 +187,7 @@ macro_rules! create_player_api_for_cluster {
             axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
             axum::extract::Json(playlist_req): axum::extract::Json<PlaylistRequest>,
         ) -> impl IntoResponse + Send {
-            playlist_content(
-                accept.clone(),
-                &app_state,
-                &playlist_req,
-                $cluster
-            )
-            .await
-            .into_response()
+            playlist_content(accept.clone(), &app_state, &playlist_req, $cluster).await.into_response()
         }
     };
 }
@@ -164,10 +197,7 @@ create_player_api_for_cluster!(playlist_content_vod, XtreamCluster::Video);
 create_player_api_for_cluster!(playlist_content_series, XtreamCluster::Series);
 
 async fn playlist_series_info(
-    axum::extract::Path((virtual_id, _provider_id)): axum::extract::Path<(
-        String,
-        String,
-    )>,
+    axum::extract::Path((virtual_id, _provider_id)): axum::extract::Path<(String, String)>,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     axum::extract::Json(playlist_req): axum::extract::Json<PlaylistRequest>,
 ) -> impl IntoResponse + Send {
@@ -177,7 +207,15 @@ async fn playlist_series_info(
                 if target.has_output(TargetType::Xtream) {
                     let mut user = create_api_proxy_user(&app_state);
                     user.proxy = ProxyType::Redirect;
-                    return xtream_get_stream_info_response(&app_state, &user, &target, &virtual_id, XtreamCluster::Series).await.into_response();
+                    return xtream_get_stream_info_response(
+                        &app_state,
+                        &user,
+                        &target,
+                        &virtual_id,
+                        XtreamCluster::Series,
+                    )
+                    .await
+                    .into_response();
                 }
             }
         }
@@ -193,7 +231,7 @@ async fn playlist_series_info(
         PlaylistRequest::CustomXtream(_xtream) => {
             // TODO: Implement series info retrieval for custom Xtream requests
             debug!("TODO: Implement series info retrieval for custom Xtream requests");
-        },
+        }
         PlaylistRequest::CustomM3u(_) => {}
     }
     axum::http::StatusCode::NO_CONTENT.into_response()
@@ -205,10 +243,20 @@ async fn playlist_webplayer(
 ) -> impl axum::response::IntoResponse + Send {
     let access_token = create_access_token(&app_state.app_config.access_token_secret, 30);
     let config = app_state.app_config.config.load();
-    let server_name = config.web_ui.as_ref().and_then(|web_ui| web_ui.player_server.as_ref()).map_or("default", |server_name| server_name.as_str());
+    let server_name = config
+        .web_ui
+        .as_ref()
+        .and_then(|web_ui| web_ui.player_server.as_ref())
+        .map_or("default", |server_name| server_name.as_str());
     let server_info = app_state.app_config.get_server_info(server_name);
     let base_url = server_info.get_base_url();
-    format!("{base_url}/token/{access_token}/{}/{}/{}", playlist_item.target_id, playlist_item.cluster.as_stream_type(), playlist_item.virtual_id).into_response()
+    format!(
+        "{base_url}/token/{access_token}/{}/{}/{}",
+        playlist_item.target_id,
+        playlist_item.cluster.as_stream_type(),
+        playlist_item.virtual_id
+    )
+    .into_response()
 }
 
 async fn playlist_epg(
@@ -266,10 +314,10 @@ async fn playlist_episode_item(
         if let Some(target) = app_state.app_config.get_target_by_id(target_id) {
             if target.has_output(TargetType::Xtream) {
                 if let Ok(vid) = virtual_id.parse::<u32>() {
-                    if let Ok(pli) = xtream_get_item_for_stream_id(
-                        vid, &app_state, &target, Some(XtreamCluster::Series)
-                    ).await {
-                       return axum::Json(json!(UiPlaylistItem::from(pli))).into_response();
+                    if let Ok(pli) =
+                        xtream_get_item_for_stream_id(vid, &app_state, &target, Some(XtreamCluster::Series)).await
+                    {
+                        return axum::Json(json!(UiPlaylistItem::from(pli))).into_response();
                     }
                 }
             }

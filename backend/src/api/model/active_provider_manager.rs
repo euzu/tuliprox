@@ -1,15 +1,23 @@
-use crate::api::model::provider_lineup_manager::{ProviderAllocation, ProviderLineupManager};
-use crate::api::model::{EventManager, ProviderConfig};
-use crate::model::{AppConfig, ConfigInput, GracePeriodOptions};
-use crate::utils::debug_if_enabled;
+use crate::{
+    api::model::{
+        provider_lineup_manager::{ProviderAllocation, ProviderLineupManager},
+        EventManager, ProviderConfig,
+    },
+    model::{AppConfig, ConfigInput, GracePeriodOptions},
+    utils::debug_if_enabled,
+};
 use log::error;
 use shared::utils::sanitize_sensitive_info;
 // trace_if_enabled removed
 use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock};
-use std::time::{Duration, Instant};
+use std::{
+    net::SocketAddr,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, LazyLock,
+    },
+    time::{Duration, Instant},
+};
 use tokio::sync::{RwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
 
@@ -38,12 +46,7 @@ impl ProviderHandle {
         allocation: ProviderAllocation,
         cancel_token: Option<CancellationToken>,
     ) -> Self {
-        Self {
-            client_id,
-            allocation_id,
-            allocation,
-            cancel_token,
-        }
+        Self { client_id, allocation_id, allocation, cancel_token }
     }
 }
 
@@ -106,9 +109,7 @@ impl ActiveProviderManager {
         cfg.sources.load().inputs.iter().filter(|i| i.enabled).map(Arc::clone).collect()
     }
 
-    fn get_grace_options(cfg: &AppConfig) -> GracePeriodOptions {
-        cfg.config.load().get_grace_options()
-    }
+    fn get_grace_options(cfg: &AppConfig) -> GracePeriodOptions { cfg.config.load().get_grace_options() }
 
     pub async fn update_config(&self, cfg: &AppConfig) {
         let grace_period_options = Self::get_grace_options(cfg);
@@ -153,27 +154,14 @@ impl ActiveProviderManager {
     ) -> Option<ProviderHandle> {
         // 1. Try to acquire directly
         let (allow_grace, allocation) = if force {
-            (
-                true,
-                self.providers
-                    .force_exact_acquire_connection(provider_or_input_name)
-                    .await,
-            )
+            (true, self.providers.force_exact_acquire_connection(provider_or_input_name).await)
         } else {
             match allow_grace_override {
                 Some(allow_grace) => (
                     allow_grace,
-                    self.providers
-                        .acquire_connection_with_grace_override(
-                            provider_or_input_name,
-                            allow_grace,
-                        )
-                        .await,
+                    self.providers.acquire_connection_with_grace_override(provider_or_input_name, allow_grace).await,
                 ),
-                None => (
-                    true,
-                    self.providers.acquire_connection(provider_or_input_name).await,
-                ),
+                None => (true, self.providers.acquire_connection(provider_or_input_name).await),
             }
         };
 
@@ -207,19 +195,24 @@ impl ActiveProviderManager {
         let mut connections = self.connections.write().await;
         let per_addr = connections.single.entry(*addr).or_default();
 
-        per_addr.insert(allocation_id, ActiveConnectionInfo {
-            allocation: allocation.clone(),
-            priority,
-            is_probe,
-            cancel_token: cancel_token.clone(),
-            created_at: Instant::now(),
-        });
+        per_addr.insert(
+            allocation_id,
+            ActiveConnectionInfo {
+                allocation: allocation.clone(),
+                priority,
+                is_probe,
+                cancel_token: cancel_token.clone(),
+                created_at: Instant::now(),
+            },
+        );
 
-        connections.by_provider.entry(provider_name.clone())
-            .or_default()
-            .push((*addr, allocation_id));
+        connections.by_provider.entry(provider_name.clone()).or_default().push((*addr, allocation_id));
 
-        debug_if_enabled!("Added provider connection {provider_name:?} for {} (prio={})", sanitize_sensitive_info(&addr.to_string()), priority);
+        debug_if_enabled!(
+            "Added provider connection {provider_name:?} for {} (prio={})",
+            sanitize_sensitive_info(&addr.to_string()),
+            priority
+        );
         Some(ProviderHandle::new(*addr, allocation_id, allocation, Some(cancel_token)))
     }
 
@@ -246,7 +239,8 @@ impl ActiveProviderManager {
                                     let is_better = match victim {
                                         None => true,
                                         Some((_, _, v_prio, v_created, _)) => {
-                                            info.priority > v_prio || (info.priority == v_prio && info.created_at < v_created)
+                                            info.priority > v_prio
+                                                || (info.priority == v_prio && info.created_at < v_created)
                                         }
                                     };
                                     if is_better {
@@ -267,13 +261,11 @@ impl ActiveProviderManager {
                                         None => true,
                                         Some((_, _, v_prio, v_created, _)) => {
                                             shared.priority > v_prio
-                                                || (shared.priority == v_prio
-                                                    && shared.created_at < v_created)
+                                                || (shared.priority == v_prio && shared.created_at < v_created)
                                         }
                                     };
                                     if is_better {
-                                        victim =
-                                            Some((*addr, *alloc_id, shared.priority, shared.created_at, true));
+                                        victim = Some((*addr, *alloc_id, shared.priority, shared.created_at, true));
                                     }
                                 }
                             }
@@ -284,9 +276,13 @@ impl ActiveProviderManager {
         }
 
         if let Some((addr, alloc_id, v_prio, victim_created_at, is_shared)) = victim {
-            debug_if_enabled!("Preempting {} connection from {} (prio={}) for higher priority request (prio={})", 
+            debug_if_enabled!(
+                "Preempting {} connection from {} (prio={}) for higher priority request (prio={})",
                 if is_shared { "shared" } else { "single" },
-                sanitize_sensitive_info(&addr.to_string()), v_prio, new_priority);
+                sanitize_sensitive_info(&addr.to_string()),
+                v_prio,
+                new_priority
+            );
 
             if is_shared {
                 let released_shared_allocation = {
@@ -304,10 +300,7 @@ impl ActiveProviderManager {
                     if !still_single {
                         None
                     } else if let Some(shared) = connections.shared.by_key.remove(&key) {
-                        connections
-                            .shared
-                            .shared_by_allocation_id
-                            .remove(&shared.allocation_id);
+                        connections.shared.shared_by_allocation_id.remove(&shared.allocation_id);
                         for shared_addr in &shared.connections {
                             connections.shared.key_by_addr.remove(shared_addr);
                         }
@@ -386,10 +379,7 @@ impl ActiveProviderManager {
             }
 
             // Now try acquire again preserving the original grace policy.
-            let allocation = self
-                .providers
-                .acquire_connection_with_grace_override(input_name, allow_grace)
-                .await;
+            let allocation = self.providers.acquire_connection_with_grace_override(input_name, allow_grace).await;
             if !matches!(allocation, ProviderAllocation::Exhausted) {
                 return Some(allocation);
             }
@@ -404,10 +394,7 @@ impl ActiveProviderManager {
         addr: &SocketAddr,
         allow_grace: bool,
     ) -> Option<ProviderHandle> {
-        let allocation = self
-            .providers
-            .acquire_exact_connection_with_grace_override(provider_name, allow_grace)
-            .await;
+        let allocation = self.providers.acquire_exact_connection_with_grace_override(provider_name, allow_grace).await;
         if matches!(allocation, ProviderAllocation::Exhausted) {
             return None;
         }
@@ -435,18 +422,13 @@ impl ActiveProviderManager {
         addr: &SocketAddr,
         allow_grace: bool,
     ) -> Option<ProviderHandle> {
-        self.acquire_connection_inner(input_name, addr, false, Some(allow_grace), DEFAULT_USER_PRIORITY, false)
-            .await
+        self.acquire_connection_inner(input_name, addr, false, Some(allow_grace), DEFAULT_USER_PRIORITY, false).await
     }
 
     /// Acquire a provider connection while optionally disabling provider grace allocations.
-    pub async fn acquire_connection_for_probe(
-        &self,
-        input_name: &Arc<str>,
-    ) -> Option<ProviderHandle> {
+    pub async fn acquire_connection_for_probe(&self, input_name: &Arc<str>) -> Option<ProviderHandle> {
         // Probe is strictly low-priority and must never consume grace capacity.
-        self.acquire_connection_inner(input_name, &DUMMY_ADDR, false, Some(false), DEFAULT_PROBE_PRIORITY, true)
-            .await
+        self.acquire_connection_inner(input_name, &DUMMY_ADDR, false, Some(false), DEFAULT_PROBE_PRIORITY, true).await
     }
 
     // This method is used for redirects to cycle through the provider
@@ -522,10 +504,7 @@ impl ActiveProviderManager {
             if shared.connections.is_empty() {
                 // If this was the last user of the shared allocation:
                 connections.shared.by_key.remove(&key);
-                connections
-                    .shared
-                    .shared_by_allocation_id
-                    .remove(&shared.allocation_id);
+                connections.shared.shared_by_allocation_id.remove(&shared.allocation_id);
                 if let Some(name) = shared.allocation.get_provider_name() {
                     if let Some(list) = connections.by_provider.get_mut(&name) {
                         list.retain(|(_, i)| *i != shared.allocation_id);
@@ -543,10 +522,10 @@ impl ActiveProviderManager {
         if let Some(allocation) = shared_allocation {
             allocation.release().await;
             debug_if_enabled!(
-              "Released last shared connection for provider {}, releasing allocation {}",
-              allocation.get_provider_name().unwrap_or_default(),
-              sanitize_sensitive_info(&addr.to_string())
-        );
+                "Released last shared connection for provider {}, releasing allocation {}",
+                allocation.get_provider_name().unwrap_or_default(),
+                sanitize_sensitive_info(&addr.to_string())
+            );
         }
     }
 
@@ -566,7 +545,9 @@ impl ActiveProviderManager {
                     // Remove from by_provider index
                     if let Some(name) = released.as_ref().and_then(ProviderAllocation::get_provider_name) {
                         if let Some(list) = connections.by_provider.get_mut(&name) {
-                            if let Some(idx) = list.iter().position(|(a, i)| *a == handle.client_id && *i == handle.allocation_id) {
+                            if let Some(idx) =
+                                list.iter().position(|(a, i)| *a == handle.client_id && *i == handle.allocation_id)
+                            {
                                 list.remove(idx);
                             }
                         }
@@ -576,11 +557,7 @@ impl ActiveProviderManager {
 
             if released.is_none() {
                 // Try removing from Shared
-                if let Some(key) = connections
-                    .shared
-                    .shared_by_allocation_id
-                    .remove(&handle.allocation_id)
-                {
+                if let Some(key) = connections.shared.shared_by_allocation_id.remove(&handle.allocation_id) {
                     if let Some(shared) = connections.shared.by_key.remove(&key) {
                         released = Some(shared.allocation);
                         for addr in shared.connections {
@@ -615,7 +592,6 @@ impl ActiveProviderManager {
                 } else {
                     let mut iter = m.drain();
                     if let Some((id, info)) = iter.next() {
-
                         // Collect others as extras to release
                         for (_, extra_info) in iter {
                             extras.push(extra_info.allocation);
@@ -639,8 +615,9 @@ impl ActiveProviderManager {
                         None
                     }
                 }
-            } else { None };
-
+            } else {
+                None
+            };
 
             if let Some(handle) = &handle {
                 let provider_name = handle.0.allocation.get_provider_name().unwrap_or_default();
@@ -661,10 +638,7 @@ impl ActiveProviderManager {
                     },
                 );
                 connections.shared.key_by_addr.insert(*addr, key.to_string());
-                connections
-                    .shared
-                    .shared_by_allocation_id
-                    .insert(handle.0.allocation_id, key.to_string());
+                connections.shared.shared_by_allocation_id.insert(handle.0.allocation_id, key.to_string());
             }
             extras
         };
@@ -686,31 +660,27 @@ impl ActiveProviderManager {
             shared_allocation.connections.insert(*addr);
             connections.shared.key_by_addr.insert(*addr, key.to_string());
         } else {
-            error!(
-                "Failed to add shared connection for {addr}: url {} not found",
-                sanitize_sensitive_info(key)
-            );
+            error!("Failed to add shared connection for {addr}: url {} not found", sanitize_sensitive_info(key));
         }
     }
 
-    pub async fn get_provider_connections_count(&self) -> usize {
-        self.providers.active_connection_count().await
-    }
+    pub async fn get_provider_connections_count(&self) -> usize { self.providers.active_connection_count().await }
 }
 
 #[cfg(test)]
 mod tests {
     use super::ActiveProviderManager;
-    use crate::api::model::EventManager;
-    use crate::model::{AppConfig, Config, ConfigInput, ConfigInputAlias, SourcesConfig};
-    use crate::utils::FileLockManager;
+    use crate::{
+        api::model::EventManager,
+        model::{AppConfig, Config, ConfigInput, ConfigInputAlias, SourcesConfig},
+        utils::FileLockManager,
+    };
     use arc_swap::{ArcSwap, ArcSwapOption};
-    use shared::model::{ConfigPaths, InputFetchMethod, InputType};
-    use shared::utils::Internable;
-    use std::collections::HashMap;
-    use std::net::SocketAddr;
-    use std::sync::Arc;
-    use std::time::Duration;
+    use shared::{
+        model::{ConfigPaths, InputFetchMethod, InputType},
+        utils::Internable,
+    };
+    use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
     fn build_test_app_config(aliases: Option<Vec<ConfigInputAlias>>, max_connections: u16) -> AppConfig {
         let input = Arc::new(ConfigInput {
@@ -729,10 +699,7 @@ mod tests {
             ..ConfigInput::default()
         });
 
-        let sources = SourcesConfig {
-            inputs: vec![input],
-            ..SourcesConfig::default()
-        };
+        let sources = SourcesConfig { inputs: vec![input], ..SourcesConfig::default() };
 
         AppConfig {
             config: Arc::new(ArcSwap::from_pointee(Config::default())),
@@ -775,9 +742,7 @@ mod tests {
         )
     }
 
-    fn create_test_app_config_single_provider_pool() -> AppConfig {
-        build_test_app_config(None, 1)
-    }
+    fn create_test_app_config_single_provider_pool() -> AppConfig { build_test_app_config(None, 1) }
 
     #[tokio::test]
     async fn test_force_exact_acquire_does_not_overallocate_busy_provider() {
@@ -789,20 +754,13 @@ mod tests {
         let client_1_addr: SocketAddr = "127.0.0.1:40001".parse().unwrap();
         let client_2_addr: SocketAddr = "127.0.0.1:40002".parse().unwrap();
 
-        let first_alloc = manager
-            .acquire_connection(&input_name, &client_1_addr)
-            .await
-            .expect("client1 initial allocation");
-        let pinned_provider = first_alloc
-            .allocation
-            .get_provider_name()
-            .expect("provider name expected");
+        let first_alloc =
+            manager.acquire_connection(&input_name, &client_1_addr).await.expect("client1 initial allocation");
+        let pinned_provider = first_alloc.allocation.get_provider_name().expect("provider name expected");
         assert_eq!(pinned_provider.as_ref(), "provider_1");
 
         // provider_1 has max_connections=1 and is already in use by client1
-        let forced = manager
-            .force_exact_acquire_connection(&pinned_provider, &client_2_addr)
-            .await;
+        let forced = manager.force_exact_acquire_connection(&pinned_provider, &client_2_addr).await;
         assert!(forced.is_none(), "forced exact acquire must not over-allocate busy provider");
 
         manager.release_connection(&client_1_addr).await;
@@ -820,17 +778,16 @@ mod tests {
         let client_2_addr: SocketAddr = "127.0.0.1:41002".parse().unwrap();
 
         // Step 1: Client1 starts movie -> provider_1
-        let first_alloc = manager.acquire_connection(&input_name, &client_1_addr).await.expect("client1 initial allocation");
-        assert_eq!(
-            first_alloc.allocation.get_provider_name().as_deref(),
-            Some(input_name.as_ref())
-        );
+        let first_alloc =
+            manager.acquire_connection(&input_name, &client_1_addr).await.expect("client1 initial allocation");
+        assert_eq!(first_alloc.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
 
         // Step 2: Client1 stops -> release provider_1
         manager.release_connection(&client_1_addr).await;
 
         // Step 3: Client2 starts live -> provider_1
-        let live_alloc = manager.acquire_connection(&input_name, &client_2_addr).await.expect("client2 live allocation");
+        let live_alloc =
+            manager.acquire_connection(&input_name, &client_2_addr).await.expect("client2 live allocation");
         let busy_provider = live_alloc.allocation.get_provider_name().expect("provider name expected");
         assert_eq!(busy_provider.as_ref(), input_name.as_ref());
         assert!(manager.is_exhausted(&busy_provider).await);
@@ -841,10 +798,7 @@ mod tests {
             .acquire_connection_with_grace(&input_name, &client_1_addr, false)
             .await
             .expect("client1 fallback allocation without grace");
-        let fallback_provider = fallback_alloc
-            .allocation
-            .get_provider_name()
-            .expect("fallback provider expected");
+        let fallback_provider = fallback_alloc.allocation.get_provider_name().expect("fallback provider expected");
 
         assert_ne!(fallback_provider.as_ref(), busy_provider.as_ref());
         assert_eq!(fallback_provider.as_ref(), "provider_2");
@@ -864,25 +818,14 @@ mod tests {
         let client_2_addr: SocketAddr = "127.0.0.1:42002".parse().unwrap();
 
         // Initial playback for client1.
-        let first_alloc = manager
-            .acquire_connection(&input_name, &client_1_addr)
-            .await
-            .expect("client1 initial allocation");
-        let pinned_provider = first_alloc
-            .allocation
-            .get_provider_name()
-            .expect("provider name expected");
+        let first_alloc =
+            manager.acquire_connection(&input_name, &client_1_addr).await.expect("client1 initial allocation");
+        let pinned_provider = first_alloc.allocation.get_provider_name().expect("provider name expected");
         assert_eq!(pinned_provider.as_ref(), "provider_1");
 
         // Another client occupies the alternate account while client1 keeps seeking.
-        let second_alloc = manager
-            .acquire_connection(&input_name, &client_2_addr)
-            .await
-            .expect("client2 allocation");
-        let second_provider = second_alloc
-            .allocation
-            .get_provider_name()
-            .expect("provider name expected");
+        let second_alloc = manager.acquire_connection(&input_name, &client_2_addr).await.expect("client2 allocation");
+        let second_provider = second_alloc.allocation.get_provider_name().expect("provider name expected");
         assert_eq!(second_provider.as_ref(), "provider_2");
 
         // Simulate repeated seek/range reconnects for client1:
@@ -893,10 +836,7 @@ mod tests {
                 .force_exact_acquire_connection(&pinned_provider, &client_1_addr)
                 .await
                 .expect("seek reacquire should stay on pinned provider");
-            let seek_provider = seek_alloc
-                .allocation
-                .get_provider_name()
-                .expect("provider name expected");
+            let seek_provider = seek_alloc.allocation.get_provider_name().expect("provider name expected");
             assert_eq!(seek_provider.as_ref(), pinned_provider.as_ref());
         }
 
@@ -914,24 +854,16 @@ mod tests {
         let input_name = "provider_1".intern();
         let user_addr: SocketAddr = "127.0.0.1:43001".parse().unwrap();
 
-        let probe_handle = manager
-            .acquire_connection_for_probe(&input_name)
-            .await
-            .expect("probe allocation should succeed");
-        let probe_token = probe_handle
-            .cancel_token
-            .clone()
-            .expect("probe handle must carry cancel token");
+        let probe_handle =
+            manager.acquire_connection_for_probe(&input_name).await.expect("probe allocation should succeed");
+        let probe_token = probe_handle.cancel_token.clone().expect("probe handle must carry cancel token");
 
         // User request should preempt probe and immediately acquire released capacity.
         let user_alloc = manager
             .acquire_connection_with_grace(&input_name, &user_addr, false)
             .await
             .expect("user allocation should preempt probe");
-        assert_eq!(
-            user_alloc.allocation.get_provider_name().as_deref(),
-            Some(input_name.as_ref())
-        );
+        assert_eq!(user_alloc.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
 
         // Let the detached cancellation task start and arm its sleep timer on the paused clock.
         tokio::task::yield_now().await;
@@ -942,16 +874,12 @@ mod tests {
 
         let cancel_wait_timeout = super::PREEMPTED_PROBE_CANCEL_GRACE + Duration::from_millis(500);
         let wait_token = probe_token.clone();
-        let cancel_wait = tokio::spawn(async move {
-            tokio::time::timeout(cancel_wait_timeout, wait_token.cancelled()).await
-        });
+        let cancel_wait =
+            tokio::spawn(async move { tokio::time::timeout(cancel_wait_timeout, wait_token.cancelled()).await });
         tokio::task::yield_now().await;
         tokio::time::advance(cancel_wait_timeout).await;
         assert!(
-            cancel_wait
-                .await
-                .expect("cancel wait task should join")
-                .is_ok(),
+            cancel_wait.await.expect("cancel wait task should join").is_ok(),
             "probe token should be cancelled before timeout after grace"
         );
 

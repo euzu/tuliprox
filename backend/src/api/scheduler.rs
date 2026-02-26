@@ -1,17 +1,18 @@
-use crate::api::model::AppState;
-use crate::api::panel_api::sync_panel_api_exp_dates;
-use crate::api::library_scan::spawn_library_scan;
-use crate::model::{AppConfig, ProcessTargets, ScheduleConfig};
-use shared::model::ScheduleTaskType;
-use crate::processing::processor::exec_processing;
-use crate::utils::exit;
+use crate::{
+    api::{library_scan::spawn_library_scan, model::AppState},
+    model::{AppConfig, ProcessTargets, ScheduleConfig},
+    processing::processor::exec_processing,
+    utils::exit,
+};
 use chrono::{DateTime, FixedOffset, Local};
 use cron::Schedule;
-use std::str::FromStr;
-use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use shared::{model::ScheduleTaskType, utils::interner_gc};
+use std::{
+    str::FromStr,
+    sync::Arc,
+    time::{Duration, Instant, SystemTime},
+};
 use tokio_util::sync::CancellationToken;
-use shared::utils::interner_gc;
 
 pub fn datetime_to_instant(datetime: DateTime<FixedOffset>) -> Instant {
     // Convert DateTime<FixedOffset> to SystemTime
@@ -21,23 +22,22 @@ pub fn datetime_to_instant(datetime: DateTime<FixedOffset>) -> Instant {
     let now_system_time = SystemTime::now();
 
     // Calculate the duration between now and the target time
-    let duration_until = target_system_time
-        .duration_since(now_system_time)
-        .unwrap_or_else(|_| Duration::from_secs(0));
+    let duration_until = target_system_time.duration_since(now_system_time).unwrap_or_else(|_| Duration::from_secs(0));
 
     // Get the current Instant and add the duration to calculate the target Instant
     Instant::now() + duration_until
 }
 
-pub fn exec_scheduler(client: &reqwest::Client, app_state: &Arc<AppState>, targets: &Arc<ProcessTargets>,
-                      cancel: &CancellationToken) {
+pub fn exec_scheduler(
+    client: &reqwest::Client,
+    app_state: &Arc<AppState>,
+    targets: &Arc<ProcessTargets>,
+    cancel: &CancellationToken,
+) {
     let cfg = &app_state.app_config;
     let config = cfg.config.load();
-    let schedules: Vec<ScheduleConfig> = if let Some(schedules) = &config.schedules {
-        schedules.clone()
-    } else {
-        vec![]
-    };
+    let schedules: Vec<ScheduleConfig> =
+        if let Some(schedules) = &config.schedules { schedules.clone() } else { vec![] };
     for schedule in schedules {
         let expression = schedule.schedule.clone();
         let task_type = schedule.task_type;
@@ -46,13 +46,20 @@ pub fn exec_scheduler(client: &reqwest::Client, app_state: &Arc<AppState>, targe
         let http_client = client.clone();
         let cancel_token = cancel.clone();
         tokio::spawn(async move {
-            start_scheduler(http_client, expression.as_str(), task_type, app_state_clone, exec_targets, cancel_token).await;
+            start_scheduler(http_client, expression.as_str(), task_type, app_state_clone, exec_targets, cancel_token)
+                .await;
         });
     }
 }
 
-async fn start_scheduler(client: reqwest::Client, expression: &str, task_type: ScheduleTaskType, app_state: Arc<AppState>,
-                         targets: Arc<ProcessTargets>, cancel: CancellationToken) {
+async fn start_scheduler(
+    client: reqwest::Client,
+    expression: &str,
+    task_type: ScheduleTaskType,
+    app_state: Arc<AppState>,
+    targets: Arc<ProcessTargets>,
+    cancel: CancellationToken,
+) {
     match Schedule::from_str(expression) {
         Ok(schedule) => {
             let offset = *Local::now().offset();
@@ -77,7 +84,7 @@ async fn start_scheduler(client: reqwest::Client, expression: &str, task_type: S
                 }
             }
         }
-        Err(err) => exit!("Failed to start scheduler: {err}")
+        Err(err) => exit!("Failed to start scheduler: {err}"),
     }
 }
 
@@ -92,12 +99,12 @@ fn run_playlist_update(client: &reqwest::Client, app_state: &Arc<AppState>, targ
         let provider_manager = Arc::clone(&app_state.active_provider);
         let disabled_headers = app_state.get_disabled_headers();
         let metadata_manager = Arc::clone(&app_state.metadata_manager);
-        sync_panel_api_exp_dates(&app_state).await;
         exec_processing(
             &client,
             app_config,
             targets,
             Some(event_manager),
+            Some(app_state.clone()),
             Some(playlist_state),
             Some(app_state.update_guard.clone()),
             disabled_headers,
@@ -130,7 +137,11 @@ fn run_library_scan(client: &reqwest::Client, app_state: &Arc<AppState>) {
     }
 }
 
-pub fn get_process_targets(cfg: &Arc<AppConfig>, process_targets: &Arc<ProcessTargets>, exec_targets: Option<&Vec<String>>) -> Arc<ProcessTargets> {
+pub fn get_process_targets(
+    cfg: &Arc<AppConfig>,
+    process_targets: &Arc<ProcessTargets>,
+    exec_targets: Option<&Vec<String>>,
+) -> Arc<ProcessTargets> {
     let sources = cfg.sources.load();
     if let Ok(user_targets) = sources.validate_targets(exec_targets) {
         if user_targets.enabled {
@@ -138,24 +149,17 @@ pub fn get_process_targets(cfg: &Arc<AppConfig>, process_targets: &Arc<ProcessTa
                 return Arc::new(user_targets);
             }
 
-            let inputs: Vec<u16> = user_targets.inputs.iter()
-                .filter(|&id| process_targets.inputs.contains(id))
-                .copied()
-                .collect();
-            let targets: Vec<u16> = user_targets.targets.iter()
-                .filter(|&id| process_targets.inputs.contains(id))
-                .copied()
-                .collect();
-            let target_names: Vec<String> = user_targets.target_names.iter()
+            let inputs: Vec<u16> =
+                user_targets.inputs.iter().filter(|&id| process_targets.inputs.contains(id)).copied().collect();
+            let targets: Vec<u16> =
+                user_targets.targets.iter().filter(|&id| process_targets.inputs.contains(id)).copied().collect();
+            let target_names: Vec<String> = user_targets
+                .target_names
+                .iter()
                 .filter(|&name| process_targets.target_names.contains(name))
                 .cloned()
                 .collect();
-            return Arc::new(ProcessTargets {
-                enabled: user_targets.enabled,
-                inputs,
-                targets,
-                target_names,
-            });
+            return Arc::new(ProcessTargets { enabled: user_targets.enabled, inputs, targets, target_names });
         }
     }
     Arc::clone(process_targets)
@@ -184,8 +188,10 @@ mod tests {
     use crate::api::scheduler::datetime_to_instant;
     use chrono::Local;
     use cron::Schedule;
-    use std::str::FromStr;
-    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::{
+        str::FromStr,
+        sync::atomic::{AtomicU8, Ordering},
+    };
 
     #[tokio::test]
     async fn test_run_scheduler() {

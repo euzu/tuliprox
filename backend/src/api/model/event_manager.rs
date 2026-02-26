@@ -1,13 +1,13 @@
-use std::sync::Arc;
-use log::{trace};
+use log::trace;
 use shared::model::{ActiveUserConnectionChange, ConfigType, LibraryScanSummary, PlaylistUpdateState, SystemInfo};
+use std::sync::Arc;
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, PartialEq)]
 pub enum EventMessage {
     ServerError(String),
     ActiveUser(ActiveUserConnectionChange), // user_count, connection count
-    ActiveProvider(Arc<str>, usize), // provider name, connections
+    ActiveProvider(Arc<str>, usize),        // provider name, connections
     ConfigChange(ConfigType),
     PlaylistUpdate(PlaylistUpdateState),
     PlaylistUpdateProgress(String, String),
@@ -33,9 +33,7 @@ impl EventManager {
         }
     }
 
-    pub fn get_event_channel(&self) -> tokio::sync::broadcast::Receiver<EventMessage> {
-        self.channel_tx.subscribe()
-    }
+    pub fn get_event_channel(&self) -> tokio::sync::broadcast::Receiver<EventMessage> { self.channel_tx.subscribe() }
 
     pub fn send_event(&self, event: EventMessage) -> bool {
         if let Err(err) = self.channel_tx.send(event) {
@@ -60,7 +58,5 @@ impl EventManager {
 }
 
 impl Default for EventManager {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }

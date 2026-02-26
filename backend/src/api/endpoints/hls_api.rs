@@ -1,29 +1,28 @@
-use crate::api::api_utils::{create_session_fingerprint, try_unwrap_body};
-use crate::api::api_utils::{
-    force_provider_stream_response, get_stream_alternative_url, is_seek_request, local_stream_response,
+use crate::{
+    api::{
+        api_utils::{
+            create_session_fingerprint, force_provider_stream_response, get_headers_from_request,
+            get_stream_alternative_url, is_seek_request, local_stream_response, try_option_bad_request,
+            try_unwrap_body, HeaderFilter,
+        },
+        model::{
+            create_custom_video_stream_response, AppState, CustomVideoStreamType, ProviderAllocation, UserSession,
+        },
+    },
+    auth::Fingerprint,
+    model::{ConfigInput, ConfigInputFlags, ConfigTarget, InputSource, ProxyUserCredentials},
+    processing::parser::hls::{get_hls_session_token_and_url_from_token, rewrite_hls, RewriteHlsProps},
+    repository::{m3u_get_item_for_stream_id, xtream_get_item_for_stream_id},
+    utils::{debug_if_enabled, request, request::is_file_url},
 };
-use crate::api::api_utils::{get_headers_from_request, try_option_bad_request, HeaderFilter};
-use crate::api::model::AppState;
-use crate::api::model::{create_custom_video_stream_response, CustomVideoStreamType};
-use crate::api::model::{ProviderAllocation, UserSession};
-use crate::auth::Fingerprint;
-use crate::model::{ConfigInput, InputSource};
-use crate::model::{ConfigTarget, ProxyUserCredentials};
-use crate::model::ConfigInputFlags;
-use crate::processing::parser::hls::{
-    get_hls_session_token_and_url_from_token, rewrite_hls, RewriteHlsProps,
-};
-use crate::repository::{m3u_get_item_for_stream_id, xtream_get_item_for_stream_id};
-use crate::utils::request;
-use crate::utils::debug_if_enabled;
-use axum::http::HeaderMap;
-use axum::response::IntoResponse;
+use axum::{http::HeaderMap, response::IntoResponse};
 use log::{debug, error};
 use serde::Deserialize;
-use shared::model::{PlaylistItemType, StreamChannel, TargetType, UserConnectionPermission, XtreamCluster};
-use shared::utils::{is_hls_url, replace_url_extension, sanitize_sensitive_info, Internable, CUSTOM_VIDEO_PREFIX, HLS_EXT};
+use shared::{
+    model::{PlaylistItemType, StreamChannel, TargetType, UserConnectionPermission, XtreamCluster},
+    utils::{is_hls_url, replace_url_extension, sanitize_sensitive_info, Internable, CUSTOM_VIDEO_PREFIX, HLS_EXT},
+};
 use std::sync::Arc;
-use crate::utils::request::is_file_url;
 use url::Url;
 
 const PLAYLIST_TEMPLATE: &str = r"#EXTM3U
@@ -118,10 +117,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
                     sanitize_sensitive_info(&session.provider),
                     sanitize_sensitive_info(&fingerprint.addr.to_string())
                 );
-                app_state
-                    .active_provider
-                    .acquire_connection_with_grace(&input.name, &fingerprint.addr, false)
-                    .await
+                app_state.active_provider.acquire_connection_with_grace(&input.name, &fingerprint.addr, false).await
             };
 
             match handle {
@@ -147,22 +143,19 @@ pub(in crate::api) async fn handle_hls_stream_request(
                 None => (url, None),
             }
         }
-        None => {
-            match app_state
-                .active_provider
-                .get_next_provider(&input.name)
-                .await
-            {
-                Some(provider_cfg) => {
-                    let stream_url = get_stream_alternative_url(&url, input, &provider_cfg);
-                    debug_if_enabled!(
+        None => match app_state.active_provider.get_next_provider(&input.name).await {
+            Some(provider_cfg) => {
+                let stream_url = get_stream_alternative_url(&url, input, &provider_cfg);
+                debug_if_enabled!(
                         "API endpoint [HLS] create_session_fingerprint user={} virtual_id={virtual_id} provider={} stream_url={}",
                         sanitize_sensitive_info(&user.username),
                         provider_cfg.name,
                         sanitize_sensitive_info(&stream_url)
                     );
-                    let user_session_token = create_session_fingerprint(fingerprint, &user.username, virtual_id);
-                    let session_token = app_state.active_users.create_user_session(
+                let user_session_token = create_session_fingerprint(fingerprint, &user.username, virtual_id);
+                let session_token = app_state
+                    .active_users
+                    .create_user_session(
                         user,
                         &user_session_token,
                         virtual_id,
@@ -170,26 +163,21 @@ pub(in crate::api) async fn handle_hls_stream_request(
                         &stream_url,
                         &fingerprint.addr,
                         connection_permission,
-                    ).await;
-                    (stream_url, Some(session_token))
-                }
-                None => (url, None),
+                    )
+                    .await;
+                (stream_url, Some(session_token))
             }
-        }
+            None => (url, None),
+        },
     };
-
 
     // Don't forward Range on playlist fetch; segments use original headers in provider path
     let filter_header: HeaderFilter = Some(Box::new(|name: &str| !name.eq_ignore_ascii_case("range")));
     let forwarded = get_headers_from_request(req_headers, &filter_header);
     let disabled_headers = app_state.get_disabled_headers();
     let default_user_agent = app_state.app_config.config.load().default_user_agent.clone();
-    let headers = request::get_request_headers(
-        None,
-        Some(&forwarded),
-        disabled_headers.as_ref(),
-        default_user_agent.as_deref(),
-    );
+    let headers =
+        request::get_request_headers(None, Some(&forwarded), disabled_headers.as_ref(), default_user_agent.as_deref());
     let input_source = InputSource::from(input).with_url(request_url);
     let use_manual_redirects = app_state.should_use_manual_redirects();
     let download_result = if use_manual_redirects {
@@ -229,10 +217,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
             hls_response(hls_content).into_response()
         }
         Err(err) => {
-            error!(
-                "Failed to download m3u8 {}",
-                sanitize_sensitive_info(err.to_string().as_str())
-            );
+            error!("Failed to download m3u8 {}", sanitize_sensitive_info(err.to_string().as_str()));
 
             let custom_stream_response = app_state.app_config.custom_stream_response.load();
             if custom_stream_response.as_ref().and_then(|c| c.channel_unavailable.as_ref()).is_some() {
@@ -241,7 +226,8 @@ pub(in crate::api) async fn handle_hls_stream_request(
                     &server_info.get_base_url(),
                     user.username,
                     user.password,
-                    CustomVideoStreamType::ChannelUnavailable);
+                    CustomVideoStreamType::ChannelUnavailable
+                );
 
                 let playlist = PLAYLIST_TEMPLATE.replace("{url}", &url);
                 hls_response(playlist).into_response()
@@ -252,7 +238,11 @@ pub(in crate::api) async fn handle_hls_stream_request(
     }
 }
 
-async fn get_stream_channel(app_state: &Arc<AppState>, target: &Arc<ConfigTarget>, virtual_id: u32) -> Option<StreamChannel> {
+async fn get_stream_channel(
+    app_state: &Arc<AppState>,
+    target: &Arc<ConfigTarget>,
+    virtual_id: u32,
+) -> Option<StreamChannel> {
     if target.has_output(TargetType::Xtream) {
         if let Ok(pli) = xtream_get_item_for_stream_id(virtual_id, app_state, target, None).await {
             return Some(pli.to_stream_channel(target.id));
@@ -273,7 +263,7 @@ async fn resolve_stream_channel(
         Some(mut channel) => {
             channel.url = hls_url.clone();
             channel
-        },
+        }
         None => StreamChannel {
             target_id: target.id,
             virtual_id,
@@ -299,9 +289,7 @@ async fn hls_api_stream(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
 ) -> impl axum::response::IntoResponse + Send {
     let (user, target) = try_option_bad_request!(
-        app_state
-            .app_config
-            .get_target_for_user(&params.username, &params.password),
+        app_state.app_config.get_target_for_user(&params.username, &params.password),
         false,
         format!("Could not find any user for hls stream {}", params.username)
     );
@@ -310,8 +298,9 @@ async fn hls_api_stream(
             &app_state,
             &fingerprint.addr,
             CustomVideoStreamType::UserAccountExpired,
-        ).await
-            .into_response();
+        )
+        .await
+        .into_response();
     }
 
     let target_name = &target.name;
@@ -324,37 +313,35 @@ async fn hls_api_stream(
 
     debug_if_enabled!("ID chain for hls endpoint: request_stream_id={} -> virtual_id={virtual_id}", params.stream_id);
     let user_session_token = create_session_fingerprint(&fingerprint, &user.username, virtual_id);
-    let mut user_session = app_state
-        .active_users
-        .get_and_update_user_session(&user.username, &user_session_token).await;
+    let mut user_session =
+        app_state.active_users.get_and_update_user_session(&user.username, &user_session_token).await;
 
     if let Some(session) = &mut user_session {
         if session.permission == UserConnectionPermission::Exhausted {
             return create_custom_video_stream_response(
-                &app_state, &fingerprint.addr,
+                &app_state,
+                &fingerprint.addr,
                 CustomVideoStreamType::UserConnectionsExhausted,
-            ).await.into_response();
-        }
-
-        if app_state
-            .active_provider
-            .is_over_limit(&session.provider)
+            )
             .await
-        {
-            return create_custom_video_stream_response(
-                &app_state, &fingerprint.addr,
-                CustomVideoStreamType::ProviderConnectionsExhausted,
-            ).await
-                .into_response();
+            .into_response();
         }
 
-        let hls_url = match get_hls_session_token_and_url_from_token(
-            &app_state.app_config.encrypt_secret,
-            &params.token,
-        ) {
-            Some((Some(session_token), hls_url)) if session.token.eq(&session_token) => hls_url,
-            _ => return axum::http::StatusCode::BAD_REQUEST.into_response(),
-        };
+        if app_state.active_provider.is_over_limit(&session.provider).await {
+            return create_custom_video_stream_response(
+                &app_state,
+                &fingerprint.addr,
+                CustomVideoStreamType::ProviderConnectionsExhausted,
+            )
+            .await
+            .into_response();
+        }
+
+        let hls_url =
+            match get_hls_session_token_and_url_from_token(&app_state.app_config.encrypt_secret, &params.token) {
+                Some((Some(session_token), hls_url)) if session.token.eq(&session_token) => hls_url,
+                _ => return axum::http::StatusCode::BAD_REQUEST.into_response(),
+            };
         let hls_url = hls_url.intern();
         session.stream_url = hls_url.clone();
         if session.virtual_id == virtual_id {
@@ -370,8 +357,8 @@ async fn hls_api_stream(
                     &input,
                     &user,
                 )
-                    .await
-                    .into_response();
+                .await
+                .into_response();
             }
         } else {
             return axum::http::StatusCode::BAD_REQUEST.into_response();
@@ -380,9 +367,12 @@ async fn hls_api_stream(
         let connection_permission = user.connection_permission(&app_state).await;
         if connection_permission == UserConnectionPermission::Exhausted {
             return create_custom_video_stream_response(
-                &app_state, &fingerprint.addr,
+                &app_state,
+                &fingerprint.addr,
                 CustomVideoStreamType::UserConnectionsExhausted,
-            ).await.into_response();
+            )
+            .await
+            .into_response();
         }
 
         if is_hls_url(&session.stream_url) {
@@ -402,8 +392,7 @@ async fn hls_api_stream(
         }
 
         if is_file_url(&session.stream_url) {
-            let stream_channel =
-                resolve_stream_channel(&app_state, &target, virtual_id, &hls_url).await;
+            let stream_channel = resolve_stream_channel(&app_state, &target, virtual_id, &hls_url).await;
             return local_stream_response(
                 &fingerprint,
                 &app_state,
@@ -420,15 +409,7 @@ async fn hls_api_stream(
         }
 
         let stream_channel = resolve_stream_channel(&app_state, &target, virtual_id, &hls_url).await;
-        force_provider_stream_response(
-            &fingerprint,
-            &app_state,
-            session,
-            stream_channel,
-            &req_headers,
-            &input,
-            &user,
-        )
+        force_provider_stream_response(&fingerprint, &app_state, session, stream_channel, &req_headers, &input, &user)
             .await
             .into_response()
     } else {
@@ -436,12 +417,9 @@ async fn hls_api_stream(
     }
 }
 
-
 pub fn hls_api_register() -> axum::Router<Arc<AppState>> {
-    axum::Router::new().route(
-        "/hls/{username}/{password}/{input_id}/{stream_id}/{token}",
-        axum::routing::get(hls_api_stream),
-    )
+    axum::Router::new()
+        .route("/hls/{username}/{password}/{input_id}/{stream_id}/{token}", axum::routing::get(hls_api_stream))
     //cfg.service(web::resource("/hls/{token}/{stream}").route(web::get().to(xtream_player_api_hls_stream)));
     //cfg.service(web::resource("/play/{token}/{type}").route(web::get().to(xtream_player_api_play_stream)));
 }

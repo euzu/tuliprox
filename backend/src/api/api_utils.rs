@@ -1,47 +1,59 @@
-use crate::api::endpoints::xtream_api::{get_xtream_player_api_stream_url, ApiStreamContext};
-use crate::api::model::{
-    create_active_client_stream, create_channel_unavailable_stream, create_custom_video_stream_response,
-    create_provider_connections_exhausted_stream, create_provider_stream, get_stream_response_with_headers, AppState,
-    CustomVideoStreamType, ProviderStreamFactoryOptions, SharedStreamManager, StreamError, ThrottledStream,
-    UserApiRequest,
+use crate::{
+    api::{
+        endpoints::xtream_api::{get_xtream_player_api_stream_url, ApiStreamContext},
+        model::{
+            create_active_client_stream, create_channel_unavailable_stream, create_custom_video_stream_response,
+            create_provider_connections_exhausted_stream, create_provider_stream, get_stream_response_with_headers,
+            tee_stream, AppState, CustomVideoStreamType, ProviderAllocation, ProviderConfig,
+            ProviderStreamFactoryOptions, ProviderStreamState, SharedStreamManager, StreamDetails, StreamError,
+            StreamingStrategy, ThrottledStream, UserApiRequest, UserSession,
+        },
+    },
+    auth::Fingerprint,
+    model::{ConfigInput, ConfigTarget, ProxyUserCredentials},
+    tools::lru_cache::LRUResourceCache,
+    utils::{
+        async_file_reader, async_file_writer, create_new_file_for_write, debug_if_enabled, get_file_extension, request,
+        request::{content_type_from_ext, parse_range, send_with_retry_and_provider},
+        trace_if_enabled,
+    },
+    BUILD_TIMESTAMP,
 };
-use crate::api::model::{tee_stream, UserSession};
-use crate::api::model::{ProviderAllocation, ProviderConfig, ProviderStreamState, StreamDetails, StreamingStrategy};
-use crate::auth::Fingerprint;
-use crate::model::ConfigInput;
-use crate::model::{ConfigTarget, ProxyUserCredentials};
-use crate::tools::lru_cache::LRUResourceCache;
-use crate::utils::request;
-use crate::utils::request::{content_type_from_ext, parse_range, send_with_retry_and_provider};
-use crate::utils::{async_file_reader, async_file_writer, create_new_file_for_write, get_file_extension};
-use crate::utils::{debug_if_enabled, trace_if_enabled};
-use crate::BUILD_TIMESTAMP;
-
 use arc_swap::ArcSwapOption;
-use axum::body::Body;
-use axum::http::{header, HeaderMap, HeaderValue, Response, StatusCode};
-use axum::response::IntoResponse;
+use axum::{
+    body::Body,
+    http::{header, HeaderMap, HeaderValue, Response, StatusCode},
+    response::IntoResponse,
+};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::{stream, Stream, StreamExt, TryStreamExt};
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use log::{debug, error, info, log_enabled, trace, warn};
 use serde::Serialize;
-use shared::concat_string;
-use shared::model::{
-    Claims, InputFetchMethod, PlaylistEntry, PlaylistItemType, ProxyType, StreamChannel, TargetType,
-    UserConnectionPermission, VirtualId, XtreamCluster,
+use shared::{
+    concat_string,
+    model::{
+        Claims, InputFetchMethod, PlaylistEntry, PlaylistItemType, ProxyType, StreamChannel, TargetType,
+        UserConnectionPermission, VirtualId, XtreamCluster,
+    },
+    utils::{
+        bin_serialize, extract_extension_from_url, human_readable_kbps, replace_url_extension, sanitize_sensitive_info,
+        trim_slash, Internable, CONTENT_TYPE_CBOR, CONTENT_TYPE_JSON, DASH_EXT, HLS_EXT,
+    },
 };
-use shared::utils::{bin_serialize, human_readable_kbps, trim_slash, Internable, CONTENT_TYPE_CBOR, CONTENT_TYPE_JSON};
-use shared::utils::{extract_extension_from_url, replace_url_extension, sanitize_sensitive_info, DASH_EXT, HLS_EXT};
-use std::borrow::Cow;
-use std::collections::HashMap;
-use std::convert::Infallible;
-use std::io::SeekFrom;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
-use tokio::sync::Mutex;
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    convert::Infallible,
+    io::SeekFrom,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+use tokio::{
+    io::{AsyncReadExt, AsyncSeekExt},
+    sync::Mutex,
+};
 use tokio_util::io::ReaderStream;
 use url::Url;
 
@@ -444,7 +456,8 @@ async fn create_stream_response_details(
     virtual_id: VirtualId,
 ) -> Result<StreamDetails, TuliproxError> {
     let mut streaming_strategy =
-        resolve_streaming_strategy(app_state, stream_url, fingerprint, input, force_provider, allow_provider_grace).await;
+        resolve_streaming_strategy(app_state, stream_url, fingerprint, input, force_provider, allow_provider_grace)
+            .await;
     let mut grace_period_options = app_state.get_grace_options();
     grace_period_options.period_millis = get_grace_period_millis(
         connection_permission,
@@ -915,10 +928,7 @@ pub async fn stream_response(
             .as_ref()
             .map(|(h, sc, response_url, cvt)| (h.clone(), *sc, response_url.clone(), *cvt));
         let provider_name = stream_details.provider_name.clone();
-        let actual_request_url = stream_details
-            .request_url
-            .clone()
-            .unwrap_or_else(|| Arc::<str>::from(stream_url));
+        let actual_request_url = stream_details.request_url.clone().unwrap_or_else(|| Arc::<str>::from(stream_url));
 
         debug_if_enabled!(
             "Provider request mapping: allocated_provider={} actual_request_url={}",
@@ -1009,10 +1019,7 @@ pub async fn stream_response(
             };
             if log_enabled!(log::Level::Debug) {
                 if session_url.eq(actual_request_url.as_ref()) {
-                    debug!(
-                        "Streaming stream request from {}",
-                        sanitize_sensitive_info(actual_request_url.as_ref())
-                    );
+                    debug!("Streaming stream request from {}", sanitize_sensitive_info(actual_request_url.as_ref()));
                 } else {
                     debug!(
                         "Streaming stream request for {} from {}",

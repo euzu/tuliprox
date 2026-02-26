@@ -1,11 +1,14 @@
-use crate::api::model::StreamError;
-use crate::api::model::TransportStreamBuffer;
-use crate::tools::atomic_once_flag::AtomicOnceFlag;
+use crate::{
+    api::model::{StreamError, TransportStreamBuffer},
+    tools::atomic_once_flag::AtomicOnceFlag,
+};
 use bytes::Bytes;
 use futures::Stream;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll};
+use std::{
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+};
 
 pub struct ProvisioningStream {
     buffer: TransportStreamBuffer,
@@ -13,9 +16,7 @@ pub struct ProvisioningStream {
 }
 
 impl ProvisioningStream {
-    pub fn new(buffer: TransportStreamBuffer, stop_signal: Arc<AtomicOnceFlag>) -> Self {
-        Self { buffer, stop_signal }
-    }
+    pub fn new(buffer: TransportStreamBuffer, stop_signal: Arc<AtomicOnceFlag>) -> Self { Self { buffer, stop_signal } }
 }
 
 impl Stream for ProvisioningStream {

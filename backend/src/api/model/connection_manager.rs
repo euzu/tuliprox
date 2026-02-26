@@ -1,12 +1,17 @@
-use crate::api::model::{ActiveProviderManager, ActiveUserManager, CustomVideoStreamType, EventManager, EventMessage, ProviderHandle, SharedStreamManager};
-use crate::auth::Fingerprint;
-use crate::utils::debug_if_enabled;
-use log::{warn};
-use shared::model::{ActiveUserConnectionChange, StreamChannel, VirtualId};
-use shared::utils::sanitize_sensitive_info;
-use std::borrow::Cow;
-use std::net::SocketAddr;
-use std::sync::Arc;
+use crate::{
+    api::model::{
+        ActiveProviderManager, ActiveUserManager, CustomVideoStreamType, EventManager, EventMessage, ProviderHandle,
+        SharedStreamManager,
+    },
+    auth::Fingerprint,
+    utils::debug_if_enabled,
+};
+use log::warn;
+use shared::{
+    model::{ActiveUserConnectionChange, StreamChannel, VirtualId},
+    utils::sanitize_sensitive_info,
+};
+use std::{borrow::Cow, net::SocketAddr, sync::Arc};
 
 pub struct ConnectionManager {
     pub user_manager: Arc<ActiveUserManager>,
@@ -39,13 +44,19 @@ impl ConnectionManager {
     }
 
     pub async fn kick_connection(&self, addr: &SocketAddr, virtual_id: VirtualId, block_secs: u64) -> bool {
-        debug_if_enabled!("User {} kicked for stream with virtual_id {virtual_id} for {block_secs} seconds with addr {}.",
-            self.user_manager.get_username_for_addr(addr).await.unwrap_or_default(), sanitize_sensitive_info(&addr.to_string()));
+        debug_if_enabled!(
+            "User {} kicked for stream with virtual_id {virtual_id} for {block_secs} seconds with addr {}.",
+            self.user_manager.get_username_for_addr(addr).await.unwrap_or_default(),
+            sanitize_sensitive_info(&addr.to_string())
+        );
         if block_secs > 0 {
             self.user_manager.block_user_for_stream(addr, virtual_id, block_secs).await;
         }
         if let Err(e) = self.close_socket_signal_tx.send(*addr) {
-            debug_if_enabled!("No active receivers for close signal ({}): {e:?}", sanitize_sensitive_info(&addr.to_string()));
+            debug_if_enabled!(
+                "No active receivers for close signal ({}): {e:?}",
+                sanitize_sensitive_info(&addr.to_string())
+            );
             return false;
         }
         true
@@ -70,14 +81,32 @@ impl ConnectionManager {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub async fn add_connection(&self, addr: &SocketAddr) {
-        self.user_manager.add_connection(addr).await;
-    }
+    pub async fn add_connection(&self, addr: &SocketAddr) { self.user_manager.add_connection(addr).await; }
 
     #[allow(clippy::too_many_arguments)]
-    pub async fn update_connection(&self, username: &str, max_connections: u32, fingerprint: &Fingerprint,
-                                   provider: &str, stream_channel: StreamChannel, user_agent: Cow<'_, str>, session_token: Option<&str>) {
-        if let Some(stream_info) = self.user_manager.update_connection(username, max_connections, fingerprint, provider, stream_channel, user_agent, session_token).await {
+    pub async fn update_connection(
+        &self,
+        username: &str,
+        max_connections: u32,
+        fingerprint: &Fingerprint,
+        provider: &str,
+        stream_channel: StreamChannel,
+        user_agent: Cow<'_, str>,
+        session_token: Option<&str>,
+    ) {
+        if let Some(stream_info) = self
+            .user_manager
+            .update_connection(
+                username,
+                max_connections,
+                fingerprint,
+                provider,
+                stream_channel,
+                user_agent,
+                session_token,
+            )
+            .await
+        {
             self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream_info)));
         } else {
             warn!("Failed to register connection for user {username} at {}; disconnecting client", fingerprint.addr);
