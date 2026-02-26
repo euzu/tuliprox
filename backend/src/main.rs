@@ -21,6 +21,7 @@ use crate::{
     library::LibraryProcessor,
     model::{AppConfig, Config, Healthcheck, HealthcheckConfig, ProcessTargets, SourcesConfig},
     processing::processor::exec_processing,
+    repository::migrate_bplustree_databases_with_marker,
     utils::{config_file_reader, db_viewer, init_logger, request::create_client, resolve_env_var},
 };
 use arc_swap::{access::Access, ArcSwap};
@@ -31,7 +32,11 @@ use shared::{
     model::ConfigPaths,
     utils::{CONFIG_FILE, SOURCE_FILE},
 };
-use std::{fs::File, sync::Arc};
+use std::{
+    fs::File,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Parser)]
@@ -143,6 +148,8 @@ async fn main() {
         std::process::exit(i32::from(!healthy));
     }
 
+    run_startup_bplustree_migration(&config_paths);
+
     // Handle Library scan before starting main application
     if args.scan_library || args.force_library_rescan {
         info!("Library scan mode requested");
@@ -191,6 +198,50 @@ async fn main() {
         start_in_server_mode(Arc::new(app_config), Arc::new(targets)).await;
     } else {
         start_in_cli_mode(Arc::new(app_config), Arc::new(targets)).await;
+    }
+}
+
+fn run_startup_bplustree_migration(config_paths: &ConfigPaths) {
+    let config_file_path = Path::new(config_paths.config_file_path.as_str());
+    if !config_file_path.exists() {
+        return;
+    }
+
+    let config_dto = match utils::read_config_file(config_paths.config_file_path.as_str(), true, false) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            warn!("Skipping B+Tree startup migration because config could not be read: {err}");
+            return;
+        }
+    };
+
+    let mut roots: Vec<PathBuf> = vec![PathBuf::from(&config_paths.config_path)];
+    let working_dir = PathBuf::from(config_dto.working_dir);
+    if !roots.iter().any(|root| root == &working_dir) {
+        roots.push(working_dir.clone());
+    }
+
+    match migrate_bplustree_databases_with_marker(&roots, &working_dir) {
+        Ok(stats) => {
+            if stats.skipped_by_marker {
+                info!("B+Tree startup migration skipped (marker already present)");
+            } else if stats.migrated_files > 0 {
+                info!(
+                    "B+Tree startup migration completed: migrated {} file(s) ({} B+Tree files checked, {} .db files scanned)",
+                    stats.migrated_files,
+                    stats.bplustree_files,
+                    stats.scanned_files
+                );
+                //} else {
+                //    info!(
+                //       "B+Tree startup migration check completed: {} B+Tree files already current ({} .db files scanned)",
+                //        stats.bplustree_files, stats.scanned_files
+                //   );
+            }
+        }
+        Err(err) => {
+            exit!("B+Tree startup migration failed: {err}");
+        }
     }
 }
 

@@ -1,35 +1,25 @@
 use super::bplustree::{BPlusTree, BPlusTreeQuery, BPlusTreeSerialWriter, BPlusTreeUpdate, FlushPolicy};
-use rand::prelude::*;
-use rand::distr::Alphanumeric;
-use std::io::Write;
-use std::sync::{Arc, Barrier};
-use std::thread;
-use std::time::{Duration, Instant};
+use rand::{distr::Alphanumeric, prelude::*};
+use std::{
+    io::Write,
+    sync::{Arc, Barrier},
+    thread,
+    time::{Duration, Instant},
+};
 use tempfile::NamedTempFile;
 
 // Run with:  `cargo test --release --package tuliprox -- stress_test_bplustree -- --nocapture`
 
 // Helper to generate random string
-fn random_string(len: usize) -> String {
-    rand::rng().sample_iter(&Alphanumeric)
-        .take(len)
-        .map(char::from)
-        .collect()
-}
+fn random_string(len: usize) -> String { rand::rng().sample_iter(&Alphanumeric).take(len).map(char::from).collect() }
 
 #[inline]
 fn lcg_next(state: &mut u64) -> u64 {
-    *state = state
-        .wrapping_mul(6_364_136_223_846_793_005)
-        .wrapping_add(1_442_695_040_888_963_407);
+    *state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
     *state
 }
 
-#[allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss
-)]
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn percentile_nearest_rank(sorted_values: &[f64], percentile: f64) -> f64 {
     if sorted_values.is_empty() {
         return 0.0;
@@ -61,11 +51,11 @@ fn stress_test_bplustree() {
     let value_pool_size = 2_048usize;
     let small_val_len = 50;
     let large_val_len = 500; // Larger than packed limit (256)
-    
+
     writeln!(log_file, "=== B+Tree Stress Test & Performance Analysis ===").unwrap();
     writeln!(log_file, "Dataset: {num_items} items").unwrap();
     writeln!(log_file, "Insert benchmark runs: {insert_runs}").unwrap();
-    
+
     // ----------------------------------------------------------------
     // Phase 1: Batch Insert (Sequential Keys)
     // ----------------------------------------------------------------
@@ -76,13 +66,8 @@ fn stress_test_bplustree() {
     for _ in 0..value_pool_size {
         value_pool.push(random_string(small_val_len));
     }
-    writeln!(
-        log_file,
-        "Value pool generation time ({} templates): {:.2?}",
-        value_pool_size,
-        start_gen.elapsed()
-    )
-    .unwrap();
+    writeln!(log_file, "Value pool generation time ({} templates): {:.2?}", value_pool_size, start_gen.elapsed())
+        .unwrap();
 
     let mut insert_throughputs = Vec::with_capacity(insert_runs);
     let mut final_tree: Option<BPlusTree<u32, String>> = None;
@@ -96,14 +81,7 @@ fn stress_test_bplustree() {
         let run_duration = start.elapsed();
         let run_throughput = num_items as f64 / run_duration.as_secs_f64();
         insert_throughputs.push(run_throughput);
-        writeln!(
-            log_file,
-            "Run {}: {:.2?} ({:.0} ops/sec)",
-            run_idx + 1,
-            run_duration,
-            run_throughput
-        )
-        .unwrap();
+        writeln!(log_file, "Run {}: {:.2?} ({:.0} ops/sec)", run_idx + 1, run_duration, run_throughput).unwrap();
         final_tree = Some(run_tree);
     }
     let mut sorted_insert_throughputs = insert_throughputs.clone();
@@ -161,17 +139,16 @@ fn stress_test_bplustree() {
     let duration = start.elapsed();
     writeln!(log_file, "Time: {duration:.2?}").unwrap();
     writeln!(log_file, "Throughput: {:.0} ops/sec", query_count as f64 / duration.as_secs_f64()).unwrap();
-    
+    drop(query);
+
     // ----------------------------------------------------------------
     // Phase 3: Batch Update (In-Place Packed)
     // ----------------------------------------------------------------
     writeln!(log_file, "\n[Phase 3] Batch Update (In-Place Packed)...").unwrap();
     let update_count = 5000;
     let update_subset = &query_keys[0..update_count];
-    let updates: Vec<(u32, String)> = update_subset.iter()
-        .map(|&k| (k, random_string(small_val_len)))
-        .collect();
-    let update_refs: Vec<(&u32, &String)> = updates.iter().map(|(k,v)| (k,v)).collect();
+    let updates: Vec<(u32, String)> = update_subset.iter().map(|&k| (k, random_string(small_val_len))).collect();
+    let update_refs: Vec<(&u32, &String)> = updates.iter().map(|(k, v)| (k, v)).collect();
     let mut tree_updater = BPlusTreeUpdate::<u32, String>::try_new(&filepath).unwrap();
     let start = Instant::now();
     tree_updater.update_batch(&update_refs).unwrap();
@@ -180,15 +157,13 @@ fn stress_test_bplustree() {
     writeln!(log_file, "Throughput: {:.0} ops/sec", update_count as f64 / duration.as_secs_f64()).unwrap();
     let size_phase3 = std::fs::metadata(&filepath).unwrap().len();
     writeln!(log_file, "File Size: {:.2} MB", size_phase3 as f64 / 1024.0 / 1024.0).unwrap();
-    
+
     // ----------------------------------------------------------------
     // Phase 4: Batch Update (Promoting Packed -> Single)
     // ----------------------------------------------------------------
     writeln!(log_file, "\n[Phase 4] Batch Update (Promotion to Single)...").unwrap();
-    let updates_prom: Vec<(u32, String)> = update_subset.iter()
-        .map(|&k| (k, random_string(large_val_len)))
-        .collect();
-    let update_refs_prom: Vec<(&u32, &String)> = updates_prom.iter().map(|(k,v)| (k,v)).collect();
+    let updates_prom: Vec<(u32, String)> = update_subset.iter().map(|&k| (k, random_string(large_val_len))).collect();
+    let update_refs_prom: Vec<(&u32, &String)> = updates_prom.iter().map(|(k, v)| (k, v)).collect();
     let start = Instant::now();
     tree_updater.update_batch(&update_refs_prom).unwrap();
     let duration = start.elapsed();
@@ -196,31 +171,72 @@ fn stress_test_bplustree() {
     writeln!(log_file, "Throughput: {:.0} ops/sec", update_count as f64 / duration.as_secs_f64()).unwrap();
     let size_phase4 = std::fs::metadata(&filepath).unwrap().len();
     writeln!(log_file, "File Size: {:.2} MB", size_phase4 as f64 / 1024.0 / 1024.0).unwrap();
+
+    // ----------------------------------------------------------------
+    // Phase 5: Batch Delete
+    // ----------------------------------------------------------------
+    writeln!(log_file, "\n[Phase 5] Batch Delete...").unwrap();
+    let delete_count = 100_000usize;
+    let delete_start_idx = update_count;
+    let delete_end_idx = delete_start_idx + delete_count;
+    let delete_subset = &query_keys[delete_start_idx..delete_end_idx];
+    let delete_refs: Vec<&u32> = delete_subset.iter().collect();
+
+    let start = Instant::now();
+    let deleted = tree_updater.delete_batch(&delete_refs).unwrap();
+    let duration = start.elapsed();
+    writeln!(log_file, "Deleted: {deleted}").unwrap();
+    writeln!(log_file, "Time: {duration:.2?}").unwrap();
+    writeln!(log_file, "Throughput: {:.0} ops/sec", deleted as f64 / duration.as_secs_f64()).unwrap();
+    let mut delete_verify_hits = 0usize;
+    for key in &delete_refs {
+        if tree_updater.query(key).unwrap().is_some() {
+            delete_verify_hits += 1;
+        }
+    }
+    writeln!(log_file, "Delete verification false-positives: {delete_verify_hits}").unwrap();
+    assert_eq!(delete_verify_hits, 0, "deleted keys are still visible after delete_batch");
+    let size_phase5 = std::fs::metadata(&filepath).unwrap().len();
+    writeln!(log_file, "File Size: {:.2} MB", size_phase5 as f64 / 1024.0 / 1024.0).unwrap();
+
+    // ----------------------------------------------------------------
+    // Phase 5b: Reinsert Deleted Keys
+    // ----------------------------------------------------------------
+    writeln!(log_file, "\n[Phase 5b] Reinsert Deleted Keys...").unwrap();
+    let reinserts: Vec<(u32, String)> = delete_subset.iter().map(|&k| (k, random_string(small_val_len))).collect();
+    let reinsert_refs: Vec<(&u32, &String)> = reinserts.iter().map(|(k, v)| (k, v)).collect();
+    let start = Instant::now();
+    tree_updater.update_batch(&reinsert_refs).unwrap();
+    let duration = start.elapsed();
+    writeln!(log_file, "Time: {duration:.2?}").unwrap();
+    writeln!(log_file, "Throughput: {:.0} ops/sec", delete_count as f64 / duration.as_secs_f64()).unwrap();
+    let size_phase5b = std::fs::metadata(&filepath).unwrap().len();
+    writeln!(log_file, "File Size: {:.2} MB", size_phase5b as f64 / 1024.0 / 1024.0).unwrap();
     drop(tree_updater);
 
     // ----------------------------------------------------------------
-    // Phase 5: Compaction
+    // Phase 6: Compaction
     // ----------------------------------------------------------------
-    writeln!(log_file, "\n[Phase 5] Compaction...").unwrap();
+    writeln!(log_file, "\n[Phase 6] Compaction...").unwrap();
     let mut tree_updater = BPlusTreeUpdate::<u32, String>::try_new(&filepath).unwrap();
     let start = Instant::now();
     tree_updater.compact(&filepath).unwrap();
     let duration = start.elapsed();
     writeln!(log_file, "Time: {duration:.2?}").unwrap();
-    let size_phase5 = std::fs::metadata(&filepath).unwrap().len();
+    let size_phase6 = std::fs::metadata(&filepath).unwrap().len();
     writeln!(
         log_file,
         "File Size: {:.2} MB (Reduction: {:.2} MB)",
-        size_phase5 as f64 / 1024.0 / 1024.0,
-        (size_phase4 as i64 - size_phase5 as i64) as f64 / 1024.0 / 1024.0
+        size_phase6 as f64 / 1024.0 / 1024.0,
+        (size_phase5b as i64 - size_phase6 as i64) as f64 / 1024.0 / 1024.0
     )
     .unwrap();
     drop(tree_updater);
 
     // ----------------------------------------------------------------
-    // Phase 6: Full Tree Load and In-Memory Query
+    // Phase 7: Full Tree Load and In-Memory Query
     // ----------------------------------------------------------------
-    writeln!(log_file, "\n[Phase 6] Full Tree Load (Memory-Only Read)...").unwrap();
+    writeln!(log_file, "\n[Phase 7] Full Tree Load (Memory-Only Read)...").unwrap();
     let start = Instant::now();
     let tree_mem = BPlusTree::<u32, String>::load(&filepath).unwrap();
     let load_duration = start.elapsed();
@@ -236,9 +252,9 @@ fn stress_test_bplustree() {
     drop(tree_mem);
 
     // ----------------------------------------------------------------
-    // Phase 7: Concurrent Readers + Writers (Disk-based)
+    // Phase 8: Concurrent Readers + Writers (Disk-based)
     // ----------------------------------------------------------------
-    writeln!(log_file, "\n[Phase 7] Concurrent Readers + Writers (Disk-based)...").unwrap();
+    writeln!(log_file, "\n[Phase 8] Concurrent Readers + Writers (Disk-based)...").unwrap();
     let reader_threads = 8usize;
     let writer_threads = 4usize;
     let reader_ops_per_thread = 40_000u64;
@@ -256,9 +272,8 @@ fn stress_test_bplustree() {
 
     let start_barrier = Arc::new(Barrier::new(reader_threads + writer_threads + 1));
     let shared_path = Arc::new(filepath.clone());
-    let wal_writer = Arc::new(
-        BPlusTreeSerialWriter::<u32, String>::new(filepath.as_path(), FlushPolicy::Batch).unwrap(),
-    );
+    let wal_writer =
+        Arc::new(BPlusTreeSerialWriter::<u32, String>::new(filepath.as_path(), FlushPolicy::Batch).unwrap());
     let small_payload = "s".repeat(small_val_len.saturating_sub(24));
     let large_payload = "L".repeat(large_val_len.saturating_sub(24));
 
@@ -268,7 +283,8 @@ fn stress_test_bplustree() {
         let path = Arc::clone(&shared_path);
         reader_handles.push(thread::spawn(move || -> (u64, u64, Duration) {
             let mut query = BPlusTreeQuery::<u32, String>::try_new(path.as_path()).unwrap();
-            let mut prng_state = 0x9E37_79B9_7F4A_7C15u64 ^ ((reader_id as u64 + 1).wrapping_mul(0xBF58_476D_1CE4_E5B9));
+            let mut prng_state =
+                0x9E37_79B9_7F4A_7C15u64 ^ ((reader_id as u64 + 1).wrapping_mul(0xBF58_476D_1CE4_E5B9));
             barrier.wait();
             let started = Instant::now();
             let mut ops = 0u64;
@@ -292,12 +308,12 @@ fn stress_test_bplustree() {
         let wal_writer = Arc::clone(&wal_writer);
         let small_payload_local = small_payload.clone();
         let large_payload_local = large_payload.clone();
-        writer_handles.push(thread::spawn(move || -> (u64, u64, u64, Duration) {
-            let mut prng_state = 0xD6E8_FEB8_6659_FD93u64 ^ ((writer_id as u64 + 1).wrapping_mul(0x94D0_49BB_1331_11EB));
+        writer_handles.push(thread::spawn(move || -> (u64, u64, Duration) {
+            let mut prng_state =
+                0xD6E8_FEB8_6659_FD93u64 ^ ((writer_id as u64 + 1).wrapping_mul(0x94D0_49BB_1331_11EB));
             barrier.wait();
             let started = Instant::now();
 
-            let retries = 0u64;
             let mut applied_batches = 0u64;
             let mut applied_updates = 0u64;
 
@@ -306,11 +322,8 @@ fn stress_test_bplustree() {
                 for _ in 0..writer_batch_size {
                     let key = (lcg_next(&mut prng_state) as u32) % num_items_u32;
                     let variant = lcg_next(&mut prng_state);
-                    let payload = if variant.trailing_zeros() >= 4 {
-                        &large_payload_local
-                    } else {
-                        &small_payload_local
-                    };
+                    let payload =
+                        if variant.trailing_zeros() >= 4 { &large_payload_local } else { &small_payload_local };
                     owned_batch.push((key, format!("w{writer_id}_b{batch_idx}_k{key}_{payload}")));
                 }
                 let batch_refs: Vec<(&u32, &String)> = owned_batch.iter().map(|(k, v)| (k, v)).collect();
@@ -321,7 +334,7 @@ fn stress_test_bplustree() {
                 applied_updates += writer_batch_size as u64;
             }
 
-            (applied_updates, applied_batches, retries, started.elapsed())
+            (applied_updates, applied_batches, started.elapsed())
         }));
     }
 
@@ -344,14 +357,12 @@ fn stress_test_bplustree() {
 
     let mut total_writer_updates = 0u64;
     let mut total_writer_batches = 0u64;
-    let mut total_writer_retries = 0u64;
     let mut total_writer_time = Duration::ZERO;
     let mut max_writer_duration = Duration::ZERO;
     for handle in writer_handles {
-        let (updates, batches, retries, elapsed) = handle.join().unwrap();
+        let (updates, batches, elapsed) = handle.join().unwrap();
         total_writer_updates += updates;
         total_writer_batches += batches;
-        total_writer_retries += retries;
         total_writer_time += elapsed;
         if elapsed > max_writer_duration {
             max_writer_duration = elapsed;
@@ -359,6 +370,7 @@ fn stress_test_bplustree() {
     }
     wal_writer.commit().unwrap();
     wal_writer.shutdown().unwrap();
+    drop(wal_writer);
 
     let concurrent_duration = concurrent_start.elapsed();
     let reader_avg_latency_us = total_reader_time.as_secs_f64() * 1_000_000.0 / total_reader_ops as f64;
@@ -374,7 +386,7 @@ fn stress_test_bplustree() {
     .unwrap();
     writeln!(
         log_file,
-        "Writer Updates: {total_writer_updates} (batches: {total_writer_batches}), Throughput: {:.0} updates/sec, Avg Latency: {:.2}us/update, Lock Retries: {total_writer_retries} (single-writer queue), Slowest Writer: {max_writer_duration:.2?}",
+        "Writer Updates: {total_writer_updates} (batches: {total_writer_batches}), Throughput: {:.0} updates/sec, Avg Latency: {:.2}us/update, Slowest Writer: {max_writer_duration:.2?}",
         total_writer_updates as f64 / concurrent_duration.as_secs_f64(),
         writer_avg_latency_us
     )
@@ -385,25 +397,128 @@ fn stress_test_bplustree() {
     assert_eq!(total_reader_misses, 0, "all reader queries should resolve during concurrent load");
 
     // ----------------------------------------------------------------
-    // Phase 7b: Post-Concurrency Verification
+    // Phase 8b: Post-Concurrency Verification
     // ----------------------------------------------------------------
-    writeln!(log_file, "\n[Phase 7b] Post-Concurrency Verification...").unwrap();
+    writeln!(log_file, "\n[Phase 8b] Post-Concurrency Verification...").unwrap();
     let mut verify_query = BPlusTreeQuery::<u32, String>::try_new(&filepath).unwrap();
     let verification_samples = 20_000u64;
     let mut verification_misses = 0u64;
+    let mut verification_corrupt = 0u64;
     let mut verify_state = 0x243F_6A88_85A3_08D3u64;
     let verify_start = Instant::now();
     for _ in 0..verification_samples {
         let key = (lcg_next(&mut verify_state) as u32) % num_items_u32;
-        if verify_query.query(&key).unwrap().is_none() {
-            verification_misses += 1;
+        match verify_query.query(&key).unwrap() {
+            Some(val) => {
+                let is_original = val.len() == small_val_len || val.len() == large_val_len;
+                let is_written = val.starts_with('w');
+                if !(is_original || is_written) {
+                    verification_corrupt += 1;
+                }
+            }
+            None => {
+                verification_misses += 1;
+            }
         }
     }
     let verify_duration = verify_start.elapsed();
     writeln!(
         log_file,
-        "Verification Time: {verify_duration:.2?}, misses: {verification_misses}/{verification_samples}"
+        "Verification Time: {verify_duration:.2?}, misses: {verification_misses}/{verification_samples}, corrupt: {verification_corrupt}/{verification_samples}"
     )
     .unwrap();
     assert_eq!(verification_misses, 0, "post-concurrency verification failed");
+    assert_eq!(verification_corrupt, 0, "post-concurrency value integrity check failed");
+    drop(verify_query);
+
+    // ----------------------------------------------------------------
+    // Phase 9: Iterator + query_le Traversal
+    // ----------------------------------------------------------------
+    writeln!(log_file, "\n[Phase 9] Iterator + query_le Traversal...").unwrap();
+    let mut iter_query = BPlusTreeQuery::<u32, String>::try_new(&filepath).unwrap();
+    let iterator_target = 100_000usize;
+    let iter_start = Instant::now();
+    let mut iterated_count = 0usize;
+    let mut iterator = iter_query.iter();
+    for (_k, _v) in iterator.by_ref() {
+        iterated_count += 1;
+        if iterated_count >= iterator_target {
+            break;
+        }
+    }
+    let iter_duration = iter_start.elapsed();
+    writeln!(
+        log_file,
+        "Iterator: {iterated_count} items in {iter_duration:.2?} ({:.0} items/sec)",
+        iterated_count as f64 / iter_duration.as_secs_f64()
+    )
+    .unwrap();
+    assert_eq!(iterated_count, iterator_target, "iterator ended before target");
+    drop(iterator);
+
+    let query_le_samples = 50_000u64;
+    let mut query_le_state = 0x1319_8A2E_0370_7344u64;
+    let mut query_le_misses = 0u64;
+    let query_le_start = Instant::now();
+    for _ in 0..query_le_samples {
+        let key = (lcg_next(&mut query_le_state) as u32) % num_items_u32;
+        if iter_query.query_le(&key).unwrap().is_none() {
+            query_le_misses += 1;
+        }
+    }
+    let query_le_duration = query_le_start.elapsed();
+    writeln!(
+        log_file,
+        "query_le: {query_le_samples} lookups in {query_le_duration:.2?} ({:.0} ops/sec), misses: {query_le_misses}",
+        query_le_samples as f64 / query_le_duration.as_secs_f64()
+    )
+    .unwrap();
+    assert_eq!(query_le_misses, 0, "query_le returned misses unexpectedly");
+    drop(iter_query);
+
+    // ----------------------------------------------------------------
+    // Phase 10: Final Delete + Compact Verification
+    // ----------------------------------------------------------------
+    writeln!(log_file, "\n[Phase 10] Final Delete + Compact Verification...").unwrap();
+    let final_delete_count = 100_000usize;
+    let final_delete_start = delete_end_idx;
+    let final_delete_end = final_delete_start + final_delete_count;
+    assert!(final_delete_end <= query_keys.len(), "final delete range exceeds dataset");
+    let final_delete_subset = &query_keys[final_delete_start..final_delete_end];
+    let final_delete_refs: Vec<&u32> = final_delete_subset.iter().collect();
+    let mut final_updater = BPlusTreeUpdate::<u32, String>::try_new(&filepath).unwrap();
+
+    let final_delete_start_ts = Instant::now();
+    let final_deleted = final_updater.delete_batch(&final_delete_refs).unwrap();
+    let final_delete_duration = final_delete_start_ts.elapsed();
+    writeln!(
+        log_file,
+        "Final delete: {final_deleted} items in {final_delete_duration:.2?} ({:.0} ops/sec)",
+        final_deleted as f64 / final_delete_duration.as_secs_f64()
+    )
+    .unwrap();
+    assert_eq!(final_deleted, final_delete_count, "final delete count mismatch");
+
+    let mut final_delete_verify_hits = 0usize;
+    for key in &final_delete_refs {
+        if final_updater.query(key).unwrap().is_some() {
+            final_delete_verify_hits += 1;
+        }
+    }
+    writeln!(log_file, "Final delete verification false-positives: {final_delete_verify_hits}").unwrap();
+    assert_eq!(final_delete_verify_hits, 0, "final deleted keys are still visible");
+
+    let final_size_before_compact = std::fs::metadata(&filepath).unwrap().len();
+    let final_compact_start = Instant::now();
+    final_updater.compact(&filepath).unwrap();
+    let final_compact_duration = final_compact_start.elapsed();
+    let final_size_after_compact = std::fs::metadata(&filepath).unwrap().len();
+    writeln!(
+        log_file,
+        "Final compact: {final_compact_duration:.2?}, size {:.2} MB -> {:.2} MB (freed {:.2} MB)",
+        final_size_before_compact as f64 / 1024.0 / 1024.0,
+        final_size_after_compact as f64 / 1024.0 / 1024.0,
+        (final_size_before_compact as i64 - final_size_after_compact as i64) as f64 / 1024.0 / 1024.0
+    )
+    .unwrap();
 }
