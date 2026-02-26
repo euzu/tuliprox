@@ -81,6 +81,20 @@ async fn playlist_update(
                 async move {
                     let Some(lock) = update_guard.acquire_playlist_lock().await else {
                         warn!("Playlist update lock is closed; update skipped.");
+                        exec_processing(
+                            &http_client,
+                            app_config,
+                            valid_targets,
+                            Some(event_manager),
+                            Some(playlist_state),
+                            Some(update_guard),
+                            disabled_headers,
+                            Some(provider_manager),
+                            Some(metadata_manager),
+                            None,
+                            None,
+                        )
+                        .await;
                         return;
                     };
 
