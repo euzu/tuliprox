@@ -808,9 +808,11 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         }
     };
 
+    let button_disabled = *show_alias_form_state || *show_epg_form_state;
+
     let render_sidebar = || {
         html! {
-            <div class="tp__source-editor-form__sidebar">
+            <div class={concat_string!("tp__source-editor-form__sidebar", if button_disabled {" disabled"} else {""})}>
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Main, if *view_visible == InputFormPage::Main { " active" } else {""})}  icon="Settings" hint={translate.t(LABEL_MAIN)} name={InputFormPage::Main.to_string()} onclick={&handle_menu_click}></IconButton>
             {html_if!(!library_input, {
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Alias, if *view_visible == InputFormPage::Alias { " active" } else {""})}  icon="Alias" hint={translate.t(LABEL_ALIAS)} name={InputFormPage::Alias.to_string()} onclick={&handle_menu_click}></IconButton>
@@ -825,8 +827,6 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
           </div>
         }
     };
-
-    let button_disabled = *show_alias_form_state || *show_epg_form_state;
 
     html! {
         <div class="tp__source-editor-form tp__config-view-page">

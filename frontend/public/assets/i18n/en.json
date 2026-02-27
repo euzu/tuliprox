@@ -475,7 +475,7 @@
     "CLIPBOARD_NOT_SUPPORTED": "Clipboard not supported.\nYour browser or current context does not allow clipboard access.\nPlease use HTTPS or localhost.",
     "FAILED_TO_KICK_USER_STREAM": "Failed to kick user stream",
     "FAILED_TO_RETRIEVE_WEBPLAYER_URL": "Failed to retrieve webplayer URL",
-    "CONFIRM_SOURCES_SAVE": "Warning: This is an experimental feature.\nUse at your own risk.\n\nProceed?",
+    "CONFIRM_SOURCES_SAVE": "Do you really want to save?.\n\nProceed?",
     "DOWNLOAD": {
       "SUCCESS": "Successfully downloaded",
       "FAIL": "Failed to download!",
