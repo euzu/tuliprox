@@ -33,7 +33,7 @@ impl EpgConfigDto {
     /// Prepares the EPG configuration by resolving all source URLs into `t_sources`.
     ///
     /// - `create_auto_url` — closure that derives an XMLTV URL from the parent input
-    ///   (called when `url` is `AUTO_URL`).
+    ///   (called when `url` is `auto`).
     /// - `include_computed` — when `false` the resolution is skipped (used for serialisation
     ///   round-trips that do not need fully-resolved URLs).
     pub fn prepare<F>(&mut self, create_auto_url: F, include_computed: bool) -> Result<(), TuliproxError>

@@ -505,72 +505,76 @@ impl ConfigInputDto {
         }
     }
 
+    // Neue ausgelagerte Methode für die URL-Generierung
+    fn generate_auto_epg_url(&self) -> Result<String, String> {
+        let get_creds = || {
+            if self.username.is_some() && self.password.is_some() {
+                return (self.username.clone(), self.password.clone(), Some(self.url.clone()));
+            }
+
+            let (u, p, r) = self
+                .aliases
+                .as_ref()
+                .and_then(|aliases| aliases.iter().find(|a| a.enabled))
+                .map(|alias| (alias.username.clone(), alias.password.clone(), Some(alias.url.clone())))
+                .unwrap_or((None, None, None));
+
+            if u.is_some() && p.is_some() && r.is_some() {
+                return (u, p, r);
+            }
+
+            let (u, p) = get_credentials_from_url_str(&self.url);
+            if u.is_some() && p.is_some() {
+                return (u, p, Some(self.url.clone()));
+            }
+
+            self.aliases
+                .as_ref()
+                .and_then(|aliases| aliases.iter().find(|a| a.enabled))
+                .map(|alias| {
+                    let (u, p) = get_credentials_from_url_str(alias.url.as_str());
+                    (u, p, Some(alias.url.clone()))
+                })
+                .unwrap_or((None, None, None))
+        };
+
+        let (username, password, base_url) = get_creds();
+
+        if username.is_none() || password.is_none() || base_url.is_none() {
+            Err(format!("auto_epg is enabled for input {}, but no credentials could be extracted", self.name))
+        } else if let Some(base) = base_url {
+            let clean_base = base.split('?').next().unwrap_or(&base);
+
+            let provider_epg_url = format!(
+                "{}/xmltv.php?username={}&password={}",
+                trim_last_slash(clean_base),
+                username.unwrap_or_default(),
+                password.unwrap_or_default()
+            );
+            Ok(provider_epg_url)
+        } else {
+            Err(format!(
+                "auto_epg is enabled for input {}, but url could not be parsed {}",
+                self.name,
+                sanitize_sensitive_info(&self.url)
+            ))
+        }
+    }
+
     pub fn prepare_epg(&mut self, include_computed: bool) -> Result<(), TuliproxError> {
-        if let Some(epg) = self.epg.as_mut() {
+        if let Some(mut epg) = self.epg.take() {
             if self.input_type == InputType::Library {
                 warn!("EPG is not supported for library inputs {}, skipping", self.name);
                 self.epg = None;
                 return Ok(());
             }
 
-            let create_auto_url = || {
-                let get_creds = || {
-                    if self.username.is_some() && self.password.is_some() {
-                        return (self.username.clone(), self.password.clone(), Some(self.url.clone()));
-                    }
-
-                    let (u, p, r) = self
-                        .aliases
-                        .as_ref()
-                        .and_then(|aliases| aliases.iter().find(|a| a.enabled))
-                        .map(|alias| (alias.username.clone(), alias.password.clone(), Some(alias.url.clone())))
-                        .unwrap_or((None, None, None));
-
-                    if u.is_some() && p.is_some() && r.is_some() {
-                        return (u, p, r);
-                    }
-
-                    let (u, p) = get_credentials_from_url_str(&self.url);
-                    if u.is_some() && p.is_some() {
-                        return (u, p, Some(self.url.clone()));
-                    }
-
-                    self.aliases
-                        .as_ref()
-                        .and_then(|aliases| aliases.iter().find(|a| a.enabled))
-                        .map(|alias| {
-                            let (u, p) = get_credentials_from_url_str(alias.url.as_str());
-                            (u, p, Some(alias.url.clone()))
-                        })
-                        .unwrap_or((None, None, None))
-                };
-
-                let (username, password, base_url) = get_creds();
-
-                if username.is_none() || password.is_none() || base_url.is_none() {
-                    Err(format!("auto_epg is enabled for input {}, but no credentials could be extracted", self.name))
-                } else if base_url.is_some() {
-                    let provider_epg_url = format!(
-                        "{}/xmltv.php?username={}&password={}",
-                        trim_last_slash(&base_url.unwrap_or_default()),
-                        username.unwrap_or_default(),
-                        password.unwrap_or_default()
-                    );
-                    Ok(provider_epg_url)
-                } else {
-                    Err(format!(
-                        "auto_epg is enabled for input {}, but url could not be parsed {}",
-                        self.name,
-                        sanitize_sensitive_info(&self.url)
-                    ))
-                }
-            };
-
-            epg.prepare(create_auto_url, include_computed)?;
+            epg.prepare(|| self.generate_auto_epg_url(), include_computed)?;
             epg.t_sources = {
                 let mut seen_urls = HashSet::new();
                 epg.t_sources.drain(..).filter(|src| seen_urls.insert(src.url.clone())).collect()
             };
+            self.epg = Some(epg);
         }
         Ok(())
     }
@@ -645,5 +649,113 @@ impl ConfigProviderDto {
             return info_err_res!("Urls for provider is mandatory");
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_test_dto() -> ConfigInputDto {
+        let mut dto = ConfigInputDto::default();
+        dto.name = "test_input".intern();
+        dto
+    }
+
+    #[test]
+    fn test_epg_url_from_explicit_main_credentials() {
+        let mut dto = create_test_dto();
+        // Hier testen wir auch gleich mit, ob der Trailing Slash sauber entfernt wird!
+        dto.url = "http://myprovider.com/".to_string();
+        dto.username = Some("hello".to_string());
+        dto.password = Some("mello".to_string());
+
+        let result = dto.generate_auto_epg_url().unwrap();
+        assert_eq!(result, "http://myprovider.com/xmltv.php?username=hello&password=mello");
+    }
+
+    #[test]
+    fn test_epg_url_from_enabled_alias_explicit_credentials() {
+        let mut dto = create_test_dto();
+        dto.url = "http://main.com".to_string(); // Haupt-URL hat keine Credentials
+
+        let mut alias = ConfigInputAliasDto::default();
+        alias.enabled = true;
+        alias.url = "http://alias.com".to_string();
+        alias.username = Some("alias_user".to_string());
+        alias.password = Some("alias_pass".to_string());
+
+        dto.aliases = Some(vec![alias]);
+
+        let result = dto.generate_auto_epg_url().unwrap();
+        // Er muss die URL und die Credentials vom Alias nehmen
+        assert_eq!(result, "http://alias.com/xmltv.php?username=alias_user&password=alias_pass");
+    }
+
+    #[test]
+    fn test_epg_url_skips_disabled_aliases() {
+        let mut dto = create_test_dto();
+
+        let mut alias = ConfigInputAliasDto::default();
+        alias.enabled = false; // Alias ist deaktiviert!
+        alias.url = "http://alias.com".to_string();
+        alias.username = Some("alias_user".to_string());
+        alias.password = Some("alias_pass".to_string());
+
+        dto.aliases = Some(vec![alias]);
+
+        let result = dto.generate_auto_epg_url();
+        // Da Haupt-DTO leer ist und Alias deaktiviert, muss ein Fehler kommen
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("no credentials could be extracted"));
+    }
+
+    #[test]
+    fn test_epg_url_fails_without_credentials() {
+        let mut dto = create_test_dto();
+        dto.url = "http://nocreds.com".to_string();
+
+        let result = dto.generate_auto_epg_url();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("no credentials could be extracted"));
+    }
+
+    #[test]
+    fn test_epg_url_from_main_url_query_credentials() {
+        let mut dto = create_test_dto();
+        // Credentials stecken als Query-Parameter in der URL
+        dto.url = "http://myprovider.com?username=hello&password=mello".to_string();
+
+        let result = dto.generate_auto_epg_url().unwrap();
+
+        // Durch unseren sauberen "clean_base" Fix sieht die URL jetzt richtig aus!
+        assert_eq!(result, "http://myprovider.com/xmltv.php?username=hello&password=mello");
+    }
+
+    #[test]
+    fn test_epg_url_from_alias_url_query_credentials() {
+        let mut dto = create_test_dto();
+        dto.url = "http://main.com".to_string();
+
+        let mut alias = ConfigInputAliasDto::default();
+        alias.enabled = true;
+        // Credentials im Alias als Query-Parameter
+        alias.url = "http://alias.com?username=alias_user&password=alias_pass".to_string();
+
+        dto.aliases = Some(vec![alias]);
+
+        let result = dto.generate_auto_epg_url().unwrap();
+        assert_eq!(result, "http://alias.com/xmltv.php?username=alias_user&password=alias_pass");
+    }
+
+    #[test]
+    fn test_epg_url_from_provider_scheme_url_query_credentials() {
+        let mut dto = create_test_dto();
+        dto.url = "provider://myprovider".to_string();
+        dto.username = Some("test".to_string());
+        dto.password = Some("secret".to_string());
+
+        let result = dto.generate_auto_epg_url().unwrap();
+        assert_eq!(result, "provider://myprovider/xmltv.php?username=test&password=secret");
     }
 }
