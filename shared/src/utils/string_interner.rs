@@ -4,14 +4,33 @@
 //! strings like `input_name` and `group` in playlist items.
 
 use crate::model::UUIDType;
-use serde::{Deserialize, Deserializer, Serializer};
+use serde::{
+    de::{IgnoredAny, MapAccess, SeqAccess, Visitor},
+    Deserialize, Deserializer, Serializer,
+};
 use std::{
     borrow::Cow,
     collections::HashSet,
+    fmt,
     sync::{Arc, LazyLock, RwLock},
 };
 
-// Global interner store
+/// Global interning pool.
+///
+/// ## Performance (millions of entries)
+///
+/// * **Happy-path (already-interned):** one `RwLock::read()` + hash lookup +
+///   `Arc::clone` (single atomic increment).  Multiple threads can read
+///   concurrently without blocking each other.
+/// * **First-time intern:** upgrades to a write lock, double-checks, and
+///   inserts.  This only happens *once per unique string value*, so the write
+///   path is not on the hot parse loop.
+/// * **`deserialize_string` vs `deserialize_any`:** the former is *faster*
+///   because saphyr skips bool / int / float parsing attempts and hands the
+///   raw scalar text directly to the visitor.
+/// * **Pruning:** call `interner_gc()` periodically (e.g. after a full
+///   playlist reload) to release strings that are only referenced by the
+///   pool itself.
 static INTERNER: LazyLock<RwLock<HashSet<Arc<str>>>> = LazyLock::new(|| RwLock::new(HashSet::new()));
 
 pub trait Internable {
@@ -61,21 +80,16 @@ impl Internable for i64 {
 
 /// Interns a string slice.
 fn intern_str(s: &str) -> Arc<str> {
-    // Try read first
     if let Ok(guard) = INTERNER.read() {
         if let Some(existing) = guard.get(s) {
             return Arc::clone(existing);
         }
         drop(guard);
     }
-
-    // Write lock
     if let Ok(mut guard) = INTERNER.write() {
-        // Double check
         if let Some(existing) = guard.get(s) {
             return Arc::clone(existing);
         }
-
         let arc: Arc<str> = Arc::from(s);
         guard.insert(Arc::clone(&arc));
         return arc;
@@ -85,21 +99,16 @@ fn intern_str(s: &str) -> Arc<str> {
 
 /// Interns an owned string.
 fn intern_string(s: String) -> Arc<str> {
-    // Try read first
     if let Ok(guard) = INTERNER.read() {
         if let Some(existing) = guard.get(s.as_str()) {
             return Arc::clone(existing);
         }
         drop(guard);
     }
-
-    // Write lock
     if let Ok(mut guard) = INTERNER.write() {
-        // Double check
         if let Some(existing) = guard.get(s.as_str()) {
             return Arc::clone(existing);
         }
-
         let arc: Arc<str> = Arc::from(s);
         guard.insert(Arc::clone(&arc));
         return arc;
@@ -111,7 +120,6 @@ fn intern_string(s: String) -> Arc<str> {
 pub fn interner_gc() -> usize {
     if let Ok(mut guard) = INTERNER.write() {
         let before = guard.len();
-        // Arc::strong_count == 1 means the cache is the only one holding it.
         guard.retain(|s| Arc::strong_count(s) > 1);
         let removed = before - guard.len();
         if removed > 0 {
@@ -120,6 +128,92 @@ pub fn interner_gc() -> usize {
         return removed;
     }
     0
+}
+
+/// Convert an `f64` that reached `visit_f64` into a round-trip-safe string
+/// using the canonical YAML 1.2 spelling (`.inf`, `-.inf`, `.nan`).
+///
+/// `serde_saphyr` recognises these spellings as ambiguous and **quotes** them
+/// when re-serializing, so the value survives a YAML round-trip as a string.
+///
+/// This is a safety-net: the primary fix is using `deserialize_string` (which
+/// skips float parsing entirely), so `visit_f64` is normally not reached for
+/// plain string fields.
+#[inline]
+fn f64_to_str(v: f64) -> String {
+    if v.is_infinite() {
+        if v.is_sign_positive() {
+            ".inf".to_owned()
+        } else {
+            "-.inf".to_owned()
+        }
+    } else if v.is_nan() {
+        ".nan".to_owned()
+    } else {
+        v.to_string()
+    }
+}
+
+//
+// Two reusable visitor types live here so that multiple public entry-points
+// can share them without code duplication:
+//
+//   ArcStrVisitor        -> Arc<str>         (null/empty -> "")
+//   OptionArcStrVisitor  -> Option<Arc<str>> (null/empty -> None)
+//
+// Both visitors use `deserialize_string` inside `visit_some`, which tells
+// saphyr to return the **raw scalar text** without float-parsing.  This is
+// what makes `name: infinity` survive as the literal string `"infinity"`.
+
+/// Visitor that produces `Arc<str>`, mapping null / empty -> `""`.
+struct ArcStrVisitor;
+
+impl<'de> Visitor<'de> for ArcStrVisitor {
+    type Value = Arc<str>;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result { f.write_str("a string, number, boolean, or null") }
+
+    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> { Ok(v.intern()) }
+    fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> { Ok(v.intern()) }
+    fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> { Ok(v.to_string().intern()) }
+    fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> { Ok(v.to_string().intern()) }
+    fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> { Ok(v.to_string().intern()) }
+    fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Self::Value, E> { Ok(f64_to_str(v).intern()) }
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> { Ok("".intern()) }
+    fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> { Ok("".intern()) }
+    fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+        // `deserialize_string` returns the raw text -> `infinity` stays `infinity`.
+        d.deserialize_string(self)
+    }
+}
+
+/// Visitor that produces `Option<Arc<str>>`, mapping null / empty -> `None`.
+struct OptionArcStrVisitor;
+
+impl<'de> Visitor<'de> for OptionArcStrVisitor {
+    type Value = Option<Arc<str>>;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a string, number, boolean, null, or empty")
+    }
+
+    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> { Ok(Some(v.intern())) }
+    fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> { Ok(Some(v.intern())) }
+    fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> { Ok(Some(v.to_string().intern())) }
+    fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> { Ok(Some(v.to_string().intern())) }
+    fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> { Ok(Some(v.to_string().intern())) }
+    fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Self::Value, E> { Ok(Some(f64_to_str(v).intern())) }
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> { Ok(None) }
+    fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> { Ok(None) }
+    fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> { d.deserialize_string(self) }
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        while seq.next_element::<IgnoredAny>()?.is_some() {}
+        Ok(None)
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+        Ok(None)
+    }
 }
 
 pub mod arc_str_vec_serde {
@@ -148,7 +242,7 @@ pub mod arc_str_vec_serde {
 
 pub mod arc_str_serde {
     use super::*;
-    use serde_json::Value;
+
     pub fn serialize<S>(value: &Arc<str>, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -156,24 +250,23 @@ pub mod arc_str_serde {
         serializer.serialize_str(value)
     }
 
+    /// Deserialize a YAML scalar as an interned `Arc<str>`.
+    ///
+    /// Uses `deserialize_string` so saphyr hands us the **raw text** without
+    /// first running it through float/bool/int parsing.  This preserves values
+    /// like `infinity` as the literal string `"infinity"` instead of silently
+    /// converting them to `".inf"`.
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Arc<str>, D::Error>
     where
         D: Deserializer<'de>,
     {
-        match Value::deserialize(deserializer)? {
-            Value::Null => Ok("".intern()),
-            Value::Bool(b) => Ok(b.to_string().intern()),
-            Value::Number(n) => Ok(n.to_string().intern()),
-            Value::String(v) => Ok(v.intern()),
-            Value::Array(_) => Ok("".intern()),
-            Value::Object(_) => Ok("".intern()),
-        }
+        deserializer.deserialize_string(ArcStrVisitor)
     }
 }
 
 pub mod arc_str_option_serde {
     use super::*;
-    use serde_json::Value;
+
     pub fn serialize<S>(value: &Option<Arc<str>>, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -188,16 +281,7 @@ pub mod arc_str_option_serde {
     where
         D: Deserializer<'de>,
     {
-        let opt = Option::<Value>::deserialize(deserializer)?;
-        match opt {
-            Some(value) => match value {
-                Value::Bool(b) => Ok(Some(b.to_string().intern())),
-                Value::Number(n) => Ok(Some(n.to_string().intern())),
-                Value::String(v) => Ok(Some(v.intern())),
-                Value::Null | Value::Array(_) | Value::Object(_) => Ok(None),
-            },
-            None => Ok(None),
-        }
+        deserializer.deserialize_option(OptionArcStrVisitor)
     }
 
     pub fn serialize_null_if_empty<S>(value: &Option<Arc<str>>, serializer: S) -> Result<S::Ok, S::Error>
@@ -212,24 +296,23 @@ pub mod arc_str_option_serde {
     }
 }
 
+//
+// Reuses `ArcStrVisitor` via `deserialize_option`:
+//   - null / ~ / empty  -> visit_none / visit_unit -> ""
+//   - any other scalar  -> visit_some -> deserialize_string -> visit_str/visit_string -> interned text
+
+pub use arc_str_default_on_null as arc_str_none_default_on_null;
+
 pub fn arc_str_default_on_null<'de, D>(deserializer: D) -> Result<Arc<str>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let opt = Option::<String>::deserialize(deserializer)?;
-    Ok(opt.unwrap_or_default().intern())
+    deserializer.deserialize_option(ArcStrVisitor)
 }
-
-pub use arc_str_default_on_null as arc_str_none_default_on_null;
 
 pub fn deserialize_as_option_arc_str<'de, D>(deserializer: D) -> Result<Option<Arc<str>>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let value: serde_json::Value = Deserialize::deserialize(deserializer)?;
-    match value {
-        serde_json::Value::String(s) => Ok(Some(s.intern())),
-        serde_json::Value::Number(s) => Ok(Some(s.to_string().intern())),
-        _ => Ok(None),
-    }
+    deserializer.deserialize_option(OptionArcStrVisitor)
 }

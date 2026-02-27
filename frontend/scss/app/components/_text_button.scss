@@ -46,6 +46,7 @@
       outline: none;
    }
 }
+
 .tp__text-button.secondary {
   background-color: var(--text-button-secondary-background-color);
   border-color: var(--text-button-secondary-border-color);
@@ -59,6 +60,7 @@
     outline: none;
   }
 }
+
 .tp__text-button.active {
   background-color: var(--text-button-active-background-color);
   border-color: var(--text-button-active-border-color);
@@ -71,4 +73,13 @@
     fill: var(--text-button-active-hover-color);
     outline: none;
   }
+}
+
+.tp__text-button.primary.disabled,
+.tp__text-button.secondary.disabled,
+.tp__text-button.disabled {
+  border-color: var(--text-button-disabled-border-color);
+  background-color: var(--text-button-disabled-background-color);
+  color: var(--text-button-disabled-color);
+  fill: var(--text-button-disabled-color);
 }
