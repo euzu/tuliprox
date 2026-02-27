@@ -1082,6 +1082,8 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         let editor_state_ref = editor_state_ref.clone();
         let move_blocks = move_blocks.clone();
         Callback::from(move |e: WheelEvent| {
+            e.prevent_default();
+            e.stop_propagation();
             let mut editor_state = editor_state_ref.borrow_mut();
             let delta_y = e.delta_y() as f32;
             let (canvas_ox, canvas_oy) = editor_state.canvas_offset;
