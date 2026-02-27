@@ -8,13 +8,21 @@ use crate::{
     edit_field_number_u32, edit_field_text, edit_field_text_option, generate_form_reducer, html_if,
     i18n::use_translation,
 };
-use shared::{concat_string, error::TuliproxError, info_err_res, model::{
-    ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, EpgConfigDto, EpgSourceDto, InputFetchMethod,
-    InputType, StagedInputDto,
-}};
+use shared::{
+    concat_string,
+    error::TuliproxError,
+    info_err_res,
+    model::{
+        ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, EpgConfigDto, EpgSourceDto, InputFetchMethod,
+        InputType, StagedInputDto,
+    },
+};
 use std::{collections::HashMap, fmt::Display, rc::Rc, str::FromStr};
 use web_sys::MouseEvent;
-use yew::{component, html, use_context, use_effect_with, use_memo, use_reducer, use_state, Callback, Html, Properties, UseReducerHandle};
+use yew::{
+    component, html, use_context, use_effect_with, use_memo, use_reducer, use_state, Callback, Html, Properties,
+    UseReducerHandle,
+};
 
 const LABEL_NAME: &str = "LABEL.NAME";
 const LABEL_INPUT_TYPE: &str = "LABEL.INPUT_TYPE";

@@ -6,9 +6,14 @@ use crate::{
     config_field_child, edit_field_bool, edit_field_text, generate_form_reducer,
     i18n::use_translation,
 };
-use shared::{concat_string, error::TuliproxError, info_err_res, model::{
-    TargetOutputDto, TraktApiConfigDto, TraktConfigDto, TraktContentType, TraktListConfigDto, XtreamTargetOutputDto,
-}};
+use shared::{
+    concat_string,
+    error::TuliproxError,
+    info_err_res,
+    model::{
+        TargetOutputDto, TraktApiConfigDto, TraktConfigDto, TraktContentType, TraktListConfigDto, XtreamTargetOutputDto,
+    },
+};
 use std::{fmt::Display, rc::Rc, str::FromStr};
 use web_sys::MouseEvent;
 use yew::{
