@@ -25,3 +25,16 @@
     }
   }
 }
+
+.tp__collapse-panel.tp__expanded {
+  .tp__stats__header {
+    color: var(--text-color);
+    fill: var(--text-color);
+  }
+}
+.tp__collapse-panel.tp__collapsed {
+  .tp__stats__header {
+    color: var(--modest-text-color);
+    fill: var(--modest-text-color);
+  }
+}

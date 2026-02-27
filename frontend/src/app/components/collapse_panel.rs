@@ -32,7 +32,7 @@ pub fn CollapsePanel(props: &CollapsePanelProps) -> Html {
     };
 
     html! {
-        <div class={classes!("tp__collapse-panel", if *expanded {""} else {"tp__collapsed"}, props.class.to_string())}>
+        <div class={classes!("tp__collapse-panel", if *expanded {"tp__expanded"} else {"tp__collapsed"}, props.class.to_string())}>
             <div class="tp__collapse-panel__header" onclick={toggle}>
                 <span class="tp__collapse-panel__header-title">
                     { props.title_content.clone().unwrap_or_else(|| html! { &props.title }) }

@@ -653,9 +653,9 @@
   },
   "EXPLANATION": {
     "DEFAULT": "No dedicated explanation is available for this field yet.",
-    "RESOLVE": "Resolve controls metadata lookup retries.\n\nUse this group to tune how often failed metadata lookups are retried and how long the system should wait between retries.",
+    "RESOLVE": "Resolve controls metadata lookup retries.\n\nUse this group to tune how often failed metadata lookups are retried and how long the system should wait between retries. Duration fields support suffixes like '30s', '10m', '1h', '7d'.",
     "PROBE": "Probe controls technical stream analysis retries.\n\nUse this group to define retry steps, retry limits, and cooldown behavior for FFprobe-based stream checks.",
-    "FFPROBE": "FFprobe controls how stream analysis is performed.\n\nUse this group to configure timeout, analyze duration, and probe size for both VOD/Series and Live streams.",
+    "FFPROBE": "FFprobe controls how stream analysis is performed.\n\nTurns technical stream analysis on or off and configures timeouts and probe depths. \nExample:\n```yaml\nffprobe:\n  enabled: true\n  timeout: 60\n  analyze_duration: 10s\n  probe_size: 10MB\n```",
     "API_PROXY_CONFIG": {
       "SERVER": "Configuration value for server.",
       "USE_USER_DB": "If enabled, API proxy users are loaded from the user database."
@@ -670,26 +670,26 @@
       "TIMEZONE": "Timezone applied by this proxy server profile for time-aware responses."
     },
     "CACHE_CONFIG": {
-      "DIR": "Configuration value for dir.",
-      "ENABLED": "Configuration value for enabled.",
-      "SIZE": "Configuration value for size."
+      "DIR": "Filesystem directory where playlist and metadata caches are stored.",
+      "ENABLED": "Globally enables or disables disk caching for input resources.",
+      "SIZE": "Maximum size (in bytes) allowed for the cache directory."
     },
     "CONFIG_API": {
-      "HOST": "Hostname or IP where the tuliprox API listens.",
-      "PORT": "TCP port where the tuliprox API listens.",
-      "WEB_ROOT": "Filesystem path that serves the frontend assets for the API endpoint."
+      "HOST": "Hostname or IP where the tuliprox API listens. Default: localhost",
+      "PORT": "TCP port where the tuliprox API listens. Default: 8901",
+      "WEB_ROOT": "Filesystem path that serves the frontend assets for the API endpoint. Default: ./web"
     },
     "CONFIG_INPUT": {
-      "CACHE_DURATION": "Configuration value for cache duration.",
-      "ENABLED": "Configuration value for enabled.",
-      "EXP_DATE": "Configuration value for exp date.",
-      "MAX_CONNECTIONS": "Configuration value for max connections.",
-      "METHOD": "Configuration value for method.",
-      "NAME": "Human readable name for this entry.",
+      "CACHE_DURATION": "Playlist cache duration (e.g. 12h, 1d, 30m). Cached playlists are reused to reduce downloads.",
+      "ENABLED": "If disabled, the processing for this input is skipped.",
+      "EXP_DATE": "Manual expiration date for this input (YYYY-MM-DD HH:MM:SS format or Unix timestamp).",
+      "MAX_CONNECTIONS": "Limit of concurrent connections for this input. 0 means unlimited.",
+      "METHOD": "HTTP method used for downloading the playlist (GET or POST).",
+      "NAME": "Human readable name for this entry. Must be unique.",
       "PASSWORD": "Password or credential used for this account or service.",
-      "PERSIST": "Configuration value for persist.",
-      "PRIORITY": "Configuration value for priority.",
-      "URL": "Target URL for this setting.",
+      "PERSIST": "Filename pattern to persist the raw input to disk (e.g. ./playlist_{}.m3u).",
+      "PRIORITY": "The order of processing. Lower numbers mean higher priority (e.g. -1 is higher than 0).",
+      "URL": "Target URL for this input. Supports provider:// scheme for failover.",
       "USERNAME": "Login username for this account or service."
     },
     "CONFIG_INPUT_ALIAS": {
@@ -703,40 +703,40 @@
       "USERNAME": "Login username for this account or service."
     },
     "CONFIG_INPUT_OPTIONS": {
-      "PROBE_DELAY": "Configuration value for probe delay.",
-      "PROBE_LIVE": "Configuration value for probe live.",
-      "PROBE_LIVE_INTERVAL_HOURS": "Configuration value for probe live interval hours.",
-      "PROBE_SERIES": "Configuration value for probe series.",
-      "PROBE_VOD": "Configuration value for probe vod.",
-      "RESOLVE_BACKGROUND": "Configuration value for resolve background.",
-      "RESOLVE_DELAY": "Configuration value for resolve delay.",
-      "RESOLVE_SERIES": "Configuration value for resolve series.",
-      "RESOLVE_TMDB": "Configuration value for resolve tmdb.",
-      "RESOLVE_VOD": "Configuration value for resolve vod.",
-      "XTREAM_LIVE_STREAM_USE_PREFIX": "Configuration value for xtream live stream use prefix.",
-      "XTREAM_LIVE_STREAM_WITHOUT_EXTENSION": "Configuration value for xtream live stream without extension.",
-      "XTREAM_SKIP_LIVE": "Configuration value for xtream skip live.",
-      "XTREAM_SKIP_SERIES": "Configuration value for xtream skip series.",
-      "XTREAM_SKIP_VOD": "Configuration value for xtream skip vod."
+      "PROBE_DELAY": "Delay in seconds between probe requests (default 2) to reduce provider pressure.",
+      "PROBE_LIVE": "Enables background technical analysis for live channels to detect codecs and resolution.",
+      "PROBE_LIVE_INTERVAL_HOURS": "Interval in hours between re-probing live channels (default: 120).",
+      "PROBE_SERIES": "Enables technical analysis for series entries (requires ffprobe and probe_stream).",
+      "PROBE_VOD": "Enables technical analysis for VOD entries (requires ffprobe and probe_stream).",
+      "RESOLVE_BACKGROUND": "If true, metadata resolve tasks are processed in the background (default true).",
+      "RESOLVE_DELAY": "Delay in seconds between metadata resolve requests (default 2).",
+      "RESOLVE_SERIES": "Enables metadata resolution (TMDB/NFO) for series entries.",
+      "RESOLVE_TMDB": "Attempts to resolve missing TMDB IDs based on title if missing from provider.",
+      "RESOLVE_VOD": "Enables metadata resolution (TMDB/NFO) for VOD entries.",
+      "XTREAM_LIVE_STREAM_USE_PREFIX": "If true, adds /live/ prefix to Xtream stream links (default true).",
+      "XTREAM_LIVE_STREAM_WITHOUT_EXTENSION": "If true, removes .ts extension from Xtream stream links (default false).",
+      "XTREAM_SKIP_LIVE": "If true, the live section of the Xtream provider is skipped during update.",
+      "XTREAM_SKIP_SERIES": "If true, the series section of the Xtream provider is skipped during update.",
+      "XTREAM_SKIP_VOD": "If true, the VOD section of the Xtream provider is skipped during update."
     },
     "CONFIG_TARGET": {
-      "ENABLED": "Configuration value for enabled.",
-      "FILTER": "Configuration value for filter.",
-      "MAPPING": "Configuration value for mapping.",
-      "NAME": "Human readable name for this entry.",
-      "PROCESSING_ORDER": "Configuration value for processing order.",
-      "USE_MEMORY_CACHE": "Configuration value for use memory cache.",
-      "WATCH": "Configuration value for watch."
+      "ENABLED": "If disabled, the processing for this target output is skipped.",
+      "FILTER": "Filter expression to select items for this target. \nExample:\n```yaml\nfilter: '(Group ~ \"^DE.*\") AND NOT (Title ~ \".*Shopping.*\")'\n```",
+      "MAPPING": "List of mapping IDs to apply to this target.",
+      "NAME": "Human readable name for this entry. Used for selective processing via -t CLI arg.",
+      "PROCESSING_ORDER": "Execution order of Filter, Rename and Map (e.g. frm, mrf). Default: frm",
+      "USE_MEMORY_CACHE": "If enabled, the playlist is cached in RAM to reduce disk overhead (increases memory usage).",
+      "WATCH": "List of group patterns to monitor for changes. Notifications are sent via configured messaging."
     },
     "CONFIG_TARGET_OPTIONS": {
-      "FORCE_REDIRECT": "Configuration value for force redirect.",
-      "IGNORE_LOGO": "Configuration value for ignore logo.",
-      "REMOVE_DUPLICATES": "Configuration value for remove duplicates.",
-      "SHARE_LIVE_STREAMS": "Configuration value for share live streams."
+      "FORCE_REDIRECT": "Forces redirect mode for this target's stream URLs.",
+      "IGNORE_LOGO": "Ignores logo attributes to avoid device-side caching issues.",
+      "REMOVE_DUPLICATES": "Attempts to remove duplicate stream entries by URL.",
+      "SHARE_LIVE_STREAMS": "Enables cross-client stream sharing to reduce bandwidth (consumes more memory)."
     },
     "CONTENT_SECURITY_POLICY_CONFIG": {
-      "CUSTOM_ATTRIBUTES": "Configuration value for custom attributes.",
-      "ENABLED": "Configuration value for enabled."
+      "CUSTOM_ATTRIBUTES": "Additional CSP attributes appended to the standard policy.",
+      "ENABLED": "Enables or disables Content Security Policy headers for the WebUI."
     },
     "DISCORD": {
       "TEMPLATE_MESSAGE": "Template message body for Discord notifications."
@@ -745,37 +745,37 @@
       "TEMPLATES": "Configuration value for templates.",
       "URL": "Target URL for this setting."
     },
-    "EPG_SOURCE": {
-      "LOGO_OVERRIDE": "Configuration value for logo override.",
-      "PRIORITY": "Configuration value for priority.",
-      "URL": "Target URL for this setting."
+    "EPG_CONFIG": {
+      "LOGO_OVERRIDE": "If enabled, channel logos are replaced by the provider's EPG logos if present.",
+      "PRIORITY": "Order of processing for multiple EPG sources. Lower numbers have higher priority.",
+      "URL": "URL of the XMLTV EPG file. Use 'auto' to use the provider's default EPG."
     },
     "FAILOVER_PATTERNS": {
-      "PATTERNS": "Configuration value for patterns."
+      "PATTERNS": "Regex patterns that trigger automatic provider failover when matched in error messages."
     },
     "GEO_IP_CONFIG": {
-      "ENABLED": "Configuration value for enabled.",
-      "URL": "Target URL for this setting."
+      "ENABLED": "If enabled, Geo-IP lookup is performed for incoming requests.",
+      "URL": "URL to download the Geo-IP database (e.g. MaxMind GeoLite2-City.mmdb)."
     },
-    "HD_HOME_RUN_CONFIG": {
-      "AUTH": "Configuration value for auth.",
-      "DEVICES": "Configuration value for devices.",
-      "ENABLED": "Configuration value for enabled.",
-      "PROPRIETARY_DISCOVERY": "Configuration value for proprietary discovery.",
-      "SSDP_DISCOVERY": "Configuration value for ssdp discovery."
+    "HDHOMERUN_CONFIG": {
+      "AUTH": "If enabled, HDHomeRun devices require authentication (username/password) for access.",
+      "DEVICES": "List of virtual HDHomeRun devices to emulate.",
+      "ENABLED": "Globally enables or disables HDHomeRun emulation.",
+      "PROPRIETARY_DISCOVERY": "If enabled, HDHomeRun devices are discoverable via SiliconDust's proprietary discovery protocol.",
+      "SSDP_DISCOVERY": "If enabled, HDHomeRun devices are discoverable via SSDP/UPnP."
     },
-    "HD_HOME_RUN_DEVICE_CONFIG": {
-      "DEVICE_TYPE": "Configuration value for device type.",
-      "DEVICE_UDN": "Configuration value for device udn.",
-      "FIRMWARE_NAME": "Configuration value for firmware name.",
-      "FIRMWARE_VERSION": "Configuration value for firmware version.",
-      "FRIENDLY_NAME": "Configuration value for friendly name.",
-      "MANUFACTURER": "Configuration value for manufacturer.",
-      "MODEL_NAME": "Configuration value for model name.",
-      "MODEL_NUMBER": "Configuration value for model number.",
-      "NAME": "Human readable name for this entry.",
-      "PORT": "Network port used by this setting.",
-      "TUNER_COUNT": "Configuration value for tuner count."
+    "HDHOMERUN_DEVICE_CONFIG": {
+      "DEVICE_ID": "8-char hex ID for SiliconDust protocol. Tuliprox generates one if empty or corrects invalid ones.",
+      "DEVICE_TYPE": "Emulated device model name (e.g. HDTC-2US).",
+      "DEVICE_UDN": "Unique Device Name (UUID) for SSDP/UPnP discovery. Recommended to leave default.",
+      "FIRMWARE_NAME": "Emulated firmware name reported to clients.",
+      "FIRMWARE_VERSION": "Emulated firmware version reported to clients.",
+      "FRIENDLY_NAME": "The human-readable name seen in apps like Plex (e.g. Tuliprox Tuner).",
+      "MANUFACTURER": "Hardware manufacturer name reported in discovery.",
+      "MODEL_NAME": "Hardware model name reported in discovery.",
+      "MODEL_NUMBER": "Hardware model number reported in discovery.",
+      "PORT": "TCP port for this device's HTTP API. Must be unique for each emulated tuner.",
+      "TUNER_COUNT": "Number of virtual tuners this device reports (default 1)."
     },
     "HD_HOME_RUN_TARGET_OUTPUT": {
       "DEVICE": "Configuration value for device.",
@@ -783,58 +783,58 @@
       "USE_OUTPUT": "Configuration value for use output."
     },
     "IP_CHECK_CONFIG": {
-      "PATTERN_IPV4": "Configuration value for pattern ipv4.",
-      "PATTERN_IPV6": "Configuration value for pattern ipv6.",
-      "URL": "Target URL for this setting.",
-      "URL_IPV4": "Configuration value for url ipv4.",
-      "URL_IPV6": "Configuration value for url ipv6."
+      "PATTERN_IPV4": "Optional regex to extract IPv4 address from the response (default matches standard decimal format).",
+      "PATTERN_IPV6": "Optional regex to extract IPv6 address from the response (default matches standard hex format).",
+      "URL": "URL for a service that returns the current public IP (IPv4 or IPv6).",
+      "URL_IPV4": "Dedicated URL to fetch the current public IPv4 address (e.g. https://ipinfo.io/ip).",
+      "URL_IPV6": "Dedicated URL to fetch the current public IPv6 address."
     },
     "LIBRARY_CONFIG": {
-      "ENABLED": "Configuration value for enabled.",
-      "SCAN_DIRECTORIES": "Configuration value for scan directories.",
-      "SUPPORTED_EXTENSIONS": "Configuration value for supported extensions."
+      "ENABLED": "Globally enables or disables the local media library feature.",
+      "SCAN_DIRECTORIES": "List of directories to scan for local movies and TV series records.",
+      "SUPPORTED_EXTENSIONS": "List of video file extensions (e.g. mp4, mkv) supported by the scanner."
     },
     "LIBRARY_METADATA_CONFIG": {
-      "FALLBACK_TO_FILENAME": "Configuration value for fallback to filename.",
-      "FORMATS": "Configuration value for formats.",
-      "PATH": "Path or path prefix used by this setting."
-    },
-    "LIBRARY_METADATA_READ_CONFIG": {
-      "JELLYFIN": "Configuration value for jellyfin.",
-      "KODI": "Configuration value for kodi.",
-      "PLEX": "Configuration value for plex."
+      "FALLBACK_TO_FILENAME": "If NFO or TMDB resolution fails, Tuliprox attempts to guess metadata from the filename.",
+      "FORMATS": "List of metadata formats to write (e.g. 'nfo' for Kodi-compatible sidecars).",
+      "PATH": "Directory where processed library metadata is stored."
     },
     "LIBRARY_PLAYLIST_CONFIG": {
-      "MOVIE_CATEGORY": "Configuration value for movie category.",
-      "SERIES_CATEGORY": "Configuration value for series category."
+      "MOVIE_CATEGORY": "Category name for local movies in the generated playlist (default 'Local Movies').",
+      "SERIES_CATEGORY": "Category name for local series in the generated playlist (default 'Local Series')."
+    },
+    "LIBRARY_READ_EXISTING": {
+      "JELLYFIN": "If enabled, reads existing .nfo files in Jellyfin format.",
+      "KODI": "If enabled, reads existing .nfo files in Kodi format.",
+      "PLEX": "If enabled, reads existing .nfo files in Plex format."
     },
     "LOG_CONFIG": {
-      "LOG_ACTIVE_USER": "Configuration value for log active user.",
-      "LOG_LEVEL": "Configuration value for log level.",
-      "SANITIZE_SENSITIVE_INFO": "Configuration value for sanitize sensitive info."
+      "LOG_ACTIVE_USER": "If enabled, the number of active reverse proxy clients is logged regularly.",
+      "LOG_LEVEL": "System log verbosity (trace, debug, info, warn, error). \nExample:\n```yaml\nlog_level: 'tuliprox=debug,info'\n```",
+      "SANITIZE_SENSITIVE_INFO": "If enabled, masks passwords and tokens in logs (default true)."
     },
     "M3U_TARGET_OUTPUT": {
-      "FILENAME": "Configuration value for filename.",
-      "FILTER": "Configuration value for filter.",
-      "INCLUDE_TYPE_IN_URL": "Configuration value for include type in url.",
-      "MASK_REDIRECT_URL": "Configuration value for mask redirect url."
+      "FILENAME": "The name of the generated M3U file (e.g. playlist.m3u).",
+      "FILTER": "Filter expression used to select which items are included in this M3U output.",
+      "INCLUDE_TYPE_IN_URL": "If true, the stream type (live/vod/series) is explicitly included in the generated URLs.",
+      "MASK_REDIRECT_URL": "If enabled, the real provider URL is masked behind a Tuliprox redirect link even in redirect mode."
     },
     "MAIN_CONFIG": {
-      "ACCEPT_INSECURE_SSL_CERTIFICATES": "Configuration value for accept insecure ssl certificates.",
-      "BACKUP_DIR": "Configuration value for backup dir.",
-      "CONFIG_HOT_RELOAD": "Configuration value for config hot reload.",
+      "ACCEPT_INSECURE_SSL_CERTIFICATES": "If enabled, SSL certificate validation is skipped for all outgoing requests.",
+      "BACKUP_DIR": "Filesystem directory used for configuration backups.",
+      "CONFIG_HOT_RELOAD": "If true, config files are reloaded automatically on change.",
       "CONNECT_TIMEOUT_SECS": "Maximum connect timeout in seconds.",
-      "CUSTOM_STREAM_RESPONSE_PATH": "Configuration value for custom stream response path.",
-      "DEFAULT_USER_AGENT": "Configuration value for default user agent.",
-      "DISK_BASED_PROCESSING": "Configuration value for disk based processing.",
-      "MAPPING_PATH": "Configuration value for mapping path.",
-      "TEMPLATE_PATH": "Configuration value for template path.",
-      "PROCESS_PARALLEL": "Configuration value for process parallel.",
+      "CUSTOM_STREAM_RESPONSE_PATH": "Path to a directory containing custom error response files for stream failures.",
+      "DEFAULT_USER_AGENT": "The User-Agent string used for outgoing requests if not specified elsewhere.",
+      "DISK_BASED_PROCESSING": "If enabled, input playlists are processed from disk to save RAM.\nIf you have enough RAM, you can let this option disabled to improve performance.",
+      "MAPPING_PATH": "Path or directory containing mapping configuration files.",
+      "TEMPLATE_PATH": "Path or directory containing template configuration files.",
+      "PROCESS_PARALLEL": "If enabled, input playlists are processed in parallel to reduce latency. However this is currently not supported.",
       "SLEEP_TIMER_MINS": "Configuration value for sleep timer mins.",
-      "UPDATE_ON_BOOT": "Configuration value for update on boot.",
-      "USER_ACCESS_CONTROL": "Configuration value for user access control.",
+      "UPDATE_ON_BOOT": "If enabled, Tuliprox triggers a full playlist update immediately upon startup. Helpful during initial setup, but usually set to false for stable operations.",
+      "USER_ACCESS_CONTROL": "If enabled, the attributes (if set)\n\n- expiration date,\n- status and\n- max_connections\n\nare checked to permit or deny access for api users.",
       "USER_CONFIG_DIR": "Configuration value for user config dir.",
-      "WORKING_DIR": "Base working directory used by tuliprox."
+      "WORKING_DIR": "The primary directory where Tuliprox stores its data files and databases."
     },
     "METADATA_UPDATE_CONFIG": {
       "RETRY_DELAY": "Minimum delay for transient requeue scheduling.\n\nUse this to prevent immediate hot-loop retries when tasks are temporarily deferred.\n\nUse duration units like `2s`, `5s`, `10s`.",
@@ -877,7 +877,8 @@
       "COOLDOWN": "Pause after a successful TMDB lookup that returned no match.\n\nThis prevents endless re-tries for titles that currently do not exist in TMDB.\n\nExamples: `1d`, `3d`, `7d`."
     },
     "MESSAGING_CONFIG": {
-      "NOTIFY_ON": "Configuration value for notify on."
+      "ENABLED": "Globally enables or disables outgoing notifications forTuliprox events.",
+      "NOTIFY_ON": "List of events to notify on (info, stats, error, watch)."
     },
     "PANEL": {
       "ALIAS_POOL_MAX": "Maximum alias pool size to maintain.",
@@ -903,23 +904,23 @@
       "USERNAME": "Login username for this account or service."
     },
     "PROXY_USER_CREDENTIALS": {
-      "COMMENT": "Configuration value for comment.",
-      "EPG_REQUEST_TIMESHIFT": "Configuration value for epg request timeshift.",
-      "EPG_TIMESHIFT": "Configuration value for epg timeshift.",
-      "EXP_DATE": "Configuration value for exp date.",
-      "MAX_CONNECTIONS": "Configuration value for max connections.",
-      "PASSWORD": "Password or credential used for this account or service.",
-      "PROXY": "Configuration value for proxy.",
-      "SERVER": "Configuration value for server.",
-      "STATUS": "Configuration value for status.",
-      "TOKEN": "API token used for authentication.",
-      "UI_ENABLED": "Configuration value for ui enabled.",
-      "USERNAME": "Login username for this account or service."
+      "COMMENT": "Optional private note for this user account.",
+      "EPG_REQUEST_TIMESHIFT": "Override for EPG timeshift from client request parameters.",
+      "EPG_TIMESHIFT": "TimeZone or offset (e.g. +2:00, Europe/Berlin) to adjust EPG times for this user.",
+      "EXP_DATE": "Unix timestamp or 'YYYY-MM-DD' when this user access expires.",
+      "MAX_CONNECTIONS": "Limit of simultaneous streams for this user. 0 = unlimited.",
+      "PASSWORD": "Access password for this user's playlist and streams.",
+      "PROXY": "Proxy mode: 'redirect' (direct to provider) or 'reverse' (through Tuliprox).",
+      "SERVER": "The server profile (from api-proxy.yml) to use for generating stream URLs.",
+      "STATUS": "Current account status (Active, Disabled, Expired).",
+      "TOKEN": "Unique API token that can be used instead of username/password.",
+      "UI_ENABLED": "If true, this user can log into the simplified WebUI bouquet editor (default true).",
+      "USERNAME": "The unique username for this credentials record."
     },
     "PUSHOVER_MESSAGING_CONFIG": {
-      "TOKEN": "API token used for authentication.",
-      "URL": "Target URL for this setting.",
-      "USER": "Configuration value for user."
+      "TOKEN": "The API Token/Key for your Pushover application.",
+      "URL": "The Pushover API URL (default: https://api.pushover.net/1/messages.json).",
+      "USER": "User or Group Key from your Pushover dashboard."
     },
     "RATE_LIMIT_CONFIG": {
       "BURST_SIZE": "Configuration value for burst size.",
@@ -934,15 +935,15 @@
     "REST": {
       "TEMPLATE_MESSAGE": "Template message body for REST notifications."
     },
-    "REST_MESSAGING_CONFIG": {
-      "HEADERS": "Configuration value for headers.",
-      "METHOD": "Configuration value for method.",
-      "TEMPLATES": "Configuration value for templates.",
-      "URL": "Target URL for this setting."
+    "REST_CONFIG": {
+      "HEADERS": "Custom HTTP headers to send with the request (JSON format).",
+      "METHOD": "HTTP method for the request (GET, POST, PUT, DELETE).",
+      "TEMPLATES": "Handlebars templates for REST message bodies.",
+      "URL": "Target URL for the REST endpoint."
     },
     "REVERSE_PROXY_CONFIG": {
-      "RESOURCE_REWRITE_DISABLED": "Configuration value for resource rewrite disabled.",
-      "REWRITE_SECRET": "Configuration value for rewrite secret."
+      "RESOURCE_REWRITE_DISABLED": "If enabled, URL rewriting for logos and EPG is disabled (also disables caching).",
+      "REWRITE_SECRET": "Persistent secret for stable resource URLs across restarts. \nExample:\n```yaml\nreverse_proxy:\n  rewrite_secret: A1B2C3D4E5F60718293A4B5C6D7E8F90\n```"
     },
     "REVERSE_PROXY_DISABLED_HEADER_CONFIG": {
       "CLOUDFLARE_HEADER": "Configuration value for cloudflare header.",
@@ -971,79 +972,89 @@
       "SIZE": "Configuration value for size."
     },
     "STREAM_CONFIG": {
-      "GRACE_PERIOD_HOLD_STREAM": "Configuration value for grace period hold stream.",
-      "GRACE_PERIOD_MILLIS": "Configuration value for grace period millis.",
-      "GRACE_PERIOD_TIMEOUT_SECS": "Configuration value for grace period timeout secs.",
-      "RETRY": "Configuration value for retry.",
-      "SHARED_BURST_BUFFER_MB": "Configuration value for shared burst buffer mb.",
-      "THROTTLE": "Configuration value for throttle.",
-      "THROTTLE_KBPS": "Configuration value for throttle kbps."
+      "GRACE_PERIOD_HOLD_STREAM": "If enabled, keeps the provider stream open briefly after the last client disconnects to allow quick reconnects.",
+      "GRACE_PERIOD_MILLIS": "Duration in milliseconds to allow exceeding max_connections during rapid channel switches (default 2000).",
+      "GRACE_PERIOD_TIMEOUT_SECS": "How many seconds to wait before terminating excess connections after grace period ends (default 5).",
+      "RETRY": "Number of times to retry connecting to the provider on initial stream failure.",
+      "SHARED_BURST_BUFFER_MB": "Initial buffer size in MB to provide immediate data to new clients joining a shared stream.",
+      "THROTTLE": "Enables bandwidth limiting for outgoing streams.",
+      "THROTTLE_KBPS": "Maximum bandwidth in Kilobits per second per stream."
     },
     "STRM_TARGET_OUTPUT": {
-      "ADD_QUALITY_TO_FILENAME": "Configuration value for add quality to filename.",
-      "CLEANUP": "Configuration value for cleanup.",
-      "DIRECTORY": "Filesystem directory used for output.",
-      "FILTER": "Configuration value for filter.",
-      "FLAT": "Configuration value for flat.",
-      "STRM_PROPS": "Configuration value for strm props.",
-      "STYLE": "Configuration value for style.",
-      "UNDERSCORE_WHITESPACE": "Configuration value for underscore whitespace.",
-      "USERNAME": "Login username for this account or service."
+      "ADD_QUALITY_TO_FILENAME": "If true, media quality (e.g. 1080p, 4K) is appended to the generated .strm filename.",
+      "CLEANUP": "If enabled, the destination directory is emptied before generating new .strm files. Use with caution!",
+      "DIRECTORY": "The filesystem path where .strm files and folder structures are created.",
+      "FILTER": "Optional filter expression to limit which items are generated as .strm files.",
+      "FLAT": "If true, creates a flat file structure instead of nested category folders.",
+      "STRM_PROPS": "List of Kodi stream properties (e.g. inputstream=...) to include in .strm files.",
+      "STYLE": "The naming convention used for media centers (kodi, plex, emby, jellyfin).",
+      "UNDERSCORE_WHITESPACE": "If enabled, replaces all spaces with underscores in filenames and paths.",
+      "USERNAME": "The user whose credentials will be embedded in the .strm URLs."
     },
     "TELEGRAM": {
       "TEMPLATE_MESSAGE": "Template message body for Telegram notifications."
     },
-    "TELEGRAM_MESSAGING_CONFIG": {
-      "BOT_TOKEN": "Configuration value for bot token.",
-      "CHAT_IDS": "Configuration value for chat ids.",
-      "MARKDOWN": "Configuration value for markdown.",
-      "TEMPLATES": "Configuration value for templates."
+    "TELEGRAM_CONFIG": {
+      "BOT_TOKEN": "The unique bot token received from @BotFather.",
+      "CHAT_IDS": "List of telegram chat IDs to receive notifications. Format: '<chat_id>' or '<chat_id>:<thread_id>'.",
+      "MARKDOWN": "If enabled, notifications are sent with MarkdownV2 formatting support (default true).",
+      "TEMPLATES": "Handlebars templates for Telegram message bodies."
     },
     "TRAKT_API_CONFIG": {
-      "API_KEY": "Configuration value for api key.",
-      "URL": "Target URL for this setting.",
-      "USER_AGENT": "Configuration value for user agent.",
-      "VERSION": "Configuration value for version."
+      "API_KEY": "Your Trakt.tv API client ID (Client ID).",
+      "URL": "Trakt API endpoint URL (default: https://api.trakt.tv).",
+      "USER_AGENT": "User-Agent string sent to Trakt API.",
+      "VERSION": "Trakt API version header (default: 2)."
     },
     "TRAKT_CONFIG": {
-      "ENABLED": "Configuration value for enabled."
+      "ENABLED": "Enables or disables synchronization with Trakt.tv lists."
     },
     "TRAKT_LIST_CONFIG": {
-      "CATEGORY_NAME": "Configuration value for category name.",
-      "CONTENT_TYPE": "Configuration value for content type.",
-      "FUZZY_MATCH_THRESHOLD": "Configuration value for fuzzy match threshold.",
-      "LIST_SLUG": "Configuration value for list slug.",
-      "USER": "Configuration value for user."
+      "CATEGORY_NAME": "The category name used in the playlist for items from this Trakt list.",
+      "CONTENT_TYPE": "Type of content to fetch from Trakt (movies or shows).",
+      "FUZZY_MATCH_THRESHOLD": "Similarity threshold for matching Trakt items to provider streams (0-100).",
+      "LIST_SLUG": "The slug (part of URL) of the Trakt list to fetch.",
+      "USER": "The Trakt username who owns the list."
     },
     "VIDEO_CONFIG": {
-      "EXTENSIONS": "Allowed file extensions for this feature.",
-      "WEB_SEARCH": "Configuration value for web search."
+      "EXTENSIONS": "Allowed video file extensions (e.g. mp4, mkv, avi). Used for category classification.",
+      "WEB_SEARCH": "Template URL for external web search (e.g. IMDb). {} is replaced by the title."
     },
     "VIDEO_DOWNLOAD_CONFIG": {
-      "DIRECTORY": "Filesystem directory used for output.",
-      "EPISODE_PATTERN": "Regular expression used to detect episode information.",
-      "HEADERS": "Configuration value for headers.",
-      "ORGANIZE_INTO_DIRECTORIES": "Configuration value for organize into directories."
+      "DIRECTORY": "The destination directory for downloaded video files.",
+      "EPISODE_PATTERN": "Regex with 'episode' capture group to clean up series filenames.\nExample:\n```yaml\nepisode_pattern: '.*(?P<episode>[Ss]\\\\d{1,2}.*?[Ee]\\\\d{1,2}).*'\n```",
+      "HEADERS": "Custom HTTP headers applied to download requests.",
+      "ORGANIZE_INTO_DIRECTORIES": "If enabled, creates subdirectories per movie or series during download."
     },
     "WEB_AUTH_CONFIG": {
-      "ENABLED": "Configuration value for enabled.",
-      "ISSUER": "Token issuer name used in WebUI auth tokens.",
-      "SECRET": "Signing secret used for WebUI auth tokens.",
-      "TOKEN_TTL_MINS": "Lifetime of generated auth tokens in minutes.",
-      "USERFILE": "Configuration value for userfile."
+      "ENABLED": "Enables or disables authentication for the Web-UI.",
+      "ISSUER": "The issuer name embedded in JWT auth tokens.",
+      "SECRET": "The secret key used to sign and verify JWT auth tokens. Changing this logs out everyone.",
+      "TOKEN_TTL_MINS": "How many minutes a login session remains valid (default 3600).",
+      "USERFILE": "Path to the text file containing WebUI users (default user.txt)."
+    },
+    "SMART_MATCH_CONFIG": {
+      "BEST_MATCH_THRESHOLD": "Score threshold (0-100) above which a match is considered 'perfect' and scanning stops (default 99).",
+      "ENABLED": "Enables fuzzy logic to automatically match channels with EPG IDs based on name similarity.",
+      "FUZZY_MATCHING": "If enabled, uses Levenshtein distance for string similarity instead of exact matching.",
+      "MATCH_THRESHOLD": "Minimum similarity score (0-100) required to accept an EPG match (default 80).",
+      "NAME_PREFIX": "Defines how country/category prefixes are handled (ignore, prefix, or suffix).",
+      "NAME_PREFIX_SEPARATOR": "List of characters (e.g. ':', '|') that separate channel prefixes from the main title.",
+      "NORMALIZE_REGEX": "Regular expression used to remove special characters before matching.",
+      "STRIP": "List of terms to ignore during matching (e.g. '4K', 'HD', 'HEVC')."
     },
     "WEB_UI_CONFIG": {
-      "ENABLED": "Configuration value for enabled.",
-      "KICK_SECS": "Configuration value for kick secs.",
-      "PATH": "Path or path prefix used by this setting.",
-      "PLAYER_SERVER": "Configuration value for player server.",
-      "USER_UI_ENABLED": "Configuration value for user ui enabled."
+      "ENABLED": "Enables or disables the central web-based management interface.",
+      "KICK_SECS": "Duration in seconds a kicked user is blocked from reconnecting (default 90).",
+      "PATH": "Optional path prefix (e.g. /ui) for reverse proxy integration.",
+      "PLAYER_SERVER": "Optional server override used specifically for the built-in web player.",
+      "USER_UI_ENABLED": "Enables or disables the simplified bouquet editor for standard users."
     },
     "XTREAM_TARGET_OUTPUT": {
-      "FILTER": "Configuration value for filter.",
-      "SKIP_LIVE_DIRECT_SOURCE": "Configuration value for skip live direct source.",
-      "SKIP_SERIES_DIRECT_SOURCE": "Configuration value for skip series direct source.",
-      "SKIP_VIDEO_DIRECT_SOURCE": "Configuration value for skip video direct source."
+      "FILTER": "Filter expression used to select which items are included in this Xtream output.",
+      "SKIP_LIVE_DIRECT_SOURCE": "If enabled, live streams are not linked directly but proxied/resolved.",
+      "SKIP_SERIES_DIRECT_SOURCE": "If enabled, series episodes are not linked directly but proxied/resolved.",
+      "SKIP_VIDEO_DIRECT_SOURCE": "If enabled, VOD files are not linked directly but proxied/resolved."
     }
   },
   "COUNTRY": {
