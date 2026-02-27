@@ -20,7 +20,7 @@ pub fn VersionActionCard(props: &VersionActionProps) -> Html {
 
     let handle_url = {
         Callback::from(move |_| {
-            let _ = window().open_with_url_and_target("https://github.com/euzu/tuliprox/releases", "_blank");
+            let _ = window().open_with_url_and_target("https://github.com/euzu/tuliprox/tags", "_blank");
         })
     };
 
