@@ -6,13 +6,9 @@ use crate::{
     config_field_child, edit_field_bool, edit_field_text, generate_form_reducer,
     i18n::use_translation,
 };
-use shared::{
-    error::TuliproxError,
-    info_err_res,
-    model::{
-        TargetOutputDto, TraktApiConfigDto, TraktConfigDto, TraktContentType, TraktListConfigDto, XtreamTargetOutputDto,
-    },
-};
+use shared::{concat_string, error::TuliproxError, info_err_res, model::{
+    TargetOutputDto, TraktApiConfigDto, TraktConfigDto, TraktContentType, TraktListConfigDto, XtreamTargetOutputDto,
+}};
 use std::{fmt::Display, rc::Rc, str::FromStr};
 use web_sys::MouseEvent;
 use yew::{
@@ -373,14 +369,16 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
         })
     };
 
+    let button_disabled = *show_trakt_list_form_state;
+
     html! {
         <div class="tp__source-editor-form tp__config-view-page">
           <div class="tp__source-editor-form__toolbar tp__form-page__toolbar">
-             <TextButton class="secondary" name="cancel_input"
+             <TextButton class={concat_string!("secondary", if button_disabled {" disabled"} else {""} )} name="cancel_input"
                 icon="Cancel"
                 title={ translate.t("LABEL.CANCEL")}
                 onclick={handle_cancel}></TextButton>
-             <TextButton class="primary" name="apply_input"
+             <TextButton class={concat_string!("primary", if button_disabled {" disabled"} else {""} )} name="apply_input"
                 icon="Accept"
                 title={ translate.t("LABEL.OK")}
                 onclick={handle_apply_target}></TextButton>

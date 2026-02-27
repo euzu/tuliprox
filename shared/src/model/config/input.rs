@@ -9,7 +9,7 @@ use crate::{
         default_resolve_background, default_resolve_delay_secs, default_xtream_live_stream_use_prefix,
         deserialize_timestamp, get_credentials_from_url_str, get_trimmed_string, is_blank_optional_string,
         is_default_probe_delay_secs, is_default_probe_live_interval, is_default_resolve_delay_secs, is_false, is_true,
-        is_zero_u16, parse_duration_seconds, parse_provider_scheme_url_parts, sanitize_sensitive_info,
+        is_zero_i16, is_zero_u16, parse_duration_seconds, parse_provider_scheme_url_parts, sanitize_sensitive_info,
         serialize_option_vec_flow_map_items, trim_last_slash, Internable, PROVIDER_SCHEME_PREFIX,
     },
 };
@@ -132,6 +132,8 @@ pub enum InputFetchMethod {
 impl InputFetchMethod {
     const GET_METHOD: &'static str = "GET";
     const POST_METHOD: &'static str = "POST";
+
+    pub fn is_default(value: &InputFetchMethod) -> bool { matches!(value, Self::GET) }
 }
 
 impl Display for InputFetchMethod {
@@ -311,7 +313,7 @@ pub struct ConfigInputAliasDto {
     pub username: Option<String>,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub password: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero_i16")]
     pub priority: i16,
     #[serde(default)]
     pub max_connections: u16,
@@ -370,11 +372,11 @@ pub struct ConfigInputDto {
     pub cache_duration_seconds: u64,
     #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "serialize_option_vec_flow_map_items")]
     pub aliases: Option<Vec<ConfigInputAliasDto>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero_i16")]
     pub priority: i16,
     #[serde(default)]
     pub max_connections: u16,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "InputFetchMethod::is_default")]
     pub method: InputFetchMethod,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub staged: Option<StagedInputDto>,

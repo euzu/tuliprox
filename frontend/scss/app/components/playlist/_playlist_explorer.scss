@@ -40,7 +40,7 @@ $series-backdrop-mobile-height: 150px;
   flex-flow: column;
   gap: var(--gap-default);
   box-sizing: border-box;
-  overflow: auto;
+  overflow: hidden;
   background-color: var(--card-background-color);
   color: var(--card-color);
   border: 1px solid var(--border-color);
@@ -94,6 +94,7 @@ $series-backdrop-mobile-height: 150px;
     flex-flow: column;
     gap: var(--gap-default);
     box-sizing: border-box;
+    overflow: auto;
   }
 
   &__group,

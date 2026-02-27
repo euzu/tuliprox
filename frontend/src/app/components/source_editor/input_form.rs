@@ -8,20 +8,13 @@ use crate::{
     edit_field_number_u32, edit_field_text, edit_field_text_option, generate_form_reducer, html_if,
     i18n::use_translation,
 };
-use shared::{
-    error::TuliproxError,
-    info_err_res,
-    model::{
-        ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, EpgConfigDto, EpgSourceDto, InputFetchMethod,
-        InputType, StagedInputDto,
-    },
-};
+use shared::{concat_string, error::TuliproxError, info_err_res, model::{
+    ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, EpgConfigDto, EpgSourceDto, InputFetchMethod,
+    InputType, StagedInputDto,
+}};
 use std::{collections::HashMap, fmt::Display, rc::Rc, str::FromStr};
 use web_sys::MouseEvent;
-use yew::{
-    component, html, use_context, use_effect_with, use_memo, use_reducer, use_state, Callback, Html, Properties,
-    UseReducerHandle,
-};
+use yew::{component, html, use_context, use_effect_with, use_memo, use_reducer, use_state, Callback, Html, Properties, UseReducerHandle};
 
 const LABEL_NAME: &str = "LABEL.NAME";
 const LABEL_INPUT_TYPE: &str = "LABEL.INPUT_TYPE";
@@ -779,31 +772,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     let render_edit_mode = || {
         html! {
             <div class="tp__source-editor-form__body">
-                // <div class="tp__tab-header">
-                // {
-                //     for [
-                //         InputFormPage::Main,
-                //         InputFormPage::Options,
-                //         InputFormPage::Staged,
-                //         InputFormPage::Advanced
-                //     ].iter().map(|page| {
-                //         let active = &*view_visible == page;
-                //         let on_tab_click = {
-                //             let on_tab_click = on_tab_click.clone();
-                //             let page = *page;
-                //             Callback::from(move |_| on_tab_click.emit(page))
-                //         };
-                //         html! {
-                //             <button
-                //                 class={classes!("tp__tab-button", if active { "active" } else { "" })}
-                //                 onclick={on_tab_click}
-                //             >
-                //                 { page.to_string() }
-                //             </button>
-                //         }
-                //     })
-                // }
-                // </div>
+
             <div class="tp__source-editor-form__body__pages">
                 <Panel value={InputFormPage::Main.to_string()} active={view_visible.to_string()}>
                 {render_input()}
@@ -849,14 +818,16 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         }
     };
 
+    let button_disabled = *show_alias_form_state || *show_epg_form_state;
+
     html! {
         <div class="tp__source-editor-form tp__config-view-page">
           <div class="tp__source-editor-form__toolbar tp__form-page__toolbar">
-             <TextButton class="secondary" name="cancel_input"
+             <TextButton class={concat_string!("secondary", if button_disabled {" disabled"} else {""} )} name="cancel_input"
                 icon="Cancel"
                 title={ translate.t("LABEL.CANCEL")}
                 onclick={handle_cancel}></TextButton>
-             <TextButton class="primary" name="apply_input"
+             <TextButton class={concat_string!("primary", if button_disabled {" disabled"} else {""} )} name="apply_input"
                 icon="Accept"
                 title={ translate.t("LABEL.OK")}
                 onclick={handle_apply_input}></TextButton>
