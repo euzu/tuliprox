@@ -59,6 +59,27 @@ macro_rules! apply_batch_aliases {
     }};
 }
 
+#[macro_export]
+macro_rules! check_provider_scheme_url {
+    ($url:expr, $provider_names:expr) => {
+        if $url.starts_with(PROVIDER_SCHEME_PREFIX) {
+            let (host, _path) = match parse_provider_scheme_url_parts(&$url) {
+                Ok(parts) => parts,
+                Err(err) => {
+                    return info_err_res!(
+                        "Malformed provider URL {}: {}",
+                        sanitize_sensitive_info(&$url),
+                        sanitize_sensitive_info(err.to_string().as_str())
+                    );
+                }
+            };
+            if !$provider_names.contains(host) {
+                return info_err_res!("Provider name {host} is not defined");
+            }
+        }
+    };
+}
+
 #[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq, Default)]
 pub enum InputType {
     #[serde(rename = "m3u")]
@@ -444,39 +465,10 @@ impl ConfigInputDto {
         }
 
         self.persist = get_trimmed_string(self.persist.as_deref());
-
-        if self.url.starts_with(PROVIDER_SCHEME_PREFIX) {
-            let (host, _path) = match parse_provider_scheme_url_parts(&self.url) {
-                Ok(parts) => parts,
-                Err(err) => {
-                    return info_err_res!(
-                        "Malformed provider URL {}: {}",
-                        sanitize_sensitive_info(&self.url),
-                        sanitize_sensitive_info(err.to_string().as_str())
-                    );
-                }
-            };
-            if !provider_names.contains(host) {
-                return info_err_res!("Provider name {host} is not defined");
-            }
-        }
+        check_provider_scheme_url!(self.url, provider_names);
 
         if let Some(staged_input) = self.staged.as_ref() {
-            if staged_input.url.starts_with(PROVIDER_SCHEME_PREFIX) {
-                let (host, _path) = match parse_provider_scheme_url_parts(&staged_input.url) {
-                    Ok(parts) => parts,
-                    Err(err) => {
-                        return info_err_res!(
-                            "Malformed provider URL {}: {}",
-                            sanitize_sensitive_info(&staged_input.url),
-                            sanitize_sensitive_info(err.to_string().as_str())
-                        );
-                    }
-                };
-                if !provider_names.contains(host) {
-                    return info_err_res!("Provider name {host} is not defined");
-                }
-            }
+            check_provider_scheme_url!(staged_input.url, provider_names);
         }
 
         let mut current_index = index + 1;
@@ -485,26 +477,22 @@ impl ConfigInputDto {
             let input_type = &self.input_type;
             for alias in aliases {
                 current_index = alias.prepare(current_index, input_type)?;
-                if alias.url.starts_with(PROVIDER_SCHEME_PREFIX) {
-                    let (host, _path) = match parse_provider_scheme_url_parts(&alias.url) {
-                        Ok(parts) => parts,
-                        Err(err) => {
-                            return info_err_res!(
-                                "Malformed provider URL {}: {}",
-                                sanitize_sensitive_info(&alias.url),
-                                sanitize_sensitive_info(err.to_string().as_str())
-                            );
-                        }
-                    };
-                    if !provider_names.contains(host) {
-                        return info_err_res!("Provider name {host} is not defined");
-                    }
-                }
+                check_provider_scheme_url!(alias.url.as_str(), provider_names);
             }
         }
 
         if let Some(panel_api) = self.panel_api.as_mut() {
             panel_api.prepare(&self.name)?;
+        }
+
+        // Validate provider:// URLs in EPG sources
+        if let Some(epg) = self.epg.as_ref() {
+            if let Some(sources) = epg.sources.as_ref() {
+                for epg_source in sources {
+                    let url = epg_source.url.trim();
+                    check_provider_scheme_url!(url, provider_names);
+                }
+            }
         }
 
         Ok(current_index)
