@@ -22,7 +22,7 @@ use std::{
     rc::Rc,
 };
 use wasm_bindgen::{prelude::Closure, JsCast};
-use web_sys::{Element, HtmlElement, MouseEvent};
+use web_sys::{Element, HtmlElement, MouseEvent, WheelEvent};
 use yew::{platform::spawn_local, prelude::*};
 
 const PENDING_LINE: &str = "pending-line";
@@ -1078,6 +1078,24 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         })
     };
 
+    let handle_canvas_wheel = {
+        let editor_state_ref = editor_state_ref.clone();
+        let move_blocks = move_blocks.clone();
+        Callback::from(move |e: WheelEvent| {
+            let mut editor_state = editor_state_ref.borrow_mut();
+            let delta_y = e.delta_y() as f32;
+            let (canvas_ox, canvas_oy) = editor_state.canvas_offset;
+            editor_state.canvas_offset = (canvas_ox, canvas_oy - delta_y);
+
+            let initial_positions: Vec<(BlockId, Position)> =
+                editor_state.blocks.iter().map(|b| (b.id, b.position)).collect();
+
+            // Use the move_blocks logic to update current positions in the DOM for smoothness
+            drop(editor_state);
+            move_blocks.emit((0.0, 0.0, (0.0, 0.0), initial_positions));
+        })
+    };
+
     // Ensure interaction state is cleaned up even when mouseup happens outside the canvas.
     {
         let editor_state_ref = editor_state_ref.clone();
@@ -1332,6 +1350,7 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                 ondragend={handle_drag_end.clone()}
                 ondragover={handle_drag_over.clone()}
                 onmousemove={handle_canvas_mouse_move.clone()}
+                onwheel={handle_canvas_wheel.clone()}
                 onmousedown={handle_canvas_mouse_down.clone()}
                 onmouseup={handle_canvas_mouse_up.clone()}
                 oncontextmenu={handle_canvas_right_click.clone()}>

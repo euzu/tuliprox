@@ -88,3 +88,8 @@ $form-width: 520px;
     }
   }
 }
+
+.tp__source-editor-form.disabled {
+  pointer-events: none;
+  opacity: 0.3;
+}

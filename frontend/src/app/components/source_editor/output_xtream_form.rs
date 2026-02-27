@@ -320,6 +320,8 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
         }
     };
 
+    let button_disabled = *show_trakt_list_form_state;
+
     let render_sidebar = || {
         let main_class = format!(
             "tp__app-sidebar-menu--{}{}",
@@ -332,7 +334,7 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
             if *view_visible == XtreamOutputFormPage::Trakt { " active" } else { "" }
         );
         html! {
-        <div class="tp__source-editor-form__sidebar">
+        <div class={concat_string!("tp__source-editor-form__sidebar", if button_disabled {" disabled"} else {""})}>
             <IconButton class={main_class} icon="Settings" hint={translate.t(LABEL_MAIN)} name={XtreamOutputFormPage::Main.to_string()} onclick={&handle_menu_click}></IconButton>
             <IconButton class={trakt_class} icon="Trakt" hint={translate.t(LABEL_TRAKT)} name={XtreamOutputFormPage::Trakt.to_string()} onclick={&handle_menu_click}></IconButton>
         </div>
@@ -373,8 +375,6 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
             source_editor_ctx.edit_mode.set(EditMode::Inactive);
         })
     };
-
-    let button_disabled = *show_trakt_list_form_state;
 
     html! {
         <div class="tp__source-editor-form tp__config-view-page">
