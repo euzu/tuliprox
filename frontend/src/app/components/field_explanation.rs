@@ -91,9 +91,11 @@ pub fn show_field_explanation(field_id: &str, field_label: &str, dialog: &Dialog
                 // Inside a code block
                 let (_, mut code) = part.split_once('\n').unwrap_or(("", part));
                 code = code.trim_matches(|c| c == '\n' || c == '\r');
-                elements.push(html! {
-                    <pre><code>{ code }</code></pre>
-                });
+                if !code.trim().is_empty() {
+                    elements.push(html! {
+                        <pre><code>{ code }</code></pre>
+                    });
+                }
             } else {
                 // Regular text
                 let text = part.replace("\r\n", "\n");

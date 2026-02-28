@@ -235,7 +235,7 @@ pub fn MessagingConfigView() -> Html {
              { render_templates_view(&entry.templates) }
           </Card>
         },
-         None => html! {
+        None => html! {
           <Card class="tp__config-view__card">
              <h1>{translate.t(LABEL_TELEGRAM)}</h1>
              { config_field_empty!(translate.t(LABEL_BOT_TOKEN), "TELEGRAM_CONFIG.BOT_TOKEN") }
@@ -353,7 +353,7 @@ pub fn MessagingConfigView() -> Html {
                 html! {
                     <TextArea
                         label={kind_str}
-                        field_id={Some("TELEGRAM_CONFIG.TEMPLATES")}
+                        field_id={Some(format!("TELEGRAM_CONFIG.TEMPLATES.{}", kind.to_string().to_uppercase()))}
                         value={current_val}
                         collapse_on_empty={true}
                         on_change={Callback::from(move |val: String| {
@@ -379,7 +379,7 @@ pub fn MessagingConfigView() -> Html {
                 html! {
                     <TextArea
                         label={kind_str}
-                        field_id={Some("REST_MESSAGING_CONFIG.TEMPLATES")}
+                        field_id={Some(format!("REST_MESSAGING_CONFIG.TEMPLATES.{}", kind.to_string().to_uppercase()))}
                         value={current_val}
                         collapse_on_empty={true}
                         on_change={Callback::from(move |val: String| {
@@ -405,7 +405,7 @@ pub fn MessagingConfigView() -> Html {
                 html! {
                     <TextArea
                         label={kind_str}
-                        field_id={Some("DISCORD_MESSAGING_CONFIG.TEMPLATES")}
+                        field_id={Some(format!("DISCORD_MESSAGING_CONFIG.TEMPLATES.{}", kind.to_string().to_uppercase()))}
                         value={current_val}
                         collapse_on_empty={true}
                         on_change={Callback::from(move |val: String| {
