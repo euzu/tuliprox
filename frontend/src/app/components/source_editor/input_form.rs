@@ -481,7 +481,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 <div class="tp__config-view__cols-2">
                 { edit_field_text_option!(staged_input_state, translate.t(LABEL_USERNAME), username, StagedInputFormAction::Username) }
                 { edit_field_text_option!(staged_input_state, translate.t(LABEL_PASSWORD), password, StagedInputFormAction::Password, true) }
-                { config_field_child!(translate.t(LABEL_FETCH_METHOD), {
+                { config_field_child!(translate.t(LABEL_FETCH_METHOD), "INPUT_FORM.FETCH_METHOD", {
 
                    html! {
                        <RadioButtonGroup
@@ -495,7 +495,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                         selected={staged_method_selection}
                     />
                }})}
-               { config_field_child!(translate.t(LABEL_INPUT_TYPE), {
+               { config_field_child!(translate.t(LABEL_INPUT_TYPE), "INPUT_FORM.INPUT_TYPE", {
                    html! {
                        <Select
                         name={"staged_input_types"}
@@ -545,7 +545,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                  { edit_field_number_i16!(input_form_state, translate.t(LABEL_PRIORITY), priority, ConfigInputFormAction::Priority) }
                  { edit_field_date!(input_form_state, translate.t(LABEL_EXP_DATE), exp_date, ConfigInputFormAction::ExpDate) }
                  { edit_field_text_option!(input_form_state, translate.t(LABEL_CACHE_DURATION), cache_duration, ConfigInputFormAction::CacheDuration) }
-                 { config_field_child!(translate.t(LABEL_FETCH_METHOD), {
+                 { config_field_child!(translate.t(LABEL_FETCH_METHOD), "INPUT_FORM.FETCH_METHOD", {
                    html! {
                        <RadioButtonGroup
                         multi_select={false} none_allowed={false}
@@ -580,7 +580,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                         on_cancel={handle_close_add_alias_item}
                     />
               } else {
-                  { config_field_child!(translate.t(LABEL_ALIASES), {
+                  { config_field_child!(translate.t(LABEL_ALIASES), "INPUT_FORM.ALIASES", {
                       let aliases_list = aliases.clone();
                       let alias_count = aliases_list.len();
                       html! {
@@ -667,7 +667,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                     />
                } else  {
                   // Headers Section
-                  { config_field_child!(translate.t(LABEL_HEADERS), {
+                  { config_field_child!(translate.t(LABEL_HEADERS), "INPUT_FORM.HEADERS", {
                       let headers_set = headers.clone();
                       html! {
                         <KeyValueEditor
@@ -683,7 +683,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                   })}
 
                   // EPG Sources Section
-                  { config_field_child!(translate.t(LABEL_EPG_SOURCES), {
+                  { config_field_child!(translate.t(LABEL_EPG_SOURCES), "INPUT_FORM.EPG_SOURCES", {
                       let epg_sources_list = epg_sources.clone();
 
                       html! {

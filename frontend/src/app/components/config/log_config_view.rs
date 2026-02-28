@@ -75,7 +75,7 @@ pub fn LogConfigView() -> Html {
            </Card>
             <Card class="tp__config-view__card">
             <div class="tp__log-config-view__header tp__config-view-page__header">
-                { config_field_child!(translate.t(LABEL_LOG_LEVEL), {
+                { config_field_child!(translate.t(LABEL_LOG_LEVEL), "LOG_CONFIG.LOG_LEVEL", {
                     match log_state.form.log_level.as_ref() {
                         Some(level) => html! { <div><Chip label={level.to_string()} /></div> },
                         None => html! { <div><Chip class="tp__text-button" label={"INFO".to_string()} /></div> },
@@ -98,7 +98,7 @@ pub fn LogConfigView() -> Html {
             { edit_field_bool!(form_state, translate.t(LABEL_LOG_SANITIZE_SENSITIVE_INFO),  sanitize_sensitive_info, LogConfigFormAction::SanitizeSensitiveInfo) }
             </Card>
             <Card class="tp__config-view__card">
-            { config_field_child!(translate.t(LABEL_LOG_LEVEL), {
+            { config_field_child!(translate.t(LABEL_LOG_LEVEL), "LOG_CONFIG.LOG_LEVEL", {
                html! { <RadioButtonGroup
                     multi_select={false} none_allowed={true}
                     on_select={Callback::from(move |selections: Rc<Vec<String>>| {

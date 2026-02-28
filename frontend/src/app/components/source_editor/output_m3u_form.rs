@@ -60,7 +60,7 @@ pub fn M3uTargetOutputView(props: &M3uTargetOutputViewProps) -> Html {
                 { edit_field_text_option!(output_form_state, translate.t(LABEL_FILENAME), filename, M3uTargetOutputFormAction::Filename) }
                 { edit_field_bool!(output_form_state, translate.t(LABEL_INCLUDE_TYPE_IN_URL), include_type_in_url, M3uTargetOutputFormAction::IncludeTypeInUrl) }
                 { edit_field_bool!(output_form_state, translate.t(LABEL_MASK_REDIRECT_URL), mask_redirect_url, M3uTargetOutputFormAction::MaskRedirectUrl) }
-                { config_field_child!(translate.t(LABEL_FILTER), {
+                { config_field_child!(translate.t(LABEL_FILTER), "OUTPUT_M3U_FORM.FILTER", {
                        html! {
                             <FilterInput filter={output_form_state_1.form.filter.clone()} on_change={Callback::from(move |new_filter| {
                                 output_form_state_1.dispatch(M3uTargetOutputFormAction::Filter(new_filter));

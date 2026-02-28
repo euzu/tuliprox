@@ -471,7 +471,7 @@ pub fn ReverseProxyConfigView() -> Html {
                         format_float_localized(resource_retry_state.form.backoff_multiplier, 4, true)
                     )
                 }
-                { config_field_child!(translate.t(LABEL_FAILOVER_REDIRECT_PATTERNS), {
+                { config_field_child!(translate.t(LABEL_FAILOVER_REDIRECT_PATTERNS), "REVERSE_PROXY_CONFIG.FAILOVER_REDIRECT_PATTERNS", {
                     html! {
                         <div class="tp__config-view__tags">
                         if patterns.is_empty() {

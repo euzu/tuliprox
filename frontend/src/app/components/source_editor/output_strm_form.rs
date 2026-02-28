@@ -141,7 +141,7 @@ pub fn StrmTargetOutputView(props: &StrmTargetOutputViewProps) -> Html {
             <Card class="tp__config-view__card">
                 { edit_field_text!(output_form_state, translate.t(LABEL_DIRECTORY), directory, StrmTargetOutputFormAction::Directory) }
                 { edit_field_text_option!(output_form_state, translate.t(LABEL_USERNAME), username, StrmTargetOutputFormAction::Username) }
-                { config_field_child!(translate.t(LABEL_EXPORT_STYLE), {
+                { config_field_child!(translate.t(LABEL_EXPORT_STYLE), "OUTPUT_STRM_FORM.EXPORT_STYLE", {
                     html! {
                         <Select
                             name={"export_style"}
@@ -165,7 +165,7 @@ pub fn StrmTargetOutputView(props: &StrmTargetOutputViewProps) -> Html {
                         />
                     }
                 })}
-                { config_field_child!(translate.t(LABEL_FILTER), {
+                { config_field_child!(translate.t(LABEL_FILTER), "OUTPUT_STRM_FORM.FILTER", {
                    html! {
                         <FilterInput filter={output_form_state_2.form.filter.clone()} on_change={Callback::from(move |new_filter| {
                             output_form_state_2.dispatch(StrmTargetOutputFormAction::Filter(new_filter));

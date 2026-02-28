@@ -69,7 +69,7 @@ pub fn HdHomeRunTargetOutputView(props: &HdHomeRunTargetOutputViewProps) -> Html
             <Card class="tp__config-view__card">
                 { edit_field_text!(output_form_state, translate.t(LABEL_DEVICE), device, HdHomeRunTargetOutputFormAction::Device) }
                 { edit_field_text!(output_form_state, translate.t(LABEL_USERNAME), username, HdHomeRunTargetOutputFormAction::Username) }
-                { config_field_child!(translate.t(LABEL_USE_OUTPUT), {
+                { config_field_child!(translate.t(LABEL_USE_OUTPUT), "OUTPUT_HDHOMERUN_FORM.USE_OUTPUT", {
                     html! {
                         <Select
                             name={"use_output"}

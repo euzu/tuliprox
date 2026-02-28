@@ -66,7 +66,7 @@ pub fn EpgConfigView(props: &EpgConfigViewProps) -> Html {
                   { config_field!(entry, translate.t("LABEL.BEST_MATCH_THRESHOLD"), best_match_threshold) }
                   { config_field_optional!(entry, translate.t("LABEL.NORMALIZE_REGEX"), normalize_regex) }
                   { config_field!(entry, translate.t("LABEL.NAME_PREFIX"), name_prefix) }
-                  { config_field_child!(translate.t("LABEL.NAME_PREFIX_SEPARATOR"), {
+                  { config_field_child!(translate.t("LABEL.NAME_PREFIX_SEPARATOR"), "EPG_CONFIG.NAME_PREFIX_SEPARATOR", {
                         html! {
                             <div class="tp__config-view__tags">
                                 {
@@ -87,7 +87,7 @@ pub fn EpgConfigView(props: &EpgConfigViewProps) -> Html {
                             </div>
                         }
                     })}
-                  { config_field_child!(translate.t("LABEL.STRIP"), {
+                  { config_field_child!(translate.t("LABEL.STRIP"), "EPG_CONFIG.STRIP", {
                         html! {
                             <div class="tp__config-view__tags">
                                 {

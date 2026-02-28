@@ -99,7 +99,7 @@ pub fn VideoConfigView() -> Html {
     let render_extensions = |extensions: &Vec<String>| {
         html! {
             <Card>
-            { config_field_child!(translate.t(LABEL_EXTENSIONS), {
+            { config_field_child!(translate.t(LABEL_EXTENSIONS), "VIDEO_CONFIG.EXTENSIONS", {
                html! {
                  <div class="tp__config-view__tags">
                  for t in extensions.iter() { <Chip label={t.clone()} /> }
@@ -116,7 +116,7 @@ pub fn VideoConfigView() -> Html {
                 { config_field_bool!(download_state.form, translate.t(LABEL_ORGANIZE_INTO_DIRECTORIES), organize_into_directories) }
                 { config_field_optional!(download_state.form, translate.t(LABEL_DIRECTORY), directory) }
                 { config_field_optional!(download_state.form, translate.t(LABEL_EPISODE_PATTERN), episode_pattern) }
-                { config_field_child!(translate.t(LABEL_HEADERS), {
+                { config_field_child!(translate.t(LABEL_HEADERS), "VIDEO_CONFIG.HEADERS", {
                     html! {
                         <div class="tp__config-view__tags">
                           <ul>

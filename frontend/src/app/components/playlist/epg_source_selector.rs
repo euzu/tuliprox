@@ -168,7 +168,7 @@ pub fn EpgSourceSelector(props: &EpgSourceSelectorProps) -> Html {
                   <div class="tp__playlist-source-selector__source-custom-body">
                      <Input
                          label={translate.t("LABEL.URL")}
-                         field_id={Some("PLAYLIST_EPG_SOURCE_SELECTOR_URL".to_string())}
+                         field_id={Some("PLAYLIST_EPG_SOURCE_SELECTOR.URL".to_string())}
                          input_ref={url_ref}
                          name="url"
                          autocomplete={true}

@@ -652,12 +652,7 @@
     "BRICK_OutputStrm": "STRM"
   },
   "EXPLANATION": {
-    "DEFAULT": "No dedicated explanation is available for this field yet.",
-    "RESOLVE": "Resolve controls metadata lookup retries.\n\nUse this group to tune how often failed metadata lookups are retried and how long the system should wait between retries. Duration fields support suffixes like '30s', '10m', '1h', '7d'.",
-    "PROBE": "Probe controls technical stream analysis retries.\n\nUse this group to define retry steps, retry limits, and cooldown behavior for FFprobe-based stream checks.",
-    "FFPROBE": "FFprobe controls how stream analysis is performed.\n\nTurns technical stream analysis on or off and configures timeouts and probe depths. \nExample:\n```yaml\nffprobe:\n  enabled: true\n  timeout: 60\n  analyze_duration: 10s\n  probe_size: 10MB\n```",
     "API_PROXY_CONFIG": {
-      "SERVER": "Configuration value for server.",
       "USE_USER_DB": "If enabled, API proxy users are loaded from the user database."
     },
     "API_PROXY_SERVER_INFO": {
@@ -669,13 +664,16 @@
       "PROTOCOL": "Protocol used by this API proxy server endpoint (for example http or https).",
       "TIMEZONE": "Timezone applied by this proxy server profile for time-aware responses."
     },
+    "Backoff jitter percent must be between 0 and 95": {
+      "": "No dedicated explanation is available for this field yet."
+    },
     "CACHE_CONFIG": {
       "DIR": "Filesystem directory where playlist and metadata caches are stored.",
       "ENABLED": "Globally enables or disables disk caching for input resources.",
       "SIZE": "Maximum size (in bytes) allowed for the cache directory."
     },
     "CONFIG_API": {
-      "HOST": "Hostname or IP where the tuliprox API listens. Default: localhost",
+      "HOST": "Host where the tuliprox API listens. Default: 0.0.0.0",
       "PORT": "TCP port where the tuliprox API listens. Default: 8901",
       "WEB_ROOT": "Filesystem path that serves the frontend assets for the API endpoint. Default: ./web"
     },
@@ -684,21 +682,19 @@
       "ENABLED": "If disabled, the processing for this input is skipped.",
       "EXP_DATE": "Manual expiration date for this input (YYYY-MM-DD HH:MM:SS format or Unix timestamp).",
       "MAX_CONNECTIONS": "Limit of concurrent connections for this input. 0 means unlimited.",
-      "METHOD": "HTTP method used for downloading the playlist (GET or POST).",
       "NAME": "Human readable name for this entry. Must be unique.",
       "PASSWORD": "Password or credential used for this account or service.",
-      "PERSIST": "Filename pattern to persist the raw input to disk (e.g. ./playlist_{}.m3u).",
       "PRIORITY": "The order of processing. Lower numbers mean higher priority (e.g. -1 is higher than 0).",
       "URL": "Target URL for this input. Supports provider:// scheme for failover.",
       "USERNAME": "Login username for this account or service."
     },
     "CONFIG_INPUT_ALIAS": {
-      "ENABLED": "Configuration value for enabled.",
-      "EXP_DATE": "Configuration value for exp date.",
-      "MAX_CONNECTIONS": "Configuration value for max connections.",
+      "ENABLED": "Enables or disables this specific alias.",
+      "EXP_DATE": "Expiration date for this alias connection.",
+      "MAX_CONNECTIONS": "Maximum number of simultaneous connections allowed for this specific alias.",
       "NAME": "Human readable name for this entry.",
       "PASSWORD": "Password or credential used for this account or service.",
-      "PRIORITY": "Configuration value for priority.",
+      "PRIORITY": "Priority of this alias when failing over. Lower number means higher priority.",
       "URL": "Target URL for this setting.",
       "USERNAME": "Login username for this account or service."
     },
@@ -721,66 +717,57 @@
     },
     "CONFIG_TARGET": {
       "ENABLED": "If disabled, the processing for this target output is skipped.",
-      "FILTER": "Filter expression to select items for this target. \nExample:\n```yaml\nfilter: '(Group ~ \"^DE.*\") AND NOT (Title ~ \".*Shopping.*\")'\n```",
       "MAPPING": "List of mapping IDs to apply to this target.",
       "NAME": "Human readable name for this entry. Used for selective processing via -t CLI arg.",
-      "PROCESSING_ORDER": "Execution order of Filter, Rename and Map (e.g. frm, mrf). Default: frm",
       "USE_MEMORY_CACHE": "If enabled, the playlist is cached in RAM to reduce disk overhead (increases memory usage).",
       "WATCH": "List of group patterns to monitor for changes. Notifications are sent via configured messaging."
-    },
-    "CONFIG_TARGET_OPTIONS": {
-      "FORCE_REDIRECT": "Forces redirect mode for this target's stream URLs.",
-      "IGNORE_LOGO": "Ignores logo attributes to avoid device-side caching issues.",
-      "REMOVE_DUPLICATES": "Attempts to remove duplicate stream entries by URL.",
-      "SHARE_LIVE_STREAMS": "Enables cross-client stream sharing to reduce bandwidth (consumes more memory)."
     },
     "CONTENT_SECURITY_POLICY_CONFIG": {
       "CUSTOM_ATTRIBUTES": "Additional CSP attributes appended to the standard policy.",
       "ENABLED": "Enables or disables Content Security Policy headers for the WebUI."
     },
+    "DEFAULT": "No dedicated explanation is available for this field yet.",
     "DISCORD": {
       "TEMPLATE_MESSAGE": "Template message body for Discord notifications."
     },
-    "DISCORD_MESSAGING_CONFIG": {
-      "TEMPLATES": "Configuration value for templates.",
-      "URL": "Target URL for this setting."
-    },
     "EPG_CONFIG": {
-      "LOGO_OVERRIDE": "If enabled, channel logos are replaced by the provider's EPG logos if present.",
-      "PRIORITY": "Order of processing for multiple EPG sources. Lower numbers have higher priority.",
-      "URL": "URL of the XMLTV EPG file. Use 'auto' to use the provider's default EPG."
+      "NAME_PREFIX_SEPARATOR": "List of characters (e.g. ':', '|') that separate channel prefixes from the main title during Smart Match.",
+      "STRIP": "Terms to ignore during EPG Smart Matching (e.g. '4K', 'HD', 'HEVC')."
     },
-    "FAILOVER_PATTERNS": {
-      "PATTERNS": "Regex patterns that trigger automatic provider failover when matched in error messages."
+    "EPG_SOURCE": {
+      "LOGO_OVERRIDE": "Overrides the channel logos provided by the EPG with the ones from the playlist or external mapping.",
+      "PRIORITY": "Determines which EPG source is preferred if multiple sources provide data for the same channel.",
+      "URL": "The URL of the XMLTV EPG file."
+    },
+    "FFPROBE": "FFprobe controls how stream analysis is performed.\n\nTurns technical stream analysis on or off and configures timeouts and probe depths. \nExample:\n```\nffprobe:\n  enabled: true\n  timeout: 60\n  analyze_duration: 10s\n  probe_size: 10MB\n```",
+    "FFPROBE_CONFIG": {
+      "ANALYZE_DURATION": "How much playback time FFprobe is allowed to inspect for VOD/Series.\n\nHigher values can find more details but take longer.\n\nExamples: `10s`, `30s`, `1m`.",
+      "ENABLED": "Turns FFprobe stream analysis on or off.\n\nWhen off, the app skips technical probing (video/audio details).",
+      "LIVE_ANALYZE_DURATION": "How much playback time FFprobe may inspect for live streams.\n\nLive checks are usually faster with small values.\n\nExamples: `2s`, `5s`, `10s`.",
+      "LIVE_PROBE_SIZE": "How much data FFprobe may read for live streams.\n\nSmaller values reduce load and make checks faster.\n\nExamples: `512KB`, `1MB`, `5MB`.",
+      "PROBE_SIZE": "How much data FFprobe may read for VOD/Series.\n\nHigher values can improve detection but use more bandwidth.\n\nExamples: `1MB`, `5MB`, `10MB`.",
+      "TIMEOUT": "Maximum seconds one FFprobe run may take.\n\nIf the stream is too slow, probing stops when this limit is reached.\n\nLeave empty to use the default (60 seconds)."
     },
     "GEO_IP_CONFIG": {
       "ENABLED": "If enabled, Geo-IP lookup is performed for incoming requests.",
       "URL": "URL to download the Geo-IP database (e.g. MaxMind GeoLite2-City.mmdb)."
     },
-    "HDHOMERUN_CONFIG": {
-      "AUTH": "If enabled, HDHomeRun devices require authentication (username/password) for access.",
-      "DEVICES": "List of virtual HDHomeRun devices to emulate.",
-      "ENABLED": "Globally enables or disables HDHomeRun emulation.",
-      "PROPRIETARY_DISCOVERY": "If enabled, HDHomeRun devices are discoverable via SiliconDust's proprietary discovery protocol.",
-      "SSDP_DISCOVERY": "If enabled, HDHomeRun devices are discoverable via SSDP/UPnP."
-    },
-    "HDHOMERUN_DEVICE_CONFIG": {
-      "DEVICE_ID": "8-char hex ID for SiliconDust protocol. Tuliprox generates one if empty or corrects invalid ones.",
-      "DEVICE_TYPE": "Emulated device model name (e.g. HDTC-2US).",
-      "DEVICE_UDN": "Unique Device Name (UUID) for SSDP/UPnP discovery. Recommended to leave default.",
-      "FIRMWARE_NAME": "Emulated firmware name reported to clients.",
-      "FIRMWARE_VERSION": "Emulated firmware version reported to clients.",
-      "FRIENDLY_NAME": "The human-readable name seen in apps like Plex (e.g. Tuliprox Tuner).",
-      "MANUFACTURER": "Hardware manufacturer name reported in discovery.",
-      "MODEL_NAME": "Hardware model name reported in discovery.",
-      "MODEL_NUMBER": "Hardware model number reported in discovery.",
-      "PORT": "TCP port for this device's HTTP API. Must be unique for each emulated tuner.",
-      "TUNER_COUNT": "Number of virtual tuners this device reports (default 1)."
+    "HD_HOME_RUN_CONFIG": {
+      "AUTH": "Authentication string or token required for HDHomeRun API access.",
+      "ENABLED": "Enables the HDHomeRun target output emulation.",
+      "PROPRIETARY_DISCOVERY": "Enables proprietary HDHomeRun discovery protocols.",
+      "SSDP_DISCOVERY": "Enables standard SSDP discovery for HDHomeRun emulation on the local network."
     },
     "HD_HOME_RUN_TARGET_OUTPUT": {
-      "DEVICE": "Configuration value for device.",
-      "USERNAME": "Login username for this account or service.",
-      "USE_OUTPUT": "Configuration value for use output."
+      "DEVICE": "The virtual Device ID exposed by the HDHomeRun emulation.",
+      "USERNAME": "Login username for this account or service."
+    },
+    "INPUT_FORM": {
+      "ALIASES": "Optional aliases used to manage multiple lines from the same provider.",
+      "EPG_SOURCES": "Associated EPG (Electronic Program Guide) sources for this input.",
+      "FETCH_METHOD": "HTTP method used to retrieve the input (e.g., GET, POST).",
+      "HEADERS": "Custom HTTP headers sent when retrieving the input playlist.",
+      "INPUT_TYPE": "Defines the streaming protocol or source format (e.g. xtream, m3u)."
     },
     "IP_CHECK_CONFIG": {
       "PATTERN_IPV4": "Optional regex to extract IPv4 address from the response (default matches standard decimal format).",
@@ -791,31 +778,28 @@
     },
     "LIBRARY_CONFIG": {
       "ENABLED": "Globally enables or disables the local media library feature.",
-      "SCAN_DIRECTORIES": "List of directories to scan for local movies and TV series records.",
+      "FORMATS": "List of metadata formats to write (e.g. 'nfo' for Kodi-compatible sidecars).",
       "SUPPORTED_EXTENSIONS": "List of video file extensions (e.g. mp4, mkv) supported by the scanner."
     },
     "LIBRARY_METADATA_CONFIG": {
       "FALLBACK_TO_FILENAME": "If NFO or TMDB resolution fails, Tuliprox attempts to guess metadata from the filename.",
-      "FORMATS": "List of metadata formats to write (e.g. 'nfo' for Kodi-compatible sidecars).",
       "PATH": "Directory where processed library metadata is stored."
+    },
+    "LIBRARY_METADATA_READ_CONFIG": {
+      "JELLYFIN": "Reads NFO metadata files formatted for Jellyfin.",
+      "PLEX": "Reads XML metadata files or sidecars formatted for Plex."
     },
     "LIBRARY_PLAYLIST_CONFIG": {
       "MOVIE_CATEGORY": "Category name for local movies in the generated playlist (default 'Local Movies').",
       "SERIES_CATEGORY": "Category name for local series in the generated playlist (default 'Local Series')."
     },
-    "LIBRARY_READ_EXISTING": {
-      "JELLYFIN": "If enabled, reads existing .nfo files in Jellyfin format.",
-      "KODI": "If enabled, reads existing .nfo files in Kodi format.",
-      "PLEX": "If enabled, reads existing .nfo files in Plex format."
-    },
     "LOG_CONFIG": {
       "LOG_ACTIVE_USER": "If enabled, the number of active reverse proxy clients is logged regularly.",
-      "LOG_LEVEL": "System log verbosity (trace, debug, info, warn, error). \nExample:\n```yaml\nlog_level: 'tuliprox=debug,info'\n```",
-      "SANITIZE_SENSITIVE_INFO": "If enabled, masks passwords and tokens in logs (default true)."
+      "LOG_LEVEL": "Sets the verbosity of application logs (e.g. info, debug, error).",
+      "SANITIZE_SENSITIVE_INFO": "If enabled, masks passwords and tokens in logs."
     },
     "M3U_TARGET_OUTPUT": {
       "FILENAME": "The name of the generated M3U file (e.g. playlist.m3u).",
-      "FILTER": "Filter expression used to select which items are included in this M3U output.",
       "INCLUDE_TYPE_IN_URL": "If true, the stream type (live/vod/series) is explicitly included in the generated URLs.",
       "MASK_REDIRECT_URL": "If enabled, the real provider URL is masked behind a Tuliprox redirect link even in redirect mode."
     },
@@ -828,67 +812,43 @@
       "DEFAULT_USER_AGENT": "The User-Agent string used for outgoing requests if not specified elsewhere.",
       "DISK_BASED_PROCESSING": "If enabled, input playlists are processed from disk to save RAM.\nIf you have enough RAM, you can let this option disabled to improve performance.",
       "MAPPING_PATH": "Path or directory containing mapping configuration files.",
-      "TEMPLATE_PATH": "Path or directory containing template configuration files.",
       "PROCESS_PARALLEL": "If enabled, input playlists are processed in parallel to reduce latency. However this is currently not supported.",
-      "SLEEP_TIMER_MINS": "Configuration value for sleep timer mins.",
+      "SLEEP_TIMER_MINS": "Automatically closes streams and stops streaming after the specified number of minutes of inactivity.",
+      "TEMPLATE_PATH": "Path or directory containing template configuration files.",
       "UPDATE_ON_BOOT": "If enabled, Tuliprox triggers a full playlist update immediately upon startup. Helpful during initial setup, but usually set to false for stable operations.",
       "USER_ACCESS_CONTROL": "If enabled, the attributes (if set)\n\n- expiration date,\n- status and\n- max_connections\n\nare checked to permit or deny access for api users.",
-      "USER_CONFIG_DIR": "Configuration value for user config dir.",
+      "USER_CONFIG_DIR": "Directory path where user-specific overrides and configuration files are stored.",
       "WORKING_DIR": "The primary directory where Tuliprox stores its data files and databases."
     },
-    "METADATA_UPDATE_CONFIG": {
-      "RETRY_DELAY": "Minimum delay for transient requeue scheduling.\n\nUse this to prevent immediate hot-loop retries when tasks are temporarily deferred.\n\nUse duration units like `2s`, `5s`, `10s`.",
-      "MAX_QUEUE_SIZE": "Maximum number of metadata tasks kept in memory for one input worker.\n\nWhen this limit is reached, additional tasks are rejected to protect system stability and memory usage.",
-      "WORKER_IDLE_TIMEOUT": "How long a metadata worker waits for new tasks while idle before it can stop itself.\n\nA lower value releases resources sooner; a higher value keeps workers warm for bursty workloads.\n\nUse duration units like `30s`, `1m`, `5m`."
+    "MESSAGING_CONFIG": {
+      "NOTIFY_ON": "Select events (e.g. 'info', 'stats', 'error') that trigger notifications for this specific type.",
+      "REST_HEADERS": "Custom HTTP headers to send with the request (JSON format).",
+      "TELEGRAM_CHAT_IDS": "List of telegram chat IDs to receive notifications. Format: '<chat_id>' or '<chat_id>:<thread_id>'."
     },
     "METADATA_LOG_CONFIG": {
+      "LOG_ACTIVE_USER": "Logs which WebUI user initiated or is viewing the metadata processing.",
+      "PROGRESS_INTERVAL": "How often the app writes progress updates while metadata tasks are running.\n\nShort intervals show more live progress, long intervals keep logs cleaner.\n\nExamples: `10s`, `30s`, `1m`.",
       "QUEUE_INTERVAL": "How often the app writes queue status messages to the log.\n\nUse a smaller value if you want to see activity more often. Use a larger value if logs feel too noisy.\n\nExamples: `15s`, `30s`, `1m`.",
-      "PROGRESS_INTERVAL": "How often the app writes progress updates while metadata tasks are running.\n\nShort intervals show more live progress, long intervals keep logs cleaner.\n\nExamples: `10s`, `30s`, `1m`."
+      "SANITIZE_SENSITIVE_INFO": "Attempts to mask passwords and tokens in the logging output for security."
     },
-    "RESOLVE_CONFIG": {
-      "MAX_RETRY_BACKOFF": "Maximum waiting time between repeated resolve retries.\n\nIf something keeps failing, the app waits longer each time, but never longer than this value.\n\nExamples: `1m`, `10m`, `1h`.",
-      "MIN_RETRY_BASE": "Minimum waiting time before a resolve retry.\n\nThis prevents very fast retry loops when a source has temporary issues.\n\nExamples: `5s`, `30s`, `1m`.",
-      "MAX_ATTEMPTS": "How many resolve tries are allowed for one item in one update cycle.\n\nAfter this limit, the item is paused for now and retried in a later cycle.",
-      "EXHAUSTION_RESET_GAP": "How long the app waits before allowing a fresh resolve cycle for previously exhausted items.\n\nUse higher values to avoid repeatedly hammering the same failing entries.\n\nExamples: `30m`, `1h`, `2h`."
+    "METADATA_UPDATE_CONFIG": {
+      "MAX_QUEUE_SIZE": "Maximum number of metadata tasks kept in memory for one input worker.\n\nWhen this limit is reached, additional tasks are rejected to protect system stability and memory usage.",
+      "RETRY_DELAY": "Minimum delay for transient requeue scheduling.\n\nUse this to prevent immediate hot-loop retries when tasks are temporarily deferred.\n\nUse duration units like `2s`, `5s`, `10s`.",
+      "WORKER_IDLE_TIMEOUT": "How long a metadata worker waits for new tasks while idle before it can stop itself.\n\nA lower value releases resources sooner; a higher value keeps workers warm for bursty workloads.\n\nUse duration units like `30s`, `1m`, `5m`."
     },
-    "PROBE_CONFIG": {
-      "COOLDOWN": "Pause time after probe retries are exhausted.\n\nDuring cooldown, that item is skipped for probing. After cooldown ends, probing can start again.\n\nExamples: `1d`, `3d`, `7d`.",
-      "RETRY_LOAD_RETRY_DELAY": "Wait time before retrying to load saved retry-state data after a read failure.\n\nThis helps when storage is temporarily busy or unavailable.\n\nExamples: `30s`, `1m`, `5m`.",
-      "RETRY_BACKOFF_STEP_1": "Wait time after the first probe failure.\n\nUse this as a gentle first retry step.\n\nExample: `10m`.",
-      "RETRY_BACKOFF_STEP_2": "Wait time after the second probe failure.\n\nUsually set higher than step 1.\n\nExample: `30m`.",
-      "RETRY_BACKOFF_STEP_3": "Wait time after the third and later probe failures.\n\nThis is the longest regular probe delay before cooldown takes over.\n\nExample: `1h`.",
-      "MAX_ATTEMPTS": "How many probe tries are allowed before cooldown starts.\n\nLower values reduce provider load, higher values can recover more transient failures.",
-      "BACKOFF_JITTER_PERCENT": "Adds small randomness to retry timing.\n\nThis prevents many retries from happening at exactly the same second.\n\nTypical value: `20`."
+    "OUTPUT_HDHOMERUN_FORM": {
+      "USE_OUTPUT": "Enables or disables output creation specifically for HDHomeRun format."
     },
-    "FFPROBE_CONFIG": {
-      "ENABLED": "Turns FFprobe stream analysis on or off.\n\nWhen off, the app skips technical probing (video/audio details).",
-      "TIMEOUT": "Maximum seconds one FFprobe run may take.\n\nIf the stream is too slow, probing stops when this limit is reached.\n\nLeave empty to use the default (60 seconds).",
-      "ANALYZE_DURATION": "How much playback time FFprobe is allowed to inspect for VOD/Series.\n\nHigher values can find more details but take longer.\n\nExamples: `10s`, `30s`, `1m`.",
-      "PROBE_SIZE": "How much data FFprobe may read for VOD/Series.\n\nHigher values can improve detection but use more bandwidth.\n\nExamples: `1MB`, `5MB`, `10MB`.",
-      "LIVE_ANALYZE_DURATION": "How much playback time FFprobe may inspect for live streams.\n\nLive checks are usually faster with small values.\n\nExamples: `2s`, `5s`, `10s`.",
-      "LIVE_PROBE_SIZE": "How much data FFprobe may read for live streams.\n\nSmaller values reduce load and make checks faster.\n\nExamples: `512KB`, `1MB`, `5MB`."
+    "OUTPUT_M3U_FORM": {
+      "FILTER": "Filter expression used to specify which items should be included in the M3U output."
     },
-    "TMDB_CONFIG": {
-      "ENABLED": "Enables metadata lookup from TMDB.\n\nTurn this off if you do not want TMDB-based title matching.",
-      "API_KEY": "Your TMDB API key.\n\nYou only need this if you want to use your own TMDB account limits.",
-      "RATE_LIMIT_MS": "Minimum wait time between TMDB requests in milliseconds.\n\nHigher values are gentler to the TMDB API.\n\nExamples: `250`, `500`, `1000`.",
-      "CACHE_DURATION_DAYS": "How many days TMDB results stay cached before refresh.\n\nLonger cache means fewer API calls.",
-      "LANGUAGE": "Preferred language for TMDB titles and metadata.\n\nExample: `en-US`.",
-      "COOLDOWN": "Pause after a successful TMDB lookup that returned no match.\n\nThis prevents endless re-tries for titles that currently do not exist in TMDB.\n\nExamples: `1d`, `3d`, `7d`."
+    "OUTPUT_STRM_FORM": {
+      "EXPORT_STYLE": "The naming convention used for generating .strm files (e.g. kodi, plex, jellyfin).",
+      "FILTER": "Filter expression used to specify which items should be exported as .strm files."
     },
-    "MESSAGING_CONFIG": {
-      "ENABLED": "Globally enables or disables outgoing notifications forTuliprox events.",
-      "NOTIFY_ON": "List of events to notify on (info, stats, error, watch)."
-    },
-    "PANEL": {
-      "ALIAS_POOL_MAX": "Maximum alias pool size to maintain.",
-      "ALIAS_POOL_MIN": "Minimum alias pool size to keep available.",
-      "API_KEY": "API key used to authenticate requests to the panel API.",
-      "PROBE_INTERVAL": "Interval (seconds) between panel status checks.",
-      "PROVISION_COOLDOWN": "Cooldown period before retrying panel provisioning.",
-      "PROVISION_OFFSET": "Time offset used to schedule panel provisioning.",
-      "PROVISION_TIMEOUT": "Request timeout (seconds) for panel provisioning calls.",
-      "URL": "Panel API endpoint URL used for account provisioning."
+    "OUTPUT_XTREAM_FORM": {
+      "FILTER": "Filter expression used to specify which items should be included in the Xtream output.",
+      "TRAKT_LISTS": "Associates Trakt.tv lists to synchronize with this Xtream target output."
     },
     "PLAYLIST_EPG_SOURCE_SELECTOR": {
       "URL": "Source URL used to download EPG data."
@@ -897,6 +857,15 @@
       "PASSWORD": "Source password used for loading playlists from a protected provider.",
       "URL": "Source URL used to download playlist data.",
       "USERNAME": "Source username used for loading playlists from a protected provider."
+    },
+    "PROBE": "Probe controls technical stream analysis retries.\n\nUse this group to define retry steps, retry limits, and cooldown behavior for FFprobe-based stream checks.",
+    "PROBE_CONFIG": {
+      "COOLDOWN": "Pause time after probe retries are exhausted.\n\nDuring cooldown, that item is skipped for probing. After cooldown ends, probing can start again.\n\nExamples: `1d`, `3d`, `7d`.",
+      "MAX_ATTEMPTS": "How many probe tries are allowed before cooldown starts.\n\nLower values reduce provider load, higher values can recover more transient failures.",
+      "RETRY_BACKOFF_STEP_1": "Wait time after the first probe failure.\n\nUse this as a gentle first retry step.\n\nExample: `10m`.",
+      "RETRY_BACKOFF_STEP_2": "Wait time after the second probe failure.\n\nUsually set higher than step 1.\n\nExample: `30m`.",
+      "RETRY_BACKOFF_STEP_3": "Wait time after the third and later probe failures.\n\nThis is the longest regular probe delay before cooldown takes over.\n\nExample: `1h`.",
+      "RETRY_LOAD_RETRY_DELAY": "Wait time before retrying to load saved retry-state data after a read failure.\n\nThis helps when storage is temporarily busy or unavailable.\n\nExamples: `30s`, `1m`, `5m`."
     },
     "PROXY_CONFIG": {
       "PASSWORD": "Password or credential used for this account or service.",
@@ -910,66 +879,57 @@
       "EXP_DATE": "Unix timestamp or 'YYYY-MM-DD' when this user access expires.",
       "MAX_CONNECTIONS": "Limit of simultaneous streams for this user. 0 = unlimited.",
       "PASSWORD": "Access password for this user's playlist and streams.",
-      "PROXY": "Proxy mode: 'redirect' (direct to provider) or 'reverse' (through Tuliprox).",
-      "SERVER": "The server profile (from api-proxy.yml) to use for generating stream URLs.",
-      "STATUS": "Current account status (Active, Disabled, Expired).",
+      "PLAYLIST": "Playlist specifically assigned to the user proxy context.",
+      "PROXY": "Proxy access definitions or roles for the designated user.",
+      "SERVER": "Target proxy server address or definition.",
+      "STATUS": "The active or disabled state of the user proxy credential.",
       "TOKEN": "Unique API token that can be used instead of username/password.",
-      "UI_ENABLED": "If true, this user can log into the simplified WebUI bouquet editor (default true).",
-      "USERNAME": "The unique username for this credentials record."
-    },
-    "PUSHOVER_MESSAGING_CONFIG": {
-      "TOKEN": "The API Token/Key for your Pushover application.",
-      "URL": "The Pushover API URL (default: https://api.pushover.net/1/messages.json).",
-      "USER": "User or Group Key from your Pushover dashboard."
+      "UI_ENABLED": "If true, this user can log into the simplified WebUI bouquet editor (default true)."
     },
     "RATE_LIMIT_CONFIG": {
-      "BURST_SIZE": "Configuration value for burst size.",
-      "ENABLED": "Configuration value for enabled.",
-      "PERIOD_MILLIS": "Configuration value for period millis."
+      "BURST_SIZE": "Defines the initial number of available connections before throttling applies (e.g. 10).",
+      "ENABLED": "Enables rate limiting per IP for reverse proxy connections.",
+      "PERIOD_MILLIS": "Interval in milliseconds at which one connection is replenished (e.g. 500)."
+    },
+    "RESOLVE": "Resolve controls metadata lookup retries.\n\nUse this group to tune how often failed metadata lookups are retried and how long the system should wait between retries. Duration fields support suffixes like '30s', '10m', '1h', '7d'.",
+    "RESOLVE_CONFIG": {
+      "EXHAUSTION_RESET_GAP": "How long the app waits before allowing a fresh resolve cycle for previously exhausted items.\n\nUse higher values to avoid repeatedly hammering the same failing entries.\n\nExamples: `30m`, `1h`, `2h`.",
+      "MAX_ATTEMPTS": "How many resolve tries are allowed for one item in one update cycle.\n\nAfter this limit, the item is paused for now and retried in a later cycle.",
+      "MAX_RETRY_BACKOFF": "Maximum waiting time between repeated resolve retries.\n\nIf something keeps failing, the app waits longer each time, but never longer than this value.\n\nExamples: `1m`, `10m`, `1h`.",
+      "MIN_RETRY_BASE": "Minimum waiting time before a resolve retry.\n\nThis prevents very fast retry loops when a source has temporary issues.\n\nExamples: `5s`, `30s`, `1m`."
     },
     "RESOURCE_RETRY_CONFIG": {
-      "BACKOFF_MILLIS": "Configuration value for backoff millis.",
-      "BACKOFF_MULTIPLIER": "Configuration value for backoff multiplier.",
-      "MAX_ATTEMPTS": "Configuration value for max attempts."
-    },
-    "REST": {
-      "TEMPLATE_MESSAGE": "Template message body for REST notifications."
+      "BACKOFF_MILLIS": "The wait time between failed request attempts (e.g. 250ms).",
+      "BACKOFF_MULTIPLIER": "Multiplies the base backoff after each failed attempt to create an exponential delay."
     },
     "REST_CONFIG": {
-      "HEADERS": "Custom HTTP headers to send with the request (JSON format).",
-      "METHOD": "HTTP method for the request (GET, POST, PUT, DELETE).",
-      "TEMPLATES": "Handlebars templates for REST message bodies.",
-      "URL": "Target URL for the REST endpoint."
+      "TEMPLATES": "Handlebars templates for REST message bodies."
     },
     "REVERSE_PROXY_CONFIG": {
+      "FAILOVER_REDIRECT_PATTERNS": "Regex patterns determining which HTTP error responses trigger an automatic failover rotation.",
       "RESOURCE_REWRITE_DISABLED": "If enabled, URL rewriting for logos and EPG is disabled (also disables caching).",
-      "REWRITE_SECRET": "Persistent secret for stable resource URLs across restarts. \nExample:\n```yaml\nreverse_proxy:\n  rewrite_secret: A1B2C3D4E5F60718293A4B5C6D7E8F90\n```"
+      "REWRITE_SECRET": "Persistent secret for stable resource URLs across restarts. \nExample:\n```\nreverse_proxy:\n  rewrite_secret: A1B2C3D4E5F60718293A4B5C6D7E8F90\n```"
     },
     "REVERSE_PROXY_DISABLED_HEADER_CONFIG": {
-      "CLOUDFLARE_HEADER": "Configuration value for cloudflare header.",
-      "CUSTOM_HEADER": "Configuration value for custom header.",
-      "REFERER_HEADER": "Configuration value for referer header.",
-      "X_HEADER": "Configuration value for x header."
+      "CLOUDFLARE_HEADER": "Removes Cloudflare-specific headers (like CF-Connecting-IP) before forwarding to the upstream.",
+      "CUSTOM_HEADER": "List of custom HTTP headers to unconditionally remove before forwarding.",
+      "REFERER_HEADER": "Specifically removes the 'Referer' header from incoming requests.",
+      "X_HEADER": "Strips any header beginning with 'X-' (e.g., X-Forwarded-For) from incoming requests."
     },
     "SCHEDULES_CONFIG": {
-      "SCHEDULES": "Configuration value for schedules."
-    },
-    "SETUP": {
-      "PASSWORD": "Password for the initial WebUI account created during setup.",
-      "PASSWORD_REPEAT": "Repeat the setup password to confirm the initial WebUI account.",
-      "USERNAME": "Username for the initial WebUI account created during setup."
+      "SCHEDULE": "Standard cron expression defining when the task runs (e.g. '0 0 8 * * * *').",
+      "TARGETS": "List of target playlists to update during a scheduled PlaylistUpdate task.",
+      "TYPE": "The type of task to perform at the scheduled time (e.g. PlaylistUpdate, LibraryScan)."
     },
     "STAGED_INPUT": {
-      "HEADERS": "Configuration value for headers.",
-      "INPUT_TYPE": "Configuration value for input type.",
-      "METHOD": "Configuration value for method.",
+      "HEADERS": "Custom HTTP headers sent when retrieving this staged configuration.",
       "PASSWORD": "Password or credential used for this account or service.",
       "URL": "Target URL for this setting.",
       "USERNAME": "Login username for this account or service."
     },
     "STREAM_BUFFER_CONFIG": {
-      "ENABLED": "Configuration value for enabled.",
-      "SIZE": "Configuration value for size."
+      "ENABLED": "Buffers the stream in memory. Useful if the provider is faster than the consumer player.",
+      "SIZE": "Size of the stream buffer in 8192-byte chunks. A value of 1024 means approximately 8MB."
     },
     "STREAM_CONFIG": {
       "GRACE_PERIOD_HOLD_STREAM": "If enabled, keeps the provider stream open briefly after the last client disconnects to allow quick reconnects.",
@@ -984,47 +944,47 @@
       "ADD_QUALITY_TO_FILENAME": "If true, media quality (e.g. 1080p, 4K) is appended to the generated .strm filename.",
       "CLEANUP": "If enabled, the destination directory is emptied before generating new .strm files. Use with caution!",
       "DIRECTORY": "The filesystem path where .strm files and folder structures are created.",
-      "FILTER": "Optional filter expression to limit which items are generated as .strm files.",
-      "FLAT": "If true, creates a flat file structure instead of nested category folders.",
       "STRM_PROPS": "List of Kodi stream properties (e.g. inputstream=...) to include in .strm files.",
-      "STYLE": "The naming convention used for media centers (kodi, plex, emby, jellyfin).",
       "UNDERSCORE_WHITESPACE": "If enabled, replaces all spaces with underscores in filenames and paths.",
       "USERNAME": "The user whose credentials will be embedded in the .strm URLs."
     },
-    "TELEGRAM": {
-      "TEMPLATE_MESSAGE": "Template message body for Telegram notifications."
+    "TARGET_FORM": {
+      "FILTER": "Global filter expression applied to the target before creating explicit outputs.",
+      "FORCE_REDIRECT": "Forces streams directly to the proxy or the provider instead of resolving individually.",
+      "PROCESSING_ORDER": "Determines the priority or the sequence in which target channels are matched and listed."
     },
     "TELEGRAM_CONFIG": {
-      "BOT_TOKEN": "The unique bot token received from @BotFather.",
-      "CHAT_IDS": "List of telegram chat IDs to receive notifications. Format: '<chat_id>' or '<chat_id>:<thread_id>'.",
-      "MARKDOWN": "If enabled, notifications are sent with MarkdownV2 formatting support (default true).",
       "TEMPLATES": "Handlebars templates for Telegram message bodies."
     },
-    "TRAKT_API_CONFIG": {
-      "API_KEY": "Your Trakt.tv API client ID (Client ID).",
-      "URL": "Trakt API endpoint URL (default: https://api.trakt.tv).",
-      "USER_AGENT": "User-Agent string sent to Trakt API.",
-      "VERSION": "Trakt API version header (default: 2)."
-    },
-    "TRAKT_CONFIG": {
-      "ENABLED": "Enables or disables synchronization with Trakt.tv lists."
+    "TMDB_CONFIG": {
+      "API_KEY": "Your TMDB API key.\n\nYou only need this if you want to use your own TMDB account limits.",
+      "CACHE_DURATION_DAYS": "How many days TMDB results stay cached before refresh.\n\nLonger cache means fewer API calls.",
+      "COOLDOWN": "Pause after a successful TMDB lookup that returned no match.\n\nThis prevents endless re-tries for titles that currently do not exist in TMDB.\n\nExamples: `1d`, `3d`, `7d`.",
+      "ENABLED": "Enables metadata lookup from TMDB.\n\nTurn this off if you do not want TMDB-based title matching.",
+      "LANGUAGE": "Preferred language for TMDB titles and metadata.\n\nExample: `en-US`.",
+      "RATE_LIMIT_MS": "Minimum wait time between TMDB requests in milliseconds.\n\nHigher values are gentler to the TMDB API.\n\nExamples: `250`, `500`, `1000`."
     },
     "TRAKT_LIST_CONFIG": {
       "CATEGORY_NAME": "The category name used in the playlist for items from this Trakt list.",
-      "CONTENT_TYPE": "Type of content to fetch from Trakt (movies or shows).",
       "FUZZY_MATCH_THRESHOLD": "Similarity threshold for matching Trakt items to provider streams (0-100).",
       "LIST_SLUG": "The slug (part of URL) of the Trakt list to fetch.",
       "USER": "The Trakt username who owns the list."
     },
+    "TRAKT_LIST_FORM": {
+      "TRAKT_CONTENT_TYPE": "Specifies whether to fetch 'movies' or 'shows' from the assigned Trakt list."
+    },
     "VIDEO_CONFIG": {
-      "EXTENSIONS": "Allowed video file extensions (e.g. mp4, mkv, avi). Used for category classification.",
+      "EXTENSIONS": "List of valid video file extensions (e.g. mp4, avi, mkv). Streams ending in these are classified as video VODs.",
+      "HEADERS": "Custom HTTP headers applied to video download requests (e.g. User-Agent).",
       "WEB_SEARCH": "Template URL for external web search (e.g. IMDb). {} is replaced by the title."
     },
     "VIDEO_DOWNLOAD_CONFIG": {
       "DIRECTORY": "The destination directory for downloaded video files.",
-      "EPISODE_PATTERN": "Regex with 'episode' capture group to clean up series filenames.\nExample:\n```yaml\nepisode_pattern: '.*(?P<episode>[Ss]\\\\d{1,2}.*?[Ee]\\\\d{1,2}).*'\n```",
-      "HEADERS": "Custom HTTP headers applied to download requests.",
+      "EPISODE_PATTERN": "Regex with 'episode' capture group to clean up series filenames.\nExample:\n```\nepisode_pattern: '.*(?P<episode>[Ss]\\\\d{1,2}.*?[Ee]\\\\d{1,2}).*'\n```",
       "ORGANIZE_INTO_DIRECTORIES": "If enabled, creates subdirectories per movie or series during download."
+    },
+    "WEBUI_CONFIG": {
+      "CONTENT_SECURITY_POLICY_CUSTOM_ATTRIBUTES": "Custom CSP (Content Security Policy) directives applied to the Web UI."
     },
     "WEB_AUTH_CONFIG": {
       "ENABLED": "Enables or disables authentication for the Web-UI.",
@@ -1032,16 +992,6 @@
       "SECRET": "The secret key used to sign and verify JWT auth tokens. Changing this logs out everyone.",
       "TOKEN_TTL_MINS": "How many minutes a login session remains valid (default 3600).",
       "USERFILE": "Path to the text file containing WebUI users (default user.txt)."
-    },
-    "SMART_MATCH_CONFIG": {
-      "BEST_MATCH_THRESHOLD": "Score threshold (0-100) above which a match is considered 'perfect' and scanning stops (default 99).",
-      "ENABLED": "Enables fuzzy logic to automatically match channels with EPG IDs based on name similarity.",
-      "FUZZY_MATCHING": "If enabled, uses Levenshtein distance for string similarity instead of exact matching.",
-      "MATCH_THRESHOLD": "Minimum similarity score (0-100) required to accept an EPG match (default 80).",
-      "NAME_PREFIX": "Defines how country/category prefixes are handled (ignore, prefix, or suffix).",
-      "NAME_PREFIX_SEPARATOR": "List of characters (e.g. ':', '|') that separate channel prefixes from the main title.",
-      "NORMALIZE_REGEX": "Regular expression used to remove special characters before matching.",
-      "STRIP": "List of terms to ignore during matching (e.g. '4K', 'HD', 'HEVC')."
     },
     "WEB_UI_CONFIG": {
       "ENABLED": "Enables or disables the central web-based management interface.",
@@ -1051,7 +1001,6 @@
       "USER_UI_ENABLED": "Enables or disables the simplified bouquet editor for standard users."
     },
     "XTREAM_TARGET_OUTPUT": {
-      "FILTER": "Filter expression used to select which items are included in this Xtream output.",
       "SKIP_LIVE_DIRECT_SOURCE": "If enabled, live streams are not linked directly but proxied/resolved.",
       "SKIP_SERIES_DIRECT_SOURCE": "If enabled, series episodes are not linked directly but proxied/resolved.",
       "SKIP_VIDEO_DIRECT_SOURCE": "If enabled, VOD files are not linked directly but proxied/resolved."

@@ -191,7 +191,7 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
     html! {
         <div class="tp__proxy-user-credentials-form tp__form-page">
           <div class="tp__proxy-user-credentials-form__body tp__form-page__body">
-            { config_field_child!(translate.t("LABEL.PLAYLIST"), {
+            { config_field_child!(translate.t("LABEL.PLAYLIST"), "PROXY_USER_CREDENTIALS.PLAYLIST", {
                html! { <Select name="target"
                     multi_select={false}
                     on_select={Callback::from(move |(_name, selections):(String, DropDownSelection)| {
@@ -205,7 +205,7 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                     options={targets.clone()}
                 />
             }})}
-            { config_field_child!(translate.t("LABEL.STATUS"), {
+            { config_field_child!(translate.t("LABEL.STATUS"), "PROXY_USER_CREDENTIALS.STATUS", {
                html! { <Select name="status"
                     multi_select={false}
                     on_select={Callback::from(move |(_name, selections):(String, DropDownSelection)| {
@@ -227,7 +227,7 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
             }
             { edit_field_text!(form_state, translate.t("LABEL.PASSWORD"), password, UserFormAction::Password, true) }
             { edit_field_text_option!(form_state,  translate.t("LABEL.TOKEN"), token, UserFormAction::Token, true) }
-            { config_field_child!(translate.t("LABEL.PROXY"), {
+            { config_field_child!(translate.t("LABEL.PROXY"), "PROXY_USER_CREDENTIALS.PROXY", {
                html! {
                      <ProxyTypeInput value={form_state.data().proxy}
                         on_change={Callback::from(move |proxy_type: ProxyType| {
@@ -235,7 +235,7 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                         }
                     )}/>
             }})}
-            { config_field_child!(translate.t("LABEL.SERVER"), {
+            { config_field_child!(translate.t("LABEL.SERVER"), "PROXY_USER_CREDENTIALS.SERVER", {
                html! {
                 <Select name="server"
                     multi_select={false}

@@ -139,7 +139,7 @@ pub fn WebUiConfigView() -> Html {
             <Card class="tp__config-view__card">
                 <h1>{translate.t(LABEL_CONTENT_SECURITY_POLICY)}</h1>
                 { config_field_bool!(csp_state.form, translate.t(LABEL_ENABLED), enabled) }
-                { config_field_child!(translate.t(LABEL_CONTENT_SECURITY_POLICY_CUSTOM_ATTRIBUTES), {
+                { config_field_child!(translate.t(LABEL_CONTENT_SECURITY_POLICY_CUSTOM_ATTRIBUTES), "WEBUI_CONFIG.CONTENT_SECURITY_POLICY_CUSTOM_ATTRIBUTES", {
                     html! {
                         <div class="tp__config-view__tags">
                             {
