@@ -235,11 +235,11 @@ pub fn MessagingConfigView() -> Html {
              { render_templates_view(&entry.templates) }
           </Card>
         },
-        None => html! {
+         None => html! {
           <Card class="tp__config-view__card">
              <h1>{translate.t(LABEL_TELEGRAM)}</h1>
              { config_field_empty!(translate.t(LABEL_BOT_TOKEN), "TELEGRAM_CONFIG.BOT_TOKEN") }
-             { config_field_empty!(translate.t(LABEL_CHAT_IDS), "TELEGRAM_CONFIG.CHAT_IDS") }
+             { config_field_empty!(translate.t(LABEL_CHAT_IDS), "MESSAGING_CONFIG.TELEGRAM_CHAT_IDS") }
              { config_field_bool_empty!(translate.t(LABEL_MARKDOWN), "TELEGRAM_CONFIG.MARKDOWN") }
           </Card>
         },
@@ -379,7 +379,7 @@ pub fn MessagingConfigView() -> Html {
                 html! {
                     <TextArea
                         label={kind_str}
-                        field_id={Some("REST_CONFIG.TEMPLATES")}
+                        field_id={Some("REST_MESSAGING_CONFIG.TEMPLATES")}
                         value={current_val}
                         collapse_on_empty={true}
                         on_change={Callback::from(move |val: String| {
@@ -405,7 +405,7 @@ pub fn MessagingConfigView() -> Html {
                 html! {
                     <TextArea
                         label={kind_str}
-                        field_id={Some("DISCORD.TEMPLATE_MESSAGE")}
+                        field_id={Some("DISCORD_MESSAGING_CONFIG.TEMPLATES")}
                         value={current_val}
                         collapse_on_empty={true}
                         on_change={Callback::from(move |val: String| {

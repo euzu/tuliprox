@@ -30,11 +30,6 @@ fn explanation_key_candidates(field_id: &str) -> Vec<String> {
 
     let tokens = field_tokens(field_id);
     if tokens.len() > 1 {
-        for split in (1..tokens.len()).rev() {
-            let prefix = tokens[..split].join(".");
-            let suffix = tokens[split..].join(".");
-            push_unique(&mut keys, format!("EXPLANATION.{prefix}.{suffix}"));
-        }
         for start in 1..tokens.len() {
             let suffix = tokens[start..].join(".");
             push_unique(&mut keys, format!("EXPLANATION.{suffix}"));
@@ -95,7 +90,7 @@ pub fn show_field_explanation(field_id: &str, field_label: &str, dialog: &Dialog
             if i % 2 == 1 {
                 // Inside a code block
                 let (_, mut code) = part.split_once('\n').unwrap_or(("", part));
-                code = code.trim_matches('\n');
+                code = code.trim_matches(|c| c == '\n' || c == '\r');
                 elements.push(html! {
                     <pre><code>{ code }</code></pre>
                 });

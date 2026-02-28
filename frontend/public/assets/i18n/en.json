@@ -423,7 +423,6 @@
     },
     "MESSAGING_CONFIG": {
       "NOTIFY_ON": "Select events (e.g. 'info', 'stats', 'error') that trigger notifications for this specific type.",
-      "REST_HEADERS": "Custom HTTP headers to send with the request (JSON format).",
       "TELEGRAM_CHAT_IDS": "List of telegram chat IDs to receive notifications. Format: '<chat_id>' or '<chat_id>:<thread_id>'."
     },
     "METADATA_LOG_CONFIG": {
@@ -503,8 +502,8 @@
       "BACKOFF_MILLIS": "The wait time between failed request attempts (e.g. 250ms).",
       "BACKOFF_MULTIPLIER": "Multiplies the base backoff after each failed attempt to create an exponential delay."
     },
-    "REST_CONFIG": {
-      "TEMPLATES": "Handlebars templates for REST message bodies."
+    "REST_MESSAGING_CONFIG": {
+      "HEADERS": "Custom HTTP headers to send with the request (JSON format)."
     },
     "REVERSE_PROXY_CONFIG": {
       "FAILOVER_REDIRECT_PATTERNS": "Regex patterns determining which HTTP error responses trigger an automatic failover rotation.",
