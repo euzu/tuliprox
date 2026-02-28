@@ -95,11 +95,7 @@ pub fn show_field_explanation(field_id: &str, field_label: &str, dialog: &Dialog
             if i % 2 == 1 {
                 // Inside a code block
                 let (_, mut code) = part.split_once('\n').unwrap_or(("", part));
-                if part.contains('\n') {
-                    code = code.trim_matches('\n');
-                } else {
-                    code = part.trim_matches('\n');
-                }
+                code = code.trim_matches('\n');
                 elements.push(html! {
                     <pre><code>{ code }</code></pre>
                 });

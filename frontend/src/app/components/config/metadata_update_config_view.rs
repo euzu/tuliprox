@@ -199,9 +199,10 @@ pub fn MetadataUpdateConfigView() -> Html {
     {
         let probe_state = probe_state.clone();
         let backoff_jitter_error = backoff_jitter_error.clone();
+        let translate_local = translate.clone();
         use_effect_with(probe_state.form.backoff_jitter_percent, move |value| {
             if *value > 95 {
-                backoff_jitter_error.set(Some("Backoff jitter percent must be between 0 and 95.".to_string()));
+                backoff_jitter_error.set(Some(translate_local.t("BACKOFF_JITTER_PERCENT_VALIDATION")));
                 probe_state.dispatch(ProbeConfigFormAction::BackoffJitterPercent(95));
             } else {
                 backoff_jitter_error.set(None);
@@ -280,6 +281,7 @@ pub fn MetadataUpdateConfigView() -> Html {
         let jitter_error_text = (*backoff_jitter_error).clone();
         let jitter_error_state = backoff_jitter_error.clone();
         let jitter_probe_state = probe_state.clone();
+        let translate_for_cb = translate.clone();
         let jitter_label = translate.t(LABEL_BACKOFF_JITTER_PERCENT);
         let jitter_field_id = dto_field_id(&jitter_probe_state.form, "backoff_jitter_percent");
 
@@ -339,7 +341,7 @@ pub fn MetadataUpdateConfigView() -> Html {
                             on_change={Callback::from(move |value: Option<i64>| {
                                 match value {
                                     Some(raw) if !(0..=95).contains(&raw) => {
-                                        jitter_error_state.set(Some("Backoff jitter percent must be between 0 and 95.".to_string()));
+                                        jitter_error_state.set(Some(translate_for_cb.t("BACKOFF_JITTER_PERCENT_VALIDATION")));
                                     }
                                     Some(raw) => {
                                         jitter_error_state.set(None);

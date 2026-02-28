@@ -303,9 +303,9 @@ pub fn MessagingConfigView() -> Html {
         None => html! {
           <Card class="tp__config-view__card">
               <h1>{translate.t(LABEL_PUSHOVER)}</h1>
-              { config_field_empty!(translate.t(LABEL_URL), "PUSHOVER_MESSAGING_CONFIG_URL") }
-              { config_field_empty!(translate.t(LABEL_TOKEN), "PUSHOVER_MESSAGING_CONFIG_TOKEN") }
-              { config_field_empty!(translate.t(LABEL_USER), "PUSHOVER_MESSAGING_CONFIG_USER") }
+              { config_field_empty!(translate.t(LABEL_URL), "PUSHOVER_MESSAGING_CONFIG.URL") }
+              { config_field_empty!(translate.t(LABEL_TOKEN), "PUSHOVER_MESSAGING_CONFIG.TOKEN") }
+              { config_field_empty!(translate.t(LABEL_USER), "PUSHOVER_MESSAGING_CONFIG.USER") }
           </Card>
         },
     };
