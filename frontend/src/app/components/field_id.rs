@@ -23,7 +23,7 @@ pub fn resolve_field_id(field_id: &Option<String>, name: &str, label: &str) -> S
 
     candidate
         .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' { ch } else { '_' })
+        .map(|ch| if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' { ch } else { '_' })
         .collect::<String>()
 }
 
@@ -121,6 +121,6 @@ pub fn dto_field_id<T: ?Sized>(_dto: &T, field: &str) -> String {
     if prefix.is_empty() {
         field_name
     } else {
-        format!("{prefix}_{field_name}")
+        format!("{prefix}.{field_name}")
     }
 }

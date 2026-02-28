@@ -51,9 +51,9 @@ pub fn StreamsView() -> Html {
 
     html! {
       <div class="tp__streams">
-        <div class="tp__streams__header">
-         <h1>{ translate.t("LABEL.STREAMS")}</h1>
-        </div>
+        // <div class="tp__streams__header">
+        //  <h1>{ translate.t("LABEL.STREAMS")}</h1>
+        // </div>
         <div class="tp__streams__body">
            <div class="tp__stats__body-group">
                 <Card><StatusCard title={translate.t("LABEL.ACTIVE_USERS")} data={status_ctx.status.as_ref().map_or_else(|| "n/a".to_string(), |status| status.active_users.to_string())} /></Card>

@@ -258,7 +258,7 @@ pub fn LibraryConfigView() -> Html {
     let render_extensions = |extensions: &Vec<String>| {
         html! {
             <Card class="tp__config-view__card">
-            { config_field_child!(translate.t(LABEL_SUPPORTED_EXTENSIONS), {
+            { config_field_child!(translate.t(LABEL_SUPPORTED_EXTENSIONS), "LIBRARY_CONFIG.SUPPORTED_EXTENSIONS", {
                html! {
                  <div class="tp__config-view__tags">
                  for t in extensions.iter() { <Chip label={t.clone()} /> }
@@ -366,7 +366,7 @@ pub fn LibraryConfigView() -> Html {
                     <h1>{translate.t(LABEL_METADATA)}</h1>
                     { config_field!(metadata, translate.t(LABEL_METADATA_PATH), path) }
                     { config_field_bool!(metadata, translate.t(LABEL_FALLBACK_TO_FILENAME), fallback_to_filename) }
-                    { config_field_child!(translate.t(LABEL_FORMATS), {
+                    { config_field_child!(translate.t(LABEL_FORMATS), "LIBRARY_CONFIG.FORMATS", {
                         html! {
                             <div class="tp__config-view__tags">
                                 for f in metadata.formats.iter() { <Chip label={format!("{f:?}")} /> }
@@ -408,7 +408,7 @@ pub fn LibraryConfigView() -> Html {
                     <h1>{translate.t(LABEL_METADATA)}</h1>
                     { edit_field_text!(metadata_state, translate.t(LABEL_METADATA_PATH), path, LibraryMetadataConfigFormAction::Path) }
                     { edit_field_bool!(metadata_state, translate.t(LABEL_FALLBACK_TO_FILENAME), fallback_to_filename, LibraryMetadataConfigFormAction::FallbackToFilename) }
-                    { config_field_child!(translate.t(LABEL_FORMATS), {
+                    { config_field_child!(translate.t(LABEL_FORMATS), "LIBRARY_CONFIG.FORMATS", {
                         let metadata_state = metadata_state.clone();
                         let formats = metadata_state.form.formats.clone();
                         let format_chips = formats

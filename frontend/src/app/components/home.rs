@@ -3,8 +3,7 @@ use crate::{
         components::{
             config::ConfigView, loading_indicator::BusyIndicator, theme::Theme, AppIcon, DashboardView, EpgView,
             IconButton, InputRow, Panel, ParticleFlowBackground, PlaylistExplorerView, PlaylistSettingsView,
-            PlaylistUpdateView, Setup, Sidebar, SourceEditor, StatsView, StreamsView, ToastrView, UserlistView,
-            WebsocketStatus,
+            PlaylistUpdateView, Setup, Sidebar, SourceEditor, StatsView, ToastrView, UserlistView, WebsocketStatus,
         },
         context::{ConfigContext, PlaylistContext, StatusContext},
     },
@@ -230,9 +229,9 @@ pub fn Home() -> Html {
                                        <Panel class="tp__full-width" value={ViewType::Stats.to_string()} active={view_visible.to_string()}>
                                         <StatsView/>
                                        </Panel>
-                                       <Panel class="tp__full-width" value={ViewType::Streams.to_string()} active={view_visible.to_string()}>
-                                        <StreamsView/>
-                                       </Panel>
+                                       // <Panel class="tp__full-width" value={ViewType::Streams.to_string()} active={view_visible.to_string()}>
+                                       //  <StreamsView/>
+                                       // </Panel>
                                        <Panel class="tp__full-width" value={ViewType::Users.to_string()} active={view_visible.to_string()}>
                                           <UserlistView/>
                                        </Panel>

@@ -218,7 +218,7 @@ pub fn MessagingConfigView() -> Html {
           <Card class="tp__config-view__card">
               <h1>{translate.t("LABEL.TELEGRAM")}</h1>
               { config_field_hide!(entry, translate.t(LABEL_BOT_TOKEN), bot_token) }
-              { config_field_child!(translate.t(LABEL_CHAT_IDS), {
+              { config_field_child!(translate.t(LABEL_CHAT_IDS), "MESSAGING_CONFIG.TELEGRAM_CHAT_IDS", {
                   html! {
                       <div class="tp__config-view__tags">
                           {
@@ -238,9 +238,9 @@ pub fn MessagingConfigView() -> Html {
         None => html! {
           <Card class="tp__config-view__card">
              <h1>{translate.t(LABEL_TELEGRAM)}</h1>
-             { config_field_empty!(translate.t(LABEL_BOT_TOKEN), "TELEGRAM_MESSAGING_CONFIG_BOT_TOKEN") }
-             { config_field_empty!(translate.t(LABEL_CHAT_IDS), "TELEGRAM_MESSAGING_CONFIG_CHAT_IDS") }
-             { config_field_bool_empty!(translate.t(LABEL_MARKDOWN), "TELEGRAM_MESSAGING_CONFIG_MARKDOWN") }
+             { config_field_empty!(translate.t(LABEL_BOT_TOKEN), "TELEGRAM_CONFIG.BOT_TOKEN") }
+             { config_field_empty!(translate.t(LABEL_CHAT_IDS), "MESSAGING_CONFIG.TELEGRAM_CHAT_IDS") }
+             { config_field_bool_empty!(translate.t(LABEL_MARKDOWN), "TELEGRAM_CONFIG.MARKDOWN") }
           </Card>
         },
     };
@@ -251,7 +251,7 @@ pub fn MessagingConfigView() -> Html {
               <h1>{translate.t(LABEL_REST)}</h1>
               { config_field!(entry, translate.t(LABEL_URL), url) }
               { config_field_optional!(entry, translate.t(LABEL_METHOD), method) }
-              { config_field_child!(translate.t(LABEL_HEADERS), {
+              { config_field_child!(translate.t(LABEL_HEADERS), "MESSAGING_CONFIG.REST_HEADERS", {
                   html! {
                       <div class="tp__config-view__tags">
                           {
@@ -270,7 +270,7 @@ pub fn MessagingConfigView() -> Html {
         None => html! {
           <Card class="tp__config-view__card">
               <h1>{translate.t(LABEL_REST)}</h1>
-              { config_field_empty!(translate.t(LABEL_URL), "REST_MESSAGING_CONFIG_URL") }
+              { config_field_empty!(translate.t(LABEL_URL), "REST_MESSAGING_CONFIG.URL") }
           </Card>
         },
     };
@@ -286,7 +286,7 @@ pub fn MessagingConfigView() -> Html {
         None => html! {
           <Card class="tp__config-view__card">
               <h1>{translate.t(LABEL_DISCORD)}</h1>
-              { config_field_empty!(translate.t(LABEL_WEBHOOK_URL), "DISCORD_MESSAGING_CONFIG_URL") }
+              { config_field_empty!(translate.t(LABEL_WEBHOOK_URL), "DISCORD_MESSAGING_CONFIG.URL") }
           </Card>
         },
     };
@@ -303,9 +303,9 @@ pub fn MessagingConfigView() -> Html {
         None => html! {
           <Card class="tp__config-view__card">
               <h1>{translate.t(LABEL_PUSHOVER)}</h1>
-              { config_field_empty!(translate.t(LABEL_URL), "PUSHOVER_MESSAGING_CONFIG_URL") }
-              { config_field_empty!(translate.t(LABEL_TOKEN), "PUSHOVER_MESSAGING_CONFIG_TOKEN") }
-              { config_field_empty!(translate.t(LABEL_USER), "PUSHOVER_MESSAGING_CONFIG_USER") }
+              { config_field_empty!(translate.t(LABEL_URL), "PUSHOVER_MESSAGING_CONFIG.URL") }
+              { config_field_empty!(translate.t(LABEL_TOKEN), "PUSHOVER_MESSAGING_CONFIG.TOKEN") }
+              { config_field_empty!(translate.t(LABEL_USER), "PUSHOVER_MESSAGING_CONFIG.USER") }
           </Card>
         },
     };
@@ -323,7 +323,7 @@ pub fn MessagingConfigView() -> Html {
         html! {
           <>
         <div class="tp__messaging-config-view__header tp__config-view-page__header">
-          { config_field_child!(translate.t(LABEL_NOTIFY_ON), {
+          { config_field_child!(translate.t(LABEL_NOTIFY_ON), "MESSAGING_CONFIG.NOTIFY_ON", {
              html! { <div class="tp__messaging-config-view__notify-on">
                  { notify_on_chips }
                 </div>
@@ -353,7 +353,7 @@ pub fn MessagingConfigView() -> Html {
                 html! {
                     <TextArea
                         label={kind_str}
-                        field_id={Some(format!("TELEGRAM_TEMPLATE_MESSAGE_{}", kind.to_string().to_uppercase()))}
+                        field_id={Some(format!("TELEGRAM_CONFIG.TEMPLATES.{}", kind.to_string().to_uppercase()))}
                         value={current_val}
                         collapse_on_empty={true}
                         on_change={Callback::from(move |val: String| {
@@ -379,7 +379,7 @@ pub fn MessagingConfigView() -> Html {
                 html! {
                     <TextArea
                         label={kind_str}
-                        field_id={Some(format!("REST_TEMPLATE_MESSAGE_{}", kind.to_string().to_uppercase()))}
+                        field_id={Some(format!("REST_MESSAGING_CONFIG.TEMPLATES.{}", kind.to_string().to_uppercase()))}
                         value={current_val}
                         collapse_on_empty={true}
                         on_change={Callback::from(move |val: String| {
@@ -405,7 +405,7 @@ pub fn MessagingConfigView() -> Html {
                 html! {
                     <TextArea
                         label={kind_str}
-                        field_id={Some(format!("DISCORD_TEMPLATE_MESSAGE_{}", kind.to_string().to_uppercase()))}
+                        field_id={Some(format!("DISCORD_MESSAGING_CONFIG.TEMPLATES.{}", kind.to_string().to_uppercase()))}
                         value={current_val}
                         collapse_on_empty={true}
                         on_change={Callback::from(move |val: String| {
@@ -424,7 +424,7 @@ pub fn MessagingConfigView() -> Html {
         html! {
             <>
             <div class="tp__messaging-config-view__header tp__config-view-page__header">
-                { config_field_child!(translate.t("LABEL.NOTIFY_ON"), {
+                { config_field_child!(translate.t("LABEL.NOTIFY_ON"), "MESSAGING_CONFIG.NOTIFY_ON", {
                    html! { <RadioButtonGroup
                         multi_select={true} none_allowed={true}
                         on_select={Callback::from(move |selections: Rc<Vec<String>>| {

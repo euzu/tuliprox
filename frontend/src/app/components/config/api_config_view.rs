@@ -431,9 +431,9 @@ pub fn ApiConfigView() -> Html {
         } else {
             html! {
                 <Card class="tp__api-config-card">
-                    { config_field_empty!(translate.t(LABEL_HOST), "CONFIG_API_HOST") }
-                    { config_field_empty!(translate.t(LABEL_PORT), "CONFIG_API_PORT") }
-                    { config_field_empty!(translate.t(LABEL_WEB_ROOT), "CONFIG_API_WEB_ROOT") }
+                    { config_field_empty!(translate.t(LABEL_HOST), "CONFIG_API.HOST") }
+                    { config_field_empty!(translate.t(LABEL_PORT), "CONFIG_API.PORT") }
+                    { config_field_empty!(translate.t(LABEL_WEB_ROOT), "CONFIG_API.WEB_ROOT") }
                 </Card>
             }
         }
@@ -523,42 +523,42 @@ pub fn ApiConfigView() -> Html {
                     <div class="tp__api-server-dialog__grid">
                         <Input
                             name="api_proxy_server_name"
-                            field_id={Some("API_PROXY_SERVER_INFO_NAME".to_string())}
+                            field_id={Some("API_PROXY_SERVER_INFO.NAME".to_string())}
                             label={Some(translate.t(LABEL_NAME))}
                             value={server_dialog_form.name.clone()}
                             on_change={Some(handle_server_name_change.clone())}
                         />
                         <Input
                             name="api_proxy_server_protocol"
-                            field_id={Some("API_PROXY_SERVER_INFO_PROTOCOL".to_string())}
+                            field_id={Some("API_PROXY_SERVER_INFO.PROTOCOL".to_string())}
                             label={Some(translate.t(LABEL_PROTOCOL))}
                             value={server_dialog_form.protocol.clone()}
                             on_change={Some(handle_server_protocol_change.clone())}
                         />
                         <Input
                             name="api_proxy_server_host"
-                            field_id={Some("API_PROXY_SERVER_INFO_HOST".to_string())}
+                            field_id={Some("API_PROXY_SERVER_INFO.HOST".to_string())}
                             label={Some(translate.t(LABEL_HOST))}
                             value={server_dialog_form.host.clone()}
                             on_change={Some(handle_server_host_change.clone())}
                         />
                         <Input
                             name="api_proxy_server_port"
-                            field_id={Some("API_PROXY_SERVER_INFO_PORT".to_string())}
+                            field_id={Some("API_PROXY_SERVER_INFO.PORT".to_string())}
                             label={Some(translate.t(LABEL_PORT))}
                             value={server_dialog_form.port.clone().unwrap_or_default()}
                             on_change={Some(handle_server_port_change.clone())}
                         />
                         <Input
                             name="api_proxy_server_timezone"
-                            field_id={Some("API_PROXY_SERVER_INFO_TIMEZONE".to_string())}
+                            field_id={Some("API_PROXY_SERVER_INFO.TIMEZONE".to_string())}
                             label={Some(translate.t(LABEL_TIMEZONE))}
                             value={server_dialog_form.timezone.clone()}
                             on_change={Some(handle_server_timezone_change.clone())}
                         />
                         <Input
                             name="api_proxy_server_path"
-                            field_id={Some("API_PROXY_SERVER_INFO_PATH".to_string())}
+                            field_id={Some("API_PROXY_SERVER_INFO.PATH".to_string())}
                             label={Some(translate.t(LABEL_PATH))}
                             value={server_dialog_form.path.clone().unwrap_or_default()}
                             on_change={Some(handle_server_path_change.clone())}
@@ -566,7 +566,7 @@ pub fn ApiConfigView() -> Html {
                         <div class="tp__api-server-dialog__message">
                             <Input
                                 name="api_proxy_server_message"
-                                field_id={Some("API_PROXY_SERVER_INFO_MESSAGE".to_string())}
+                                field_id={Some("API_PROXY_SERVER_INFO.MESSAGE".to_string())}
                                 label={Some(translate.t(LABEL_MESSAGE))}
                                 value={server_dialog_form.message.clone()}
                                 on_change={Some(handle_server_message_change.clone())}

@@ -95,7 +95,7 @@ pub fn TraktListItemForm(props: &TraktListItemFormProps) -> Html {
             { edit_field_text!(form_state, translate.t(LABEL_TRAKT_LIST_SLUG), list_slug, TraktListFormAction::ListSlug) }
             { edit_field_text!(form_state, translate.t(LABEL_TRAKT_CATEGORY_NAME), category_name, TraktListFormAction::CategoryName) }
 
-            { config_field_child!(translate.t(LABEL_TRAKT_CONTENT_TYPE), {
+            { config_field_child!(translate.t(LABEL_TRAKT_CONTENT_TYPE), "TRAKT_LIST_FORM.TRAKT_CONTENT_TYPE", {
                 let form_state_ct = form_state.clone();
                 html! {
                     <Select

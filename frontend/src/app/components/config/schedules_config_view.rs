@@ -250,10 +250,10 @@ pub fn SchedulesConfigView() -> Html {
 
         html! {
             <div class="tp__schedules-config-view__editor">
-            {config_field_child!(translate.t(LABEL_SCHEDULE), {
+            {config_field_child!(translate.t(LABEL_SCHEDULE), "SCHEDULES_CONFIG.SCHEDULE", {
                 html!{ <Input name="schedule" value={(*selected_schedule).as_ref().map_or_else(String::new, ToString::to_string)} on_change={handle_schedule_selection} /> }
             })}
-            {config_field_child!(translate.t(LABEL_TYPE), {
+            {config_field_child!(translate.t(LABEL_TYPE), "SCHEDULES_CONFIG.TYPE", {
                  html!{ <Select name="type"
                       on_select={Callback::from(move |(_name, selections): (String, DropDownSelection)| if let DropDownSelection::Single(option) = selections {
                           if option == "PlaylistUpdate" {
@@ -266,7 +266,7 @@ pub fn SchedulesConfigView() -> Html {
                   />
              }})}
             {html_if!(*selected_type == ScheduleTaskType::PlaylistUpdate, {
-                config_field_child!(translate.t(LABEL_TARGETS), {
+                config_field_child!(translate.t(LABEL_TARGETS), "SCHEDULES_CONFIG.TARGETS", {
                     html!{ <Select name="target"
                         multi_select={true}
                         on_select={handle_target_selection}

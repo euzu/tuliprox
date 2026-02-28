@@ -1,0 +1,24 @@
+.tp__field-explanation-dialog__body {
+    p {
+        margin-bottom: 1rem;
+        line-height: 1.5;
+    }
+
+    pre {
+        background: var(--bg-secondary, #1e1e1e);
+        color: var(--text-secondary, #d4d4d4);
+        padding: 1rem;
+        border-radius: 8px;
+        font-family: 'JetBrains Mono', 'Fira Code', monospace;
+        font-size: 0.9rem;
+        overflow-x: auto;
+        margin: 1rem 0;
+        border: 1px solid var(--border-color, #333);
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+
+        code {
+            display: block;
+            white-space: pre;
+        }
+    }
+}

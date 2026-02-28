@@ -87,7 +87,7 @@ macro_rules! config_field_bool_empty {
             <div class="tp__form-field tp__form-field__bool">
                 <$crate::app::components::FieldLabel
                     label={$label.to_string()}
-                    field_id={format!("{}_BOOL", $label.to_string())}
+                    field_id={$label.to_string()}
                 />
                 <$crate::app::components::ToggleSwitch value={false} readonly={true} />
             </div>
@@ -117,7 +117,7 @@ macro_rules! config_field_custom {
             <div class="tp__form-field tp__form-field__text">
                 <$crate::app::components::FieldLabel
                     label={$label.to_string()}
-                    field_id={format!("CUSTOM_{}", $label.to_string())}
+                    field_id={$label.to_string()}
                 />
                 <span class="tp__form-field__value">{$value}</span>
             </div>
@@ -132,7 +132,7 @@ macro_rules! config_field_custom_hide {
             <div class="tp__form-field tp__form-field__text">
                 <$crate::app::components::FieldLabel
                     label={$label.to_string()}
-                    field_id={format!("CUSTOM_{}", $label.to_string())}
+                    field_id={$label.to_string()}
                 />
                 <span class="tp__form-field__value">
                     <$crate::app::components::HideContent content={$value}></$crate::app::components::HideContent>
@@ -144,12 +144,23 @@ macro_rules! config_field_custom_hide {
 
 #[macro_export]
 macro_rules! config_field_child {
+    ($label:expr,  $field_id:expr, $body:block) => {
+        html! {
+            <div class="tp__form-field tp__form-field__text">
+                <$crate::app::components::FieldLabel
+                    label={$label.to_string()}
+                    field_id={$field_id.to_string()}
+                />
+                { $body }
+            </div>
+        }
+    };
     ($label:expr, $body:block) => {
         html! {
             <div class="tp__form-field tp__form-field__text">
                 <$crate::app::components::FieldLabel
                     label={$label.to_string()}
-                    field_id={format!("CHILD_{}", $label.to_string())}
+                    field_id={$label.to_string()}
                 />
                 { $body }
             </div>
@@ -175,7 +186,7 @@ macro_rules! config_field_empty {
             <div class="tp__form-field tp__form-field__text">
                 <$crate::app::components::FieldLabel
                     label={$label.to_string()}
-                    field_id={format!("EMPTY_{}", $label.to_string())}
+                    field_id={$label.to_string()}
                 />
                 <span class="tp__form-field__value"></span>
             </div>

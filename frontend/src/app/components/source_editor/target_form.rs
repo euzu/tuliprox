@@ -166,7 +166,7 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
             { edit_field_bool!(target_options_state, translate.t(LABEL_SHARE_LIVE_STREAMS), share_live_streams, ConfigTargetOptionsFormAction::ShareLiveStreams) }
             </div>
             { edit_field_bool!(target_options_state, translate.t(LABEL_REMOVE_DUPLICATES), remove_duplicates, ConfigTargetOptionsFormAction::RemoveDuplicates) }
-            { config_field_child!(translate.t(LABEL_FORCE_REDIRECT), {
+            { config_field_child!(translate.t(LABEL_FORCE_REDIRECT), "TARGET_FORM.FORCE_REDIRECT", {
                html! {
                     <ClusterFlagsInput
                         name="force_redirect"
@@ -191,7 +191,7 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
             { edit_field_bool!(target_form_state, translate.t(LABEL_USE_MEMORY_CACHE), use_memory_cache,  ConfigTargetFormAction::UseMemoryCache) }
             </div>
             { edit_field_text!(target_form_state, translate.t(LABEL_NAME), name, ConfigTargetFormAction::Name) }
-            { config_field_child!(translate.t(LABEL_FILTER), {
+            { config_field_child!(translate.t(LABEL_FILTER), "TARGET_FORM.FILTER", {
                    html! {
                         <FilterInput filter={target_form_state_2.form.filter.clone()} on_change={Callback::from(move |new_filter: Option<String>| {
                             target_form_state_2.dispatch(ConfigTargetFormAction::Filter(new_filter.unwrap_or_default()));
@@ -199,7 +199,7 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
                    }
             })}
 
-            { config_field_child!(translate.t(LABEL_PROCESSING_ORDER), {
+            { config_field_child!(translate.t(LABEL_PROCESSING_ORDER), "TARGET_FORM.PROCESSING_ORDER", {
                    html! {
                        <Select
                         name={"processing_order"}

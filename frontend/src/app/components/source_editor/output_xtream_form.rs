@@ -221,7 +221,7 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
                   { edit_field_bool!(output_form_state, translate.t(LABEL_SERIES), skip_series_direct_source,  XtreamTargetOutputFormAction::SkipSeriesDirectSource) }
                   </div>
                 </TitledCard>
-                { config_field_child!(translate.t(LABEL_FILTER), {
+                { config_field_child!(translate.t(LABEL_FILTER), "OUTPUT_XTREAM_FORM.FILTER", {
                        html! {
                             <FilterInput filter={output_form_state_1.form.filter.clone()} on_change={Callback::from(move |new_filter| {
                                 output_form_state_1.dispatch(XtreamTargetOutputFormAction::Filter(new_filter));
@@ -257,7 +257,7 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
                 </div>
 
                 // Trakt Lists
-                { config_field_child!(translate.t(LABEL_TRAKT_LISTS), {
+                { config_field_child!(translate.t(LABEL_TRAKT_LISTS), "OUTPUT_XTREAM_FORM.TRAKT_LISTS", {
                     let trakt_lists_list = trakt_lists.clone();
                     html! {
                         <div class="tp__form-list">

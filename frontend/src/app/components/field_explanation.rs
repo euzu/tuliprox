@@ -10,13 +10,13 @@ use yew::{platform::spawn_local, prelude::*};
 fn normalize_field_id(raw: &str) -> String {
     let normalized = raw
         .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() { ch.to_ascii_uppercase() } else { '_' })
+        .map(|ch| if ch.is_ascii_alphanumeric() || ch == '.' { ch.to_ascii_uppercase() } else { '_' })
         .collect::<String>();
 
     normalized.split('_').filter(|part| !part.is_empty()).collect::<Vec<_>>().join("_")
 }
 
-fn field_tokens(field_id: &str) -> Vec<&str> { field_id.split('_').filter(|part| !part.is_empty()).collect::<Vec<_>>() }
+fn field_tokens(field_id: &str) -> Vec<&str> { field_id.split('.').filter(|part| !part.is_empty()).collect::<Vec<_>>() }
 
 fn push_unique(values: &mut Vec<String>, value: String) {
     if !values.iter().any(|existing| existing == &value) {
@@ -30,13 +30,8 @@ fn explanation_key_candidates(field_id: &str) -> Vec<String> {
 
     let tokens = field_tokens(field_id);
     if tokens.len() > 1 {
-        for split in (1..tokens.len()).rev() {
-            let prefix = tokens[..split].join("_");
-            let suffix = tokens[split..].join("_");
-            push_unique(&mut keys, format!("EXPLANATION.{prefix}.{suffix}"));
-        }
         for start in 1..tokens.len() {
-            let suffix = tokens[start..].join("_");
+            let suffix = tokens[start..].join(".");
             push_unique(&mut keys, format!("EXPLANATION.{suffix}"));
         }
     }
@@ -52,27 +47,11 @@ fn label_key_candidates(field_id: &str) -> Vec<String> {
     let tokens = field_tokens(field_id);
     if tokens.len() > 1 {
         for start in 1..tokens.len() {
-            let suffix = tokens[start..].join("_");
+            let suffix = tokens[start..].join(".");
             push_unique(&mut keys, format!("LABEL.{suffix}"));
         }
     }
     keys
-}
-
-fn explanation_paragraphs(explanation: &str) -> Vec<String> {
-    let normalized = explanation.replace("\r\n", "\n");
-    let mut paragraphs = normalized
-        .split("\n\n")
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
-
-    if paragraphs.is_empty() {
-        paragraphs.push(explanation.to_string());
-    }
-
-    paragraphs
 }
 
 pub fn show_field_explanation(field_id: &str, field_label: &str, dialog: &DialogService, translate: &YewI18n) {
@@ -81,7 +60,6 @@ pub fn show_field_explanation(field_id: &str, field_label: &str, dialog: &Dialog
         .into_iter()
         .find_map(|key| t_safe(translate, &key))
         .unwrap_or_else(|| "No explanation available for this field.".to_string());
-    let explanation_paragraphs = explanation_paragraphs(&explanation);
 
     let title = if field_label.trim().is_empty() {
         label_key_candidates(field_id)
@@ -105,6 +83,28 @@ pub fn show_field_explanation(field_id: &str, field_label: &str, dialog: &Dialog
 
     let dialog = dialog.clone();
     spawn_local(async move {
+        let mut elements = Vec::new();
+        let parts: Vec<&str> = explanation.split("```").collect();
+
+        for (i, part) in parts.into_iter().enumerate() {
+            if i % 2 == 1 {
+                // Inside a code block
+                let (_, mut code) = part.split_once('\n').unwrap_or(("", part));
+                code = code.trim_matches(|c| c == '\n' || c == '\r');
+                if !code.trim().is_empty() {
+                    elements.push(html! {
+                        <pre><code>{ code }</code></pre>
+                    });
+                }
+            } else {
+                // Regular text
+                let text = part.replace("\r\n", "\n");
+                for paragraph in text.split("\n\n").map(str::trim).filter(|s| !s.is_empty()) {
+                    elements.push(html! { <p>{ paragraph }</p> });
+                }
+            }
+        }
+
         let _ = dialog
             .content(
                 html! {
@@ -112,10 +112,8 @@ pub fn show_field_explanation(field_id: &str, field_label: &str, dialog: &Dialog
                         <div class="tp__field-explanation-dialog__header">
                             <h2>{title}</h2>
                         </div>
-                        <div class="tp__field-explanation-dialog__body">
-                            {for explanation_paragraphs.into_iter().map(|paragraph| {
-                                html! { <p>{paragraph}</p> }
-                            })}
+                       <div class="tp__field-explanation-dialog__body">
+                            { for elements }
                         </div>
                     </div>
                 },

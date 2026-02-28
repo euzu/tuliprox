@@ -241,14 +241,14 @@ pub fn PlaylistSourceSelector(props: &PlaylistSourceSelectorProps) -> Html {
                        <>
                         <Input
                             label={translate.t("LABEL.USERNAME")}
-                            field_id={Some("PLAYLIST_SOURCE_SELECTOR_USERNAME".to_string())}
+                            field_id={Some("PLAYLIST_SOURCE_SELECTOR.USERNAME".to_string())}
                             input_ref={username_ref}
                             name="username"
                             autocomplete={true}
                         />
                         <Input
                             label={translate.t("LABEL.PASSWORD")}
-                            field_id={Some("PLAYLIST_SOURCE_SELECTOR_PASSWORD".to_string())}
+                            field_id={Some("PLAYLIST_SOURCE_SELECTOR.PASSWORD".to_string())}
                             input_ref={password_ref}
                             name="password"
                             hidden={true}
@@ -260,7 +260,7 @@ pub fn PlaylistSourceSelector(props: &PlaylistSourceSelectorProps) -> Html {
                   }
                     <Input
                         label={translate.t("LABEL.URL")}
-                        field_id={Some("PLAYLIST_SOURCE_SELECTOR_URL".to_string())}
+                        field_id={Some("PLAYLIST_SOURCE_SELECTOR.URL".to_string())}
                         input_ref={url_ref}
                         name="url"
                         autocomplete={true}
