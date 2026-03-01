@@ -30,6 +30,7 @@ const LABEL_USER_UI_ENABLED: &str = "LABEL.USER_UI_ENABLED";
 const LABEL_CONTENT_SECURITY_POLICY: &str = "LABEL.CONTENT_SECURITY_POLICY";
 const LABEL_CONTENT_SECURITY_POLICY_CUSTOM_ATTRIBUTES: &str = "LABEL.CUSTOM_ATTRIBUTES";
 const LABEL_PATH: &str = "LABEL.PATH";
+const LABEL_COMBINE_VIEWS_STATS_STREAMS: &str = "LABEL.COMBINE_VIEWS_STATS_STREAMS";
 
 // Reducers for form states
 generate_form_reducer!(
@@ -41,6 +42,7 @@ generate_form_reducer!(
         Path => path: Option<String>,
         PlayerServer => player_server: Option<String>,
         KickSecs => kick_secs: u64,
+        CombineViewsStatsStreams => combine_views_stats_streams: bool,
     }
 );
 
@@ -131,6 +133,7 @@ pub fn WebUiConfigView() -> Html {
             <Card class="tp__config-view__card">
             { config_field_bool!(webui_state.form, translate.t(LABEL_ENABLED), enabled) }
             { config_field_bool!(webui_state.form, translate.t(LABEL_USER_UI_ENABLED), user_ui_enabled) }
+            { config_field_bool!(webui_state.form, translate.t(LABEL_COMBINE_VIEWS_STATS_STREAMS), combine_views_stats_streams) }
             { config_field_optional!(webui_state.form, translate.t(LABEL_PATH), path) }
             { config_field_optional!(webui_state.form, translate.t(LABEL_PLAYER_SERVER), player_server) }
             { config_field!(webui_state.form, translate.t(LABEL_KICK_DURATION), kick_secs) }
@@ -172,6 +175,7 @@ pub fn WebUiConfigView() -> Html {
             <Card class="tp__config-view__card">
                 { edit_field_bool!(webui_state, translate.t(LABEL_ENABLED), enabled, WebUiConfigFormAction::Enabled) }
                 { edit_field_bool!(webui_state, translate.t(LABEL_USER_UI_ENABLED), user_ui_enabled, WebUiConfigFormAction::UserUiEnabled) }
+                { edit_field_bool!(webui_state, translate.t(LABEL_COMBINE_VIEWS_STATS_STREAMS), combine_views_stats_streams, WebUiConfigFormAction::CombineViewsStatsStreams) }
                 { edit_field_text_option!(webui_state, translate.t(LABEL_PATH), path, WebUiConfigFormAction::Path) }
                 { edit_field_text_option!(webui_state, translate.t(LABEL_PLAYER_SERVER), player_server, WebUiConfigFormAction::PlayerServer) }
                 { edit_field_number_u64!(webui_state, translate.t(LABEL_KICK_DURATION), kick_secs, WebUiConfigFormAction::KickSecs) }

@@ -1,3 +1,5 @@
+@use '../../../size';
+
 .tp__stats {
   display: flex;
   flex-flow: column;
@@ -22,6 +24,14 @@
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
       gap: var(--gap-larger);
+    }
+
+    &-group-provider {
+      @media (max-width: size.$dashboard-mobile-breakpoint) {
+        display: flex;
+        flex-flow: row wrap;
+        gap: var(--gap-larger);
+      }
     }
   }
 }

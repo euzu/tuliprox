@@ -22,6 +22,7 @@ use shared::model::{
     MsgKind, PatternTemplate, SourcesConfigDto, TargetUserDto, TemplateDefinitionDto,
 };
 use shared::utils::{CONSTANTS, TEMPLATE_FILE};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::File;
@@ -108,6 +109,17 @@ fn parse_sources_file_from_path(
     }
 }
 
+pub fn resolve_template_and_mapping_paths<'a>(paths: &'a ConfigPaths, template_path: Option<&'a str>, mapping_path: Option<&'a str>) -> (Cow<'a, str>, Cow<'a, str>) {
+    // Resolve effective paths for templates and mappings (with robust fallbacks)
+    let effective_template_path = paths.template_file_path.as_deref()
+        .or(template_path).map_or_else(|| Cow::Owned(utils::get_default_templates_path(&paths.config_path)), Cow::Borrowed);
+
+    let effective_mapping_path = paths.mapping_file_path.as_deref()
+        .or(mapping_path).map_or_else(|| Cow::Owned(utils::get_default_mappings_path(&paths.config_path)), Cow::Borrowed);
+
+    (effective_template_path, effective_mapping_path)
+}
+
 pub fn read_sources_file_from_path_with_templates(
     sources_file: &Path,
     resolve_env: bool,
@@ -147,13 +159,14 @@ pub fn read_sources_file(
     resolve_env: bool,
     include_computed: bool,
     hdhr_config: Option<&HdHomeRunDeviceOverview>,
+    prepared_templates: Option<&[shared::model::PatternTemplate]>,
 ) -> Result<SourcesConfigDto, TuliproxError> {
     read_sources_file_from_path_with_templates(
         &PathBuf::from(sources_file),
         resolve_env,
         include_computed,
         hdhr_config,
-        None,
+        prepared_templates,
     )
 }
 
@@ -316,15 +329,16 @@ pub fn read_app_config_dto(
     let api_proxy_file = paths.api_proxy_file_path.as_str();
 
     let config = read_config_file(config_file, resolve_env, include_computed)?;
+
+    // Resolve effective paths for templates and mappings (with robust fallbacks)
+    let (effective_template_path,effective_mapping_path) = resolve_template_and_mapping_paths(paths, config.template_path.as_deref(), config.mapping_path.as_deref());
+
     let mut sources = parse_sources_file_from_path(&PathBuf::from(sources_file), resolve_env)?;
-    let mut mappings = if let Some(mappings_file) = paths.mapping_file_path.as_ref() {
-        read_mappings_file_unprepared(mappings_file, resolve_env)?.map(|(_, mapping)| mapping)
-    } else {
-        None
-    };
+    let mut mappings = read_mappings_file_unprepared(effective_mapping_path.as_ref(), resolve_env)?
+        .map(|(_, mapping)| mapping);
 
     let template_bundle = read_templates(
-        paths.template_file_path.as_deref().or(config.template_path.as_deref()),
+        Some(effective_template_path.as_ref()),
         resolve_env,
         sources.templates.as_deref(),
         mappings
@@ -514,7 +528,6 @@ pub async fn read_initial_app_config(
     }
 
     let mut sources_dto = parse_sources_file_from_path(&PathBuf::from(sources_file), resolve_env)?;
-    prepare_sources_batch(&mut sources_dto, include_computed).await?;
 
     let (mapping_paths, mut mappings_dto) = if let Some(mappings_file) = &paths.mapping_file_path {
         match read_mappings_file_unprepared(mappings_file.as_str(), resolve_env) {
@@ -536,6 +549,8 @@ pub async fn read_initial_app_config(
     )?;
     let prepared_templates = template_bundle.prepared;
     let template_files_used = template_bundle.files_used;
+
+    prepare_sources_batch(&mut sources_dto, include_computed).await?;
 
     if resolve_env {
         sources_dto.prepare(

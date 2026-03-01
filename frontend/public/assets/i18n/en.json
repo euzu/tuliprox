@@ -598,7 +598,8 @@
       "KICK_SECS": "Duration in seconds a kicked user is blocked from reconnecting (default 90).",
       "PATH": "Optional path prefix (e.g. /ui) for reverse proxy integration.",
       "PLAYER_SERVER": "Optional server override used specifically for the built-in web player.",
-      "USER_UI_ENABLED": "Enables or disables the simplified bouquet editor for standard users."
+      "USER_UI_ENABLED": "Enables or disables the simplified bouquet editor for standard users.",
+      "COMBINE_VIEWS_STATS_STREAMS": "If set, the Stats and Streams views are combined into a single view."
     },
     "XTREAM_TARGET_OUTPUT": {
       "SKIP_LIVE_DIRECT_SOURCE": "If enabled, live streams are not linked directly but proxied/resolved.",
@@ -1072,6 +1073,7 @@
     "USER_STATUS_TRIAL": "Trial",
     "USER_UI": "User UI",
     "USER_UI_ENABLED": "User-UI Enabled",
+    "COMBINE_VIEWS_STATS_STREAMS": "Combine Stats & Streams",
     "USE_MEMORY_CACHE": "Mem-Cache",
     "USE_OUTPUT": "Use output",
     "USE_USER_DB": "Use User DB",

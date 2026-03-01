@@ -244,6 +244,7 @@ fn apply_setup_webui_form(config: &mut shared::model::ConfigDto, web_ui_cfg: Web
         if is_setup_webui_toggle_only_update(&web_ui_cfg) {
             existing.enabled = web_ui_cfg.enabled;
             existing.user_ui_enabled = web_ui_cfg.user_ui_enabled;
+            existing.combine_views_stats_streams = web_ui_cfg.combine_views_stats_streams;
             return;
         }
     }

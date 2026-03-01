@@ -856,6 +856,7 @@ log:
 - `player_server` optional, if set the server setting is used for the web-ui-player.
 - `kick_secs` default 90 seconds, if a user is kicked from the `web_ui`, they can't connect for this duration. This setting is also used for
   sleep-timed streams.
+- `combine_views_stats_streams`: if `enabled`, display Stats and Stream views together in WebUI.
 - `auth` for authentication settings
   - `enabled` can be deactivated if `enabled` is set to `false`. If not set default is `true`.
   - `issuer`
