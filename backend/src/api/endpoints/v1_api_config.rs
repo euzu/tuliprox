@@ -20,6 +20,37 @@ use shared::{
 };
 use std::sync::Arc;
 
+fn inject_provider_dns_resolved(sources_dto: &mut SourcesConfigDto, runtime_sources: &crate::model::SourcesConfig) {
+    let Some(provider_dtos) = sources_dto.provider.as_mut() else {
+        return;
+    };
+    for provider_dto in provider_dtos {
+        let Some(runtime_provider) = runtime_sources.get_provider_by_name(provider_dto.name.as_ref()) else {
+            continue;
+        };
+        let Some(dns_dto) = provider_dto.dns.as_mut() else {
+            continue;
+        };
+        if runtime_provider.get_dns_config().is_none() {
+            dns_dto.resolved = None;
+            continue;
+        }
+        let snapshot = runtime_provider.snapshot_resolved();
+        dns_dto.resolved = (!snapshot.is_empty()).then_some(snapshot);
+    }
+}
+
+fn strip_provider_dns_resolved(sources_dto: &mut SourcesConfigDto) {
+    let Some(provider_dtos) = sources_dto.provider.as_mut() else {
+        return;
+    };
+    for provider_dto in provider_dtos {
+        if let Some(dns_dto) = provider_dto.dns.as_mut() {
+            dns_dto.resolved = None;
+        }
+    }
+}
+
 pub(in crate::api::endpoints) async fn intern_save_config_api_proxy(
     backup_dir: &str,
     api_proxy: &ApiProxyConfigDto,
@@ -78,8 +109,11 @@ async fn save_config_main(
 
 async fn save_config_sources(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
-    axum::extract::Json(sources): axum::extract::Json<SourcesConfigDto>,
+    axum::extract::Json(mut sources): axum::extract::Json<SourcesConfigDto>,
 ) -> impl axum::response::IntoResponse + Send {
+    // `dns.resolved` is runtime-managed and must not be accepted from API input.
+    strip_provider_dns_resolved(&mut sources);
+
     let templates_to_persist = match utils::validate_source_config_for_persist(&app_state, &sources) {
         Ok(value) => value,
         Err(err) => {
@@ -188,6 +222,8 @@ async fn config(axum::extract::State(app_state): axum::extract::State<Arc<AppSta
                 error!("Failed to prepare users: {err}");
                 internal_server_error!()
             } else {
+                let runtime_sources = app_state.app_config.sources.load();
+                inject_provider_dns_resolved(&mut app_config.sources, &runtime_sources);
                 axum::response::Json(app_config).into_response()
             }
         }
@@ -242,4 +278,124 @@ pub fn v1_api_config_register(router: Router<Arc<AppState>>) -> axum::Router<Arc
         .route("/config/sources", axum::routing::post(save_config_sources))
         .route("/config/apiproxy", axum::routing::get(get_config_api_proxy_config))
         .route("/config/apiproxy", axum::routing::put(save_config_api_proxy_config))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{inject_provider_dns_resolved, strip_provider_dns_resolved};
+    use crate::model::{ConfigProvider, SourcesConfig};
+    use shared::model::{ConfigProviderDto, DnsScheme, ProviderDnsDto, SourcesConfigDto};
+    use std::{collections::HashMap, net::IpAddr, sync::Arc};
+
+    #[test]
+    fn inject_provider_dns_resolved_populates_runtime_snapshot() {
+        let mut dto = SourcesConfigDto {
+            provider: Some(vec![ConfigProviderDto {
+                name: "p1".into(),
+                urls: vec!["http://example.com".into()],
+                dns: Some(ProviderDnsDto {
+                    enabled: true,
+                    schemes: Some(vec![DnsScheme::Http]),
+                    ..ProviderDnsDto::default()
+                }),
+            }]),
+            ..SourcesConfigDto::default()
+        };
+
+        let runtime_provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {
+            name: "p1".into(),
+            urls: vec!["http://example.com".into()],
+            dns: Some(ProviderDnsDto {
+                enabled: true,
+                schemes: Some(vec![DnsScheme::Http]),
+                ..ProviderDnsDto::default()
+            }),
+        }));
+        runtime_provider.store_resolved(
+            "example.com",
+            vec!["203.0.113.10".parse::<IpAddr>().expect("ip parse should work")],
+        );
+        let runtime_sources = SourcesConfig {
+            provider: vec![runtime_provider],
+            ..SourcesConfig::default()
+        };
+
+        inject_provider_dns_resolved(&mut dto, &runtime_sources);
+
+        let resolved = dto.provider.as_ref()
+            .and_then(|providers| providers.first())
+            .and_then(|provider| provider.dns.as_ref())
+            .and_then(|dns| dns.resolved.as_ref())
+            .expect("resolved dns snapshot should be present");
+        assert_eq!(
+            resolved.get("example.com"),
+            Some(&vec!["203.0.113.10".parse::<IpAddr>().expect("ip parse should work")])
+        );
+    }
+
+    #[test]
+    fn inject_provider_dns_resolved_clears_value_when_runtime_dns_disabled() {
+        let mut dto = SourcesConfigDto {
+            provider: Some(vec![ConfigProviderDto {
+                name: "p1".into(),
+                urls: vec!["http://example.com".into()],
+                dns: Some(ProviderDnsDto {
+                    enabled: true,
+                    resolved: Some(HashMap::from([(
+                        "example.com".to_string(),
+                        vec!["203.0.113.10".parse::<IpAddr>().expect("ip parse should work")],
+                    )])),
+                    ..ProviderDnsDto::default()
+                }),
+            }]),
+            ..SourcesConfigDto::default()
+        };
+
+        let runtime_provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {
+            name: "p1".into(),
+            urls: vec!["http://example.com".into()],
+            dns: None,
+        }));
+        let runtime_sources = SourcesConfig {
+            provider: vec![runtime_provider],
+            ..SourcesConfig::default()
+        };
+
+        inject_provider_dns_resolved(&mut dto, &runtime_sources);
+
+        let resolved = dto.provider.as_ref()
+            .and_then(|providers| providers.first())
+            .and_then(|provider| provider.dns.as_ref())
+            .and_then(|dns| dns.resolved.as_ref());
+        assert!(resolved.is_none(), "resolved output must be empty when runtime dns is disabled");
+    }
+
+    #[test]
+    fn strip_provider_dns_resolved_removes_payload_values() {
+        let mut dto = SourcesConfigDto {
+            provider: Some(vec![ConfigProviderDto {
+                name: "p1".into(),
+                urls: vec!["http://example.com".into()],
+                dns: Some(ProviderDnsDto {
+                    enabled: true,
+                    resolved: Some(HashMap::from([(
+                        "example.com".to_string(),
+                        vec!["203.0.113.10".parse::<IpAddr>().expect("ip parse should work")],
+                    )])),
+                    ..ProviderDnsDto::default()
+                }),
+            }]),
+            ..SourcesConfigDto::default()
+        };
+
+        strip_provider_dns_resolved(&mut dto);
+
+        let resolved = dto
+            .provider
+            .as_ref()
+            .and_then(|providers| providers.first())
+            .and_then(|provider| provider.dns.as_ref())
+            .and_then(|dns| dns.resolved.as_ref());
+        assert!(resolved.is_none(), "resolved must be stripped from incoming payload");
+    }
 }

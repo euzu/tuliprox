@@ -16,9 +16,9 @@ use crate::{
         hdhomerun_proprietary::spawn_proprietary_tasks,
         hdhomerun_ssdp::spawn_ssdp_discover_task,
         model::{
-            create_cache, create_http_client, create_http_client_no_redirect, ActiveProviderManager, ActiveUserManager,
-            AppState, CancelTokens, ConnectionManager, DownloadQueue, EventManager, EventMessage, HdHomerunAppState,
-            MetadataUpdateManager, PlaylistStorageState, SharedStreamManager, UpdateGuard,
+            create_cache, create_http_client, create_http_client_no_redirect, exec_provider_dns, ActiveProviderManager,
+            ActiveUserManager, AppState, CancelTokens, ConnectionManager, DownloadQueue, EventManager, EventMessage,
+            HdHomerunAppState, MetadataUpdateManager, PlaylistStorageState, SharedStreamManager, UpdateGuard,
         },
         panel_api::sync_panel_api_exp_dates_on_boot,
         scheduler::{exec_interner_prune, exec_scheduler},
@@ -287,9 +287,14 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
     // Keep using the original `app_state` below, which is valid because `Arc::clone` borrows.
     let shared_data = Arc::clone(&app_state);
 
-    let (cancel_token_scheduler, cancel_token_hdhomerun, cancel_token_file_watch) = {
+    let (cancel_token_scheduler, cancel_token_hdhomerun, cancel_token_file_watch, cancel_token_provider_dns) = {
         let cancel_tokens = app_state.cancel_tokens.load();
-        (cancel_tokens.scheduler.clone(), cancel_tokens.hdhomerun.clone(), cancel_tokens.file_watch.clone())
+        (
+            cancel_tokens.scheduler.clone(),
+            cancel_tokens.hdhomerun.clone(),
+            cancel_tokens.file_watch.clone(),
+            cancel_tokens.provider_dns.clone(),
+        )
     };
 
     if let Err(err) = load_playlists_into_memory_cache(&app_state).await {
@@ -311,6 +316,7 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
     exec_interner_prune(&app_state);
 
     exec_config_watch(&app_state, &cancel_token_file_watch);
+    exec_provider_dns(&app_state, &cancel_token_provider_dns);
 
     let web_auth_enabled = is_web_auth_enabled(&cfg, web_ui_enabled);
 

@@ -1,17 +1,153 @@
 use crate::model::{macros, ConfigInput, ConfigTarget, ProcessTargets};
+use parking_lot::RwLock;
 use shared::error::{info_err_res, TuliproxError};
-use shared::model::{ConfigProviderDto, ConfigSourceDto, PatternTemplate, SourcesConfigDto};
+use shared::model::{
+    ConfigProviderDto, ConfigSourceDto, DnsPrefer, DnsScheme, OnConnectErrorPolicy, OnResolveErrorPolicy, PatternTemplate,
+    SourcesConfigDto,
+};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::SystemTime;
+use url::Url;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderDnsConfig {
+    pub enabled: bool,
+    pub refresh_secs: u64,
+    pub prefer: DnsPrefer,
+    pub max_addrs: Option<usize>,
+    pub schemes: Vec<DnsScheme>,
+    pub keep_vhost: bool,
+    pub overrides: HashMap<String, Vec<IpAddr>>,
+    pub on_resolve_error: OnResolveErrorPolicy,
+    pub on_connect_error: OnConnectErrorPolicy,
+}
+
+impl ProviderDnsConfig {
+    pub fn supports_scheme(&self, scheme: &str) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        match scheme.to_ascii_lowercase().as_str() {
+            "http" => self.schemes.contains(&DnsScheme::Http),
+            "https" => self.schemes.contains(&DnsScheme::Https),
+            _ => false,
+        }
+    }
+}
+
+impl From<&shared::model::ProviderDnsDto> for ProviderDnsConfig {
+    fn from(dto: &shared::model::ProviderDnsDto) -> Self {
+        Self {
+            enabled: dto.enabled,
+            refresh_secs: dto.refresh_secs,
+            prefer: dto.prefer,
+            max_addrs: dto.max_addrs,
+            schemes: dto
+                .schemes
+                .as_ref()
+                .filter(|list| !list.is_empty())
+                .cloned()
+                .unwrap_or_else(|| vec![DnsScheme::Http]),
+            keep_vhost: dto.keep_vhost,
+            overrides: dto.overrides.clone().unwrap_or_default(),
+            on_resolve_error: dto.on_resolve_error,
+            on_connect_error: dto.on_connect_error,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ProviderDnsCacheEntry {
+    pub ips: Vec<IpAddr>,
+    pub rr_index: usize,
+    pub last_ok: Option<SystemTime>,
+    pub last_err: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct ProviderDnsCache {
+    by_host: RwLock<HashMap<String, ProviderDnsCacheEntry>>,
+}
+
+impl ProviderDnsCache {
+    pub fn select_ip_from(&self, host: &str, ips: &[IpAddr]) -> Option<IpAddr> {
+        if ips.is_empty() {
+            return None;
+        }
+        let mut guard = self.by_host.write();
+        let entry = guard.entry(host.to_ascii_lowercase()).or_default();
+        let idx = entry.rr_index % ips.len();
+        entry.rr_index = (idx + 1) % ips.len();
+        Some(ips[idx])
+    }
+
+    pub fn select_cached_ip(&self, host: &str) -> Option<IpAddr> {
+        let mut guard = self.by_host.write();
+        let entry = guard.get_mut(&host.to_ascii_lowercase())?;
+        if entry.ips.is_empty() {
+            return None;
+        }
+        let idx = entry.rr_index % entry.ips.len();
+        let ip = entry.ips[idx];
+        entry.rr_index = (idx + 1) % entry.ips.len();
+        Some(ip)
+    }
+
+    pub fn store_resolved(&self, host: &str, ips: Vec<IpAddr>) {
+        let mut guard = self.by_host.write();
+        let entry = guard.entry(host.to_ascii_lowercase()).or_default();
+        entry.ips = ips;
+        if entry.ips.is_empty() {
+            entry.rr_index = 0;
+        } else {
+            entry.rr_index %= entry.ips.len();
+        }
+        entry.last_ok = Some(SystemTime::now());
+        entry.last_err = None;
+    }
+
+    pub fn clear_resolved(&self, host: &str) {
+        let mut guard = self.by_host.write();
+        if let Some(entry) = guard.get_mut(&host.to_ascii_lowercase()) {
+            entry.ips.clear();
+            entry.rr_index = 0;
+        }
+    }
+
+    pub fn mark_resolve_error(&self, host: &str, err: impl Into<String>) {
+        let mut guard = self.by_host.write();
+        let entry = guard.entry(host.to_ascii_lowercase()).or_default();
+        entry.last_err = Some(err.into());
+    }
+
+    pub fn snapshot_resolved(&self) -> HashMap<String, Vec<IpAddr>> {
+        let guard = self.by_host.read();
+        guard
+            .iter()
+            .filter_map(|(host, entry)| (!entry.ips.is_empty()).then_some((host.clone(), entry.ips.clone())))
+            .collect()
+    }
+
+    pub fn ip_count(&self, host: &str) -> usize {
+        let guard = self.by_host.read();
+        guard
+            .get(&host.to_ascii_lowercase())
+            .map_or(0, |entry| entry.ips.len())
+    }
+}
 
 #[derive(Debug)]
 pub struct ConfigProvider {
     pub name: Arc<str>,
     pub urls: Vec<Arc<str>>,
     pub current_url_index: AtomicUsize,
+    pub dns: Option<ProviderDnsConfig>,
+    pub dns_cache: Arc<ProviderDnsCache>,
 }
 
 impl Clone for ConfigProvider {
@@ -20,6 +156,8 @@ impl Clone for ConfigProvider {
             name: self.name.clone(),
             urls: self.urls.clone(),
             current_url_index: AtomicUsize::new(self.current_url_index.load(Ordering::Relaxed)),
+            dns: self.dns.clone(),
+            dns_cache: Arc::clone(&self.dns_cache),
         }
     }
 }
@@ -28,10 +166,21 @@ impl Clone for ConfigProvider {
 macros::from_impl!(ConfigProvider);
 impl From<&ConfigProviderDto> for ConfigProvider {
     fn from(dto: &ConfigProviderDto) -> Self {
+        let dns_cfg = dto.dns.as_ref().map(ProviderDnsConfig::from);
+        let dns_cache = Arc::new(ProviderDnsCache::default());
+        if let Some(dns_dto) = dto.dns.as_ref() {
+            if let Some(resolved) = dns_dto.resolved.as_ref() {
+                for (host, ips) in resolved {
+                    dns_cache.store_resolved(host, ips.clone());
+                }
+            }
+        }
         Self {
             name: dto.name.clone(),
             urls: dto.urls.clone(),
             current_url_index: AtomicUsize::new(0),
+            dns: dns_cfg,
+            dns_cache,
         }
     }
 }
@@ -53,6 +202,63 @@ impl ConfigProvider {
     pub fn get_current_index(&self) -> usize {
         self.current_url_index.load(Ordering::Relaxed)
     }
+
+    pub fn get_dns_config(&self) -> Option<&ProviderDnsConfig> { self.dns.as_ref() }
+
+    pub fn dns_enabled_for_scheme(&self, scheme: &str) -> bool {
+        self.dns.as_ref().is_some_and(|cfg| cfg.supports_scheme(scheme))
+    }
+
+    pub fn select_ip_for_host(&self, host: &str) -> Option<IpAddr> {
+        let dns = self.dns.as_ref()?;
+        let normalized = host.trim().to_ascii_lowercase();
+        if let Some(ips) = dns.overrides.get(&normalized) {
+            return self.dns_cache.select_ip_from(&normalized, ips);
+        }
+        self.dns_cache.select_cached_ip(&normalized)
+    }
+
+    pub fn ip_count_for_host(&self, host: &str) -> usize {
+        let Some(dns) = self.dns.as_ref() else {
+            return 0;
+        };
+        let normalized = host.trim().to_ascii_lowercase();
+        if let Some(ips) = dns.overrides.get(&normalized) {
+            return ips.len();
+        }
+        self.dns_cache.ip_count(&normalized)
+    }
+
+    pub fn hostnames_from_urls(&self) -> HashSet<String> {
+        let mut hostnames = HashSet::new();
+        for raw in &self.urls {
+            let raw = raw.as_ref();
+            let candidate = if raw.contains("://") {
+                raw.to_string()
+            } else {
+                format!("http://{raw}")
+            };
+            let Ok(parsed) = Url::parse(&candidate) else {
+                continue;
+            };
+            let Some(host) = parsed.host_str() else {
+                continue;
+            };
+            if host.parse::<IpAddr>().is_ok() {
+                continue;
+            }
+            hostnames.insert(host.to_ascii_lowercase());
+        }
+        hostnames
+    }
+
+    pub fn store_resolved(&self, host: &str, ips: Vec<IpAddr>) { self.dns_cache.store_resolved(host, ips); }
+
+    pub fn clear_resolved(&self, host: &str) { self.dns_cache.clear_resolved(host); }
+
+    pub fn mark_resolve_error(&self, host: &str, err: impl Into<String>) { self.dns_cache.mark_resolve_error(host, err); }
+
+    pub fn snapshot_resolved(&self) -> HashMap<String, Vec<IpAddr>> { self.dns_cache.snapshot_resolved() }
 
     /// Rotates to next URL, checking if a full cycle has been completed.
     /// Returns None if we've cycled back to the `start_index`, indicating all URLs were tried.

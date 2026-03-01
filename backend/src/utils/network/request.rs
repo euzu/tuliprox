@@ -14,21 +14,22 @@ use futures::{StreamExt, TryStreamExt};
 use log::{debug, error, log_enabled, trace, warn, Level};
 use regex::Regex;
 use reqwest::{
-    header::{HeaderMap, HeaderName, HeaderValue, CONTENT_ENCODING},
+    header::{HeaderMap, HeaderName, HeaderValue, CONTENT_ENCODING, HOST},
     redirect::Policy,
     StatusCode,
 };
 use shared::{
     error::{notify_err_res, string_to_io_error, TuliproxError},
-    model::{format_elapsed_time, InputFetchMethod, DEFAULT_USER_AGENT},
+    model::{format_elapsed_time, InputFetchMethod, OnConnectErrorPolicy, DEFAULT_USER_AGENT},
     utils::{
         filter_request_header, human_readable_byte_size, sanitize_sensitive_info, CONTENT_TYPE_JSON, ENCODING_DEFLATE,
         ENCODING_GZIP,
     },
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::{Error, ErrorKind},
+    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     pin::Pin,
     sync::{Arc, Once},
@@ -158,6 +159,172 @@ fn resolve_provider_url_for_attempt(url: &Url, provider: Option<&Arc<ConfigProvi
     }
 }
 
+#[derive(Debug, Clone)]
+struct AttemptTarget {
+    request_url: Url,
+    effective_url: Url,
+    host_header: Option<String>,
+    sni_host: Option<String>,
+    connect_ip: Option<IpAddr>,
+    dns_host: Option<String>,
+}
+
+impl AttemptTarget {
+    fn new(url: Url) -> Self {
+        Self {
+            request_url: url.clone(),
+            effective_url: url,
+            host_header: None,
+            sni_host: None,
+            connect_ip: None,
+            dns_host: None,
+        }
+    }
+}
+
+fn is_ip_literal(host: &str) -> bool { host.parse::<IpAddr>().is_ok() }
+
+fn format_host_header_with_port(host: &str, port: Option<u16>) -> String {
+    match port {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_string(),
+    }
+}
+
+fn format_ip_host_header_with_port(ip: IpAddr, port: Option<u16>) -> String {
+    match (ip, port) {
+        (IpAddr::V4(addr), Some(port)) => format!("{addr}:{port}"),
+        (IpAddr::V4(addr), None) => addr.to_string(),
+        (IpAddr::V6(addr), Some(port)) => format!("[{addr}]:{port}"),
+        (IpAddr::V6(addr), None) => format!("[{addr}]"),
+    }
+}
+
+fn resolve_attempt_target(url: &Url, provider: Option<&Arc<ConfigProvider>>) -> AttemptTarget {
+    let resolved_url = resolve_provider_url_for_attempt(url, provider);
+    let Some(provider) = provider else {
+        return AttemptTarget::new(resolved_url);
+    };
+
+    let mut target = AttemptTarget::new(resolved_url.clone());
+    let scheme = resolved_url.scheme();
+    if !provider.dns_enabled_for_scheme(scheme) {
+        return target;
+    }
+
+    let Some(host) = resolved_url.host_str() else {
+        return target;
+    };
+    if is_ip_literal(host) {
+        return target;
+    }
+
+    let Some(connect_ip) = provider.select_ip_for_host(host) else {
+        return target;
+    };
+    let keep_vhost = provider.get_dns_config().is_some_and(|dns| dns.keep_vhost);
+    let host_header = if keep_vhost {
+        format_host_header_with_port(host, resolved_url.port())
+    } else {
+        format_ip_host_header_with_port(connect_ip, resolved_url.port())
+    };
+
+    target.host_header = Some(host_header);
+    target.connect_ip = Some(connect_ip);
+    target.dns_host = Some(host.to_ascii_lowercase());
+
+    if scheme.eq_ignore_ascii_case("https") {
+        target.sni_host = Some(host.to_string());
+        return target;
+    }
+
+    if scheme.eq_ignore_ascii_case("http") {
+        let mut effective = resolved_url.clone();
+        if effective.set_host(Some(connect_ip.to_string().as_str())).is_ok() {
+            target.effective_url = effective;
+        }
+    }
+
+    target
+}
+
+fn should_try_next_ip_on_connect_error(
+    provider: Option<&Arc<ConfigProvider>>,
+    target: &AttemptTarget,
+    attempted_ips: &mut HashSet<IpAddr>,
+) -> bool {
+    let Some(provider) = provider else {
+        return false;
+    };
+    let Some(connect_ip) = target.connect_ip else {
+        return false;
+    };
+    let Some(dns_host) = target.dns_host.as_ref() else {
+        return false;
+    };
+    let Some(dns_cfg) = provider.get_dns_config() else {
+        return false;
+    };
+    if dns_cfg.on_connect_error != OnConnectErrorPolicy::TryNextIp {
+        return false;
+    }
+
+    let inserted = attempted_ips.insert(connect_ip);
+    if !inserted {
+        return false;
+    }
+
+    let total_ips = provider.ip_count_for_host(dns_host);
+    total_ips > attempted_ips.len()
+}
+
+fn apply_attempt_to_request(
+    request: &mut reqwest::Request,
+    target: &AttemptTarget,
+) -> Result<(), std::io::Error> {
+    if request.url().as_str() != target.effective_url.as_str() {
+        *request.url_mut() = target.effective_url.clone();
+    }
+    if let Some(host_header) = target.host_header.as_ref() {
+        let host = HeaderValue::from_str(host_header)
+            .map_err(|err| string_to_io_error(format!("Invalid host header '{host_header}': {err}")))?;
+        request.headers_mut().insert(HOST, host);
+    }
+    Ok(())
+}
+
+fn build_https_attempt_client(
+    app_config: &Arc<AppConfig>,
+    sni_host: &str,
+    connect_ip: IpAddr,
+    connect_port: u16,
+) -> Result<reqwest::Client, reqwest::Error> {
+    let config = app_config.config.load();
+    let mut builder = create_client(app_config).http1_only();
+    if config.connect_timeout_secs > 0 {
+        builder = builder.connect_timeout(Duration::from_secs(u64::from(config.connect_timeout_secs)));
+    }
+    drop(config);
+    builder = builder.resolve_to_addrs(sni_host, &[SocketAddr::new(connect_ip, connect_port)]);
+    builder.build()
+}
+
+async fn execute_attempt_request(
+    app_config: &Arc<AppConfig>,
+    base_client: reqwest::Client,
+    request: reqwest::Request,
+    target: &AttemptTarget,
+) -> Result<reqwest::Response, reqwest::Error> {
+    if target.effective_url.scheme().eq_ignore_ascii_case("https") {
+        if let (Some(sni_host), Some(connect_ip)) = (target.sni_host.as_ref(), target.connect_ip) {
+            let connect_port = target.effective_url.port_or_known_default().unwrap_or(443);
+            let https_client = build_https_attempt_client(app_config, sni_host.as_str(), connect_ip, connect_port)?;
+            return https_client.execute(request).await;
+        }
+    }
+    base_client.execute(request).await
+}
+
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
 pub fn calculate_retry_backoff(base_delay_ms: u64, multiplier: f64, attempt: u32) -> u64 {
     let base = base_delay_ms.max(1);
@@ -208,102 +375,120 @@ pub async fn send_with_retry_and_provider(
 
     'provider_loop: loop {
         // 2. Retry loop for the current URL
-        for attempt in 0..max_attempts {
-            let resolved_url = resolve_provider_url_for_attempt(url, provider);
-            // Reset the idle timer for a new attempt
-            idle.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
+        'attempt_loop: for attempt in 0..max_attempts {
+            let mut attempted_dns_ips = HashSet::new();
 
-            tokio::select! {
-                () = &mut idle => {
-                    warn!("Request idle for too long: {}", sanitize_sensitive_info(url.as_str()));
-                    // 1. Try Provider Failover first
-                    if max_provider_attempts > 1 && provider_attempts < max_provider_attempts {
-                        if let Some(p) = provider {
-                            if p.rotate_to_next_url_with_cycle_check(start_index).is_some() {
-                                provider_attempts += 1;
-                                let current_index = p.get_current_index();
-                                warn!("Provider '{}' idle timeout -> switching to index {}", p.name, current_index);
-                                continue 'provider_loop;
-                            }
-                        }
-                    }
+            'ip_loop: loop {
+                let attempt_target = resolve_attempt_target(url, provider);
+                // Reset the idle timer for a new attempt
+                idle.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
 
-                    // 2. If no provider or rotation failed, check if we can retry the same URL
-                    if attempt < max_attempts - 1 {
-                        let delay = calculate_retry_backoff(backoff_ms, backoff_multiplier, attempt);
-                        warn!("Idle timeout, retrying same URL in {}ms (attempt {})", delay, attempt + 1);
-                        tokio::time::sleep(Duration::from_millis(delay)).await;
-                        continue; // This will restart the 'for attempt' loop
-                    }
+                let request_builder = send(&attempt_target.request_url);
+                let (base_client, request_result) = request_builder.build_split();
+                let mut request = request_result.map_err(|err| {
+                    string_to_io_error(format!("Failed to build request: {}", sanitize_sensitive_info(err.to_string().as_str())))
+                })?;
+                apply_attempt_to_request(&mut request, &attempt_target)?;
 
-                    return Err(string_to_io_error(format!("Request timed out and no retries left: {}", sanitize_sensitive_info(url.as_str()))));
-                }
-
-                result = send(&resolved_url).send() => {
-                    match result {
-                        Ok(response) => {
-                            let status = response.status();
-                            if allow_redirects && status.is_redirection() {
-                                return Ok(response);
-                            }
-                            let is_failover = is_failover_redirect(response.url(), &failover_patterns);
-                            if !is_failover && status.is_success() {
-                                return Ok(response);
-                            }
-
-                            // Failover check: Should we switch to the next provider URL?
-                            if (is_failover || should_trigger_failover(status))
-                                && max_provider_attempts > 1
-                                && provider_attempts < max_provider_attempts
-                            {
-                                if let Some(p) = provider {
-                                    if p.rotate_to_next_url_with_cycle_check(start_index).is_some() {
-                                        provider_attempts += 1;
-                                        let current_index = p.get_current_index();
-                                        warn!("Provider '{}' failover: status {} -> switching to URL index {current_index}",
-                                            p.name, format_http_status(status));
-                                        continue 'provider_loop;
-                                    }
+                tokio::select! {
+                    () = &mut idle => {
+                        warn!("Request idle for too long: {}", sanitize_sensitive_info(url.as_str()));
+                        // 1. Try Provider Failover first
+                        if max_provider_attempts > 1 && provider_attempts < max_provider_attempts {
+                            if let Some(p) = provider {
+                                if p.rotate_to_next_url_with_cycle_check(start_index).is_some() {
+                                    provider_attempts += 1;
+                                    let current_index = p.get_current_index();
+                                    warn!("Provider '{}' idle timeout -> switching to index {}", p.name, current_index);
+                                    continue 'provider_loop;
                                 }
                             }
-
-                            // Standard retry check for the same URL
-                            let is_retryable = status.is_server_error()
-                                || matches!(status, StatusCode::TOO_MANY_REQUESTS | StatusCode::REQUEST_TIMEOUT);
-
-                            if attempt < max_attempts - 1 && is_retryable {
-                                perform_backoff(attempt, backoff_ms, backoff_multiplier, &response).await;
-                                continue;
-                            }
-
-                            return Err(string_to_io_error(format!("Request failed ({}): {}",
-                                format_http_status(status), sanitize_sensitive_info(url.as_str()))));
                         }
 
-                        Err(err) => {
-                            // Connection errors (Timeout/Connect) trigger failover if provider exists
-                            if (err.is_timeout() || err.is_connect())
-                                && max_provider_attempts > 1
-                                && provider_attempts < max_provider_attempts
-                            {
-                                if let Some(p) = provider {
-                                    if p.rotate_to_next_url_with_cycle_check(start_index).is_some() {
-                                        provider_attempts += 1;
-                                        let current_index = p.get_current_index();
-                                        warn!("Provider '{}' failover: connection error -> switching to index {}", p.name, current_index);
-                                        continue 'provider_loop;
+                        // 2. If no provider or rotation failed, check if we can retry the same URL
+                        if attempt < max_attempts - 1 {
+                            let delay = calculate_retry_backoff(backoff_ms, backoff_multiplier, attempt);
+                            warn!("Idle timeout, retrying same URL in {}ms (attempt {})", delay, attempt + 1);
+                            tokio::time::sleep(Duration::from_millis(delay)).await;
+                            continue 'attempt_loop;
+                        }
+
+                        return Err(string_to_io_error(format!("Request timed out and no retries left: {}", sanitize_sensitive_info(url.as_str()))));
+                    }
+
+                    result = execute_attempt_request(app_config, base_client, request, &attempt_target) => {
+                        match result {
+                            Ok(response) => {
+                                let status = response.status();
+                                if allow_redirects && status.is_redirection() {
+                                    return Ok(response);
+                                }
+                                let is_failover = is_failover_redirect(response.url(), &failover_patterns);
+                                if !is_failover && status.is_success() {
+                                    return Ok(response);
+                                }
+
+                                // Failover check: Should we switch to the next provider URL?
+                                if (is_failover || should_trigger_failover(status))
+                                    && max_provider_attempts > 1
+                                    && provider_attempts < max_provider_attempts
+                                {
+                                    if let Some(p) = provider {
+                                        if p.rotate_to_next_url_with_cycle_check(start_index).is_some() {
+                                            provider_attempts += 1;
+                                            let current_index = p.get_current_index();
+                                            warn!("Provider '{}' failover: status {} -> switching to URL index {current_index}",
+                                                p.name, format_http_status(status));
+                                            continue 'provider_loop;
+                                        }
                                     }
                                 }
+
+                                // Standard retry check for the same URL
+                                let is_retryable = status.is_server_error()
+                                    || matches!(status, StatusCode::TOO_MANY_REQUESTS | StatusCode::REQUEST_TIMEOUT);
+
+                                if attempt < max_attempts - 1 && is_retryable {
+                                    perform_backoff(attempt, backoff_ms, backoff_multiplier, &response).await;
+                                    continue 'attempt_loop;
+                                }
+
+                                return Err(string_to_io_error(format!("Request failed ({}): {}",
+                                    format_http_status(status), sanitize_sensitive_info(url.as_str()))));
                             }
 
-                            // If not a provider or rotation failed, try standard retry
-                            if (err.is_timeout() || err.is_connect()) && attempt < max_attempts - 1 {
-                                let delay = calculate_retry_backoff(backoff_ms, backoff_multiplier, attempt);
-                                tokio::time::sleep(Duration::from_millis(delay)).await;
-                                continue;
-                            }
+                            Err(err) => {
+                                // For DNS IP-connect policy, attempt next IP before provider URL rotation.
+                                if (err.is_timeout() || err.is_connect())
+                                    && should_try_next_ip_on_connect_error(provider, &attempt_target, &mut attempted_dns_ips)
+                                {
+                                    continue 'ip_loop;
+                                }
 
-                            return Err(string_to_io_error(format!("Request error: {}", sanitize_sensitive_info(err.to_string().as_str()))));
+                                // Connection errors (Timeout/Connect) trigger failover if provider exists
+                                if (err.is_timeout() || err.is_connect())
+                                    && max_provider_attempts > 1
+                                    && provider_attempts < max_provider_attempts
+                                {
+                                    if let Some(p) = provider {
+                                        if p.rotate_to_next_url_with_cycle_check(start_index).is_some() {
+                                            provider_attempts += 1;
+                                            let current_index = p.get_current_index();
+                                            warn!("Provider '{}' failover: connection error -> switching to index {}", p.name, current_index);
+                                            continue 'provider_loop;
+                                        }
+                                    }
+                                }
+
+                                // If not a provider or rotation failed, try standard retry
+                                if (err.is_timeout() || err.is_connect()) && attempt < max_attempts - 1 {
+                                    let delay = calculate_retry_backoff(backoff_ms, backoff_multiplier, attempt);
+                                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                                    continue 'attempt_loop;
+                                }
+
+                                return Err(string_to_io_error(format!("Request error: {}", sanitize_sensitive_info(err.to_string().as_str()))));
+                            }
                         }
                     }
                 }
@@ -1312,10 +1497,104 @@ pub fn should_trigger_failover(status: StatusCode) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{same_origin, strip_sensitive_headers_for_cross_origin_redirect};
+    use super::{
+        resolve_attempt_target, same_origin, send_with_retry_and_provider, should_try_next_ip_on_connect_error,
+        strip_sensitive_headers_for_cross_origin_redirect,
+    };
+    use crate::{
+        model::{AppConfig, Config, ConfigProvider, ResourceRetryConfig, ReverseProxyConfig, SourcesConfig},
+        utils::FileLockManager,
+    };
+    use arc_swap::{ArcSwap, ArcSwapOption};
+    use shared::model::{
+        ConfigPaths, ConfigProviderDto, DnsScheme, OnConnectErrorPolicy, ProviderDnsDto,
+    };
     use shared::utils::{get_base_url_from_str, replace_url_extension, sanitize_sensitive_info};
-    use std::collections::HashMap;
+    use std::{
+        collections::{HashMap, HashSet},
+        net::SocketAddr,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+        time::Duration,
+    };
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
     use url::Url;
+
+    fn make_test_app_config(config: Config) -> Arc<AppConfig> {
+        Arc::new(AppConfig {
+            config: Arc::new(ArcSwap::from_pointee(config)),
+            sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
+            hdhomerun: Arc::new(ArcSwapOption::default()),
+            api_proxy: Arc::new(ArcSwapOption::default()),
+            file_locks: Arc::new(FileLockManager::default()),
+            paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
+                config_path: String::new(),
+                config_file_path: String::new(),
+                sources_file_path: String::new(),
+                mapping_file_path: None,
+                mapping_files_used: None,
+                template_file_path: None,
+                template_files_used: None,
+                api_proxy_file_path: String::new(),
+                custom_stream_response_path: None,
+            })),
+            custom_stream_response: Arc::new(ArcSwapOption::default()),
+            access_token_secret: [0; 32],
+            encrypt_secret: [0; 16],
+            ffprobe_available: Arc::default(),
+        })
+    }
+
+    fn make_provider_with_dns(keep_vhost: bool, on_connect_error: OnConnectErrorPolicy, ips: Vec<&str>) -> Arc<ConfigProvider> {
+        let parsed_ips = ips
+            .into_iter()
+            .map(|raw| raw.parse().expect("ip must parse"))
+            .collect::<Vec<_>>();
+        let dto = ConfigProviderDto {
+            name: "provider-a".into(),
+            urls: vec!["http://example.com".into()],
+            dns: Some(ProviderDnsDto {
+                enabled: true,
+                schemes: Some(vec![DnsScheme::Http, DnsScheme::Https]),
+                keep_vhost,
+                overrides: Some(HashMap::from([("example.com".to_string(), parsed_ips)])),
+                on_connect_error,
+                ..ProviderDnsDto::default()
+            }),
+        };
+        Arc::new(ConfigProvider::from(&dto))
+    }
+
+    async fn start_plain_http_server() -> (SocketAddr, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("tcp bind should work");
+        let addr = listener.local_addr().expect("local addr should exist");
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let accepted_clone = Arc::clone(&accepted);
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    continue;
+                };
+                accepted_clone.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut buf = vec![0_u8; 2048];
+                    let _ = socket.read(&mut buf).await;
+                    let _ = socket
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                        .await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+
+        (addr, accepted, handle)
+    }
 
     #[test]
     fn test_url_mask() {
@@ -1411,5 +1690,102 @@ mod tests {
         assert!(!headers.contains_key("Proxy-Authorization"));
         assert!(!headers.contains_key("Host"));
         assert_eq!(headers.get("X-Test").map(String::as_str), Some("ok"));
+    }
+
+    #[test]
+    fn test_keep_vhost_false_uses_ip_host_header_for_http() {
+        let provider = make_provider_with_dns(false, OnConnectErrorPolicy::TryNextIp, vec!["203.0.113.10"]);
+        let url = Url::parse("http://example.com:8080/stream").expect("url parse should work");
+
+        let target = resolve_attempt_target(&url, Some(&provider));
+        assert_eq!(target.effective_url.host_str(), Some("203.0.113.10"));
+        assert_eq!(target.host_header.as_deref(), Some("203.0.113.10:8080"));
+    }
+
+    #[test]
+    fn test_keep_vhost_true_uses_hostname_host_header_for_http() {
+        let provider = make_provider_with_dns(true, OnConnectErrorPolicy::TryNextIp, vec!["203.0.113.10"]);
+        let url = Url::parse("http://example.com:8080/stream").expect("url parse should work");
+
+        let target = resolve_attempt_target(&url, Some(&provider));
+        assert_eq!(target.effective_url.host_str(), Some("203.0.113.10"));
+        assert_eq!(target.host_header.as_deref(), Some("example.com:8080"));
+    }
+
+    #[test]
+    fn test_https_attempt_keeps_hostname_and_sets_sni() {
+        let provider = make_provider_with_dns(false, OnConnectErrorPolicy::TryNextIp, vec!["203.0.113.10"]);
+        let url = Url::parse("https://example.com/live").expect("url parse should work");
+
+        let target = resolve_attempt_target(&url, Some(&provider));
+        assert_eq!(target.effective_url.host_str(), Some("example.com"));
+        assert_eq!(target.sni_host.as_deref(), Some("example.com"));
+        assert_eq!(target.connect_ip.map(|ip| ip.to_string()), Some("203.0.113.10".to_string()));
+        assert_eq!(target.host_header.as_deref(), Some("203.0.113.10"));
+    }
+
+    #[test]
+    fn test_try_next_ip_policy_uses_next_ip_until_exhausted() {
+        let provider = make_provider_with_dns(false, OnConnectErrorPolicy::TryNextIp, vec!["203.0.113.10", "203.0.113.11"]);
+        let url = Url::parse("http://example.com/live").expect("url parse should work");
+        let mut tried = HashSet::new();
+
+        let first = resolve_attempt_target(&url, Some(&provider));
+        let second = resolve_attempt_target(&url, Some(&provider));
+
+        assert!(should_try_next_ip_on_connect_error(Some(&provider), &first, &mut tried));
+        assert!(!should_try_next_ip_on_connect_error(Some(&provider), &second, &mut tried));
+    }
+
+    #[tokio::test]
+    async fn test_on_connect_error_try_next_ip_before_provider_rotation() {
+        let (addr, accepted, server_handle) = start_plain_http_server().await;
+
+        let mut cfg = Config {
+            connect_timeout_secs: 1,
+            ..Config::default()
+        };
+        cfg.accept_insecure_ssl_certificates = true;
+        cfg.reverse_proxy = Some(ReverseProxyConfig {
+            resource_rewrite_disabled: false,
+            rewrite_secret: [0; 16],
+            resource_retry: ResourceRetryConfig {
+                max_attempts: 1,
+                ..ResourceRetryConfig::default()
+            },
+            disabled_header: None,
+            stream: None,
+            cache: None,
+            rate_limit: None,
+            geoip: None,
+        });
+        let app_config = make_test_app_config(cfg);
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .connect_timeout(Duration::from_millis(400))
+            .timeout(Duration::from_secs(2))
+            .build()
+            .expect("http client should build");
+        let url = Url::parse(format!("http://example.com:{}/ok", addr.port()).as_str()).expect("url parse should work");
+
+        let provider_rotate =
+            make_provider_with_dns(false, OnConnectErrorPolicy::RotateProviderUrl, vec!["203.0.113.1", "127.0.0.1"]);
+        let result_rotate = send_with_retry_and_provider(&app_config, &url, Some(&provider_rotate), false, |resolved_url| {
+            client.get(resolved_url.clone())
+        })
+        .await;
+        assert!(result_rotate.is_err(), "without try_next_ip policy the request should fail");
+
+        let provider_try_next =
+            make_provider_with_dns(false, OnConnectErrorPolicy::TryNextIp, vec!["203.0.113.1", "127.0.0.1"]);
+        let result_try_next =
+            send_with_retry_and_provider(&app_config, &url, Some(&provider_try_next), false, |resolved_url| {
+                client.get(resolved_url.clone())
+            })
+            .await;
+        assert!(result_try_next.is_ok(), "try_next_ip should succeed by trying the second IP");
+        assert_eq!(accepted.load(Ordering::SeqCst), 1, "server should be reached exactly once");
+
+        server_handle.abort();
     }
 }

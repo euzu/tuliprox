@@ -18,6 +18,7 @@ use log::warn;
 use std::{
     collections::{HashMap, HashSet},
     fmt::Display,
+    net::IpAddr,
     str::FromStr,
     sync::Arc,
 };
@@ -636,6 +637,8 @@ pub struct ConfigProviderDto {
     pub name: Arc<str>,
     #[serde(with = "arc_str_vec_serde")]
     pub urls: Vec<Arc<str>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dns: Option<ProviderDnsDto>,
 }
 
 impl ConfigProviderDto {
@@ -648,6 +651,142 @@ impl ConfigProviderDto {
         if self.urls.is_empty() {
             return info_err_res!("Urls for provider is mandatory");
         }
+        if let Some(dns) = self.dns.as_mut() {
+            dns.prepare()?;
+        }
+        Ok(())
+    }
+}
+
+pub const fn default_provider_dns_refresh_secs() -> u64 { 300 }
+pub const fn is_default_provider_dns_refresh_secs(v: &u64) -> bool { *v == default_provider_dns_refresh_secs() }
+pub fn is_default_dns_prefer(v: &DnsPrefer) -> bool { *v == DnsPrefer::default() }
+pub fn is_default_on_resolve_error(v: &OnResolveErrorPolicy) -> bool { *v == OnResolveErrorPolicy::default() }
+pub fn is_default_on_connect_error(v: &OnConnectErrorPolicy) -> bool { *v == OnConnectErrorPolicy::default() }
+
+#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq, Default)]
+pub enum DnsPrefer {
+    #[serde(rename = "ipv4")]
+    Ipv4,
+    #[serde(rename = "ipv6")]
+    Ipv6,
+    #[serde(rename = "system")]
+    #[default]
+    System,
+}
+
+#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq)]
+pub enum DnsScheme {
+    #[serde(rename = "http")]
+    Http,
+    #[serde(rename = "https")]
+    Https,
+}
+
+#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq, Default)]
+pub enum OnResolveErrorPolicy {
+    #[serde(rename = "keep_last_good")]
+    #[default]
+    KeepLastGood,
+    #[serde(rename = "fallback_to_hostname")]
+    FallbackToHostname,
+}
+
+#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq, Default)]
+pub enum OnConnectErrorPolicy {
+    #[serde(rename = "try_next_ip")]
+    #[default]
+    TryNextIp,
+    #[serde(rename = "rotate_provider_url")]
+    RotateProviderUrl,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderDnsDto {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub enabled: bool,
+    #[serde(
+        default = "default_provider_dns_refresh_secs",
+        skip_serializing_if = "is_default_provider_dns_refresh_secs"
+    )]
+    pub refresh_secs: u64,
+    #[serde(default, skip_serializing_if = "is_default_dns_prefer")]
+    pub prefer: DnsPrefer,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_addrs: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schemes: Option<Vec<DnsScheme>>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub keep_vhost: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overrides: Option<HashMap<String, Vec<IpAddr>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved: Option<HashMap<String, Vec<IpAddr>>>,
+    #[serde(default, skip_serializing_if = "is_default_on_resolve_error")]
+    pub on_resolve_error: OnResolveErrorPolicy,
+    #[serde(default, skip_serializing_if = "is_default_on_connect_error")]
+    pub on_connect_error: OnConnectErrorPolicy,
+}
+
+impl Default for ProviderDnsDto {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            refresh_secs: default_provider_dns_refresh_secs(),
+            prefer: DnsPrefer::default(),
+            max_addrs: None,
+            schemes: None,
+            keep_vhost: false,
+            overrides: None,
+            resolved: None,
+            on_resolve_error: OnResolveErrorPolicy::default(),
+            on_connect_error: OnConnectErrorPolicy::default(),
+        }
+    }
+}
+
+impl ProviderDnsDto {
+    pub fn prepare(&mut self) -> Result<(), TuliproxError> {
+        self.refresh_secs = self.refresh_secs.max(10);
+
+        if let Some(schemes) = self.schemes.as_mut() {
+            let mut unique = Vec::with_capacity(schemes.len());
+            for scheme in schemes.drain(..) {
+                if !unique.contains(&scheme) {
+                    unique.push(scheme);
+                }
+            }
+            *schemes = unique;
+            if schemes.is_empty() {
+                self.schemes = None;
+            }
+        }
+
+        if let Some(overrides) = self.overrides.as_mut() {
+            let mut normalized: HashMap<String, Vec<IpAddr>> = HashMap::new();
+            for (host, ips) in std::mem::take(overrides) {
+                let host = host.trim().to_ascii_lowercase();
+                if host.is_empty() {
+                    return info_err_res!("Provider dns overrides hostname must not be empty");
+                }
+                if ips.is_empty() {
+                    return info_err_res!("Provider dns overrides for host '{host}' must not be empty");
+                }
+                let entry = normalized.entry(host.clone()).or_default();
+                for ip in ips {
+                    if !entry.contains(&ip) {
+                        entry.push(ip);
+                    }
+                }
+            }
+            if normalized.is_empty() {
+                self.overrides = None;
+            } else {
+                *overrides = normalized;
+            }
+        }
+
         Ok(())
     }
 }
@@ -757,5 +896,58 @@ mod tests {
 
         let result = dto.generate_auto_epg_url().unwrap();
         assert_eq!(result, "provider://myprovider/xmltv.php?username=test&password=secret");
+    }
+
+    #[test]
+    fn test_provider_dns_defaults() {
+        let dns = ProviderDnsDto::default();
+        assert!(!dns.enabled);
+        assert_eq!(dns.refresh_secs, 300);
+        assert_eq!(dns.prefer, DnsPrefer::System);
+        assert_eq!(dns.on_resolve_error, OnResolveErrorPolicy::KeepLastGood);
+        assert_eq!(dns.on_connect_error, OnConnectErrorPolicy::TryNextIp);
+        assert!(dns.schemes.is_none());
+    }
+
+    #[test]
+    fn test_provider_dns_prepare_normalizes_overrides_and_clamps_refresh() {
+        let mut dns = ProviderDnsDto {
+            refresh_secs: 1,
+            schemes: Some(vec![DnsScheme::Http, DnsScheme::Http, DnsScheme::Https]),
+            overrides: Some(HashMap::from([(
+                "  EXAMPLE.COM ".to_string(),
+                vec![
+                    "203.0.113.10".parse::<IpAddr>().expect("valid ip"),
+                    "203.0.113.10".parse::<IpAddr>().expect("valid ip"),
+                ],
+            )])),
+            ..ProviderDnsDto::default()
+        };
+
+        dns.prepare().expect("dns prepare should succeed");
+
+        assert_eq!(dns.refresh_secs, 10);
+        assert_eq!(dns.schemes, Some(vec![DnsScheme::Http, DnsScheme::Https]));
+        let overrides = dns.overrides.expect("overrides should exist");
+        assert_eq!(overrides.len(), 1);
+        assert!(overrides.contains_key("example.com"));
+        assert_eq!(overrides["example.com"].len(), 1);
+    }
+
+    #[test]
+    fn test_provider_dns_resolved_deserializes() {
+        let json = r#"{
+            "name":"p1",
+            "urls":["http://example.com"],
+            "dns":{
+                "enabled":true,
+                "resolved":{"example.com":["203.0.113.10"]}
+            }
+        }"#;
+
+        let dto: ConfigProviderDto = serde_json::from_str(json).expect("provider json should parse");
+        let dns = dto.dns.expect("dns should be present");
+        let resolved = dns.resolved.expect("resolved must be deserialized");
+        assert_eq!(resolved.get("example.com"), Some(&vec!["203.0.113.10".parse::<IpAddr>().expect("valid ip")]));
     }
 }

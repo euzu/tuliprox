@@ -1,6 +1,7 @@
 use crate::{
     api::{
         config_watch::exec_config_watch,
+        model::provider_dns_manager::exec_provider_dns,
         model::{
             metadata_update_manager::MetadataUpdateManager, ActiveProviderManager, ActiveUserManager,
             ConnectionManager, DownloadQueue, EventManager, PlaylistStorage, PlaylistStorageState, SharedStreamManager,
@@ -9,8 +10,8 @@ use crate::{
         scheduler::exec_scheduler,
     },
     model::{
-        AppConfig, Config, ConfigTarget, GracePeriodOptions, HdHomeRunConfig, HdHomeRunDeviceConfig, ProcessTargets,
-        ReverseProxyDisabledHeaderConfig, ScheduleConfig, SourcesConfig,
+        AppConfig, Config, ConfigProvider, ConfigTarget, GracePeriodOptions, HdHomeRunConfig, HdHomeRunDeviceConfig,
+        ProcessTargets, ReverseProxyDisabledHeaderConfig, ScheduleConfig, SourcesConfig,
     },
     repository::{get_geoip_path, load_target_into_memory_cache},
     tools::lru_cache::LRUResourceCache,
@@ -69,7 +70,7 @@ struct TargetChanges {
     target: Arc<ConfigTarget>,
 }
 
-create_bitset!(u8, UpdateChangesFlags, Scheduler, Hdhomerun, FileWatch, Geoip);
+create_bitset!(u8, UpdateChangesFlags, Scheduler, Hdhomerun, FileWatch, Geoip, ProviderDns);
 
 pub(in crate::api) struct UpdateChanges {
     flags: UpdateChangesFlagsSet,
@@ -149,8 +150,14 @@ fn cancel_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
     let scheduler = cancel_service!(scheduler, UpdateChangesFlags::Scheduler, changes, cancel_tokens);
     let hdhomerun = cancel_service!(hdhomerun, UpdateChangesFlags::Hdhomerun, changes, cancel_tokens);
     let file_watch = cancel_service!(file_watch, UpdateChangesFlags::FileWatch, changes, cancel_tokens);
+    let provider_dns = cancel_service!(provider_dns, UpdateChangesFlags::ProviderDns, changes, cancel_tokens);
 
-    let tokens = CancelTokens { scheduler, hdhomerun, file_watch };
+    let tokens = CancelTokens {
+        scheduler,
+        hdhomerun,
+        file_watch,
+        provider_dns,
+    };
 
     app_state.cancel_tokens.store(Arc::new(tokens));
 }
@@ -180,6 +187,10 @@ fn start_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
 
     if changes.flags.contains(UpdateChangesFlags::FileWatch) {
         exec_config_watch(app_state, &app_state.cancel_tokens.load().file_watch);
+    }
+
+    if changes.flags.contains(UpdateChangesFlags::ProviderDns) {
+        exec_provider_dns(app_state, &app_state.cancel_tokens.load().provider_dns);
     }
 }
 
@@ -285,6 +296,7 @@ pub struct CancelTokens {
     pub(crate) scheduler: CancellationToken,
     pub(crate) hdhomerun: CancellationToken,
     pub(crate) file_watch: CancellationToken,
+    pub(crate) provider_dns: CancellationToken,
 }
 impl Default for CancelTokens {
     fn default() -> Self {
@@ -292,6 +304,7 @@ impl Default for CancelTokens {
             scheduler: CancellationToken::new(),
             hdhomerun: CancellationToken::new(),
             file_watch: CancellationToken::new(),
+            provider_dns: CancellationToken::new(),
         }
     }
 }
@@ -425,9 +438,10 @@ impl AppState {
     }
 
     fn detect_changes_for_sources(&self, sources: &SourcesConfig) -> UpdateChanges {
-        let (file_watch_changed, target_changes) = {
+        let (file_watch_changed, provider_dns_changed, target_changes) = {
             let old_sources = self.app_config.sources.load();
             let file_watch_changed = old_sources.get_input_files() != sources.get_input_files();
+            let provider_dns_changed = providers_changed(&old_sources.provider, &sources.provider);
 
             let mut target_changes = HashMap::new();
             for source in &old_sources.sources {
@@ -477,11 +491,12 @@ impl AppState {
                 }
             }
 
-            (file_watch_changed, target_changes)
+            (file_watch_changed, provider_dns_changed, target_changes)
         };
 
         let mut changes = UpdateChanges { flags: UpdateChangesFlagsSet::new(), targets: Some(target_changes) };
         changes.set_flag_if(file_watch_changed, UpdateChangesFlags::FileWatch);
+        changes.set_flag_if(provider_dns_changed, UpdateChangesFlags::ProviderDns);
         changes
     }
 
@@ -589,6 +604,21 @@ fn hdhomerun_changed(a: &HdHomeRunConfig, b: &HdHomeRunConfig) -> bool {
 }
 
 fn string_changed(a: &str, b: &str) -> bool { a != b }
+
+fn providers_changed(a: &[Arc<ConfigProvider>], b: &[Arc<ConfigProvider>]) -> bool {
+    if a.len() != b.len() {
+        return true;
+    }
+    for lhs in a {
+        let Some(rhs) = b.iter().find(|candidate| candidate.name == lhs.name) else {
+            return true;
+        };
+        if lhs.urls != rhs.urls || lhs.dns != rhs.dns {
+            return true;
+        }
+    }
+    false
+}
 
 #[derive(Clone)]
 pub struct HdHomerunAppState {
