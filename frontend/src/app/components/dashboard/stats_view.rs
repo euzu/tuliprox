@@ -2,7 +2,7 @@ use crate::{
     app::components::{Card, CollapsePanel, PlaylistProgressStatusCard, StatusCard, StatusContext, StreamsView},
     i18n::use_translation,
 };
-use shared::{utils::human_readable_byte_size};
+use shared::utils::human_readable_byte_size;
 use yew::prelude::*;
 
 #[derive(Properties, Clone, PartialEq, Debug)]
@@ -85,6 +85,7 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
                         if !map.is_empty() {
                             let cards = map
                                 .iter()
+                                .filter(|(_provider, connections)| **connections > 0)
                                 .map(|(provider, connections)| {
                                     html! {
                                         <Card>
@@ -149,7 +150,7 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
                 <div class="tp__stats__body-group">
                     <Card><PlaylistProgressStatusCard /></Card>
                 </div>
-                <div class="tp__stats__body-group">
+                <div class="tp__stats__body-group tp__stats__body-group-provider">
                     <Card><StatusCard title={translate.t("LABEL.ACTIVE_USERS")} data={users} /></Card>
                     <Card><StatusCard title={translate.t("LABEL.ACTIVE_USER_CONNECTIONS")} data={connections} /></Card>
                     { render_active_provider_connections() }

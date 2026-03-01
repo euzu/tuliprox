@@ -219,6 +219,7 @@ fn build_initial_draft(paths: &ConfigPaths) -> AppConfigDto {
             false,
             false,
             draft.config.get_hdhr_device_overview().as_ref(),
+            None,
         ) {
             Ok(src) => draft.sources = src,
             Err(err) => warn!("Setup mode: failed to load existing source.yml: {err}"),

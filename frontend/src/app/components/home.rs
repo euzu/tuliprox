@@ -167,7 +167,7 @@ pub fn Home() -> Html {
     //<div class={"app-header__toolbar"}><select onchange={handle_language} defaultValue={i18next.language}>{services.config().getUiConfig().languages.map(l => <option key={l} value={l}>{l}</option>)}</select></div>
 
     if config.is_none() {
-        return html!{};
+        return html! {};
     }
 
     let show_streams_page = config_context

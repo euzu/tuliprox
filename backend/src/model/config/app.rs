@@ -327,21 +327,37 @@ impl AppConfig {
     }
 
     fn set_mapping_path(&self, mapping_path: Option<&str>) {
-        let paths = self.paths.load_full();
-        let mut new_paths = paths.as_ref().clone();
-        let old_mapping_file_path = new_paths.mapping_file_path.as_deref();
-        if old_mapping_file_path != mapping_path {
-            new_paths.mapping_file_path = mapping_path.map(ToString::to_string);
+        let paths_guard = self.paths.load();
+        let old_path = paths_guard.mapping_file_path.as_deref();
+        let new_path = mapping_path.map(ToString::to_string).or_else(|| {
+            if old_path.is_some() {
+                paths_guard.mapping_file_path.clone()
+            } else {
+                Some(utils::get_default_mappings_path(&paths_guard.config_path))
+            }
+        });
+
+        if old_path != new_path.as_deref() {
+            let mut new_paths = (**paths_guard).clone();
+            new_paths.mapping_file_path = new_path;
             self.paths.store(Arc::new(new_paths));
         }
     }
 
     fn set_template_path(&self, template_path: Option<&str>) {
-        let paths = self.paths.load_full();
-        let mut new_paths = paths.as_ref().clone();
-        let old_template_file_path = new_paths.template_file_path.as_deref();
-        if old_template_file_path != template_path {
-            new_paths.template_file_path = template_path.map(ToString::to_string);
+        let paths_guard = self.paths.load();
+        let old_path = paths_guard.template_file_path.as_deref();
+        let new_path = template_path.map(ToString::to_string).or_else(|| {
+            if old_path.is_some() {
+                paths_guard.template_file_path.clone()
+            } else {
+                Some(utils::get_default_templates_path(&paths_guard.config_path))
+            }
+        });
+
+        if old_path != new_path.as_deref() {
+            let mut new_paths = (**paths_guard).clone();
+            new_paths.template_file_path = new_path;
             self.paths.store(Arc::new(new_paths));
         }
     }

@@ -18,7 +18,7 @@
     display: flex;
     flex-flow: column;
     gap: var(--gap-larger);
-    overflow: auto;
+    overflow: hidden;
   }
 }
 
@@ -27,6 +27,9 @@
 }
 
 .tp__streams-table {
+  display: flex;
+  flex-flow: column;
+  overflow: auto;
 
   .tp__table__th {
     $column-widths:
