@@ -3,7 +3,8 @@ use crate::{
         components::{
             config::ConfigView, loading_indicator::BusyIndicator, theme::Theme, AppIcon, DashboardView, EpgView,
             IconButton, InputRow, Panel, ParticleFlowBackground, PlaylistExplorerView, PlaylistSettingsView,
-            PlaylistUpdateView, Setup, Sidebar, SourceEditor, StatsView, ToastrView, UserlistView, WebsocketStatus,
+            PlaylistUpdateView, Setup, Sidebar, SourceEditor, StatsView, StreamsView, ToastrView, UserlistView,
+            WebsocketStatus,
         },
         context::{ConfigContext, PlaylistContext, StatusContext},
     },
@@ -165,6 +166,17 @@ pub fn Home() -> Html {
 
     //<div class={"app-header__toolbar"}><select onchange={handle_language} defaultValue={i18next.language}>{services.config().getUiConfig().languages.map(l => <option key={l} value={l}>{l}</option>)}</select></div>
 
+    if config.is_none() {
+        return html!{};
+    }
+
+    let show_streams_page = config_context
+        .config
+        .as_ref()
+        .and_then(|app_cfg| app_cfg.config.web_ui.as_ref())
+        .map(|web_ui| !web_ui.combine_views_stats_streams)
+        .unwrap_or(true);
+
     html! {
         <ContextProvider<ConfigContext> context={config_context}>
         <ContextProvider<StatusContext> context={status_context}>
@@ -176,7 +188,7 @@ pub fn Home() -> Html {
                { if setup_mode {
                     html! {}
                  } else {
-                    html! { <Sidebar onview={handle_view_change}/> }
+                    html! { <Sidebar onview={handle_view_change} show_streams_page={show_streams_page}/> }
                  }
                }
 
@@ -227,11 +239,13 @@ pub fn Home() -> Html {
                                         <DashboardView/>
                                        </Panel>
                                        <Panel class="tp__full-width" value={ViewType::Stats.to_string()} active={view_visible.to_string()}>
-                                        <StatsView/>
+                                        <StatsView show_streams={!show_streams_page}/>
                                        </Panel>
-                                       // <Panel class="tp__full-width" value={ViewType::Streams.to_string()} active={view_visible.to_string()}>
-                                       //  <StreamsView/>
-                                       // </Panel>
+                                        { html_if!(show_streams_page, {
+                                           <Panel class="tp__full-width" value={ViewType::Streams.to_string()} active={view_visible.to_string()}>
+                                              <StreamsView embedded={false}/>
+                                            </Panel>
+                                        })}
                                        <Panel class="tp__full-width" value={ViewType::Users.to_string()} active={view_visible.to_string()}>
                                           <UserlistView/>
                                        </Panel>

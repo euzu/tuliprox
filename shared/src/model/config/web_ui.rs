@@ -3,7 +3,7 @@ use crate::{
     model::WebAuthConfigDto,
     utils::{
         default_as_true, default_kick_secs, is_blank_optional_str, is_blank_optional_string, is_default_kick_secs,
-        is_true,
+        is_false, is_true,
     },
 };
 
@@ -85,6 +85,8 @@ pub struct WebUiConfigDto {
     pub player_server: Option<String>,
     #[serde(default = "default_kick_secs", skip_serializing_if = "is_default_kick_secs")]
     pub kick_secs: u64,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub combine_views_stats_streams: bool,
 }
 
 impl Default for WebUiConfigDto {
@@ -97,6 +99,7 @@ impl Default for WebUiConfigDto {
             auth: None,
             player_server: None,
             kick_secs: default_kick_secs(),
+            combine_views_stats_streams: false,
         }
     }
 }
@@ -106,6 +109,7 @@ impl WebUiConfigDto {
         let empty = WebUiConfigDto::default();
         self.enabled == empty.enabled
             && self.user_ui_enabled == empty.user_ui_enabled
+            && !self.combine_views_stats_streams
             && is_blank_optional_str(self.path.as_deref())
             && is_blank_optional_str(self.player_server.as_deref())
             && self.kick_secs == default_kick_secs()

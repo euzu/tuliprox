@@ -4,14 +4,21 @@ use crate::{
         StatusContext,
     },
     hooks::use_service_context,
+    html_if,
     i18n::use_translation,
     model::EventMessage,
 };
 use std::rc::Rc;
 use yew::prelude::*;
 
+#[derive(Properties, Clone, PartialEq, Debug)]
+pub struct StreamsViewProps {
+    #[prop_or_default]
+    pub embedded: bool,
+}
+
 #[component]
-pub fn StreamsView() -> Html {
+pub fn StreamsView(props: &StreamsViewProps) -> Html {
     let translate = use_translation();
     let service_ctx = use_service_context();
     let status_ctx = use_context::<StatusContext>().expect("Status context not found");
@@ -51,9 +58,11 @@ pub fn StreamsView() -> Html {
 
     html! {
       <div class="tp__streams">
-        // <div class="tp__streams__header">
-        //  <h1>{ translate.t("LABEL.STREAMS")}</h1>
-        // </div>
+        { html_if!(!props.embedded, {
+         <div class="tp__streams__header">
+          <h1>{ translate.t("LABEL.STREAMS")}</h1>
+         </div>
+         })}
         <div class="tp__streams__body">
            <div class="tp__stats__body-group">
                 <Card><StatusCard title={translate.t("LABEL.ACTIVE_USERS")} data={status_ctx.status.as_ref().map_or_else(|| "n/a".to_string(), |status| status.active_users.to_string())} /></Card>
