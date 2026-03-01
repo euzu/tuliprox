@@ -16,21 +16,21 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
     let translate = use_translation();
     let status_ctx = use_context::<StatusContext>().expect("Status context not found");
 
-    let render_streams_embedded = || {
-        let (mem, cpu) = status_ctx.system_info.as_ref().map_or_else(
-            || ("n/a".to_string(), "n/a".to_string()),
-            |system| {
-                (
-                    format!(
-                        "{} / {}",
-                        human_readable_byte_size(system.memory_usage),
-                        human_readable_byte_size(system.memory_total)
-                    ),
-                    format!("{:.2}%", system.cpu_usage),
-                )
-            },
-        );
+    let (mem, cpu) = status_ctx.system_info.as_ref().map_or_else(
+        || ("n/a".to_string(), "n/a".to_string()),
+        |system| {
+            (
+                format!(
+                    "{} / {}",
+                    human_readable_byte_size(system.memory_usage),
+                    human_readable_byte_size(system.memory_total)
+                ),
+                format!("{:.2}%", system.cpu_usage),
+            )
+        },
+    );
 
+    let render_streams_embedded = || {
         let cache = status_ctx.status.as_ref().map_or_else(
             || "n/a".to_string(),
             |status| status.cache.as_ref().map_or_else(|| "n/a".to_string(), |c| c.clone()),
@@ -45,8 +45,8 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
                 })}>
                 <div class="tp__stats__body">
                   <div class="tp__stats__body-group">
-                    <Card><StatusCard title={translate.t("LABEL.MEMORY")} data={mem} /></Card>
-                    <Card><StatusCard title={translate.t("LABEL.CPU")} data={cpu} /></Card>
+                    <Card><StatusCard title={translate.t("LABEL.MEMORY")} data={mem.clone()} /></Card>
+                    <Card><StatusCard title={translate.t("LABEL.CPU")} data={cpu.clone()} /></Card>
                     <Card><StatusCard title={translate.t("LABEL.CACHE")} data={cache} /></Card>
                   </div>
                   <div class="tp__stats__body-group">
@@ -111,20 +111,6 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
             }
         };
 
-        let (mem, cpu) = status_ctx.system_info.as_ref().map_or_else(
-            || ("n/a".to_string(), "n/a".to_string()),
-            |system| {
-                (
-                    format!(
-                        "{} / {}",
-                        human_readable_byte_size(system.memory_usage),
-                        human_readable_byte_size(system.memory_total)
-                    ),
-                    format!("{:.2}%", system.cpu_usage),
-                )
-            },
-        );
-
         let (cache, users, connections) = status_ctx.status.as_ref().map_or_else(
             || ("n/a".to_string(), "n/a".to_string(), "n/a".to_string()),
             |status| {
@@ -143,8 +129,8 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
             </div>
             <div class="tp__stats__body">
                 <div class="tp__stats__body-group">
-                    <Card><StatusCard title={translate.t("LABEL.MEMORY")} data={mem} /></Card>
-                    <Card><StatusCard title={translate.t("LABEL.CPU")} data={cpu} /></Card>
+                    <Card><StatusCard title={translate.t("LABEL.MEMORY")} data={mem.clone()} /></Card>
+                    <Card><StatusCard title={translate.t("LABEL.CPU")} data={cpu.clone()} /></Card>
                     <Card><StatusCard title={translate.t("LABEL.CACHE")} data={cache} /></Card>
                 </div>
                 <div class="tp__stats__body-group">

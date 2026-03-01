@@ -599,7 +599,7 @@
       "PATH": "Optional path prefix (e.g. /ui) for reverse proxy integration.",
       "PLAYER_SERVER": "Optional server override used specifically for the built-in web player.",
       "USER_UI_ENABLED": "Enables or disables the simplified bouquet editor for standard users.",
-      "COMBINE_VIEWS_STATS_STREAMS": "If set, the Stats and Streams views are combined to a single view."
+      "COMBINE_VIEWS_STATS_STREAMS": "If set, the Stats and Streams views are combined into a single view."
     },
     "XTREAM_TARGET_OUTPUT": {
       "SKIP_LIVE_DIRECT_SOURCE": "If enabled, live streams are not linked directly but proxied/resolved.",

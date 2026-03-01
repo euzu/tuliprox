@@ -170,6 +170,8 @@ pub fn Home() -> Html {
         return html! {};
     }
 
+    // combine_views_stats_streams=true means embed streams in stats (no separate page), so show_streams_page = !combine_views_stats_streams.
+    // The default unwrap_or(true) correctly preserves backward compatibility (separate pages by default).
     let show_streams_page = config_context
         .config
         .as_ref()
