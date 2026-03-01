@@ -147,12 +147,8 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
     };
 
     if props.show_streams {
-        {
-            render_streams_embedded()
-        }
+        render_streams_embedded()
     } else {
-        {
-            render_stats_only()
-        }
+        render_stats_only()
     }
 }
