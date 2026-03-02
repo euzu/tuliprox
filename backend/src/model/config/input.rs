@@ -619,8 +619,8 @@ fn assemble_provider_url(provider: &ConfigProvider, path_and_query: &str) -> Res
 mod tests {
     use super::*;
     use crate::model::ConfigProvider;
+    use shared::model::ConfigProviderDto;
     use std::borrow::Cow;
-    use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
 
     #[test]
@@ -636,11 +636,11 @@ mod tests {
 
     #[test]
     fn test_resolve_url_provider() {
-        let provider = ConfigProvider {
+        let provider = ConfigProvider::from(&ConfigProviderDto {
             name: "myprovider".into(),
             urls: vec!["http://provider.com".into()],
-            current_url_index: AtomicUsize::new(0),
-        };
+            dns: None,
+        });
         let input = ConfigInput {
             name: "test_input".into(),
             provider_configs: Some(vec![Arc::new(provider)]),

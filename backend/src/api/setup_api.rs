@@ -203,7 +203,7 @@ fn create_default_draft() -> AppConfigDto {
     }
 }
 
-fn build_initial_draft(paths: &ConfigPaths) -> AppConfigDto {
+async fn build_initial_draft(paths: &ConfigPaths) -> AppConfigDto {
     let mut draft = create_default_draft();
 
     if file_exists(&paths.config_file_path) {
@@ -219,8 +219,10 @@ fn build_initial_draft(paths: &ConfigPaths) -> AppConfigDto {
             false,
             false,
             draft.config.get_hdhr_device_overview().as_ref(),
-            None,
-        ) {
+            None
+        )
+        .await
+        {
             Ok(src) => draft.sources = src,
             Err(err) => warn!("Setup mode: failed to load existing source.yml: {err}"),
         }
@@ -980,7 +982,7 @@ fn create_compression_layer() -> tower_http::compression::CompressionLayer {
 }
 
 pub async fn start_setup_server(paths: &ConfigPaths, missing_files: &[String]) -> Result<(), TuliproxError> {
-    let draft = build_initial_draft(paths);
+    let draft = build_initial_draft(paths).await;
     let (host, port, web_root) = setup_bind_values(&draft);
     let web_dir = resolve_setup_web_dir(&web_root)
         .ok_or_else(|| info_err!("Setup mode requires a web directory. Tried '{}'", web_root.display(),))?;

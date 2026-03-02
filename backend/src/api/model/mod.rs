@@ -8,6 +8,7 @@ mod metadata_update_manager;
 mod model_utils;
 mod playlist_mem_cache;
 mod provider_config;
+mod provider_dns_manager;
 mod provider_lineup_manager;
 mod request;
 mod stream;
@@ -19,7 +20,7 @@ mod xtream;
 pub(crate) use self::streams::*;
 pub use self::{
     active_provider_manager::*, app_state::*, connection_manager::*, event_manager::*, metadata_update_manager::*,
-    playlist_mem_cache::*, provider_lineup_manager::*, stream::*, update_guard::*,
+    playlist_mem_cache::*, provider_dns_manager::*, provider_lineup_manager::*, stream::*, update_guard::*,
 };
 pub(in crate::api) use self::{
     active_user_manager::*, download::*, model_utils::*, provider_config::*, request::*, stream_error::*, xtream::*,

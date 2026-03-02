@@ -1120,7 +1120,7 @@ async fn patch_source_yml_add_alias(
     password: &str,
     exp_date: Option<i64>,
 ) -> Result<(), TuliproxError> {
-    let mut sources = match read_sources_file_from_path(source_file_path, false, false, None) {
+    let mut sources = match read_sources_file_from_path(source_file_path, false, false, None).await {
         Ok(sources) => sources,
         Err(e) => return info_err_res!("panel_api: failed to read source file: {e}"),
     };
@@ -1416,6 +1416,7 @@ async fn persist_sources_yml_with_patches(
         return Ok(false);
     }
     let mut sources = read_sources_file_from_path(sources_path, false, false, None)
+        .await
         .map_err(|e| info_err!("panel_api: failed to read source file: {e}"))?;
 
     let changed = apply_sources_yml_patches(&mut sources, patches)?;
@@ -1434,7 +1435,7 @@ async fn patch_source_yml_update_exp_date(
     account_name: &Arc<str>,
     exp_date: i64,
 ) -> Result<(), TuliproxError> {
-    let mut sources = match read_sources_file_from_path(source_file_path, false, false, None) {
+    let mut sources = match read_sources_file_from_path(source_file_path, false, false, None).await {
         Ok(sources) => sources,
         Err(e) => return info_err_res!("panel_api: failed to read source file: {e}"),
     };

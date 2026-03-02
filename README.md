@@ -170,16 +170,18 @@ CLI overrides:
 
 ## 1.4 Provider Failover & Rotation
 
-Tuliprox supports robust failover mechanisms for streaming providers. If a provider has multiple URLs defined (or aliases), Tuliprox can automatically
-rotate between them in case of failures.
+Tuliprox supports robust provider failover and DNS-aware rotation.
+If a provider has multiple URLs defined (or aliases), Tuliprox can automatically rotate between them on failures.
+Additionally, Tuliprox can periodically resolve provider hostnames to IPs and use those IPs for connection attempts.
 
 ### 1.4.1 `provider://` Scheme
 
-You can use the special `provider://<provider_name>/...` URL scheme in your configurations. Tuliprox will automatically resolve this to the current
-active URL of the specified provider.
+You can use the special `provider://<provider_name>/...` URL scheme in your configurations. Tuliprox will automatically  
+resolve this to the current active URL or IP address of the specified provider.
 
-- If the current URL fails (e.g., 5xx error, timeout), Tuliprox automatically rotates to the next available URL for that provider.
-- It tracks failures and prevents infinite loops by limiting attempts to the number of available URLs.
+- If the current URL | IP Address fails (e.g., 5xx error, timeout/connect error), Tuliprox automatically rotates to the  
+  next available URL | IP Address for that provider.
+- It tracks failures and prevents infinite loops by limiting attempts to the number of available URLs|IP Addresses.
 
 ### 1.4.2 Automatic Failover triggers
 
@@ -192,7 +194,38 @@ Failover is triggered automatically on:
 
 It does **not** trigger on Authentication errors (401, 403), as those usually indicate invalid credentials rather than a server issue.
 
-### 1.4.3 Provider Failover Configuration Example
+### 1.4.3 Provider DNS Resolution (IP-Connect)
+
+Each provider can optionally enable a `dns` block:
+
+- `enabled` (default: `false`)
+- `refresh_secs` (default: `300`, minimum effective value is `10`)
+- `prefer`: `system` | `ipv4` | `ipv6` (default: `system`)
+- `max_addrs`: limit number of resolved IPs per host
+- `schemes`: list of `http` / `https` to which DNS-IP connect applies (default: `["http"]`)
+- `keep_vhost` (default: `false`)
+- `overrides`: static host -> IP list (used before DNS lookup)
+- `on_resolve_error`: `keep_last_good` | `fallback_to_hostname` (default: `keep_last_good`)
+- `on_connect_error`: `try_next_ip` | `rotate_provider_url` (default: `try_next_ip`)
+- `resolved`: runtime-managed resolved snapshot per host
+
+Behavior:
+
+- A background task resolves hostnames from `provider.urls` periodically (`refresh_secs`).
+- For HTTP attempts with a resolved IP, Tuliprox connects via IP.
+- For HTTPS attempts with a resolved IP, Tuliprox connects via IP while keeping TLS SNI on the original hostname.
+- `keep_vhost=false`: `Host` header uses `IP[:port]`.
+- `keep_vhost=true`: `Host` header keeps `hostname[:port]`.
+- On connect/timeout errors and `on_connect_error=try_next_ip`, Tuliprox tries the next IP for the same host before rotating provider URL.
+
+### 1.4.4 `dns.resolved` persistence and visibility
+
+- `dns.resolved` is runtime-managed.
+- It is exposed in `GET /api/v1/config`.
+- It is also written back to `source.yml` and overwritten on each DNS refresh cycle.
+- Save endpoints treat `dns.resolved` as managed data and do not accept it as user-controlled input.
+
+### 1.4.5 Provider Failover + DNS Configuration Example
 
 Define a provider with multiple URLs and reference it from your inputs/sources. Tuliprox will resolve the active URL and rotate to the next entry on
 failover conditions.
@@ -207,6 +240,22 @@ provider:
       - http://hello.provider.me
       - http://stable.golden-bridge.con
       - http://sleep.time.now.net
+    dns:
+      enabled: true
+      refresh_secs: 300
+      prefer: ipv4
+      schemes: [http, https]
+      keep_vhost: true
+      max_addrs: 2
+      on_resolve_error: keep_last_good
+      on_connect_error: try_next_ip
+      overrides:
+        stable.golden-bridge.con:
+          - 203.0.113.10
+      # runtime-managed, written by tuliprox:
+      resolved:
+        hello.provider.me:
+          - 203.0.113.20
 inputs:
   - name: my_input
     type: xtream_batch
