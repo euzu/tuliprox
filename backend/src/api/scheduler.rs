@@ -1,5 +1,5 @@
 use crate::{
-    api::{library_scan::spawn_library_scan, model::AppState},
+    api::{library_scan::{spawn_library_scan, LibraryScanTaskOptions}, model::AppState},
     model::{AppConfig, ProcessTargets, ScheduleConfig},
     processing::processor::exec_processing,
     utils::exit,
@@ -128,8 +128,11 @@ fn run_library_scan(client: &reqwest::Client, app_state: &Arc<AppState>) {
                     lib_config.clone(),
                     config.metadata_update.clone(),
                     client.clone(),
-                    false,
-                    "Scheduled ",
+                    LibraryScanTaskOptions {
+                        force_rescan: false,
+                        message_prefix: "Scheduled ",
+                        working_dir: config.working_dir.clone(),
+                    },
                     permit,
                 );
             }

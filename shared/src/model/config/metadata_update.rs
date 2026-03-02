@@ -475,7 +475,7 @@ impl MetadataUpdateConfigDto {
 
     pub fn prepare(&mut self) -> Result<(), TuliproxError> {
         if self.cache_path.trim().is_empty() {
-            return info_err_res!("metadata_update.path cannot be empty");
+            return info_err_res!("metadata_update.cache_path cannot be empty");
         }
         self.log.prepare()?;
         self.resolve.prepare()?;

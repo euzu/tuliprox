@@ -123,6 +123,19 @@ fn schemes_from_ids(ids: Vec<String>) -> Option<Vec<DnsScheme>> {
     }
 }
 
+fn has_meaningful_dns_config(dns: &ProviderDnsDto) -> bool {
+    dns.enabled
+        || dns.refresh_secs != ProviderDnsDto::default().refresh_secs
+        || dns.prefer != DnsPrefer::default()
+        || dns.max_addrs.is_some()
+        || dns.schemes.as_ref().is_some_and(|schemes| !schemes.is_empty())
+        || dns.keep_vhost
+        || dns.overrides.as_ref().is_some_and(|overrides| !overrides.is_empty())
+        || dns.resolved.as_ref().is_some_and(|resolved| !resolved.is_empty())
+        || dns.on_resolve_error != OnResolveErrorPolicy::default()
+        || dns.on_connect_error != OnConnectErrorPolicy::default()
+}
+
 #[derive(Properties, PartialEq, Clone)]
 pub struct ProviderItemFormProps {
     pub on_submit: Callback<ConfigProviderDto>,
@@ -161,13 +174,15 @@ pub fn ProviderItemForm(props: &ProviderItemFormProps) -> Html {
         let on_submit = props.on_submit.clone();
         Callback::from(move |_| {
             let mut data = form_state.form.clone();
+            data.name = data.name.trim().to_string().intern();
             data.urls = (*urls_state)
                 .iter()
                 .map(|t| t.label.trim().to_string().intern())
                 .filter(|u: &Arc<str>| !u.is_empty())
                 .collect();
-            data.dns = Some(dns_state.form.clone());
-            if !data.name.trim().is_empty() && !data.urls.is_empty() {
+            let dns_form = dns_state.form.clone();
+            data.dns = if has_meaningful_dns_config(&dns_form) { Some(dns_form) } else { None };
+            if !data.name.is_empty() && !data.urls.is_empty() {
                 on_submit.emit(data);
             }
         })

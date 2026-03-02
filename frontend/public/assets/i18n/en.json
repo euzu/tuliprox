@@ -373,7 +373,8 @@
       "EPG_SOURCES": "Associated EPG (Electronic Program Guide) sources for this input.",
       "FETCH_METHOD": "HTTP method used to retrieve the input (e.g., GET, POST).",
       "HEADERS": "Custom HTTP headers sent when retrieving the input playlist.",
-      "INPUT_TYPE": "Defines the streaming protocol or source format (e.g. xtream, m3u)."
+      "INPUT_TYPE": "Defines the streaming protocol or source format (e.g. xtream, m3u).",
+      "PROVIDERS": "Provider profiles define reusable upstream URLs and DNS behavior that this input can reference."
     },
     "IP_CHECK_CONFIG": {
       "PATTERN_IPV4": "Optional regex to extract IPv4 address from the response (default matches standard decimal format).",

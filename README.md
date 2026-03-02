@@ -1197,7 +1197,7 @@ library:
 ```
 
 TMDB resolver settings for library enrichment are configured globally under `metadata_update.tmdb`.
-The metadata storage path is configured via `metadata_update.path` (default `metadata`).
+The metadata storage path is configured via `metadata_update.cache_path` (default `metadata`).
 
 **CLI Usage**:
 

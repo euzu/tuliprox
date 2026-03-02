@@ -8,6 +8,7 @@ use crate::model::{AppConfig, LibraryConfig, MetadataUpdateConfig};
 use log::{debug, error, info, warn};
 use shared::model::{LibraryMetadataFormat, LibraryScanResult};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 // Action taken when processing a file
@@ -38,13 +39,24 @@ impl LibraryProcessor {
         config
             .library
             .as_ref()
-            .map(|lib_cfg| Self::new(lib_cfg.clone(), config.metadata_update.as_ref(), client))
+            .map(|lib_cfg| Self::new(lib_cfg.clone(), config.metadata_update.as_ref(), client, &config.working_dir))
     }
 
     // Creates a new Library processor with the given configuration
-    pub fn new(config: LibraryConfig, metadata_update_config: Option<&MetadataUpdateConfig>, client: reqwest::Client) -> Self {
-        let storage_path = metadata_update_config
-            .map_or_else(|| std::path::PathBuf::from(shared::utils::default_metadata_path()), |c| std::path::PathBuf::from(&c.cache_path));
+    pub fn new(
+        config: LibraryConfig,
+        metadata_update_config: Option<&MetadataUpdateConfig>,
+        client: reqwest::Client,
+        working_dir: &str,
+    ) -> Self {
+        let configured_path = PathBuf::from(
+            metadata_update_config.map_or_else(shared::utils::default_metadata_path, |c| c.cache_path.clone()),
+        );
+        let storage_path = if configured_path.is_absolute() {
+            configured_path
+        } else {
+            PathBuf::from(working_dir).join(configured_path)
+        };
         let scanner = LibraryScanner::new(config.clone());
         let storage = MetadataStorage::new(storage_path);
         let resolver = MetadataResolver::from_config(Some(&config), metadata_update_config, client, Some(storage.clone()));

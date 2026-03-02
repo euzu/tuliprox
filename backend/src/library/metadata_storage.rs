@@ -24,8 +24,9 @@ impl MetadataStorage {
     pub async fn initialize(&self) -> std::io::Result<()> {
         if !fs::try_exists(&self.storage_dir).await.unwrap_or(false) {
             info!("Creating metadata storage directory: {}", self.storage_dir.display());
-            fs::create_dir_all(&self.storage_dir).await?;
         }
+        fs::create_dir_all(&self.storage_dir).await?;
+        fs::create_dir_all(self.storage_dir.join("library")).await?;
         Ok(())
     }
 
@@ -76,11 +77,12 @@ impl MetadataStorage {
     // Loads all metadata entries from storage
     pub async fn load_all(&self) -> Vec<MetadataCacheEntry> {
         let mut entries = Vec::new();
+        let library_dir = self.storage_dir.join("library");
 
-        let mut read_dir = match fs::read_dir(&self.storage_dir).await {
+        let mut read_dir = match fs::read_dir(&library_dir).await {
             Ok(dir) => dir,
             Err(e) => {
-                error!("Failed to read metadata directory: {e}");
+                error!("Failed to read metadata directory {}: {e}", library_dir.display());
                 return entries;
             }
         };

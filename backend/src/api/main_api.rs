@@ -55,6 +55,151 @@ use tower_http::services::ServeDir;
 
 const METADATA_TRIGGER_WAIT_CYCLE_LIMIT: u32 = 900;
 
+fn collect_rescheduled_targets(
+    targets_set: &HashSet<String>,
+    running_trigger_targets: &Arc<std::sync::Mutex<HashSet<String>>>,
+    pending_trigger_targets: &Arc<std::sync::Mutex<HashSet<String>>>,
+) -> Vec<String> {
+    let mut running = running_trigger_targets.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut pending = pending_trigger_targets.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut targets_to_respawn = Vec::new();
+    for target in targets_set {
+        running.remove(target);
+        if pending.remove(target) {
+            running.insert(target.clone());
+            targets_to_respawn.push(target.clone());
+        }
+    }
+    targets_to_respawn
+}
+
+fn spawn_followup_if_any(
+    app_state: Arc<AppState>,
+    targets_to_respawn: &[String],
+    running_trigger_targets: Arc<std::sync::Mutex<HashSet<String>>>,
+    pending_trigger_targets: Arc<std::sync::Mutex<HashSet<String>>>,
+) {
+    if !targets_to_respawn.is_empty() {
+        spawn_metadata_trigger_update(
+            app_state,
+            targets_to_respawn,
+            running_trigger_targets,
+            pending_trigger_targets,
+        );
+    }
+}
+
+fn spawn_metadata_trigger_update(
+    app_state: Arc<AppState>,
+    targets_to_spawn: &[String],
+    running_trigger_targets: Arc<std::sync::Mutex<HashSet<String>>>,
+    pending_trigger_targets: Arc<std::sync::Mutex<HashSet<String>>>,
+) {
+    if targets_to_spawn.is_empty() {
+        return;
+    }
+
+    info!("Triggering playlist update for targets due to metadata change completion: {targets_to_spawn:?}");
+
+    let client = app_state.http_client.load().as_ref().clone();
+    let app_config = Arc::clone(&app_state.app_config);
+    let event_manager = Arc::clone(&app_state.event_manager);
+    let playlist_state = Arc::clone(&app_state.playlists);
+    let disabled_headers = app_state.get_disabled_headers();
+    let sources = app_config.sources.load();
+    let targets_to_spawn_owned = targets_to_spawn.to_vec();
+    let targets_set: HashSet<String> = targets_to_spawn.iter().cloned().collect();
+
+    if let Ok(process_targets) = sources.validate_targets(Some(&targets_to_spawn_owned)) {
+        let proc_targets = Arc::new(process_targets);
+        let mut pre_processed_inputs: HashSet<Arc<str>> = HashSet::new();
+        for source in &sources.sources {
+            for target in &source.targets {
+                if targets_set.contains(&target.name) {
+                    for input in &source.inputs {
+                        pre_processed_inputs.insert(input.clone());
+                    }
+                }
+            }
+        }
+
+        let update_guard = app_state.update_guard.clone();
+        let app_state_clone = app_state.clone();
+        let running_trigger_targets_clone = Arc::clone(&running_trigger_targets);
+        let pending_trigger_targets_clone = Arc::clone(&pending_trigger_targets);
+
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            let mut wait_cycles: u32 = 0;
+            loop {
+                if let Some(lock) = update_guard.try_playlist() {
+                    exec_processing(
+                        &client,
+                        app_config,
+                        proc_targets,
+                        Some(event_manager),
+                        Some(app_state_clone.clone()),
+                        Some(playlist_state),
+                        Some(update_guard),
+                        disabled_headers,
+                        Some(app_state_clone.active_provider.clone()),
+                        Some(app_state_clone.metadata_manager.clone()),
+                        Some(pre_processed_inputs),
+                        Some(lock),
+                    )
+                    .await;
+
+                    let targets_to_respawn = collect_rescheduled_targets(
+                        &targets_set,
+                        &running_trigger_targets_clone,
+                        &pending_trigger_targets_clone,
+                    );
+                    spawn_followup_if_any(
+                        app_state_clone,
+                        &targets_to_respawn,
+                        running_trigger_targets_clone,
+                        pending_trigger_targets_clone,
+                    );
+                    break;
+                }
+
+                wait_cycles = wait_cycles.saturating_add(1);
+                if wait_cycles >= METADATA_TRIGGER_WAIT_CYCLE_LIMIT {
+                    warn!(
+                        "Aborting metadata-triggered update after waiting ~{}s for playlist lock ({} cycles)",
+                        wait_cycles * 2,
+                        wait_cycles
+                    );
+                    let targets_to_respawn = collect_rescheduled_targets(
+                        &targets_set,
+                        &running_trigger_targets_clone,
+                        &pending_trigger_targets_clone,
+                    );
+                    spawn_followup_if_any(
+                        app_state_clone,
+                        &targets_to_respawn,
+                        running_trigger_targets_clone,
+                        pending_trigger_targets_clone,
+                    );
+                    break;
+                }
+                if wait_cycles.is_multiple_of(30) {
+                    debug!(
+                        "Metadata-triggered update is still waiting for active playlist update to finish (waited ~{}s)",
+                        wait_cycles * 2
+                    );
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        });
+    } else {
+        warn!("Failed to validate targets for triggered update: {targets_to_spawn:?}");
+        let targets_to_respawn =
+            collect_rescheduled_targets(&targets_set, &running_trigger_targets, &pending_trigger_targets);
+        spawn_followup_if_any(app_state, &targets_to_respawn, running_trigger_targets, pending_trigger_targets);
+    }
+}
+
 fn get_web_dir_path(web_ui_enabled: bool, web_root: &str) -> Result<PathBuf, TuliproxError> {
     let web_dir_path = if web_root.is_empty() { get_default_web_root_path() } else { PathBuf::from(web_root) };
     if web_ui_enabled && (!&web_dir_path.exists() || !&web_dir_path.is_dir()) {
@@ -442,6 +587,8 @@ fn exec_input_update_listener(app_state: &Arc<AppState>, targets: &Arc<ProcessTa
         let mut pending_targets: HashSet<String> = HashSet::new();
         // Set<TargetName>: Tracks which targets have an active spawned playlist-update task (dedup guard)
         let running_trigger_targets: Arc<std::sync::Mutex<HashSet<String>>> = Arc::new(std::sync::Mutex::new(HashSet::new()));
+        // Set<TargetName>: Tracks follow-up triggers that arrive while a target is already running.
+        let pending_trigger_targets: Arc<std::sync::Mutex<HashSet<String>>> = Arc::new(std::sync::Mutex::new(HashSet::new()));
 
         loop {
             match rx.recv().await {
@@ -489,103 +636,26 @@ fn exec_input_update_listener(app_state: &Arc<AppState>, targets: &Arc<ProcessTa
                     // Deduplicate: only spawn for targets that don't already have a running trigger task
                     let targets_to_spawn: Vec<String> = {
                         let mut running = running_trigger_targets.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                        targets_to_trigger.into_iter().filter(|t| running.insert(t.clone())).collect()
+                        let mut pending =
+                            pending_trigger_targets.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let mut to_spawn = Vec::new();
+                        for target in targets_to_trigger {
+                            if running.insert(target.clone()) {
+                                to_spawn.push(target);
+                            } else {
+                                pending.insert(target);
+                            }
+                        }
+                        to_spawn
                     };
 
                     if !targets_to_spawn.is_empty() {
-                        info!("Triggering playlist update for targets due to metadata change completion: {targets_to_spawn:?}");
-
-                        let client = app_state.http_client.load().as_ref().clone();
-                        let app_config = Arc::clone(&app_state.app_config);
-                        let event_manager = Arc::clone(&app_state.event_manager);
-                        let playlist_state = Arc::clone(&app_state.playlists);
-                        let disabled_headers = app_state.get_disabled_headers();
-                        let sources = app_config.sources.load();
-
-                        // For each target, we need to gather ALL its inputs to pass as pre_processed_inputs
-                        let targets_set: HashSet<String> = targets_to_spawn.iter().map(Clone::clone).collect();
-
-                        if let Ok(process_targets) = sources.validate_targets(Some(&targets_to_spawn)) {
-                            let proc_targets = Arc::new(process_targets);
-                            // Collect all inputs for these targets
-                            let mut pre_processed_inputs: HashSet<Arc<str>> = HashSet::new();
-                            for source in &sources.sources {
-                                for target in &source.targets {
-                                    if targets_set.contains(&target.name) {
-                                        for input in &source.inputs {
-                                            pre_processed_inputs.insert(input.clone());
-                                        }
-                                    }
-                                }
-                            }
-
-                            let update_guard = app_state.update_guard.clone();
-                            let app_state_clone = app_state.clone();
-                            let running_trigger_targets_clone = Arc::clone(&running_trigger_targets);
-
-                            // SPAWN the trigger logic so we don't block the event loop with sleep or heavy processing setup
-                            tokio::spawn(async move {
-                                // Small delay to ensure any lingering updates or file locks from the background thread are fully released
-                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                                let mut wait_cycles: u32 = 0;
-                                loop {
-                                    // Low-priority behavior: never enqueue as a lock waiter.
-                                    // Only start when no playlist update is currently active.
-                                    if let Some(lock) = update_guard.try_playlist() {
-                                        exec_processing(
-                                            &client,
-                                            app_config,
-                                            proc_targets,
-                                            Some(event_manager),
-                                            Some(app_state_clone.clone()),
-                                            Some(playlist_state),
-                                            Some(update_guard),
-                                            disabled_headers,
-                                            Some(app_state_clone.active_provider.clone()),
-                                            Some(app_state_clone.metadata_manager.clone()),
-                                            Some(pre_processed_inputs),
-                                            Some(lock), // Keep permit during processing
-                                        )
-                                        .await;
-                                        // Release dedup guard for these targets
-                                        let mut running = running_trigger_targets_clone.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                                        for t in &targets_set {
-                                            running.remove(t);
-                                        }
-                                        break;
-                                    }
-
-                                    wait_cycles = wait_cycles.saturating_add(1);
-                                    if wait_cycles >= METADATA_TRIGGER_WAIT_CYCLE_LIMIT {
-                                        warn!(
-                                            "Aborting metadata-triggered update after waiting ~{}s for playlist lock ({} cycles)",
-                                            wait_cycles * 2,
-                                            wait_cycles
-                                        );
-                                        // Release dedup guard even on abort
-                                        let mut running = running_trigger_targets_clone.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                                        for t in &targets_set {
-                                            running.remove(t);
-                                        }
-                                        break;
-                                    }
-                                    if wait_cycles.is_multiple_of(30) {
-                                        debug!(
-                                            "Metadata-triggered update is still waiting for active playlist update to finish (waited ~{}s)",
-                                            wait_cycles * 2
-                                        );
-                                    }
-                                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                                }
-                            });
-                        } else {
-                            warn!("Failed to validate targets for triggered update: {targets_to_spawn:?}");
-                            // Release dedup guard since we're not spawning
-                            let mut running = running_trigger_targets.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                            for t in &targets_set {
-                                running.remove(t);
-                            }
-                        }
+                        spawn_metadata_trigger_update(
+                            app_state.clone(),
+                            &targets_to_spawn,
+                            Arc::clone(&running_trigger_targets),
+                            Arc::clone(&pending_trigger_targets),
+                        );
                     }
                 }
                 Ok(_) => {}
@@ -595,6 +665,7 @@ fn exec_input_update_listener(app_state: &Arc<AppState>, targets: &Arc<ProcessTa
                     active_target_inputs.clear();
                     pending_targets.clear();
                     running_trigger_targets.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+                    pending_trigger_targets.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
