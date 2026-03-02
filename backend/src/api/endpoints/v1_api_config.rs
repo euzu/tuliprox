@@ -114,7 +114,7 @@ async fn save_config_sources(
     // `dns.resolved` is runtime-managed and must not be accepted from API input.
     strip_provider_dns_resolved(&mut sources);
 
-    let templates_to_persist = match utils::validate_source_config_for_persist(&app_state, &sources) {
+    let templates_to_persist = match utils::validate_source_config_for_persist(&app_state, &sources).await {
         Ok(value) => value,
         Err(err) => {
             error!("Failed to validate source.yml {err}");
@@ -213,7 +213,7 @@ async fn save_config_api_proxy_config(
 
 async fn config(axum::extract::State(app_state): axum::extract::State<Arc<AppState>>) -> impl IntoResponse + Send {
     let paths = app_state.app_config.paths.load();
-    match utils::read_app_config_dto(&paths, true, false) {
+    match utils::read_app_config_dto(&paths, true, false).await {
         Ok(mut app_config) => {
             if let Err(err) = prepare_sources_batch(&mut app_config.sources, false).await {
                 error!("Failed to prepare sources batch: {err}");

@@ -85,11 +85,12 @@ pub async fn read_api_proxy_config(
     }
 }
 
-fn parse_sources_file_from_path(
+async fn parse_sources_file_from_path(
     sources_file: &Path,
     resolve_env: bool,
 ) -> Result<SourcesConfigDto, TuliproxError> {
-    match open_file(sources_file) {
+    let sources_file = sources_file.to_path_buf();
+    tokio::task::spawn_blocking(move || match open_file(&sources_file) {
         Ok(file) => {
             let maybe_sources: Result<SourcesConfigDto, _> =
                 serde_saphyr::from_reader(config_file_reader(file, resolve_env));
@@ -105,17 +106,19 @@ fn parse_sources_file_from_path(
             "Can't read the sources-config file: {}: {err}",
             sources_file.display()
         ),
-    }
+    })
+    .await
+    .map_err(|join_err| info_err!("Failed to read sources-config file: {join_err}"))?
 }
 
-pub fn read_sources_file_from_path_with_templates(
+pub async fn read_sources_file_from_path_with_templates(
     sources_file: &Path,
     resolve_env: bool,
     include_computed: bool,
     hdhr_config: Option<&HdHomeRunDeviceOverview>,
     prepared_templates: Option<&[shared::model::PatternTemplate]>,
 ) -> Result<SourcesConfigDto, TuliproxError> {
-    let mut sources = parse_sources_file_from_path(sources_file, resolve_env)?;
+    let mut sources = parse_sources_file_from_path(sources_file, resolve_env).await?;
     if resolve_env {
         if let Err(err) = sources.prepare(include_computed, hdhr_config, prepared_templates) {
             return info_err_res!(
@@ -127,34 +130,22 @@ pub fn read_sources_file_from_path_with_templates(
     Ok(sources)
 }
 
-pub fn read_sources_file_from_path(
+pub async fn read_sources_file_from_path(
     sources_file: &Path,
     resolve_env: bool,
     include_computed: bool,
     hdhr_config: Option<&HdHomeRunDeviceOverview>,
 ) -> Result<SourcesConfigDto, TuliproxError> {
-    read_sources_file_from_path_with_templates(
-        sources_file,
-        resolve_env,
-        include_computed,
-        hdhr_config,
-        None,
-    )
+    read_sources_file_from_path_with_templates(sources_file, resolve_env, include_computed, hdhr_config, None).await
 }
 
-pub fn read_sources_file(
+pub async fn read_sources_file(
     sources_file: &str,
     resolve_env: bool,
     include_computed: bool,
     hdhr_config: Option<&HdHomeRunDeviceOverview>,
 ) -> Result<SourcesConfigDto, TuliproxError> {
-    read_sources_file_from_path_with_templates(
-        &PathBuf::from(sources_file),
-        resolve_env,
-        include_computed,
-        hdhr_config,
-        None,
-    )
+    read_sources_file_from_path_with_templates(&PathBuf::from(sources_file), resolve_env, include_computed, hdhr_config, None).await
 }
 
 pub fn read_config_file(
@@ -306,7 +297,7 @@ pub(crate) fn read_templates(
     })
 }
 
-pub fn read_app_config_dto(
+pub async fn read_app_config_dto(
     paths: &ConfigPaths,
     resolve_env: bool,
     include_computed: bool,
@@ -316,7 +307,7 @@ pub fn read_app_config_dto(
     let api_proxy_file = paths.api_proxy_file_path.as_str();
 
     let config = read_config_file(config_file, resolve_env, include_computed)?;
-    let mut sources = parse_sources_file_from_path(&PathBuf::from(sources_file), resolve_env)?;
+    let mut sources = parse_sources_file_from_path(&PathBuf::from(sources_file), resolve_env).await?;
     let mut mappings = if let Some(mappings_file) = paths.mapping_file_path.as_ref() {
         read_mappings_file_unprepared(mappings_file, resolve_env)?.map(|(_, mapping)| mapping)
     } else {
@@ -513,7 +504,7 @@ pub async fn read_initial_app_config(
         paths.template_file_path.replace(path);
     }
 
-    let mut sources_dto = parse_sources_file_from_path(&PathBuf::from(sources_file), resolve_env)?;
+    let mut sources_dto = parse_sources_file_from_path(&PathBuf::from(sources_file), resolve_env).await?;
     prepare_sources_batch(&mut sources_dto, include_computed).await?;
 
     let (mapping_paths, mut mappings_dto) = if let Some(mappings_file) = &paths.mapping_file_path {
@@ -754,7 +745,7 @@ pub async fn save_templates_config(
     write_config_file(file_path, backup_dir, config, TEMPLATE_FILE).await
 }
 
-fn build_templates_to_persist(
+async fn build_templates_to_persist(
     app_state: &Arc<AppState>,
     dto: &SourcesConfigDto,
 ) -> Result<Option<TemplateDefinitionDto>, TuliproxError> {
@@ -765,7 +756,9 @@ fn build_templates_to_persist(
     let existing_source_inline_templates = match parse_sources_file_from_path(
         Path::new(paths.sources_file_path.as_str()),
         true,
-    ) {
+    )
+    .await
+    {
         Ok(existing_sources) => existing_sources.templates,
         Err(err) => {
             warn!(
@@ -818,11 +811,11 @@ fn build_templates_to_persist(
     }
 }
 
-pub fn validate_source_config_for_persist(
+pub async fn validate_source_config_for_persist(
     app_state: &Arc<AppState>,
     dto: &SourcesConfigDto,
 ) -> Result<Option<TemplateDefinitionDto>, TuliproxError> {
-    build_templates_to_persist(app_state, dto)
+    build_templates_to_persist(app_state, dto).await
 }
 
 pub async fn persist_templates_config(
@@ -910,7 +903,7 @@ pub async fn validate_and_persist_source_config(
     app_state: &Arc<AppState>,
     dto: SourcesConfigDto,
 ) -> Result<SourcesConfigDto, TuliproxError> {
-    let templates_to_persist = validate_source_config_for_persist(app_state, &dto)?;
+    let templates_to_persist = validate_source_config_for_persist(app_state, &dto).await?;
 
     if let Some(template_definition) = templates_to_persist.as_ref() {
         persist_templates_config(app_state, template_definition).await?;

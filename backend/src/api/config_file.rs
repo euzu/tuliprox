@@ -54,22 +54,22 @@ impl ConfigFile {
     // -----------------------------------------------------------------
 
     /// Load and merge global templates using the current app state.
-    fn load_prepared_global_templates(
+    async fn load_prepared_global_templates(
         app_state: &Arc<AppState>,
     ) -> Result<Option<Vec<PatternTemplate>>, TuliproxError> {
         let paths = app_state.app_config.paths.load();
         let config = app_state.app_config.config.load();
-        Self::load_prepared_global_templates_with_config(&paths, &config)
+        Self::load_prepared_global_templates_with_config(&paths, &config).await
     }
 
     /// Load and merge global templates using explicitly-provided config/paths.
     /// Used in the prepare phase when the new config has not yet been applied to `app_state`.
-    fn load_prepared_global_templates_with_config(
+    async fn load_prepared_global_templates_with_config(
         paths: &ConfigPaths,
         config: &Config,
     ) -> Result<Option<Vec<PatternTemplate>>, TuliproxError> {
         let sources_inline_templates =
-            read_sources_file(paths.sources_file_path.as_str(), false, false, None)?.templates;
+            read_sources_file(paths.sources_file_path.as_str(), false, false, None).await?.templates;
         let mapping_inline_templates = if let Some(mapping_file_path) = paths.mapping_file_path.as_ref() {
             read_mappings_file_unprepared(mapping_file_path, false)?
                 .map(|(_, mapping)| mapping)
@@ -134,8 +134,8 @@ impl ConfigFile {
         Ok(())
     }
 
-    fn load_mapping(app_state: &Arc<AppState>) -> Result<(), TuliproxError> {
-        let prepared_templates = Self::load_prepared_global_templates(app_state)?;
+    async fn load_mapping(app_state: &Arc<AppState>) -> Result<(), TuliproxError> {
+        let prepared_templates = Self::load_prepared_global_templates(app_state).await?;
         Self::load_mapping_with_templates(app_state, prepared_templates.as_deref())
     }
 
@@ -149,14 +149,15 @@ impl ConfigFile {
         paths: &ConfigPaths,
     ) -> Result<PreparedSourcesReload, TuliproxError> {
         let sources_file = paths.sources_file_path.clone();
-        let prepared_templates = Self::load_prepared_global_templates_with_config(paths, config)?;
+        let prepared_templates = Self::load_prepared_global_templates_with_config(paths, config).await?;
         let mut sources_dto = read_sources_file_from_path_with_templates(
             &PathBuf::from(sources_file.as_str()),
             true,
             true,
             config.get_hdhr_device_overview().as_ref(),
             prepared_templates.as_deref(),
-        )?;
+        )
+        .await?;
         prepare_sources_batch(&mut sources_dto, true).await?;
         let sources: SourcesConfig = SourcesConfig::try_from(sources_dto)?;
         let prepared_mapping =
@@ -251,7 +252,7 @@ impl ConfigFile {
             PreparedFollowUp::Sources(prepared)
         } else if mapping_changed {
             // Only mapping path changed; templates are the same → load templates once.
-            let prepared_templates = Self::load_prepared_global_templates_with_config(&effective_paths, &config)?;
+            let prepared_templates = Self::load_prepared_global_templates_with_config(&effective_paths, &config).await?;
             let prepared = Self::prepare_mapping_reload(
                 effective_paths.mapping_file_path.as_deref(),
                 prepared_templates.as_deref(),
@@ -329,7 +330,7 @@ impl ConfigFile {
                 app_state.event_manager.send_event(EventMessage::ConfigChange(ConfigType::ApiProxy));
             }
             ConfigFile::Mapping => {
-                ConfigFile::load_mapping(app_state)?;
+                ConfigFile::load_mapping(app_state).await?;
                 app_state.event_manager.send_event(EventMessage::ConfigChange(ConfigType::Mapping));
             }
             ConfigFile::Template | ConfigFile::Sources => {

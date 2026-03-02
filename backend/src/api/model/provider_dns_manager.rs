@@ -164,7 +164,7 @@ async fn persist_provider_resolved_to_source_file(app_state: &Arc<AppState>, pro
     let source_path = PathBuf::from(&source_file);
     let _lock = app_state.app_config.file_locks.write_lock(&source_path).await;
 
-    let mut sources_dto = match read_sources_file_from_path(&source_path, false, false, None) {
+    let mut sources_dto = match read_sources_file_from_path(&source_path, false, false, None).await {
         Ok(dto) => dto,
         Err(err) => {
             warn!(
@@ -255,7 +255,7 @@ fn spawn_provider_dns_task(app_state: Arc<AppState>, provider_name: Arc<str>, ca
                     };
                     let Some(provider) = provider else {
                         warn!("Provider dns '{provider_name}' not found in runtime sources, retrying");
-                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        tokio::time::sleep(Duration::from_secs(30)).await;
                         return;
                     };
                     refresh_secs = provider.get_dns_config().map_or(300, |dns| dns.refresh_secs.max(10));
