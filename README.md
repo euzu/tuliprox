@@ -176,9 +176,11 @@ Additionally, Tuliprox can periodically resolve provider hostnames to IPs and us
 
 ### 1.4.1 `provider://` Scheme
 
-You can use the special `provider://<provider_name>/...` URL scheme in your configurations. Tuliprox will automatically resolve this to the current active URL or IP address of the specified provider.
+You can use the special `provider://<provider_name>/...` URL scheme in your configurations. Tuliprox will automatically  
+resolve this to the current active URL or IP address of the specified provider.
 
-- If the current URL | IP Address fails (e.g., 5xx error, timeout/connect error), Tuliprox automatically rotates to the next available URL | IP Address for that provider.
+- If the current URL | IP Address fails (e.g., 5xx error, timeout/connect error), Tuliprox automatically rotates to the  
+  next available URL | IP Address for that provider.
 - It tracks failures and prevents infinite loops by limiting attempts to the number of available URLs|IP Addresses.
 
 ### 1.4.2 Automatic Failover triggers

@@ -132,7 +132,9 @@ where
             // optional sign
             let mut out = String::new();
             if matches!(it.peek(), Some('-' | '+')) {
-                out.push(it.next().unwrap());
+                if let Some(val) = it.next() {
+                    out.push(val);
+                }
                 while matches!(it.peek(), Some(c) if c.is_whitespace()) {
                     it.next();
                 }

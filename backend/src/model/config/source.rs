@@ -52,7 +52,7 @@ impl From<&shared::model::ProviderDnsDto> for ProviderDnsConfig {
                 .as_ref()
                 .filter(|list| !list.is_empty())
                 .cloned()
-                .unwrap_or_else(|| vec![DnsScheme::Http]),
+                .unwrap_or_else(|| vec![DnsScheme::Http, DnsScheme::Https]),
             keep_vhost: dto.keep_vhost,
             overrides: dto.overrides.clone().unwrap_or_default(),
             on_resolve_error: dto.on_resolve_error,
@@ -61,12 +61,23 @@ impl From<&shared::model::ProviderDnsDto> for ProviderDnsConfig {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct ProviderDnsCacheEntry {
     pub ips: Vec<IpAddr>,
-    pub rr_index: usize,
+    pub rr_index: AtomicUsize,
     pub last_ok: Option<SystemTime>,
     pub last_err: Option<String>,
+}
+
+impl Clone for ProviderDnsCacheEntry {
+    fn clone(&self) -> Self {
+        Self {
+            ips: self.ips.clone(),
+            rr_index: AtomicUsize::new(self.rr_index.load(Ordering::Relaxed)),
+            last_ok: self.last_ok,
+            last_err: self.last_err.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -79,33 +90,34 @@ impl ProviderDnsCache {
         if ips.is_empty() {
             return None;
         }
+        let len = ips.len();
         let mut guard = self.by_host.write();
         let entry = guard.entry(host.to_ascii_lowercase()).or_default();
-        let idx = entry.rr_index % ips.len();
-        entry.rr_index = (idx + 1) % ips.len();
+        // `% len` guards against a stale index when the override list changed length.
+        let idx = entry.rr_index.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |i| Some((i + 1) % len)).unwrap_or_else(|i| i) % len;
         Some(ips[idx])
     }
 
     pub fn select_cached_ip(&self, host: &str) -> Option<IpAddr> {
-        let mut guard = self.by_host.write();
-        let entry = guard.get_mut(&host.to_ascii_lowercase())?;
+        let guard = self.by_host.read();
+        let entry = guard.get(&host.to_ascii_lowercase())?;
         if entry.ips.is_empty() {
             return None;
         }
-        let idx = entry.rr_index % entry.ips.len();
-        let ip = entry.ips[idx];
-        entry.rr_index = (idx + 1) % entry.ips.len();
-        Some(ip)
+        let len = entry.ips.len();
+        let idx = entry.rr_index.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |i| Some((i + 1) % len)).unwrap_or_else(|i| i) % len;
+        Some(entry.ips[idx])
     }
 
     pub fn store_resolved(&self, host: &str, ips: Vec<IpAddr>) {
         let mut guard = self.by_host.write();
         let entry = guard.entry(host.to_ascii_lowercase()).or_default();
+        let new_len = ips.len();
         entry.ips = ips;
-        if entry.ips.is_empty() {
-            entry.rr_index = 0;
+        if new_len == 0 {
+            entry.rr_index.store(0, Ordering::Relaxed);
         } else {
-            entry.rr_index %= entry.ips.len();
+            entry.rr_index.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |i| Some(i % new_len)).ok();
         }
         entry.last_ok = Some(SystemTime::now());
         entry.last_err = None;
@@ -115,7 +127,8 @@ impl ProviderDnsCache {
         let mut guard = self.by_host.write();
         if let Some(entry) = guard.get_mut(&host.to_ascii_lowercase()) {
             entry.ips.clear();
-            entry.rr_index = 0;
+            entry.rr_index.store(0, Ordering::Relaxed);
+            entry.last_ok = None;
         }
     }
 
@@ -303,13 +316,12 @@ impl ConfigSource {
     }
 }
 
-// macros::try_from_impl!(ConfigSource);
-impl ConfigSource {
-    pub fn from_dto(dto: &ConfigSourceDto) -> Result<ConfigSource, TuliproxError> {
-        Ok(Self {
+impl From<&ConfigSourceDto> for ConfigSource {
+    fn from(dto: &ConfigSourceDto) -> Self {
+        Self {
             inputs: dto.inputs.clone(),
             targets: dto.targets.iter().map(|c| Arc::new(ConfigTarget::from(c))).collect(),
-        })
+        }
     }
 }
 
@@ -351,7 +363,7 @@ impl TryFrom<&SourcesConfigDto> for SourcesConfig {
                     return info_err_res!("Source references unknown input: {input_name}");
                 }
             }
-            sources.push(ConfigSource::from_dto(source_dto)?);
+            sources.push(ConfigSource::from(source_dto));
         }
 
         Ok(Self {

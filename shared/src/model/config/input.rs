@@ -749,7 +749,9 @@ impl Default for ProviderDnsDto {
 impl ProviderDnsDto {
     pub fn prepare(&mut self) -> Result<(), TuliproxError> {
         self.refresh_secs = self.refresh_secs.max(10);
-
+        if self.max_addrs == Some(0) {
+            return info_err_res!("Provider dns max_addrs must be >= 1 when set");
+        }
         if let Some(schemes) = self.schemes.as_mut() {
             let mut unique = Vec::with_capacity(schemes.len());
             for scheme in schemes.drain(..) {

@@ -138,8 +138,12 @@ async fn write_sources_file_force(path: &Path, sources: &SourcesConfigDto) -> io
         Err(err) => {
             #[cfg(windows)]
             {
-                if fs::remove_file(path).await.is_ok() && fs::rename(&tmp_path, path).await.is_ok() {
-                    return Ok(());
+                // Try to rename again after removing destination (Windows often needs this)
+                if let Ok(()) = fs::remove_file(path).await {
+                    if fs::rename(&tmp_path, path).await.is_ok() {
+                        return Ok(());
+                    }
+                    // Rename still failed after removing dest - fall through to clean up
                 }
             }
             let _ = fs::remove_file(&tmp_path).await;
@@ -232,6 +236,9 @@ fn spawn_provider_dns_task(app_state: Arc<AppState>, provider_name: Arc<str>, ca
                 refresh_secs = provider.get_dns_config().map_or(300, |dns| dns.refresh_secs.max(10));
             }
         }
+        // Add initial jitter (0-10% of refresh interval) to prevent thundering herd
+        let jitter_ms = (rand::random::<u64>() % (refresh_secs * 100)).min(5000);
+        tokio::time::sleep(Duration::from_millis(jitter_ms)).await;
         debug!("Starting provider dns task for '{provider_name}' (refresh={refresh_secs}s)");
         loop {
             tokio::select! {
