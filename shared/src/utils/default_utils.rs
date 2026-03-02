@@ -75,7 +75,8 @@ pub fn default_tmdb_api_key() -> Option<String> { Some(TMDB_API_KEY.to_string())
 pub fn is_tmdb_default_api_key(s: &Option<String>) -> bool { s.as_ref().is_none_or(|s| s == TMDB_API_KEY) }
 pub fn is_default_tmdb_language(v: &String) -> bool { v == DEFAULT_TMDB_LANGUAGE }
 
-pub fn default_metadata_path() -> String { "library_metadata".to_string() }
+pub fn default_metadata_path() -> String { "metadata".to_string() }
+pub fn is_default_metadata_path(s: &String) -> bool { s == &default_metadata_path() }
 
 pub const DEFAULT_TMDB_RATE_LIMIT_MS: u64 = 250;
 pub const DEFAULT_TMDB_CACHE_DURATION_DAYS: u32 = 30;

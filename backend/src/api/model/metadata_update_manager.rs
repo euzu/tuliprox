@@ -918,6 +918,7 @@ impl InputWorker {
         let mut last_queue_log_at = Instant::now();
         let mut last_progress_log_at = Instant::now();
         let mut queue_cycle_active = false;
+        let mut cycle_had_changes = false;
 
         let input_name = self.input_name.clone();
         let app_state_weak = self.app_state_weak.clone();
@@ -951,6 +952,7 @@ impl InputWorker {
             if !queue_cycle_active {
                 // First entry of a new processing cycle.
                 queue_cycle_active = true;
+                cycle_had_changes = false;
                 processed_vod_count = 0;
                 processed_series_count = 0;
                 last_progress_log_at = Instant::now();
@@ -1102,6 +1104,7 @@ impl InputWorker {
                         } else if Self::is_series_task_key(&current_key) {
                             processed_series_count += 1;
                         }
+                        cycle_had_changes |= task_outcome.task_changed;
                         debug!(
                             "Processed metadata task for input {input_name}: {task_for_execution} (changed={}, tmdb_pending={})",
                             task_outcome.task_changed,
@@ -1425,14 +1428,19 @@ impl InputWorker {
             }
 
             if queue_cycle_active && queue_completely_empty {
-                info!("All pending metadata resolves completed for input {input_name}");
-                if let Some(app_state) = app_state_weak.as_ref().and_then(Weak::upgrade) {
-                    app_state.event_manager.send_event(EventMessage::InputMetadataUpdatesCompleted(input_name.clone()));
-                }
                 self.last_cycle_completed_at_ts = Some(chrono::Utc::now().timestamp());
                 queue_cycle_active = false;
                 processed_vod_count = 0;
                 processed_series_count = 0;
+                if cycle_had_changes {
+                    info!("All pending metadata resolves completed for input {input_name} (with changes)");
+                    if let Some(app_state) = app_state_weak.as_ref().and_then(Weak::upgrade) {
+                        app_state.event_manager.send_event(EventMessage::InputMetadataUpdatesCompleted(input_name.clone()));
+                    }
+                } else {
+                    debug!("All pending metadata resolves completed for input {input_name} (no changes, skipping playlist update trigger)");
+                }
+                cycle_had_changes = false;
             }
         }
 

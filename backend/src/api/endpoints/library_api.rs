@@ -81,7 +81,7 @@ async fn get_library_status(
                 total_items: entries.len(),
                 movies,
                 series,
-                path: Some(config.metadata.path.clone()),
+                path: config_snapshot.metadata_update.as_ref().map(|m| m.cache_path.clone()),
             };
 
             return axum::Json(response).into_response();

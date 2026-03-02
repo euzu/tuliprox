@@ -440,6 +440,8 @@ fn exec_input_update_listener(app_state: &Arc<AppState>, targets: &Arc<ProcessTa
         let mut active_target_inputs: HashMap<String, HashSet<String>> = HashMap::new();
         // Set<TargetName>: Tracks which targets are pending an update once their inputs are done
         let mut pending_targets: HashSet<String> = HashSet::new();
+        // Set<TargetName>: Tracks which targets have an active spawned playlist-update task (dedup guard)
+        let running_trigger_targets: Arc<std::sync::Mutex<HashSet<String>>> = Arc::new(std::sync::Mutex::new(HashSet::new()));
 
         loop {
             match rx.recv().await {
@@ -484,8 +486,14 @@ fn exec_input_update_listener(app_state: &Arc<AppState>, targets: &Arc<ProcessTa
                         }
                     }
 
-                    if !targets_to_trigger.is_empty() {
-                        info!("Triggering playlist update for targets due to metadata change completion: {targets_to_trigger:?}");
+                    // Deduplicate: only spawn for targets that don't already have a running trigger task
+                    let targets_to_spawn: Vec<String> = {
+                        let mut running = running_trigger_targets.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                        targets_to_trigger.into_iter().filter(|t| running.insert(t.clone())).collect()
+                    };
+
+                    if !targets_to_spawn.is_empty() {
+                        info!("Triggering playlist update for targets due to metadata change completion: {targets_to_spawn:?}");
 
                         let client = app_state.http_client.load().as_ref().clone();
                         let app_config = Arc::clone(&app_state.app_config);
@@ -495,9 +503,9 @@ fn exec_input_update_listener(app_state: &Arc<AppState>, targets: &Arc<ProcessTa
                         let sources = app_config.sources.load();
 
                         // For each target, we need to gather ALL its inputs to pass as pre_processed_inputs
-                        let targets_set: HashSet<String> = targets_to_trigger.iter().map(Clone::clone).collect();
+                        let targets_set: HashSet<String> = targets_to_spawn.iter().map(Clone::clone).collect();
 
-                        if let Ok(process_targets) = sources.validate_targets(Some(&targets_to_trigger)) {
+                        if let Ok(process_targets) = sources.validate_targets(Some(&targets_to_spawn)) {
                             let proc_targets = Arc::new(process_targets);
                             // Collect all inputs for these targets
                             let mut pre_processed_inputs: HashSet<Arc<str>> = HashSet::new();
@@ -513,6 +521,7 @@ fn exec_input_update_listener(app_state: &Arc<AppState>, targets: &Arc<ProcessTa
 
                             let update_guard = app_state.update_guard.clone();
                             let app_state_clone = app_state.clone();
+                            let running_trigger_targets_clone = Arc::clone(&running_trigger_targets);
 
                             // SPAWN the trigger logic so we don't block the event loop with sleep or heavy processing setup
                             tokio::spawn(async move {
@@ -538,6 +547,11 @@ fn exec_input_update_listener(app_state: &Arc<AppState>, targets: &Arc<ProcessTa
                                             Some(lock), // Keep permit during processing
                                         )
                                         .await;
+                                        // Release dedup guard for these targets
+                                        let mut running = running_trigger_targets_clone.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                                        for t in &targets_set {
+                                            running.remove(t);
+                                        }
                                         break;
                                     }
 
@@ -548,6 +562,11 @@ fn exec_input_update_listener(app_state: &Arc<AppState>, targets: &Arc<ProcessTa
                                             wait_cycles * 2,
                                             wait_cycles
                                         );
+                                        // Release dedup guard even on abort
+                                        let mut running = running_trigger_targets_clone.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                                        for t in &targets_set {
+                                            running.remove(t);
+                                        }
                                         break;
                                     }
                                     if wait_cycles.is_multiple_of(30) {
@@ -560,7 +579,12 @@ fn exec_input_update_listener(app_state: &Arc<AppState>, targets: &Arc<ProcessTa
                                 }
                             });
                         } else {
-                            warn!("Failed to validate targets for triggered update: {targets_to_trigger:?}");
+                            warn!("Failed to validate targets for triggered update: {targets_to_spawn:?}");
+                            // Release dedup guard since we're not spawning
+                            let mut running = running_trigger_targets.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                            for t in &targets_set {
+                                running.remove(t);
+                            }
                         }
                     }
                 }
@@ -570,6 +594,7 @@ fn exec_input_update_listener(app_state: &Arc<AppState>, targets: &Arc<ProcessTa
                         active_target_inputs.len(), pending_targets.len());
                     active_target_inputs.clear();
                     pending_targets.clear();
+                    running_trigger_targets.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }

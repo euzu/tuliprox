@@ -43,7 +43,8 @@ impl LibraryProcessor {
 
     // Creates a new Library processor with the given configuration
     pub fn new(config: LibraryConfig, metadata_update_config: Option<&MetadataUpdateConfig>, client: reqwest::Client) -> Self {
-        let storage_path = std::path::PathBuf::from(&config.metadata.path);
+        let storage_path = metadata_update_config
+            .map_or_else(|| std::path::PathBuf::from(shared::utils::default_metadata_path()), |c| std::path::PathBuf::from(&c.cache_path));
         let scanner = LibraryScanner::new(config.clone());
         let storage = MetadataStorage::new(storage_path);
         let resolver = MetadataResolver::from_config(Some(&config), metadata_update_config, client, Some(storage.clone()));

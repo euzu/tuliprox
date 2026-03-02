@@ -147,18 +147,17 @@ impl MetadataStorage {
             .collect()
     }
 
-
     // Gets the metadata file path for a UUID
     fn get_metadata_file_path(&self, uuid: &str) -> PathBuf {
-        self.storage_dir.join(format!("{uuid}.json"))
+        self.storage_dir.join("library").join(format!("{uuid}.json"))
     }
 
     fn get_tmdb_movie_data_file_path(&self, tmdb_id: u32) -> PathBuf {
-        self.storage_dir.join(format!("movie_{tmdb_id}.tmdb"))
+        self.storage_dir.join("movie").join(format!("movie_{tmdb_id}.tmdb"))
     }
 
     fn get_tmdb_series_data_file_path(&self, tmdb_id: u32) -> PathBuf {
-        self.storage_dir.join(format!("series_{tmdb_id}.tmdb"))
+        self.storage_dir.join("series").join(format!("series_{tmdb_id}.tmdb"))
     }
 
     // write raw tmdb movie info

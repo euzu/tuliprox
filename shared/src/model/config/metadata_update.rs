@@ -6,7 +6,7 @@ use crate::{
         default_metadata_ffprobe_live_analyze_duration, default_metadata_ffprobe_live_probe_size,
         default_metadata_ffprobe_probe_size, default_metadata_max_attempts_probe,
         default_metadata_max_attempts_resolve, default_metadata_max_queue_size,
-        default_metadata_max_resolve_retry_backoff, default_metadata_probe_cooldown,
+        default_metadata_max_resolve_retry_backoff, default_metadata_path, default_metadata_probe_cooldown,
         default_metadata_probe_retry_backoff_step_1, default_metadata_probe_retry_backoff_step_2,
         default_metadata_probe_retry_backoff_step_3, default_metadata_probe_retry_load_retry_delay,
         default_metadata_progress_log_interval, default_metadata_queue_log_interval,
@@ -17,7 +17,7 @@ use crate::{
         is_default_metadata_ffprobe_analyze_duration, is_default_metadata_ffprobe_live_analyze_duration,
         is_default_metadata_ffprobe_live_probe_size, is_default_metadata_ffprobe_probe_size,
         is_default_metadata_max_attempts_probe, is_default_metadata_max_attempts_resolve,
-        is_default_metadata_max_queue_size, is_default_metadata_max_resolve_retry_backoff,
+        is_default_metadata_max_queue_size, is_default_metadata_max_resolve_retry_backoff, is_default_metadata_path,
         is_default_metadata_probe_cooldown, is_default_metadata_probe_retry_backoff_step_1,
         is_default_metadata_probe_retry_backoff_step_2, is_default_metadata_probe_retry_backoff_step_3,
         is_default_metadata_probe_retry_load_retry_delay, is_default_metadata_progress_log_interval,
@@ -38,6 +38,8 @@ const DEFAULT_FFPROBE_TIMEOUT_SECS: u64 = 60;
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct MetadataUpdateConfigDto {
+    #[serde(default = "default_metadata_path", skip_serializing_if = "is_default_metadata_path")]
+    pub cache_path: String,
     #[serde(default, skip_serializing_if = "MetadataLogConfigDto::is_empty")]
     pub log: MetadataLogConfigDto,
     #[serde(default, skip_serializing_if = "ResolveConfigDto::is_empty")]
@@ -62,6 +64,7 @@ pub struct MetadataUpdateConfigDto {
 impl Default for MetadataUpdateConfigDto {
     fn default() -> Self {
         Self {
+            cache_path: default_metadata_path(),
             log: MetadataLogConfigDto::default(),
             resolve: ResolveConfigDto::default(),
             probe: ProbeConfigDto::default(),
@@ -451,7 +454,8 @@ impl TmdbConfigDto {
 
 impl MetadataUpdateConfigDto {
     pub fn is_empty(&self) -> bool {
-        self.log.is_empty()
+        is_default_metadata_path(&self.cache_path)
+            && self.log.is_empty()
             && self.resolve.is_empty()
             && self.probe.is_empty()
             && self.ffprobe.is_empty()
@@ -462,11 +466,17 @@ impl MetadataUpdateConfigDto {
     }
 
     pub fn clean(&mut self) {
+        if self.cache_path.trim().is_empty() {
+            self.cache_path = default_metadata_path();
+        }
         self.ffprobe.clean();
         self.tmdb.clean();
     }
 
     pub fn prepare(&mut self) -> Result<(), TuliproxError> {
+        if self.cache_path.trim().is_empty() {
+            return info_err_res!("metadata_update.path cannot be empty");
+        }
         self.log.prepare()?;
         self.resolve.prepare()?;
         self.probe.prepare()?;

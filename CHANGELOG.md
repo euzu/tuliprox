@@ -18,6 +18,26 @@
   - Removed `forced_retry_interval_secs`.
   - FFprobe settings moved from `video.*` to `metadata_update.ffprobe.*`.
   - `metadata_update.ffprobe.analyze_duration` and `metadata_update.ffprobe.live_analyze_duration` now require explicit unit suffixes (`s|m|h|d`).
+  - **`library.metadata.path` moved to `metadata_update.cache_path`** (default `metadata`).
+    The TMDB cache is now shared across all metadata resolution paths (Xtream VOD/Series and local library).
+    Remove `path` from `library.metadata` in your `config.yml` and set it under `metadata_update` instead:
+
+    ```yaml
+    # Before
+    library:
+      metadata:
+        path: /data/library_metadata
+        fallback_to_filename: true
+
+    # After
+    metadata_update:
+      cache_path: /data/library_metadata  # moved here
+
+    library:
+      metadata:
+        fallback_to_filename: true
+    ```
+  
 - **Input Batch Changes**: `name` attribute is now mandatory for input type batch to ensure stable playlist UUIDs.
 - **Favorites Redesign**: Replaced implicit `create_alias` with explicit `add_favourite(group_name)` script function.
   - **EpgSmartMatch**: Field `name_prefix` syntax needs to be changed from  `name_prefix: !suffix "."` to `name_prefix: { suffix: "." }`.
@@ -116,6 +136,7 @@ active URL of the specified provider.
 
 - **config.yml**:
   - Added `metadata_update` (optional) with grouped sections: `log`, `resolve`, `probe`, `ffprobe`, `tmdb`.
+  - Added `metadata_update.cache_path` (default `metadata`): shared storage directory for TMDB cache and metadata files (moved from `library.metadata.path`).
   - Added `metadata_update.tmdb.cooldown` (default `7d`) for successful TMDB no-match cooldown behavior.
   - Added `metadata_update.ffprobe.enabled` (default: false), `metadata_update.ffprobe.timeout`, and ffprobe probe/analyze size settings.
   - `metadata_update.ffprobe.analyze_duration` and `metadata_update.ffprobe.live_analyze_duration` require explicit unit suffixes (`s|m|h|d`).

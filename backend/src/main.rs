@@ -274,10 +274,8 @@ fn print_info(app_config: &AppConfig) {
             info!("Cache dir: {}", cache.dir);
         }
     }
-    if let Some(lib_config) = config.library.as_ref() {
-        if lib_config.enabled {
-            info!("Library Metadata path: {}", lib_config.metadata.path);
-        }
+    if let Some(metadata_update) = config.metadata_update.as_ref() {
+        info!("Metadata path: {}", metadata_update.cache_path);
     }
     if let Some(resource_path) = paths.custom_stream_response_path.as_ref() {
         info!("Resource path: {resource_path}");

@@ -291,7 +291,6 @@ mod tests {
                 "avi".to_string(),
             ],
             metadata: LibraryMetadataConfig {
-                path: "/tmp/vod_metadata".to_string(),
                 read_existing: LibraryMetadataReadConfig {
                     kodi: false,
                     jellyfin: false,

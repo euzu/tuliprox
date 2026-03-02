@@ -16,6 +16,7 @@ use shared::utils::{
 
 #[derive(Debug, Clone)]
 pub struct MetadataUpdateConfig {
+    pub cache_path: String,
     pub log: MetadataLogConfig,
     pub resolve: ResolveConfig,
     pub probe: ProbeConfig,
@@ -135,6 +136,7 @@ impl From<&MetadataUpdateConfigDto> for MetadataUpdateConfig {
         }
 
         Self {
+            cache_path: normalized.cache_path,
             log: MetadataLogConfig::from(&normalized.log),
             resolve: ResolveConfig::from(&normalized.resolve),
             probe: ProbeConfig::from(&normalized.probe),
@@ -160,6 +162,7 @@ impl From<&MetadataUpdateConfigDto> for MetadataUpdateConfig {
 impl From<&MetadataUpdateConfig> for MetadataUpdateConfigDto {
     fn from(instance: &MetadataUpdateConfig) -> Self {
         Self {
+            cache_path: instance.cache_path.clone(),
             log: MetadataLogConfigDto::from(&instance.log),
             resolve: ResolveConfigDto::from(&instance.resolve),
             probe: ProbeConfigDto::from(&instance.probe),
