@@ -6,6 +6,7 @@ use crate::library::scanner::LibraryScanner;
 use crate::library::{MediaGroup, MediaGrouper};
 use crate::model::{AppConfig, LibraryConfig, MetadataUpdateConfig};
 use log::{debug, error, info, warn};
+use path_clean::PathClean;
 use shared::model::{LibraryMetadataFormat, LibraryScanResult};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -26,6 +27,20 @@ pub struct LibraryProcessor {
     resolver: MetadataResolver,
     storage: MetadataStorage,
     app_config: Option<Arc<AppConfig>>, // Need access to global config for FFprobe settings
+}
+
+pub fn resolve_metadata_storage_path(
+    metadata_update_config: Option<&MetadataUpdateConfig>,
+    working_dir: &str,
+) -> PathBuf {
+    let configured_path = PathBuf::from(
+        metadata_update_config.map_or_else(shared::utils::default_metadata_path, |c| c.cache_path.clone()),
+    );
+    if configured_path.is_absolute() {
+        configured_path.clean()
+    } else {
+        PathBuf::from(working_dir).join(configured_path).clean()
+    }
 }
 
 impl LibraryProcessor {
@@ -49,14 +64,7 @@ impl LibraryProcessor {
         client: reqwest::Client,
         working_dir: &str,
     ) -> Self {
-        let configured_path = PathBuf::from(
-            metadata_update_config.map_or_else(shared::utils::default_metadata_path, |c| c.cache_path.clone()),
-        );
-        let storage_path = if configured_path.is_absolute() {
-            configured_path
-        } else {
-            PathBuf::from(working_dir).join(configured_path)
-        };
+        let storage_path = resolve_metadata_storage_path(metadata_update_config, working_dir);
         let scanner = LibraryScanner::new(config.clone());
         let storage = MetadataStorage::new(storage_path);
         let resolver = MetadataResolver::from_config(Some(&config), metadata_update_config, client, Some(storage.clone()));

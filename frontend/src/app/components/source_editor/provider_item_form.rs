@@ -22,6 +22,15 @@ const LABEL_DNS_SCHEMES: &str = "LABEL.DNS_SCHEMES";
 const LABEL_DNS_KEEP_VHOST: &str = "LABEL.DNS_KEEP_VHOST";
 const LABEL_DNS_ON_RESOLVE_ERROR: &str = "LABEL.DNS_ON_RESOLVE_ERROR";
 const LABEL_DNS_ON_CONNECT_ERROR: &str = "LABEL.DNS_ON_CONNECT_ERROR";
+const LABEL_DNS_PREFER_SYSTEM: &str = "LABEL.DNS_PREFER_SYSTEM";
+const LABEL_DNS_PREFER_IPV4: &str = "LABEL.DNS_PREFER_IPV4";
+const LABEL_DNS_PREFER_IPV6: &str = "LABEL.DNS_PREFER_IPV6";
+const LABEL_DNS_SCHEME_HTTP: &str = "LABEL.DNS_SCHEME_HTTP";
+const LABEL_DNS_SCHEME_HTTPS: &str = "LABEL.DNS_SCHEME_HTTPS";
+const LABEL_DNS_RESOLVE_KEEP_LAST_GOOD: &str = "LABEL.DNS_RESOLVE_KEEP_LAST_GOOD";
+const LABEL_DNS_RESOLVE_FALLBACK_TO_HOSTNAME: &str = "LABEL.DNS_RESOLVE_FALLBACK_TO_HOSTNAME";
+const LABEL_DNS_CONNECT_TRY_NEXT_IP: &str = "LABEL.DNS_CONNECT_TRY_NEXT_IP";
+const LABEL_DNS_CONNECT_ROTATE_PROVIDER_URL: &str = "LABEL.DNS_CONNECT_ROTATE_PROVIDER_URL";
 
 const DNS_PREFER_IPV4: &str = "ipv4";
 const DNS_PREFER_IPV6: &str = "ipv6";
@@ -198,17 +207,17 @@ pub fn ProviderItemForm(props: &ProviderItemFormProps) -> Html {
     let dns_prefer_options = Rc::new(vec![
         DropDownOption::new(
             DNS_PREFER_SYSTEM,
-            html! { "system" },
+            html! { { translate.t(LABEL_DNS_PREFER_SYSTEM) } },
             dns_prefer_to_id(dns_state.form.prefer) == DNS_PREFER_SYSTEM,
         ),
         DropDownOption::new(
             DNS_PREFER_IPV4,
-            html! { "ipv4" },
+            html! { { translate.t(LABEL_DNS_PREFER_IPV4) } },
             dns_prefer_to_id(dns_state.form.prefer) == DNS_PREFER_IPV4,
         ),
         DropDownOption::new(
             DNS_PREFER_IPV6,
-            html! { "ipv6" },
+            html! { { translate.t(LABEL_DNS_PREFER_IPV6) } },
             dns_prefer_to_id(dns_state.form.prefer) == DNS_PREFER_IPV6,
         ),
     ]);
@@ -228,8 +237,16 @@ pub fn ProviderItemForm(props: &ProviderItemFormProps) -> Html {
         .as_ref()
         .map_or_else(HashSet::new, |schemes| schemes.iter().copied().map(scheme_to_id).collect::<HashSet<_>>());
     let dns_scheme_options = Rc::new(vec![
-        DropDownOption::new(DNS_SCHEME_HTTP, html! { "http" }, selected_dns_schemes.contains(DNS_SCHEME_HTTP)),
-        DropDownOption::new(DNS_SCHEME_HTTPS, html! { "https" }, selected_dns_schemes.contains(DNS_SCHEME_HTTPS)),
+        DropDownOption::new(
+            DNS_SCHEME_HTTP,
+            html! { { translate.t(LABEL_DNS_SCHEME_HTTP) } },
+            selected_dns_schemes.contains(DNS_SCHEME_HTTP),
+        ),
+        DropDownOption::new(
+            DNS_SCHEME_HTTPS,
+            html! { { translate.t(LABEL_DNS_SCHEME_HTTPS) } },
+            selected_dns_schemes.contains(DNS_SCHEME_HTTPS),
+        ),
     ]);
     let dns_schemes_state = dns_state.clone();
     let handle_dns_schemes_select = Callback::from(move |(_, selection): (String, DropDownSelection)| {
@@ -244,12 +261,12 @@ pub fn ProviderItemForm(props: &ProviderItemFormProps) -> Html {
     let dns_on_resolve_error_options = Rc::new(vec![
         DropDownOption::new(
             DNS_RESOLVE_KEEP_LAST_GOOD,
-            html! { "keep_last_good" },
+            html! { { translate.t(LABEL_DNS_RESOLVE_KEEP_LAST_GOOD) } },
             on_resolve_error_to_id(dns_state.form.on_resolve_error) == DNS_RESOLVE_KEEP_LAST_GOOD,
         ),
         DropDownOption::new(
             DNS_RESOLVE_FALLBACK_TO_HOSTNAME,
-            html! { "fallback_to_hostname" },
+            html! { { translate.t(LABEL_DNS_RESOLVE_FALLBACK_TO_HOSTNAME) } },
             on_resolve_error_to_id(dns_state.form.on_resolve_error) == DNS_RESOLVE_FALLBACK_TO_HOSTNAME,
         ),
     ]);
@@ -268,12 +285,12 @@ pub fn ProviderItemForm(props: &ProviderItemFormProps) -> Html {
     let dns_on_connect_error_options = Rc::new(vec![
         DropDownOption::new(
             DNS_CONNECT_TRY_NEXT_IP,
-            html! { "try_next_ip" },
+            html! { { translate.t(LABEL_DNS_CONNECT_TRY_NEXT_IP) } },
             on_connect_error_to_id(dns_state.form.on_connect_error) == DNS_CONNECT_TRY_NEXT_IP,
         ),
         DropDownOption::new(
             DNS_CONNECT_ROTATE_PROVIDER_URL,
-            html! { "rotate_provider_url" },
+            html! { { translate.t(LABEL_DNS_CONNECT_ROTATE_PROVIDER_URL) } },
             on_connect_error_to_id(dns_state.form.on_connect_error) == DNS_CONNECT_ROTATE_PROVIDER_URL,
         ),
     ]);

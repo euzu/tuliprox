@@ -82,7 +82,9 @@ impl MetadataStorage {
         let mut read_dir = match fs::read_dir(&library_dir).await {
             Ok(dir) => dir,
             Err(e) => {
-                error!("Failed to read metadata directory {}: {e}", library_dir.display());
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    error!("Failed to read metadata directory {}: {e}", library_dir.display());
+                }
                 return entries;
             }
         };

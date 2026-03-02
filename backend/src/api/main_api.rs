@@ -73,131 +73,108 @@ fn collect_rescheduled_targets(
     targets_to_respawn
 }
 
-fn spawn_followup_if_any(
-    app_state: Arc<AppState>,
-    targets_to_respawn: &[String],
-    running_trigger_targets: Arc<std::sync::Mutex<HashSet<String>>>,
-    pending_trigger_targets: Arc<std::sync::Mutex<HashSet<String>>>,
-) {
-    if !targets_to_respawn.is_empty() {
-        spawn_metadata_trigger_update(
-            app_state,
-            targets_to_respawn,
-            running_trigger_targets,
-            pending_trigger_targets,
-        );
-    }
-}
-
 fn spawn_metadata_trigger_update(
-    app_state: Arc<AppState>,
+    app_state: &Arc<AppState>,
     targets_to_spawn: &[String],
-    running_trigger_targets: Arc<std::sync::Mutex<HashSet<String>>>,
-    pending_trigger_targets: Arc<std::sync::Mutex<HashSet<String>>>,
+    running_trigger_targets: &Arc<std::sync::Mutex<HashSet<String>>>,
+    pending_trigger_targets: &Arc<std::sync::Mutex<HashSet<String>>>,
 ) {
     if targets_to_spawn.is_empty() {
         return;
     }
-
-    info!("Triggering playlist update for targets due to metadata change completion: {targets_to_spawn:?}");
 
     let client = app_state.http_client.load().as_ref().clone();
     let app_config = Arc::clone(&app_state.app_config);
     let event_manager = Arc::clone(&app_state.event_manager);
     let playlist_state = Arc::clone(&app_state.playlists);
     let disabled_headers = app_state.get_disabled_headers();
-    let sources = app_config.sources.load();
-    let targets_to_spawn_owned = targets_to_spawn.to_vec();
-    let targets_set: HashSet<String> = targets_to_spawn.iter().cloned().collect();
+    let update_guard = app_state.update_guard.clone();
+    let app_state_clone = Arc::clone(app_state);
+    let running_trigger_targets_clone = Arc::clone(running_trigger_targets);
+    let pending_trigger_targets_clone = Arc::clone(pending_trigger_targets);
+    let mut current_targets = targets_to_spawn.to_vec();
 
-    if let Ok(process_targets) = sources.validate_targets(Some(&targets_to_spawn_owned)) {
-        let proc_targets = Arc::new(process_targets);
-        let mut pre_processed_inputs: HashSet<Arc<str>> = HashSet::new();
-        for source in &sources.sources {
-            for target in &source.targets {
-                if targets_set.contains(&target.name) {
-                    for input in &source.inputs {
-                        pre_processed_inputs.insert(input.clone());
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        loop {
+            if current_targets.is_empty() {
+                break;
+            }
+
+            info!("Triggering playlist update for targets due to metadata change completion: {current_targets:?}");
+            let targets_set: HashSet<String> = current_targets.iter().cloned().collect();
+
+            let (proc_targets, pre_processed_inputs) = {
+                let sources = app_config.sources.load();
+                match sources.validate_targets(Some(&current_targets)) {
+                    Ok(process_targets) => {
+                        let mut pre_processed_inputs: HashSet<Arc<str>> = HashSet::new();
+                        for source in &sources.sources {
+                            for target in &source.targets {
+                                if targets_set.contains(&target.name) {
+                                    for input in &source.inputs {
+                                        pre_processed_inputs.insert(input.clone());
+                                    }
+                                }
+                            }
+                        }
+                        (Some(Arc::new(process_targets)), Some(pre_processed_inputs))
                     }
+                    Err(_) => (None, None),
                 }
+            };
+
+            if let Some(proc_targets) = proc_targets {
+                let mut wait_cycles: u32 = 0;
+                loop {
+                    if let Some(lock) = update_guard.try_playlist() {
+                        exec_processing(
+                            &client,
+                            Arc::clone(&app_config),
+                            proc_targets,
+                            Some(Arc::clone(&event_manager)),
+                            Some(app_state_clone.clone()),
+                            Some(Arc::clone(&playlist_state)),
+                            Some(update_guard.clone()),
+                            disabled_headers.clone(),
+                            Some(app_state_clone.active_provider.clone()),
+                            Some(app_state_clone.metadata_manager.clone()),
+                            pre_processed_inputs.clone(),
+                            Some(lock),
+                        )
+                        .await;
+                        break;
+                    }
+
+                    wait_cycles = wait_cycles.saturating_add(1);
+                    if wait_cycles >= METADATA_TRIGGER_WAIT_CYCLE_LIMIT {
+                        warn!(
+                            "Aborting metadata-triggered update after waiting ~{}s for playlist lock ({} cycles)",
+                            wait_cycles * 2,
+                            wait_cycles
+                        );
+                        break;
+                    }
+                    if wait_cycles.is_multiple_of(30) {
+                        debug!(
+                            "Metadata-triggered update is still waiting for active playlist update to finish (waited ~{}s)",
+                            wait_cycles * 2
+                        );
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+            } else {
+                warn!("Failed to validate targets for triggered update: {current_targets:?}");
             }
+
+            current_targets = collect_rescheduled_targets(
+                &targets_set,
+                &running_trigger_targets_clone,
+                &pending_trigger_targets_clone,
+            );
         }
-
-        let update_guard = app_state.update_guard.clone();
-        let app_state_clone = app_state.clone();
-        let running_trigger_targets_clone = Arc::clone(&running_trigger_targets);
-        let pending_trigger_targets_clone = Arc::clone(&pending_trigger_targets);
-
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            let mut wait_cycles: u32 = 0;
-            loop {
-                if let Some(lock) = update_guard.try_playlist() {
-                    exec_processing(
-                        &client,
-                        app_config,
-                        proc_targets,
-                        Some(event_manager),
-                        Some(app_state_clone.clone()),
-                        Some(playlist_state),
-                        Some(update_guard),
-                        disabled_headers,
-                        Some(app_state_clone.active_provider.clone()),
-                        Some(app_state_clone.metadata_manager.clone()),
-                        Some(pre_processed_inputs),
-                        Some(lock),
-                    )
-                    .await;
-
-                    let targets_to_respawn = collect_rescheduled_targets(
-                        &targets_set,
-                        &running_trigger_targets_clone,
-                        &pending_trigger_targets_clone,
-                    );
-                    spawn_followup_if_any(
-                        app_state_clone,
-                        &targets_to_respawn,
-                        running_trigger_targets_clone,
-                        pending_trigger_targets_clone,
-                    );
-                    break;
-                }
-
-                wait_cycles = wait_cycles.saturating_add(1);
-                if wait_cycles >= METADATA_TRIGGER_WAIT_CYCLE_LIMIT {
-                    warn!(
-                        "Aborting metadata-triggered update after waiting ~{}s for playlist lock ({} cycles)",
-                        wait_cycles * 2,
-                        wait_cycles
-                    );
-                    let targets_to_respawn = collect_rescheduled_targets(
-                        &targets_set,
-                        &running_trigger_targets_clone,
-                        &pending_trigger_targets_clone,
-                    );
-                    spawn_followup_if_any(
-                        app_state_clone,
-                        &targets_to_respawn,
-                        running_trigger_targets_clone,
-                        pending_trigger_targets_clone,
-                    );
-                    break;
-                }
-                if wait_cycles.is_multiple_of(30) {
-                    debug!(
-                        "Metadata-triggered update is still waiting for active playlist update to finish (waited ~{}s)",
-                        wait_cycles * 2
-                    );
-                }
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            }
-        });
-    } else {
-        warn!("Failed to validate targets for triggered update: {targets_to_spawn:?}");
-        let targets_to_respawn =
-            collect_rescheduled_targets(&targets_set, &running_trigger_targets, &pending_trigger_targets);
-        spawn_followup_if_any(app_state, &targets_to_respawn, running_trigger_targets, pending_trigger_targets);
-    }
+    });
 }
 
 fn get_web_dir_path(web_ui_enabled: bool, web_root: &str) -> Result<PathBuf, TuliproxError> {
@@ -651,10 +628,10 @@ fn exec_input_update_listener(app_state: &Arc<AppState>, targets: &Arc<ProcessTa
 
                     if !targets_to_spawn.is_empty() {
                         spawn_metadata_trigger_update(
-                            app_state.clone(),
+                            &app_state,
                             &targets_to_spawn,
-                            Arc::clone(&running_trigger_targets),
-                            Arc::clone(&pending_trigger_targets),
+                            &running_trigger_targets,
+                            &pending_trigger_targets,
                         );
                     }
                 }

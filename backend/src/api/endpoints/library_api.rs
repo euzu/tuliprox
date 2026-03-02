@@ -3,13 +3,12 @@ use crate::{
         library_scan::{spawn_library_scan, LibraryScanTaskOptions},
         model::{AppState, EventMessage},
     },
-    library::LibraryProcessor,
+    library::{resolve_metadata_storage_path, LibraryProcessor},
 };
 use axum::response::IntoResponse;
 use log::{debug, warn};
 use serde_json::json;
 use shared::model::{LibraryScanRequest, LibraryScanSummary, LibraryScanSummaryStatus, LibraryStatus};
-use shared::utils::default_metadata_path;
 use std::sync::Arc;
 
 // Triggers a library scan
@@ -91,10 +90,9 @@ async fn get_library_status(
                 movies,
                 series,
                 path: Some(
-                    config_snapshot
-                        .metadata_update
-                        .as_ref()
-                        .map_or_else(default_metadata_path, |m| m.cache_path.clone()),
+                    resolve_metadata_storage_path(config_snapshot.metadata_update.as_ref(), &config_snapshot.working_dir)
+                        .to_string_lossy()
+                        .to_string(),
                 ),
             };
 
