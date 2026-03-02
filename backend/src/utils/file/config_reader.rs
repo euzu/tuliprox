@@ -112,6 +112,17 @@ async fn parse_sources_file_from_path(
     .map_err(|join_err| info_err!("Failed to read sources-config file: {join_err}"))?
 }
 
+pub fn resolve_template_and_mapping_paths<'a>(paths: &'a ConfigPaths, template_path: Option<&'a str>, mapping_path: Option<&'a str>) -> (Cow<'a, str>, Cow<'a, str>) {
+    // Resolve effective paths for templates and mappings (with robust fallbacks)
+    let effective_template_path = paths.template_file_path.as_deref()
+        .or(template_path).map_or_else(|| Cow::Owned(utils::get_default_templates_path(&paths.config_path)), Cow::Borrowed);
+
+    let effective_mapping_path = paths.mapping_file_path.as_deref()
+        .or(mapping_path).map_or_else(|| Cow::Owned(utils::get_default_mappings_path(&paths.config_path)), Cow::Borrowed);
+
+    (effective_template_path, effective_mapping_path)
+}
+
 pub async fn read_sources_file_from_path_with_templates(
     sources_file: &Path,
     resolve_env: bool,
@@ -147,7 +158,7 @@ pub async fn read_sources_file(
     hdhr_config: Option<&HdHomeRunDeviceOverview>,
     prepared_templates: Option<&[shared::model::PatternTemplate]>,
 ) -> Result<SourcesConfigDto, TuliproxError> {
-    read_sources_file_from_path_with_templates(&PathBuf::from(sources_file), resolve_env, include_computed, hdhr_config, None).await
+    read_sources_file_from_path_with_templates(&PathBuf::from(sources_file), resolve_env, include_computed, hdhr_config, prepared_templates).await
 }
 
 pub fn read_config_file(
@@ -309,12 +320,13 @@ pub async fn read_app_config_dto(
     let api_proxy_file = paths.api_proxy_file_path.as_str();
 
     let config = read_config_file(config_file, resolve_env, include_computed)?;
+
+    // Resolve effective paths for templates and mappings (with robust fallbacks)
+    let (effective_template_path,effective_mapping_path) = resolve_template_and_mapping_paths(paths, config.template_path.as_deref(), config.mapping_path.as_deref());
+
     let mut sources = parse_sources_file_from_path(&PathBuf::from(sources_file), resolve_env).await?;
-    let mut mappings = if let Some(mappings_file) = paths.mapping_file_path.as_ref() {
-        read_mappings_file_unprepared(mappings_file, resolve_env)?.map(|(_, mapping)| mapping)
-    } else {
-        None
-    };
+    let mut mappings = read_mappings_file_unprepared(effective_mapping_path.as_ref(), resolve_env)?
+        .map(|(_, mapping)| mapping);
 
     let template_bundle = read_templates(
         Some(effective_template_path.as_ref()),
@@ -507,7 +519,6 @@ pub async fn read_initial_app_config(
     }
 
     let mut sources_dto = parse_sources_file_from_path(&PathBuf::from(sources_file), resolve_env).await?;
-    prepare_sources_batch(&mut sources_dto, include_computed).await?;
 
     let (mapping_paths, mut mappings_dto) = if let Some(mappings_file) = &paths.mapping_file_path {
         match read_mappings_file_unprepared(mappings_file.as_str(), resolve_env) {

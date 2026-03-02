@@ -70,14 +70,15 @@ impl ConfigFile {
         config: &Config,
     ) -> Result<Option<Vec<PatternTemplate>>, TuliproxError> {
         let sources_inline_templates =
-            read_sources_file(paths.sources_file_path.as_str(), false, false, None).await?.templates;
-        let mapping_inline_templates = if let Some(mapping_file_path) = paths.mapping_file_path.as_ref() {
-            read_mappings_file_unprepared(mapping_file_path, false)?
-                .map(|(_, mapping)| mapping)
-                .and_then(|mapping| mapping.mappings.templates)
-        } else {
-            None
-        };
+            read_sources_file(paths.sources_file_path.as_str(), false, false, None, None).await?.templates;
+
+        // Use robust fallbacks for mapping and template paths
+        let (effective_template_path, effective_mapping_path) = resolve_template_and_mapping_paths(paths, config.template_path.as_deref(), config.mapping_path.as_deref());
+
+        let mapping_inline_templates = read_mappings_file_unprepared(effective_mapping_path.as_ref(), false)?
+            .map(|(_, mapping)| mapping)
+            .and_then(|mapping| mapping.mappings.templates);
+
         let template_bundle = read_templates(
             Some(effective_template_path.as_ref()),
             true,

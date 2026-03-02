@@ -219,6 +219,7 @@ async fn build_initial_draft(paths: &ConfigPaths) -> AppConfigDto {
             false,
             false,
             draft.config.get_hdhr_device_overview().as_ref(),
+            None
         )
         .await
         {
