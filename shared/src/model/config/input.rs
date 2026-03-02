@@ -406,6 +406,8 @@ pub struct ConfigInputDto {
     pub exp_date: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub panel_api: Option<PanelApiConfigDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<Vec<ConfigProviderDto>>,
 }
 
 impl Default for ConfigInputDto {
@@ -431,6 +433,7 @@ impl Default for ConfigInputDto {
             staged: None,
             exp_date: None,
             panel_api: None,
+            provider: None,
         }
     }
 }

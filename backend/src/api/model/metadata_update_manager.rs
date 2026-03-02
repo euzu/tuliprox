@@ -918,6 +918,7 @@ impl InputWorker {
         let mut last_queue_log_at = Instant::now();
         let mut last_progress_log_at = Instant::now();
         let mut queue_cycle_active = false;
+        let mut cycle_had_changes = false;
 
         let input_name = self.input_name.clone();
         let app_state_weak = self.app_state_weak.clone();
@@ -951,6 +952,7 @@ impl InputWorker {
             if !queue_cycle_active {
                 // First entry of a new processing cycle.
                 queue_cycle_active = true;
+                cycle_had_changes = false;
                 processed_vod_count = 0;
                 processed_series_count = 0;
                 last_progress_log_at = Instant::now();
@@ -1102,9 +1104,13 @@ impl InputWorker {
                         } else if Self::is_series_task_key(&current_key) {
                             processed_series_count += 1;
                         }
+                        let trigger_playlist_update =
+                            Self::should_trigger_playlist_update_for_task(&task_for_execution, task_outcome.task_changed);
+                        cycle_had_changes |= trigger_playlist_update;
                         debug!(
-                            "Processed metadata task for input {input_name}: {task_for_execution} (changed={}, tmdb_pending={})",
+                            "Processed metadata task for input {input_name}: {task_for_execution} (changed={}, trigger_playlist_update={}, tmdb_pending={})",
                             task_outcome.task_changed,
+                            trigger_playlist_update,
                             task_outcome.tmdb_pending
                         );
 
@@ -1425,14 +1431,19 @@ impl InputWorker {
             }
 
             if queue_cycle_active && queue_completely_empty {
-                info!("All pending metadata resolves completed for input {input_name}");
-                if let Some(app_state) = app_state_weak.as_ref().and_then(Weak::upgrade) {
-                    app_state.event_manager.send_event(EventMessage::InputMetadataUpdatesCompleted(input_name.clone()));
-                }
                 self.last_cycle_completed_at_ts = Some(chrono::Utc::now().timestamp());
                 queue_cycle_active = false;
                 processed_vod_count = 0;
                 processed_series_count = 0;
+                if cycle_had_changes {
+                    info!("All pending metadata resolves completed for input {input_name} (with changes)");
+                    if let Some(app_state) = app_state_weak.as_ref().and_then(Weak::upgrade) {
+                        app_state.event_manager.send_event(EventMessage::InputMetadataUpdatesCompleted(input_name.clone()));
+                    }
+                } else {
+                    debug!("All pending metadata resolves completed for input {input_name} (no changes, skipping playlist update trigger)");
+                }
+                cycle_had_changes = false;
             }
         }
 
@@ -1854,6 +1865,11 @@ impl InputWorker {
     #[inline]
     fn is_resolve_task(task: &UpdateTask) -> bool {
         matches!(task, UpdateTask::ResolveVod { .. } | UpdateTask::ResolveSeries { .. })
+    }
+
+    #[inline]
+    fn should_trigger_playlist_update_for_task(task: &UpdateTask, task_changed: bool) -> bool {
+        task_changed && !Self::is_probe_task(task) && !Self::is_probe_only_resolve_task(task)
     }
 
     #[inline]
@@ -3364,5 +3380,27 @@ mod tests {
             delay: 0,
         };
         assert_eq!(InputWorker::retry_domain_for_task(&task), RetryDomain::Resolve);
+    }
+
+    #[test]
+    fn playlist_trigger_ignores_probe_only_changes() {
+        let task = UpdateTask::ProbeLive {
+            id: ProviderIdType::Id(22),
+            reason: ResolveReasonSet::from_variants(&[ResolveReason::Probe]),
+            delay: 0,
+            interval: 60,
+        };
+        assert!(!InputWorker::should_trigger_playlist_update_for_task(&task, true));
+    }
+
+    #[test]
+    fn playlist_trigger_keeps_info_changes() {
+        let task = UpdateTask::ResolveSeries {
+            id: ProviderIdType::Id(33),
+            reason: ResolveReasonSet::from_variants(&[ResolveReason::Info]),
+            delay: 0,
+        };
+        assert!(InputWorker::should_trigger_playlist_update_for_task(&task, true));
+        assert!(!InputWorker::should_trigger_playlist_update_for_task(&task, false));
     }
 }

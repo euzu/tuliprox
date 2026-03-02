@@ -20,13 +20,7 @@ impl MetadataResolver {
         metadata_update_config: Option<&MetadataUpdateConfig>,
         client: reqwest::Client,
     ) -> Self {
-        let storage = match library_config {
-            None => None,
-            Some(c) => {
-                let storage_path = std::path::PathBuf::from(&c.metadata.path);
-                Some(MetadataStorage::new(storage_path))
-            }
-        };
+        let storage = metadata_update_config.map(|c| MetadataStorage::new(std::path::PathBuf::from(&c.cache_path)));
         Self::from_config(library_config, metadata_update_config, client, storage)
     }
 
@@ -229,7 +223,6 @@ mod tests {
             scan_directories: vec![],
             supported_extensions: vec![],
             metadata: LibraryMetadataConfig {
-                path: "/tmp/vod".to_string(),
                 read_existing: LibraryMetadataReadConfig {
                     kodi: true,
                     jellyfin: true,

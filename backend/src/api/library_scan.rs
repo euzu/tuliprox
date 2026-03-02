@@ -7,19 +7,25 @@ use log::{error, info};
 use shared::model::{LibraryScanSummary, LibraryScanSummaryStatus};
 use std::sync::Arc;
 
+pub(crate) struct LibraryScanTaskOptions {
+    pub force_rescan: bool,
+    pub message_prefix: &'static str,
+    pub working_dir: String,
+}
+
 pub(crate) fn spawn_library_scan(
     event_manager: Arc<EventManager>,
     lib_config: LibraryConfig,
     metadata_update_config: Option<MetadataUpdateConfig>,
     client: reqwest::Client,
-    force_rescan: bool,
-    message_prefix: &'static str,
+    options: LibraryScanTaskOptions,
     permit: UpdateGuardPermit,
 ) {
+    let LibraryScanTaskOptions { force_rescan, message_prefix, working_dir } = options;
     let prefix = message_prefix.to_string();
     tokio::spawn(async move {
         let _permit = permit;
-        let processor = LibraryProcessor::new(lib_config, metadata_update_config.as_ref(), client);
+        let processor = LibraryProcessor::new(lib_config, metadata_update_config.as_ref(), client, &working_dir);
         match processor.scan(force_rescan).await {
             Ok(result) => {
                 info!("{prefix}Library scan completed successfully");

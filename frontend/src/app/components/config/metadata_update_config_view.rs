@@ -38,6 +38,7 @@ const LABEL_MAX_ATTEMPTS_RESOLVE: &str = "LABEL.METADATA_MAX_ATTEMPTS_RESOLVE";
 const LABEL_MAX_ATTEMPTS_PROBE: &str = "LABEL.METADATA_MAX_ATTEMPTS_PROBE";
 const LABEL_BACKOFF_JITTER_PERCENT: &str = "LABEL.METADATA_BACKOFF_JITTER_PERCENT";
 const LABEL_MAX_QUEUE_SIZE: &str = "LABEL.METADATA_MAX_QUEUE_SIZE";
+const LABEL_METADATA_PATH: &str = "LABEL.METADATA_PATH";
 const LABEL_FFPROBE_ENABLED: &str = "LABEL.FFPROBE_ENABLED";
 const LABEL_FFPROBE_TIMEOUT: &str = "LABEL.FFPROBE_TIMEOUT";
 const LABEL_FFPROBE_ANALYZE_DURATION: &str = "LABEL.METADATA_FFPROBE_ANALYZE_DURATION";
@@ -61,6 +62,7 @@ generate_form_reducer!(
     state: MetadataUpdateConfigFormState { form: MetadataUpdateConfigDto },
     action_name: MetadataUpdateConfigFormAction,
     fields {
+        Path => cache_path: String,
         RetryDelay => retry_delay: String,
         MaxQueueSize => max_queue_size: usize,
         WorkerIdleTimeout => worker_idle_timeout: String,
@@ -244,6 +246,7 @@ pub fn MetadataUpdateConfigView() -> Html {
 
                 <Card class="tp__config-view__card">
                     <h1>{translate.t(LABEL_SETTINGS)}</h1>
+                    { config_field!(form_state.form, translate.t(LABEL_METADATA_PATH), cache_path) }
                     { config_field!(form_state.form, translate.t(LABEL_RETRY_DELAY), retry_delay) }
                     { config_field!(form_state.form, translate.t(LABEL_MAX_QUEUE_SIZE), max_queue_size) }
                     { config_field!(form_state.form, translate.t(LABEL_WORKER_IDLE_TIMEOUT), worker_idle_timeout) }
@@ -311,6 +314,7 @@ pub fn MetadataUpdateConfigView() -> Html {
 
                 <Card class="tp__config-view__card">
                     <h1>{translate.t(LABEL_SETTINGS)}</h1>
+                    { edit_field_text!(form_state, translate.t(LABEL_METADATA_PATH), cache_path, MetadataUpdateConfigFormAction::Path) }
                     { edit_field_text!(form_state, translate.t(LABEL_RETRY_DELAY), retry_delay, MetadataUpdateConfigFormAction::RetryDelay) }
                     { edit_field_number_usize!(form_state, translate.t(LABEL_MAX_QUEUE_SIZE), max_queue_size, MetadataUpdateConfigFormAction::MaxQueueSize) }
                     { edit_field_text!(form_state, translate.t(LABEL_WORKER_IDLE_TIMEOUT), worker_idle_timeout, MetadataUpdateConfigFormAction::WorkerIdleTimeout) }

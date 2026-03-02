@@ -24,8 +24,9 @@ impl MetadataStorage {
     pub async fn initialize(&self) -> std::io::Result<()> {
         if !fs::try_exists(&self.storage_dir).await.unwrap_or(false) {
             info!("Creating metadata storage directory: {}", self.storage_dir.display());
-            fs::create_dir_all(&self.storage_dir).await?;
         }
+        fs::create_dir_all(&self.storage_dir).await?;
+        fs::create_dir_all(self.storage_dir.join("library")).await?;
         Ok(())
     }
 
@@ -76,11 +77,14 @@ impl MetadataStorage {
     // Loads all metadata entries from storage
     pub async fn load_all(&self) -> Vec<MetadataCacheEntry> {
         let mut entries = Vec::new();
+        let library_dir = self.storage_dir.join("library");
 
-        let mut read_dir = match fs::read_dir(&self.storage_dir).await {
+        let mut read_dir = match fs::read_dir(&library_dir).await {
             Ok(dir) => dir,
             Err(e) => {
-                error!("Failed to read metadata directory: {e}");
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    error!("Failed to read metadata directory {}: {e}", library_dir.display());
+                }
                 return entries;
             }
         };
@@ -147,18 +151,17 @@ impl MetadataStorage {
             .collect()
     }
 
-
     // Gets the metadata file path for a UUID
     fn get_metadata_file_path(&self, uuid: &str) -> PathBuf {
-        self.storage_dir.join(format!("{uuid}.json"))
+        self.storage_dir.join("library").join(format!("{uuid}.json"))
     }
 
     fn get_tmdb_movie_data_file_path(&self, tmdb_id: u32) -> PathBuf {
-        self.storage_dir.join(format!("movie_{tmdb_id}.tmdb"))
+        self.storage_dir.join("movie").join(format!("movie_{tmdb_id}.tmdb"))
     }
 
     fn get_tmdb_series_data_file_path(&self, tmdb_id: u32) -> PathBuf {
-        self.storage_dir.join(format!("series_{tmdb_id}.tmdb"))
+        self.storage_dir.join("series").join(format!("series_{tmdb_id}.tmdb"))
     }
 
     // write raw tmdb movie info

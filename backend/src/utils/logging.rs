@@ -10,7 +10,8 @@ const LOG_ERROR_LEVEL_MOD: &[&str] = &[
     "reqwest::async_impl::client",
     "reqwest::connect",
     "hyper_util::client",
-    "tungstenite::protocol"
+    "tungstenite::protocol",
+    "rustls_platform_verifier::verification"
 ];
 
 fn get_log_level(log_level: &str) -> LevelFilter {

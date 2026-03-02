@@ -299,6 +299,10 @@
       "URL": "Target URL for this setting.",
       "USERNAME": "Login username for this account or service."
     },
+    "CONFIG_PROVIDER": {
+      "NAME": "Unique provider identifier used by provider://<provider_name> references.",
+      "URLS": "Ordered list of provider base URLs. Tuliprox rotates through them on failover."
+    },
     "CONFIG_INPUT_OPTIONS": {
       "PROBE_DELAY": "Delay in seconds between probe requests (default 2) to reduce provider pressure.",
       "PROBE_LIVE": "Enables background technical analysis for live channels to detect codecs and resolution.",
@@ -331,6 +335,7 @@
     "DISCORD": {
       "TEMPLATE_MESSAGE": "Template message body for Discord notifications."
     },
+    "DNS_MAX_ADDRS": "Optional limit of resolved IP addresses kept per hostname. Leave empty for no explicit limit.",
     "EPG_CONFIG": {
       "NAME_PREFIX_SEPARATOR": "List of characters (e.g. ':', '|') that separate channel prefixes from the main title during Smart Match.",
       "STRIP": "Terms to ignore during EPG Smart Matching (e.g. '4K', 'HD', 'HEVC')."
@@ -368,7 +373,8 @@
       "EPG_SOURCES": "Associated EPG (Electronic Program Guide) sources for this input.",
       "FETCH_METHOD": "HTTP method used to retrieve the input (e.g., GET, POST).",
       "HEADERS": "Custom HTTP headers sent when retrieving the input playlist.",
-      "INPUT_TYPE": "Defines the streaming protocol or source format (e.g. xtream, m3u)."
+      "INPUT_TYPE": "Defines the streaming protocol or source format (e.g. xtream, m3u).",
+      "PROVIDERS": "Provider profiles define reusable upstream URLs and DNS behavior that this input can reference."
     },
     "IP_CHECK_CONFIG": {
       "PATTERN_IPV4": "Optional regex to extract IPv4 address from the response (default matches standard decimal format).",
@@ -457,6 +463,20 @@
       "PASSWORD": "Source password used for loading playlists from a protected provider.",
       "URL": "Source URL used to download playlist data.",
       "USERNAME": "Source username used for loading playlists from a protected provider."
+    },
+    "PROVIDER_DNS": {
+      "ENABLED": "Enables DNS/IP-connect behavior for this provider.",
+      "KEEP_VHOST": "If enabled, keeps the original hostname in the Host header while connecting by resolved IP.",
+      "REFRESH_SECS": "DNS refresh interval in seconds for provider hostnames (minimum effective value is 10)."
+    },
+    "PROVIDER_FORM": {
+      "URLS": "List of base URLs for this provider. They are used in order and rotated when failover is triggered.",
+      "DNS": {
+        "ON_CONNECT_ERROR": "Defines connect-error behavior: try the next resolved IP first, or rotate directly to the next provider URL.",
+        "ON_RESOLVE_ERROR": "Defines resolve-error behavior: keep last known good IPs, or fall back to hostname-based connections.",
+        "PREFER": "IP family preference for DNS resolution (`system`, `ipv4`, `ipv6`).",
+        "SCHEMES": "Restricts DNS/IP-connect handling to selected URL schemes (`http`, `https`)."
+      }
     },
     "PROBE": "Probe controls technical stream analysis retries.\n\nUse this group to define retry steps, retry limits, and cooldown behavior for FFprobe-based stream checks.",
     "PROBE_CONFIG": {
@@ -660,9 +680,11 @@
     "ADD_MAPPING": "Add Mapping",
     "ADD_PATTERN": "Add Pattern",
     "ADD_PROPERTY": "Add Property",
+    "ADD_PROVIDER": "Add Provider",
     "ADD_QUALITY_TO_FILENAME": "Quality",
     "ADD_SERVER": "Add Server",
     "ADD_TRAKT_LIST": "Add a Trakt list",
+    "ADD_URL": "Add Url",
     "ADD_WATCH": "Add Watch",
     "ADVANCED": "Advanced",
     "ALIAS": "Alias",
@@ -742,6 +764,23 @@
     "DISK_BASED_PROCESSING": "Disk Based Processing",
     "DOCUMENTATION": "Documentation",
     "DOCUMENTATION_CONTENT": "Get started with tuliprox: features, setup, and examples",
+    "DNS_CONNECT_ROTATE_PROVIDER_URL": "Rotate Provider Url",
+    "DNS_CONNECT_TRY_NEXT_IP": "Try Next IP",
+    "DNS_ENABLED": "DNS Enabled",
+    "DNS_KEEP_VHOST": "DNS Keep VHost",
+    "DNS_MAX_ADDRS": "DNS Max Addrs",
+    "DNS_ON_CONNECT_ERROR": "DNS On Connect Error",
+    "DNS_ON_RESOLVE_ERROR": "DNS On Resolve Error",
+    "DNS_PREFER": "DNS Prefer",
+    "DNS_PREFER_IPV4": "IPv4",
+    "DNS_PREFER_IPV6": "IPv6",
+    "DNS_PREFER_SYSTEM": "System",
+    "DNS_REFRESH_SECS": "DNS Refresh (secs)",
+    "DNS_RESOLVE_FALLBACK_TO_HOSTNAME": "Fallback To Hostname",
+    "DNS_RESOLVE_KEEP_LAST_GOOD": "Keep Last Good",
+    "DNS_SCHEME_HTTP": "HTTP",
+    "DNS_SCHEME_HTTPS": "HTTPS",
+    "DNS_SCHEMES": "DNS Schemes",
     "DOWNLOAD": "Download",
     "DURATION": "Duration",
     "EDIT": "Edit",
@@ -946,6 +985,9 @@
     "PROPRIETARY_DISCOVERY": "Proprietary Discovery",
     "PROTOCOL": "Protocol",
     "PROVIDER": "Provider",
+    "PROVIDER_DNS": "Provider DNS",
+    "PROVIDER_NAME": "Provider Name",
+    "PROVIDER_URLS": "Provider URLs",
     "PROXY": "Proxy",
     "PROXY_CONFIG": "Proxy",
     "PUSHOVER": "Pushover",

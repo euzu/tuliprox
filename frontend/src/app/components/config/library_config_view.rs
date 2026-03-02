@@ -27,7 +27,6 @@ const LABEL_SCAN_DIRECTORIES: &str = "LABEL.SCAN_DIRECTORIES";
 const LABEL_ADD_DIRECTORY: &str = "LABEL.ADD_DIRECTORY";
 const LABEL_SUPPORTED_EXTENSIONS: &str = "LABEL.SUPPORTED_EXTENSIONS";
 const LABEL_METADATA: &str = "LABEL.METADATA";
-const LABEL_METADATA_PATH: &str = "LABEL.METADATA_PATH";
 const LABEL_PLAYLIST: &str = "LABEL.PLAYLIST";
 const LABEL_MOVIE_CATEGORY: &str = "LABEL.MOVIE_CATEGORY";
 const LABEL_SERIES_CATEGORY: &str = "LABEL.SERIES_CATEGORY";
@@ -73,7 +72,6 @@ generate_form_reducer!(
     state: LibraryMetadataConfigFormState { form: LibraryMetadataConfigDto },
     action_name: LibraryMetadataConfigFormAction,
     fields {
-        Path => path: String,
         FallbackToFilename => fallback_to_filename: bool,
         Formats => formats: Vec<LibraryMetadataFormat>,
     }
@@ -364,7 +362,6 @@ pub fn LibraryConfigView() -> Html {
                 { render_extensions(&form_state.form.supported_extensions) }
                 <Card class="tp__config-view__card">
                     <h1>{translate.t(LABEL_METADATA)}</h1>
-                    { config_field!(metadata, translate.t(LABEL_METADATA_PATH), path) }
                     { config_field_bool!(metadata, translate.t(LABEL_FALLBACK_TO_FILENAME), fallback_to_filename) }
                     { config_field_child!(translate.t(LABEL_FORMATS), "LIBRARY_CONFIG.FORMATS", {
                         html! {
@@ -406,7 +403,6 @@ pub fn LibraryConfigView() -> Html {
 
                  <Card class="tp__config-view__card">
                     <h1>{translate.t(LABEL_METADATA)}</h1>
-                    { edit_field_text!(metadata_state, translate.t(LABEL_METADATA_PATH), path, LibraryMetadataConfigFormAction::Path) }
                     { edit_field_bool!(metadata_state, translate.t(LABEL_FALLBACK_TO_FILENAME), fallback_to_filename, LibraryMetadataConfigFormAction::FallbackToFilename) }
                     { config_field_child!(translate.t(LABEL_FORMATS), "LIBRARY_CONFIG.FORMATS", {
                         let metadata_state = metadata_state.clone();

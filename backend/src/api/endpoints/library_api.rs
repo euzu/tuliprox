@@ -1,9 +1,9 @@
 use crate::{
     api::{
-        library_scan::spawn_library_scan,
+        library_scan::{spawn_library_scan, LibraryScanTaskOptions},
         model::{AppState, EventMessage},
     },
-    library::LibraryProcessor,
+    library::{resolve_metadata_storage_path, LibraryProcessor},
 };
 use axum::response::IntoResponse;
 use log::{debug, warn};
@@ -34,10 +34,10 @@ async fn scan_library(
     };
 
     // Check if Library is enabled
-    let (lib_config, metadata_update_config) = {
+    let (lib_config, metadata_update_config, working_dir) = {
         let config = app_state.app_config.config.load();
         match config.library.as_ref() {
-            Some(lib) if lib.enabled => (lib.clone(), config.metadata_update.clone()),
+            Some(lib) if lib.enabled => (lib.clone(), config.metadata_update.clone(), config.working_dir.clone()),
             _ => {
                 let response = LibraryScanSummary {
                     status: LibraryScanSummaryStatus::Error,
@@ -56,7 +56,14 @@ async fn scan_library(
 
     let client = app_state.http_client.load_full().as_ref().clone();
     let event_manager = Arc::clone(&app_state.event_manager);
-    spawn_library_scan(event_manager, lib_config, metadata_update_config, client, request.force_rescan, "", permit);
+    spawn_library_scan(
+        event_manager,
+        lib_config,
+        metadata_update_config,
+        client,
+        LibraryScanTaskOptions { force_rescan: request.force_rescan, message_prefix: "", working_dir },
+        permit,
+    );
 
     axum::http::StatusCode::ACCEPTED.into_response()
 }
@@ -70,7 +77,8 @@ async fn get_library_status(
         if config.enabled {
             let client = app_state.http_client.load_full().as_ref().clone();
             // Get statistics from processor
-            let processor = LibraryProcessor::new(config.clone(), config_snapshot.metadata_update.as_ref(), client);
+            let processor =
+                LibraryProcessor::new(config.clone(), config_snapshot.metadata_update.as_ref(), client, &config_snapshot.working_dir);
             let entries = processor.get_all_entries().await;
 
             let movies = entries.iter().filter(|e| e.metadata.is_movie()).count();
@@ -81,7 +89,11 @@ async fn get_library_status(
                 total_items: entries.len(),
                 movies,
                 series,
-                path: Some(config.metadata.path.clone()),
+                path: Some(
+                    resolve_metadata_storage_path(config_snapshot.metadata_update.as_ref(), &config_snapshot.working_dir)
+                        .to_string_lossy()
+                        .to_string(),
+                ),
             };
 
             return axum::Json(response).into_response();

@@ -6,8 +6,10 @@ use crate::library::scanner::LibraryScanner;
 use crate::library::{MediaGroup, MediaGrouper};
 use crate::model::{AppConfig, LibraryConfig, MetadataUpdateConfig};
 use log::{debug, error, info, warn};
+use path_clean::PathClean;
 use shared::model::{LibraryMetadataFormat, LibraryScanResult};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 // Action taken when processing a file
@@ -27,6 +29,27 @@ pub struct LibraryProcessor {
     app_config: Option<Arc<AppConfig>>, // Need access to global config for FFprobe settings
 }
 
+pub fn resolve_metadata_storage_path(
+    metadata_update_config: Option<&MetadataUpdateConfig>,
+    working_dir: &str,
+) -> PathBuf {
+    let configured_path = metadata_update_config.map_or_else(
+        || PathBuf::from(shared::utils::default_metadata_path()),
+        |c| {
+            if c.cache_path.is_empty() {
+                PathBuf::from(shared::utils::default_metadata_path())
+            } else {
+                PathBuf::from(c.cache_path.clone())
+            }
+        },
+    );
+    if configured_path.is_absolute() {
+        configured_path.clean()
+    } else {
+        PathBuf::from(working_dir).join(configured_path).clean()
+    }
+}
+
 impl LibraryProcessor {
     // Creates a new Library processor from application config
     pub fn from_app_config(app_config: &AppConfig) -> Option<Self> {
@@ -38,12 +61,17 @@ impl LibraryProcessor {
         config
             .library
             .as_ref()
-            .map(|lib_cfg| Self::new(lib_cfg.clone(), config.metadata_update.as_ref(), client))
+            .map(|lib_cfg| Self::new(lib_cfg.clone(), config.metadata_update.as_ref(), client, &config.working_dir))
     }
 
     // Creates a new Library processor with the given configuration
-    pub fn new(config: LibraryConfig, metadata_update_config: Option<&MetadataUpdateConfig>, client: reqwest::Client) -> Self {
-        let storage_path = std::path::PathBuf::from(&config.metadata.path);
+    pub fn new(
+        config: LibraryConfig,
+        metadata_update_config: Option<&MetadataUpdateConfig>,
+        client: reqwest::Client,
+        working_dir: &str,
+    ) -> Self {
+        let storage_path = resolve_metadata_storage_path(metadata_update_config, working_dir);
         let scanner = LibraryScanner::new(config.clone());
         let storage = MetadataStorage::new(storage_path);
         let resolver = MetadataResolver::from_config(Some(&config), metadata_update_config, client, Some(storage.clone()));

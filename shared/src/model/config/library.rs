@@ -2,9 +2,8 @@ use crate::{
     error::TuliproxError,
     info_err_res,
     utils::{
-        default_as_true, default_metadata_path, default_movie_category, default_series_category,
-        default_storage_formats, default_supported_library_extensions, is_default_supported_library_extensions,
-        is_true,
+        default_as_true, default_movie_category, default_series_category, default_storage_formats,
+        default_supported_library_extensions, is_default_supported_library_extensions, is_true,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -71,8 +70,6 @@ pub enum LibraryContentType {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct LibraryMetadataConfigDto {
-    #[serde(default = "default_metadata_path")]
-    pub path: String,
     #[serde(default)]
     pub read_existing: LibraryMetadataReadConfigDto,
     #[serde(default = "default_as_true")]
@@ -83,16 +80,9 @@ pub struct LibraryMetadataConfigDto {
 
 impl LibraryMetadataConfigDto {
     pub fn is_empty(&self) -> bool {
-        self.fallback_to_filename
-            && self.path == default_metadata_path()
-            && self.read_existing.is_empty()
-            && self.formats.is_empty()
+        self.fallback_to_filename && self.read_existing.is_empty() && self.formats.is_empty()
     }
-    pub fn clean(&mut self) {
-        if self.path.trim().is_empty() {
-            self.path = default_metadata_path();
-        }
-    }
+    pub fn clean(&mut self) {}
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -151,11 +141,6 @@ impl LibraryConfigDto {
             if dir.path.is_empty() {
                 return info_err_res!("Library scan directory path cannot be empty");
             }
-        }
-
-        // Validate metadata storage location
-        if self.metadata.path.is_empty() {
-            return info_err_res!("Library Metadata storage location cannot be empty");
         }
 
         Ok(())

@@ -23,7 +23,7 @@ fn create_directories(cfg: &Config, temp_path: &Path) {
         cfg.user_config_dir.clone(),
         cfg.video.as_ref().and_then(|v| v.download.as_ref()).map(|d| d.directory.clone()),
         cfg.reverse_proxy.as_ref().and_then(|r| r.cache.as_ref().and_then(|c| if c.enabled { Some(c.dir.clone()) } else { None })),
-        cfg.library.as_ref().filter(|l| l.enabled).map(|l| l.metadata.path.clone()),
+        cfg.metadata_update.as_ref().map(|m| m.cache_path.clone()),
     ];
 
     let mut paths: Vec<PathBuf> = paths_strings.iter()
@@ -107,6 +107,16 @@ impl Config {
 
         if let Some(library) = self.library.as_mut() {
             library.prepare(&self.working_dir)?;
+        }
+
+        if let Some(metadata_update) = self.metadata_update.as_mut() {
+            let meta_path = PathBuf::from(&metadata_update.cache_path);
+            let meta_path = if meta_path.is_relative() {
+                PathBuf::from(&self.working_dir).join(meta_path)
+            } else {
+                meta_path
+            };
+            metadata_update.cache_path = meta_path.to_string_lossy().to_string();
         }
 
         if let Some(messaging) = self.messaging.as_mut() {

@@ -764,7 +764,7 @@ pub async fn update_series_metadata(
         let metadata_update_config = config.metadata_update.as_ref();
         let tmdb_storage = metadata_update_config
             .filter(|cfg| cfg.tmdb.enabled)
-            .map(|_| MetadataStorage::new(storage_path.clone()));
+            .map(|cfg| MetadataStorage::new(std::path::PathBuf::from(&cfg.cache_path)));
         let meta_resolver =
             MetadataResolver::from_config(library_config, metadata_update_config, client.clone(), tmdb_storage);
 

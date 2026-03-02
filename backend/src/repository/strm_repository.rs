@@ -798,6 +798,46 @@ fn get_quality(strm_target_output: &StrmTargetOutput, pli: &PlaylistItem, separa
     String::new()
 }
 
+/// Returns `true` if `s` contains a known TMDB path marker.
+fn strm_contains_tmdb_marker(s: &str) -> bool {
+    s.contains(" {tmdb=")
+        || s.contains(" {tmdb-")
+        || s.contains(" [tmdbid=")
+        || s.contains(" [tmdbid-")
+        || s.contains("_{tmdb=")
+        || s.contains("_{tmdb-")
+        || s.contains("_[tmdbid=")
+        || s.contains("_[tmdbid-")
+}
+
+/// Strips all TMDB markers (e.g. ` {tmdb=123}`, ` [tmdbid-456]`) from a path string,
+/// returning the equivalent no-tmdb path used for identity matching.
+fn strip_tmdb_markers(s: &str) -> String {
+    let mut result = s.to_string();
+    for marker_prefix in &[
+        " {tmdb=",
+        " {tmdb-",
+        " [tmdbid=",
+        " [tmdbid-",
+        "_{tmdb=",
+        "_{tmdb-",
+        "_[tmdbid=",
+        "_[tmdbid-",
+    ] {
+        while let Some(start) = result.find(marker_prefix) {
+            let close_char = if marker_prefix.contains('{') { '}' } else { ']' };
+            let search_from = start + marker_prefix.len();
+            if let Some(rel_close) = result[search_from..].find(close_char) {
+                let end = search_from + rel_close + 1;
+                result.replace_range(start..end, "");
+            } else {
+                break;
+            }
+        }
+    }
+    result
+}
+
 pub async fn write_strm_playlist(
     app_config: &AppConfig,
     target: &ConfigTarget,
@@ -831,6 +871,15 @@ pub async fn write_strm_playlist(
     };
     let mut processed_strm: HashSet<String> = HashSet::with_capacity(existing_strm.len());
 
+    // Build a lookup map: stripped_path → enriched_path for all existing STRM paths
+    // that already contain a TMDB marker. Used to preserve enriched filenames when the
+    // current playlist item has no tmdb_id yet (avoids rename back to plain name).
+    let enriched_strm: std::collections::HashMap<String, String> = existing_strm
+        .iter()
+        .filter(|p| strm_contains_tmdb_marker(p))
+        .map(|p| (strip_tmdb_markers(p), p.clone()))
+        .collect();
+
     let mut failed = vec![];
 
     prepare_strm_output_directory(&root_path).await?;
@@ -847,8 +896,18 @@ pub async fn write_strm_playlist(
         let output_path = truncate_filename(&root_path.join(&strm_file.dir_path), 255);
         let file_path = output_path.join(format!("{}.strm", truncate_string(&strm_file.file_name, 250)));
 
-        let file_exists = file_path.exists();
         let relative_file_path = get_relative_path_str(&file_path, &root_path);
+
+        let (target_relative_file_path, target_file_path) = if strm_file.strm_info.tmdb_id.is_none() {
+            if let Some(enriched_path) = enriched_strm.get(&relative_file_path) {
+                (enriched_path.clone(), root_path.join(enriched_path))
+            } else {
+                (relative_file_path.clone(), file_path)
+            }
+        } else {
+            (relative_file_path.clone(), file_path)
+        };
+        let file_exists = target_file_path.exists();
 
         // create content
         let url = get_strm_url(target_force_redirect, user_and_server_info.as_ref(), &strm_file.strm_info);
@@ -859,24 +918,25 @@ pub async fn write_strm_playlist(
         let content_hash = hash_bytes(content_as_bytes);
 
         // check if file exists and has same hash
-        if file_exists && has_strm_file_same_hash(&file_path, content_hash).await {
-            processed_strm.insert(relative_file_path);
+        if file_exists && has_strm_file_same_hash(&target_file_path, content_hash).await {
+            processed_strm.insert(target_relative_file_path);
             continue; // skip creation
         }
 
         // if we can't create the directory skip this entry
-        if !ensure_strm_file_directory(&mut failed, &output_path).await {
+        let target_output_path = target_file_path.parent().map_or_else(|| output_path.clone(), std::path::Path::to_path_buf);
+        if !ensure_strm_file_directory(&mut failed, &target_output_path).await {
             continue;
         }
 
         match write_strm_file(
-            &file_path,
+            &target_file_path,
             content_as_bytes,
             strm_file.strm_info.get_file_ts(),
         ).await
         {
             Ok(()) => {
-                processed_strm.insert(relative_file_path);
+                processed_strm.insert(target_relative_file_path);
             }
             Err(err) => {
                 failed.push(err);

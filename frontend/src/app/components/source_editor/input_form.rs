@@ -1,8 +1,8 @@
 use crate::{
     app::components::{
         config::HasFormData, key_value_editor::KeyValueEditor, select::Select, AliasItemForm, BlockId, BlockInstance,
-        Card, DropDownOption, DropDownSelection, EditMode, EpgSourceItemForm, IconButton, Panel, RadioButtonGroup,
-        SourceEditorContext, TextButton, TitledCard,
+        Card, DropDownOption, DropDownSelection, EditMode, EpgSourceItemForm, IconButton, Panel, ProviderItemForm,
+        RadioButtonGroup, SourceEditorContext, TextButton, TitledCard,
     },
     config_field_child, edit_field_bool, edit_field_date, edit_field_number_i16, edit_field_number_u16,
     edit_field_number_u32, edit_field_text, edit_field_text_option, generate_form_reducer, html_if,
@@ -13,8 +13,8 @@ use shared::{
     error::TuliproxError,
     info_err_res,
     model::{
-        ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, EpgConfigDto, EpgSourceDto, InputFetchMethod,
-        InputType, StagedInputDto,
+        ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigProviderDto, EpgConfigDto, EpgSourceDto,
+        InputFetchMethod, InputType, StagedInputDto,
     },
 };
 use std::{collections::HashMap, fmt::Display, rc::Rc, str::FromStr};
@@ -40,6 +40,8 @@ const LABEL_MAX_CONNECTIONS: &str = "LABEL.MAX_CONNECTIONS";
 const LABEL_EXP_DATE: &str = "LABEL.EXP_DATE";
 const LABEL_ADD_EPG_SOURCE: &str = "LABEL.ADD_EPG_SOURCE";
 const LABEL_ADD_ALIAS: &str = "LABEL.ADD_ALIAS";
+const LABEL_ADD_PROVIDER: &str = "LABEL.ADD_PROVIDER";
+const LABEL_PROVIDERS: &str = "LABEL.PROVIDER";
 const LABEL_SKIP: &str = "LABEL.SKIP";
 const LABEL_XTREAM_SKIP_LIVE: &str = "LABEL.LIVE";
 const LABEL_XTREAM_SKIP_VOD: &str = "LABEL.VOD";
@@ -60,6 +62,7 @@ const LABEL_OPTIONS: &str = "LABEL.OPTIONS";
 const LABEL_STAGED: &str = "LABEL.STAGED";
 const LABEL_ADVANCED: &str = "LABEL.ADVANCED";
 const LABEL_ALIAS: &str = "LABEL.ALIAS";
+const LABEL_PROVIDER: &str = "LABEL.PROVIDER";
 const LABEL_LIVE_STREAMS: &str = "LABEL.LIVE_STREAMS";
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -69,6 +72,7 @@ enum InputFormPage {
     Staged,
     Advanced,
     Alias,
+    Provider,
 }
 
 impl InputFormPage {
@@ -77,6 +81,7 @@ impl InputFormPage {
     const STAGED: &str = "Staged";
     const ADVANCED: &str = "Advanced";
     const ALIAS: &str = "Alias";
+    const PROVIDER: &str = "Provider";
 }
 
 impl FromStr for InputFormPage {
@@ -89,6 +94,7 @@ impl FromStr for InputFormPage {
             Self::STAGED => Ok(InputFormPage::Staged),
             Self::ADVANCED => Ok(InputFormPage::Advanced),
             Self::ALIAS => Ok(InputFormPage::Alias),
+            Self::PROVIDER => Ok(InputFormPage::Provider),
             _ => info_err_res!("Unknown input form page: {s}"),
         }
     }
@@ -105,6 +111,7 @@ impl Display for InputFormPage {
                 InputFormPage::Staged => Self::STAGED,
                 InputFormPage::Advanced => Self::ADVANCED,
                 InputFormPage::Alias => Self::ALIAS,
+                InputFormPage::Provider => Self::PROVIDER,
             }
         )
     }
@@ -204,15 +211,18 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     let staged_input_state: UseReducerHandle<StagedInputDtoFormState> =
         use_reducer(|| StagedInputDtoFormState { form: StagedInputDto::default(), modified: false });
 
-    // State for EPG sources, Aliases, and Headers
+    // State for EPG sources, Aliases, Headers, and Providers
     let epg_sources_state = use_state(Vec::<EpgSourceDto>::new);
     let aliases_state = use_state(Vec::<ConfigInputAliasDto>::new);
     let headers_state = use_state(HashMap::<String, String>::new);
+    let providers_state = use_state(Vec::<ConfigProviderDto>::new);
 
     // State for showing item forms
     let show_epg_form_state = use_state(|| false);
     let show_alias_form_state = use_state(|| false);
+    let show_provider_form_state = use_state(|| false);
     let edit_alias = use_state(|| None::<ConfigInputAliasDto>);
+    let edit_provider = use_state(|| None::<ConfigProviderDto>);
 
     let staged_input_types = use_memo(staged_input_state.form.input_type, |input_type| {
         let default_it = input_type;
@@ -234,6 +244,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         let epg_sources_state = epg_sources_state.clone();
         let aliases_state = aliases_state.clone();
         let headers_state = headers_state.clone();
+        let providers_state = providers_state.clone();
 
         let deps = (props.block_id, props.input.clone());
         let view_visible = view_visible.clone();
@@ -263,6 +274,9 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
 
                 // Load aliases
                 aliases_state.set(input.aliases.clone().unwrap_or_default());
+
+                // Load providers
+                providers_state.set(input.provider.clone().unwrap_or_default());
             } else {
                 input_form_state.dispatch(ConfigInputFormAction::SetAll(ConfigInputDto::default()));
                 input_options_state.dispatch(ConfigInputOptionsFormAction::SetAll(ConfigInputOptionsDto::default()));
@@ -270,6 +284,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 headers_state.set(HashMap::new());
                 epg_sources_state.set(Vec::new());
                 aliases_state.set(Vec::new());
+                providers_state.set(Vec::new());
             }
             || ()
         });
@@ -415,6 +430,80 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 if index < items.len() {
                     items.remove(index);
                     epg_list.set(items);
+                }
+            }
+        })
+    };
+
+    let handle_add_provider_item = {
+        let providers = providers_state.clone();
+        let show_provider_form = show_provider_form_state.clone();
+        let edit_provider = edit_provider.clone();
+        Callback::from(move |provider: ConfigProviderDto| {
+            let mut items = (*providers).clone();
+            if let Some(e) = edit_provider.as_ref() {
+                if let Some(pos) = items.iter().position(|x| x.name == e.name) {
+                    if let Some(slot) = items.get_mut(pos) {
+                        *slot = provider;
+                    }
+                } else {
+                    items.push(provider);
+                }
+                edit_provider.set(None);
+            } else {
+                items.push(provider);
+            }
+            providers.set(items);
+            show_provider_form.set(false);
+        })
+    };
+
+    let handle_close_add_provider_item = {
+        let show_provider_form = show_provider_form_state.clone();
+        let edit_provider = edit_provider.clone();
+        Callback::from(move |()| {
+            show_provider_form.set(false);
+            edit_provider.set(None);
+        })
+    };
+
+    let handle_show_add_provider_item = {
+        let show_provider_form = show_provider_form_state.clone();
+        let edit_provider = edit_provider.clone();
+        Callback::from(move |_| {
+            show_provider_form.set(true);
+            edit_provider.set(None);
+        })
+    };
+
+    let handle_remove_provider_list_item = {
+        let provider_list = providers_state.clone();
+        Callback::from(move |(idx, e): (String, MouseEvent)| {
+            e.prevent_default();
+            e.stop_propagation();
+            if let Ok(index) = idx.parse::<usize>() {
+                let mut items = (*provider_list).clone();
+                if index < items.len() {
+                    items.remove(index);
+                    provider_list.set(items);
+                }
+            }
+        })
+    };
+
+    let handle_edit_provider_list_item = {
+        let provider_list = providers_state.clone();
+        let show_provider_form = show_provider_form_state.clone();
+        let edit_provider = edit_provider.clone();
+        Callback::from(move |(idx, e): (String, MouseEvent)| {
+            e.prevent_default();
+            e.stop_propagation();
+            if let Ok(index) = idx.parse::<usize>() {
+                let items = (*provider_list).clone();
+                if index < items.len() {
+                    let item = items.get(index).cloned();
+                    edit_provider.set(item);
+                    show_provider_form.set(true);
                 }
             }
         })
@@ -653,6 +742,68 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         }
     };
 
+    let render_provider = || {
+        let providers = providers_state.clone();
+        let show_provider_form = show_provider_form_state.clone();
+        let edit_provider = edit_provider.clone();
+
+        html! {
+            <Card class="tp__config-view__card">
+              if *show_provider_form {
+                    <ProviderItemForm
+                        initial={(*edit_provider).clone()}
+                        on_submit={handle_add_provider_item.clone()}
+                        on_cancel={handle_close_add_provider_item.clone()}
+                    />
+              } else {
+                  { config_field_child!(translate.t(LABEL_PROVIDERS), "INPUT_FORM.PROVIDERS", {
+                      let provider_list = providers.clone();
+                      html! {
+                        <div class="tp__form-list">
+                            <div class="tp__form-list__items">
+                            {
+                                for (*provider_list).iter().enumerate().map(|(idx, provider)| {
+                                    html! {
+                                        <div class="tp__form-list__item" key={format!("provider-{idx}")}>
+                                            <div class="tp__form-list__item-toolbar">
+                                                <IconButton
+                                                    name={idx.to_string()}
+                                                    icon="Delete"
+                                                    onclick={handle_remove_provider_list_item.clone()}
+                                                />
+                                                <IconButton
+                                                    name={idx.to_string()}
+                                                    icon="Edit"
+                                                    onclick={handle_edit_provider_list_item.clone()}
+                                                />
+                                            </div>
+                                            <div class="tp__form-list__item-content">
+                                                <span>
+                                                    <strong>{provider.name.as_ref()}</strong>
+                                                </span>
+                                            </div>
+                                        </div>
+                                    }
+                                })
+                            }
+                            </div>
+                            <div class="tp__form-list__toolbar">
+                                <TextButton
+                                    class="primary"
+                                    name="add_provider"
+                                    icon="Add"
+                                    title={translate.t(LABEL_ADD_PROVIDER)}
+                                    onclick={handle_show_add_provider_item.clone()}
+                                />
+                            </div>
+                          </div>
+                      }
+                  })}
+              }
+            </Card>
+        }
+    };
+
     let render_advanced = || {
         let headers = headers_state.clone();
         let epg_sources = epg_sources_state.clone();
@@ -730,6 +881,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         let headers_state = headers_state.clone();
         let epg_sources_state = epg_sources_state.clone();
         let aliases_state = aliases_state.clone();
+        let providers_state = providers_state.clone();
 
         Callback::from(move |_| {
             let mut input = input_form_state.data().clone();
@@ -756,6 +908,10 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             // Handle Aliases
             let aliases = (*aliases_state).clone();
             input.aliases = if aliases.is_empty() { None } else { Some(aliases) };
+
+            // Handle Providers
+            let providers = (*providers_state).clone();
+            input.provider = if providers.is_empty() { None } else { Some(providers) };
 
             if let Some(on_apply) = &on_apply {
                 on_apply.emit(input);
@@ -795,12 +951,15 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                   <Panel value={InputFormPage::Options.to_string()} active={view_visible.to_string()}>
                    {render_options()}
                   </Panel>
-                  <Panel value={InputFormPage::Staged.to_string()} active={view_visible.to_string()}>
-                   {render_staged()}
+                  <Panel value={InputFormPage::Provider.to_string()} active={view_visible.to_string()}>
+                   {render_provider()}
                    </Panel>
                   <Panel value={InputFormPage::Advanced.to_string()} active={view_visible.to_string()}>
                    {render_advanced()}
                   </Panel>
+                  <Panel value={InputFormPage::Staged.to_string()} active={view_visible.to_string()}>
+                   {render_staged()}
+                   </Panel>
                     </>
                 })}
             </div>
@@ -808,7 +967,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         }
     };
 
-    let button_disabled = *show_alias_form_state || *show_epg_form_state;
+    let button_disabled = *show_alias_form_state || *show_epg_form_state || *show_provider_form_state;
 
     let render_sidebar = || {
         html! {
@@ -820,8 +979,9 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Options, if *view_visible == InputFormPage::Options { " active" } else {""})}  icon="Options" hint={translate.t(LABEL_OPTIONS)} name={InputFormPage::Options.to_string()} onclick={&handle_menu_click}></IconButton>
             { html_if!(!library_input, {
                 <>
-            <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Staged, if *view_visible == InputFormPage::Staged { " active" } else {""})}  icon="Staged" hint={translate.t(LABEL_STAGED)} name={InputFormPage::Staged.to_string()} onclick={&handle_menu_click}></IconButton>
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Advanced, if *view_visible == InputFormPage::Advanced { " active" } else {""})}  icon="Advanced" hint={translate.t(LABEL_ADVANCED)} name={InputFormPage::Advanced.to_string()} onclick={&handle_menu_click}></IconButton>
+            <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Provider, if *view_visible == InputFormPage::Provider { " active" } else {""})}  icon="Dns" hint={translate.t(LABEL_PROVIDER)} name={InputFormPage::Provider.to_string()} onclick={&handle_menu_click}></IconButton>
+            <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Staged, if *view_visible == InputFormPage::Staged { " active" } else {""})}  icon="Staged" hint={translate.t(LABEL_STAGED)} name={InputFormPage::Staged.to_string()} onclick={&handle_menu_click}></IconButton>
                 </>
              })}
           </div>

@@ -1,9 +1,9 @@
 @use "../../../size" as size;
 $movie-card-height: 24rem;
-$movie-card-width: 16rem;
+$movie-card-width: 14rem;
 $live-card-width: 17.5rem;
 $episode-card-height: 13rem;
-$episode-card-width: 18rem;
+$episode-card-width: 14rem;
 $series-backdrop-height: 300px;
 $series-backdrop-mobile-height: 150px;
 
@@ -139,7 +139,7 @@ $series-backdrop-mobile-height: 150px;
       &-series {
         display: grid;
         grid-template-columns: repeat(auto-fill, minmax($movie-card-width, 1fr));
-        gap: var(--gap-default);
+        gap: var(--gap-large);
         box-sizing: border-box;
         width: 100%;
       }
@@ -147,7 +147,7 @@ $series-backdrop-mobile-height: 150px;
       &-episodes {
         display: grid;
         grid-template-columns: repeat(auto-fill, minmax($episode-card-width, 1fr));
-        gap: var(--gap-default);
+        gap: var(--gap-large);
         box-sizing: border-box;
         width: 100%;
       }

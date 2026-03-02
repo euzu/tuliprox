@@ -434,6 +434,7 @@ Duration fields use the same format as `cache_duration`: plain seconds (`60`) or
 
 ```yaml
 metadata_update:
+  cache_path: metadata  # Storage path for TMDB cache and metadata files (default: "metadata")
   log:
     queue_interval: 30s
     progress_interval: 15s
@@ -473,6 +474,8 @@ metadata_update:
 
 **Group overview:**
 
+- `cache_path` (default `metadata`): Directory where TMDB cache files and metadata are stored. Relative paths are resolved against `working_dir`.
+  Used by all metadata resolution paths (Xtream VOD/Series, local library).
 - `resolve`: Controls retries for metadata lookup tasks (for example title/date/TMDB resolution).
 - `probe`: Controls retries and cooldown for technical stream probing tasks.
 - `ffprobe`: Controls how deep and how long FFprobe inspects streams.
@@ -1181,7 +1184,6 @@ library:
     - "m4v"
     - "webm"
   metadata:
-    path: "${env:TULIPROX_HOME}/library_metadata"
     read_existing:
       kodi: true
       jellyfin: false
@@ -1195,6 +1197,7 @@ library:
 ```
 
 TMDB resolver settings for library enrichment are configured globally under `metadata_update.tmdb`.
+The metadata storage path is configured via `metadata_update.cache_path` (default `metadata`).
 
 **CLI Usage**:
 

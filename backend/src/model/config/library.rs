@@ -1,7 +1,7 @@
 use crate::model::macros;
 use shared::error::{info_err_res, TuliproxError};
 use shared::model::{ConfigDto, LibraryConfigDto, LibraryContentType, LibraryMetadataFormat};
-use shared::utils::{default_metadata_path, Internable};
+use shared::utils::Internable;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -15,7 +15,6 @@ pub struct LibraryScanDirectory {
 
 #[derive(Debug, Clone)]
 pub struct LibraryMetadataConfig {
-    pub path: String,
     pub read_existing: LibraryMetadataReadConfig,
     pub fallback_to_filename: bool,
     pub formats: Vec<LibraryMetadataFormat>,
@@ -68,16 +67,6 @@ impl LibraryConfig {
 
     pub fn prepare(&mut self, working_dir: &str) -> Result<(), TuliproxError> {
         if self.enabled {
-            if self.metadata.path.is_empty() {
-                self.metadata.path = default_metadata_path();
-            }
-
-            // Resolve metadata path to absolute path based on working_dir
-            let meta_path = PathBuf::from(&self.metadata.path);
-            let meta_path =
-                if meta_path.is_relative() { PathBuf::from(working_dir).join(meta_path) } else { meta_path };
-            self.metadata.path = meta_path.to_string_lossy().to_string();
-
             self.canonicalize_scan_directories(working_dir)?;
         }
         Ok(())
@@ -108,7 +97,6 @@ impl From<&LibraryConfigDto> for LibraryConfig {
                 .collect(),
             supported_extensions: dto.supported_extensions.iter().map(|ext| ext.to_lowercase()).collect(),
             metadata: LibraryMetadataConfig {
-                path: dto.metadata.path.clone(),
                 read_existing: LibraryMetadataReadConfig {
                     kodi: dto.metadata.read_existing.kodi,
                     jellyfin: dto.metadata.read_existing.jellyfin,

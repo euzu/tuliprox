@@ -311,6 +311,22 @@ fn editor_state_to_sources_config(base_sources: &SourcesConfigDto, editor_state:
         }
     }
 
+    // Aggregate per-input providers into the source-level provider list.
+    // Source-level providers (from base_sources) take precedence; per-input providers
+    // with duplicate names are ignored.
+    let mut all_providers: Vec<shared::model::ConfigProviderDto> = sources_config.provider.take().unwrap_or_default();
+    let mut seen_provider_names: HashSet<String> = all_providers.iter().map(|p| p.name.to_string()).collect();
+    for input in &gen_inputs {
+        if let Some(input_providers) = &input.provider {
+            for p in input_providers {
+                if seen_provider_names.insert(p.name.to_string()) {
+                    all_providers.push(p.clone());
+                }
+            }
+        }
+    }
+    sources_config.provider = if all_providers.is_empty() { None } else { Some(all_providers) };
+
     sources_config.inputs = gen_inputs;
     sources_config.sources = gen_sources;
     sources_config
