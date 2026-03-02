@@ -299,6 +299,10 @@
       "URL": "Target URL for this setting.",
       "USERNAME": "Login username for this account or service."
     },
+    "CONFIG_PROVIDER": {
+      "NAME": "Unique provider identifier used by provider://<provider_name> references.",
+      "URLS": "Ordered list of provider base URLs. Tuliprox rotates through them on failover."
+    },
     "CONFIG_INPUT_OPTIONS": {
       "PROBE_DELAY": "Delay in seconds between probe requests (default 2) to reduce provider pressure.",
       "PROBE_LIVE": "Enables background technical analysis for live channels to detect codecs and resolution.",
@@ -331,6 +335,7 @@
     "DISCORD": {
       "TEMPLATE_MESSAGE": "Template message body for Discord notifications."
     },
+    "DNS_MAX_ADDRS": "Optional limit of resolved IP addresses kept per hostname. Leave empty for no explicit limit.",
     "EPG_CONFIG": {
       "NAME_PREFIX_SEPARATOR": "List of characters (e.g. ':', '|') that separate channel prefixes from the main title during Smart Match.",
       "STRIP": "Terms to ignore during EPG Smart Matching (e.g. '4K', 'HD', 'HEVC')."
@@ -457,6 +462,20 @@
       "PASSWORD": "Source password used for loading playlists from a protected provider.",
       "URL": "Source URL used to download playlist data.",
       "USERNAME": "Source username used for loading playlists from a protected provider."
+    },
+    "PROVIDER_DNS": {
+      "ENABLED": "Enables DNS/IP-connect behavior for this provider.",
+      "KEEP_VHOST": "If enabled, keeps the original hostname in the Host header while connecting by resolved IP.",
+      "REFRESH_SECS": "DNS refresh interval in seconds for provider hostnames (minimum effective value is 10)."
+    },
+    "PROVIDER_FORM": {
+      "URLS": "List of base URLs for this provider. They are used in order and rotated when failover is triggered.",
+      "DNS": {
+        "ON_CONNECT_ERROR": "Defines connect-error behavior: try the next resolved IP first, or rotate directly to the next provider URL.",
+        "ON_RESOLVE_ERROR": "Defines resolve-error behavior: keep last known good IPs, or fall back to hostname-based connections.",
+        "PREFER": "IP family preference for DNS resolution (`system`, `ipv4`, `ipv6`).",
+        "SCHEMES": "Restricts DNS/IP-connect handling to selected URL schemes (`http`, `https`)."
+      }
     },
     "PROBE": "Probe controls technical stream analysis retries.\n\nUse this group to define retry steps, retry limits, and cooldown behavior for FFprobe-based stream checks.",
     "PROBE_CONFIG": {
@@ -1100,7 +1119,20 @@
     "XTREAM_BATCH": "xc batch",
     "XTREAM_CODES": "xtream codes",
     "X_HEADER": "Remove X-* headers",
-    "YES": "Yes"
+    "YES": "Yes",
+    "PROVIDER_NAME": "Provider Name",
+    "PROVIDER_URLS": "Provider URLs",
+    "ADD_PROVIDER": "Add Provider",
+    "ADD_URL": "Add Url",
+    "PROVIDER_DNS": "Provider DNS",
+    "DNS_ENABLED": "DNS Enabled",
+    "DNS_REFRESH_SECS": "DNS Refresh (secs)",
+    "DNS_PREFER": "DNS Prefer",
+    "DNS_MAX_ADDRS": "DNS Max Addrs",
+    "DNS_SCHEMES": "DNS Schemes",
+    "DNS_KEEP_VHOST": "DNS Keep VHost",
+    "DNS_ON_RESOLVE_ERROR": "DNS On Resolve Error",
+    "DNS_ON_CONNECT_ERROR": "DNS On Connect Error"
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "Clipboard not supported.\nYour browser or current context does not allow clipboard access.\nPlease use HTTPS or localhost.",
