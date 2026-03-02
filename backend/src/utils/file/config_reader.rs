@@ -22,6 +22,7 @@ use shared::model::{
     MsgKind, PatternTemplate, SourcesConfigDto, TargetUserDto, TemplateDefinitionDto,
 };
 use shared::utils::{CONSTANTS, TEMPLATE_FILE};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::File;
@@ -144,6 +145,7 @@ pub async fn read_sources_file(
     resolve_env: bool,
     include_computed: bool,
     hdhr_config: Option<&HdHomeRunDeviceOverview>,
+    prepared_templates: Option<&[shared::model::PatternTemplate]>,
 ) -> Result<SourcesConfigDto, TuliproxError> {
     read_sources_file_from_path_with_templates(&PathBuf::from(sources_file), resolve_env, include_computed, hdhr_config, None).await
 }
@@ -315,7 +317,7 @@ pub async fn read_app_config_dto(
     };
 
     let template_bundle = read_templates(
-        paths.template_file_path.as_deref().or(config.template_path.as_deref()),
+        Some(effective_template_path.as_ref()),
         resolve_env,
         sources.templates.as_deref(),
         mappings
@@ -527,6 +529,8 @@ pub async fn read_initial_app_config(
     )?;
     let prepared_templates = template_bundle.prepared;
     let template_files_used = template_bundle.files_used;
+
+    prepare_sources_batch(&mut sources_dto, include_computed).await?;
 
     if resolve_env {
         sources_dto.prepare(

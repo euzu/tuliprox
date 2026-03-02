@@ -155,9 +155,9 @@ async fn serve_epg_with_rewrites(
 
     let epg_processing_options = get_epg_processing_options(app_state, user, target);
 
+    let server_info = app_state.app_config.get_user_server_info(user);
     let base_url =
         if !matches!(epg_processing_options.time_shift, EpgTimeShift::None) || epg_processing_options.rewrite_urls {
-            let server_info = app_state.app_config.get_user_server_info(user);
             Some(concat_string!(
                 &server_info.get_base_url(),
                 "/",
@@ -197,6 +197,9 @@ async fn serve_epg_with_rewrites(
         }
     });
 
+
+    let generator_info = server_info.get_base_url();
+
     let (mut tx, rx) = tokio::io::duplex(8192);
     tokio::spawn(async move {
         // Work-Around BytesText DocType escape, see below
@@ -204,7 +207,7 @@ async fn serve_epg_with_rewrites(
             error!("EPG: Failed to write xml header {err}");
             return;
         }
-        if let Err(err) = tx.write_all(r#"<tv generator-info-name="X" generator-info-url="tuliprox">"#.as_bytes()).await
+        if let Err(err) = tx.write_all(format!(r#"<tv generator-info-name="X" generator-info-url="{generator_info}">"#).as_bytes()).await
         {
             error!("EPG: Failed to write xml tv header {err}");
             return;

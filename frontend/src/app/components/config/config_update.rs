@@ -74,6 +74,7 @@ fn update_webui_field(config: &mut ConfigDto, mut web_ui_cfg: WebUiConfigDto) {
             // Toggle-only form updates must not drop existing nested WebUI payload.
             existing.enabled = web_ui_cfg.enabled;
             existing.user_ui_enabled = web_ui_cfg.user_ui_enabled;
+            existing.combine_views_stats_streams = web_ui_cfg.combine_views_stats_streams;
             return;
         }
     }

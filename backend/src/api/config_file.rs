@@ -16,6 +16,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+use crate::utils::resolve_template_and_mapping_paths;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ConfigFile {
@@ -78,7 +79,7 @@ impl ConfigFile {
             None
         };
         let template_bundle = read_templates(
-            paths.template_file_path.as_deref().or(config.template_path.as_deref()),
+            Some(effective_template_path.as_ref()),
             true,
             sources_inline_templates.as_deref(),
             mapping_inline_templates.as_deref(),
