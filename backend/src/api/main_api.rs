@@ -637,12 +637,10 @@ fn exec_input_update_listener(app_state: &Arc<AppState>, targets: &Arc<ProcessTa
                 }
                 Ok(_) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                    warn!("Input update listener lagged by {skipped} messages. Resetting tracking state (active_targets={}, pending={}) to avoid inconsistencies.",
+                    warn!("Input update listener lagged by {skipped} messages. Resetting input-tracking state (active_targets={}, pending={}) while preserving trigger dedup state.",
                         active_target_inputs.len(), pending_targets.len());
                     active_target_inputs.clear();
                     pending_targets.clear();
-                    running_trigger_targets.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
-                    pending_trigger_targets.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }

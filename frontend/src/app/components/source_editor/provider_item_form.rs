@@ -8,7 +8,7 @@ use shared::{
     utils::Internable,
 };
 use std::{collections::HashSet, rc::Rc, sync::Arc};
-use yew::{component, html, use_reducer, use_state, Callback, Html, Properties, UseReducerHandle};
+use yew::{component, html, use_effect_with, use_reducer, use_state, Callback, Html, Properties, UseReducerHandle};
 
 const LABEL_PROVIDER_NAME: &str = "LABEL.PROVIDER_NAME";
 const LABEL_PROVIDER_URLS: &str = "LABEL.PROVIDER_URLS";
@@ -31,6 +31,7 @@ const LABEL_DNS_RESOLVE_KEEP_LAST_GOOD: &str = "LABEL.DNS_RESOLVE_KEEP_LAST_GOOD
 const LABEL_DNS_RESOLVE_FALLBACK_TO_HOSTNAME: &str = "LABEL.DNS_RESOLVE_FALLBACK_TO_HOSTNAME";
 const LABEL_DNS_CONNECT_TRY_NEXT_IP: &str = "LABEL.DNS_CONNECT_TRY_NEXT_IP";
 const LABEL_DNS_CONNECT_ROTATE_PROVIDER_URL: &str = "LABEL.DNS_CONNECT_ROTATE_PROVIDER_URL";
+const VALIDATION_PROVIDER_REQUIRED: &str = "Provider name and at least one URL are required.";
 
 const DNS_PREFER_IPV4: &str = "ipv4";
 const DNS_PREFER_IPV6: &str = "ipv6";
@@ -168,11 +169,32 @@ pub fn ProviderItemForm(props: &ProviderItemFormProps) -> Html {
     let urls_state = use_state(|| {
         initial.urls.iter().map(|u| Rc::new(Tag { label: u.to_string(), class: None })).collect::<Vec<_>>()
     });
+    let validation_error = use_state(|| None::<String>);
+
+    {
+        let form_state = form_state.clone();
+        let dns_state = dns_state.clone();
+        let urls_state = urls_state.clone();
+        let validation_error = validation_error.clone();
+        use_effect_with(props.initial.clone(), move |initial| {
+            let initial =
+                initial.clone().unwrap_or_else(|| ConfigProviderDto { name: "".intern(), urls: Vec::new(), dns: None });
+            form_state.dispatch(ProviderFormAction::SetAll(initial.clone()));
+            dns_state.dispatch(ProviderDnsFormAction::SetAll(initial.dns.clone().unwrap_or_default()));
+            urls_state.set(
+                initial.urls.iter().map(|u| Rc::new(Tag { label: u.to_string(), class: None })).collect::<Vec<_>>(),
+            );
+            validation_error.set(None);
+            || ()
+        });
+    }
 
     let handle_urls_change = {
         let urls_state = urls_state.clone();
+        let validation_error = validation_error.clone();
         Callback::from(move |tags: Vec<Rc<Tag>>| {
             urls_state.set(tags);
+            validation_error.set(None);
         })
     };
 
@@ -180,6 +202,7 @@ pub fn ProviderItemForm(props: &ProviderItemFormProps) -> Html {
         let form_state = form_state.clone();
         let dns_state = dns_state.clone();
         let urls_state = urls_state.clone();
+        let validation_error = validation_error.clone();
         let on_submit = props.on_submit.clone();
         Callback::from(move |_| {
             let mut data = form_state.form.clone();
@@ -191,9 +214,12 @@ pub fn ProviderItemForm(props: &ProviderItemFormProps) -> Html {
                 .collect();
             let dns_form = dns_state.form.clone();
             data.dns = if has_meaningful_dns_config(&dns_form) { Some(dns_form) } else { None };
-            if !data.name.is_empty() && !data.urls.is_empty() {
-                on_submit.emit(data);
+            if data.name.is_empty() || data.urls.is_empty() {
+                validation_error.set(Some(VALIDATION_PROVIDER_REQUIRED.to_string()));
+                return;
             }
+            validation_error.set(None);
+            on_submit.emit(data);
         })
     };
 
@@ -203,6 +229,9 @@ pub fn ProviderItemForm(props: &ProviderItemFormProps) -> Html {
             on_cancel.emit(());
         })
     };
+
+    let form_valid =
+        !form_state.form.name.trim().is_empty() && (*urls_state).iter().any(|tag| !tag.label.trim().is_empty());
 
     let dns_prefer_options = Rc::new(vec![
         DropDownOption::new(
@@ -319,6 +348,11 @@ pub fn ProviderItemForm(props: &ProviderItemFormProps) -> Html {
                     />
                 }
             })}
+            if let Some(validation_error) = &*validation_error {
+                <div class="tp__form-field">
+                    <small>{ validation_error.clone() }</small>
+                </div>
+            }
 
             <h1> { translate.t(LABEL_PROVIDER_DNS) } </h1>
             { edit_field_bool!(dns_state, translate.t(LABEL_DNS_ENABLED), enabled, ProviderDnsFormAction::Enabled) }
@@ -394,6 +428,7 @@ pub fn ProviderItemForm(props: &ProviderItemFormProps) -> Html {
                     icon="Accept"
                     title={translate.t("LABEL.SUBMIT")}
                     onclick={handle_submit}
+                    disabled={!form_valid}
                 />
             </div>
         </Card>

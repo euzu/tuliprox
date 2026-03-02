@@ -33,8 +33,15 @@ pub fn resolve_metadata_storage_path(
     metadata_update_config: Option<&MetadataUpdateConfig>,
     working_dir: &str,
 ) -> PathBuf {
-    let configured_path = PathBuf::from(
-        metadata_update_config.map_or_else(shared::utils::default_metadata_path, |c| c.cache_path.clone()),
+    let configured_path = metadata_update_config.map_or_else(
+        || PathBuf::from(shared::utils::default_metadata_path()),
+        |c| {
+            if c.cache_path.is_empty() {
+                PathBuf::from(shared::utils::default_metadata_path())
+            } else {
+                PathBuf::from(c.cache_path.clone())
+            }
+        },
     );
     if configured_path.is_absolute() {
         configured_path.clean()
