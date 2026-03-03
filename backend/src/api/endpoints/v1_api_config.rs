@@ -12,12 +12,13 @@ use crate::{
     },
 };
 use axum::{response::IntoResponse, Router};
-use log::error;
+use log::{error, warn};
 use serde_json::json;
 use shared::{
     error::TuliproxError,
     model::{ApiProxyConfigDto, ConfigDto, SourcesConfigDto},
 };
+use std::path::Path;
 use std::sync::Arc;
 
 fn inject_provider_dns_resolved(sources_dto: &mut SourcesConfigDto, runtime_sources: &crate::model::SourcesConfig) {
@@ -47,6 +48,47 @@ fn strip_provider_dns_resolved(sources_dto: &mut SourcesConfigDto) {
     for provider_dto in provider_dtos {
         if let Some(dns_dto) = provider_dto.dns.as_mut() {
             dns_dto.resolved = None;
+        }
+    }
+}
+
+fn merge_provider_dns_resolved_from_existing(
+    sources_dto: &mut SourcesConfigDto,
+    existing_sources_dto: &SourcesConfigDto,
+) {
+    let Some(provider_dtos) = sources_dto.provider.as_mut() else {
+        return;
+    };
+    let Some(existing_provider_dtos) = existing_sources_dto.provider.as_ref() else {
+        return;
+    };
+
+    let mut resolved_by_provider_name = std::collections::HashMap::new();
+    for provider in existing_provider_dtos {
+        let Some(dns) = provider.dns.as_ref() else {
+            continue;
+        };
+        let Some(resolved) = dns.resolved.as_ref() else {
+            continue;
+        };
+        if !resolved.is_empty() {
+            resolved_by_provider_name.insert(provider.name.to_string(), resolved.clone());
+        }
+    }
+
+    if resolved_by_provider_name.is_empty() {
+        return;
+    }
+
+    for provider in provider_dtos {
+        let Some(dns) = provider.dns.as_mut() else {
+            continue;
+        };
+        if dns.resolved.is_some() {
+            continue;
+        }
+        if let Some(resolved) = resolved_by_provider_name.get(provider.name.as_ref()) {
+            dns.resolved = Some(resolved.clone());
         }
     }
 }
@@ -111,8 +153,25 @@ async fn save_config_sources(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     axum::extract::Json(mut sources): axum::extract::Json<SourcesConfigDto>,
 ) -> impl axum::response::IntoResponse + Send {
-    // `dns.resolved` is runtime-managed and must not be accepted from API input.
+    let sources_file_path = {
+        let paths = app_state.app_config.paths.load();
+        paths.sources_file_path.clone()
+    };
+    let existing_sources_dto =
+        match utils::read_sources_file_from_path(Path::new(&sources_file_path), false, false, None).await {
+        Ok(existing) => Some(existing),
+        Err(err) => {
+            warn!("Failed to preload existing source.yml from '{sources_file_path}' before save: {err}");
+            None
+        }
+    };
+
+    // `dns.resolved` is runtime-managed and must not be accepted from API input,
+    // but existing runtime values should survive UI saves until the next DNS refresh updates them.
     strip_provider_dns_resolved(&mut sources);
+    if let Some(existing_sources_dto) = existing_sources_dto.as_ref() {
+        merge_provider_dns_resolved_from_existing(&mut sources, existing_sources_dto);
+    }
 
     let templates_to_persist = match utils::validate_source_config_for_persist(&app_state, &sources).await {
         Ok(value) => value,
@@ -282,7 +341,7 @@ pub fn v1_api_config_register(router: Router<Arc<AppState>>) -> axum::Router<Arc
 
 #[cfg(test)]
 mod tests {
-    use super::{inject_provider_dns_resolved, strip_provider_dns_resolved};
+    use super::{inject_provider_dns_resolved, merge_provider_dns_resolved_from_existing, strip_provider_dns_resolved};
     use crate::model::{ConfigProvider, SourcesConfig};
     use indexmap::IndexMap;
     use shared::model::{ConfigProviderDto, DnsScheme, ProviderDnsDto, SourcesConfigDto};
@@ -398,5 +457,49 @@ mod tests {
             .and_then(|provider| provider.dns.as_ref())
             .and_then(|dns| dns.resolved.as_ref());
         assert!(resolved.is_none(), "resolved must be stripped from incoming payload");
+    }
+
+    #[test]
+    fn merge_provider_dns_resolved_from_existing_preserves_runtime_snapshot() {
+        let mut incoming = SourcesConfigDto {
+            provider: Some(vec![ConfigProviderDto {
+                name: "p1".into(),
+                urls: vec!["http://example.com".into()],
+                dns: Some(ProviderDnsDto {
+                    enabled: true,
+                    ..ProviderDnsDto::default()
+                }),
+            }]),
+            ..SourcesConfigDto::default()
+        };
+        let existing = SourcesConfigDto {
+            provider: Some(vec![ConfigProviderDto {
+                name: "p1".into(),
+                urls: vec!["http://example.com".into()],
+                dns: Some(ProviderDnsDto {
+                    enabled: true,
+                    resolved: Some(IndexMap::from([(
+                        "example.com".to_string(),
+                        vec!["203.0.113.10".parse::<IpAddr>().expect("ip parse should work")],
+                    )])),
+                    ..ProviderDnsDto::default()
+                }),
+            }]),
+            ..SourcesConfigDto::default()
+        };
+
+        merge_provider_dns_resolved_from_existing(&mut incoming, &existing);
+
+        let resolved = incoming
+            .provider
+            .as_ref()
+            .and_then(|providers| providers.first())
+            .and_then(|provider| provider.dns.as_ref())
+            .and_then(|dns| dns.resolved.as_ref())
+            .expect("resolved should be merged from existing source dto");
+        assert_eq!(
+            resolved.get("example.com"),
+            Some(&vec!["203.0.113.10".parse::<IpAddr>().expect("ip parse should work")])
+        );
     }
 }

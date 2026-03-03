@@ -1,8 +1,11 @@
 use crate::{
-    app::components::{
-        config::HasFormData, key_value_editor::KeyValueEditor, select::Select, AliasItemForm, BlockId, BlockInstance,
-        Card, DropDownOption, DropDownSelection, EditMode, EpgSourceItemForm, IconButton, Panel, ProviderItemForm,
-        RadioButtonGroup, SourceEditorContext, TextButton, TitledCard,
+    app::{
+        components::{
+            config::HasFormData, key_value_editor::KeyValueEditor, select::Select, AliasItemForm, BlockId,
+            BlockInstance, Card, DropDownOption, DropDownSelection, EditMode, EpgSourceItemForm, IconButton, Panel,
+            ProviderItemForm, RadioButtonGroup, SourceEditorContext, TextButton, TitledCard,
+        },
+        ConfigContext,
     },
     config_field_child, edit_field_bool, edit_field_date, edit_field_number_i16, edit_field_number_u16,
     edit_field_number_u32, edit_field_text, edit_field_text_option, generate_form_reducer, html_if,
@@ -17,7 +20,12 @@ use shared::{
         InputFetchMethod, InputType, StagedInputDto,
     },
 };
-use std::{collections::HashMap, fmt::Display, rc::Rc, str::FromStr};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Display,
+    rc::Rc,
+    str::FromStr,
+};
 use web_sys::MouseEvent;
 use yew::{
     component, html, use_context, use_effect_with, use_memo, use_reducer, use_state, Callback, Html, Properties,
@@ -185,6 +193,7 @@ pub struct ConfigInputViewProps {
 pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     let translate = use_translation();
     let source_editor_ctx = use_context::<SourceEditorContext>();
+    let config_ctx = use_context::<ConfigContext>();
     let fetch_methods = use_memo((), |_| {
         [InputFetchMethod::GET, InputFetchMethod::POST].iter().map(ToString::to_string).collect::<Vec<String>>()
     });
@@ -245,10 +254,16 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         let aliases_state = aliases_state.clone();
         let headers_state = headers_state.clone();
         let providers_state = providers_state.clone();
+        let config_ctx = config_ctx.clone();
 
         let deps = (props.block_id, props.input.clone());
         let view_visible = view_visible.clone();
         use_effect_with(deps, move |(_, cfg)| {
+            let global_providers = config_ctx
+                .as_ref()
+                .and_then(|ctx| ctx.config.as_ref())
+                .and_then(|cfg| cfg.sources.provider.clone())
+                .unwrap_or_default();
             if let Some(input) = cfg {
                 if input.input_type.is_library()
                     && matches!(*view_visible, InputFormPage::Staged | InputFormPage::Advanced)
@@ -275,8 +290,23 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 // Load aliases
                 aliases_state.set(input.aliases.clone().unwrap_or_default());
 
-                // Load providers
-                providers_state.set(input.provider.clone().unwrap_or_default());
+                // Load providers:
+                // - Prefer explicit input-level providers.
+                // - If missing, fall back to source-level providers from source.yml.
+                // - If both exist, keep input providers first and append missing source-level providers.
+                let mut providers = input.provider.clone().unwrap_or_default();
+                if providers.is_empty() {
+                    providers = global_providers;
+                } else if !global_providers.is_empty() {
+                    let mut seen: HashSet<String> =
+                        providers.iter().map(|provider| provider.name.to_string()).collect();
+                    for provider in global_providers {
+                        if seen.insert(provider.name.to_string()) {
+                            providers.push(provider);
+                        }
+                    }
+                }
+                providers_state.set(providers);
             } else {
                 input_form_state.dispatch(ConfigInputFormAction::SetAll(ConfigInputDto::default()));
                 input_options_state.dispatch(ConfigInputOptionsFormAction::SetAll(ConfigInputOptionsDto::default()));
