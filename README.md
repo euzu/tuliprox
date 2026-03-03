@@ -1363,7 +1363,7 @@ the list. All streaming, proxying, and metadata still come from the provider’s
 
 `staged` has the following properties:
 
-- `enabled`, default false 
+- `enabled`, default false
 - `type` is optional, default is `m3u`. Valid values are `m3u` and `xtream`
 - `url` for type `m3u` is the download url or a local filename (can be gzip) of the input-source.  For type `xtream`it is `http://<hostname>:<port>`
 - `headers` is optional

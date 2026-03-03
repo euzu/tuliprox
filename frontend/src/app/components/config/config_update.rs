@@ -61,9 +61,7 @@ fn update_library_field(config: &mut ConfigDto, mut library_cfg: LibraryConfigDt
 }
 
 fn is_webui_toggle_only_update(cfg: &WebUiConfigDto) -> bool {
-    cfg.path
-        .as_deref()
-        .is_none_or(|path| path.trim().is_empty() || path.trim() == "/")
+    cfg.path.as_deref().is_none_or(|path| path.trim().is_empty() || path.trim() == "/")
         && cfg.player_server.as_deref().is_none_or(|player_server| player_server.trim().is_empty())
         && cfg.kick_secs == WebUiConfigDto::default().kick_secs
         && cfg.auth.as_ref().is_none_or(WebAuthConfigDto::is_empty)

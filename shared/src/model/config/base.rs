@@ -20,17 +20,16 @@ fn default_main_template_path() -> Option<String> { Some(format!("./{CONFIG_PATH
 fn is_default_config_file_path(value: &str, file_name: &str) -> bool {
     let normalized = value.trim().replace('\\', "/");
     let normalized = normalized.trim_start_matches("./");
-    normalized == file_name || normalized.rsplit_once('/').is_some_and(|(dir, file)| dir == CONFIG_PATH && file == file_name)
+    normalized == file_name
+        || normalized.rsplit_once('/').is_some_and(|(dir, file)| dir == CONFIG_PATH && file == file_name)
 }
 
 fn is_blank_or_default_mapping_path(path: &Option<String>) -> bool {
-    path.as_ref()
-        .is_none_or(|value| value.trim().is_empty() || is_default_config_file_path(value, MAPPING_FILE))
+    path.as_ref().is_none_or(|value| value.trim().is_empty() || is_default_config_file_path(value, MAPPING_FILE))
 }
 
 fn is_blank_or_default_template_path(path: &Option<String>) -> bool {
-    path.as_ref()
-        .is_none_or(|value| value.trim().is_empty() || is_default_config_file_path(value, TEMPLATE_FILE))
+    path.as_ref().is_none_or(|value| value.trim().is_empty() || is_default_config_file_path(value, TEMPLATE_FILE))
 }
 
 fn effective_main_mapping_path(path: Option<String>) -> Option<String> {
