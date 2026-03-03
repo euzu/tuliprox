@@ -39,6 +39,7 @@ Define complex filters using expressive logic, e.g.:
 - Show a fallback video stream if a channel becomes unavailable.
 - Integrate **HDHomeRun** devices with **Plex**, **Emby**, or **Jellyfin**.
 - Use provider aliases to manage multiple lines from the same source.
+- Optional per-input `disable_hls_streaming` flag to force direct TS stream endpoints instead of HLS reverse-proxy streaming.
 
 ## 🐋 Docker Container Templates
 
@@ -1164,6 +1165,7 @@ The local media file library module enables Tuliprox to scan, classify, and serv
 - NFO file reading and writing (Kodi/Jellyfin/Emby/Plex compatible)
 - Incremental scanning (only processes changed files)
 - Virtual ID management for stable playlist integration
+- Local series episode backgrounds in Playlist Explorer use direct TMDB still-image URLs
 
 **Configuration Example**:
 
@@ -1331,6 +1333,7 @@ Each input has the following attributes:
   - `xtream_skip_series` true or false, series section can be skipped.
   - `xtream_live_stream_without_extension` default false, if set to true `.ts` extension is not added to the stream link.
   - `xtream_live_stream_use_prefix` default true, if set to true `/live/` prefix is added to the stream link.
+  - `disable_hls_streaming` default false, if set to true HLS reverse-proxy playback is disabled for live streams and TS stream endpoints are used.
   - `resolve_tmdb`: `true`|`false` Attempts to resolve missing TMDB IDs via TMDB API based on title.
   - `probe_stream`: `true`|`false` Probes stream if video/audio info is missing in provider data. Probing respects the `max_connections` limit of your
     provider input. If no connection slot is available, the item is skipped and retried during the next update.
@@ -1360,6 +1363,7 @@ the list. All streaming, proxying, and metadata still come from the provider’s
 
 `staged` has the following properties:
 
+- `enabled`, default false
 - `type` is optional, default is `m3u`. Valid values are `m3u` and `xtream`
 - `url` for type `m3u` is the download url or a local filename (can be gzip) of the input-source.  For type `xtream`it is `http://<hostname>:<port>`
 - `headers` is optional

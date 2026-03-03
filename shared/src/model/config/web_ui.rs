@@ -27,6 +27,15 @@ const RESERVED_PATHS: &[&str] = &[
     "resource",
 ];
 
+fn default_web_ui_path() -> Option<String> { Some("/".to_string()) }
+
+fn is_blank_or_default_web_ui_path(path: &Option<String>) -> bool {
+    path.as_ref().is_none_or(|value| {
+        let trimmed = value.trim();
+        trimmed.is_empty() || trimmed.chars().all(|c| c == '/')
+    })
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct ContentSecurityPolicyConfigDto {
@@ -77,7 +86,7 @@ pub struct WebUiConfigDto {
     pub user_ui_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_security_policy: Option<ContentSecurityPolicyConfigDto>,
-    #[serde(default, skip_serializing_if = "is_blank_optional_string")]
+    #[serde(default = "default_web_ui_path", skip_serializing_if = "is_blank_or_default_web_ui_path")]
     pub path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<WebAuthConfigDto>,
@@ -95,7 +104,7 @@ impl Default for WebUiConfigDto {
             enabled: default_as_true(),
             user_ui_enabled: default_as_true(),
             content_security_policy: None,
-            path: None,
+            path: default_web_ui_path(),
             auth: None,
             player_server: None,
             kick_secs: default_kick_secs(),
@@ -110,7 +119,7 @@ impl WebUiConfigDto {
         self.enabled == empty.enabled
             && self.user_ui_enabled == empty.user_ui_enabled
             && !self.combine_views_stats_streams
-            && is_blank_optional_str(self.path.as_deref())
+            && is_blank_or_default_web_ui_path(&self.path)
             && is_blank_optional_str(self.player_server.as_deref())
             && self.kick_secs == default_kick_secs()
             && (self.content_security_policy.is_none()
@@ -126,7 +135,7 @@ impl WebUiConfigDto {
             self.auth = None;
         }
 
-        if is_blank_optional_str(self.path.as_deref()) {
+        if is_blank_or_default_web_ui_path(&self.path) {
             self.path = None;
         }
         if is_blank_optional_str(self.player_server.as_deref()) {
@@ -145,14 +154,19 @@ impl WebUiConfigDto {
             if web_path.is_empty() {
                 self.path = None;
             } else {
-                let web_path = web_path.trim().trim_start_matches('/').trim_end_matches('/').to_string();
-                if RESERVED_PATHS.contains(&web_path.to_lowercase().as_str()) {
-                    return Err(TuliproxError::new(
-                        TuliproxErrorKind::Info,
-                        format!("web ui path is a reserved path. Do not use {RESERVED_PATHS:?}"),
-                    ));
+                let normalized_path = web_path.trim_start_matches('/').trim_end_matches('/');
+                if normalized_path.is_empty() {
+                    self.path = default_web_ui_path();
+                } else {
+                    let normalized_path = normalized_path.to_string();
+                    if RESERVED_PATHS.contains(&normalized_path.to_lowercase().as_str()) {
+                        return Err(TuliproxError::new(
+                            TuliproxErrorKind::Info,
+                            format!("web ui path is a reserved path. Do not use {RESERVED_PATHS:?}"),
+                        ));
+                    }
+                    self.path = Some(normalized_path);
                 }
-                self.path = Some(web_path);
             }
         }
         if let Some(csp) = &self.content_security_policy {

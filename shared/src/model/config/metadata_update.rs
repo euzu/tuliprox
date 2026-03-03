@@ -35,6 +35,11 @@ const MAX_JITTER_PERCENT: u8 = 95;
 const MIN_QUEUE_SIZE: usize = 1;
 const DEFAULT_FFPROBE_TIMEOUT_SECS: u64 = 60;
 
+fn default_ffprobe_timeout_secs() -> Option<u64> { Some(DEFAULT_FFPROBE_TIMEOUT_SECS) }
+fn is_default_ffprobe_timeout(timeout: &Option<u64>) -> bool {
+    timeout.is_none_or(|value| value == DEFAULT_FFPROBE_TIMEOUT_SECS)
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct MetadataUpdateConfigDto {
@@ -305,7 +310,7 @@ impl ProbeConfigDto {
 pub struct FfprobeConfigDto {
     #[serde(default, skip_serializing_if = "is_false")]
     pub enabled: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default = "default_ffprobe_timeout_secs", skip_serializing_if = "is_default_ffprobe_timeout")]
     pub timeout: Option<u64>,
     #[serde(
         default = "default_metadata_ffprobe_analyze_duration",
@@ -337,7 +342,7 @@ impl Default for FfprobeConfigDto {
     fn default() -> Self {
         Self {
             enabled: false,
-            timeout: None,
+            timeout: default_ffprobe_timeout_secs(),
             analyze_duration: default_metadata_ffprobe_analyze_duration(),
             probe_size: default_metadata_ffprobe_probe_size(),
             live_analyze_duration: default_metadata_ffprobe_live_analyze_duration(),
@@ -349,16 +354,28 @@ impl Default for FfprobeConfigDto {
 impl FfprobeConfigDto {
     pub fn is_empty(&self) -> bool {
         !self.enabled
-            && self.timeout.is_none()
+            && is_default_ffprobe_timeout(&self.timeout)
             && self.analyze_duration == default_metadata_ffprobe_analyze_duration()
             && self.probe_size == default_metadata_ffprobe_probe_size()
             && self.live_analyze_duration == default_metadata_ffprobe_live_analyze_duration()
             && self.live_probe_size == default_metadata_ffprobe_live_probe_size()
     }
 
-    fn clean(&mut self) {
-        if self.timeout.is_some_and(|v| v == DEFAULT_FFPROBE_TIMEOUT_SECS) {
-            self.timeout = None;
+    pub fn clean(&mut self) {
+        if self.timeout.is_none_or(|timeout| timeout == 0) {
+            self.timeout = default_ffprobe_timeout_secs();
+        }
+        if self.analyze_duration.trim().is_empty() {
+            self.analyze_duration = default_metadata_ffprobe_analyze_duration();
+        }
+        if self.probe_size.trim().is_empty() {
+            self.probe_size = default_metadata_ffprobe_probe_size();
+        }
+        if self.live_analyze_duration.trim().is_empty() {
+            self.live_analyze_duration = default_metadata_ffprobe_live_analyze_duration();
+        }
+        if self.live_probe_size.trim().is_empty() {
+            self.live_probe_size = default_metadata_ffprobe_live_probe_size();
         }
     }
 

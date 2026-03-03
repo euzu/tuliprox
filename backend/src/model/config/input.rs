@@ -157,6 +157,7 @@ impl InputUserInfo {
 
 #[derive(Debug, Clone, Default)]
 pub struct StagedInput {
+    pub enabled: bool,
     pub name: Arc<str>,
     pub url: String,
     pub username: Option<String>,
@@ -172,6 +173,7 @@ macros::from_impl!(StagedInput);
 impl From<&StagedInputDto> for StagedInput {
     fn from(dto: &StagedInputDto) -> Self {
         Self {
+            enabled: dto.enabled,
             name: dto.name.clone(),
             input_type: dto.input_type,
             url: dto.url.clone(),

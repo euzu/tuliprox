@@ -350,7 +350,7 @@ pub async fn download_xtream_playlist(app_config: &Arc<AppConfig>, client: &reqw
     let input_source: InputSource = {
         match input.staged.as_ref() {
             None => input.into(),
-            Some(staged) => staged.into(),
+            Some(staged) =>  if staged.enabled { staged.into() } else { input.into() },
         }
     };
 

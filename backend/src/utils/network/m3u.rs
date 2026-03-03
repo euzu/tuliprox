@@ -16,7 +16,7 @@ pub async fn download_m3u_playlist(
     let input_source: InputSource = {
         match input.staged.as_ref() {
             None => input.into(),
-            Some(staged) => staged.into(),
+            Some(staged) => if staged.enabled { staged.into() } else { input.into() },
         }
     };
     let persist_file_path = prepare_file_path(input.persist.as_deref(), working_dir, "");

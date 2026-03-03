@@ -64,7 +64,15 @@ impl From<&WebUiConfigDto> for WebUiConfig {
             enabled: dto.enabled,
             user_ui_enabled: dto.user_ui_enabled,
             content_security_policy: dto.content_security_policy.as_ref().map(Into::into),
-            path: dto.path.clone(),
+            path: dto.path.as_ref().and_then(|path| {
+                let trimmed = path.trim();
+                let normalized = trimmed.trim_matches('/');
+                if normalized.is_empty() {
+                    None
+                } else {
+                    Some(normalized.to_string())
+                }
+            }),
             auth: dto.auth.as_ref().map(Into::into),
             player_server: dto.player_server.clone(),
             kick_secs: dto.kick_secs,
@@ -86,4 +94,3 @@ impl From<&WebUiConfig> for WebUiConfigDto {
         }
     }
 }
-

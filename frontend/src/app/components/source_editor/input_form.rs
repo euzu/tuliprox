@@ -143,6 +143,7 @@ generate_form_reducer!(
     state: StagedInputDtoFormState { form: StagedInputDto },
     action_name: StagedInputFormAction,
     fields {
+        Enabled => enabled: bool,
         Url => url: String,
         Username => username: Option<String>,
         Password => password: Option<String>,
@@ -566,6 +567,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         let staged_input_state_2 = staged_input_state.clone();
         html! {
             <Card class="tp__config-view__card">
+                { edit_field_bool!(staged_input_state, translate.t(LABEL_ENABLED),  enabled, StagedInputFormAction::Enabled) }
                 { edit_field_text!(staged_input_state, translate.t(LABEL_URL),  url, StagedInputFormAction::Url) }
                 <div class="tp__config-view__cols-2">
                 { edit_field_text_option!(staged_input_state, translate.t(LABEL_USERNAME), username, StagedInputFormAction::Username) }
@@ -976,9 +978,9 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             {html_if!(!library_input, {
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Alias, if *view_visible == InputFormPage::Alias { " active" } else {""})}  icon="Alias" hint={translate.t(LABEL_ALIAS)} name={InputFormPage::Alias.to_string()} onclick={&handle_menu_click}></IconButton>
             })}
-            <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Options, if *view_visible == InputFormPage::Options { " active" } else {""})}  icon="Options" hint={translate.t(LABEL_OPTIONS)} name={InputFormPage::Options.to_string()} onclick={&handle_menu_click}></IconButton>
             { html_if!(!library_input, {
                 <>
+            <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Options, if *view_visible == InputFormPage::Options { " active" } else {""})}  icon="Options" hint={translate.t(LABEL_OPTIONS)} name={InputFormPage::Options.to_string()} onclick={&handle_menu_click}></IconButton>
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Advanced, if *view_visible == InputFormPage::Advanced { " active" } else {""})}  icon="Advanced" hint={translate.t(LABEL_ADVANCED)} name={InputFormPage::Advanced.to_string()} onclick={&handle_menu_click}></IconButton>
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Provider, if *view_visible == InputFormPage::Provider { " active" } else {""})}  icon="Dns" hint={translate.t(LABEL_PROVIDER)} name={InputFormPage::Provider.to_string()} onclick={&handle_menu_click}></IconButton>
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Staged, if *view_visible == InputFormPage::Staged { " active" } else {""})}  icon="Staged" hint={translate.t(LABEL_STAGED)} name={InputFormPage::Staged.to_string()} onclick={&handle_menu_click}></IconButton>

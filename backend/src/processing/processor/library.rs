@@ -15,7 +15,8 @@ pub async fn download_library_playlist(_client: &reqwest::Client, app_config: &A
     if !library_config.enabled { return (vec![], vec![]); }
 
     let storage_path = config.metadata_update.as_ref()
-        .map_or_else(|| std::path::PathBuf::from(shared::utils::default_metadata_path()), |m| std::path::PathBuf::from(&m.cache_path));
+        .map_or_else(|| std::path::PathBuf::from(shared::utils::default_metadata_path()), |m| std::path::PathBuf::from(&m.cache_path))
+        .join("library");
     let mut metadata_iter = MetadataAsyncIter::new(&storage_path).await;
     let mut group_movies = PlaylistGroup {
         id: 0,

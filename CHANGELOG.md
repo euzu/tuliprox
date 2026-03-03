@@ -146,6 +146,8 @@ active URL of the specified provider.
   - Added `resolve_tmdb`: Triggers TMDB lookup if ID is missing.
   - Added `probe_stream`: Triggers ffprobe if technical info is missing.
   - Added `probe_delay`: Delay between probe tasks (default `50` seconds).
+  - Added `disable_hls_streaming`: Disables HLS reverse-proxy mode for live streams and requests direct TS stream endpoints instead.
+  - Added `staged.enabled`: Disables/enables the staged input
 - **source.yml (target output)**:
   - Added `probe_live`: Enables background probing for Live TV streams (default disabled).
   - Added `probe_live_interval_hours`: Sets the frequency for re-probing Live TV streams.
@@ -192,12 +194,17 @@ active URL of the specified provider.
 - **Messaging Config View**: New UI for configuring Discord and enhanced REST settings.
 - **Performance Monitoring**: Added CPU usage display to the dashboard.
 - **Stream Table Enhancements**: Added "Copy-To-Clipboard" functions and improved connection monitoring.
+- **Streams Table Episode Title**: Stream rows now prefer explicit episode titles instead of falling back to the series name.
 - **UX Improvements**: Implemented API-user category selection and better session tracking for HLS.
 - **Filter View**: Compacted pretty printing for filters.
 - **Mapper View**: Updated to support new `for_each` syntax.
 - Added **Stream Buffer** settings (Enabled, Size) to Reverse Proxy configuration UI.
 - Added **TMDB** settings (Rate Limit, Cache Duration, Language) and **Metadata Formats** (NFO support) to Library configuration UI.
 - Introduced the **Metadata Update** config tab, with FFprobe controls relocated from **Video** into it.
+- **Playlist Explorer Resources**: Channel logos (and non-local episode images) are loaded via authenticated same-origin resource endpoints so HTTP
+  upstream assets still render behind HTTPS frontends.
+- **Local Library Episode Backgrounds**: Local series episode `movie_image` values are now kept as direct TMDB image URLs in series info documents and
+  rendered directly in Playlist Explorer.
 
 ## 🚀 Performance & Stability
 
@@ -223,14 +230,18 @@ active URL of the specified provider.
 - **Shared Stream Shutdown**: Drops registry locks before releasing provider handles.
 - **EPG Icon URLs**: Rewritten in reverse proxy mode.
 - **Short EPG**: Served from local disk.
+- **EPG Memory Cache**: Added target-scoped in-memory EPG cache (when `use_memory_cache=true`) to reduce disk access for WebUI and short EPG
+  lookups.
 - **Client Requests**: Extended debug logging for client requests and ID chain.
 - **XTream Fixes**: Fixed series/catch-up lookups using `series-info virtual_id`.
+- **Catchup Stability**: Fixed catchup parent mapping/session isolation to keep playback/account selection stable on the same user account.
 - **Cloudflare Header**: Added `cloudflare_header` to reverse proxy `disable_header` settings.
 - **Kick Seconds**: `kick_secs` added to `config.yml web_ui` config.
 - **Improved connection handling** for users with strict connection limits during streaming operations.
 - **Fixed streaming response handling** for specific content types.
 - **Enhanced validation of response headers** to prevent invalid values.
 - **Corrected request header prioritization logic**.
+- **HLS-to-TS Fallback**: Added optional non-HLS fallback path for live streams by forcing direct TS stream endpoints.
 - **Fix**: Re-instated EPG Title Synchronization after playlist updates.
 - **Optimization**: Significant EPG memory reduction.
 - **Optimization**: Improved EPG parsing performance.

@@ -486,7 +486,7 @@ pub fn PlaylistExplorer() -> Html {
         }
     };
 
-    let render_episode = |chan: &&SeriesStreamDetailEpisodeProperties| {
+    let render_episode = |chan: &SeriesStreamDetailEpisodeProperties| {
         let channel_select = ChannelSelection {
             virtual_id: chan.id,
             cluster: XtreamCluster::Series,
@@ -495,7 +495,7 @@ pub fn PlaylistExplorer() -> Html {
         let popup_onclick = handle_episode_popup_onclick.clone();
         let rating = chan.rating.unwrap_or_default();
         html! {
-            <span key={chan.id.to_string()} class="tp__playlist-explorer__channel tp__playlist-explorer__channel-episode">
+            <span class="tp__playlist-explorer__channel tp__playlist-explorer__channel-episode">
                 {render_channel_logo(&chan.movie_image)}
                 {
                     html_if!(rating > 0.001, {
