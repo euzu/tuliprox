@@ -91,6 +91,9 @@ fn merge_provider_dns_resolved_from_existing(
         let Some(dns) = provider.dns.as_mut() else {
             continue;
         };
+        if !dns.enabled {
+            continue;
+        }
         if dns.resolved.is_some() {
             continue;
         }
@@ -724,6 +727,46 @@ mod tests {
             resolved.get("example.com"),
             Some(&vec!["203.0.113.10".parse::<IpAddr>().expect("ip parse should work")])
         );
+    }
+
+    #[test]
+    fn merge_provider_dns_resolved_from_existing_skips_disabled_dns() {
+        let mut incoming = SourcesConfigDto {
+            provider: Some(vec![ConfigProviderDto {
+                name: "p1".into(),
+                urls: vec!["http://example.com".into()],
+                dns: Some(ProviderDnsDto {
+                    enabled: false,
+                    ..ProviderDnsDto::default()
+                }),
+            }]),
+            ..SourcesConfigDto::default()
+        };
+        let existing = SourcesConfigDto {
+            provider: Some(vec![ConfigProviderDto {
+                name: "p1".into(),
+                urls: vec!["http://example.com".into()],
+                dns: Some(ProviderDnsDto {
+                    enabled: true,
+                    resolved: Some(IndexMap::from([(
+                        "example.com".to_string(),
+                        vec!["203.0.113.10".parse::<IpAddr>().expect("ip parse should work")],
+                    )])),
+                    ..ProviderDnsDto::default()
+                }),
+            }]),
+            ..SourcesConfigDto::default()
+        };
+
+        merge_provider_dns_resolved_from_existing(&mut incoming, &existing);
+
+        let resolved = incoming
+            .provider
+            .as_ref()
+            .and_then(|providers| providers.first())
+            .and_then(|provider| provider.dns.as_ref())
+            .and_then(|dns| dns.resolved.as_ref());
+        assert!(resolved.is_none(), "resolved should not be merged for disabled dns entries");
     }
 
     #[test]

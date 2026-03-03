@@ -256,11 +256,9 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         let headers_state = headers_state.clone();
         let providers_state = providers_state.clone();
         let providers_dirty_state = providers_dirty_state.clone();
-        let config_ctx = config_ctx.clone();
-
-        let deps = (props.block_id, props.input.clone());
+        let deps = (props.block_id, props.input.clone(), config_ctx.clone());
         let view_visible = view_visible.clone();
-        use_effect_with(deps, move |(_, cfg)| {
+        use_effect_with(deps, move |(_, cfg, config_ctx)| {
             let global_providers = config_ctx
                 .as_ref()
                 .and_then(|ctx| ctx.config.as_ref())
