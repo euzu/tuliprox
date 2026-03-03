@@ -285,10 +285,12 @@ impl ConfigInputOptionsDto {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
+fn default_true() -> bool { true }
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct StagedInputDto {
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(with = "arc_str_serde")]
     pub name: Arc<str>,
@@ -303,6 +305,21 @@ pub struct StagedInputDto {
     pub input_type: InputType,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub headers: HashMap<String, String>,
+}
+
+impl Default for StagedInputDto {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            name: Arc::default(),
+            url: String::default(),
+            username: Option::default(),
+            password: Option::default(),
+            method: InputFetchMethod::default(),
+            input_type: InputType::default(),
+            headers: HashMap::default(),
+        }
+    }
 }
 
 impl StagedInputDto {

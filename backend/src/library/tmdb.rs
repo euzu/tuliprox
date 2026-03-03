@@ -9,18 +9,21 @@ fn some_if_nonempty<T>(v: Vec<T>) -> Option<Vec<T>> {
     if v.is_empty() { None } else { Some(v) }
 }
 
-fn resolve_tmdb_image_url(path: &str) -> String {
+fn resolve_tmdb_image_url(path: &str) -> Option<String> {
     let normalized = path.trim();
+    if normalized.is_empty() {
+        return None;
+    }
     if normalized.starts_with("http://") || normalized.starts_with("https://") {
-        return normalized.to_string();
+        return Some(normalized.to_string());
     }
     if normalized.starts_with("//") {
-        return format!("https:{normalized}");
+        return Some(format!("https:{normalized}"));
     }
     if normalized.starts_with('/') {
-        return format!("{TMDB_IMAGE_BASE_URL}{normalized}");
+        return Some(format!("{TMDB_IMAGE_BASE_URL}{normalized}"));
     }
-    format!("{TMDB_IMAGE_BASE_URL}/{normalized}")
+    Some(format!("{TMDB_IMAGE_BASE_URL}/{normalized}"))
 }
 
 // helper function: Crew-Filter
@@ -168,14 +171,14 @@ impl TmdbMovieDetails {
                             role: Some(actor.character.clone()),
                             thumb: actor.profile_path
                                 .as_ref()
-                                .map(|p| resolve_tmdb_image_url(p)),
+                                .and_then(|p| resolve_tmdb_image_url(p)),
                         })
                         .collect::<Vec<_>>()
                 })
                 .and_then(some_if_nonempty),
             studios: self.production_companies.as_ref().map(|list| list.iter().map(|n| n.name.clone()).collect()).and_then(some_if_nonempty),
-            poster: self.poster_path.as_ref().map(|p| resolve_tmdb_image_url(p)),
-            fanart: self.backdrop_path.as_ref().map(|p| resolve_tmdb_image_url(p)),
+            poster: self.poster_path.as_ref().and_then(|p| resolve_tmdb_image_url(p)),
+            fanart: self.backdrop_path.as_ref().and_then(|p| resolve_tmdb_image_url(p)),
             source: MetadataSource::Tmdb,
             last_updated: chrono::Utc::now().timestamp(),
             videos: self.videos
@@ -227,7 +230,7 @@ impl TmdbSeriesInfoEpisodeDetails {
             plot: if self.overview.is_empty() {None} else { Some(self.overview.clone())},
             runtime: self.runtime,
             rating: Some(self.vote_average),
-            thumb: self.still_path.as_ref().map(|path| resolve_tmdb_image_url(path)),
+            thumb: self.still_path.as_ref().and_then(|path| resolve_tmdb_image_url(path)),
             file_path: String::new(),
             file_size: 0,
             file_modified: 0,
@@ -326,7 +329,7 @@ impl TmdbSeriesInfoDetails {
                             role: Some(actor.character.clone()),
                             thumb: actor.profile_path
                                 .as_ref()
-                                .map(|p| resolve_tmdb_image_url(p)),
+                                .and_then(|p| resolve_tmdb_image_url(p)),
                         })
                         .collect::<Vec<_>>()
                 })
@@ -339,8 +342,8 @@ impl TmdbSeriesInfoDetails {
                     Some(result)
                 }
             }),
-            poster: self.poster_path.as_ref().map(|p| resolve_tmdb_image_url(p)),
-            fanart: self.backdrop_path.as_ref().map(|p| resolve_tmdb_image_url(p)),
+            poster: self.poster_path.as_ref().and_then(|p| resolve_tmdb_image_url(p)),
+            fanart: self.backdrop_path.as_ref().and_then(|p| resolve_tmdb_image_url(p)),
             status: Some(self.status.clone()),
             seasons: self.seasons.as_ref().map(|seasons| seasons.iter().map(TmdbSeason::to_meta_data).collect()),
             episodes: self.seasons
@@ -476,30 +479,36 @@ mod tests {
     #[test]
     fn test_resolve_tmdb_url_with_absolute_http() {
         let input = "http://cdn.example.org/image.jpg";
-        assert_eq!(resolve_tmdb_image_url(input), input);
+        assert_eq!(resolve_tmdb_image_url(input), Some(input.to_string()));
     }
 
     #[test]
     fn test_resolve_tmdb_url_with_absolute_https() {
         let input = "https://cdn.example.org/image.jpg";
-        assert_eq!(resolve_tmdb_image_url(input), input);
+        assert_eq!(resolve_tmdb_image_url(input), Some(input.to_string()));
     }
 
     #[test]
     fn test_resolve_tmdb_url_with_protocol_relative() {
         let input = "//cdn.example.org/image.jpg";
-        assert_eq!(resolve_tmdb_image_url(input), String::from("https://cdn.example.org/image.jpg"));
+        assert_eq!(resolve_tmdb_image_url(input), Some(String::from("https://cdn.example.org/image.jpg")));
     }
 
     #[test]
     fn test_resolve_tmdb_url_with_leading_slash() {
         let input = "/abc/def.jpg";
-        assert_eq!(resolve_tmdb_image_url(input), format!("{TMDB_IMAGE_BASE_URL}{input}"));
+        assert_eq!(resolve_tmdb_image_url(input), Some(format!("{TMDB_IMAGE_BASE_URL}{input}")));
     }
 
     #[test]
     fn test_resolve_tmdb_url_with_relative_path() {
         let input = "abc/def.jpg";
-        assert_eq!(resolve_tmdb_image_url(input), format!("{TMDB_IMAGE_BASE_URL}/{input}"));
+        assert_eq!(resolve_tmdb_image_url(input), Some(format!("{TMDB_IMAGE_BASE_URL}/{input}")));
+    }
+
+    #[test]
+    fn test_resolve_tmdb_url_with_blank_path() {
+        let input = "   ";
+        assert_eq!(resolve_tmdb_image_url(input), None);
     }
 }

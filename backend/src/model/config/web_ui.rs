@@ -66,10 +66,11 @@ impl From<&WebUiConfigDto> for WebUiConfig {
             content_security_policy: dto.content_security_policy.as_ref().map(Into::into),
             path: dto.path.as_ref().and_then(|path| {
                 let trimmed = path.trim();
-                if trimmed.is_empty() || trimmed == "/" {
+                let normalized = trimmed.trim_matches('/');
+                if normalized.is_empty() {
                     None
                 } else {
-                    Some(trimmed.trim_matches('/').to_string())
+                    Some(normalized.to_string())
                 }
             }),
             auth: dto.auth.as_ref().map(Into::into),

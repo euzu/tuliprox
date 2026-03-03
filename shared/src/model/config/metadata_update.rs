@@ -33,9 +33,12 @@ const MIN_DURATION_SECS: u64 = 1;
 const MIN_ATTEMPTS: u8 = 1;
 const MAX_JITTER_PERCENT: u8 = 95;
 const MIN_QUEUE_SIZE: usize = 1;
+const DEFAULT_FFPROBE_TIMEOUT_SECS: u64 = 60;
 
-fn default_ffprobe_timeout_secs() -> Option<u64> { Some(60) }
-fn is_default_ffprobe_timeout(timeout: &Option<u64>) -> bool { timeout.is_none_or(|value| value == 60) }
+fn default_ffprobe_timeout_secs() -> Option<u64> { Some(DEFAULT_FFPROBE_TIMEOUT_SECS) }
+fn is_default_ffprobe_timeout(timeout: &Option<u64>) -> bool {
+    timeout.is_none_or(|value| value == DEFAULT_FFPROBE_TIMEOUT_SECS)
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -358,7 +361,14 @@ impl FfprobeConfigDto {
             && self.live_probe_size == default_metadata_ffprobe_live_probe_size()
     }
 
-    fn clean(&mut self) {}
+    pub fn clean(&mut self) {
+        self.enabled = false;
+        self.timeout = default_ffprobe_timeout_secs();
+        self.analyze_duration = default_metadata_ffprobe_analyze_duration();
+        self.probe_size = default_metadata_ffprobe_probe_size();
+        self.live_analyze_duration = default_metadata_ffprobe_live_analyze_duration();
+        self.live_probe_size = default_metadata_ffprobe_live_probe_size();
+    }
 
     fn prepare(&mut self) -> Result<(), TuliproxError> {
         self.timeout = self.timeout.map(|timeout| timeout.max(MIN_DURATION_SECS));
