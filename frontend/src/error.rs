@@ -34,6 +34,14 @@ pub enum Error {
     #[error("Not Found")]
     NotFound,
 
+    /// 409
+    #[error("{0}")]
+    Conflict(String),
+
+    /// 428
+    #[error("{0}")]
+    PreconditionRequired(String),
+
     /// 422
     #[error("Unprocessable Entity: {0:?}")]
     UnprocessableEntity(ErrorSetInfo),

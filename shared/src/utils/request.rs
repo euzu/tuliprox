@@ -12,6 +12,10 @@ pub const PROVIDER_SCHEME_PREFIX: &str = "provider://";
 pub const CONTENT_TYPE_JSON: &str = "application/json";
 pub const CONTENT_TYPE_CBOR: &str = "application/cbor";
 pub const ACCEPT_PREFER_CBOR: &str = "application/cbor, application/json;q=0.9";
+pub const HEADER_IF_MATCH: &str = "If-Match";
+pub const HEADER_CONFIG_MAIN_REVISION: &str = "X-Tuliprox-Main-Revision";
+pub const HEADER_CONFIG_SOURCES_REVISION: &str = "X-Tuliprox-Sources-Revision";
+pub const HEADER_CONFIG_API_PROXY_REVISION: &str = "X-Tuliprox-ApiProxy-Revision";
 
 pub fn set_sanitize_sensitive_info(value: bool) { CONSTANTS.sanitize.store(value, Ordering::Relaxed); }
 pub fn sanitize_sensitive_info(query: &str) -> Cow<'_, str> {

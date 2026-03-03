@@ -11,12 +11,19 @@ use crate::{
         request::download_text_content,
     },
 };
-use axum::{response::IntoResponse, Router};
+use axum::{
+    http::{header::IF_MATCH, HeaderMap, HeaderName, HeaderValue, StatusCode},
+    response::IntoResponse,
+    Router,
+};
 use log::{error, warn};
 use serde_json::json;
 use shared::{
     error::TuliproxError,
     model::{ApiProxyConfigDto, ConfigDto, ConfigProviderDto, ProviderDnsDto, SourcesConfigDto},
+    utils::{
+        HEADER_CONFIG_API_PROXY_REVISION, HEADER_CONFIG_MAIN_REVISION, HEADER_CONFIG_SOURCES_REVISION, HEADER_IF_MATCH,
+    },
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -125,6 +132,61 @@ fn build_existing_sources_from_runtime(runtime_sources: &crate::model::SourcesCo
     }
 }
 
+fn file_revision_from_bytes(bytes: &[u8]) -> String { blake3::hash(bytes).to_hex().to_string() }
+
+async fn read_file_revision(path: &str) -> Result<String, std::io::Error> {
+    match tokio::fs::read(path).await {
+        Ok(bytes) => Ok(file_revision_from_bytes(&bytes)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok("missing".to_string()),
+        Err(err) => Err(err),
+    }
+}
+
+fn response_with_revision_header(
+    mut response: axum::response::Response,
+    revision_header: &'static str,
+    revision: &str,
+) -> axum::response::Response {
+    let Ok(header_name) = HeaderName::try_from(revision_header) else {
+        return response;
+    };
+    let Ok(header_value) = HeaderValue::from_str(revision) else {
+        return response;
+    };
+    response.headers_mut().insert(header_name, header_value);
+    response
+}
+
+fn require_matching_revision(
+    headers: &HeaderMap,
+    current_revision: &str,
+    revision_header: &'static str,
+    file_label: &str,
+) -> Result<(), axum::response::Response> {
+    let if_match = headers.get(IF_MATCH).and_then(|value| value.to_str().ok()).map(str::trim);
+    let Some(if_match) = if_match.filter(|value| !value.is_empty()) else {
+        let response = (
+            StatusCode::PRECONDITION_REQUIRED,
+            axum::Json(json!({
+                "error": format!("Missing required '{}' header for {file_label}", HEADER_IF_MATCH)
+            })),
+        )
+            .into_response();
+        return Err(response_with_revision_header(response, revision_header, current_revision));
+    };
+    if if_match != current_revision {
+        let response = (
+            StatusCode::CONFLICT,
+            axum::Json(json!({
+                "error": format!("{file_label} changed on server. Reload configuration and retry save."),
+            })),
+        )
+            .into_response();
+        return Err(response_with_revision_header(response, revision_header, current_revision));
+    }
+    Ok(())
+}
+
 pub(in crate::api::endpoints) async fn intern_save_config_api_proxy(
     backup_dir: &str,
     api_proxy: &ApiProxyConfigDto,
@@ -153,8 +215,29 @@ async fn intern_save_config_main(file_path: &str, backup_dir: &str, cfg: &Config
 
 async fn save_config_main(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+    headers: HeaderMap,
     axum::extract::Json(mut cfg): axum::extract::Json<ConfigDto>,
 ) -> impl axum::response::IntoResponse + Send {
+    let (file_path, backup_dir) = {
+        let paths = app_state.app_config.paths.load();
+        let config = app_state.app_config.config.load();
+        (paths.config_file_path.clone(), config.get_backup_dir().to_string())
+    };
+
+    let _lock = app_state.app_config.file_locks.write_lock(Path::new(&file_path)).await;
+    let current_revision = match read_file_revision(&file_path).await {
+        Ok(revision) => revision,
+        Err(err) => {
+            error!("Failed to read revision for config.yml '{file_path}': {err}");
+            return internal_server_error!();
+        }
+    };
+    if let Err(response) =
+        require_matching_revision(&headers, &current_revision, HEADER_CONFIG_MAIN_REVISION, "config.yml")
+    {
+        return response;
+    }
+
     if let Err(err) = cfg.prepare(false) {
         return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": err.to_string()}))).into_response();
     }
@@ -169,26 +252,45 @@ async fn save_config_main(
                 .into_response();
         }
 
-        let paths = app_state.app_config.paths.load();
-        let file_path = paths.config_file_path.as_str();
-        let config = app_state.app_config.config.load();
-        let backup_dir = config.get_backup_dir();
-        if let Some(err) = intern_save_config_main(file_path, backup_dir.as_ref(), &cfg).await {
+        if let Some(err) = intern_save_config_main(&file_path, &backup_dir, &cfg).await {
             return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({"error": err.to_string()})))
                 .into_response();
         }
-        axum::http::StatusCode::OK.into_response()
+        let updated_revision = match read_file_revision(&file_path).await {
+            Ok(revision) => revision,
+            Err(err) => {
+                error!("Failed to read updated revision for config.yml '{file_path}': {err}");
+                return internal_server_error!();
+            }
+        };
+        response_with_revision_header(StatusCode::OK.into_response(), HEADER_CONFIG_MAIN_REVISION, &updated_revision)
     }
 }
 
 async fn save_config_sources(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+    headers: HeaderMap,
     axum::extract::Json(mut sources): axum::extract::Json<SourcesConfigDto>,
 ) -> impl axum::response::IntoResponse + Send {
     let sources_file_path = {
         let paths = app_state.app_config.paths.load();
         paths.sources_file_path.clone()
     };
+    let _lock = app_state.app_config.file_locks.write_lock(Path::new(&sources_file_path)).await;
+
+    let current_revision = match read_file_revision(&sources_file_path).await {
+        Ok(revision) => revision,
+        Err(err) => {
+            error!("Failed to read revision for source.yml '{sources_file_path}': {err}");
+            return internal_server_error!();
+        }
+    };
+    if let Err(response) =
+        require_matching_revision(&headers, &current_revision, HEADER_CONFIG_SOURCES_REVISION, "source.yml")
+    {
+        return response;
+    }
+
     let existing_sources_dto =
         match utils::read_sources_file_from_path(Path::new(&sources_file_path), false, false, None).await {
         Ok(existing) => Some(existing),
@@ -244,18 +346,33 @@ async fn save_config_sources(
     }
 
     app_state.active_provider.update_config(&app_state.app_config).await;
-    axum::http::StatusCode::OK.into_response()
+    let updated_revision = match read_file_revision(&sources_file_path).await {
+        Ok(revision) => revision,
+        Err(err) => {
+            error!("Failed to read updated revision for source.yml '{sources_file_path}': {err}");
+            return internal_server_error!();
+        }
+    };
+    response_with_revision_header(StatusCode::OK.into_response(), HEADER_CONFIG_SOURCES_REVISION, &updated_revision)
 }
 
 async fn get_config_api_proxy_config(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
 ) -> impl IntoResponse + Send {
     let paths = app_state.app_config.paths.load();
-    let api_proxy_file_path = paths.api_proxy_file_path.as_str();
-    match read_api_proxy_file(api_proxy_file_path, true) {
+    let api_proxy_file_path = paths.api_proxy_file_path.clone();
+    let revision = match read_file_revision(&api_proxy_file_path).await {
+        Ok(revision) => revision,
+        Err(err) => {
+            error!("Failed to read revision for api-proxy.yml '{}': {err}", api_proxy_file_path);
+            return internal_server_error!();
+        }
+    };
+    match read_api_proxy_file(api_proxy_file_path.as_str(), true) {
         Ok(Some(mut api_proxy_dto)) => {
             api_proxy_dto.user = vec![];
-            return axum::response::Json(api_proxy_dto).into_response();
+            let response = axum::response::Json(api_proxy_dto).into_response();
+            return response_with_revision_header(response, HEADER_CONFIG_API_PROXY_REVISION, &revision);
         }
         Ok(None) => {
             error!("Failed to read api proxy config");
@@ -269,8 +386,32 @@ async fn get_config_api_proxy_config(
 
 async fn save_config_api_proxy_config(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+    headers: HeaderMap,
     axum::extract::Json(mut req_api_proxy): axum::extract::Json<ApiProxyConfigDto>,
 ) -> impl IntoResponse + Send {
+    let (api_proxy_file_path, backup_dir) = {
+        let paths = app_state.app_config.paths.load();
+        let config = app_state.app_config.config.load();
+        (paths.api_proxy_file_path.clone(), config.get_backup_dir().to_string())
+    };
+    let _lock = app_state.app_config.file_locks.write_lock(Path::new(&api_proxy_file_path)).await;
+
+    let current_revision = match read_file_revision(&api_proxy_file_path).await {
+        Ok(revision) => revision,
+        Err(err) => {
+            error!("Failed to read revision for api-proxy.yml '{}': {err}", api_proxy_file_path);
+            return internal_server_error!();
+        }
+    };
+    if let Err(response) = require_matching_revision(
+        &headers,
+        &current_revision,
+        HEADER_CONFIG_API_PROXY_REVISION,
+        "api-proxy.yml",
+    ) {
+        return response;
+    }
+
     for server_info in &mut req_api_proxy.server {
         if !server_info.validate() {
             return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": "Invalid content"})))
@@ -287,14 +428,10 @@ async fn save_config_api_proxy_config(
         ..base
     };
 
-    let config = app_state.app_config.config.load();
-    let backup_dir = config.get_backup_dir();
-    let paths = app_state.app_config.paths.load();
-
     if let Some(err) = intern_save_config_api_proxy(
-        backup_dir.as_ref(),
+        &backup_dir,
         &ApiProxyConfigDto::from(&updated_api_proxy),
-        paths.api_proxy_file_path.as_str(),
+        &api_proxy_file_path,
     )
     .await
     {
@@ -304,12 +441,53 @@ async fn save_config_api_proxy_config(
     // Persist succeeded — now update in‑memory state
     app_state.app_config.api_proxy.store(Some(Arc::new(updated_api_proxy)));
 
-    axum::http::StatusCode::OK.into_response()
+    let updated_revision = match read_file_revision(&api_proxy_file_path).await {
+        Ok(revision) => revision,
+        Err(err) => {
+            error!("Failed to read updated revision for api-proxy.yml '{}': {err}", api_proxy_file_path);
+            return internal_server_error!();
+        }
+    };
+    response_with_revision_header(StatusCode::OK.into_response(), HEADER_CONFIG_API_PROXY_REVISION, &updated_revision)
 }
 
 async fn config(axum::extract::State(app_state): axum::extract::State<Arc<AppState>>) -> impl IntoResponse + Send {
-    let paths = app_state.app_config.paths.load();
-    match utils::read_app_config_dto(&paths, true, false).await {
+    let (config_file_path, sources_file_path, api_proxy_file_path) = {
+        let paths = app_state.app_config.paths.load();
+        (
+            paths.config_file_path.clone(),
+            paths.sources_file_path.clone(),
+            paths.api_proxy_file_path.clone(),
+        )
+    };
+
+    let main_revision = match read_file_revision(&config_file_path).await {
+        Ok(revision) => revision,
+        Err(err) => {
+            error!("Failed to read revision for config.yml '{}': {err}", config_file_path);
+            return internal_server_error!();
+        }
+    };
+    let sources_revision = match read_file_revision(&sources_file_path).await {
+        Ok(revision) => revision,
+        Err(err) => {
+            error!("Failed to read revision for source.yml '{}': {err}", sources_file_path);
+            return internal_server_error!();
+        }
+    };
+    let api_proxy_revision = match read_file_revision(&api_proxy_file_path).await {
+        Ok(revision) => revision,
+        Err(err) => {
+            error!("Failed to read revision for api-proxy.yml '{}': {err}", api_proxy_file_path);
+            return internal_server_error!();
+        }
+    };
+
+    let read_result = {
+        let paths = app_state.app_config.paths.load();
+        utils::read_app_config_dto(&paths, true, false).await
+    };
+    match read_result {
         Ok(mut app_config) => {
             if let Err(err) = prepare_sources_batch(&mut app_config.sources, false).await {
                 error!("Failed to prepare sources batch: {err}");
@@ -320,7 +498,10 @@ async fn config(axum::extract::State(app_state): axum::extract::State<Arc<AppSta
             } else {
                 let runtime_sources = app_state.app_config.sources.load();
                 inject_provider_dns_resolved(&mut app_config.sources, &runtime_sources);
-                axum::response::Json(app_config).into_response()
+                let response = axum::response::Json(app_config).into_response();
+                let response = response_with_revision_header(response, HEADER_CONFIG_MAIN_REVISION, &main_revision);
+                let response = response_with_revision_header(response, HEADER_CONFIG_SOURCES_REVISION, &sources_revision);
+                response_with_revision_header(response, HEADER_CONFIG_API_PROXY_REVISION, &api_proxy_revision)
             }
         }
         Err(err) => {
@@ -380,11 +561,13 @@ pub fn v1_api_config_register(router: Router<Arc<AppState>>) -> axum::Router<Arc
 mod tests {
     use super::{
         build_existing_sources_from_runtime, inject_provider_dns_resolved, merge_provider_dns_resolved_from_existing,
-        strip_provider_dns_resolved,
+        require_matching_revision, strip_provider_dns_resolved,
     };
+    use axum::http::{HeaderMap, HeaderValue, StatusCode};
     use crate::model::{ConfigProvider, SourcesConfig};
     use indexmap::IndexMap;
     use shared::model::{ConfigProviderDto, DnsScheme, ProviderDnsDto, SourcesConfigDto};
+    use shared::utils::{HEADER_CONFIG_SOURCES_REVISION, HEADER_IF_MATCH};
     use std::{net::IpAddr, sync::Arc};
 
     #[test]
@@ -576,5 +759,34 @@ mod tests {
             resolved.get("example.com"),
             Some(&vec!["203.0.113.10".parse::<IpAddr>().expect("ip parse should work")])
         );
+    }
+
+    #[test]
+    fn require_matching_revision_rejects_missing_if_match_header() {
+        let headers = HeaderMap::new();
+        let response = require_matching_revision(
+            &headers,
+            "rev-a",
+            HEADER_CONFIG_SOURCES_REVISION,
+            "source.yml",
+        )
+        .expect_err("missing if-match header must fail");
+        assert_eq!(response.status(), StatusCode::PRECONDITION_REQUIRED);
+    }
+
+    #[test]
+    fn require_matching_revision_accepts_exact_match() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HEADER_IF_MATCH,
+            HeaderValue::from_str("rev-a").expect("header value should be valid"),
+        );
+        let result = require_matching_revision(
+            &headers,
+            "rev-a",
+            HEADER_CONFIG_SOURCES_REVISION,
+            "source.yml",
+        );
+        assert!(result.is_ok(), "exact revision match should be accepted");
     }
 }
