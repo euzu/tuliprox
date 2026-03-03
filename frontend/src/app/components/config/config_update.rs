@@ -239,7 +239,7 @@ mod tests {
     }
 
     #[test]
-    fn update_config_metadata_update_cleaned_payload_clears_config() {
+    fn update_config_metadata_update_applies_and_cleans_payload() {
         let mut config = ConfigDto::default();
         let mut metadata_cfg = MetadataUpdateConfigDto::default();
         metadata_cfg.ffprobe.enabled = true;
@@ -247,11 +247,12 @@ mod tests {
 
         assert!(!metadata_cfg.is_empty());
         metadata_cfg.clean();
-        assert!(metadata_cfg.is_empty());
         assert_eq!(metadata_cfg.ffprobe.timeout, Some(60));
 
         update_config(&mut config, vec![ConfigForm::MetadataUpdate(true, metadata_cfg)]);
 
-        assert!(config.metadata_update.is_none());
+        let stored = config.metadata_update.as_ref().expect("metadata_update config should be set");
+        assert!(stored.ffprobe.enabled);
+        assert_eq!(stored.ffprobe.timeout, Some(60));
     }
 }

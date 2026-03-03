@@ -362,12 +362,21 @@ impl FfprobeConfigDto {
     }
 
     pub fn clean(&mut self) {
-        self.enabled = false;
-        self.timeout = default_ffprobe_timeout_secs();
-        self.analyze_duration = default_metadata_ffprobe_analyze_duration();
-        self.probe_size = default_metadata_ffprobe_probe_size();
-        self.live_analyze_duration = default_metadata_ffprobe_live_analyze_duration();
-        self.live_probe_size = default_metadata_ffprobe_live_probe_size();
+        if self.timeout.is_none_or(|timeout| timeout == 0) {
+            self.timeout = default_ffprobe_timeout_secs();
+        }
+        if self.analyze_duration.trim().is_empty() {
+            self.analyze_duration = default_metadata_ffprobe_analyze_duration();
+        }
+        if self.probe_size.trim().is_empty() {
+            self.probe_size = default_metadata_ffprobe_probe_size();
+        }
+        if self.live_analyze_duration.trim().is_empty() {
+            self.live_analyze_duration = default_metadata_ffprobe_live_analyze_duration();
+        }
+        if self.live_probe_size.trim().is_empty() {
+            self.live_probe_size = default_metadata_ffprobe_live_probe_size();
+        }
     }
 
     fn prepare(&mut self) -> Result<(), TuliproxError> {
@@ -610,9 +619,9 @@ mod tests {
         assert_eq!(cfg.resolve.max_attempts, 1);
         assert_eq!(cfg.probe.max_attempts, 1);
         assert_eq!(cfg.max_queue_size, 1);
-        assert_eq!(cfg.ffprobe.timeout, Some(60));
-        assert_eq!(cfg.ffprobe.analyze_duration, "10s");
-        assert_eq!(cfg.ffprobe.probe_size, "10MB");
+        assert_eq!(cfg.ffprobe.timeout, Some(1));
+        assert_eq!(cfg.ffprobe.analyze_duration, "1s");
+        assert_eq!(cfg.ffprobe.probe_size, "1B");
     }
 
     #[test]

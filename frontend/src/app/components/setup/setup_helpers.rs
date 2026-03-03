@@ -683,8 +683,7 @@ mod tests {
 
         let app_cfg = build_setup_app_config(&config_ctx, &form_state, SourcesConfigDto::default());
         let metadata_update = app_cfg.config.metadata_update.expect("metadata_update config should be present");
-        assert!(!metadata_update.ffprobe.enabled);
+        assert!(metadata_update.ffprobe.enabled);
         assert_eq!(metadata_update.ffprobe.timeout, Some(60));
-        assert!(metadata_update.is_empty());
     }
 }
