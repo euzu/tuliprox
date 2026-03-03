@@ -14,6 +14,7 @@ use crate::{
     },
 };
 use enum_iterator::Sequence;
+use indexmap::IndexMap;
 use log::warn;
 use std::{
     collections::{HashMap, HashSet},
@@ -744,7 +745,7 @@ pub struct ProviderDnsDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overrides: Option<HashMap<String, Vec<IpAddr>>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resolved: Option<HashMap<String, Vec<IpAddr>>>,
+    pub resolved: Option<IndexMap<String, Vec<IpAddr>>>,
     #[serde(default, skip_serializing_if = "is_default_on_resolve_error")]
     pub on_resolve_error: OnResolveErrorPolicy,
     #[serde(default, skip_serializing_if = "is_default_on_connect_error")]
@@ -820,9 +821,7 @@ mod tests {
     use super::*;
 
     fn create_test_dto() -> ConfigInputDto {
-        let mut dto = ConfigInputDto::default();
-        dto.name = "test_input".intern();
-        dto
+        ConfigInputDto { name: "test_input".intern(), ..ConfigInputDto::default() }
     }
 
     #[test]
@@ -842,11 +841,13 @@ mod tests {
         let mut dto = create_test_dto();
         dto.url = "http://main.com".to_string(); // Haupt-URL hat keine Credentials
 
-        let mut alias = ConfigInputAliasDto::default();
-        alias.enabled = true;
-        alias.url = "http://alias.com".to_string();
-        alias.username = Some("alias_user".to_string());
-        alias.password = Some("alias_pass".to_string());
+        let alias = ConfigInputAliasDto {
+            enabled: true,
+            url: "http://alias.com".to_string(),
+            username: Some("alias_user".to_string()),
+            password: Some("alias_pass".to_string()),
+            ..ConfigInputAliasDto::default()
+        };
 
         dto.aliases = Some(vec![alias]);
 
@@ -859,11 +860,13 @@ mod tests {
     fn test_epg_url_skips_disabled_aliases() {
         let mut dto = create_test_dto();
 
-        let mut alias = ConfigInputAliasDto::default();
-        alias.enabled = false; // Alias ist deaktiviert!
-        alias.url = "http://alias.com".to_string();
-        alias.username = Some("alias_user".to_string());
-        alias.password = Some("alias_pass".to_string());
+        let alias = ConfigInputAliasDto {
+            enabled: false, // Alias ist deaktiviert!
+            url: "http://alias.com".to_string(),
+            username: Some("alias_user".to_string()),
+            password: Some("alias_pass".to_string()),
+            ..ConfigInputAliasDto::default()
+        };
 
         dto.aliases = Some(vec![alias]);
 
@@ -900,10 +903,12 @@ mod tests {
         let mut dto = create_test_dto();
         dto.url = "http://main.com".to_string();
 
-        let mut alias = ConfigInputAliasDto::default();
-        alias.enabled = true;
-        // Credentials im Alias als Query-Parameter
-        alias.url = "http://alias.com?username=alias_user&password=alias_pass".to_string();
+        let alias = ConfigInputAliasDto {
+            enabled: true,
+            // Credentials im Alias als Query-Parameter
+            url: "http://alias.com?username=alias_user&password=alias_pass".to_string(),
+            ..ConfigInputAliasDto::default()
+        };
 
         dto.aliases = Some(vec![alias]);
 

@@ -11,13 +11,21 @@ use crate::{
         request::download_text_content,
     },
 };
-use axum::{response::IntoResponse, Router};
-use log::error;
+use axum::{
+    http::{header::IF_MATCH, HeaderMap, HeaderName, HeaderValue, StatusCode},
+    response::IntoResponse,
+    Router,
+};
+use log::{error, warn};
 use serde_json::json;
 use shared::{
     error::TuliproxError,
-    model::{ApiProxyConfigDto, ConfigDto, SourcesConfigDto},
+    model::{ApiProxyConfigDto, ConfigDto, ConfigProviderDto, ProviderDnsDto, SourcesConfigDto},
+    utils::{
+        HEADER_CONFIG_API_PROXY_REVISION, HEADER_CONFIG_MAIN_REVISION, HEADER_CONFIG_SOURCES_REVISION, HEADER_IF_MATCH,
+    },
 };
+use std::path::Path;
 use std::sync::Arc;
 
 fn inject_provider_dns_resolved(sources_dto: &mut SourcesConfigDto, runtime_sources: &crate::model::SourcesConfig) {
@@ -35,7 +43,7 @@ fn inject_provider_dns_resolved(sources_dto: &mut SourcesConfigDto, runtime_sour
             dns_dto.resolved = None;
             continue;
         }
-        let snapshot = runtime_provider.snapshot_resolved();
+        let snapshot = runtime_provider.snapshot_resolved_ordered();
         dns_dto.resolved = (!snapshot.is_empty()).then_some(snapshot);
     }
 }
@@ -49,6 +57,137 @@ fn strip_provider_dns_resolved(sources_dto: &mut SourcesConfigDto) {
             dns_dto.resolved = None;
         }
     }
+}
+
+fn merge_provider_dns_resolved_from_existing(
+    sources_dto: &mut SourcesConfigDto,
+    existing_sources_dto: &SourcesConfigDto,
+) {
+    let Some(provider_dtos) = sources_dto.provider.as_mut() else {
+        return;
+    };
+    let Some(existing_provider_dtos) = existing_sources_dto.provider.as_ref() else {
+        return;
+    };
+
+    let mut resolved_by_provider_name = std::collections::HashMap::new();
+    for provider in existing_provider_dtos {
+        let Some(dns) = provider.dns.as_ref() else {
+            continue;
+        };
+        let Some(resolved) = dns.resolved.as_ref() else {
+            continue;
+        };
+        if !resolved.is_empty() {
+            resolved_by_provider_name.insert(provider.name.to_string(), resolved.clone());
+        }
+    }
+
+    if resolved_by_provider_name.is_empty() {
+        return;
+    }
+
+    for provider in provider_dtos {
+        let Some(dns) = provider.dns.as_mut() else {
+            continue;
+        };
+        if !dns.enabled {
+            continue;
+        }
+        if dns.resolved.is_some() {
+            continue;
+        }
+        if let Some(resolved) = resolved_by_provider_name.get(provider.name.as_ref()) {
+            dns.resolved = Some(resolved.clone());
+        }
+    }
+}
+
+fn build_existing_sources_from_runtime(runtime_sources: &crate::model::SourcesConfig) -> Option<SourcesConfigDto> {
+    let providers: Vec<ConfigProviderDto> = runtime_sources
+        .provider
+        .iter()
+        .filter_map(|runtime_provider| {
+            let resolved = runtime_provider.snapshot_resolved_ordered();
+            if resolved.is_empty() {
+                return None;
+            }
+
+            Some(ConfigProviderDto {
+                name: runtime_provider.name.clone(),
+                urls: runtime_provider.urls.clone(),
+                dns: Some(ProviderDnsDto {
+                    enabled: runtime_provider.get_dns_config().is_some_and(|cfg| cfg.enabled),
+                    resolved: Some(resolved),
+                    ..ProviderDnsDto::default()
+                }),
+            })
+        })
+        .collect();
+
+    if providers.is_empty() {
+        None
+    } else {
+        Some(SourcesConfigDto {
+            provider: Some(providers),
+            ..SourcesConfigDto::default()
+        })
+    }
+}
+
+fn file_revision_from_bytes(bytes: &[u8]) -> String { blake3::hash(bytes).to_hex().to_string() }
+
+async fn read_file_revision(path: &str) -> Result<String, std::io::Error> {
+    match tokio::fs::read(path).await {
+        Ok(bytes) => Ok(file_revision_from_bytes(&bytes)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok("missing".to_string()),
+        Err(err) => Err(err),
+    }
+}
+
+fn response_with_revision_header(
+    mut response: axum::response::Response,
+    revision_header: &'static str,
+    revision: &str,
+) -> axum::response::Response {
+    let Ok(header_name) = HeaderName::try_from(revision_header) else {
+        return response;
+    };
+    let Ok(header_value) = HeaderValue::from_str(revision) else {
+        return response;
+    };
+    response.headers_mut().insert(header_name, header_value);
+    response
+}
+
+fn require_matching_revision(
+    headers: &HeaderMap,
+    current_revision: &str,
+    revision_header: &'static str,
+    file_label: &str,
+) -> Option<axum::response::Response> {
+    let if_match = headers.get(IF_MATCH).and_then(|value| value.to_str().ok()).map(str::trim);
+    let Some(if_match) = if_match.filter(|value| !value.is_empty()) else {
+        let response = (
+            StatusCode::PRECONDITION_REQUIRED,
+            axum::Json(json!({
+                "error": format!("Missing required '{}' header for {file_label}", HEADER_IF_MATCH)
+            })),
+        )
+            .into_response();
+        return Some(response_with_revision_header(response, revision_header, current_revision));
+    };
+    if if_match != current_revision {
+        let response = (
+            StatusCode::CONFLICT,
+            axum::Json(json!({
+                "error": format!("{file_label} changed on server. Reload configuration and retry save."),
+            })),
+        )
+            .into_response();
+        return Some(response_with_revision_header(response, revision_header, current_revision));
+    }
+    None
 }
 
 pub(in crate::api::endpoints) async fn intern_save_config_api_proxy(
@@ -79,8 +218,29 @@ async fn intern_save_config_main(file_path: &str, backup_dir: &str, cfg: &Config
 
 async fn save_config_main(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+    headers: HeaderMap,
     axum::extract::Json(mut cfg): axum::extract::Json<ConfigDto>,
 ) -> impl axum::response::IntoResponse + Send {
+    let (file_path, backup_dir) = {
+        let paths = app_state.app_config.paths.load();
+        let config = app_state.app_config.config.load();
+        (paths.config_file_path.clone(), config.get_backup_dir().to_string())
+    };
+
+    let _lock = app_state.app_config.file_locks.write_lock(Path::new(&file_path)).await;
+    let current_revision = match read_file_revision(&file_path).await {
+        Ok(revision) => revision,
+        Err(err) => {
+            error!("Failed to read revision for config.yml '{file_path}': {err}");
+            return internal_server_error!();
+        }
+    };
+    if let Some(response) =
+        require_matching_revision(&headers, &current_revision, HEADER_CONFIG_MAIN_REVISION, "config.yml")
+    {
+        return response;
+    }
+
     if let Err(err) = cfg.prepare(false) {
         return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": err.to_string()}))).into_response();
     }
@@ -95,24 +255,65 @@ async fn save_config_main(
                 .into_response();
         }
 
-        let paths = app_state.app_config.paths.load();
-        let file_path = paths.config_file_path.as_str();
-        let config = app_state.app_config.config.load();
-        let backup_dir = config.get_backup_dir();
-        if let Some(err) = intern_save_config_main(file_path, backup_dir.as_ref(), &cfg).await {
+        if let Some(err) = intern_save_config_main(&file_path, &backup_dir, &cfg).await {
             return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({"error": err.to_string()})))
                 .into_response();
         }
-        axum::http::StatusCode::OK.into_response()
+        let updated_revision = match read_file_revision(&file_path).await {
+            Ok(revision) => revision,
+            Err(err) => {
+                error!("Failed to read updated revision for config.yml '{file_path}': {err}");
+                return internal_server_error!();
+            }
+        };
+        response_with_revision_header(StatusCode::OK.into_response(), HEADER_CONFIG_MAIN_REVISION, &updated_revision)
     }
 }
 
 async fn save_config_sources(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+    headers: HeaderMap,
     axum::extract::Json(mut sources): axum::extract::Json<SourcesConfigDto>,
 ) -> impl axum::response::IntoResponse + Send {
-    // `dns.resolved` is runtime-managed and must not be accepted from API input.
+    let sources_file_path = {
+        let paths = app_state.app_config.paths.load();
+        paths.sources_file_path.clone()
+    };
+    let _lock = app_state.app_config.file_locks.write_lock(Path::new(&sources_file_path)).await;
+
+    let current_revision = match read_file_revision(&sources_file_path).await {
+        Ok(revision) => revision,
+        Err(err) => {
+            error!("Failed to read revision for source.yml '{sources_file_path}': {err}");
+            return internal_server_error!();
+        }
+    };
+    if let Some(response) =
+        require_matching_revision(&headers, &current_revision, HEADER_CONFIG_SOURCES_REVISION, "source.yml")
+    {
+        return response;
+    }
+
+    let existing_sources_dto =
+        match utils::read_sources_file_from_path(Path::new(&sources_file_path), false, false, None).await {
+        Ok(existing) => Some(existing),
+        Err(err) => {
+            warn!("Failed to preload existing source.yml from '{sources_file_path}' before save: {err}");
+            let runtime_sources = app_state.app_config.sources.load();
+            let runtime_fallback = build_existing_sources_from_runtime(runtime_sources.as_ref());
+            if runtime_fallback.is_some() {
+                warn!("Using runtime provider dns snapshot as fallback for preserving dns.resolved");
+            }
+            runtime_fallback
+        }
+    };
+
+    // `dns.resolved` is runtime-managed and must not be accepted from API input,
+    // but existing runtime values should survive UI saves until the next DNS refresh updates them.
     strip_provider_dns_resolved(&mut sources);
+    if let Some(existing_sources_dto) = existing_sources_dto.as_ref() {
+        merge_provider_dns_resolved_from_existing(&mut sources, existing_sources_dto);
+    }
 
     let templates_to_persist = match utils::validate_source_config_for_persist(&app_state, &sources).await {
         Ok(value) => value,
@@ -148,18 +349,33 @@ async fn save_config_sources(
     }
 
     app_state.active_provider.update_config(&app_state.app_config).await;
-    axum::http::StatusCode::OK.into_response()
+    let updated_revision = match read_file_revision(&sources_file_path).await {
+        Ok(revision) => revision,
+        Err(err) => {
+            error!("Failed to read updated revision for source.yml '{sources_file_path}': {err}");
+            return internal_server_error!();
+        }
+    };
+    response_with_revision_header(StatusCode::OK.into_response(), HEADER_CONFIG_SOURCES_REVISION, &updated_revision)
 }
 
 async fn get_config_api_proxy_config(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
 ) -> impl IntoResponse + Send {
     let paths = app_state.app_config.paths.load();
-    let api_proxy_file_path = paths.api_proxy_file_path.as_str();
-    match read_api_proxy_file(api_proxy_file_path, true) {
+    let api_proxy_file_path = paths.api_proxy_file_path.clone();
+    let revision = match read_file_revision(&api_proxy_file_path).await {
+        Ok(revision) => revision,
+        Err(err) => {
+            error!("Failed to read revision for api-proxy.yml '{api_proxy_file_path}': {err}");
+            return internal_server_error!();
+        }
+    };
+    match read_api_proxy_file(api_proxy_file_path.as_str(), true) {
         Ok(Some(mut api_proxy_dto)) => {
             api_proxy_dto.user = vec![];
-            return axum::response::Json(api_proxy_dto).into_response();
+            let response = axum::response::Json(api_proxy_dto).into_response();
+            return response_with_revision_header(response, HEADER_CONFIG_API_PROXY_REVISION, &revision);
         }
         Ok(None) => {
             error!("Failed to read api proxy config");
@@ -173,8 +389,32 @@ async fn get_config_api_proxy_config(
 
 async fn save_config_api_proxy_config(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+    headers: HeaderMap,
     axum::extract::Json(mut req_api_proxy): axum::extract::Json<ApiProxyConfigDto>,
 ) -> impl IntoResponse + Send {
+    let (api_proxy_file_path, backup_dir) = {
+        let paths = app_state.app_config.paths.load();
+        let config = app_state.app_config.config.load();
+        (paths.api_proxy_file_path.clone(), config.get_backup_dir().to_string())
+    };
+    let _lock = app_state.app_config.file_locks.write_lock(Path::new(&api_proxy_file_path)).await;
+
+    let current_revision = match read_file_revision(&api_proxy_file_path).await {
+        Ok(revision) => revision,
+        Err(err) => {
+            error!("Failed to read revision for api-proxy.yml '{api_proxy_file_path}': {err}");
+            return internal_server_error!();
+        }
+    };
+    if let Some(response) = require_matching_revision(
+        &headers,
+        &current_revision,
+        HEADER_CONFIG_API_PROXY_REVISION,
+        "api-proxy.yml",
+    ) {
+        return response;
+    }
+
     for server_info in &mut req_api_proxy.server {
         if !server_info.validate() {
             return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": "Invalid content"})))
@@ -191,14 +431,10 @@ async fn save_config_api_proxy_config(
         ..base
     };
 
-    let config = app_state.app_config.config.load();
-    let backup_dir = config.get_backup_dir();
-    let paths = app_state.app_config.paths.load();
-
     if let Some(err) = intern_save_config_api_proxy(
-        backup_dir.as_ref(),
+        &backup_dir,
         &ApiProxyConfigDto::from(&updated_api_proxy),
-        paths.api_proxy_file_path.as_str(),
+        &api_proxy_file_path,
     )
     .await
     {
@@ -208,12 +444,53 @@ async fn save_config_api_proxy_config(
     // Persist succeeded — now update in‑memory state
     app_state.app_config.api_proxy.store(Some(Arc::new(updated_api_proxy)));
 
-    axum::http::StatusCode::OK.into_response()
+    let updated_revision = match read_file_revision(&api_proxy_file_path).await {
+        Ok(revision) => revision,
+        Err(err) => {
+            error!("Failed to read updated revision for api-proxy.yml '{api_proxy_file_path}': {err}");
+            return internal_server_error!();
+        }
+    };
+    response_with_revision_header(StatusCode::OK.into_response(), HEADER_CONFIG_API_PROXY_REVISION, &updated_revision)
 }
 
 async fn config(axum::extract::State(app_state): axum::extract::State<Arc<AppState>>) -> impl IntoResponse + Send {
-    let paths = app_state.app_config.paths.load();
-    match utils::read_app_config_dto(&paths, true, false).await {
+    let (config_file_path, sources_file_path, api_proxy_file_path) = {
+        let paths = app_state.app_config.paths.load();
+        (
+            paths.config_file_path.clone(),
+            paths.sources_file_path.clone(),
+            paths.api_proxy_file_path.clone(),
+        )
+    };
+
+    let main_revision = match read_file_revision(&config_file_path).await {
+        Ok(revision) => revision,
+        Err(err) => {
+            error!("Failed to read revision for config.yml '{config_file_path}': {err}");
+            return internal_server_error!();
+        }
+    };
+    let sources_revision = match read_file_revision(&sources_file_path).await {
+        Ok(revision) => revision,
+        Err(err) => {
+            error!("Failed to read revision for source.yml '{sources_file_path}': {err}");
+            return internal_server_error!();
+        }
+    };
+    let api_proxy_revision = match read_file_revision(&api_proxy_file_path).await {
+        Ok(revision) => revision,
+        Err(err) => {
+            error!("Failed to read revision for api-proxy.yml '{api_proxy_file_path}': {err}");
+            return internal_server_error!();
+        }
+    };
+
+    let read_result = {
+        let paths = app_state.app_config.paths.load();
+        utils::read_app_config_dto(&paths, true, false).await
+    };
+    match read_result {
         Ok(mut app_config) => {
             if let Err(err) = prepare_sources_batch(&mut app_config.sources, false).await {
                 error!("Failed to prepare sources batch: {err}");
@@ -224,7 +501,10 @@ async fn config(axum::extract::State(app_state): axum::extract::State<Arc<AppSta
             } else {
                 let runtime_sources = app_state.app_config.sources.load();
                 inject_provider_dns_resolved(&mut app_config.sources, &runtime_sources);
-                axum::response::Json(app_config).into_response()
+                let response = axum::response::Json(app_config).into_response();
+                let response = response_with_revision_header(response, HEADER_CONFIG_MAIN_REVISION, &main_revision);
+                let response = response_with_revision_header(response, HEADER_CONFIG_SOURCES_REVISION, &sources_revision);
+                response_with_revision_header(response, HEADER_CONFIG_API_PROXY_REVISION, &api_proxy_revision)
             }
         }
         Err(err) => {
@@ -282,10 +562,16 @@ pub fn v1_api_config_register(router: Router<Arc<AppState>>) -> axum::Router<Arc
 
 #[cfg(test)]
 mod tests {
-    use super::{inject_provider_dns_resolved, strip_provider_dns_resolved};
+    use super::{
+        build_existing_sources_from_runtime, inject_provider_dns_resolved, merge_provider_dns_resolved_from_existing,
+        require_matching_revision, strip_provider_dns_resolved,
+    };
+    use axum::http::{HeaderMap, HeaderValue, StatusCode};
     use crate::model::{ConfigProvider, SourcesConfig};
+    use indexmap::IndexMap;
     use shared::model::{ConfigProviderDto, DnsScheme, ProviderDnsDto, SourcesConfigDto};
-    use std::{collections::HashMap, net::IpAddr, sync::Arc};
+    use shared::utils::{HEADER_CONFIG_SOURCES_REVISION, HEADER_IF_MATCH};
+    use std::{net::IpAddr, sync::Arc};
 
     #[test]
     fn inject_provider_dns_resolved_populates_runtime_snapshot() {
@@ -341,7 +627,7 @@ mod tests {
                 urls: vec!["http://example.com".into()],
                 dns: Some(ProviderDnsDto {
                     enabled: true,
-                    resolved: Some(HashMap::from([(
+                    resolved: Some(IndexMap::from([(
                         "example.com".to_string(),
                         vec!["203.0.113.10".parse::<IpAddr>().expect("ip parse should work")],
                     )])),
@@ -378,7 +664,7 @@ mod tests {
                 urls: vec!["http://example.com".into()],
                 dns: Some(ProviderDnsDto {
                     enabled: true,
-                    resolved: Some(HashMap::from([(
+                    resolved: Some(IndexMap::from([(
                         "example.com".to_string(),
                         vec!["203.0.113.10".parse::<IpAddr>().expect("ip parse should work")],
                     )])),
@@ -397,5 +683,153 @@ mod tests {
             .and_then(|provider| provider.dns.as_ref())
             .and_then(|dns| dns.resolved.as_ref());
         assert!(resolved.is_none(), "resolved must be stripped from incoming payload");
+    }
+
+    #[test]
+    fn merge_provider_dns_resolved_from_existing_preserves_runtime_snapshot() {
+        let mut incoming = SourcesConfigDto {
+            provider: Some(vec![ConfigProviderDto {
+                name: "p1".into(),
+                urls: vec!["http://example.com".into()],
+                dns: Some(ProviderDnsDto {
+                    enabled: true,
+                    ..ProviderDnsDto::default()
+                }),
+            }]),
+            ..SourcesConfigDto::default()
+        };
+        let existing = SourcesConfigDto {
+            provider: Some(vec![ConfigProviderDto {
+                name: "p1".into(),
+                urls: vec!["http://example.com".into()],
+                dns: Some(ProviderDnsDto {
+                    enabled: true,
+                    resolved: Some(IndexMap::from([(
+                        "example.com".to_string(),
+                        vec!["203.0.113.10".parse::<IpAddr>().expect("ip parse should work")],
+                    )])),
+                    ..ProviderDnsDto::default()
+                }),
+            }]),
+            ..SourcesConfigDto::default()
+        };
+
+        merge_provider_dns_resolved_from_existing(&mut incoming, &existing);
+
+        let resolved = incoming
+            .provider
+            .as_ref()
+            .and_then(|providers| providers.first())
+            .and_then(|provider| provider.dns.as_ref())
+            .and_then(|dns| dns.resolved.as_ref())
+            .expect("resolved should be merged from existing source dto");
+        assert_eq!(
+            resolved.get("example.com"),
+            Some(&vec!["203.0.113.10".parse::<IpAddr>().expect("ip parse should work")])
+        );
+    }
+
+    #[test]
+    fn merge_provider_dns_resolved_from_existing_skips_disabled_dns() {
+        let mut incoming = SourcesConfigDto {
+            provider: Some(vec![ConfigProviderDto {
+                name: "p1".into(),
+                urls: vec!["http://example.com".into()],
+                dns: Some(ProviderDnsDto {
+                    enabled: false,
+                    ..ProviderDnsDto::default()
+                }),
+            }]),
+            ..SourcesConfigDto::default()
+        };
+        let existing = SourcesConfigDto {
+            provider: Some(vec![ConfigProviderDto {
+                name: "p1".into(),
+                urls: vec!["http://example.com".into()],
+                dns: Some(ProviderDnsDto {
+                    enabled: true,
+                    resolved: Some(IndexMap::from([(
+                        "example.com".to_string(),
+                        vec!["203.0.113.10".parse::<IpAddr>().expect("ip parse should work")],
+                    )])),
+                    ..ProviderDnsDto::default()
+                }),
+            }]),
+            ..SourcesConfigDto::default()
+        };
+
+        merge_provider_dns_resolved_from_existing(&mut incoming, &existing);
+
+        let resolved = incoming
+            .provider
+            .as_ref()
+            .and_then(|providers| providers.first())
+            .and_then(|provider| provider.dns.as_ref())
+            .and_then(|dns| dns.resolved.as_ref());
+        assert!(resolved.is_none(), "resolved should not be merged for disabled dns entries");
+    }
+
+    #[test]
+    fn build_existing_sources_from_runtime_exports_provider_dns_resolved() {
+        let runtime_provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {
+            name: "p1".into(),
+            urls: vec!["http://example.com".into()],
+            dns: Some(ProviderDnsDto {
+                enabled: true,
+                schemes: Some(vec![DnsScheme::Http]),
+                ..ProviderDnsDto::default()
+            }),
+        }));
+        runtime_provider.store_resolved(
+            "example.com",
+            vec!["203.0.113.10".parse::<IpAddr>().expect("ip parse should work")],
+        );
+        let runtime_sources = SourcesConfig {
+            provider: vec![runtime_provider],
+            ..SourcesConfig::default()
+        };
+
+        let exported =
+            build_existing_sources_from_runtime(&runtime_sources).expect("runtime fallback dto should exist");
+        let resolved = exported
+            .provider
+            .as_ref()
+            .and_then(|providers| providers.first())
+            .and_then(|provider| provider.dns.as_ref())
+            .and_then(|dns| dns.resolved.as_ref())
+            .expect("resolved should be present in runtime fallback dto");
+        assert_eq!(
+            resolved.get("example.com"),
+            Some(&vec!["203.0.113.10".parse::<IpAddr>().expect("ip parse should work")])
+        );
+    }
+
+    #[test]
+    fn require_matching_revision_rejects_missing_if_match_header() {
+        let headers = HeaderMap::new();
+        let response = require_matching_revision(
+            &headers,
+            "rev-a",
+            HEADER_CONFIG_SOURCES_REVISION,
+            "source.yml",
+        )
+        .expect("missing if-match header must fail");
+        assert_eq!(response.status(), StatusCode::PRECONDITION_REQUIRED);
+    }
+
+    #[test]
+    fn require_matching_revision_accepts_exact_match() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HEADER_IF_MATCH,
+            HeaderValue::from_str("rev-a").expect("header value should be valid"),
+        );
+        let result = require_matching_revision(
+            &headers,
+            "rev-a",
+            HEADER_CONFIG_SOURCES_REVISION,
+            "source.yml",
+        );
+        assert!(result.is_none(), "exact revision match should be accepted");
     }
 }

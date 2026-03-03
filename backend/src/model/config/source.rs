@@ -1,4 +1,5 @@
 use crate::model::{macros, ConfigInput, ConfigTarget, ProcessTargets};
+use indexmap::IndexMap;
 use parking_lot::RwLock;
 use shared::error::{info_err_res, TuliproxError};
 use shared::model::{
@@ -242,8 +243,9 @@ impl ConfigProvider {
         self.dns_cache.ip_count(&normalized)
     }
 
-    pub fn hostnames_from_urls(&self) -> HashSet<String> {
-        let mut hostnames = HashSet::new();
+    pub fn hostnames_from_urls(&self) -> Vec<String> {
+        let mut hostnames = Vec::new();
+        let mut seen = HashSet::new();
         for raw in &self.urls {
             let raw = raw.as_ref();
             let candidate = if raw.contains("://") {
@@ -260,7 +262,10 @@ impl ConfigProvider {
             if host.parse::<IpAddr>().is_ok() {
                 continue;
             }
-            hostnames.insert(host.to_ascii_lowercase());
+            let normalized = host.to_ascii_lowercase();
+            if seen.insert(normalized.clone()) {
+                hostnames.push(normalized);
+            }
         }
         hostnames
     }
@@ -272,6 +277,27 @@ impl ConfigProvider {
     pub fn mark_resolve_error(&self, host: &str, err: impl Into<String>) { self.dns_cache.mark_resolve_error(host, err); }
 
     pub fn snapshot_resolved(&self) -> HashMap<String, Vec<IpAddr>> { self.dns_cache.snapshot_resolved() }
+
+    pub fn snapshot_resolved_ordered(&self) -> IndexMap<String, Vec<IpAddr>> {
+        let mut remaining = self.snapshot_resolved();
+        if remaining.is_empty() {
+            return IndexMap::new();
+        }
+
+        let mut ordered = IndexMap::new();
+        for host in self.hostnames_from_urls() {
+            if let Some(ips) = remaining.remove(&host) {
+                ordered.insert(host, ips);
+            }
+        }
+
+        let mut extras: Vec<_> = remaining.into_iter().collect();
+        extras.sort_by(|left, right| left.0.cmp(&right.0));
+        for (host, ips) in extras {
+            ordered.insert(host, ips);
+        }
+        ordered
+    }
 
     /// Rotates to next URL, checking if a full cycle has been completed.
     /// Returns None if we've cycled back to the `start_index`, indicating all URLs were tried.
@@ -476,5 +502,73 @@ impl SourcesConfig {
 
     pub fn get_provider_by_name(&self, name: &str) -> Option<&Arc<ConfigProvider>> {
         self.provider.iter().find(|p| p.name.as_ref() == name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ConfigProvider;
+    use shared::model::ConfigProviderDto;
+    use std::net::IpAddr;
+
+    #[test]
+    fn hostnames_from_urls_preserve_definition_order() {
+        let provider = ConfigProvider::from(&ConfigProviderDto {
+            name: "p1".into(),
+            urls: vec![
+                "http://cdn-b.example.net".into(),
+                "https://cdn-a.example.net/live".into(),
+                "http://cdn-b.example.net/redundant".into(),
+                "http://203.0.113.10".into(),
+            ],
+            dns: None,
+        });
+
+        assert_eq!(
+            provider.hostnames_from_urls(),
+            vec!["cdn-b.example.net".to_string(), "cdn-a.example.net".to_string()]
+        );
+    }
+
+    #[test]
+    fn snapshot_resolved_ordered_matches_url_order_and_stable_extras() {
+        let provider = ConfigProvider::from(&ConfigProviderDto {
+            name: "p1".into(),
+            urls: vec![
+                "http://cdn-a.example.net".into(),
+                "http://cdn-b.example.net".into(),
+                "http://cdn-c.example.net".into(),
+            ],
+            dns: None,
+        });
+
+        provider.store_resolved(
+            "cdn-c.example.net",
+            vec!["203.0.113.30".parse::<IpAddr>().expect("ip parse should work")],
+        );
+        provider.store_resolved(
+            "cdn-a.example.net",
+            vec!["203.0.113.10".parse::<IpAddr>().expect("ip parse should work")],
+        );
+        provider.store_resolved(
+            "extra-b.example.net",
+            vec!["203.0.113.50".parse::<IpAddr>().expect("ip parse should work")],
+        );
+        provider.store_resolved(
+            "extra-a.example.net",
+            vec!["203.0.113.40".parse::<IpAddr>().expect("ip parse should work")],
+        );
+
+        let ordered = provider.snapshot_resolved_ordered();
+        let keys: Vec<_> = ordered.keys().cloned().collect();
+        assert_eq!(
+            keys,
+            vec![
+                "cdn-a.example.net".to_string(),
+                "cdn-c.example.net".to_string(),
+                "extra-a.example.net".to_string(),
+                "extra-b.example.net".to_string(),
+            ]
+        );
     }
 }

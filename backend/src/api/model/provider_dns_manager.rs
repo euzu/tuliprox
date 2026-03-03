@@ -204,9 +204,9 @@ async fn persist_provider_resolved_to_source_file(app_state: &Arc<AppState>, pro
     };
 
     let resolved_hosts = {
-        let snapshot = provider.snapshot_resolved();
+        let snapshot = provider.snapshot_resolved_ordered();
         dns_dto.resolved = (!snapshot.is_empty()).then_some(snapshot);
-        dns_dto.resolved.as_ref().map_or(0, std::collections::HashMap::len)
+        dns_dto.resolved.as_ref().map_or(0, indexmap::IndexMap::len)
     };
 
     match write_sources_file_force(&source_path, &sources_dto).await {

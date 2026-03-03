@@ -5,6 +5,7 @@ use reqwasm::http::Request;
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use shared::utils::{bin_deserialize, CONTENT_TYPE_CBOR, CONTENT_TYPE_JSON};
+use std::collections::HashMap;
 use web_sys::window;
 
 enum RequestMethod {
@@ -13,6 +14,12 @@ enum RequestMethod {
     Put,
     // Patch,
     Delete,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResponseMeta<T> {
+    pub body: Option<T>,
+    pub headers: HashMap<String, String>,
 }
 
 const TOKEN_KEY: &str = "tuliprox.token";
@@ -43,7 +50,9 @@ async fn request<B, T>(
     body: B,
     content_type: Option<String>,
     response_type: Option<String>,
-) -> Result<Option<T>, Error>
+    request_headers: Option<&[(String, String)]>,
+    response_header_keys: Option<&[&str]>,
+) -> Result<ResponseMeta<T>, Error>
 where
     T: DeserializeOwned + 'static + std::fmt::Debug,
     B: Serialize + std::fmt::Debug,
@@ -66,6 +75,11 @@ where
     if let Some(token) = get_token() {
         request = request.header("Authorization", format!("Bearer {token}").as_str());
     }
+    if let Some(extra_headers) = request_headers {
+        for (key, value) in extra_headers {
+            request = request.header(key, value);
+        }
+    }
 
     if r_type.contains(CONTENT_TYPE_CBOR) {
         request = request.header("Accept", CONTENT_TYPE_CBOR);
@@ -73,7 +87,16 @@ where
 
     match request.send().await {
         Ok(response) => {
-            match response.status() {
+            let status = response.status();
+            let mut response_headers = HashMap::new();
+            if let Some(header_keys) = response_header_keys {
+                for key in header_keys {
+                    if let Some(value) = response.headers().get(key) {
+                        response_headers.insert((*key).to_string(), value);
+                    }
+                }
+            }
+            match status {
                 200 | 205 | 206 => {
                     let content_type = response.headers().get("content-type").unwrap_or(r_type.to_string());
                     let is_json = content_type.contains(CONTENT_TYPE_JSON);
@@ -81,13 +104,13 @@ where
                     if (is_json || is_bin) && std::any::TypeId::of::<T>() == std::any::TypeId::of::<()>() {
                         // `T = ()` valid
                         let _ = response.binary().await;
-                        return Ok(None);
+                        return Ok(ResponseMeta { body: None, headers: response_headers });
                     }
 
                     if is_bin {
                         match response.binary().await {
                             Ok(bytes) => match bin_deserialize::<T>(&bytes) {
-                                Ok(data) => Ok(Some(data)),
+                                Ok(data) => Ok(ResponseMeta { body: Some(data), headers: response_headers }),
                                 Err(err) => {
                                     error!("Failed to deserialize {err}");
                                     Err(Error::DeserializeError)
@@ -101,21 +124,21 @@ where
                     } else if is_json {
                         let data: Result<T, _> = response.json::<T>().await;
                         if let Ok(data) = data {
-                            Ok(Some(data))
+                            Ok(ResponseMeta { body: Some(data), headers: response_headers })
                         } else {
                             Err(Error::DeserializeError)
                         }
                     } else {
                         match response.text().await {
                             Ok(content) => match serde_json::from_value::<T>(Value::String(content)) {
-                                Ok(parsed) => Ok(Some(parsed)),
+                                Ok(parsed) => Ok(ResponseMeta { body: Some(parsed), headers: response_headers }),
                                 Err(_err) => Err(Error::DeserializeError),
                             },
                             Err(_err) => Err(Error::RequestError),
                         }
                     }
                 }
-                201 | 202 | 204 => Ok(None),
+                201 | 202 | 204 => Ok(ResponseMeta { body: None, headers: response_headers }),
                 400 => {
                     let ct = response.headers().get("content-type").unwrap_or_default();
                     let is_json = ct.contains(CONTENT_TYPE_JSON);
@@ -138,6 +161,42 @@ where
                 401 => Err(Error::Unauthorized),
                 403 => Err(Error::Forbidden),
                 404 => Err(Error::NotFound),
+                409 => {
+                    let ct = response.headers().get("content-type").unwrap_or_default();
+                    let is_json = ct.contains(CONTENT_TYPE_JSON);
+                    let is_bin = !is_json && ct.contains(CONTENT_TYPE_CBOR);
+                    let data: Result<ErrorInfo, _> = if is_bin {
+                        match response.binary().await {
+                            Ok(bytes) => bin_deserialize::<ErrorInfo>(&bytes).map_err(|_| Error::DeserializeError),
+                            Err(_) => Err(Error::DeserializeError),
+                        }
+                    } else {
+                        response.json::<ErrorInfo>().await.map_err(|_| Error::DeserializeError)
+                    };
+                    if let Ok(data) = data {
+                        Err(Error::Conflict(data.error))
+                    } else {
+                        Err(Error::Conflict("Configuration conflict (409)".to_string()))
+                    }
+                }
+                428 => {
+                    let ct = response.headers().get("content-type").unwrap_or_default();
+                    let is_json = ct.contains(CONTENT_TYPE_JSON);
+                    let is_bin = !is_json && ct.contains(CONTENT_TYPE_CBOR);
+                    let data: Result<ErrorInfo, _> = if is_bin {
+                        match response.binary().await {
+                            Ok(bytes) => bin_deserialize::<ErrorInfo>(&bytes).map_err(|_| Error::DeserializeError),
+                            Err(_) => Err(Error::DeserializeError),
+                        }
+                    } else {
+                        response.json::<ErrorInfo>().await.map_err(|_| Error::DeserializeError)
+                    };
+                    if let Ok(data) = data {
+                        Err(Error::PreconditionRequired(data.error))
+                    } else {
+                        Err(Error::PreconditionRequired("Missing precondition header (428)".to_string()))
+                    }
+                }
                 500 => Err(Error::InternalServerError),
                 422 => {
                     let ct = response.headers().get("content-type").unwrap_or_default();
@@ -177,7 +236,7 @@ pub async fn request_delete<T>(
 where
     T: DeserializeOwned + 'static + std::fmt::Debug,
 {
-    request(RequestMethod::Delete, url, (), content_type, response_type).await
+    request(RequestMethod::Delete, url, (), content_type, response_type, None, None).await.map(|response| response.body)
 }
 
 /// Get request
@@ -189,7 +248,19 @@ pub async fn request_get<T>(
 where
     T: DeserializeOwned + 'static + std::fmt::Debug,
 {
-    request(RequestMethod::Get, url, (), content_type, response_type).await
+    request(RequestMethod::Get, url, (), content_type, response_type, None, None).await.map(|response| response.body)
+}
+
+pub async fn request_get_meta<T>(
+    url: &str,
+    content_type: Option<String>,
+    response_type: Option<String>,
+    response_header_keys: &[&str],
+) -> Result<ResponseMeta<T>, Error>
+where
+    T: DeserializeOwned + 'static + std::fmt::Debug,
+{
+    request(RequestMethod::Get, url, (), content_type, response_type, None, Some(response_header_keys)).await
 }
 
 // pub async fn request_get_api<T>(url: &str) -> Result<T, Error>
@@ -210,7 +281,23 @@ where
     T: DeserializeOwned + 'static + std::fmt::Debug,
     B: Serialize + std::fmt::Debug,
 {
-    request(RequestMethod::Post, url, body, content_type, response_type).await
+    request(RequestMethod::Post, url, body, content_type, response_type, None, None).await.map(|response| response.body)
+}
+
+pub async fn request_post_meta<B, T>(
+    url: &str,
+    body: B,
+    content_type: Option<String>,
+    response_type: Option<String>,
+    request_headers: Option<&[(String, String)]>,
+    response_header_keys: &[&str],
+) -> Result<ResponseMeta<T>, Error>
+where
+    T: DeserializeOwned + 'static + std::fmt::Debug,
+    B: Serialize + std::fmt::Debug,
+{
+    request(RequestMethod::Post, url, body, content_type, response_type, request_headers, Some(response_header_keys))
+        .await
 }
 
 /// Put request with a body
@@ -224,7 +311,23 @@ where
     T: DeserializeOwned + 'static + std::fmt::Debug,
     B: Serialize + std::fmt::Debug,
 {
-    request(RequestMethod::Put, url, body, content_type, response_type).await
+    request(RequestMethod::Put, url, body, content_type, response_type, None, None).await.map(|response| response.body)
+}
+
+pub async fn request_put_meta<B, T>(
+    url: &str,
+    body: B,
+    content_type: Option<String>,
+    response_type: Option<String>,
+    request_headers: Option<&[(String, String)]>,
+    response_header_keys: &[&str],
+) -> Result<ResponseMeta<T>, Error>
+where
+    T: DeserializeOwned + 'static + std::fmt::Debug,
+    B: Serialize + std::fmt::Debug,
+{
+    request(RequestMethod::Put, url, body, content_type, response_type, request_headers, Some(response_header_keys))
+        .await
 }
 
 /// Set limit for pagination

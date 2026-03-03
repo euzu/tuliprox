@@ -312,18 +312,29 @@ fn editor_state_to_sources_config(base_sources: &SourcesConfigDto, editor_state:
     }
 
     // Aggregate per-input providers into the source-level provider list.
-    // Source-level providers (from base_sources) take precedence; per-input providers
-    // with duplicate names are ignored.
-    let mut all_providers: Vec<shared::model::ConfigProviderDto> = sources_config.provider.take().unwrap_or_default();
-    let mut seen_provider_names: HashSet<String> = all_providers.iter().map(|p| p.name.to_string()).collect();
+    // If any input has provider overrides, build from input-level providers only.
+    // Otherwise keep existing source-level providers untouched.
+    let has_input_provider_overrides = gen_inputs.iter().any(|input| input.provider.is_some());
+    let mut all_providers: Vec<shared::model::ConfigProviderDto> =
+        if has_input_provider_overrides { Vec::new() } else { sources_config.provider.take().unwrap_or_default() };
+    let mut provider_index_by_name: HashMap<String, usize> =
+        all_providers.iter().enumerate().map(|(idx, provider)| (provider.name.to_string(), idx)).collect();
     for input in &gen_inputs {
         if let Some(input_providers) = &input.provider {
-            for p in input_providers {
-                if seen_provider_names.insert(p.name.to_string()) {
-                    all_providers.push(p.clone());
+            for provider in input_providers {
+                let provider_name = provider.name.to_string();
+                if let Some(existing_idx) = provider_index_by_name.get(&provider_name).copied() {
+                    all_providers[existing_idx] = provider.clone();
+                } else {
+                    provider_index_by_name.insert(provider_name, all_providers.len());
+                    all_providers.push(provider.clone());
                 }
             }
         }
+    }
+    // Keep providers only at source-level to avoid duplicating provider definitions under each input.
+    for input in &mut gen_inputs {
+        input.provider = None;
     }
     sources_config.provider = if all_providers.is_empty() { None } else { Some(all_providers) };
 

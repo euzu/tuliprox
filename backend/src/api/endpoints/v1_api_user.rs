@@ -12,7 +12,7 @@ use shared::{
     model::{ApiProxyConfigDto, ProxyUserCredentialsDto},
     utils::mask_credentials,
 };
-use std::{path::PathBuf, sync::Arc};
+use std::{path::Path, sync::Arc};
 
 #[allow(clippy::too_many_lines)]
 async fn save_config_api_proxy_user(
@@ -21,8 +21,11 @@ async fn save_config_api_proxy_user(
     axum::extract::Path(target_name): axum::extract::Path<String>,
     axum::extract::Json(mut credential): axum::extract::Json<ProxyUserCredentialsDto>,
 ) -> impl axum::response::IntoResponse + Send {
-    let virtual_file = PathBuf::from("api_proxy");
-    let _lock = app_state.app_config.file_locks.write_lock(&virtual_file).await;
+    let api_proxy_file_path = {
+        let paths = app_state.app_config.paths.load();
+        paths.api_proxy_file_path.clone()
+    };
+    let _lock = app_state.app_config.file_locks.write_lock(Path::new(&api_proxy_file_path)).await;
 
     credential.prepare();
     if let Err(err) = credential.validate() {

@@ -1,8 +1,11 @@
 use crate::{
-    app::components::{
-        config::HasFormData, key_value_editor::KeyValueEditor, select::Select, AliasItemForm, BlockId, BlockInstance,
-        Card, DropDownOption, DropDownSelection, EditMode, EpgSourceItemForm, IconButton, Panel, ProviderItemForm,
-        RadioButtonGroup, SourceEditorContext, TextButton, TitledCard,
+    app::{
+        components::{
+            config::HasFormData, key_value_editor::KeyValueEditor, select::Select, AliasItemForm, BlockId,
+            BlockInstance, Card, DropDownOption, DropDownSelection, EditMode, EpgSourceItemForm, IconButton, Panel,
+            ProviderItemForm, RadioButtonGroup, SourceEditorContext, TextButton, TitledCard,
+        },
+        ConfigContext,
     },
     config_field_child, edit_field_bool, edit_field_date, edit_field_number_i16, edit_field_number_u16,
     edit_field_number_u32, edit_field_text, edit_field_text_option, generate_form_reducer, html_if,
@@ -17,7 +20,12 @@ use shared::{
         InputFetchMethod, InputType, StagedInputDto,
     },
 };
-use std::{collections::HashMap, fmt::Display, rc::Rc, str::FromStr};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Display,
+    rc::Rc,
+    str::FromStr,
+};
 use web_sys::MouseEvent;
 use yew::{
     component, html, use_context, use_effect_with, use_memo, use_reducer, use_state, Callback, Html, Properties,
@@ -186,6 +194,7 @@ pub struct ConfigInputViewProps {
 pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     let translate = use_translation();
     let source_editor_ctx = use_context::<SourceEditorContext>();
+    let config_ctx = use_context::<ConfigContext>();
     let fetch_methods = use_memo((), |_| {
         [InputFetchMethod::GET, InputFetchMethod::POST].iter().map(ToString::to_string).collect::<Vec<String>>()
     });
@@ -217,6 +226,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     let aliases_state = use_state(Vec::<ConfigInputAliasDto>::new);
     let headers_state = use_state(HashMap::<String, String>::new);
     let providers_state = use_state(Vec::<ConfigProviderDto>::new);
+    let providers_dirty_state = use_state(|| false);
 
     // State for showing item forms
     let show_epg_form_state = use_state(|| false);
@@ -246,10 +256,15 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         let aliases_state = aliases_state.clone();
         let headers_state = headers_state.clone();
         let providers_state = providers_state.clone();
-
-        let deps = (props.block_id, props.input.clone());
+        let providers_dirty_state = providers_dirty_state.clone();
+        let deps = (props.block_id, props.input.clone(), config_ctx.clone());
         let view_visible = view_visible.clone();
-        use_effect_with(deps, move |(_, cfg)| {
+        use_effect_with(deps, move |(_, cfg, config_ctx)| {
+            let global_providers = config_ctx
+                .as_ref()
+                .and_then(|ctx| ctx.config.as_ref())
+                .and_then(|cfg| cfg.sources.provider.clone())
+                .unwrap_or_default();
             if let Some(input) = cfg {
                 if input.input_type.is_library()
                     && matches!(*view_visible, InputFormPage::Staged | InputFormPage::Advanced)
@@ -276,8 +291,26 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 // Load aliases
                 aliases_state.set(input.aliases.clone().unwrap_or_default());
 
-                // Load providers
-                providers_state.set(input.provider.clone().unwrap_or_default());
+                // Load providers:
+                // - Prefer explicit input-level providers.
+                // - If missing, fall back to source-level providers from source.yml.
+                // - If both exist, keep input providers first and append missing source-level providers.
+                let mut display_providers = if let Some(input_providers) = input.provider.as_ref() {
+                    input_providers.clone()
+                } else {
+                    global_providers.clone()
+                };
+                if input.provider.is_some() && !display_providers.is_empty() && !global_providers.is_empty() {
+                    let mut seen: HashSet<String> =
+                        display_providers.iter().map(|provider| provider.name.to_string()).collect();
+                    for provider in global_providers {
+                        if seen.insert(provider.name.to_string()) {
+                            display_providers.push(provider);
+                        }
+                    }
+                }
+                providers_state.set(display_providers);
+                providers_dirty_state.set(false);
             } else {
                 input_form_state.dispatch(ConfigInputFormAction::SetAll(ConfigInputDto::default()));
                 input_options_state.dispatch(ConfigInputOptionsFormAction::SetAll(ConfigInputOptionsDto::default()));
@@ -286,6 +319,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 epg_sources_state.set(Vec::new());
                 aliases_state.set(Vec::new());
                 providers_state.set(Vec::new());
+                providers_dirty_state.set(false);
             }
             || ()
         });
@@ -438,6 +472,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
 
     let handle_add_provider_item = {
         let providers = providers_state.clone();
+        let providers_dirty_state = providers_dirty_state.clone();
         let show_provider_form = show_provider_form_state.clone();
         let edit_provider = edit_provider.clone();
         Callback::from(move |provider: ConfigProviderDto| {
@@ -455,6 +490,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 items.push(provider);
             }
             providers.set(items);
+            providers_dirty_state.set(true);
             show_provider_form.set(false);
         })
     };
@@ -479,6 +515,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
 
     let handle_remove_provider_list_item = {
         let provider_list = providers_state.clone();
+        let providers_dirty_state = providers_dirty_state.clone();
         Callback::from(move |(idx, e): (String, MouseEvent)| {
             e.prevent_default();
             e.stop_propagation();
@@ -487,6 +524,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 if index < items.len() {
                     items.remove(index);
                     provider_list.set(items);
+                    providers_dirty_state.set(true);
                 }
             }
         })
@@ -884,6 +922,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         let epg_sources_state = epg_sources_state.clone();
         let aliases_state = aliases_state.clone();
         let providers_state = providers_state.clone();
+        let providers_dirty_state = providers_dirty_state.clone();
 
         Callback::from(move |_| {
             let mut input = input_form_state.data().clone();
@@ -912,8 +951,12 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             input.aliases = if aliases.is_empty() { None } else { Some(aliases) };
 
             // Handle Providers
-            let providers = (*providers_state).clone();
-            input.provider = if providers.is_empty() { None } else { Some(providers) };
+            if *providers_dirty_state {
+                let providers = (*providers_state).clone();
+                // Keep explicit empty overrides (Some(vec![])) so deleting the last provider
+                // survives source-level fallback logic during save.
+                input.provider = Some(providers);
+            }
 
             if let Some(on_apply) = &on_apply {
                 on_apply.emit(input);
