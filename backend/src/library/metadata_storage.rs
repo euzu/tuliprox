@@ -32,7 +32,7 @@ impl MetadataStorage {
 
     // Stores metadata for a video file
     pub async fn store(&self, entry: &MetadataCacheEntry) -> std::io::Result<()> {
-        let file_path = self.get_metadata_file_path(&entry.uuid);
+        let file_path = self.get_library_metadata_file_path(&entry.uuid);
 
         debug!("Storing metadata for {}: {}", entry.file_path, file_path.clean().display());
 
@@ -53,7 +53,7 @@ impl MetadataStorage {
 
     // Loads metadata for a specific UUID
     pub async fn load_by_uuid(&self, uuid: &str) -> Option<MetadataCacheEntry> {
-        let file_path = self.get_metadata_file_path(uuid);
+        let file_path = self.get_library_metadata_file_path(uuid);
 
         if !fs::try_exists(&file_path).await.unwrap_or(false) {
             return None;
@@ -109,7 +109,7 @@ impl MetadataStorage {
 
     // Deletes metadata for a specific UUID
     pub async fn delete_by_uuid(&self, uuid: &str) -> std::io::Result<()> {
-        let file_path = self.get_metadata_file_path(uuid);
+        let file_path = self.get_library_metadata_file_path(uuid);
 
         if fs::try_exists(&file_path).await.unwrap_or(false) {
             debug!("Deleting metadata file: {}", file_path.display());
@@ -151,8 +151,8 @@ impl MetadataStorage {
             .collect()
     }
 
-    // Gets the metadata file path for a UUID
-    fn get_metadata_file_path(&self, uuid: &str) -> PathBuf {
+    // Gets the metadata file path for a Local library
+    fn get_library_metadata_file_path(&self, uuid: &str) -> PathBuf {
         self.storage_dir.join("library").join(format!("{uuid}.json"))
     }
 

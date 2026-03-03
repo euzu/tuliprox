@@ -7,13 +7,48 @@ use crate::{
     },
     utils::{
         default_connect_timeout_secs, default_supported_video_extensions, is_blank_optional_string,
-        is_default_connect_timeout_secs, is_false,
+        is_default_connect_timeout_secs, is_false, CONFIG_PATH, MAPPING_FILE, TEMPLATE_FILE,
     },
 };
 
 pub const DEFAULT_USER_AGENT: &str = "VLC/3.0.16 LibVLC/3.0.16";
 
 fn default_default_user_agent() -> Option<String> { Some(DEFAULT_USER_AGENT.to_string()) }
+fn default_main_mapping_path() -> Option<String> { Some(format!("./{CONFIG_PATH}/{MAPPING_FILE}")) }
+fn default_main_template_path() -> Option<String> { Some(format!("./{CONFIG_PATH}/{TEMPLATE_FILE}")) }
+
+fn is_default_config_file_path(value: &str, file_name: &str) -> bool {
+    let normalized = value.trim().replace('\\', "/");
+    let normalized = normalized.trim_start_matches("./");
+    normalized == file_name || normalized.rsplit_once('/').is_some_and(|(dir, file)| dir == CONFIG_PATH && file == file_name)
+}
+
+fn is_blank_or_default_mapping_path(path: &Option<String>) -> bool {
+    path.as_ref()
+        .is_none_or(|value| value.trim().is_empty() || is_default_config_file_path(value, MAPPING_FILE))
+}
+
+fn is_blank_or_default_template_path(path: &Option<String>) -> bool {
+    path.as_ref()
+        .is_none_or(|value| value.trim().is_empty() || is_default_config_file_path(value, TEMPLATE_FILE))
+}
+
+fn effective_main_mapping_path(path: Option<String>) -> Option<String> {
+    if is_blank_or_default_mapping_path(&path) {
+        default_main_mapping_path()
+    } else {
+        path
+    }
+}
+
+fn effective_main_template_path(path: Option<String>) -> Option<String> {
+    if is_blank_or_default_template_path(&path) {
+        default_main_template_path()
+    } else {
+        path
+    }
+}
+
 fn is_none_or_empty_video(video: &Option<VideoConfigDto>) -> bool {
     video.as_ref().is_none_or(VideoConfigDto::is_empty)
 }
@@ -35,9 +70,9 @@ pub struct ConfigDto {
     pub backup_dir: Option<String>,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub user_config_dir: Option<String>,
-    #[serde(default, skip_serializing_if = "is_blank_optional_string")]
+    #[serde(default, skip_serializing_if = "is_blank_or_default_mapping_path")]
     pub mapping_path: Option<String>,
-    #[serde(default, skip_serializing_if = "is_blank_optional_string")]
+    #[serde(default, skip_serializing_if = "is_blank_or_default_template_path")]
     pub template_path: Option<String>,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub custom_stream_response_path: Option<String>,
@@ -126,9 +161,9 @@ pub struct MainConfigDto {
     pub backup_dir: Option<String>,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub user_config_dir: Option<String>,
-    #[serde(default, skip_serializing_if = "is_blank_optional_string")]
+    #[serde(default = "default_main_mapping_path", skip_serializing_if = "is_blank_or_default_mapping_path")]
     pub mapping_path: Option<String>,
-    #[serde(default, skip_serializing_if = "is_blank_optional_string")]
+    #[serde(default = "default_main_template_path", skip_serializing_if = "is_blank_or_default_template_path")]
     pub template_path: Option<String>,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub custom_stream_response_path: Option<String>,
@@ -157,8 +192,8 @@ impl Default for MainConfigDto {
             default_user_agent: default_default_user_agent(),
             backup_dir: None,
             user_config_dir: None,
-            mapping_path: None,
-            template_path: None,
+            mapping_path: default_main_mapping_path(),
+            template_path: default_main_template_path(),
             custom_stream_response_path: None,
             user_access_control: false,
             connect_timeout_secs: default_connect_timeout_secs(),
@@ -179,8 +214,8 @@ impl From<&ConfigDto> for MainConfigDto {
             default_user_agent: config.default_user_agent.clone(),
             backup_dir: config.backup_dir.clone(),
             user_config_dir: config.user_config_dir.clone(),
-            mapping_path: config.mapping_path.clone(),
-            template_path: config.template_path.clone(),
+            mapping_path: effective_main_mapping_path(config.mapping_path.clone()),
+            template_path: effective_main_template_path(config.template_path.clone()),
             custom_stream_response_path: config.custom_stream_response_path.clone(),
             user_access_control: config.user_access_control,
             connect_timeout_secs: config.connect_timeout_secs,
