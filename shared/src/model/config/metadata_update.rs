@@ -610,9 +610,9 @@ mod tests {
         assert_eq!(cfg.resolve.max_attempts, 1);
         assert_eq!(cfg.probe.max_attempts, 1);
         assert_eq!(cfg.max_queue_size, 1);
-        assert_eq!(cfg.ffprobe.timeout, Some(1));
-        assert_eq!(cfg.ffprobe.analyze_duration, "1s");
-        assert_eq!(cfg.ffprobe.probe_size, "1B");
+        assert_eq!(cfg.ffprobe.timeout, Some(60));
+        assert_eq!(cfg.ffprobe.analyze_duration, "10s");
+        assert_eq!(cfg.ffprobe.probe_size, "10MB");
     }
 
     #[test]

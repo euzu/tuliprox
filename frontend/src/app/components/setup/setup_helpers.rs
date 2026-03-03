@@ -232,8 +232,10 @@ fn apply_setup_library_form(config: &mut shared::model::ConfigDto, library_cfg: 
 }
 
 fn is_setup_webui_toggle_only_update(cfg: &WebUiConfigDto) -> bool {
-    cfg.path.as_deref().is_none_or(|path| path.trim().is_empty())
-        && cfg.player_server.as_deref().is_none_or(|player_server| player_server.trim().is_empty())
+    cfg.path.as_deref().is_none_or(|path| {
+        let trimmed = path.trim();
+        trimmed.is_empty() || trimmed.chars().all(|c| c == '/')
+    }) && cfg.player_server.as_deref().is_none_or(|player_server| player_server.trim().is_empty())
         && cfg.kick_secs == WebUiConfigDto::default().kick_secs
         && cfg.auth.as_ref().is_none_or(WebAuthConfigDto::is_empty)
         && cfg.content_security_policy.as_ref().is_none_or(ContentSecurityPolicyConfigDto::is_empty)
@@ -681,7 +683,8 @@ mod tests {
 
         let app_cfg = build_setup_app_config(&config_ctx, &form_state, SourcesConfigDto::default());
         let metadata_update = app_cfg.config.metadata_update.expect("metadata_update config should be present");
-        assert!(metadata_update.ffprobe.enabled);
+        assert!(!metadata_update.ffprobe.enabled);
         assert_eq!(metadata_update.ffprobe.timeout, Some(60));
+        assert!(metadata_update.is_empty());
     }
 }

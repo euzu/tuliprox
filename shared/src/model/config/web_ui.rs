@@ -32,7 +32,7 @@ fn default_web_ui_path() -> Option<String> { Some("/".to_string()) }
 fn is_blank_or_default_web_ui_path(path: &Option<String>) -> bool {
     path.as_ref().is_none_or(|value| {
         let trimmed = value.trim();
-        trimmed.is_empty() || trimmed == "/"
+        trimmed.is_empty() || trimmed.chars().all(|c| c == '/')
     })
 }
 
