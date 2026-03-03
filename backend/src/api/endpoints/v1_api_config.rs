@@ -162,7 +162,7 @@ fn require_matching_revision(
     current_revision: &str,
     revision_header: &'static str,
     file_label: &str,
-) -> Result<(), axum::response::Response> {
+) -> Option<axum::response::Response> {
     let if_match = headers.get(IF_MATCH).and_then(|value| value.to_str().ok()).map(str::trim);
     let Some(if_match) = if_match.filter(|value| !value.is_empty()) else {
         let response = (
@@ -172,7 +172,7 @@ fn require_matching_revision(
             })),
         )
             .into_response();
-        return Err(response_with_revision_header(response, revision_header, current_revision));
+        return Some(response_with_revision_header(response, revision_header, current_revision));
     };
     if if_match != current_revision {
         let response = (
@@ -182,9 +182,9 @@ fn require_matching_revision(
             })),
         )
             .into_response();
-        return Err(response_with_revision_header(response, revision_header, current_revision));
+        return Some(response_with_revision_header(response, revision_header, current_revision));
     }
-    Ok(())
+    None
 }
 
 pub(in crate::api::endpoints) async fn intern_save_config_api_proxy(
@@ -232,7 +232,7 @@ async fn save_config_main(
             return internal_server_error!();
         }
     };
-    if let Err(response) =
+    if let Some(response) =
         require_matching_revision(&headers, &current_revision, HEADER_CONFIG_MAIN_REVISION, "config.yml")
     {
         return response;
@@ -285,7 +285,7 @@ async fn save_config_sources(
             return internal_server_error!();
         }
     };
-    if let Err(response) =
+    if let Some(response) =
         require_matching_revision(&headers, &current_revision, HEADER_CONFIG_SOURCES_REVISION, "source.yml")
     {
         return response;
@@ -364,7 +364,7 @@ async fn get_config_api_proxy_config(
     let revision = match read_file_revision(&api_proxy_file_path).await {
         Ok(revision) => revision,
         Err(err) => {
-            error!("Failed to read revision for api-proxy.yml '{}': {err}", api_proxy_file_path);
+            error!("Failed to read revision for api-proxy.yml '{api_proxy_file_path}': {err}");
             return internal_server_error!();
         }
     };
@@ -399,11 +399,11 @@ async fn save_config_api_proxy_config(
     let current_revision = match read_file_revision(&api_proxy_file_path).await {
         Ok(revision) => revision,
         Err(err) => {
-            error!("Failed to read revision for api-proxy.yml '{}': {err}", api_proxy_file_path);
+            error!("Failed to read revision for api-proxy.yml '{api_proxy_file_path}': {err}");
             return internal_server_error!();
         }
     };
-    if let Err(response) = require_matching_revision(
+    if let Some(response) = require_matching_revision(
         &headers,
         &current_revision,
         HEADER_CONFIG_API_PROXY_REVISION,
@@ -444,7 +444,7 @@ async fn save_config_api_proxy_config(
     let updated_revision = match read_file_revision(&api_proxy_file_path).await {
         Ok(revision) => revision,
         Err(err) => {
-            error!("Failed to read updated revision for api-proxy.yml '{}': {err}", api_proxy_file_path);
+            error!("Failed to read updated revision for api-proxy.yml '{api_proxy_file_path}': {err}");
             return internal_server_error!();
         }
     };
@@ -464,21 +464,21 @@ async fn config(axum::extract::State(app_state): axum::extract::State<Arc<AppSta
     let main_revision = match read_file_revision(&config_file_path).await {
         Ok(revision) => revision,
         Err(err) => {
-            error!("Failed to read revision for config.yml '{}': {err}", config_file_path);
+            error!("Failed to read revision for config.yml '{config_file_path}': {err}");
             return internal_server_error!();
         }
     };
     let sources_revision = match read_file_revision(&sources_file_path).await {
         Ok(revision) => revision,
         Err(err) => {
-            error!("Failed to read revision for source.yml '{}': {err}", sources_file_path);
+            error!("Failed to read revision for source.yml '{sources_file_path}': {err}");
             return internal_server_error!();
         }
     };
     let api_proxy_revision = match read_file_revision(&api_proxy_file_path).await {
         Ok(revision) => revision,
         Err(err) => {
-            error!("Failed to read revision for api-proxy.yml '{}': {err}", api_proxy_file_path);
+            error!("Failed to read revision for api-proxy.yml '{api_proxy_file_path}': {err}");
             return internal_server_error!();
         }
     };
@@ -770,7 +770,7 @@ mod tests {
             HEADER_CONFIG_SOURCES_REVISION,
             "source.yml",
         )
-        .expect_err("missing if-match header must fail");
+        .expect("missing if-match header must fail");
         assert_eq!(response.status(), StatusCode::PRECONDITION_REQUIRED);
     }
 
@@ -787,6 +787,6 @@ mod tests {
             HEADER_CONFIG_SOURCES_REVISION,
             "source.yml",
         );
-        assert!(result.is_ok(), "exact revision match should be accepted");
+        assert!(result.is_none(), "exact revision match should be accepted");
     }
 }

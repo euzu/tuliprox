@@ -1241,7 +1241,19 @@ fn resolve_provisioned_account_base_url(
     }
 
     let base_url = base_url_from_response.map_or_else(|| input_url.to_string(), ToString::to_string);
-    get_base_url_from_str(base_url.as_str()).unwrap_or(base_url)
+    if let Some(origin) = get_base_url_from_str(base_url.as_str()) {
+        let trimmed_origin = origin.trim();
+        if !trimmed_origin.is_empty() && !trimmed_origin.eq_ignore_ascii_case("null") {
+            return origin;
+        }
+    }
+
+    let trimmed_base = base_url.trim();
+    if !trimmed_base.is_empty() && !trimmed_base.eq_ignore_ascii_case("null") {
+        return base_url;
+    }
+
+    input_url.to_string()
 }
 
 #[allow(clippy::too_many_lines)]
@@ -3724,5 +3736,29 @@ mod tests {
         );
 
         assert_eq!(result, "http://panel.example.com:8080");
+    }
+
+    #[test]
+    fn resolve_base_url_falls_back_when_panel_response_is_literal_null() {
+        let result = resolve_provisioned_account_base_url(
+            "http://input.example.org/path?x=1",
+            Some("null"),
+            "new",
+            "secret",
+        );
+
+        assert_eq!(result, "http://input.example.org/path?x=1");
+    }
+
+    #[test]
+    fn resolve_base_url_avoids_null_origin_for_non_special_schemes() {
+        let result = resolve_provisioned_account_base_url(
+            "http://input.example.org/path?x=1",
+            Some("custom-scheme://panel.example.com/path?username=new&password=new"),
+            "new",
+            "secret",
+        );
+
+        assert_eq!(result, "custom-scheme://panel.example.com/path?username=new&password=new");
     }
 }

@@ -296,10 +296,12 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 // - Prefer explicit input-level providers.
                 // - If missing, fall back to source-level providers from source.yml.
                 // - If both exist, keep input providers first and append missing source-level providers.
-                let mut display_providers = input.provider.clone().unwrap_or_default();
-                if display_providers.is_empty() {
-                    display_providers = global_providers;
-                } else if !global_providers.is_empty() {
+                let mut display_providers = if let Some(input_providers) = input.provider.as_ref() {
+                    input_providers.clone()
+                } else {
+                    global_providers.clone()
+                };
+                if input.provider.is_some() && !display_providers.is_empty() && !global_providers.is_empty() {
                     let mut seen: HashSet<String> =
                         display_providers.iter().map(|provider| provider.name.to_string()).collect();
                     for provider in global_providers {
@@ -951,7 +953,9 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             // Handle Providers
             if *providers_dirty_state {
                 let providers = (*providers_state).clone();
-                input.provider = if providers.is_empty() { None } else { Some(providers) };
+                // Keep explicit empty overrides (Some(vec![])) so deleting the last provider
+                // survives source-level fallback logic during save.
+                input.provider = Some(providers);
             }
 
             if let Some(on_apply) = &on_apply {
