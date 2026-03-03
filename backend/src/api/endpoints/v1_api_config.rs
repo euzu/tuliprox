@@ -35,7 +35,7 @@ fn inject_provider_dns_resolved(sources_dto: &mut SourcesConfigDto, runtime_sour
             dns_dto.resolved = None;
             continue;
         }
-        let snapshot = runtime_provider.snapshot_resolved();
+        let snapshot = runtime_provider.snapshot_resolved_ordered();
         dns_dto.resolved = (!snapshot.is_empty()).then_some(snapshot);
     }
 }
@@ -284,8 +284,9 @@ pub fn v1_api_config_register(router: Router<Arc<AppState>>) -> axum::Router<Arc
 mod tests {
     use super::{inject_provider_dns_resolved, strip_provider_dns_resolved};
     use crate::model::{ConfigProvider, SourcesConfig};
+    use indexmap::IndexMap;
     use shared::model::{ConfigProviderDto, DnsScheme, ProviderDnsDto, SourcesConfigDto};
-    use std::{collections::HashMap, net::IpAddr, sync::Arc};
+    use std::{net::IpAddr, sync::Arc};
 
     #[test]
     fn inject_provider_dns_resolved_populates_runtime_snapshot() {
@@ -341,7 +342,7 @@ mod tests {
                 urls: vec!["http://example.com".into()],
                 dns: Some(ProviderDnsDto {
                     enabled: true,
-                    resolved: Some(HashMap::from([(
+                    resolved: Some(IndexMap::from([(
                         "example.com".to_string(),
                         vec!["203.0.113.10".parse::<IpAddr>().expect("ip parse should work")],
                     )])),
@@ -378,7 +379,7 @@ mod tests {
                 urls: vec!["http://example.com".into()],
                 dns: Some(ProviderDnsDto {
                     enabled: true,
-                    resolved: Some(HashMap::from([(
+                    resolved: Some(IndexMap::from([(
                         "example.com".to_string(),
                         vec!["203.0.113.10".parse::<IpAddr>().expect("ip parse should work")],
                     )])),
