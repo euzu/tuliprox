@@ -34,6 +34,7 @@ use shared::{
     utils::{
         get_base_url_from_str, get_credentials_from_url, get_credentials_from_url_str, get_i64_from_serde_value,
         get_string_from_serde_value, parse_timestamp, sanitize_sensitive_info, Internable,
+        PROVIDER_SCHEME_PREFIX,
     },
 };
 use std::{
@@ -1227,6 +1228,22 @@ fn update_url_query_credentials_if_present(url: &mut String, username: &str, pas
     }
 }
 
+fn resolve_provisioned_account_base_url(
+    input_url: &str,
+    base_url_from_response: Option<&str>,
+    username: &str,
+    password: &str,
+) -> String {
+    if input_url.starts_with(PROVIDER_SCHEME_PREFIX) {
+        let mut provider_url = input_url.to_string();
+        update_url_query_credentials_if_present(&mut provider_url, username, password);
+        return provider_url;
+    }
+
+    let base_url = base_url_from_response.map_or_else(|| input_url.to_string(), ToString::to_string);
+    get_base_url_from_str(base_url.as_str()).unwrap_or(base_url)
+}
+
 #[allow(clippy::too_many_lines)]
 fn apply_sources_yml_patches(doc: &mut SourcesConfigDto, patches: &[SourcesYmlPatch]) -> Result<bool, TuliproxError> {
     if patches.is_empty() {
@@ -1645,8 +1662,12 @@ async fn try_create_new_account(
     let adult_enabled = optional.contains(PanelApiOptionalFlags::AdultContent);
     match panel_client_new(app_state, panel_cfg).await {
         Ok((username, password, base_url_from_resp)) => {
-            let base_url = base_url_from_resp.unwrap_or_else(|| input.url.clone());
-            let base_url = get_base_url_from_str(base_url.as_str()).unwrap_or_else(|| base_url.clone());
+            let base_url = resolve_provisioned_account_base_url(
+                input.url.as_str(),
+                base_url_from_resp.as_deref(),
+                &username,
+                &password,
+            );
 
             let mut existing_names: Vec<Arc<str>> = vec![input.name.clone()];
             if let Some(aliases) = input.aliases.as_ref() {
@@ -1933,8 +1954,12 @@ async fn ensure_alias_pool_min(
         }
         match panel_client_new(app_state.as_ref(), panel_cfg).await {
             Ok((username, password, base_url_from_resp)) => {
-                let base_url = base_url_from_resp.unwrap_or_else(|| input.url.clone());
-                let base_url = get_base_url_from_str(base_url.as_str()).unwrap_or_else(|| base_url.clone());
+                let base_url = resolve_provisioned_account_base_url(
+                    input.url.as_str(),
+                    base_url_from_resp.as_deref(),
+                    &username,
+                    &password,
+                );
 
                 let alias_name = derive_unique_alias_name_set(&existing_names, &input.name, &username);
                 existing_names.insert(alias_name.clone().into());
@@ -2280,8 +2305,12 @@ async fn sync_panel_api_for_input_on_boot(
                                             root_expiring && !root_expired && root_exp_date.is_some();
 
                                         if park_old_root_as_alias {
-                                            let base_url = get_base_url_from_str(input.url.as_str())
-                                                .unwrap_or_else(|| input.url.clone());
+                                            let base_url = resolve_provisioned_account_base_url(
+                                                input.url.as_str(),
+                                                None,
+                                                &old_username,
+                                                &old_password,
+                                            );
                                             let alias_name = derive_unique_alias_name_set(
                                                 &existing_names,
                                                 &input.name,
@@ -2401,8 +2430,12 @@ async fn sync_panel_api_for_input_on_boot(
                             let park_old_root_as_alias = root_expiring && !root_expired && root_exp_date.is_some();
 
                             if park_old_root_as_alias {
-                                let base_url =
-                                    get_base_url_from_str(input.url.as_str()).unwrap_or_else(|| input.url.clone());
+                                let base_url = resolve_provisioned_account_base_url(
+                                    input.url.as_str(),
+                                    None,
+                                    &old_username,
+                                    &old_password,
+                                );
                                 let alias_name =
                                     derive_unique_alias_name_set(&existing_names, &input.name, old_username.as_str());
                                 existing_names.insert(alias_name.clone().into());
@@ -2754,9 +2787,12 @@ async fn sync_panel_api_for_input_on_boot(
                     if new_enabled {
                         match panel_client_new(app_state.as_ref(), panel_cfg).await {
                             Ok((new_username, new_password, base_url_from_resp)) => {
-                                let base_url = base_url_from_resp.unwrap_or_else(|| input.url.clone());
-                                let base_url =
-                                    get_base_url_from_str(base_url.as_str()).unwrap_or_else(|| base_url.clone());
+                                let base_url = resolve_provisioned_account_base_url(
+                                    input.url.as_str(),
+                                    base_url_from_resp.as_deref(),
+                                    &new_username,
+                                    &new_password,
+                                );
 
                                 let alias_name =
                                     derive_unique_alias_name_set(&existing_names, &input.name, &new_username);
@@ -2854,8 +2890,12 @@ async fn sync_panel_api_for_input_on_boot(
         } else if new_enabled {
             match panel_client_new(app_state.as_ref(), panel_cfg).await {
                 Ok((new_username, new_password, base_url_from_resp)) => {
-                    let base_url = base_url_from_resp.unwrap_or_else(|| input.url.clone());
-                    let base_url = get_base_url_from_str(base_url.as_str()).unwrap_or_else(|| base_url.clone());
+                    let base_url = resolve_provisioned_account_base_url(
+                        input.url.as_str(),
+                        base_url_from_resp.as_deref(),
+                        &new_username,
+                        &new_password,
+                    );
 
                     let alias_name = derive_unique_alias_name_set(&existing_names, &input.name, &new_username);
                     existing_names.insert(alias_name.clone().into());
@@ -3637,5 +3677,52 @@ pub fn create_panel_api_provisioning_stream_details(
         disable_provider_grace: true,
         reconnect_flag: None,
         provider_handle: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_provisioned_account_base_url;
+    use url::Url;
+
+    #[test]
+    fn resolve_base_url_keeps_provider_scheme_for_provisioned_accounts() {
+        let result = resolve_provisioned_account_base_url(
+            "provider://demo-provider/live",
+            Some("http://panel.example.com:8080/get.php?username=new&password=new"),
+            "new",
+            "secret",
+        );
+
+        assert_eq!(result, "provider://demo-provider/live");
+    }
+
+    #[test]
+    fn resolve_base_url_updates_provider_query_credentials_when_present() {
+        let result = resolve_provisioned_account_base_url(
+            "provider://demo-provider/live?foo=bar&username=old&password=oldpw",
+            Some("http://panel.example.com:8080/get.php?username=new&password=new"),
+            "new-user",
+            "new-pass",
+        );
+
+        let parsed = Url::parse(result.as_str()).expect("expected valid provider url");
+        let pairs: Vec<(String, String)> =
+            parsed.query_pairs().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        assert!(pairs.contains(&("foo".to_string(), "bar".to_string())));
+        assert!(pairs.contains(&("username".to_string(), "new-user".to_string())));
+        assert!(pairs.contains(&("password".to_string(), "new-pass".to_string())));
+    }
+
+    #[test]
+    fn resolve_base_url_uses_panel_response_origin_for_http_inputs() {
+        let result = resolve_provisioned_account_base_url(
+            "http://input.example.org/path?x=1",
+            Some("http://panel.example.com:8080/get.php?username=new&password=new"),
+            "new",
+            "secret",
+        );
+
+        assert_eq!(result, "http://panel.example.com:8080");
     }
 }
