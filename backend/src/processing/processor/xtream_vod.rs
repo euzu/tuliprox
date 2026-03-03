@@ -728,10 +728,15 @@ pub async fn update_vod_metadata(
                     properties.tmdb = m.tmdb_id();
                     properties_updated = true;
                 }
+                if properties.details.is_none() {
+                    properties.details = Some(VideoStreamDetailProperties::default());
+                }
                 if let Some(details) = properties.details.as_mut() {
                     if details.release_date.is_none() {
-                        details.release_date = m.year().map(|y| format!("{y}-01-01").into());
-                        properties_updated = true;
+                        if let Some(year) = m.year() {
+                            details.release_date = Some(format!("{year}-01-01").into());
+                            properties_updated = true;
+                        }
                     }
                 }
                 if properties_updated {
