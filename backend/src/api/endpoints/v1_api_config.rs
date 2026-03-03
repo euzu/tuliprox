@@ -16,7 +16,7 @@ use log::{error, warn};
 use serde_json::json;
 use shared::{
     error::TuliproxError,
-    model::{ApiProxyConfigDto, ConfigDto, SourcesConfigDto},
+    model::{ApiProxyConfigDto, ConfigDto, ConfigProviderDto, ProviderDnsDto, SourcesConfigDto},
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -93,6 +93,38 @@ fn merge_provider_dns_resolved_from_existing(
     }
 }
 
+fn build_existing_sources_from_runtime(runtime_sources: &crate::model::SourcesConfig) -> Option<SourcesConfigDto> {
+    let providers: Vec<ConfigProviderDto> = runtime_sources
+        .provider
+        .iter()
+        .filter_map(|runtime_provider| {
+            let resolved = runtime_provider.snapshot_resolved_ordered();
+            if resolved.is_empty() {
+                return None;
+            }
+
+            Some(ConfigProviderDto {
+                name: runtime_provider.name.clone(),
+                urls: runtime_provider.urls.clone(),
+                dns: Some(ProviderDnsDto {
+                    enabled: runtime_provider.get_dns_config().is_some_and(|cfg| cfg.enabled),
+                    resolved: Some(resolved),
+                    ..ProviderDnsDto::default()
+                }),
+            })
+        })
+        .collect();
+
+    if providers.is_empty() {
+        None
+    } else {
+        Some(SourcesConfigDto {
+            provider: Some(providers),
+            ..SourcesConfigDto::default()
+        })
+    }
+}
+
 pub(in crate::api::endpoints) async fn intern_save_config_api_proxy(
     backup_dir: &str,
     api_proxy: &ApiProxyConfigDto,
@@ -162,7 +194,12 @@ async fn save_config_sources(
         Ok(existing) => Some(existing),
         Err(err) => {
             warn!("Failed to preload existing source.yml from '{sources_file_path}' before save: {err}");
-            None
+            let runtime_sources = app_state.app_config.sources.load();
+            let runtime_fallback = build_existing_sources_from_runtime(runtime_sources.as_ref());
+            if runtime_fallback.is_some() {
+                warn!("Using runtime provider dns snapshot as fallback for preserving dns.resolved");
+            }
+            runtime_fallback
         }
     };
 
@@ -341,7 +378,10 @@ pub fn v1_api_config_register(router: Router<Arc<AppState>>) -> axum::Router<Arc
 
 #[cfg(test)]
 mod tests {
-    use super::{inject_provider_dns_resolved, merge_provider_dns_resolved_from_existing, strip_provider_dns_resolved};
+    use super::{
+        build_existing_sources_from_runtime, inject_provider_dns_resolved, merge_provider_dns_resolved_from_existing,
+        strip_provider_dns_resolved,
+    };
     use crate::model::{ConfigProvider, SourcesConfig};
     use indexmap::IndexMap;
     use shared::model::{ConfigProviderDto, DnsScheme, ProviderDnsDto, SourcesConfigDto};
@@ -497,6 +537,41 @@ mod tests {
             .and_then(|provider| provider.dns.as_ref())
             .and_then(|dns| dns.resolved.as_ref())
             .expect("resolved should be merged from existing source dto");
+        assert_eq!(
+            resolved.get("example.com"),
+            Some(&vec!["203.0.113.10".parse::<IpAddr>().expect("ip parse should work")])
+        );
+    }
+
+    #[test]
+    fn build_existing_sources_from_runtime_exports_provider_dns_resolved() {
+        let runtime_provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {
+            name: "p1".into(),
+            urls: vec!["http://example.com".into()],
+            dns: Some(ProviderDnsDto {
+                enabled: true,
+                schemes: Some(vec![DnsScheme::Http]),
+                ..ProviderDnsDto::default()
+            }),
+        }));
+        runtime_provider.store_resolved(
+            "example.com",
+            vec!["203.0.113.10".parse::<IpAddr>().expect("ip parse should work")],
+        );
+        let runtime_sources = SourcesConfig {
+            provider: vec![runtime_provider],
+            ..SourcesConfig::default()
+        };
+
+        let exported =
+            build_existing_sources_from_runtime(&runtime_sources).expect("runtime fallback dto should exist");
+        let resolved = exported
+            .provider
+            .as_ref()
+            .and_then(|providers| providers.first())
+            .and_then(|provider| provider.dns.as_ref())
+            .and_then(|dns| dns.resolved.as_ref())
+            .expect("resolved should be present in runtime fallback dto");
         assert_eq!(
             resolved.get("example.com"),
             Some(&vec!["203.0.113.10".parse::<IpAddr>().expect("ip parse should work")])

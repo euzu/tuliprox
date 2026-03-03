@@ -312,9 +312,11 @@ fn editor_state_to_sources_config(base_sources: &SourcesConfigDto, editor_state:
     }
 
     // Aggregate per-input providers into the source-level provider list.
-    // Input-level providers override same-name source-level providers so edits from the
-    // input provider form are applied to source.yml.
-    let mut all_providers: Vec<shared::model::ConfigProviderDto> = sources_config.provider.take().unwrap_or_default();
+    // If any input has provider overrides, build from input-level providers only.
+    // Otherwise keep existing source-level providers untouched.
+    let has_input_provider_overrides = gen_inputs.iter().any(|input| input.provider.is_some());
+    let mut all_providers: Vec<shared::model::ConfigProviderDto> =
+        if has_input_provider_overrides { Vec::new() } else { sources_config.provider.take().unwrap_or_default() };
     let mut provider_index_by_name: HashMap<String, usize> =
         all_providers.iter().enumerate().map(|(idx, provider)| (provider.name.to_string(), idx)).collect();
     for input in &gen_inputs {

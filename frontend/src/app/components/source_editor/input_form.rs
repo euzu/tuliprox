@@ -225,6 +225,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     let aliases_state = use_state(Vec::<ConfigInputAliasDto>::new);
     let headers_state = use_state(HashMap::<String, String>::new);
     let providers_state = use_state(Vec::<ConfigProviderDto>::new);
+    let providers_dirty_state = use_state(|| false);
 
     // State for showing item forms
     let show_epg_form_state = use_state(|| false);
@@ -254,6 +255,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         let aliases_state = aliases_state.clone();
         let headers_state = headers_state.clone();
         let providers_state = providers_state.clone();
+        let providers_dirty_state = providers_dirty_state.clone();
         let config_ctx = config_ctx.clone();
 
         let deps = (props.block_id, props.input.clone());
@@ -294,19 +296,20 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 // - Prefer explicit input-level providers.
                 // - If missing, fall back to source-level providers from source.yml.
                 // - If both exist, keep input providers first and append missing source-level providers.
-                let mut providers = input.provider.clone().unwrap_or_default();
-                if providers.is_empty() {
-                    providers = global_providers;
+                let mut display_providers = input.provider.clone().unwrap_or_default();
+                if display_providers.is_empty() {
+                    display_providers = global_providers;
                 } else if !global_providers.is_empty() {
                     let mut seen: HashSet<String> =
-                        providers.iter().map(|provider| provider.name.to_string()).collect();
+                        display_providers.iter().map(|provider| provider.name.to_string()).collect();
                     for provider in global_providers {
                         if seen.insert(provider.name.to_string()) {
-                            providers.push(provider);
+                            display_providers.push(provider);
                         }
                     }
                 }
-                providers_state.set(providers);
+                providers_state.set(display_providers);
+                providers_dirty_state.set(false);
             } else {
                 input_form_state.dispatch(ConfigInputFormAction::SetAll(ConfigInputDto::default()));
                 input_options_state.dispatch(ConfigInputOptionsFormAction::SetAll(ConfigInputOptionsDto::default()));
@@ -315,6 +318,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 epg_sources_state.set(Vec::new());
                 aliases_state.set(Vec::new());
                 providers_state.set(Vec::new());
+                providers_dirty_state.set(false);
             }
             || ()
         });
@@ -467,6 +471,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
 
     let handle_add_provider_item = {
         let providers = providers_state.clone();
+        let providers_dirty_state = providers_dirty_state.clone();
         let show_provider_form = show_provider_form_state.clone();
         let edit_provider = edit_provider.clone();
         Callback::from(move |provider: ConfigProviderDto| {
@@ -484,6 +489,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 items.push(provider);
             }
             providers.set(items);
+            providers_dirty_state.set(true);
             show_provider_form.set(false);
         })
     };
@@ -508,6 +514,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
 
     let handle_remove_provider_list_item = {
         let provider_list = providers_state.clone();
+        let providers_dirty_state = providers_dirty_state.clone();
         Callback::from(move |(idx, e): (String, MouseEvent)| {
             e.prevent_default();
             e.stop_propagation();
@@ -516,6 +523,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 if index < items.len() {
                     items.remove(index);
                     provider_list.set(items);
+                    providers_dirty_state.set(true);
                 }
             }
         })
@@ -912,6 +920,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         let epg_sources_state = epg_sources_state.clone();
         let aliases_state = aliases_state.clone();
         let providers_state = providers_state.clone();
+        let providers_dirty_state = providers_dirty_state.clone();
 
         Callback::from(move |_| {
             let mut input = input_form_state.data().clone();
@@ -940,8 +949,10 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             input.aliases = if aliases.is_empty() { None } else { Some(aliases) };
 
             // Handle Providers
-            let providers = (*providers_state).clone();
-            input.provider = if providers.is_empty() { None } else { Some(providers) };
+            if *providers_dirty_state {
+                let providers = (*providers_state).clone();
+                input.provider = if providers.is_empty() { None } else { Some(providers) };
+            }
 
             if let Some(on_apply) = &on_apply {
                 on_apply.emit(input);
