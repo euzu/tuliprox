@@ -802,10 +802,7 @@ mod tests {
     use super::*;
 
     fn create_test_dto() -> ConfigInputDto {
-        ConfigInputDto {
-            name: "test_input".intern(),
-            ..ConfigInputDto::default()
-        }
+        ConfigInputDto { name: "test_input".intern(), ..ConfigInputDto::default() }
     }
 
     #[test]
