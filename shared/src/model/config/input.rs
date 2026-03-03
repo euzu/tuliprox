@@ -288,6 +288,8 @@ impl ConfigInputOptionsDto {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct StagedInputDto {
+    #[serde(default)]
+    pub enabled: bool,
     #[serde(with = "arc_str_serde")]
     pub name: Arc<str>,
     pub url: String,

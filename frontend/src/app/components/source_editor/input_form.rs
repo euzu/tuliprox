@@ -143,6 +143,7 @@ generate_form_reducer!(
     state: StagedInputDtoFormState { form: StagedInputDto },
     action_name: StagedInputFormAction,
     fields {
+        Enabled => enabled: bool,
         Url => url: String,
         Username => username: Option<String>,
         Password => password: Option<String>,
@@ -566,6 +567,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         let staged_input_state_2 = staged_input_state.clone();
         html! {
             <Card class="tp__config-view__card">
+                { edit_field_bool!(staged_input_state, translate.t(LABEL_ENABLED),  enabled, StagedInputFormAction::Enabled) }
                 { edit_field_text!(staged_input_state, translate.t(LABEL_URL),  url, StagedInputFormAction::Url) }
                 <div class="tp__config-view__cols-2">
                 { edit_field_text_option!(staged_input_state, translate.t(LABEL_USERNAME), username, StagedInputFormAction::Username) }

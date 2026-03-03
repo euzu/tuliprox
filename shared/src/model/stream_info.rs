@@ -1,6 +1,6 @@
 use crate::{
     model::{M3uPlaylistItem, PlaylistEntry, PlaylistItemType, XtreamCluster, XtreamPlaylistItem},
-    utils::{arc_str_serde, current_time_secs, is_blank_optional_string, longest},
+    utils::{arc_str_serde, current_time_secs, is_blank_optional_string},
 };
 use serde::{Deserialize, Serialize};
 use std::{net::SocketAddr, sync::Arc};
@@ -33,6 +33,7 @@ pub fn create_stream_channel_with_type(
 
 impl XtreamPlaylistItem {
     pub fn to_stream_channel(&self, target_id: u16) -> StreamChannel {
+        let title = if self.title.is_empty() { Arc::clone(&self.name) } else { Arc::clone(&self.title) };
         StreamChannel {
             target_id,
             virtual_id: self.virtual_id,
@@ -40,7 +41,7 @@ impl XtreamPlaylistItem {
             item_type: self.item_type,
             cluster: self.xtream_cluster,
             group: Arc::clone(&self.group),
-            title: Arc::clone(longest(&self.title, &self.name)),
+            title,
             url: Arc::clone(&self.url),
             shared: false,
         }
@@ -49,6 +50,7 @@ impl XtreamPlaylistItem {
 
 impl M3uPlaylistItem {
     pub fn to_stream_channel(&self, target_id: u16) -> StreamChannel {
+        let title = if self.title.is_empty() { Arc::clone(&self.name) } else { Arc::clone(&self.title) };
         StreamChannel {
             target_id,
             virtual_id: self.virtual_id,
@@ -56,7 +58,7 @@ impl M3uPlaylistItem {
             item_type: self.item_type,
             cluster: XtreamCluster::try_from(self.item_type).unwrap_or(XtreamCluster::Live),
             group: Arc::clone(&self.group),
-            title: Arc::clone(longest(&self.title, &self.name)),
+            title,
             url: Arc::clone(&self.url),
             shared: false,
         }
