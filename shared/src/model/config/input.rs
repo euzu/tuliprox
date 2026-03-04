@@ -461,6 +461,27 @@ impl Default for ConfigInputDto {
 impl ConfigInputDto {
     pub fn new_with_type(input_type: InputType) -> Self { Self { input_type, ..Self::default() } }
 
+    fn normalize_input_type_from_aliases(&mut self) {
+        let has_aliases = self.aliases.as_ref().is_some_and(|aliases| !aliases.is_empty());
+        self.input_type = match self.input_type {
+            InputType::M3u | InputType::M3uBatch => {
+                if has_aliases {
+                    InputType::M3uBatch
+                } else {
+                    InputType::M3u
+                }
+            }
+            InputType::Xtream | InputType::XtreamBatch => {
+                if has_aliases {
+                    InputType::XtreamBatch
+                } else {
+                    InputType::Xtream
+                }
+            }
+            InputType::Library => InputType::Library,
+        };
+    }
+
     #[allow(clippy::cast_possible_truncation)]
     pub fn prepare(
         &mut self,
@@ -489,6 +510,22 @@ impl ConfigInputDto {
         }
 
         self.persist = get_trimmed_string(self.persist.as_deref());
+
+        if self.url.starts_with("file://") {
+            match self.input_type {
+                InputType::M3u => {
+                    self.input_type = InputType::M3uBatch;
+                }
+                InputType::Xtream => {
+                    self.input_type = InputType::XtreamBatch;
+                }
+                _ => {}
+            }
+        } else if self.url.starts_with(PROVIDER_SCHEME_PREFIX)
+            && matches!(self.input_type, InputType::M3uBatch | InputType::XtreamBatch)
+        {
+            return info_err_res!("input type {} does not support provider:// URLs for batch definitions; use a local CSV path or file:// URL", self.input_type);
+        }
         check_provider_scheme_url!(self.url, provider_names);
 
         if let Some(staged_input) = self.staged.as_ref() {
@@ -610,6 +647,16 @@ impl ConfigInputDto {
     ) -> Result<Option<u16>, TuliproxError> {
         let idx = apply_batch_aliases!(self, batch_aliases, Some(index));
         Ok(idx)
+    }
+
+    pub fn prepare_type(&mut self) -> Result<(), TuliproxError> {
+        self.normalize_input_type_from_aliases();
+        if self.url.starts_with(PROVIDER_SCHEME_PREFIX)
+            && matches!(self.input_type, InputType::M3uBatch | InputType::XtreamBatch)
+        {
+            return info_err_res!("input type {} does not support provider:// URLs for batch definitions; use a local CSV path or file:// URL", self.input_type);
+        }
+        Ok(())
     }
 
     pub fn upsert_alias(&mut self, mut alias: ConfigInputAliasDto) -> Result<(), TuliproxError> {
@@ -978,5 +1025,50 @@ mod tests {
         let dns = dto.dns.expect("dns should be present");
         let resolved = dns.resolved.expect("resolved must be deserialized");
         assert_eq!(resolved.get("example.com"), Some(&vec!["203.0.113.10".parse::<IpAddr>().expect("valid ip")]));
+    }
+
+    #[test]
+    fn prepare_switches_xtream_to_xtream_batch_when_alias_exists() {
+        let mut dto = ConfigInputDto {
+            name: "input_alias".intern(),
+            input_type: InputType::Xtream,
+            url: "file:///tmp/input_alias.csv".to_string(),
+            aliases: Some(vec![ConfigInputAliasDto {
+                id: 1,
+                name: "alias_1".intern(),
+                url: "http://provider.example/stream".to_string(),
+                username: Some("u".to_string()),
+                password: Some("p".to_string()),
+                enabled: true,
+                ..ConfigInputAliasDto::default()
+            }]),
+            ..ConfigInputDto::default()
+        };
+
+        dto.prepare_type().expect("prepare type should succeed");
+        dto.prepare(0, true, &HashSet::new()).expect("prepare should succeed and infer batch type");
+        assert_eq!(dto.input_type, InputType::XtreamBatch);
+    }
+
+    #[test]
+    fn prepare_fails_for_provider_scheme_on_batch_input() {
+        let mut dto = ConfigInputDto {
+            name: "batch_provider".intern(),
+            input_type: InputType::XtreamBatch,
+            url: "provider://myprovider".to_string(),
+            aliases: Some(vec![ConfigInputAliasDto {
+                id: 1,
+                name: "alias_1".intern(),
+                url: "http://provider.example/stream".to_string(),
+                username: Some("u".to_string()),
+                password: Some("p".to_string()),
+                enabled: true,
+                ..ConfigInputAliasDto::default()
+            }]),
+            ..ConfigInputDto::default()
+        };
+
+        let err = dto.prepare(0, true, &HashSet::new()).expect_err("prepare must reject provider:// for batch input");
+        assert!(err.to_string().contains("does not support provider:// URLs"));
     }
 }

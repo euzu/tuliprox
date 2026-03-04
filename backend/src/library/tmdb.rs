@@ -227,7 +227,7 @@ impl TmdbSeriesInfoEpisodeDetails {
             season: self.season_number,
             episode: self.episode_number,
             aired: self.air_date.clone(),
-            plot: if self.overview.is_empty() {None} else { Some(self.overview.clone())},
+            plot: if self.overview.is_empty() { None } else { Some(self.overview.clone()) },
             runtime: self.runtime,
             rating: Some(self.vote_average),
             thumb: self.still_path.as_ref().and_then(|path| resolve_tmdb_image_url(path)),
@@ -239,7 +239,7 @@ impl TmdbSeriesInfoEpisodeDetails {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct  TmdbSeriesInfoSeasonDetails {
+pub struct TmdbSeriesInfoSeasonDetails {
     // #[serde(rename = "_id")]
     // pub internal_id: String,
     // pub id: u32,
@@ -453,7 +453,6 @@ pub struct TmdbSeason {
 }
 
 impl TmdbSeason {
-
     // TODO maybe use Arc for episodes, networks, credits to avoid memory usage
     pub fn to_meta_data(&self) -> SeasonMetadata {
         SeasonMetadata {
@@ -474,7 +473,7 @@ impl TmdbSeason {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_tmdb_image_url, TMDB_IMAGE_BASE_URL};
+    use super::{resolve_tmdb_image_url, TmdbMovieDetails, TMDB_IMAGE_BASE_URL};
 
     #[test]
     fn test_resolve_tmdb_url_with_absolute_http() {
@@ -511,4 +510,12 @@ mod tests {
         let input = "   ";
         assert_eq!(resolve_tmdb_image_url(input), None);
     }
+
+    // #[test]
+    // fn test_parse_movie_details() {
+    // curl "https://api.themoviedb.org/3/movie/84892?api_key=4219e299c89411838049ab0dab19ebd5&append_to_response=credits,videos,external_ids"
+    //     let a: TmdbMovieDetails = serde_json::from_str(RESULT).map_err(|err| format!("Failed to parse TMDB movie details: {err}")).expect("Failed to parse TMDB movie details");
+    //     assert_eq!(a.id, 84892)
+    // }
 }
+

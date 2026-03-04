@@ -21,7 +21,7 @@ use shared::model::{
     ApiProxyConfigDto, AppConfigDto, ConfigDto, ConfigInputAliasDto, ConfigPaths, HdHomeRunDeviceOverview, InputType,
     MsgKind, PatternTemplate, SourcesConfigDto, TargetUserDto, TemplateDefinitionDto,
 };
-use shared::utils::{generate_default_access_secret, generate_default_encrypt_secret, CONSTANTS, TEMPLATE_FILE};
+use shared::utils::{generate_default_access_secret, generate_default_encrypt_secret, CONSTANTS, PROVIDER_SCHEME_PREFIX, TEMPLATE_FILE};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::env;
@@ -432,6 +432,7 @@ pub async fn prepare_sources_batch(
                 return Err(err);
             }
         }
+        input.prepare_type()?;
         // we need to prepare epg after alias, because epg `auto` depends on the first input url.
         input.prepare_epg(include_computed)?;
     }
@@ -443,6 +444,13 @@ pub async fn get_batch_aliases(
     url: &str,
 ) -> Result<Option<(PathBuf, Vec<ConfigInputAliasDto>)>, TuliproxError> {
     if input_type == InputType::M3uBatch || input_type == InputType::XtreamBatch {
+        if url.starts_with(PROVIDER_SCHEME_PREFIX) {
+            return info_err_res!(
+                "Batch input type '{input_type}' does not support provider:// URLs. \
+Use a local CSV path (absolute/relative) or file:// URL."
+            );
+        }
+
         return match csv_read_inputs(input_type, url).await {
             Ok((file_path, batch_aliases)) => Ok(Some((file_path, batch_aliases))),
             Err(err) => {
@@ -1012,7 +1020,8 @@ async fn persist_single_template(prefix: &str, kind: Option<&MsgKind>, template:
 
 #[cfg(test)]
 mod tests {
-    use crate::utils::resolve_env_var;
+    use crate::utils::{file::config_reader::get_batch_aliases, resolve_env_var};
+    use shared::model::InputType;
 
     #[test]
     #[allow(clippy::manual_unwrap_or_default)]
@@ -1025,4 +1034,14 @@ mod tests {
         };
         assert_eq!(resolved, expected);
     }
+
+    #[tokio::test]
+    async fn batch_provider_scheme_returns_clear_error() {
+        let result = get_batch_aliases(InputType::XtreamBatch, "provider://my_provider").await;
+        let err = result.expect_err("provider:// must not be accepted for batch inputs");
+        assert!(err
+            .to_string()
+            .contains("does not support provider:// URLs"));
+    }
+
 }
