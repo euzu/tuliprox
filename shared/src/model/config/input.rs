@@ -510,7 +510,18 @@ impl ConfigInputDto {
         }
 
         self.persist = get_trimmed_string(self.persist.as_deref());
-        if self.url.starts_with(PROVIDER_SCHEME_PREFIX)
+
+        if self.url.starts_with("file://") {
+            match self.input_type {
+                InputType::M3u => {
+                    self.input_type = InputType::M3uBatch;
+                }
+                InputType::Xtream => {
+                    self.input_type = InputType::XtreamBatch;
+                }
+                _ => {}
+            }
+        } else if self.url.starts_with(PROVIDER_SCHEME_PREFIX)
             && matches!(self.input_type, InputType::M3uBatch | InputType::XtreamBatch)
         {
             return info_err_res!("input type {} does not support provider:// URLs for batch definitions; use a local CSV path or file:// URL", self.input_type);
@@ -1034,6 +1045,7 @@ mod tests {
             ..ConfigInputDto::default()
         };
 
+        dto.prepare_type().expect("prepare type should succeed");
         dto.prepare(0, true, &HashSet::new()).expect("prepare should succeed and infer batch type");
         assert_eq!(dto.input_type, InputType::XtreamBatch);
     }

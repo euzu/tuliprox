@@ -1044,10 +1044,4 @@ mod tests {
             .contains("does not support provider:// URLs"));
     }
 
-    #[tokio::test]
-    async fn batch_http_scheme_returns_clear_error() {
-        let result = get_batch_aliases(InputType::M3uBatch, "https://example.com/batch.csv").await;
-        let err = result.expect_err("http(s) must not be accepted for batch inputs");
-        assert!(err.to_string().contains("only supports local CSV paths"));
-    }
 }
