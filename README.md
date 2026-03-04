@@ -504,7 +504,8 @@ metadata_update:
 - `retry_delay` (default `2s`): Minimum retry delay for transient worker errors (for example temporary connection/resource issues).
 - `worker_idle_timeout` (default `1m`): Idle timeout for metadata worker shutdown when there is no immediate work.
 - `max_queue_size` (default `100000`): Maximum pending metadata tasks per input before new tasks are rejected.
-- `no_change_cache_ttl_secs` (default `3600`): TTL in seconds for the per-item no-change deduplication cache. While valid, identical reason sets are skipped.
+- `no_change_cache_ttl_secs` (default `3600`): TTL in seconds for the per-item no-change deduplication cache.
+  While valid, identical reason sets are skipped.
 - `ffprobe.enabled` (default `false`): Globally enables/disables FFprobe-based stream analysis.
 - `ffprobe.timeout` (default `60`): FFprobe process timeout in seconds.
 - `ffprobe.analyze_duration` (default `10s`): FFprobe `-analyzeduration`

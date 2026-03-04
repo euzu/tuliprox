@@ -1000,16 +1000,16 @@ impl InputWorker {
 
             // Skip tasks that recently completed with no changes (already resolved in DB).
             // Only skip when the incoming reason set exactly matches the cached reason set.
-            if !skip_execution {
-                if self.should_skip_recent_no_change_task(&current_key, &task_for_execution, &runtime_settings) {
-                    debug_if_enabled!(
-                        "Skipping recently-resolved no-change task for input {}: {}",
-                        input_name,
-                        task_for_execution
-                    );
-                    remove_current_task = true;
-                    skip_execution = true;
-                }
+            if !skip_execution
+                && self.should_skip_recent_no_change_task(&current_key, &task_for_execution, &runtime_settings)
+            {
+                debug_if_enabled!(
+                    "Skipping recently-resolved no-change task for input {}: {}",
+                    input_name,
+                    task_for_execution
+                );
+                remove_current_task = true;
+                skip_execution = true;
             }
 
             if !skip_execution {
