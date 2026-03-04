@@ -259,7 +259,7 @@ provider:
           - 203.0.113.20
 inputs:
   - name: my_input
-    type: xtream_batch
+    type: xtream
     headers:
       User-Agent: TiviMate/5.1.6 (Android 12)
     url: provider://my_provider  # the name is the same as defined in provider: section
@@ -1482,6 +1482,7 @@ sources:
 
 Input aliases can be defined as batches in csv files with `;` separator.
 There are 2 batch input types  `xtream_batch` and `m3u_batch`.
+Batch inputs are file-based only: use a local path (`/path/file.csv`, `./file.csv`) or `file://...`.
 
 #### `XtreamBatch`
 
