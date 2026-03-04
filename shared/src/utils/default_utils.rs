@@ -51,19 +51,29 @@ pub const fn is_default_resource_retry_backoff_multiplier(v: &f64) -> bool {
     (*v - default_resource_retry_backoff_multiplier()).abs() < F64_DEFAULT_EPSILON
 }
 
+fn fill_with_secure_random_bytes(out: &mut [u8]) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        for byte in out {
+            *byte = fastrand::u8(..);
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Err(err) = getrandom::fill(out) {
+        panic!("failed to generate secure random bytes: {err}");
+    }
+}
+
 pub fn generate_default_access_secret() -> [u8; 32] {
     let mut out = [0u8; 32];
-    for x in &mut out {
-        *x = fastrand::u8(..);
-    }
+    fill_with_secure_random_bytes(&mut out);
     out
 }
 
 pub fn generate_default_encrypt_secret() -> [u8; 16] {
     let mut out = [0u8; 16];
-    for x in &mut out {
-        *x = fastrand::u8(..);
-    }
+    fill_with_secure_random_bytes(&mut out);
     out
 }
 

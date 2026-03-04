@@ -7,6 +7,9 @@ pub fn decode_base64_string(input: &str) -> Vec<u8> {
 }
 
 pub fn xor_bytes(secret: &[u8], data: &[u8]) -> Vec<u8> {
+    if secret.is_empty() {
+        return data.to_vec();
+    }
     data.iter().enumerate().map(|(i, &b)| b ^ secret[i % secret.len()]).collect()
 }
 
@@ -33,7 +36,7 @@ mod tests {
         }
         let plain = "hello world";
         let encrypted = obfuscate_text(&secret, plain);
-        let decrypted = deobfuscate_text(&secret, &encrypted.unwrap()).unwrap();
+        let decrypted = deobfuscate_text(&secret, &encrypted).unwrap();
 
         assert_eq!(decrypted, plain);
     }

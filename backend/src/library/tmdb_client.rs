@@ -93,11 +93,12 @@ pub struct TmdbClient {
 impl TmdbClient {
     // Creates a new TMDB client
     pub fn new(api_key: String, tmdb_config: &TmdbConfig, client: reqwest::Client, storage: MetadataStorage) -> Self {
+        let capped_match_threshold = tmdb_config.match_threshold.clamp(0, 100);
         Self {
             api_key,
             client,
             rate_limit_ms: tmdb_config.rate_limit_ms,
-            match_threshold: f64::from(tmdb_config.match_threshold) / 100.0f64,
+            match_threshold: f64::from(capped_match_threshold) / 100.0f64,
             storage,
             fetched_movie_metadata: tokio::sync::RwLock::new(BoundedSet::new(MAX_FETCHED_CACHE_ENTRIES)),
             fetched_series_metadata: tokio::sync::RwLock::new(BoundedSet::new(MAX_FETCHED_CACHE_ENTRIES)),

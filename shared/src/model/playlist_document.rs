@@ -123,75 +123,80 @@ impl XtreamPlaylistItem {
     }
 
     fn to_info_document_no_props(&self, options: &XtreamMappingOptions) -> XtreamInfoDocument {
-        let stream_icon = self.get_stream_icon(options);
         let empty_str = "".intern();
         match self.xtream_cluster {
             XtreamCluster::Live => XtreamInfoDocument::Empty(XtreamEmptyDoc {}),
-            XtreamCluster::Video => XtreamInfoDocument::Video(XtreamVideoInfoDoc {
-                info: XtreamVideoInfoData {
-                    kinopoisk_url: Arc::clone(&empty_str),
-                    tmdb_id: Arc::clone(&empty_str),
-                    name: Arc::clone(&self.title),
-                    o_name: Arc::clone(&self.name),
-                    cover_big: Arc::clone(&stream_icon),
-                    movie_image: Arc::clone(&stream_icon),
-                    release_date: Arc::clone(&empty_str),
-                    episode_run_time: 0,
-                    youtube_trailer: Arc::clone(&empty_str),
-                    director: Arc::clone(&empty_str),
-                    actors: Arc::clone(&empty_str),
-                    cast: Arc::clone(&empty_str),
-                    description: Arc::clone(&empty_str),
-                    plot: Arc::clone(&empty_str),
-                    age: Arc::clone(&empty_str),
-                    mpaa_rating: Arc::clone(&empty_str),
-                    rating_count_kinopoisk: 0,
-                    country: Arc::clone(&empty_str),
-                    genre: Arc::clone(&empty_str),
-                    backdrop_path: vec![Arc::clone(&stream_icon)],
-                    duration_secs: "0".intern(),
-                    duration: Arc::clone(&empty_str),
-                    video: Value::Array(Vec::new()),
-                    audio: Value::Array(Vec::new()),
-                    bitrate: 0,
-                    rating: Arc::clone(&empty_str),
-                    runtime: Arc::clone(&empty_str),
-                    status: "Released".intern(),
-                },
-                movie_data: XtreamVideoMovieData {
-                    stream_id: self.virtual_id,
-                    name: Arc::clone(&self.name),
-                    added: Arc::clone(&empty_str),
-                    category_id: self.category_id.intern(),
-                    category_ids: vec![self.category_id],
-                    container_extension: Arc::clone(&empty_str),
-                    custom_sid: None,
-                    direct_source: Arc::clone(&empty_str),
-                },
-            }),
-            XtreamCluster::Series => XtreamInfoDocument::Series(XtreamSeriesInfoDoc {
-                seasons: Vec::new(),
-                info: XtreamSeriesInfoData {
-                    name: Arc::clone(&self.title),
-                    cover: Arc::clone(&stream_icon),
-                    plot: Arc::clone(&empty_str),
-                    cast: Arc::clone(&empty_str),
-                    director: Arc::clone(&empty_str),
-                    genre: Arc::clone(&empty_str),
-                    release_date_alternate: Arc::clone(&empty_str),
-                    release_date: Arc::clone(&empty_str),
-                    last_modified: Arc::clone(&empty_str),
-                    rating: Arc::clone(&empty_str),
-                    rating_5based: Arc::clone(&empty_str),
-                    backdrop_path: if stream_icon.is_empty() { vec![] } else { vec![Arc::clone(&stream_icon)] },
-                    tmdb: Arc::clone(&empty_str),
-                    youtube_trailer: Arc::clone(&empty_str),
-                    episode_run_time: empty_str,
-                    category_id: self.category_id.intern(),
-                    category_ids: vec![self.category_id],
-                },
-                episodes: IndexMap::new(),
-            }),
+            XtreamCluster::Video => {
+                let stream_icon = self.get_stream_icon(options);
+                XtreamInfoDocument::Video(XtreamVideoInfoDoc {
+                    info: XtreamVideoInfoData {
+                        kinopoisk_url: Arc::clone(&empty_str),
+                        tmdb_id: Arc::clone(&empty_str),
+                        name: Arc::clone(&self.title),
+                        o_name: Arc::clone(&self.name),
+                        cover_big: Arc::clone(&stream_icon),
+                        movie_image: Arc::clone(&stream_icon),
+                        release_date: Arc::clone(&empty_str),
+                        episode_run_time: 0,
+                        youtube_trailer: Arc::clone(&empty_str),
+                        director: Arc::clone(&empty_str),
+                        actors: Arc::clone(&empty_str),
+                        cast: Arc::clone(&empty_str),
+                        description: Arc::clone(&empty_str),
+                        plot: Arc::clone(&empty_str),
+                        age: Arc::clone(&empty_str),
+                        mpaa_rating: Arc::clone(&empty_str),
+                        rating_count_kinopoisk: 0,
+                        country: Arc::clone(&empty_str),
+                        genre: Arc::clone(&empty_str),
+                        backdrop_path: vec![Arc::clone(&stream_icon)],
+                        duration_secs: "0".intern(),
+                        duration: Arc::clone(&empty_str),
+                        video: Value::Array(Vec::new()),
+                        audio: Value::Array(Vec::new()),
+                        bitrate: 0,
+                        rating: Arc::clone(&empty_str),
+                        runtime: Arc::clone(&empty_str),
+                        status: "Released".intern(),
+                    },
+                    movie_data: XtreamVideoMovieData {
+                        stream_id: self.virtual_id,
+                        name: Arc::clone(&self.name),
+                        added: Arc::clone(&empty_str),
+                        category_id: self.category_id.intern(),
+                        category_ids: vec![self.category_id],
+                        container_extension: Arc::clone(&empty_str),
+                        custom_sid: None,
+                        direct_source: Arc::clone(&empty_str),
+                    },
+                })
+            }
+            XtreamCluster::Series => {
+                let stream_icon = self.get_stream_icon(options);
+                XtreamInfoDocument::Series(XtreamSeriesInfoDoc {
+                    seasons: Vec::new(),
+                    info: XtreamSeriesInfoData {
+                        name: Arc::clone(&self.title),
+                        cover: Arc::clone(&stream_icon),
+                        plot: Arc::clone(&empty_str),
+                        cast: Arc::clone(&empty_str),
+                        director: Arc::clone(&empty_str),
+                        genre: Arc::clone(&empty_str),
+                        release_date_alternate: Arc::clone(&empty_str),
+                        release_date: Arc::clone(&empty_str),
+                        last_modified: Arc::clone(&empty_str),
+                        rating: Arc::clone(&empty_str),
+                        rating_5based: Arc::clone(&empty_str),
+                        backdrop_path: if stream_icon.is_empty() { vec![] } else { vec![Arc::clone(&stream_icon)] },
+                        tmdb: Arc::clone(&empty_str),
+                        youtube_trailer: Arc::clone(&empty_str),
+                        episode_run_time: empty_str,
+                        category_id: self.category_id.intern(),
+                        category_ids: vec![self.category_id],
+                    },
+                    episodes: IndexMap::new(),
+                })
+            }
         }
     }
 
@@ -214,7 +219,7 @@ impl XtreamPlaylistItem {
             num: self.channel_no,
             name: self.title.clone(),
             series_id: self.virtual_id,
-            cover: self.get_stream_resource(options, &series.cover, "cover").intern(),
+            cover: self.get_stream_resource(options, &series.cover, "cover"),
             plot: series.plot.clone().unwrap_or_else(|| Arc::clone(&empty_str)),
             cast: series.cast.clone(),
             director: series.director.clone(),
@@ -230,7 +235,7 @@ impl XtreamPlaylistItem {
                     if res_url.is_empty() {
                         vec![]
                     } else {
-                        vec![res_url.intern()]
+                        vec![res_url]
                     }
                 },
                 |b| {

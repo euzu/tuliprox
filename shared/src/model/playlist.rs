@@ -651,6 +651,9 @@ impl XtreamMappingOptions {
         resource_field: &str,
     ) -> String {
         if self.web_ui_request {
+            if resource_url.is_empty() {
+                return resource_url.to_string();
+            }
             let rewrite_url = concat_path(&self.base_url, &obfuscate_text(&self.encrypt_secret, resource_url));
             return rewrite_url;
         }
@@ -687,6 +690,9 @@ impl XtreamMappingOptions {
         index: usize,
     ) -> String {
         if self.web_ui_request {
+            if resource_url.is_empty() {
+                return resource_url.to_string();
+            }
             let rewrite_url = concat_path(&self.base_url, &obfuscate_text(&self.encrypt_secret, resource_url));
             return rewrite_url;
         }

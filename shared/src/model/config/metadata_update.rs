@@ -451,6 +451,7 @@ impl TmdbConfigDto {
             && self.cache_duration_days == default_tmdb_cache_duration_days()
             && self.language == default_tmdb_language()
             && self.cooldown == default_metadata_tmdb_cooldown()
+            && self.match_threshold == default_tmdb_match_threshold()
     }
 
     fn clean(&mut self) {
@@ -468,6 +469,7 @@ impl TmdbConfigDto {
         let cooldown_secs =
             MetadataUpdateConfigDto::parse_and_clamp_duration(&self.cooldown, MIN_DURATION_SECS, "tmdb.cooldown")?;
         self.cooldown = MetadataUpdateConfigDto::canonicalize_seconds(cooldown_secs);
+        self.match_threshold = self.match_threshold.clamp(0, 100);
         Ok(())
     }
 }
@@ -669,5 +671,24 @@ mod tests {
         assert!(result.is_err(), "numeric ffprobe analyze duration without unit must fail");
         let err_text = result.expect_err("validation should fail").to_string();
         assert!(err_text.contains("ffprobe.analyze_duration"));
+    }
+
+    #[test]
+    fn tmdb_non_default_match_threshold_is_not_empty() {
+        let mut cfg = MetadataUpdateConfigDto::default();
+        cfg.tmdb.match_threshold = 90;
+        cfg.prepare().expect("metadata update config should remain valid");
+
+        assert!(!cfg.tmdb.is_empty(), "tmdb config with non-default match threshold must not be empty");
+        assert!(!cfg.is_empty(), "metadata update config with non-default tmdb match threshold must not be empty");
+    }
+
+    #[test]
+    fn prepare_clamps_tmdb_match_threshold() {
+        let mut cfg = MetadataUpdateConfigDto::default();
+        cfg.tmdb.match_threshold = 250;
+        cfg.prepare().expect("metadata update config should clamp tmdb match threshold");
+
+        assert_eq!(cfg.tmdb.match_threshold, 100);
     }
 }

@@ -459,7 +459,7 @@ metadata_update:
     cache_duration_days: 0
     language: en-US
     cooldown: 7d
-    match_threshold: 90
+    match_threshold: 86
   ffprobe:
     enabled: true
     timeout: 60
