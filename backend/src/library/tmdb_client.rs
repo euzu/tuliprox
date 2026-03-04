@@ -15,14 +15,13 @@ use std::{
 };
 use tokio::time::{sleep, timeout, Duration, Instant};
 use url::Url;
+use crate::model::TmdbConfig;
 
 // TODO make this configurable in Library tmdb config
 const TMDB_API_BASE_URL: &str = "https://api.themoviedb.org/3";
 const MAX_RETRIES: u32 = 3;
 const REQUEST_TIMEOUT_SECS: u64 = 30;
 const MAX_FETCHED_CACHE_ENTRIES: usize = 10_000;
-/// Minimum Jaro-Winkler score required to accept a TMDB search result.
-const TMDB_MATCH_THRESHOLD: f64 = 0.9;
 
 /// Bounded set with insertion-order (FIFO) eviction.
 /// This is intentionally not LRU: `contains()` does not refresh recency.
@@ -84,6 +83,7 @@ pub struct TmdbClient {
     api_key: String,
     client: reqwest::Client,
     rate_limit_ms: u64,
+    match_threshold: f64,
     storage: MetadataStorage,
     fetched_movie_metadata: tokio::sync::RwLock<BoundedSet<u32>>,
     fetched_series_metadata: tokio::sync::RwLock<BoundedSet<u32>>,
@@ -92,11 +92,12 @@ pub struct TmdbClient {
 
 impl TmdbClient {
     // Creates a new TMDB client
-    pub fn new(api_key: String, rate_limit_ms: u64, client: reqwest::Client, storage: MetadataStorage) -> Self {
+    pub fn new(api_key: String, tmdb_config: &TmdbConfig, client: reqwest::Client, storage: MetadataStorage) -> Self {
         Self {
             api_key,
             client,
-            rate_limit_ms,
+            rate_limit_ms: tmdb_config.rate_limit_ms,
+            match_threshold: f64::from(tmdb_config.match_threshold) / 100.0f64,
             storage,
             fetched_movie_metadata: tokio::sync::RwLock::new(BoundedSet::new(MAX_FETCHED_CACHE_ENTRIES)),
             fetched_series_metadata: tokio::sync::RwLock::new(BoundedSet::new(MAX_FETCHED_CACHE_ENTRIES)),
@@ -268,11 +269,11 @@ impl TmdbClient {
                 .map(|m| (m.id, m.title.as_str(), m.original_title.as_str()))
                 .collect();
 
-            if let Some((score, movie_id)) = Self::best_match_by_title(&query_lower, &candidates) {
+            if let Some((score, movie_id)) = Self::best_match_by_title(&query_lower, &candidates, self.match_threshold) {
                 debug!("TMDB movie best match for '{title}': ID {movie_id} (score {score:.2})");
                 self.fetch_movie_details(movie_id).await
             } else {
-                debug!("TMDB movie search for '{title}': no result met threshold {TMDB_MATCH_THRESHOLD:.2}");
+                debug!("TMDB movie search for '{title}': no result met threshold {:.2}", self.match_threshold);
                 Ok(None)
             }
         } else {
@@ -390,11 +391,11 @@ impl TmdbClient {
                 .map(|s| (s.id, s.name.as_str(), s.original_name.as_str()))
                 .collect();
 
-            if let Some((score, series_id)) = Self::best_match_by_title(&query_lower, &candidates) {
+            if let Some((score, series_id)) = Self::best_match_by_title(&query_lower, &candidates, self.match_threshold) {
                 debug!("TMDB series best match for '{title}': ID {series_id} (score {score:.2})");
                 self.fetch_series_details(series_id).await
             } else {
-                debug!("TMDB series search for '{title}': no result met threshold {TMDB_MATCH_THRESHOLD:.2}");
+                debug!("TMDB series search for '{title}': no result met threshold {:.2}", self.match_threshold);
                 Ok(None)
             }
         } else {
@@ -406,8 +407,9 @@ impl TmdbClient {
     ///
     /// Compares `query` (already lowercased) against both the primary title and
     /// the original title of every candidate, takes the maximum score, and returns
-    /// `Some((score, id))` only when the best score is >= `TMDB_MATCH_THRESHOLD`.
-    fn best_match_by_title(query: &str, candidates: &[(u32, &str, &str)]) -> Option<(f64, u32)> {
+    /// `Some((score, id))` only when the best score is >= `match_threshold`.
+    fn best_match_by_title(query: &str, candidates: &[(u32, &str, &str)], match_threshold: f64) -> Option<(f64, u32)> {
+
         candidates
             .iter()
             .map(|&(id, title, original_title)| {
@@ -416,7 +418,7 @@ impl TmdbClient {
                 (score, id)
             })
             .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
-            .filter(|&(score, _)| score >= TMDB_MATCH_THRESHOLD)
+            .filter(|&(score, _)| score >= match_threshold)
     }
 
     // Fetches detailed TV series information

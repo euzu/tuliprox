@@ -205,7 +205,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
     match download_result {
         Ok((content, response_url)) => {
             let rewrite_hls_props = RewriteHlsProps {
-                secret: &app_state.app_config.encrypt_secret,
+                secret: &app_state.get_encrypt_secret(),
                 base_url: &server_info.get_base_url(),
                 content: &content,
                 hls_url: response_url,
@@ -338,7 +338,7 @@ async fn hls_api_stream(
         }
 
         let hls_url =
-            match get_hls_session_token_and_url_from_token(&app_state.app_config.encrypt_secret, &params.token) {
+            match get_hls_session_token_and_url_from_token(&app_state.get_encrypt_secret(), &params.token) {
                 Some((Some(session_token), hls_url)) if session.token.eq(&session_token) => hls_url,
                 _ => return axum::http::StatusCode::BAD_REQUEST.into_response(),
             };

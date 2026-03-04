@@ -2,17 +2,7 @@ use crate::model::macros;
 use shared::model::{
     FfprobeConfigDto, MetadataLogConfigDto, MetadataUpdateConfigDto, ProbeConfigDto, ResolveConfigDto, TmdbConfigDto,
 };
-use shared::utils::{
-    default_metadata_ffprobe_analyze_duration, default_metadata_ffprobe_live_analyze_duration,
-    default_metadata_ffprobe_live_probe_size, default_metadata_ffprobe_probe_size,
-    default_metadata_max_resolve_retry_backoff, default_metadata_probe_cooldown,
-    default_metadata_probe_retry_backoff_step_1, default_metadata_probe_retry_backoff_step_2,
-    default_metadata_probe_retry_backoff_step_3, default_metadata_probe_retry_load_retry_delay,
-    default_metadata_progress_log_interval, default_metadata_queue_log_interval,
-    default_metadata_resolve_exhaustion_reset_gap, default_metadata_resolve_min_retry_base, default_metadata_retry_delay,
-    default_metadata_tmdb_cooldown, default_metadata_worker_idle_timeout, default_tmdb_cache_duration_days,
-    default_tmdb_language, default_tmdb_rate_limit_ms, parse_duration_seconds, parse_size_base_2,
-};
+use shared::utils::{default_metadata_ffprobe_analyze_duration, default_metadata_ffprobe_live_analyze_duration, default_metadata_ffprobe_live_probe_size, default_metadata_ffprobe_probe_size, default_metadata_max_resolve_retry_backoff, default_metadata_probe_cooldown, default_metadata_probe_retry_backoff_step_1, default_metadata_probe_retry_backoff_step_2, default_metadata_probe_retry_backoff_step_3, default_metadata_probe_retry_load_retry_delay, default_metadata_progress_log_interval, default_metadata_queue_log_interval, default_metadata_resolve_exhaustion_reset_gap, default_metadata_resolve_min_retry_base, default_metadata_retry_delay, default_metadata_tmdb_cooldown, default_metadata_worker_idle_timeout, default_tmdb_cache_duration_days, default_tmdb_language, default_tmdb_match_threshold, default_tmdb_rate_limit_ms, parse_duration_seconds, parse_size_base_2};
 
 #[derive(Debug, Clone)]
 pub struct MetadataUpdateConfig {
@@ -87,6 +77,7 @@ pub struct TmdbConfig {
     pub language: String,
     pub cooldown: String,
     pub cooldown_secs: u64,
+    pub match_threshold: u16,
 }
 
 impl Default for TmdbConfig {
@@ -100,6 +91,7 @@ impl Default for TmdbConfig {
             language: default_tmdb_language(),
             cooldown_secs: parse_duration_or_default(&cooldown, &default_metadata_tmdb_cooldown(), false),
             cooldown,
+            match_threshold: default_tmdb_match_threshold(),
         }
     }
 }
@@ -342,6 +334,7 @@ impl From<&TmdbConfigDto> for TmdbConfig {
             language: dto.language.clone(),
             cooldown_secs: parse_duration_or_default(&dto.cooldown, &default_metadata_tmdb_cooldown(), false),
             cooldown: dto.cooldown.clone(),
+            match_threshold: dto.match_threshold,
         }
     }
 }
@@ -355,6 +348,7 @@ impl From<&TmdbConfig> for TmdbConfigDto {
             cache_duration_days: instance.cache_duration_days,
             language: instance.language.clone(),
             cooldown: instance.cooldown.clone(),
+            match_threshold: instance.match_threshold,
         }
     }
 }

@@ -462,7 +462,7 @@ impl TmdbSeason {
             episode_count: self.episode_count,
             name: self.name.clone(),
             overview: self.overview.clone(),
-            poster_path: self.poster_path.clone(),
+            poster_path: self.poster_path.as_ref().and_then(|p| resolve_tmdb_image_url(p)),
             season_number: self.season_number,
             vote_average: self.vote_average,
             episodes: self.episodes.clone(),

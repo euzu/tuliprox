@@ -5,8 +5,8 @@ use crate::{
         SeriesStreamProperties, StreamProperties, UUIDType, VideoStreamProperties, XtreamInfoDocument,
     },
     utils::{
-        arc_str_option_serde, arc_str_serde, extract_extension_from_url, generate_playlist_uuid, get_provider_id,
-        Internable,
+        arc_str_option_serde, arc_str_serde, concat_path, extract_extension_from_url, generate_playlist_uuid,
+        get_provider_id, obfuscate_text, Internable,
     },
 };
 use enum_iterator::Sequence;
@@ -633,7 +633,9 @@ pub struct XtreamMappingOptions {
     pub reverse_item_types: PlaylistItemTypeSet,
     pub username: String,
     pub password: String,
-    pub base_url: Option<String>,
+    pub base_url: String,
+    pub web_ui_request: bool,
+    pub encrypt_secret: [u8; 16],
 }
 
 impl XtreamMappingOptions {
@@ -645,23 +647,71 @@ impl XtreamMappingOptions {
         xtream_cluster: XtreamCluster,
         item_type: PlaylistItemType,
         virtual_id: VirtualId,
-    ) -> Option<String> {
+        resource_url: &str,
+        resource_field: &str,
+    ) -> String {
+        if self.web_ui_request {
+            let rewrite_url = concat_path(&self.base_url, &obfuscate_text(&self.encrypt_secret, resource_url));
+            return rewrite_url;
+        }
+
         let is_reverse = self.is_reverse(item_type);
-        let resource_url =
-            if is_reverse && self.flags.contains(XtreamMappingFlags::RewriteResourceUrl) && self.base_url.is_some() {
-                let resource_url = format!(
-                    "{}/resource/{}/{}/{}/{}",
-                    self.base_url.as_ref().map_or_else(String::new, |b| b.clone()),
-                    xtream_cluster.as_stream_type(),
-                    self.username,
-                    self.password,
-                    virtual_id
-                );
-                Some(resource_url)
-            } else {
-                None
-            };
-        resource_url
+        let rewrite_url = if is_reverse && self.flags.contains(XtreamMappingFlags::RewriteResourceUrl) {
+            let url = format!(
+                "{}/resource/{}/{}/{}/{}",
+                self.base_url,
+                xtream_cluster.as_stream_type(),
+                self.username,
+                self.password,
+                virtual_id
+            );
+            Some(url)
+        } else {
+            None
+        };
+
+        if let Some(url) = rewrite_url {
+            if resource_url.starts_with("http") {
+                return format!("{url}/{resource_field}");
+            }
+        }
+        resource_url.to_string()
+    }
+    pub fn get_bd_path_resource_url(
+        &self,
+        xtream_cluster: XtreamCluster,
+        item_type: PlaylistItemType,
+        virtual_id: VirtualId,
+        resource_url: &str,
+        resource_field: &str,
+        index: usize,
+    ) -> String {
+        if self.web_ui_request {
+            let rewrite_url = concat_path(&self.base_url, &obfuscate_text(&self.encrypt_secret, resource_url));
+            return rewrite_url;
+        }
+
+        let is_reverse = self.is_reverse(item_type);
+        let rewrite_url = if is_reverse && self.flags.contains(XtreamMappingFlags::RewriteResourceUrl) {
+            let url = format!(
+                "{}/resource/{}/{}/{}/{}",
+                self.base_url,
+                xtream_cluster.as_stream_type(),
+                self.username,
+                self.password,
+                virtual_id
+            );
+            Some(url)
+        } else {
+            None
+        };
+
+        if let Some(url) = rewrite_url {
+            if resource_url.starts_with("http") {
+                return format!("{url}/{resource_field}{}_{index}", xtream_const::XC_PROP_BACKDROP_PATH);
+            }
+        }
+        resource_url.to_string()
     }
 }
 

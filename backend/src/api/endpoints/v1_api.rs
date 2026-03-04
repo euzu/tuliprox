@@ -4,7 +4,8 @@ use crate::{
         endpoints::{
             download_api, extract_accept_header::ExtractAcceptHeader, library_api::library_api_register,
             user_api::user_api_register, v1_api_config::v1_api_config_register,
-            v1_api_playlist::v1_api_playlist_register, v1_api_user::v1_api_user_register,
+            v1_api_playlist::{v1_api_playlist_register_protected, v1_api_playlist_register_public},
+            v1_api_user::v1_api_user_register,
         },
         model::AppState,
     },
@@ -162,20 +163,23 @@ pub fn v1_api_register(
     app_state: Arc<AppState>,
     web_ui_path: &str,
 ) -> axum::Router<Arc<AppState>> {
-    let mut router = axum::Router::new();
-    router = router
+    let public_router = v1_api_playlist_register_public(axum::Router::new());
+
+    let mut protected_router = axum::Router::new();
+    protected_router = protected_router
         .route("/status", axum::routing::get(status))
         .route("/streams", axum::routing::get(streams))
         .route("/geoip/update", axum::routing::get(geoip_update))
         .route("/file/download", axum::routing::post(download_api::queue_download_file))
         .route("/file/download/info", axum::routing::get(download_api::download_file_info))
         .route("/ipinfo", axum::routing::get(ipinfo));
-    router = v1_api_config_register(router);
-    router = v1_api_user_register(router);
-    router = v1_api_playlist_register(router);
-    router = library_api_register(router);
+    protected_router = v1_api_config_register(protected_router);
+    protected_router = v1_api_user_register(protected_router);
+    protected_router = v1_api_playlist_register_protected(protected_router);
+    protected_router = library_api_register(protected_router);
     if web_auth_enabled {
-        router = router.route_layer(axum::middleware::from_fn_with_state(Arc::clone(&app_state), validator_admin));
+        protected_router =
+            protected_router.route_layer(axum::middleware::from_fn_with_state(Arc::clone(&app_state), validator_admin));
     }
     let config = app_state.app_config.config.load();
 
@@ -183,5 +187,7 @@ pub fn v1_api_register(
     if config.web_ui.as_ref().is_none_or(|c| c.user_ui_enabled) {
         base_router = base_router.merge(user_api_register(app_state, web_ui_path));
     }
-    base_router.nest(&concat_path_leading_slash(web_ui_path, "api/v1"), router)
+    base_router
+        .nest(&concat_path_leading_slash(web_ui_path, "api/v1"), public_router)
+        .nest(&concat_path_leading_slash(web_ui_path, "api/v1"), protected_router)
 }

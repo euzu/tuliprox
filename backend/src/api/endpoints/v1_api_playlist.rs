@@ -26,6 +26,8 @@ use shared::{
 };
 use std::sync::Arc;
 use url::Url;
+use shared::utils::deobfuscate_text;
+use crate::api::api_utils::resource_response;
 
 fn create_config_input_for_m3u(url: &str) -> ConfigInput {
     ConfigInput {
@@ -120,12 +122,11 @@ async fn playlist_content(
     playlist_req: &PlaylistRequest,
     cluster: XtreamCluster,
 ) -> impl IntoResponse + Send {
-    let _config = app_state.app_config.config.load();
     let client = app_state.http_client.load();
     match playlist_req {
         PlaylistRequest::Target(target_id) => get_playlist_for_target(
             app_state.app_config.get_target_by_id(*target_id).as_deref(),
-            &app_state.app_config,
+            app_state,
             cluster,
             accept.as_deref(),
         )
@@ -133,7 +134,7 @@ async fn playlist_content(
         .into_response(),
         PlaylistRequest::Input(input_id) => get_playlist_for_input(
             app_state.app_config.get_input_by_id(*input_id).as_ref(),
-            &app_state.app_config,
+            app_state,
             cluster,
             accept.as_deref(),
         )
@@ -145,7 +146,7 @@ async fn playlist_content(
                 get_playlist_for_custom_provider(
                     client.as_ref(),
                     Some(&input),
-                    &app_state.app_config,
+                    app_state,
                     cluster,
                     accept.as_deref(),
                 )
@@ -164,7 +165,7 @@ async fn playlist_content(
                 get_playlist_for_custom_provider(
                     client.as_ref(),
                     Some(&input),
-                    &app_state.app_config,
+                    app_state,
                     cluster,
                     accept.as_deref(),
                 )
@@ -293,7 +294,20 @@ async fn playlist_epg(
     axum::http::StatusCode::NO_CONTENT.into_response()
 }
 
-pub fn v1_api_playlist_register(router: Router<Arc<AppState>>) -> axum::Router<Arc<AppState>> {
+async fn playlist_resource(
+    req_headers: axum::http::HeaderMap,
+    axum::extract::Path(resource): axum::extract::Path<String>,
+    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+) -> impl IntoResponse + Send {
+    let encrypt_secret = app_state.get_encrypt_secret();
+    if let Ok(resource_url) = deobfuscate_text(&encrypt_secret, &resource) {
+        resource_response(&app_state, &resource_url, &req_headers, None).await.into_response()
+    } else {
+        axum::http::StatusCode::BAD_REQUEST.into_response()
+    }
+}
+
+pub fn v1_api_playlist_register_protected(router: Router<Arc<AppState>>) -> axum::Router<Arc<AppState>> {
     router
         .route("/playlist/webplayer", axum::routing::post(playlist_webplayer))
         .route("/playlist/update", axum::routing::post(playlist_update))
@@ -303,6 +317,12 @@ pub fn v1_api_playlist_register(router: Router<Arc<AppState>>) -> axum::Router<A
         .route("/playlist/series", axum::routing::post(playlist_content_series))
         .route("/playlist/series_info/{virtual_id}/{provider_id}", axum::routing::post(playlist_series_info))
         .route("/playlist/series/episode/{virtual_id}", axum::routing::post(playlist_episode_item))
+}
+
+pub fn v1_api_playlist_register_public(
+    router: Router<Arc<AppState>>,
+) -> axum::Router<Arc<AppState>> {
+    router.route("/playlist/resource/{resource}", axum::routing::get(playlist_resource))
 }
 
 async fn playlist_episode_item(

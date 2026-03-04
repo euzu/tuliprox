@@ -12,8 +12,8 @@ use crate::{
         context::ConfigContext,
     },
     config_field, config_field_bool, config_field_optional, edit_field_bool, edit_field_number,
-    edit_field_number_option_u64, edit_field_number_u64, edit_field_number_u8, edit_field_number_usize,
-    edit_field_text, edit_field_text_option, generate_form_reducer,
+    edit_field_number_option_u64, edit_field_number_u16, edit_field_number_u64, edit_field_number_u8,
+    edit_field_number_usize, edit_field_text, edit_field_text_option, generate_form_reducer,
     i18n::use_translation,
 };
 use shared::model::{
@@ -55,6 +55,7 @@ const LABEL_ENABLED: &str = "LABEL.ENABLED";
 const LABEL_API_KEY: &str = "LABEL.API_KEY";
 const LABEL_RATE_LIMIT_MS: &str = "LABEL.RATE_LIMIT_MS";
 const LABEL_CACHE_DURATION_DAYS: &str = "LABEL.CACHE_DURATION_DAYS";
+const LABEL_TMDB_MATCH_THRESHOLD: &str = "LABEL.MATCH_THRESHOLD";
 const LABEL_LANGUAGE: &str = "LABEL.LANGUAGE";
 const BACKOFF_JITTER_PERCENT_VALIDATION_KEY: &str = "BACKOFF_JITTER_PERCENT_VALIDATION";
 
@@ -126,6 +127,7 @@ generate_form_reducer!(
         CacheDurationDays => cache_duration_days: u32,
         Language => language: String,
         Cooldown => cooldown: String,
+        MatchThreshold => match_threshold: u16,
     }
 );
 
@@ -235,6 +237,17 @@ pub fn MetadataUpdateConfigView() -> Html {
                 </Card>
 
                 <Card class="tp__config-view__card">
+                    <h1>{translate.t(LABEL_PROBE)}</h1>
+                    { config_field!(probe, translate.t(LABEL_MAX_ATTEMPTS_PROBE), max_attempts) }
+                    { config_field!(probe, translate.t(LABEL_BACKOFF_JITTER_PERCENT), backoff_jitter_percent) }
+                    { config_field!(probe, translate.t(LABEL_PROBE_RETRY_BACKOFF_STEP_1), retry_backoff_step_1) }
+                    { config_field!(probe, translate.t(LABEL_PROBE_RETRY_BACKOFF_STEP_2), retry_backoff_step_2) }
+                    { config_field!(probe, translate.t(LABEL_PROBE_RETRY_BACKOFF_STEP_3), retry_backoff_step_3) }
+                    { config_field!(probe, translate.t(LABEL_PROBE_RETRY_LOAD_RETRY_DELAY), retry_load_retry_delay) }
+                    { config_field!(probe, translate.t(LABEL_PROBE_COOLDOWN), cooldown) }
+                </Card>
+
+                <Card class="tp__config-view__card">
                     <h1>{translate.t(LABEL_TMDB)}</h1>
                     { config_field_bool!(tmdb, translate.t(LABEL_ENABLED), enabled) }
                     { config_field_optional!(tmdb, translate.t(LABEL_API_KEY), api_key) }
@@ -242,6 +255,8 @@ pub fn MetadataUpdateConfigView() -> Html {
                     { config_field!(tmdb, translate.t(LABEL_CACHE_DURATION_DAYS), cache_duration_days) }
                     { config_field!(tmdb, translate.t(LABEL_LANGUAGE), language) }
                     { config_field!(tmdb, translate.t(LABEL_TMDB_COOLDOWN), cooldown) }
+                    { config_field!(tmdb, translate.t(LABEL_TMDB_MATCH_THRESHOLD), match_threshold) }
+
                 </Card>
 
                 <Card class="tp__config-view__card">
@@ -264,17 +279,6 @@ pub fn MetadataUpdateConfigView() -> Html {
                     { config_field!(resolve, translate.t(LABEL_RESOLVE_MIN_RETRY_BASE), min_retry_base) }
                     { config_field!(resolve, translate.t(LABEL_MAX_RESOLVE_RETRY_BACKOFF), max_retry_backoff) }
                     { config_field!(resolve, translate.t(LABEL_RESOLVE_EXHAUSTION_RESET_GAP), exhaustion_reset_gap) }
-                </Card>
-
-                <Card class="tp__config-view__card">
-                    <h1>{translate.t(LABEL_PROBE)}</h1>
-                    { config_field!(probe, translate.t(LABEL_MAX_ATTEMPTS_PROBE), max_attempts) }
-                    { config_field!(probe, translate.t(LABEL_BACKOFF_JITTER_PERCENT), backoff_jitter_percent) }
-                    { config_field!(probe, translate.t(LABEL_PROBE_RETRY_BACKOFF_STEP_1), retry_backoff_step_1) }
-                    { config_field!(probe, translate.t(LABEL_PROBE_RETRY_BACKOFF_STEP_2), retry_backoff_step_2) }
-                    { config_field!(probe, translate.t(LABEL_PROBE_RETRY_BACKOFF_STEP_3), retry_backoff_step_3) }
-                    { config_field!(probe, translate.t(LABEL_PROBE_RETRY_LOAD_RETRY_DELAY), retry_load_retry_delay) }
-                    { config_field!(probe, translate.t(LABEL_PROBE_COOLDOWN), cooldown) }
                 </Card>
 
             </>
@@ -300,38 +304,6 @@ pub fn MetadataUpdateConfigView() -> Html {
                     { edit_field_text!(ffprobe_state, translate.t(LABEL_FFPROBE_PROBE_SIZE), probe_size, FfprobeConfigFormAction::ProbeSize) }
                     { edit_field_text!(ffprobe_state, translate.t(LABEL_FFPROBE_LIVE_ANALYZE_DURATION), live_analyze_duration, FfprobeConfigFormAction::LiveAnalyzeDuration) }
                     { edit_field_text!(ffprobe_state, translate.t(LABEL_FFPROBE_LIVE_PROBE_SIZE), live_probe_size, FfprobeConfigFormAction::LiveProbeSize) }
-                </Card>
-
-                <Card class="tp__config-view__card">
-                    <h1>{translate.t(LABEL_TMDB)}</h1>
-                    { edit_field_bool!(tmdb_state, translate.t(LABEL_ENABLED), enabled, TmdbConfigFormAction::Enabled) }
-                    { edit_field_text_option!(tmdb_state, translate.t(LABEL_API_KEY), api_key, TmdbConfigFormAction::ApiKey, true) }
-                    { edit_field_number_u64!(tmdb_state, translate.t(LABEL_RATE_LIMIT_MS), rate_limit_ms, TmdbConfigFormAction::RateLimitMs) }
-                    { edit_field_number!(tmdb_state, translate.t(LABEL_CACHE_DURATION_DAYS), cache_duration_days, TmdbConfigFormAction::CacheDurationDays) }
-                    { edit_field_text!(tmdb_state, translate.t(LABEL_LANGUAGE), language, TmdbConfigFormAction::Language) }
-                    { edit_field_text!(tmdb_state, translate.t(LABEL_TMDB_COOLDOWN), cooldown, TmdbConfigFormAction::Cooldown) }
-                </Card>
-
-                <Card class="tp__config-view__card">
-                    <h1>{translate.t(LABEL_SETTINGS)}</h1>
-                    { edit_field_text!(form_state, translate.t(LABEL_METADATA_PATH), cache_path, MetadataUpdateConfigFormAction::Path) }
-                    { edit_field_text!(form_state, translate.t(LABEL_RETRY_DELAY), retry_delay, MetadataUpdateConfigFormAction::RetryDelay) }
-                    { edit_field_number_usize!(form_state, translate.t(LABEL_MAX_QUEUE_SIZE), max_queue_size, MetadataUpdateConfigFormAction::MaxQueueSize) }
-                    { edit_field_text!(form_state, translate.t(LABEL_WORKER_IDLE_TIMEOUT), worker_idle_timeout, MetadataUpdateConfigFormAction::WorkerIdleTimeout) }
-                </Card>
-
-                <Card class="tp__config-view__card">
-                    <h1>{translate.t(LABEL_LOG)}</h1>
-                    { edit_field_text!(log_state, translate.t(LABEL_QUEUE_LOG_INTERVAL), queue_interval, MetadataLogConfigFormAction::QueueInterval) }
-                    { edit_field_text!(log_state, translate.t(LABEL_PROGRESS_LOG_INTERVAL), progress_interval, MetadataLogConfigFormAction::ProgressInterval) }
-                </Card>
-
-                <Card class="tp__config-view__card">
-                    <h1>{translate.t(LABEL_RESOLVE)}</h1>
-                    { edit_field_number_u8!(resolve_state, translate.t(LABEL_MAX_ATTEMPTS_RESOLVE), max_attempts, ResolveConfigFormAction::MaxAttempts) }
-                    { edit_field_text!(resolve_state, translate.t(LABEL_RESOLVE_MIN_RETRY_BASE), min_retry_base, ResolveConfigFormAction::MinRetryBase) }
-                    { edit_field_text!(resolve_state, translate.t(LABEL_MAX_RESOLVE_RETRY_BACKOFF), max_retry_backoff, ResolveConfigFormAction::MaxRetryBackoff) }
-                    { edit_field_text!(resolve_state, translate.t(LABEL_RESOLVE_EXHAUSTION_RESET_GAP), exhaustion_reset_gap, ResolveConfigFormAction::ExhaustionResetGap) }
                 </Card>
 
                 <Card class="tp__config-view__card">
@@ -374,6 +346,39 @@ pub fn MetadataUpdateConfigView() -> Html {
                     { edit_field_text!(probe_state, translate.t(LABEL_PROBE_RETRY_BACKOFF_STEP_3), retry_backoff_step_3, ProbeConfigFormAction::RetryBackoffStep3) }
                     { edit_field_text!(probe_state, translate.t(LABEL_PROBE_RETRY_LOAD_RETRY_DELAY), retry_load_retry_delay, ProbeConfigFormAction::RetryLoadRetryDelay) }
                     { edit_field_text!(probe_state, translate.t(LABEL_PROBE_COOLDOWN), cooldown, ProbeConfigFormAction::Cooldown) }
+                </Card>
+
+                <Card class="tp__config-view__card">
+                    <h1>{translate.t(LABEL_TMDB)}</h1>
+                    { edit_field_bool!(tmdb_state, translate.t(LABEL_ENABLED), enabled, TmdbConfigFormAction::Enabled) }
+                    { edit_field_text_option!(tmdb_state, translate.t(LABEL_API_KEY), api_key, TmdbConfigFormAction::ApiKey, true) }
+                    { edit_field_number_u64!(tmdb_state, translate.t(LABEL_RATE_LIMIT_MS), rate_limit_ms, TmdbConfigFormAction::RateLimitMs) }
+                    { edit_field_number!(tmdb_state, translate.t(LABEL_CACHE_DURATION_DAYS), cache_duration_days, TmdbConfigFormAction::CacheDurationDays) }
+                    { edit_field_text!(tmdb_state, translate.t(LABEL_LANGUAGE), language, TmdbConfigFormAction::Language) }
+                    { edit_field_text!(tmdb_state, translate.t(LABEL_TMDB_COOLDOWN), cooldown, TmdbConfigFormAction::Cooldown) }
+                    { edit_field_number_u16!(tmdb_state, translate.t(LABEL_TMDB_MATCH_THRESHOLD), match_threshold, TmdbConfigFormAction::MatchThreshold) }
+                </Card>
+
+                <Card class="tp__config-view__card">
+                    <h1>{translate.t(LABEL_SETTINGS)}</h1>
+                    { edit_field_text!(form_state, translate.t(LABEL_METADATA_PATH), cache_path, MetadataUpdateConfigFormAction::Path) }
+                    { edit_field_text!(form_state, translate.t(LABEL_RETRY_DELAY), retry_delay, MetadataUpdateConfigFormAction::RetryDelay) }
+                    { edit_field_number_usize!(form_state, translate.t(LABEL_MAX_QUEUE_SIZE), max_queue_size, MetadataUpdateConfigFormAction::MaxQueueSize) }
+                    { edit_field_text!(form_state, translate.t(LABEL_WORKER_IDLE_TIMEOUT), worker_idle_timeout, MetadataUpdateConfigFormAction::WorkerIdleTimeout) }
+                </Card>
+
+                <Card class="tp__config-view__card">
+                    <h1>{translate.t(LABEL_LOG)}</h1>
+                    { edit_field_text!(log_state, translate.t(LABEL_QUEUE_LOG_INTERVAL), queue_interval, MetadataLogConfigFormAction::QueueInterval) }
+                    { edit_field_text!(log_state, translate.t(LABEL_PROGRESS_LOG_INTERVAL), progress_interval, MetadataLogConfigFormAction::ProgressInterval) }
+                </Card>
+
+                <Card class="tp__config-view__card">
+                    <h1>{translate.t(LABEL_RESOLVE)}</h1>
+                    { edit_field_number_u8!(resolve_state, translate.t(LABEL_MAX_ATTEMPTS_RESOLVE), max_attempts, ResolveConfigFormAction::MaxAttempts) }
+                    { edit_field_text!(resolve_state, translate.t(LABEL_RESOLVE_MIN_RETRY_BASE), min_retry_base, ResolveConfigFormAction::MinRetryBase) }
+                    { edit_field_text!(resolve_state, translate.t(LABEL_MAX_RESOLVE_RETRY_BACKOFF), max_retry_backoff, ResolveConfigFormAction::MaxRetryBackoff) }
+                    { edit_field_text!(resolve_state, translate.t(LABEL_RESOLVE_EXHAUSTION_RESET_GAP), exhaustion_reset_gap, ResolveConfigFormAction::ExhaustionResetGap) }
                 </Card>
 
             </>

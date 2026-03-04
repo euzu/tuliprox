@@ -47,6 +47,7 @@ impl StoredProxyUserCredentialsDeprecated {
             status: stored.status,
             ui_enabled: stored.ui_enabled,
             comment: stored.comment.clone(),
+            t_is_api_user: false,
         }
     }
 }
@@ -108,6 +109,7 @@ impl StoredProxyUserCredentials {
             status: stored.status,
             ui_enabled: stored.ui_enabled,
             comment: stored.comment.clone(),
+            t_is_api_user: false,
         }
     }
 }
@@ -456,6 +458,7 @@ mod tests {
                         status: Some(ProxyUserStatus::Active),
                         ui_enabled: true,
                         comment: None,
+                        t_is_api_user: false,
                     },
                     ProxyUserCredentials {
                         username: "Test2".to_string(),
@@ -471,6 +474,7 @@ mod tests {
                         status: Some(ProxyUserStatus::Expired),
                         ui_enabled: true,
                         comment: None,
+                        t_is_api_user: false,
                     },
                     ProxyUserCredentials {
                         username: "Test3".to_string(),
@@ -486,6 +490,7 @@ mod tests {
                         status: Some(ProxyUserStatus::Expired),
                         ui_enabled: true,
                         comment: None,
+                        t_is_api_user: false,
                     },
                     ProxyUserCredentials {
                         username: "Test4".to_string(),
@@ -501,6 +506,7 @@ mod tests {
                         status: Some(ProxyUserStatus::Expired),
                         ui_enabled: true,
                         comment: None,
+                        t_is_api_user: false,
                     }
                 ],
             };

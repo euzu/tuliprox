@@ -582,7 +582,8 @@
       "COOLDOWN": "Pause after a successful TMDB lookup that returned no match.\n\nThis prevents endless re-tries for titles that currently do not exist in TMDB.\n\nExamples: `1d`, `3d`, `7d`.",
       "ENABLED": "Enables metadata lookup from TMDB.\n\nTurn this off if you do not want TMDB-based title matching.",
       "LANGUAGE": "Preferred language for TMDB titles and metadata.\n\nExample: `en-US`.",
-      "RATE_LIMIT_MS": "Minimum wait time between TMDB requests in milliseconds.\n\nHigher values are gentler to the TMDB API.\n\nExamples: `250`, `500`, `1000`."
+      "RATE_LIMIT_MS": "Minimum wait time between TMDB requests in milliseconds.\n\nHigher values are gentler to the TMDB API.\n\nExamples: `250`, `500`, `1000`.",
+      "MATCH_THRESHOLD": "Minimum match score for TMDB search. Value should be between 1 - 100"
     },
     "TRAKT_LIST_CONFIG": {
       "CATEGORY_NAME": "The category name used in the playlist for items from this Trakt list.",

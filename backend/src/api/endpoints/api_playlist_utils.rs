@@ -1,6 +1,7 @@
+use crate::api::model::AppState;
 use crate::{
     api::api_utils::{empty_json_list_response, json_or_bin_response, stream_json_or_bin_response_stream},
-    model::{AppConfig, ConfigInput, ConfigTarget},
+    model::{ConfigInput, ConfigTarget},
     repository::{
         iter_raw_m3u_input_playlist, iter_raw_m3u_target_playlist, iter_raw_xtream_input_playlist,
         iter_raw_xtream_target_playlist,
@@ -10,6 +11,7 @@ use crate::{
 use axum::response::IntoResponse;
 use log::warn;
 use serde_json::json;
+use shared::utils::{concat_path, concat_path_leading_slash, obfuscate_text, Internable};
 use shared::{
     model::{
         InputType, M3uPlaylistItem, PlaylistItemType, TargetType, UiPlaylistItem, XtreamCluster, XtreamPlaylistItem,
@@ -21,13 +23,21 @@ use tokio_stream::StreamExt;
 
 pub(in crate::api::endpoints) async fn get_playlist_for_target(
     cfg_target: Option<&ConfigTarget>,
-    cfg: &AppConfig,
+    app_state: &Arc<AppState>,
     cluster: XtreamCluster,
     accept: Option<&str>,
 ) -> impl IntoResponse + Send {
+    let config = app_state.app_config.config.load();
+    let web_ui_path = config
+        .web_ui
+        .as_ref()
+        .and_then(|w| w.path.as_ref())
+        .map_or("", String::as_str);
+    let resource_url = concat_path_leading_slash(web_ui_path, "api/v1/playlist/resource");
+    let encrypt_secret = app_state.get_encrypt_secret();
     if let Some(target) = cfg_target {
         if target.has_output(TargetType::Xtream) {
-            let Some(channel_iterator) = iter_raw_xtream_target_playlist(cfg, target, cluster).await else {
+            let Some(channel_iterator) = iter_raw_xtream_target_playlist(&app_state.app_config, target, cluster).await else {
                 return empty_json_list_response();
             };
             let item_filter = if cluster == XtreamCluster::Series {
@@ -37,10 +47,10 @@ pub(in crate::api::endpoints) async fn get_playlist_for_target(
             } else {
                 |_pli: &XtreamPlaylistItem| true
             };
-            let converted_stream = channel_iterator.filter(item_filter).map(UiPlaylistItem::from);
+            let converted_stream = channel_iterator.filter(item_filter).map(UiPlaylistItem::from).map(move |uiu| rewrite_resource_url(&encrypt_secret, &resource_url, uiu));
             return stream_json_or_bin_response_stream(accept, converted_stream).into_response();
         } else if target.has_output(TargetType::M3u) {
-            let Some(channel_iterator) = iter_raw_m3u_target_playlist(cfg, target, Some(cluster)).await else {
+            let Some(channel_iterator) = iter_raw_m3u_target_playlist(&app_state.app_config, target, Some(cluster)).await else {
                 return empty_json_list_response();
             };
             let item_filter = if cluster == XtreamCluster::Series {
@@ -54,7 +64,7 @@ pub(in crate::api::endpoints) async fn get_playlist_for_target(
             let converted_stream = channel_iterator.filter_map(move |res| match res {
                 Ok(pli) => {
                     if item_filter(&pli) {
-                        Some(UiPlaylistItem::from(pli))
+                        Some(rewrite_resource_url(&encrypt_secret, &resource_url, UiPlaylistItem::from(pli)))
                     } else {
                         None
                     }
@@ -70,21 +80,30 @@ pub(in crate::api::endpoints) async fn get_playlist_for_target(
     (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": "Invalid Arguments"}))).into_response()
 }
 
+fn rewrite_resource_url(encrypt_secret: &[u8; 16], resource_url: &str, item: UiPlaylistItem) -> UiPlaylistItem {
+    if item.logo.is_empty() {
+        return item;
+    }
+    let mut item = item;
+    item.logo = concat_path(resource_url, &obfuscate_text(encrypt_secret, &item.logo)).intern();
+    item
+}
+
 pub(in crate::api::endpoints) async fn get_playlist_for_input(
     cfg_input: Option<&Arc<ConfigInput>>,
-    cfg: &AppConfig,
+    app_state: &Arc<AppState>,
     cluster: XtreamCluster,
     accept: Option<&str>,
 ) -> impl IntoResponse + Send {
     if let Some(input) = cfg_input {
         if matches!(input.input_type, InputType::Xtream | InputType::XtreamBatch) {
-            let Some(channel_iterator) = iter_raw_xtream_input_playlist(cfg, input, cluster).await else {
+            let Some(channel_iterator) = iter_raw_xtream_input_playlist(&app_state.app_config, input, cluster).await else {
                 return empty_json_list_response();
             };
             let converted_stream = channel_iterator.map(UiPlaylistItem::from);
             return stream_json_or_bin_response_stream(accept, converted_stream).into_response();
         } else if matches!(input.input_type, InputType::M3u | InputType::M3uBatch) {
-            let Some(channels) = iter_raw_m3u_input_playlist(cfg, input, Some(cluster)).await else {
+            let Some(channels) = iter_raw_m3u_input_playlist(&app_state.app_config, input, Some(cluster)).await else {
                 return empty_json_list_response();
             };
             let converted_stream = channels.filter_map(|res| match res {
@@ -103,20 +122,20 @@ pub(in crate::api::endpoints) async fn get_playlist_for_input(
 pub(in crate::api::endpoints) async fn get_playlist_for_custom_provider(
     client: &reqwest::Client,
     cfg_input: Option<&Arc<ConfigInput>>,
-    app_config: &Arc<AppConfig>,
+    app_state: &Arc<AppState>,
     cluster: XtreamCluster,
     accept: Option<&str>,
 ) -> impl IntoResponse + Send {
-    let cfg = app_config.config.load();
+    let cfg = app_state.app_config.config.load();
     match cfg_input {
         Some(input) => {
             let (result, errors) = match input.input_type {
                 InputType::M3u | InputType::M3uBatch => {
-                    m3u::download_m3u_playlist(app_config, client, &cfg, input).await
+                    m3u::download_m3u_playlist(&app_state.app_config, client, &cfg, input).await
                 }
                 InputType::Xtream | InputType::XtreamBatch => {
                     let (pl, err, _) =
-                        xtream::download_xtream_playlist(app_config, client, input, Some(&[cluster])).await;
+                        xtream::download_xtream_playlist(&app_state.app_config, client, input, Some(&[cluster])).await;
                     (pl, err)
                 }
                 InputType::Library => {

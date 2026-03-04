@@ -75,8 +75,8 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
     let xtream_output = target.get_xtream_output().ok_or_else(|| info_err!("Unexpected error, missing xtream output"))?;
 
     let app_config = &app_state.app_config;
-    let server_info = app_config.get_user_server_info(user);
-    let options = xtream_mapping_option_from_target_options(target, xtream_output, app_config, user, Some(server_info.get_base_url().as_str()));
+    let encrypt_secret = app_state.get_encrypt_secret();
+    let options = xtream_mapping_option_from_target_options(target, xtream_output, app_config, user, encrypt_secret);
 
     if let Some(content) = pli.get_resolved_info_document(&options) {
         return serde_json::to_string(&content).map_err(|err| info_err!("{err}"));
@@ -245,8 +245,8 @@ fn xtream_resolve_stream_info(app_state: &Arc<AppState>, user: &ProxyUserCredent
                               target: &ConfigTarget, xtream_output: &XtreamTargetOutput,
                               pli: &XtreamPlaylistItem) -> Option<Result<String, TuliproxError>> {
     let app_config = &app_state.app_config;
-    let server_info = app_config.get_user_server_info(user);
-    let options = xtream_mapping_option_from_target_options(target, xtream_output, app_config, user, Some(server_info.get_base_url().as_str()));
+    let encrypt_secret = app_state.get_encrypt_secret();
+    let options = xtream_mapping_option_from_target_options(target, xtream_output, app_config, user, encrypt_secret);
     if let Some(content) = pli.get_resolved_info_document(&options) {
         return Some(serde_json::to_string(&content).map_err(|err| info_err!("Failed to serialize stream info: {err}")));
     }

@@ -119,12 +119,11 @@ impl XtreamPlaylistItem {
                 return doc.to_info_document(options, self.item_type, self.virtual_id, self.category_id);
             }
         }
-        let resource_url = options.get_resource_url(self.xtream_cluster, self.item_type, self.virtual_id);
-        self.to_info_document_no_props(resource_url)
+        self.to_info_document_no_props(options)
     }
 
-    fn to_info_document_no_props(&self, resource_url: Option<String>) -> XtreamInfoDocument {
-        let stream_icon = self.get_stream_icon(resource_url);
+    fn to_info_document_no_props(&self, options: &XtreamMappingOptions) -> XtreamInfoDocument {
+        let stream_icon = self.get_stream_icon(options);
         let empty_str = "".intern();
         match self.xtream_cluster {
             XtreamCluster::Live => XtreamInfoDocument::Empty(XtreamEmptyDoc {}),
@@ -205,19 +204,17 @@ impl XtreamPlaylistItem {
                 StreamProperties::Episode(_episode) => XtreamDocument::Episode(XtreamEmptyDoc::default()),
             }
         } else {
-            let resource_url = options.get_resource_url(self.xtream_cluster, self.item_type, self.virtual_id);
-            self.to_document_no_props(resource_url)
+            self.to_document_no_props(options)
         }
     }
 
     fn series_to_document(&self, options: &XtreamMappingOptions, series: &SeriesStreamProperties) -> XtreamDocument {
-        let resource_url = options.get_resource_url(self.xtream_cluster, self.item_type, self.virtual_id);
         let empty_str = "".intern();
         XtreamDocument::Series(XtreamSeriesDoc {
             num: self.channel_no,
             name: self.title.clone(),
             series_id: self.virtual_id,
-            cover: InfoDocUtils::make_resource_url(resource_url.as_deref(), &series.cover, "cover").intern(),
+            cover: self.get_stream_resource(options, &series.cover, "cover").intern(),
             plot: series.plot.clone().unwrap_or_else(|| Arc::clone(&empty_str)),
             cast: series.cast.clone(),
             director: series.director.clone(),
@@ -229,7 +226,7 @@ impl XtreamPlaylistItem {
             rating_5based: InfoDocUtils::limited(series.rating_5based).intern(),
             backdrop_path: series.backdrop_path.as_ref().map_or_else(
                 || {
-                    let res_url = InfoDocUtils::make_resource_url(resource_url.as_deref(), &series.cover, "cover");
+                    let res_url = self.get_stream_resource(options, &series.cover, "cover");
                     if res_url.is_empty() {
                         vec![]
                     } else {
@@ -240,7 +237,16 @@ impl XtreamPlaylistItem {
                     b.iter()
                         .enumerate()
                         .map(|(idx, p)| {
-                            InfoDocUtils::make_bdpath_resource_url(resource_url.as_deref(), p, idx, "").intern()
+                            options
+                                .get_bd_path_resource_url(
+                                    XtreamCluster::Series,
+                                    self.item_type,
+                                    self.virtual_id,
+                                    p,
+                                    "",
+                                    idx,
+                                )
+                                .intern()
                         })
                         .collect()
                 },
@@ -254,8 +260,7 @@ impl XtreamPlaylistItem {
     }
 
     fn video_to_document(&self, options: &XtreamMappingOptions, video: &VideoStreamProperties) -> XtreamDocument {
-        let resource_url = options.get_resource_url(self.xtream_cluster, self.item_type, self.virtual_id);
-        let stream_icon = self.get_stream_icon(resource_url);
+        let stream_icon = self.get_stream_icon(options);
         let empty_str = "".intern();
         XtreamDocument::Video(XtreamVideoDoc {
             num: self.channel_no,
@@ -282,8 +287,7 @@ impl XtreamPlaylistItem {
     }
 
     fn live_to_document(&self, options: &XtreamMappingOptions, live: &LiveStreamProperties) -> XtreamDocument {
-        let resource_url = options.get_resource_url(self.xtream_cluster, self.item_type, self.virtual_id);
-        let stream_icon = self.get_stream_icon(resource_url);
+        let stream_icon = self.get_stream_icon(options);
         let empty_str = "".intern();
         XtreamDocument::Live(XtreamLiveDoc {
             num: self.channel_no,
@@ -307,10 +311,10 @@ impl XtreamPlaylistItem {
         })
     }
 
-    fn to_document_no_props(&self, resource_url: Option<String>) -> XtreamDocument {
+    fn to_document_no_props(&self, options: &XtreamMappingOptions) -> XtreamDocument {
         let empty_str = "".intern();
         let zero_str = "0".intern();
-        let stream_icon = self.get_stream_icon(resource_url);
+        let stream_icon = self.get_stream_icon(options);
         match self.xtream_cluster {
             XtreamCluster::Live => XtreamDocument::Live(XtreamLiveDoc {
                 num: self.channel_no,
@@ -370,14 +374,25 @@ impl XtreamPlaylistItem {
         }
     }
 
-    fn get_stream_icon(&self, resource_url: Option<String>) -> Arc<str> {
+    fn get_stream_icon(&self, options: &XtreamMappingOptions) -> Arc<str> {
         if !self.logo.is_empty() {
-            InfoDocUtils::make_resource_url(resource_url.as_deref(), &self.logo, "logo").intern()
+            self.get_stream_resource(options, &self.logo, "logo")
         } else if !self.logo_small.is_empty() {
-            InfoDocUtils::make_resource_url(resource_url.as_deref(), &self.logo_small, "logo_small").intern()
+            self.get_stream_resource(options, &self.logo_small, "logo_small")
         } else {
             "".intern()
         }
+    }
+
+    fn get_stream_resource(
+        &self,
+        options: &XtreamMappingOptions,
+        resource_url: &str,
+        resource_field: &str,
+    ) -> Arc<str> {
+        options
+            .get_resource_url(self.xtream_cluster, self.item_type, self.virtual_id, resource_url, resource_field)
+            .intern()
     }
 }
 

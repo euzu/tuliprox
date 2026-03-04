@@ -12,8 +12,8 @@ use crate::{
         default_metadata_progress_log_interval, default_metadata_queue_log_interval,
         default_metadata_resolve_exhaustion_reset_gap, default_metadata_resolve_min_retry_base,
         default_metadata_retry_delay, default_metadata_tmdb_cooldown, default_metadata_worker_idle_timeout,
-        default_tmdb_api_key, default_tmdb_cache_duration_days, default_tmdb_language, default_tmdb_rate_limit_ms,
-        deserialize_as_string, is_default_metadata_backoff_jitter_percent,
+        default_tmdb_api_key, default_tmdb_cache_duration_days, default_tmdb_language, default_tmdb_match_threshold,
+        default_tmdb_rate_limit_ms, deserialize_as_string, is_default_metadata_backoff_jitter_percent,
         is_default_metadata_ffprobe_analyze_duration, is_default_metadata_ffprobe_live_analyze_duration,
         is_default_metadata_ffprobe_live_probe_size, is_default_metadata_ffprobe_probe_size,
         is_default_metadata_max_attempts_probe, is_default_metadata_max_attempts_resolve,
@@ -24,8 +24,8 @@ use crate::{
         is_default_metadata_queue_log_interval, is_default_metadata_resolve_exhaustion_reset_gap,
         is_default_metadata_resolve_min_retry_base, is_default_metadata_retry_delay, is_default_metadata_tmdb_cooldown,
         is_default_metadata_worker_idle_timeout, is_default_tmdb_cache_duration_days, is_default_tmdb_language,
-        is_default_tmdb_rate_limit_ms, is_false, is_tmdb_default_api_key, parse_duration_seconds, parse_size_base_2,
-        TMDB_API_KEY,
+        is_default_tmdb_match_threshold, is_default_tmdb_rate_limit_ms, is_false, is_tmdb_default_api_key,
+        parse_duration_seconds, parse_size_base_2, TMDB_API_KEY,
     },
 };
 
@@ -425,6 +425,8 @@ pub struct TmdbConfigDto {
     pub language: String,
     #[serde(default = "default_metadata_tmdb_cooldown", skip_serializing_if = "is_default_metadata_tmdb_cooldown")]
     pub cooldown: String,
+    #[serde(default = "default_tmdb_match_threshold", skip_serializing_if = "is_default_tmdb_match_threshold")]
+    pub match_threshold: u16,
 }
 
 impl Default for TmdbConfigDto {
@@ -436,6 +438,7 @@ impl Default for TmdbConfigDto {
             cache_duration_days: default_tmdb_cache_duration_days(),
             language: default_tmdb_language(),
             cooldown: default_metadata_tmdb_cooldown(),
+            match_threshold: default_tmdb_match_threshold(),
         }
     }
 }

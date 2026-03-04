@@ -7,7 +7,7 @@ use shared::model::{
     PlaylistItem, PlaylistItemType, PlaylistItemTypeSet, ProxyUserStatus, XtreamMappingFlags,
     XtreamMappingFlagsSet, XtreamMappingOptions,
 };
-use shared::utils::{arc_str_serde, deserialize_number_from_string_or_zero};
+use shared::utils::{arc_str_serde, concat_path_leading_slash, deserialize_number_from_string_or_zero};
 use enum_iterator::all;
 use crate::model::XtreamTargetFlags;
 
@@ -36,8 +36,8 @@ impl XtreamCategory {
 
 
 pub fn xtream_mapping_option_from_target_options(target: &ConfigTarget, target_output: &XtreamTargetOutput,
-                                                 cfg: &AppConfig, user: &ProxyUserCredentials,
-                                                 resource_url: Option<&str>) -> XtreamMappingOptions {
+                                                 app_config: &AppConfig, user: &ProxyUserCredentials,
+                                                 encrypt_secret: [u8; 16]) -> XtreamMappingOptions {
 
     let force_redirect = target.options.as_ref().and_then(|o| o.force_redirect);
     let mut reverse_item_types = PlaylistItemTypeSet::empty();
@@ -67,9 +67,23 @@ pub fn xtream_mapping_option_from_target_options(target: &ConfigTarget, target_o
     {
         flags.set(XtreamMappingFlags::SkipSeriesDirectSource);
     }
-    if cfg.is_reverse_proxy_resource_rewrite_enabled() {
+    if app_config.is_reverse_proxy_resource_rewrite_enabled() {
         flags.set(XtreamMappingFlags::RewriteResourceUrl);
     }
+
+
+    let base_url = if user.t_is_api_user {
+        let config = app_config.config.load();
+        let web_ui_path = config
+            .web_ui
+            .as_ref()
+            .and_then(|w| w.path.as_ref())
+            .map_or("", String::as_str);
+        concat_path_leading_slash(web_ui_path, "api/v1/playlist/resource")
+    } else {
+        app_config.get_user_server_info(user).get_base_url()
+    };
+
 
     XtreamMappingOptions {
         flags,
@@ -77,7 +91,9 @@ pub fn xtream_mapping_option_from_target_options(target: &ConfigTarget, target_o
         reverse_item_types,
         username: user.username.clone(),
         password: user.password.clone(),
-        base_url: resource_url.map(ToString::to_string),
+        base_url,
+        web_ui_request: user.t_is_api_user,
+        encrypt_secret
     }
 }
 

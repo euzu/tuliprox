@@ -459,6 +459,7 @@ metadata_update:
     cache_duration_days: 0
     language: en-US
     cooldown: 7d
+    match_threshold: 90
   ffprobe:
     enabled: true
     timeout: 60
@@ -498,6 +499,7 @@ metadata_update:
 - `probe.backoff_jitter_percent` (default `20`): Random jitter percentage applied to resolve/probe retry backoff to avoid synchronized retries.
 - `tmdb.cooldown` (default `7d`): Cooldown duration after a TMDB lookup completed successfully but returned no match.
 - `tmdb.enabled` / `tmdb.api_key` / `tmdb.rate_limit_ms` / `tmdb.cache_duration_days` / `tmdb.language`: TMDB resolver settings.
+- `tmdb.match_threshold` (default `86`): TMDB match threshold for search results for TMDB ID resolution.
 - `retry_delay` (default `2s`): Minimum retry delay for transient worker errors (for example temporary connection/resource issues).
 - `worker_idle_timeout` (default `1m`): Idle timeout for metadata worker shutdown when there is no immediate work.
 - `max_queue_size` (default `100000`): Maximum pending metadata tasks per input before new tasks are rejected.

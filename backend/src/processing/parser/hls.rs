@@ -1,22 +1,19 @@
-use std::borrow::Cow;
 use crate::model::ProxyUserCredentials;
-use crate::utils::{deobfuscate_text, obfuscate_text};
-use shared::utils::{extract_extension_from_url, CONSTANTS, HLS_PREFIX};
+use shared::concat_string;
+use shared::utils::{deobfuscate_text, extract_extension_from_url, obfuscate_text, CONSTANTS, HLS_PREFIX};
+use std::borrow::Cow;
 use std::str;
 use url::Url;
-use shared::concat_string;
 
 const TOKEN_SEPARATOR: char = '\x1F';
 const TOKEN_SEPARATOR_STR: &str = "\x1F";
 
-fn create_hls_session_token_and_url(secret: &[u8], session_token: &str, stream_url: &str) -> Option<String> {
-    if let Ok(cookie_value) = obfuscate_text(secret, &concat_string!(session_token, TOKEN_SEPARATOR_STR, stream_url)) {
-        if let Some(ext) = extract_extension_from_url(stream_url) {
-            return Some(concat_string!(&cookie_value, &ext));
-        }
-        return Some(cookie_value);
+fn create_hls_session_token_and_url(secret: &[u8], session_token: &str, stream_url: &str) -> String {
+    let cookie_value = obfuscate_text(secret, &concat_string!(session_token, TOKEN_SEPARATOR_STR, stream_url));
+    if let Some(ext) = extract_extension_from_url(stream_url) {
+        return concat_string!(&cookie_value, &ext);
     }
-    None
+    cookie_value
 }
 
 fn remove_any_ext(s: &str) -> &str {
@@ -49,7 +46,7 @@ pub struct RewriteHlsProps<'a> {
 
 /// Rewrites an HLS URI relative to a base playlist URL.
 /// Absolute URIs are returned unchanged.
-pub fn rewrite_hls_url<'a>(base:  &'a str, reference: &'a str) -> Cow<'a, str> {
+pub fn rewrite_hls_url<'a>(base: &'a str, reference: &'a str) -> Cow<'a, str> {
     // absolute URI → passthrough
     if Url::parse(reference).is_ok() {
         return Cow::Borrowed(reference);
@@ -71,11 +68,11 @@ fn rewrite_uri_attrib<'a>(line: &'a str, props: &RewriteHlsProps) -> Cow<'a, str
     let rewritten = rewrite_hls_url(&props.hls_url, uri);
 
     let final_uri = if let Some(user_token) = &props.user_token {
-        create_hls_session_token_and_url(
+        Cow::Owned(create_hls_session_token_and_url(
             props.secret,
             user_token,
             &rewritten,
-        ).map(Cow::Owned).unwrap_or(rewritten)
+        ))
     } else {
         rewritten
     };
@@ -105,18 +102,17 @@ pub fn rewrite_hls(user: &ProxyUserCredentials, props: &RewriteHlsProps) -> Stri
         // target url
         let target_url = rewrite_hls_url(&props.hls_url, line);
         if let Some(user_token) = &props.user_token {
-            if let Some(token) = create_hls_session_token_and_url(props.secret, user_token, &target_url) {
-                let url = format!(
-                    "{}/{HLS_PREFIX}/{}/{}/{}/{}/{}",
-                    props.base_url,
-                    username,
-                    password,
-                    props.input_id,
-                    props.virtual_id,
-                    token
-                );
-                result.push(url);
-            }
+            let token = create_hls_session_token_and_url(props.secret, user_token, &target_url);
+            let url = format!(
+                "{}/{HLS_PREFIX}/{}/{}/{}/{}/{}",
+                props.base_url,
+                username,
+                password,
+                props.input_id,
+                props.virtual_id,
+                token
+            );
+            result.push(url);
         }
     }
     result.push("\r\n".to_string());
@@ -125,9 +121,9 @@ pub fn rewrite_hls(user: &ProxyUserCredentials, props: &RewriteHlsProps) -> Stri
 
 #[cfg(test)]
 mod test {
+    use crate::processing::parser::hls::rewrite_hls_url;
     use rand::RngCore;
     use shared::utils::u32_to_base64;
-    use crate::processing::parser::hls::{rewrite_hls_url};
 
     #[test]
     fn test_token_size() {

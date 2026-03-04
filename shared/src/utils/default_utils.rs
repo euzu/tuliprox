@@ -51,13 +51,23 @@ pub const fn is_default_resource_retry_backoff_multiplier(v: &f64) -> bool {
     (*v - default_resource_retry_backoff_multiplier()).abs() < F64_DEFAULT_EPSILON
 }
 
-pub fn default_secret() -> String {
+pub fn generate_default_access_secret() -> [u8; 32] {
+    let mut out = [0u8; 32];
+    for x in &mut out {
+        *x = fastrand::u8(..);
+    }
+    out
+}
+
+pub fn generate_default_encrypt_secret() -> [u8; 16] {
     let mut out = [0u8; 16];
     for x in &mut out {
         *x = fastrand::u8(..);
     }
-    out.iter().map(|b| format!("{:02X}", b)).collect()
+    out
 }
+
+pub fn default_secret() -> String { generate_default_encrypt_secret().iter().map(|b| format!("{:02X}", b)).collect() }
 
 pub const fn default_kick_secs() -> u64 { 90 }
 pub const fn is_default_kick_secs(v: &u64) -> bool { *v == default_kick_secs() }
@@ -65,10 +75,13 @@ pub const fn is_default_kick_secs(v: &u64) -> bool { *v == default_kick_secs() }
 pub const fn default_token_ttl_mins() -> u32 { 30 }
 pub const fn is_default_token_ttl_mins(v: &u32) -> bool { *v == default_token_ttl_mins() }
 
-pub const fn default_match_threshold() -> u16 { 80 }
-pub const fn is_default_match_threshold(v: &u16) -> bool { *v == default_match_threshold() }
-pub const fn default_best_match_threshold() -> u16 { 95 }
-pub const fn is_default_best_match_threshold(v: &u16) -> bool { *v == default_best_match_threshold() }
+pub const fn default_epg_match_threshold() -> u16 { 80 }
+pub const fn is_default_epg_match_threshold(v: &u16) -> bool { *v == default_epg_match_threshold() }
+pub const fn default_epg_best_match_threshold() -> u16 { 95 }
+pub const fn is_default_epg_best_match_threshold(v: &u16) -> bool { *v == default_epg_best_match_threshold() }
+
+pub const fn default_tmdb_match_threshold() -> u16 { 86 }
+pub const fn is_default_tmdb_match_threshold(v: &u16) -> bool { *v == default_tmdb_match_threshold() }
 
 pub const TMDB_API_KEY: &str = "4219e299c89411838049ab0dab19ebd5";
 pub fn default_tmdb_api_key() -> Option<String> { Some(TMDB_API_KEY.to_string()) }

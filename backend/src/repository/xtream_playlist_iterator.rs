@@ -10,9 +10,11 @@ use shared::model::{PlaylistItemType, TargetType, XtreamCluster, XtreamMappingOp
 use std::collections::HashSet;
 use crate::repository::get_file_path_for_db_index;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::sync::mpsc;
 use tokio::task;
+use crate::api::model::AppState;
 
 pub struct XtreamPlaylistIterator {
     inner: LockedReceiverStream<(XtreamPlaylistItem, bool)>,
@@ -150,22 +152,22 @@ pub struct XtreamPlaylistJsonIterator {
 impl XtreamPlaylistJsonIterator {
     pub async fn new(
         cluster: XtreamCluster,
-        config: &AppConfig,
+        app_state: &Arc<AppState>,
         target: &ConfigTarget,
         category_id: Option<u32>,
         user: &ProxyUserCredentials,
     ) -> Result<Self, TuliproxError> {
         let xtream_output = target.get_xtream_output().ok_or_else(|| info_err!("Unexpected: xtream output required for target {}", target.name))?;
-        let server_info = config.get_user_server_info(user);
+        let encrypt_secret = app_state.get_encrypt_secret();
         let options = xtream_mapping_option_from_target_options(
             target,
             xtream_output,
-            config,
+            &app_state.app_config,
             user,
-            Some(server_info.get_base_url().as_str()),
+            encrypt_secret
         );
         Ok(Self {
-            inner: XtreamPlaylistIterator::new(cluster, config, target, category_id, user).await?,
+            inner: XtreamPlaylistIterator::new(cluster, &app_state.app_config, target, category_id, user).await?,
             options,
         })
     }
