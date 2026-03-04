@@ -27,6 +27,7 @@ use shared::model::{
     VideoStreamProperties, XtreamCluster, XtreamPlaylistItem, XtreamVideoInfo,
 };
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -479,6 +480,7 @@ async fn update_vod_info_immediate(
         resolve_tmdb,
         reasons.contains(ResolveReason::Probe),
         db_query,
+        None,
     )
     .await
 }
@@ -505,6 +507,7 @@ pub async fn update_vod_metadata(
     resolve_tmdb: bool,
     do_probe: bool,
     db_query: Option<Arc<Mutex<BPlusTreeQuery<u32, XtreamPlaylistItem>>>>,
+    tmdb_resolved_out: Option<&AtomicBool>,
 ) -> Result<Option<VideoStreamProperties>, TuliproxError> {
     let working_dir = &app_config.config.load().working_dir;
     let storage_path = get_input_storage_path(&input.name, working_dir)
@@ -747,6 +750,17 @@ pub async fn update_vod_metadata(
         }
     }
 
+    // Report whether TMDB data is present (regardless of whether we updated it this call).
+    if let Some(out) = tmdb_resolved_out {
+        let has_tmdb = properties.tmdb.is_some();
+        let has_date = properties
+            .details
+            .as_ref()
+            .and_then(|d| d.release_date.as_ref())
+            .is_some();
+        out.store(has_tmdb && has_date, Ordering::Relaxed);
+    }
+
     // 3. Probe (if enabled globally in config)
     let ffprobe_enabled = app_config.is_ffprobe_enabled().await;
     if do_probe && ffprobe_enabled {
@@ -793,16 +807,38 @@ pub async fn update_vod_metadata(
 
                 if active_handle.is_some() || temp_handle.is_some() {
                     debug_if_enabled!("Probing VOD '{}' (ID: {})", display_title, display_id);
-                    match crate::utils::ffmpeg::probe_url(
-                        &stream_url,
-                        user_agent.as_deref(),
-                        analyze_duration,
-                        probe_size,
-                        ffprobe_timeout,
-                        config.proxy.as_ref(),
-                    )
-                    .await
-                    {
+                    let cancel_token = temp_handle
+                        .as_ref()
+                        .and_then(|h| h.cancel_token.as_ref())
+                        .or_else(|| active_handle.and_then(|h| h.cancel_token.as_ref()));
+                    let probe_result = if let Some(token) = cancel_token {
+                        tokio::select! {
+                            biased;
+                            () = token.cancelled() => {
+                                warn!("Probe preempted for VOD {display_id}");
+                                ProbeUrlOutcome::Failed(ProbeFailureKind::Other)
+                            }
+                            result = crate::utils::ffmpeg::probe_url(
+                                &stream_url,
+                                user_agent.as_deref(),
+                                analyze_duration,
+                                probe_size,
+                                ffprobe_timeout,
+                                config.proxy.as_ref(),
+                            ) => result,
+                        }
+                    } else {
+                        crate::utils::ffmpeg::probe_url(
+                            &stream_url,
+                            user_agent.as_deref(),
+                            analyze_duration,
+                            probe_size,
+                            ffprobe_timeout,
+                            config.proxy.as_ref(),
+                        )
+                        .await
+                    };
+                    match probe_result {
                         ProbeUrlOutcome::Success(_quality, raw_video, raw_audio) => {
                             if let Some(details) = properties.details.as_mut() {
                                 if let Some(v) = raw_video {

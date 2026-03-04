@@ -31,7 +31,7 @@ use std::{
     io,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc, OnceLock, Weak,
     },
     time::{Duration, Instant},
@@ -48,6 +48,7 @@ const BLOCKING_DB_MAX_CONCURRENCY: usize = 32;
 const RETRY_STATE_PRUNE_INTERVAL_SECS: i64 = 300;
 const RETRY_STATE_MIN_TTL_SECS: i64 = 86_400;
 const RUNTIME_SETTINGS_REFRESH_INTERVAL_SECS: u64 = 60;
+const DEFAULT_NO_CHANGE_CACHE_TTL_SECS: u64 = 3600;
 
 fn metadata_blocking_concurrency_limit() -> usize {
     let parallelism =
@@ -645,6 +646,7 @@ impl MetadataUpdateManager {
                             metadata_retry_load_retry_at_ts: None,
                             last_retry_state_prune_at_ts: None,
                             scheduled_requeues: Arc::new(DashMap::new()),
+                            recently_completed_no_change: HashMap::new(),
                         },
                     ));
 
@@ -900,6 +902,9 @@ struct InputWorker {
     // Shared with detached delayed requeue tasks spawned in `schedule_requeue_at`.
     // A plain HashMap cannot be moved safely into those `'static` tasks.
     scheduled_requeues: Arc<DashMap<TaskKey, i64>>,
+    // Cache of tasks that recently completed with no changes (Ok(None)).
+    // Prevents repeated resolution of already-resolved items across playlist refreshes.
+    recently_completed_no_change: HashMap<TaskKey, Instant>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -989,6 +994,25 @@ impl InputWorker {
                 self.scheduled_requeues.remove(&current_key);
                 remove_current_task = true;
                 skip_execution = true;
+            }
+
+            // Skip tasks that recently completed with no changes (already resolved in DB).
+            if !skip_execution {
+                if let Some(completed_at) = self.recently_completed_no_change.get(&current_key) {
+                    let ttl = Duration::from_secs(DEFAULT_NO_CHANGE_CACHE_TTL_SECS);
+                    if completed_at.elapsed() < ttl {
+                        debug_if_enabled!(
+                            "Skipping recently-resolved no-change task for input {}: {}",
+                            input_name,
+                            task_for_execution
+                        );
+                        self.scheduled_requeues.remove(&current_key);
+                        remove_current_task = true;
+                        skip_execution = true;
+                    } else {
+                        self.recently_completed_no_change.remove(&current_key);
+                    }
+                }
             }
 
             if !skip_execution {
@@ -1179,6 +1203,13 @@ impl InputWorker {
 
                         self.resolve_exhausted.remove(&current_key);
                         self.scheduled_requeues.remove(&current_key);
+
+                        // Cache tasks that completed with no changes to skip redundant re-resolution.
+                        if !task_outcome.task_changed && Self::is_resolve_task(&task_for_execution) {
+                            self.recently_completed_no_change.insert(current_key.clone(), Instant::now());
+                        } else {
+                            self.recently_completed_no_change.remove(&current_key);
+                        }
 
                         if last_progress_log_at.elapsed() >= runtime_settings.progress_log_interval {
                             // current_key is removed from pending_tasks later in this loop iteration;
@@ -2540,19 +2571,6 @@ impl InputWorker {
         None
     }
 
-    fn vod_tmdb_pending_for_reason(props: &VideoStreamProperties, reason: ResolveReasonSet) -> bool {
-        let tmdb_missing = reason.contains(ResolveReason::Tmdb) && props.tmdb.is_none();
-        let date_missing = reason.contains(ResolveReason::Date)
-            && props.details.as_ref().and_then(|d| d.release_date.as_ref()).is_none();
-        tmdb_missing || date_missing
-    }
-
-    fn series_tmdb_pending_for_reason(props: &SeriesStreamProperties, reason: ResolveReasonSet) -> bool {
-        let tmdb_missing = reason.contains(ResolveReason::Tmdb) && props.tmdb.is_none();
-        let date_missing = reason.contains(ResolveReason::Date) && props.release_date.is_none();
-        tmdb_missing || date_missing
-    }
-
     #[allow(clippy::too_many_lines)]
     async fn process_task_static(
         input_name: &Arc<str>,
@@ -2672,7 +2690,7 @@ impl InputWorker {
             app_state.connection_manager.release_provider_handle(provider_handle).await;
         }
         match res {
-            Ok(()) => {
+            Ok(tmdb_resolved) => {
                 let task_changed = match task {
                     UpdateTask::ResolveVod { .. } => collector.vod.len() > pre_vod_updates,
                     UpdateTask::ResolveSeries { .. } => collector.series.len() > pre_series_updates,
@@ -2680,22 +2698,9 @@ impl InputWorker {
                     UpdateTask::ProbeStream { .. } => true,
                 };
                 let tmdb_pending = match task {
-                    UpdateTask::ResolveVod { reason, .. } => {
+                    UpdateTask::ResolveVod { reason, .. } | UpdateTask::ResolveSeries { reason, .. } => {
                         if reason.contains(ResolveReason::Tmdb) || reason.contains(ResolveReason::Date) {
-                            collector
-                                .vod
-                                .get(pre_vod_updates)
-                                .is_none_or(|(_, props)| Self::vod_tmdb_pending_for_reason(props, *reason))
-                        } else {
-                            false
-                        }
-                    }
-                    UpdateTask::ResolveSeries { reason, .. } => {
-                        if reason.contains(ResolveReason::Tmdb) || reason.contains(ResolveReason::Date) {
-                            collector
-                                .series
-                                .get(pre_series_updates)
-                                .is_none_or(|(_, props)| Self::series_tmdb_pending_for_reason(props, *reason))
+                            !tmdb_resolved
                         } else {
                             false
                         }
@@ -2713,9 +2718,10 @@ impl InputWorker {
             UpdateTask::ProbeLive { .. } => true,
             // Local library probing is fully local and must not depend on provider capacity.
             UpdateTask::ProbeStream { .. } => !matches!(input_type, InputType::Library),
-            UpdateTask::ResolveVod { reason, .. } | UpdateTask::ResolveSeries { reason, .. } => {
-                reason.contains(ResolveReason::Probe)
-            }
+            // Resolve tasks handle their own probe connection acquisition internally.
+            // This avoids holding a provider connection for the entire duration of
+            // info fetch + TMDB resolve + probe, reducing "provider exhausted" errors.
+            UpdateTask::ResolveVod { .. } | UpdateTask::ResolveSeries { .. } => false,
         }
     }
 
@@ -2730,7 +2736,9 @@ impl InputWorker {
         collector: &mut BatchResultCollector,
         db_handles: &mut HashMap<XtreamCluster, DbHandle>,
         failed_clusters: &mut HashSet<XtreamCluster>,
-    ) -> Result<(), TuliproxError> {
+    ) -> Result<bool, TuliproxError> {
+        // The returned bool indicates whether TMDB data is already present in the DB
+        // (used by the caller to avoid false-positive "no match" cooldowns).
         match task {
             UpdateTask::ResolveVod { id, reason, .. } => {
                 let fetch_info = reason.contains(ResolveReason::Info);
@@ -2752,6 +2760,7 @@ impl InputWorker {
                         .await
                 };
 
+                let tmdb_resolved = AtomicBool::new(false);
                 match update_vod_metadata(
                     &app_state.app_config,
                     client,
@@ -2765,14 +2774,15 @@ impl InputWorker {
                     resolve_tmdb,
                     will_probe,
                     query_opt,
+                    Some(&tmdb_resolved),
                 )
                 .await
                 {
                     Ok(Some(props)) => {
                         collector.add_vod(id.clone(), props);
-                        Ok(())
+                        Ok(tmdb_resolved.load(Ordering::Relaxed))
                     }
-                    Ok(None) => Ok(()),
+                    Ok(None) => Ok(tmdb_resolved.load(Ordering::Relaxed)),
                     Err(e) => Err(e),
                 }
             }
@@ -2797,6 +2807,7 @@ impl InputWorker {
                         .await
                 };
 
+                let tmdb_resolved = AtomicBool::new(false);
                 match update_series_metadata(
                     &app_state.app_config,
                     client,
@@ -2811,14 +2822,15 @@ impl InputWorker {
                     will_probe,
                     series_probe_settings,
                     query_opt,
+                    Some(&tmdb_resolved),
                 )
                 .await
                 {
                     Ok(Some(props)) => {
                         collector.add_series(id.clone(), props);
-                        Ok(())
+                        Ok(tmdb_resolved.load(Ordering::Relaxed))
                     }
-                    Ok(None) => Ok(()),
+                    Ok(None) => Ok(tmdb_resolved.load(Ordering::Relaxed)),
                     Err(e) => Err(e),
                 }
             }
@@ -2839,9 +2851,9 @@ impl InputWorker {
                 {
                     Ok(Some(props)) => {
                         collector.add_live(id.clone(), props);
-                        Ok(())
+                        Ok(false)
                     }
-                    Ok(None) => Ok(()),
+                    Ok(None) => Ok(false),
                     Err(e) => Err(e),
                 }
             }
@@ -2866,7 +2878,7 @@ impl InputWorker {
                 .await?;
 
                 match outcome {
-                    GenericProbeOutcome::Updated | GenericProbeOutcome::Noop => Ok(()),
+                    GenericProbeOutcome::Updated | GenericProbeOutcome::Noop => Ok(false),
                     GenericProbeOutcome::ProbeFailed => Err(shared::error::info_err!(
                         "Probe stream task failed for key {:?} ({})",
                         task_key,
@@ -3166,6 +3178,7 @@ mod tests {
             metadata_retry_load_retry_at_ts: None,
             last_retry_state_prune_at_ts: None,
             scheduled_requeues: Arc::new(DashMap::new()),
+            recently_completed_no_change: HashMap::new(),
         };
 
         let requeued = worker.finalize_processed_task_success(&key, 0, "input_a").await;
@@ -3209,6 +3222,7 @@ mod tests {
             metadata_retry_load_retry_at_ts: None,
             last_retry_state_prune_at_ts: None,
             scheduled_requeues: Arc::new(DashMap::new()),
+            recently_completed_no_change: HashMap::new(),
         };
 
         let requeued = worker.finalize_processed_task_success(&key, 0, "input_b").await;

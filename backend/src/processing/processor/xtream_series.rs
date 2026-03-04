@@ -30,6 +30,7 @@ use shared::model::{
 };
 use shared::model::{PlaylistGroup, PlaylistItemType, XtreamCluster};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -524,6 +525,7 @@ async fn update_series_info_immediate(
         reasons.contains(ResolveReason::Probe),
         probe_settings,
         db_query,
+        None,
     )
     .await
 }
@@ -620,6 +622,7 @@ pub async fn update_series_metadata(
     do_probe: bool,
     probe_settings: SeriesProbeSettings,
     db_query: Option<Arc<Mutex<BPlusTreeQuery<u32, XtreamPlaylistItem>>>>,
+    tmdb_resolved_out: Option<&AtomicBool>,
 ) -> Result<Option<SeriesStreamProperties>, TuliproxError> {
     let working_dir = &app_config.config.load().working_dir;
     let storage_path = get_input_storage_path(&input.name, working_dir)
@@ -818,6 +821,13 @@ pub async fn update_series_metadata(
         }
     }
 
+    // Report whether TMDB data is present (regardless of whether we updated it this call).
+    if let Some(out) = tmdb_resolved_out {
+        let has_tmdb = properties.tmdb.is_some();
+        let has_date = properties.release_date.is_some();
+        out.store(has_tmdb && has_date, Ordering::Relaxed);
+    }
+
     // 3. Probe Episodes (if enabled)
     if do_probe && app_config.is_ffprobe_enabled().await {
         if let Some(details) = properties.details.as_mut() {
@@ -863,16 +873,38 @@ pub async fn update_series_metadata(
                                 ep.title, ep.season, ep.episode_num, missing_reason
                             );
 
-                            match crate::utils::ffmpeg::probe_url(
-                                &episode_url,
-                                user_agent.as_deref(),
-                                probe_settings.analyze_duration_micros,
-                                probe_settings.probe_size_bytes,
-                                probe_settings.timeout_secs,
-                                config.proxy.as_ref(),
-                            )
-                            .await
-                            {
+                            let cancel_token = temp_handle
+                                .as_ref()
+                                .and_then(|h| h.cancel_token.as_ref())
+                                .or_else(|| active_handle.and_then(|h| h.cancel_token.as_ref()));
+                            let probe_result = if let Some(token) = cancel_token {
+                                tokio::select! {
+                                    biased;
+                                    () = token.cancelled() => {
+                                        warn!("Probe preempted for Series Episode S{}E{}", ep.season, ep.episode_num);
+                                        ProbeUrlOutcome::Failed(ProbeFailureKind::Other)
+                                    }
+                                    result = crate::utils::ffmpeg::probe_url(
+                                        &episode_url,
+                                        user_agent.as_deref(),
+                                        probe_settings.analyze_duration_micros,
+                                        probe_settings.probe_size_bytes,
+                                        probe_settings.timeout_secs,
+                                        config.proxy.as_ref(),
+                                    ) => result,
+                                }
+                            } else {
+                                crate::utils::ffmpeg::probe_url(
+                                    &episode_url,
+                                    user_agent.as_deref(),
+                                    probe_settings.analyze_duration_micros,
+                                    probe_settings.probe_size_bytes,
+                                    probe_settings.timeout_secs,
+                                    config.proxy.as_ref(),
+                                )
+                                .await
+                            };
+                            match probe_result {
                                 ProbeUrlOutcome::Success(_quality, raw_video, raw_audio) => {
                                     if let Some(v) = raw_video {
                                         ep.video = Some(v.to_string().into());
