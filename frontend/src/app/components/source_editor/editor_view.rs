@@ -257,6 +257,22 @@ fn create_output_instance(output: &TargetOutputDto) -> (BlockInstance, BlockType
     }
 }
 
+fn normalize_input_type_by_aliases(input: &mut ConfigInputDto, block_type: BlockType) {
+    let has_aliases = input.aliases.as_ref().is_some_and(|aliases| !aliases.is_empty());
+    match block_type {
+        BlockType::InputXtream => {
+            input.input_type = if has_aliases { InputType::XtreamBatch } else { InputType::Xtream };
+        }
+        BlockType::InputM3u => {
+            input.input_type = if has_aliases { InputType::M3uBatch } else { InputType::M3u };
+        }
+        BlockType::InputLibrary => {
+            input.input_type = InputType::Library;
+        }
+        _ => {}
+    }
+}
+
 fn editor_state_to_sources_config(base_sources: &SourcesConfigDto, editor_state: &EditorState) -> SourcesConfigDto {
     let mut sources_config = base_sources.clone();
     let mut gen_sources: Vec<ConfigSourceDto> = Vec::new();
@@ -266,7 +282,9 @@ fn editor_state_to_sources_config(base_sources: &SourcesConfigDto, editor_state:
     let input_blocks: Vec<&Block> = editor_state.blocks.iter().filter(|b| b.block_type.is_input()).collect();
     for block in input_blocks {
         if let BlockInstance::Input(input) = &block.instance {
-            gen_inputs.push(input.as_ref().clone());
+            let mut normalized_input = input.as_ref().clone();
+            normalize_input_type_by_aliases(&mut normalized_input, block.block_type);
+            gen_inputs.push(normalized_input);
         }
     }
 
@@ -1265,9 +1283,18 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         let editor_state_ref = editor_state_ref.clone();
         let emit_sources_change = emit_sources_change.clone();
         Callback::<(BlockId, BlockInstance)>::from(move |(block_id, instance): (BlockId, BlockInstance)| {
-            if let Some(block) = editor_state_ref.borrow_mut().get_block_mut(block_id) {
-                block.instance = instance;
+            let mut editor_state = editor_state_ref.borrow_mut();
+            if let Some(block) = editor_state.get_block_mut(block_id) {
+                block.instance = match instance {
+                    BlockInstance::Input(input_cfg) => {
+                        let mut normalized_input = input_cfg.as_ref().clone();
+                        normalize_input_type_by_aliases(&mut normalized_input, block.block_type);
+                        BlockInstance::Input(Rc::new(normalized_input))
+                    }
+                    other => other,
+                };
             }
+            drop(editor_state);
             emit_sources_change.emit(());
         })
     };
