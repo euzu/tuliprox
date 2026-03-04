@@ -38,7 +38,7 @@ impl MetadataResolver {
                         .api_key
                         .as_ref()
                         .map_or_else(|| TMDB_API_KEY.to_string(), ToString::to_string);
-                    Some(TmdbClient::new(api_key, config.tmdb.rate_limit_ms, client, tmdb_storage))
+                    Some(TmdbClient::new(api_key, &config.tmdb, client, tmdb_storage))
                 } else {
                     warn!("TMDB is enabled but metadata storage is unavailable; TMDB resolver is disabled.");
                     None

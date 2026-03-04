@@ -7,8 +7,8 @@ use crate::model::{AppConfig, ConfigTarget};
 use crate::model::{ConfigInput, ConfigInputFlags};
 use crate::processing::processor::playlist::PlaylistProcessingContext;
 use crate::processing::processor::{
-    create_resolve_options_function_for_xtream_target, process_foreground_retry_once, ResolveOptions,
-    ResolveOptionsFlags, FOREGROUND_BATCH_SIZE as BATCH_SIZE, FOREGROUND_MIN_RETRY_DELAY_SECS,
+    create_resolve_options_function_for_xtream_target, process_foreground_retry_once, select_cancel_token,
+    ResolveOptions, ResolveOptionsFlags, FOREGROUND_BATCH_SIZE as BATCH_SIZE, FOREGROUND_MIN_RETRY_DELAY_SECS,
     FOREGROUND_RETRY_BATCH_MAX_SIZE as RETRY_BATCH_MAX_SIZE,
 };
 use crate::ptt::ptt_parse_title;
@@ -27,6 +27,7 @@ use shared::model::{
     VideoStreamProperties, XtreamCluster, XtreamPlaylistItem, XtreamVideoInfo,
 };
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -479,6 +480,7 @@ async fn update_vod_info_immediate(
         resolve_tmdb,
         reasons.contains(ResolveReason::Probe),
         db_query,
+        None,
     )
     .await
 }
@@ -505,6 +507,7 @@ pub async fn update_vod_metadata(
     resolve_tmdb: bool,
     do_probe: bool,
     db_query: Option<Arc<Mutex<BPlusTreeQuery<u32, XtreamPlaylistItem>>>>,
+    tmdb_resolved_out: Option<&AtomicBool>,
 ) -> Result<Option<VideoStreamProperties>, TuliproxError> {
     let working_dir = &app_config.config.load().working_dir;
     let storage_path = get_input_storage_path(&input.name, working_dir)
@@ -747,6 +750,17 @@ pub async fn update_vod_metadata(
         }
     }
 
+    // Report whether TMDB data is present (regardless of whether we updated it this call).
+    if let Some(out) = tmdb_resolved_out {
+        let has_tmdb = properties.tmdb.is_some();
+        let has_date = properties
+            .details
+            .as_ref()
+            .and_then(|d| d.release_date.as_ref())
+            .is_some();
+        out.store(has_tmdb && has_date, Ordering::Relaxed);
+    }
+
     // 3. Probe (if enabled globally in config)
     let ffprobe_enabled = app_config.is_ffprobe_enabled().await;
     if do_probe && ffprobe_enabled {
@@ -793,13 +807,15 @@ pub async fn update_vod_metadata(
 
                 if active_handle.is_some() || temp_handle.is_some() {
                     debug_if_enabled!("Probing VOD '{}' (ID: {})", display_title, display_id);
-                    match crate::utils::ffmpeg::probe_url(
+                    let cancel_token = select_cancel_token(temp_handle.as_ref(), active_handle);
+                    match crate::utils::ffmpeg::probe_url_with_cancel(
                         &stream_url,
                         user_agent.as_deref(),
                         analyze_duration,
                         probe_size,
                         ffprobe_timeout,
                         config.proxy.as_ref(),
+                        cancel_token,
                     )
                     .await
                     {
@@ -823,6 +839,11 @@ pub async fn update_vod_metadata(
                                 probe_failure = Some(ProbeFailureKind::Other);
                             }
                         }
+                        ProbeUrlOutcome::Failed(ProbeFailureKind::Cancelled) => {
+                            if probe_failure.is_none() {
+                                probe_failure = Some(ProbeFailureKind::Cancelled);
+                            }
+                        }
                     }
                 if let Some(h) = temp_handle {
                     active_provider.release_handle(&h).await;
@@ -841,6 +862,7 @@ pub async fn update_vod_metadata(
                     shared::error::info_err!("Probe failed with 404 Not Found for VOD {display_id}")
                 }
                 ProbeFailureKind::Other => shared::error::info_err!("Probe failed for VOD {display_id}"),
+                ProbeFailureKind::Cancelled => shared::error::info_err!("Probe cancelled for VOD {display_id}"),
             };
             return Err(err);
         }

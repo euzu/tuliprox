@@ -21,7 +21,7 @@ use shared::model::{
     ApiProxyConfigDto, AppConfigDto, ConfigDto, ConfigInputAliasDto, ConfigPaths, HdHomeRunDeviceOverview, InputType,
     MsgKind, PatternTemplate, SourcesConfigDto, TargetUserDto, TemplateDefinitionDto,
 };
-use shared::utils::{CONSTANTS, PROVIDER_SCHEME_PREFIX, TEMPLATE_FILE};
+use shared::utils::{generate_default_access_secret, generate_default_encrypt_secret, CONSTANTS, PROVIDER_SCHEME_PREFIX, TEMPLATE_FILE};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::env;
@@ -573,8 +573,8 @@ pub async fn read_initial_app_config(
         paths: Arc::new(ArcSwap::from_pointee(paths.clone())),
         file_locks: Arc::new(FileLockManager::default()),
         custom_stream_response: Arc::new(ArcSwapAny::default()),
-        access_token_secret: Default::default(),
-        encrypt_secret: Default::default(),
+        access_token_secret: generate_default_access_secret(),
+        encrypt_secret: generate_default_encrypt_secret(),
         ffprobe_available: Arc::new(OnceCell::new())
     };
     app_config.prepare(include_computed)?;

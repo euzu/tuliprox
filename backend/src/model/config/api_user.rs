@@ -23,6 +23,7 @@ pub struct ProxyUserCredentials {
     pub status: Option<ProxyUserStatus>,
     pub ui_enabled: bool,
     pub comment: Option<String>,
+    pub t_is_api_user: bool,
 }
 
 macros::from_impl!(ProxyUserCredentials);
@@ -42,6 +43,7 @@ impl From<&ProxyUserCredentialsDto> for ProxyUserCredentials {
             status: dto.status,
             ui_enabled: dto.ui_enabled,
             comment: dto.comment.clone(),
+            t_is_api_user: false,
         }
     }
 }

@@ -272,16 +272,16 @@ impl StreamProperties {
         virtual_id: VirtualId,
         category_id: u32,
     ) -> XtreamSeriesInfoDoc {
-        let resource_url = options.get_resource_url(XtreamCluster::Series, item_type, virtual_id);
         XtreamSeriesInfoDoc {
             seasons: if let Some(seasons) = series.details.as_ref().and_then(|d| d.seasons.as_ref()) {
-                self.series_seasons_to_info_document(resource_url.as_deref(), seasons)
+                self.series_seasons_to_info_document(options, item_type, virtual_id, seasons)
             } else {
                 Vec::new()
             },
             info: XtreamSeriesInfoData {
                 name: Arc::clone(&series.name),
-                cover: InfoDocUtils::make_resource_url(resource_url.as_deref(), series.cover.as_ref(), "cover")
+                cover: options
+                    .get_resource_url(XtreamCluster::Series, item_type, virtual_id, series.cover.as_ref(), "cover")
                     .intern(),
                 plot: series.plot.as_ref().map(Arc::clone).unwrap_or_else(|| "".intern()),
                 cast: Arc::clone(&series.cast),
@@ -296,7 +296,9 @@ impl StreamProperties {
                     b.iter()
                         .enumerate()
                         .map(|(idx, p)| {
-                            InfoDocUtils::make_bdpath_resource_url(resource_url.as_deref(), p, idx, "").intern()
+                            options
+                                .get_bd_path_resource_url(XtreamCluster::Series, item_type, virtual_id, p, "", idx)
+                                .intern()
                         })
                         .collect()
                 }),
@@ -307,7 +309,7 @@ impl StreamProperties {
                 category_ids: vec![category_id],
             },
             episodes: if let Some(episodes) = series.details.as_ref().and_then(|d| d.episodes.as_ref()) {
-                self.series_episodes_to_info_document(options, resource_url.as_deref(), episodes)
+                self.series_episodes_to_info_document(options, item_type, virtual_id, episodes)
             } else {
                 IndexMap::new()
             },
@@ -322,9 +324,9 @@ impl StreamProperties {
         virtual_id: VirtualId,
         category_id: u32,
     ) -> XtreamVideoInfoDoc {
-        let resource_url = options.get_resource_url(XtreamCluster::Video, item_type, virtual_id);
-        let stream_icon =
-            InfoDocUtils::make_resource_url(resource_url.as_deref(), &self.get_stream_icon(), "logo").intern();
+        let stream_icon = options
+            .get_resource_url(XtreamCluster::Video, item_type, virtual_id, &self.get_stream_icon(), "logo")
+            .intern();
         let empty_str = "".intern();
         let zero_str = "0".intern();
 
@@ -334,18 +336,24 @@ impl StreamProperties {
                 tmdb_id: video.tmdb.unwrap_or_default().to_string().intern(),
                 name: Arc::clone(&video.name),
                 o_name: details.o_name.as_ref().map(Arc::clone).unwrap_or_else(|| Arc::clone(&empty_str)),
-                cover_big: InfoDocUtils::make_resource_url(
-                    resource_url.as_deref(),
-                    details.cover_big.as_ref().map(Arc::as_ref).unwrap_or(""),
-                    "nfo_cover_big",
-                )
-                .intern(),
-                movie_image: InfoDocUtils::make_resource_url(
-                    resource_url.as_deref(),
-                    details.cover_big.as_ref().map(Arc::as_ref).unwrap_or(""),
-                    "nfo_movie_image",
-                )
-                .intern(),
+                cover_big: options
+                    .get_resource_url(
+                        XtreamCluster::Video,
+                        item_type,
+                        virtual_id,
+                        details.cover_big.as_ref().map(Arc::as_ref).unwrap_or(""),
+                        "nfo_cover_big",
+                    )
+                    .intern(),
+                movie_image: options
+                    .get_resource_url(
+                        XtreamCluster::Video,
+                        item_type,
+                        virtual_id,
+                        details.movie_image.as_ref().map(Arc::as_ref).unwrap_or(""),
+                        "nfo_movie_image",
+                    )
+                    .intern(),
                 release_date: details.release_date.as_ref().map(Arc::clone).unwrap_or_else(|| Arc::clone(&empty_str)),
                 episode_run_time: details.episode_run_time.unwrap_or_default(),
                 youtube_trailer: details
@@ -367,7 +375,9 @@ impl StreamProperties {
                     b.iter()
                         .enumerate()
                         .map(|(idx, p)| {
-                            InfoDocUtils::make_bdpath_resource_url(resource_url.as_deref(), p, idx, "nfo_").intern()
+                            options
+                                .get_bd_path_resource_url(XtreamCluster::Video, item_type, virtual_id, p, "nfo_", idx)
+                                .intern()
                         })
                         .collect()
                 }),
@@ -434,7 +444,9 @@ impl StreamProperties {
 
     fn series_seasons_to_info_document(
         &self,
-        resource_url: Option<&str>,
+        options: &XtreamMappingOptions,
+        item_type: PlaylistItemType,
+        virtual_id: VirtualId,
         seasons: &[SeriesStreamDetailSeasonProperties],
     ) -> Vec<XtreamSeriesSeasonInfoDoc> {
         seasons
@@ -444,37 +456,53 @@ impl StreamProperties {
                 season_number: season.season_number,
                 episode_count: season.episode_count.intern(),
                 overview: season.overview.as_ref().map(|v| {
-                    if v.starts_with("http") {
-                        InfoDocUtils::make_resource_url(
-                            resource_url,
-                            v,
-                            &build_season_field(season.season_number, "overview"),
-                        )
-                        .intern()
+                    if v.starts_with("http://") || v.starts_with("https://") {
+                        options
+                            .get_resource_url(
+                                XtreamCluster::Series,
+                                item_type,
+                                virtual_id,
+                                v,
+                                &build_season_field(season.season_number, "overview"),
+                            )
+                            .intern()
                     } else {
                         Arc::clone(v)
                     }
                 }),
                 air_date: season.air_date.as_ref().map(Arc::clone),
                 cover: season.cover.as_ref().map(|v| {
-                    InfoDocUtils::make_resource_url(resource_url, v, &build_season_field(season.season_number, "cover"))
+                    options
+                        .get_resource_url(
+                            XtreamCluster::Series,
+                            item_type,
+                            virtual_id,
+                            v,
+                            &build_season_field(season.season_number, "cover"),
+                        )
                         .intern()
                 }),
                 cover_tmdb: season.cover_tmdb.as_ref().map(|v| {
-                    InfoDocUtils::make_resource_url(
-                        resource_url,
-                        v,
-                        &build_season_field(season.season_number, "cover_tmdb"),
-                    )
-                    .intern()
+                    options
+                        .get_resource_url(
+                            XtreamCluster::Series,
+                            item_type,
+                            virtual_id,
+                            v,
+                            &build_season_field(season.season_number, "cover_tmdb"),
+                        )
+                        .intern()
                 }),
                 cover_big: season.cover_big.as_ref().map(|v| {
-                    InfoDocUtils::make_resource_url(
-                        resource_url,
-                        v,
-                        &build_season_field(season.season_number, "cover_big"),
-                    )
-                    .intern()
+                    options
+                        .get_resource_url(
+                            XtreamCluster::Series,
+                            item_type,
+                            virtual_id,
+                            v,
+                            &build_season_field(season.season_number, "cover_big"),
+                        )
+                        .intern()
                 }),
                 release_date: season.air_date.as_ref().map(Arc::clone),
                 duration: season.duration.as_ref().map(Arc::clone),
@@ -485,7 +513,8 @@ impl StreamProperties {
     fn series_episodes_to_info_document(
         &self,
         options: &XtreamMappingOptions,
-        resource_url: Option<&str>,
+        item_type: PlaylistItemType,
+        virtual_id: VirtualId,
         episodes: &[SeriesStreamDetailEpisodeProperties],
     ) -> IndexMap<String, Vec<XtreamSeriesEpisodeInfoDoc>> {
         let empty_str = "".intern();
@@ -501,12 +530,15 @@ impl StreamProperties {
                     air_date: Arc::clone(&ep.release_date),
                     crew: ep.crew.as_ref().map(Arc::clone),
                     rating: ep.rating.unwrap_or_default(),
-                    movie_image: InfoDocUtils::make_resource_url(
-                        resource_url,
-                        &ep.movie_image,
-                        &build_season_episode_field(ep.season, ep.episode_num, "movie_image"),
-                    )
-                    .intern(),
+                    movie_image: options
+                        .get_resource_url(
+                            XtreamCluster::Series,
+                            item_type,
+                            virtual_id,
+                            &ep.movie_image,
+                            &build_season_episode_field(ep.season, ep.episode_num, "movie_image"),
+                        )
+                        .intern(),
                     duration: Arc::clone(&ep.duration),
                     duration_secs: ep.duration_secs,
                     video: InfoDocUtils::build_value(ep.video.as_ref().map(Arc::as_ref)),

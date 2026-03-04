@@ -2,38 +2,11 @@ use base64::{engine::general_purpose, Engine as _};
 use openssl::symm::{Cipher, Crypter, Mode};
 use rand::{RngCore, rngs::OsRng, TryRngCore};
 use shared::error::{TuliproxError, TuliproxErrorKind};
+use shared::utils::encode_base64_string;
 
 pub fn encode_base64_hash(text: &str) -> String {
     let hash = blake3::hash(text.as_bytes());
     encode_base64_string(hash.as_bytes())
-}
-
-pub fn encode_base64_string(input: &[u8]) -> String {
-    general_purpose::URL_SAFE_NO_PAD.encode(input)
-}
-
-pub fn decode_base64_string(input: &str) -> Vec<u8> {
-    general_purpose::URL_SAFE_NO_PAD.decode(input).unwrap_or_else(|_| input.as_bytes().to_vec())
-}
-
-pub fn xor_bytes(secret: &[u8], data: &[u8]) -> Vec<u8> {
-    data.iter()
-        .enumerate()
-        .map(|(i, &b)| b ^ secret[i % secret.len()])
-        .collect()
-}
-
-pub fn obfuscate_text(secret: &[u8], text: &str) -> Result<String, String> {
-    Ok(encode_base64_string(&xor_bytes(secret, text.as_bytes())))
-}
-
-pub fn deobfuscate_text(secret: &[u8], text: &str) -> Result<String, String> {
-    let data = xor_bytes(secret, &decode_base64_string(text));
-    if let Ok(result) = String::from_utf8(data) {
-        Ok(result)
-    } else {
-        Err(text.to_string())
-    }
 }
 
 pub fn obscure_text(secret: &[u8;16], url: &str) -> Result<String, TuliproxError> {
@@ -84,7 +57,7 @@ pub fn deobscure_text(secret: &[u8;16], encoded: &str) -> Result<String, Tulipro
 
 #[cfg(test)]
 mod tests {
-    use crate::utils::crypto_utils::{obscure_text, deobscure_text, deobfuscate_text, obfuscate_text};
+    use crate::utils::crypto_utils::{obscure_text, deobscure_text};
     use rand::{Rng};
 
     #[test]
@@ -93,15 +66,6 @@ mod tests {
         let plain = "hello world";
         let encrypted = obscure_text(&secret, plain).unwrap();
         let decrypted = deobscure_text(&secret, &encrypted).unwrap();
-
-        assert_eq!(decrypted, plain);
-    }
-    #[test]
-    fn test_obfuscate() {
-        let secret: [u8; 16] = rand::rng().random(); // Random IV (AES-CBC 16 Bytes)
-        let plain = "hello world";
-        let encrypted = obfuscate_text(&secret, plain);
-        let decrypted = deobfuscate_text(&secret, &encrypted.unwrap()).unwrap();
 
         assert_eq!(decrypted, plain);
     }

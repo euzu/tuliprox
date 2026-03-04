@@ -105,8 +105,23 @@ struct Args {
     #[arg(long = "dbe")]
     db_epg_file_name: Option<String>,
 
-    #[arg(long = "dbv")]
+    #[arg(long = "dbv")] // Target Id Mapping
     db_tim_file_name: Option<String>,
+
+    #[arg(long = "dbms")] // Metadata Retry Status
+    db_mrs_file_name: Option<String>,
+}
+
+impl Args {
+    fn db_viewer_args(&self) -> utils::DbViewerArgs<'_> {
+        utils::DbViewerArgs::new(
+            self.db_xtream_file_name.as_deref(),
+            self.db_m3u_file_name.as_deref(),
+            self.db_epg_file_name.as_deref(),
+            self.db_tim_file_name.as_deref(),
+            self.db_mrs_file_name.as_deref(),
+        )
+    }
 }
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -124,12 +139,7 @@ const BUILD_TIMESTAMP: &str = env!("VERGEN_BUILD_TIMESTAMP");
 async fn main() {
     let args = Args::parse();
 
-    db_viewer(
-        args.db_xtream_file_name.as_deref(),
-        args.db_m3u_file_name.as_deref(),
-        args.db_epg_file_name.as_deref(),
-        args.db_tim_file_name.as_deref(),
-    );
+    db_viewer(&args.db_viewer_args());
 
     if args.genpwd {
         match generate_password() {

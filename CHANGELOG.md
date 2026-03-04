@@ -44,6 +44,7 @@
   - **Sort**: Sort can now use filter to sort specific entries.
 
     ```yaml
+    
       sort:
         match_as_ascii: true
         rules:
@@ -136,7 +137,10 @@ active URL of the specified provider.
 
 - **config.yml**:
   - Added `metadata_update` (optional) with grouped sections: `log`, `resolve`, `probe`, `ffprobe`, `tmdb`.
-  - Added `metadata_update.cache_path` (default `metadata`): shared storage directory for TMDB cache and metadata files (moved from `library.metadata.path`).
+  - Added `metadata_update.cache_path` (default `metadata`): shared storage directory for TMDB cache and metadata files
+    (moved from `library.metadata.path`).
+  - Added `metadata_update.no_change_cache_ttl_secs` (default `3600`): TTL in seconds for the no-change
+    deduplication cache used by background metadata resolve tasks.
   - Added `metadata_update.tmdb.cooldown` (default `7d`) for successful TMDB no-match cooldown behavior.
   - Added `metadata_update.ffprobe.enabled` (default: false), `metadata_update.ffprobe.timeout`, and ffprobe probe/analyze size settings.
   - `metadata_update.ffprobe.analyze_duration` and `metadata_update.ffprobe.live_analyze_duration` require explicit unit suffixes (`s|m|h|d`).
@@ -146,7 +150,6 @@ active URL of the specified provider.
   - Added `resolve_tmdb`: Triggers TMDB lookup if ID is missing.
   - Added `probe_stream`: Triggers ffprobe if technical info is missing.
   - Added `probe_delay`: Delay between probe tasks (default `50` seconds).
-  - Added `disable_hls_streaming`: Disables HLS reverse-proxy mode for live streams and requests direct TS stream endpoints instead.
   - Added `staged.enabled`: Disables/enables the staged input
 - **source.yml (target output)**:
   - Added `probe_live`: Enables background probing for Live TV streams (default disabled).
@@ -234,7 +237,6 @@ active URL of the specified provider.
   lookups.
 - **Client Requests**: Extended debug logging for client requests and ID chain.
 - **XTream Fixes**: Fixed series/catch-up lookups using `series-info virtual_id`.
-- **Catchup Stability**: Fixed catchup parent mapping/session isolation to keep playback/account selection stable on the same user account.
 - **Cloudflare Header**: Added `cloudflare_header` to reverse proxy `disable_header` settings.
 - **Kick Seconds**: `kick_secs` added to `config.yml web_ui` config.
 - **Improved connection handling** for users with strict connection limits during streaming operations.

@@ -1710,6 +1710,7 @@ pub fn create_api_proxy_user(app_state: &Arc<AppState>) -> ProxyUserCredentials 
         status: None,
         ui_enabled: false,
         comment: None,
+        t_is_api_user: true,
     }
 }
 

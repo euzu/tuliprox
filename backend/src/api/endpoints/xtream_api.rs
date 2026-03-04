@@ -789,13 +789,14 @@ pub async fn xtream_get_stream_info_response(
                 return try_unwrap_body!(empty_json_response_as_array());
             };
 
-            let server_info = app_state.app_config.get_user_server_info(user);
+            let encrypt_secret = app_state.get_encrypt_secret();
+
             let options = xtream_mapping_option_from_target_options(
                 target,
                 xtream_output,
                 &app_state.app_config,
                 user,
-                Some(server_info.get_base_url().as_str()),
+                encrypt_secret,
             );
             return axum::Json(pli.to_info_document(&options)).into_response();
         }
@@ -1209,17 +1210,17 @@ async fn xtream_player_api(api_req: UserApiRequest, app_state: &Arc<AppState>) -
         let result = match action {
             crate::model::XC_ACTION_GET_LIVE_STREAMS => skip_flag_optional!(
                 skip_live,
-                xtream_load_rewrite_playlist(XtreamCluster::Live, &app_state.app_config, &target, category_id, &user)
+                xtream_load_rewrite_playlist(XtreamCluster::Live, app_state, &target, category_id, &user)
                     .await
             ),
             crate::model::XC_ACTION_GET_VOD_STREAMS => skip_flag_optional!(
                 skip_vod,
-                xtream_load_rewrite_playlist(XtreamCluster::Video, &app_state.app_config, &target, category_id, &user)
+                xtream_load_rewrite_playlist(XtreamCluster::Video, app_state, &target, category_id, &user)
                     .await
             ),
             crate::model::XC_ACTION_GET_SERIES => skip_flag_optional!(
                 skip_series,
-                xtream_load_rewrite_playlist(XtreamCluster::Series, &app_state.app_config, &target, category_id, &user)
+                xtream_load_rewrite_playlist(XtreamCluster::Series, app_state, &target, category_id, &user)
                     .await
             ),
             _ => Some(info_err_res!("Unknown api call: {action} for target: {}", &target.name)),

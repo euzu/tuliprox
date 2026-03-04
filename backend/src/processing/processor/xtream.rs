@@ -164,6 +164,10 @@ pub async fn update_live_stream_metadata(
             warn!("Probe failed for Live Stream ID {} (Input: {})", display_id, input.name);
             // We still persist the updated last_probed_timestamp so we don't retry immediately
         }
+        ProbeUrlOutcome::Failed(ProbeFailureKind::Cancelled) => {
+            warn!("Probe cancelled for Live Stream ID {} (Input: {})", display_id, input.name);
+            // We still persist the updated last_probed_timestamp so we don't retry immediately
+        }
     }
 
     // 4. Persist

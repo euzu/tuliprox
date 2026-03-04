@@ -31,7 +31,7 @@ use std::{
     io,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc, OnceLock, Weak,
     },
     time::{Duration, Instant},
@@ -87,6 +87,7 @@ struct MetadataUpdateRuntimeSettings {
     metadata_retry_load_retry_delay_secs: i64,
     worker_idle_timeout_secs: u64,
     max_queue_size: usize,
+    no_change_cache_ttl_secs: u64,
     probe_retry_backoff_step_1_secs: u64,
     probe_retry_backoff_step_2_secs: u64,
     probe_retry_backoff_step_3_secs: u64,
@@ -131,6 +132,7 @@ impl MetadataUpdateRuntimeSettings {
             metadata_retry_load_retry_delay_secs: to_i64(cfg.probe.retry_load_retry_delay_secs),
             worker_idle_timeout_secs: cfg.worker_idle_timeout_secs.max(1),
             max_queue_size: cfg.max_queue_size.max(1),
+            no_change_cache_ttl_secs: cfg.no_change_cache_ttl_secs.max(1),
             probe_retry_backoff_step_1_secs: cfg.probe.retry_backoff_step_1_secs.max(1),
             probe_retry_backoff_step_2_secs: cfg.probe.retry_backoff_step_2_secs.max(1),
             probe_retry_backoff_step_3_secs: cfg.probe.retry_backoff_step_3_secs.max(1),
@@ -339,7 +341,7 @@ impl TaskRetryState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-enum MetadataRetryDbKey {
+pub enum MetadataRetryDbKey {
     VodId(u32),
     VodText(String),
     SeriesId(u32),
@@ -409,7 +411,7 @@ impl RetryStateDbValue {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct MetadataRetryDbValue {
+pub struct MetadataRetryDbValue {
     resolve: Option<RetryStateDbValue>,
     probe: Option<RetryStateDbValue>,
     tmdb: Option<RetryStateDbValue>,
@@ -645,6 +647,7 @@ impl MetadataUpdateManager {
                             metadata_retry_load_retry_at_ts: None,
                             last_retry_state_prune_at_ts: None,
                             scheduled_requeues: Arc::new(DashMap::new()),
+                            recently_completed_no_change: HashMap::new(),
                         },
                     ));
 
@@ -900,6 +903,10 @@ struct InputWorker {
     // Shared with detached delayed requeue tasks spawned in `schedule_requeue_at`.
     // A plain HashMap cannot be moved safely into those `'static` tasks.
     scheduled_requeues: Arc<DashMap<TaskKey, i64>>,
+    // Cache of tasks that recently completed with no changes (Ok(None)).
+    // Prevents repeated resolution of already-resolved items across playlist refreshes.
+    // Stores the reason set so that tasks with new/different reasons are not wrongly skipped.
+    recently_completed_no_change: HashMap<TaskKey, (Instant, ResolveReasonSet)>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -987,6 +994,20 @@ impl InputWorker {
                     runtime_settings.resolve_exhaustion_reset_gap_secs
                 );
                 self.scheduled_requeues.remove(&current_key);
+                remove_current_task = true;
+                skip_execution = true;
+            }
+
+            // Skip tasks that recently completed with no changes (already resolved in DB).
+            // Only skip when the incoming reason set exactly matches the cached reason set.
+            if !skip_execution
+                && self.should_skip_recent_no_change_task(&current_key, &task_for_execution, &runtime_settings)
+            {
+                debug_if_enabled!(
+                    "Skipping recently-resolved no-change task for input {}: {}",
+                    input_name,
+                    task_for_execution
+                );
                 remove_current_task = true;
                 skip_execution = true;
             }
@@ -1179,6 +1200,17 @@ impl InputWorker {
 
                         self.resolve_exhausted.remove(&current_key);
                         self.scheduled_requeues.remove(&current_key);
+
+                        // Cache tasks that completed with no changes to skip redundant re-resolution.
+                        if !task_outcome.task_changed
+                            && Self::is_resolve_task(&task_for_execution)
+                            && !task_outcome.tmdb_pending
+                        {
+                            let reasons = Self::task_reason(&task_for_execution);
+                            self.recently_completed_no_change.insert(current_key.clone(), (Instant::now(), reasons));
+                        } else {
+                            self.recently_completed_no_change.remove(&current_key);
+                        }
 
                         if last_progress_log_at.elapsed() >= runtime_settings.progress_log_interval {
                             // current_key is removed from pending_tasks later in this loop iteration;
@@ -1762,6 +1794,10 @@ impl InputWorker {
         for key in stale_resolve_exhausted_keys {
             self.resolve_exhausted.remove(&key);
         }
+
+        let no_change_ttl = Duration::from_secs(runtime_settings.no_change_cache_ttl_secs);
+        self.recently_completed_no_change
+            .retain(|_, (completed_at, _)| completed_at.elapsed() < no_change_ttl);
     }
 
     fn release_db_handles(&mut self) {
@@ -1865,6 +1901,39 @@ impl InputWorker {
     #[inline]
     fn is_resolve_task(task: &UpdateTask) -> bool {
         matches!(task, UpdateTask::ResolveVod { .. } | UpdateTask::ResolveSeries { .. })
+    }
+
+    #[inline]
+    fn task_reason(task: &UpdateTask) -> ResolveReasonSet {
+        match task {
+            UpdateTask::ResolveVod { reason, .. }
+            | UpdateTask::ResolveSeries { reason, .. }
+            | UpdateTask::ProbeLive { reason, .. }
+            | UpdateTask::ProbeStream { reason, .. } => *reason,
+        }
+    }
+
+    fn should_skip_recent_no_change_task(
+        &mut self,
+        current_key: &TaskKey,
+        task_for_execution: &UpdateTask,
+        runtime_settings: &MetadataUpdateRuntimeSettings,
+    ) -> bool {
+        let Some((completed_at, cached_reasons)) =
+            self.recently_completed_no_change.get(current_key).copied()
+        else {
+            return false;
+        };
+
+        let ttl = Duration::from_secs(runtime_settings.no_change_cache_ttl_secs);
+        let current_reasons = Self::task_reason(task_for_execution);
+        if completed_at.elapsed() < ttl && current_reasons == cached_reasons {
+            self.scheduled_requeues.remove(current_key);
+            return true;
+        }
+
+        self.recently_completed_no_change.remove(current_key);
+        false
     }
 
     #[inline]
@@ -2540,19 +2609,6 @@ impl InputWorker {
         None
     }
 
-    fn vod_tmdb_pending_for_reason(props: &VideoStreamProperties, reason: ResolveReasonSet) -> bool {
-        let tmdb_missing = reason.contains(ResolveReason::Tmdb) && props.tmdb.is_none();
-        let date_missing = reason.contains(ResolveReason::Date)
-            && props.details.as_ref().and_then(|d| d.release_date.as_ref()).is_none();
-        tmdb_missing || date_missing
-    }
-
-    fn series_tmdb_pending_for_reason(props: &SeriesStreamProperties, reason: ResolveReasonSet) -> bool {
-        let tmdb_missing = reason.contains(ResolveReason::Tmdb) && props.tmdb.is_none();
-        let date_missing = reason.contains(ResolveReason::Date) && props.release_date.is_none();
-        tmdb_missing || date_missing
-    }
-
     #[allow(clippy::too_many_lines)]
     async fn process_task_static(
         input_name: &Arc<str>,
@@ -2672,7 +2728,7 @@ impl InputWorker {
             app_state.connection_manager.release_provider_handle(provider_handle).await;
         }
         match res {
-            Ok(()) => {
+            Ok(tmdb_and_date_present) => {
                 let task_changed = match task {
                     UpdateTask::ResolveVod { .. } => collector.vod.len() > pre_vod_updates,
                     UpdateTask::ResolveSeries { .. } => collector.series.len() > pre_series_updates,
@@ -2680,22 +2736,9 @@ impl InputWorker {
                     UpdateTask::ProbeStream { .. } => true,
                 };
                 let tmdb_pending = match task {
-                    UpdateTask::ResolveVod { reason, .. } => {
+                    UpdateTask::ResolveVod { reason, .. } | UpdateTask::ResolveSeries { reason, .. } => {
                         if reason.contains(ResolveReason::Tmdb) || reason.contains(ResolveReason::Date) {
-                            collector
-                                .vod
-                                .get(pre_vod_updates)
-                                .is_none_or(|(_, props)| Self::vod_tmdb_pending_for_reason(props, *reason))
-                        } else {
-                            false
-                        }
-                    }
-                    UpdateTask::ResolveSeries { reason, .. } => {
-                        if reason.contains(ResolveReason::Tmdb) || reason.contains(ResolveReason::Date) {
-                            collector
-                                .series
-                                .get(pre_series_updates)
-                                .is_none_or(|(_, props)| Self::series_tmdb_pending_for_reason(props, *reason))
+                            !tmdb_and_date_present
                         } else {
                             false
                         }
@@ -2713,9 +2756,10 @@ impl InputWorker {
             UpdateTask::ProbeLive { .. } => true,
             // Local library probing is fully local and must not depend on provider capacity.
             UpdateTask::ProbeStream { .. } => !matches!(input_type, InputType::Library),
-            UpdateTask::ResolveVod { reason, .. } | UpdateTask::ResolveSeries { reason, .. } => {
-                reason.contains(ResolveReason::Probe)
-            }
+            // Resolve tasks handle their own probe connection acquisition internally.
+            // This avoids holding a provider connection for the entire duration of
+            // info fetch + TMDB resolve + probe, reducing "provider exhausted" errors.
+            UpdateTask::ResolveVod { .. } | UpdateTask::ResolveSeries { .. } => false,
         }
     }
 
@@ -2730,7 +2774,9 @@ impl InputWorker {
         collector: &mut BatchResultCollector,
         db_handles: &mut HashMap<XtreamCluster, DbHandle>,
         failed_clusters: &mut HashSet<XtreamCluster>,
-    ) -> Result<(), TuliproxError> {
+    ) -> Result<bool, TuliproxError> {
+        // The returned bool indicates whether both TMDB id and release date are already present in the DB
+        // (used by the caller to avoid false-positive "no match" cooldowns).
         match task {
             UpdateTask::ResolveVod { id, reason, .. } => {
                 let fetch_info = reason.contains(ResolveReason::Info);
@@ -2752,6 +2798,7 @@ impl InputWorker {
                         .await
                 };
 
+                let tmdb_and_date_present = AtomicBool::new(false);
                 match update_vod_metadata(
                     &app_state.app_config,
                     client,
@@ -2765,14 +2812,15 @@ impl InputWorker {
                     resolve_tmdb,
                     will_probe,
                     query_opt,
+                    Some(&tmdb_and_date_present),
                 )
                 .await
                 {
                     Ok(Some(props)) => {
                         collector.add_vod(id.clone(), props);
-                        Ok(())
+                        Ok(tmdb_and_date_present.load(Ordering::Relaxed))
                     }
-                    Ok(None) => Ok(()),
+                    Ok(None) => Ok(tmdb_and_date_present.load(Ordering::Relaxed)),
                     Err(e) => Err(e),
                 }
             }
@@ -2797,6 +2845,7 @@ impl InputWorker {
                         .await
                 };
 
+                let tmdb_and_date_present = AtomicBool::new(false);
                 match update_series_metadata(
                     &app_state.app_config,
                     client,
@@ -2811,14 +2860,15 @@ impl InputWorker {
                     will_probe,
                     series_probe_settings,
                     query_opt,
+                    Some(&tmdb_and_date_present),
                 )
                 .await
                 {
                     Ok(Some(props)) => {
                         collector.add_series(id.clone(), props);
-                        Ok(())
+                        Ok(tmdb_and_date_present.load(Ordering::Relaxed))
                     }
-                    Ok(None) => Ok(()),
+                    Ok(None) => Ok(tmdb_and_date_present.load(Ordering::Relaxed)),
                     Err(e) => Err(e),
                 }
             }
@@ -2839,9 +2889,9 @@ impl InputWorker {
                 {
                     Ok(Some(props)) => {
                         collector.add_live(id.clone(), props);
-                        Ok(())
+                        Ok(false)
                     }
-                    Ok(None) => Ok(()),
+                    Ok(None) => Ok(false),
                     Err(e) => Err(e),
                 }
             }
@@ -2866,7 +2916,7 @@ impl InputWorker {
                 .await?;
 
                 match outcome {
-                    GenericProbeOutcome::Updated | GenericProbeOutcome::Noop => Ok(()),
+                    GenericProbeOutcome::Updated | GenericProbeOutcome::Noop => Ok(false),
                     GenericProbeOutcome::ProbeFailed => Err(shared::error::info_err!(
                         "Probe stream task failed for key {:?} ({})",
                         task_key,
@@ -2883,6 +2933,37 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
     use tokio::sync::mpsc;
+
+    fn create_test_worker(
+        input_name: &str,
+        sender: mpsc::Sender<TaskKey>,
+        receiver: mpsc::Receiver<TaskKey>,
+        pending_tasks: Arc<DashMap<TaskKey, PendingTask>>,
+        pending_task_count: Arc<AtomicUsize>,
+    ) -> InputWorker {
+        InputWorker {
+            input_name: Arc::from(input_name),
+            sender,
+            receiver,
+            pending_tasks,
+            pending_task_count,
+            app_state_weak: None,
+            update_pause_gate: Arc::new(RwLock::new(())),
+            cancel_token: CancellationToken::new(),
+            batch_buffer: BatchResultCollector::new(),
+            db_handles: HashMap::new(),
+            failed_clusters: HashSet::new(),
+            retry_states: HashMap::new(),
+            resolve_exhausted: HashMap::new(),
+            last_cycle_completed_at_ts: None,
+            metadata_retry_state_path: None,
+            metadata_retry_loaded: false,
+            metadata_retry_load_retry_at_ts: None,
+            last_retry_state_prune_at_ts: None,
+            scheduled_requeues: Arc::new(DashMap::new()),
+            recently_completed_no_change: HashMap::new(),
+        }
+    }
 
     #[tokio::test]
     async fn queue_task_creates_single_worker_per_input_under_concurrency() {
@@ -3132,6 +3213,7 @@ mod tests {
     async fn finalize_processed_task_success_requeues_when_generation_changed() {
         let (tx, rx) = mpsc::channel::<TaskKey>(8);
         let pending_tasks = Arc::new(DashMap::new());
+        let pending_task_count = Arc::new(AtomicUsize::new(1));
         let key = TaskKey::Vod(7);
 
         pending_tasks.insert(
@@ -3146,27 +3228,7 @@ mod tests {
             entry.generation.store(1, Ordering::Relaxed);
         }
 
-        let mut worker = InputWorker {
-            input_name: Arc::from("input_a"),
-            sender: tx,
-            receiver: rx,
-            pending_tasks: pending_tasks.clone(),
-            pending_task_count: Arc::new(AtomicUsize::new(1)),
-            app_state_weak: None,
-            update_pause_gate: Arc::new(RwLock::new(())),
-            cancel_token: CancellationToken::new(),
-            batch_buffer: BatchResultCollector::new(),
-            db_handles: HashMap::new(),
-            failed_clusters: HashSet::new(),
-            retry_states: HashMap::new(),
-            resolve_exhausted: HashMap::new(),
-            last_cycle_completed_at_ts: None,
-            metadata_retry_state_path: None,
-            metadata_retry_loaded: false,
-            metadata_retry_load_retry_at_ts: None,
-            last_retry_state_prune_at_ts: None,
-            scheduled_requeues: Arc::new(DashMap::new()),
-        };
+        let mut worker = create_test_worker("input_a", tx, rx, pending_tasks.clone(), pending_task_count);
 
         let requeued = worker.finalize_processed_task_success(&key, 0, "input_a").await;
         assert!(requeued);
@@ -3178,43 +3240,99 @@ mod tests {
     async fn finalize_processed_task_success_removes_when_unchanged() {
         let (tx, rx) = mpsc::channel::<TaskKey>(8);
         let pending_tasks = Arc::new(DashMap::new());
+        let pending_task_count = Arc::new(AtomicUsize::new(1));
         let key = TaskKey::Vod(9);
-
-        pending_tasks.insert(
-            key.clone(),
-            PendingTask::new(UpdateTask::ResolveVod {
-                id: ProviderIdType::Id(9),
-                reason: ResolveReasonSet::from_variants(&[ResolveReason::Info]),
-                delay: 0,
-            }),
-        );
-
-        let mut worker = InputWorker {
-            input_name: Arc::from("input_b"),
-            sender: tx,
-            receiver: rx,
-            pending_tasks: pending_tasks.clone(),
-            pending_task_count: Arc::new(AtomicUsize::new(1)),
-            app_state_weak: None,
-            update_pause_gate: Arc::new(RwLock::new(())),
-            cancel_token: CancellationToken::new(),
-            batch_buffer: BatchResultCollector::new(),
-            db_handles: HashMap::new(),
-            failed_clusters: HashSet::new(),
-            retry_states: HashMap::new(),
-            resolve_exhausted: HashMap::new(),
-            last_cycle_completed_at_ts: None,
-            metadata_retry_state_path: None,
-            metadata_retry_loaded: false,
-            metadata_retry_load_retry_at_ts: None,
-            last_retry_state_prune_at_ts: None,
-            scheduled_requeues: Arc::new(DashMap::new()),
+        let task = UpdateTask::ResolveVod {
+            id: ProviderIdType::Id(9),
+            reason: ResolveReasonSet::from_variants(&[ResolveReason::Info]),
+            delay: 0,
         };
+
+        pending_tasks.insert(key.clone(), PendingTask::new(task.clone()));
+
+        let mut worker = create_test_worker("input_b", tx, rx, pending_tasks.clone(), pending_task_count);
+        let runtime_settings = MetadataUpdateRuntimeSettings::default();
+
+        worker.scheduled_requeues.insert(key.clone(), chrono::Utc::now().timestamp().saturating_add(30));
+        worker.recently_completed_no_change.insert(
+            key.clone(),
+            (Instant::now(), ResolveReasonSet::from_variants(&[ResolveReason::Info])),
+        );
+        assert!(worker.should_skip_recent_no_change_task(&key, &task, &runtime_settings));
+        assert!(worker.recently_completed_no_change.contains_key(&key));
+        assert!(!worker.scheduled_requeues.contains_key(&key));
 
         let requeued = worker.finalize_processed_task_success(&key, 0, "input_b").await;
         assert!(!requeued);
         assert!(!pending_tasks.contains_key(&key));
         assert!(matches!(worker.receiver.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn recent_no_change_skip_requires_exact_reason_match() {
+        let (tx, rx) = mpsc::channel::<TaskKey>(8);
+        let pending_tasks = Arc::new(DashMap::new());
+        let pending_task_count = Arc::new(AtomicUsize::new(0));
+        let key = TaskKey::Vod(10);
+        let task = UpdateTask::ResolveVod {
+            id: ProviderIdType::Id(10),
+            reason: ResolveReasonSet::from_variants(&[ResolveReason::Info]),
+            delay: 0,
+        };
+        let mut worker = create_test_worker("input_c", tx, rx, pending_tasks, pending_task_count);
+        let runtime_settings = MetadataUpdateRuntimeSettings::default();
+
+        worker.recently_completed_no_change.insert(
+            key.clone(),
+            (
+                Instant::now(),
+                ResolveReasonSet::from_variants(&[ResolveReason::Info, ResolveReason::Probe]),
+            ),
+        );
+        assert!(!worker.should_skip_recent_no_change_task(&key, &task, &runtime_settings));
+        assert!(!worker.recently_completed_no_change.contains_key(&key));
+
+        worker.recently_completed_no_change.insert(
+            key.clone(),
+            (Instant::now(), ResolveReasonSet::from_variants(&[ResolveReason::Info])),
+        );
+        assert!(worker.should_skip_recent_no_change_task(&key, &task, &runtime_settings));
+        assert!(worker.recently_completed_no_change.contains_key(&key));
+    }
+
+    #[tokio::test]
+    async fn recent_no_change_skip_ttl_expiry_allows_requeue() {
+        let (tx, rx) = mpsc::channel::<TaskKey>(8);
+        let pending_tasks = Arc::new(DashMap::new());
+        let pending_task_count = Arc::new(AtomicUsize::new(1));
+        let key = TaskKey::Vod(11);
+        let task = UpdateTask::ResolveVod {
+            id: ProviderIdType::Id(11),
+            reason: ResolveReasonSet::from_variants(&[ResolveReason::Info]),
+            delay: 0,
+        };
+
+        pending_tasks.insert(key.clone(), PendingTask::new(task.clone()));
+        if let Some(entry) = pending_tasks.get(&key) {
+            entry.generation.store(1, Ordering::Relaxed);
+        }
+
+        let mut worker = create_test_worker("input_d", tx, rx, pending_tasks.clone(), pending_task_count);
+        let mut runtime_settings = MetadataUpdateRuntimeSettings::default();
+        runtime_settings.no_change_cache_ttl_secs = 1;
+
+        let stale_instant = Instant::now().checked_sub(Duration::from_secs(2)).unwrap_or_else(Instant::now);
+        worker.recently_completed_no_change.insert(
+            key.clone(),
+            (stale_instant, ResolveReasonSet::from_variants(&[ResolveReason::Info])),
+        );
+        assert!(!worker.should_skip_recent_no_change_task(&key, &task, &runtime_settings));
+        assert!(!worker.recently_completed_no_change.contains_key(&key));
+
+        let requeued = worker.finalize_processed_task_success(&key, 0, "input_d").await;
+        assert!(requeued);
+        assert!(pending_tasks.contains_key(&key));
+        assert_eq!(worker.receiver.try_recv().expect("requeued signal should be present"), key);
     }
 
     #[test]

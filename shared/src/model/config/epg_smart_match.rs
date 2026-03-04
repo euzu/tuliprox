@@ -2,8 +2,8 @@ use crate::{
     error::TuliproxError,
     info_err,
     utils::{
-        default_best_match_threshold, default_match_threshold, is_blank_optional_string,
-        is_default_best_match_threshold, is_default_match_threshold, is_false,
+        default_epg_best_match_threshold, default_epg_match_threshold, is_blank_optional_string,
+        is_default_epg_best_match_threshold, is_default_epg_match_threshold, is_false,
     },
 };
 use log::warn;
@@ -49,9 +49,9 @@ pub struct EpgSmartMatchConfigDto {
     pub name_prefix_separator: Option<Vec<char>>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub fuzzy_matching: bool,
-    #[serde(default = "default_match_threshold", skip_serializing_if = "is_default_match_threshold")]
+    #[serde(default = "default_epg_match_threshold", skip_serializing_if = "is_default_epg_match_threshold")]
     pub match_threshold: u16,
-    #[serde(default = "default_best_match_threshold", skip_serializing_if = "is_default_best_match_threshold")]
+    #[serde(default = "default_epg_best_match_threshold", skip_serializing_if = "is_default_epg_best_match_threshold")]
     pub best_match_threshold: u16,
 }
 impl Default for EpgSmartMatchConfigDto {
@@ -63,8 +63,8 @@ impl Default for EpgSmartMatchConfigDto {
             name_prefix: EpgNamePrefix::default(),
             name_prefix_separator: None,
             fuzzy_matching: false,
-            match_threshold: default_match_threshold(),
-            best_match_threshold: default_best_match_threshold(),
+            match_threshold: default_epg_match_threshold(),
+            best_match_threshold: default_epg_best_match_threshold(),
         }
     }
 }

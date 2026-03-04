@@ -582,7 +582,8 @@
       "COOLDOWN": "Pause after a successful TMDB lookup that returned no match.\n\nThis prevents endless re-tries for titles that currently do not exist in TMDB.\n\nExamples: `1d`, `3d`, `7d`.",
       "ENABLED": "Enables metadata lookup from TMDB.\n\nTurn this off if you do not want TMDB-based title matching.",
       "LANGUAGE": "Preferred language for TMDB titles and metadata.\n\nExample: `en-US`.",
-      "RATE_LIMIT_MS": "Minimum wait time between TMDB requests in milliseconds.\n\nHigher values are gentler to the TMDB API.\n\nExamples: `250`, `500`, `1000`."
+      "RATE_LIMIT_MS": "Minimum wait time between TMDB requests in milliseconds.\n\nHigher values are gentler to the TMDB API.\n\nExamples: `250`, `500`, `1000`.",
+      "MATCH_THRESHOLD": "Minimum match score for TMDB search. Value should be between 1 - 100"
     },
     "TRAKT_LIST_CONFIG": {
       "CATEGORY_NAME": "The category name used in the playlist for items from this Trakt list.",
@@ -894,6 +895,7 @@
     "METADATA_MAX_ATTEMPTS_RESOLVE": "Max resolve attempts",
     "METADATA_MAX_QUEUE_SIZE": "Max queue size",
     "METADATA_MAX_RESOLVE_RETRY_BACKOFF": "Max resolve retry backoff",
+    "METADATA_NO_CHANGE_CACHE_TTL_SECS": "No-change cache TTL (seconds)",
     "METADATA_PATH": "Metadata Path",
     "METADATA_PROBE_COOLDOWN": "Probe cooldown",
     "METADATA_PROBE_RETRY_BACKOFF_STEP_1": "Probe backoff step 1",

@@ -71,6 +71,12 @@ macro_rules! create_bitset {
                 self.0 == 0
             }
 
+            /// Returns true if every bit set in `self` is also set in `other`.
+            #[inline(always)]
+            pub fn is_subset_of(&self, other: &Self) -> bool {
+                (self.0 & other.0) == self.0
+            }
+
             #[inline]
             pub fn clear(&mut self) {
                 self.0 = 0;

@@ -14,7 +14,9 @@ pub use self::xtream::*;
 pub use self::xtream_vod::*;
 pub use self::xtream_series::*;
 pub use self::stream_probe::*;
+use crate::api::model::ProviderHandle;
 use shared::create_bitset;
+use tokio_util::sync::CancellationToken;
 
 create_bitset!(u8, ResolveOptionsFlags, Resolve, TmdbMissing, Probe, Background);
 
@@ -46,6 +48,15 @@ impl Default for ResolveOptions {
 pub(crate) const FOREGROUND_BATCH_SIZE: usize = 200;
 pub(crate) const FOREGROUND_RETRY_BATCH_MAX_SIZE: usize = FOREGROUND_BATCH_SIZE * 4;
 pub(crate) const FOREGROUND_MIN_RETRY_DELAY_SECS: u64 = 1;
+
+pub(crate) fn select_cancel_token<'a>(
+    acquired_handle: Option<&'a ProviderHandle>,
+    active_handle: Option<&'a ProviderHandle>,
+) -> Option<&'a CancellationToken> {
+    acquired_handle
+        .and_then(|h| h.cancel_token.as_ref())
+        .or_else(|| active_handle.and_then(|h| h.cancel_token.as_ref()))
+}
 
 
 //

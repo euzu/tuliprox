@@ -51,13 +51,33 @@ pub const fn is_default_resource_retry_backoff_multiplier(v: &f64) -> bool {
     (*v - default_resource_retry_backoff_multiplier()).abs() < F64_DEFAULT_EPSILON
 }
 
-pub fn default_secret() -> String {
-    let mut out = [0u8; 16];
-    for x in &mut out {
-        *x = fastrand::u8(..);
+fn fill_with_secure_random_bytes(out: &mut [u8]) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        for byte in out {
+            *byte = fastrand::u8(..);
+        }
     }
-    out.iter().map(|b| format!("{:02X}", b)).collect()
+
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Err(err) = getrandom::fill(out) {
+        panic!("failed to generate secure random bytes: {err}");
+    }
 }
+
+pub fn generate_default_access_secret() -> [u8; 32] {
+    let mut out = [0u8; 32];
+    fill_with_secure_random_bytes(&mut out);
+    out
+}
+
+pub fn generate_default_encrypt_secret() -> [u8; 16] {
+    let mut out = [0u8; 16];
+    fill_with_secure_random_bytes(&mut out);
+    out
+}
+
+pub fn default_secret() -> String { generate_default_encrypt_secret().iter().map(|b| format!("{:02X}", b)).collect() }
 
 pub const fn default_kick_secs() -> u64 { 90 }
 pub const fn is_default_kick_secs(v: &u64) -> bool { *v == default_kick_secs() }
@@ -65,10 +85,13 @@ pub const fn is_default_kick_secs(v: &u64) -> bool { *v == default_kick_secs() }
 pub const fn default_token_ttl_mins() -> u32 { 30 }
 pub const fn is_default_token_ttl_mins(v: &u32) -> bool { *v == default_token_ttl_mins() }
 
-pub const fn default_match_threshold() -> u16 { 80 }
-pub const fn is_default_match_threshold(v: &u16) -> bool { *v == default_match_threshold() }
-pub const fn default_best_match_threshold() -> u16 { 95 }
-pub const fn is_default_best_match_threshold(v: &u16) -> bool { *v == default_best_match_threshold() }
+pub const fn default_epg_match_threshold() -> u16 { 80 }
+pub const fn is_default_epg_match_threshold(v: &u16) -> bool { *v == default_epg_match_threshold() }
+pub const fn default_epg_best_match_threshold() -> u16 { 95 }
+pub const fn is_default_epg_best_match_threshold(v: &u16) -> bool { *v == default_epg_best_match_threshold() }
+
+pub const fn default_tmdb_match_threshold() -> u16 { 86 }
+pub const fn is_default_tmdb_match_threshold(v: &u16) -> bool { *v == default_tmdb_match_threshold() }
 
 pub const TMDB_API_KEY: &str = "4219e299c89411838049ab0dab19ebd5";
 pub fn default_tmdb_api_key() -> Option<String> { Some(TMDB_API_KEY.to_string()) }
@@ -176,6 +199,10 @@ pub const fn is_default_metadata_backoff_jitter_percent(v: &u8) -> bool {
 }
 pub const fn default_metadata_max_queue_size() -> usize { 100_000 }
 pub const fn is_default_metadata_max_queue_size(v: &usize) -> bool { *v == default_metadata_max_queue_size() }
+pub const fn default_metadata_no_change_cache_ttl_secs() -> u64 { 3600 }
+pub const fn is_default_metadata_no_change_cache_ttl_secs(v: &u64) -> bool {
+    *v == default_metadata_no_change_cache_ttl_secs()
+}
 pub fn default_metadata_ffprobe_analyze_duration() -> String { "10s".to_string() }
 pub fn is_default_metadata_ffprobe_analyze_duration(v: &String) -> bool {
     *v == default_metadata_ffprobe_analyze_duration()

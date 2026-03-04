@@ -105,7 +105,6 @@ fn preserve_local_probe_state_if_unchanged(new_item: &mut XtreamPlaylistItem, ol
     }
 }
 
-
 pub async fn load_input_local_library_playlist(app_config: &Arc<AppConfig>, lib_path: &Path) -> Result<Vec<PlaylistGroup>, TuliproxError> {
     if file_exists_async(lib_path).await {
         let file_lock = app_config.file_locks.read_lock(lib_path).await;

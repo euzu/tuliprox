@@ -515,6 +515,12 @@ impl AppState {
         config.proxy.as_ref().is_some_and(|proxy| should_use_manual_redirect_for_proxy(proxy.url.as_str()))
             || proxy_env_present()
     }
+
+    pub fn get_encrypt_secret(&self) -> [u8;16] {
+        self.app_config
+            .get_reverse_proxy_rewrite_secret()
+            .unwrap_or(self.app_config.encrypt_secret)
+    }
 }
 
 fn proxy_env_present() -> bool { should_use_manual_redirects_for_env_vars(std::env::vars_os()) }

@@ -494,8 +494,7 @@ async fn epg_api_resource(
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
 
-    let encrypt_secret =
-        app_state.app_config.get_reverse_proxy_rewrite_secret().unwrap_or_else(|| app_state.app_config.encrypt_secret);
+    let encrypt_secret = app_state.get_encrypt_secret();
     if let Ok(resource_url) = deobscure_text(&encrypt_secret, &resource) {
         resource_response(&app_state, &resource_url, &req_headers, None).await.into_response()
     } else {

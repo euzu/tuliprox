@@ -10,6 +10,7 @@ use url::Url;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProbeFailureKind {
     NotFound,
+    Cancelled,
     Other,
 }
 
@@ -117,55 +118,47 @@ pub async fn probe_url(
                 return ProbeUrlOutcome::Failed(ProbeFailureKind::Other);
             }
 
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if let Ok(json) = serde_json::from_str::<Value>(&stdout) {
-                 let streams = json.get("streams").and_then(|s| s.as_array());
+            if let Ok(json) = serde_json::from_slice::<Value>(&output.stdout) {
+                if let Some(stream_list) = json.get("streams").and_then(Value::as_array) {
+                    // Single-pass stream detection: prefer codec_type, fall back to structural hints.
+                    let mut video_stream: Option<&Value> = None;
+                    let mut audio_stream: Option<&Value> = None;
 
-                 if let Some(stream_list) = streams {
-                     let mut video_info: Option<String> = None;
-                     let mut audio_info: Option<String> = None;
-                     let mut raw_video_json: Option<Value> = None;
-                     let mut raw_audio_json: Option<Value> = None;
+                    for stream in stream_list {
+                        let codec_type = stream.get("codec_type").and_then(Value::as_str);
+                        if video_stream.is_none()
+                            && (codec_type == Some("video")
+                                || (codec_type.is_none()
+                                    && (stream.get("width").is_some() || stream.get("height").is_some())))
+                        {
+                            video_stream = Some(stream);
+                        } else if audio_stream.is_none()
+                            && (codec_type == Some("audio")
+                                || (codec_type.is_none()
+                                    && (stream.get("channels").is_some()
+                                        || stream.get("channel_layout").is_some())))
+                        {
+                            audio_stream = Some(stream);
+                        }
+                        if video_stream.is_some() && audio_stream.is_some() {
+                            break;
+                        }
+                    }
 
-                     for stream in stream_list {
-                         // Check codec_type if available
-                         let codec_type = stream.get("codec_type").and_then(|s| s.as_str());
-                         
-                         // We prefer the first video/audio stream we find
-                         if codec_type == Some("video") && video_info.is_none() {
-                             video_info = Some(stream.to_string());
-                             raw_video_json = Some(stream.clone());
-                         } else if codec_type == Some("audio") && audio_info.is_none() {
-                             audio_info = Some(stream.to_string());
-                             raw_audio_json = Some(stream.clone());
-                         }
-                     }
-
-                     // Fallback heuristic if codec_type missing
-                     if video_info.is_none() {
-                         for stream in stream_list {
-                             if (stream.get("width").is_some() || stream.get("height").is_some()) && video_info.is_none() {
-                                 video_info = Some(stream.to_string());
-                                 raw_video_json = Some(stream.clone());
-                             }
-                         }
-                     }
-                     if audio_info.is_none() {
-                         for stream in stream_list {
-                              if (stream.get("channels").is_some() || stream.get("channel_layout").is_some()) && audio_info.is_none() {
-                                 audio_info = Some(stream.to_string());
-                                 raw_audio_json = Some(stream.clone());
-                             }
-                         }
-                     }
-
-                     if video_info.is_some() || audio_info.is_some() {
-                         let mq = MediaQuality::from_ffprobe_info(audio_info.as_deref(), video_info.as_deref());
-                         if let Some(quality) = mq {
-                             return ProbeUrlOutcome::Success(quality, raw_video_json, raw_audio_json);
-                         }
-                     }
-                 }
+                    if video_stream.is_some() || audio_stream.is_some() {
+                        // Materialize strings only for the selected streams.
+                        let video_str = video_stream.map(Value::to_string);
+                        let audio_str = audio_stream.map(Value::to_string);
+                        let mq = MediaQuality::from_ffprobe_info(audio_str.as_deref(), video_str.as_deref());
+                        if let Some(quality) = mq {
+                            return ProbeUrlOutcome::Success(
+                                quality,
+                                video_stream.cloned(),
+                                audio_stream.cloned(),
+                            );
+                        }
+                    }
+                }
             } else {
                 warn!("Failed to parse ffprobe json output for {}", sanitize_sensitive_info(url));
             }
@@ -179,6 +172,32 @@ pub async fn probe_url(
     }
 
     ProbeUrlOutcome::Failed(ProbeFailureKind::Other)
+}
+
+/// Wrapper around [`probe_url`] that races the probe against an optional cancellation token.
+/// When the token fires, the probe future is dropped (`kill_on_drop` kills the ffprobe process)
+/// and `ProbeUrlOutcome::Failed(Cancelled)` is returned immediately.
+pub async fn probe_url_with_cancel(
+    url: &str,
+    user_agent: Option<&str>,
+    analyze_duration: u64,
+    probe_size: u64,
+    timeout_secs: u64,
+    proxy_cfg: Option<&ProxyConfig>,
+    cancel_token: Option<&tokio_util::sync::CancellationToken>,
+) -> ProbeUrlOutcome {
+    if let Some(token) = cancel_token {
+        tokio::select! {
+            biased;
+            () = token.cancelled() => {
+                warn!("Probe preempted for {}", shared::utils::sanitize_sensitive_info(url));
+                ProbeUrlOutcome::Failed(ProbeFailureKind::Cancelled)
+            }
+            result = probe_url(url, user_agent, analyze_duration, probe_size, timeout_secs, proxy_cfg) => result,
+        }
+    } else {
+        probe_url(url, user_agent, analyze_duration, probe_size, timeout_secs, proxy_cfg).await
+    }
 }
 
 #[cfg(test)]
