@@ -10,6 +10,7 @@ use url::Url;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProbeFailureKind {
     NotFound,
+    Cancelled,
     Other,
 }
 
@@ -175,7 +176,7 @@ pub async fn probe_url(
 
 /// Wrapper around [`probe_url`] that races the probe against an optional cancellation token.
 /// When the token fires, the probe future is dropped (`kill_on_drop` kills the ffprobe process)
-/// and `ProbeUrlOutcome::Failed(Other)` is returned immediately.
+/// and `ProbeUrlOutcome::Failed(Cancelled)` is returned immediately.
 pub async fn probe_url_with_cancel(
     url: &str,
     user_agent: Option<&str>,
@@ -190,7 +191,7 @@ pub async fn probe_url_with_cancel(
             biased;
             () = token.cancelled() => {
                 warn!("Probe preempted for {}", shared::utils::sanitize_sensitive_info(url));
-                ProbeUrlOutcome::Failed(ProbeFailureKind::Other)
+                ProbeUrlOutcome::Failed(ProbeFailureKind::Cancelled)
             }
             result = probe_url(url, user_agent, analyze_duration, probe_size, timeout_secs, proxy_cfg) => result,
         }

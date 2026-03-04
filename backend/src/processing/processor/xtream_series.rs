@@ -8,8 +8,8 @@ use crate::processing::parser::xtream::create_xtream_series_episode_url;
 use crate::processing::parser::xtream::parse_xtream_series_info;
 use crate::processing::processor::playlist::{PlaylistProcessingContext, ProcessingPipe};
 use crate::processing::processor::{
-    create_resolve_options_function_for_xtream_target, process_foreground_retry_once, ResolveOptions,
-    ResolveOptionsFlags, FOREGROUND_BATCH_SIZE as BATCH_SIZE, FOREGROUND_MIN_RETRY_DELAY_SECS,
+    create_resolve_options_function_for_xtream_target, process_foreground_retry_once, select_cancel_token,
+    ResolveOptions, ResolveOptionsFlags, FOREGROUND_BATCH_SIZE as BATCH_SIZE, FOREGROUND_MIN_RETRY_DELAY_SECS,
     FOREGROUND_RETRY_BATCH_MAX_SIZE as RETRY_BATCH_MAX_SIZE,
 };
 use crate::ptt::ptt_parse_title;
@@ -622,7 +622,7 @@ pub async fn update_series_metadata(
     do_probe: bool,
     probe_settings: SeriesProbeSettings,
     db_query: Option<Arc<Mutex<BPlusTreeQuery<u32, XtreamPlaylistItem>>>>,
-    tmdb_resolved_out: Option<&AtomicBool>,
+    tmdb_and_date_present_out: Option<&AtomicBool>,
 ) -> Result<Option<SeriesStreamProperties>, TuliproxError> {
     let working_dir = &app_config.config.load().working_dir;
     let storage_path = get_input_storage_path(&input.name, working_dir)
@@ -821,8 +821,8 @@ pub async fn update_series_metadata(
         }
     }
 
-    // Report whether TMDB data is present (regardless of whether we updated it this call).
-    if let Some(out) = tmdb_resolved_out {
+    // Report whether TMDB and release date are present (regardless of whether we updated them this call).
+    if let Some(out) = tmdb_and_date_present_out {
         let has_tmdb = properties.tmdb.is_some();
         let has_date = properties.release_date.is_some();
         out.store(has_tmdb && has_date, Ordering::Relaxed);
@@ -873,10 +873,7 @@ pub async fn update_series_metadata(
                                 ep.title, ep.season, ep.episode_num, missing_reason
                             );
 
-                            let cancel_token = temp_handle
-                                .as_ref()
-                                .and_then(|h| h.cancel_token.as_ref())
-                                .or_else(|| active_handle.and_then(|h| h.cancel_token.as_ref()));
+                            let cancel_token = select_cancel_token(temp_handle.as_ref(), active_handle);
                             match crate::utils::ffmpeg::probe_url_with_cancel(
                                 &episode_url,
                                 user_agent.as_deref(),
@@ -905,6 +902,11 @@ pub async fn update_series_metadata(
                                 ProbeUrlOutcome::Failed(ProbeFailureKind::Other) => {
                                     if probe_failure.is_none() {
                                         probe_failure = Some(ProbeFailureKind::Other);
+                                    }
+                                }
+                                ProbeUrlOutcome::Failed(ProbeFailureKind::Cancelled) => {
+                                    if probe_failure.is_none() {
+                                        probe_failure = Some(ProbeFailureKind::Cancelled);
                                     }
                                 }
                             }
@@ -938,6 +940,7 @@ pub async fn update_series_metadata(
                     shared::error::info_err!("Probe failed with 404 Not Found for Series {display_id}")
                 }
                 ProbeFailureKind::Other => shared::error::info_err!("Probe failed for Series {display_id}"),
+                ProbeFailureKind::Cancelled => shared::error::info_err!("Probe cancelled for Series {display_id}"),
             };
             return Err(err);
         }

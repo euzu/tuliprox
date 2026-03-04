@@ -1,123 +1,164 @@
+use crate::api::model::{MetadataRetryDbKey, MetadataRetryDbValue};
 use crate::repository::{BPlusTreeDiskIterator, BPlusTreeQuery, VirtualIdRecord};
 use env_logger::{Builder, Target};
 use log::{error, LevelFilter};
 use serde::{Deserialize, Serialize};
 use shared::model::{EpgChannel, M3uPlaylistItem, XtreamPlaylistItem};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-#[derive(Debug, Copy, Clone)]
-enum DbType {
-    Xtream,
-    M3u,
-    Epg,
-    TargetIdMapping
+type DumpFn = fn(&Path) -> bool;
+
+struct DumpRequest<'a> {
+    filename: Option<&'a str>,
+    label: &'static str,
+    dump_fn: DumpFn,
 }
 
-pub fn db_viewer(xtream_filename: Option<&str>,
-                 m3u_filename: Option<&str>,
-                 epg_filename: Option<&str>,
-                 tim_filename: Option<&str>,) {
+pub struct DbViewerArgs<'a> {
+    pub xtream_filename: Option<&'a str>,
+    pub m3u_filename: Option<&'a str>,
+    pub epg_filename: Option<&'a str>,
+    pub tim_filename: Option<&'a str>,
+    pub metadata_status_filename: Option<&'a str>,
+}
+
+impl<'a> DbViewerArgs<'a> {
+    pub const fn new(
+        xtream_filename: Option<&'a str>,
+        m3u_filename: Option<&'a str>,
+        epg_filename: Option<&'a str>,
+        tim_filename: Option<&'a str>,
+        metadata_status_filename: Option<&'a str>,
+    ) -> Self {
+        Self {
+            xtream_filename,
+            m3u_filename,
+            epg_filename,
+            tim_filename,
+            metadata_status_filename,
+        }
+    }
+}
+
+pub fn db_viewer(args: &DbViewerArgs<'_>) {
+    init_db_viewer_logger();
+
+    let requests = [
+        DumpRequest {
+            filename: args.xtream_filename,
+            label: "xtream",
+            dump_fn: dump_xtream_db,
+        },
+        DumpRequest {
+            filename: args.m3u_filename,
+            label: "m3u",
+            dump_fn: dump_m3u_db,
+        },
+        DumpRequest {
+            filename: args.epg_filename,
+            label: "epg",
+            dump_fn: dump_epg_db,
+        },
+        DumpRequest {
+            filename: args.tim_filename,
+            label: "target_id_mapping",
+            dump_fn: dump_target_mapping_db,
+        },
+        DumpRequest {
+            filename: args.metadata_status_filename,
+            label: "metadata_status",
+            dump_fn: dump_metadata_status_db,
+        },
+    ];
+
     let mut any_processed = false;
-    if let Some(filename) = xtream_filename {
-        any_processed = true;
-        if !dump_db(filename, DbType::Xtream) {
-            exit_app(1);
-        }
-    }
-    if let Some(filename) = m3u_filename {
-        any_processed = true;
-        if !dump_db(filename, DbType::M3u) {
-            exit_app(1);
-        }
-    }
-
-    if let Some(filename) = epg_filename {
-        any_processed = true;
-        if !dump_db(filename, DbType::Epg) {
-            exit_app(1);
-        }
-    }
-
-    if let Some(filename) = tim_filename {
-        any_processed = true;
-        if !dump_db(filename, DbType::TargetIdMapping) {
-            exit_app(1);
+    for request in requests {
+        if let Some(filename) = request.filename {
+            any_processed = true;
+            if !dump_db(filename, request.label, request.dump_fn) {
+                exit_app(1);
+            }
         }
     }
 
     if any_processed {
-        exit_app(1);
+        exit_app(0);
     }
 }
 
-fn dump_db(filename: &str, db_type: DbType) -> bool {
+fn init_db_viewer_logger() {
     let mut log_builder = Builder::from_default_env();
     log_builder.target(Target::Stderr);
     log_builder.filter_level(LevelFilter::Info);
     let _ = log_builder.try_init();
+}
 
+fn try_dump_typed_db<K, V>(path: &Path) -> bool
+where
+    K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
+    V: Serialize + for<'de> Deserialize<'de> + Clone,
+{
+    if let Ok(mut query) = BPlusTreeQuery::<K, V>::try_new(path) {
+        return print_json_from_iter(query.iter());
+    }
+    false
+}
+
+fn try_dump_m3u_with_key<K>(path: &Path) -> Result<bool, String>
+where
+    K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
+{
+    let mut query = BPlusTreeQuery::<K, M3uPlaylistItem>::try_new(path).map_err(|err| err.to_string())?;
+    query.len().map_err(|err| err.to_string())?;
+    Ok(print_json_from_iter(query.iter()))
+}
+
+fn dump_xtream_db(path: &Path) -> bool { try_dump_typed_db::<u32, XtreamPlaylistItem>(path) }
+
+fn dump_m3u_db(path: &Path) -> bool {
+    // M3U DB keys can be u32 (target playlists) or Arc<str> (input playlists).
+    let err_u32 = match try_dump_m3u_with_key::<u32>(path) {
+        Ok(result) => return result,
+        Err(err) => Some(err),
+    };
+    let err_str = match try_dump_m3u_with_key::<Arc<str>>(path) {
+        Ok(result) => return result,
+        Err(err) => Some(err),
+    };
+
+    error!(
+        "Failed to open M3U DB with any known key type at {}: u32_err={:?}, string_err={:?}",
+        path.display(),
+        err_u32,
+        err_str
+    );
+    false
+}
+
+fn dump_epg_db(path: &Path) -> bool { try_dump_typed_db::<Arc<str>, EpgChannel>(path) }
+
+fn dump_target_mapping_db(path: &Path) -> bool { try_dump_typed_db::<u32, VirtualIdRecord>(path) }
+
+fn dump_metadata_status_db(path: &Path) -> bool {
+    try_dump_typed_db::<MetadataRetryDbKey, MetadataRetryDbValue>(path)
+}
+
+fn dump_db(filename: &str, label: &str, dump_fn: DumpFn) -> bool {
     match PathBuf::from(filename).canonicalize() {
         Ok(path) => {
-            match db_type {
-                DbType::Xtream => {
-                    if let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&path) {
-                        let iterator = query.iter();
-                        return print_json_from_iter(iterator);
-                    }
-                }
-                DbType::M3u => {
-                    // M3U DB keys can be u32 (target playlists) or Arc<str> (input playlists).
-                    let err_u32 = match BPlusTreeQuery::<u32, M3uPlaylistItem>::try_new(&path) {
-                        Ok(mut query) => match query.len() {
-                            Ok(_) => {
-                                let iterator = query.iter();
-                                return print_json_from_iter(iterator);
-                            }
-                            Err(err) => Some(err.to_string()),
-                        },
-                        Err(err) => Some(err.to_string()),
-                    };
-
-                    let err_str = match BPlusTreeQuery::<Arc<str>, M3uPlaylistItem>::try_new(&path) {
-                        Ok(mut query) => match query.len() {
-                            Ok(_) => {
-                                let iterator = query.iter();
-                                return print_json_from_iter(iterator);
-                            }
-                            Err(err) => Some(err.to_string()),
-                        },
-                        Err(err) => Some(err.to_string()),
-                    };
-
-                    error!(
-                        "Failed to open M3U DB with any known key type at {}: u32_err={:?}, string_err={:?}",
-                        path.display(),
-                        err_u32,
-                        err_str
-                    );
-                }
-                DbType::Epg => {
-                    if let Ok(mut query) = BPlusTreeQuery::<Arc<str>, EpgChannel>::try_new(&path) {
-                        let iterator = query.iter();
-                        return print_json_from_iter(iterator);
-                    }
-                }
-                DbType::TargetIdMapping => {
-                    if let Ok(mut query) = BPlusTreeQuery::<u32, VirtualIdRecord>::try_new(&path) {
-                        let iterator = query.iter();
-                        return print_json_from_iter(iterator);
-                    }
-                }
+            if !dump_fn(&path) {
+                error!("Failed to dump {label} DB at {}", path.display());
+                return false;
             }
+            true
         }
         Err(err) => {
-            error!("Invalid file path! {err}");
+            error!("Invalid file path for {label} DB: {err}");
+            false
         }
     }
-
-    false
 }
 
 fn print_json_from_iter<K, P>(iterator: BPlusTreeDiskIterator<K, P>) -> bool
@@ -146,7 +187,7 @@ where
     }
     println!("]");
 
-    error_count <= 0
+    error_count == 0
 }
 
 fn exit_app(code: i32) {

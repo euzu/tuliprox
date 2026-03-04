@@ -1,6 +1,7 @@
 use crate::api::model::ActiveProviderManager;
 use crate::model::ConfigInput;
 use crate::model::{AppConfig};
+use crate::processing::processor::select_cancel_token;
 use crate::repository::{get_input_m3u_playlist_file_path, get_input_storage_path, get_input_local_library_playlist_file_path, xtream_get_file_path, BPlusTreeUpdate};
 use crate::utils::{debug_if_enabled, ffmpeg};
 use crate::utils::ffmpeg::{ProbeFailureKind, ProbeUrlOutcome};
@@ -115,10 +116,7 @@ pub async fn update_generic_stream_metadata(
 
     debug_if_enabled!("Probing Generic Stream '{unique_id}'");
 
-    let cancel_token = acquired_handle
-        .as_ref()
-        .and_then(|h| h.cancel_token.as_ref())
-        .or_else(|| active_handle.and_then(|h| h.cancel_token.as_ref()));
+    let cancel_token = select_cancel_token(acquired_handle.as_ref(), active_handle);
     let probe_data = ffmpeg::probe_url_with_cancel(
         &probe_url,
         user_agent.as_deref(),
@@ -142,6 +140,10 @@ pub async fn update_generic_stream_metadata(
         }
         ProbeUrlOutcome::Failed(ProbeFailureKind::Other) => {
             warn!("Probe failed or timed out for generic stream: {unique_id}");
+            return Ok(GenericProbeOutcome::ProbeFailed);
+        }
+        ProbeUrlOutcome::Failed(ProbeFailureKind::Cancelled) => {
+            warn!("Probe cancelled for generic stream: {unique_id}");
             return Ok(GenericProbeOutcome::ProbeFailed);
         }
     };

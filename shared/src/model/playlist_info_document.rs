@@ -350,7 +350,7 @@ impl StreamProperties {
                         XtreamCluster::Video,
                         item_type,
                         virtual_id,
-                        details.cover_big.as_ref().map(Arc::as_ref).unwrap_or(""),
+                        details.movie_image.as_ref().map(Arc::as_ref).unwrap_or(""),
                         "nfo_movie_image",
                     )
                     .intern(),

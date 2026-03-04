@@ -340,7 +340,7 @@ impl TaskRetryState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-enum MetadataRetryDbKey {
+pub enum MetadataRetryDbKey {
     VodId(u32),
     VodText(String),
     SeriesId(u32),
@@ -410,7 +410,7 @@ impl RetryStateDbValue {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct MetadataRetryDbValue {
+pub struct MetadataRetryDbValue {
     resolve: Option<RetryStateDbValue>,
     probe: Option<RetryStateDbValue>,
     tmdb: Option<RetryStateDbValue>,
@@ -1209,7 +1209,10 @@ impl InputWorker {
                         self.scheduled_requeues.remove(&current_key);
 
                         // Cache tasks that completed with no changes to skip redundant re-resolution.
-                        if !task_outcome.task_changed && Self::is_resolve_task(&task_for_execution) {
+                        if !task_outcome.task_changed
+                            && Self::is_resolve_task(&task_for_execution)
+                            && !task_outcome.tmdb_pending
+                        {
                             let reasons = Self::task_reason(&task_for_execution);
                             self.recently_completed_no_change.insert(current_key.clone(), (Instant::now(), reasons));
                         } else {
@@ -2709,7 +2712,7 @@ impl InputWorker {
             app_state.connection_manager.release_provider_handle(provider_handle).await;
         }
         match res {
-            Ok(tmdb_resolved) => {
+            Ok(tmdb_and_date_present) => {
                 let task_changed = match task {
                     UpdateTask::ResolveVod { .. } => collector.vod.len() > pre_vod_updates,
                     UpdateTask::ResolveSeries { .. } => collector.series.len() > pre_series_updates,
@@ -2719,7 +2722,7 @@ impl InputWorker {
                 let tmdb_pending = match task {
                     UpdateTask::ResolveVod { reason, .. } | UpdateTask::ResolveSeries { reason, .. } => {
                         if reason.contains(ResolveReason::Tmdb) || reason.contains(ResolveReason::Date) {
-                            !tmdb_resolved
+                            !tmdb_and_date_present
                         } else {
                             false
                         }
@@ -2756,7 +2759,7 @@ impl InputWorker {
         db_handles: &mut HashMap<XtreamCluster, DbHandle>,
         failed_clusters: &mut HashSet<XtreamCluster>,
     ) -> Result<bool, TuliproxError> {
-        // The returned bool indicates whether TMDB data is already present in the DB
+        // The returned bool indicates whether both TMDB id and release date are already present in the DB
         // (used by the caller to avoid false-positive "no match" cooldowns).
         match task {
             UpdateTask::ResolveVod { id, reason, .. } => {
@@ -2779,7 +2782,7 @@ impl InputWorker {
                         .await
                 };
 
-                let tmdb_resolved = AtomicBool::new(false);
+                let tmdb_and_date_present = AtomicBool::new(false);
                 match update_vod_metadata(
                     &app_state.app_config,
                     client,
@@ -2793,15 +2796,15 @@ impl InputWorker {
                     resolve_tmdb,
                     will_probe,
                     query_opt,
-                    Some(&tmdb_resolved),
+                    Some(&tmdb_and_date_present),
                 )
                 .await
                 {
                     Ok(Some(props)) => {
                         collector.add_vod(id.clone(), props);
-                        Ok(tmdb_resolved.load(Ordering::Relaxed))
+                        Ok(tmdb_and_date_present.load(Ordering::Relaxed))
                     }
-                    Ok(None) => Ok(tmdb_resolved.load(Ordering::Relaxed)),
+                    Ok(None) => Ok(tmdb_and_date_present.load(Ordering::Relaxed)),
                     Err(e) => Err(e),
                 }
             }
@@ -2826,7 +2829,7 @@ impl InputWorker {
                         .await
                 };
 
-                let tmdb_resolved = AtomicBool::new(false);
+                let tmdb_and_date_present = AtomicBool::new(false);
                 match update_series_metadata(
                     &app_state.app_config,
                     client,
@@ -2841,15 +2844,15 @@ impl InputWorker {
                     will_probe,
                     series_probe_settings,
                     query_opt,
-                    Some(&tmdb_resolved),
+                    Some(&tmdb_and_date_present),
                 )
                 .await
                 {
                     Ok(Some(props)) => {
                         collector.add_series(id.clone(), props);
-                        Ok(tmdb_resolved.load(Ordering::Relaxed))
+                        Ok(tmdb_and_date_present.load(Ordering::Relaxed))
                     }
-                    Ok(None) => Ok(tmdb_resolved.load(Ordering::Relaxed)),
+                    Ok(None) => Ok(tmdb_and_date_present.load(Ordering::Relaxed)),
                     Err(e) => Err(e),
                 }
             }

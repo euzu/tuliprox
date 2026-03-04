@@ -7,8 +7,8 @@ use crate::model::{AppConfig, ConfigTarget};
 use crate::model::{ConfigInput, ConfigInputFlags};
 use crate::processing::processor::playlist::PlaylistProcessingContext;
 use crate::processing::processor::{
-    create_resolve_options_function_for_xtream_target, process_foreground_retry_once, ResolveOptions,
-    ResolveOptionsFlags, FOREGROUND_BATCH_SIZE as BATCH_SIZE, FOREGROUND_MIN_RETRY_DELAY_SECS,
+    create_resolve_options_function_for_xtream_target, process_foreground_retry_once, select_cancel_token,
+    ResolveOptions, ResolveOptionsFlags, FOREGROUND_BATCH_SIZE as BATCH_SIZE, FOREGROUND_MIN_RETRY_DELAY_SECS,
     FOREGROUND_RETRY_BATCH_MAX_SIZE as RETRY_BATCH_MAX_SIZE,
 };
 use crate::ptt::ptt_parse_title;
@@ -807,10 +807,7 @@ pub async fn update_vod_metadata(
 
                 if active_handle.is_some() || temp_handle.is_some() {
                     debug_if_enabled!("Probing VOD '{}' (ID: {})", display_title, display_id);
-                    let cancel_token = temp_handle
-                        .as_ref()
-                        .and_then(|h| h.cancel_token.as_ref())
-                        .or_else(|| active_handle.and_then(|h| h.cancel_token.as_ref()));
+                    let cancel_token = select_cancel_token(temp_handle.as_ref(), active_handle);
                     match crate::utils::ffmpeg::probe_url_with_cancel(
                         &stream_url,
                         user_agent.as_deref(),
@@ -842,6 +839,11 @@ pub async fn update_vod_metadata(
                                 probe_failure = Some(ProbeFailureKind::Other);
                             }
                         }
+                        ProbeUrlOutcome::Failed(ProbeFailureKind::Cancelled) => {
+                            if probe_failure.is_none() {
+                                probe_failure = Some(ProbeFailureKind::Cancelled);
+                            }
+                        }
                     }
                 if let Some(h) = temp_handle {
                     active_provider.release_handle(&h).await;
@@ -860,6 +862,7 @@ pub async fn update_vod_metadata(
                     shared::error::info_err!("Probe failed with 404 Not Found for VOD {display_id}")
                 }
                 ProbeFailureKind::Other => shared::error::info_err!("Probe failed for VOD {display_id}"),
+                ProbeFailureKind::Cancelled => shared::error::info_err!("Probe cancelled for VOD {display_id}"),
             };
             return Err(err);
         }
