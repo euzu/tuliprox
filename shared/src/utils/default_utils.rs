@@ -199,6 +199,10 @@ pub const fn is_default_metadata_backoff_jitter_percent(v: &u8) -> bool {
 }
 pub const fn default_metadata_max_queue_size() -> usize { 100_000 }
 pub const fn is_default_metadata_max_queue_size(v: &usize) -> bool { *v == default_metadata_max_queue_size() }
+pub const fn default_metadata_no_change_cache_ttl_secs() -> u64 { 3600 }
+pub const fn is_default_metadata_no_change_cache_ttl_secs(v: &u64) -> bool {
+    *v == default_metadata_no_change_cache_ttl_secs()
+}
 pub fn default_metadata_ffprobe_analyze_duration() -> String { "10s".to_string() }
 pub fn is_default_metadata_ffprobe_analyze_duration(v: &String) -> bool {
     *v == default_metadata_ffprobe_analyze_duration()

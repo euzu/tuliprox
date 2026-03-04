@@ -43,8 +43,6 @@ impl<'a> DbViewerArgs<'a> {
 }
 
 pub fn db_viewer(args: &DbViewerArgs<'_>) {
-    init_db_viewer_logger();
-
     let requests = [
         DumpRequest {
             filename: args.xtream_filename,
@@ -72,6 +70,13 @@ pub fn db_viewer(args: &DbViewerArgs<'_>) {
             dump_fn: dump_metadata_status_db,
         },
     ];
+
+    let any_requested = requests.iter().any(|request| request.filename.is_some());
+    if !any_requested {
+        return;
+    }
+
+    init_db_viewer_logger();
 
     let mut any_processed = false;
     for request in requests {

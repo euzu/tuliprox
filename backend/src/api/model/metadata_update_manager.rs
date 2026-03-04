@@ -48,7 +48,6 @@ const BLOCKING_DB_MAX_CONCURRENCY: usize = 32;
 const RETRY_STATE_PRUNE_INTERVAL_SECS: i64 = 300;
 const RETRY_STATE_MIN_TTL_SECS: i64 = 86_400;
 const RUNTIME_SETTINGS_REFRESH_INTERVAL_SECS: u64 = 60;
-const DEFAULT_NO_CHANGE_CACHE_TTL_SECS: u64 = 3600;
 
 fn metadata_blocking_concurrency_limit() -> usize {
     let parallelism =
@@ -88,6 +87,7 @@ struct MetadataUpdateRuntimeSettings {
     metadata_retry_load_retry_delay_secs: i64,
     worker_idle_timeout_secs: u64,
     max_queue_size: usize,
+    no_change_cache_ttl_secs: u64,
     probe_retry_backoff_step_1_secs: u64,
     probe_retry_backoff_step_2_secs: u64,
     probe_retry_backoff_step_3_secs: u64,
@@ -132,6 +132,7 @@ impl MetadataUpdateRuntimeSettings {
             metadata_retry_load_retry_delay_secs: to_i64(cfg.probe.retry_load_retry_delay_secs),
             worker_idle_timeout_secs: cfg.worker_idle_timeout_secs.max(1),
             max_queue_size: cfg.max_queue_size.max(1),
+            no_change_cache_ttl_secs: cfg.no_change_cache_ttl_secs.max(1),
             probe_retry_backoff_step_1_secs: cfg.probe.retry_backoff_step_1_secs.max(1),
             probe_retry_backoff_step_2_secs: cfg.probe.retry_backoff_step_2_secs.max(1),
             probe_retry_backoff_step_3_secs: cfg.probe.retry_backoff_step_3_secs.max(1),
@@ -998,24 +999,16 @@ impl InputWorker {
             }
 
             // Skip tasks that recently completed with no changes (already resolved in DB).
-            // Only skip if the incoming reason set is a subset of the cached reasons,
-            // so tasks with new/different reasons are not wrongly skipped.
+            // Only skip when the incoming reason set exactly matches the cached reason set.
             if !skip_execution {
-                if let Some((completed_at, cached_reasons)) = self.recently_completed_no_change.get(&current_key) {
-                    let ttl = Duration::from_secs(DEFAULT_NO_CHANGE_CACHE_TTL_SECS);
-                    let current_reasons = Self::task_reason(&task_for_execution);
-                    if completed_at.elapsed() < ttl && current_reasons.is_subset_of(cached_reasons) {
-                        debug_if_enabled!(
-                            "Skipping recently-resolved no-change task for input {}: {}",
-                            input_name,
-                            task_for_execution
-                        );
-                        self.scheduled_requeues.remove(&current_key);
-                        remove_current_task = true;
-                        skip_execution = true;
-                    } else {
-                        self.recently_completed_no_change.remove(&current_key);
-                    }
+                if self.should_skip_recent_no_change_task(&current_key, &task_for_execution, &runtime_settings) {
+                    debug_if_enabled!(
+                        "Skipping recently-resolved no-change task for input {}: {}",
+                        input_name,
+                        task_for_execution
+                    );
+                    remove_current_task = true;
+                    skip_execution = true;
                 }
             }
 
@@ -1802,7 +1795,7 @@ impl InputWorker {
             self.resolve_exhausted.remove(&key);
         }
 
-        let no_change_ttl = Duration::from_secs(DEFAULT_NO_CHANGE_CACHE_TTL_SECS);
+        let no_change_ttl = Duration::from_secs(runtime_settings.no_change_cache_ttl_secs);
         self.recently_completed_no_change
             .retain(|_, (completed_at, _)| completed_at.elapsed() < no_change_ttl);
     }
@@ -1918,6 +1911,29 @@ impl InputWorker {
             | UpdateTask::ProbeLive { reason, .. }
             | UpdateTask::ProbeStream { reason, .. } => *reason,
         }
+    }
+
+    fn should_skip_recent_no_change_task(
+        &mut self,
+        current_key: &TaskKey,
+        task_for_execution: &UpdateTask,
+        runtime_settings: &MetadataUpdateRuntimeSettings,
+    ) -> bool {
+        let Some((completed_at, cached_reasons)) =
+            self.recently_completed_no_change.get(current_key).copied()
+        else {
+            return false;
+        };
+
+        let ttl = Duration::from_secs(runtime_settings.no_change_cache_ttl_secs);
+        let current_reasons = Self::task_reason(task_for_execution);
+        if completed_at.elapsed() < ttl && current_reasons == cached_reasons {
+            self.scheduled_requeues.remove(current_key);
+            return true;
+        }
+
+        self.recently_completed_no_change.remove(current_key);
+        false
     }
 
     #[inline]
@@ -2918,6 +2934,37 @@ mod tests {
     use tempfile::tempdir;
     use tokio::sync::mpsc;
 
+    fn create_test_worker(
+        input_name: &str,
+        sender: mpsc::Sender<TaskKey>,
+        receiver: mpsc::Receiver<TaskKey>,
+        pending_tasks: Arc<DashMap<TaskKey, PendingTask>>,
+        pending_task_count: Arc<AtomicUsize>,
+    ) -> InputWorker {
+        InputWorker {
+            input_name: Arc::from(input_name),
+            sender,
+            receiver,
+            pending_tasks,
+            pending_task_count,
+            app_state_weak: None,
+            update_pause_gate: Arc::new(RwLock::new(())),
+            cancel_token: CancellationToken::new(),
+            batch_buffer: BatchResultCollector::new(),
+            db_handles: HashMap::new(),
+            failed_clusters: HashSet::new(),
+            retry_states: HashMap::new(),
+            resolve_exhausted: HashMap::new(),
+            last_cycle_completed_at_ts: None,
+            metadata_retry_state_path: None,
+            metadata_retry_loaded: false,
+            metadata_retry_load_retry_at_ts: None,
+            last_retry_state_prune_at_ts: None,
+            scheduled_requeues: Arc::new(DashMap::new()),
+            recently_completed_no_change: HashMap::new(),
+        }
+    }
+
     #[tokio::test]
     async fn queue_task_creates_single_worker_per_input_under_concurrency() {
         let cancel_token = CancellationToken::new();
@@ -3166,6 +3213,7 @@ mod tests {
     async fn finalize_processed_task_success_requeues_when_generation_changed() {
         let (tx, rx) = mpsc::channel::<TaskKey>(8);
         let pending_tasks = Arc::new(DashMap::new());
+        let pending_task_count = Arc::new(AtomicUsize::new(1));
         let key = TaskKey::Vod(7);
 
         pending_tasks.insert(
@@ -3180,28 +3228,7 @@ mod tests {
             entry.generation.store(1, Ordering::Relaxed);
         }
 
-        let mut worker = InputWorker {
-            input_name: Arc::from("input_a"),
-            sender: tx,
-            receiver: rx,
-            pending_tasks: pending_tasks.clone(),
-            pending_task_count: Arc::new(AtomicUsize::new(1)),
-            app_state_weak: None,
-            update_pause_gate: Arc::new(RwLock::new(())),
-            cancel_token: CancellationToken::new(),
-            batch_buffer: BatchResultCollector::new(),
-            db_handles: HashMap::new(),
-            failed_clusters: HashSet::new(),
-            retry_states: HashMap::new(),
-            resolve_exhausted: HashMap::new(),
-            last_cycle_completed_at_ts: None,
-            metadata_retry_state_path: None,
-            metadata_retry_loaded: false,
-            metadata_retry_load_retry_at_ts: None,
-            last_retry_state_prune_at_ts: None,
-            scheduled_requeues: Arc::new(DashMap::new()),
-            recently_completed_no_change: HashMap::new(),
-        };
+        let mut worker = create_test_worker("input_a", tx, rx, pending_tasks.clone(), pending_task_count);
 
         let requeued = worker.finalize_processed_task_success(&key, 0, "input_a").await;
         assert!(requeued);
@@ -3213,44 +3240,99 @@ mod tests {
     async fn finalize_processed_task_success_removes_when_unchanged() {
         let (tx, rx) = mpsc::channel::<TaskKey>(8);
         let pending_tasks = Arc::new(DashMap::new());
+        let pending_task_count = Arc::new(AtomicUsize::new(1));
         let key = TaskKey::Vod(9);
-
-        pending_tasks.insert(
-            key.clone(),
-            PendingTask::new(UpdateTask::ResolveVod {
-                id: ProviderIdType::Id(9),
-                reason: ResolveReasonSet::from_variants(&[ResolveReason::Info]),
-                delay: 0,
-            }),
-        );
-
-        let mut worker = InputWorker {
-            input_name: Arc::from("input_b"),
-            sender: tx,
-            receiver: rx,
-            pending_tasks: pending_tasks.clone(),
-            pending_task_count: Arc::new(AtomicUsize::new(1)),
-            app_state_weak: None,
-            update_pause_gate: Arc::new(RwLock::new(())),
-            cancel_token: CancellationToken::new(),
-            batch_buffer: BatchResultCollector::new(),
-            db_handles: HashMap::new(),
-            failed_clusters: HashSet::new(),
-            retry_states: HashMap::new(),
-            resolve_exhausted: HashMap::new(),
-            last_cycle_completed_at_ts: None,
-            metadata_retry_state_path: None,
-            metadata_retry_loaded: false,
-            metadata_retry_load_retry_at_ts: None,
-            last_retry_state_prune_at_ts: None,
-            scheduled_requeues: Arc::new(DashMap::new()),
-            recently_completed_no_change: HashMap::new(),
+        let task = UpdateTask::ResolveVod {
+            id: ProviderIdType::Id(9),
+            reason: ResolveReasonSet::from_variants(&[ResolveReason::Info]),
+            delay: 0,
         };
+
+        pending_tasks.insert(key.clone(), PendingTask::new(task.clone()));
+
+        let mut worker = create_test_worker("input_b", tx, rx, pending_tasks.clone(), pending_task_count);
+        let runtime_settings = MetadataUpdateRuntimeSettings::default();
+
+        worker.scheduled_requeues.insert(key.clone(), chrono::Utc::now().timestamp().saturating_add(30));
+        worker.recently_completed_no_change.insert(
+            key.clone(),
+            (Instant::now(), ResolveReasonSet::from_variants(&[ResolveReason::Info])),
+        );
+        assert!(worker.should_skip_recent_no_change_task(&key, &task, &runtime_settings));
+        assert!(worker.recently_completed_no_change.contains_key(&key));
+        assert!(!worker.scheduled_requeues.contains_key(&key));
 
         let requeued = worker.finalize_processed_task_success(&key, 0, "input_b").await;
         assert!(!requeued);
         assert!(!pending_tasks.contains_key(&key));
         assert!(matches!(worker.receiver.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn recent_no_change_skip_requires_exact_reason_match() {
+        let (tx, rx) = mpsc::channel::<TaskKey>(8);
+        let pending_tasks = Arc::new(DashMap::new());
+        let pending_task_count = Arc::new(AtomicUsize::new(0));
+        let key = TaskKey::Vod(10);
+        let task = UpdateTask::ResolveVod {
+            id: ProviderIdType::Id(10),
+            reason: ResolveReasonSet::from_variants(&[ResolveReason::Info]),
+            delay: 0,
+        };
+        let mut worker = create_test_worker("input_c", tx, rx, pending_tasks, pending_task_count);
+        let runtime_settings = MetadataUpdateRuntimeSettings::default();
+
+        worker.recently_completed_no_change.insert(
+            key.clone(),
+            (
+                Instant::now(),
+                ResolveReasonSet::from_variants(&[ResolveReason::Info, ResolveReason::Probe]),
+            ),
+        );
+        assert!(!worker.should_skip_recent_no_change_task(&key, &task, &runtime_settings));
+        assert!(!worker.recently_completed_no_change.contains_key(&key));
+
+        worker.recently_completed_no_change.insert(
+            key.clone(),
+            (Instant::now(), ResolveReasonSet::from_variants(&[ResolveReason::Info])),
+        );
+        assert!(worker.should_skip_recent_no_change_task(&key, &task, &runtime_settings));
+        assert!(worker.recently_completed_no_change.contains_key(&key));
+    }
+
+    #[tokio::test]
+    async fn recent_no_change_skip_ttl_expiry_allows_requeue() {
+        let (tx, rx) = mpsc::channel::<TaskKey>(8);
+        let pending_tasks = Arc::new(DashMap::new());
+        let pending_task_count = Arc::new(AtomicUsize::new(1));
+        let key = TaskKey::Vod(11);
+        let task = UpdateTask::ResolveVod {
+            id: ProviderIdType::Id(11),
+            reason: ResolveReasonSet::from_variants(&[ResolveReason::Info]),
+            delay: 0,
+        };
+
+        pending_tasks.insert(key.clone(), PendingTask::new(task.clone()));
+        if let Some(entry) = pending_tasks.get(&key) {
+            entry.generation.store(1, Ordering::Relaxed);
+        }
+
+        let mut worker = create_test_worker("input_d", tx, rx, pending_tasks.clone(), pending_task_count);
+        let mut runtime_settings = MetadataUpdateRuntimeSettings::default();
+        runtime_settings.no_change_cache_ttl_secs = 1;
+
+        let stale_instant = Instant::now().checked_sub(Duration::from_secs(2)).unwrap_or_else(Instant::now);
+        worker.recently_completed_no_change.insert(
+            key.clone(),
+            (stale_instant, ResolveReasonSet::from_variants(&[ResolveReason::Info])),
+        );
+        assert!(!worker.should_skip_recent_no_change_task(&key, &task, &runtime_settings));
+        assert!(!worker.recently_completed_no_change.contains_key(&key));
+
+        let requeued = worker.finalize_processed_task_success(&key, 0, "input_d").await;
+        assert!(requeued);
+        assert!(pending_tasks.contains_key(&key));
+        assert_eq!(worker.receiver.try_recv().expect("requeued signal should be present"), key);
     }
 
     #[test]

@@ -31,6 +31,7 @@ const LABEL_TMDB_COOLDOWN: &str = "LABEL.METADATA_TMDB_COOLDOWN";
 const LABEL_RETRY_DELAY: &str = "LABEL.METADATA_RETRY_DELAY";
 const LABEL_PROBE_RETRY_LOAD_RETRY_DELAY: &str = "LABEL.METADATA_PROBE_RETRY_LOAD_RETRY_DELAY";
 const LABEL_WORKER_IDLE_TIMEOUT: &str = "LABEL.METADATA_WORKER_IDLE_TIMEOUT";
+const LABEL_NO_CHANGE_CACHE_TTL_SECS: &str = "LABEL.METADATA_NO_CHANGE_CACHE_TTL_SECS";
 const LABEL_PROBE_RETRY_BACKOFF_STEP_1: &str = "LABEL.METADATA_PROBE_RETRY_BACKOFF_STEP_1";
 const LABEL_PROBE_RETRY_BACKOFF_STEP_2: &str = "LABEL.METADATA_PROBE_RETRY_BACKOFF_STEP_2";
 const LABEL_PROBE_RETRY_BACKOFF_STEP_3: &str = "LABEL.METADATA_PROBE_RETRY_BACKOFF_STEP_3";
@@ -67,6 +68,7 @@ generate_form_reducer!(
         RetryDelay => retry_delay: String,
         MaxQueueSize => max_queue_size: usize,
         WorkerIdleTimeout => worker_idle_timeout: String,
+        NoChangeCacheTtlSecs => no_change_cache_ttl_secs: u64,
     }
 );
 
@@ -265,6 +267,7 @@ pub fn MetadataUpdateConfigView() -> Html {
                     { config_field!(form_state.form, translate.t(LABEL_RETRY_DELAY), retry_delay) }
                     { config_field!(form_state.form, translate.t(LABEL_MAX_QUEUE_SIZE), max_queue_size) }
                     { config_field!(form_state.form, translate.t(LABEL_WORKER_IDLE_TIMEOUT), worker_idle_timeout) }
+                    { config_field!(form_state.form, translate.t(LABEL_NO_CHANGE_CACHE_TTL_SECS), no_change_cache_ttl_secs) }
                 </Card>
 
                 <Card class="tp__config-view__card">
@@ -365,6 +368,7 @@ pub fn MetadataUpdateConfigView() -> Html {
                     { edit_field_text!(form_state, translate.t(LABEL_RETRY_DELAY), retry_delay, MetadataUpdateConfigFormAction::RetryDelay) }
                     { edit_field_number_usize!(form_state, translate.t(LABEL_MAX_QUEUE_SIZE), max_queue_size, MetadataUpdateConfigFormAction::MaxQueueSize) }
                     { edit_field_text!(form_state, translate.t(LABEL_WORKER_IDLE_TIMEOUT), worker_idle_timeout, MetadataUpdateConfigFormAction::WorkerIdleTimeout) }
+                    { edit_field_number_u64!(form_state, translate.t(LABEL_NO_CHANGE_CACHE_TTL_SECS), no_change_cache_ttl_secs, MetadataUpdateConfigFormAction::NoChangeCacheTtlSecs) }
                 </Card>
 
                 <Card class="tp__config-view__card">

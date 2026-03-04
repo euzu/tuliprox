@@ -895,6 +895,7 @@
     "METADATA_MAX_ATTEMPTS_RESOLVE": "Max resolve attempts",
     "METADATA_MAX_QUEUE_SIZE": "Max queue size",
     "METADATA_MAX_RESOLVE_RETRY_BACKOFF": "Max resolve retry backoff",
+    "METADATA_NO_CHANGE_CACHE_TTL_SECS": "No-change cache TTL (seconds)",
     "METADATA_PATH": "Metadata Path",
     "METADATA_PROBE_COOLDOWN": "Probe cooldown",
     "METADATA_PROBE_RETRY_BACKOFF_STEP_1": "Probe backoff step 1",

@@ -17,6 +17,7 @@ pub struct MetadataUpdateConfig {
     pub worker_idle_timeout: String,
     pub worker_idle_timeout_secs: u64,
     pub max_queue_size: usize,
+    pub no_change_cache_ttl_secs: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -147,6 +148,7 @@ impl From<&MetadataUpdateConfigDto> for MetadataUpdateConfig {
             ),
             worker_idle_timeout: normalized.worker_idle_timeout,
             max_queue_size: normalized.max_queue_size.max(1),
+            no_change_cache_ttl_secs: normalized.no_change_cache_ttl_secs.max(1),
         }
     }
 }
@@ -163,6 +165,7 @@ impl From<&MetadataUpdateConfig> for MetadataUpdateConfigDto {
             retry_delay: instance.retry_delay.clone(),
             worker_idle_timeout: instance.worker_idle_timeout.clone(),
             max_queue_size: instance.max_queue_size,
+            no_change_cache_ttl_secs: instance.no_change_cache_ttl_secs,
         }
     }
 }

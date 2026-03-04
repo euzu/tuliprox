@@ -470,6 +470,7 @@ metadata_update:
   retry_delay: 2s
   worker_idle_timeout: 1m
   max_queue_size: 100000
+  no_change_cache_ttl_secs: 3600
 ```
 
 **Field Reference (`metadata_update`):**
@@ -503,6 +504,7 @@ metadata_update:
 - `retry_delay` (default `2s`): Minimum retry delay for transient worker errors (for example temporary connection/resource issues).
 - `worker_idle_timeout` (default `1m`): Idle timeout for metadata worker shutdown when there is no immediate work.
 - `max_queue_size` (default `100000`): Maximum pending metadata tasks per input before new tasks are rejected.
+- `no_change_cache_ttl_secs` (default `3600`): TTL in seconds for the per-item no-change deduplication cache. While valid, identical reason sets are skipped.
 - `ffprobe.enabled` (default `false`): Globally enables/disables FFprobe-based stream analysis.
 - `ffprobe.timeout` (default `60`): FFprobe process timeout in seconds.
 - `ffprobe.analyze_duration` (default `10s`): FFprobe `-analyzeduration`
@@ -519,6 +521,7 @@ metadata_update:
 - `retry_delay`: Minimum waiting time before a task is retried after a temporary problem. Prevents very fast retry loops.
 - `worker_idle_timeout`: How long a metadata worker stays alive with no new work before it can stop and free resources.
 - `max_queue_size`: Safety limit for how many metadata tasks are kept in memory at once.
+- `no_change_cache_ttl_secs`: How long (seconds) a no-change resolve result is remembered before the same reason set is allowed to execute again.
 - `log.queue_interval`: How often Tuliprox writes queue status logs.
 - `log.progress_interval`: How often Tuliprox writes progress logs while tasks are running.
 - `resolve.max_retry_backoff`: Longest wait time between repeated resolve retries.

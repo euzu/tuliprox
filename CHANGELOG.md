@@ -138,6 +138,7 @@ active URL of the specified provider.
 - **config.yml**:
   - Added `metadata_update` (optional) with grouped sections: `log`, `resolve`, `probe`, `ffprobe`, `tmdb`.
   - Added `metadata_update.cache_path` (default `metadata`): shared storage directory for TMDB cache and metadata files (moved from `library.metadata.path`).
+  - Added `metadata_update.no_change_cache_ttl_secs` (default `3600`): TTL in seconds for the no-change deduplication cache used by background metadata resolve tasks.
   - Added `metadata_update.tmdb.cooldown` (default `7d`) for successful TMDB no-match cooldown behavior.
   - Added `metadata_update.ffprobe.enabled` (default: false), `metadata_update.ffprobe.timeout`, and ffprobe probe/analyze size settings.
   - `metadata_update.ffprobe.analyze_duration` and `metadata_update.ffprobe.live_analyze_duration` require explicit unit suffixes (`s|m|h|d`).
