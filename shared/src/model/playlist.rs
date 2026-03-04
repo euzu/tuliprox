@@ -642,6 +642,27 @@ impl XtreamMappingOptions {
     #[inline]
     pub fn is_reverse(&self, item_type: PlaylistItemType) -> bool { self.reverse_item_types.is_set(item_type) }
 
+    fn build_reverse_proxy_base_url(
+        &self,
+        xtream_cluster: XtreamCluster,
+        item_type: PlaylistItemType,
+        virtual_id: VirtualId,
+    ) -> Option<String> {
+        let is_reverse = self.is_reverse(item_type);
+        if is_reverse && self.flags.contains(XtreamMappingFlags::RewriteResourceUrl) {
+            Some(format!(
+                "{}/resource/{}/{}/{}/{}",
+                self.base_url,
+                xtream_cluster.as_stream_type(),
+                self.username,
+                self.password,
+                virtual_id
+            ))
+        } else {
+            None
+        }
+    }
+
     pub fn get_resource_url(
         &self,
         xtream_cluster: XtreamCluster,
@@ -658,20 +679,7 @@ impl XtreamMappingOptions {
             return rewrite_url;
         }
 
-        let is_reverse = self.is_reverse(item_type);
-        let rewrite_url = if is_reverse && self.flags.contains(XtreamMappingFlags::RewriteResourceUrl) {
-            let url = format!(
-                "{}/resource/{}/{}/{}/{}",
-                self.base_url,
-                xtream_cluster.as_stream_type(),
-                self.username,
-                self.password,
-                virtual_id
-            );
-            Some(url)
-        } else {
-            None
-        };
+        let rewrite_url = self.build_reverse_proxy_base_url(xtream_cluster, item_type, virtual_id);
 
         if let Some(url) = rewrite_url {
             if resource_url.starts_with("http") {
@@ -697,20 +705,7 @@ impl XtreamMappingOptions {
             return rewrite_url;
         }
 
-        let is_reverse = self.is_reverse(item_type);
-        let rewrite_url = if is_reverse && self.flags.contains(XtreamMappingFlags::RewriteResourceUrl) {
-            let url = format!(
-                "{}/resource/{}/{}/{}/{}",
-                self.base_url,
-                xtream_cluster.as_stream_type(),
-                self.username,
-                self.password,
-                virtual_id
-            );
-            Some(url)
-        } else {
-            None
-        };
+        let rewrite_url = self.build_reverse_proxy_base_url(xtream_cluster, item_type, virtual_id);
 
         if let Some(url) = rewrite_url {
             if resource_url.starts_with("http") {
