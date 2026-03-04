@@ -510,7 +510,8 @@ impl ConfigInputDto {
         }
 
         self.persist = get_trimmed_string(self.persist.as_deref());
-        if self.url.starts_with(PROVIDER_SCHEME_PREFIX) && matches!(self.input_type, InputType::M3uBatch | InputType::XtreamBatch)
+        if self.url.starts_with(PROVIDER_SCHEME_PREFIX)
+            && matches!(self.input_type, InputType::M3uBatch | InputType::XtreamBatch)
         {
             return info_err_res!("input type {} does not support provider:// URLs for batch definitions; use a local CSV path or file:// URL", self.input_type);
         }
@@ -639,7 +640,8 @@ impl ConfigInputDto {
 
     pub fn prepare_type(&mut self) -> Result<(), TuliproxError> {
         self.normalize_input_type_from_aliases();
-        if self.url.starts_with(PROVIDER_SCHEME_PREFIX) && matches!(self.input_type, InputType::M3uBatch | InputType::XtreamBatch)
+        if self.url.starts_with(PROVIDER_SCHEME_PREFIX)
+            && matches!(self.input_type, InputType::M3uBatch | InputType::XtreamBatch)
         {
             return info_err_res!("input type {} does not support provider:// URLs for batch definitions; use a local CSV path or file:// URL", self.input_type);
         }
