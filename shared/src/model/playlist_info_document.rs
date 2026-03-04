@@ -456,7 +456,7 @@ impl StreamProperties {
                 season_number: season.season_number,
                 episode_count: season.episode_count.intern(),
                 overview: season.overview.as_ref().map(|v| {
-                    if v.starts_with("http") {
+                    if v.starts_with("http://") || v.starts_with("https://") {
                         options
                             .get_resource_url(
                                 XtreamCluster::Series,

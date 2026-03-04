@@ -682,7 +682,7 @@ impl XtreamMappingOptions {
         let rewrite_url = self.build_reverse_proxy_base_url(xtream_cluster, item_type, virtual_id);
 
         if let Some(url) = rewrite_url {
-            if resource_url.starts_with("http") {
+            if resource_url.starts_with("http://") || resource_url.starts_with("https://") {
                 return format!("{url}/{resource_field}");
             }
         }
@@ -708,7 +708,7 @@ impl XtreamMappingOptions {
         let rewrite_url = self.build_reverse_proxy_base_url(xtream_cluster, item_type, virtual_id);
 
         if let Some(url) = rewrite_url {
-            if resource_url.starts_with("http") {
+            if resource_url.starts_with("http://") || resource_url.starts_with("https://") {
                 return format!("{url}/{resource_field}{}_{index}", xtream_const::XC_PROP_BACKDROP_PATH);
             }
         }

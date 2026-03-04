@@ -877,34 +877,17 @@ pub async fn update_series_metadata(
                                 .as_ref()
                                 .and_then(|h| h.cancel_token.as_ref())
                                 .or_else(|| active_handle.and_then(|h| h.cancel_token.as_ref()));
-                            let probe_result = if let Some(token) = cancel_token {
-                                tokio::select! {
-                                    biased;
-                                    () = token.cancelled() => {
-                                        warn!("Probe preempted for Series Episode S{}E{}", ep.season, ep.episode_num);
-                                        ProbeUrlOutcome::Failed(ProbeFailureKind::Other)
-                                    }
-                                    result = crate::utils::ffmpeg::probe_url(
-                                        &episode_url,
-                                        user_agent.as_deref(),
-                                        probe_settings.analyze_duration_micros,
-                                        probe_settings.probe_size_bytes,
-                                        probe_settings.timeout_secs,
-                                        config.proxy.as_ref(),
-                                    ) => result,
-                                }
-                            } else {
-                                crate::utils::ffmpeg::probe_url(
-                                    &episode_url,
-                                    user_agent.as_deref(),
-                                    probe_settings.analyze_duration_micros,
-                                    probe_settings.probe_size_bytes,
-                                    probe_settings.timeout_secs,
-                                    config.proxy.as_ref(),
-                                )
-                                .await
-                            };
-                            match probe_result {
+                            match crate::utils::ffmpeg::probe_url_with_cancel(
+                                &episode_url,
+                                user_agent.as_deref(),
+                                probe_settings.analyze_duration_micros,
+                                probe_settings.probe_size_bytes,
+                                probe_settings.timeout_secs,
+                                config.proxy.as_ref(),
+                                cancel_token,
+                            )
+                            .await
+                            {
                                 ProbeUrlOutcome::Success(_quality, raw_video, raw_audio) => {
                                     if let Some(v) = raw_video {
                                         ep.video = Some(v.to_string().into());

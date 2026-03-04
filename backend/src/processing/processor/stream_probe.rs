@@ -119,33 +119,16 @@ pub async fn update_generic_stream_metadata(
         .as_ref()
         .and_then(|h| h.cancel_token.as_ref())
         .or_else(|| active_handle.and_then(|h| h.cancel_token.as_ref()));
-    let probe_data = if let Some(token) = cancel_token {
-        tokio::select! {
-            biased;
-            () = token.cancelled() => {
-                warn!("Probe preempted for generic stream {unique_id}");
-                ProbeUrlOutcome::Failed(ProbeFailureKind::Other)
-            }
-            result = ffmpeg::probe_url(
-                &probe_url,
-                user_agent.as_deref(),
-                analyze_duration,
-                probe_size,
-                ffprobe_timeout,
-                config.proxy.as_ref(),
-            ) => result,
-        }
-    } else {
-        ffmpeg::probe_url(
-            &probe_url,
-            user_agent.as_deref(),
-            analyze_duration,
-            probe_size,
-            ffprobe_timeout,
-            config.proxy.as_ref(),
-        )
-        .await
-    };
+    let probe_data = ffmpeg::probe_url_with_cancel(
+        &probe_url,
+        user_agent.as_deref(),
+        analyze_duration,
+        probe_size,
+        ffprobe_timeout,
+        config.proxy.as_ref(),
+        cancel_token,
+    )
+    .await;
 
     if let Some(handle) = acquired_handle {
         active_provider.release_handle(&handle).await;

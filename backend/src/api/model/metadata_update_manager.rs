@@ -904,7 +904,8 @@ struct InputWorker {
     scheduled_requeues: Arc<DashMap<TaskKey, i64>>,
     // Cache of tasks that recently completed with no changes (Ok(None)).
     // Prevents repeated resolution of already-resolved items across playlist refreshes.
-    recently_completed_no_change: HashMap<TaskKey, Instant>,
+    // Stores the reason set so that tasks with new/different reasons are not wrongly skipped.
+    recently_completed_no_change: HashMap<TaskKey, (Instant, ResolveReasonSet)>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -997,10 +998,13 @@ impl InputWorker {
             }
 
             // Skip tasks that recently completed with no changes (already resolved in DB).
+            // Only skip if the incoming reason set is a subset of the cached reasons,
+            // so tasks with new/different reasons are not wrongly skipped.
             if !skip_execution {
-                if let Some(completed_at) = self.recently_completed_no_change.get(&current_key) {
+                if let Some((completed_at, cached_reasons)) = self.recently_completed_no_change.get(&current_key) {
                     let ttl = Duration::from_secs(DEFAULT_NO_CHANGE_CACHE_TTL_SECS);
-                    if completed_at.elapsed() < ttl {
+                    let current_reasons = Self::task_reason(&task_for_execution);
+                    if completed_at.elapsed() < ttl && current_reasons.is_subset_of(cached_reasons) {
                         debug_if_enabled!(
                             "Skipping recently-resolved no-change task for input {}: {}",
                             input_name,
@@ -1206,7 +1210,8 @@ impl InputWorker {
 
                         // Cache tasks that completed with no changes to skip redundant re-resolution.
                         if !task_outcome.task_changed && Self::is_resolve_task(&task_for_execution) {
-                            self.recently_completed_no_change.insert(current_key.clone(), Instant::now());
+                            let reasons = Self::task_reason(&task_for_execution);
+                            self.recently_completed_no_change.insert(current_key.clone(), (Instant::now(), reasons));
                         } else {
                             self.recently_completed_no_change.remove(&current_key);
                         }
@@ -1793,6 +1798,10 @@ impl InputWorker {
         for key in stale_resolve_exhausted_keys {
             self.resolve_exhausted.remove(&key);
         }
+
+        let no_change_ttl = Duration::from_secs(DEFAULT_NO_CHANGE_CACHE_TTL_SECS);
+        self.recently_completed_no_change
+            .retain(|_, (completed_at, _)| completed_at.elapsed() < no_change_ttl);
     }
 
     fn release_db_handles(&mut self) {
@@ -1896,6 +1905,16 @@ impl InputWorker {
     #[inline]
     fn is_resolve_task(task: &UpdateTask) -> bool {
         matches!(task, UpdateTask::ResolveVod { .. } | UpdateTask::ResolveSeries { .. })
+    }
+
+    #[inline]
+    fn task_reason(task: &UpdateTask) -> ResolveReasonSet {
+        match task {
+            UpdateTask::ResolveVod { reason, .. }
+            | UpdateTask::ResolveSeries { reason, .. }
+            | UpdateTask::ProbeLive { reason, .. }
+            | UpdateTask::ProbeStream { reason, .. } => *reason,
+        }
     }
 
     #[inline]

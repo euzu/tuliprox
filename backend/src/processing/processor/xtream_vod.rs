@@ -811,34 +811,17 @@ pub async fn update_vod_metadata(
                         .as_ref()
                         .and_then(|h| h.cancel_token.as_ref())
                         .or_else(|| active_handle.and_then(|h| h.cancel_token.as_ref()));
-                    let probe_result = if let Some(token) = cancel_token {
-                        tokio::select! {
-                            biased;
-                            () = token.cancelled() => {
-                                warn!("Probe preempted for VOD {display_id}");
-                                ProbeUrlOutcome::Failed(ProbeFailureKind::Other)
-                            }
-                            result = crate::utils::ffmpeg::probe_url(
-                                &stream_url,
-                                user_agent.as_deref(),
-                                analyze_duration,
-                                probe_size,
-                                ffprobe_timeout,
-                                config.proxy.as_ref(),
-                            ) => result,
-                        }
-                    } else {
-                        crate::utils::ffmpeg::probe_url(
-                            &stream_url,
-                            user_agent.as_deref(),
-                            analyze_duration,
-                            probe_size,
-                            ffprobe_timeout,
-                            config.proxy.as_ref(),
-                        )
-                        .await
-                    };
-                    match probe_result {
+                    match crate::utils::ffmpeg::probe_url_with_cancel(
+                        &stream_url,
+                        user_agent.as_deref(),
+                        analyze_duration,
+                        probe_size,
+                        ffprobe_timeout,
+                        config.proxy.as_ref(),
+                        cancel_token,
+                    )
+                    .await
+                    {
                         ProbeUrlOutcome::Success(_quality, raw_video, raw_audio) => {
                             if let Some(details) = properties.details.as_mut() {
                                 if let Some(v) = raw_video {
