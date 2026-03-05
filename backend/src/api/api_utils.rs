@@ -38,7 +38,8 @@ use shared::{
         UserConnectionPermission, VirtualId, XtreamCluster,
     },
     utils::{
-        bin_serialize, extract_extension_from_url, human_readable_kbps, replace_url_extension, sanitize_sensitive_info,
+        bin_serialize, extract_extension_from_url, human_readable_kbps, is_sanitize_sensitive_info_enabled,
+        replace_url_extension, sanitize_sensitive_info,
         trim_slash, Internable, CONTENT_TYPE_CBOR, CONTENT_TYPE_JSON, DASH_EXT, HLS_EXT,
     },
 };
@@ -58,6 +59,9 @@ use tokio_util::io::ReaderStream;
 use url::Url;
 
 fn resolve_stream_url_for_logging<'a>(input: &ConfigInput, stream_url: &'a str) -> Cow<'a, str> {
+    if !is_sanitize_sensitive_info_enabled() {
+        return Cow::Borrowed(stream_url);
+    }
     input.resolve_url(stream_url).unwrap_or(Cow::Borrowed(stream_url))
 }
 
