@@ -58,7 +58,7 @@ use tokio_util::io::ReaderStream;
 use url::Url;
 
 fn resolve_stream_url_for_logging<'a>(input: &ConfigInput, stream_url: &'a str) -> Cow<'a, str> {
-    input.resolve_url(stream_url).unwrap_or_else(|_| Cow::Borrowed(stream_url))
+    input.resolve_url(stream_url).unwrap_or(Cow::Borrowed(stream_url))
 }
 
 #[macro_export]
