@@ -67,17 +67,22 @@ pub fn get_home_path() -> PathBuf {
 }
 
 pub fn get_default_web_root_path() -> PathBuf {
-    if let Some(web_root) = env::var(DEFAULT_WEB_ROOT_ENV_VAR)
-        .ok()
-        .filter(|p| !p.trim().is_empty()) {
-        return PathBuf::from(web_root)
+    get_default_web_root_path_for_home(get_home_path().as_path())
+}
+
+pub fn get_default_web_root_path_for_home(home_path: &Path) -> PathBuf {
+    if let Some(web_root) = env::var(DEFAULT_WEB_ROOT_ENV_VAR).ok().filter(|p| !p.trim().is_empty()) {
+        return PathBuf::from(web_root);
     }
-    get_exe_path().join(DEFAULT_WEB_DIR)
+    get_default_path_for_home(home_path, DEFAULT_WEB_DIR)
 }
 
 
 pub fn get_default_path(file: &str) -> PathBuf {
-    let home_path =  get_home_path();
+    get_default_path_for_home(get_home_path().as_path(), file)
+}
+
+pub fn get_default_path_for_home(home_path: &Path, file: &str) -> PathBuf {
     home_path.join(file)
 }
 
@@ -329,11 +334,11 @@ where
     Ok(())
 }
 
-pub fn prepare_file_path(persist: Option<&str>, working_dir: &str, action: &str) -> Option<PathBuf> {
+pub fn prepare_file_path(persist: Option<&str>, storage_dir: &str, action: &str) -> Option<PathBuf> {
     let persist_file: Option<PathBuf> =
         persist.map(|persist_path| prepare_persist_path(persist_path, action));
     if persist_file.is_some() {
-        let file_path = get_file_path(working_dir, persist_file);
+        let file_path = get_file_path(storage_dir, persist_file);
         debug_if_enabled!("persist to file:  {}", file_path.as_ref().map_or(Cow::from("?"), |p| p.to_string_lossy()));
         file_path
     } else {
@@ -348,15 +353,15 @@ pub fn read_file_as_bytes(path: &Path) -> std::io::Result<Vec<u8>> {
     Ok(buffer)
 }
 
-pub fn make_absolute_path(path: &str, working_dir: &str) -> String {
+pub fn make_absolute_path(path: &str, storage_dir: &str) -> String {
     let rpb = std::path::PathBuf::from(path);
-    let pathbuf = make_path_absolute(&rpb, working_dir);
+    let pathbuf = make_path_absolute(&rpb, storage_dir);
     pathbuf.to_str().unwrap_or_default().to_string()
 }
 
-pub fn make_path_absolute(rpb: &Path, working_dir: &str) -> PathBuf {
+pub fn make_path_absolute(rpb: &Path, storage_dir: &str) -> PathBuf {
     if rpb.is_relative() {
-        let mut rpb2 = std::path::PathBuf::from(working_dir).join(rpb);
+        let mut rpb2 = std::path::PathBuf::from(storage_dir).join(rpb);
         if !rpb2.exists() {
             rpb2 = get_exe_path().join(rpb);
         }

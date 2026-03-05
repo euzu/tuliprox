@@ -11,28 +11,28 @@ use shared::error::{info_err, TuliproxError};
 use shared::utils::{sanitize_sensitive_info, short_hash};
 use std::path::PathBuf;
 
-pub async fn get_input_raw_epg_file_path(url: &str, input: &ConfigInput, working_dir: &str) -> std::io::Result<PathBuf> {
+pub async fn get_input_raw_epg_file_path(url: &str, input: &ConfigInput, storage_dir: &str) -> std::io::Result<PathBuf> {
     let file_prefix = short_hash(url);
 
     if let Some(persist_path) = input.persist.as_deref() {
         if !persist_path.is_empty() {
-            if let Some(path) = prepare_file_path(input.persist.as_deref(), working_dir, "")
+            if let Some(path) = prepare_file_path(input.persist.as_deref(), storage_dir, "")
                 .map(|path| add_prefix_to_filename(&path, concat_string!(&file_prefix, "_epg_").as_str(), Some("xml"))) {
                 return Ok(path);
             }
         }
     }
 
-    let download_path = get_input_storage_path(&input.name, working_dir).await?;
+    let download_path = get_input_storage_path(&input.name, storage_dir).await?;
     Ok(download_path.join(format!("{}_{}", file_prefix, storage_const::FILE_EPG)))
 }
 
 async fn download_epg_file(url: &str, ctx: &PlaylistProcessingContext,
                            input: &ConfigInput,
                            headers: Option<&reqwest::header::HeaderMap>,
-                           working_dir: &str) -> Result<PathBuf, TuliproxError> {
+                           storage_dir: &str) -> Result<PathBuf, TuliproxError> {
     debug!("Getting epg file path for url: {}", sanitize_sensitive_info(url));
-    let persist_file_path = get_input_raw_epg_file_path(url, input, working_dir).await.map_err(|e| info_err!("Could not access epg file download directory: {}", e))?;
+    let persist_file_path = get_input_raw_epg_file_path(url, input, storage_dir).await.map_err(|e| info_err!("Could not access epg file download directory: {}", e))?;
 
     if input.cache_duration_seconds > 0 {
         if let Ok(metadata) = tokio::fs::metadata(&persist_file_path).await {
@@ -55,7 +55,7 @@ async fn download_epg_file(url: &str, ctx: &PlaylistProcessingContext,
         return Ok(persist_file_path);
     }
     debug!("Downloading epg for input '{}'", input.name);
-    match request::get_input_epg_content_as_file(&ctx.config, &ctx.client, input, headers, working_dir, url, &persist_file_path).await {
+    match request::get_input_epg_content_as_file(&ctx.config, &ctx.client, input, headers, storage_dir, url, &persist_file_path).await {
         Ok(path) => {
             ctx.mark_input_downloaded(lock_key.clone()).await;
             Ok(path)
@@ -66,7 +66,7 @@ async fn download_epg_file(url: &str, ctx: &PlaylistProcessingContext,
 
 pub async fn get_xmltv(ctx: &PlaylistProcessingContext, input: &ConfigInput,
                        headers: Option<&reqwest::header::HeaderMap>,
-                       working_dir: &str) -> (Option<TVGuide>, Vec<TuliproxError>) {
+                       storage_dir: &str) -> (Option<TVGuide>, Vec<TuliproxError>) {
     match &input.epg {
         None => (None, vec![]),
         Some(epg_config) => {
@@ -75,7 +75,7 @@ pub async fn get_xmltv(ctx: &PlaylistProcessingContext, input: &ConfigInput,
             let mut stored_file_paths = vec![];
 
             for epg_source in &epg_config.sources {
-                match download_epg_file(&epg_source.url, ctx, input, headers, working_dir).await {
+                match download_epg_file(&epg_source.url, ctx, input, headers, storage_dir).await {
                     Ok(file_path) => {
                         stored_file_paths.push(file_path.clone());
                         file_paths.push(PersistedEpgSource { file_path, priority: epg_source.priority, logo_override: epg_source.logo_override });

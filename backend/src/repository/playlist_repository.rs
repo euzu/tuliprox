@@ -374,8 +374,8 @@ pub async fn persist_input_playlist(app_config: &Arc<AppConfig>, input: &ConfigI
 
     match input.input_type {
         InputType::Xtream | InputType::XtreamBatch => {
-            let working_dir = &app_config.config.load().working_dir;
-            let storage_path = match get_input_storage_path(&input.name, working_dir).await {
+            let storage_dir = &app_config.config.load().storage_dir;
+            let storage_path = match get_input_storage_path(&input.name, storage_dir).await {
                 Ok(storage_path) => storage_path,
                 Err(err) => {
                     return (playlist, Some(info_err!("Error creating input storage directory for input '{}' failed: {err}", input.name)));
@@ -386,8 +386,8 @@ pub async fn persist_input_playlist(app_config: &Arc<AppConfig>, input: &ConfigI
 
         InputType::M3u | InputType::M3uBatch => {
             // Persist M3U
-            let working_dir = &app_config.config.load().working_dir;
-            let storage_path = match get_input_storage_path(&input.name, working_dir).await {
+            let storage_dir = &app_config.config.load().storage_dir;
+            let storage_path = match get_input_storage_path(&input.name, storage_dir).await {
                 Ok(storage_path) => storage_path,
                 Err(err) => {
                     return (playlist, Some(info_err!("Error creating input storage directory for input '{}' failed: {err}", input.name)));
@@ -401,8 +401,8 @@ pub async fn persist_input_playlist(app_config: &Arc<AppConfig>, input: &ConfigI
         }
         InputType::Library => {
             // Persist local library playlist
-            let working_dir = &app_config.config.load().working_dir;
-            let storage_path = match get_input_storage_path(&input.name, working_dir).await {
+            let storage_dir = &app_config.config.load().storage_dir;
+            let storage_path = match get_input_storage_path(&input.name, storage_dir).await {
                 Ok(storage_path) => storage_path,
                 Err(err) => {
                     return (playlist, Some(info_err!("Error creating input storage directory for input '{}' failed: {err}", input.name)));
@@ -420,8 +420,8 @@ pub async fn persist_input_playlist(app_config: &Arc<AppConfig>, input: &ConfigI
 
 pub async fn load_input_playlist(ctx: &PlaylistProcessingContext, input: &ConfigInput, clusters: Option<&[XtreamCluster]>) -> Result<Box<dyn PlaylistSource>, TuliproxError> {
     let app_config = &ctx.config;
-    let working_dir = &app_config.config.load().working_dir;
-    let storage_path = get_input_storage_path(&input.name, working_dir).await
+    let storage_dir = &app_config.config.load().storage_dir;
+    let storage_path = get_input_storage_path(&input.name, storage_dir).await
         .map_err(|e| info_err!("Error getting input path: {e}"))?;
 
     let disk_based_processing = app_config.config.load().disk_based_processing;

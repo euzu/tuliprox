@@ -34,10 +34,10 @@ async fn scan_library(
     };
 
     // Check if Library is enabled
-    let (lib_config, metadata_update_config, working_dir) = {
+    let (lib_config, metadata_update_config, storage_dir) = {
         let config = app_state.app_config.config.load();
         match config.library.as_ref() {
-            Some(lib) if lib.enabled => (lib.clone(), config.metadata_update.clone(), config.working_dir.clone()),
+            Some(lib) if lib.enabled => (lib.clone(), config.metadata_update.clone(), config.storage_dir.clone()),
             _ => {
                 let response = LibraryScanSummary {
                     status: LibraryScanSummaryStatus::Error,
@@ -61,7 +61,7 @@ async fn scan_library(
         lib_config,
         metadata_update_config,
         client,
-        LibraryScanTaskOptions { force_rescan: request.force_rescan, message_prefix: "", working_dir },
+        LibraryScanTaskOptions { force_rescan: request.force_rescan, message_prefix: "", storage_dir },
         permit,
     );
 
@@ -78,7 +78,7 @@ async fn get_library_status(
             let client = app_state.http_client.load_full().as_ref().clone();
             // Get statistics from processor
             let processor =
-                LibraryProcessor::new(config.clone(), config_snapshot.metadata_update.as_ref(), client, &config_snapshot.working_dir);
+                LibraryProcessor::new(config.clone(), config_snapshot.metadata_update.as_ref(), client, &config_snapshot.storage_dir);
             let entries = processor.get_all_entries().await;
 
             let movies = entries.iter().filter(|e| e.metadata.is_movie()).count();
@@ -90,7 +90,7 @@ async fn get_library_status(
                 movies,
                 series,
                 path: Some(
-                    resolve_metadata_storage_path(config_snapshot.metadata_update.as_ref(), &config_snapshot.working_dir)
+                    resolve_metadata_storage_path(config_snapshot.metadata_update.as_ref(), &config_snapshot.storage_dir)
                         .to_string_lossy()
                         .to_string(),
                 ),

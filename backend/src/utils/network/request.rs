@@ -20,7 +20,7 @@ use reqwest::{
 };
 use shared::{
     error::{notify_err_res, string_to_io_error, TuliproxError},
-    model::{format_elapsed_time, InputFetchMethod, OnConnectErrorPolicy, DEFAULT_USER_AGENT},
+    model::{format_elapsed_time, InputFetchMethod, OnConnectErrorPolicy},
     utils::{
         filter_request_header, human_readable_byte_size, sanitize_sensitive_info, CONTENT_TYPE_JSON, ENCODING_DEFLATE,
         ENCODING_GZIP,
@@ -42,6 +42,7 @@ use tokio::{
 };
 use tokio_util::io::StreamReader;
 use url::Url;
+use shared::utils::DEFAULT_USER_AGENT;
 
 static PROXY_DIAGNOSTICS_ONCE: Once = Once::new();
 
@@ -533,13 +534,13 @@ pub async fn get_input_epg_content_as_file(
     client: &reqwest::Client,
     input: &ConfigInput,
     headers: Option<&HeaderMap>,
-    working_dir: &str,
+    storage_dir: &str,
     url_str: &str,
     persist_filepath: &Path,
 ) -> Result<PathBuf, TuliproxError> {
     debug_if_enabled!(
-        "getting input epg content working_dir: {}, url: {}",
-        working_dir,
+        "getting input epg content storage_dir: {}, url: {}",
+        storage_dir,
         sanitize_sensitive_info(url_str)
     );
     if url_str.parse::<url::Url>().is_ok() {
@@ -556,7 +557,7 @@ pub async fn get_input_epg_content_as_file(
             }
         }
     } else {
-        let result = match get_file_path(working_dir, Some(PathBuf::from(url_str))) {
+        let result = match get_file_path(storage_dir, Some(PathBuf::from(url_str))) {
             Some(filepath) => {
                 if filepath.exists() {
                     if let Err(e) = tokio::fs::copy(&filepath, persist_filepath).await {
@@ -590,12 +591,12 @@ pub async fn get_input_text_content(
     app_state: &Arc<AppState>,
     client: &reqwest::Client,
     input: &InputSource,
-    working_dir: &str,
+    storage_dir: &str,
     persist_filepath: Option<PathBuf>,
 ) -> Result<String, TuliproxError> {
     debug_if_enabled!(
-        "getting input text content working_dir: {}, url: {}",
-        working_dir,
+        "getting input text content storage_dir: {}, url: {}",
+        storage_dir,
         sanitize_sensitive_info(&input.url)
     );
 
@@ -612,7 +613,7 @@ pub async fn get_input_text_content(
             }
         }
     } else {
-        let result = match get_file_path(working_dir, Some(PathBuf::from(&input.url))) {
+        let result = match get_file_path(storage_dir, Some(PathBuf::from(&input.url))) {
             Some(filepath) => {
                 if filepath.exists() {
                     if let Some(persist_file_value) = persist_filepath {
@@ -650,12 +651,12 @@ pub async fn get_input_text_content_as_stream(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
     input: &InputSource,
-    working_dir: &str,
+    storage_dir: &str,
     persist_filepath: Option<PathBuf>,
 ) -> Result<DynReader, TuliproxError> {
     debug_if_enabled!(
-        "getting input text content working_dir: {}, url: {}",
-        working_dir,
+        "getting input text content storage_dir: {}, url: {}",
+        storage_dir,
         sanitize_sensitive_info(&input.url)
     );
 
@@ -672,7 +673,7 @@ pub async fn get_input_text_content_as_stream(
             }
         }
     } else {
-        let result = match get_file_path(working_dir, Some(PathBuf::from(&input.url))) {
+        let result = match get_file_path(storage_dir, Some(PathBuf::from(&input.url))) {
             Some(filepath) => {
                 if filepath.exists() {
                     match get_local_file_content_as_stream(&filepath).await {
@@ -1503,7 +1504,7 @@ mod tests {
     };
     use crate::{
         model::{AppConfig, Config, ConfigProvider, ResourceRetryConfig, ReverseProxyConfig, SourcesConfig},
-        utils::FileLockManager,
+        utils::{FileLockManager, DEFAULT_USER_AGENT}
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
     use shared::model::{
@@ -1533,7 +1534,9 @@ mod tests {
             api_proxy: Arc::new(ArcSwapOption::default()),
             file_locks: Arc::new(FileLockManager::default()),
             paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
+                home_path: String::new(),
                 config_path: String::new(),
+                storage_path: String::new(),
                 config_file_path: String::new(),
                 sources_file_path: String::new(),
                 mapping_file_path: None,
@@ -1628,7 +1631,7 @@ mod tests {
 
     #[test]
     fn test_get_request_headers_prioritization() {
-        use super::{get_request_headers, DEFAULT_USER_AGENT};
+        use super::{get_request_headers};
         use axum::http::header::USER_AGENT;
 
         // Case 1: No headers provided -> Default UA

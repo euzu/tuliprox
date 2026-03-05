@@ -4,6 +4,7 @@
 
 ## ⚠️ Breaking Changes
 
+- `working_dir` in `config.yml` renamed to `storage_dir`.
 - **Global Input Definitions**: To align input definitions with the SourceEditor, inputs are now defined globally in the `inputs` section of the
   config file. Each source can reference one or more inputs by their name in the `inputs` attribute.
 - **Data Format Migration**: Due to heavy refactoring, the old data format is invalid. You need to clean your `data` folder and update the playlists.
@@ -104,6 +105,7 @@
 - **Playlist Caching**: Added `cache_duration` to inputs, allowing configurable provider playlist cache times during subsequent updates (e.g., `60s`,
   `5m` `12h`, `1d`).
 - **Database Viewer**: New CLI flags `--dbx` and `--dbm` to inspect internal database content.
+- **Home Directory Override**: Added `--home` (`-H`) CLI argument to set the base directory for config, data, backup, and downloads.
 - **Added `disk_based_processing`**: (boolean, default `false`) to `config.yml`. When enabled, input playlists are processed from disk instead of
   memory.
 - **User-Agent `default_user_agent`**: Ensures that outgoing requests always pass a default user agent.

@@ -406,7 +406,7 @@ impl AppConfig {
             }
 
             let path = PathBuf::from(custom_stream_response_path);
-            let path = utils::make_path_absolute(&path, &config.working_dir);
+            let path = utils::make_path_absolute(&path, &config.storage_dir);
 
             let paths = self.paths.load_full();
             let mut new_paths = paths.as_ref().clone();

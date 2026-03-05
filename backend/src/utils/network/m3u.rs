@@ -12,19 +12,19 @@ pub async fn download_m3u_playlist(
     cfg: &Arc<Config>,
     input: &ConfigInput,
 ) -> (Vec<PlaylistGroup>, Vec<TuliproxError>) {
-    let working_dir = &cfg.working_dir;
+    let storage_dir = &cfg.storage_dir;
     let input_source: InputSource = {
         match input.staged.as_ref() {
             None => input.into(),
             Some(staged) => if staged.enabled { staged.into() } else { input.into() },
         }
     };
-    let persist_file_path = prepare_file_path(input.persist.as_deref(), working_dir, "");
+    let persist_file_path = prepare_file_path(input.persist.as_deref(), storage_dir, "");
     match request::get_input_text_content_as_stream(
         app_config,
         client,
         &input_source,
-        working_dir,
+        storage_dir,
         persist_file_path,
     )
     .await

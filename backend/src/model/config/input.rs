@@ -243,6 +243,14 @@ pub struct ConfigInput {
 
 impl ConfigInput {
     #[inline]
+    pub fn get_download_input_type(&self) -> InputType {
+        self.staged
+            .as_ref()
+            .filter(|staged| staged.enabled)
+            .map_or(self.input_type, |staged| staged.input_type)
+    }
+
+    #[inline]
     pub fn has_flag(&self, flag: ConfigInputFlags) -> bool {
         self.has_flag_or(flag, false)
     }
@@ -733,5 +741,35 @@ mod tests {
 
         let err = input.prepare(&[]).unwrap_err();
         assert!(err.to_string().contains("Malformed provider URL"));
+    }
+
+    #[test]
+    fn test_get_download_input_type_uses_staged_when_enabled() {
+        let input = ConfigInput {
+            input_type: InputType::Xtream,
+            staged: Some(StagedInput {
+                enabled: true,
+                input_type: InputType::M3u,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(input.get_download_input_type(), InputType::M3u);
+    }
+
+    #[test]
+    fn test_get_download_input_type_uses_primary_when_staged_disabled() {
+        let input = ConfigInput {
+            input_type: InputType::Xtream,
+            staged: Some(StagedInput {
+                enabled: false,
+                input_type: InputType::M3u,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(input.get_download_input_type(), InputType::Xtream);
     }
 }

@@ -7,7 +7,7 @@ use crate::{
         context::ConfigContext,
     },
     config_field, config_field_bool, config_field_optional, edit_field_bool, edit_field_number,
-    edit_field_number_option_u32, edit_field_text, edit_field_text_option, generate_form_reducer,
+    edit_field_number_option_u32, edit_field_text_option, generate_form_reducer,
     i18n::use_translation,
 };
 use shared::model::MainConfigDto;
@@ -18,7 +18,7 @@ const LABEL_CONFIG_HOT_RELOAD: &str = "LABEL.CONFIG_HOT_RELOAD";
 const LABEL_USER_ACCESS_CONTROL: &str = "LABEL.USER_ACCESS_CONTROL";
 const LABEL_PROCESS_PARALLEL: &str = "LABEL.PROCESS_PARALLEL";
 const LABEL_DISK_BASED_PROCESSING: &str = "LABEL.DISK_BASED_PROCESSING";
-const LABEL_WORKING_DIR: &str = "LABEL.WORKING_DIR";
+const LABEL_STORAGE_DIR: &str = "LABEL.STORAGE_DIR";
 const LABEL_DEFAULT_USER_AGENT: &str = "LABEL.DEFAULT_USER_AGENT";
 const LABEL_MAPPING_PATH: &str = "LABEL.MAPPING_PATH";
 const LABEL_TEMPLATE_PATH: &str = "LABEL.TEMPLATE_PATH";
@@ -39,7 +39,7 @@ generate_form_reducer!(
         AcceptInsecureSslCertificates => accept_insecure_ssl_certificates: bool,
         ProcessParallel => process_parallel: bool,
         DiskBasedProcessing => disk_based_processing: bool,
-        WorkingDir => working_dir: String,
+        StorageDir => storage_dir: Option<String>,
         DefaultUserAgent => default_user_agent: Option<String>,
         MappingPath => mapping_path: Option<String>,
         TemplatePath => template_path: Option<String>,
@@ -91,7 +91,7 @@ pub fn MainConfigView() -> Html {
                 { config_field_bool!(form_state.form, translate.t(LABEL_ACCEPT_INSECURE_SSL_CERTIFICATES), accept_insecure_ssl_certificates) }
                 { config_field_bool!(form_state.form, translate.t(LABEL_PROCESS_PARALLEL), process_parallel) }
                 { config_field_bool!(form_state.form, translate.t(LABEL_DISK_BASED_PROCESSING), disk_based_processing) }
-                { config_field!(form_state.form, translate.t(LABEL_WORKING_DIR), working_dir) }
+                { config_field_optional!(form_state.form, translate.t(LABEL_STORAGE_DIR), storage_dir) }
                 { config_field_optional!(form_state.form, translate.t(LABEL_DEFAULT_USER_AGENT), default_user_agent) }
                 { config_field_optional!(form_state.form, translate.t(LABEL_MAPPING_PATH), mapping_path) }
                 { config_field_optional!(form_state.form, translate.t(LABEL_TEMPLATE_PATH), template_path) }
@@ -113,7 +113,7 @@ pub fn MainConfigView() -> Html {
                 { edit_field_bool!(form_state, translate.t(LABEL_ACCEPT_INSECURE_SSL_CERTIFICATES), accept_insecure_ssl_certificates, MainConfigFormAction::AcceptInsecureSslCertificates) }
                 { edit_field_bool!(form_state, translate.t(LABEL_PROCESS_PARALLEL), process_parallel, MainConfigFormAction::ProcessParallel) }
                 { edit_field_bool!(form_state, translate.t(LABEL_DISK_BASED_PROCESSING), disk_based_processing, MainConfigFormAction::DiskBasedProcessing) }
-                { edit_field_text!(form_state, translate.t(LABEL_WORKING_DIR), working_dir, MainConfigFormAction::WorkingDir) }
+                { edit_field_text_option!(form_state, translate.t(LABEL_STORAGE_DIR), storage_dir, MainConfigFormAction::StorageDir) }
                 { edit_field_text_option!(form_state, translate.t(LABEL_DEFAULT_USER_AGENT), default_user_agent, MainConfigFormAction::DefaultUserAgent) }
                 { edit_field_text_option!(form_state, translate.t(LABEL_MAPPING_PATH), mapping_path, MainConfigFormAction::MappingPath) }
                 { edit_field_text_option!(form_state, translate.t(LABEL_TEMPLATE_PATH), template_path, MainConfigFormAction::TemplatePath) }

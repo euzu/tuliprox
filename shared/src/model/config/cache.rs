@@ -22,9 +22,9 @@ impl CacheConfigDto {
         !self.enabled && is_blank_optional_str(self.size.as_deref()) && is_blank_optional_str(self.dir.as_deref())
     }
 
-    pub(crate) fn prepare(&mut self, working_dir: &str) -> Result<(), TuliproxError> {
+    pub(crate) fn prepare(&mut self, storage_dir: &str) -> Result<(), TuliproxError> {
         if self.enabled {
-            let work_path = PathBuf::from(working_dir);
+            let work_path = PathBuf::from(storage_dir);
             match self.dir.as_ref() {
                 None => self.dir = Some(work_path.join("cache").to_string_lossy().to_string()),
                 Some(work_dir) => {

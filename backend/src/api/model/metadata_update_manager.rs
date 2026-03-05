@@ -1510,8 +1510,8 @@ impl InputWorker {
             return;
         };
 
-        let working_dir = app_state.app_config.config.load().working_dir.clone();
-        let Ok(storage_path) = get_input_storage_path(input_name, &working_dir).await else {
+        let storage_dir = app_state.app_config.config.load().storage_dir.clone();
+        let Ok(storage_path) = get_input_storage_path(input_name, &storage_dir).await else {
             warn!("Could not resolve storage path for metadata retry state on input {input_name}");
             self.metadata_retry_load_retry_at_ts =
                 Some(now_ts.saturating_add(runtime_settings.metadata_retry_load_retry_delay_secs));
@@ -2026,7 +2026,7 @@ impl InputWorker {
 
         let Some(app_state) = app_state_weak.and_then(Weak::upgrade) else { return };
         let app_config = &app_state.app_config;
-        let working_dir = &app_config.config.load().working_dir;
+        let storage_dir = &app_config.config.load().storage_dir;
         let vod_updates = batch_buffer.take_vod_updates();
         let series_updates = batch_buffer.take_series_updates();
         let live_updates = batch_buffer.take_live_updates();
@@ -2035,7 +2035,7 @@ impl InputWorker {
             return;
         }
 
-        if let Ok(storage_path) = get_input_storage_path(input_name, working_dir).await {
+        if let Ok(storage_path) = get_input_storage_path(input_name, storage_dir).await {
             if !vod_updates.is_empty() {
                 let mut updates: Vec<(u32, VideoStreamProperties)> = Vec::with_capacity(vod_updates.len());
                 for (id, props) in &vod_updates {
@@ -2531,8 +2531,8 @@ impl InputWorker {
         }
 
         if let std::collections::hash_map::Entry::Vacant(entry) = db_handles.entry(cluster) {
-            let working_dir = &app_state.app_config.config.load().working_dir;
-            if let Ok(storage_path) = get_input_storage_path(input_name, working_dir).await {
+            let storage_dir = &app_state.app_config.config.load().storage_dir;
+            if let Ok(storage_path) = get_input_storage_path(input_name, storage_dir).await {
                 let file_path = xtream_get_file_path(&storage_path, cluster);
                 if file_path.exists() {
                     let lock = app_state.app_config.file_locks.read_lock(&file_path).await;

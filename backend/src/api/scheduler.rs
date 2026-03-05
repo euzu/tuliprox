@@ -131,7 +131,7 @@ fn run_library_scan(client: &reqwest::Client, app_state: &Arc<AppState>) {
                     LibraryScanTaskOptions {
                         force_rescan: false,
                         message_prefix: "Scheduled ",
-                        working_dir: config.working_dir.clone(),
+                        storage_dir: config.storage_dir.clone(),
                     },
                     permit,
                 );

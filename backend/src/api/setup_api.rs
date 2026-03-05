@@ -3,8 +3,8 @@ use crate::{
     auth::generate_password_from_input,
     model::validate_library_paths_from_dto,
     utils::{
-        file_exists, get_default_path, get_default_web_root_path, read_api_proxy_file, read_config_file,
-        read_sources_file, read_templates_file, resolve_template_persist_file_path, sanitize_sources_for_persist,
+        file_exists, get_default_web_root_path_for_home, read_api_proxy_file, read_config_file, read_sources_file,
+        read_templates_file, resolve_template_persist_file_path, sanitize_sources_for_persist,
     },
 };
 use axum::{
@@ -26,7 +26,7 @@ use shared::{
         ApiProxyConfigDto, ApiProxyServerInfoDto, AppConfigDto, ConfigApiDto, ConfigDto, ConfigPaths, PatternTemplate,
         SourcesConfigDto, TemplateDefinitionDto, TokenResponse, WebAuthConfigDto, WebUiConfigDto, TOKEN_NO_AUTH,
     },
-    utils::{default_kick_secs, hex_encode, DEFAULT_PORT, DEFAULT_WORKING_DIR, USER_FILE},
+    utils::{default_kick_secs, hex_encode, DEFAULT_PORT, DEFAULT_STORAGE_DIR, USER_FILE},
 };
 use std::{
     collections::HashSet,
@@ -40,9 +40,9 @@ use std::{
 };
 use tokio::sync::{oneshot, Mutex, RwLock};
 use tower_http::services::ServeDir;
+use shared::utils::DEFAULT_CUSTOM_STREAM_RESPONSE_PATH;
 
 const DEFAULT_SETUP_HOST: &str = "0.0.0.0";
-const DEFAULT_SETUP_CUSTOM_STREAM_RESPONSE_PATH: &str = "./resources";
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SetupWebUserCredentialDto {
@@ -68,6 +68,7 @@ pub struct SetupCompleteRequestDto {
 
 struct SetupModeState {
     draft: Arc<RwLock<AppConfigDto>>,
+    home_path: String,
     output_dir: PathBuf,
     config_file_path: PathBuf,
     source_file_path: PathBuf,
@@ -165,7 +166,7 @@ fn create_default_api_proxy_server() -> ApiProxyServerInfoDto {
     }
 }
 
-fn create_default_config_dto() -> ConfigDto {
+fn create_default_config_dto(home_path: &str) -> ConfigDto {
     let auth = WebAuthConfigDto {
         issuer: "tuliprox".to_string(),
         secret: generate_web_auth_secret(),
@@ -179,18 +180,20 @@ fn create_default_config_dto() -> ConfigDto {
         api: ConfigApiDto {
             host: DEFAULT_SETUP_HOST.to_string(),
             port: DEFAULT_PORT,
-            web_root: get_default_web_root_path().display().to_string(),
+            web_root: get_default_web_root_path_for_home(FsPath::new(home_path))
+                .display()
+                .to_string(),
         },
-        working_dir: get_default_path(DEFAULT_WORKING_DIR).display().to_string(),
-        custom_stream_response_path: Some(DEFAULT_SETUP_CUSTOM_STREAM_RESPONSE_PATH.to_string()),
+        storage_dir: Some(DEFAULT_STORAGE_DIR.to_string()),
+        custom_stream_response_path: Some(DEFAULT_CUSTOM_STREAM_RESPONSE_PATH.to_string()),
         web_ui: Some(web_ui),
         ..ConfigDto::default()
     }
 }
 
-fn create_default_draft() -> AppConfigDto {
+fn create_default_draft(home_path: &str) -> AppConfigDto {
     AppConfigDto {
-        config: create_default_config_dto(),
+        config: create_default_config_dto(home_path),
         sources: SourcesConfigDto::default(),
         mappings: None,
         templates: None,
@@ -203,7 +206,7 @@ fn create_default_draft() -> AppConfigDto {
 }
 
 async fn build_initial_draft(paths: &ConfigPaths) -> AppConfigDto {
-    let mut draft = create_default_draft();
+    let mut draft = create_default_draft(paths.home_path.as_str());
 
     if file_exists(&paths.config_file_path) {
         match read_config_file(paths.config_file_path.as_str(), true, false) {
@@ -250,7 +253,7 @@ fn generate_web_auth_secret() -> String {
     hex_encode(&secret).to_lowercase()
 }
 
-fn ensure_setup_defaults(config: &mut ConfigDto) {
+fn ensure_setup_defaults(config: &mut ConfigDto, home_path: &str) {
     if config.api.host.trim().is_empty() {
         config.api.host = DEFAULT_SETUP_HOST.to_string();
     }
@@ -258,13 +261,15 @@ fn ensure_setup_defaults(config: &mut ConfigDto) {
         config.api.port = DEFAULT_PORT;
     }
     if config.api.web_root.trim().is_empty() {
-        config.api.web_root = get_default_web_root_path().display().to_string();
+        config.api.web_root = get_default_web_root_path_for_home(FsPath::new(home_path))
+            .display()
+            .to_string();
     }
-    if config.working_dir.trim().is_empty() {
-        config.working_dir = get_default_path(DEFAULT_WORKING_DIR).display().to_string();
+    if config.storage_dir.as_ref().is_none_or(|dir| dir.trim().is_empty()) {
+        config.storage_dir = Some(DEFAULT_STORAGE_DIR.to_string());
     }
     if config.custom_stream_response_path.as_ref().is_none_or(|path| path.trim().is_empty()) {
-        config.custom_stream_response_path = Some(DEFAULT_SETUP_CUSTOM_STREAM_RESPONSE_PATH.to_string());
+        config.custom_stream_response_path = Some(DEFAULT_CUSTOM_STREAM_RESPONSE_PATH.to_string());
     }
 
     if config.web_ui.is_none() {
@@ -287,7 +292,7 @@ fn ensure_setup_defaults(config: &mut ConfigDto) {
     }
 }
 
-fn setup_bind_values(draft: &AppConfigDto) -> (String, u16, PathBuf) {
+fn setup_bind_values(draft: &AppConfigDto, home_path: &str) -> (String, u16, PathBuf) {
     let host = if draft.config.api.host.trim().is_empty() {
         DEFAULT_SETUP_HOST.to_string()
     } else {
@@ -295,18 +300,18 @@ fn setup_bind_values(draft: &AppConfigDto) -> (String, u16, PathBuf) {
     };
     let port = if draft.config.api.port == 0 { DEFAULT_PORT } else { draft.config.api.port };
     let web_root = if draft.config.api.web_root.trim().is_empty() {
-        get_default_web_root_path()
+        get_default_web_root_path_for_home(FsPath::new(home_path))
     } else {
         PathBuf::from(&draft.config.api.web_root)
     };
     (host, port, web_root)
 }
 
-fn resolve_setup_web_dir(web_root: &FsPath) -> Option<PathBuf> {
+fn resolve_setup_web_dir(web_root: &FsPath, home_path: &str) -> Option<PathBuf> {
     if web_root.exists() && web_root.is_dir() {
         return Some(web_root.to_path_buf());
     }
-    let fallback = get_default_web_root_path();
+    let fallback = get_default_web_root_path_for_home(FsPath::new(home_path));
     if fallback.exists() && fallback.is_dir() {
         return Some(fallback);
     }
@@ -630,7 +635,7 @@ async fn setup_complete_inner(
     state: Arc<SetupModeState>,
     mut req: SetupCompleteRequestDto,
 ) -> axum::response::Response {
-    ensure_setup_defaults(&mut req.app_config.config);
+    ensure_setup_defaults(&mut req.app_config.config, state.home_path.as_str());
 
     if let Err(err) = req.app_config.config.prepare(false) {
         return (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": err.to_string() }))).into_response();
@@ -850,13 +855,14 @@ fn create_compression_layer() -> tower_http::compression::CompressionLayer {
 
 pub async fn start_setup_server(paths: &ConfigPaths, missing_files: &[String]) -> Result<(), TuliproxError> {
     let draft = build_initial_draft(paths).await;
-    let (host, port, web_root) = setup_bind_values(&draft);
-    let web_dir = resolve_setup_web_dir(&web_root)
+    let (host, port, web_root) = setup_bind_values(&draft, paths.home_path.as_str());
+    let web_dir = resolve_setup_web_dir(&web_root, paths.home_path.as_str())
         .ok_or_else(|| info_err!("Setup mode requires a web directory. Tried '{}'", web_root.display(),))?;
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let state = Arc::new(SetupModeState {
         draft: Arc::new(RwLock::new(draft)),
+        home_path: paths.home_path.clone(),
         output_dir: PathBuf::from(&paths.config_path),
         config_file_path: PathBuf::from(&paths.config_file_path),
         source_file_path: PathBuf::from(&paths.sources_file_path),

@@ -7,13 +7,15 @@ use crate::{
     },
     utils::{
         default_connect_timeout_secs, default_supported_video_extensions, is_blank_optional_string,
-        is_default_connect_timeout_secs, is_false, CONFIG_PATH, MAPPING_FILE, TEMPLATE_FILE,
+        is_default_connect_timeout_secs, is_false, CONFIG_PATH, DEFAULT_BACKUP_DIR, DEFAULT_STORAGE_DIR,
+        DEFAULT_USER_CONFIG_DIR, MAPPING_FILE, TEMPLATE_FILE, DEFAULT_USER_AGENT
     },
 };
 
-pub const DEFAULT_USER_AGENT: &str = "VLC/3.0.16 LibVLC/3.0.16";
-
 fn default_default_user_agent() -> Option<String> { Some(DEFAULT_USER_AGENT.to_string()) }
+fn default_main_storage_dir() -> Option<String> { Some(DEFAULT_STORAGE_DIR.to_string()) }
+fn default_main_backup_dir() -> Option<String> { Some(DEFAULT_BACKUP_DIR.to_string()) }
+fn default_main_user_config_dir() -> Option<String> { Some(DEFAULT_USER_CONFIG_DIR.to_string()) }
 fn default_main_mapping_path() -> Option<String> { Some(format!("./{CONFIG_PATH}/{MAPPING_FILE}")) }
 fn default_main_template_path() -> Option<String> { Some(format!("./{CONFIG_PATH}/{TEMPLATE_FILE}")) }
 
@@ -32,20 +34,31 @@ fn is_blank_or_default_template_path(path: &Option<String>) -> bool {
     path.as_ref().is_none_or(|value| value.trim().is_empty() || is_default_config_file_path(value, TEMPLATE_FILE))
 }
 
-fn effective_main_mapping_path(path: Option<String>) -> Option<String> {
-    if is_blank_or_default_mapping_path(&path) {
-        default_main_mapping_path()
-    } else {
-        path
-    }
+fn is_default_dir_path(value: &str, default_dir: &str) -> bool {
+    let normalized = value.trim().replace('\\', "/");
+    normalized.trim_start_matches("./") == default_dir
 }
 
-fn effective_main_template_path(path: Option<String>) -> Option<String> {
-    if is_blank_or_default_template_path(&path) {
-        default_main_template_path()
-    } else {
-        path
-    }
+fn is_blank_or_default_storage_dir(path: &Option<String>) -> bool {
+    path.as_ref().is_none_or(|value| value.trim().is_empty() || is_default_dir_path(value, DEFAULT_STORAGE_DIR))
+}
+
+fn is_blank_or_default_backup_dir(path: &Option<String>) -> bool {
+    path.as_ref().is_none_or(|value| value.trim().is_empty() || is_default_dir_path(value, DEFAULT_BACKUP_DIR))
+}
+
+fn is_blank_or_default_user_config_dir(path: &Option<String>) -> bool {
+    path.as_ref().is_none_or(|value| value.trim().is_empty() || is_default_dir_path(value, DEFAULT_USER_CONFIG_DIR))
+}
+
+fn normalize_optional_dir(path: &Option<String>, default_dir: &str) -> Option<String> {
+    path.as_ref().and_then(|value| {
+        if value.trim().is_empty() || is_default_dir_path(value, default_dir) {
+            None
+        } else {
+            Some(value.clone())
+        }
+    })
 }
 
 fn is_none_or_empty_video(video: &Option<VideoConfigDto>) -> bool {
@@ -62,12 +75,13 @@ pub struct ConfigDto {
     #[serde(default, skip_serializing_if = "is_false")]
     pub process_parallel: bool,
     pub api: ConfigApiDto,
-    pub working_dir: String,
+    #[serde(default, alias = "working_dir", skip_serializing_if = "is_blank_or_default_storage_dir")]
+    pub storage_dir: Option<String>,
     #[serde(default = "default_default_user_agent", skip_serializing_if = "is_blank_optional_string")]
     pub default_user_agent: Option<String>,
-    #[serde(default, skip_serializing_if = "is_blank_optional_string")]
+    #[serde(default, skip_serializing_if = "is_blank_or_default_backup_dir")]
     pub backup_dir: Option<String>,
-    #[serde(default, skip_serializing_if = "is_blank_optional_string")]
+    #[serde(default, skip_serializing_if = "is_blank_or_default_user_config_dir")]
     pub user_config_dir: Option<String>,
     #[serde(default, skip_serializing_if = "is_blank_or_default_mapping_path")]
     pub mapping_path: Option<String>,
@@ -118,7 +132,7 @@ impl Default for ConfigDto {
         Self {
             process_parallel: false,
             api: ConfigApiDto::default(),
-            working_dir: String::new(),
+            storage_dir: None,
             default_user_agent: default_default_user_agent(),
             backup_dir: None,
             user_config_dir: None,
@@ -153,12 +167,13 @@ impl Default for ConfigDto {
 pub struct MainConfigDto {
     #[serde(default, skip_serializing_if = "is_false")]
     pub process_parallel: bool,
-    pub working_dir: String,
+    #[serde(default = "default_main_storage_dir", skip_serializing_if = "is_blank_or_default_storage_dir")]
+    pub storage_dir: Option<String>,
     #[serde(default = "default_default_user_agent", skip_serializing_if = "is_blank_optional_string")]
     pub default_user_agent: Option<String>,
-    #[serde(default, skip_serializing_if = "is_blank_optional_string")]
+    #[serde(default = "default_main_backup_dir", skip_serializing_if = "is_blank_or_default_backup_dir")]
     pub backup_dir: Option<String>,
-    #[serde(default, skip_serializing_if = "is_blank_optional_string")]
+    #[serde(default = "default_main_user_config_dir", skip_serializing_if = "is_blank_or_default_user_config_dir")]
     pub user_config_dir: Option<String>,
     #[serde(default = "default_main_mapping_path", skip_serializing_if = "is_blank_or_default_mapping_path")]
     pub mapping_path: Option<String>,
@@ -187,10 +202,10 @@ impl Default for MainConfigDto {
         MainConfigDto {
             process_parallel: false,
             disk_based_processing: false,
-            working_dir: String::new(),
+            storage_dir: default_main_storage_dir(),
             default_user_agent: default_default_user_agent(),
-            backup_dir: None,
-            user_config_dir: None,
+            backup_dir: default_main_backup_dir(),
+            user_config_dir: default_main_user_config_dir(),
             mapping_path: default_main_mapping_path(),
             template_path: default_main_template_path(),
             custom_stream_response_path: None,
@@ -209,12 +224,12 @@ impl From<&ConfigDto> for MainConfigDto {
         Self {
             process_parallel: config.process_parallel,
             disk_based_processing: config.disk_based_processing,
-            working_dir: config.working_dir.clone(),
+            storage_dir: config.storage_dir.clone(),
             default_user_agent: config.default_user_agent.clone(),
             backup_dir: config.backup_dir.clone(),
             user_config_dir: config.user_config_dir.clone(),
-            mapping_path: effective_main_mapping_path(config.mapping_path.clone()),
-            template_path: effective_main_template_path(config.template_path.clone()),
+            mapping_path: config.mapping_path.clone(),
+            template_path: config.template_path.clone(),
             custom_stream_response_path: config.custom_stream_response_path.clone(),
             user_access_control: config.user_access_control,
             connect_timeout_secs: config.connect_timeout_secs,
@@ -249,8 +264,19 @@ pub struct HdHomeRunDeviceOverview {
 
 impl ConfigDto {
     pub fn prepare(&mut self, include_computed: bool) -> Result<(), TuliproxError> {
+        self.api.prepare();
+
         if is_blank_optional_string(&self.default_user_agent) {
             self.default_user_agent = default_default_user_agent();
+        }
+        if is_blank_or_default_storage_dir(&self.storage_dir) {
+            self.storage_dir = default_main_storage_dir();
+        }
+        if is_blank_or_default_backup_dir(&self.backup_dir) {
+            self.backup_dir = default_main_backup_dir();
+        }
+        if is_blank_or_default_user_config_dir(&self.user_config_dir) {
+            self.user_config_dir = default_main_user_config_dir();
         }
 
         if let Some(mins) = self.sleep_timer_mins {
@@ -268,7 +294,7 @@ impl ConfigDto {
         self.prepare_metadata_update_config()?;
 
         if let Some(reverse_proxy) = self.reverse_proxy.as_mut() {
-            reverse_proxy.prepare(&self.working_dir)?;
+            reverse_proxy.prepare(self.storage_dir.as_deref().unwrap_or_default())?;
         }
         if let Some(proxy) = &mut self.proxy {
             proxy.prepare()?;
@@ -361,10 +387,10 @@ impl ConfigDto {
     pub fn update_from_main_config(&mut self, main_config: &MainConfigDto) {
         self.process_parallel = main_config.process_parallel;
         self.disk_based_processing = main_config.disk_based_processing;
-        self.working_dir = main_config.working_dir.clone();
+        self.storage_dir = normalize_optional_dir(&main_config.storage_dir, DEFAULT_STORAGE_DIR);
         self.default_user_agent = main_config.default_user_agent.clone();
-        self.backup_dir = main_config.backup_dir.clone();
-        self.user_config_dir = main_config.user_config_dir.clone();
+        self.backup_dir = normalize_optional_dir(&main_config.backup_dir, DEFAULT_BACKUP_DIR);
+        self.user_config_dir = normalize_optional_dir(&main_config.user_config_dir, DEFAULT_USER_CONFIG_DIR);
         self.mapping_path = main_config.mapping_path.clone();
         self.template_path = main_config.template_path.clone();
         self.custom_stream_response_path = main_config.custom_stream_response_path.clone();
@@ -426,6 +452,88 @@ mod tests {
     }
 
     #[test]
+    fn serializing_skips_default_storage_backup_and_user_config_dirs() {
+        let cfg = ConfigDto {
+            storage_dir: Some(DEFAULT_STORAGE_DIR.to_string()),
+            backup_dir: Some(DEFAULT_BACKUP_DIR.to_string()),
+            user_config_dir: Some(DEFAULT_USER_CONFIG_DIR.to_string()),
+            ..ConfigDto::default()
+        };
+
+        let serialized = serde_json::to_string(&cfg).expect("config serialization should succeed");
+        assert!(
+            !serialized.contains("\"storage_dir\""),
+            "expected no storage_dir field for default value, got: {serialized}"
+        );
+        assert!(
+            !serialized.contains("\"backup_dir\""),
+            "expected no backup_dir field for default value, got: {serialized}"
+        );
+        assert!(
+            !serialized.contains("\"user_config_dir\""),
+            "expected no user_config_dir field for default value, got: {serialized}"
+        );
+    }
+
+    #[test]
+    fn serializing_keeps_non_default_storage_and_backup_dirs() {
+        let cfg = ConfigDto {
+            storage_dir: Some("custom-storage".to_string()),
+            backup_dir: Some("custom-backup".to_string()),
+            user_config_dir: Some("custom-user-config".to_string()),
+            ..ConfigDto::default()
+        };
+
+        let serialized = serde_json::to_string(&cfg).expect("config serialization should succeed");
+        assert!(
+            serialized.contains("\"storage_dir\""),
+            "expected storage_dir field for non-default value, got: {serialized}"
+        );
+        assert!(
+            serialized.contains("\"backup_dir\""),
+            "expected backup_dir field for non-default value, got: {serialized}"
+        );
+        assert!(
+            serialized.contains("\"user_config_dir\""),
+            "expected user_config_dir field for non-default value, got: {serialized}"
+        );
+    }
+
+    #[test]
+    fn main_config_from_applies_default_storage_backup_and_user_config_dirs() {
+        let cfg = ConfigDto::default();
+        let main = MainConfigDto::from(&cfg);
+        assert_eq!(main.storage_dir.as_deref(), Some(DEFAULT_STORAGE_DIR));
+        assert_eq!(main.backup_dir.as_deref(), Some(DEFAULT_BACKUP_DIR));
+        assert_eq!(main.user_config_dir.as_deref(), Some(DEFAULT_USER_CONFIG_DIR));
+    }
+
+    #[test]
+    fn update_from_main_config_omits_default_storage_backup_and_user_config_dirs() {
+        let mut cfg = ConfigDto::default();
+        let main = MainConfigDto {
+            storage_dir: Some(DEFAULT_STORAGE_DIR.to_string()),
+            backup_dir: Some(DEFAULT_BACKUP_DIR.to_string()),
+            user_config_dir: Some(DEFAULT_USER_CONFIG_DIR.to_string()),
+            ..MainConfigDto::default()
+        };
+
+        cfg.update_from_main_config(&main);
+        assert!(cfg.storage_dir.is_none());
+        assert!(cfg.backup_dir.is_none());
+        assert!(cfg.user_config_dir.is_none());
+    }
+
+    #[test]
+    fn prepare_sets_default_storage_backup_and_user_config_dirs() {
+        let mut cfg = ConfigDto { storage_dir: None, backup_dir: None, user_config_dir: None, ..ConfigDto::default() };
+        cfg.prepare(false).expect("prepare should succeed");
+        assert_eq!(cfg.storage_dir.as_deref(), Some(DEFAULT_STORAGE_DIR));
+        assert_eq!(cfg.backup_dir.as_deref(), Some(DEFAULT_BACKUP_DIR));
+        assert_eq!(cfg.user_config_dir.as_deref(), Some(DEFAULT_USER_CONFIG_DIR));
+    }
+
+    #[test]
     fn deserializing_rejects_legacy_video_ffprobe_fields() {
         let raw = json!({
             "api": {
@@ -433,7 +541,7 @@ mod tests {
                 "port": 8901,
                 "web_root": "./web"
             },
-            "working_dir": ".",
+            "storage_dir": ".",
             "video": {
                 "extensions": ["mp4"],
                 "ffprobe_enabled": true
@@ -444,5 +552,49 @@ mod tests {
         assert!(result.is_err(), "legacy ffprobe field under video must fail");
         let err = result.unwrap_err().to_string();
         assert!(err.contains("ffprobe_enabled"), "unexpected error text: {err}");
+    }
+
+    #[test]
+    fn deserializing_rejects_legacy_data_dir_alias() {
+        let raw = json!({
+            "api": {
+                "host": "127.0.0.1",
+                "port": 8901,
+                "web_root": "./web"
+            },
+            "data_dir": "."
+        });
+
+        let result: Result<ConfigDto, _> = serde_json::from_value(raw);
+        assert!(result.is_err(), "data_dir should not deserialize");
+    }
+
+    #[test]
+    fn deserializing_rejects_legacy_working_dir_alias() {
+        let raw = json!({
+            "api": {
+                "host": "127.0.0.1",
+                "port": 8901,
+                "web_root": "./web"
+            },
+            "working_dir": "."
+        });
+
+        let result: Result<ConfigDto, _> = serde_json::from_value(raw);
+        assert!(result.is_err(), "working_dir should not deserialize");
+    }
+
+    #[test]
+    fn deserializing_accepts_missing_storage_dir() {
+        let raw = json!({
+            "api": {
+                "host": "127.0.0.1",
+                "port": 8901,
+                "web_root": "./web"
+            }
+        });
+
+        let cfg: ConfigDto = serde_json::from_value(raw).expect("missing storage_dir should deserialize");
+        assert!(cfg.storage_dir.is_none());
     }
 }

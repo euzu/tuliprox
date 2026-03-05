@@ -345,7 +345,7 @@ impl AppState {
         config.update_runtime();
 
         let use_geoip = config.is_geoip_enabled();
-        let working_dir = config.working_dir.clone();
+        let storage_dir = config.storage_dir.clone();
 
         self.active_users.update_config(&config);
         self.app_config.set_config(config)?;
@@ -354,7 +354,7 @@ impl AppState {
 
         if changes.flags.contains(UpdateChangesFlags::Geoip) {
             let new_geoip = if use_geoip {
-                let path = get_geoip_path(&working_dir);
+                let path = get_geoip_path(&storage_dir);
                 let _file_lock = self.app_config.file_locks.read_lock(&path).await;
                 GeoIp::load(&path).ok().map(Arc::new)
             } else {

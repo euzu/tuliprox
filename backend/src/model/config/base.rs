@@ -8,17 +8,15 @@ use log::{error, info};
 use path_clean::PathClean;
 use shared::error::TuliproxError;
 use shared::model::{ConfigDto, HdHomeRunDeviceOverview};
-use shared::utils::{default_grace_period_millis, default_grace_period_timeout_secs, set_sanitize_sensitive_info, DEFAULT_WEB_DIR};
+use shared::utils::{default_grace_period_millis, default_grace_period_timeout_secs, set_sanitize_sensitive_info, DEFAULT_BACKUP_DIR, DEFAULT_CACHE_DIR, DEFAULT_DOWNLOAD_DIR, DEFAULT_STORAGE_DIR, DEFAULT_STORAGE_TEMP_DIR, DEFAULT_USER_CONFIG_DIR};
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
-use crate::utils::get_default_path;
-
-const DEFAULT_BACKUP_DIR: &str = "backup";
+use crate::utils::get_default_path_for_home;
 
 fn create_directories(cfg: &Config, temp_path: &Path) {
     // Collect the paths into a vector.
     let paths_strings = [
-        Some(cfg.working_dir.clone()),
+        Some(cfg.storage_dir.clone()),
         cfg.backup_dir.clone(),
         cfg.user_config_dir.clone(),
         cfg.video.as_ref().and_then(|v| v.download.as_ref()).map(|d| d.directory.clone()),
@@ -67,7 +65,7 @@ impl Default for GracePeriodOptions {
 pub struct Config {
     pub process_parallel: bool,
     pub api: ConfigApi,
-    pub working_dir: String,
+    pub storage_dir: String,
     pub default_user_agent: Option<String>,
     pub backup_dir: Option<String>,
     pub user_config_dir: Option<String>,
@@ -95,24 +93,21 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn prepare(&mut self, config_path: &str) -> Result<(), TuliproxError> {
-        let work_dir = &self.working_dir;
-        self.working_dir = utils::resolve_directory_path(work_dir);
+    pub fn prepare(&mut self, config_path: &str, home_path: &str) -> Result<(), TuliproxError> {
 
-        self.prepare_directories();
-        self.prepare_api_web_root();
+        self.prepare_directories(home_path);
         if let Some(ref mut webui) = &mut self.web_ui {
             webui.prepare(config_path)?;
         }
 
         if let Some(library) = self.library.as_mut() {
-            library.prepare(&self.working_dir)?;
+            library.prepare(&self.storage_dir)?;
         }
 
         if let Some(metadata_update) = self.metadata_update.as_mut() {
             let meta_path = PathBuf::from(&metadata_update.cache_path);
             let meta_path = if meta_path.is_relative() {
-                PathBuf::from(&self.working_dir).join(meta_path)
+                PathBuf::from(&self.storage_dir).join(meta_path)
             } else {
                 meta_path
             };
@@ -125,38 +120,97 @@ impl Config {
 
         if let Some(video) = self.video.as_mut() {
             video.prepare();
+            if let Some(download) = video.download.as_mut() {
+                let download_path = PathBuf::from(&download.directory);
+                if download.directory.trim().is_empty() {
+                    download.directory = get_default_path_for_home(Path::new(home_path), DEFAULT_DOWNLOAD_DIR)
+                        .clean()
+                        .to_string_lossy()
+                        .to_string();
+                } else if download_path.is_relative() {
+                    download.directory = PathBuf::from(home_path)
+                        .join(download_path)
+                        .clean()
+                        .to_string_lossy()
+                        .to_string();
+                }
+            }
         }
 
         Ok(())
     }
 
-    fn prepare_directories(&mut self) {
-        fn set_directory(path: &mut Option<String>, default_subdir: &str, working_dir: &str) {
-            *path = Some(match path.as_ref() {
-                Some(existing) => existing.to_owned(),
-                None => PathBuf::from(working_dir).join(default_subdir).clean().to_string_lossy().to_string(),
-            });
+    fn prepare_reverse_proxy_cache_dir(&mut self, raw_storage_dir: &str) {
+        let Some(reverse_proxy) = self.reverse_proxy.as_mut() else {
+            return;
+        };
+        let Some(cache) = reverse_proxy.cache.as_mut() else {
+            return;
+        };
+        if !cache.enabled {
+            return;
         }
 
-        set_directory(&mut self.backup_dir, DEFAULT_BACKUP_DIR, &self.working_dir);
-        set_directory(&mut self.user_config_dir, "user_config", &self.working_dir);
+        let cache_path = PathBuf::from(&cache.dir);
+        let normalized = if cache.dir.trim().is_empty() {
+            PathBuf::from(&self.storage_dir).join(DEFAULT_CACHE_DIR)
+        } else if cache_path.is_relative() {
+            let raw_path = PathBuf::from(raw_storage_dir);
+            if !raw_storage_dir.is_empty() && raw_path.is_relative() && cache_path.starts_with(&raw_path) {
+                match cache_path.strip_prefix(&raw_path) {
+                    Ok(stripped) => PathBuf::from(&self.storage_dir).join(stripped),
+                    Err(_) => PathBuf::from(&self.storage_dir).join(&cache_path),
+                }
+            } else {
+                PathBuf::from(&self.storage_dir).join(&cache_path)
+            }
+        } else {
+            return;
+        };
+        cache.dir = normalized.clean().to_string_lossy().to_string();
+    }
+
+    fn prepare_directories(&mut self, home_path: &str) {
+        let raw_storage_dir = self.storage_dir.trim().to_string();
+        let storage_dir_path = if raw_storage_dir.is_empty() {
+            get_default_path_for_home(Path::new(home_path), DEFAULT_STORAGE_DIR)
+        } else {
+            let configured_storage_path = PathBuf::from(&raw_storage_dir);
+            if configured_storage_path.is_relative() {
+                PathBuf::from(home_path).join(configured_storage_path)
+            } else {
+                configured_storage_path
+            }
+        };
+        self.storage_dir = utils::resolve_directory_path(storage_dir_path.to_string_lossy().as_ref());
+        self.prepare_reverse_proxy_cache_dir(&raw_storage_dir);
+
+        if self.backup_dir.is_none() {
+            self.backup_dir = Some(PathBuf::from(&self.storage_dir).join(DEFAULT_BACKUP_DIR).clean().to_string_lossy().to_string());
+        }
+        if self.user_config_dir.is_none() {
+            self.user_config_dir = Some(PathBuf::from(&self.storage_dir).join(DEFAULT_USER_CONFIG_DIR).clean().to_string_lossy().to_string());
+        }
+        self.prepare_api_web_root(home_path);
     }
 
     pub fn get_backup_dir(&self) -> Cow<'_, str> {
         self.backup_dir.as_ref().map_or_else(|| Cow::Borrowed(DEFAULT_BACKUP_DIR), |v| Cow::Borrowed(v))
     }
 
-    fn prepare_api_web_root(&mut self) {
+    fn prepare_api_web_root(&mut self, home_path: &str) {
         if self.api.web_root.is_empty() {
-            self.api.web_root = get_default_path(DEFAULT_WEB_DIR).display().to_string();
+            self.api.web_root = utils::get_default_web_root_path_for_home(Path::new(home_path))
+                .display()
+                .to_string();
         } else {
-            self.api.web_root = utils::make_absolute_path(&self.api.web_root, &self.working_dir);
+            self.api.web_root = utils::make_absolute_path(&self.api.web_root, &self.storage_dir);
         }
     }
 
     pub fn update_runtime(&self) {
         set_sanitize_sensitive_info(self.log.as_ref().is_none_or(|l| l.sanitize_sensitive_info));
-        let temp_path = PathBuf::from(&self.working_dir).join("tmp");
+        let temp_path = PathBuf::from(&self.storage_dir).join(DEFAULT_STORAGE_TEMP_DIR);
         create_directories(self, &temp_path);
         let _ = tempfile::env::override_temp_dir(&temp_path);
     }
@@ -200,7 +254,7 @@ impl From<&ConfigDto> for Config {
             process_parallel: dto.process_parallel,
             disk_based_processing: dto.disk_based_processing,
             api: ConfigApi::from(&dto.api),
-            working_dir: dto.working_dir.clone(),
+            storage_dir: dto.storage_dir.clone().unwrap_or_default(),
             default_user_agent: dto.default_user_agent.clone(),
             backup_dir: dto.backup_dir.clone(),
             user_config_dir: dto.user_config_dir.clone(),

@@ -31,7 +31,7 @@ pub struct LibraryProcessor {
 
 pub fn resolve_metadata_storage_path(
     metadata_update_config: Option<&MetadataUpdateConfig>,
-    working_dir: &str,
+    storage_dir: &str,
 ) -> PathBuf {
     let configured_path = metadata_update_config.map_or_else(
         || PathBuf::from(shared::utils::default_metadata_path()),
@@ -46,7 +46,7 @@ pub fn resolve_metadata_storage_path(
     if configured_path.is_absolute() {
         configured_path.clean()
     } else {
-        PathBuf::from(working_dir).join(configured_path).clean()
+        PathBuf::from(storage_dir).join(configured_path).clean()
     }
 }
 
@@ -61,7 +61,7 @@ impl LibraryProcessor {
         config
             .library
             .as_ref()
-            .map(|lib_cfg| Self::new(lib_cfg.clone(), config.metadata_update.as_ref(), client, &config.working_dir))
+            .map(|lib_cfg| Self::new(lib_cfg.clone(), config.metadata_update.as_ref(), client, &config.storage_dir))
     }
 
     // Creates a new Library processor with the given configuration
@@ -69,9 +69,9 @@ impl LibraryProcessor {
         config: LibraryConfig,
         metadata_update_config: Option<&MetadataUpdateConfig>,
         client: reqwest::Client,
-        working_dir: &str,
+        storage_dir: &str,
     ) -> Self {
-        let storage_path = resolve_metadata_storage_path(metadata_update_config, working_dir);
+        let storage_path = resolve_metadata_storage_path(metadata_update_config, storage_dir);
         let scanner = LibraryScanner::new(config.clone());
         let storage = MetadataStorage::new(storage_path);
         let resolver = MetadataResolver::from_config(Some(&config), metadata_update_config, client, Some(storage.clone()));

@@ -148,9 +148,9 @@ async fn process_immediate_vod_info(
     resolve_tmdb_enabled: bool,
 ) {
     let input = fpl.input;
-    let working_dir = &ctx.config.config.load().working_dir;
+    let storage_dir = &ctx.config.config.load().storage_dir;
 
-    let storage_path = match get_input_storage_path(&input.name, working_dir).await {
+    let storage_path = match get_input_storage_path(&input.name, storage_dir).await {
         Ok(path) => path,
         Err(err) => {
             error!("Can't resolve vod, input storage directory for input '{}' failed: {err}", input.name);
@@ -509,8 +509,8 @@ pub async fn update_vod_metadata(
     db_query: Option<Arc<Mutex<BPlusTreeQuery<u32, XtreamPlaylistItem>>>>,
     tmdb_resolved_out: Option<&AtomicBool>,
 ) -> Result<Option<VideoStreamProperties>, TuliproxError> {
-    let working_dir = &app_config.config.load().working_dir;
-    let storage_path = get_input_storage_path(&input.name, working_dir)
+    let storage_dir = &app_config.config.load().storage_dir;
+    let storage_path = get_input_storage_path(&input.name, storage_dir)
         .await
         .map_err(|e| shared::error::info_err!("Storage path error: {e}"))?;
 

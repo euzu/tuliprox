@@ -243,9 +243,9 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             // InputType::M3uBatch,
             // InputType::XtreamBatch,
         ]
-            .iter()
-            .map(|t| DropDownOption { id: t.to_string(), label: html! { t.to_string() }, selected: t == default_it })
-            .collect::<Vec<DropDownOption>>()
+        .iter()
+        .map(|t| DropDownOption { id: t.to_string(), label: html! { t.to_string() }, selected: t == default_it })
+        .collect::<Vec<DropDownOption>>()
     });
 
     {
@@ -603,6 +603,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         let staged_method_selection = Rc::new(vec![staged_input_state.form.method.to_string()]);
         let staged_input_state_1 = staged_input_state.clone();
         let staged_input_state_2 = staged_input_state.clone();
+        let staged_input_type_fallback = staged_input_state.form.input_type;
         html! {
             <Card class="tp__config-view__card">
                 { edit_field_bool!(staged_input_state, translate.t(LABEL_ENABLED),  enabled, StagedInputFormAction::Enabled) }
@@ -631,16 +632,23 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                         multi_select={false}
                         on_select={Callback::from(move |(_, selections):(String, DropDownSelection)| {
                            match selections {
-                            DropDownSelection::Empty => {
-                                   staged_input_state_2.dispatch(StagedInputFormAction::InputType(InputType::Xtream));
-                            }
+                            DropDownSelection::Empty => {}
                             DropDownSelection::Single(option) => {
-                                staged_input_state_2.dispatch(StagedInputFormAction::InputType(option.parse::<InputType>().unwrap_or(InputType::Xtream)));
+                                if let Ok(input_type) = option.parse::<InputType>() {
+                                    staged_input_state_2.dispatch(StagedInputFormAction::InputType(input_type));
+                                } else {
+                                    staged_input_state_2.dispatch(StagedInputFormAction::InputType(staged_input_type_fallback));
+                                }
                             }
                             DropDownSelection::Multi(options) => {
-                              if let Some(first) = options.first() {
-                                staged_input_state_2.dispatch(StagedInputFormAction::InputType(first.parse::<InputType>().unwrap_or(InputType::Xtream)));
-                               }
+                                if let Some(first) = options.first() {
+                                    if let Ok(input_type) = first.parse::<InputType>() {
+                                        staged_input_state_2.dispatch(StagedInputFormAction::InputType(input_type));
+                                    } else {
+                                        staged_input_state_2
+                                            .dispatch(StagedInputFormAction::InputType(staged_input_type_fallback));
+                                    }
+                                }
                              }
                            }
                         })}

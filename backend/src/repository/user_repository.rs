@@ -517,7 +517,9 @@ mod tests {
             hdhomerun: Arc::new(ArcSwapAny::default()),
             api_proxy: Arc::new(ArcSwapAny::default()),
             paths: Arc::new(ArcSwap::from(Arc::new(ConfigPaths {
+                home_path: String::new(),
                 config_path: temp_dir().to_string_lossy().to_string(),
+                storage_path: temp_dir().to_string_lossy().to_string(),
                 config_file_path: String::new(),
                 sources_file_path: String::new(),
                 mapping_file_path: None,

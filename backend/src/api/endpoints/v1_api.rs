@@ -88,7 +88,7 @@ async fn geoip_update(
     let config = app_state.app_config.config.load();
     if let Some(geoip) = config.reverse_proxy.as_ref().and_then(|r| r.geoip.as_ref()) {
         if geoip.enabled {
-            let geoip_db_path = &*get_geoip_path(&config.working_dir);
+            let geoip_db_path = &*get_geoip_path(&config.storage_dir);
             let _file_lock = app_state.app_config.file_locks.write_lock(geoip_db_path).await;
 
             let url = if geoip.url.trim().is_empty() { default_geoip_url() } else { geoip.url.clone() };

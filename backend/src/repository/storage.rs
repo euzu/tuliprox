@@ -25,7 +25,7 @@ pub async fn ensure_target_storage_path(cfg: &Config, target_name: &str) -> Resu
 }
 
 pub fn get_target_storage_path(cfg: &Config, target_name: &str) -> Option<PathBuf> {
-    utils::get_file_path(&cfg.working_dir, Some(std::path::PathBuf::from(target_name.replace(' ', "_"))))
+    utils::get_file_path(&cfg.storage_dir, Some(std::path::PathBuf::from(target_name.replace(' ', "_"))))
 }
 
 pub fn sanitize_name(name: &str) -> String {
@@ -34,27 +34,27 @@ pub fn sanitize_name(name: &str) -> String {
         .collect()
 }
 
-pub fn build_input_storage_path(input_name: &str, working_dir: &str) -> PathBuf {
+pub fn build_input_storage_path(input_name: &str, storage_dir: &str) -> PathBuf {
     let sanitized_name: String = sanitize_name(input_name);
     let name = concat_string!(cap = 6 + sanitized_name.len(); "input_", &sanitized_name);
-    Path::new(working_dir).join(name)
+    Path::new(storage_dir).join(name)
 }
 
-pub async fn get_input_storage_path(input_name: &str, working_dir: &str) -> std::io::Result<PathBuf> {
-    let path = build_input_storage_path(input_name, working_dir);
+pub async fn get_input_storage_path(input_name: &str, storage_dir: &str) -> std::io::Result<PathBuf> {
+    let path = build_input_storage_path(input_name, storage_dir);
     // Create the directory and return the path or propagate the error
     tokio::fs::create_dir_all(&path).await.map(|()| path)
 }
 
 pub async fn ensure_input_storage_path(cfg: &Config, input_name: &str) -> Result<PathBuf, TuliproxError> {
-    get_input_storage_path(input_name, &cfg.working_dir).await
+    get_input_storage_path(input_name, &cfg.storage_dir).await
         .map_err(|err| {
             notify_err!("Failed to save input data, can't create directory for input {input_name}: {err}")
         })
 }
 
-pub fn get_geoip_path(working_dir: &str) -> PathBuf {
-    Path::new(working_dir).join("geoip.db")
+pub fn get_geoip_path(storage_dir: &str) -> PathBuf {
+    Path::new(storage_dir).join("geoip.db")
 }
 
 pub fn get_file_path_for_db_index(db_path: &Path) -> PathBuf {

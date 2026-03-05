@@ -61,6 +61,7 @@ Define complex filters using expressive logic, e.g.:
 Usage: tuliprox [OPTIONS]
 
 Options:
+  -H, --home <HOME>                The home directory (base for config, storage, backup, downloads)
   -p, --config-path <CONFIG_PATH>  The config directory
   -c, --config <CONFIG_FILE>       The config file
   -i, --source <SOURCE_FILE>       The source config file
@@ -83,6 +84,20 @@ Options:
 
 ```
 
+Home directory resolution order:
+
+1. `--home`
+2. `TULIPROX_HOME` environment variable
+3. Directory of the `tuliprox` binary
+
+Default layout under `{home}`:
+
+- `{home}/config`
+- `{home}/storage`
+- `{home}/backup`
+- `{home}/downloads`
+- `{home}/web`
+
 ## 1. `config.yml`
 
 For running in cli mode, you need to define a `config.yml` file which can be inside config directory next to the executable or provided with the
@@ -95,7 +110,7 @@ This means, even disabled inputs and targets are processed when the given target
 Top level entries in the config files are:
 
 - `api`
-- `working_dir`
+- `storage_dir`
 - `default_user_agent` _optional_, used as fallback for upstream requests when no `User-Agent` is provided by input headers or the client request
   (client request overrides it).
 - `process_parallel` _optional_
@@ -132,10 +147,10 @@ If you process the same provider multiple times each thread uses a connection. K
 `api` contains the `server-mode` settings. To run `tuliprox` in `server-mode` you need to start it with the `-s`cli argument.
 -`api: {host: localhost, port: 8901, web_root: ./web}`
 
-### 1.3. `working_dir`
+### 1.3. `storage_dir`
 
-`working_dir` is the directory where files are written which are given with relative paths.
--`working_dir: ./data`
+`storage_dir` is the directory where files are written which are given with relative paths.
+-`storage_dir: ./data`
 
 With this configuration, you should create a `data` directory where you execute the binary.
 
@@ -477,7 +492,7 @@ metadata_update:
 
 **Group overview:**
 
-- `cache_path` (default `metadata`): Directory where TMDB cache files and metadata are stored. Relative paths are resolved against `working_dir`.
+- `cache_path` (default `metadata`): Directory where TMDB cache files and metadata are stored. Relative paths are resolved against `storage_dir`.
   Used by all metadata resolution paths (Xtream VOD/Series, local library).
 - `resolve`: Controls retries for metadata lookup tasks (for example title/date/TMDB resolution).
 - `probe`: Controls retries and cooldown for technical stream probing tasks.
@@ -983,7 +998,7 @@ The encrypted pasword needs to be added manually into the users file.
 
 ```yaml
 threads: 4
-working_dir: ./data
+storage_dir: ./data
 api:
   host: localhost
   port: 8901
@@ -2993,12 +3008,13 @@ The provider gives you:
 - epg_url: `http://fantastic.provider.xyz:8080/xmltv.php?username=tvjunkie&password=junkie.secret`
 
 To use `tuliprox` you need to create the configuration.
-The configuration consist of 4 files.
+The configuration consists of 5 files.
 
 - config.yml
 - source.yml
-- mapping.yml
 - api-proxy.yml
+- mapping.yml
+- template.yml
 
 The file `mapping.yml`is optional and only needed if you want to do something linke renaming titles or changing attributes.
 
@@ -3006,7 +3022,7 @@ Lets start with `config.yml`. An example basic configuration is:
 
 ```yaml
 api: {host: 0.0.0.0, port: 8901, web_root: ./web}
-working_dir: ./data
+storage_dir: ./data
 update_on_boot: true
 ```
 

@@ -654,8 +654,8 @@ pub async fn iter_raw_xtream_target_playlist(app_config: &AppConfig, target: &Co
 
 pub async fn iter_raw_xtream_input_playlist(app_config: &AppConfig, input: &ConfigInput, cluster: XtreamCluster) -> Option<Box<dyn Stream<Item = XtreamPlaylistItem> + Send + Unpin>> {
     let config = app_config.config.load();
-    let working_dir = &config.working_dir;
-    let storage_path = get_input_storage_path(&input.name, working_dir).await.ok()?;
+    let storage_dir = &config.storage_dir;
+    let storage_path = get_input_storage_path(&input.name, storage_dir).await.ok()?;
     let xtream_path = xtream_get_file_path(&storage_path, cluster);
 
     iter_raw_xtream_playlist(app_config, &xtream_path).await

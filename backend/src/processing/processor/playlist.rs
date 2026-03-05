@@ -324,10 +324,11 @@ async fn playlist_download_from_input(
     input: &ConfigInput,
 ) -> PlaylistDownloadResult {
     let config = &*app_config.config.load();
-    let working_dir = &config.working_dir;
+    let storage_dir = &config.storage_dir;
+    let download_input_type = input.get_download_input_type();
 
     // Check Status
-    let storage_path = input_cache::resolve_input_storage_path(working_dir, &input.name).await;
+    let storage_path = input_cache::resolve_input_storage_path(storage_dir, &input.name).await;
     let mut status = input_cache::load_input_status(&storage_path);
     let cache_duration = input.cache_duration_seconds;
 
@@ -336,7 +337,7 @@ async fn playlist_download_from_input(
         let _ = std::fs::create_dir_all(&storage_path);
     }
 
-    let (clusters_to_download, fully_cached) = match input.input_type {
+    let (clusters_to_download, fully_cached) = match download_input_type {
         InputType::Xtream => {
             let mut to_download = vec![];
             for c in XTREAM_CLUSTER {
@@ -364,7 +365,7 @@ async fn playlist_download_from_input(
         return PlaylistDownloadResult::new(vec![], vec![], true, false);
     }
 
-    let (playlist, errors, persisted) = match input.input_type {
+    let (playlist, errors, persisted) = match download_input_type {
         InputType::M3u => {
             let (p, e) = m3u::download_m3u_playlist(app_config, client, config, input).await;
             (p, e, false)
@@ -381,7 +382,7 @@ async fn playlist_download_from_input(
 
     // Update Status
     if errors.is_empty() {
-        if let InputType::Xtream = input.input_type {
+        if let InputType::Xtream = download_input_type {
             if let Some(clusters) = clusters_to_download {
                 for c in clusters {
                     input_cache::update_cluster_status(&mut status, &c.to_string(), ClusterState::Ok);
@@ -401,7 +402,7 @@ async fn playlist_download_from_input(
         // We could mark specific clusters as failed if we knew which one failed.
         // For simplicity, if error, we don't update the timestamp (so it stays expired/invalid).
         // Or we mark as Failed.
-        if let InputType::Xtream = input.input_type {
+        if let InputType::Xtream = download_input_type {
             if let Some(clusters) = clusters_to_download {
                 for c in clusters {
                     // Optimistic: Only mark failed if we are sure?
@@ -547,8 +548,8 @@ async fn download_input_epg(
 ) -> Option<TVGuide> {
     // Download epg for input
     let (tvguide, mut tvguide_errors) = if error_list.is_empty() {
-        let working_dir = &ctx.config.config.load().working_dir;
-        epg::get_xmltv(ctx, input, None, working_dir).await
+        let storage_dir = &ctx.config.config.load().storage_dir;
+        epg::get_xmltv(ctx, input, None, storage_dir).await
     } else {
         (None, vec![])
     };

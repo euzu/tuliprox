@@ -181,8 +181,8 @@ async fn persist_m3u_playlist_as_text(
     let Some(filename) = target_output.filename.as_ref() else {
         return Ok(());
     };
-    let working_dir = &app_config.config.load().working_dir;
-    let Some(m3u_filename) = utils::get_file_path(working_dir, Some(PathBuf::from(filename))) else {
+    let storage_dir = &app_config.config.load().storage_dir;
+    let Some(m3u_filename) = utils::get_file_path(storage_dir, Some(PathBuf::from(filename))) else {
         return Ok(());
     };
 
@@ -375,8 +375,8 @@ pub async fn iter_raw_m3u_input_playlist(
     input: &ConfigInput,
     cluster: Option<XtreamCluster>,
 ) -> Option<Box<dyn Stream<Item=Result<M3uPlaylistItem, TuliproxError>> + Send + Unpin>> {
-    let working_dir = &app_config.config.load().working_dir;
-    let storage_path = get_input_storage_path(&input.name, working_dir).await.ok()?;
+    let storage_dir = &app_config.config.load().storage_dir;
+    let storage_path = get_input_storage_path(&input.name, storage_dir).await.ok()?;
     let m3u_path = get_input_m3u_playlist_file_path(&storage_path, &input.name);
 
     iter_raw_m3u_playlist::<u32, Arc<str>>(app_config, &m3u_path, cluster).await
