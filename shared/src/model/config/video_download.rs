@@ -3,7 +3,8 @@ use crate::{
     info_err_res,
     utils::{
         default_supported_video_extensions, is_blank_optional_str, is_blank_optional_string,
-        is_default_supported_video_extensions, is_false, DEFAULT_USER_AGENT,
+        is_blank_or_default_download_dir, is_default_supported_video_extensions, is_false, DEFAULT_DOWNLOAD_DIR,
+        DEFAULT_USER_AGENT,
     },
 };
 use std::{borrow::BorrowMut, collections::HashMap};
@@ -13,7 +14,7 @@ use std::{borrow::BorrowMut, collections::HashMap};
 pub struct VideoDownloadConfigDto {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub headers: HashMap<String, String>,
-    #[serde(default, skip_serializing_if = "is_blank_optional_string")]
+    #[serde(default, skip_serializing_if = "is_blank_or_default_download_dir")]
     pub directory: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub organize_into_directories: bool,
@@ -68,6 +69,12 @@ impl VideoConfigDto {
         match &mut self.download {
             None => {}
             Some(downl) => {
+                if is_blank_or_default_download_dir(&downl.directory) {
+                    downl.directory = Some(DEFAULT_DOWNLOAD_DIR.to_string());
+                } else if let Some(directory) = downl.directory.as_ref() {
+                    downl.directory = Some(directory.trim().to_string());
+                }
+
                 if downl.headers.is_empty() {
                     downl.headers.borrow_mut().insert("Accept".to_string(), "video/*".to_string());
                     downl.headers.borrow_mut().insert("User-Agent".to_string(), DEFAULT_USER_AGENT.to_string());
@@ -81,5 +88,71 @@ impl VideoConfigDto {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prepare_sets_default_download_dir_when_missing() {
+        let mut video = VideoConfigDto {
+            extensions: Vec::new(),
+            download: Some(VideoDownloadConfigDto {
+                headers: HashMap::new(),
+                directory: None,
+                organize_into_directories: false,
+                episode_pattern: None,
+            }),
+            web_search: None,
+        };
+        video.prepare().expect("prepare should succeed");
+        let download = video.download.expect("download should exist");
+        assert_eq!(download.directory.as_deref(), Some(DEFAULT_DOWNLOAD_DIR));
+    }
+
+    #[test]
+    fn prepare_keeps_custom_download_dir() {
+        let mut video = VideoConfigDto {
+            extensions: Vec::new(),
+            download: Some(VideoDownloadConfigDto {
+                headers: HashMap::new(),
+                directory: Some("custom-downloads".to_string()),
+                organize_into_directories: false,
+                episode_pattern: None,
+            }),
+            web_search: None,
+        };
+        video.prepare().expect("prepare should succeed");
+        let download = video.download.expect("download should exist");
+        assert_eq!(download.directory.as_deref(), Some("custom-downloads"));
+    }
+
+    #[test]
+    fn serializing_skips_default_download_dir() {
+        let download = VideoDownloadConfigDto {
+            headers: HashMap::new(),
+            directory: Some(DEFAULT_DOWNLOAD_DIR.to_string()),
+            organize_into_directories: false,
+            episode_pattern: None,
+        };
+        let serialized = serde_json::to_string(&download).expect("download serialization should succeed");
+        assert!(
+            !serialized.contains("\"directory\""),
+            "expected no directory field for default value, got: {serialized}"
+        );
+    }
+
+    #[test]
+    fn serializing_keeps_custom_download_dir() {
+        let download = VideoDownloadConfigDto {
+            headers: HashMap::new(),
+            directory: Some("custom-downloads".to_string()),
+            organize_into_directories: false,
+            episode_pattern: None,
+        };
+        let serialized = serde_json::to_string(&download).expect("download serialization should succeed");
+        assert!(serialized.contains("\"directory\""), "expected directory field for custom value, got: {serialized}");
     }
 }

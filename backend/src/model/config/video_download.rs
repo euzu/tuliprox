@@ -1,6 +1,7 @@
 use crate::model::macros;
 use regex::Regex;
 use shared::model::{VideoConfigDto, VideoDownloadConfigDto};
+use shared::utils::DEFAULT_DOWNLOAD_DIR;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -17,7 +18,7 @@ impl From<&VideoDownloadConfigDto> for VideoDownloadConfig {
     fn from(dto: &VideoDownloadConfigDto) -> Self {
         Self {
             headers: dto.headers.clone(),
-            directory: dto.directory.as_ref().map_or_else(|| "downloads".to_string(), ToString::to_string),
+            directory: dto.directory.as_ref().map_or_else(|| DEFAULT_DOWNLOAD_DIR.to_string(), ToString::to_string),
             organize_into_directories: dto.organize_into_directories,
             episode_pattern: dto.episode_pattern.as_ref().and_then(|s| shared::model::REGEX_CACHE.get_or_compile(s)
                 .map_err(|e| log::warn!("Invalid episode_pattern regex '{s}': {e}"))

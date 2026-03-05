@@ -10,7 +10,7 @@ use crate::{
     edit_field_number_option_u32, edit_field_text_option, generate_form_reducer,
     i18n::use_translation,
 };
-use shared::model::MainConfigDto;
+use shared::model::{ConfigDto, MainConfigDto};
 use yew::prelude::*;
 
 const LABEL_UPDATE_ON_BOOT: &str = "LABEL.UPDATE_ON_BOOT";
@@ -73,7 +73,9 @@ pub fn MainConfigView() -> Html {
         let config = config_ctx.config.as_ref().map(|c| c.config.clone());
         use_effect_with((config, config_view_ctx.edit_mode.clone()), move |(cfg, _mode)| {
             if let Some(main) = cfg {
-                let main_config = MainConfigDto::from(main);
+                let mut prepared_main: ConfigDto = main.clone();
+                let _ = prepared_main.prepare(false);
+                let main_config = MainConfigDto::from(&prepared_main);
                 form_state.dispatch(MainConfigFormAction::SetAll(main_config.clone()));
             } else {
                 form_state.dispatch(MainConfigFormAction::SetAll(MainConfigDto::default()));
