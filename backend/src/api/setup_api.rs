@@ -1001,7 +1001,7 @@ pub async fn start_setup_server(paths: &ConfigPaths, missing_files: &[String]) -
         shutdown_tx: Mutex::new(Some(shutdown_tx)),
     });
 
-    info!("Setup mode enabled. Missing required config files: {}", missing_files.join(", "));
+    info!("Setup mode enabled.");
     info!("Setup output directory: {}", state.output_dir.display());
     info!("Setup web root: {}", state.web_dir.display());
     info!("Setup server running: http://{host}:{port}");
