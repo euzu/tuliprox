@@ -188,9 +188,8 @@ impl Config {
             return;
         }
 
-        let Some(normalized) = Self::normalize_storage_path(raw_storage_dir, &self.storage_dir, &cache.dir, DEFAULT_CACHE_DIR) else {
-            return;
-        };
+        let normalized = Self::normalize_storage_path(raw_storage_dir, &self.storage_dir, &cache.dir, DEFAULT_CACHE_DIR)
+            .unwrap_or_else(|| PathBuf::from(cache.dir.trim()));
         cache.dir = normalized.clean().to_string_lossy().to_string();
     }
 

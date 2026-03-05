@@ -95,8 +95,8 @@ All relative paths that are resolved against `home` (including `storage_dir` whe
 Default layout under `{home}`:
 
 - `{home}/config`
-- `{home}/storage`
-- `{home}/backup`
+- `{home}/data` (`storage_dir` default)
+- `{home}/data/backup` (`backup_dir` default = `{storage_dir}/backup`)
 - `{home}/downloads`
 - `{home}/web`
 
@@ -3032,8 +3032,8 @@ storage_dir: ./data
 update_on_boot: true
 ```
 
-This configuration starts `tuliprox`and listens on the 8901 port. The downloaded playlists are stored inside the `data`-folder in the current working
-directory.
+This configuration starts `tuliprox`and listens on the 8901 port. The downloaded playlists are stored inside the `data` folder under the resolved
+home directory (`--home`, then `TULIPROX_HOME`, then binary directory), i.e. `{home}/data`.
 The property `update_on_boot` is optional and can be helpful in the beginning until you have found a working configuration. I prefer to set it to
 false.
 
