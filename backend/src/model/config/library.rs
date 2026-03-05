@@ -122,9 +122,10 @@ pub fn validate_library_paths_from_dto(cfg: &ConfigDto) -> Result<(), TuliproxEr
     let storage_dir = cfg.storage_dir.as_deref().unwrap_or_default();
     // Always validate configured scan directories, even when library is disabled.
     // This prevents persisting invalid paths that would later break startup when enabled.
-    library_cfg.canonicalize_scan_directories(storage_dir)?;
     if library_cfg.enabled {
         library_cfg.prepare(storage_dir)?;
+    } else {
+        library_cfg.canonicalize_scan_directories(storage_dir)?;
     }
     Ok(())
 }

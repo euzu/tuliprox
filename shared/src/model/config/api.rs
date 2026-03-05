@@ -10,9 +10,11 @@ pub struct ConfigApiDto {
 }
 
 impl ConfigApiDto {
+    pub fn default_web_root() -> String { get_default_web_root() }
+
     pub fn prepare(&mut self) {
         if self.web_root.trim().is_empty() {
-            self.web_root = get_default_web_root();
+            self.web_root = Self::default_web_root();
         }
     }
 }
@@ -43,7 +45,8 @@ mod tests {
     #[test]
     fn prepare_sets_default_web_root_when_empty() {
         let mut dto = ConfigApiDto { host: "0.0.0.0".to_string(), port: 8901, web_root: String::new() };
+        let expected_web_root = ConfigApiDto::default_web_root();
         dto.prepare();
-        assert_eq!(dto.web_root, "./web");
+        assert_eq!(dto.web_root, expected_web_root);
     }
 }

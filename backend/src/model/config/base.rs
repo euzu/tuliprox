@@ -185,12 +185,20 @@ impl Config {
         self.storage_dir = utils::resolve_directory_path(storage_dir_path.to_string_lossy().as_ref());
         self.prepare_reverse_proxy_cache_dir(&raw_storage_dir);
 
-        if self.backup_dir.is_none() {
-            self.backup_dir = Some(PathBuf::from(&self.storage_dir).join(DEFAULT_BACKUP_DIR).clean().to_string_lossy().to_string());
-        }
-        if self.user_config_dir.is_none() {
-            self.user_config_dir = Some(PathBuf::from(&self.storage_dir).join(DEFAULT_USER_CONFIG_DIR).clean().to_string_lossy().to_string());
-        }
+        let storage_dir = self.storage_dir.clone();
+        let normalize_optional_path = |value: Option<&str>, default_dir: &str| -> String {
+            let configured = value.map(str::trim).filter(|v| !v.is_empty()).map(PathBuf::from);
+            let path = configured.unwrap_or_else(|| PathBuf::from(&storage_dir).join(default_dir));
+            let normalized = if path.is_relative() {
+                PathBuf::from(&storage_dir).join(path)
+            } else {
+                path
+            };
+            normalized.clean().to_string_lossy().to_string()
+        };
+
+        self.backup_dir = Some(normalize_optional_path(self.backup_dir.as_deref(), DEFAULT_BACKUP_DIR));
+        self.user_config_dir = Some(normalize_optional_path(self.user_config_dir.as_deref(), DEFAULT_USER_CONFIG_DIR));
         self.prepare_api_web_root(home_path);
     }
 

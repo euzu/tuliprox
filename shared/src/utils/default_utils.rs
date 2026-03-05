@@ -237,7 +237,11 @@ pub fn is_blank_or_default_web_root(value: &str) -> bool {
 
 pub fn is_default_dir_path(value: &str, default_dir: &str) -> bool {
     let normalized = value.trim().replace('\\', "/");
-    normalized.trim_start_matches("./") == default_dir
+    let normalized = normalized.trim_end_matches('/');
+    let normalized = normalized.trim_start_matches("./");
+    let default_dir = default_dir.trim().replace('\\', "/");
+    let default_dir = default_dir.trim_end_matches('/');
+    normalized == default_dir
 }
 
 pub fn is_blank_or_default_download_dir(path: &Option<String>) -> bool {

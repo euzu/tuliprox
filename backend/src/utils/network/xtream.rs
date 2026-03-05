@@ -388,9 +388,10 @@ pub async fn download_xtream_playlist(app_config: &Arc<AppConfig>, client: &reqw
 
     let cfg = app_config.config.load();
     let storage_dir = &cfg.storage_dir;
-    // If staged input type differs from the provider input type, we need in-memory parsing so
-    // playlist persistence can still follow the provider input type later in the pipeline.
-    let use_disk_based_processing = cfg.disk_based_processing && matches!(input.input_type, InputType::Xtream | InputType::XtreamBatch);
+    // Staged input type is the effective type during download.
+    let effective_type = input.get_download_input_type();
+    let use_disk_based_processing =
+        cfg.disk_based_processing && matches!(effective_type, InputType::Xtream | InputType::XtreamBatch);
 
     let mut errors = vec![];
     for (xtream_cluster, category, stream) in &ACTIONS {

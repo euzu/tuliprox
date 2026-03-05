@@ -337,10 +337,10 @@ fn get_file_paths(args: &Args) -> ConfigPaths {
     let mappings_file = args.mapping_file.as_ref().map(|p| resolve_env_var(p));
     let template_file = args.template_file.as_ref().map(|p| resolve_env_var(p));
     let storage_path = if Path::new(&config_file).exists() {
-        utils::read_config_file(&config_file, true, false).map_or_else(
-            |_| resolve_storage_path(&home_path, None),
-            |cfg| resolve_storage_path(&home_path, cfg.storage_dir.as_deref()),
-        )
+        match utils::read_config_file(&config_file, true, false) {
+            Ok(cfg) => resolve_storage_path(&home_path, cfg.storage_dir.as_deref()),
+            Err(err) => exit!("Can't read config file {} while resolving storage path: {err}", config_file),
+        }
     } else {
         resolve_storage_path(&home_path, None)
     };

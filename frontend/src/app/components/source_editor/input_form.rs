@@ -179,6 +179,15 @@ generate_form_reducer!(
     }
 );
 
+fn apply_parsed_input_type(
+    staged_input_state: &UseReducerHandle<StagedInputDtoFormState>,
+    selected: Option<&str>,
+    staged_input_type_fallback: InputType,
+) {
+    let input_type = selected.and_then(|value| value.parse::<InputType>().ok()).unwrap_or(staged_input_type_fallback);
+    staged_input_state.dispatch(StagedInputFormAction::InputType(input_type));
+}
+
 #[derive(Properties, PartialEq, Clone)]
 pub struct ConfigInputViewProps {
     #[prop_or_default]
@@ -634,21 +643,18 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                            match selections {
                             DropDownSelection::Empty => {}
                             DropDownSelection::Single(option) => {
-                                if let Ok(input_type) = option.parse::<InputType>() {
-                                    staged_input_state_2.dispatch(StagedInputFormAction::InputType(input_type));
-                                } else {
-                                    staged_input_state_2.dispatch(StagedInputFormAction::InputType(staged_input_type_fallback));
-                                }
+                                apply_parsed_input_type(
+                                    &staged_input_state_2,
+                                    Some(option.as_str()),
+                                    staged_input_type_fallback,
+                                );
                             }
                             DropDownSelection::Multi(options) => {
-                                if let Some(first) = options.first() {
-                                    if let Ok(input_type) = first.parse::<InputType>() {
-                                        staged_input_state_2.dispatch(StagedInputFormAction::InputType(input_type));
-                                    } else {
-                                        staged_input_state_2
-                                            .dispatch(StagedInputFormAction::InputType(staged_input_type_fallback));
-                                    }
-                                }
+                                apply_parsed_input_type(
+                                    &staged_input_state_2,
+                                    options.first().map(String::as_str),
+                                    staged_input_type_fallback,
+                                );
                              }
                            }
                         })}

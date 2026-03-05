@@ -361,19 +361,20 @@ pub fn make_absolute_path(path: &str, storage_dir: &str) -> String {
 
 pub fn make_path_absolute(rpb: &Path, storage_dir: &str) -> PathBuf {
     if rpb.is_relative() {
-        let mut rpb2 = std::path::PathBuf::from(storage_dir).join(rpb);
-        if !rpb2.exists() {
-            rpb2 = get_exe_path().join(rpb);
+        if !storage_dir.trim().is_empty() {
+            return std::path::PathBuf::from(storage_dir).join(rpb).clean();
         }
-        if !rpb2.exists() {
-            let cwd = std::env::current_dir();
-            if let Ok(cwd_path) = cwd {
-                rpb2 = cwd_path.join(rpb);
-            }
+
+        let exe_based = get_exe_path().join(rpb).clean();
+        if exe_based.is_absolute() {
+            return exe_based;
         }
-        if rpb2.exists() {
-            return rpb2.clean();
+
+        if let Ok(cwd_path) = std::env::current_dir() {
+            return cwd_path.join(rpb).clean();
         }
+
+        return exe_based;
     }
     rpb.to_path_buf()
 }

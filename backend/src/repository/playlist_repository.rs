@@ -372,7 +372,7 @@ pub async fn persist_input_playlist(app_config: &Arc<AppConfig>, input: &ConfigI
     }
     playlist.iter_mut().for_each(PlaylistGroup::on_load);
 
-    match input.input_type {
+    match input.get_download_input_type() {
         InputType::Xtream | InputType::XtreamBatch => {
             let storage_dir = &app_config.config.load().storage_dir;
             let storage_path = match get_input_storage_path(&input.name, storage_dir).await {
@@ -426,7 +426,7 @@ pub async fn load_input_playlist(ctx: &PlaylistProcessingContext, input: &Config
 
     let disk_based_processing = app_config.config.load().disk_based_processing;
 
-    match input.input_type {
+    match input.get_download_input_type() {
         InputType::Xtream | InputType::XtreamBatch => {
             if disk_based_processing {
                 Ok(Box::new(XtreamDiskPlaylistSource::new(app_config, &storage_path).await))

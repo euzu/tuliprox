@@ -74,9 +74,16 @@ pub fn MainConfigView() -> Html {
         use_effect_with((config, config_view_ctx.edit_mode.clone()), move |(cfg, _mode)| {
             if let Some(main) = cfg {
                 let mut prepared_main: ConfigDto = main.clone();
-                let _ = prepared_main.prepare(false);
-                let main_config = MainConfigDto::from(&prepared_main);
-                form_state.dispatch(MainConfigFormAction::SetAll(main_config.clone()));
+                match prepared_main.prepare(false) {
+                    Ok(()) => {
+                        let main_config = MainConfigDto::from(&prepared_main);
+                        form_state.dispatch(MainConfigFormAction::SetAll(main_config.clone()));
+                    }
+                    Err(err) => {
+                        log::error!("Failed to prepare main config for view state: {err}");
+                        form_state.dispatch(MainConfigFormAction::SetAll(MainConfigDto::default()));
+                    }
+                }
             } else {
                 form_state.dispatch(MainConfigFormAction::SetAll(MainConfigDto::default()));
             }

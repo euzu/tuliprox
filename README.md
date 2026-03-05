@@ -3008,15 +3008,16 @@ The provider gives you:
 - epg_url: `http://fantastic.provider.xyz:8080/xmltv.php?username=tvjunkie&password=junkie.secret`
 
 To use `tuliprox` you need to create the configuration.
-The configuration consists of 5 files.
+The configuration consists of 3 required files and up to 2 optional files.
 
+Required files:
 - config.yml
 - source.yml
 - api-proxy.yml
-- mapping.yml
-- template.yml
 
-The file `mapping.yml`is optional and only needed if you want to do something linke renaming titles or changing attributes.
+Optional files:
+- mapping.yml (for advanced transformations like renaming titles or changing attributes)
+- template.yml (for centralized pattern reuse)
 
 Lets start with `config.yml`. An example basic configuration is:
 

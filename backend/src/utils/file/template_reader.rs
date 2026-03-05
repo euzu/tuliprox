@@ -26,13 +26,17 @@ fn read_template_definition(
                     "Optional template file not found: {}",
                     template_file.to_str().unwrap_or("?")
                 );
+                Ok(None)
             } else {
                 warn!(
                     "Can't read template file {}: {err}",
                     template_file.to_str().unwrap_or("?")
                 );
+                info_err_res!(
+                    "Can't read template file {}: {err}",
+                    template_file.to_string_lossy()
+                )
             }
-            Ok(None)
         }
     }
 }
@@ -118,13 +122,17 @@ pub fn read_templates_file(
         Err(err) => {
             if err.kind() == ErrorKind::NotFound {
                 debug!("Optional template path not found: {}", path.to_string_lossy());
+                Ok(None)
             } else {
                 warn!(
                     "Can't read template path metadata for {}: {err}",
                     path.to_string_lossy()
                 );
+                info_err_res!(
+                    "Can't read template path metadata for {}: {err}",
+                    path.to_string_lossy()
+                )
             }
-            Ok(None)
         }
     }
 }

@@ -545,7 +545,7 @@ mod tests {
     }
 
     #[test]
-    fn deserializing_rejects_legacy_working_dir_alias() {
+    fn deserializing_accepts_legacy_working_dir_alias() {
         let raw = json!({
             "api": {
                 "host": "127.0.0.1",
@@ -555,8 +555,8 @@ mod tests {
             "working_dir": "."
         });
 
-        let result: Result<ConfigDto, _> = serde_json::from_value(raw);
-        assert!(result.is_err(), "working_dir should not deserialize");
+        let cfg: ConfigDto = serde_json::from_value(raw).expect("working_dir should deserialize as legacy alias");
+        assert_eq!(cfg.storage_dir.as_deref(), Some("."));
     }
 
     #[test]
