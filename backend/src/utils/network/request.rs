@@ -1492,8 +1492,7 @@ pub fn should_trigger_failover(status: StatusCode) -> bool {
     // - 402 Payment Required (subscription issue)
     // - 451 Unavailable For Legal Reasons (geo-blocking)
     //
-    // Note:
-    //   DO trigger failover via the match arms above.
+    // Note: DO triggering failover for:
     // - 429 Too Many Requests
     // - 408 Request Timeout
     // - 407 Proxy Authentication Required
