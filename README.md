@@ -61,7 +61,7 @@ Define complex filters using expressive logic, e.g.:
 Usage: tuliprox [OPTIONS]
 
 Options:
-  -H, --home <HOME>                The home directory (base for config, storage, backup, downloads)
+  -H, --home <HOME>                The home directory (base for config, storage, backup, downloads, web)
   -p, --config-path <CONFIG_PATH>  The config directory
   -c, --config <CONFIG_FILE>       The config file
   -i, --source <SOURCE_FILE>       The source config file
@@ -89,6 +89,8 @@ Home directory resolution order:
 1. `--home`
 2. `TULIPROX_HOME` environment variable
 3. Directory of the `tuliprox` binary
+
+All relative paths that are resolved against `home` (including `storage_dir` when configured as relative) use this order.
 
 Default layout under `{home}`:
 
@@ -152,7 +154,8 @@ If you process the same provider multiple times each thread uses a connection. K
 `storage_dir` is the directory where files are written which are given with relative paths.
 -`storage_dir: ./data`
 
-With this configuration, you should create a `data` directory where you execute the binary.
+`storage_dir` is resolved relative to `home` (resolved via `--home`, then `TULIPROX_HOME`, then binary directory).
+With `storage_dir: ./data`, the effective directory is `{home}/data`.
 
 Be aware that different configurations (e.g. user bouquets) along the playlists are stored in this directory.
 

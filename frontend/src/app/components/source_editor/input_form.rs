@@ -179,12 +179,9 @@ generate_form_reducer!(
     }
 );
 
-fn apply_parsed_input_type(
-    staged_input_state: &UseReducerHandle<StagedInputDtoFormState>,
-    selected: Option<&str>,
-    staged_input_type_fallback: InputType,
-) {
-    let input_type = selected.and_then(|value| value.parse::<InputType>().ok()).unwrap_or(staged_input_type_fallback);
+fn apply_parsed_input_type(staged_input_state: &UseReducerHandle<StagedInputDtoFormState>, selected: Option<&str>) {
+    let input_type =
+        selected.and_then(|value| value.parse::<InputType>().ok()).unwrap_or(staged_input_state.form.input_type);
     if staged_input_state.form.input_type != input_type {
         staged_input_state.dispatch(StagedInputFormAction::InputType(input_type));
     }
@@ -614,7 +611,6 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         let staged_method_selection = Rc::new(vec![staged_input_state.form.method.to_string()]);
         let staged_input_state_1 = staged_input_state.clone();
         let staged_input_state_2 = staged_input_state.clone();
-        let staged_input_type_fallback = staged_input_state.form.input_type;
         html! {
             <Card class="tp__config-view__card">
                 { edit_field_bool!(staged_input_state, translate.t(LABEL_ENABLED),  enabled, StagedInputFormAction::Enabled) }
@@ -648,14 +644,12 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                                 apply_parsed_input_type(
                                     &staged_input_state_2,
                                     Some(option.as_str()),
-                                    staged_input_type_fallback,
                                 );
                             }
                             DropDownSelection::Multi(options) => {
                                 apply_parsed_input_type(
                                     &staged_input_state_2,
                                     options.first().map(String::as_str),
-                                    staged_input_type_fallback,
                                 );
                              }
                            }

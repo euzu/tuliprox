@@ -93,6 +93,43 @@ pub struct Config {
 }
 
 impl Config {
+    fn lexical_normalize(path: &Path) -> PathBuf {
+        path.components().collect::<PathBuf>()
+    }
+
+    fn normalize_storage_path(raw_storage_dir: &str, storage_dir: &str, input: &str, default_dir: &str) -> Option<PathBuf> {
+        let trimmed_input = input.trim();
+        if trimmed_input.is_empty() {
+            return Some(PathBuf::from(storage_dir).join(default_dir));
+        }
+
+        let input_path = PathBuf::from(trimmed_input);
+        if input_path.is_absolute() {
+            return None;
+        }
+
+        let mut normalized_relative = Self::lexical_normalize(&input_path);
+        let trimmed_raw_storage = raw_storage_dir.trim();
+        if !trimmed_raw_storage.is_empty() {
+            let raw_path = PathBuf::from(trimmed_raw_storage);
+            if raw_path.is_relative() {
+                let normalized_raw = Self::lexical_normalize(&raw_path);
+                if normalized_raw.components().next().is_some() {
+                    while normalized_relative.starts_with(&normalized_raw) {
+                        match normalized_relative.strip_prefix(&normalized_raw) {
+                            Ok(stripped) => {
+                                normalized_relative = Self::lexical_normalize(stripped);
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                }
+            }
+        }
+
+        Some(PathBuf::from(storage_dir).join(normalized_relative))
+    }
+
     pub fn prepare(&mut self, config_path: &str, home_path: &str) -> Result<(), TuliproxError> {
 
         self.prepare_directories(home_path);
@@ -151,20 +188,7 @@ impl Config {
             return;
         }
 
-        let cache_path = PathBuf::from(&cache.dir);
-        let normalized = if cache.dir.trim().is_empty() {
-            PathBuf::from(&self.storage_dir).join(DEFAULT_CACHE_DIR)
-        } else if cache_path.is_relative() {
-            let raw_path = PathBuf::from(raw_storage_dir);
-            if !raw_storage_dir.is_empty() && raw_path.is_relative() && cache_path.starts_with(&raw_path) {
-                match cache_path.strip_prefix(&raw_path) {
-                    Ok(stripped) => PathBuf::from(&self.storage_dir).join(stripped),
-                    Err(_) => PathBuf::from(&self.storage_dir).join(&cache_path),
-                }
-            } else {
-                PathBuf::from(&self.storage_dir).join(&cache_path)
-            }
-        } else {
+        let Some(normalized) = Self::normalize_storage_path(raw_storage_dir, &self.storage_dir, &cache.dir, DEFAULT_CACHE_DIR) else {
             return;
         };
         cache.dir = normalized.clean().to_string_lossy().to_string();
@@ -186,24 +210,10 @@ impl Config {
         self.prepare_reverse_proxy_cache_dir(&raw_storage_dir);
 
         let storage_dir = self.storage_dir.clone();
-        let raw_storage_dir_path = PathBuf::from(&raw_storage_dir);
         let normalize_optional_path = |value: Option<&str>, default_dir: &str| -> String {
-            let configured = value.map(str::trim).filter(|v| !v.is_empty()).map(PathBuf::from);
-            let path = configured.unwrap_or_else(|| PathBuf::from(&storage_dir).join(default_dir));
-            let normalized = if path.is_relative() {
-                let normalized_relative = if !raw_storage_dir.is_empty() && raw_storage_dir_path.is_relative() {
-                    let mut stripped = path.clone();
-                    while let Ok(next) = stripped.strip_prefix(&raw_storage_dir_path) {
-                        stripped = next.to_path_buf();
-                    }
-                    stripped
-                } else {
-                    path
-                };
-                PathBuf::from(&storage_dir).join(normalized_relative)
-            } else {
-                path
-            };
+            let configured = value.unwrap_or_default();
+            let normalized = Self::normalize_storage_path(&raw_storage_dir, &storage_dir, configured, default_dir)
+                .unwrap_or_else(|| PathBuf::from(configured.trim()));
             normalized.clean().to_string_lossy().to_string()
         };
 
