@@ -1491,8 +1491,12 @@ pub fn should_trigger_failover(status: StatusCode) -> bool {
     // - 403 Forbidden (permission issue)
     // - 402 Payment Required (subscription issue)
     // - 451 Unavailable For Legal Reasons (geo-blocking)
-    // - 429 To many requests block
-    // - 408 Request takes too long
+    //
+    // Note:
+    //   DO trigger failover via the match arms above.
+    // - 429 Too Many Requests
+    // - 408 Request Timeout
+    // - 407 Proxy Authentication Required
 }
 
 #[cfg(test)]
