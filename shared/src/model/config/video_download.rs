@@ -1,10 +1,9 @@
 use crate::{
     error::TuliproxError,
     info_err_res,
-    model::DEFAULT_USER_AGENT,
     utils::{
         default_supported_video_extensions, is_blank_optional_str, is_blank_optional_string,
-        is_default_supported_video_extensions, is_false,
+        is_default_supported_video_extensions, is_false, DEFAULT_USER_AGENT,
     },
 };
 use std::{borrow::BorrowMut, collections::HashMap};

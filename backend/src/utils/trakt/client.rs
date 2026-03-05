@@ -3,8 +3,7 @@ use shared::error::TuliproxError;
 use reqwest::header::{HeaderMap, HeaderValue};
 use log::{debug, info};
 use shared::error::{info_err};
-use shared::model::DEFAULT_USER_AGENT;
-use shared::utils::{trim_last_slash, TRAKT_API_KEY};
+use shared::utils::{trim_last_slash, DEFAULT_USER_AGENT, TRAKT_API_KEY};
 use super::errors::{handle_trakt_api_error};
 
 pub struct TraktClient {

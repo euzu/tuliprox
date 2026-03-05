@@ -8,7 +8,7 @@ use crate::{
     utils::{
         default_connect_timeout_secs, default_supported_video_extensions, is_blank_optional_string,
         is_default_connect_timeout_secs, is_false, CONFIG_PATH, DEFAULT_BACKUP_DIR, DEFAULT_STORAGE_DIR,
-        DEFAULT_USER_CONFIG_DIR, MAPPING_FILE, TEMPLATE_FILE, DEFAULT_USER_AGENT
+        DEFAULT_USER_AGENT, DEFAULT_USER_CONFIG_DIR, MAPPING_FILE, TEMPLATE_FILE,
     },
 };
 

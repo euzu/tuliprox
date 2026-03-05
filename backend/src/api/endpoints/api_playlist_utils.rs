@@ -129,7 +129,7 @@ pub(in crate::api::endpoints) async fn get_playlist_for_custom_provider(
     let cfg = app_state.app_config.config.load();
     match cfg_input {
         Some(input) => {
-            let (result, errors) = match input.input_type {
+            let (result, errors) = match input.get_download_input_type() {
                 InputType::M3u | InputType::M3uBatch => {
                     m3u::download_m3u_playlist(&app_state.app_config, client, &cfg, input).await
                 }

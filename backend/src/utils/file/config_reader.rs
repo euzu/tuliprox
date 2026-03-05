@@ -563,7 +563,7 @@ pub async fn read_initial_app_config(
     let sources: SourcesConfig = SourcesConfig::try_from(sources_dto)?;
     let mut config: Config = Config::from(config_dto);
     config.prepare(config_path, paths.home_path.as_str())?;
-    paths.storage_path = config.storage_dir.clone();
+    paths.storage_path.clone_from(&config.storage_dir);
     config.update_runtime();
 
     let mut app_config = AppConfig {

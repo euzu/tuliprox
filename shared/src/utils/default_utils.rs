@@ -1,6 +1,8 @@
-use crate::model::{ConfigTargetOptions, LibraryMetadataFormat, ProcessingOrder};
+use crate::{
+    model::{ConfigTargetOptions, LibraryMetadataFormat, ProcessingOrder},
+    utils::DEFAULT_WEB_DIR,
+};
 use std::sync::Arc;
-use crate::utils::DEFAULT_WEB_DIR;
 
 pub const fn is_zero_u16(v: &u16) -> bool { *v == 0 }
 pub const fn is_zero_i16(v: &i16) -> bool { *v == 0 }
@@ -219,9 +221,7 @@ pub fn is_default_metadata_ffprobe_live_probe_size(v: &String) -> bool {
     *v == default_metadata_ffprobe_live_probe_size()
 }
 
-pub fn get_default_web_root() -> String {
-    DEFAULT_WEB_DIR.to_string()
-}
+pub fn get_default_web_root() -> String { DEFAULT_WEB_DIR.to_string() }
 pub fn is_blank_or_default_web_root(value: &str) -> bool {
     let normalized = value.trim().replace('\\', "/");
     if normalized.is_empty() {
