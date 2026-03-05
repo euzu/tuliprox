@@ -1,28 +1,40 @@
 use crate::utils::traverse_dir;
 use crate::utils::{config_file_reader, open_file};
-use log::warn;
+use log::{debug, warn};
 use shared::error::{info_err_res, TuliproxError};
 use shared::info_err;
 use shared::model::TemplateDefinitionDto;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 fn read_template_definition(
     template_file: &Path,
     resolve_var: bool,
 ) -> Result<Option<TemplateDefinitionDto>, TuliproxError> {
-    if let Ok(file) = open_file(template_file) {
-        let maybe_definition: Result<TemplateDefinitionDto, _> =
-            serde_saphyr::from_reader(config_file_reader(file, resolve_var));
-        return match maybe_definition {
-            Ok(definition) => Ok(Some(definition)),
-            Err(err) => info_err_res!("{err}"),
-        };
+    match open_file(template_file) {
+        Ok(file) => {
+            let maybe_definition: Result<TemplateDefinitionDto, _> =
+                serde_saphyr::from_reader(config_file_reader(file, resolve_var));
+            match maybe_definition {
+                Ok(definition) => Ok(Some(definition)),
+                Err(err) => info_err_res!("{err}"),
+            }
+        }
+        Err(err) => {
+            if err.kind() == ErrorKind::NotFound {
+                debug!(
+                    "Optional template file not found: {}",
+                    template_file.to_str().unwrap_or("?")
+                );
+            } else {
+                warn!(
+                    "Can't read template file {}: {err}",
+                    template_file.to_str().unwrap_or("?")
+                );
+            }
+            Ok(None)
+        }
     }
-    warn!(
-        "Can't read template file: {}",
-        template_file.to_str().unwrap_or("?")
-    );
-    Ok(None)
 }
 
 fn merge_template_definitions(definitions: Vec<TemplateDefinitionDto>) -> Option<TemplateDefinitionDto> {
@@ -104,10 +116,14 @@ pub fn read_templates_file(
             }
         }
         Err(err) => {
-            warn!(
-                "Can't read template path metadata for {}: {err}",
-                path.to_string_lossy()
-            );
+            if err.kind() == ErrorKind::NotFound {
+                debug!("Optional template path not found: {}", path.to_string_lossy());
+            } else {
+                warn!(
+                    "Can't read template path metadata for {}: {err}",
+                    path.to_string_lossy()
+                );
+            }
             Ok(None)
         }
     }
