@@ -186,11 +186,21 @@ impl Config {
         self.prepare_reverse_proxy_cache_dir(&raw_storage_dir);
 
         let storage_dir = self.storage_dir.clone();
+        let raw_storage_dir_path = PathBuf::from(&raw_storage_dir);
         let normalize_optional_path = |value: Option<&str>, default_dir: &str| -> String {
             let configured = value.map(str::trim).filter(|v| !v.is_empty()).map(PathBuf::from);
             let path = configured.unwrap_or_else(|| PathBuf::from(&storage_dir).join(default_dir));
             let normalized = if path.is_relative() {
-                PathBuf::from(&storage_dir).join(path)
+                let normalized_relative = if !raw_storage_dir.is_empty() && raw_storage_dir_path.is_relative() {
+                    let mut stripped = path.clone();
+                    while let Ok(next) = stripped.strip_prefix(&raw_storage_dir_path) {
+                        stripped = next.to_path_buf();
+                    }
+                    stripped
+                } else {
+                    path
+                };
+                PathBuf::from(&storage_dir).join(normalized_relative)
             } else {
                 path
             };

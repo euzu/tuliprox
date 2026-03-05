@@ -81,7 +81,6 @@ pub fn MainConfigView() -> Html {
                     }
                     Err(err) => {
                         log::error!("Failed to prepare main config for view state: {err}");
-                        form_state.dispatch(MainConfigFormAction::SetAll(MainConfigDto::default()));
                     }
                 }
             } else {

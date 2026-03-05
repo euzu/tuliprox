@@ -3011,11 +3011,13 @@ To use `tuliprox` you need to create the configuration.
 The configuration consists of 3 required files and up to 2 optional files.
 
 Required files:
+
 - config.yml
 - source.yml
 - api-proxy.yml
 
 Optional files:
+
 - mapping.yml (for advanced transformations like renaming titles or changing attributes)
 - template.yml (for centralized pattern reuse)
 

@@ -371,28 +371,21 @@ pub async fn persist_input_playlist(app_config: &Arc<AppConfig>, input: &ConfigI
         return (playlist, None);
     }
     playlist.iter_mut().for_each(PlaylistGroup::on_load);
+    let cfg = app_config.config.load();
+    let storage_path = match get_input_storage_path(&input.name, &cfg.storage_dir).await {
+        Ok(storage_path) => storage_path,
+        Err(err) => {
+            return (playlist, Some(info_err!("Error creating input storage directory for input '{}' failed: {err}", input.name)));
+        }
+    };
 
     match input.get_download_input_type() {
         InputType::Xtream | InputType::XtreamBatch => {
-            let storage_dir = &app_config.config.load().storage_dir;
-            let storage_path = match get_input_storage_path(&input.name, storage_dir).await {
-                Ok(storage_path) => storage_path,
-                Err(err) => {
-                    return (playlist, Some(info_err!("Error creating input storage directory for input '{}' failed: {err}", input.name)));
-                }
-            };
             persist_input_xtream_playlist(app_config, &storage_path, playlist).await
         }
 
         InputType::M3u | InputType::M3uBatch => {
             // Persist M3U
-            let storage_dir = &app_config.config.load().storage_dir;
-            let storage_path = match get_input_storage_path(&input.name, storage_dir).await {
-                Ok(storage_path) => storage_path,
-                Err(err) => {
-                    return (playlist, Some(info_err!("Error creating input storage directory for input '{}' failed: {err}", input.name)));
-                }
-            };
             let file_path = get_input_m3u_playlist_file_path(&storage_path, &input.name);
             if let Err(err) = persist_input_m3u_playlist(app_config, &file_path, &playlist).await {
                 return (playlist, Some(err));
@@ -401,13 +394,6 @@ pub async fn persist_input_playlist(app_config: &Arc<AppConfig>, input: &ConfigI
         }
         InputType::Library => {
             // Persist local library playlist
-            let storage_dir = &app_config.config.load().storage_dir;
-            let storage_path = match get_input_storage_path(&input.name, storage_dir).await {
-                Ok(storage_path) => storage_path,
-                Err(err) => {
-                    return (playlist, Some(info_err!("Error creating input storage directory for input '{}' failed: {err}", input.name)));
-                }
-            };
             let file_path = get_input_local_library_playlist_file_path(&storage_path, &input.name);
             let (playlist, result) = persist_input_library_playlist(app_config, &file_path, playlist).await;
             if let Err(err) = result {
@@ -420,11 +406,10 @@ pub async fn persist_input_playlist(app_config: &Arc<AppConfig>, input: &ConfigI
 
 pub async fn load_input_playlist(ctx: &PlaylistProcessingContext, input: &ConfigInput, clusters: Option<&[XtreamCluster]>) -> Result<Box<dyn PlaylistSource>, TuliproxError> {
     let app_config = &ctx.config;
-    let storage_dir = &app_config.config.load().storage_dir;
-    let storage_path = get_input_storage_path(&input.name, storage_dir).await
+    let cfg = app_config.config.load();
+    let storage_path = get_input_storage_path(&input.name, &cfg.storage_dir).await
         .map_err(|e| info_err!("Error getting input path: {e}"))?;
-
-    let disk_based_processing = app_config.config.load().disk_based_processing;
+    let disk_based_processing = cfg.disk_based_processing;
 
     match input.get_download_input_type() {
         InputType::Xtream | InputType::XtreamBatch => {

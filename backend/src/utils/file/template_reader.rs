@@ -17,7 +17,10 @@ fn read_template_definition(
                 serde_saphyr::from_reader(config_file_reader(file, resolve_var));
             match maybe_definition {
                 Ok(definition) => Ok(Some(definition)),
-                Err(err) => info_err_res!("{err}"),
+                Err(err) => info_err_res!(
+                    "Failed to parse template file {}: {err}",
+                    template_file.to_string_lossy()
+                ),
             }
         }
         Err(err) => {

@@ -185,7 +185,9 @@ fn apply_parsed_input_type(
     staged_input_type_fallback: InputType,
 ) {
     let input_type = selected.and_then(|value| value.parse::<InputType>().ok()).unwrap_or(staged_input_type_fallback);
-    staged_input_state.dispatch(StagedInputFormAction::InputType(input_type));
+    if staged_input_state.form.input_type != input_type {
+        staged_input_state.dispatch(StagedInputFormAction::InputType(input_type));
+    }
 }
 
 #[derive(Properties, PartialEq, Clone)]

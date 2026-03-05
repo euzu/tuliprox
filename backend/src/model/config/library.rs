@@ -1,6 +1,7 @@
 use crate::model::macros;
 use shared::error::{info_err_res, TuliproxError};
 use shared::model::{ConfigDto, LibraryConfigDto, LibraryContentType, LibraryMetadataFormat};
+use shared::utils::DEFAULT_STORAGE_DIR;
 use shared::utils::Internable;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -119,7 +120,12 @@ pub fn validate_library_paths_from_dto(cfg: &ConfigDto) -> Result<(), TuliproxEr
     };
 
     let mut library_cfg = LibraryConfig::from(library_dto);
-    let storage_dir = cfg.storage_dir.as_deref().unwrap_or_default();
+    let storage_dir = cfg
+        .storage_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|dir| !dir.is_empty())
+        .unwrap_or(DEFAULT_STORAGE_DIR);
     // Always validate configured scan directories, even when library is disabled.
     // This prevents persisting invalid paths that would later break startup when enabled.
     if library_cfg.enabled {
