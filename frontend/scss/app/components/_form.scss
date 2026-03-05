@@ -21,7 +21,9 @@
 
   &__list,
   &__text {
+    display: flex;
     flex-flow: column;
+    gap: var(--gap-defaut);
   }
 
   &__value {

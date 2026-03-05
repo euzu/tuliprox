@@ -474,7 +474,7 @@ pub fn ConfigView() -> Html {
 
                 { html_if!(*edit_mode || setup_mode, {
                     <div class="tp__config-view__toolbar tp__form-page__toolbar">
-                     <TextButton class="primary" name="save_config"
+                     <TextButton class="secondary" name="save_config"
                         icon="Save"
                         title={ if setup_mode { translate.t(LABEL_SETUP_FINISH) } else { translate.t(LABEL_SAVE) }}
                         onclick={handle_save_config}></TextButton>

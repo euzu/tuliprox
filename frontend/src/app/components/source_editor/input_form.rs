@@ -243,9 +243,9 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             // InputType::M3uBatch,
             // InputType::XtreamBatch,
         ]
-        .iter()
-        .map(|t| DropDownOption { id: t.to_string(), label: html! { t.to_string() }, selected: t == default_it })
-        .collect::<Vec<DropDownOption>>()
+            .iter()
+            .map(|t| DropDownOption { id: t.to_string(), label: html! { t.to_string() }, selected: t == default_it })
+            .collect::<Vec<DropDownOption>>()
     });
 
     {
@@ -896,7 +896,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                                 })
                             }
                             </div>
-                            <TextButton
+                        <TextButton
                                 class="primary"
                                 name="add_epg_source"
                                 icon="Add"
