@@ -1485,15 +1485,18 @@ pub fn should_trigger_failover(status: StatusCode) -> bool {
             | StatusCode::INTERNAL_SERVER_ERROR
             | StatusCode::TOO_MANY_REQUESTS
             | StatusCode::REQUEST_TIMEOUT
+            | StatusCode::PROXY_AUTHENTICATION_REQUIRED
     )
     // Explicitly NOT triggering failover for:
     // - 401 Unauthorized (wrong credentials)
     // - 403 Forbidden (permission issue)
     // - 402 Payment Required (subscription issue)
-    // - 407 Proxy Authentication Required (proxy credentials issue)
     // - 451 Unavailable For Legal Reasons (geo-blocking)
-    // - 429 To many requests block
-    // - 408 Request takes too long
+    //
+    // Note: DO triggering failover for:
+    // - 429 Too Many Requests
+    // - 408 Request Timeout
+    // - 407 Proxy Authentication Required
 }
 
 #[cfg(test)]

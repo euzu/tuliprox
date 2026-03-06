@@ -18,8 +18,9 @@ pub const HEADER_CONFIG_SOURCES_REVISION: &str = "X-Tuliprox-Sources-Revision";
 pub const HEADER_CONFIG_API_PROXY_REVISION: &str = "X-Tuliprox-ApiProxy-Revision";
 
 pub fn set_sanitize_sensitive_info(value: bool) { CONSTANTS.sanitize.store(value, Ordering::Relaxed); }
+pub fn is_sanitize_sensitive_info_enabled() -> bool { CONSTANTS.sanitize.load(Ordering::Relaxed) }
 pub fn sanitize_sensitive_info(query: &str) -> Cow<'_, str> {
-    if !CONSTANTS.sanitize.load(Ordering::Relaxed) {
+    if !is_sanitize_sensitive_info_enabled() {
         return Cow::Borrowed(query);
     }
 
