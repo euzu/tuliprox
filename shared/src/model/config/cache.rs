@@ -68,13 +68,13 @@ mod tests {
     fn serializing_skips_default_cache_dir() {
         let cache = CacheConfigDto { enabled: true, directory: Some(DEFAULT_CACHE_DIR.to_string()), size: None };
         let serialized = serde_json::to_string(&cache).expect("cache serialization should succeed");
-        assert!(!serialized.contains("\"dir\""), "expected no dir field for default value, got: {serialized}");
+        assert!(!serialized.contains("\"directory\""), "expected no dir field for default value, got: {serialized}");
     }
 
     #[test]
     fn serializing_keeps_non_default_cache_dir() {
         let cache = CacheConfigDto { enabled: true, directory: Some("custom-cache".to_string()), size: None };
         let serialized = serde_json::to_string(&cache).expect("cache serialization should succeed");
-        assert!(serialized.contains("\"dir\""), "expected dir field for custom value, got: {serialized}");
+        assert!(serialized.contains("\"directory\""), "expected dir field for custom value, got: {serialized}");
     }
 }
