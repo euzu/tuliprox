@@ -39,6 +39,27 @@
         fallback_to_filename: true
     ```
   
+- **Input Batch URL Scheme**: Batch input URLs now use the `batch://` scheme instead of `file://`.
+  `file://` is no longer accepted for batch CSV definitions. Update your `source.yml`:
+
+    ```yaml
+    # Before
+    inputs:
+      - type: xtream_batch
+        url: 'file:///home/tuliprox/config/batch.csv'
+
+    # After
+    inputs:
+      - type: xtream_batch
+        url: 'batch:///home/tuliprox/config/batch.csv'
+    ```
+
+  Local paths without a scheme (`/path/file.csv`, `./file.csv`) continue to work.
+  The `batch://` scheme clearly distinguishes batch alias files from provider `file://` URLs.
+- **DNS Resolved Persistence**: `dns.resolved` has been removed from `source.yml` and the `ProviderDnsDto`.
+  Resolved IPs are now persisted separately in `{storage_dir}/provider_dns_resolved.json`.
+  This eliminates hot-reload interference caused by DNS refresh cycles writing to `source.yml`.
+  DNS caches are automatically carried over during config hot-reloads.
 - **Input Batch Changes**: `name` attribute is now mandatory for input type batch to ensure stable playlist UUIDs.
 - **Favorites Redesign**: Replaced implicit `create_alias` with explicit `add_favourite(group_name)` script function.
   - **EpgSmartMatch**: Field `name_prefix` syntax needs to be changed from  `name_prefix: !suffix "."` to `name_prefix: { suffix: "." }`.

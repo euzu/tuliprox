@@ -10,7 +10,7 @@ use crate::{
         deserialize_timestamp, get_credentials_from_url_str, get_trimmed_string, is_blank_optional_string,
         is_default_probe_delay_secs, is_default_probe_live_interval, is_default_resolve_delay_secs, is_false, is_true,
         is_zero_i16, is_zero_u16, parse_duration_seconds, parse_provider_scheme_url_parts, sanitize_sensitive_info,
-        serialize_option_vec_flow_map_items, trim_last_slash, Internable, PROVIDER_SCHEME_PREFIX,
+        serialize_option_vec_flow_map_items, trim_last_slash, Internable, BATCH_SCHEME_PREFIX, PROVIDER_SCHEME_PREFIX,
     },
 };
 use enum_iterator::Sequence;
@@ -510,7 +510,7 @@ impl ConfigInputDto {
 
         self.persist = get_trimmed_string(self.persist.as_deref());
 
-        if self.url.starts_with("file://") {
+        if self.url.starts_with(BATCH_SCHEME_PREFIX) {
             match self.input_type {
                 InputType::M3u => {
                     self.input_type = InputType::M3uBatch;
@@ -523,7 +523,10 @@ impl ConfigInputDto {
         } else if self.url.starts_with(PROVIDER_SCHEME_PREFIX)
             && matches!(self.input_type, InputType::M3uBatch | InputType::XtreamBatch)
         {
-            return info_err_res!("input type {} does not support provider:// URLs for batch definitions; use a local CSV path or file:// URL", self.input_type);
+            return info_err_res!(
+                "input type {} does not support provider:// URLs for batch definitions; use batch:// URL",
+                self.input_type
+            );
         }
         check_provider_scheme_url!(self.url, provider_names);
 
@@ -653,7 +656,10 @@ impl ConfigInputDto {
         if self.url.starts_with(PROVIDER_SCHEME_PREFIX)
             && matches!(self.input_type, InputType::M3uBatch | InputType::XtreamBatch)
         {
-            return info_err_res!("input type {} does not support provider:// URLs for batch definitions; use a local CSV path or file:// URL", self.input_type);
+            return info_err_res!(
+                "input type {} does not support provider:// URLs for batch definitions; use batch:// URL",
+                self.input_type
+            );
         }
         Ok(())
     }
@@ -1011,7 +1017,7 @@ mod tests {
         let mut dto = ConfigInputDto {
             name: "input_alias".intern(),
             input_type: InputType::Xtream,
-            url: "file:///tmp/input_alias.csv".to_string(),
+            url: "batch:///tmp/input_alias.csv".to_string(),
             aliases: Some(vec![ConfigInputAliasDto {
                 id: 1,
                 name: "alias_1".intern(),
@@ -1025,7 +1031,7 @@ mod tests {
         };
 
         dto.prepare_type().expect("prepare type should succeed");
-        dto.prepare(0, true, &HashSet::new()).expect("prepare should succeed and infer batch type");
+        dto.prepare(0, true, &HashSet::new()).expect("prepare should succeed and infer batch type from batch:// URL");
         assert_eq!(dto.input_type, InputType::XtreamBatch);
     }
 
@@ -1048,6 +1054,6 @@ mod tests {
         };
 
         let err = dto.prepare(0, true, &HashSet::new()).expect_err("prepare must reject provider:// for batch input");
-        assert!(err.to_string().contains("does not support provider:// URLs"));
+        assert!(err.to_string().contains("does not support provider:// URLs"), "Error: {err}");
     }
 }

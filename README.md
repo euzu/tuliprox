@@ -1522,7 +1522,7 @@ sources:
 
 Input aliases can be defined as batches in csv files with `;` separator.
 There are 2 batch input types  `xtream_batch` and `m3u_batch`.
-Batch inputs are file-based only: use a local path (`/path/file.csv`, `./file.csv`) or `file://...`.
+Batch inputs use the `batch://` URL scheme: `batch:///path/file.csv` (absolute) or `batch://./file.csv` (relative).
 
 #### `XtreamBatch`
 
@@ -1530,7 +1530,7 @@ Batch inputs are file-based only: use a local path (`/path/file.csv`, `./file.cs
 inputs:
   - type: xtream_batch
     name: my_provider # Mandatory: used for playlist UUID generation
-    url: 'file:///home/tuliprox/config/my_provider_batch.csv'
+    url: 'batch:///home/tuliprox/config/my_provider_batch.csv'
 sources:
   - inputs:
     - my_provider
@@ -1554,7 +1554,7 @@ This is necessary because of playlist uuid generation and assigning same channel
 ```yaml
 inputs:
   - type: m3u_batch
-    url: 'file:///home/tuliprox/config/my_provider_batch.csv'
+    url: 'batch:///home/tuliprox/config/my_provider_batch.csv'
 sources:
   - inputs:
       - m3u_batch

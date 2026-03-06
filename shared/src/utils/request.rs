@@ -8,6 +8,7 @@ use std::{borrow::Cow, sync::atomic::Ordering};
 use url::Url;
 
 pub const PROVIDER_SCHEME_PREFIX: &str = "provider://";
+pub const BATCH_SCHEME_PREFIX: &str = "batch://";
 
 pub const CONTENT_TYPE_JSON: &str = "application/json";
 pub const CONTENT_TYPE_CBOR: &str = "application/cbor";

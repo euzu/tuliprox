@@ -452,7 +452,7 @@ pub async fn get_batch_aliases(
         if url.starts_with(PROVIDER_SCHEME_PREFIX) {
             return info_err_res!(
                 "Batch input type '{input_type}' does not support provider:// URLs. \
-Use a local CSV path (absolute/relative) or file:// URL."
+Use a batch:// URL or a local CSV path (absolute/relative)."
             );
         }
 
