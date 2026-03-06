@@ -1222,7 +1222,7 @@ async fn process_watch(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub async fn exec_processing(
     client: &reqwest::Client,
     app_config: Arc<AppConfig>,
@@ -1258,8 +1258,7 @@ pub async fn exec_processing(
         if let Some(state) = app_state.as_ref() {
             if tokio::time::timeout(max_update_duration, sync_panel_api_exp_dates(state)).await.is_err() {
                 error!(
-                    "Playlist update bootstrap timed out after {} secs while holding playlist lock",
-                    PLAYLIST_UPDATE_MAX_DURATION_SECS
+                    "Playlist update bootstrap timed out after {PLAYLIST_UPDATE_MAX_DURATION_SECS} secs while holding playlist lock",
                 );
                 if let Some(events) = event_manager.as_deref() {
                     events.send_event(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Failure));
@@ -1310,8 +1309,7 @@ pub async fn exec_processing(
         }
         Err(_) => {
             error!(
-                "Playlist processing timed out after {} secs while holding playlist lock",
-                PLAYLIST_UPDATE_MAX_DURATION_SECS
+                "Playlist processing timed out after {PLAYLIST_UPDATE_MAX_DURATION_SECS} secs while holding playlist lock",
             );
             if let Some(events) = event_manager.as_deref() {
                 events.send_event(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Failure));
