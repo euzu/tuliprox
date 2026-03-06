@@ -663,10 +663,9 @@ where
                     (params.input.username.as_deref().unwrap_or(""), params.input.password.as_deref().unwrap_or(""));
                 // TODO do i need action_path like for timeshift ?
                 let stream_url = format!("{url}/series/{username}/{password}/{provider_id}{ext}");
-                let log_stream_url = resolve_stream_url_for_logging(params.input, &stream_url);
                 debug_if_enabled!(
                     "Redirecting stream request to {}",
-                    sanitize_sensitive_info(log_stream_url.as_ref())
+                    sanitize_sensitive_info(resolve_stream_url_for_logging(params.input, &stream_url).as_ref())
                 );
                 return Some(redirect(&stream_url).into_response());
             }
@@ -699,18 +698,16 @@ where
                 } else {
                     &replace_url_extension(&stream_url, DASH_EXT)
                 };
-                let log_redirect_url = resolve_stream_url_for_logging(params.input, redirect_url);
                 debug_if_enabled!(
                     "Redirecting stream request to {}",
-                    sanitize_sensitive_info(log_redirect_url.as_ref())
+                    sanitize_sensitive_info(resolve_stream_url_for_logging(params.input, redirect_url).as_ref())
                 );
                 return Some(redirect(redirect_url).into_response());
             }
 
-            let log_stream_url = resolve_stream_url_for_logging(params.input, &stream_url);
             debug_if_enabled!(
                 "Redirecting stream request to {}",
-                sanitize_sensitive_info(log_stream_url.as_ref())
+                sanitize_sensitive_info(resolve_stream_url_for_logging(params.input, &stream_url).as_ref())
             );
             return Some(redirect(&stream_url).into_response());
         }
@@ -757,7 +754,6 @@ pub async fn force_provider_stream_response(
     input: &Arc<ConfigInput>,
     user: &ProxyUserCredentials,
 ) -> impl IntoResponse + Send {
-    let log_stream_url = resolve_stream_url_for_logging(input, user_session.stream_url.as_ref());
     let stream_options = get_stream_options(app_state);
     let share_stream = false;
     let connection_permission = UserConnectionPermission::Allowed;
@@ -823,7 +819,7 @@ pub async fn force_provider_stream_response(
         let body_stream = prepare_body_stream(app_state, item_type, stream);
         debug_if_enabled!(
             "Streaming provider forced stream request from {}",
-            sanitize_sensitive_info(log_stream_url.as_ref())
+            sanitize_sensitive_info(resolve_stream_url_for_logging(input, user_session.stream_url.as_ref()).as_ref())
         );
         return try_unwrap_body!(response.body(body_stream));
     }
