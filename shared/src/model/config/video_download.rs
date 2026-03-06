@@ -99,6 +99,7 @@ impl VideoConfigDto {
 
 #[cfg(test)]
 mod tests {
+    use crate::utils::DEFAULT_DOWNLOAD_DIR;
     use super::*;
 
     #[test]
