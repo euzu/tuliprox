@@ -50,12 +50,14 @@ use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{Arc, Weak},
-    time::Instant,
+    time::{Duration, Instant},
 };
 use tokio::{
     sync::{Mutex, OwnedRwLockWriteGuard, RwLock},
     task::JoinSet,
 };
+
+const PLAYLIST_UPDATE_MAX_DURATION_SECS: u64 = 3600;
 
 fn is_valid(pli: &PlaylistItem, filter: &Filter, match_as_ascii: bool) -> bool {
     let provider = ValueProvider { pli, match_as_ascii };
@@ -1235,6 +1237,7 @@ pub async fn exec_processing(
     pre_processed_inputs: Option<HashSet<Arc<str>>>,
     acquired_permit: Option<crate::api::model::UpdateGuardPermit>,
 ) {
+    let max_update_duration = Duration::from_secs(PLAYLIST_UPDATE_MAX_DURATION_SECS);
     let playlist_guard = if let Some(permit) = acquired_permit {
         Some(permit)
     } else if let Some(guard) = &update_guard {
@@ -1253,7 +1256,16 @@ pub async fn exec_processing(
 
     if playlist_guard.is_some() {
         if let Some(state) = app_state.as_ref() {
-            sync_panel_api_exp_dates(state).await;
+            if tokio::time::timeout(max_update_duration, sync_panel_api_exp_dates(state)).await.is_err() {
+                error!(
+                    "Playlist update bootstrap timed out after {} secs while holding playlist lock",
+                    PLAYLIST_UPDATE_MAX_DURATION_SECS
+                );
+                if let Some(events) = event_manager.as_deref() {
+                    events.send_event(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Failure));
+                }
+                return;
+            }
         }
     }
 
@@ -1282,13 +1294,30 @@ pub async fn exec_processing(
     };
 
     let start_time = Instant::now();
-    let process_result = std::panic::AssertUnwindSafe(process_sources(&ctx)).catch_unwind().await;
-    let Ok((stats, errors)) = process_result else {
-        error!("Playlist processing panicked");
-        if let Some(events) = event_manager.as_deref() {
-            events.send_event(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Failure));
+    let process_result = tokio::time::timeout(
+        max_update_duration,
+        std::panic::AssertUnwindSafe(process_sources(&ctx)).catch_unwind(),
+    )
+    .await;
+    let (stats, errors) = match process_result {
+        Ok(Ok((stats, errors))) => (stats, errors),
+        Ok(Err(_)) => {
+            error!("Playlist processing panicked");
+            if let Some(events) = event_manager.as_deref() {
+                events.send_event(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Failure));
+            }
+            return;
         }
-        return;
+        Err(_) => {
+            error!(
+                "Playlist processing timed out after {} secs while holding playlist lock",
+                PLAYLIST_UPDATE_MAX_DURATION_SECS
+            );
+            if let Some(events) = event_manager.as_deref() {
+                events.send_event(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Failure));
+            }
+            return;
+        }
     };
     log_memory_snapshot("exec_processing after_process_sources");
 
