@@ -341,6 +341,7 @@ pub struct AppState {
 
 impl AppState {
     pub(in crate::api::model) async fn set_config(&self, config: Config) -> Result<UpdateChanges, TuliproxError> {
+        let old_storage_dir = self.app_config.config.load().storage_dir.clone();
         let changes = self.detect_changes_for_config(&config);
         config.update_runtime();
 
@@ -352,7 +353,9 @@ impl AppState {
         self.active_provider.update_config(&self.app_config).await;
         self.update_config().await?;
 
-        if changes.flags.contains(UpdateChangesFlags::Geoip) {
+        let geoip_reload_needed =
+            changes.flags.contains(UpdateChangesFlags::Geoip) || (use_geoip && old_storage_dir != storage_dir);
+        if geoip_reload_needed {
             let new_geoip = if use_geoip {
                 let path = get_geoip_path(&storage_dir);
                 let _file_lock = self.app_config.file_locks.read_lock(&path).await;

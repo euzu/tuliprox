@@ -226,15 +226,17 @@ impl ConfigFile {
         let current_mapping_path = paths.mapping_file_path.clone().unwrap_or_else(|| {
             utils::resolve_mapping_file_path(paths.config_path.as_str(), None)
         });
-        let next_mapping_path =
-            utils::resolve_mapping_file_path(paths.config_path.as_str(), config_dto.mapping_path.as_deref());
+        let next_mapping_path = paths.mapping_file_path.clone().unwrap_or_else(|| {
+            utils::resolve_mapping_file_path(paths.config_path.as_str(), config_dto.mapping_path.as_deref())
+        });
         let mapping_changed = current_mapping_path != next_mapping_path;
 
         let current_template_path = paths.template_file_path.clone().unwrap_or_else(|| {
             utils::resolve_template_file_path(paths.config_path.as_str(), None)
         });
-        let next_template_path =
-            utils::resolve_template_file_path(paths.config_path.as_str(), config_dto.template_path.as_deref());
+        let next_template_path = paths.template_file_path.clone().unwrap_or_else(|| {
+            utils::resolve_template_file_path(paths.config_path.as_str(), config_dto.template_path.as_deref())
+        });
         let template_changed = current_template_path != next_template_path;
 
         let mut config: Config = Config::from(config_dto);

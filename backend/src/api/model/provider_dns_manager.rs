@@ -184,22 +184,25 @@ pub fn exec_provider_dns(app_state: &Arc<AppState>, cancel: &CancellationToken) 
         return;
     }
 
-    // Seed DNS caches from persisted storage file (non-blocking fire-and-forget).
-    let app_for_seed = Arc::clone(app_state);
+    let app_for_start = Arc::clone(app_state);
+    let cancel_for_start = cancel.clone();
     tokio::spawn(async move {
-        load_persisted_dns_resolved(&app_for_seed).await;
+        // Seed runtime caches first, then start writer/tasks to avoid startup races.
+        load_persisted_dns_resolved(&app_for_start).await;
+        if cancel_for_start.is_cancelled() {
+            return;
+        }
+
+        let writer_tx = spawn_dns_resolved_writer(Arc::clone(&app_for_start), cancel_for_start.clone(), generation);
+        debug!("Provider dns manager: starting {} provider task(s)", provider_names.len());
+
+        for provider_name in provider_names {
+            spawn_provider_dns_task(
+                Arc::clone(&app_for_start),
+                provider_name,
+                cancel_for_start.clone(),
+                writer_tx.clone(),
+            );
+        }
     });
-
-    let writer_tx = spawn_dns_resolved_writer(Arc::clone(app_state), cancel.clone(), generation);
-
-    debug!("Provider dns manager: starting {} provider task(s)", provider_names.len());
-
-    for provider_name in provider_names {
-        spawn_provider_dns_task(
-            Arc::clone(app_state),
-            provider_name,
-            cancel.clone(),
-            writer_tx.clone(),
-        );
-    }
 }

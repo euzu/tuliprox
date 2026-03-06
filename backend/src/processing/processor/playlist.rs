@@ -438,6 +438,7 @@ async fn process_source(
                 continue;
             };
             if is_input_enabled(input, &ctx.user_targets) {
+                let effective_input_type = input.get_download_input_type();
                 source_downloaded = true;
                 log_memory_snapshot(format!("source[{source_idx}] input '{}' before_download", input.name).as_str());
 
@@ -460,7 +461,7 @@ async fn process_source(
                 };
                 log_memory_snapshot(format!("source[{source_idx}] input '{}' after_download", input.name).as_str());
 
-                let tvguide = if input.input_type == InputType::Library {
+                let tvguide = if effective_input_type == InputType::Library {
                     None
                 } else {
                     download_input_epg(ctx, input, &mut error_list).await
@@ -484,7 +485,7 @@ async fn process_source(
                 let elapsed = start_time.elapsed().as_secs();
                 input_stats.insert(
                     input_name.clone(),
-                    create_input_stat(group_count, channel_count, errors.len(), input.input_type, input_name, elapsed),
+                    create_input_stat(group_count, channel_count, errors.len(), effective_input_type, input_name, elapsed),
                 );
             }
         }
@@ -1019,10 +1020,10 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
     }
 
     let input_name = fpl.input.name.clone();
-    let input_type = fpl.input.input_type;
-    let xtream_probe_handled = input_type.is_xtream() && target.get_xtream_output().is_some();
+    let effective_input_type = fpl.input.get_download_input_type();
+    let xtream_probe_handled = effective_input_type.is_xtream() && target.get_xtream_output().is_some();
     let live_probe_settings = if probe_live_enabled {
-        get_live_probe_interval_settings(target, input_type, Some(opts)).map(|(delay, interval_secs)| {
+        get_live_probe_interval_settings(target, effective_input_type, Some(opts)).map(|(delay, interval_secs)| {
             let interval_signed = i64::try_from(interval_secs).unwrap_or(i64::MAX);
             let cutoff_ts = chrono::Utc::now().timestamp().saturating_sub(interval_signed);
             (delay, interval_secs, cutoff_ts)
@@ -1103,7 +1104,7 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
         }
 
         // For M3U, ID is a provider id; for Library, ID is UUID.
-        let unique_id = if input_type == InputType::Library {
+        let unique_id = if effective_input_type == InputType::Library {
             item.header.uuid.to_valid_uuid()
         } else {
             item.header.id.to_string()

@@ -72,7 +72,12 @@ pub fn get_default_web_root_path() -> PathBuf {
 
 pub fn get_default_web_root_path_for_home(home_path: &Path) -> PathBuf {
     if let Some(web_root) = env::var(DEFAULT_WEB_ROOT_ENV_VAR).ok().filter(|p| !p.trim().is_empty()) {
-        return PathBuf::from(web_root);
+        let configured = PathBuf::from(web_root);
+        return if configured.is_absolute() {
+            configured
+        } else {
+            home_path.join(configured)
+        };
     }
     get_default_path_for_home(home_path, DEFAULT_WEB_DIR)
 }
@@ -524,6 +529,7 @@ mod tests {
         normalize_string_path, resolve_mapping_file_path, resolve_template_file_path,
         resolve_template_persist_file_path,
     };
+    use std::path::PathBuf;
 
     #[test]
     fn test_simple_relative_path() {
@@ -562,29 +568,37 @@ mod tests {
 
     #[test]
     fn test_resolve_template_default_path_uses_config_dir() {
-        let config_path = "/tmp/tuliprox/settings/config";
-        let resolved = resolve_template_file_path(config_path, Some("./config/template.yml"));
-        assert_eq!(resolved, "/tmp/tuliprox/settings/config/template.yml");
+        let config_path = std::env::temp_dir().join("tuliprox").join("settings").join("config");
+        let resolved = resolve_template_file_path(
+            config_path.to_string_lossy().as_ref(),
+            Some("./config/template.yml"),
+        );
+        let expected = config_path.join("template.yml");
+        assert_eq!(PathBuf::from(resolved), expected);
     }
 
     #[test]
     fn test_resolve_template_directory_path_uses_config_dir() {
-        let config_path = "/tmp/tuliprox/settings/config";
-        let resolved = resolve_template_file_path(config_path, Some("template.d"));
-        assert_eq!(resolved, "/tmp/tuliprox/settings/config/template.d");
+        let config_path = std::env::temp_dir().join("tuliprox").join("settings").join("config");
+        let resolved = resolve_template_file_path(config_path.to_string_lossy().as_ref(), Some("template.d"));
+        let expected = config_path.join("template.d");
+        assert_eq!(PathBuf::from(resolved), expected);
     }
 
     #[test]
     fn test_resolve_mapping_directory_path_uses_config_dir() {
-        let config_path = "/tmp/tuliprox/settings/config";
-        let resolved = resolve_mapping_file_path(config_path, Some("mapping.d"));
-        assert_eq!(resolved, "/tmp/tuliprox/settings/config/mapping.d");
+        let config_path = std::env::temp_dir().join("tuliprox").join("settings").join("config");
+        let resolved = resolve_mapping_file_path(config_path.to_string_lossy().as_ref(), Some("mapping.d"));
+        let expected = config_path.join("mapping.d");
+        assert_eq!(PathBuf::from(resolved), expected);
     }
 
     #[test]
     fn test_resolve_template_persist_file_for_directory_path() {
-        let config_path = "/tmp/tuliprox/settings/config";
-        let resolved = resolve_template_persist_file_path(Some("template.d"), config_path);
-        assert_eq!(resolved, "/tmp/tuliprox/settings/config/template.d/template.yml");
+        let config_path = std::env::temp_dir().join("tuliprox").join("settings").join("config");
+        let resolved =
+            resolve_template_persist_file_path(Some("template.d"), config_path.to_string_lossy().as_ref());
+        let expected = config_path.join("template.d").join("template.yml");
+        assert_eq!(PathBuf::from(resolved), expected);
     }
 }

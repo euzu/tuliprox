@@ -102,8 +102,9 @@ Default layout under `{home}`:
 
 ## 1. `config.yml`
 
-For running in cli mode, you need to define a `config.yml` file which can be inside config directory next to the executable or provided with the
-`-c` cli argument.
+For CLI mode, `config.yml` is loaded from `{home}/config/config.yml` by default.
+`{home}` is resolved in this order: `--home` -> `TULIPROX_HOME` -> directory of the `tuliprox` binary.
+You can override the config file with `-c` (and config directory with `-p`).
 
 For running specific targets use the `-t` argument like `tuliprox -t <target_name> -t <other_target_name>`.
 Target names should be provided in the config. The -t option overrides `enabled` attributes of `input` and `target` elements.
@@ -148,6 +149,9 @@ If you process the same provider multiple times each thread uses a connection. K
 
 `api` contains the `server-mode` settings. To run `tuliprox` in `server-mode` you need to start it with the `-s`cli argument.
 -`api: {host: localhost, port: 8901, web_root: ./web}`
+
+`web_root` follows the same home-based resolution rules:
+with `web_root: ./web`, the effective path is `{home}/web` (`--home` -> `TULIPROX_HOME` -> binary directory).
 
 ### 1.3. `storage_dir`
 
@@ -1002,6 +1006,10 @@ api:
   port: 8901
   web_root: ./web
 ```
+
+Relative paths in this example are resolved under `{home}`.
+So `storage_dir: ./data` -> `{home}/data` and `web_root: ./web` -> `{home}/web`
+(`--home` -> `TULIPROX_HOME` -> binary directory).
 
 ### 1.12 `user_access_control`
 
@@ -3029,6 +3037,7 @@ update_on_boot: true
 
 This configuration starts `tuliprox`and listens on the 8901 port. The downloaded playlists are stored inside the `data` folder under the resolved
 home directory (`--home`, then `TULIPROX_HOME`, then binary directory), i.e. `{home}/data`.
+`web_root: ./web` resolves to `{home}/web` with the same order.
 The property `update_on_boot` is optional and can be helpful in the beginning until you have found a working configuration. I prefer to set it to
 false.
 

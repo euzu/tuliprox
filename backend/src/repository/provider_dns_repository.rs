@@ -8,6 +8,7 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::fs;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -22,6 +23,8 @@ pub struct DnsResolvedStore {
 }
 
 static DNS_WRITER_GENERATION: AtomicU64 = AtomicU64::new(0);
+const DNS_WRITER_FLUSH_INTERVAL_SECS: u64 = 2;
+const DNS_WRITER_FLUSH_BATCH_THRESHOLD: usize = 32;
 
 pub fn next_dns_writer_generation() -> u64 { DNS_WRITER_GENERATION.fetch_add(1, Ordering::SeqCst) + 1 }
 
@@ -216,6 +219,7 @@ pub struct DnsResolvedWriteUpdate {
 
 pub type DnsResolvedWriteTx = mpsc::Sender<DnsResolvedWriteUpdate>;
 
+#[allow(clippy::too_many_lines)]
 pub fn spawn_dns_resolved_writer(
     app_state: Arc<AppState>,
     cancel: CancellationToken,
@@ -247,6 +251,13 @@ pub fn spawn_dns_resolved_writer(
                 );
             }
         }
+        let mut dirty = false;
+        let mut dirty_updates = 0usize;
+        let mut flush_before_exit = false;
+        let mut flush_timer = std::pin::pin!(tokio::time::sleep(Duration::from_secs(
+            DNS_WRITER_FLUSH_INTERVAL_SECS,
+        )));
+        let mut flush_timer_active = false;
 
         loop {
             if !is_dns_writer_generation_current(generation) {
@@ -260,11 +271,13 @@ pub fn spawn_dns_resolved_writer(
             tokio::select! {
                 () = cancel.cancelled() => {
                     debug!("Stopping DNS resolved writer task for '{}'", path.display());
+                    flush_before_exit = true;
                     break;
                 }
                 maybe_update = rx.recv() => {
                     let Some(update) = maybe_update else {
                         debug!("DNS resolved writer channel closed for '{}'", path.display());
+                        flush_before_exit = true;
                         break;
                     };
                     if !is_dns_writer_generation_current(generation) {
@@ -282,11 +295,47 @@ pub fn spawn_dns_resolved_writer(
                         store.providers.insert(update.provider_name, update.resolved);
                     }
 
-                    let _ = prune_store_to_runtime_enabled_providers(&app_state, &mut store);
-                    if let Err(err) = persist_dns_resolved_store(&path, &store).await {
-                        warn!("Failed to persist DNS resolved store '{}': {err}", path.display());
+                    dirty = true;
+                    dirty_updates = dirty_updates.saturating_add(1);
+
+                    if dirty_updates >= DNS_WRITER_FLUSH_BATCH_THRESHOLD {
+                        let _ = prune_store_to_runtime_enabled_providers(&app_state, &mut store);
+                        if let Err(err) = persist_dns_resolved_store(&path, &store).await {
+                            warn!("Failed to persist DNS resolved store '{}': {err}", path.display());
+                        } else {
+                            dirty = false;
+                            dirty_updates = 0;
+                            flush_timer_active = false;
+                        }
+                    } else if !flush_timer_active {
+                        flush_timer.as_mut().reset(
+                            tokio::time::Instant::now() + Duration::from_secs(DNS_WRITER_FLUSH_INTERVAL_SECS),
+                        );
+                        flush_timer_active = true;
                     }
                 }
+                () = &mut flush_timer, if flush_timer_active => {
+                    flush_timer_active = false;
+                    if dirty {
+                        let _ = prune_store_to_runtime_enabled_providers(&app_state, &mut store);
+                        if let Err(err) = persist_dns_resolved_store(&path, &store).await {
+                            warn!("Failed to persist DNS resolved store '{}': {err}", path.display());
+                        } else {
+                            dirty = false;
+                            dirty_updates = 0;
+                        }
+                    }
+                }
+            }
+        }
+
+        if flush_before_exit && dirty {
+            let _ = prune_store_to_runtime_enabled_providers(&app_state, &mut store);
+            if let Err(err) = persist_dns_resolved_store(&path, &store).await {
+                warn!(
+                    "Failed to persist DNS resolved store during writer shutdown '{}': {err}",
+                    path.display()
+                );
             }
         }
     });

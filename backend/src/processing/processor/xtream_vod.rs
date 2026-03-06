@@ -5,6 +5,7 @@ use crate::model::FetchedPlaylist;
 use crate::model::InputSource;
 use crate::model::{AppConfig, ConfigTarget};
 use crate::model::{ConfigInput, ConfigInputFlags};
+use crate::processing::input_cache::resolve_input_storage_path;
 use crate::processing::processor::playlist::PlaylistProcessingContext;
 use crate::processing::processor::{
     create_resolve_options_function_for_xtream_target, process_foreground_retry_once, select_cancel_token,
@@ -12,7 +13,6 @@ use crate::processing::processor::{
     FOREGROUND_RETRY_BATCH_MAX_SIZE as RETRY_BATCH_MAX_SIZE,
 };
 use crate::ptt::ptt_parse_title;
-use crate::repository::get_input_storage_path;
 use crate::repository::persist_input_vod_info;
 use crate::repository::persist_input_vod_info_batch;
 use crate::repository::{xtream_get_file_path, BPlusTreeQuery};
@@ -150,13 +150,7 @@ async fn process_immediate_vod_info(
     let input = fpl.input;
     let storage_dir = &ctx.config.config.load().storage_dir;
 
-    let storage_path = match get_input_storage_path(&input.name, storage_dir).await {
-        Ok(path) => path,
-        Err(err) => {
-            error!("Can't resolve vod, input storage directory for input '{}' failed: {err}", input.name);
-            return;
-        }
-    };
+    let storage_path = resolve_input_storage_path(storage_dir, &input.name).await;
 
     // Keep an optional read query open and reopen lazily only when needed.
     let xtream_path = xtream_get_file_path(&storage_path, XtreamCluster::Video);
@@ -530,9 +524,7 @@ pub async fn update_vod_metadata(
     tmdb_resolved_out: Option<&AtomicBool>,
 ) -> Result<Option<VideoStreamProperties>, TuliproxError> {
     let storage_dir = &app_config.config.load().storage_dir;
-    let storage_path = get_input_storage_path(&input.name, storage_dir)
-        .await
-        .map_err(|e| shared::error::info_err!("Storage path error: {e}"))?;
+    let storage_path = resolve_input_storage_path(storage_dir, &input.name).await;
 
     // Check if we should skip based on input options
     if input.has_flag(ConfigInputFlags::XtreamSkipVod) {
