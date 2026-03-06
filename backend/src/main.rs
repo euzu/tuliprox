@@ -334,8 +334,14 @@ fn get_file_paths(args: &Args) -> ConfigPaths {
             .as_ref()
             .map_or_else(|| utils::get_default_sources_file_path(&config_path), ToString::to_string),
     );
-    let mappings_file = args.mapping_file.as_ref().map(|p| resolve_env_var(p));
-    let template_file = args.template_file.as_ref().map(|p| resolve_env_var(p));
+    let mappings_file = args.mapping_file.as_ref().map(|p| {
+        let path = resolve_env_var(p);
+        utils::resolve_mapping_file_path(config_path.as_str(), Some(path.as_str()))
+    });
+    let template_file = args.template_file.as_ref().map(|p| {
+        let path = resolve_env_var(p);
+        utils::resolve_template_file_path(config_path.as_str(), Some(path.as_str()))
+    });
     let storage_path = if Path::new(&config_file).exists() {
         match utils::read_config_file(&config_file, true, false) {
             Ok(cfg) => resolve_storage_path(&home_path, cfg.storage_dir.as_deref()),

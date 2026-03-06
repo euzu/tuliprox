@@ -121,11 +121,52 @@ pub fn get_default_templates_path(config_path: &str) -> String {
     get_default_file_path(config_path, TEMPLATE_FILE)
 }
 
+fn resolve_config_scoped_path(config_path: &str, candidate: &str) -> String {
+    let candidate_path = PathBuf::from(candidate.trim()).clean();
+    if candidate_path.is_absolute() {
+        return candidate_path.to_string_lossy().to_string();
+    }
+
+    let config_dir = PathBuf::from(config_path).clean();
+    let relative = if let Some(config_dir_name) = config_dir.file_name() {
+        candidate_path
+            .strip_prefix(Path::new(config_dir_name))
+            .map_or_else(|_| candidate_path.clone(), Path::to_path_buf)
+    } else {
+        candidate_path.clone()
+    };
+
+    config_dir.join(relative).clean().to_string_lossy().to_string()
+}
+
+#[inline]
+pub fn resolve_mapping_file_path(config_path: &str, mapping_path: Option<&str>) -> String {
+    let configured = mapping_path.map(str::trim).filter(|path| !path.is_empty()).map(ToString::to_string);
+    let candidate = if shared::utils::is_blank_or_default_mapping_path(&configured) {
+        get_default_mappings_path(config_path)
+    } else {
+        configured.unwrap_or_else(|| get_default_mappings_path(config_path))
+    };
+    resolve_config_scoped_path(config_path, &candidate)
+}
+
+#[inline]
+pub fn resolve_template_file_path(config_path: &str, template_path: Option<&str>) -> String {
+    let configured = template_path.map(str::trim).filter(|path| !path.is_empty()).map(ToString::to_string);
+    let candidate = if shared::utils::is_blank_or_default_template_path(&configured) {
+        get_default_templates_path(config_path)
+    } else {
+        configured.unwrap_or_else(|| get_default_templates_path(config_path))
+    };
+    resolve_config_scoped_path(config_path, &candidate)
+}
+
 #[inline]
 pub fn resolve_template_persist_file_path(template_path: Option<&str>, config_path: &str) -> String {
-    let candidate = template_path
+    let raw_candidate = template_path
         .filter(|path| !path.trim().is_empty())
         .map_or_else(|| get_default_templates_path(config_path), ToString::to_string);
+    let candidate = resolve_template_file_path(config_path, Some(raw_candidate.as_str()));
     let path = PathBuf::from(&candidate);
 
     if path.exists() {
@@ -135,8 +176,8 @@ pub fn resolve_template_persist_file_path(template_path: Option<&str>, config_pa
         return path.to_string_lossy().to_string();
     }
 
-    let looks_like_directory = candidate.ends_with('/')
-        || candidate.ends_with('\\')
+    let looks_like_directory = raw_candidate.ends_with('/')
+        || raw_candidate.ends_with('\\')
         || path.extension().is_none()
         || path.extension().is_some_and(|ext| ext == "d");
 
@@ -479,7 +520,10 @@ pub fn get_file_extension(path: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_string_path;
+    use super::{
+        normalize_string_path, resolve_mapping_file_path, resolve_template_file_path,
+        resolve_template_persist_file_path,
+    };
 
     #[test]
     fn test_simple_relative_path() {
@@ -514,5 +558,33 @@ mod tests {
         let input = "";
         let normalized = normalize_string_path(input);
         assert_eq!(normalized, "");
+    }
+
+    #[test]
+    fn test_resolve_template_default_path_uses_config_dir() {
+        let config_path = "/tmp/tuliprox/settings/config";
+        let resolved = resolve_template_file_path(config_path, Some("./config/template.yml"));
+        assert_eq!(resolved, "/tmp/tuliprox/settings/config/template.yml");
+    }
+
+    #[test]
+    fn test_resolve_template_directory_path_uses_config_dir() {
+        let config_path = "/tmp/tuliprox/settings/config";
+        let resolved = resolve_template_file_path(config_path, Some("template.d"));
+        assert_eq!(resolved, "/tmp/tuliprox/settings/config/template.d");
+    }
+
+    #[test]
+    fn test_resolve_mapping_directory_path_uses_config_dir() {
+        let config_path = "/tmp/tuliprox/settings/config";
+        let resolved = resolve_mapping_file_path(config_path, Some("mapping.d"));
+        assert_eq!(resolved, "/tmp/tuliprox/settings/config/mapping.d");
+    }
+
+    #[test]
+    fn test_resolve_template_persist_file_for_directory_path() {
+        let config_path = "/tmp/tuliprox/settings/config";
+        let resolved = resolve_template_persist_file_path(Some("template.d"), config_path);
+        assert_eq!(resolved, "/tmp/tuliprox/settings/config/template.d/template.yml");
     }
 }

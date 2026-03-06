@@ -1747,7 +1747,7 @@ where
                 let mut v = Vec::with_capacity(info.len());
 
                 let original_keys = std::mem::take(&mut keys);
-                for (entry_key, entry_info) in original_keys.into_iter().zip(info.into_iter()) {
+                for (entry_key, entry_info) in original_keys.into_iter().zip(info) {
                     if entry_info.is_tombstone() {
                         continue;
                     }
@@ -1854,7 +1854,7 @@ where
                 let mut filtered_info: Vec<ValueInfo> = Vec::with_capacity(info.len());
                 let mut last_packed_block: Option<(u64, Vec<u8>)> = None;
                 let original_keys = std::mem::take(&mut keys);
-                for (entry_key, entry_info) in original_keys.into_iter().zip(info.into_iter()) {
+                for (entry_key, entry_info) in original_keys.into_iter().zip(info) {
                     if entry_info.is_tombstone() {
                         continue;
                     }

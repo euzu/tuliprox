@@ -596,6 +596,7 @@ impl MetadataUpdateManager {
     /// * `task` - The task to process
     #[allow(clippy::too_many_lines)]
     pub async fn queue_task(&self, input_name: Arc<str>, task: UpdateTask) {
+        debug!("[Task] Queuing task for input {input_name}: {task}");
         // Read app state once and reuse for worker creation when needed.
         let app_state_weak = {
             let guard = self.app_state.lock().await;
@@ -747,8 +748,12 @@ impl MetadataUpdateManager {
                 }
             } else {
                 let mut existing = entry.task.lock();
+                let before = format!("{existing}");
                 if Self::merge_task_payload(&mut existing, task_to_submit) {
                     entry.generation.fetch_add(1, Ordering::Relaxed);
+                    debug!("[Task] Merged task for input {input_name}: before={before}, after={existing}");
+                } else {
+                    debug!("[Task] Task already pending for input {input_name} (no merge needed): {existing}");
                 }
                 return SubmitTaskResult::QueuedOrMerged;
             }
@@ -987,8 +992,8 @@ impl InputWorker {
             let mut task_for_execution = current_task.clone();
 
             if Self::is_resolve_task(&task_for_execution) && self.resolve_exhausted.contains_key(&current_key) {
-                debug_if_enabled!(
-                    "Skipping exhausted resolve task for input {}: {} (reset window: {}s)",
+                debug!(
+                    "[Metadata-Task] Skipping task (resolve exhausted) for input {}: {} (reset window: {}s)",
                     input_name,
                     task_for_execution,
                     runtime_settings.resolve_exhaustion_reset_gap_secs
@@ -1003,10 +1008,8 @@ impl InputWorker {
             if !skip_execution
                 && self.should_skip_recent_no_change_task(&current_key, &task_for_execution, &runtime_settings)
             {
-                debug_if_enabled!(
-                    "Skipping recently-resolved no-change task for input {}: {}",
-                    input_name,
-                    task_for_execution
+                debug!(
+                    "[Metadata-Task] Skipping task (recently completed with no changes) for input {input_name}: {task_for_execution}",
                 );
                 remove_current_task = true;
                 skip_execution = true;
@@ -1019,19 +1022,21 @@ impl InputWorker {
                         if let Some(cooldown_until_ts) = tmdb_state.cooldown_until_ts {
                             if now_ts < cooldown_until_ts {
                                 if let Some(stripped_task) = Self::strip_tmdb_reasons(&task_for_execution) {
-                                    debug_if_enabled!(
-                                        "TMDB cooldown active for input {}: {} (cooldown_until={}), continuing with non-TMDB reasons",
+                                    debug!(
+                                        "[Task] TMDB cooldown active for input {}: {}, continuing with non-TMDB reasons (cooldown_until={}, remaining={}s)",
                                         input_name,
                                         task_for_execution,
-                                        cooldown_until_ts
+                                        cooldown_until_ts,
+                                        cooldown_until_ts.saturating_sub(now_ts)
                                     );
                                     task_for_execution = stripped_task;
                                 } else {
-                                    debug_if_enabled!(
-                                        "Skipping TMDB-only task in cooldown for input {}: {} (cooldown_until={})",
+                                    debug!(
+                                        "[Metadata-Task] Skipping task (TMDB-only in cooldown) for input {}: {} (cooldown_until={}, remaining={}s)",
                                         input_name,
                                         task_for_execution,
-                                        cooldown_until_ts
+                                        cooldown_until_ts,
+                                        cooldown_until_ts.saturating_sub(now_ts)
                                     );
                                     self.scheduled_requeues.remove(&current_key);
                                     remove_current_task = true;
@@ -1053,11 +1058,12 @@ impl InputWorker {
                             if active_retry_domain == RetryDomain::Probe {
                                 if let Some(cooldown_until_ts) = active_state.cooldown_until_ts {
                                     if now_ts < cooldown_until_ts {
-                                        debug_if_enabled!(
-                                            "Skipping probe task in cooldown for input {}: {} (cooldown_until={})",
+                                        debug!(
+                                            "[Metadata-Task] Skipping task (probe cooldown) for input {}: {} (cooldown_until={}, remaining={}s)",
                                             input_name,
                                             task_for_execution,
-                                            cooldown_until_ts
+                                            cooldown_until_ts,
+                                            cooldown_until_ts.saturating_sub(now_ts)
                                         );
                                         self.scheduled_requeues.remove(&current_key);
                                         remove_current_task = true;
@@ -1069,6 +1075,14 @@ impl InputWorker {
                             }
 
                             if !skip_execution && active_state.next_allowed_at_ts > now_ts {
+                                debug!(
+                                    "[Task] Deferring task (retry backoff) for input {}: {} (next_allowed_at={}, wait={}s, attempts={})",
+                                    input_name,
+                                    task_for_execution,
+                                    active_state.next_allowed_at_ts,
+                                    active_state.next_allowed_at_ts.saturating_sub(now_ts),
+                                    active_state.attempts
+                                );
                                 schedule_requeue_at_ts = Some(active_state.next_allowed_at_ts);
                                 skip_execution = true;
                             }
@@ -1103,6 +1117,12 @@ impl InputWorker {
             }
 
             if !skip_execution {
+                debug!(
+                    "[Task] Executing task for input {}: {} (retry_domain={:?})",
+                    input_name,
+                    task_for_execution,
+                    Self::retry_domain_for_task(&task_for_execution)
+                );
                 let task_result = {
                     let Some(_pause_guard) = self.wait_for_update_pause_window().await else {
                         break;
@@ -1129,7 +1149,7 @@ impl InputWorker {
                             Self::should_trigger_playlist_update_for_task(&task_for_execution, task_outcome.task_changed);
                         cycle_had_changes |= trigger_playlist_update;
                         debug!(
-                            "Processed metadata task for input {input_name}: {task_for_execution} (changed={}, trigger_playlist_update={}, tmdb_pending={})",
+                            "[Metadata-Task] Task succeeded for input {input_name}: {task_for_execution} (changed={}, trigger_playlist_update={}, tmdb_pending={})",
                             task_outcome.task_changed,
                             trigger_playlist_update,
                             task_outcome.tmdb_pending
@@ -1151,11 +1171,12 @@ impl InputWorker {
                                     tmdb_state.cooldown_until_ts = Some(cooldown_until_ts);
                                     tmdb_state.last_error =
                                         Some("TMDB lookup completed without matching result".to_string());
-                                    debug_if_enabled!(
-                                        "TMDB resolve produced no match for input {}: {} (cooldown_until={})",
+                                    debug!(
+                                        "[Metadata-Task] TMDB resolve produced no match (existing retry state), entering cooldown for input {}: {} (cooldown_until={}, cooldown_duration={}s)",
                                         input_name,
                                         task_for_execution,
-                                        cooldown_until_ts
+                                        cooldown_until_ts,
+                                        runtime_settings.tmdb_cooldown_secs
                                     );
                                 } else {
                                     state_bundle.clear_domain(RetryDomain::Tmdb);
@@ -1183,11 +1204,12 @@ impl InputWorker {
                             };
                             self.retry_states.insert(current_key.clone(), state_bundle.clone());
                             state_after_success = Some(state_bundle);
-                            debug_if_enabled!(
-                                "TMDB resolve produced no match for input {}: {} (cooldown_until={})",
+                            debug!(
+                                "[Metadata-Task] TMDB resolve produced no match (new retry state), entering cooldown for input {}: {} (cooldown_until={}, cooldown_duration={}s)",
                                 input_name,
                                 task_for_execution,
-                                cooldown_until_ts
+                                cooldown_until_ts,
+                                runtime_settings.tmdb_cooldown_secs
                             );
                         }
 
@@ -1207,6 +1229,10 @@ impl InputWorker {
                             && !task_outcome.tmdb_pending
                         {
                             let reasons = Self::task_reason(&task_for_execution);
+                            debug!(
+                                "[Task] Caching no-change result for input {}: {} (reasons={}, ttl={}s)",
+                                input_name, task_for_execution, reasons, runtime_settings.no_change_cache_ttl_secs
+                            );
                             self.recently_completed_no_change.insert(current_key.clone(), (Instant::now(), reasons));
                         } else {
                             self.recently_completed_no_change.remove(&current_key);
@@ -1237,6 +1263,10 @@ impl InputWorker {
                     }
                     Err(e) => {
                         if Self::is_permanent_not_found_error(&e.message) {
+                            debug!(
+                                "[Task] Task failed with permanent not-found for input {}: {} (error={})",
+                                input_name, task_for_execution, e.message
+                            );
                             let retry_domain = Self::retry_domain_for_task(&task_for_execution);
                             self.scheduled_requeues.remove(&current_key);
                             if retry_domain == RetryDomain::Probe {
@@ -1253,11 +1283,12 @@ impl InputWorker {
                                 };
                                 metadata_persist_state = Some(Some(state_bundle_after_update));
                                 remove_current_task = true;
-                                debug_if_enabled!(
-                                    "Probe task entered cooldown after permanent not-found for input {}: {} (cooldown_until={})",
+                                debug!(
+                                    "[Metadata-Task] Probe task entering cooldown after permanent not-found for input {}: {} (cooldown_until={}, cooldown_duration={}s)",
                                     input_name,
                                     task_for_execution,
-                                    cooldown_until_ts
+                                    cooldown_until_ts,
+                                    runtime_settings.probe_cooldown_secs
                                 );
                             } else {
                                 self.resolve_exhausted.insert(current_key.clone(), now_ts);
@@ -1277,10 +1308,11 @@ impl InputWorker {
                                 }
                                 metadata_persist_state = Some(state_after_clear);
                                 remove_current_task = true;
-                                debug_if_enabled!(
-                                    "Resolve task marked exhausted after permanent not-found for input {}: {}",
+                                debug!(
+                                    "[Metadata-Task] Resolve task marked exhausted after permanent not-found for input {}: {} (error={})",
                                     input_name,
-                                    task_for_execution
+                                    task_for_execution,
+                                    e.message
                                 );
                             }
                         } else if Self::is_transient_worker_error(&e.message) {
@@ -1293,8 +1325,8 @@ impl InputWorker {
                                 Self::compute_retry_delay_secs(current_task.delay(), &runtime_settings);
                             let retry_delay_i64 = i64::try_from(retry_delay_secs).unwrap_or(i64::MAX);
                             schedule_requeue_at_ts = Some(now_ts.saturating_add(retry_delay_i64));
-                            debug_if_enabled!(
-                                "Transient task deferral for input {}: {} (retry_in={}s, err={})",
+                            debug!(
+                                "[Metadata-Task] Task deferred (transient error) for input {}: {} (retry_in={}s, error={})",
                                 input_name,
                                 task_for_execution,
                                 retry_delay_secs,
@@ -1350,12 +1382,14 @@ impl InputWorker {
                                     let cooldown_until = state_after_update
                                         .cooldown_until_ts
                                         .map_or_else(|| "none".to_string(), |ts| ts.to_string());
-                                    debug_if_enabled!(
-                                        "Probe task exhausted for input {}: {} (attempts={}, cooldown_until={})",
+                                    debug!(
+                                        "Metadata-[Task] Probe task exhausted (max attempts reached) for input {}: {} (attempts={}/{}, cooldown_until={}, error={})",
                                         input_name,
                                         task_for_execution,
                                         state_after_update.attempts,
-                                        cooldown_until
+                                        max_attempts,
+                                        cooldown_until,
+                                        e.message
                                     );
                                 } else {
                                     self.resolve_exhausted.insert(current_key.clone(), now_ts);
@@ -1375,22 +1409,26 @@ impl InputWorker {
                                     }
                                     metadata_persist_state = Some(state_after_clear);
                                     remove_current_task = true;
-                                    debug_if_enabled!(
-                                        "Resolve task exhausted for input {}: {} (attempts={})",
+                                    debug!(
+                                        "[Metadata-Task] Resolve task exhausted (max attempts reached) for input {}: {} (attempts={}/{}, error={})",
                                         input_name,
                                         task_for_execution,
-                                        attempts
+                                        attempts,
+                                        max_attempts,
+                                        e.message
                                     );
                                 }
                             } else {
                                 schedule_requeue_at_ts = Some(state_after_update.next_allowed_at_ts);
                                 metadata_persist_state = Some(Some(state_bundle_after_update));
-                                debug_if_enabled!(
-                                    "Task failed for input {}, scheduling retry: {} (attempt={}, next_allowed_at={}, err={})",
+                                debug!(
+                                    "[Metadata-Task] Task failed, scheduling retry for input {}: {} (attempt={}/{}, next_allowed_at={}, backoff={}s, error={})",
                                     input_name,
                                     task_for_execution,
                                     attempts,
+                                    max_attempts,
                                     state_after_update.next_allowed_at_ts,
+                                    state_after_update.next_allowed_at_ts.saturating_sub(now_ts),
                                     e.message
                                 );
                             }
@@ -1413,6 +1451,13 @@ impl InputWorker {
             }
 
             if let Some(retry_at_ts) = schedule_requeue_at_ts {
+                debug!(
+                    "[Task] Scheduling requeue for input {}: {:?} (retry_at_ts={}, in={}s)",
+                    input_name,
+                    current_key,
+                    retry_at_ts,
+                    retry_at_ts.saturating_sub(chrono::Utc::now().timestamp())
+                );
                 self.schedule_requeue_at(current_key.clone(), retry_at_ts);
             }
 

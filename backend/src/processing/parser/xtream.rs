@@ -174,9 +174,7 @@ pub async fn parse_xtream(input: &ConfigInput,
                         input.has_flag(ConfigInputFlags::XtreamLiveStreamWithoutExtension),
                     );
 
-                    // Re-implement the loop to add ordinal
-                    let mut ord_counter: u32 = 1;
-                    for stream in xtream_streams {
+                    for (ord_counter, stream) in (1_u32..).zip(xtream_streams) {
                         let group = group_map.get_mut(&stream.get_category_id()).unwrap_or(&mut unknown_grp);
                         let category_name = &group.category_name;
                         let stream_url = create_xtream_url(xtream_cluster, url, username, password, &stream, live_stream_use_prefix, live_stream_without_extension);
@@ -200,7 +198,6 @@ pub async fn parse_xtream(input: &ConfigInput,
                             },
                         };
                         item.header.source_ordinal = ord_counter;
-                        ord_counter += 1;
                         group.add(item);
                     }
 

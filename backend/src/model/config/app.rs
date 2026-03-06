@@ -329,9 +329,10 @@ impl AppConfig {
     fn set_mapping_path(&self, mapping_path: Option<&str>) {
         let paths_guard = self.paths.load();
         let old_path = paths_guard.mapping_file_path.as_deref();
-        let new_path = mapping_path
-            .map(ToString::to_string)
-            .or_else(|| Some(utils::get_default_mappings_path(&paths_guard.config_path)));
+        let new_path = Some(utils::resolve_mapping_file_path(
+            paths_guard.config_path.as_str(),
+            mapping_path,
+        ));
 
         if old_path != new_path.as_deref() {
             let mut new_paths = (**paths_guard).clone();
@@ -343,9 +344,10 @@ impl AppConfig {
     fn set_template_path(&self, template_path: Option<&str>) {
         let paths_guard = self.paths.load();
         let old_path = paths_guard.template_file_path.as_deref();
-        let new_path = template_path
-            .map(ToString::to_string)
-            .or_else(|| Some(utils::get_default_templates_path(&paths_guard.config_path)));
+        let new_path = Some(utils::resolve_template_file_path(
+            paths_guard.config_path.as_str(),
+            template_path,
+        ));
 
         if old_path != new_path.as_deref() {
             let mut new_paths = (**paths_guard).clone();

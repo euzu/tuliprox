@@ -447,6 +447,26 @@ fn queue_background_vod_info(
         let reasons = check_resolve_reasons(resolve_options, do_probe, resolve_tmdb_enabled, pli);
 
         if !reasons.is_empty() {
+            if log_enabled!(Level::Debug) {
+                let has_details = pli.has_details();
+                let (has_tmdb, has_date, has_video, has_audio) =
+                    match pli.header.additional_properties.as_ref() {
+                        Some(StreamProperties::Video(props)) => {
+                            let details = props.details.as_ref();
+                            (
+                                props.tmdb.is_some(),
+                                details.and_then(|d| d.release_date.as_ref()).is_some(),
+                                MediaQuality::is_valid_media_info(details.and_then(|d| d.video.as_deref())),
+                                MediaQuality::is_valid_media_info(details.and_then(|d| d.audio.as_deref())),
+                            )
+                        }
+                        _ => (false, false, false, false),
+                    };
+                debug!(
+                    "[Task] Creating ResolveVod task for input {}: id={}, reasons={}, has_details={}, has_tmdb={}, has_date={}, has_video_info={}, has_audio_info={}, title=\"{}\"",
+                    input.name, provider_id, reasons, has_details, has_tmdb, has_date, has_video, has_audio, pli.header.title
+                );
+            }
             let task =
                 UpdateTask::ResolveVod { id: provider_id, reason: reasons, delay: resolve_options.resolve_delay };
             mgr.queue_task_background(input.name.clone(), task);

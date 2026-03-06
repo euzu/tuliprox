@@ -207,6 +207,19 @@ fn queue_background_series_info(
             let reasons = check_resolve_reasons(resolve_options, resolve_tmdb_enabled, pli);
 
             if !reasons.is_empty() {
+                if log_enabled!(Level::Debug) {
+                    let has_details = pli.has_details();
+                    let (has_tmdb, has_date) = match pli.header.additional_properties.as_ref() {
+                        Some(StreamProperties::Series(props)) => {
+                            (props.tmdb.is_some(), props.release_date.is_some())
+                        }
+                        _ => (false, false),
+                    };
+                    debug!(
+                        "[Task] Creating ResolveSeries task for input {}: id={}, reasons={}, has_details={}, has_tmdb={}, has_date={}, title=\"{}\"",
+                        input_name_arc, provider_id, reasons, has_details, has_tmdb, has_date, pli.header.title
+                    );
+                }
                 let task = UpdateTask::ResolveSeries {
                     id: provider_id,
                     reason: reasons,

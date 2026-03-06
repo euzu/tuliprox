@@ -1051,6 +1051,16 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
                     if needs_live_probe(&item, cutoff_ts) {
                         if let Some(provider_id) = provider_id_from_item(&item) {
                             if queued_live_keys.insert(provider_id.clone()) {
+                                if log_enabled!(Level::Debug) {
+                                    let last_probed = match item.header.additional_properties.as_ref() {
+                                        Some(StreamProperties::Live(props)) => props.last_probed_timestamp,
+                                        _ => None,
+                                    };
+                                    debug!(
+                                        "[Task] Creating ProbeLive task for input {}: id={}, last_probed_ts={:?}, cutoff_ts={}, interval={}s, title=\"{}\"",
+                                        input_name, provider_id, last_probed, cutoff_ts, interval_secs, item.header.title
+                                    );
+                                }
                                 let task = UpdateTask::ProbeLive {
                                     id: provider_id,
                                     reason: ResolveReasonSet::from_variants(&[ResolveReason::Probe]),
@@ -1105,6 +1115,10 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
             continue;
         }
 
+        debug!(
+            "[Task] Creating ProbeStream task for input {}: scope={}, unique_id={}, item_type={:?}, title=\"{}\"",
+            input_name, probe_scope, unique_id, item.header.item_type, item.header.title
+        );
         let task = UpdateTask::ProbeStream {
             probe_scope,
             unique_id,

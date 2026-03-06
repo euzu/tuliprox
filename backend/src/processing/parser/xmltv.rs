@@ -123,14 +123,12 @@ impl TVGuide {
             let src = "src".intern();
             for child in children {
                 match child.name.as_ref() {
-                    EPG_TAG_DISPLAY_NAME => {
-                        if smart_match {
+                    EPG_TAG_DISPLAY_NAME if smart_match => {
                             if let Some(name) = &child.value {
                                 tag.normalized_epg_ids
                                     .get_or_insert_with(Vec::new)
                                     .push(normalize_channel_name(name, &id_cache.smart_match_config).intern());
                             }
-                        }
                     }
                     EPG_TAG_ICON => {
                         if let Some(src) = child.get_attribute_value(&src) {
