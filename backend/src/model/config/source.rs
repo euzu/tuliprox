@@ -182,13 +182,6 @@ impl From<&ConfigProviderDto> for ConfigProvider {
     fn from(dto: &ConfigProviderDto) -> Self {
         let dns_cfg = dto.dns.as_ref().map(ProviderDnsConfig::from);
         let dns_cache = Arc::new(ProviderDnsCache::default());
-        if let Some(dns_dto) = dto.dns.as_ref() {
-            if let Some(resolved) = dns_dto.resolved.as_ref() {
-                for (host, ips) in resolved {
-                    dns_cache.store_resolved(host, ips.clone());
-                }
-            }
-        }
         Self {
             name: dto.name.clone(),
             urls: dto.urls.clone(),

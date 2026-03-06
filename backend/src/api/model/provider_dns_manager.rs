@@ -1,15 +1,15 @@
 use crate::api::model::AppState;
 use crate::model::ConfigProvider;
-use crate::utils::read_sources_file_from_path;
+use crate::repository::{
+    load_persisted_dns_resolved, next_dns_writer_generation, prune_persisted_dns_resolved_to_runtime,
+    queue_provider_resolved_snapshot, spawn_dns_resolved_writer, DnsResolvedWriteTx,
+};
 use log::{debug, warn};
-use shared::model::{DnsPrefer, OnResolveErrorPolicy, SourcesConfigDto};
+use shared::model::{DnsPrefer, OnResolveErrorPolicy};
 use std::collections::HashSet;
-use std::io;
 use std::net::IpAddr;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::fs;
 use tokio::net::lookup_host;
 use tokio_util::sync::CancellationToken;
 
@@ -105,129 +105,12 @@ async fn resolve_provider(provider: &Arc<ConfigProvider>) -> ProviderResolveStat
     stats
 }
 
-fn serialize_sources_for_persist(sources: &SourcesConfigDto) -> io::Result<String> {
-    let mut serialized = String::new();
-    let options = serde_saphyr::SerializerOptions {
-        prefer_block_scalars: false,
-        ..Default::default()
-    };
-    serde_saphyr::to_fmt_writer_with_options(&mut serialized, sources, options)
-        .map_err(|err| io::Error::other(format!("Could not serialize source.yml: {err}")))?;
-    Ok(serialized)
-}
-
-async fn write_sources_file_force(path: &Path, sources: &SourcesConfigDto) -> io::Result<()> {
-    let serialized = serialize_sources_for_persist(sources)?;
-    let parent_dir = path.parent().ok_or_else(|| {
-        io::Error::other(format!(
-            "Could not write source.yml '{}': missing parent directory",
-            path.display()
-        ))
-    })?;
-    let dest_file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("source.yml");
-    let mut tmp_path = parent_dir.to_path_buf();
-    tmp_path.push(format!(
-        ".{dest_file_name}.tmp-{}-{}",
-        std::process::id(),
-        chrono::Local::now().timestamp_nanos_opt().unwrap_or_default()
-    ));
-
-    fs::write(&tmp_path, serialized).await?;
-    match fs::rename(&tmp_path, path).await {
-        Ok(()) => Ok(()),
-        Err(err) => {
-            #[cfg(windows)]
-            {
-                // Try to rename again after removing destination (Windows often needs this)
-                if let Ok(()) = fs::remove_file(path).await {
-                    if fs::rename(&tmp_path, path).await.is_ok() {
-                        return Ok(());
-                    }
-                    // Rename still failed after removing dest - fall through to clean up
-                }
-            }
-            let _ = fs::remove_file(&tmp_path).await;
-            Err(io::Error::other(format!(
-                "Could not replace '{}' with '{}': {err}",
-                path.display(),
-                tmp_path.display()
-            )))
-        }
-    }
-}
-
-async fn persist_provider_resolved_to_source_file(app_state: &Arc<AppState>, provider: &Arc<ConfigProvider>) {
-    let source_file = {
-        let paths = app_state.app_config.paths.load();
-        paths.sources_file_path.clone()
-    };
-    let source_path = PathBuf::from(&source_file);
-    let _lock = app_state.app_config.file_locks.write_lock(&source_path).await;
-
-    let mut sources_dto = match read_sources_file_from_path(&source_path, false, false, None).await {
-        Ok(dto) => dto,
-        Err(err) => {
-            warn!(
-                "Provider dns '{}' failed to read source.yml '{}': {err}",
-                provider.name,
-                source_path.display()
-            );
-            return;
-        }
-    };
-
-    let Some(provider_dtos) = sources_dto.provider.as_mut() else {
-        debug!(
-            "Provider dns '{}' source.yml '{}' has no provider section to persist resolved values",
-            provider.name,
-            source_path.display()
-        );
-        return;
-    };
-
-    let Some(provider_dto) = provider_dtos.iter_mut().find(|dto| dto.name.as_ref() == provider.name.as_ref()) else {
-        warn!(
-            "Provider dns '{}' not found in source.yml '{}', cannot persist resolved values",
-            provider.name,
-            source_path.display()
-        );
-        return;
-    };
-
-    let Some(dns_dto) = provider_dto.dns.as_mut() else {
-        debug!(
-            "Provider dns '{}' has no dns section in source.yml '{}', skipping resolved persist",
-            provider.name,
-            source_path.display()
-        );
-        return;
-    };
-
-    let resolved_hosts = {
-        let snapshot = provider.snapshot_resolved_ordered();
-        dns_dto.resolved = (!snapshot.is_empty()).then_some(snapshot);
-        dns_dto.resolved.as_ref().map_or(0, indexmap::IndexMap::len)
-    };
-
-    match write_sources_file_force(&source_path, &sources_dto).await {
-        Ok(()) => {
-            debug!(
-                "Provider dns '{}' persisted dns.resolved to '{}' (hosts={resolved_hosts})",
-                provider.name,
-                source_path.display()
-            );
-        }
-        Err(err) => {
-            warn!(
-                "Provider dns '{}' failed to persist dns.resolved to '{}': {err}",
-                provider.name,
-                source_path.display()
-            );
-        }
-    }
-}
-
-fn spawn_provider_dns_task(app_state: Arc<AppState>, provider_name: Arc<str>, cancel: CancellationToken) {
+fn spawn_provider_dns_task(
+    app_state: Arc<AppState>,
+    provider_name: Arc<str>,
+    cancel: CancellationToken,
+    writer_tx: DnsResolvedWriteTx,
+) {
     tokio::spawn(async move {
         let mut refresh_secs = 300_u64;
         {
@@ -260,7 +143,7 @@ fn spawn_provider_dns_task(app_state: Arc<AppState>, provider_name: Arc<str>, ca
                     };
                     refresh_secs = provider.get_dns_config().map_or(300, |dns| dns.refresh_secs.max(10));
                     let stats = resolve_provider(&provider).await;
-                    persist_provider_resolved_to_source_file(&app_state, &provider).await;
+                    queue_provider_resolved_snapshot(&writer_tx, &provider).await;
                     let cache_hosts = provider.snapshot_resolved().len();
                     debug!(
                         "Provider dns tick '{}' finished: total_hosts={} resolved={} overridden={} empty={} failed={} cache_hosts={} elapsed_ms={}",
@@ -282,6 +165,7 @@ fn spawn_provider_dns_task(app_state: Arc<AppState>, provider_name: Arc<str>, ca
 }
 
 pub fn exec_provider_dns(app_state: &Arc<AppState>, cancel: &CancellationToken) {
+    let generation = next_dns_writer_generation();
     let sources = app_state.app_config.sources.load();
     let provider_names: Vec<_> = sources
         .provider
@@ -292,13 +176,30 @@ pub fn exec_provider_dns(app_state: &Arc<AppState>, cancel: &CancellationToken) 
     drop(sources);
 
     if provider_names.is_empty() {
+        let app_for_prune = Arc::clone(app_state);
+        tokio::spawn(async move {
+            prune_persisted_dns_resolved_to_runtime(&app_for_prune).await;
+        });
         debug!("Provider dns manager: no enabled providers found");
         return;
     }
 
+    // Seed DNS caches from persisted storage file (non-blocking fire-and-forget).
+    let app_for_seed = Arc::clone(app_state);
+    tokio::spawn(async move {
+        load_persisted_dns_resolved(&app_for_seed).await;
+    });
+
+    let writer_tx = spawn_dns_resolved_writer(Arc::clone(app_state), cancel.clone(), generation);
+
     debug!("Provider dns manager: starting {} provider task(s)", provider_names.len());
 
     for provider_name in provider_names {
-        spawn_provider_dns_task(Arc::clone(app_state), provider_name, cancel.clone());
+        spawn_provider_dns_task(
+            Arc::clone(app_state),
+            provider_name,
+            cancel.clone(),
+            writer_tx.clone(),
+        );
     }
 }

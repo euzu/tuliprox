@@ -226,7 +226,6 @@ Each provider can optionally enable a `dns` block:
 - `overrides`: static host -> IP list (used before DNS lookup)
 - `on_resolve_error`: `keep_last_good` | `fallback_to_hostname` (default: `keep_last_good`)
 - `on_connect_error`: `try_next_ip` | `rotate_provider_url` (default: `try_next_ip`)
-- `resolved`: runtime-managed resolved snapshot per host
 
 Behavior:
 
@@ -237,12 +236,12 @@ Behavior:
 - `keep_vhost=true`: `Host` header keeps `hostname[:port]`.
 - On connect/timeout errors and `on_connect_error=try_next_ip`, Tuliprox tries the next IP for the same host before rotating provider URL.
 
-### 1.4.4 `dns.resolved` persistence and visibility
+### 1.4.4 DNS resolved IP persistence
 
-- `dns.resolved` is runtime-managed.
-- It is exposed in `GET /api/v1/config`.
-- It is also written back to `source.yml` and overwritten on each DNS refresh cycle.
-- Save endpoints treat `dns.resolved` as managed data and do not accept it as user-controlled input.
+Resolved IPs are persisted to `{storage_dir}/provider_dns_resolved.json` (not to `source.yml`).
+This file is written atomically after each DNS refresh cycle and read at startup to seed DNS caches
+before the background resolver completes its first cycle. On config hot-reloads, DNS caches are
+carried over from the previous provider instances so that resolved IPs are available immediately.
 
 ### 1.4.5 Provider Failover + DNS Configuration Example
 
@@ -271,10 +270,6 @@ provider:
       overrides:
         stable.golden-bridge.con:
           - 203.0.113.10
-      # runtime-managed, written by tuliprox:
-      resolved:
-        hello.provider.me:
-          - 203.0.113.20
 inputs:
   - name: my_input
     type: xtream

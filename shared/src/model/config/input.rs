@@ -14,7 +14,6 @@ use crate::{
     },
 };
 use enum_iterator::Sequence;
-use indexmap::IndexMap;
 use log::warn;
 use std::{
     collections::{HashMap, HashSet},
@@ -791,8 +790,6 @@ pub struct ProviderDnsDto {
     pub keep_vhost: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overrides: Option<HashMap<String, Vec<IpAddr>>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resolved: Option<IndexMap<String, Vec<IpAddr>>>,
     #[serde(default, skip_serializing_if = "is_default_on_resolve_error")]
     pub on_resolve_error: OnResolveErrorPolicy,
     #[serde(default, skip_serializing_if = "is_default_on_connect_error")]
@@ -809,7 +806,6 @@ impl Default for ProviderDnsDto {
             schemes: None,
             keep_vhost: false,
             overrides: None,
-            resolved: None,
             on_resolve_error: OnResolveErrorPolicy::default(),
             on_connect_error: OnConnectErrorPolicy::default(),
         }
@@ -1008,23 +1004,6 @@ mod tests {
         assert_eq!(overrides.len(), 1);
         assert!(overrides.contains_key("example.com"));
         assert_eq!(overrides["example.com"].len(), 1);
-    }
-
-    #[test]
-    fn test_provider_dns_resolved_deserializes() {
-        let json = r#"{
-            "name":"p1",
-            "urls":["http://example.com"],
-            "dns":{
-                "enabled":true,
-                "resolved":{"example.com":["203.0.113.10"]}
-            }
-        }"#;
-
-        let dto: ConfigProviderDto = serde_json::from_str(json).expect("provider json should parse");
-        let dns = dto.dns.expect("dns should be present");
-        let resolved = dns.resolved.expect("resolved must be deserialized");
-        assert_eq!(resolved.get("example.com"), Some(&vec!["203.0.113.10".parse::<IpAddr>().expect("valid ip")]));
     }
 
     #[test]

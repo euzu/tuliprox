@@ -141,7 +141,6 @@ fn has_meaningful_dns_config(dns: &ProviderDnsDto) -> bool {
         || dns.schemes.as_ref().is_some_and(|schemes| !schemes.is_empty())
         || dns.keep_vhost
         || dns.overrides.as_ref().is_some_and(|overrides| !overrides.is_empty())
-        || dns.resolved.as_ref().is_some_and(|resolved| !resolved.is_empty())
         || dns.on_resolve_error != OnResolveErrorPolicy::default()
         || dns.on_connect_error != OnConnectErrorPolicy::default()
 }

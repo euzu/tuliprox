@@ -401,6 +401,22 @@ impl AppState {
         sources: SourcesConfig,
     ) -> Result<UpdateChanges, TuliproxError> {
         let changes = self.detect_changes_for_sources(&sources);
+        // Carry over DNS caches from old providers so resolved IPs survive hot-reloads
+        // without waiting for the background resolver or the persisted-file seed.
+        {
+            let old_sources = self.app_config.sources.load();
+            for new_provider in &sources.provider {
+                if let Some(old_provider) = old_sources.get_provider_by_name(&new_provider.name) {
+                    if new_provider.get_dns_config().is_some_and(|cfg| cfg.enabled) {
+                        for (host, ips) in old_provider.snapshot_resolved() {
+                            if !ips.is_empty() && new_provider.dns_cache.ip_count(&host) == 0 {
+                                new_provider.dns_cache.store_resolved(&host, ips);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         self.app_config.set_sources(sources)?;
         self.active_provider.update_config(&self.app_config).await;
 
