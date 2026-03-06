@@ -670,12 +670,25 @@ schedules:
   - xtream
 - schedule: "0  0  20  *  *  *  *"
   type: LibraryScan
+- schedule: "0  0  4  *  *  1  *"
+  type: GeoIpUpdate
+- schedule: "0  0  4  1  *  *  *"
+  type: GeoIpUpdate
 ```
 
 The `type` attribute defines the task to be executed and defaults to `PlaylistUpdate` if omitted. Possible values:
 
 - `PlaylistUpdate`: Updates the target playlists (optionally filtered by `targets`).
 - `LibraryScan`: Triggers a scan of the local media library (requires `library` configuration to be enabled).
+- `GeoIpUpdate`: Downloads and rebuilds the Geo-IP database file (requires `reverse_proxy.geoip.enabled: true`).
+
+Cron fields for Tuliprox schedules always start with **seconds**:
+
+```yaml
+# sec  min  hour  day-of-month  month  day-of-week  year
+schedule: "0  0  4  *  *  1  *"   # every Monday at 04:00:00
+schedule: "0  0  4  1  * * *"     # every 1st of the month at 04:00:00
+```
 
 At the given times the update is started. Do not start it every second or minute.
 You could be banned from your server. Twice a day should be enough.

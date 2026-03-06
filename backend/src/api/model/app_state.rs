@@ -439,6 +439,9 @@ impl AppState {
         let old_config = self.app_config.config.load();
         let changed_schedules =
             change_detect!(schedules_changed, old_config.schedules.as_ref(), config.schedules.as_ref());
+        let library_enabled = config.library.as_ref().is_some_and(|library| library.enabled);
+        let old_library_enabled = old_config.library.as_ref().is_some_and(|library| library.enabled);
+        let changed_library_enabled = library_enabled != old_library_enabled;
         let changed_hdhomerun =
             change_detect!(hdhomerun_changed, old_config.hdhomerun.as_ref(), config.hdhomerun.as_ref());
         let changed_file_watch =
@@ -449,7 +452,7 @@ impl AppState {
         let geoip_enabled_old = old_config.is_geoip_enabled();
 
         let mut changes = UpdateChanges { flags: UpdateChangesFlagsSet::new(), targets: None };
-        changes.set_flag_if(changed_schedules, UpdateChangesFlags::Scheduler);
+        changes.set_flag_if(changed_schedules || changed_library_enabled || geoip_enabled != geoip_enabled_old, UpdateChangesFlags::Scheduler);
         changes.set_flag_if(changed_hdhomerun, UpdateChangesFlags::Hdhomerun);
         changes.set_flag_if(changed_file_watch, UpdateChangesFlags::FileWatch);
         changes.set_flag_if(geoip_enabled != geoip_enabled_old, UpdateChangesFlags::Geoip);
@@ -601,19 +604,30 @@ fn schedules_changed(a: &[ScheduleConfig], b: &[ScheduleConfig]) -> bool {
     if a.len() != b.len() {
         return true;
     }
+    let mut used = vec![false; b.len()];
+
     for schedule in a {
-        let Some(found) = b.iter().find(|&s| s.schedule == schedule.schedule) else {
+        let Some(found_idx) = b.iter().enumerate().find_map(|(idx, candidate)| {
+            if used[idx]
+                || candidate.schedule != schedule.schedule
+                || candidate.task_type != schedule.task_type
+            {
+                return None;
+            }
+            let targets_match = match (schedule.targets.as_ref(), candidate.targets.as_ref()) {
+                (None, None) => true,
+                (Some(_), None) | (None, Some(_)) => false,
+                (Some(a_targets), Some(b_targets)) => small_vecs_equal_unordered(a_targets, b_targets),
+            };
+            if targets_match {
+                Some(idx)
+            } else {
+                None
+            }
+        }) else {
             return true;
         };
-        match (schedule.targets.as_ref(), found.targets.as_ref()) {
-            (None, None) => {}
-            (Some(_), None) | (None, Some(_)) => return true,
-            (Some(a_targets), Some(b_targets)) => {
-                if !small_vecs_equal_unordered(a_targets, b_targets) {
-                    return true;
-                }
-            }
-        }
+        used[found_idx] = true;
     }
     false
 }
@@ -654,7 +668,9 @@ pub struct HdHomerunAppState {
 
 #[cfg(test)]
 mod tests {
-    use super::{should_use_manual_redirect_for_proxy, should_use_manual_redirects_for_env_vars};
+    use super::{schedules_changed, should_use_manual_redirect_for_proxy, should_use_manual_redirects_for_env_vars};
+    use crate::model::ScheduleConfig;
+    use shared::model::ScheduleTaskType;
 
     #[test]
     fn should_use_manual_redirect_for_proxy_only_http_or_https() {
@@ -690,5 +706,49 @@ mod tests {
             "NO_PROXY".to_string(),
             "http://localhost".to_string(),
         )]));
+    }
+
+    #[test]
+    fn schedules_changed_detects_task_type_changes() {
+        let a = vec![ScheduleConfig {
+            schedule: "0 0 3 * * * *".to_string(),
+            task_type: ScheduleTaskType::PlaylistUpdate,
+            targets: None,
+        }];
+        let b = vec![ScheduleConfig {
+            schedule: "0 0 3 * * * *".to_string(),
+            task_type: ScheduleTaskType::GeoIpUpdate,
+            targets: None,
+        }];
+        assert!(schedules_changed(&a, &b));
+    }
+
+    #[test]
+    fn schedules_changed_treats_same_entries_as_unchanged() {
+        let a = vec![
+            ScheduleConfig {
+                schedule: "0 0 3 * * * *".to_string(),
+                task_type: ScheduleTaskType::GeoIpUpdate,
+                targets: None,
+            },
+            ScheduleConfig {
+                schedule: "0 0 8 * * * *".to_string(),
+                task_type: ScheduleTaskType::PlaylistUpdate,
+                targets: Some(vec!["a".to_string(), "b".to_string()]),
+            },
+        ];
+        let b = vec![
+            ScheduleConfig {
+                schedule: "0 0 8 * * * *".to_string(),
+                task_type: ScheduleTaskType::PlaylistUpdate,
+                targets: Some(vec!["b".to_string(), "a".to_string()]),
+            },
+            ScheduleConfig {
+                schedule: "0 0 3 * * * *".to_string(),
+                task_type: ScheduleTaskType::GeoIpUpdate,
+                targets: None,
+            },
+        ];
+        assert!(!schedules_changed(&a, &b));
     }
 }
