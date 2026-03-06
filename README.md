@@ -1497,6 +1497,23 @@ inputs:
       probe_stream: true
 ```
 
+#### Input URL Schemes (`inputs[].url`)
+
+Tuliprox supports the following URL schemes for input sources:
+
+- `http://...` / `https://...`: Download from remote provider endpoints.
+- `file://...`: Read from a local file.
+- `provider://<provider_name>/...`: Resolve the URL via `provider` definitions (supports failover/rotation).
+- `batch://...`: CSV source for batch aliases (e.g. `batch:///path/file.csv` or `batch://./file.csv`).
+
+Notes:
+
+- If `type` is `m3u` or `xtream` and the URL starts with `batch://`, Tuliprox automatically treats it as `m3u_batch` / `xtream_batch`.
+- For `m3u_batch` and `xtream_batch`, only local CSV sources are supported:
+  - `batch://...` or
+  - plain local filesystem path (absolute/relative).
+- For batch inputs, `provider://...` and other URI schemes such as `http(s)://...` or `file://...` are rejected.
+
 Input alias definition for same provider with same content but different credentials.
 `max_connections` default is unlimited
 
