@@ -50,12 +50,14 @@ use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{Arc, Weak},
-    time::Instant,
+    time::{Duration, Instant},
 };
 use tokio::{
     sync::{Mutex, OwnedRwLockWriteGuard, RwLock},
     task::JoinSet,
 };
+
+const PLAYLIST_UPDATE_MAX_DURATION_SECS: u64 = 3600;
 
 fn is_valid(pli: &PlaylistItem, filter: &Filter, match_as_ascii: bool) -> bool {
     let provider = ValueProvider { pli, match_as_ascii };
@@ -324,10 +326,11 @@ async fn playlist_download_from_input(
     input: &ConfigInput,
 ) -> PlaylistDownloadResult {
     let config = &*app_config.config.load();
-    let working_dir = &config.working_dir;
+    let storage_dir = &config.storage_dir;
+    let download_input_type = input.get_download_input_type();
 
     // Check Status
-    let storage_path = input_cache::resolve_input_storage_path(working_dir, &input.name).await;
+    let storage_path = input_cache::resolve_input_storage_path(storage_dir, &input.name).await;
     let mut status = input_cache::load_input_status(&storage_path);
     let cache_duration = input.cache_duration_seconds;
 
@@ -336,7 +339,7 @@ async fn playlist_download_from_input(
         let _ = std::fs::create_dir_all(&storage_path);
     }
 
-    let (clusters_to_download, fully_cached) = match input.input_type {
+    let (clusters_to_download, fully_cached) = match download_input_type {
         InputType::Xtream => {
             let mut to_download = vec![];
             for c in XTREAM_CLUSTER {
@@ -364,7 +367,7 @@ async fn playlist_download_from_input(
         return PlaylistDownloadResult::new(vec![], vec![], true, false);
     }
 
-    let (playlist, errors, persisted) = match input.input_type {
+    let (playlist, errors, persisted) = match download_input_type {
         InputType::M3u => {
             let (p, e) = m3u::download_m3u_playlist(app_config, client, config, input).await;
             (p, e, false)
@@ -381,7 +384,7 @@ async fn playlist_download_from_input(
 
     // Update Status
     if errors.is_empty() {
-        if let InputType::Xtream = input.input_type {
+        if let InputType::Xtream = download_input_type {
             if let Some(clusters) = clusters_to_download {
                 for c in clusters {
                     input_cache::update_cluster_status(&mut status, &c.to_string(), ClusterState::Ok);
@@ -401,7 +404,7 @@ async fn playlist_download_from_input(
         // We could mark specific clusters as failed if we knew which one failed.
         // For simplicity, if error, we don't update the timestamp (so it stays expired/invalid).
         // Or we mark as Failed.
-        if let InputType::Xtream = input.input_type {
+        if let InputType::Xtream = download_input_type {
             if let Some(clusters) = clusters_to_download {
                 for c in clusters {
                     // Optimistic: Only mark failed if we are sure?
@@ -437,6 +440,7 @@ async fn process_source(
                 continue;
             };
             if is_input_enabled(input, &ctx.user_targets) {
+                let effective_input_type = input.get_download_input_type();
                 source_downloaded = true;
                 log_memory_snapshot(format!("source[{source_idx}] input '{}' before_download", input.name).as_str());
 
@@ -459,7 +463,7 @@ async fn process_source(
                 };
                 log_memory_snapshot(format!("source[{source_idx}] input '{}' after_download", input.name).as_str());
 
-                let tvguide = if input.input_type == InputType::Library {
+                let tvguide = if effective_input_type == InputType::Library {
                     None
                 } else {
                     download_input_epg(ctx, input, &mut error_list).await
@@ -483,7 +487,7 @@ async fn process_source(
                 let elapsed = start_time.elapsed().as_secs();
                 input_stats.insert(
                     input_name.clone(),
-                    create_input_stat(group_count, channel_count, errors.len(), input.input_type, input_name, elapsed),
+                    create_input_stat(group_count, channel_count, errors.len(), effective_input_type, input_name, elapsed),
                 );
             }
         }
@@ -547,8 +551,8 @@ async fn download_input_epg(
 ) -> Option<TVGuide> {
     // Download epg for input
     let (tvguide, mut tvguide_errors) = if error_list.is_empty() {
-        let working_dir = &ctx.config.config.load().working_dir;
-        epg::get_xmltv(ctx, input, None, working_dir).await
+        let storage_dir = &ctx.config.config.load().storage_dir;
+        epg::get_xmltv(ctx, input, None, storage_dir).await
     } else {
         (None, vec![])
     };
@@ -1018,10 +1022,10 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
     }
 
     let input_name = fpl.input.name.clone();
-    let input_type = fpl.input.input_type;
-    let xtream_probe_handled = input_type.is_xtream() && target.get_xtream_output().is_some();
+    let effective_input_type = fpl.input.get_download_input_type();
+    let xtream_probe_handled = effective_input_type.is_xtream() && target.get_xtream_output().is_some();
     let live_probe_settings = if probe_live_enabled {
-        get_live_probe_interval_settings(target, input_type, Some(opts)).map(|(delay, interval_secs)| {
+        get_live_probe_interval_settings(target, effective_input_type, Some(opts)).map(|(delay, interval_secs)| {
             let interval_signed = i64::try_from(interval_secs).unwrap_or(i64::MAX);
             let cutoff_ts = chrono::Utc::now().timestamp().saturating_sub(interval_signed);
             (delay, interval_secs, cutoff_ts)
@@ -1050,6 +1054,16 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
                     if needs_live_probe(&item, cutoff_ts) {
                         if let Some(provider_id) = provider_id_from_item(&item) {
                             if queued_live_keys.insert(provider_id.clone()) {
+                                if log_enabled!(Level::Debug) {
+                                    let last_probed = match item.header.additional_properties.as_ref() {
+                                        Some(StreamProperties::Live(props)) => props.last_probed_timestamp,
+                                        _ => None,
+                                    };
+                                    debug!(
+                                        "[Task] Creating ProbeLive task for input {}: id={}, last_probed_ts={:?}, cutoff_ts={}, interval={}s, title=\"{}\"",
+                                        input_name, provider_id, last_probed, cutoff_ts, interval_secs, item.header.title
+                                    );
+                                }
                                 let task = UpdateTask::ProbeLive {
                                     id: provider_id,
                                     reason: ResolveReasonSet::from_variants(&[ResolveReason::Probe]),
@@ -1092,7 +1106,7 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
         }
 
         // For M3U, ID is a provider id; for Library, ID is UUID.
-        let unique_id = if input_type == InputType::Library {
+        let unique_id = if effective_input_type == InputType::Library {
             item.header.uuid.to_valid_uuid()
         } else {
             item.header.id.to_string()
@@ -1104,6 +1118,10 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
             continue;
         }
 
+        debug!(
+            "[Task] Creating ProbeStream task for input {}: scope={}, unique_id={}, item_type={:?}, title=\"{}\"",
+            input_name, probe_scope, unique_id, item.header.item_type, item.header.title
+        );
         let task = UpdateTask::ProbeStream {
             probe_scope,
             unique_id,
@@ -1204,7 +1222,7 @@ async fn process_watch(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub async fn exec_processing(
     client: &reqwest::Client,
     app_config: Arc<AppConfig>,
@@ -1219,6 +1237,7 @@ pub async fn exec_processing(
     pre_processed_inputs: Option<HashSet<Arc<str>>>,
     acquired_permit: Option<crate::api::model::UpdateGuardPermit>,
 ) {
+    let max_update_duration = Duration::from_secs(PLAYLIST_UPDATE_MAX_DURATION_SECS);
     let playlist_guard = if let Some(permit) = acquired_permit {
         Some(permit)
     } else if let Some(guard) = &update_guard {
@@ -1237,7 +1256,15 @@ pub async fn exec_processing(
 
     if playlist_guard.is_some() {
         if let Some(state) = app_state.as_ref() {
-            sync_panel_api_exp_dates(state).await;
+            if tokio::time::timeout(max_update_duration, sync_panel_api_exp_dates(state)).await.is_err() {
+                error!(
+                    "Playlist update bootstrap timed out after {PLAYLIST_UPDATE_MAX_DURATION_SECS} secs while holding playlist lock",
+                );
+                if let Some(events) = event_manager.as_deref() {
+                    events.send_event(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Failure));
+                }
+                return;
+            }
         }
     }
 
@@ -1266,13 +1293,29 @@ pub async fn exec_processing(
     };
 
     let start_time = Instant::now();
-    let process_result = std::panic::AssertUnwindSafe(process_sources(&ctx)).catch_unwind().await;
-    let Ok((stats, errors)) = process_result else {
-        error!("Playlist processing panicked");
-        if let Some(events) = event_manager.as_deref() {
-            events.send_event(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Failure));
+    let process_result = tokio::time::timeout(
+        max_update_duration,
+        std::panic::AssertUnwindSafe(process_sources(&ctx)).catch_unwind(),
+    )
+    .await;
+    let (stats, errors) = match process_result {
+        Ok(Ok((stats, errors))) => (stats, errors),
+        Ok(Err(_)) => {
+            error!("Playlist processing panicked");
+            if let Some(events) = event_manager.as_deref() {
+                events.send_event(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Failure));
+            }
+            return;
         }
-        return;
+        Err(_) => {
+            error!(
+                "Playlist processing timed out after {PLAYLIST_UPDATE_MAX_DURATION_SECS} secs while holding playlist lock",
+            );
+            if let Some(events) = event_manager.as_deref() {
+                events.send_event(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Failure));
+            }
+            return;
+        }
     };
     log_memory_snapshot("exec_processing after_process_sources");
 

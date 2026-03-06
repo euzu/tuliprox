@@ -473,7 +473,7 @@ impl TmdbSeason {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_tmdb_image_url, TmdbMovieDetails, TMDB_IMAGE_BASE_URL};
+    use super::{resolve_tmdb_image_url, TMDB_IMAGE_BASE_URL};
 
     #[test]
     fn test_resolve_tmdb_url_with_absolute_http() {

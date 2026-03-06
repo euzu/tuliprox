@@ -89,7 +89,7 @@ impl ReverseProxyConfigDto {
         }
     }
 
-    pub(crate) fn prepare(&mut self, working_dir: &str) -> Result<(), TuliproxError> {
+    pub(crate) fn prepare(&mut self, storage_dir: &str) -> Result<(), TuliproxError> {
         self.rewrite_secret = self.rewrite_secret.trim().to_string();
         if !self.resource_rewrite_disabled {
             if self.rewrite_secret.is_empty() {
@@ -106,7 +106,7 @@ impl ReverseProxyConfigDto {
                 warn!("The cache is disabled because resource rewrite is disabled");
                 cache.enabled = false;
             }
-            cache.prepare(working_dir)?;
+            cache.prepare(storage_dir)?;
         }
 
         if let Some(rate_limit) = self.rate_limit.as_mut() {

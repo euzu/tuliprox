@@ -41,7 +41,7 @@ pub async fn update_generic_stream_metadata(
     active_provider: &Arc<ActiveProviderManager>,
     active_handle: Option<&crate::api::model::ProviderHandle>,
 ) -> Result<GenericProbeOutcome, TuliproxError> {
-    let working_dir = &app_config.config.load().working_dir;
+    let storage_dir = &app_config.config.load().storage_dir;
 
     // Check if probing is enabled globally
     let ffprobe_enabled = app_config.is_ffprobe_enabled().await;
@@ -50,7 +50,7 @@ pub async fn update_generic_stream_metadata(
     }
 
     // Determine storage file path based on input type
-    let storage_path = get_input_storage_path(&input.name, working_dir).await
+    let storage_path = get_input_storage_path(&input.name, storage_dir).await
         .map_err(|e| shared::error::info_err!("Storage path error: {e}"))?;
 
     let (db_path, storage_kind) = match input.input_type {

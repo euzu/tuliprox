@@ -207,6 +207,19 @@ fn queue_background_series_info(
             let reasons = check_resolve_reasons(resolve_options, resolve_tmdb_enabled, pli);
 
             if !reasons.is_empty() {
+                if log_enabled!(Level::Debug) {
+                    let has_details = pli.has_details();
+                    let (has_tmdb, has_date) = match pli.header.additional_properties.as_ref() {
+                        Some(StreamProperties::Series(props)) => {
+                            (props.tmdb.is_some(), props.release_date.is_some())
+                        }
+                        _ => (false, false),
+                    };
+                    debug!(
+                        "[Task] Creating ResolveSeries task for input {}: id={}, reasons={}, has_details={}, has_tmdb={}, has_date={}, title=\"{}\"",
+                        input_name_arc, provider_id, reasons, has_details, has_tmdb, has_date, pli.header.title
+                    );
+                }
                 let task = UpdateTask::ResolveSeries {
                     id: provider_id,
                     reason: reasons,
@@ -233,8 +246,8 @@ async fn process_immediate_series_info(
     resolve_tmdb_enabled: bool,
 ) -> Vec<PlaylistGroup> {
     let input = fpl.input;
-    let working_dir = &ctx.config.config.load().working_dir;
-    let storage_path = match get_input_storage_path(&input.name, working_dir).await {
+    let storage_dir = &ctx.config.config.load().storage_dir;
+    let storage_path = match get_input_storage_path(&input.name, storage_dir).await {
         Ok(path) => path,
         Err(err) => {
             error!("Can't resolve series, input storage directory for input '{}' failed: {err}", input.name);
@@ -624,8 +637,8 @@ pub async fn update_series_metadata(
     db_query: Option<Arc<Mutex<BPlusTreeQuery<u32, XtreamPlaylistItem>>>>,
     tmdb_and_date_present_out: Option<&AtomicBool>,
 ) -> Result<Option<SeriesStreamProperties>, TuliproxError> {
-    let working_dir = &app_config.config.load().working_dir;
-    let storage_path = get_input_storage_path(&input.name, working_dir)
+    let storage_dir = &app_config.config.load().storage_dir;
+    let storage_path = get_input_storage_path(&input.name, storage_dir)
         .await
         .map_err(|e| shared::error::info_err!("Storage path error: {e}"))?;
 

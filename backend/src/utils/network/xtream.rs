@@ -14,7 +14,7 @@ use chrono::{DateTime, Utc};
 use log::{error, info, warn};
 use shared::error::TuliproxError;
 use shared::model::{PlaylistEntry, PlaylistGroup, ProxyUserStatus, SeriesStreamProperties,
-                    StreamProperties, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem,
+                    StreamProperties, VideoStreamProperties, InputType, XtreamCluster, XtreamPlaylistItem,
                     XtreamSeriesInfo, XtreamVideoInfo, XtreamVideoInfoDoc};
 use shared::utils::{extract_extension_from_url, get_i64_from_serde_value, get_string_from_serde_value, sanitize_sensitive_info, Internable, PROVIDER_SCHEME_PREFIX};
 use std::collections::HashMap;
@@ -93,8 +93,8 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
             match cluster {
                 XtreamCluster::Live => {}
                 XtreamCluster::Video => {
-                    let working_dir = &app_config.config.load().working_dir;
-                    if let Ok(storage_path) = get_input_storage_path(&input.name, working_dir).await {
+                    let storage_dir = &app_config.config.load().storage_dir;
+                    if let Ok(storage_path) = get_input_storage_path(&input.name, storage_dir).await {
                         match serde_json::from_str::<XtreamVideoInfo>(&content) {
                             Ok(info) => {
                                 // parse downloaded info into StreamProperties
@@ -126,7 +126,7 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
                     }
                 }
                 XtreamCluster::Series => {
-                    let working_dir = &app_config.config.load().working_dir;
+                    let storage_dir = &app_config.config.load().storage_dir;
                     let group = pli.get_group();
                     let series_name = pli.get_name();
 
@@ -135,7 +135,7 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
                             // parse series info
                             let series_stream_props = SeriesStreamProperties::from_info(&info, pli);
 
-                            if let Ok(storage_path) = get_input_storage_path(&input.name, working_dir).await {
+                            if let Ok(storage_path) = get_input_storage_path(&input.name, storage_dir).await {
                                 // update input db
                                 if let Err(err) = persists_input_series_info(app_config, &storage_path, cluster, &input.name, provider_id, &series_stream_props).await {
                                     error!("Failed to persist series info for input {}: {err}", &input.name);
@@ -387,7 +387,11 @@ pub async fn download_xtream_playlist(app_config: &Arc<AppConfig>, client: &reqw
     let skip_cluster = get_skip_cluster(input);
 
     let cfg = app_config.config.load();
-    let working_dir = &cfg.working_dir;
+    let storage_dir = &cfg.storage_dir;
+    // Staged input type is the effective type during download.
+    let effective_type = input.get_download_input_type();
+    let use_disk_based_processing =
+        cfg.disk_based_processing && matches!(effective_type, InputType::Xtream | InputType::XtreamBatch);
 
     let mut errors = vec![];
     for (xtream_cluster, category, stream) in &ACTIONS {
@@ -396,16 +400,16 @@ pub async fn download_xtream_playlist(app_config: &Arc<AppConfig>, client: &reqw
             let input_source_category = input_source.with_url(concat_string!(&base_url, "&action=", category));
             let input_source_stream = input_source.with_url(concat_string!(&base_url, "&action=", stream));
             let category_file_path = crate::utils::prepare_file_path(input.persist.as_deref(),
-                                                                     working_dir, concat_string!(category, "_").as_str());
+                                                                     storage_dir, concat_string!(category, "_").as_str());
             let stream_file_path = crate::utils::prepare_file_path(input.persist.as_deref(),
-                                                                   working_dir, concat_string!(stream, "_").as_str());
+                                                                   storage_dir, concat_string!(stream, "_").as_str());
 
             match futures::join!(
                 request::get_input_json_content_as_stream(app_config, client, &input_source_category, category_file_path),
                 request::get_input_json_content_as_stream(app_config, client, &input_source_stream, stream_file_path)
             ) {
                 (Ok(category_content), Ok(stream_content)) => {
-                    if cfg.disk_based_processing {
+                    if use_disk_based_processing {
                         // trace!("Using disk input playlist optimization for cluster {}", xtream_cluster);
                         if let Err(err) = persist_input_xtream_playlist_cluster_to_disk(app_config, input, *xtream_cluster, category_content, stream_content).await {
                             error!("persist_input_xtream_playlist_cluster_to_disk failed: {err}");
@@ -443,7 +447,7 @@ pub async fn download_xtream_playlist(app_config: &Arc<AppConfig>, client: &reqw
         plg.id = grp_id;
     }
 
-    (playlist_groups, errors, cfg.disk_based_processing)
+    (playlist_groups, errors, use_disk_based_processing)
 }
 
 async fn check_alias_user_state(app_config: &Arc<AppConfig>, client: &reqwest::Client, input: &ConfigInput) {

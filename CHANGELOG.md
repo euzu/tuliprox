@@ -4,6 +4,7 @@
 
 ## ⚠️ Breaking Changes
 
+- `working_dir` in `config.yml` renamed to `storage_dir`.
 - **Global Input Definitions**: To align input definitions with the SourceEditor, inputs are now defined globally in the `inputs` section of the
   config file. Each source can reference one or more inputs by their name in the `inputs` attribute.
 - **Data Format Migration**: Due to heavy refactoring, the old data format is invalid. You need to clean your `data` folder and update the playlists.
@@ -38,6 +39,27 @@
         fallback_to_filename: true
     ```
   
+- **Input Batch URL Scheme**: Batch input URLs now use the `batch://` scheme instead of `file://`.
+  `file://` is no longer accepted for batch CSV definitions. Update your `source.yml`:
+
+    ```yaml
+    # Before
+    inputs:
+      - type: xtream_batch
+        url: 'file:///home/tuliprox/config/batch.csv'
+
+    # After
+    inputs:
+      - type: xtream_batch
+        url: 'batch:///home/tuliprox/config/batch.csv'
+    ```
+
+  Local paths without a scheme (`/path/file.csv`, `./file.csv`) continue to work.
+  The `batch://` scheme clearly distinguishes batch alias files from provider `file://` URLs.
+- **DNS Resolved Persistence**: `dns.resolved` has been removed from `source.yml` and the `ProviderDnsDto`.
+  Resolved IPs are now persisted separately in `{storage_dir}/provider_dns_resolved.json`.
+  This eliminates hot-reload interference caused by DNS refresh cycles writing to `source.yml`.
+  DNS caches are automatically carried over during config hot-reloads.
 - **Input Batch Changes**: `name` attribute is now mandatory for input type batch to ensure stable playlist UUIDs.
 - **Favorites Redesign**: Replaced implicit `create_alias` with explicit `add_favourite(group_name)` script function.
   - **EpgSmartMatch**: Field `name_prefix` syntax needs to be changed from  `name_prefix: !suffix "."` to `name_prefix: { suffix: "." }`.
@@ -104,6 +126,7 @@
 - **Playlist Caching**: Added `cache_duration` to inputs, allowing configurable provider playlist cache times during subsequent updates (e.g., `60s`,
   `5m` `12h`, `1d`).
 - **Database Viewer**: New CLI flags `--dbx` and `--dbm` to inspect internal database content.
+- **Home Directory Override**: Added `--home` (`-H`) CLI argument to set the base directory for config, data, backup, and downloads.
 - **Added `disk_based_processing`**: (boolean, default `false`) to `config.yml`. When enabled, input playlists are processed from disk instead of
   memory.
 - **User-Agent `default_user_agent`**: Ensures that outgoing requests always pass a default user agent.

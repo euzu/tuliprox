@@ -309,7 +309,9 @@ mod tests {
             api_proxy: Arc::new(ArcSwapOption::default()),
             file_locks: Arc::new(FileLockManager::default()),
             paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
+                home_path: String::new(),
                 config_path: String::new(),
+                storage_path: String::new(),
                 config_file_path: String::new(),
                 sources_file_path: String::new(),
                 mapping_file_path: None,

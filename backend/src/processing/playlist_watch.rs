@@ -21,7 +21,7 @@ pub async fn process_group_watch(app_config: &Arc<AppConfig>, client: &reqwest::
 
     let watch_filename = format!("{}/{}.bin", utils::sanitize_filename(target_name), utils::sanitize_filename(&pl.title));
     let cfg = app_config.config.load();
-    match utils::get_file_path(&cfg.working_dir, Some(std::path::PathBuf::from(&watch_filename))) {
+    match utils::get_file_path(&cfg.storage_dir, Some(std::path::PathBuf::from(&watch_filename))) {
         Some(path) => {
             let save_path = path.as_path();
             let mut changed = false;

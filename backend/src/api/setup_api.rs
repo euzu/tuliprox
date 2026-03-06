@@ -3,8 +3,8 @@ use crate::{
     auth::generate_password_from_input,
     model::validate_library_paths_from_dto,
     utils::{
-        file_exists, get_default_path, get_default_web_root_path, read_api_proxy_file, read_config_file,
-        read_sources_file, read_templates_file, resolve_template_persist_file_path, sanitize_sources_for_persist,
+        file_exists, get_default_web_root_path_for_home, read_api_proxy_file, read_config_file, read_sources_file,
+        read_templates_file, resolve_template_persist_file_path, sanitize_sources_for_persist,
     },
 };
 use axum::{
@@ -26,10 +26,10 @@ use shared::{
         ApiProxyConfigDto, ApiProxyServerInfoDto, AppConfigDto, ConfigApiDto, ConfigDto, ConfigPaths, PatternTemplate,
         SourcesConfigDto, TemplateDefinitionDto, TokenResponse, WebAuthConfigDto, WebUiConfigDto, TOKEN_NO_AUTH,
     },
-    utils::{default_kick_secs, hex_encode, DEFAULT_PORT, DEFAULT_WORKING_DIR, USER_FILE},
+    utils::{default_kick_secs, hex_encode, DEFAULT_PORT, DEFAULT_STORAGE_DIR, USER_FILE},
 };
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     io::ErrorKind,
     net::{SocketAddr, UdpSocket},
     path::{Component, Path as FsPath, PathBuf},
@@ -40,10 +40,9 @@ use std::{
 };
 use tokio::sync::{oneshot, Mutex, RwLock};
 use tower_http::services::ServeDir;
+use shared::utils::DEFAULT_CUSTOM_STREAM_RESPONSE_PATH;
 
 const DEFAULT_SETUP_HOST: &str = "0.0.0.0";
-const DEFAULT_SETUP_CUSTOM_STREAM_RESPONSE_PATH: &str = "./resources";
-const SETUP_REDACTED_SECRET_VALUE: &str = "__TULIPROX_SETUP_REDACTED__";
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SetupWebUserCredentialDto {
@@ -69,6 +68,7 @@ pub struct SetupCompleteRequestDto {
 
 struct SetupModeState {
     draft: Arc<RwLock<AppConfigDto>>,
+    home_path: String,
     output_dir: PathBuf,
     config_file_path: PathBuf,
     source_file_path: PathBuf,
@@ -166,7 +166,7 @@ fn create_default_api_proxy_server() -> ApiProxyServerInfoDto {
     }
 }
 
-fn create_default_config_dto() -> ConfigDto {
+fn create_default_config_dto(home_path: &str) -> ConfigDto {
     let auth = WebAuthConfigDto {
         issuer: "tuliprox".to_string(),
         secret: generate_web_auth_secret(),
@@ -180,18 +180,20 @@ fn create_default_config_dto() -> ConfigDto {
         api: ConfigApiDto {
             host: DEFAULT_SETUP_HOST.to_string(),
             port: DEFAULT_PORT,
-            web_root: get_default_web_root_path().display().to_string(),
+            web_root: get_default_web_root_path_for_home(FsPath::new(home_path))
+                .display()
+                .to_string(),
         },
-        working_dir: get_default_path(DEFAULT_WORKING_DIR).display().to_string(),
-        custom_stream_response_path: Some(DEFAULT_SETUP_CUSTOM_STREAM_RESPONSE_PATH.to_string()),
+        storage_dir: Some(DEFAULT_STORAGE_DIR.to_string()),
+        custom_stream_response_path: Some(DEFAULT_CUSTOM_STREAM_RESPONSE_PATH.to_string()),
         web_ui: Some(web_ui),
         ..ConfigDto::default()
     }
 }
 
-fn create_default_draft() -> AppConfigDto {
+fn create_default_draft(home_path: &str) -> AppConfigDto {
     AppConfigDto {
-        config: create_default_config_dto(),
+        config: create_default_config_dto(home_path),
         sources: SourcesConfigDto::default(),
         mappings: None,
         templates: None,
@@ -204,7 +206,7 @@ fn create_default_draft() -> AppConfigDto {
 }
 
 async fn build_initial_draft(paths: &ConfigPaths) -> AppConfigDto {
-    let mut draft = create_default_draft();
+    let mut draft = create_default_draft(paths.home_path.as_str());
 
     if file_exists(&paths.config_file_path) {
         match read_config_file(paths.config_file_path.as_str(), true, false) {
@@ -251,7 +253,7 @@ fn generate_web_auth_secret() -> String {
     hex_encode(&secret).to_lowercase()
 }
 
-fn ensure_setup_defaults(config: &mut ConfigDto) {
+fn ensure_setup_defaults(config: &mut ConfigDto, home_path: &str) {
     if config.api.host.trim().is_empty() {
         config.api.host = DEFAULT_SETUP_HOST.to_string();
     }
@@ -259,13 +261,15 @@ fn ensure_setup_defaults(config: &mut ConfigDto) {
         config.api.port = DEFAULT_PORT;
     }
     if config.api.web_root.trim().is_empty() {
-        config.api.web_root = get_default_web_root_path().display().to_string();
+        config.api.web_root = get_default_web_root_path_for_home(FsPath::new(home_path))
+            .display()
+            .to_string();
     }
-    if config.working_dir.trim().is_empty() {
-        config.working_dir = get_default_path(DEFAULT_WORKING_DIR).display().to_string();
+    if config.storage_dir.as_ref().is_none_or(|dir| dir.trim().is_empty()) {
+        config.storage_dir = Some(DEFAULT_STORAGE_DIR.to_string());
     }
     if config.custom_stream_response_path.as_ref().is_none_or(|path| path.trim().is_empty()) {
-        config.custom_stream_response_path = Some(DEFAULT_SETUP_CUSTOM_STREAM_RESPONSE_PATH.to_string());
+        config.custom_stream_response_path = Some(DEFAULT_CUSTOM_STREAM_RESPONSE_PATH.to_string());
     }
 
     if config.web_ui.is_none() {
@@ -288,7 +292,7 @@ fn ensure_setup_defaults(config: &mut ConfigDto) {
     }
 }
 
-fn setup_bind_values(draft: &AppConfigDto) -> (String, u16, PathBuf) {
+fn setup_bind_values(draft: &AppConfigDto, home_path: &str) -> (String, u16, PathBuf) {
     let host = if draft.config.api.host.trim().is_empty() {
         DEFAULT_SETUP_HOST.to_string()
     } else {
@@ -296,18 +300,18 @@ fn setup_bind_values(draft: &AppConfigDto) -> (String, u16, PathBuf) {
     };
     let port = if draft.config.api.port == 0 { DEFAULT_PORT } else { draft.config.api.port };
     let web_root = if draft.config.api.web_root.trim().is_empty() {
-        get_default_web_root_path()
+        get_default_web_root_path_for_home(FsPath::new(home_path))
     } else {
         PathBuf::from(&draft.config.api.web_root)
     };
     (host, port, web_root)
 }
 
-fn resolve_setup_web_dir(web_root: &FsPath) -> Option<PathBuf> {
+fn resolve_setup_web_dir(web_root: &FsPath, home_path: &str) -> Option<PathBuf> {
     if web_root.exists() && web_root.is_dir() {
         return Some(web_root.to_path_buf());
     }
-    let fallback = get_default_web_root_path();
+    let fallback = get_default_web_root_path_for_home(FsPath::new(home_path));
     if fallback.exists() && fallback.is_dir() {
         return Some(fallback);
     }
@@ -319,126 +323,6 @@ fn api_proxy_or_default(draft: &AppConfigDto) -> ApiProxyConfigDto {
         server: vec![create_default_api_proxy_server()],
         user: vec![],
         use_user_db: false,
-    })
-}
-
-fn is_setup_redacted_value(value: &str) -> bool { value == SETUP_REDACTED_SECRET_VALUE }
-
-fn redact_non_empty_secret(value: &mut String) {
-    if !value.trim().is_empty() {
-        *value = SETUP_REDACTED_SECRET_VALUE.to_string();
-    }
-}
-
-fn redact_optional_secret(value: &mut Option<String>) {
-    if value.as_ref().is_some_and(|entry| !entry.trim().is_empty()) {
-        *value = Some(SETUP_REDACTED_SECRET_VALUE.to_string());
-    }
-}
-
-fn redact_api_proxy_user_credentials(api_proxy: &mut ApiProxyConfigDto) {
-    for target in &mut api_proxy.user {
-        for user in &mut target.credentials {
-            redact_non_empty_secret(&mut user.password);
-            redact_optional_secret(&mut user.token);
-        }
-    }
-}
-
-fn redact_app_config_for_setup(mut app_config: AppConfigDto) -> AppConfigDto {
-    if let Some(web_ui) = app_config.config.web_ui.as_mut() {
-        if let Some(auth) = web_ui.auth.as_mut() {
-            redact_non_empty_secret(&mut auth.secret);
-        }
-    }
-    if let Some(api_proxy) = app_config.api_proxy.as_mut() {
-        redact_api_proxy_user_credentials(api_proxy);
-    }
-    app_config
-}
-
-fn redact_api_proxy_for_setup(mut api_proxy: ApiProxyConfigDto) -> ApiProxyConfigDto {
-    redact_api_proxy_user_credentials(&mut api_proxy);
-    api_proxy
-}
-
-fn restore_redacted_web_auth_secret(app_config: &mut AppConfigDto, draft: &AppConfigDto) {
-    let Some(web_ui) = app_config.config.web_ui.as_mut() else {
-        return;
-    };
-    let Some(auth) = web_ui.auth.as_mut() else {
-        return;
-    };
-    if !is_setup_redacted_value(&auth.secret) {
-        return;
-    }
-
-    let draft_secret = draft
-        .config
-        .web_ui
-        .as_ref()
-        .and_then(|draft_web_ui| draft_web_ui.auth.as_ref())
-        .map(|draft_auth| draft_auth.secret.trim().to_string())
-        .filter(|secret| !secret.is_empty());
-    if let Some(draft_secret) = draft_secret {
-        auth.secret = draft_secret;
-    }
-}
-
-fn restore_redacted_api_proxy_credentials(
-    api_proxy: &mut ApiProxyConfigDto,
-    draft_api_proxy: Option<&ApiProxyConfigDto>,
-) {
-    let mut credentials_by_username: HashMap<String, (String, Option<String>)> = HashMap::new();
-    if let Some(draft) = draft_api_proxy {
-        for target in &draft.user {
-            for user in &target.credentials {
-                credentials_by_username.insert(user.username.clone(), (user.password.clone(), user.token.clone()));
-            }
-        }
-    }
-
-    for target in &mut api_proxy.user {
-        for user in &mut target.credentials {
-            let draft_credentials = credentials_by_username.get(&user.username);
-            if is_setup_redacted_value(&user.password) {
-                if let Some((password, _)) = draft_credentials {
-                    user.password = password.clone();
-                }
-            }
-            if user.token.as_deref().is_some_and(is_setup_redacted_value) {
-                if let Some((_, token)) = draft_credentials {
-                    user.token = token.clone();
-                }
-            }
-        }
-    }
-}
-
-fn restore_redacted_setup_values(app_config: &mut AppConfigDto, draft: &AppConfigDto) {
-    restore_redacted_web_auth_secret(app_config, draft);
-    if let Some(api_proxy) = app_config.api_proxy.as_mut() {
-        restore_redacted_api_proxy_credentials(api_proxy, draft.api_proxy.as_ref());
-    }
-}
-
-fn has_unresolved_redacted_setup_values(app_config: &AppConfigDto) -> bool {
-    if app_config
-        .config
-        .web_ui
-        .as_ref()
-        .and_then(|web_ui| web_ui.auth.as_ref())
-        .is_some_and(|auth| is_setup_redacted_value(&auth.secret))
-    {
-        return true;
-    }
-
-    app_config.api_proxy.as_ref().is_some_and(|api_proxy| {
-        api_proxy.user.iter().any(|target| {
-            target.credentials.iter().any(|user| {
-                is_setup_redacted_value(&user.password) || user.token.as_deref().is_some_and(is_setup_redacted_value)
-            })
-        })
     })
 }
 
@@ -518,12 +402,12 @@ async fn setup_token_refresh() -> impl IntoResponse + Send {
 
 async fn setup_get_config(State(state): State<Arc<SetupModeState>>) -> impl IntoResponse + Send {
     let draft = state.draft.read().await.clone();
-    axum::Json(redact_app_config_for_setup(draft)).into_response()
+    axum::Json(draft).into_response()
 }
 
 async fn setup_get_api_proxy(State(state): State<Arc<SetupModeState>>) -> impl IntoResponse + Send {
     let draft = state.draft.read().await.clone();
-    axum::Json(redact_api_proxy_for_setup(api_proxy_or_default(&draft))).into_response()
+    axum::Json(api_proxy_or_default(&draft)).into_response()
 }
 
 async fn setup_config_json(State(state): State<Arc<SetupModeState>>) -> impl IntoResponse + Send {
@@ -751,19 +635,7 @@ async fn setup_complete_inner(
     state: Arc<SetupModeState>,
     mut req: SetupCompleteRequestDto,
 ) -> axum::response::Response {
-    let draft_snapshot = state.draft.read().await.clone();
-    restore_redacted_setup_values(&mut req.app_config, &draft_snapshot);
-    if has_unresolved_redacted_setup_values(&req.app_config) {
-        return (
-            StatusCode::BAD_REQUEST,
-            axum::Json(json!({
-                "error": "One or more redacted secret fields could not be restored. Please re-enter secret values before saving setup."
-            })),
-        )
-            .into_response();
-    }
-
-    ensure_setup_defaults(&mut req.app_config.config);
+    ensure_setup_defaults(&mut req.app_config.config, state.home_path.as_str());
 
     if let Err(err) = req.app_config.config.prepare(false) {
         return (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": err.to_string() }))).into_response();
@@ -983,13 +855,14 @@ fn create_compression_layer() -> tower_http::compression::CompressionLayer {
 
 pub async fn start_setup_server(paths: &ConfigPaths, missing_files: &[String]) -> Result<(), TuliproxError> {
     let draft = build_initial_draft(paths).await;
-    let (host, port, web_root) = setup_bind_values(&draft);
-    let web_dir = resolve_setup_web_dir(&web_root)
+    let (host, port, web_root) = setup_bind_values(&draft, paths.home_path.as_str());
+    let web_dir = resolve_setup_web_dir(&web_root, paths.home_path.as_str())
         .ok_or_else(|| info_err!("Setup mode requires a web directory. Tried '{}'", web_root.display(),))?;
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let state = Arc::new(SetupModeState {
         draft: Arc::new(RwLock::new(draft)),
+        home_path: paths.home_path.clone(),
         output_dir: PathBuf::from(&paths.config_path),
         config_file_path: PathBuf::from(&paths.config_file_path),
         source_file_path: PathBuf::from(&paths.sources_file_path),
@@ -1001,7 +874,7 @@ pub async fn start_setup_server(paths: &ConfigPaths, missing_files: &[String]) -
         shutdown_tx: Mutex::new(Some(shutdown_tx)),
     });
 
-    info!("Setup mode enabled. Missing required config files: {}", missing_files.join(", "));
+    info!("Setup mode enabled.");
     info!("Setup output directory: {}", state.output_dir.display());
     info!("Setup web root: {}", state.web_dir.display());
     info!("Setup server running: http://{host}:{port}");
@@ -1048,25 +921,12 @@ pub async fn start_setup_server(paths: &ConfigPaths, missing_files: &[String]) -
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        has_unresolved_redacted_setup_values, redact_app_config_for_setup, restore_redacted_setup_values,
-        SETUP_REDACTED_SECRET_VALUE,
-    };
-    use shared::model::{ApiProxyConfigDto, AppConfigDto, TargetUserDto, WebAuthConfigDto, WebUiConfigDto};
+    use super::api_proxy_or_default;
+    use shared::model::{ApiProxyConfigDto, AppConfigDto, TargetUserDto};
 
-    fn sample_app_config() -> AppConfigDto {
-        AppConfigDto {
-            config: shared::model::ConfigDto {
-                web_ui: Some(WebUiConfigDto {
-                    auth: Some(WebAuthConfigDto {
-                        issuer: "tuliprox".to_string(),
-                        secret: "very-secret-value".to_string(),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
+    #[test]
+    fn setup_api_proxy_or_default_preserves_existing_credentials() {
+        let app_config = AppConfigDto {
             api_proxy: Some(ApiProxyConfigDto {
                 user: vec![TargetUserDto {
                     target: "target-a".to_string(),
@@ -1080,49 +940,17 @@ mod tests {
                 ..Default::default()
             }),
             ..Default::default()
-        }
-    }
-
-    #[test]
-    fn setup_redaction_masks_web_auth_and_api_proxy_credentials() {
-        let redacted = redact_app_config_for_setup(sample_app_config());
-
-        let auth_secret =
-            redacted.config.web_ui.as_ref().and_then(|web_ui| web_ui.auth.as_ref()).map(|auth| auth.secret.as_str());
-        assert_eq!(auth_secret, Some(SETUP_REDACTED_SECRET_VALUE));
-
-        let creds = &redacted.api_proxy.expect("api_proxy should be present").user[0].credentials[0];
-        assert_eq!(creds.password, SETUP_REDACTED_SECRET_VALUE);
-        assert_eq!(creds.token.as_deref(), Some(SETUP_REDACTED_SECRET_VALUE));
-    }
-
-    #[test]
-    fn setup_restore_replaces_redacted_values_from_existing_draft() {
-        let draft = sample_app_config();
-        let mut submitted = redact_app_config_for_setup(draft.clone());
-
-        restore_redacted_setup_values(&mut submitted, &draft);
-
-        let auth_secret =
-            submitted.config.web_ui.as_ref().and_then(|web_ui| web_ui.auth.as_ref()).map(|auth| auth.secret.as_str());
-        assert_eq!(auth_secret, Some("very-secret-value"));
-
-        let creds = &submitted.api_proxy.as_ref().expect("api_proxy should be present").user[0].credentials[0];
+        };
+        let api_proxy = api_proxy_or_default(&app_config);
+        let creds = &api_proxy.user[0].credentials[0];
         assert_eq!(creds.password, "alice-password");
         assert_eq!(creds.token.as_deref(), Some("alice-token"));
-        assert!(!has_unresolved_redacted_setup_values(&submitted));
     }
 
     #[test]
-    fn setup_restore_keeps_unmatched_redacted_credentials_as_unresolved() {
-        let draft = sample_app_config();
-        let mut submitted = redact_app_config_for_setup(draft);
-        if let Some(api_proxy) = submitted.api_proxy.as_mut() {
-            api_proxy.user[0].credentials[0].username = "bob".to_string();
-        }
-
-        restore_redacted_setup_values(&mut submitted, &AppConfigDto::default());
-
-        assert!(has_unresolved_redacted_setup_values(&submitted));
+    fn setup_api_proxy_or_default_creates_server_when_missing() {
+        let api_proxy = api_proxy_or_default(&AppConfigDto::default());
+        assert_eq!(api_proxy.server.len(), 1);
+        assert!(!api_proxy.server[0].host.trim().is_empty());
     }
 }

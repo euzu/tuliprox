@@ -5,7 +5,7 @@ use crate::model::macros;
 #[derive(Debug, Clone)]
 pub struct CacheConfig {
     pub enabled: bool,
-    pub dir: String,
+    pub directory: String,
     pub size: usize,
     pub size_str: Option<String>,
 }
@@ -16,7 +16,7 @@ impl From<&CacheConfigDto> for CacheConfig {
         Self {
             enabled: dto.enabled,
             // Dto prepare should have set the right path
-            dir: dto.dir.as_ref().map_or_else(Default::default, std::string::ToString::to_string),
+            directory: dto.directory.as_ref().map_or_else(Default::default, std::string::ToString::to_string),
             size_str: dto.size.clone(),
             size: get_size(dto)
         }
@@ -28,7 +28,7 @@ impl From<&CacheConfig> for CacheConfigDto {
         Self {
             enabled: instance.enabled,
             // Dto prepare should have set the right path
-            dir: Some(instance.dir.clone()),
+            directory: Some(instance.directory.clone()),
             size: instance.size_str.clone(),
         }
     }

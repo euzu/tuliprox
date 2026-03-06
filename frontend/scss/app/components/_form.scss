@@ -21,7 +21,9 @@
 
   &__list,
   &__text {
+    display: flex;
     flex-flow: column;
+    gap: var(--gap-default);
   }
 
   &__value {
@@ -40,6 +42,8 @@
     border-radius: var(--border-radius);
     box-sizing: border-box;
     white-space: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
   }
 
   &__bool {

@@ -850,7 +850,7 @@ pub async fn write_strm_playlist(
 
     let config = app_config.config.load();
     let Some(root_path) = crate::utils::get_file_path(
-        &config.working_dir,
+        &config.storage_dir,
         Some(std::path::PathBuf::from(&target_output.directory)),
     ) else {
         return info_err_res!("Failed to get file path for {}",target_output.directory);

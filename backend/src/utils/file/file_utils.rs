@@ -67,17 +67,27 @@ pub fn get_home_path() -> PathBuf {
 }
 
 pub fn get_default_web_root_path() -> PathBuf {
-    if let Some(web_root) = env::var(DEFAULT_WEB_ROOT_ENV_VAR)
-        .ok()
-        .filter(|p| !p.trim().is_empty()) {
-        return PathBuf::from(web_root)
+    get_default_web_root_path_for_home(get_home_path().as_path())
+}
+
+pub fn get_default_web_root_path_for_home(home_path: &Path) -> PathBuf {
+    if let Some(web_root) = env::var(DEFAULT_WEB_ROOT_ENV_VAR).ok().filter(|p| !p.trim().is_empty()) {
+        let configured = PathBuf::from(web_root);
+        return if configured.is_absolute() {
+            configured
+        } else {
+            home_path.join(configured)
+        };
     }
-    get_exe_path().join(DEFAULT_WEB_DIR)
+    get_default_path_for_home(home_path, DEFAULT_WEB_DIR)
 }
 
 
 pub fn get_default_path(file: &str) -> PathBuf {
-    let home_path =  get_home_path();
+    get_default_path_for_home(get_home_path().as_path(), file)
+}
+
+pub fn get_default_path_for_home(home_path: &Path, file: &str) -> PathBuf {
     home_path.join(file)
 }
 
@@ -116,11 +126,52 @@ pub fn get_default_templates_path(config_path: &str) -> String {
     get_default_file_path(config_path, TEMPLATE_FILE)
 }
 
+fn resolve_config_scoped_path(config_path: &str, candidate: &str) -> String {
+    let candidate_path = PathBuf::from(candidate.trim()).clean();
+    if candidate_path.is_absolute() {
+        return candidate_path.to_string_lossy().to_string();
+    }
+
+    let config_dir = PathBuf::from(config_path).clean();
+    let relative = if let Some(config_dir_name) = config_dir.file_name() {
+        candidate_path
+            .strip_prefix(Path::new(config_dir_name))
+            .map_or_else(|_| candidate_path.clone(), Path::to_path_buf)
+    } else {
+        candidate_path.clone()
+    };
+
+    config_dir.join(relative).clean().to_string_lossy().to_string()
+}
+
+#[inline]
+pub fn resolve_mapping_file_path(config_path: &str, mapping_path: Option<&str>) -> String {
+    let configured = mapping_path.map(str::trim).filter(|path| !path.is_empty()).map(ToString::to_string);
+    let candidate = if shared::utils::is_blank_or_default_mapping_path(&configured) {
+        get_default_mappings_path(config_path)
+    } else {
+        configured.unwrap_or_else(|| get_default_mappings_path(config_path))
+    };
+    resolve_config_scoped_path(config_path, &candidate)
+}
+
+#[inline]
+pub fn resolve_template_file_path(config_path: &str, template_path: Option<&str>) -> String {
+    let configured = template_path.map(str::trim).filter(|path| !path.is_empty()).map(ToString::to_string);
+    let candidate = if shared::utils::is_blank_or_default_template_path(&configured) {
+        get_default_templates_path(config_path)
+    } else {
+        configured.unwrap_or_else(|| get_default_templates_path(config_path))
+    };
+    resolve_config_scoped_path(config_path, &candidate)
+}
+
 #[inline]
 pub fn resolve_template_persist_file_path(template_path: Option<&str>, config_path: &str) -> String {
-    let candidate = template_path
+    let raw_candidate = template_path
         .filter(|path| !path.trim().is_empty())
         .map_or_else(|| get_default_templates_path(config_path), ToString::to_string);
+    let candidate = resolve_template_file_path(config_path, Some(raw_candidate.as_str()));
     let path = PathBuf::from(&candidate);
 
     if path.exists() {
@@ -130,8 +181,8 @@ pub fn resolve_template_persist_file_path(template_path: Option<&str>, config_pa
         return path.to_string_lossy().to_string();
     }
 
-    let looks_like_directory = candidate.ends_with('/')
-        || candidate.ends_with('\\')
+    let looks_like_directory = raw_candidate.ends_with('/')
+        || raw_candidate.ends_with('\\')
         || path.extension().is_none()
         || path.extension().is_some_and(|ext| ext == "d");
 
@@ -329,11 +380,11 @@ where
     Ok(())
 }
 
-pub fn prepare_file_path(persist: Option<&str>, working_dir: &str, action: &str) -> Option<PathBuf> {
+pub fn prepare_file_path(persist: Option<&str>, storage_dir: &str, action: &str) -> Option<PathBuf> {
     let persist_file: Option<PathBuf> =
         persist.map(|persist_path| prepare_persist_path(persist_path, action));
     if persist_file.is_some() {
-        let file_path = get_file_path(working_dir, persist_file);
+        let file_path = get_file_path(storage_dir, persist_file);
         debug_if_enabled!("persist to file:  {}", file_path.as_ref().map_or(Cow::from("?"), |p| p.to_string_lossy()));
         file_path
     } else {
@@ -348,27 +399,28 @@ pub fn read_file_as_bytes(path: &Path) -> std::io::Result<Vec<u8>> {
     Ok(buffer)
 }
 
-pub fn make_absolute_path(path: &str, working_dir: &str) -> String {
+pub fn make_absolute_path(path: &str, storage_dir: &str) -> String {
     let rpb = std::path::PathBuf::from(path);
-    let pathbuf = make_path_absolute(&rpb, working_dir);
+    let pathbuf = make_path_absolute(&rpb, storage_dir);
     pathbuf.to_str().unwrap_or_default().to_string()
 }
 
-pub fn make_path_absolute(rpb: &Path, working_dir: &str) -> PathBuf {
+pub fn make_path_absolute(rpb: &Path, storage_dir: &str) -> PathBuf {
     if rpb.is_relative() {
-        let mut rpb2 = std::path::PathBuf::from(working_dir).join(rpb);
-        if !rpb2.exists() {
-            rpb2 = get_exe_path().join(rpb);
+        if !storage_dir.trim().is_empty() {
+            return std::path::PathBuf::from(storage_dir).join(rpb).clean();
         }
-        if !rpb2.exists() {
-            let cwd = std::env::current_dir();
-            if let Ok(cwd_path) = cwd {
-                rpb2 = cwd_path.join(rpb);
-            }
+
+        let exe_based = get_exe_path().join(rpb).clean();
+        if exe_based.is_absolute() {
+            return exe_based;
         }
-        if rpb2.exists() {
-            return rpb2.clean();
+
+        if let Ok(cwd_path) = std::env::current_dir() {
+            return cwd_path.join(rpb).clean();
         }
+
+        return exe_based;
     }
     rpb.to_path_buf()
 }
@@ -473,7 +525,11 @@ pub fn get_file_extension(path: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_string_path;
+    use super::{
+        normalize_string_path, resolve_mapping_file_path, resolve_template_file_path,
+        resolve_template_persist_file_path,
+    };
+    use std::path::PathBuf;
 
     #[test]
     fn test_simple_relative_path() {
@@ -508,5 +564,41 @@ mod tests {
         let input = "";
         let normalized = normalize_string_path(input);
         assert_eq!(normalized, "");
+    }
+
+    #[test]
+    fn test_resolve_template_default_path_uses_config_dir() {
+        let config_path = std::env::temp_dir().join("tuliprox").join("settings").join("config");
+        let resolved = resolve_template_file_path(
+            config_path.to_string_lossy().as_ref(),
+            Some("./config/template.yml"),
+        );
+        let expected = config_path.join("template.yml");
+        assert_eq!(PathBuf::from(resolved), expected);
+    }
+
+    #[test]
+    fn test_resolve_template_directory_path_uses_config_dir() {
+        let config_path = std::env::temp_dir().join("tuliprox").join("settings").join("config");
+        let resolved = resolve_template_file_path(config_path.to_string_lossy().as_ref(), Some("template.d"));
+        let expected = config_path.join("template.d");
+        assert_eq!(PathBuf::from(resolved), expected);
+    }
+
+    #[test]
+    fn test_resolve_mapping_directory_path_uses_config_dir() {
+        let config_path = std::env::temp_dir().join("tuliprox").join("settings").join("config");
+        let resolved = resolve_mapping_file_path(config_path.to_string_lossy().as_ref(), Some("mapping.d"));
+        let expected = config_path.join("mapping.d");
+        assert_eq!(PathBuf::from(resolved), expected);
+    }
+
+    #[test]
+    fn test_resolve_template_persist_file_for_directory_path() {
+        let config_path = std::env::temp_dir().join("tuliprox").join("settings").join("config");
+        let resolved =
+            resolve_template_persist_file_path(Some("template.d"), config_path.to_string_lossy().as_ref());
+        let expected = config_path.join("template.d").join("template.yml");
+        assert_eq!(PathBuf::from(resolved), expected);
     }
 }

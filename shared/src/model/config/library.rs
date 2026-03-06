@@ -106,7 +106,7 @@ pub enum LibraryMetadataFormat {
     Nfo,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct LibraryPlaylistConfigDto {
     #[serde(default = "default_movie_category")]
@@ -119,7 +119,7 @@ impl LibraryPlaylistConfigDto {
     pub fn is_empty(&self) -> bool {
         self.movie_category == default_movie_category() && self.series_category == default_series_category()
     }
-    pub fn clean(&mut self) {
+    pub fn prepare(&mut self) {
         if self.movie_category.trim().is_empty() {
             self.movie_category = default_movie_category();
         }
@@ -127,10 +127,19 @@ impl LibraryPlaylistConfigDto {
             self.series_category = default_series_category();
         }
     }
+    pub fn clean(&mut self) { self.prepare(); }
+}
+
+impl Default for LibraryPlaylistConfigDto {
+    fn default() -> Self {
+        Self { movie_category: default_movie_category(), series_category: default_series_category() }
+    }
 }
 
 impl LibraryConfigDto {
     pub fn prepare(&mut self) -> Result<(), TuliproxError> {
+        self.playlist.prepare();
+
         // Validate enabled state
         if self.enabled && self.scan_directories.is_empty() {
             return info_err_res!("Library enabled but no scan_directories configured");
@@ -144,5 +153,26 @@ impl LibraryConfigDto {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{default_movie_category, default_series_category, LibraryPlaylistConfigDto};
+
+    #[test]
+    fn playlist_default_uses_default_categories() {
+        let playlist = LibraryPlaylistConfigDto::default();
+        assert_eq!(playlist.movie_category, default_movie_category());
+        assert_eq!(playlist.series_category, default_series_category());
+    }
+
+    #[test]
+    fn playlist_prepare_sets_default_categories_when_empty() {
+        let mut playlist =
+            LibraryPlaylistConfigDto { movie_category: String::new(), series_category: "   ".to_string() };
+        playlist.prepare();
+        assert_eq!(playlist.movie_category, default_movie_category());
+        assert_eq!(playlist.series_category, default_series_category());
     }
 }

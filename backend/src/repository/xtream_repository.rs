@@ -654,8 +654,8 @@ pub async fn iter_raw_xtream_target_playlist(app_config: &AppConfig, target: &Co
 
 pub async fn iter_raw_xtream_input_playlist(app_config: &AppConfig, input: &ConfigInput, cluster: XtreamCluster) -> Option<Box<dyn Stream<Item = XtreamPlaylistItem> + Send + Unpin>> {
     let config = app_config.config.load();
-    let working_dir = &config.working_dir;
-    let storage_path = get_input_storage_path(&input.name, working_dir).await.ok()?;
+    let storage_dir = &config.storage_dir;
+    let storage_path = get_input_storage_path(&input.name, storage_dir).await.ok()?;
     let xtream_path = xtream_get_file_path(&storage_path, cluster);
 
     iter_raw_xtream_playlist(app_config, &xtream_path).await
@@ -1211,15 +1211,14 @@ fn needs_preserved_stream_property_merge(
     let preserve_info_details = old_stream_props.has_details() && !needs_update_info_details(new_stream_props, old_stream_props);
 
     match (new_stream_props, old_stream_props) {
-        (StreamProperties::Video(v_new), StreamProperties::Video(v_old))
-            if preserve_info_details && v_old.details.is_some() =>
-        {
-            v_new.details != v_old.details
+        (StreamProperties::Video(v_new), StreamProperties::Video(v_old)) => {
+            (preserve_info_details && v_old.details.is_some() && v_new.details != v_old.details)
+                || (v_new.tmdb.is_none() && v_old.tmdb.is_some())
         }
-        (StreamProperties::Series(s_new), StreamProperties::Series(s_old))
-            if preserve_info_details && s_old.details.is_some() =>
-        {
-            s_new.details != s_old.details
+        (StreamProperties::Series(s_new), StreamProperties::Series(s_old)) => {
+            (preserve_info_details && s_old.details.is_some() && s_new.details != s_old.details)
+                || (s_new.tmdb.is_none() && s_old.tmdb.is_some())
+                || (s_new.release_date.is_none() && s_old.release_date.is_some())
         }
         (StreamProperties::Live(l_new), StreamProperties::Live(l_old)) => {
             (l_new.video.is_none() && l_old.video.is_some())
@@ -1245,26 +1244,41 @@ pub(crate) fn merge_preserved_stream_properties(
         old_stream_props.has_details() && !needs_update_info_details(new_stream_props, old_stream_props);
 
     match (new_stream_props, old_stream_props) {
-        (StreamProperties::Video(v_new), StreamProperties::Video(v_old))
-        if preserve_info_details && v_old.details.is_some() =>
-            {
-                if v_new.details == v_old.details {
-                    false
-                } else {
-                    v_new.details.clone_from(&v_old.details);
-                    true
-                }
+        (StreamProperties::Video(v_new), StreamProperties::Video(v_old)) => {
+            let mut changed = false;
+
+            if preserve_info_details && v_old.details.is_some() && v_new.details != v_old.details {
+                v_new.details.clone_from(&v_old.details);
+                changed = true;
             }
-        (StreamProperties::Series(s_new), StreamProperties::Series(s_old))
-        if preserve_info_details && s_old.details.is_some() =>
-            {
-                if s_new.details == s_old.details {
-                    false
-                } else {
-                    s_new.details.clone_from(&s_old.details);
-                    true
-                }
+
+            if v_new.tmdb.is_none() && v_old.tmdb.is_some() {
+                v_new.tmdb = v_old.tmdb;
+                changed = true;
             }
+
+            changed
+        }
+        (StreamProperties::Series(s_new), StreamProperties::Series(s_old)) => {
+            let mut changed = false;
+
+            if preserve_info_details && s_old.details.is_some() && s_new.details != s_old.details {
+                s_new.details.clone_from(&s_old.details);
+                changed = true;
+            }
+
+            if s_new.tmdb.is_none() && s_old.tmdb.is_some() {
+                s_new.tmdb = s_old.tmdb;
+                changed = true;
+            }
+
+            if s_new.release_date.is_none() && s_old.release_date.is_some() {
+                s_new.release_date.clone_from(&s_old.release_date);
+                changed = true;
+            }
+
+            changed
+        }
         (StreamProperties::Live(l_new), StreamProperties::Live(l_old)) => {
             let mut changed = false;
 
@@ -1583,6 +1597,49 @@ mod tests {
                 assert_eq!(live.last_success_timestamp, Some(1_800_000_100));
             }
             _ => panic!("expected live properties"),
+        }
+    }
+
+    #[test]
+    fn merge_preserves_missing_video_tmdb() {
+        let mut new_props = StreamProperties::Video(Box::new(VideoStreamProperties {
+            tmdb: None,
+            ..VideoStreamProperties::default()
+        }));
+        let old_props = StreamProperties::Video(Box::new(VideoStreamProperties {
+            tmdb: Some(317981),
+            ..VideoStreamProperties::default()
+        }));
+
+        let changed = merge_preserved_stream_properties(&mut new_props, &old_props);
+        assert!(changed);
+        match new_props {
+            StreamProperties::Video(video) => assert_eq!(video.tmdb, Some(317981)),
+            _ => panic!("expected video properties"),
+        }
+    }
+
+    #[test]
+    fn merge_preserves_missing_series_tmdb_and_release_date() {
+        let mut new_props = StreamProperties::Series(Box::new(SeriesStreamProperties {
+            tmdb: None,
+            release_date: None,
+            ..SeriesStreamProperties::default()
+        }));
+        let old_props = StreamProperties::Series(Box::new(SeriesStreamProperties {
+            tmdb: Some(12345),
+            release_date: Some("2015-01-01".into()),
+            ..SeriesStreamProperties::default()
+        }));
+
+        let changed = merge_preserved_stream_properties(&mut new_props, &old_props);
+        assert!(changed);
+        match new_props {
+            StreamProperties::Series(series) => {
+                assert_eq!(series.tmdb, Some(12345));
+                assert_eq!(series.release_date.as_deref(), Some("2015-01-01"));
+            }
+            _ => panic!("expected series properties"),
         }
     }
 

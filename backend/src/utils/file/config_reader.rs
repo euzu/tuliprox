@@ -22,7 +22,6 @@ use shared::model::{
     MsgKind, PatternTemplate, SourcesConfigDto, TargetUserDto, TemplateDefinitionDto,
 };
 use shared::utils::{generate_default_access_secret, generate_default_encrypt_secret, CONSTANTS, PROVIDER_SCHEME_PREFIX, TEMPLATE_FILE};
-use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::File;
@@ -112,14 +111,19 @@ async fn parse_sources_file_from_path(
     .map_err(|join_err| info_err!("Failed to read sources-config file: {join_err}"))?
 }
 
-pub fn resolve_template_and_mapping_paths<'a>(paths: &'a ConfigPaths, template_path: Option<&'a str>, mapping_path: Option<&'a str>) -> (Cow<'a, str>, Cow<'a, str>) {
-    // Resolve effective paths for templates and mappings (with robust fallbacks)
-    let effective_template_path = paths.template_file_path.as_deref()
-        .or(template_path).map_or_else(|| Cow::Owned(utils::get_default_templates_path(&paths.config_path)), Cow::Borrowed);
-
-    let effective_mapping_path = paths.mapping_file_path.as_deref()
-        .or(mapping_path).map_or_else(|| Cow::Owned(utils::get_default_mappings_path(&paths.config_path)), Cow::Borrowed);
-
+pub fn resolve_template_and_mapping_paths(
+    paths: &ConfigPaths,
+    template_path: Option<&str>,
+    mapping_path: Option<&str>,
+) -> (String, String) {
+    let effective_template_path = utils::resolve_template_file_path(
+        paths.config_path.as_str(),
+        paths.template_file_path.as_deref().or(template_path),
+    );
+    let effective_mapping_path = utils::resolve_mapping_file_path(
+        paths.config_path.as_str(),
+        paths.mapping_file_path.as_deref().or(mapping_path),
+    );
     (effective_template_path, effective_mapping_path)
 }
 
@@ -322,14 +326,15 @@ pub async fn read_app_config_dto(
     let config = read_config_file(config_file, resolve_env, include_computed)?;
 
     // Resolve effective paths for templates and mappings (with robust fallbacks)
-    let (effective_template_path,effective_mapping_path) = resolve_template_and_mapping_paths(paths, config.template_path.as_deref(), config.mapping_path.as_deref());
+    let (effective_template_path, effective_mapping_path) =
+        resolve_template_and_mapping_paths(paths, config.template_path.as_deref(), config.mapping_path.as_deref());
 
     let mut sources = parse_sources_file_from_path(&PathBuf::from(sources_file), resolve_env).await?;
-    let mut mappings = read_mappings_file_unprepared(effective_mapping_path.as_ref(), resolve_env)?
+    let mut mappings = read_mappings_file_unprepared(&effective_mapping_path, resolve_env)?
         .map(|(_, mapping)| mapping);
 
     let template_bundle = read_templates(
-        Some(effective_template_path.as_ref()),
+        Some(&effective_template_path),
         resolve_env,
         sources.templates.as_deref(),
         mappings
@@ -447,7 +452,7 @@ pub async fn get_batch_aliases(
         if url.starts_with(PROVIDER_SCHEME_PREFIX) {
             return info_err_res!(
                 "Batch input type '{input_type}' does not support provider:// URLs. \
-Use a local CSV path (absolute/relative) or file:// URL."
+Use a batch:// URL or a local CSV path (absolute/relative)."
             );
         }
 
@@ -505,26 +510,25 @@ pub async fn read_initial_app_config(
 
     let config_dto = read_config_file(config_file, resolve_env, include_computed)?;
 
-    if paths.mapping_file_path.is_none() {
-        let mut path = config_dto.mapping_path.as_ref().map_or_else(
-            || utils::get_default_mappings_path(config_path),
-            ToString::to_string,
-        );
-        if resolve_env {
-            path = resolve_env_var(&path);
-        }
-        paths.mapping_file_path.replace(path);
-    }
-    if paths.template_file_path.is_none() {
-        let mut path = config_dto.template_path.as_ref().map_or_else(
-            || utils::get_default_templates_path(config_path),
-            ToString::to_string,
-        );
-        if resolve_env {
-            path = resolve_env_var(&path);
-        }
-        paths.template_file_path.replace(path);
-    }
+    let configured_mapping_path = paths
+        .mapping_file_path
+        .as_deref()
+        .or(config_dto.mapping_path.as_deref())
+        .map(|path| if resolve_env { resolve_env_var(path) } else { path.to_string() });
+    let configured_template_path = paths
+        .template_file_path
+        .as_deref()
+        .or(config_dto.template_path.as_deref())
+        .map(|path| if resolve_env { resolve_env_var(path) } else { path.to_string() });
+
+    paths.mapping_file_path = Some(utils::resolve_mapping_file_path(
+        config_path,
+        configured_mapping_path.as_deref(),
+    ));
+    paths.template_file_path = Some(utils::resolve_template_file_path(
+        config_path,
+        configured_template_path.as_deref(),
+    ));
 
     let mut sources_dto = parse_sources_file_from_path(&PathBuf::from(sources_file), resolve_env).await?;
 
@@ -539,7 +543,7 @@ pub async fn read_initial_app_config(
     };
 
     let template_bundle = read_templates(
-        paths.template_file_path.as_deref().or(config_dto.template_path.as_deref()),
+        paths.template_file_path.as_deref(),
         resolve_env,
         sources_dto.templates.as_deref(),
         mappings_dto
@@ -562,7 +566,8 @@ pub async fn read_initial_app_config(
 
     let sources: SourcesConfig = SourcesConfig::try_from(sources_dto)?;
     let mut config: Config = Config::from(config_dto);
-    config.prepare(config_path)?;
+    config.prepare(config_path, paths.home_path.as_str())?;
+    paths.storage_path.clone_from(&config.storage_dir);
     config.update_runtime();
 
     let mut app_config = AppConfig {

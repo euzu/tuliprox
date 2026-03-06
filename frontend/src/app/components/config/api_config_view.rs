@@ -184,9 +184,13 @@ pub fn ApiConfigView() -> Html {
         let deps = (api_config, *config_view_ctx.edit_mode);
         use_effect_with(deps, move |(cfg, _mode)| {
             if let Some(api) = cfg {
-                form_state_api_config.dispatch(ApiConfigFormAction::SetAll(api.clone()));
+                let mut next_api = api.clone();
+                next_api.prepare();
+                form_state_api_config.dispatch(ApiConfigFormAction::SetAll(next_api));
             } else {
-                form_state_api_config.dispatch(ApiConfigFormAction::SetAll(ConfigApiDto::default()));
+                let mut defaults = ConfigApiDto::default();
+                defaults.prepare();
+                form_state_api_config.dispatch(ApiConfigFormAction::SetAll(defaults));
             }
             || ()
         });
@@ -421,11 +425,13 @@ pub fn ApiConfigView() -> Html {
 
     let render_view_mode_api_config = || {
         if let Some(config) = &config_ctx.config {
+            let mut api_config = config.config.api.clone();
+            api_config.prepare();
             html! {
                 <Card class="tp__api-config-card">
-                    { config_field!(config.config.api, translate.t(LABEL_HOST), host) }
-                    { config_field!(config.config.api, translate.t(LABEL_PORT), port) }
-                    { config_field!(config.config.api, translate.t(LABEL_WEB_ROOT), web_root) }
+                    { config_field!(api_config, translate.t(LABEL_HOST), host) }
+                    { config_field!(api_config, translate.t(LABEL_PORT), port) }
+                    { config_field!(api_config, translate.t(LABEL_WEB_ROOT), web_root) }
                 </Card>
             }
         } else {

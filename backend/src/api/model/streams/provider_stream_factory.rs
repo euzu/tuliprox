@@ -25,7 +25,6 @@ use reqwest::{
 };
 use shared::{
     create_bitset,
-    model::{PlaylistItemType, DEFAULT_USER_AGENT},
     utils::{filter_request_header, sanitize_sensitive_info},
 };
 use std::{
@@ -38,6 +37,8 @@ use std::{
     time::{Duration, Instant},
 };
 use url::Url;
+use shared::model::PlaylistItemType;
+use shared::utils::DEFAULT_USER_AGENT;
 
 const RETRY_SECONDS: u64 = 5;
 const ERR_MAX_RETRY_COUNT: u32 = 5;

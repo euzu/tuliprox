@@ -30,7 +30,7 @@ use clap::Parser;
 use log::{error, info, warn};
 use shared::{
     model::ConfigPaths,
-    utils::{CONFIG_FILE, SOURCE_FILE},
+    utils::{CONFIG_FILE, CONFIG_PATH, DEFAULT_STORAGE_DIR, SOURCE_FILE},
 };
 use std::{
     fs::File,
@@ -45,6 +45,10 @@ use std::{
 #[command(version)]
 #[command(about = "Extended playlist proxy", long_about = None)]
 struct Args {
+    /// The home directory (base for config, storage, backup, downloads)
+    #[arg(short = 'H', long = "home")]
+    home: Option<String>,
+
     /// The config directory
     #[arg(short = 'p', long = "config-path")]
     config_path: Option<String>,
@@ -217,21 +221,13 @@ fn run_startup_bplustree_migration(config_paths: &ConfigPaths) {
         return;
     }
 
-    let config_dto = match utils::read_config_file(config_paths.config_file_path.as_str(), true, false) {
-        Ok(cfg) => cfg,
-        Err(err) => {
-            warn!("Skipping B+Tree startup migration because config could not be read: {err}");
-            return;
-        }
-    };
-
     let mut roots: Vec<PathBuf> = vec![PathBuf::from(&config_paths.config_path)];
-    let working_dir = PathBuf::from(config_dto.working_dir);
-    if !roots.iter().any(|root| root == &working_dir) {
-        roots.push(working_dir.clone());
+    let storage_dir = PathBuf::from(&config_paths.storage_path);
+    if !roots.iter().any(|root| root == &storage_dir) {
+        roots.push(storage_dir.clone());
     }
 
-    match migrate_bplustree_databases_with_marker(&roots, &working_dir) {
+    match migrate_bplustree_databases_with_marker(&roots, &storage_dir) {
         Ok(stats) => {
             if stats.skipped_by_marker {
                 info!("B+Tree startup migration skipped (marker already present)");
@@ -260,7 +256,7 @@ fn print_info(app_config: &AppConfig) {
     let paths = <Arc<ArcSwap<ConfigPaths>> as Access<ConfigPaths>>::load(&app_config.paths);
     info!("Current time: {}", chrono::offset::Local::now().format("%Y-%m-%d %H:%M:%S"));
     info!("Temp dir: {}", tempfile::env::temp_dir().display());
-    info!("Working dir: {:?}", &config.working_dir);
+    info!("Storage dir: {:?}", &config.storage_dir);
     info!("Config dir: {:?}", &paths.config_path);
     info!("Config file: {:?}", &paths.config_file_path);
     info!("Source file: {:?}", &paths.sources_file_path);
@@ -281,7 +277,7 @@ fn print_info(app_config: &AppConfig) {
 
     if let Some(cache) = config.reverse_proxy.as_ref().and_then(|r| r.cache.as_ref()) {
         if cache.enabled {
-            info!("Cache dir: {}", cache.dir);
+            info!("Cache dir: {}", cache.directory);
         }
     }
     if let Some(metadata_update) = config.metadata_update.as_ref() {
@@ -293,11 +289,31 @@ fn print_info(app_config: &AppConfig) {
 }
 
 fn get_file_paths(args: &Args) -> ConfigPaths {
-    let raw_path = args
-        .config_path
+    let resolve_storage_path = |home_path: &str, storage_dir: Option<&str>| {
+        let path = storage_dir.map(str::trim).filter(|value| !value.is_empty()).map(PathBuf::from).map_or_else(
+            || utils::get_default_path_for_home(Path::new(home_path), DEFAULT_STORAGE_DIR),
+            |configured_path| {
+                if configured_path.is_relative() {
+                    PathBuf::from(home_path).join(configured_path)
+                } else {
+                    configured_path
+                }
+            },
+        );
+        utils::resolve_directory_path(path.to_string_lossy().as_ref())
+    };
+
+    let home_path = args
+        .home
         .as_ref()
         .filter(|p| !p.trim().is_empty())
-        .map_or_else(utils::get_default_config_path, |p| resolve_env_var(p));
+        .map_or_else(utils::get_home_path, |p| PathBuf::from(resolve_env_var(p)));
+    let home_path = utils::resolve_directory_path(home_path.to_string_lossy().as_ref());
+
+    let raw_path = args.config_path.as_ref().filter(|p| !p.trim().is_empty()).map_or_else(
+        || utils::get_default_path_for_home(Path::new(&home_path), CONFIG_PATH).to_string_lossy().to_string(),
+        |p| resolve_env_var(p),
+    );
     let config_path: String = utils::resolve_directory_path(&raw_path);
 
     let config_file: String = resolve_env_var(
@@ -318,11 +334,27 @@ fn get_file_paths(args: &Args) -> ConfigPaths {
             .as_ref()
             .map_or_else(|| utils::get_default_sources_file_path(&config_path), ToString::to_string),
     );
-    let mappings_file = args.mapping_file.as_ref().map(|p| resolve_env_var(p));
-    let template_file = args.template_file.as_ref().map(|p| resolve_env_var(p));
+    let mappings_file = args.mapping_file.as_ref().map(|p| {
+        let path = resolve_env_var(p);
+        utils::resolve_mapping_file_path(config_path.as_str(), Some(path.as_str()))
+    });
+    let template_file = args.template_file.as_ref().map(|p| {
+        let path = resolve_env_var(p);
+        utils::resolve_template_file_path(config_path.as_str(), Some(path.as_str()))
+    });
+    let storage_path = if Path::new(&config_file).exists() {
+        match utils::read_config_file(&config_file, true, false) {
+            Ok(cfg) => resolve_storage_path(&home_path, cfg.storage_dir.as_deref()),
+            Err(err) => exit!("Can't read config file {} while resolving storage path: {err}", config_file),
+        }
+    } else {
+        resolve_storage_path(&home_path, None)
+    };
 
     ConfigPaths {
+        home_path,
         config_path,
+        storage_path,
         config_file_path: config_file,
         sources_file_path: sources_file,
         mapping_file_path: mappings_file, // need to be set after config read

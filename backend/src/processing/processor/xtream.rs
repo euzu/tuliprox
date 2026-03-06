@@ -21,8 +21,8 @@ pub async fn update_live_stream_metadata(
     _active_handle: Option<&ProviderHandle>,
     _active_provider: &Arc<ActiveProviderManager>,
 ) -> Result<Option<LiveStreamProperties>, TuliproxError> {
-    let working_dir = &app_config.config.load().working_dir;
-    let storage_path = get_input_storage_path(&input.name, working_dir).await
+    let storage_dir = &app_config.config.load().storage_dir;
+    let storage_path = get_input_storage_path(&input.name, storage_dir).await
         .map_err(|e| shared::error::info_err!("Storage path error: {e}"))?;
 
     // Try to load existing info first to preserve data

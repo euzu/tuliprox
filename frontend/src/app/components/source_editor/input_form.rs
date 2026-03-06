@@ -179,6 +179,14 @@ generate_form_reducer!(
     }
 );
 
+fn apply_parsed_input_type(staged_input_state: &UseReducerHandle<StagedInputDtoFormState>, selected: Option<&str>) {
+    let input_type =
+        selected.and_then(|value| value.parse::<InputType>().ok()).unwrap_or(staged_input_state.form.input_type);
+    if staged_input_state.form.input_type != input_type {
+        staged_input_state.dispatch(StagedInputFormAction::InputType(input_type));
+    }
+}
+
 #[derive(Properties, PartialEq, Clone)]
 pub struct ConfigInputViewProps {
     #[prop_or_default]
@@ -631,16 +639,18 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                         multi_select={false}
                         on_select={Callback::from(move |(_, selections):(String, DropDownSelection)| {
                            match selections {
-                            DropDownSelection::Empty => {
-                                   staged_input_state_2.dispatch(StagedInputFormAction::InputType(InputType::Xtream));
-                            }
+                            DropDownSelection::Empty => {}
                             DropDownSelection::Single(option) => {
-                                staged_input_state_2.dispatch(StagedInputFormAction::InputType(option.parse::<InputType>().unwrap_or(InputType::Xtream)));
+                                apply_parsed_input_type(
+                                    &staged_input_state_2,
+                                    Some(option.as_str()),
+                                );
                             }
                             DropDownSelection::Multi(options) => {
-                              if let Some(first) = options.first() {
-                                staged_input_state_2.dispatch(StagedInputFormAction::InputType(first.parse::<InputType>().unwrap_or(InputType::Xtream)));
-                               }
+                                apply_parsed_input_type(
+                                    &staged_input_state_2,
+                                    options.first().map(String::as_str),
+                                );
                              }
                            }
                         })}
@@ -896,7 +906,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                                 })
                             }
                             </div>
-                            <TextButton
+                        <TextButton
                                 class="primary"
                                 name="add_epg_source"
                                 icon="Add"

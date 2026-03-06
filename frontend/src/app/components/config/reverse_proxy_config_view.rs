@@ -70,7 +70,7 @@ generate_form_reducer!(
     fields {
         Enabled => enabled: bool,
         Size => size: Option<String>,
-        Dir => dir: Option<String>,
+        Dir => directory: Option<String>,
     }
 );
 
@@ -389,7 +389,7 @@ pub fn ReverseProxyConfigView() -> Html {
                 <h1>{translate.t(LABEL_CACHE)}</h1>
                 { config_field_bool!(cache_state.form, translate.t(LABEL_ENABLED), enabled) }
                 { config_field_optional!(cache_state.form, translate.t(LABEL_SIZE), size) }
-                { config_field_optional!(cache_state.form, translate.t(LABEL_DIRECTORY), dir) }
+                { config_field_optional!(cache_state.form, translate.t(LABEL_DIRECTORY), directory) }
             </Card>
         }
     };
@@ -543,7 +543,7 @@ pub fn ReverseProxyConfigView() -> Html {
             <h1>{translate.t(LABEL_CACHE)}</h1>
             { edit_field_bool!(cache_state, translate.t(LABEL_ENABLED), enabled, CacheConfigFormAction::Enabled) }
             { edit_field_text_option!(cache_state, translate.t(LABEL_SIZE), size, CacheConfigFormAction::Size) }
-            { edit_field_text_option!(cache_state, translate.t(LABEL_DIRECTORY), dir, CacheConfigFormAction::Dir) }
+            { edit_field_text_option!(cache_state, translate.t(LABEL_DIRECTORY), directory, CacheConfigFormAction::Dir) }
           </Card>
         }
     };

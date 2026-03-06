@@ -61,6 +61,7 @@ Define complex filters using expressive logic, e.g.:
 Usage: tuliprox [OPTIONS]
 
 Options:
+  -H, --home <HOME>                The home directory (base for config, storage, backup, downloads, web)
   -p, --config-path <CONFIG_PATH>  The config directory
   -c, --config <CONFIG_FILE>       The config file
   -i, --source <SOURCE_FILE>       The source config file
@@ -83,10 +84,27 @@ Options:
 
 ```
 
+Home directory resolution order:
+
+1. `--home`
+2. `TULIPROX_HOME` environment variable
+3. Directory of the `tuliprox` binary
+
+All relative paths that are resolved against `home` (including `storage_dir` when configured as relative) use this order.
+
+Default layout under `{home}`:
+
+- `{home}/config`
+- `{home}/data` (`storage_dir` default)
+- `{home}/data/backup` (`backup_dir` default = `{storage_dir}/backup`)
+- `{home}/downloads`
+- `{home}/web`
+
 ## 1. `config.yml`
 
-For running in cli mode, you need to define a `config.yml` file which can be inside config directory next to the executable or provided with the
-`-c` cli argument.
+For CLI mode, `config.yml` is loaded from `{home}/config/config.yml` by default.
+`{home}` is resolved in this order: `--home` -> `TULIPROX_HOME` -> directory of the `tuliprox` binary.
+You can override the config file with `-c` (and config directory with `-p`).
 
 For running specific targets use the `-t` argument like `tuliprox -t <target_name> -t <other_target_name>`.
 Target names should be provided in the config. The -t option overrides `enabled` attributes of `input` and `target` elements.
@@ -95,7 +113,7 @@ This means, even disabled inputs and targets are processed when the given target
 Top level entries in the config files are:
 
 - `api`
-- `working_dir`
+- `storage_dir`
 - `default_user_agent` _optional_, used as fallback for upstream requests when no `User-Agent` is provided by input headers or the client request
   (client request overrides it).
 - `process_parallel` _optional_
@@ -132,12 +150,16 @@ If you process the same provider multiple times each thread uses a connection. K
 `api` contains the `server-mode` settings. To run `tuliprox` in `server-mode` you need to start it with the `-s`cli argument.
 -`api: {host: localhost, port: 8901, web_root: ./web}`
 
-### 1.3. `working_dir`
+`web_root` follows the same home-based resolution rules:
+with `web_root: ./web`, the effective path is `{home}/web` (`--home` -> `TULIPROX_HOME` -> binary directory).
 
-`working_dir` is the directory where files are written which are given with relative paths.
--`working_dir: ./data`
+### 1.3. `storage_dir`
 
-With this configuration, you should create a `data` directory where you execute the binary.
+`storage_dir` is the directory where files are written which are given with relative paths.
+-`storage_dir: ./data`
+
+`storage_dir` is resolved relative to `home` (resolved via `--home`, then `TULIPROX_HOME`, then binary directory).
+With `storage_dir: ./data`, the effective directory is `{home}/data`.
 
 Be aware that different configurations (e.g. user bouquets) along the playlists are stored in this directory.
 
@@ -208,7 +230,6 @@ Each provider can optionally enable a `dns` block:
 - `overrides`: static host -> IP list (used before DNS lookup)
 - `on_resolve_error`: `keep_last_good` | `fallback_to_hostname` (default: `keep_last_good`)
 - `on_connect_error`: `try_next_ip` | `rotate_provider_url` (default: `try_next_ip`)
-- `resolved`: runtime-managed resolved snapshot per host
 
 Behavior:
 
@@ -219,12 +240,12 @@ Behavior:
 - `keep_vhost=true`: `Host` header keeps `hostname[:port]`.
 - On connect/timeout errors and `on_connect_error=try_next_ip`, Tuliprox tries the next IP for the same host before rotating provider URL.
 
-### 1.4.4 `dns.resolved` persistence and visibility
+### 1.4.4 DNS resolved IP persistence
 
-- `dns.resolved` is runtime-managed.
-- It is exposed in `GET /api/v1/config`.
-- It is also written back to `source.yml` and overwritten on each DNS refresh cycle.
-- Save endpoints treat `dns.resolved` as managed data and do not accept it as user-controlled input.
+Resolved IPs are persisted to `{storage_dir}/provider_dns_resolved.json` (not to `source.yml`).
+This file is written atomically after each DNS refresh cycle and read at startup to seed DNS caches
+before the background resolver completes its first cycle. On config hot-reloads, DNS caches are
+carried over from the previous provider instances so that resolved IPs are available immediately.
 
 ### 1.4.5 Provider Failover + DNS Configuration Example
 
@@ -253,10 +274,6 @@ provider:
       overrides:
         stable.golden-bridge.con:
           - 203.0.113.10
-      # runtime-managed, written by tuliprox:
-      resolved:
-        hello.provider.me:
-          - 203.0.113.20
 inputs:
   - name: my_input
     type: xtream
@@ -477,7 +494,7 @@ metadata_update:
 
 **Group overview:**
 
-- `cache_path` (default `metadata`): Directory where TMDB cache files and metadata are stored. Relative paths are resolved against `working_dir`.
+- `cache_path` (default `metadata`): Directory where TMDB cache files and metadata are stored. Relative paths are resolved against `storage_dir`.
   Used by all metadata resolution paths (Xtream VOD/Series, local library).
 - `resolve`: Controls retries for metadata lookup tasks (for example title/date/TMDB resolution).
 - `probe`: Controls retries and cooldown for technical stream probing tasks.
@@ -653,12 +670,25 @@ schedules:
   - xtream
 - schedule: "0  0  20  *  *  *  *"
   type: LibraryScan
+- schedule: "0  0  4  *  *  1  *"
+  type: GeoIpUpdate
+- schedule: "0  0  4  1  *  *  *"
+  type: GeoIpUpdate
 ```
 
 The `type` attribute defines the task to be executed and defaults to `PlaylistUpdate` if omitted. Possible values:
 
 - `PlaylistUpdate`: Updates the target playlists (optionally filtered by `targets`).
 - `LibraryScan`: Triggers a scan of the local media library (requires `library` configuration to be enabled).
+- `GeoIpUpdate`: Downloads and rebuilds the Geo-IP database file (requires `reverse_proxy.geoip.enabled: true`).
+
+Cron fields for Tuliprox schedules always start with **seconds**:
+
+```yaml
+# sec  min  hour  day-of-month  month  day-of-week  year
+schedule: "0  0  4  *  *  1  *"   # every Monday at 04:00:00
+schedule: "0  0  4  1  * * *"     # every 1st of the month at 04:00:00
+```
 
 At the given times the update is started. Do not start it every second or minute.
 You could be banned from your server. Twice a day should be enough.
@@ -741,7 +771,7 @@ This is useful for players that might time out or error if they receive data and
 
 #### 1.7.2 `cache`
 
-LRU-Cache is for resources. If it is `enabled`, the resources/images are persisted in the given `dir`. If the cache size exceeds `size`,
+LRU-Cache is for resources. If it is `enabled`, the resources/images are persisted in the given `directory`. If the cache size exceeds `size`,
 In an LRU cache, the least recently used items are evicted to make room for new items if the cache `size`is exceeded.
 
 #### 1.7.3 `resource_rewrite_disabled`
@@ -762,7 +792,7 @@ reverse_proxy:
   cache:
     enabled: true
     size: 1GB
-    dir: ./cache
+    directory: ./cache
 ```
 
 #### 1.7.4 `rate_limit`
@@ -983,12 +1013,16 @@ The encrypted pasword needs to be added manually into the users file.
 
 ```yaml
 threads: 4
-working_dir: ./data
+storage_dir: ./data
 api:
   host: localhost
   port: 8901
   web_root: ./web
 ```
+
+Relative paths in this example are resolved under `{home}`.
+So `storage_dir: ./data` -> `{home}/data` and `web_root: ./web` -> `{home}/web`
+(`--home` -> `TULIPROX_HOME` -> binary directory).
 
 ### 1.12 `user_access_control`
 
@@ -1463,6 +1497,23 @@ inputs:
       probe_stream: true
 ```
 
+#### Input URL Schemes (`inputs[].url`)
+
+Tuliprox supports the following URL schemes for input sources:
+
+- `http://...` / `https://...`: Download from remote provider endpoints.
+- `file://...`: Read from a local file.
+- `provider://<provider_name>/...`: Resolve the URL via `provider` definitions (supports failover/rotation).
+- `batch://...`: CSV source for batch aliases (e.g. `batch:///path/file.csv` or `batch://./file.csv`).
+
+Notes:
+
+- If `type` is `m3u` or `xtream` and the URL starts with `batch://`, Tuliprox automatically treats it as `m3u_batch` / `xtream_batch`.
+- For `m3u_batch` and `xtream_batch`, only local CSV sources are supported:
+  - `batch://...` or
+  - plain local filesystem path (absolute/relative).
+- For batch inputs, `provider://...` and other URI schemes such as `http(s)://...` or `file://...` are rejected.
+
 Input alias definition for same provider with same content but different credentials.
 `max_connections` default is unlimited
 
@@ -1488,7 +1539,7 @@ sources:
 
 Input aliases can be defined as batches in csv files with `;` separator.
 There are 2 batch input types  `xtream_batch` and `m3u_batch`.
-Batch inputs are file-based only: use a local path (`/path/file.csv`, `./file.csv`) or `file://...`.
+Batch inputs use the `batch://` URL scheme: `batch:///path/file.csv` (absolute) or `batch://./file.csv` (relative).
 
 #### `XtreamBatch`
 
@@ -1496,7 +1547,7 @@ Batch inputs are file-based only: use a local path (`/path/file.csv`, `./file.cs
 inputs:
   - type: xtream_batch
     name: my_provider # Mandatory: used for playlist UUID generation
-    url: 'file:///home/tuliprox/config/my_provider_batch.csv'
+    url: 'batch:///home/tuliprox/config/my_provider_batch.csv'
 sources:
   - inputs:
     - my_provider
@@ -1520,7 +1571,7 @@ This is necessary because of playlist uuid generation and assigning same channel
 ```yaml
 inputs:
   - type: m3u_batch
-    url: 'file:///home/tuliprox/config/my_provider_batch.csv'
+    url: 'batch:///home/tuliprox/config/my_provider_batch.csv'
 sources:
   - inputs:
       - m3u_batch
@@ -2993,25 +3044,30 @@ The provider gives you:
 - epg_url: `http://fantastic.provider.xyz:8080/xmltv.php?username=tvjunkie&password=junkie.secret`
 
 To use `tuliprox` you need to create the configuration.
-The configuration consist of 4 files.
+The configuration consists of 3 required files and up to 2 optional files.
+
+Required files:
 
 - config.yml
 - source.yml
-- mapping.yml
 - api-proxy.yml
 
-The file `mapping.yml`is optional and only needed if you want to do something linke renaming titles or changing attributes.
+Optional files:
+
+- mapping.yml (for advanced transformations like renaming titles or changing attributes)
+- template.yml (for centralized pattern reuse)
 
 Lets start with `config.yml`. An example basic configuration is:
 
 ```yaml
 api: {host: 0.0.0.0, port: 8901, web_root: ./web}
-working_dir: ./data
+storage_dir: ./data
 update_on_boot: true
 ```
 
-This configuration starts `tuliprox`and listens on the 8901 port. The downloaded playlists are stored inside the `data`-folder in the current working
-directory.
+This configuration starts `tuliprox`and listens on the 8901 port. The downloaded playlists are stored inside the `data` folder under the resolved
+home directory (`--home`, then `TULIPROX_HOME`, then binary directory), i.e. `{home}/data`.
+`web_root: ./web` resolves to `{home}/web` with the same order.
 The property `update_on_boot` is optional and can be helpful in the beginning until you have found a working configuration. I prefer to set it to
 false.
 

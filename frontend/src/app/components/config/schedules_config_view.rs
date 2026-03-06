@@ -188,6 +188,7 @@ pub fn SchedulesConfigView() -> Html {
                         <td>{ match entry.task_type {
                             ScheduleTaskType::PlaylistUpdate => translate.t("LABEL.PLAYLIST_UPDATE"),
                             ScheduleTaskType::LibraryScan => translate.t("LABEL.LIBRARY"),
+                            ScheduleTaskType::GeoIpUpdate => translate.t("LABEL.GEOIP"),
                         }}</td>
                         <td>
                             <div class="tp__config-view__tags">
@@ -246,6 +247,11 @@ pub fn SchedulesConfigView() -> Html {
                 label: html! { translate.t("LABEL.LIBRARY") },
                 selected: *selected_type == ScheduleTaskType::LibraryScan,
             },
+            DropDownOption {
+                id: "GeoIpUpdate".to_string(),
+                label: html! { translate.t("LABEL.GEOIP") },
+                selected: *selected_type == ScheduleTaskType::GeoIpUpdate,
+            },
         ]);
 
         html! {
@@ -260,6 +266,8 @@ pub fn SchedulesConfigView() -> Html {
                               set_selected_type.set(ScheduleTaskType::PlaylistUpdate);
                           } else if option == "LibraryScan" {
                               set_selected_type.set(ScheduleTaskType::LibraryScan);
+                          } else if option == "GeoIpUpdate" {
+                              set_selected_type.set(ScheduleTaskType::GeoIpUpdate);
                           }
                       })}
                       options={types}

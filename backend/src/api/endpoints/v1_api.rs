@@ -10,22 +10,16 @@ use crate::{
         model::AppState,
     },
     auth::validator_admin,
-    model::InputSource,
-    repository::get_geoip_path,
-    utils::{ip_checker::get_ips, request::download_text_content, GeoIp},
+    processing::geoip::{update_geoip_db, GeoIpUpdateError},
+    utils::ip_checker::get_ips,
     VERSION,
 };
 use axum::response::IntoResponse;
-use log::{error, info};
 use shared::{
-    model::{default_geoip_url, InputFetchMethod, IpCheckDto, StatusCheck},
-    utils::{concat_path_leading_slash, Internable},
+    model::{IpCheckDto, StatusCheck},
+    utils::concat_path_leading_slash,
 };
-use std::{
-    collections::{BTreeMap, HashMap},
-    io::Cursor,
-    sync::Arc,
-};
+use std::{collections::BTreeMap, sync::Arc};
 
 async fn create_ipinfo_check(app_state: &Arc<AppState>) -> Option<(Option<String>, Option<String>)> {
     let config = app_state.app_config.config.load();
@@ -85,63 +79,16 @@ async fn streams(
 async fn geoip_update(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
 ) -> axum::response::Response {
-    let config = app_state.app_config.config.load();
-    if let Some(geoip) = config.reverse_proxy.as_ref().and_then(|r| r.geoip.as_ref()) {
-        if geoip.enabled {
-            let geoip_db_path = &*get_geoip_path(&config.working_dir);
-            let _file_lock = app_state.app_config.file_locks.write_lock(geoip_db_path).await;
-
-            let url = if geoip.url.trim().is_empty() { default_geoip_url() } else { geoip.url.clone() };
-            let input_source = InputSource {
-                name: "GeoIP".intern(),
-                url,
-                provider: None,
-                username: None,
-                password: None,
-                method: InputFetchMethod::GET,
-                headers: HashMap::default(),
-            };
-            return match download_text_content(
-                &app_state.app_config,
-                &app_state.http_client.load(),
-                &input_source,
-                None,
-                None,
-                false,
-            )
-            .await
-            {
-                Ok((content, _)) => {
-                    let reader = Cursor::new(content);
-                    let mut geoip = GeoIp::new();
-                    let result = {
-                        match geoip.import_ipv4_from_csv(reader, geoip_db_path) {
-                            Ok(size) => (Some(size), None),
-                            Err(err) => (None, Some(err)),
-                        }
-                    };
-
-                    return match result {
-                        (Some(_), None) => {
-                            info!("GeoIp db updated");
-                            app_state.geoip.store(Some(Arc::new(geoip)));
-                            axum::http::StatusCode::OK.into_response()
-                        }
-                        (None, Some(err)) => {
-                            error!("Failed to process geoip db: {err}");
-                            internal_server_error!()
-                        }
-                        _ => internal_server_error!(),
-                    };
-                }
-                Err(err) => {
-                    error!("Failed to download geoip db: {err}");
-                    axum::http::StatusCode::BAD_REQUEST.into_response()
-                }
-            };
+    match update_geoip_db(&app_state).await {
+        Ok(()) => axum::http::StatusCode::OK.into_response(),
+        Err(GeoIpUpdateError::Disabled | GeoIpUpdateError::DownloadFailed(_)) => {
+            axum::http::StatusCode::BAD_REQUEST.into_response()
+        }
+        Err(err) => {
+            log::error!("GeoIp update failed: {err}");
+            internal_server_error!()
         }
     }
-    axum::http::StatusCode::BAD_REQUEST.into_response()
 }
 
 async fn ipinfo(axum::extract::State(app_state): axum::extract::State<Arc<AppState>>) -> axum::response::Response {

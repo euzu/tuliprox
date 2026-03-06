@@ -27,9 +27,9 @@ pub struct InputStatus {
     pub clusters: HashMap<String, ClusterStatus>,
 }
 
-pub async fn resolve_input_storage_path(working_dir: &str, input_name: &str) -> PathBuf {
-    if let Ok(path) = get_input_storage_path(input_name, working_dir).await { path } else {
-        build_input_storage_path(input_name, working_dir)
+pub async fn resolve_input_storage_path(storage_dir: &str, input_name: &str) -> PathBuf {
+    if let Ok(path) = get_input_storage_path(input_name, storage_dir).await { path } else {
+        build_input_storage_path(input_name, storage_dir)
     }
 }
 

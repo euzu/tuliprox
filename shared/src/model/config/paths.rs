@@ -2,7 +2,11 @@ use crate::utils::{is_blank_optional_string, is_empty_optional_vec};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ConfigPaths {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub home_path: String,
     pub config_path: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub storage_path: String,
     pub config_file_path: String,
     pub sources_file_path: String,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]

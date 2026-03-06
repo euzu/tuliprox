@@ -286,7 +286,7 @@
       "NAME": "Human readable name for this entry. Must be unique.",
       "PASSWORD": "Password or credential used for this account or service.",
       "PRIORITY": "The order of processing. Lower numbers mean higher priority (e.g. -1 is higher than 0).",
-      "URL": "Target URL for this input. Supports provider:// scheme for failover.",
+      "URL": "Input source URL. Supported schemes:\n\n```http(s)://\nfile://\nprovider://<provider>/...\nbatch://...(auto-switches m3u/xtream to batch types).```\n\nFor m3u_batch/xtream_batch only local CSV sources are allowed (batch://...).",
       "USERNAME": "Login username for this account or service."
     },
     "CONFIG_INPUT_ALIAS": {
@@ -425,7 +425,7 @@
       "UPDATE_ON_BOOT": "If enabled, Tuliprox triggers a full playlist update immediately upon startup. Helpful during initial setup, but usually set to false for stable operations.",
       "USER_ACCESS_CONTROL": "If enabled, the attributes (if set)\n\n- expiration date,\n- status and\n- max_connections\n\nare checked to permit or deny access for api users.",
       "USER_CONFIG_DIR": "Directory path where user-specific overrides and configuration files are stored.",
-      "WORKING_DIR": "The primary directory where Tuliprox stores its data files and databases."
+      "STORAGE_DIR": "The primary directory where Tuliprox stores its data files and databases."
     },
     "MESSAGING_CONFIG": {
       "NOTIFY_ON": "Select events (e.g. 'info', 'stats', 'error') that trigger notifications for this specific type.",
@@ -544,7 +544,7 @@
     "STAGED_INPUT": {
       "HEADERS": "Custom HTTP headers sent when retrieving this staged configuration.",
       "PASSWORD": "Password or credential used for this account or service.",
-      "URL": "Target URL for this setting.",
+      "URL": "Source URL for the staged input. Use http(s)://, file:// or provider://<provider>/... . Batch URLs are not supported for staged inputs.",
       "USERNAME": "Login username for this account or service."
     },
     "STREAM_BUFFER_CONFIG": {
@@ -1138,7 +1138,7 @@
     "WEB_UI_CONFIG": "Web-Ui",
     "WEB_UI_PATH": "Path prefix",
     "WELCOME": "Welcome",
-    "WORKING_DIR": "Working dir",
+    "STORAGE_DIR": "Storage dir",
     "XC": "xc",
     "XTREAM": "xtream",
     "XTREAM_BATCH": "xc batch",

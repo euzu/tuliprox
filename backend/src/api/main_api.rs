@@ -204,7 +204,7 @@ async fn create_shared_data(
 
     let use_geoip = config.is_geoip_enabled();
     let geoip = if use_geoip {
-        let path = get_geoip_path(&config.working_dir);
+        let path = get_geoip_path(&config.storage_dir);
         let _file_lock = app_config.file_locks.read_lock(&path).await;
         match GeoIp::load(&path) {
             Ok(db) => {

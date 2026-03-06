@@ -1,10 +1,11 @@
 use crate::{
     error::TuliproxError,
     info_err_res,
-    utils::{is_blank_optional_str, is_blank_optional_string, parse_size_base_2},
+    utils::{
+        is_blank_optional_str, is_blank_optional_string, is_blank_or_default_cache_dir, parse_size_base_2,
+        DEFAULT_CACHE_DIR,
+    },
 };
-use path_clean::PathClean;
-use std::path::PathBuf;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -13,27 +14,21 @@ pub struct CacheConfigDto {
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub size: Option<String>,
-    #[serde(default, skip_serializing_if = "is_blank_optional_string")]
-    pub dir: Option<String>,
+    #[serde(default, alias = "dir", skip_serializing_if = "is_blank_or_default_cache_dir")]
+    pub directory: Option<String>,
 }
 
 impl CacheConfigDto {
     pub fn is_empty(&self) -> bool {
-        !self.enabled && is_blank_optional_str(self.size.as_deref()) && is_blank_optional_str(self.dir.as_deref())
+        !self.enabled && is_blank_optional_str(self.size.as_deref()) && is_blank_optional_str(self.directory.as_deref())
     }
 
-    pub(crate) fn prepare(&mut self, working_dir: &str) -> Result<(), TuliproxError> {
+    pub(crate) fn prepare(&mut self, _storage_dir: &str) -> Result<(), TuliproxError> {
         if self.enabled {
-            let work_path = PathBuf::from(working_dir);
-            match self.dir.as_ref() {
-                None => self.dir = Some(work_path.join("cache").to_string_lossy().to_string()),
-                Some(work_dir) => {
-                    let mut cache_dir = work_dir.to_string();
-                    if PathBuf::from(&cache_dir).is_relative() {
-                        cache_dir = work_path.join(&cache_dir).clean().to_string_lossy().to_string();
-                    }
-                    self.dir = Some(cache_dir.to_string());
-                }
+            if is_blank_or_default_cache_dir(&self.directory) {
+                self.directory = Some(DEFAULT_CACHE_DIR.to_string());
+            } else if let Some(dir) = self.directory.as_ref() {
+                self.directory = Some(dir.trim().to_string());
             }
 
             if let Some(val) = self.size.as_ref() {
@@ -48,5 +43,38 @@ impl CacheConfigDto {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prepare_sets_default_cache_dir_when_enabled_and_missing() {
+        let mut cache = CacheConfigDto { enabled: true, directory: None, size: None };
+        cache.prepare("storage").expect("prepare should succeed");
+        assert_eq!(cache.directory.as_deref(), Some(DEFAULT_CACHE_DIR));
+    }
+
+    #[test]
+    fn prepare_keeps_custom_cache_dir_when_enabled() {
+        let mut cache = CacheConfigDto { enabled: true, directory: Some("custom-cache".to_string()), size: None };
+        cache.prepare("storage").expect("prepare should succeed");
+        assert_eq!(cache.directory.as_deref(), Some("custom-cache"));
+    }
+
+    #[test]
+    fn serializing_skips_default_cache_dir() {
+        let cache = CacheConfigDto { enabled: true, directory: Some(DEFAULT_CACHE_DIR.to_string()), size: None };
+        let serialized = serde_json::to_string(&cache).expect("cache serialization should succeed");
+        assert!(!serialized.contains("\"directory\""), "expected no dir field for default value, got: {serialized}");
+    }
+
+    #[test]
+    fn serializing_keeps_non_default_cache_dir() {
+        let cache = CacheConfigDto { enabled: true, directory: Some("custom-cache".to_string()), size: None };
+        let serialized = serde_json::to_string(&cache).expect("cache serialization should succeed");
+        assert!(serialized.contains("\"directory\""), "expected dir field for custom value, got: {serialized}");
     }
 }

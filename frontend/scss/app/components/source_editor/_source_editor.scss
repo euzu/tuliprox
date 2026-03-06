@@ -137,6 +137,14 @@
    cursor: pointer;
 }
 
+.tp__form-list {
+   display: flex;
+   flex-flow: column;
+   gap: var(--gap-default);
+   box-sizing: border-box;
+   overflow: hidden;
+}
+
 .tp__form-list__item-arrow-btn {
    svg {
       transform: scale(2);

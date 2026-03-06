@@ -7,7 +7,7 @@ use log::{error, warn};
 use shared::error::{string_to_io_error, to_io_error, TuliproxError};
 use shared::info_err;
 use shared::model::{ConfigInputAliasDto, InputType};
-use shared::utils::{get_credentials_from_url, get_credentials_from_url_str, parse_timestamp, sanitize_sensitive_info, Internable, PROVIDER_SCHEME_PREFIX};
+use shared::utils::{get_credentials_from_url, get_credentials_from_url_str, parse_timestamp, sanitize_sensitive_info, Internable, BATCH_SCHEME_PREFIX, PROVIDER_SCHEME_PREFIX};
 use std::io;
 use std::io::{BufRead, Cursor, Error};
 use std::path::{Path, PathBuf};
@@ -267,21 +267,23 @@ pub async fn csv_read_inputs(
 }
 
 pub fn get_csv_file_path(file_uri: &str) -> Result<PathBuf, Error> {
+    // Handle batch:// scheme: strip prefix and treat remainder as file path.
+    if let Some(path_str) = file_uri.strip_prefix(BATCH_SCHEME_PREFIX) {
+        let path = Path::new(path_str);
+        return if path.is_absolute() {
+            Ok(path.to_path_buf())
+        } else {
+            resolve_relative_path(path_str)
+        };
+    }
     let raw_path = Path::new(file_uri);
     if raw_path.is_absolute() {
         return Ok(raw_path.to_path_buf());
     }
-    if let Ok(url) = file_uri.parse::<Url>() {
-        if url.scheme() == "file" {
-            match url.to_file_path() {
-                Ok(path) => Ok(path),
-                Err(()) => Err(string_to_io_error(format!("Could not open {file_uri}"))),
-            }
-        } else {
-            Err(string_to_io_error(format!(
-                "Only file:// is supported {file_uri}"
-            )))
-        }
+    if let Ok(_url) = file_uri.parse::<Url>() {
+        Err(string_to_io_error(format!(
+            "Unsupported URL scheme for batch CSV, use batch:// instead: {file_uri}"
+        )))
     } else {
         resolve_relative_path(file_uri)
     }

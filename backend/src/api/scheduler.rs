@@ -1,6 +1,10 @@
 use crate::{
-    api::{library_scan::{spawn_library_scan, LibraryScanTaskOptions}, model::AppState},
+    api::{
+        library_scan::{spawn_library_scan, LibraryScanTaskOptions},
+        model::AppState,
+    },
     model::{AppConfig, ProcessTargets, ScheduleConfig},
+    processing::geoip::{update_geoip_db, GeoIpUpdateError},
     processing::processor::exec_processing,
     utils::exit,
 };
@@ -39,6 +43,24 @@ pub fn exec_scheduler(
     let schedules: Vec<ScheduleConfig> =
         if let Some(schedules) = &config.schedules { schedules.clone() } else { vec![] };
     for schedule in schedules {
+        let task_enabled = match schedule.task_type {
+            ScheduleTaskType::PlaylistUpdate => true,
+            ScheduleTaskType::LibraryScan => config.library.as_ref().is_some_and(|library| library.enabled),
+            ScheduleTaskType::GeoIpUpdate => config
+                .reverse_proxy
+                .as_ref()
+                .and_then(|reverse_proxy| reverse_proxy.geoip.as_ref())
+                .is_some_and(|geoip| geoip.enabled),
+        };
+        if !task_enabled {
+            log::info!(
+                "Skipping disabled scheduled task {:?} ({})",
+                schedule.task_type,
+                schedule.schedule
+            );
+            continue;
+        }
+
         let expression = schedule.schedule.clone();
         let task_type = schedule.task_type;
         let exec_targets = get_process_targets(cfg, targets, schedule.targets.as_ref());
@@ -74,6 +96,9 @@ async fn start_scheduler(
                                 }
                                 ScheduleTaskType::LibraryScan => {
                                     run_library_scan(&client, &app_state);
+                                }
+                                ScheduleTaskType::GeoIpUpdate => {
+                                    run_geoip_update(&app_state);
                                 }
                             }
                         }
@@ -131,13 +156,24 @@ fn run_library_scan(client: &reqwest::Client, app_state: &Arc<AppState>) {
                     LibraryScanTaskOptions {
                         force_rescan: false,
                         message_prefix: "Scheduled ",
-                        working_dir: config.working_dir.clone(),
+                        storage_dir: config.storage_dir.clone(),
                     },
                     permit,
                 );
             }
         }
     }
+}
+
+fn run_geoip_update(app_state: &Arc<AppState>) {
+    let app_state = Arc::clone(app_state);
+    tokio::spawn(async move {
+        if let Err(err) = update_geoip_db(&app_state).await {
+            if !matches!(err, GeoIpUpdateError::Disabled) {
+                log::error!("Scheduled GeoIp update failed: {err}");
+            }
+        }
+    });
 }
 
 pub fn get_process_targets(

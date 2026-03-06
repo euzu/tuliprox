@@ -802,33 +802,23 @@ impl<'a> MapperContext<'a> {
                     BuiltInFunction::ToNumber
                     | BuiltInFunction::Template
                     | BuiltInFunction::First
-                    | BuiltInFunction::AddFavourite => {
-                        if args.len() > 1 {
-                            return info_err_res!(
-                                "Function accepts only one argument {:?}, {} given",
-                                name,
-                                args.len()
-                            );
-                        }
+                    | BuiltInFunction::AddFavourite
+                        if args.len() > 1 =>
+                    {
+                        return info_err_res!("Function accepts only one argument {:?}, {} given", name, args.len());
                     }
-                    BuiltInFunction::Split => {
-                        if args.len() != 2 {
-                            return info_err_res!("Function accepts two arguments {:?}, {} given", name, args.len());
-                        }
+                    BuiltInFunction::Split if args.len() != 2 => {
+                        return info_err_res!("Function accepts two arguments {:?}, {} given", name, args.len());
                     }
-                    BuiltInFunction::Replace => {
-                        if args.len() != 3 {
-                            return info_err_res!("Function accepts three arguments {:?}, {} given", name, args.len());
-                        }
+                    BuiltInFunction::Replace if args.len() != 3 => {
+                        return info_err_res!("Function accepts three arguments {:?}, {} given", name, args.len());
                     }
-                    BuiltInFunction::Pad => {
-                        if !(args.len() == 3 || args.len() == 4) {
-                            return info_err_res!(
-                                "Function accepts three or four arguments {:?}, {} given",
-                                name,
-                                args.len()
-                            );
-                        }
+                    BuiltInFunction::Pad if !(args.len() == 3 || args.len() == 4) => {
+                        return info_err_res!(
+                            "Function accepts three or four arguments {:?}, {} given",
+                            name,
+                            args.len()
+                        );
                     }
                     _ => {}
                 }

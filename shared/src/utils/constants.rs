@@ -7,6 +7,14 @@ use std::{
 
 pub const DEFAULT_HOME_ENV_VAR: &str = "TULIPROX_HOME";
 pub const DEFAULT_WEB_ROOT_ENV_VAR: &str = "TULIPROX_WEB_ROOT";
+pub const DEFAULT_USER_AGENT: &str = "VLC/3.0.16 LibVLC/3.0.16";
+pub const DEFAULT_BACKUP_DIR: &str = "backup";
+pub const DEFAULT_CACHE_DIR: &str = "cache";
+pub const DEFAULT_STORAGE_TEMP_DIR: &str = "tmp";
+pub const DEFAULT_USER_CONFIG_DIR: &str = "user_config";
+pub const DEFAULT_DOWNLOAD_DIR: &str = "downloads";
+pub const DEFAULT_CUSTOM_STREAM_RESPONSE_PATH: &str = "resources";
+pub const DNS_RESOLVED_FILE: &str = "provider_dns_resolved.json";
 pub const USER_FILE: &str = "user.txt";
 pub const CONFIG_PATH: &str = "config";
 pub const CONFIG_FILE: &str = "config.yml";
@@ -15,7 +23,7 @@ pub const MAPPING_FILE: &str = "mapping.yml";
 pub const TEMPLATE_FILE: &str = "template.yml";
 pub const API_PROXY_FILE: &str = "api-proxy.yml";
 pub const DEFAULT_WEB_DIR: &str = "web";
-pub const DEFAULT_WORKING_DIR: &str = "data";
+pub const DEFAULT_STORAGE_DIR: &str = "data"; // TODO rename to storage and use data for config, storage, ...
 pub const DEFAULT_PORT: u16 = 8901;
 pub const ENCODING_GZIP: &str = "gzip";
 pub const ENCODING_DEFLATE: &str = "deflate";
@@ -30,6 +38,8 @@ pub const HLS_EXT_QUERY: &str = ".m3u8?";
 pub const HLS_EXT_FRAGMENT: &str = ".m3u8#";
 pub const DASH_EXT_QUERY: &str = ".mpd?";
 pub const DASH_EXT_FRAGMENT: &str = ".mpd#";
+
+pub const DEFAULT_EPISODE_PATTERN: &str = r".*(?P<episode>[Ss]\d{1,2}(.*?)[Ee]\d{1,2}).*";
 
 pub const FILENAME_TRIM_PATTERNS: &[char] = &['.', '-', '_'];
 
