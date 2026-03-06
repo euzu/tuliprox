@@ -20,7 +20,7 @@ fn create_directories(cfg: &Config, temp_path: &Path) {
         cfg.backup_dir.clone(),
         cfg.user_config_dir.clone(),
         cfg.video.as_ref().and_then(|v| v.download.as_ref()).map(|d| d.directory.clone()),
-        cfg.reverse_proxy.as_ref().and_then(|r| r.cache.as_ref().and_then(|c| if c.enabled { Some(c.dir.clone()) } else { None })),
+        cfg.reverse_proxy.as_ref().and_then(|r| r.cache.as_ref().and_then(|c| if c.enabled { Some(c.directory.clone()) } else { None })),
         cfg.metadata_update.as_ref().map(|m| m.cache_path.clone()),
     ];
 
@@ -188,9 +188,9 @@ impl Config {
             return;
         }
 
-        let normalized = Self::normalize_storage_path(raw_storage_dir, &self.storage_dir, &cache.dir, DEFAULT_CACHE_DIR)
-            .unwrap_or_else(|| PathBuf::from(cache.dir.trim()));
-        cache.dir = normalized.clean().to_string_lossy().to_string();
+        let normalized = Self::normalize_storage_path(raw_storage_dir, &self.storage_dir, &cache.directory, DEFAULT_CACHE_DIR)
+            .unwrap_or_else(|| PathBuf::from(cache.directory.trim()));
+        cache.directory = normalized.clean().to_string_lossy().to_string();
     }
 
     fn prepare_directories(&mut self, home_path: &str) {

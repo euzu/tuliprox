@@ -1,8 +1,9 @@
 use crate::{
     model::{ConfigTargetOptions, LibraryMetadataFormat, MetadataUpdateConfigDto, ProcessingOrder, VideoConfigDto},
     utils::{
-        CONFIG_PATH, DEFAULT_BACKUP_DIR, DEFAULT_CACHE_DIR, DEFAULT_DOWNLOAD_DIR, DEFAULT_STORAGE_DIR,
-        DEFAULT_USER_AGENT, DEFAULT_USER_CONFIG_DIR, DEFAULT_WEB_DIR, MAPPING_FILE, TEMPLATE_FILE,
+        CONFIG_PATH, DEFAULT_BACKUP_DIR, DEFAULT_CACHE_DIR, DEFAULT_DOWNLOAD_DIR, DEFAULT_EPISODE_PATTERN,
+        DEFAULT_STORAGE_DIR, DEFAULT_USER_AGENT, DEFAULT_USER_CONFIG_DIR, DEFAULT_WEB_DIR, MAPPING_FILE, TEMPLATE_FILE,
+        USER_FILE,
     },
 };
 use std::sync::Arc;
@@ -247,6 +248,13 @@ pub fn is_default_dir_path(value: &str, default_dir: &str) -> bool {
 pub fn is_blank_or_default_download_dir(path: &Option<String>) -> bool {
     path.as_ref().is_none_or(|value| value.trim().is_empty() || is_default_dir_path(value, DEFAULT_DOWNLOAD_DIR))
 }
+pub fn default_download_dir() -> Option<String> { Some(DEFAULT_DOWNLOAD_DIR.to_string()) }
+
+pub fn default_episode_pattern() -> Option<String> { Some(DEFAULT_EPISODE_PATTERN.to_string()) }
+
+pub fn is_blank_or_default_episode_pattern(path: &Option<String>) -> bool {
+    path.as_ref().is_none_or(|value| value.trim().is_empty() || value.trim() == DEFAULT_EPISODE_PATTERN)
+}
 
 pub fn is_blank_or_default_cache_dir(path: &Option<String>) -> bool {
     path.as_ref().is_none_or(|value| value.trim().is_empty() || is_default_dir_path(value, DEFAULT_CACHE_DIR))
@@ -284,6 +292,10 @@ pub fn is_blank_or_default_backup_dir(path: &Option<String>) -> bool {
 
 pub fn is_blank_or_default_user_config_dir(path: &Option<String>) -> bool {
     path.as_ref().is_none_or(|value| value.trim().is_empty() || is_default_dir_path(value, DEFAULT_USER_CONFIG_DIR))
+}
+
+pub fn is_blank_or_default_user_file_path(path: &Option<String>) -> bool {
+    path.as_ref().is_none_or(|value| value.trim().is_empty() || is_default_config_file_path(value, USER_FILE))
 }
 
 pub fn normalize_optional_dir(path: &Option<String>, default_dir: &str) -> Option<String> {

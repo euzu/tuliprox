@@ -2,9 +2,9 @@ use crate::{
     error::TuliproxError,
     info_err_res,
     utils::{
-        default_supported_video_extensions, is_blank_optional_str, is_blank_optional_string,
-        is_blank_or_default_download_dir, is_default_supported_video_extensions, is_false, DEFAULT_DOWNLOAD_DIR,
-        DEFAULT_USER_AGENT,
+        default_download_dir, default_episode_pattern, default_supported_video_extensions, is_blank_optional_str,
+        is_blank_optional_string, is_blank_or_default_download_dir, is_blank_or_default_episode_pattern,
+        is_default_supported_video_extensions, is_false, DEFAULT_USER_AGENT,
     },
 };
 use std::{borrow::BorrowMut, collections::HashMap};
@@ -14,12 +14,12 @@ use std::{borrow::BorrowMut, collections::HashMap};
 pub struct VideoDownloadConfigDto {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub headers: HashMap<String, String>,
-    #[serde(default, skip_serializing_if = "is_blank_or_default_download_dir")]
+    #[serde(default = "default_download_dir", skip_serializing_if = "is_blank_or_default_download_dir")]
     pub directory: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub organize_into_directories: bool,
     // TODO use ptt
-    #[serde(default, skip_serializing_if = "is_blank_optional_string")]
+    #[serde(default = "default_episode_pattern", skip_serializing_if = "is_blank_or_default_episode_pattern")]
     pub episode_pattern: Option<String>,
 }
 
@@ -27,8 +27,8 @@ impl VideoDownloadConfigDto {
     pub fn is_empty(&self) -> bool {
         !self.organize_into_directories
             && self.headers.is_empty()
-            && is_blank_optional_str(self.directory.as_deref())
-            && is_blank_optional_str(self.episode_pattern.as_deref())
+            && is_blank_or_default_download_dir(&self.directory)
+            && is_blank_or_default_episode_pattern(&self.episode_pattern)
     }
 }
 
@@ -70,7 +70,7 @@ impl VideoConfigDto {
             None => {}
             Some(downl) => {
                 if is_blank_or_default_download_dir(&downl.directory) {
-                    downl.directory = Some(DEFAULT_DOWNLOAD_DIR.to_string());
+                    downl.directory = default_download_dir();
                 } else if let Some(directory) = downl.directory.as_ref() {
                     downl.directory = Some(directory.trim().to_string());
                 }
@@ -78,6 +78,12 @@ impl VideoConfigDto {
                 if downl.headers.is_empty() {
                     downl.headers.borrow_mut().insert("Accept".to_string(), "video/*".to_string());
                     downl.headers.borrow_mut().insert("User-Agent".to_string(), DEFAULT_USER_AGENT.to_string());
+                }
+
+                if is_blank_or_default_episode_pattern(&downl.episode_pattern) {
+                    downl.episode_pattern = default_episode_pattern();
+                } else if let Some(episode_pattern) = downl.episode_pattern.as_ref() {
+                    downl.episode_pattern = Some(episode_pattern.trim().to_string());
                 }
 
                 if let Some(episode_pattern) = &downl.episode_pattern {
@@ -110,6 +116,23 @@ mod tests {
         video.prepare().expect("prepare should succeed");
         let download = video.download.expect("download should exist");
         assert_eq!(download.directory.as_deref(), Some(DEFAULT_DOWNLOAD_DIR));
+    }
+
+    #[test]
+    fn prepare_sets_default_episode_pattern_when_missing() {
+        let mut video = VideoConfigDto {
+            extensions: Vec::new(),
+            download: Some(VideoDownloadConfigDto {
+                headers: HashMap::new(),
+                directory: None,
+                organize_into_directories: false,
+                episode_pattern: None,
+            }),
+            web_search: None,
+        };
+        video.prepare().expect("prepare should succeed");
+        let download = video.download.expect("download should exist");
+        assert!(download.episode_pattern.is_some(), "expected default episode pattern to be set");
     }
 
     #[test]
@@ -154,5 +177,20 @@ mod tests {
         };
         let serialized = serde_json::to_string(&download).expect("download serialization should succeed");
         assert!(serialized.contains("\"directory\""), "expected directory field for custom value, got: {serialized}");
+    }
+
+    #[test]
+    fn serializing_skips_default_episode_pattern() {
+        let download = VideoDownloadConfigDto {
+            headers: HashMap::new(),
+            directory: None,
+            organize_into_directories: false,
+            episode_pattern: default_episode_pattern(),
+        };
+        let serialized = serde_json::to_string(&download).expect("download serialization should succeed");
+        assert!(
+            !serialized.contains("\"episode_pattern\""),
+            "expected no episode_pattern field for default value, got: {serialized}"
+        );
     }
 }

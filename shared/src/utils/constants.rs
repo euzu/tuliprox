@@ -39,6 +39,8 @@ pub const HLS_EXT_FRAGMENT: &str = ".m3u8#";
 pub const DASH_EXT_QUERY: &str = ".mpd?";
 pub const DASH_EXT_FRAGMENT: &str = ".mpd#";
 
+pub const DEFAULT_EPISODE_PATTERN: &str = r".*(?P<episode>[Ss]\d{1,2}(.*?)[Ee]\d{1,2}).*";
+
 pub const FILENAME_TRIM_PATTERNS: &[char] = &['.', '-', '_'];
 
 const SUPPORTED_RESPONSE_HEADERS: &[&str] = &[

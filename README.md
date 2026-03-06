@@ -758,7 +758,7 @@ This is useful for players that might time out or error if they receive data and
 
 #### 1.7.2 `cache`
 
-LRU-Cache is for resources. If it is `enabled`, the resources/images are persisted in the given `dir`. If the cache size exceeds `size`,
+LRU-Cache is for resources. If it is `enabled`, the resources/images are persisted in the given `directory`. If the cache size exceeds `size`,
 In an LRU cache, the least recently used items are evicted to make room for new items if the cache `size`is exceeded.
 
 #### 1.7.3 `resource_rewrite_disabled`
@@ -779,7 +779,7 @@ reverse_proxy:
   cache:
     enabled: true
     size: 1GB
-    dir: ./cache
+    directory: ./cache
 ```
 
 #### 1.7.4 `rate_limit`

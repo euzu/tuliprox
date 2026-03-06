@@ -277,7 +277,7 @@ fn print_info(app_config: &AppConfig) {
 
     if let Some(cache) = config.reverse_proxy.as_ref().and_then(|r| r.cache.as_ref()) {
         if cache.enabled {
-            info!("Cache dir: {}", cache.dir);
+            info!("Cache dir: {}", cache.directory);
         }
     }
     if let Some(metadata_update) = config.metadata_update.as_ref() {

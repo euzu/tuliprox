@@ -266,7 +266,7 @@ fn build_http_client_with_fallback(
 pub fn create_cache(config: &Config) -> Option<Arc<Mutex<LRUResourceCache>>> {
     let lru_cache = config.reverse_proxy.as_ref().and_then(|r| r.cache.as_ref()).and_then(|c| {
         if c.enabled {
-            Some(LRUResourceCache::new(c.size, c.dir.as_str()))
+            Some(LRUResourceCache::new(c.size, c.directory.as_str()))
         } else {
             None
         }
@@ -384,7 +384,7 @@ impl AppState {
             .reverse_proxy
             .as_ref()
             .and_then(|r| r.cache.as_ref())
-            .map_or((false, 0, ""), |c| (c.enabled, c.size, c.dir.as_str()));
+            .map_or((false, 0, ""), |c| (c.enabled, c.size, c.directory.as_str()));
 
         if let Some(cache) = self.cache.load().as_ref() {
             if enabled {
