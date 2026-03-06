@@ -6,9 +6,10 @@ use crate::{
         WebUiConfigDto,
     },
     utils::{
-        default_connect_timeout_secs, default_default_user_agent, default_main_backup_dir, default_main_mapping_path,
-        default_main_storage_dir, default_main_template_path, default_main_user_config_dir,
-        default_supported_video_extensions, is_blank_optional_string, is_blank_or_default_backup_dir,
+        default_connect_timeout_secs, default_custom_stream_response_path, default_default_user_agent,
+        default_main_backup_dir, default_main_mapping_path, default_main_storage_dir, default_main_template_path,
+        default_main_user_config_dir, default_supported_video_extensions, is_blank_optional_string,
+        is_blank_or_default_backup_dir, is_blank_or_default_custom_stream_response_path,
         is_blank_or_default_mapping_path, is_blank_or_default_storage_dir, is_blank_or_default_template_path,
         is_blank_or_default_user_config_dir, is_default_connect_timeout_secs, is_false,
         is_none_or_empty_metadata_update, is_none_or_empty_video, normalize_optional_config_file_path,
@@ -36,7 +37,10 @@ pub struct ConfigDto {
     pub mapping_path: Option<String>,
     #[serde(default, skip_serializing_if = "is_blank_or_default_template_path")]
     pub template_path: Option<String>,
-    #[serde(default, skip_serializing_if = "is_blank_optional_string")]
+    #[serde(
+        default = "default_custom_stream_response_path",
+        skip_serializing_if = "is_blank_or_default_custom_stream_response_path"
+    )]
     pub custom_stream_response_path: Option<String>,
     #[serde(default, skip_serializing_if = "is_none_or_empty_video")]
     pub video: Option<VideoConfigDto>,
