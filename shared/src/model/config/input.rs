@@ -433,7 +433,7 @@ impl ConfigInputAliasDto {
         }
         self.url = self.url.trim().to_string();
         if self.url.is_empty() {
-            return info_err_res!("url for input is mandatory");
+            return info_err_res!("url for input is mandatory (input: {})", self.name);
         }
         check_input_credentials!(self, input_type, true, true);
         check_input_connections!(self, input_type, true);
@@ -520,18 +520,18 @@ impl Default for ConfigInputDto {
 impl ConfigInputDto {
     pub fn new_with_type(input_type: InputType) -> Self { Self { input_type, ..Self::default() } }
 
-    fn normalize_input_type_from_aliases(&mut self) {
-        let has_aliases = self.aliases.as_ref().is_some_and(|aliases| !aliases.is_empty());
+    fn normalize_input_type_from_batch_url(&mut self) {
+        let is_batch_url = self.url.trim().starts_with(BATCH_SCHEME_PREFIX);
         self.input_type = match self.input_type {
             InputType::M3u | InputType::M3uBatch => {
-                if has_aliases {
+                if is_batch_url {
                     InputType::M3uBatch
                 } else {
                     InputType::M3u
                 }
             }
             InputType::Xtream | InputType::XtreamBatch => {
-                if has_aliases {
+                if is_batch_url {
                     InputType::XtreamBatch
                 } else {
                     InputType::Xtream
@@ -560,22 +560,14 @@ impl ConfigInputDto {
         }
 
         self.url = self.url.trim().to_string();
-        if self.url.starts_with(BATCH_SCHEME_PREFIX) {
-            match self.input_type {
-                InputType::M3u => {
-                    self.input_type = InputType::M3uBatch;
-                }
-                InputType::Xtream => {
-                    self.input_type = InputType::XtreamBatch;
-                }
-                _ => {}
-            }
-        } else if self.url.starts_with(PROVIDER_SCHEME_PREFIX)
+        self.normalize_input_type_from_batch_url();
+        if self.url.starts_with(PROVIDER_SCHEME_PREFIX)
             && matches!(self.input_type, InputType::M3uBatch | InputType::XtreamBatch)
         {
             return info_err_res!(
-                "input type {} does not support provider:// URLs for batch definitions; use batch:// URL",
-                self.input_type
+                "input type {} does not support provider:// URLs for batch definitions; use batch:// URL (input: {})",
+                self.input_type,
+                self.name
             );
         }
 
@@ -585,7 +577,11 @@ impl ConfigInputDto {
             if staged_input.enabled {
                 check_input_credentials!(staged_input, staged_input.input_type, true, true);
                 if !matches!(staged_input.input_type, InputType::M3u | InputType::Xtream) {
-                    return info_err_res!("Staged input can only be of type m3u or xtream");
+                    return info_err_res!(
+                        "Staged input can only be of type m3u or xtream (input: {}, staged: {})",
+                        self.name,
+                        staged_input.name
+                    );
                 }
                 if self.input_type.is_xtream() {
                     let live = staged_input.live_source.unwrap_or(ClusterSource::Staged);
@@ -606,13 +602,17 @@ impl ConfigInputDto {
 
                     if !live_uses_staged && !vod_uses_staged && !series_uses_staged {
                         return info_err_res!(
-                            "Staged input is enabled but no cluster source uses 'staged'; set at least one of live_source/vod_source/series_source to 'staged'"
+                            "Staged input is enabled but no cluster source uses 'staged'; set at least one of live_source/vod_source/series_source to 'staged' (input: {}, staged: {})",
+                            self.name,
+                            staged_input.name
                         );
                     }
 
                     if staged_input.input_type.is_m3u() && (vod_uses_staged || series_uses_staged) {
                         return info_err_res!(
-                            "Staged M3U input cannot provide VOD or Series clusters; use 'input' or 'skip'"
+                            "Staged M3U input cannot provide VOD or Series clusters; use 'input' or 'skip' (input: {}, staged: {})",
+                            self.name,
+                            staged_input.name
                         );
                     }
                 }
@@ -744,7 +744,7 @@ impl ConfigInputDto {
     }
 
     pub fn prepare_type(&mut self) -> Result<(), TuliproxError> {
-        self.normalize_input_type_from_aliases();
+        self.normalize_input_type_from_batch_url();
         if self.url.starts_with(PROVIDER_SCHEME_PREFIX)
             && matches!(self.input_type, InputType::M3uBatch | InputType::XtreamBatch)
         {
@@ -1128,6 +1128,32 @@ mod tests {
     }
 
     #[test]
+    fn prepare_keeps_xtream_type_when_alias_exists_without_batch_url() {
+        let mut dto = ConfigInputDto {
+            name: "input_alias_http".intern(),
+            input_type: InputType::XtreamBatch,
+            url: "http://localhost:3001".to_string(),
+            username: Some("root_user".to_string()),
+            password: Some("root_pass".to_string()),
+            aliases: Some(vec![ConfigInputAliasDto {
+                id: 1,
+                name: "alias_1".intern(),
+                url: "http://provider.example/stream".to_string(),
+                username: Some("u".to_string()),
+                password: Some("p".to_string()),
+                enabled: true,
+                ..ConfigInputAliasDto::default()
+            }]),
+            ..ConfigInputDto::default()
+        };
+
+        dto.prepare_type().expect("prepare type should normalize non-batch URL to xtream");
+        assert_eq!(dto.input_type, InputType::Xtream);
+        dto.prepare(0, true, &HashSet::new()).expect("prepare should succeed for regular URL with aliases");
+        assert_eq!(dto.input_type, InputType::Xtream);
+    }
+
+    #[test]
     fn prepare_batch_url_does_not_require_xtream_credentials() {
         let mut dto = ConfigInputDto {
             name: "batch_no_creds".intern(),
@@ -1143,7 +1169,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_fails_for_provider_scheme_on_batch_input() {
+    fn prepare_provider_scheme_url_is_not_treated_as_batch_input() {
         let mut dto = ConfigInputDto {
             name: "batch_provider".intern(),
             input_type: InputType::XtreamBatch,
@@ -1162,8 +1188,10 @@ mod tests {
             ..ConfigInputDto::default()
         };
 
-        let err = dto.prepare(0, true, &HashSet::new()).expect_err("prepare must reject provider:// for batch input");
-        assert!(err.to_string().contains("does not support provider:// URLs"), "Error: {err}");
+        let err = dto
+            .prepare(0, true, &HashSet::new())
+            .expect_err("prepare should treat provider:// URL as regular input (non-batch) and validate provider");
+        assert!(err.to_string().contains("Provider name myprovider is not defined"), "Error: {err}");
     }
 
     #[test]
@@ -1190,10 +1218,11 @@ mod tests {
             .prepare(0, true, &HashSet::new())
             .expect_err("prepare must require root input url even when aliases are present");
         assert!(err.to_string().contains("url for input is mandatory"), "Error: {err}");
+        assert!(err.to_string().contains("xtream_missing_root_url"), "Error: {err}");
     }
 
     #[test]
-    fn prepare_rejects_xtream_batch_without_root_credentials_even_with_aliases() {
+    fn prepare_rejects_missing_root_credentials_for_non_batch_url_even_with_aliases() {
         let mut dto = ConfigInputDto {
             name: "xtream_batch_missing_root_creds".intern(),
             input_type: InputType::XtreamBatch,
@@ -1210,10 +1239,10 @@ mod tests {
             ..ConfigInputDto::default()
         };
 
-        let err = dto
-            .prepare(0, true, &HashSet::new())
-            .expect_err("prepare must require root credentials for non-batch xtream-batch input");
-        assert!(err.to_string().contains("xtream-batch without batch:// URL"), "Error: {err}");
+        let err =
+            dto.prepare(0, true, &HashSet::new()).expect_err("prepare must require root credentials for non-batch URL");
+        assert!(err.to_string().contains("for input type xtream: username and password are mandatory"), "Error: {err}");
+        assert!(err.to_string().contains("xtream_batch_missing_root_creds"), "Error: {err}");
     }
 
     #[test]
@@ -1240,6 +1269,7 @@ mod tests {
             .prepare(0, true, &HashSet::new())
             .expect_err("prepare must reject root credentials when using batch:// for xtream-batch");
         assert!(err.to_string().contains("with batch:// URL should not define username or password"), "Error: {err}");
+        assert!(err.to_string().contains("xtream_batch_with_root_creds"), "Error: {err}");
     }
 
     #[test]

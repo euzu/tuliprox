@@ -425,6 +425,8 @@ pub async fn prepare_sources_batch(
     current_index = std::cmp::max(current_index, max_id_in_source);
 
     for input in &mut sources.inputs {
+        // Normalize batch type from URL before deciding whether aliases must be loaded from CSV.
+        input.prepare_type()?;
         match get_batch_aliases(input.input_type, input.url.as_str()).await {
             Ok(Some((_, aliases))) => {
                 if let Some(idx) = input.prepare_batch(aliases, current_index)? {
@@ -437,7 +439,6 @@ pub async fn prepare_sources_batch(
                 return Err(err);
             }
         }
-        input.prepare_type()?;
         // we need to prepare epg after alias, because epg `auto` depends on the first input url.
         input.prepare_epg(include_computed)?;
     }
@@ -1025,8 +1026,9 @@ async fn persist_single_template(prefix: &str, kind: Option<&MsgKind>, template:
 
 #[cfg(test)]
 mod tests {
+    use super::prepare_sources_batch;
     use crate::utils::{file::config_reader::get_batch_aliases, resolve_env_var};
-    use shared::model::InputType;
+    use shared::{model::{ConfigInputDto, InputType, SourcesConfigDto}, utils::Internable};
 
     #[test]
     #[allow(clippy::manual_unwrap_or_default)]
@@ -1047,6 +1049,27 @@ mod tests {
         assert!(err
             .to_string()
             .contains("does not support provider:// URLs"));
+    }
+
+    #[tokio::test]
+    async fn prepare_sources_batch_skips_csv_for_non_batch_url_even_with_batch_type() {
+        let mut sources = SourcesConfigDto {
+            inputs: vec![ConfigInputDto {
+                name: "input_http_aliases".intern(),
+                input_type: InputType::XtreamBatch,
+                url: "http://localhost:3001".to_string(),
+                username: Some("user".to_string()),
+                password: Some("pass".to_string()),
+                ..ConfigInputDto::default()
+            }],
+            ..SourcesConfigDto::default()
+        };
+
+        prepare_sources_batch(&mut sources, false)
+            .await
+            .expect("non-batch URL must not be treated as CSV batch source");
+
+        assert_eq!(sources.inputs[0].input_type, InputType::Xtream);
     }
 
 }

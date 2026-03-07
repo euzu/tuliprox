@@ -392,7 +392,11 @@ impl ConfigInput {
 
                     check_input_credentials!(staged_input, staged_input.input_type, false, true);
                     if !matches!(staged_input.input_type, InputType::M3u | InputType::Xtream) {
-                        return info_err_res!("Staged input can only be from type m3u or xtream");
+                        return info_err_res!(
+                            "Staged input can only be from type m3u or xtream (input: {}, staged: {})",
+                            self.name,
+                            staged_input.name
+                        );
                     }
 
                     if self.input_type.is_xtream()
@@ -404,13 +408,17 @@ impl ConfigInput {
 
                         if !live_uses_staged && !vod_uses_staged && !series_uses_staged {
                             return info_err_res!(
-                                "Staged input is enabled but no cluster source uses 'staged'; set at least one of live_source/vod_source/series_source to 'staged'"
+                                "Staged input is enabled but no cluster source uses 'staged'; set at least one of live_source/vod_source/series_source to 'staged' (input: {}, staged: {})",
+                                self.name,
+                                staged_input.name
                             );
                         }
 
                         if staged_input.input_type.is_m3u() && (vod_uses_staged || series_uses_staged) {
                             return info_err_res!(
-                                "Staged M3U input cannot provide VOD or Series clusters; use 'input' or 'skip'"
+                                "Staged M3U input cannot provide VOD or Series clusters; use 'input' or 'skip' (input: {}, staged: {})",
+                                self.name,
+                                staged_input.name
                             );
                         }
                     }
@@ -1089,6 +1097,7 @@ mod tests {
             .prepare(&[])
             .expect_err("prepare must require root URL even when aliases are attached directly");
         assert!(err.to_string().contains("url for input is mandatory"), "Error: {err}");
+        assert!(err.to_string().contains("xtream_batch_missing_root_url"), "Error: {err}");
     }
 
     #[test]
@@ -1116,6 +1125,7 @@ mod tests {
             .prepare(&[])
             .expect_err("prepare must require root credentials for non-batch xtream-batch URL");
         assert!(err.to_string().contains("xtream-batch without batch:// URL"), "Error: {err}");
+        assert!(err.to_string().contains("xtream_batch_missing_root_creds"), "Error: {err}");
     }
 
     #[test]
@@ -1134,5 +1144,6 @@ mod tests {
             .prepare(&[])
             .expect_err("prepare must reject root credentials for batch:// xtream-batch URL");
         assert!(err.to_string().contains("with batch:// URL should not define username or password"), "Error: {err}");
+        assert!(err.to_string().contains("xtream_batch_root_creds_not_allowed"), "Error: {err}");
     }
 }
