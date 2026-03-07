@@ -16,8 +16,8 @@ use shared::{
     error::TuliproxError,
     info_err_res,
     model::{
-        ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigProviderDto, EpgConfigDto, EpgSourceDto,
-        InputFetchMethod, InputType, StagedInputDto,
+        ClusterSource, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigProviderDto, EpgConfigDto,
+        EpgSourceDto, InputFetchMethod, InputType, StagedInputDto,
     },
 };
 use std::{
@@ -68,6 +68,9 @@ const LABEL_CACHE_DURATION: &str = "LABEL.CACHE_DURATION";
 const LABEL_MAIN: &str = "LABEL.MAIN_CONFIG";
 const LABEL_OPTIONS: &str = "LABEL.OPTIONS";
 const LABEL_STAGED: &str = "LABEL.STAGED";
+const LABEL_LIVE_SOURCE: &str = "LABEL.LIVE_SOURCE";
+const LABEL_VOD_SOURCE: &str = "LABEL.VOD_SOURCE";
+const LABEL_SERIES_SOURCE: &str = "LABEL.SERIES_SOURCE";
 const LABEL_ADVANCED: &str = "LABEL.ADVANCED";
 const LABEL_ALIAS: &str = "LABEL.ALIAS";
 const LABEL_PROVIDER: &str = "LABEL.PROVIDER";
@@ -157,6 +160,9 @@ generate_form_reducer!(
         Password => password: Option<String>,
         Method => method: InputFetchMethod,
         InputType => input_type: InputType,
+        LiveSource => live_source: Option<ClusterSource>,
+        VodSource => vod_source: Option<ClusterSource>,
+        SeriesSource => series_source: Option<ClusterSource>,
         // Headers => headers: HashMap<String, String>,
     }
 );
@@ -178,6 +184,23 @@ generate_form_reducer!(
         CacheDuration => cache_duration: Option<String>,
     }
 );
+fn cluster_source_options(current: Option<ClusterSource>) -> Rc<Vec<DropDownOption>> {
+    let options: [(Option<ClusterSource>, &str); 3] = [
+        (Some(ClusterSource::Staged), "staged"),
+        (Some(ClusterSource::Input), "input"),
+        (Some(ClusterSource::Skip), "skip"),
+    ];
+    Rc::new(
+        options
+            .iter()
+            .map(|(val, label)| DropDownOption {
+                id: label.to_string(),
+                label: html! { label.to_string() },
+                selected: *val == current,
+            })
+            .collect(),
+    )
+}
 
 fn apply_parsed_input_type(staged_input_state: &UseReducerHandle<StagedInputDtoFormState>, selected: Option<&str>) {
     let input_type =
@@ -611,6 +634,13 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         let staged_method_selection = Rc::new(vec![staged_input_state.form.method.to_string()]);
         let staged_input_state_1 = staged_input_state.clone();
         let staged_input_state_2 = staged_input_state.clone();
+        let staged_input_state_live = staged_input_state.clone();
+        let staged_input_state_vod = staged_input_state.clone();
+        let staged_input_state_series = staged_input_state.clone();
+        let show_cluster_sources = input_form_state.form.input_type.is_xtream();
+        let live_source_options = cluster_source_options(staged_input_state.form.live_source);
+        let vod_source_options = cluster_source_options(staged_input_state.form.vod_source);
+        let series_source_options = cluster_source_options(staged_input_state.form.series_source);
         html! {
             <Card class="tp__config-view__card">
                 { edit_field_bool!(staged_input_state, translate.t(LABEL_ENABLED),  enabled, StagedInputFormAction::Enabled) }
@@ -658,6 +688,60 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                     />
                }})}
                 </div>
+                {
+                    html_if!(show_cluster_sources, {
+                    <div class="tp__config-view__cols-2">
+                    { config_field_child!(translate.t(LABEL_LIVE_SOURCE), "INPUT_FORM.LIVE_SOURCE", {
+                        html! {
+                            <Select
+                                name={"live_source"}
+                                multi_select={false}
+                                on_select={Callback::from(move |(_, selections):(String, DropDownSelection)| {
+                                    if let DropDownSelection::Single(option) = selections {
+                                        staged_input_state_live.dispatch(StagedInputFormAction::LiveSource(
+                                            ClusterSource::from_str(option.as_str()).ok()
+                                        ));
+                                    }
+                                })}
+                                options={live_source_options}
+                            />
+                        }
+                    })}
+                    { config_field_child!(translate.t(LABEL_VOD_SOURCE), "INPUT_FORM.VOD_SOURCE", {
+                        html! {
+                            <Select
+                                name={"vod_source"}
+                                multi_select={false}
+                                on_select={Callback::from(move |(_, selections):(String, DropDownSelection)| {
+                                    if let DropDownSelection::Single(option) = selections {
+                                        staged_input_state_vod.dispatch(StagedInputFormAction::VodSource(
+                                            ClusterSource::from_str(option.as_str()).ok()
+                                        ));
+                                    }
+                                })}
+                                options={vod_source_options}
+                            />
+                        }
+                    })}
+                    { config_field_child!(translate.t(LABEL_SERIES_SOURCE), "INPUT_FORM.SERIES_SOURCE", {
+                        html! {
+                            <Select
+                                name={"series_source"}
+                                multi_select={false}
+                                on_select={Callback::from(move |(_, selections):(String, DropDownSelection)| {
+                                    if let DropDownSelection::Single(option) = selections {
+                                        staged_input_state_series.dispatch(StagedInputFormAction::SeriesSource(
+                                            ClusterSource::from_str(option.as_str()).ok()
+                                        ));
+                                    }
+                                })}
+                                options={series_source_options}
+                            />
+                        }
+                    })}
+                    </div>
+                    })
+                }
 
                 //{ edit_field_list!(staged_input_state, translate.t(LABEL_HEADERS), headers, StagedInputFormAction::Headers, translate.t(LABEL_ADD_HEADER)) }
             </Card>

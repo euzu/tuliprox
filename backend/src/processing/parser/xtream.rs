@@ -74,8 +74,7 @@ pub fn parse_xtream_series_info(parent_uuid: &UUIDType, series_info: &SeriesStre
     );
 
     if let Some(episodes) = series_info.details.as_ref().and_then(|d| d.episodes.as_ref()) {
-        let base_source_ordinal = if parent_source_ordinal == 0 { 1 } else { parent_source_ordinal };
-        let result: Vec<PlaylistItem> = episodes.iter().enumerate().map(|(index, episode)| {
+        let result: Vec<PlaylistItem> = episodes.iter().map(|episode| {
             let episode_id = episode.id.to_string();
             let episode_url = create_xtream_series_episode_url(url, username, password, episode);
 
@@ -102,7 +101,8 @@ pub fn parse_xtream_series_info(parent_uuid: &UUIDType, series_info: &SeriesStre
                     additional_properties: Some(StreamProperties::Episode(Box::new(episode_info))),
                     category_id: 0,
                     input_name: input.name.intern(),
-                    source_ordinal: base_source_ordinal.saturating_add(u32::try_from(index).unwrap_or(u32::MAX)),
+                    // Keep episode ordering tied to its parent SeriesInfo to avoid cross-series ordinal overlap.
+                    source_ordinal: parent_source_ordinal,
                     ..Default::default()
                 }
             }
@@ -452,7 +452,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_xtream_series_info_sets_episode_source_ordinals_from_parent() {
+    fn test_parse_xtream_series_info_episodes_inherit_parent_source_ordinal() {
         let input = ConfigInput {
             name: "input".intern(),
             url: "http://provider.example".to_string(),
@@ -492,6 +492,45 @@ mod tests {
         .expect("episodes should be parsed");
 
         assert_eq!(episodes[0].header.source_ordinal, 42);
-        assert_eq!(episodes[1].header.source_ordinal, 43);
+        assert_eq!(episodes[1].header.source_ordinal, 42);
+    }
+
+    #[test]
+    fn test_parse_xtream_series_info_keeps_zero_parent_source_ordinal() {
+        let input = ConfigInput {
+            name: "input".intern(),
+            url: "http://provider.example".to_string(),
+            username: Some("user".to_string()),
+            password: Some("pass".to_string()),
+            ..ConfigInput::default()
+        };
+
+        let episode: SeriesStreamDetailEpisodeProperties = serde_json::from_str(
+            r#"{"id":101,"episode_num":1,"season":1,"title":"S01E01","container_extension":"mp4"}"#,
+        )
+        .unwrap();
+
+        let series_props = SeriesStreamProperties {
+            details: Some(SeriesStreamDetailProperties {
+                year: None,
+                seasons: None,
+                episodes: Some(vec![episode]),
+            }),
+            ..SeriesStreamProperties::default()
+        };
+        let parent_uuid = UUIDType::from_valid_uuid("parent_uuid");
+
+        let episodes = parse_xtream_series_info(
+            &parent_uuid,
+            &series_props,
+            "Series Group",
+            &"Series Name".intern(),
+            &input,
+            None,
+            0,
+        )
+        .expect("episodes should be parsed");
+
+        assert_eq!(episodes[0].header.source_ordinal, 0);
     }
 }

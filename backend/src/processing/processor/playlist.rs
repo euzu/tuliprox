@@ -29,6 +29,7 @@ use crate::{
         debug_if_enabled, epg, log_memory_snapshot, m3u, trace_if_enabled, xtream, StepMeasure, StepMeasureCallback,
     },
 };
+use super::filtered_playlist_source::FilteredPlaylistSource;
 use futures::{FutureExt, StreamExt};
 use indexmap::IndexMap;
 use log::{debug, error, info, log_enabled, warn, Level};
@@ -37,9 +38,9 @@ use shared::{
     error::{get_errors_notify_message, notify_err, TuliproxError},
     foundation::{get_field_value, set_field_value, Filter, ValueAccessor, ValueProvider},
     model::{
-        xtream_const::XTREAM_CLUSTER, CounterModifier, FieldGetAccessor, FieldSetAccessor, InputStats, InputType,
-        ItemField, PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistStats, ProcessingOrder, SourceStats,
-        StreamProperties, TargetStats, UUIDType, XtreamCluster,
+        ClusterSource, CounterModifier, FieldGetAccessor, FieldSetAccessor, InputStats, InputType, ItemField,
+        PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistStats, ProcessingOrder, SourceStats, StreamProperties,
+        TargetStats, UUIDType, XtreamCluster,
     },
     utils::{
         create_alias_uuid, default_as_default, default_probe_delay_secs, default_probe_live_interval, interner_gc,
@@ -320,6 +321,60 @@ impl PlaylistDownloadResult {
     }
 }
 
+/// Returns true when the input uses a hybrid download strategy:
+/// M3U staged providing some clusters and Xtream main providing others.
+fn is_hybrid_m3u_xtream(input: &ConfigInput) -> bool {
+    if !input.input_type.is_xtream() {
+        return false;
+    }
+    input.staged.as_ref().is_some_and(|s| s.enabled && s.input_type.is_m3u())
+}
+
+fn collect_effective_skip_clusters(input: &ConfigInput) -> Vec<XtreamCluster> {
+    if !input.input_type.is_xtream() {
+        return vec![];
+    }
+
+    let mut skip_cluster = xtream::get_skip_cluster(input);
+    if let Some(staged) = input.staged.as_ref().filter(|staged| staged.enabled) {
+        for cluster in [XtreamCluster::Live, XtreamCluster::Video, XtreamCluster::Series] {
+            if staged.get_cluster_source(cluster) == ClusterSource::Skip && !skip_cluster.contains(&cluster) {
+                skip_cluster.push(cluster);
+            }
+        }
+    }
+    skip_cluster
+}
+
+fn hybrid_has_m3u_staged_cluster(input: &ConfigInput, skip_cluster: &[XtreamCluster]) -> bool {
+    if !is_hybrid_m3u_xtream(input) {
+        return false;
+    }
+
+    input.staged.as_ref().is_some_and(|staged| {
+        [XtreamCluster::Live, XtreamCluster::Video, XtreamCluster::Series]
+            .iter()
+            .any(|cluster| {
+                !skip_cluster.contains(cluster)
+                    && staged.get_cluster_source(*cluster) == ClusterSource::Staged
+            })
+    })
+}
+
+fn filter_skipped_clusters_from_source(
+    source: Box<dyn PlaylistSource>,
+    input: &ConfigInput,
+) -> Box<dyn PlaylistSource> {
+    let skip_clusters = collect_effective_skip_clusters(input);
+    if skip_clusters.is_empty() {
+        return source;
+    }
+
+    let skip_set: HashSet<XtreamCluster> = skip_clusters.into_iter().collect();
+    Box::new(FilteredPlaylistSource::new(source, skip_set))
+}
+
+#[allow(clippy::too_many_lines)]
 async fn playlist_download_from_input(
     client: &reqwest::Client,
     app_config: &Arc<AppConfig>,
@@ -327,7 +382,6 @@ async fn playlist_download_from_input(
 ) -> PlaylistDownloadResult {
     let config = &*app_config.config.load();
     let storage_dir = &config.storage_dir;
-    let download_input_type = input.get_download_input_type();
 
     // Check Status
     let storage_path = input_cache::resolve_input_storage_path(storage_dir, &input.name).await;
@@ -339,81 +393,145 @@ async fn playlist_download_from_input(
         let _ = std::fs::create_dir_all(&storage_path);
     }
 
-    let (clusters_to_download, fully_cached) = match download_input_type {
-        InputType::Xtream => {
-            let mut to_download = vec![];
-            for c in XTREAM_CLUSTER {
-                if !input_cache::is_cache_valid(&status, &c.to_string(), cache_duration) {
-                    to_download.push(c);
-                }
-            }
-            if to_download.is_empty() {
-                (None, true) // Everything cached
-            } else {
-                (Some(to_download), false)
-            }
-        }
-        _ => {
-            // M3U / Library
-            if input_cache::is_cache_valid(&status, "default", cache_duration) {
-                (None, true)
-            } else {
-                (None, false) // Download all
+    let hybrid = is_hybrid_m3u_xtream(input);
+    let download_input_type = input.get_download_input_type();
+    // Use per-cluster cache for effective Xtream downloads and hybrid M3U+Xtream inputs.
+    let use_per_cluster_cache = hybrid || download_input_type.is_xtream();
+
+    let mut xtream_clusters_to_download = Vec::new();
+    let mut needs_m3u_download = false;
+    let fully_cached = if use_per_cluster_cache {
+        let skip_cluster = collect_effective_skip_clusters(input);
+        let (staged_candidates, main_candidates) =
+            xtream::partition_clusters_by_source(input, None, &skip_cluster);
+
+        let mut xtream_cache_candidates = staged_candidates;
+        xtream_cache_candidates.extend(main_candidates);
+
+        for cluster in xtream_cache_candidates {
+            if !input_cache::is_cache_valid(&status, &cluster.to_string(), cache_duration) {
+                xtream_clusters_to_download.push(cluster);
             }
         }
+
+        if hybrid {
+            if hybrid_has_m3u_staged_cluster(input, &skip_cluster) {
+                needs_m3u_download = !input_cache::is_cache_valid(&status, "default", cache_duration);
+            }
+            xtream_clusters_to_download.is_empty() && !needs_m3u_download
+        } else {
+            xtream_clusters_to_download.is_empty()
+        }
+    } else {
+        input_cache::is_cache_valid(&status, "default", cache_duration)
     };
 
     if fully_cached {
         return PlaylistDownloadResult::new(vec![], vec![], true, false);
     }
 
-    let (playlist, errors, persisted) = match download_input_type {
-        InputType::M3u => {
-            let (p, e) = m3u::download_m3u_playlist(app_config, client, config, input).await;
-            (p, e, false)
+    let (playlist, errors, persisted, m3u_error_count, xtream_error_count) = if hybrid {
+        let mut playlist = Vec::new();
+        let mut all_errors = Vec::new();
+        let mut m3u_error_count = 0usize;
+        let mut xtream_error_count = 0usize;
+        let mut m3u_added_groups = false;
+
+        if needs_m3u_download {
+            let staged = input.staged.as_ref().expect("hybrid requires staged input");
+            let staged_source: crate::model::InputSource = staged.into();
+            let (m3u_playlist, m3u_errors) =
+                m3u::download_m3u_playlist_from_source(app_config, client, config, input, Some(staged_source)).await;
+            m3u_error_count = m3u_errors.len();
+            m3u_added_groups = !m3u_playlist.is_empty();
+            playlist.extend(m3u_playlist);
+            all_errors.extend(m3u_errors);
         }
-        InputType::Xtream => {
-            xtream::download_xtream_playlist(app_config, client, input, clusters_to_download.as_deref()).await
+
+        let mut xtream_persisted = false;
+        if !xtream_clusters_to_download.is_empty() {
+            let (xtream_playlist, xtream_errors, persisted) = xtream::download_xtream_playlist(
+                app_config,
+                client,
+                input,
+                Some(xtream_clusters_to_download.as_slice()),
+            )
+            .await;
+            xtream_error_count = xtream_errors.len();
+            playlist.extend(xtream_playlist);
+            all_errors.extend(xtream_errors);
+            xtream_persisted = persisted;
+
+            if m3u_added_groups {
+                // Keep merged hybrid output in memory when staged M3U contributed groups.
+                xtream_persisted = false;
+            }
         }
-        InputType::M3uBatch | InputType::XtreamBatch => (vec![], vec![], false),
-        InputType::Library => {
-            let (p, e) = library::download_library_playlist(client, app_config, input).await;
-            (p, e, false)
+
+        (playlist, all_errors, xtream_persisted, m3u_error_count, xtream_error_count)
+    } else {
+        match download_input_type {
+            InputType::M3u => {
+                let (p, e) = m3u::download_m3u_playlist(app_config, client, config, input).await;
+                (p, e, false, 0, 0)
+            }
+            InputType::Xtream => {
+                let (p, e, persisted) = xtream::download_xtream_playlist(
+                    app_config,
+                    client,
+                    input,
+                    Some(xtream_clusters_to_download.as_slice()),
+                )
+                .await;
+                let xtream_error_count = e.len();
+                (p, e, persisted, 0, xtream_error_count)
+            }
+            InputType::M3uBatch | InputType::XtreamBatch => (vec![], vec![], false, 0, 0),
+            InputType::Library => {
+                let (p, e) = library::download_library_playlist(client, app_config, input).await;
+                (p, e, false, 0, 0)
+            }
         }
     };
 
     // Update Status
-    if errors.is_empty() {
-        if let InputType::Xtream = download_input_type {
-            if let Some(clusters) = clusters_to_download {
-                for c in clusters {
-                    input_cache::update_cluster_status(&mut status, &c.to_string(), ClusterState::Ok);
-                }
-            } else {
-                // All clusters logic if None passed (implies all were invalid or first run)
-                for c in XTREAM_CLUSTER {
-                    input_cache::update_cluster_status(&mut status, &c.to_string(), ClusterState::Ok);
-                }
+    let mut save_status = false;
+    if hybrid {
+        if needs_m3u_download {
+            input_cache::update_cluster_status(
+                &mut status,
+                "default",
+                if m3u_error_count == 0 { ClusterState::Ok } else { ClusterState::Failed },
+            );
+            save_status = true;
+        }
+
+        if !xtream_clusters_to_download.is_empty() {
+            let state = if xtream_error_count == 0 { ClusterState::Ok } else { ClusterState::Failed };
+            for cluster in &xtream_clusters_to_download {
+                input_cache::update_cluster_status(&mut status, &cluster.to_string(), state.clone());
             }
+            save_status = true;
+        }
+    } else if errors.is_empty() {
+        if use_per_cluster_cache {
+            for cluster in &xtream_clusters_to_download {
+                input_cache::update_cluster_status(&mut status, &cluster.to_string(), ClusterState::Ok);
+            }
+            save_status = !xtream_clusters_to_download.is_empty();
         } else {
             input_cache::update_cluster_status(&mut status, "default", ClusterState::Ok);
+            save_status = true;
         }
+    } else if use_per_cluster_cache {
+        for cluster in &xtream_clusters_to_download {
+            input_cache::update_cluster_status(&mut status, &cluster.to_string(), ClusterState::Failed);
+        }
+        save_status = !xtream_clusters_to_download.is_empty();
+    }
+
+    if save_status {
         input_cache::save_input_status(&storage_path, &status);
-    } else {
-        // Mark failed?
-        // We could mark specific clusters as failed if we knew which one failed.
-        // For simplicity, if error, we don't update the timestamp (so it stays expired/invalid).
-        // Or we mark as Failed.
-        if let InputType::Xtream = download_input_type {
-            if let Some(clusters) = clusters_to_download {
-                for c in clusters {
-                    // Optimistic: Only mark failed if we are sure?
-                    // Currently just don't update the status to OK.
-                    input_cache::update_cluster_status(&mut status, &c.to_string(), ClusterState::Failed);
-                }
-            }
-            input_cache::save_input_status(&storage_path, &status);
-        }
     }
 
     PlaylistDownloadResult::new(playlist, errors, false, persisted)
@@ -601,6 +719,8 @@ async fn download_input(
         let (pl, err) = persist_input_playlist(&ctx.config, input, playlist_download_result.downloaded_playlist).await;
         (MemoryPlaylistSource::new(pl).boxed(), err)
     };
+
+    let playlist = filter_skipped_clusters_from_source(playlist, input);
 
     if mark_as_processed {
         // Mark after persist/load so other workers only see this input as ready when data is usable.
@@ -1275,6 +1395,8 @@ pub async fn exec_processing(
         None
     };
 
+    info!("🌷 Update process started.");
+
     log_memory_snapshot("exec_processing start");
 
     // Initialize Context
@@ -1367,6 +1489,7 @@ pub async fn exec_processing(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::StagedInput;
     use shared::utils::Internable;
 
     fn item_with_props(props: StreamProperties) -> PlaylistItem {
@@ -1423,5 +1546,125 @@ mod tests {
         let series = shared::model::SeriesStreamProperties::default();
         let item = item_with_props(StreamProperties::Series(Box::new(series)));
         assert!(!has_probe_details(&item));
+    }
+
+    #[test]
+    fn hybrid_detection_requires_xtream_main_and_m3u_staged() {
+        let hybrid_input = ConfigInput {
+            name: "hybrid".intern(),
+            input_type: InputType::Xtream,
+            staged: Some(StagedInput { enabled: true, input_type: InputType::M3u, ..StagedInput::default() }),
+            ..ConfigInput::default()
+        };
+        assert!(is_hybrid_m3u_xtream(&hybrid_input));
+
+        let non_hybrid_main_m3u = ConfigInput {
+            name: "main_m3u".intern(),
+            input_type: InputType::M3u,
+            staged: Some(StagedInput { enabled: true, input_type: InputType::Xtream, ..StagedInput::default() }),
+            ..ConfigInput::default()
+        };
+        assert!(!is_hybrid_m3u_xtream(&non_hybrid_main_m3u));
+    }
+
+    #[test]
+    fn collect_effective_skip_clusters_includes_staged_skip_only_when_enabled() {
+        let input_with_enabled_staged = ConfigInput {
+            name: "enabled".intern(),
+            input_type: InputType::Xtream,
+            staged: Some(StagedInput {
+                enabled: true,
+                live_source: ClusterSource::Skip,
+                vod_source: ClusterSource::Input,
+                series_source: ClusterSource::Staged,
+                ..StagedInput::default()
+            }),
+            ..ConfigInput::default()
+        };
+        let skip_enabled = collect_effective_skip_clusters(&input_with_enabled_staged);
+        assert!(skip_enabled.contains(&XtreamCluster::Live));
+        assert!(!skip_enabled.contains(&XtreamCluster::Video));
+        assert!(!skip_enabled.contains(&XtreamCluster::Series));
+
+        let input_with_disabled_staged = ConfigInput {
+            name: "disabled".intern(),
+            input_type: InputType::Xtream,
+            staged: Some(StagedInput {
+                enabled: false,
+                live_source: ClusterSource::Skip,
+                vod_source: ClusterSource::Skip,
+                series_source: ClusterSource::Skip,
+                ..StagedInput::default()
+            }),
+            ..ConfigInput::default()
+        };
+        assert!(collect_effective_skip_clusters(&input_with_disabled_staged).is_empty());
+    }
+
+    #[test]
+    fn hybrid_m3u_detects_any_staged_cluster_selection() {
+        let hybrid = ConfigInput {
+            name: "hybrid".intern(),
+            input_type: InputType::Xtream,
+            staged: Some(StagedInput {
+                enabled: true,
+                input_type: InputType::M3u,
+                live_source: ClusterSource::Input,
+                vod_source: ClusterSource::Staged,
+                series_source: ClusterSource::Skip,
+                ..StagedInput::default()
+            }),
+            ..ConfigInput::default()
+        };
+        assert!(hybrid_has_m3u_staged_cluster(&hybrid, &[]));
+        assert!(!hybrid_has_m3u_staged_cluster(&hybrid, &[XtreamCluster::Video]));
+    }
+
+    #[test]
+    fn filter_skipped_clusters_removes_cached_groups() {
+        let live_item = PlaylistItem {
+            header: shared::model::PlaylistItemHeader {
+                xtream_cluster: XtreamCluster::Live,
+                ..Default::default()
+            },
+        };
+        let vod_item = PlaylistItem {
+            header: shared::model::PlaylistItemHeader {
+                xtream_cluster: XtreamCluster::Video,
+                ..Default::default()
+            },
+        };
+
+        let groups = vec![
+            PlaylistGroup {
+                id: 1,
+                title: "Live".intern(),
+                channels: vec![live_item],
+                xtream_cluster: XtreamCluster::Live,
+            },
+            PlaylistGroup {
+                id: 2,
+                title: "Vod".intern(),
+                channels: vec![vod_item],
+                xtream_cluster: XtreamCluster::Video,
+            },
+        ];
+
+        let source = MemoryPlaylistSource::new(groups).boxed();
+        let input = ConfigInput {
+            name: "skip_live".intern(),
+            input_type: InputType::Xtream,
+            staged: Some(StagedInput {
+                enabled: true,
+                live_source: ClusterSource::Skip,
+                ..StagedInput::default()
+            }),
+            ..ConfigInput::default()
+        };
+
+        let mut filtered = filter_skipped_clusters_from_source(source, &input);
+        let filtered_groups = filtered.take_groups();
+        assert_eq!(filtered_groups.len(), 1);
+        assert_eq!(filtered_groups[0].xtream_cluster, XtreamCluster::Video);
     }
 }

@@ -8,6 +8,7 @@ mod sort;
 mod trakt;
 mod library;
 mod stream_probe;
+mod filtered_playlist_source;
 pub use self::playlist::*;
 pub use self::epg::*;
 pub use self::xtream::*;

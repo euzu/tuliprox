@@ -1409,7 +1409,51 @@ the list. All streaming, proxying, and metadata still come from the provider’s
 - `headers` is optional
 - `method` can be `GET` or `POST`
 - `username` only mandatory for type `xtream`
-- `pasword`only mandatory for type `xtream`
+- `password` only mandatory for type `xtream`
+- `live_source` (optional): `staged` | `input` | `skip`
+- `vod_source` (optional): `staged` | `input` | `skip`
+- `series_source` (optional): `staged` | `input` | `skip`
+
+Staged cluster source behavior:
+
+- Cluster source rules are applied only when `staged.enabled: true`.
+- `input.options.xtream_skip_live|vod|series` has highest priority. If one of those is `true`, the cluster is skipped regardless of staged source selection.
+- For Xtream main inputs (`type: xtream`) with staged enabled:
+  - At least one of `live_source` / `vod_source` / `series_source` must resolve to `staged`.
+  - If all effective values are `input`/`skip`, config validation fails.
+- For staged input `type: m3u`:
+  - `live_source: staged` is valid.
+  - `vod_source: staged` and `series_source: staged` are invalid (M3U staged source cannot provide Xtream VOD/Series clusters).
+- If main input type is `m3u`, staged cluster source fields are ignored.
+
+Defaults:
+
+- Staged type `xtream`: `live_source=staged`, `vod_source=staged`, `series_source=staged`
+- Staged type `m3u`: `live_source=staged`, `vod_source=input`, `series_source=input`
+
+Example (Xtream main + staged Xtream per cluster):
+
+```yaml
+inputs:
+  - name: provider_main
+    type: xtream
+    url: http://provider-a.example:8080
+    username: main_user
+    password: main_pass
+    options:
+      xtream_skip_live: false
+      xtream_skip_vod: false
+      xtream_skip_series: false
+    staged:
+      enabled: true
+      type: xtream
+      url: http://provider-b.example:8080
+      username: staged_user
+      password: staged_pass
+      live_source: staged
+      vod_source: input
+      series_source: skip
+```
 
 `persist` should be different for `m3u` and `xtream` types. For `m3u` use full filename like `./playlist_{}.m3u`.
 For `xtream` use a prefix like `./playlist_`

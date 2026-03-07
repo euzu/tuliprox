@@ -226,12 +226,19 @@ impl Config {
     }
 
     fn prepare_api_web_root(&mut self, home_path: &str) {
-        if self.api.web_root.is_empty() {
+        let web_root = self.api.web_root.trim();
+        if web_root.is_empty() {
             self.api.web_root = utils::get_default_web_root_path_for_home(Path::new(home_path))
                 .display()
                 .to_string();
         } else {
-            self.api.web_root = utils::make_absolute_path(&self.api.web_root, &self.storage_dir);
+            let web_root_path = PathBuf::from(web_root);
+            let resolved = if web_root_path.is_absolute() {
+                web_root_path
+            } else {
+                PathBuf::from(home_path).join(web_root_path).clean()
+            };
+            self.api.web_root = resolved.to_string_lossy().to_string();
         }
     }
 
@@ -306,5 +313,62 @@ impl From<&ConfigDto> for Config {
             ipcheck: dto.ipcheck.as_ref().map(Into::into),
             library: dto.library.as_ref().map(Into::into),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+    use tempfile::tempdir;
+
+    #[test]
+    fn prepare_resolves_relative_web_root_from_home_path() {
+        let temp_dir = tempdir().expect("failed to create temp directory");
+        let home_path = temp_dir.path().join("home");
+        let config_path = temp_dir.path().join("config");
+
+        let mut config = Config {
+            storage_dir: "data".to_string(),
+            ..Default::default()
+        };
+        config.api.web_root = "./web".to_string();
+
+        config
+            .prepare(
+                config_path.to_string_lossy().as_ref(),
+                home_path.to_string_lossy().as_ref(),
+            )
+            .expect("prepare should succeed");
+
+        assert_eq!(
+            config.api.web_root,
+            home_path.join("web").to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn prepare_keeps_absolute_web_root_unchanged() {
+        let temp_dir = tempdir().expect("failed to create temp directory");
+        let home_path = temp_dir.path().join("home");
+        let config_path = temp_dir.path().join("config");
+        let absolute_web_root = temp_dir.path().join("custom_web_root");
+
+        let mut config = Config {
+            storage_dir: "data".to_string(),
+            ..Default::default()
+        };
+        config.api.web_root = absolute_web_root.to_string_lossy().to_string();
+
+        config
+            .prepare(
+                config_path.to_string_lossy().as_ref(),
+                home_path.to_string_lossy().as_ref(),
+            )
+            .expect("prepare should succeed");
+
+        assert_eq!(
+            config.api.web_root,
+            absolute_web_root.to_string_lossy()
+        );
     }
 }

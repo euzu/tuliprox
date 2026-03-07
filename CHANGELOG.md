@@ -125,6 +125,9 @@
 - **Panel API Integration**: Optional integration to renew expired input accounts or provision new accounts to ensure a minimum valid input accounts.
 - **Playlist Caching**: Added `cache_duration` to inputs, allowing configurable provider playlist cache times during subsequent updates (e.g., `60s`,
   `5m` `12h`, `1d`).
+- **Staged Cluster Source Routing**: Added per-cluster staged routing for Xtream inputs.
+  You can now decide cluster-wise whether `live` / `vod` / `series` is loaded from staged input, main input, or skipped.
+  Skip flags (`xtream_skip_live|vod|series`) remain highest priority and always force skip.
 - **Database Viewer**: New CLI flags `--dbx` and `--dbm` to inspect internal database content.
 - **Home Directory Override**: Added `--home` (`-H`) CLI argument to set the base directory for config, data, backup, and downloads.
 - **Added `disk_based_processing`**: (boolean, default `false`) to `config.yml`. When enabled, input playlists are processed from disk instead of
@@ -173,7 +176,14 @@ active URL of the specified provider.
   - Added `resolve_tmdb`: Triggers TMDB lookup if ID is missing.
   - Added `probe_stream`: Triggers ffprobe if technical info is missing.
   - Added `probe_delay`: Delay between probe tasks (default `50` seconds).
-  - Added `staged.enabled`: Disables/enables the staged input
+  - Added `staged.enabled`: Disables/enables the staged input.
+  - Added `staged.live_source`: Selects source for Live cluster (`staged` | `input` | `skip`).
+  - Added `staged.vod_source`: Selects source for VOD cluster (`staged` | `input` | `skip`).
+  - Added `staged.series_source`: Selects source for Series cluster (`staged` | `input` | `skip`).
+  - Added staged validation rules:
+    - Cluster source rules apply only when `staged.enabled=true`.
+    - For Xtream main inputs with staged enabled, at least one cluster source must be `staged`.
+    - For staged type `m3u`, `vod_source=staged` and `series_source=staged` are rejected.
 - **source.yml (target output)**:
   - Added `probe_live`: Enables background probing for Live TV streams (default disabled).
   - Added `probe_live_interval_hours`: Sets the frequency for re-probing Live TV streams.

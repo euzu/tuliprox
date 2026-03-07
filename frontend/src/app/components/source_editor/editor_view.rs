@@ -12,9 +12,12 @@ use crate::{
     model::DialogResult,
     services::DialogService,
 };
-use shared::model::{
-    ConfigInputDto, ConfigSourceDto, ConfigTargetDto, HdHomeRunTargetOutputDto, InputType, M3uTargetOutputDto,
-    SourcesConfigDto, StrmTargetOutputDto, TargetOutputDto, XtreamTargetOutputDto,
+use shared::{
+    model::{
+        ConfigInputDto, ConfigSourceDto, ConfigTargetDto, HdHomeRunTargetOutputDto, InputType, M3uTargetOutputDto,
+        SourcesConfigDto, StrmTargetOutputDto, TargetOutputDto, XtreamTargetOutputDto,
+    },
+    utils::BATCH_SCHEME_PREFIX,
 };
 use std::{
     cell::RefCell,
@@ -257,19 +260,29 @@ fn create_output_instance(output: &TargetOutputDto) -> (BlockInstance, BlockType
     }
 }
 
-fn normalize_input_type_by_aliases(input: &mut ConfigInputDto, block_type: BlockType) {
-    let has_aliases = input.aliases.as_ref().is_some_and(|aliases| !aliases.is_empty());
+fn normalize_input_type_by_url(input: &mut ConfigInputDto, block_type: BlockType) {
+    let is_batch_url = input.url.trim().starts_with(BATCH_SCHEME_PREFIX);
     match block_type {
         BlockType::InputXtream => {
-            input.input_type = if has_aliases { InputType::XtreamBatch } else { InputType::Xtream };
+            input.input_type = if is_batch_url { InputType::XtreamBatch } else { InputType::Xtream };
         }
         BlockType::InputM3u => {
-            input.input_type = if has_aliases { InputType::M3uBatch } else { InputType::M3u };
+            input.input_type = if is_batch_url { InputType::M3uBatch } else { InputType::M3u };
         }
         BlockType::InputLibrary => {
             input.input_type = InputType::Library;
         }
         _ => {}
+    }
+}
+
+fn input_dedupe_key(input_config: &ConfigInputDto) -> Option<String> {
+    if input_config.id > 0 {
+        Some(format!("id:{}", input_config.id))
+    } else if !input_config.name.is_empty() {
+        Some(format!("name:{}", input_config.name))
+    } else {
+        None
     }
 }
 
@@ -283,7 +296,7 @@ fn editor_state_to_sources_config(base_sources: &SourcesConfigDto, editor_state:
     for block in input_blocks {
         if let BlockInstance::Input(input) = &block.instance {
             let mut normalized_input = input.as_ref().clone();
-            normalize_input_type_by_aliases(&mut normalized_input, block.block_type);
+            normalize_input_type_by_url(&mut normalized_input, block.block_type);
             gen_inputs.push(normalized_input);
         }
     }
@@ -396,12 +409,13 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
 
     {
         let playlists = playlist_ctx.clone();
+        let config_ctx = config_ctx.clone();
         let editor_state_ref = editor_state_ref.clone();
         let force_update = force_update.clone();
         let initialized_from_playlist = initialized_from_playlist.clone();
         use_effect_with(
-            (playlists.sources.clone(), is_local_mode, *initialized_from_playlist),
-            move |(sources, local_mode, initialized)| {
+            (playlists.sources.clone(), config_ctx.config.clone(), is_local_mode, *initialized_from_playlist),
+            move |(sources, app_config, local_mode, initialized)| {
                 if !(*local_mode && *initialized) {
                     if let Some(entries) = sources.as_ref() {
                         let mut current_id = 1;
@@ -413,13 +427,7 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                             for input_row in inputs {
                                 match input_row.as_ref() {
                                     InputRow::Input(input_config) => {
-                                        let dedupe_key = if input_config.id > 0 {
-                                            Some(format!("id:{}", input_config.id))
-                                        } else if !input_config.name.is_empty() {
-                                            Some(format!("name:{}", input_config.name))
-                                        } else {
-                                            None
-                                        };
+                                        let dedupe_key = input_dedupe_key(input_config);
 
                                         let block_id = if let Some(key) = dedupe_key {
                                             if let Some(&existing_id) = added_inputs.get(&key) {
@@ -472,6 +480,30 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                                 }
                             }
                         }
+
+                        // Also include standalone inputs from sources.yml that are currently not wired to any source.
+                        if let Some(cfg) = app_config.as_ref() {
+                            for input_config in &cfg.sources.inputs {
+                                let dedupe_key = input_dedupe_key(input_config);
+                                if let Some(ref key) = dedupe_key {
+                                    if added_inputs.contains_key(key) {
+                                        continue;
+                                    }
+                                }
+
+                                let block_id = current_id;
+                                current_id += 1;
+                                if let Some(key) = dedupe_key {
+                                    added_inputs.insert(key, block_id);
+                                }
+                                gen_blocks.push(create_block(
+                                    block_id,
+                                    BlockType::from(input_config.input_type),
+                                    BlockInstance::Input(Rc::new(input_config.clone())),
+                                ));
+                            }
+                        }
+
                         if !gen_blocks.is_empty() {
                             layout(&mut gen_blocks, &gen_connections);
                         }
@@ -563,6 +595,14 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
             let base_sources = config_ctx.config.as_ref().map(|c| c.sources.clone()).unwrap_or_default();
             let editor_state = editor_state_ref.borrow();
             let sources_config = editor_state_to_sources_config(&base_sources, &editor_state);
+            let mut sources_to_validate = sources_config.clone();
+            let hdhr_overview = config_ctx.config.as_ref().and_then(|cfg| cfg.config.get_hdhr_device_overview());
+            let global_templates =
+                config_ctx.config.as_ref().and_then(|cfg| cfg.templates.as_ref().map(|defs| defs.templates.as_slice()));
+            if let Err(err) = sources_to_validate.prepare(false, hdhr_overview.as_ref(), global_templates) {
+                services.toastr.error(err.to_string());
+                return;
+            }
 
             let services = services.clone();
             let translate = translate.clone();
@@ -1288,7 +1328,7 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                 block.instance = match instance {
                     BlockInstance::Input(input_cfg) => {
                         let mut normalized_input = input_cfg.as_ref().clone();
-                        normalize_input_type_by_aliases(&mut normalized_input, block.block_type);
+                        normalize_input_type_by_url(&mut normalized_input, block.block_type);
                         BlockInstance::Input(Rc::new(normalized_input))
                     }
                     other => other,

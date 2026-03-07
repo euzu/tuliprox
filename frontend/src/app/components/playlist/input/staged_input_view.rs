@@ -3,7 +3,7 @@ use crate::{
     html_if,
     i18n::use_translation,
 };
-use shared::model::{InputType, StagedInputDto};
+use shared::model::{ClusterSource, InputType, StagedInputDto};
 use yew::prelude::*;
 
 #[derive(Properties, Clone, PartialEq, Debug)]
@@ -44,6 +44,29 @@ pub fn StagedInputView(props: &StagedInputViewProps) -> Html {
                         <HideContent content={input.password.as_ref().map_or_else(String::new, |password| password.clone())}></HideContent>
                     </div>
                     <InputHeaders headers={input.headers.clone()} />
+                    {
+                        {
+                            let fmt = |cs: &Option<ClusterSource>| -> String {
+                                cs.as_ref().map(ToString::to_string).unwrap_or_else(|| ClusterSource::default().to_string())
+                            };
+                            html! {
+                                <>
+                                <div class="tp__staged-input-view__row">
+                                    <label>{translate.t("LABEL.LIVE_SOURCE")}</label>
+                                    { fmt(&input.live_source) }
+                                </div>
+                                <div class="tp__staged-input-view__row">
+                                    <label>{translate.t("LABEL.VOD_SOURCE")}</label>
+                                    { fmt(&input.vod_source) }
+                                </div>
+                                <div class="tp__staged-input-view__row">
+                                    <label>{translate.t("LABEL.SERIES_SOURCE")}</label>
+                                    { fmt(&input.series_source) }
+                                </div>
+                                </>
+                            }
+                        }
+                    }
                 </div>
             }
         }
