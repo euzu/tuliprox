@@ -44,7 +44,10 @@ macro_rules! check_input_credentials {
                     }
                 }
 
-                if !$alias && ($this.username.is_some() || $this.password.is_some()) {
+                if !$alias
+                    && ($this.username.is_some() || $this.password.is_some())
+                    && !$this.url.starts_with($crate::utils::BATCH_SCHEME_PREFIX)
+                {
                     return info_err_res!("input type xtream-batch should not define username or password attribute ");
                 }
             }

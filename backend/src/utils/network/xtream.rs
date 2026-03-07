@@ -3,6 +3,7 @@ use crate::messaging::send_message;
 use crate::model::{is_input_expired, xtream_mapping_option_from_target_options, AppConfig,
                    ConfigInput, ConfigInputFlags, ConfigTarget, MessageContent, XtreamLoginInfo, XtreamTargetOutput};
 use crate::model::{InputSource, ProxyUserCredentials};
+use shared::model::ClusterSource;
 use crate::processing::parser::xtream;
 use crate::processing::parser::xtream::parse_xtream_series_info;
 use crate::repository::VirtualIdRecord;
@@ -253,7 +254,7 @@ fn xtream_resolve_stream_info(app_state: &Arc<AppState>, user: &ProxyUserCredent
     None
 }
 
-fn get_skip_cluster(input: &ConfigInput) -> Vec<XtreamCluster> {
+pub(crate) fn get_skip_cluster(input: &ConfigInput) -> Vec<XtreamCluster> {
     let mut skip_cluster = vec![];
     if input.has_flag(ConfigInputFlags::XtreamSkipLive) {
         skip_cluster.push(XtreamCluster::Live);
@@ -345,15 +346,51 @@ pub async fn notify_account_expire(exp_date: Option<i64>, app_config: &Arc<AppCo
     }
 }
 
-pub async fn download_xtream_playlist(app_config: &Arc<AppConfig>, client: &reqwest::Client, input: &ConfigInput, clusters: Option<&[XtreamCluster]>)
-                                      -> (Vec<PlaylistGroup>, Vec<TuliproxError>, bool) {
-    let input_source: InputSource = {
-        match input.staged.as_ref() {
-            None => input.into(),
-            Some(staged) =>  if staged.enabled { staged.into() } else { input.into() },
-        }
-    };
+/// Partitions the requested clusters into staged and main groups based on
+/// skip flags and per-cluster source configuration.
+pub(crate) fn partition_clusters_by_source(
+    input: &ConfigInput,
+    requested: Option<&[XtreamCluster]>,
+    skip_cluster: &[XtreamCluster],
+) -> (Vec<XtreamCluster>, Vec<XtreamCluster>) {
+    let mut staged_clusters = Vec::new();
+    let mut main_clusters = Vec::new();
 
+    let all_clusters = [XtreamCluster::Live, XtreamCluster::Video, XtreamCluster::Series];
+    for cluster in &all_clusters {
+        let is_requested = requested.is_none_or(|c| c.contains(cluster));
+        if !is_requested || skip_cluster.contains(cluster) {
+            continue;
+        }
+
+        if let Some(staged) = input.staged.as_ref().filter(|s| s.enabled) {
+            match staged.get_cluster_source(*cluster) {
+                ClusterSource::Staged => {
+                    // M3U staged inputs are handled by the M3U download path, never by Xtream API calls.
+                    if staged.input_type.is_xtream() {
+                        staged_clusters.push(*cluster);
+                    }
+                }
+                ClusterSource::Input => main_clusters.push(*cluster),
+                ClusterSource::Skip => {} // excluded
+            }
+        } else {
+            main_clusters.push(*cluster);
+        }
+    }
+
+    (staged_clusters, main_clusters)
+}
+
+/// Downloads xtream clusters from a single source (either main input or staged input).
+async fn download_xtream_from_source(
+    app_config: &Arc<AppConfig>,
+    client: &reqwest::Client,
+    input: &ConfigInput,
+    input_source: &InputSource,
+    source_input_type: InputType,
+    clusters: &[XtreamCluster],
+) -> (Vec<PlaylistGroup>, Vec<TuliproxError>, bool) {
     let (username, password) = (
         input_source.username.as_deref().unwrap_or(""),
         input_source.password.as_deref().unwrap_or(""),
@@ -361,8 +398,6 @@ pub async fn download_xtream_playlist(app_config: &Arc<AppConfig>, client: &reqw
 
     let is_provider_url = input_source.url.starts_with(PROVIDER_SCHEME_PREFIX);
     let base_input_url = if is_provider_url {
-        // Keep provider:// unresolved; send_with_retry_and_provider resolves per attempt
-        // so failover can switch provider hosts.
         input_source.url.clone()
     } else {
         match input.resolve_url(&input_source.url) {
@@ -371,12 +406,8 @@ pub async fn download_xtream_playlist(app_config: &Arc<AppConfig>, client: &reqw
         }
     };
 
-    // Build a canonical Xtream player_api URL for both plain URLs and provider:// URLs.
-    // For provider URLs, this keeps the scheme unresolved while still adding the required path/query.
     let base_url = get_xtream_stream_url_base(&base_input_url, username, password);
     let input_source_login = input_source.with_url(base_url.clone());
-
-    check_alias_user_state(app_config, client, input).await;
 
     if let Err(err) = xtream_login(app_config, client, &input_source_login, username).await {
         error!("Could not log in with xtream user {username} for provider {}. {err}", input.name);
@@ -384,70 +415,97 @@ pub async fn download_xtream_playlist(app_config: &Arc<AppConfig>, client: &reqw
     }
 
     let mut playlist_groups: Vec<PlaylistGroup> = Vec::with_capacity(128);
-    let skip_cluster = get_skip_cluster(input);
 
     let cfg = app_config.config.load();
     let storage_dir = &cfg.storage_dir;
-    // Staged input type is the effective type during download.
-    let effective_type = input.get_download_input_type();
     let use_disk_based_processing =
-        cfg.disk_based_processing && matches!(effective_type, InputType::Xtream | InputType::XtreamBatch);
+        cfg.disk_based_processing && matches!(source_input_type, InputType::Xtream | InputType::XtreamBatch);
 
     let mut errors = vec![];
     for (xtream_cluster, category, stream) in &ACTIONS {
-        let is_requested = clusters.is_none_or(|c| c.contains(xtream_cluster));
-        if is_requested && !skip_cluster.contains(xtream_cluster) {
-            let input_source_category = input_source.with_url(concat_string!(&base_url, "&action=", category));
-            let input_source_stream = input_source.with_url(concat_string!(&base_url, "&action=", stream));
-            let category_file_path = crate::utils::prepare_file_path(input.persist.as_deref(),
-                                                                     storage_dir, concat_string!(category, "_").as_str());
-            let stream_file_path = crate::utils::prepare_file_path(input.persist.as_deref(),
-                                                                   storage_dir, concat_string!(stream, "_").as_str());
+        if !clusters.contains(xtream_cluster) {
+            continue;
+        }
+        let input_source_category = input_source.with_url(concat_string!(&base_url, "&action=", category));
+        let input_source_stream = input_source.with_url(concat_string!(&base_url, "&action=", stream));
+        let category_file_path = crate::utils::prepare_file_path(input.persist.as_deref(),
+                                                                 storage_dir, concat_string!(category, "_").as_str());
+        let stream_file_path = crate::utils::prepare_file_path(input.persist.as_deref(),
+                                                               storage_dir, concat_string!(stream, "_").as_str());
 
-            match futures::join!(
-                request::get_input_json_content_as_stream(app_config, client, &input_source_category, category_file_path),
-                request::get_input_json_content_as_stream(app_config, client, &input_source_stream, stream_file_path)
-            ) {
-                (Ok(category_content), Ok(stream_content)) => {
-                    if use_disk_based_processing {
-                        // trace!("Using disk input playlist optimization for cluster {}", xtream_cluster);
-                        if let Err(err) = persist_input_xtream_playlist_cluster_to_disk(app_config, input, *xtream_cluster, category_content, stream_content).await {
-                            error!("persist_input_xtream_playlist_cluster_to_disk failed: {err}");
-                            errors.push(err);
-                        //} else {
-                            // trace!("persist_input_xtream_playlist_cluster_to_disk succeeded for cluster {}", xtream_cluster);
-                        }
-                    } else {
-                        // trace!("Using in-memory playlist parsing for cluster {}", xtream_cluster);
-                        match xtream::parse_xtream(input,
-                                                   *xtream_cluster,
-                                                   category_content,
-                                                   stream_content).await {
-                            Ok(sub_playlist_parsed) => {
-                                if let Some(mut xtream_sub_playlist) = sub_playlist_parsed {
-                                    playlist_groups.append(&mut xtream_sub_playlist);
-                                } else {
-                                    error!("Could not parse playlist {xtream_cluster} for input {}: {}",
-                                        input_source.name, sanitize_sensitive_info(&input_source.url));
-                                }
+        match futures::join!(
+            request::get_input_json_content_as_stream(app_config, client, &input_source_category, category_file_path),
+            request::get_input_json_content_as_stream(app_config, client, &input_source_stream, stream_file_path)
+        ) {
+            (Ok(category_content), Ok(stream_content)) => {
+                if use_disk_based_processing {
+                    if let Err(err) = persist_input_xtream_playlist_cluster_to_disk(app_config, input, *xtream_cluster, category_content, stream_content).await {
+                        error!("persist_input_xtream_playlist_cluster_to_disk failed: {err}");
+                        errors.push(err);
+                    }
+                } else {
+                    match xtream::parse_xtream(input,
+                                               *xtream_cluster,
+                                               category_content,
+                                               stream_content).await {
+                        Ok(sub_playlist_parsed) => {
+                            if let Some(mut xtream_sub_playlist) = sub_playlist_parsed {
+                                playlist_groups.append(&mut xtream_sub_playlist);
+                            } else {
+                                error!("Could not parse playlist {xtream_cluster} for input {}: {}",
+                                    input_source.name, sanitize_sensitive_info(&input_source.url));
                             }
-                            Err(err) => errors.push(err)
                         }
+                        Err(err) => errors.push(err)
                     }
                 }
-                (Err(err1), Err(err2)) => {
-                    errors.extend([err1, err2]);
-                }
-                (_, Err(err)) | (Err(err), _) => errors.push(err),
             }
+            (Err(err1), Err(err2)) => {
+                errors.extend([err1, err2]);
+            }
+            (_, Err(err)) | (Err(err), _) => errors.push(err),
         }
     }
 
-    for (grp_id, plg) in (1_u32..).zip(playlist_groups.iter_mut()) {
+    (playlist_groups, errors, use_disk_based_processing)
+}
+
+pub async fn download_xtream_playlist(app_config: &Arc<AppConfig>, client: &reqwest::Client, input: &ConfigInput, clusters: Option<&[XtreamCluster]>)
+                                      -> (Vec<PlaylistGroup>, Vec<TuliproxError>, bool) {
+    let skip_cluster = get_skip_cluster(input);
+    let (staged_clusters, main_clusters) = partition_clusters_by_source(input, clusters, &skip_cluster);
+
+    let mut all_groups = Vec::with_capacity(128);
+    let mut all_errors = Vec::new();
+    let mut any_disk = false;
+
+    if !staged_clusters.is_empty() {
+        if let Some(staged) = input.staged.as_ref().filter(|s| s.enabled) {
+            let source: InputSource = staged.into();
+            let (g, e, d) =
+                download_xtream_from_source(app_config, client, input, &source, staged.input_type, &staged_clusters)
+                    .await;
+            all_groups.extend(g);
+            all_errors.extend(e);
+            any_disk |= d;
+        }
+    }
+
+    if !main_clusters.is_empty() {
+        check_alias_user_state(app_config, client, input).await;
+        let source: InputSource = input.into();
+        let (g, e, d) =
+            download_xtream_from_source(app_config, client, input, &source, input.input_type, &main_clusters).await;
+        all_groups.extend(g);
+        all_errors.extend(e);
+        any_disk |= d;
+    }
+
+    for (grp_id, plg) in (1_u32..).zip(all_groups.iter_mut()) {
         plg.id = grp_id;
     }
 
-    (playlist_groups, errors, use_disk_based_processing)
+    (all_groups, all_errors, any_disk)
 }
 
 async fn check_alias_user_state(app_config: &Arc<AppConfig>, client: &reqwest::Client, input: &ConfigInput) {
@@ -523,4 +581,71 @@ pub fn create_vod_info_from_item(target: &ConfigTarget, user: &ProxyUserCredenti
     doc.movie_data.custom_sid = None;
 
     serde_json::to_string(&doc).unwrap_or(String::new())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::partition_clusters_by_source;
+    use crate::model::{ConfigInput, ConfigInputFlags, ConfigInputFlagsSet, ConfigInputOptions, StagedInput};
+    use shared::model::{ClusterSource, InputType, XtreamCluster};
+    use shared::utils::Internable;
+
+    fn test_input_with_staged(staged: StagedInput) -> ConfigInput {
+        ConfigInput {
+            name: "test".intern(),
+            input_type: InputType::Xtream,
+            staged: Some(staged),
+            ..ConfigInput::default()
+        }
+    }
+
+    fn options_with_flags(flags: &[ConfigInputFlags]) -> ConfigInputOptions {
+        let mut set = ConfigInputFlagsSet::new();
+        for flag in flags {
+            set.set(*flag);
+        }
+        ConfigInputOptions { flags: set, ..ConfigInputOptions::defaults().clone() }
+    }
+
+    #[test]
+    fn partition_respects_skip_flags_before_cluster_source() {
+        let staged = StagedInput {
+            enabled: true,
+            input_type: InputType::Xtream,
+            live_source: ClusterSource::Staged,
+            vod_source: ClusterSource::Input,
+            series_source: ClusterSource::Skip,
+            ..StagedInput::default()
+        };
+        let mut input = test_input_with_staged(staged);
+        input.options = Some(options_with_flags(&[ConfigInputFlags::XtreamSkipLive]));
+
+        let skip_cluster = super::get_skip_cluster(&input);
+        let (staged_clusters, main_clusters) = partition_clusters_by_source(&input, None, &skip_cluster);
+
+        assert!(staged_clusters.is_empty());
+        assert_eq!(main_clusters, vec![XtreamCluster::Video]);
+    }
+
+    #[test]
+    fn partition_excludes_staged_clusters_for_m3u_staged_inputs() {
+        let staged = StagedInput {
+            enabled: true,
+            input_type: InputType::M3u,
+            live_source: ClusterSource::Staged,
+            vod_source: ClusterSource::Input,
+            series_source: ClusterSource::Input,
+            ..StagedInput::default()
+        };
+        let input = test_input_with_staged(staged);
+
+        let (staged_clusters, main_clusters) = partition_clusters_by_source(
+            &input,
+            Some(&[XtreamCluster::Live, XtreamCluster::Video]),
+            &[],
+        );
+
+        assert!(staged_clusters.is_empty());
+        assert_eq!(main_clusters, vec![XtreamCluster::Video]);
+    }
 }

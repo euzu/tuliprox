@@ -285,12 +285,57 @@ impl ConfigInputOptionsDto {
     }
 }
 
-fn default_true() -> bool { true }
+#[derive(Debug, Default, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub enum ClusterSource {
+    #[serde(rename = "staged")]
+    #[default]
+    Staged,
+    #[serde(rename = "input")]
+    Input,
+    #[serde(rename = "skip")]
+    Skip,
+}
+
+impl ClusterSource {
+    const STAGED: &'static str = "staged";
+    const INPUT: &'static str = "input";
+    const SKIP: &'static str = "skip";
+}
+
+impl Display for ClusterSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::Staged => Self::STAGED,
+                Self::Input => Self::INPUT,
+                Self::Skip => Self::SKIP,
+            }
+        )
+    }
+}
+
+impl FromStr for ClusterSource {
+    type Err = TuliproxError;
+
+    fn from_str(s: &str) -> Result<Self, TuliproxError> {
+        if s.eq(Self::STAGED) {
+            Ok(Self::Staged)
+        } else if s.eq(Self::INPUT) {
+            Ok(Self::Input)
+        } else if s.eq(Self::SKIP) {
+            Ok(Self::Skip)
+        } else {
+            info_err_res!("Unknown ClusterSource: {}", s)
+        }
+    }
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct StagedInputDto {
-    #[serde(default = "default_true")]
+    #[serde(default = "default_as_true")]
     pub enabled: bool,
     #[serde(with = "arc_str_serde")]
     pub name: Arc<str>,
@@ -305,6 +350,12 @@ pub struct StagedInputDto {
     pub input_type: InputType,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub headers: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_source: Option<ClusterSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vod_source: Option<ClusterSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub series_source: Option<ClusterSource>,
 }
 
 impl Default for StagedInputDto {
@@ -318,6 +369,9 @@ impl Default for StagedInputDto {
             method: InputFetchMethod::default(),
             input_type: InputType::default(),
             headers: HashMap::default(),
+            live_source: None,
+            vod_source: None,
+            series_source: None,
         }
     }
 }
@@ -330,6 +384,9 @@ impl StagedInputDto {
             && self.method == InputFetchMethod::default()
             && self.input_type == InputType::default()
             && self.headers.is_empty()
+            && self.live_source.is_none()
+            && self.vod_source.is_none()
+            && self.series_source.is_none()
     }
 
     pub fn clean(&mut self) {
@@ -339,6 +396,9 @@ impl StagedInputDto {
         self.method = InputFetchMethod::default();
         self.input_type = InputType::default();
         self.headers.clear();
+        self.live_source = None;
+        self.vod_source = None;
+        self.series_source = None;
     }
 }
 
@@ -502,9 +562,37 @@ impl ConfigInputDto {
         check_input_credentials!(self, self.input_type, true, false);
         check_input_connections!(self, self.input_type, false);
         if let Some(staged_input) = self.staged.as_mut() {
-            check_input_credentials!(staged_input, staged_input.input_type, true, true);
-            if !matches!(staged_input.input_type, InputType::M3u | InputType::Xtream) {
-                return info_err_res!("Staged input can only be of type m3u or xtream");
+            if staged_input.enabled {
+                check_input_credentials!(staged_input, staged_input.input_type, true, true);
+                if !matches!(staged_input.input_type, InputType::M3u | InputType::Xtream) {
+                    return info_err_res!("Staged input can only be of type m3u or xtream");
+                }
+                if self.input_type.is_xtream() {
+                    let live = staged_input.live_source.unwrap_or(ClusterSource::Staged);
+                    let vod_default =
+                        if staged_input.input_type.is_m3u() { ClusterSource::Input } else { ClusterSource::Staged };
+                    let series_default =
+                        if staged_input.input_type.is_m3u() { ClusterSource::Input } else { ClusterSource::Staged };
+                    let vod = staged_input.vod_source.unwrap_or(vod_default);
+                    let series = staged_input.series_source.unwrap_or(series_default);
+
+                    if !matches!(live, ClusterSource::Staged)
+                        && !matches!(vod, ClusterSource::Staged)
+                        && !matches!(series, ClusterSource::Staged)
+                    {
+                        return info_err_res!(
+                            "Staged input is enabled but no cluster source uses 'staged'; set at least one of live_source/vod_source/series_source to 'staged'"
+                        );
+                    }
+
+                    if staged_input.input_type.is_m3u()
+                        && (matches!(vod, ClusterSource::Staged) || matches!(series, ClusterSource::Staged))
+                    {
+                        return info_err_res!(
+                            "Staged M3U input cannot provide VOD or Series clusters; use 'input' or 'skip'"
+                        );
+                    }
+                }
             }
         }
 
@@ -530,7 +618,7 @@ impl ConfigInputDto {
         }
         check_provider_scheme_url!(self.url, provider_names);
 
-        if let Some(staged_input) = self.staged.as_ref() {
+        if let Some(staged_input) = self.staged.as_ref().filter(|staged| staged.enabled) {
             check_provider_scheme_url!(staged_input.url, provider_names);
         }
 
@@ -1055,5 +1143,197 @@ mod tests {
 
         let err = dto.prepare(0, true, &HashSet::new()).expect_err("prepare must reject provider:// for batch input");
         assert!(err.to_string().contains("does not support provider:// URLs"), "Error: {err}");
+    }
+
+    #[test]
+    fn test_cluster_source_serde_roundtrip() {
+        let json = r#""staged""#;
+        let cs: ClusterSource = serde_json::from_str(json).expect("deserialize staged");
+        assert_eq!(cs, ClusterSource::Staged);
+        assert_eq!(serde_json::to_string(&cs).expect("serialize"), json);
+
+        let cs: ClusterSource = serde_json::from_str(r#""input""#).expect("deserialize input");
+        assert_eq!(cs, ClusterSource::Input);
+
+        let cs: ClusterSource = serde_json::from_str(r#""skip""#).expect("deserialize skip");
+        assert_eq!(cs, ClusterSource::Skip);
+    }
+
+    #[test]
+    fn test_staged_m3u_vod_source_staged_rejected() {
+        let mut dto = create_test_dto();
+        dto.input_type = InputType::Xtream;
+        dto.url = "http://main.com".to_string();
+        dto.username = Some("u".to_string());
+        dto.password = Some("p".to_string());
+        dto.staged = Some(StagedInputDto {
+            name: "staged".into(),
+            input_type: InputType::M3u,
+            url: "http://staged.com/playlist.m3u".to_string(),
+            vod_source: Some(ClusterSource::Staged),
+            ..StagedInputDto::default()
+        });
+
+        let err = dto.prepare(0, true, &HashSet::new()).expect_err("should reject vod_source=staged for M3U staged");
+        assert!(err.to_string().contains("Staged M3U input cannot provide VOD or Series"), "Error: {err}");
+    }
+
+    #[test]
+    fn test_staged_m3u_series_source_staged_rejected() {
+        let mut dto = create_test_dto();
+        dto.input_type = InputType::Xtream;
+        dto.url = "http://main.com".to_string();
+        dto.username = Some("u".to_string());
+        dto.password = Some("p".to_string());
+        dto.staged = Some(StagedInputDto {
+            name: "staged".into(),
+            input_type: InputType::M3u,
+            url: "http://staged.com/playlist.m3u".to_string(),
+            series_source: Some(ClusterSource::Staged),
+            ..StagedInputDto::default()
+        });
+
+        let err = dto.prepare(0, true, &HashSet::new()).expect_err("should reject series_source=staged for M3U staged");
+        assert!(err.to_string().contains("Staged M3U input cannot provide VOD or Series"), "Error: {err}");
+    }
+
+    #[test]
+    fn test_staged_xtream_with_cluster_sources_accepted() {
+        let mut dto = create_test_dto();
+        dto.input_type = InputType::Xtream;
+        dto.url = "http://main.com".to_string();
+        dto.username = Some("u".to_string());
+        dto.password = Some("p".to_string());
+        dto.staged = Some(StagedInputDto {
+            name: "staged".into(),
+            input_type: InputType::Xtream,
+            url: "http://staged.com".to_string(),
+            username: Some("su".to_string()),
+            password: Some("sp".to_string()),
+            live_source: Some(ClusterSource::Staged),
+            vod_source: Some(ClusterSource::Input),
+            series_source: Some(ClusterSource::Skip),
+            ..StagedInputDto::default()
+        });
+
+        dto.prepare(0, true, &HashSet::new()).expect("xtream staged with all cluster sources should succeed");
+    }
+
+    #[test]
+    fn test_staged_enabled_requires_at_least_one_staged_cluster_source() {
+        let mut dto = create_test_dto();
+        dto.input_type = InputType::Xtream;
+        dto.url = "http://main.com".to_string();
+        dto.username = Some("u".to_string());
+        dto.password = Some("p".to_string());
+        dto.staged = Some(StagedInputDto {
+            enabled: true,
+            name: "staged".into(),
+            input_type: InputType::Xtream,
+            url: "http://staged.com".to_string(),
+            username: Some("su".to_string()),
+            password: Some("sp".to_string()),
+            live_source: Some(ClusterSource::Input),
+            vod_source: Some(ClusterSource::Skip),
+            series_source: Some(ClusterSource::Input),
+            ..StagedInputDto::default()
+        });
+
+        let err =
+            dto.prepare(0, true, &HashSet::new()).expect_err("expected validation error for missing staged source");
+        assert!(err.to_string().contains("no cluster source uses 'staged'"), "Error: {err}");
+    }
+
+    #[test]
+    fn test_staged_disabled_skips_cluster_source_validation() {
+        let mut dto = create_test_dto();
+        dto.input_type = InputType::Xtream;
+        dto.url = "http://main.com".to_string();
+        dto.username = Some("u".to_string());
+        dto.password = Some("p".to_string());
+        dto.staged = Some(StagedInputDto {
+            enabled: false,
+            name: "staged".into(),
+            input_type: InputType::Xtream,
+            url: "http://staged.com".to_string(),
+            live_source: Some(ClusterSource::Input),
+            vod_source: Some(ClusterSource::Skip),
+            series_source: Some(ClusterSource::Input),
+            ..StagedInputDto::default()
+        });
+
+        dto.prepare(0, true, &HashSet::new())
+            .expect("disabled staged input should not enforce cluster source validation");
+    }
+
+    #[test]
+    fn test_staged_disabled_skips_m3u_cluster_constraints() {
+        let mut dto = create_test_dto();
+        dto.input_type = InputType::Xtream;
+        dto.url = "http://main.com".to_string();
+        dto.username = Some("u".to_string());
+        dto.password = Some("p".to_string());
+        dto.staged = Some(StagedInputDto {
+            enabled: false,
+            name: "staged".into(),
+            input_type: InputType::M3u,
+            url: "http://staged.com/playlist.m3u".to_string(),
+            vod_source: Some(ClusterSource::Staged),
+            series_source: Some(ClusterSource::Staged),
+            ..StagedInputDto::default()
+        });
+
+        dto.prepare(0, true, &HashSet::new())
+            .expect("disabled staged input should not enforce staged M3U cluster validation");
+    }
+
+    #[test]
+    fn test_staged_disabled_skips_provider_url_validation() {
+        let mut dto = create_test_dto();
+        dto.input_type = InputType::Xtream;
+        dto.url = "http://main.com".to_string();
+        dto.username = Some("u".to_string());
+        dto.password = Some("p".to_string());
+        dto.staged = Some(StagedInputDto {
+            enabled: false,
+            name: "staged".into(),
+            input_type: InputType::Xtream,
+            url: "provider://missing-provider".to_string(),
+            ..StagedInputDto::default()
+        });
+
+        dto.prepare(0, true, &HashSet::new())
+            .expect("disabled staged input should not enforce provider URL validation");
+    }
+
+    #[test]
+    fn test_staged_dto_defaults_none() {
+        let staged = StagedInputDto::default();
+        assert!(staged.live_source.is_none());
+        assert!(staged.vod_source.is_none());
+        assert!(staged.series_source.is_none());
+    }
+
+    #[test]
+    fn test_staged_dto_is_empty_with_cluster_source() {
+        let mut staged = StagedInputDto::default();
+        assert!(staged.is_empty());
+
+        staged.live_source = Some(ClusterSource::Input);
+        assert!(!staged.is_empty());
+    }
+
+    #[test]
+    fn test_staged_dto_clean_resets_cluster_sources() {
+        let mut staged = StagedInputDto {
+            live_source: Some(ClusterSource::Input),
+            vod_source: Some(ClusterSource::Skip),
+            series_source: Some(ClusterSource::Staged),
+            ..StagedInputDto::default()
+        };
+        staged.clean();
+        assert!(staged.live_source.is_none());
+        assert!(staged.vod_source.is_none());
+        assert!(staged.series_source.is_none());
     }
 }

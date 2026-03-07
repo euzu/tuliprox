@@ -374,7 +374,11 @@
       "FETCH_METHOD": "HTTP method used to retrieve the input (e.g., GET, POST).",
       "HEADERS": "Custom HTTP headers sent when retrieving the input playlist.",
       "INPUT_TYPE": "Defines the streaming protocol or source format (e.g. xtream, m3u).",
+      "LIVE_SOURCE": "Source selector for the Live cluster when staged input is enabled (`default`, `staged`, `input`, `skip`).",
       "PROVIDERS": "Provider profiles define reusable upstream URLs and DNS behavior that this input can reference."
+      ,
+      "SERIES_SOURCE": "Source selector for the Series cluster when staged input is enabled (`default`, `staged`, `input`, `skip`).",
+      "VOD_SOURCE": "Source selector for the VOD cluster when staged input is enabled (`default`, `staged`, `input`, `skip`)."
     },
     "IP_CHECK_CONFIG": {
       "PATTERN_IPV4": "Optional regex to extract IPv4 address from the response (default matches standard decimal format).",
@@ -1060,6 +1064,9 @@
     "SPECIFIC_TEMPLATES": "Specific Templates",
     "SSDP_DISCOVERY": "SSDP Discovery",
     "STAGED": "Staged",
+    "LIVE_SOURCE": "Live Source",
+    "VOD_SOURCE": "VOD Source",
+    "SERIES_SOURCE": "Series Source",
     "START": "Start",
     "STAR_ON_GITHUB": "If you like this project, star ⭐ us on GitHub",
     "STATS": "Stats",
