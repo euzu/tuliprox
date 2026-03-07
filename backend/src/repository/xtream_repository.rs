@@ -45,6 +45,14 @@ macro_rules! cant_write_result {
     };
 }
 
+// fn rebuild_source_ordinal_index_if_present(xtream_path: &Path) -> Result<(), std::io::Error> {
+//     let index_path = get_file_path_for_db_index(xtream_path);
+//     if !index_path.exists() {
+//         return Ok(());
+//     }
+//     BPlusTree::<u32, XtreamPlaylistItem>::store_index(xtream_path, |pli| pli.source_ordinal)
+// }
+
 #[inline]
 pub fn get_collection_path(path: &Path, collection: &str) -> PathBuf {
     path.join(format!("{collection}.json"))
@@ -156,6 +164,7 @@ pub async fn write_playlist_item_update(
         let _guard = file_lock;
         let mut tree = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::try_new_with_backoff(&xtream_path_clone)?;
         tree.upsert_batch_encoded(prepared_items)?;
+       // rebuild_source_ordinal_index_if_present(&xtream_path_clone)?;
         Ok(())
     })
         .await
@@ -201,6 +210,7 @@ pub async fn write_playlist_batch_item_upsert(
         let _guard = file_lock;
         let mut tree = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::try_new_with_backoff(&xtream_path_clone)?;
         tree.upsert_batch_encoded(prepared_items)?;
+        //rebuild_source_ordinal_index_if_present(&xtream_path_clone)?;
         Ok(())
     })
         .await
@@ -1323,6 +1333,8 @@ async fn persist_input_info(app_config: &Arc<AppConfig>, storage_path: &Path, cl
                 Ok(Some(mut pli)) => {
                     pli.additional_properties = Some(props);
                     tree.update(&provider_id, pli).map_err(|err| Error::other(format!("failed to write {cluster} info for input {input_name_owned}: {err}")))?;
+                    //rebuild_source_ordinal_index_if_present(&xtream_path_clone)
+                    //    .map_err(|err| Error::other(format!("failed to rebuild sorted index for input {input_name_owned}: {err}")))?;
                 }
                 Ok(None) => {
                     error!("Could not find input entry for provider_id: {provider_id} and input: {input_name_owned}");
@@ -1377,6 +1389,8 @@ pub async fn persist_input_info_batch(app_config: &Arc<AppConfig>, storage_path:
                     .map(|(id, pli)| (id, pli))
                     .collect();
                 tree.update_batch(&refs).map_err(|err| Error::other(format!("failed to write batch {cluster} info for input {input_name_owned}: {err}")))?;
+                //rebuild_source_ordinal_index_if_present(&xtream_path_clone)
+                //    .map_err(|err| Error::other(format!("failed to rebuild sorted index for input {input_name_owned}: {err}")))?;
             }
             Ok(())
         }).await.map_err(|err| Error::other(format!("failed to join blocking input info batch persist for {input_name}: {err}")))??;
