@@ -29,6 +29,7 @@ use crate::{
         debug_if_enabled, epg, log_memory_snapshot, m3u, trace_if_enabled, xtream, StepMeasure, StepMeasureCallback,
     },
 };
+use super::filtered_playlist_source::FilteredPlaylistSource;
 use futures::{FutureExt, StreamExt};
 use indexmap::IndexMap;
 use log::{debug, error, info, log_enabled, warn, Level};
@@ -361,7 +362,7 @@ fn hybrid_has_m3u_staged_cluster(input: &ConfigInput, skip_cluster: &[XtreamClus
 }
 
 fn filter_skipped_clusters_from_source(
-    mut source: Box<dyn PlaylistSource>,
+    source: Box<dyn PlaylistSource>,
     input: &ConfigInput,
 ) -> Box<dyn PlaylistSource> {
     let skip_clusters = collect_effective_skip_clusters(input);
@@ -370,23 +371,7 @@ fn filter_skipped_clusters_from_source(
     }
 
     let skip_set: HashSet<XtreamCluster> = skip_clusters.into_iter().collect();
-    let filtered_groups = source
-        .take_groups()
-        .into_iter()
-        .filter_map(|mut group| {
-            if skip_set.contains(&group.xtream_cluster) {
-                return None;
-            }
-            group.channels.retain(|item| !skip_set.contains(&item.header.xtream_cluster));
-            if group.channels.is_empty() {
-                None
-            } else {
-                Some(group)
-            }
-        })
-        .collect();
-
-    MemoryPlaylistSource::new(filtered_groups).boxed()
+    Box::new(FilteredPlaylistSource::new(source, skip_set))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -450,6 +435,7 @@ async fn playlist_download_from_input(
         let mut all_errors = Vec::new();
         let mut m3u_error_count = 0usize;
         let mut xtream_error_count = 0usize;
+        let mut m3u_added_groups = false;
 
         if needs_m3u_download {
             let staged = input.staged.as_ref().expect("hybrid requires staged input");
@@ -457,6 +443,7 @@ async fn playlist_download_from_input(
             let (m3u_playlist, m3u_errors) =
                 m3u::download_m3u_playlist_from_source(app_config, client, config, input, Some(staged_source)).await;
             m3u_error_count = m3u_errors.len();
+            m3u_added_groups = !m3u_playlist.is_empty();
             playlist.extend(m3u_playlist);
             all_errors.extend(m3u_errors);
         }
@@ -474,6 +461,11 @@ async fn playlist_download_from_input(
             playlist.extend(xtream_playlist);
             all_errors.extend(xtream_errors);
             xtream_persisted = persisted;
+
+            if m3u_added_groups {
+                // Keep merged hybrid output in memory when staged M3U contributed groups.
+                xtream_persisted = false;
+            }
         }
 
         (playlist, all_errors, xtream_persisted, m3u_error_count, xtream_error_count)

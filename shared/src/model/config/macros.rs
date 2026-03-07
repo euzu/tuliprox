@@ -44,11 +44,23 @@ macro_rules! check_input_credentials {
                     }
                 }
 
-                if !$alias
-                    && ($this.username.is_some() || $this.password.is_some())
-                    && !$this.url.starts_with($crate::utils::BATCH_SCHEME_PREFIX)
-                {
-                    return info_err_res!("input type xtream-batch should not define username or password attribute ");
+                if !$alias {
+                    let has_username = $this.username.is_some();
+                    let has_password = $this.password.is_some();
+                    let has_credentials = has_username || has_password;
+                    let is_batch_url = $this.url.starts_with($crate::utils::BATCH_SCHEME_PREFIX);
+
+                    if is_batch_url {
+                        if has_credentials {
+                            return info_err_res!(
+                                "input type xtream-batch with batch:// URL should not define username or password attribute "
+                            );
+                        }
+                    } else if !has_username || !has_password {
+                        return info_err_res!(
+                            "for input type xtream-batch without batch:// URL: username and password are mandatory"
+                        );
+                    }
                 }
             }
             InputType::Library => {

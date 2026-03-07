@@ -559,45 +559,7 @@ impl ConfigInputDto {
             self.cache_duration_seconds = 0;
         }
 
-        check_input_credentials!(self, self.input_type, true, false);
-        check_input_connections!(self, self.input_type, false);
-        if let Some(staged_input) = self.staged.as_mut() {
-            if staged_input.enabled {
-                check_input_credentials!(staged_input, staged_input.input_type, true, true);
-                if !matches!(staged_input.input_type, InputType::M3u | InputType::Xtream) {
-                    return info_err_res!("Staged input can only be of type m3u or xtream");
-                }
-                if self.input_type.is_xtream() {
-                    let live = staged_input.live_source.unwrap_or(ClusterSource::Staged);
-                    let vod_default =
-                        if staged_input.input_type.is_m3u() { ClusterSource::Input } else { ClusterSource::Staged };
-                    let series_default =
-                        if staged_input.input_type.is_m3u() { ClusterSource::Input } else { ClusterSource::Staged };
-                    let vod = staged_input.vod_source.unwrap_or(vod_default);
-                    let series = staged_input.series_source.unwrap_or(series_default);
-
-                    if !matches!(live, ClusterSource::Staged)
-                        && !matches!(vod, ClusterSource::Staged)
-                        && !matches!(series, ClusterSource::Staged)
-                    {
-                        return info_err_res!(
-                            "Staged input is enabled but no cluster source uses 'staged'; set at least one of live_source/vod_source/series_source to 'staged'"
-                        );
-                    }
-
-                    if staged_input.input_type.is_m3u()
-                        && (matches!(vod, ClusterSource::Staged) || matches!(series, ClusterSource::Staged))
-                    {
-                        return info_err_res!(
-                            "Staged M3U input cannot provide VOD or Series clusters; use 'input' or 'skip'"
-                        );
-                    }
-                }
-            }
-        }
-
-        self.persist = get_trimmed_string(self.persist.as_deref());
-
+        self.url = self.url.trim().to_string();
         if self.url.starts_with(BATCH_SCHEME_PREFIX) {
             match self.input_type {
                 InputType::M3u => {
@@ -616,6 +578,48 @@ impl ConfigInputDto {
                 self.input_type
             );
         }
+
+        check_input_credentials!(self, self.input_type, true, false);
+        check_input_connections!(self, self.input_type, false);
+        if let Some(staged_input) = self.staged.as_mut() {
+            if staged_input.enabled {
+                check_input_credentials!(staged_input, staged_input.input_type, true, true);
+                if !matches!(staged_input.input_type, InputType::M3u | InputType::Xtream) {
+                    return info_err_res!("Staged input can only be of type m3u or xtream");
+                }
+                if self.input_type.is_xtream() {
+                    let live = staged_input.live_source.unwrap_or(ClusterSource::Staged);
+                    let vod_default =
+                        if staged_input.input_type.is_m3u() { ClusterSource::Input } else { ClusterSource::Staged };
+                    let series_default =
+                        if staged_input.input_type.is_m3u() { ClusterSource::Input } else { ClusterSource::Staged };
+                    let vod = staged_input.vod_source.unwrap_or(vod_default);
+                    let series = staged_input.series_source.unwrap_or(series_default);
+                    let (skip_live, skip_vod, skip_series) =
+                        self.options.as_ref().map_or((false, false, false), |opts| {
+                            (opts.xtream_skip_live, opts.xtream_skip_vod, opts.xtream_skip_series)
+                        });
+
+                    let live_uses_staged = matches!(live, ClusterSource::Staged) && !skip_live;
+                    let vod_uses_staged = matches!(vod, ClusterSource::Staged) && !skip_vod;
+                    let series_uses_staged = matches!(series, ClusterSource::Staged) && !skip_series;
+
+                    if !live_uses_staged && !vod_uses_staged && !series_uses_staged {
+                        return info_err_res!(
+                            "Staged input is enabled but no cluster source uses 'staged'; set at least one of live_source/vod_source/series_source to 'staged'"
+                        );
+                    }
+
+                    if staged_input.input_type.is_m3u() && (vod_uses_staged || series_uses_staged) {
+                        return info_err_res!(
+                            "Staged M3U input cannot provide VOD or Series clusters; use 'input' or 'skip'"
+                        );
+                    }
+                }
+            }
+        }
+
+        self.persist = get_trimmed_string(self.persist.as_deref());
         check_provider_scheme_url!(self.url, provider_names);
 
         if let Some(staged_input) = self.staged.as_ref().filter(|staged| staged.enabled) {
@@ -1124,11 +1128,28 @@ mod tests {
     }
 
     #[test]
+    fn prepare_batch_url_does_not_require_xtream_credentials() {
+        let mut dto = ConfigInputDto {
+            name: "batch_no_creds".intern(),
+            input_type: InputType::Xtream,
+            url: "batch:///tmp/no-creds.csv".to_string(),
+            username: None,
+            password: None,
+            ..ConfigInputDto::default()
+        };
+
+        dto.prepare(0, true, &HashSet::new()).expect("batch:// input must be normalized before credential validation");
+        assert_eq!(dto.input_type, InputType::XtreamBatch);
+    }
+
+    #[test]
     fn prepare_fails_for_provider_scheme_on_batch_input() {
         let mut dto = ConfigInputDto {
             name: "batch_provider".intern(),
             input_type: InputType::XtreamBatch,
             url: "provider://myprovider".to_string(),
+            username: Some("root_user".to_string()),
+            password: Some("root_pass".to_string()),
             aliases: Some(vec![ConfigInputAliasDto {
                 id: 1,
                 name: "alias_1".intern(),
@@ -1143,6 +1164,82 @@ mod tests {
 
         let err = dto.prepare(0, true, &HashSet::new()).expect_err("prepare must reject provider:// for batch input");
         assert!(err.to_string().contains("does not support provider:// URLs"), "Error: {err}");
+    }
+
+    #[test]
+    fn prepare_rejects_missing_input_url_even_with_aliases() {
+        let mut dto = ConfigInputDto {
+            name: "xtream_missing_root_url".intern(),
+            input_type: InputType::Xtream,
+            url: "".to_string(),
+            username: Some("root_user".to_string()),
+            password: Some("root_pass".to_string()),
+            aliases: Some(vec![ConfigInputAliasDto {
+                id: 1,
+                name: "alias_1".intern(),
+                url: "http://alias.example".to_string(),
+                username: Some("alias_user".to_string()),
+                password: Some("alias_pass".to_string()),
+                enabled: true,
+                ..ConfigInputAliasDto::default()
+            }]),
+            ..ConfigInputDto::default()
+        };
+
+        let err = dto
+            .prepare(0, true, &HashSet::new())
+            .expect_err("prepare must require root input url even when aliases are present");
+        assert!(err.to_string().contains("url for input is mandatory"), "Error: {err}");
+    }
+
+    #[test]
+    fn prepare_rejects_xtream_batch_without_root_credentials_even_with_aliases() {
+        let mut dto = ConfigInputDto {
+            name: "xtream_batch_missing_root_creds".intern(),
+            input_type: InputType::XtreamBatch,
+            url: "http://root.example".to_string(),
+            aliases: Some(vec![ConfigInputAliasDto {
+                id: 1,
+                name: "alias_1".intern(),
+                url: "http://alias.example".to_string(),
+                username: Some("alias_user".to_string()),
+                password: Some("alias_pass".to_string()),
+                enabled: true,
+                ..ConfigInputAliasDto::default()
+            }]),
+            ..ConfigInputDto::default()
+        };
+
+        let err = dto
+            .prepare(0, true, &HashSet::new())
+            .expect_err("prepare must require root credentials for non-batch xtream-batch input");
+        assert!(err.to_string().contains("xtream-batch without batch:// URL"), "Error: {err}");
+    }
+
+    #[test]
+    fn prepare_rejects_xtream_batch_batch_url_with_root_credentials_even_with_aliases() {
+        let mut dto = ConfigInputDto {
+            name: "xtream_batch_with_root_creds".intern(),
+            input_type: InputType::XtreamBatch,
+            url: "batch:///tmp/aliases.csv".to_string(),
+            username: Some("root_user".to_string()),
+            password: Some("root_pass".to_string()),
+            aliases: Some(vec![ConfigInputAliasDto {
+                id: 1,
+                name: "alias_1".intern(),
+                url: "http://alias.example".to_string(),
+                username: Some("alias_user".to_string()),
+                password: Some("alias_pass".to_string()),
+                enabled: true,
+                ..ConfigInputAliasDto::default()
+            }]),
+            ..ConfigInputDto::default()
+        };
+
+        let err = dto
+            .prepare(0, true, &HashSet::new())
+            .expect_err("prepare must reject root credentials when using batch:// for xtream-batch");
+        assert!(err.to_string().contains("with batch:// URL should not define username or password"), "Error: {err}");
     }
 
     #[test]
@@ -1242,6 +1339,53 @@ mod tests {
         let err =
             dto.prepare(0, true, &HashSet::new()).expect_err("expected validation error for missing staged source");
         assert!(err.to_string().contains("no cluster source uses 'staged'"), "Error: {err}");
+    }
+
+    #[test]
+    fn test_staged_skip_flag_excludes_cluster_from_staged_requirement() {
+        let mut dto = create_test_dto();
+        dto.input_type = InputType::Xtream;
+        dto.url = "http://main.com".to_string();
+        dto.username = Some("u".to_string());
+        dto.password = Some("p".to_string());
+        dto.options = Some(ConfigInputOptionsDto { xtream_skip_live: true, ..ConfigInputOptionsDto::default() });
+        dto.staged = Some(StagedInputDto {
+            enabled: true,
+            name: "staged".into(),
+            input_type: InputType::Xtream,
+            url: "http://staged.com".to_string(),
+            username: Some("su".to_string()),
+            password: Some("sp".to_string()),
+            live_source: Some(ClusterSource::Staged),
+            vod_source: Some(ClusterSource::Input),
+            series_source: Some(ClusterSource::Input),
+            ..StagedInputDto::default()
+        });
+
+        let err = dto
+            .prepare(0, true, &HashSet::new())
+            .expect_err("skipped staged cluster must not satisfy staged-source requirement");
+        assert!(err.to_string().contains("no cluster source uses 'staged'"), "Error: {err}");
+    }
+
+    #[test]
+    fn test_staged_m3u_vod_staged_allowed_when_vod_is_skipped() {
+        let mut dto = create_test_dto();
+        dto.input_type = InputType::Xtream;
+        dto.url = "http://main.com".to_string();
+        dto.username = Some("u".to_string());
+        dto.password = Some("p".to_string());
+        dto.options = Some(ConfigInputOptionsDto { xtream_skip_vod: true, ..ConfigInputOptionsDto::default() });
+        dto.staged = Some(StagedInputDto {
+            name: "staged".into(),
+            input_type: InputType::M3u,
+            url: "http://staged.com/playlist.m3u".to_string(),
+            vod_source: Some(ClusterSource::Staged),
+            ..StagedInputDto::default()
+        });
+
+        dto.prepare(0, true, &HashSet::new())
+            .expect("staged M3U vod_source=staged is valid when VOD cluster is skipped");
     }
 
     #[test]

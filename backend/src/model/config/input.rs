@@ -345,6 +345,12 @@ impl ConfigInput {
             self.options = Some(ConfigInputOptions::defaults().clone());
         }
 
+        // For batch definitions, validate root URL/credentials before alias promotion in prepare_batch().
+        if self.enabled && matches!(self.input_type, InputType::M3uBatch | InputType::XtreamBatch) {
+            check_input_credentials!(self, self.input_type, false, false);
+            check_input_connections!(self, self.input_type, false);
+        }
+
         let mut used_provider_configs: Vec<Arc<ConfigProvider>> = vec![];
         let batch_file_path = self.prepare_batch();
         self.name = self.name.trim().intern();
@@ -373,6 +379,9 @@ impl ConfigInput {
         if self.enabled {
             check_input_credentials!(self, self.input_type, false, false);
             check_input_connections!(self, self.input_type, false);
+            let skip_live = self.has_flag(ConfigInputFlags::XtreamSkipLive);
+            let skip_vod = self.has_flag(ConfigInputFlags::XtreamSkipVod);
+            let skip_series = self.has_flag(ConfigInputFlags::XtreamSkipSeries);
             if let Some(staged_input) = &mut self.staged {
                 if staged_input.enabled {
                     if staged_input.url.starts_with(PROVIDER_SCHEME_PREFIX) {
@@ -387,13 +396,23 @@ impl ConfigInput {
                     }
 
                     if self.input_type.is_xtream()
-                        && !matches!(staged_input.live_source, ClusterSource::Staged)
-                        && !matches!(staged_input.vod_source, ClusterSource::Staged)
-                        && !matches!(staged_input.series_source, ClusterSource::Staged)
                     {
-                        return info_err_res!(
-                            "Staged input is enabled but no cluster source uses 'staged'; set at least one of live_source/vod_source/series_source to 'staged'"
-                        );
+                        let live_uses_staged = matches!(staged_input.live_source, ClusterSource::Staged) && !skip_live;
+                        let vod_uses_staged = matches!(staged_input.vod_source, ClusterSource::Staged) && !skip_vod;
+                        let series_uses_staged =
+                            matches!(staged_input.series_source, ClusterSource::Staged) && !skip_series;
+
+                        if !live_uses_staged && !vod_uses_staged && !series_uses_staged {
+                            return info_err_res!(
+                                "Staged input is enabled but no cluster source uses 'staged'; set at least one of live_source/vod_source/series_source to 'staged'"
+                            );
+                        }
+
+                        if staged_input.input_type.is_m3u() && (vod_uses_staged || series_uses_staged) {
+                            return info_err_res!(
+                                "Staged M3U input cannot provide VOD or Series clusters; use 'input' or 'skip'"
+                            );
+                        }
                     }
 
                     if self.input_type.is_m3u() {
@@ -990,5 +1009,130 @@ mod tests {
             .prepare(&[])
             .expect_err("expected validation error for staged source selection");
         assert!(err.to_string().contains("no cluster source uses 'staged'"));
+    }
+
+    #[test]
+    fn test_prepare_staged_m3u_rejects_vod_series_staged() {
+        let mut input = ConfigInput {
+            name: "xtream_main".into(),
+            input_type: InputType::Xtream,
+            url: "http://main.example".to_string(),
+            username: Some("main_user".to_string()),
+            password: Some("main_pass".to_string()),
+            enabled: true,
+            staged: Some(StagedInput {
+                enabled: true,
+                input_type: InputType::M3u,
+                url: "http://staged.example/playlist.m3u".to_string(),
+                vod_source: ClusterSource::Staged,
+                ..StagedInput::default()
+            }),
+            ..Default::default()
+        };
+
+        let err = input
+            .prepare(&[])
+            .expect_err("expected staged M3U validation error for vod_source=staged");
+        assert!(err.to_string().contains("Staged M3U input cannot provide VOD or Series"));
+    }
+
+    #[test]
+    fn test_prepare_staged_m3u_vod_staged_allowed_when_vod_skipped() {
+        let mut input = ConfigInput {
+            name: "xtream_main".into(),
+            input_type: InputType::Xtream,
+            url: "http://main.example".to_string(),
+            username: Some("main_user".to_string()),
+            password: Some("main_pass".to_string()),
+            enabled: true,
+            options: Some(ConfigInputOptions::from(&ConfigInputOptionsDto {
+                xtream_skip_vod: true,
+                ..ConfigInputOptionsDto::default()
+            })),
+            staged: Some(StagedInput {
+                enabled: true,
+                input_type: InputType::M3u,
+                url: "http://staged.example/playlist.m3u".to_string(),
+                vod_source: ClusterSource::Staged,
+                ..StagedInput::default()
+            }),
+            ..Default::default()
+        };
+
+        input
+            .prepare(&[])
+            .expect("staged M3U vod_source=staged is valid when VOD is skipped");
+    }
+
+    #[test]
+    fn test_prepare_xtream_batch_requires_root_url_even_with_aliases() {
+        let mut input = ConfigInput {
+            name: "xtream_batch_missing_root_url".into(),
+            input_type: InputType::XtreamBatch,
+            url: "".to_string(),
+            enabled: true,
+            aliases: Some(vec![ConfigInputAlias {
+                id: 1,
+                name: "alias".into(),
+                url: "http://alias.example".to_string(),
+                username: Some("alias_user".to_string()),
+                password: Some("alias_pass".to_string()),
+                priority: 0,
+                max_connections: 0,
+                exp_date: None,
+                enabled: true,
+            }]),
+            ..Default::default()
+        };
+
+        let err = input
+            .prepare(&[])
+            .expect_err("prepare must require root URL even when aliases are attached directly");
+        assert!(err.to_string().contains("url for input is mandatory"), "Error: {err}");
+    }
+
+    #[test]
+    fn test_prepare_xtream_batch_requires_root_credentials_for_non_batch_url() {
+        let mut input = ConfigInput {
+            name: "xtream_batch_missing_root_creds".into(),
+            input_type: InputType::XtreamBatch,
+            url: "http://root.example".to_string(),
+            enabled: true,
+            aliases: Some(vec![ConfigInputAlias {
+                id: 1,
+                name: "alias".into(),
+                url: "http://alias.example".to_string(),
+                username: Some("alias_user".to_string()),
+                password: Some("alias_pass".to_string()),
+                priority: 0,
+                max_connections: 0,
+                exp_date: None,
+                enabled: true,
+            }]),
+            ..Default::default()
+        };
+
+        let err = input
+            .prepare(&[])
+            .expect_err("prepare must require root credentials for non-batch xtream-batch URL");
+        assert!(err.to_string().contains("xtream-batch without batch:// URL"), "Error: {err}");
+    }
+
+    #[test]
+    fn test_prepare_xtream_batch_rejects_root_credentials_for_batch_url() {
+        let mut input = ConfigInput {
+            name: "xtream_batch_root_creds_not_allowed".into(),
+            input_type: InputType::XtreamBatch,
+            url: "batch:///tmp/aliases.csv".to_string(),
+            username: Some("root_user".to_string()),
+            password: Some("root_pass".to_string()),
+            enabled: true,
+            ..Default::default()
+        };
+
+        let err = input
+            .prepare(&[])
+            .expect_err("prepare must reject root credentials for batch:// xtream-batch URL");
+        assert!(err.to_string().contains("with batch:// URL should not define username or password"), "Error: {err}");
     }
 }
