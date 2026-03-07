@@ -290,6 +290,126 @@ pub struct ConfigInput {
 }
 
 impl ConfigInput {
+    fn resolve_provider_config(url: &str, provider_configs: &[Arc<ConfigProvider>]) -> Result<Arc<ConfigProvider>, TuliproxError> {
+        let (host, _path) = parse_provider_scheme_url_parts(url).map_err(|err| {
+            info_err!(
+                "Malformed provider URL {}: {}",
+                sanitize_sensitive_info(url),
+                sanitize_sensitive_info(err.to_string().as_str())
+            )
+        })?;
+
+        provider_configs
+            .iter()
+            .find(|p| p.name.as_ref() == host)
+            .cloned()
+            .ok_or_else(|| info_err!("Failed to resolve provider config for {}", sanitize_sensitive_info(url)))
+    }
+
+    fn prepare_staged_input(
+        &mut self,
+        provider_configs: &[Arc<ConfigProvider>],
+        used_provider_configs: &mut Vec<Arc<ConfigProvider>>,
+        skip_live: bool,
+        skip_vod: bool,
+        skip_series: bool,
+    ) -> Result<(), TuliproxError> {
+        if let Some(staged_input) = &mut self.staged {
+            if staged_input.enabled {
+                if staged_input.url.starts_with(PROVIDER_SCHEME_PREFIX) {
+                    let provider_cfg = Self::resolve_provider_config(&staged_input.url, provider_configs)?;
+                    staged_input.provider_config = Some(provider_cfg.clone());
+                    used_provider_configs.push(provider_cfg);
+                }
+
+                check_input_credentials!(staged_input, staged_input.input_type, false, true);
+                if !matches!(staged_input.input_type, InputType::M3u | InputType::Xtream) {
+                    return info_err_res!(
+                        "Staged input can only be from type m3u or xtream (input: {}, staged: {})",
+                        self.name,
+                        staged_input.name
+                    );
+                }
+
+                if self.input_type.is_xtream() {
+                    let live_uses_staged = matches!(staged_input.live_source, ClusterSource::Staged) && !skip_live;
+                    let vod_uses_staged = matches!(staged_input.vod_source, ClusterSource::Staged) && !skip_vod;
+                    let series_uses_staged = matches!(staged_input.series_source, ClusterSource::Staged) && !skip_series;
+
+                    if !live_uses_staged && !vod_uses_staged && !series_uses_staged {
+                        return info_err_res!(
+                            "Staged input is enabled but no cluster source uses 'staged'; set at least one of live_source/vod_source/series_source to 'staged' (input: {}, staged: {})",
+                            self.name,
+                            staged_input.name
+                        );
+                    }
+
+                    if staged_input.input_type.is_m3u() && (vod_uses_staged || series_uses_staged) {
+                        return info_err_res!(
+                            "Staged M3U input cannot provide VOD or Series clusters; use 'input' or 'skip' (input: {}, staged: {})",
+                            self.name,
+                            staged_input.name
+                        );
+                    }
+                }
+
+                if self.input_type.is_m3u() {
+                    if staged_input.cluster_sources_configured {
+                        warn!(
+                            "Input '{}': cluster source fields (live_source/vod_source/series_source) are ignored for M3U main inputs",
+                            self.name
+                        );
+                    }
+                    staged_input.live_source = ClusterSource::Staged;
+                    staged_input.vod_source = ClusterSource::Staged;
+                    staged_input.series_source = ClusterSource::Staged;
+                    staged_input.cluster_sources_configured = false;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn prepare_aliases(
+        &mut self,
+        provider_configs: &[Arc<ConfigProvider>],
+        used_provider_configs: &mut Vec<Arc<ConfigProvider>>,
+    ) -> Result<(), TuliproxError> {
+        if let Some(aliases) = &mut self.aliases {
+            for alias in aliases {
+                if is_input_expired(alias.exp_date) {
+                    warn!(
+                        "Account {} expired for provider: {}",
+                        alias.username.as_ref().map_or("?", |s| s.as_str()),
+                        alias.name
+                    );
+                    alias.enabled = false;
+                }
+
+                if alias.url.starts_with(PROVIDER_SCHEME_PREFIX) {
+                    let provider_cfg = Self::resolve_provider_config(&alias.url, provider_configs)?;
+                    if !used_provider_configs.iter().any(|p| p.name == provider_cfg.name) {
+                        used_provider_configs.push(provider_cfg);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn apply_expiration(&mut self) {
+        if is_input_expired(self.exp_date) {
+            warn!(
+                "Account {} expired for provider: {}",
+                self.username.as_ref().map_or("?", |s| s.as_str()),
+                self.name
+            );
+            self.enabled = false;
+        }
+    }
+
     #[inline]
     pub fn get_download_input_type(&self) -> InputType {
         self.staged
@@ -355,24 +475,8 @@ impl ConfigInput {
         let batch_file_path = self.prepare_batch();
         self.name = self.name.trim().intern();
 
-        let resolve_provider_config = |url: &str| -> Result<Arc<ConfigProvider>, TuliproxError> {
-            let (host, _path) = parse_provider_scheme_url_parts(url).map_err(|err| {
-                info_err!(
-                    "Malformed provider URL {}: {}",
-                    sanitize_sensitive_info(url),
-                    sanitize_sensitive_info(err.to_string().as_str())
-                )
-            })?;
-
-            provider_configs
-                .iter()
-                .find(|p| p.name.as_ref() == host)
-                .cloned()
-                .ok_or_else(|| info_err!("Failed to resolve provider config for {}", sanitize_sensitive_info(url)))
-        };
-
         if self.url.starts_with(PROVIDER_SCHEME_PREFIX) {
-            let provider_cfg = resolve_provider_config(&self.url)?;
+            let provider_cfg = Self::resolve_provider_config(&self.url, provider_configs)?;
             used_provider_configs.push(provider_cfg);
         }
 
@@ -382,82 +486,9 @@ impl ConfigInput {
             let skip_live = self.has_flag(ConfigInputFlags::XtreamSkipLive);
             let skip_vod = self.has_flag(ConfigInputFlags::XtreamSkipVod);
             let skip_series = self.has_flag(ConfigInputFlags::XtreamSkipSeries);
-            if let Some(staged_input) = &mut self.staged {
-                if staged_input.enabled {
-                    if staged_input.url.starts_with(PROVIDER_SCHEME_PREFIX) {
-                        let provider_cfg = resolve_provider_config(&staged_input.url)?;
-                        staged_input.provider_config = Some(provider_cfg.clone());
-                        used_provider_configs.push(provider_cfg);
-                    }
-
-                    check_input_credentials!(staged_input, staged_input.input_type, false, true);
-                    if !matches!(staged_input.input_type, InputType::M3u | InputType::Xtream) {
-                        return info_err_res!(
-                            "Staged input can only be from type m3u or xtream (input: {}, staged: {})",
-                            self.name,
-                            staged_input.name
-                        );
-                    }
-
-                    if self.input_type.is_xtream()
-                    {
-                        let live_uses_staged = matches!(staged_input.live_source, ClusterSource::Staged) && !skip_live;
-                        let vod_uses_staged = matches!(staged_input.vod_source, ClusterSource::Staged) && !skip_vod;
-                        let series_uses_staged =
-                            matches!(staged_input.series_source, ClusterSource::Staged) && !skip_series;
-
-                        if !live_uses_staged && !vod_uses_staged && !series_uses_staged {
-                            return info_err_res!(
-                                "Staged input is enabled but no cluster source uses 'staged'; set at least one of live_source/vod_source/series_source to 'staged' (input: {}, staged: {})",
-                                self.name,
-                                staged_input.name
-                            );
-                        }
-
-                        if staged_input.input_type.is_m3u() && (vod_uses_staged || series_uses_staged) {
-                            return info_err_res!(
-                                "Staged M3U input cannot provide VOD or Series clusters; use 'input' or 'skip' (input: {}, staged: {})",
-                                self.name,
-                                staged_input.name
-                            );
-                        }
-                    }
-
-                    if self.input_type.is_m3u() {
-                        if staged_input.cluster_sources_configured {
-                            warn!(
-                                "Input '{}': cluster source fields (live_source/vod_source/series_source) are ignored for M3U main inputs",
-                                self.name
-                            );
-                        }
-                        staged_input.live_source = ClusterSource::Staged;
-                        staged_input.vod_source = ClusterSource::Staged;
-                        staged_input.series_source = ClusterSource::Staged;
-                        staged_input.cluster_sources_configured = false;
-                    }
-                }
-            }
-
-            if is_input_expired(self.exp_date) {
-                warn!("Account {} expired for provider: {}", self.username.as_ref().map_or("?", |s| s.as_str()), self.name);
-                self.enabled = false;
-            }
-
-            if let Some(aliases) = &mut self.aliases {
-                for alias in aliases {
-                    if is_input_expired(alias.exp_date) {
-                        warn!("Account {} expired for provider: {}", alias.username.as_ref().map_or("?", |s| s.as_str()), alias.name);
-                        alias.enabled = false;
-                    }
-
-                    if alias.url.starts_with(PROVIDER_SCHEME_PREFIX) {
-                        let provider_cfg = resolve_provider_config(&alias.url)?;
-                        if !used_provider_configs.iter().any(|p| p.name == provider_cfg.name) {
-                            used_provider_configs.push(provider_cfg);
-                        }
-                    }
-                }
-            }
+            self.prepare_staged_input(provider_configs, &mut used_provider_configs, skip_live, skip_vod, skip_series)?;
+            self.apply_expiration();
+            self.prepare_aliases(provider_configs, &mut used_provider_configs)?;
 
             if !used_provider_configs.is_empty() {
                 self.provider_configs = Some(used_provider_configs);
