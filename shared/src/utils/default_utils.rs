@@ -210,6 +210,10 @@ pub const fn default_metadata_no_change_cache_ttl_secs() -> u64 { 3600 }
 pub const fn is_default_metadata_no_change_cache_ttl_secs(v: &u64) -> bool {
     *v == default_metadata_no_change_cache_ttl_secs()
 }
+pub const fn default_metadata_probe_fairness_resolve_burst() -> usize { 200 }
+pub const fn is_default_metadata_probe_fairness_resolve_burst(v: &usize) -> bool {
+    *v == default_metadata_probe_fairness_resolve_burst()
+}
 pub fn default_metadata_ffprobe_analyze_duration() -> String { "10s".to_string() }
 pub fn is_default_metadata_ffprobe_analyze_duration(v: &String) -> bool {
     *v == default_metadata_ffprobe_analyze_duration()

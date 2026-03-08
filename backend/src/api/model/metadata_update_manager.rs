@@ -88,6 +88,7 @@ struct MetadataUpdateRuntimeSettings {
     worker_idle_timeout_secs: u64,
     max_queue_size: usize,
     no_change_cache_ttl_secs: u64,
+    probe_fairness_resolve_burst: usize,
     probe_retry_backoff_step_1_secs: u64,
     probe_retry_backoff_step_2_secs: u64,
     probe_retry_backoff_step_3_secs: u64,
@@ -133,6 +134,7 @@ impl MetadataUpdateRuntimeSettings {
             worker_idle_timeout_secs: cfg.worker_idle_timeout_secs.max(1),
             max_queue_size: cfg.max_queue_size.max(1),
             no_change_cache_ttl_secs: cfg.no_change_cache_ttl_secs.max(1),
+            probe_fairness_resolve_burst: cfg.probe_fairness_resolve_burst.max(1),
             probe_retry_backoff_step_1_secs: cfg.probe.retry_backoff_step_1_secs.max(1),
             probe_retry_backoff_step_2_secs: cfg.probe.retry_backoff_step_2_secs.max(1),
             probe_retry_backoff_step_3_secs: cfg.probe.retry_backoff_step_3_secs.max(1),
@@ -879,6 +881,27 @@ impl MetadataUpdateManager {
 
     /// Get the number of active workers (for monitoring/debugging)
     pub fn active_worker_count(&self) -> usize { self.workers.len() }
+
+    /// Returns `true` when an equivalent task is already pending for this input and
+    /// submitting `task` would not change the queued payload after merge semantics.
+    pub fn is_redundant_with_pending_task(&self, input_name: &str, task: &UpdateTask) -> bool {
+        let Some(ctx) = self.workers.get(input_name) else {
+            return false;
+        };
+
+        // If the worker channel is already closed, let normal enqueue recovery run.
+        if ctx.sender.is_closed() {
+            return false;
+        }
+
+        let key = TaskKey::from_task(task);
+        let Some(entry) = ctx.pending_tasks.get(&key) else {
+            return false;
+        };
+
+        let mut merged = entry.task.lock().clone();
+        !Self::merge_task_payload(&mut merged, task.clone())
+    }
 }
 
 struct DbHandle {
@@ -931,6 +954,7 @@ impl InputWorker {
         let mut last_progress_log_at = Instant::now();
         let mut queue_cycle_active = false;
         let mut cycle_had_changes = false;
+        let mut consecutive_resolve_tasks = 0_usize;
 
         let input_name = self.input_name.clone();
         let app_state_weak = self.app_state_weak.clone();
@@ -948,8 +972,24 @@ impl InputWorker {
                 runtime_settings = self.runtime_settings();
                 last_runtime_settings_refresh_at = Instant::now();
             }
-            let task_data = if let Some(t) = next_task.take() {
-                Some(t)
+            let prefer_probe = consecutive_resolve_tasks >= runtime_settings.probe_fairness_resolve_burst;
+            let task_data = if let Some(prefetched) = next_task.take() {
+                if prefer_probe && Self::retry_domain_for_task(&prefetched.1) == RetryDomain::Resolve {
+                    if let Some(probe_task) = self.take_pending_probe_task_snapshot() {
+                        next_task = Some(prefetched);
+                        Some(probe_task)
+                    } else {
+                        Some(prefetched)
+                    }
+                } else {
+                    Some(prefetched)
+                }
+            } else if prefer_probe {
+                if let Some(probe_task) = self.take_pending_probe_task_snapshot() {
+                    Some(probe_task)
+                } else {
+                    self.recv_task_fast_or_wait(&runtime_settings).await
+                }
             } else {
                 self.recv_task_fast_or_wait(&runtime_settings).await
             };
@@ -983,6 +1023,7 @@ impl InputWorker {
                 debug!("Background metadata update queue has entries for input {input_name}; starting processing");
             }
 
+            let current_retry_domain = Self::retry_domain_for_task(&current_task);
             let delay_secs = current_task.delay();
             let mut schedule_requeue_at_ts: Option<i64> = None;
             let mut remove_current_task = false;
@@ -1474,6 +1515,12 @@ impl InputWorker {
                 }
             }
 
+            if current_retry_domain == RetryDomain::Resolve {
+                consecutive_resolve_tasks = consecutive_resolve_tasks.saturating_add(1);
+            } else {
+                consecutive_resolve_tasks = 0;
+            }
+
             // Try to get the next task immediately to keep locks open.
             // Ignore phantom signals (channel key without pending map entry).
             if next_task.is_none() {
@@ -1512,6 +1559,7 @@ impl InputWorker {
                 queue_cycle_active = false;
                 processed_vod_count = 0;
                 processed_series_count = 0;
+                consecutive_resolve_tasks = 0;
                 if cycle_had_changes {
                     info!("All pending metadata resolves completed for input {input_name} (with changes)");
                     if let Some(app_state) = app_state_weak.as_ref().and_then(Weak::upgrade) {
@@ -1750,6 +1798,22 @@ impl InputWorker {
         let generation = entry.generation.load(Ordering::Relaxed);
         let task = entry.task.lock().clone();
         Some((key, task, generation))
+    }
+
+    fn take_pending_probe_task_snapshot(&self) -> Option<(TaskKey, UpdateTask, u64)> {
+        for entry in self.pending_tasks.iter() {
+            if self.scheduled_requeues.contains_key(entry.key()) {
+                continue;
+            }
+
+            let generation = entry.generation.load(Ordering::Relaxed);
+            let task = entry.task.lock().clone();
+            if Self::retry_domain_for_task(&task) == RetryDomain::Probe {
+                return Some((entry.key().clone(), task, generation));
+            }
+        }
+
+        None
     }
 
     fn runtime_settings(&self) -> MetadataUpdateRuntimeSettings {
@@ -3543,6 +3607,46 @@ mod tests {
             delay: 0,
         };
         assert_eq!(InputWorker::retry_domain_for_task(&task), RetryDomain::Resolve);
+    }
+
+    #[test]
+    fn take_pending_probe_task_snapshot_skips_scheduled_requeues() {
+        let (tx, rx) = mpsc::channel::<TaskKey>(8);
+        let pending_tasks = Arc::new(DashMap::new());
+        let pending_task_count = Arc::new(AtomicUsize::new(1));
+        let worker = create_test_worker("input_probe_skip", tx, rx, pending_tasks.clone(), pending_task_count);
+
+        let key = TaskKey::Live(100);
+        let task = UpdateTask::ProbeLive {
+            id: ProviderIdType::Id(100),
+            reason: ResolveReasonSet::from_variants(&[ResolveReason::Probe]),
+            delay: 0,
+            interval: 60,
+        };
+        pending_tasks.insert(key.clone(), PendingTask::new(task));
+        worker.scheduled_requeues.insert(key, chrono::Utc::now().timestamp().saturating_add(30));
+
+        assert!(worker.take_pending_probe_task_snapshot().is_none());
+    }
+
+    #[test]
+    fn take_pending_probe_task_snapshot_accepts_probe_only_resolve() {
+        let (tx, rx) = mpsc::channel::<TaskKey>(8);
+        let pending_tasks = Arc::new(DashMap::new());
+        let pending_task_count = Arc::new(AtomicUsize::new(1));
+        let worker = create_test_worker("input_probe_only_resolve", tx, rx, pending_tasks.clone(), pending_task_count);
+
+        let key = TaskKey::Vod(77);
+        let task = UpdateTask::ResolveVod {
+            id: ProviderIdType::Id(77),
+            reason: ResolveReasonSet::from_variants(&[ResolveReason::Probe]),
+            delay: 0,
+        };
+        pending_tasks.insert(key.clone(), PendingTask::new(task));
+
+        let snapshot = worker.take_pending_probe_task_snapshot().expect("expected probe-domain snapshot");
+        assert_eq!(snapshot.0, key);
+        assert_eq!(InputWorker::retry_domain_for_task(&snapshot.1), RetryDomain::Probe);
     }
 
     #[test]

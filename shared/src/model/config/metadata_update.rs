@@ -7,19 +7,20 @@ use crate::{
         default_metadata_ffprobe_probe_size, default_metadata_max_attempts_probe,
         default_metadata_max_attempts_resolve, default_metadata_max_queue_size,
         default_metadata_max_resolve_retry_backoff, default_metadata_no_change_cache_ttl_secs, default_metadata_path,
-        default_metadata_probe_cooldown, default_metadata_probe_retry_backoff_step_1,
-        default_metadata_probe_retry_backoff_step_2, default_metadata_probe_retry_backoff_step_3,
-        default_metadata_probe_retry_load_retry_delay, default_metadata_progress_log_interval,
-        default_metadata_queue_log_interval, default_metadata_resolve_exhaustion_reset_gap,
-        default_metadata_resolve_min_retry_base, default_metadata_retry_delay, default_metadata_tmdb_cooldown,
-        default_metadata_worker_idle_timeout, default_tmdb_api_key, default_tmdb_cache_duration_days,
-        default_tmdb_language, default_tmdb_match_threshold, default_tmdb_rate_limit_ms, deserialize_as_string,
-        is_default_metadata_backoff_jitter_percent, is_default_metadata_ffprobe_analyze_duration,
-        is_default_metadata_ffprobe_live_analyze_duration, is_default_metadata_ffprobe_live_probe_size,
-        is_default_metadata_ffprobe_probe_size, is_default_metadata_max_attempts_probe,
-        is_default_metadata_max_attempts_resolve, is_default_metadata_max_queue_size,
-        is_default_metadata_max_resolve_retry_backoff, is_default_metadata_no_change_cache_ttl_secs,
-        is_default_metadata_path, is_default_metadata_probe_cooldown, is_default_metadata_probe_retry_backoff_step_1,
+        default_metadata_probe_cooldown, default_metadata_probe_fairness_resolve_burst,
+        default_metadata_probe_retry_backoff_step_1, default_metadata_probe_retry_backoff_step_2,
+        default_metadata_probe_retry_backoff_step_3, default_metadata_probe_retry_load_retry_delay,
+        default_metadata_progress_log_interval, default_metadata_queue_log_interval,
+        default_metadata_resolve_exhaustion_reset_gap, default_metadata_resolve_min_retry_base,
+        default_metadata_retry_delay, default_metadata_tmdb_cooldown, default_metadata_worker_idle_timeout,
+        default_tmdb_api_key, default_tmdb_cache_duration_days, default_tmdb_language, default_tmdb_match_threshold,
+        default_tmdb_rate_limit_ms, deserialize_as_string, is_default_metadata_backoff_jitter_percent,
+        is_default_metadata_ffprobe_analyze_duration, is_default_metadata_ffprobe_live_analyze_duration,
+        is_default_metadata_ffprobe_live_probe_size, is_default_metadata_ffprobe_probe_size,
+        is_default_metadata_max_attempts_probe, is_default_metadata_max_attempts_resolve,
+        is_default_metadata_max_queue_size, is_default_metadata_max_resolve_retry_backoff,
+        is_default_metadata_no_change_cache_ttl_secs, is_default_metadata_path, is_default_metadata_probe_cooldown,
+        is_default_metadata_probe_fairness_resolve_burst, is_default_metadata_probe_retry_backoff_step_1,
         is_default_metadata_probe_retry_backoff_step_2, is_default_metadata_probe_retry_backoff_step_3,
         is_default_metadata_probe_retry_load_retry_delay, is_default_metadata_progress_log_interval,
         is_default_metadata_queue_log_interval, is_default_metadata_resolve_exhaustion_reset_gap,
@@ -70,6 +71,11 @@ pub struct MetadataUpdateConfigDto {
         skip_serializing_if = "is_default_metadata_no_change_cache_ttl_secs"
     )]
     pub no_change_cache_ttl_secs: u64,
+    #[serde(
+        default = "default_metadata_probe_fairness_resolve_burst",
+        skip_serializing_if = "is_default_metadata_probe_fairness_resolve_burst"
+    )]
+    pub probe_fairness_resolve_burst: usize,
 }
 
 impl Default for MetadataUpdateConfigDto {
@@ -85,6 +91,7 @@ impl Default for MetadataUpdateConfigDto {
             worker_idle_timeout: default_metadata_worker_idle_timeout(),
             max_queue_size: default_metadata_max_queue_size(),
             no_change_cache_ttl_secs: default_metadata_no_change_cache_ttl_secs(),
+            probe_fairness_resolve_burst: default_metadata_probe_fairness_resolve_burst(),
         }
     }
 }
@@ -493,6 +500,7 @@ impl MetadataUpdateConfigDto {
             && self.worker_idle_timeout == default_metadata_worker_idle_timeout()
             && self.max_queue_size == default_metadata_max_queue_size()
             && self.no_change_cache_ttl_secs == default_metadata_no_change_cache_ttl_secs()
+            && self.probe_fairness_resolve_burst == default_metadata_probe_fairness_resolve_burst()
     }
 
     pub fn clean(&mut self) {
@@ -522,6 +530,7 @@ impl MetadataUpdateConfigDto {
 
         self.max_queue_size = self.max_queue_size.max(MIN_QUEUE_SIZE);
         self.no_change_cache_ttl_secs = self.no_change_cache_ttl_secs.max(MIN_DURATION_SECS);
+        self.probe_fairness_resolve_burst = self.probe_fairness_resolve_burst.max(MIN_QUEUE_SIZE);
 
         self.clean();
 
@@ -624,6 +633,7 @@ mod tests {
         cfg.probe.max_attempts = 0;
         cfg.max_queue_size = 0;
         cfg.no_change_cache_ttl_secs = 0;
+        cfg.probe_fairness_resolve_burst = 0;
         cfg.ffprobe.timeout = Some(0);
         cfg.ffprobe.analyze_duration = "0s".to_string();
         cfg.ffprobe.probe_size = "0".to_string();
@@ -635,6 +645,7 @@ mod tests {
         assert_eq!(cfg.probe.max_attempts, 1);
         assert_eq!(cfg.max_queue_size, 1);
         assert_eq!(cfg.no_change_cache_ttl_secs, 1);
+        assert_eq!(cfg.probe_fairness_resolve_burst, 1);
         assert_eq!(cfg.ffprobe.timeout, Some(1));
         assert_eq!(cfg.ffprobe.analyze_duration, "1s");
         assert_eq!(cfg.ffprobe.probe_size, "1B");

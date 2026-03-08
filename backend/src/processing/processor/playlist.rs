@@ -1174,6 +1174,15 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
                     if needs_live_probe(&item, cutoff_ts) {
                         if let Some(provider_id) = provider_id_from_item(&item) {
                             if queued_live_keys.insert(provider_id.clone()) {
+                                let task = UpdateTask::ProbeLive {
+                                    id: provider_id.clone(),
+                                    reason: ResolveReasonSet::from_variants(&[ResolveReason::Probe]),
+                                    delay: probe_delay,
+                                    interval: interval_secs,
+                                };
+                                if mgr.is_redundant_with_pending_task(input_name.as_ref(), &task) {
+                                    continue;
+                                }
                                 if log_enabled!(Level::Debug) {
                                     let last_probed = match item.header.additional_properties.as_ref() {
                                         Some(StreamProperties::Live(props)) => props.last_probed_timestamp,
@@ -1184,12 +1193,6 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
                                         input_name, provider_id, last_probed, cutoff_ts, interval_secs, item.header.title
                                     );
                                 }
-                                let task = UpdateTask::ProbeLive {
-                                    id: provider_id,
-                                    reason: ResolveReasonSet::from_variants(&[ResolveReason::Probe]),
-                                    delay: probe_delay,
-                                    interval: interval_secs,
-                                };
                                 mgr.queue_task_background(input_name.clone(), task);
                                 queued_live_count += 1;
                             }
@@ -1238,18 +1241,21 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
             continue;
         }
 
-        debug!(
-            "[Task] Creating ProbeStream task for input {}: scope={}, unique_id={}, item_type={:?}, title=\"{}\"",
-            input_name, probe_scope, unique_id, item.header.item_type, item.header.title
-        );
         let task = UpdateTask::ProbeStream {
-            probe_scope,
-            unique_id,
+            probe_scope: probe_scope.clone(),
+            unique_id: unique_id.clone(),
             url: item.header.url.to_string(),
             item_type: item.header.item_type,
             reason: ResolveReasonSet::from_variants(&[ResolveReason::MissingDetails]),
             delay: opts.probe_delay,
         };
+        if mgr.is_redundant_with_pending_task(input_name.as_ref(), &task) {
+            continue;
+        }
+        debug!(
+            "[Task] Creating ProbeStream task for input {}: scope={}, unique_id={}, item_type={:?}, title=\"{}\"",
+            input_name, probe_scope, unique_id, item.header.item_type, item.header.title
+        );
         mgr.queue_task_background(input_name.clone(), task);
         queued_stream_count += 1;
     }
