@@ -521,17 +521,20 @@ async fn ensure_parent_dir(file_path: &FsPath) -> std::io::Result<()> {
 
 fn setup_io_error_response(file_path: &FsPath, operation: &str, err: &std::io::Error) -> axum::response::Response {
     let (status, message) = if err.kind() == ErrorKind::PermissionDenied {
-        let message = if operation.contains("read") {
-            format!("No filesystem permission for {} while trying to {operation}: {err}", file_path.display())
-        } else {
-            format!("No write permission for {} while trying to {operation}: {err}", file_path.display())
-        };
-        (StatusCode::FORBIDDEN, message)
-    } else {
+        error!(
+            "Setup mode: permission denied while trying to {operation} '{}': {err}",
+            file_path.display()
+        );
         (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to {operation} {}: {err}", file_path.display()),
+            StatusCode::FORBIDDEN,
+            "Permission denied while accessing requested resource".to_string(),
         )
+    } else {
+        error!(
+            "Setup mode: failed to {operation} '{}': {err}",
+            file_path.display()
+        );
+        (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string())
     };
 
     (status, axum::Json(json!({ "error": message }))).into_response()
@@ -790,18 +793,17 @@ async fn setup_complete_inner(
             }
             return match err {
                 SetupPersistWriteError::Io(io_err) => setup_io_error_response(target_path, "write file", &io_err),
-                SetupPersistWriteError::Serialize(serialize_err) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    axum::Json(
-                        json!({
-                            "error": format!(
-                                "Failed to serialize setup content for {}: {serialize_err}",
-                                target_path.display()
-                            )
-                        }),
-                    ),
-                )
-                    .into_response(),
+                SetupPersistWriteError::Serialize(serialize_err) => {
+                    error!(
+                        "Setup mode: failed to serialize setup content for '{}': {serialize_err}",
+                        target_path.display()
+                    );
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        axum::Json(json!({ "error": "Internal server error" })),
+                    )
+                        .into_response()
+                }
             };
         }
     }
@@ -988,6 +990,10 @@ mod tests {
     async fn setup_complete_reports_permission_denied_for_unwritable_target_dir()
     -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;
+        // Safety: `geteuid` is a pure libc query with no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            return Ok(());
+        }
 
         let temp_dir = tempfile::tempdir()?;
         let readonly_dir = temp_dir.path().join("readonly");
@@ -1029,8 +1035,7 @@ mod tests {
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| std::io::Error::other("setup response is missing error field"))?;
 
-        assert!(error_message.contains("No write permission"));
-        assert!(error_message.contains("config.yml"));
+        assert_eq!(error_message, "Permission denied while accessing requested resource");
 
         let mut writable_permissions = tokio::fs::metadata(&readonly_dir).await?.permissions();
         writable_permissions.set_mode(0o755);

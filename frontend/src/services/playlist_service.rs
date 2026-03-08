@@ -1,4 +1,4 @@
-use crate::services::{get_base_href, request_post};
+use crate::services::{get_base_href, request_post, Encoding};
 use futures::join;
 use indexmap::IndexMap;
 use log::error;
@@ -7,7 +7,7 @@ use shared::{
         EpgChannel, EpgTv, PlaylistEpgRequest, PlaylistRequest, SeriesStreamProperties, UiPlaylistCategories,
         UiPlaylistGroup, UiPlaylistItem, WebplayerUrlRequest, XtreamCluster, XtreamSeriesInfoDoc,
     },
-    utils::{concat_path_leading_slash, ACCEPT_PREFER_CBOR},
+    utils::concat_path_leading_slash,
 };
 use std::rc::Rc;
 
@@ -54,19 +54,19 @@ impl PlaylistService {
                 &self.playlist_api_live_path,
                 playlist_request,
                 None,
-                Some(ACCEPT_PREFER_CBOR.to_string())
+                Some(Encoding::Cbor),
             ),
             request_post::<&PlaylistRequest, Vec<UiPlaylistItem>>(
                 &self.playlist_api_vod_path,
                 playlist_request,
                 None,
-                Some(ACCEPT_PREFER_CBOR.to_string())
+                Some(Encoding::Cbor),
             ),
             request_post::<&PlaylistRequest, Vec<UiPlaylistItem>>(
                 &self.playlist_api_series_path,
                 playlist_request,
                 None,
-                Some(ACCEPT_PREFER_CBOR.to_string())
+                Some(Encoding::Cbor),
             ),
         );
 
@@ -109,7 +109,7 @@ impl PlaylistService {
             &self.playlist_api_webplayer_url_path,
             &request,
             None,
-            Some("text/plain".to_string()),
+            Some(Encoding::Text),
         )
         .await
         .unwrap_or_else(|err| {
@@ -123,7 +123,7 @@ impl PlaylistService {
             &self.playlist_api_epg_path,
             &request,
             None,
-            Some(ACCEPT_PREFER_CBOR.to_string()),
+            Some(Encoding::Cbor),
         )
         .await
         {
@@ -141,20 +141,15 @@ impl PlaylistService {
         playlist_request: &PlaylistRequest,
     ) -> Option<SeriesStreamProperties> {
         let path = format!("{}/{}/{}", self.playlist_api_series_info_path, pli.virtual_id, pli.provider_id);
-        request_post::<&PlaylistRequest, XtreamSeriesInfoDoc>(
-            &path,
-            playlist_request,
-            None,
-            Some(ACCEPT_PREFER_CBOR.to_string()),
-        )
-        .await
-        .map_or_else(
-            |err| {
-                error!("{err}");
-                None
-            },
-            |response| response.as_ref().map(|doc| SeriesStreamProperties::from_info_doc(doc, pli.virtual_id)),
-        )
+        request_post::<&PlaylistRequest, XtreamSeriesInfoDoc>(&path, playlist_request, None, Some(Encoding::Cbor))
+            .await
+            .map_or_else(
+                |err| {
+                    error!("{err}");
+                    None
+                },
+                |response| response.as_ref().map(|doc| SeriesStreamProperties::from_info_doc(doc, pli.virtual_id)),
+            )
     }
 
     pub async fn get_episode(&self, virtual_id: u32, playlist_request: &PlaylistRequest) -> Option<UiPlaylistItem> {

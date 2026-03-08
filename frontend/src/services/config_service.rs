@@ -2,7 +2,8 @@ use crate::{
     error::Error,
     model::WebConfig,
     services::{
-        get_base_href, request_get, request_get_meta, request_post, request_post_meta, request_put_meta, EventService,
+        get_base_href, request_get, request_get_meta, request_post, request_post_meta, request_put_meta, Encoding,
+        EventService,
     },
 };
 use futures_signals::signal::{Mutable, SignalExt};
@@ -277,7 +278,7 @@ impl ConfigService {
     pub async fn get_batch_input_content(&self, input: &ConfigInputDto) -> Option<String> {
         let id = input.id.to_string();
         let path = concat_path(&self.batch_input_content_path, &id);
-        request_get::<String>(&path, None, Some("text/plain".to_owned())).await.unwrap_or_else(|err| {
+        request_get::<String>(&path, None, Some(Encoding::Text)).await.unwrap_or_else(|err| {
             error!("{err}");
             None
         })
