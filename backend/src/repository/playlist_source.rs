@@ -485,8 +485,16 @@ impl PlaylistSource for MemoryPlaylistSource {
     fn update_playlist<'a>(&'a mut self, plg: &'a PlaylistGroup) -> BoxFuture<'a, ()> {
         Box::pin(async move {
             let playlist = Arc::make_mut(&mut self.playlist);
+            let incoming_title = shared::utils::deunicode_string(&plg.title).to_lowercase();
             for grp in playlist.iter_mut() {
-                if grp.id == plg.id {
+                let existing_title = shared::utils::deunicode_string(&grp.title).to_lowercase();
+                if grp.xtream_cluster == plg.xtream_cluster && existing_title == incoming_title {
+                    grp.channels.extend(plg.channels.iter().cloned());
+                    return;
+                }
+            }
+            for grp in playlist.iter_mut() {
+                if grp.xtream_cluster == plg.xtream_cluster && grp.id == plg.id {
                     grp.channels.extend(plg.channels.iter().cloned());
                     return;
                 }
@@ -568,4 +576,56 @@ where
             }
         }
     } else { None }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MemoryPlaylistSource, PlaylistGroup, PlaylistItem, PlaylistSource, XtreamCluster};
+    use shared::model::PlaylistItemHeader;
+    use shared::utils::Internable;
+
+    fn make_item(title: &str, group: &str, category_id: u32) -> PlaylistItem {
+        PlaylistItem {
+            header: PlaylistItemHeader {
+                title: title.intern(),
+                group: group.intern(),
+                category_id,
+                xtream_cluster: XtreamCluster::Series,
+                ..Default::default()
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn update_playlist_prefers_group_title_over_colliding_group_id() {
+        let first_group = PlaylistGroup {
+            id: 1,
+            title: "A-First".intern(),
+            channels: vec![make_item("first-item", "A-First", 11)],
+            xtream_cluster: XtreamCluster::Series,
+        };
+        let target_group = PlaylistGroup {
+            id: 2,
+            title: "B-Series".intern(),
+            channels: vec![make_item("target-item", "B-Series", 22)],
+            xtream_cluster: XtreamCluster::Series,
+        };
+        let mut source = MemoryPlaylistSource::new(vec![first_group, target_group]);
+
+        // Simulates a mapped delta group whose local pipeline id restarted at 1.
+        let incoming = PlaylistGroup {
+            id: 1,
+            title: "B-Series".intern(),
+            channels: vec![make_item("new-episode", "B-Series", 22)],
+            xtream_cluster: XtreamCluster::Series,
+        };
+        source.update_playlist(&incoming).await;
+
+        let groups = source.take_groups();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].title.as_ref(), "A-First");
+        assert_eq!(groups[0].channels.len(), 1);
+        assert_eq!(groups[1].title.as_ref(), "B-Series");
+        assert_eq!(groups[1].channels.len(), 2);
+    }
 }
