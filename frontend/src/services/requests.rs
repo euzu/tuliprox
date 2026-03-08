@@ -71,20 +71,54 @@ fn apply_encoded_body(request: Request, body: EncodedBody, content_type: &'stati
     }
 }
 
+fn encoding_from_content_type(content_type: &str) -> Option<Encoding> {
+    if content_type.contains(CONTENT_TYPE_CBOR) {
+        Some(Encoding::Cbor)
+    } else if content_type.contains(CONTENT_TYPE_JSON) {
+        Some(Encoding::Json)
+    } else if content_type.contains("text/") {
+        Some(Encoding::Text)
+    } else {
+        None
+    }
+}
+
+async fn decode_response_body<T>(response: Response, encoding: Encoding) -> Result<T, Error>
+where
+    T: DeserializeOwned + 'static + std::fmt::Debug,
+{
+    match encoding {
+        Encoding::Cbor => {
+            let bytes = response.binary().await.map_err(|err| {
+                error!("Failed to deserialize {err}");
+                Error::DeserializeError
+            })?;
+            bin_deserialize::<T>(&bytes).map_err(|err| {
+                error!("Failed to deserialize {err}");
+                Error::DeserializeError
+            })
+        }
+        Encoding::Json => response.json::<T>().await.map_err(|_| Error::DeserializeError),
+        Encoding::Text => match response.text().await {
+            Ok(content) => serde_json::from_value::<T>(Value::String(content)).map_err(|_| Error::DeserializeError),
+            Err(_) => Err(Error::RequestError),
+        },
+    }
+}
+
 async fn extract_error_message_checked(response: Response) -> Result<String, Error> {
     let content_type = response.headers().get("content-type").unwrap_or_default().to_ascii_lowercase();
-    let is_json = content_type.contains(CONTENT_TYPE_JSON);
-    let is_bin = content_type.contains(CONTENT_TYPE_CBOR);
-
-    if is_bin {
-        let bytes = response.binary().await.map_err(|_| Error::DeserializeError)?;
-        let data = bin_deserialize::<ErrorInfo>(&bytes).map_err(|_| Error::DeserializeError)?;
-        Ok(data.error)
-    } else if is_json {
-        let data = response.json::<ErrorInfo>().await.map_err(|_| Error::DeserializeError)?;
-        Ok(data.error)
-    } else {
-        Ok(response.text().await.unwrap_or_default())
+    match encoding_from_content_type(&content_type) {
+        Some(Encoding::Cbor) => {
+            let bytes = response.binary().await.map_err(|_| Error::DeserializeError)?;
+            let data = bin_deserialize::<ErrorInfo>(&bytes).map_err(|_| Error::DeserializeError)?;
+            Ok(data.error)
+        }
+        Some(Encoding::Json) => {
+            let data = response.json::<ErrorInfo>().await.map_err(|_| Error::DeserializeError)?;
+            Ok(data.error)
+        }
+        _ => Ok(response.text().await.unwrap_or_default()),
     }
 }
 
@@ -169,44 +203,14 @@ where
             match status {
                 200 | 205 | 206 => {
                     let content_type = response.headers().get("content-type").unwrap_or_default().to_ascii_lowercase();
-                    let is_json = content_type.contains(CONTENT_TYPE_JSON);
-                    let is_bin = content_type.contains(CONTENT_TYPE_CBOR);
                     if std::any::TypeId::of::<T>() == std::any::TypeId::of::<()>() {
                         // `T = ()` valid
                         let _ = response.binary().await;
                         return Ok(ResponseMeta { body: None, headers: response_headers });
                     }
-
-                    if is_bin {
-                        match response.binary().await {
-                            Ok(bytes) => match bin_deserialize::<T>(&bytes) {
-                                Ok(data) => Ok(ResponseMeta { body: Some(data), headers: response_headers }),
-                                Err(err) => {
-                                    error!("Failed to deserialize {err}");
-                                    Err(Error::DeserializeError)
-                                }
-                            },
-                            Err(err) => {
-                                error!("Failed to deserialize {err}");
-                                Err(Error::DeserializeError)
-                            }
-                        }
-                    } else if is_json {
-                        let data: Result<T, _> = response.json::<T>().await;
-                        if let Ok(data) = data {
-                            Ok(ResponseMeta { body: Some(data), headers: response_headers })
-                        } else {
-                            Err(Error::DeserializeError)
-                        }
-                    } else {
-                        match response.text().await {
-                            Ok(content) => match serde_json::from_value::<T>(Value::String(content)) {
-                                Ok(parsed) => Ok(ResponseMeta { body: Some(parsed), headers: response_headers }),
-                                Err(_err) => Err(Error::DeserializeError),
-                            },
-                            Err(_err) => Err(Error::RequestError),
-                        }
-                    }
+                    let decode_encoding = encoding_from_content_type(&content_type).unwrap_or(r_type);
+                    let decoded = decode_response_body::<T>(response, decode_encoding).await?;
+                    Ok(ResponseMeta { body: Some(decoded), headers: response_headers })
                 }
                 201 | 202 | 204 => Ok(ResponseMeta { body: None, headers: response_headers }),
                 400 => {
@@ -219,7 +223,7 @@ where
                 }
                 401 => Err(Error::Unauthorized),
                 403 => {
-                    let message = extract_error_message_checked(response).await?;
+                    let message = extract_error_message(response).await;
                     if message.trim().is_empty() {
                         Err(Error::Forbidden("Forbidden".to_string()))
                     } else {
@@ -244,7 +248,7 @@ where
                     }
                 }
                 500 => {
-                    let message = extract_error_message_checked(response).await?;
+                    let message = extract_error_message(response).await;
                     if message.trim().is_empty() {
                         Err(Error::InternalServerError("Internal Server Error".to_string()))
                     } else {
