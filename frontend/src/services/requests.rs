@@ -90,7 +90,7 @@ where
     match encoding {
         Encoding::Cbor => {
             let bytes = response.binary().await.map_err(|err| {
-                error!("Failed to deserialize {err}");
+                error!("Failed to read response body for CBOR decode: {err}");
                 Error::DeserializeError
             })?;
             bin_deserialize::<T>(&bytes).map_err(|err| {
