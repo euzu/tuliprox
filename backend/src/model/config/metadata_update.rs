@@ -18,6 +18,7 @@ pub struct MetadataUpdateConfig {
     pub worker_idle_timeout_secs: u64,
     pub max_queue_size: usize,
     pub no_change_cache_ttl_secs: u64,
+    pub probe_fairness_resolve_burst: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -149,6 +150,7 @@ impl From<&MetadataUpdateConfigDto> for MetadataUpdateConfig {
             worker_idle_timeout: normalized.worker_idle_timeout,
             max_queue_size: normalized.max_queue_size.max(1),
             no_change_cache_ttl_secs: normalized.no_change_cache_ttl_secs.max(1),
+            probe_fairness_resolve_burst: normalized.probe_fairness_resolve_burst.max(1),
         }
     }
 }
@@ -166,6 +168,7 @@ impl From<&MetadataUpdateConfig> for MetadataUpdateConfigDto {
             worker_idle_timeout: instance.worker_idle_timeout.clone(),
             max_queue_size: instance.max_queue_size,
             no_change_cache_ttl_secs: instance.no_change_cache_ttl_secs,
+            probe_fairness_resolve_burst: instance.probe_fairness_resolve_burst,
         }
     }
 }

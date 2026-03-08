@@ -171,6 +171,8 @@ active URL of the specified provider.
   - Added `metadata_update.ffprobe.enabled` (default: false), `metadata_update.ffprobe.timeout`, and ffprobe probe/analyze size settings.
   - `metadata_update.ffprobe.analyze_duration` and `metadata_update.ffprobe.live_analyze_duration` require explicit unit suffixes (`s|m|h|d`).
   - FFprobe settings are configured under `metadata_update.ffprobe` (not under `video`).
+  - Added `metadata_update.probe_fairness_resolve_burst` (default `200`) to control fairness between resolve and probe tasks.
+    After N consecutive resolve-domain tasks, one pending probe-domain task is prioritized to avoid probe starvation.
   - Added `template_path` (optional): path to a template file (`template.yml`) or directory (`template.d` style).
 - **source.yml (input options)**:
   - Added `resolve_tmdb`: Triggers TMDB lookup if ID is missing.

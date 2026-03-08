@@ -442,9 +442,12 @@
       "SANITIZE_SENSITIVE_INFO": "Attempts to mask passwords and tokens in the logging output for security."
     },
     "METADATA_UPDATE_CONFIG": {
+      "METADATA_PATH": "Directory for metadata cache and retry-state files.\n\nRelative paths are resolved against `storage_dir`.\n\nExamples: `metadata`, `/app/data/metadata`.",
       "MAX_QUEUE_SIZE": "Maximum number of metadata tasks kept in memory for one input worker.\n\nWhen this limit is reached, additional tasks are rejected to protect system stability and memory usage.",
       "RETRY_DELAY": "Minimum delay for transient requeue scheduling.\n\nUse this to prevent immediate hot-loop retries when tasks are temporarily deferred.\n\nUse duration units like `2s`, `5s`, `10s`.",
-      "WORKER_IDLE_TIMEOUT": "How long a metadata worker waits for new tasks while idle before it can stop itself.\n\nA lower value releases resources sooner; a higher value keeps workers warm for bursty workloads.\n\nUse duration units like `30s`, `1m`, `5m`."
+      "WORKER_IDLE_TIMEOUT": "How long a metadata worker waits for new tasks while idle before it can stop itself.\n\nA lower value releases resources sooner; a higher value keeps workers warm for bursty workloads.\n\nUse duration units like `30s`, `1m`, `5m`.",
+      "NO_CHANGE_CACHE_TTL_SECS": "How long no-change resolve results are remembered (in seconds).\n\nWhile valid, identical resolve reason sets for the same item are skipped to reduce redundant work.\n\nExample: `3600` (1 hour).",
+      "PROBE_FAIRNESS_RESOLVE_BURST": "Fairness threshold between resolve and probe work.\n\nAfter this many consecutive resolve-domain tasks, one pending probe-domain task is prioritized to avoid probe starvation.\n\nLower values favor probe responsiveness; higher values favor resolve throughput."
     },
     "OUTPUT_HDHOMERUN_FORM": {
       "USE_OUTPUT": "Enables or disables output creation specifically for HDHomeRun format."
@@ -901,6 +904,7 @@
     "METADATA_MAX_RESOLVE_RETRY_BACKOFF": "Max resolve retry backoff",
     "METADATA_NO_CHANGE_CACHE_TTL_SECS": "No-change cache TTL (seconds)",
     "METADATA_PATH": "Metadata Path",
+    "METADATA_PROBE_FAIRNESS_RESOLVE_BURST": "Resolve burst before probe fairness",
     "METADATA_PROBE_COOLDOWN": "Probe cooldown",
     "METADATA_PROBE_RETRY_BACKOFF_STEP_1": "Probe backoff step 1",
     "METADATA_PROBE_RETRY_BACKOFF_STEP_2": "Probe backoff step 2",
@@ -1248,6 +1252,7 @@
       "LIBRARY": "Configure library settings.",
       "LOG": "Configure logging settings.",
       "MAIN": "Configure main application settings.",
+      "METADATA_UPDATE": "Configure metadata update and queue behavior.",
       "MESSAGING": "Configure messaging settings.",
       "PROXY": "Configure outgoing proxy settings.",
       "REVERSE_PROXY": "Configure reverse proxy settings.",
@@ -1269,6 +1274,7 @@
       "LIBRARY": "Library",
       "LOG": "Log",
       "MAIN": "Main",
+      "METADATA_UPDATE": "Metadata Update",
       "MESSAGING": "Messaging",
       "NEXT": "Next",
       "PROXY": "Proxy",

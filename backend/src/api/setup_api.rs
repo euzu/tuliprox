@@ -496,18 +496,48 @@ async fn setup_root_file(
 
 async fn api_not_found() -> impl IntoResponse + Send { StatusCode::NOT_FOUND.into_response() }
 
-async fn persist_yaml_file<T: serde::Serialize>(file_path: &FsPath, payload: &T) -> Result<(), String> {
-    let mut content = String::new();
-    let options = serde_saphyr::SerializerOptions { prefer_block_scalars: false, ..Default::default() };
-    serde_saphyr::to_fmt_writer_with_options(&mut content, payload, options).map_err(|err| err.to_string())?;
-    tokio::fs::write(file_path, content).await.map_err(|err| err.to_string())
+enum SetupPersistWriteError {
+    Serialize(String),
+    Io(std::io::Error),
 }
 
-async fn ensure_parent_dir(file_path: &FsPath) -> Result<(), String> {
+async fn persist_yaml_file<T: serde::Serialize>(
+    file_path: &FsPath,
+    payload: &T,
+) -> Result<(), SetupPersistWriteError> {
+    let mut content = String::new();
+    let options = serde_saphyr::SerializerOptions { prefer_block_scalars: false, ..Default::default() };
+    serde_saphyr::to_fmt_writer_with_options(&mut content, payload, options)
+        .map_err(|err| SetupPersistWriteError::Serialize(err.to_string()))?;
+    tokio::fs::write(file_path, content).await.map_err(SetupPersistWriteError::Io)
+}
+
+async fn ensure_parent_dir(file_path: &FsPath) -> std::io::Result<()> {
     if let Some(parent_dir) = file_path.parent() {
-        tokio::fs::create_dir_all(parent_dir).await.map_err(|err| err.to_string())?;
+        tokio::fs::create_dir_all(parent_dir).await?;
     }
     Ok(())
+}
+
+fn setup_io_error_response(file_path: &FsPath, operation: &str, err: &std::io::Error) -> axum::response::Response {
+    let (status, message) = if err.kind() == ErrorKind::PermissionDenied {
+        error!(
+            "Setup mode: permission denied while trying to {operation} '{}': {err}",
+            file_path.display()
+        );
+        (
+            StatusCode::FORBIDDEN,
+            "Permission denied while accessing requested resource".to_string(),
+        )
+    } else {
+        error!(
+            "Setup mode: failed to {operation} '{}': {err}",
+            file_path.display()
+        );
+        (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string())
+    };
+
+    (status, axum::Json(json!({ "error": message }))).into_response()
 }
 
 fn validate_web_users(users: &[SetupWebUserCredentialDto]) -> Result<Vec<(String, String)>, String> {
@@ -598,13 +628,13 @@ enum SetupPersistAction<'a> {
 }
 
 impl SetupPersistAction<'_> {
-    async fn write(&self, temp_path: &FsPath) -> Result<(), String> {
+    async fn write(&self, temp_path: &FsPath) -> Result<(), SetupPersistWriteError> {
         match self {
             Self::Config(payload) => persist_yaml_file(temp_path, *payload).await,
             Self::Sources(payload) => persist_yaml_file(temp_path, *payload).await,
             Self::Templates(payload) => persist_yaml_file(temp_path, *payload).await,
             Self::ApiProxy(payload) => persist_yaml_file(temp_path, *payload).await,
-            Self::UserFile(content) => tokio::fs::write(temp_path, content).await.map_err(|err| err.to_string()),
+            Self::UserFile(content) => tokio::fs::write(temp_path, content).await.map_err(SetupPersistWriteError::Io),
         }
     }
 }
@@ -688,13 +718,7 @@ async fn setup_complete_inner(
     }
     for file_path in persist_paths {
         if let Err(err) = ensure_parent_dir(file_path).await {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(
-                    json!({ "error": format!("Failed to create parent directory for {}: {err}", file_path.display()) }),
-                ),
-            )
-                .into_response();
+            return setup_io_error_response(file_path, "create parent directory", &err);
         }
     }
 
@@ -767,11 +791,20 @@ async fn setup_complete_inner(
             for (_, cleanup_path, _) in pending_writes.iter().take(index + 1) {
                 cleanup_temp_file(cleanup_path).await;
             }
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(json!({ "error": format!("Failed to write {}: {err}", target_path.display()) })),
-            )
-                .into_response();
+            return match err {
+                SetupPersistWriteError::Io(io_err) => setup_io_error_response(target_path, "write file", &io_err),
+                SetupPersistWriteError::Serialize(serialize_err) => {
+                    error!(
+                        "Setup mode: failed to serialize setup content for '{}': {serialize_err}",
+                        target_path.display()
+                    );
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        axum::Json(json!({ "error": "Internal server error" })),
+                    )
+                        .into_response()
+                }
+            };
         }
     }
 
@@ -787,11 +820,7 @@ async fn setup_complete_inner(
                 for (_, temp_path) in &file_pairs {
                     cleanup_temp_file(temp_path).await;
                 }
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    axum::Json(json!({ "error": format!("Failed to read current {}: {err}", target.display()) })),
-                )
-                    .into_response();
+                return setup_io_error_response(target, "read current file", &err);
             }
         };
         snapshots.push(snapshot);
@@ -814,11 +843,7 @@ async fn setup_complete_inner(
             for (_, pending_temp) in file_pairs.iter().skip(index) {
                 cleanup_temp_file(pending_temp).await;
             }
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(json!({ "error": format!("Failed to write {}: {err}", target.display()) })),
-            )
-                .into_response();
+            return setup_io_error_response(target, "replace file", &err);
         }
         committed_indices.push(index);
     }
@@ -921,8 +946,14 @@ pub async fn start_setup_server(paths: &ConfigPaths, missing_files: &[String]) -
 
 #[cfg(test)]
 mod tests {
-    use super::api_proxy_or_default;
+    use super::{api_proxy_or_default, setup_complete_inner, SetupCompleteRequestDto, SetupModeState, SetupWebUserCredentialDto};
+    use axum::{body::to_bytes, http::StatusCode};
     use shared::model::{ApiProxyConfigDto, AppConfigDto, TargetUserDto};
+    use std::{
+        path::PathBuf,
+        sync::{atomic::AtomicBool, Arc},
+    };
+    use tokio::sync::{oneshot, Mutex, RwLock};
 
     #[test]
     fn setup_api_proxy_or_default_preserves_existing_credentials() {
@@ -952,5 +983,71 @@ mod tests {
         let api_proxy = api_proxy_or_default(&AppConfigDto::default());
         assert_eq!(api_proxy.server.len(), 1);
         assert!(!api_proxy.server[0].host.trim().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn setup_complete_reports_permission_denied_for_unwritable_target_dir()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        struct PermissionResetGuard(PathBuf);
+        impl Drop for PermissionResetGuard {
+            fn drop(&mut self) {
+                if let Ok(metadata) = std::fs::metadata(&self.0) {
+                    let mut permissions = metadata.permissions();
+                    permissions.set_mode(0o755);
+                    let _ = std::fs::set_permissions(&self.0, permissions);
+                }
+            }
+        }
+        // Safety: `geteuid` is a pure libc query with no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            return Ok(());
+        }
+
+        let temp_dir = tempfile::tempdir()?;
+        let readonly_dir = temp_dir.path().join("readonly");
+        tokio::fs::create_dir_all(&readonly_dir).await?;
+
+        let mut readonly_permissions = tokio::fs::metadata(&readonly_dir).await?.permissions();
+        readonly_permissions.set_mode(0o555);
+        tokio::fs::set_permissions(&readonly_dir, readonly_permissions).await?;
+        let _permission_reset_guard = PermissionResetGuard(readonly_dir.clone());
+
+        let (shutdown_tx, _shutdown_rx) = oneshot::channel::<()>();
+        let state = Arc::new(SetupModeState {
+            draft: Arc::new(RwLock::new(AppConfigDto::default())),
+            home_path: temp_dir.path().to_string_lossy().to_string(),
+            output_dir: readonly_dir.clone(),
+            config_file_path: readonly_dir.join("config.yml"),
+            source_file_path: readonly_dir.join("source.yml"),
+            api_proxy_file_path: readonly_dir.join("api-proxy.yml"),
+            user_file_path: readonly_dir.join("user.txt"),
+            web_dir: PathBuf::from(temp_dir.path()),
+            missing_files: Arc::new(vec![]),
+            completed: AtomicBool::new(false),
+            shutdown_tx: Mutex::new(Some(shutdown_tx)),
+        });
+
+        let req = SetupCompleteRequestDto {
+            app_config: AppConfigDto::default(),
+            web_users: vec![SetupWebUserCredentialDto {
+                username: "admin".to_string(),
+                password: "password123".to_string(),
+            }],
+        };
+        let response = setup_complete_inner(state, req).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let body = to_bytes(response.into_body(), usize::MAX).await?;
+        let payload: serde_json::Value = serde_json::from_slice(&body)?;
+        let error_message = payload
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| std::io::Error::other("setup response is missing error field"))?;
+
+        assert_eq!(error_message, "Permission denied while accessing requested resource");
+
+        Ok(())
     }
 }

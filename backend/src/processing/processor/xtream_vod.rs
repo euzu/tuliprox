@@ -441,6 +441,12 @@ fn queue_background_vod_info(
         let reasons = check_resolve_reasons(resolve_options, do_probe, resolve_tmdb_enabled, pli);
 
         if !reasons.is_empty() {
+            let task =
+                UpdateTask::ResolveVod { id: provider_id.clone(), reason: reasons, delay: resolve_options.resolve_delay };
+            if mgr.is_redundant_with_pending_task(input.name.as_ref(), &task) {
+                continue;
+            }
+
             if log_enabled!(Level::Debug) {
                 let has_details = pli.has_details();
                 let (has_tmdb, has_date, has_video, has_audio) =
@@ -461,8 +467,6 @@ fn queue_background_vod_info(
                     input.name, provider_id, reasons, has_details, has_tmdb, has_date, has_video, has_audio, pli.header.title
                 );
             }
-            let task =
-                UpdateTask::ResolveVod { id: provider_id, reason: reasons, delay: resolve_options.resolve_delay };
             mgr.queue_task_background(input.name.clone(), task);
         }
     }

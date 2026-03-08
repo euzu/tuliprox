@@ -1,11 +1,11 @@
 use crate::error::{Error, ErrorInfo, ErrorSetInfo};
 use gloo_storage::{LocalStorage, Storage};
-use log::error;
-use reqwasm::http::Request;
+use log::{error, warn};
+use reqwasm::http::{Request, Response};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
-use shared::utils::{bin_deserialize, CONTENT_TYPE_CBOR, CONTENT_TYPE_JSON};
-use std::collections::HashMap;
+use shared::utils::{bin_deserialize, bin_serialize, CONTENT_TYPE_CBOR, CONTENT_TYPE_JSON};
+use std::{collections::HashMap, sync::OnceLock};
 use web_sys::window;
 
 enum RequestMethod {
@@ -22,12 +22,118 @@ pub struct ResponseMeta<T> {
     pub headers: HashMap<String, String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Encoding {
+    Json,
+    Cbor,
+    Text,
+}
+
+enum EncodedBody {
+    Text(String),
+    Binary(Vec<u8>),
+}
+
+impl Encoding {
+    const fn as_content_type(self) -> &'static str {
+        match self {
+            Self::Json => CONTENT_TYPE_JSON,
+            Self::Cbor => CONTENT_TYPE_CBOR,
+            Self::Text => "text/plain",
+        }
+    }
+
+    fn encode<B: Serialize>(self, body: &B) -> Result<EncodedBody, Error> {
+        match self {
+            Self::Cbor => {
+                let bytes = bin_serialize(body).map_err(|_| Error::RequestError)?;
+                Ok(EncodedBody::Binary(bytes))
+            }
+            Self::Json => {
+                let text = serde_json::to_string(body).map_err(|_| Error::RequestError)?;
+                Ok(EncodedBody::Text(text))
+            }
+            Self::Text => {
+                let value = serde_json::to_value(body).map_err(|_| Error::RequestError)?;
+                match value {
+                    Value::String(text) => Ok(EncodedBody::Text(text)),
+                    _ => Err(Error::RequestError),
+                }
+            }
+        }
+    }
+}
+
+fn apply_encoded_body(request: Request, body: EncodedBody, content_type: &'static str) -> Request {
+    match body {
+        EncodedBody::Text(payload) => request.body(payload).header("Content-Type", content_type),
+        EncodedBody::Binary(payload) => request.body(payload).header("Content-Type", content_type),
+    }
+}
+
+fn encoding_from_content_type(content_type: &str) -> Option<Encoding> {
+    if content_type.contains(CONTENT_TYPE_CBOR) {
+        Some(Encoding::Cbor)
+    } else if content_type.contains(CONTENT_TYPE_JSON) {
+        Some(Encoding::Json)
+    } else if content_type.contains("text/") {
+        Some(Encoding::Text)
+    } else {
+        None
+    }
+}
+
+async fn decode_response_body<T>(response: Response, encoding: Encoding) -> Result<T, Error>
+where
+    T: DeserializeOwned + 'static + std::fmt::Debug,
+{
+    match encoding {
+        Encoding::Cbor => {
+            let bytes = response.binary().await.map_err(|err| {
+                error!("Failed to read response body for CBOR decode: {err}");
+                Error::DeserializeError
+            })?;
+            bin_deserialize::<T>(&bytes).map_err(|err| {
+                error!("Failed to deserialize {err}");
+                Error::DeserializeError
+            })
+        }
+        Encoding::Json => response.json::<T>().await.map_err(|_| Error::DeserializeError),
+        Encoding::Text => match response.text().await {
+            Ok(content) => serde_json::from_value::<T>(Value::String(content)).map_err(|_| Error::DeserializeError),
+            Err(_) => Err(Error::RequestError),
+        },
+    }
+}
+
+async fn extract_error_message_checked(response: Response) -> Result<String, Error> {
+    let content_type = response.headers().get("content-type").unwrap_or_default().to_ascii_lowercase();
+    match encoding_from_content_type(&content_type) {
+        Some(Encoding::Cbor) => {
+            let bytes = response.binary().await.map_err(|_| Error::DeserializeError)?;
+            let data = bin_deserialize::<ErrorInfo>(&bytes).map_err(|_| Error::DeserializeError)?;
+            Ok(data.error)
+        }
+        Some(Encoding::Json) => {
+            let data = response.json::<ErrorInfo>().await.map_err(|_| Error::DeserializeError)?;
+            Ok(data.error)
+        }
+        _ => Ok(response.text().await.unwrap_or_default()),
+    }
+}
+
+async fn extract_error_message(response: Response) -> String {
+    extract_error_message_checked(response).await.unwrap_or_default()
+}
+
 const TOKEN_KEY: &str = "tuliprox.token";
 pub fn get_token() -> Option<String> { LocalStorage::get(TOKEN_KEY).ok() }
 
 pub fn set_token(token: Option<&str>) {
     if let Some(t) = token {
-        LocalStorage::set(TOKEN_KEY, String::from(t)).expect("failed to set");
+        if let Err(err) = LocalStorage::set(TOKEN_KEY, String::from(t)) {
+            warn!("failed to set token in localStorage: {err:?}");
+        }
     } else {
         LocalStorage::delete(TOKEN_KEY);
     }
@@ -48,8 +154,8 @@ async fn request<B, T>(
     method: RequestMethod,
     url: &str,
     body: B,
-    content_type: Option<String>,
-    response_type: Option<String>,
+    content_type: Option<Encoding>,
+    response_type: Option<Encoding>,
     request_headers: Option<&[(String, String)]>,
     response_header_keys: Option<&[&str]>,
 ) -> Result<ResponseMeta<T>, Error>
@@ -57,17 +163,17 @@ where
     T: DeserializeOwned + 'static + std::fmt::Debug,
     B: Serialize + std::fmt::Debug,
 {
-    let c_type = content_type.as_ref().map_or(CONTENT_TYPE_JSON, |c| c.as_str());
-    let r_type = response_type.as_ref().map_or(CONTENT_TYPE_JSON, |c| c.as_str());
+    let c_type = content_type.unwrap_or(Encoding::Json);
+    let r_type = response_type.unwrap_or(Encoding::Json);
     let mut request = match method {
         RequestMethod::Get => Request::get(url),
         RequestMethod::Post => {
-            let json = serde_json::to_string(&body).map_err(|_| Error::RequestError)?;
-            Request::post(url).body(json).header("Content-Type", c_type)
+            let encoded = c_type.encode(&body)?;
+            apply_encoded_body(Request::post(url), encoded, c_type.as_content_type())
         }
         RequestMethod::Put => {
-            let json = serde_json::to_string(&body).map_err(|_| Error::RequestError)?;
-            Request::put(url).body(json).header("Content-Type", c_type)
+            let encoded = c_type.encode(&body)?;
+            apply_encoded_body(Request::put(url), encoded, c_type.as_content_type())
         }
         // RequestMethod::PATCH =>  Request::patch(&url).body(serde_json::to_string(&body).unwrap()),
         RequestMethod::Delete => Request::delete(url),
@@ -81,9 +187,7 @@ where
         }
     }
 
-    if r_type.contains(CONTENT_TYPE_CBOR) {
-        request = request.header("Accept", CONTENT_TYPE_CBOR);
-    }
+    request = request.header("Accept", r_type.as_content_type());
 
     match request.send().await {
         Ok(response) => {
@@ -98,106 +202,59 @@ where
             }
             match status {
                 200 | 205 | 206 => {
-                    let content_type = response.headers().get("content-type").unwrap_or(r_type.to_string());
-                    let is_json = content_type.contains(CONTENT_TYPE_JSON);
-                    let is_bin = !is_json && content_type.contains(CONTENT_TYPE_CBOR);
-                    if (is_json || is_bin) && std::any::TypeId::of::<T>() == std::any::TypeId::of::<()>() {
+                    let content_type = response.headers().get("content-type").unwrap_or_default().to_ascii_lowercase();
+                    if std::any::TypeId::of::<T>() == std::any::TypeId::of::<()>() {
                         // `T = ()` valid
                         let _ = response.binary().await;
                         return Ok(ResponseMeta { body: None, headers: response_headers });
                     }
-
-                    if is_bin {
-                        match response.binary().await {
-                            Ok(bytes) => match bin_deserialize::<T>(&bytes) {
-                                Ok(data) => Ok(ResponseMeta { body: Some(data), headers: response_headers }),
-                                Err(err) => {
-                                    error!("Failed to deserialize {err}");
-                                    Err(Error::DeserializeError)
-                                }
-                            },
-                            Err(err) => {
-                                error!("Failed to deserialize {err}");
-                                Err(Error::DeserializeError)
-                            }
-                        }
-                    } else if is_json {
-                        let data: Result<T, _> = response.json::<T>().await;
-                        if let Ok(data) = data {
-                            Ok(ResponseMeta { body: Some(data), headers: response_headers })
-                        } else {
-                            Err(Error::DeserializeError)
-                        }
-                    } else {
-                        match response.text().await {
-                            Ok(content) => match serde_json::from_value::<T>(Value::String(content)) {
-                                Ok(parsed) => Ok(ResponseMeta { body: Some(parsed), headers: response_headers }),
-                                Err(_err) => Err(Error::DeserializeError),
-                            },
-                            Err(_err) => Err(Error::RequestError),
-                        }
-                    }
+                    let decode_encoding = encoding_from_content_type(&content_type).unwrap_or(r_type);
+                    let decoded = decode_response_body::<T>(response, decode_encoding).await?;
+                    Ok(ResponseMeta { body: Some(decoded), headers: response_headers })
                 }
                 201 | 202 | 204 => Ok(ResponseMeta { body: None, headers: response_headers }),
                 400 => {
-                    let ct = response.headers().get("content-type").unwrap_or_default();
-                    let is_json = ct.contains(CONTENT_TYPE_JSON);
-                    let is_bin = !is_json && ct.contains(CONTENT_TYPE_CBOR);
-                    let data: Result<ErrorInfo, _> = if is_bin {
-                        match response.binary().await {
-                            Ok(bytes) => bin_deserialize::<ErrorInfo>(&bytes).map_err(|_| Error::DeserializeError),
-                            Err(_) => Err(Error::DeserializeError),
-                        }
-                    } else {
-                        response.json::<ErrorInfo>().await.map_err(|_| Error::DeserializeError)
-                    };
-
-                    if let Ok(data) = data {
-                        Err(Error::BadRequest(data.error))
-                    } else {
+                    let message = extract_error_message(response).await;
+                    if message.trim().is_empty() {
                         Err(Error::BadRequest("400".to_string()))
+                    } else {
+                        Err(Error::BadRequest(message))
                     }
                 }
                 401 => Err(Error::Unauthorized),
-                403 => Err(Error::Forbidden),
+                403 => {
+                    let message = extract_error_message(response).await;
+                    if message.trim().is_empty() {
+                        Err(Error::Forbidden("Forbidden".to_string()))
+                    } else {
+                        Err(Error::Forbidden(message))
+                    }
+                }
                 404 => Err(Error::NotFound),
                 409 => {
-                    let ct = response.headers().get("content-type").unwrap_or_default();
-                    let is_json = ct.contains(CONTENT_TYPE_JSON);
-                    let is_bin = !is_json && ct.contains(CONTENT_TYPE_CBOR);
-                    let data: Result<ErrorInfo, _> = if is_bin {
-                        match response.binary().await {
-                            Ok(bytes) => bin_deserialize::<ErrorInfo>(&bytes).map_err(|_| Error::DeserializeError),
-                            Err(_) => Err(Error::DeserializeError),
-                        }
-                    } else {
-                        response.json::<ErrorInfo>().await.map_err(|_| Error::DeserializeError)
-                    };
-                    if let Ok(data) = data {
-                        Err(Error::Conflict(data.error))
-                    } else {
+                    let message = extract_error_message(response).await;
+                    if message.trim().is_empty() {
                         Err(Error::Conflict("Configuration conflict (409)".to_string()))
+                    } else {
+                        Err(Error::Conflict(message))
                     }
                 }
                 428 => {
-                    let ct = response.headers().get("content-type").unwrap_or_default();
-                    let is_json = ct.contains(CONTENT_TYPE_JSON);
-                    let is_bin = !is_json && ct.contains(CONTENT_TYPE_CBOR);
-                    let data: Result<ErrorInfo, _> = if is_bin {
-                        match response.binary().await {
-                            Ok(bytes) => bin_deserialize::<ErrorInfo>(&bytes).map_err(|_| Error::DeserializeError),
-                            Err(_) => Err(Error::DeserializeError),
-                        }
-                    } else {
-                        response.json::<ErrorInfo>().await.map_err(|_| Error::DeserializeError)
-                    };
-                    if let Ok(data) = data {
-                        Err(Error::PreconditionRequired(data.error))
-                    } else {
+                    let message = extract_error_message(response).await;
+                    if message.trim().is_empty() {
                         Err(Error::PreconditionRequired("Missing precondition header (428)".to_string()))
+                    } else {
+                        Err(Error::PreconditionRequired(message))
                     }
                 }
-                500 => Err(Error::InternalServerError),
+                500 => {
+                    let message = extract_error_message(response).await;
+                    if message.trim().is_empty() {
+                        Err(Error::InternalServerError("Internal Server Error".to_string()))
+                    } else {
+                        Err(Error::InternalServerError(message))
+                    }
+                }
                 422 => {
                     let ct = response.headers().get("content-type").unwrap_or_default();
                     let is_json = ct.contains(CONTENT_TYPE_JSON);
@@ -230,8 +287,8 @@ where
 /// Delete request
 pub async fn request_delete<T>(
     url: &str,
-    content_type: Option<String>,
-    response_type: Option<String>,
+    content_type: Option<Encoding>,
+    response_type: Option<Encoding>,
 ) -> Result<Option<T>, Error>
 where
     T: DeserializeOwned + 'static + std::fmt::Debug,
@@ -242,8 +299,8 @@ where
 /// Get request
 pub async fn request_get<T>(
     url: &str,
-    content_type: Option<String>,
-    response_type: Option<String>,
+    content_type: Option<Encoding>,
+    response_type: Option<Encoding>,
 ) -> Result<Option<T>, Error>
 where
     T: DeserializeOwned + 'static + std::fmt::Debug,
@@ -253,8 +310,8 @@ where
 
 pub async fn request_get_meta<T>(
     url: &str,
-    content_type: Option<String>,
-    response_type: Option<String>,
+    content_type: Option<Encoding>,
+    response_type: Option<Encoding>,
     response_header_keys: &[&str],
 ) -> Result<ResponseMeta<T>, Error>
 where
@@ -274,8 +331,8 @@ where
 pub async fn request_post<B, T>(
     url: &str,
     body: B,
-    content_type: Option<String>,
-    response_type: Option<String>,
+    content_type: Option<Encoding>,
+    response_type: Option<Encoding>,
 ) -> Result<Option<T>, Error>
 where
     T: DeserializeOwned + 'static + std::fmt::Debug,
@@ -287,8 +344,8 @@ where
 pub async fn request_post_meta<B, T>(
     url: &str,
     body: B,
-    content_type: Option<String>,
-    response_type: Option<String>,
+    content_type: Option<Encoding>,
+    response_type: Option<Encoding>,
     request_headers: Option<&[(String, String)]>,
     response_header_keys: &[&str],
 ) -> Result<ResponseMeta<T>, Error>
@@ -304,8 +361,8 @@ where
 pub async fn request_put<B, T>(
     url: &str,
     body: B,
-    content_type: Option<String>,
-    response_type: Option<String>,
+    content_type: Option<Encoding>,
+    response_type: Option<Encoding>,
 ) -> Result<Option<T>, Error>
 where
     T: DeserializeOwned + 'static + std::fmt::Debug,
@@ -317,8 +374,8 @@ where
 pub async fn request_put_meta<B, T>(
     url: &str,
     body: B,
-    content_type: Option<String>,
-    response_type: Option<String>,
+    content_type: Option<Encoding>,
+    response_type: Option<Encoding>,
     request_headers: Option<&[(String, String)]>,
     response_header_keys: &[&str],
 ) -> Result<ResponseMeta<T>, Error>
@@ -336,16 +393,22 @@ pub fn limit(count: u32, p: u32) -> String {
     format!("limit={count}&offset={offset}")
 }
 
+static BASE_HREF: OnceLock<String> = OnceLock::new();
+
 pub fn get_base_href() -> String {
-    let mut href = window()
-        .and_then(|w| w.document())
-        .and_then(|doc| doc.query_selector("base").ok().flatten())
-        .and_then(|base| base.get_attribute("href"))
-        .map_or_else(|| "/".to_owned(), |s| s.trim().to_owned());
+    BASE_HREF
+        .get_or_init(|| {
+            let mut href = window()
+                .and_then(|w| w.document())
+                .and_then(|doc| doc.query_selector("base").ok().flatten())
+                .and_then(|base| base.get_attribute("href"))
+                .map_or_else(|| "/".to_owned(), |s| s.trim().to_owned());
 
-    if !href.ends_with('/') {
-        href.push('/');
-    }
+            if !href.ends_with('/') {
+                href.push('/');
+            }
 
-    href
+            href
+        })
+        .clone()
 }

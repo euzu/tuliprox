@@ -7,8 +7,8 @@ use crate::{
         components::{
             config::{
                 ApiConfigView, ConfigForm, ConfigViewContext, HdHomerunConfigView, IpCheckConfigView,
-                LibraryConfigView, LogConfigView, MainConfigView, MessagingConfigView, ProxyConfigView,
-                ReverseProxyConfigView, SchedulesConfigView, VideoConfigView, WebUiConfigView,
+                LibraryConfigView, LogConfigView, MainConfigView, MessagingConfigView, MetadataUpdateConfigView,
+                ProxyConfigView, ReverseProxyConfigView, SchedulesConfigView, VideoConfigView, WebUiConfigView,
             },
             Card, SetupContext, SetupStep, TextButton,
         },
@@ -36,6 +36,7 @@ fn render_config_page(step: SetupStep) -> Html {
         SetupStep::Proxy => html! { <ProxyConfigView/> },
         SetupStep::IpCheck => html! { <IpCheckConfigView/> },
         SetupStep::Video => html! { <VideoConfigView/> },
+        SetupStep::MetadataUpdate => html! { <MetadataUpdateConfigView/> },
         SetupStep::HdHomerun => html! { <HdHomerunConfigView/> },
         SetupStep::Library => html! { <LibraryConfigView/> },
         SetupStep::Schedules => html! { <SchedulesConfigView/> },
