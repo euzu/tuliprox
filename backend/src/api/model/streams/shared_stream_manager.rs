@@ -127,6 +127,7 @@ async fn send_burst_buffer(
 #[derive(Debug)]
 pub struct SharedStreamState {
     headers: Vec<(String, String)>,
+    log_stream_url: String,
     buf_size: usize,
     provider_guard: Option<ProviderHandle>,
     subscribers: RwLock<HashMap<SubscriberId, CancellationToken>>,
@@ -139,6 +140,7 @@ pub struct SharedStreamState {
 impl SharedStreamState {
     fn new(
         headers: Vec<(String, String)>,
+        log_stream_url: String,
         buf_size: usize,
         provider_guard: Option<ProviderHandle>,
         min_burst_buffer_size: usize,
@@ -148,6 +150,7 @@ impl SharedStreamState {
         let burst_buffer_size_in_bytes = min_burst_buffer_size.max(buf_size * 1024 * 12);
         Self {
             headers,
+            log_stream_url,
             buf_size,
             provider_guard,
             subscribers: RwLock::new(HashMap::new()),
@@ -277,6 +280,7 @@ impl SharedStreamState {
     {
         let mut source_stream = Box::pin(bytes_stream);
         let streaming_url = stream_url.to_string();
+        let log_stream_url = self.log_stream_url.clone();
         let sender = self.broadcaster.clone();
         let stop_token = self.stop_token.clone();
         let burst_buffer = self.burst_buffer.clone();
@@ -292,7 +296,10 @@ impl SharedStreamState {
                    biased;
 
                    () = stop_token.cancelled() => {
-                        debug_if_enabled!("No shared stream subscribers left. Closing shared provider stream {}", sanitize_sensitive_info(&streaming_url));
+                        debug_if_enabled!(
+                            "No shared stream subscribers left. Closing shared provider stream {}",
+                            sanitize_sensitive_info(&log_stream_url)
+                        );
                          break;
                    },
 
@@ -312,10 +319,10 @@ impl SharedStreamState {
                              buffer.push(arc_data.clone());
                            }
 
-                           match sender.send(arc_data.as_ref().clone()) {
+                             match sender.send(arc_data.as_ref().clone()) {
                              Ok(clients) =>  {
                                  if clients == 0 {
-                                    debug_if_enabled!("No shared stream subscribers closing {}", sanitize_sensitive_info(&streaming_url));
+                                    debug_if_enabled!("No shared stream subscribers closing {}", sanitize_sensitive_info(&log_stream_url));
                                     break;
                                  }
                                  counter += 1;
@@ -325,7 +332,10 @@ impl SharedStreamState {
                                  }
                              }
                              Err(_e) => {
-                                    debug_if_enabled!("Shared stream send error,no subscribers closing {}", sanitize_sensitive_info(&streaming_url));
+                                    debug_if_enabled!(
+                                        "Shared stream send error,no subscribers closing {}",
+                                        sanitize_sensitive_info(&log_stream_url)
+                                    );
                                     break;
                              }
                            }
@@ -336,7 +346,10 @@ impl SharedStreamState {
 
                          }
                          None => {
-                             debug_if_enabled!("Source stream ended. Closing shared provider stream {}", sanitize_sensitive_info(&streaming_url));
+                             debug_if_enabled!(
+                                 "Source stream ended. Closing shared provider stream {}",
+                                 sanitize_sensitive_info(&log_stream_url)
+                             );
                              break;
                          }
                      }
@@ -345,7 +358,7 @@ impl SharedStreamState {
             }
             debug_if_enabled!(
                 "Shared stream exhausted. Closing shared provider stream {}",
-                sanitize_sensitive_info(&streaming_url)
+                sanitize_sensitive_info(&log_stream_url)
             );
             shared_streams.unregister(&streaming_url, false).await;
         });
@@ -394,8 +407,10 @@ impl SharedStreamManager {
 
         if let Some(shared_state) = shared_state_opt {
             let remaining = shared_state.subscribers.read().await.len();
-            debug_if_enabled!("Unregistering shared stream {} (remaining_subscribers={remaining}, send_stop_signal={send_stop_signal})",
-            sanitize_sensitive_info(stream_url));
+            debug_if_enabled!(
+                "Unregistering shared stream {} (remaining_subscribers={remaining}, send_stop_signal={send_stop_signal})",
+                sanitize_sensitive_info(&shared_state.log_stream_url)
+            );
 
             for handle in shared_state.task_handles.write().await.drain(..) {
                 handle.abort();
@@ -406,7 +421,10 @@ impl SharedStreamManager {
             }
 
             if send_stop_signal || remaining == 0 {
-                trace_if_enabled!("Sending shared stream stop signal {}", sanitize_sensitive_info(stream_url));
+                trace_if_enabled!(
+                    "Sending shared stream stop signal {}",
+                    sanitize_sensitive_info(&shared_state.log_stream_url)
+                );
                 shared_state.stop_token.cancel();
             }
         }
@@ -437,9 +455,10 @@ impl SharedStreamManager {
 
             if is_empty {
                 if let Some(url) = stream_url.as_ref() {
+                    let log_stream_url = state.log_stream_url.clone();
                     debug_if_enabled!(
                         "No subscribers remain for {} after removing {}",
-                        sanitize_sensitive_info(url),
+                        sanitize_sensitive_info(&log_stream_url),
                         sanitize_sensitive_info(&addr.to_string())
                     );
                     self.unregister(url, send_stop_signal).await;
@@ -472,7 +491,7 @@ impl SharedStreamManager {
             debug_if_enabled!(
                 "Responding to existing shared client stream {} {}",
                 sanitize_sensitive_info(&addr.to_string()),
-                sanitize_sensitive_info(stream_url)
+                sanitize_sensitive_info(&shared_state.log_stream_url)
             );
             Some(shared_state.subscribe(addr, manager).await)
         } else {
@@ -482,18 +501,21 @@ impl SharedStreamManager {
 
     async fn register(&self, addr: &SocketAddr, stream_url: &str, shared_state: Arc<SharedStreamState>) {
         let mut shared_streams = self.shared_streams.write().await;
+        let log_stream_url = shared_state.log_stream_url.clone();
         shared_streams.by_key.insert(stream_url.to_string(), shared_state);
         shared_streams.key_by_addr.insert(*addr, stream_url.to_string());
         debug_if_enabled!(
             "Registered shared stream {} for initial subscriber {}",
-            sanitize_sensitive_info(stream_url),
+            sanitize_sensitive_info(&log_stream_url),
             sanitize_sensitive_info(&addr.to_string())
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn register_shared_stream<S, E>(
         app_state: &AppState,
         stream_url: &str,
+        log_stream_url: &str,
         bytes_stream: S,
         addr: &SocketAddr,
         headers: Vec<(String, String)>,
@@ -507,13 +529,21 @@ impl SharedStreamManager {
         let buf_size = CHANNEL_SIZE.max(buffer_size);
         let config = app_state.app_config.config.load();
         let min_buffer_bytes = resolve_min_burst_buffer_bytes(&config);
-        let shared_state = Arc::new(SharedStreamState::new(headers, buf_size, provider_handle, min_buffer_bytes));
+        let shared_state = Arc::new(SharedStreamState::new(
+            headers,
+            log_stream_url.to_string(),
+            buf_size,
+            provider_handle,
+            min_buffer_bytes,
+        ));
         app_state.shared_stream_manager.register(addr, stream_url, Arc::clone(&shared_state)).await;
-        app_state.active_provider.make_shared_connection(addr, stream_url).await;
+        app_state.active_provider.make_shared_connection(addr, stream_url, log_stream_url).await;
         let subscribed_stream = Self::subscribe_shared_stream(app_state, stream_url, addr).await;
         shared_state.broadcast(stream_url, bytes_stream, Arc::clone(&app_state.shared_stream_manager));
-        debug_if_enabled!("Created shared provider stream {} (channel_capacity={buf_size}, burst_buffer_min={min_buffer_bytes} bytes)",
-            sanitize_sensitive_info(stream_url));
+        debug_if_enabled!(
+            "Created shared provider stream {} (channel_capacity={buf_size}, burst_buffer_min={min_buffer_bytes} bytes)",
+            sanitize_sensitive_info(log_stream_url)
+        );
         subscribed_stream
     }
 

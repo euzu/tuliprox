@@ -58,7 +58,7 @@ use tokio::{
 use tokio_util::io::ReaderStream;
 use url::Url;
 
-fn resolve_stream_url_for_logging<'a>(input: &ConfigInput, stream_url: &'a str) -> Cow<'a, str> {
+pub(crate) fn resolve_stream_url_for_logging<'a>(input: &ConfigInput, stream_url: &'a str) -> Cow<'a, str> {
     if !is_sanitize_sensitive_info_enabled() {
         return Cow::Borrowed(stream_url);
     }
@@ -407,7 +407,7 @@ async fn resolve_streaming_strategy(
                         provider_cfg.get_user_info().as_ref().map_or_else(|| "?", |u| u.username.as_str())
                     ),
                     allocation.short_key(),
-                    sanitize_sensitive_info(&url)
+                    sanitize_sensitive_info(resolve_stream_url_for_logging(input, &url).as_ref())
                 );
 
                 if matches!(allocation, ProviderAllocation::Available(_)) {
@@ -516,7 +516,7 @@ async fn create_stream_response_details(
             debug_if_enabled!(
                 "Provider stream selection: allocated_provider={} actual_request_url={}",
                 sanitize_sensitive_info(guard_provider_name.as_deref().unwrap_or("?")),
-                sanitize_sensitive_info(request_url.as_ref())
+                sanitize_sensitive_info(resolve_stream_url_for_logging(input, request_url.as_ref()).as_ref())
             );
             let parsed_url = Url::parse(&request_url);
             let ((stream, stream_info), reconnect_flag) = if let Ok(url) = parsed_url {
@@ -952,11 +952,12 @@ pub async fn stream_response(
             .map(|(h, sc, response_url, cvt)| (h.clone(), *sc, response_url.clone(), *cvt));
         let provider_name = stream_details.provider_name.clone();
         let actual_request_url = stream_details.request_url.clone().unwrap_or_else(|| Arc::<str>::from(stream_url));
+        let log_actual_request_url = resolve_stream_url_for_logging(input, actual_request_url.as_ref());
 
         debug_if_enabled!(
             "Provider request mapping: allocated_provider={} actual_request_url={}",
             sanitize_sensitive_info(provider_name.as_deref().unwrap_or("?")),
-            sanitize_sensitive_info(actual_request_url.as_ref())
+            sanitize_sensitive_info(log_actual_request_url.as_ref())
         );
 
         if let Some((headers, status, _response_url, Some(CustomVideoStreamType::Provisioning))) =
@@ -989,7 +990,7 @@ pub async fn stream_response(
         let stream_resp = if is_stream_shared {
             debug_if_enabled!(
                 "Streaming shared stream request from {}",
-                sanitize_sensitive_info(actual_request_url.as_ref())
+                sanitize_sensitive_info(log_actual_request_url.as_ref())
             );
             // Shared Stream response
             let shared_headers = provider_response.as_ref().map_or_else(Vec::new, |(h, _, _, _)| h.clone());
@@ -997,6 +998,7 @@ pub async fn stream_response(
             if let Some((broadcast_stream, _shared_provider)) = SharedStreamManager::register_shared_stream(
                 app_state,
                 stream_url,
+                log_actual_request_url.as_ref(),
                 stream,
                 &fingerprint.addr,
                 shared_headers,
