@@ -49,9 +49,16 @@ impl Encoding {
                 let bytes = bin_serialize(body).map_err(|_| Error::RequestError)?;
                 Ok(EncodedBody::Binary(bytes))
             }
-            Self::Json | Self::Text => {
+            Self::Json => {
                 let text = serde_json::to_string(body).map_err(|_| Error::RequestError)?;
                 Ok(EncodedBody::Text(text))
+            }
+            Self::Text => {
+                let value = serde_json::to_value(body).map_err(|_| Error::RequestError)?;
+                match value {
+                    Value::String(text) => Ok(EncodedBody::Text(text)),
+                    _ => Err(Error::RequestError),
+                }
             }
         }
     }

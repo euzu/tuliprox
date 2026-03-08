@@ -990,6 +990,16 @@ mod tests {
     async fn setup_complete_reports_permission_denied_for_unwritable_target_dir()
     -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;
+        struct PermissionResetGuard(PathBuf);
+        impl Drop for PermissionResetGuard {
+            fn drop(&mut self) {
+                if let Ok(metadata) = std::fs::metadata(&self.0) {
+                    let mut permissions = metadata.permissions();
+                    permissions.set_mode(0o755);
+                    let _ = std::fs::set_permissions(&self.0, permissions);
+                }
+            }
+        }
         // Safety: `geteuid` is a pure libc query with no preconditions.
         if unsafe { libc::geteuid() } == 0 {
             return Ok(());
@@ -1002,6 +1012,7 @@ mod tests {
         let mut readonly_permissions = tokio::fs::metadata(&readonly_dir).await?.permissions();
         readonly_permissions.set_mode(0o555);
         tokio::fs::set_permissions(&readonly_dir, readonly_permissions).await?;
+        let _permission_reset_guard = PermissionResetGuard(readonly_dir.clone());
 
         let (shutdown_tx, _shutdown_rx) = oneshot::channel::<()>();
         let state = Arc::new(SetupModeState {
@@ -1036,10 +1047,6 @@ mod tests {
             .ok_or_else(|| std::io::Error::other("setup response is missing error field"))?;
 
         assert_eq!(error_message, "Permission denied while accessing requested resource");
-
-        let mut writable_permissions = tokio::fs::metadata(&readonly_dir).await?.permissions();
-        writable_permissions.set_mode(0o755);
-        tokio::fs::set_permissions(&readonly_dir, writable_permissions).await?;
 
         Ok(())
     }
