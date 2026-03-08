@@ -159,7 +159,24 @@ where
                     }
                 }
                 401 => Err(Error::Unauthorized),
-                403 => Err(Error::Forbidden),
+                403 => {
+                    let ct = response.headers().get("content-type").unwrap_or_default();
+                    let is_json = ct.contains(CONTENT_TYPE_JSON);
+                    let is_bin = !is_json && ct.contains(CONTENT_TYPE_CBOR);
+                    let data: Result<ErrorInfo, _> = if is_bin {
+                        match response.binary().await {
+                            Ok(bytes) => bin_deserialize::<ErrorInfo>(&bytes).map_err(|_| Error::DeserializeError),
+                            Err(_) => Err(Error::DeserializeError),
+                        }
+                    } else {
+                        response.json::<ErrorInfo>().await.map_err(|_| Error::DeserializeError)
+                    };
+                    if let Ok(data) = data {
+                        Err(Error::Forbidden(data.error))
+                    } else {
+                        Err(Error::Forbidden("Forbidden".to_string()))
+                    }
+                }
                 404 => Err(Error::NotFound),
                 409 => {
                     let ct = response.headers().get("content-type").unwrap_or_default();
@@ -197,7 +214,24 @@ where
                         Err(Error::PreconditionRequired("Missing precondition header (428)".to_string()))
                     }
                 }
-                500 => Err(Error::InternalServerError),
+                500 => {
+                    let ct = response.headers().get("content-type").unwrap_or_default();
+                    let is_json = ct.contains(CONTENT_TYPE_JSON);
+                    let is_bin = !is_json && ct.contains(CONTENT_TYPE_CBOR);
+                    let data: Result<ErrorInfo, _> = if is_bin {
+                        match response.binary().await {
+                            Ok(bytes) => bin_deserialize::<ErrorInfo>(&bytes).map_err(|_| Error::DeserializeError),
+                            Err(_) => Err(Error::DeserializeError),
+                        }
+                    } else {
+                        response.json::<ErrorInfo>().await.map_err(|_| Error::DeserializeError)
+                    };
+                    if let Ok(data) = data {
+                        Err(Error::InternalServerError(data.error))
+                    } else {
+                        Err(Error::InternalServerError("Internal Server Error".to_string()))
+                    }
+                }
                 422 => {
                     let ct = response.headers().get("content-type").unwrap_or_default();
                     let is_json = ct.contains(CONTENT_TYPE_JSON);

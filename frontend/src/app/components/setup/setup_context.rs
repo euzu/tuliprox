@@ -15,6 +15,7 @@ pub enum SetupStep {
     Proxy,
     IpCheck,
     Video,
+    MetadataUpdate,
     HdHomerun,
     Library,
     Sources,
@@ -25,7 +26,7 @@ pub enum SetupStep {
 
 impl SetupStep {
     #[cfg(test)]
-    pub const ALL_VARIANTS: [Self; 16] = [
+    pub const ALL_VARIANTS: [Self; 17] = [
         Self::Welcome,
         Self::Api,
         Self::WebUi,
@@ -36,6 +37,7 @@ impl SetupStep {
         Self::Proxy,
         Self::IpCheck,
         Self::Video,
+        Self::MetadataUpdate,
         Self::HdHomerun,
         Self::Library,
         Self::Sources,
@@ -44,7 +46,7 @@ impl SetupStep {
         Self::Finish,
     ];
 
-    pub const ORDER: [Self; 16] = [
+    pub const ORDER: [Self; 17] = [
         Self::Welcome,
         Self::Api,
         Self::WebUi,
@@ -55,6 +57,7 @@ impl SetupStep {
         Self::Proxy,
         Self::IpCheck,
         Self::Video,
+        Self::MetadataUpdate,
         Self::HdHomerun,
         Self::Library,
         Self::Sources,
@@ -103,6 +106,7 @@ impl SetupStep {
             Self::Proxy => "SETUP.LABEL.PROXY",
             Self::IpCheck => "SETUP.LABEL.IP_CHECK",
             Self::Video => "SETUP.LABEL.VIDEO",
+            Self::MetadataUpdate => "SETUP.LABEL.METADATA_UPDATE",
             Self::HdHomerun => "SETUP.LABEL.HDHOMERUN",
             Self::Library => "SETUP.LABEL.LIBRARY",
             Self::Sources => "SETUP.LABEL.SOURCES",
@@ -124,6 +128,7 @@ impl SetupStep {
             Self::Proxy => "SETUP.DESC.PROXY",
             Self::IpCheck => "SETUP.DESC.IP_CHECK",
             Self::Video => "SETUP.DESC.VIDEO",
+            Self::MetadataUpdate => "SETUP.DESC.METADATA_UPDATE",
             Self::HdHomerun => "SETUP.DESC.HDHOMERUN",
             Self::Library => "SETUP.DESC.LIBRARY",
             Self::Sources => "SETUP.DESC.SOURCES",
@@ -144,6 +149,7 @@ impl SetupStep {
             Self::Proxy => Some(ConfigPage::Proxy),
             Self::IpCheck => Some(ConfigPage::IpCheck),
             Self::Video => Some(ConfigPage::Video),
+            Self::MetadataUpdate => Some(ConfigPage::MetadataUpdate),
             Self::HdHomerun => Some(ConfigPage::HdHomerun),
             Self::Library => Some(ConfigPage::Library),
             Self::Schedules => Some(ConfigPage::Schedules),
@@ -165,6 +171,7 @@ impl fmt::Display for SetupStep {
             SetupStep::Proxy => "proxy",
             SetupStep::IpCheck => "ipcheck",
             SetupStep::Video => "video",
+            SetupStep::MetadataUpdate => "metadata_update",
             SetupStep::HdHomerun => "hdhomerun",
             SetupStep::Library => "library",
             SetupStep::Sources => "sources",

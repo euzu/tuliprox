@@ -27,8 +27,8 @@ pub enum Error {
     Unauthorized,
 
     /// 403
-    #[error("Forbidden")]
-    Forbidden,
+    #[error("{0}")]
+    Forbidden(String),
 
     /// 404
     #[error("Not Found")]
@@ -47,8 +47,8 @@ pub enum Error {
     UnprocessableEntity(ErrorSetInfo),
 
     /// 500
-    #[error("Internal Server Error")]
-    InternalServerError,
+    #[error("{0}")]
+    InternalServerError(String),
 
     /// serde deserialize error
     #[error("Deserialize Error")]
