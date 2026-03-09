@@ -7,6 +7,7 @@ pub enum CellValue<'a> {
     Proxy(ProxyType),
     Text(&'a str),
     Date(i64),
+    I8(i8),
 }
 
 impl<'a> PartialOrd for CellValue<'a> {
@@ -32,9 +33,12 @@ impl<'a> Ord for CellValue<'a> {
                 std::cmp::Ordering::Greater
             }
             (CellValue::Proxy(_), _) => std::cmp::Ordering::Less,
-            (CellValue::Text(_), CellValue::Date(_)) => std::cmp::Ordering::Less,
+            (CellValue::I8(a), CellValue::I8(b)) => a.cmp(b),
+            (CellValue::Text(_), CellValue::Date(_) | CellValue::I8(_)) => std::cmp::Ordering::Less,
             (CellValue::Text(_), _) => std::cmp::Ordering::Greater,
+            (CellValue::Date(_), CellValue::I8(_)) => std::cmp::Ordering::Less,
             (CellValue::Date(_), _) => std::cmp::Ordering::Greater,
+            (CellValue::I8(_), _) => std::cmp::Ordering::Greater,
         }
     }
 }

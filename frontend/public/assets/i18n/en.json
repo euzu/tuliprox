@@ -512,7 +512,8 @@
       "SERVER": "Target proxy server address or definition.",
       "STATUS": "The active or disabled state of the user proxy credential.",
       "TOKEN": "Unique API token that can be used instead of username/password.",
-      "UI_ENABLED": "If true, this user can log into the simplified WebUI bouquet editor (default true)."
+      "UI_ENABLED": "If true, this user can log into the simplified WebUI bouquet editor (default true).",
+      "PRIORITY": "Connection priority assigned to this user proxy context. Default = 0, lowest priority = 127, highest priority = -128."
     },
     "RATE_LIMIT_CONFIG": {
       "BURST_SIZE": "Defines the initial number of available connections before throttling applies (e.g. 10).",
