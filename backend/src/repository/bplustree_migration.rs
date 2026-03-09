@@ -19,7 +19,7 @@ const HEADER_FLAG_HAS_TOMBSTONES: u32 = 1 << 30;
 const HEADER_METADATA_LEN_MASK: u32 = !(HEADER_FLAG_HAS_METADATA_FLAGS | HEADER_FLAG_HAS_TOMBSTONES);
 const MARKER_FILE_GUARD_PREFIX: &str = ".db_mergeto_v";
 const MARKER_FILE_GUARD_PREFIX_LEGACY_ALT: &str = ".db_mergedto";
-const MARKER_FILE_API_USER_GARD: &str = ".userdb_mergeto_v3";
+const MARKER_FILE_API_USER_GUARD: &str = ".userdb_mergeto_v3";
 const MARKER_VERSION_KEY: &str = "migrated_to";
 const MARKER_ROOTS_FINGERPRINT_KEY: &str = "roots_fingerprint";
 
@@ -170,13 +170,9 @@ impl BPlusTreeStartupMigrator {
         const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
         const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
-        let mut canonical_entries: Vec<String> = roots.iter().map(|path| path.to_string_lossy().into_owned()).collect();
-        canonical_entries.sort_unstable();
-        canonical_entries.dedup();
-
         let mut hash = FNV_OFFSET_BASIS;
-        for entry in &canonical_entries {
-            for byte in entry.as_bytes() {
+        for path in roots {
+            for byte in path.to_string_lossy().as_bytes() {
                 hash ^= u64::from(*byte);
                 hash = hash.wrapping_mul(FNV_PRIME);
             }
@@ -514,7 +510,7 @@ fn create_user_db_merge_guard(merge_guard_path: &Path) -> io::Result<()> {
 }
 
 pub(crate) fn user_db_merge_guard_path(config_dir: &Path) -> PathBuf {
-    config_dir.join(MARKER_FILE_API_USER_GARD)
+    config_dir.join(MARKER_FILE_API_USER_GUARD)
 }
 
 /// Migrates the user database file from V1 or V2 schema to V3 (current) in
