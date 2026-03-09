@@ -384,7 +384,7 @@ fn marker_file_name() -> String { format!("{MARKER_FILE_GUARD_PREFIX}{STORAGE_VE
 
 // ─── User DB schema migration ─────────────────────────────────────────────────
 //
-// The user database has gone through three serialisation schemas (MessagePack,
+// The user database has gone through three serialization schemas (MessagePack,
 // positional/sequence encoding via rmp_serde):
 //
 //   V1 (Deprecated) – original format, 13 fields, no epg_request_timeshift
@@ -501,6 +501,10 @@ fn create_user_db_merge_guard(merge_guard_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+pub(crate) fn user_db_merge_guard_path(config_dir: &Path) -> PathBuf {
+    config_dir.join(MARKER_FILE_API_USER_GARD)
+}
+
 /// Migrates the user database file from V1 or V2 schema to V3 (current) in
 /// place and creates a merge-guard file so config-driven merges are skipped
 /// until the operator explicitly removes it.
@@ -568,12 +572,8 @@ fn run_all_startup_migrations(
     let bplustree = BPlusTreeStartupMigrator::new_with_marker(roots.to_vec(), marker_path).run()?;
 
     let user_db_path = config_dir.join(storage_const::API_USER_DB_FILE);
-    let merge_guard_path = config_dir.join(MARKER_FILE_API_USER_GARD);
-    let user_db_migrated = migrate_user_db_schema(&user_db_path, &merge_guard_path)
-        .unwrap_or_else(|err| {
-            warn!("User DB schema migration failed: {err}");
-            false
-        });
+    let merge_guard_path = user_db_merge_guard_path(config_dir);
+    let user_db_migrated = migrate_user_db_schema(&user_db_path, &merge_guard_path)?;
 
     Ok(AllStartupMigrationStats { bplustree, user_db_migrated })
 }
@@ -798,4 +798,3 @@ mod tests {
         Ok(())
     }
 }
-
