@@ -58,11 +58,25 @@ use tokio::{
 use tokio_util::io::ReaderStream;
 use url::Url;
 
-pub(crate) fn resolve_stream_url_for_logging<'a>(input: &ConfigInput, stream_url: &'a str) -> Cow<'a, str> {
-    if !is_sanitize_sensitive_info_enabled() {
+pub(crate) fn resolve_request_url_for_logging<'a>(input: &ConfigInput, stream_url: &'a str) -> Cow<'a, str> {
+    if is_sanitize_sensitive_info_enabled() {
         return Cow::Borrowed(stream_url);
     }
-    input.resolve_url(stream_url).unwrap_or(Cow::Borrowed(stream_url))
+
+    let provider = input.get_resolve_provider(stream_url);
+    if let Ok(url) = Url::parse(stream_url) {
+        return Cow::Owned(request::format_request_target_for_logging(&url, provider.as_ref()));
+    }
+
+    input
+        .resolve_url(stream_url)
+        .ok()
+        .and_then(|resolved| {
+            Url::parse(resolved.as_ref())
+                .ok()
+                .map(|url| Cow::Owned(request::format_request_target_for_logging(&url, provider.as_ref())))
+        })
+        .unwrap_or(Cow::Borrowed(stream_url))
 }
 
 #[macro_export]
@@ -407,7 +421,7 @@ async fn resolve_streaming_strategy(
                         provider_cfg.get_user_info().as_ref().map_or_else(|| "?", |u| u.username.as_str())
                     ),
                     allocation.short_key(),
-                    sanitize_sensitive_info(resolve_stream_url_for_logging(input, &url).as_ref())
+                    sanitize_sensitive_info(resolve_request_url_for_logging(input, &url).as_ref())
                 );
 
                 if matches!(allocation, ProviderAllocation::Available(_)) {
@@ -516,7 +530,7 @@ async fn create_stream_response_details(
             debug_if_enabled!(
                 "Provider stream selection: allocated_provider={} actual_request_url={}",
                 sanitize_sensitive_info(guard_provider_name.as_deref().unwrap_or("?")),
-                sanitize_sensitive_info(resolve_stream_url_for_logging(input, request_url.as_ref()).as_ref())
+                sanitize_sensitive_info(resolve_request_url_for_logging(input, request_url.as_ref()).as_ref())
             );
             let parsed_url = Url::parse(&request_url);
             let ((stream, stream_info), reconnect_flag) = if let Ok(url) = parsed_url {
@@ -665,7 +679,7 @@ where
                 let stream_url = format!("{url}/series/{username}/{password}/{provider_id}{ext}");
                 debug_if_enabled!(
                     "Redirecting stream request to {}",
-                    sanitize_sensitive_info(resolve_stream_url_for_logging(params.input, &stream_url).as_ref())
+                    sanitize_sensitive_info(resolve_request_url_for_logging(params.input, &stream_url).as_ref())
                 );
                 return Some(redirect(&stream_url).into_response());
             }
@@ -700,14 +714,14 @@ where
                 };
                 debug_if_enabled!(
                     "Redirecting stream request to {}",
-                    sanitize_sensitive_info(resolve_stream_url_for_logging(params.input, redirect_url).as_ref())
+                    sanitize_sensitive_info(resolve_request_url_for_logging(params.input, redirect_url).as_ref())
                 );
                 return Some(redirect(redirect_url).into_response());
             }
 
             debug_if_enabled!(
                 "Redirecting stream request to {}",
-                sanitize_sensitive_info(resolve_stream_url_for_logging(params.input, &stream_url).as_ref())
+                sanitize_sensitive_info(resolve_request_url_for_logging(params.input, &stream_url).as_ref())
             );
             return Some(redirect(&stream_url).into_response());
         }
@@ -819,7 +833,7 @@ pub async fn force_provider_stream_response(
         let body_stream = prepare_body_stream(app_state, item_type, stream);
         debug_if_enabled!(
             "Streaming provider forced stream request from {}",
-            sanitize_sensitive_info(resolve_stream_url_for_logging(input, user_session.stream_url.as_ref()).as_ref())
+            sanitize_sensitive_info(resolve_request_url_for_logging(input, user_session.stream_url.as_ref()).as_ref())
         );
         return try_unwrap_body!(response.body(body_stream));
     }
@@ -855,9 +869,9 @@ pub async fn stream_response(
     user: &ProxyUserCredentials,
     connection_permission: UserConnectionPermission,
 ) -> impl IntoResponse + Send {
-    let log_stream_url = resolve_stream_url_for_logging(input, stream_url);
+    let request_log_stream_url = resolve_request_url_for_logging(input, stream_url);
     if log_enabled!(log::Level::Trace) {
-        trace!("Try to open stream {}", sanitize_sensitive_info(log_stream_url.as_ref()));
+        trace!("Try to open stream {}", sanitize_sensitive_info(request_log_stream_url.as_ref()));
     }
 
     if connection_permission == UserConnectionPermission::Exhausted {
@@ -880,7 +894,6 @@ pub async fn stream_response(
         if let Some(value) = try_shared_stream_response_if_any(
             app_state,
             stream_url,
-            log_stream_url.as_ref(),
             fingerprint,
             user,
             connection_permission,
@@ -900,7 +913,6 @@ pub async fn stream_response(
             if let Some(value) = try_shared_stream_response_if_any(
                 app_state,
                 stream_url,
-                log_stream_url.as_ref(),
                 fingerprint,
                 user,
                 connection_permission,
@@ -912,7 +924,7 @@ pub async fn stream_response(
             {
                 debug_if_enabled!(
                     "Opportunistic shared stream reuse for {}",
-                    sanitize_sensitive_info(log_stream_url.as_ref())
+                    sanitize_sensitive_info(stream_url)
                 );
                 return value.into_response();
             }
@@ -952,7 +964,7 @@ pub async fn stream_response(
             .map(|(h, sc, response_url, cvt)| (h.clone(), *sc, response_url.clone(), *cvt));
         let provider_name = stream_details.provider_name.clone();
         let actual_request_url = stream_details.request_url.clone().unwrap_or_else(|| Arc::<str>::from(stream_url));
-        let log_actual_request_url = resolve_stream_url_for_logging(input, actual_request_url.as_ref());
+        let log_actual_request_url = resolve_request_url_for_logging(input, actual_request_url.as_ref());
 
         debug_if_enabled!(
             "Provider request mapping: allocated_provider={} actual_request_url={}",
@@ -998,7 +1010,6 @@ pub async fn stream_response(
             if let Some((broadcast_stream, _shared_provider)) = SharedStreamManager::register_shared_stream(
                 app_state,
                 stream_url,
-                log_actual_request_url.as_ref(),
                 stream,
                 &fingerprint.addr,
                 shared_headers,
@@ -1045,14 +1056,15 @@ pub async fn stream_response(
                     .and_then(|(_, _, u, _)| u.as_ref())
                     .map_or_else(|| Cow::Owned(actual_request_url.to_string()), |url| Cow::Owned(url.to_string()))
             };
+            let log_session_url = resolve_request_url_for_logging(input, session_url.as_ref());
             if log_enabled!(log::Level::Debug) {
-                if session_url.eq(actual_request_url.as_ref()) {
-                    debug!("Streaming stream request from {}", sanitize_sensitive_info(actual_request_url.as_ref()));
+                if log_session_url.eq(log_actual_request_url.as_ref()) {
+                    debug!("Streaming stream request from {}", sanitize_sensitive_info(log_actual_request_url.as_ref()));
                 } else {
                     debug!(
                         "Streaming stream request for {} from {}",
-                        sanitize_sensitive_info(actual_request_url.as_ref()),
-                        sanitize_sensitive_info(&session_url)
+                        sanitize_sensitive_info(log_actual_request_url.as_ref()),
+                        sanitize_sensitive_info(log_session_url.as_ref())
                     );
                 }
             }
@@ -1114,7 +1126,6 @@ fn get_stream_throttle(app_state: &Arc<AppState>) -> u64 {
 async fn try_shared_stream_response_if_any(
     app_state: &Arc<AppState>,
     stream_url: &str,
-    log_stream_url: &str,
     fingerprint: &Fingerprint,
     user: &ProxyUserCredentials,
     connect_permission: UserConnectionPermission,
@@ -1125,7 +1136,7 @@ async fn try_shared_stream_response_if_any(
     if let Some((stream, provider)) =
         SharedStreamManager::subscribe_shared_stream(app_state, stream_url, &fingerprint.addr).await
     {
-        debug_if_enabled!("Using shared stream {}", sanitize_sensitive_info(log_stream_url));
+        debug_if_enabled!("Using shared stream {}", sanitize_sensitive_info(stream_url));
         if let Some(headers) = app_state.shared_stream_manager.get_shared_state_headers(stream_url).await {
             let (status_code, header_map) = get_stream_response_with_headers(Some((headers.clone(), StatusCode::OK)));
             let mut grace_period_options = app_state.get_grace_options();

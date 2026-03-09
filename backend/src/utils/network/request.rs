@@ -249,6 +249,19 @@ fn resolve_attempt_target(url: &Url, provider: Option<&Arc<ConfigProvider>>) -> 
     target
 }
 
+pub fn format_request_target_for_logging(url: &Url, provider: Option<&Arc<ConfigProvider>>) -> String {
+    let target = resolve_attempt_target(url, provider);
+    if target.effective_url.scheme().eq_ignore_ascii_case("https") {
+        if let Some(connect_ip) = target.connect_ip {
+            format!("{} (connect_ip={connect_ip})", target.request_url)
+        } else {
+            target.request_url.to_string()
+        }
+    } else {
+        target.effective_url.to_string()
+    }
+}
+
 fn should_try_next_ip_on_connect_error(
     provider: Option<&Arc<ConfigProvider>>,
     target: &AttemptTarget,

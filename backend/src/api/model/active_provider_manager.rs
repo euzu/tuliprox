@@ -54,7 +54,6 @@ impl ProviderHandle {
 struct SharedAllocation {
     allocation_id: AllocationId,
     allocation: ProviderAllocation,
-    log_key: String,
     connections: HashSet<ClientConnectionId>,
     priority: i8,
     created_at: Instant,
@@ -579,7 +578,7 @@ impl ActiveProviderManager {
         }
     }
 
-    pub async fn make_shared_connection(&self, addr: &SocketAddr, key: &str, log_key: &str) {
+    pub async fn make_shared_connection(&self, addr: &SocketAddr, key: &str) {
         let extras = {
             let mut connections = self.connections.write().await;
             let mut extras = Vec::new();
@@ -625,7 +624,7 @@ impl ActiveProviderManager {
                 debug_if_enabled!(
                     "Shared connection: promoted addr {addr} provider={} key={}",
                     sanitize_sensitive_info(&provider_name),
-                    sanitize_sensitive_info(log_key)
+                    sanitize_sensitive_info(key)
                 );
 
                 connections.shared.by_key.insert(
@@ -633,7 +632,6 @@ impl ActiveProviderManager {
                     SharedAllocation {
                         allocation_id: handle.0.allocation_id,
                         allocation: handle.0.allocation.clone(),
-                        log_key: log_key.to_string(),
                         connections: HashSet::from([*addr]),
                         priority: handle.1,
                         created_at: handle.2,
@@ -657,7 +655,7 @@ impl ActiveProviderManager {
             debug_if_enabled!(
                 "Shared connection: added addr {addr} provider={} key={}",
                 sanitize_sensitive_info(&provider_name),
-                sanitize_sensitive_info(&shared_allocation.log_key)
+                sanitize_sensitive_info(key)
             );
             shared_allocation.connections.insert(*addr);
             connections.shared.key_by_addr.insert(*addr, key.to_string());

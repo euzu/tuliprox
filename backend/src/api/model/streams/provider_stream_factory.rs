@@ -7,11 +7,14 @@ use crate::{
             AppState, BoxedProviderStream, CustomVideoStreamType, ProviderStreamFactoryResponse, StreamError,
         },
     },
-    model::{resolve_provider_scheme_url_with_provider, ConfigProvider, ReverseProxyDisabledHeaderConfig},
+    model::{ConfigProvider, ReverseProxyDisabledHeaderConfig},
     tools::atomic_once_flag::AtomicOnceFlag,
     utils::{
         debug_if_enabled,
-        request::{classify_content_type, get_request_headers, send_with_retry_and_provider, MimeCategory},
+        request::{
+            classify_content_type, format_request_target_for_logging, get_request_headers, send_with_retry_and_provider,
+            MimeCategory,
+        },
     },
 };
 use futures::{
@@ -186,17 +189,11 @@ impl ProviderStreamFactoryOptions {
     pub fn was_range_requested(&self) -> bool { self.flags.contains(ProviderStreamFactoryFlags::RangeRequested) }
 
     fn get_log_url(&self) -> std::borrow::Cow<'_, str> {
-        if !is_sanitize_sensitive_info_enabled() {
+        if is_sanitize_sensitive_info_enabled() {
             return std::borrow::Cow::Borrowed(self.url.as_str());
         }
 
-        self.provider.as_ref().map_or_else(
-            || std::borrow::Cow::Borrowed(self.url.as_str()),
-            |provider| {
-                resolve_provider_scheme_url_with_provider(self.url.as_str(), Some(Arc::clone(provider)))
-                    .map_or_else(|_| std::borrow::Cow::Borrowed(self.url.as_str()), |(_, resolved)| resolved)
-            },
-        )
+        std::borrow::Cow::Owned(format_request_target_for_logging(&self.url, self.provider.as_ref()))
     }
 }
 
