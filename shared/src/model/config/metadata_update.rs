@@ -13,19 +13,20 @@ use crate::{
         default_metadata_progress_log_interval, default_metadata_queue_log_interval,
         default_metadata_resolve_exhaustion_reset_gap, default_metadata_resolve_min_retry_base,
         default_metadata_retry_delay, default_metadata_tmdb_cooldown, default_metadata_worker_idle_timeout,
-        default_tmdb_api_key, default_tmdb_cache_duration_days, default_tmdb_language, default_tmdb_match_threshold,
-        default_tmdb_rate_limit_ms, deserialize_as_string, is_default_metadata_backoff_jitter_percent,
-        is_default_metadata_ffprobe_analyze_duration, is_default_metadata_ffprobe_live_analyze_duration,
-        is_default_metadata_ffprobe_live_probe_size, is_default_metadata_ffprobe_probe_size,
-        is_default_metadata_max_attempts_probe, is_default_metadata_max_attempts_resolve,
-        is_default_metadata_max_queue_size, is_default_metadata_max_resolve_retry_backoff,
-        is_default_metadata_no_change_cache_ttl_secs, is_default_metadata_path, is_default_metadata_probe_cooldown,
-        is_default_metadata_probe_fairness_resolve_burst, is_default_metadata_probe_retry_backoff_step_1,
-        is_default_metadata_probe_retry_backoff_step_2, is_default_metadata_probe_retry_backoff_step_3,
-        is_default_metadata_probe_retry_load_retry_delay, is_default_metadata_progress_log_interval,
-        is_default_metadata_queue_log_interval, is_default_metadata_resolve_exhaustion_reset_gap,
-        is_default_metadata_resolve_min_retry_base, is_default_metadata_retry_delay, is_default_metadata_tmdb_cooldown,
-        is_default_metadata_worker_idle_timeout, is_default_tmdb_cache_duration_days, is_default_tmdb_language,
+        default_probe_user_priority, default_tmdb_api_key, default_tmdb_cache_duration_days, default_tmdb_language,
+        default_tmdb_match_threshold, default_tmdb_rate_limit_ms, deserialize_as_string,
+        is_default_metadata_backoff_jitter_percent, is_default_metadata_ffprobe_analyze_duration,
+        is_default_metadata_ffprobe_live_analyze_duration, is_default_metadata_ffprobe_live_probe_size,
+        is_default_metadata_ffprobe_probe_size, is_default_metadata_max_attempts_probe,
+        is_default_metadata_max_attempts_resolve, is_default_metadata_max_queue_size,
+        is_default_metadata_max_resolve_retry_backoff, is_default_metadata_no_change_cache_ttl_secs,
+        is_default_metadata_path, is_default_metadata_probe_cooldown, is_default_metadata_probe_fairness_resolve_burst,
+        is_default_metadata_probe_retry_backoff_step_1, is_default_metadata_probe_retry_backoff_step_2,
+        is_default_metadata_probe_retry_backoff_step_3, is_default_metadata_probe_retry_load_retry_delay,
+        is_default_metadata_progress_log_interval, is_default_metadata_queue_log_interval,
+        is_default_metadata_resolve_exhaustion_reset_gap, is_default_metadata_resolve_min_retry_base,
+        is_default_metadata_retry_delay, is_default_metadata_tmdb_cooldown, is_default_metadata_worker_idle_timeout,
+        is_default_probe_user_priority, is_default_tmdb_cache_duration_days, is_default_tmdb_language,
         is_default_tmdb_match_threshold, is_default_tmdb_rate_limit_ms, is_false, is_tmdb_default_api_key,
         parse_duration_seconds, parse_size_base_2, TMDB_API_KEY,
     },
@@ -252,6 +253,8 @@ pub struct ProbeConfigDto {
         skip_serializing_if = "is_default_metadata_backoff_jitter_percent"
     )]
     pub backoff_jitter_percent: u8,
+    #[serde(default = "default_probe_user_priority", skip_serializing_if = "is_default_probe_user_priority")]
+    pub user_priority: i8,
 }
 
 impl Default for ProbeConfigDto {
@@ -264,6 +267,7 @@ impl Default for ProbeConfigDto {
             retry_backoff_step_3: default_metadata_probe_retry_backoff_step_3(),
             max_attempts: default_metadata_max_attempts_probe(),
             backoff_jitter_percent: default_metadata_backoff_jitter_percent(),
+            user_priority: default_probe_user_priority(),
         }
     }
 }
@@ -277,6 +281,7 @@ impl ProbeConfigDto {
             && self.retry_backoff_step_3 == default_metadata_probe_retry_backoff_step_3()
             && self.max_attempts == default_metadata_max_attempts_probe()
             && self.backoff_jitter_percent == default_metadata_backoff_jitter_percent()
+            && self.user_priority == default_probe_user_priority()
     }
 
     fn prepare(&mut self) -> Result<(), TuliproxError> {

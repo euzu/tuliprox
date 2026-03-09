@@ -33,6 +33,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use shared::utils::default_probe_user_priority;
 
 create_resolve_options_function_for_xtream_target!(series);
 
@@ -848,6 +849,7 @@ pub async fn update_series_metadata(
         if let Some(details) = properties.details.as_mut() {
             if let Some(episodes) = details.episodes.as_mut() {
                 let config = app_config.config.load();
+                let probe_priority = config.metadata_update.as_ref().map_or(default_probe_user_priority(), |cfg| cfg.probe.user_priority);
                 let user_agent = config.default_user_agent.clone();
 
                 let input_url = input.url.as_str();
@@ -868,7 +870,7 @@ pub async fn update_series_metadata(
                         let temp_handle = if active_handle.is_some() {
                             None
                         } else {
-                            active_provider.acquire_connection_for_probe(&input.name).await
+                            active_provider.acquire_connection_for_probe(&input.name, probe_priority).await
                         };
 
                         if active_handle.is_some() || temp_handle.is_some() {

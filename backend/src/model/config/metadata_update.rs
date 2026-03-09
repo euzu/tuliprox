@@ -54,6 +54,7 @@ pub struct ProbeConfig {
     pub retry_backoff_step_3_secs: u64,
     pub max_attempts: u8,
     pub backoff_jitter_percent: u8,
+    pub user_priority: i8,
 }
 
 #[derive(Debug, Clone)]
@@ -269,6 +270,7 @@ impl From<&ProbeConfigDto> for ProbeConfig {
             retry_backoff_step_3: dto.retry_backoff_step_3.clone(),
             max_attempts: dto.max_attempts.max(1),
             backoff_jitter_percent: dto.backoff_jitter_percent.min(95),
+            user_priority: dto.user_priority,
         }
     }
 }
@@ -283,6 +285,7 @@ impl From<&ProbeConfig> for ProbeConfigDto {
             retry_backoff_step_3: instance.retry_backoff_step_3.clone(),
             max_attempts: instance.max_attempts,
             backoff_jitter_percent: instance.backoff_jitter_percent,
+            user_priority: instance.user_priority,
         }
     }
 }

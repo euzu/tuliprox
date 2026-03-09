@@ -492,7 +492,8 @@
       "RETRY_BACKOFF_STEP_1": "Wait time after the first probe failure.\n\nUse this as a gentle first retry step.\n\nExample: `10m`.",
       "RETRY_BACKOFF_STEP_2": "Wait time after the second probe failure.\n\nUsually set higher than step 1.\n\nExample: `30m`.",
       "RETRY_BACKOFF_STEP_3": "Wait time after the third and later probe failures.\n\nThis is the longest regular probe delay before cooldown takes over.\n\nExample: `1h`.",
-      "RETRY_LOAD_RETRY_DELAY": "Wait time before retrying to load saved retry-state data after a read failure.\n\nThis helps when storage is temporarily busy or unavailable.\n\nExamples: `30s`, `1m`, `5m`."
+      "RETRY_LOAD_RETRY_DELAY": "Wait time before retrying to load saved retry-state data after a read failure.\n\nThis helps when storage is temporarily busy or unavailable.\n\nExamples: `30s`, `1m`, `5m`.",
+      "USER_PRIORITY": "Connection priority assigned to probe tasks. lowest priority = 127 (default), highest priority = -128. Do not set less than 1 because default user priority is 0."
     },
     "PROXY_CONFIG": {
       "PASSWORD": "Password or credential used for this account or service.",
@@ -511,7 +512,8 @@
       "SERVER": "Target proxy server address or definition.",
       "STATUS": "The active or disabled state of the user proxy credential.",
       "TOKEN": "Unique API token that can be used instead of username/password.",
-      "UI_ENABLED": "If true, this user can log into the simplified WebUI bouquet editor (default true)."
+      "UI_ENABLED": "If true, this user can log into the simplified WebUI bouquet editor (default true).",
+      "PRIORITY": "Connection priority assigned to this user proxy context. Default = 0, lowest priority = 127, highest priority = -128."
     },
     "RATE_LIMIT_CONFIG": {
       "BURST_SIZE": "Defines the initial number of available connections before throttling applies (e.g. 10).",
@@ -918,6 +920,7 @@
     "METADATA_TMDB_COOLDOWN": "TMDB cooldown",
     "METADATA_UPDATE_CONFIG": "Metadata Update",
     "METADATA_WORKER_IDLE_TIMEOUT": "Worker idle timeout",
+    "METADATA_PROBE_USER_PRIORITY": "Probe user priority",
     "METHOD": "Method",
     "MODEL_NAME": "Model Name",
     "MODEL_NUMBER": "Model Number",

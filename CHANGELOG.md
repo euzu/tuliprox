@@ -111,8 +111,16 @@
 
 ## 🌟 New Features
 
-- **Smart Connection Priority**: Introduced a priority system for connections. Users with higher priority can preempt (kick) lower priority
-  connections (e.g., background tasks or standard users) when provider slots are full.
+- **User Connection Priority**: API users now carry a `priority` field (type `i8`, nice-style: lower value = higher priority, default `0`, probe `127`).
+  When all provider slots are occupied and a higher-priority user connects, the lowest-priority active connection on that provider is
+  evicted (oldest first when tied). Only connections with exactly one active listener are eligible for eviction; shared connections
+  with multiple listeners are not interrupted. Equal priority never evicts equal priority — the new connection is rejected normally
+  (with grace-period rules applied as before). User `max_connections` limits are unaffected.
+- **Configurable Probe Priority**: Stream-probe tasks (`probe_live`, `probe_vod`, `probe_series`) now run with a configurable priority
+  instead of a fixed internal constant. Set `metadata_update.probe.user_priority` (default `127`, i.e. lowest priority) to control how
+  aggressively active users can preempt probe connections.
+- **User DB Schema Migration V3**: The `api_user.db` file is automatically upgraded to V3 format (adds `priority` field) on first startup.
+  A `.userdb_mergeto_v3` guard file is created so config-driven user merges are skipped while the DB is the authoritative source.
 - **Background Metadata Queue**: Metadata resolution (VOD/Series) and stream analysis are now queued per input and processed in the background when
   provider connections are idle. This prevents "No Connections" errors for active users during playlist updates.
 - **Stream Probing**: Added support for probing streams (`probe_live|vod|series`) to determine codecs and resolution. This runs as a low-priority
@@ -161,7 +169,12 @@ active URL of the specified provider.
 
 ## ⚙️ New Settings
 
+- **api-proxy.yml / Web UI (user)**:
+  - Added `priority` (`i8`, default `0`) to user credentials. Lower value = higher priority (nice-style).
+    Configurable via Web UI user editor. Negative values are valid and represent higher-than-default priority.
 - **config.yml**:
+  - Added `metadata_update.probe.user_priority` (`i8`, default `127`): priority assigned to probe connections.
+    Probe tasks run at the lowest priority by default; reduce this value to give probes more connection access.
   - Added `metadata_update` (optional) with grouped sections: `log`, `resolve`, `probe`, `ffprobe`, `tmdb`.
   - Added `metadata_update.cache_path` (default `metadata`): shared storage directory for TMDB cache and metadata files
     (moved from `library.metadata.path`).

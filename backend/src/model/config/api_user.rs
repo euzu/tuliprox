@@ -23,6 +23,7 @@ pub struct ProxyUserCredentials {
     pub status: Option<ProxyUserStatus>,
     pub ui_enabled: bool,
     pub comment: Option<String>,
+    pub priority: i8,
     pub t_is_api_user: bool,
 }
 
@@ -43,6 +44,7 @@ impl From<&ProxyUserCredentialsDto> for ProxyUserCredentials {
             status: dto.status,
             ui_enabled: dto.ui_enabled,
             comment: dto.comment.clone(),
+            priority: dto.priority,
             t_is_api_user: false,
         }
     }
@@ -64,6 +66,7 @@ impl From<&ProxyUserCredentials> for ProxyUserCredentialsDto {
             status: instance.status,
             ui_enabled: instance.ui_enabled,
             comment: instance.comment.clone(),
+            priority: instance.priority,
         }
     }
 }

@@ -6,8 +6,8 @@ use crate::{
         },
         TargetUser,
     },
-    config_field_child, config_field_custom, edit_field_bool, edit_field_date, edit_field_number, edit_field_text,
-    edit_field_text_option, generate_form_reducer,
+    config_field_child, config_field_custom, edit_field_bool, edit_field_date, edit_field_number, edit_field_number_i8,
+    edit_field_text, edit_field_text_option, generate_form_reducer,
     hooks::use_service_context,
     i18n::use_translation,
 };
@@ -33,6 +33,7 @@ generate_form_reducer!(
         Server => server: Option<String>,
         Status => status: Option<ProxyUserStatus>,
         MaxConnections => max_connections: u32,
+        Priority => priority: i8,
         ExpDate => exp_date: Option<i64>,
         UiEnabled => ui_enabled: bool,
         EpgTimeshift => epg_timeshift: Option<String>,
@@ -251,6 +252,7 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                 />
             }})}
             { edit_field_number!(form_state,  translate.t("LABEL.MAX_CONNECTIONS"), max_connections, UserFormAction::MaxConnections) }
+            { edit_field_number_i8!(form_state, translate.t("LABEL.PRIORITY"), priority, UserFormAction::Priority) }
             { edit_field_date!(form_state,  translate.t("LABEL.EXP_DATE"), exp_date, UserFormAction::ExpDate) }
             { edit_field_text_option!(form_state,  translate.t("LABEL.EPG_TIMESHIFT"), epg_timeshift, UserFormAction::EpgTimeshift) }
             { edit_field_text_option!(form_state,  translate.t("LABEL.EPG_REQUEST_TIMESHIFT"), epg_request_timeshift, UserFormAction::EpgRequestTimeshift) }
