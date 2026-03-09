@@ -1790,6 +1790,17 @@ mod tests {
         assert_eq!(preview, "http://203.0.113.10/live");
         assert_eq!(first.connect_ip.map(|ip| ip.to_string()), Some("203.0.113.10".to_string()));
         assert_eq!(second.connect_ip.map(|ip| ip.to_string()), Some("203.0.113.11".to_string()));
+
+        let provider_https = make_provider_with_dns(false, OnConnectErrorPolicy::TryNextIp, vec!["203.0.113.10", "203.0.113.11"]);
+        let https_url = Url::parse("https://example.com/live").expect("url parse should work");
+
+        let https_preview = preview_request_target_for_logging(&https_url, Some(&provider_https));
+        let https_first = resolve_attempt_target(&https_url, Some(&provider_https));
+        let https_second = resolve_attempt_target(&https_url, Some(&provider_https));
+
+        assert_eq!(https_preview, "https://example.com/live (connect_ip=203.0.113.10)");
+        assert_eq!(https_first.connect_ip.map(|ip| ip.to_string()), Some("203.0.113.10".to_string()));
+        assert_eq!(https_second.connect_ip.map(|ip| ip.to_string()), Some("203.0.113.11".to_string()));
     }
 
     #[tokio::test]
