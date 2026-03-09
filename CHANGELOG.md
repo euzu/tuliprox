@@ -113,8 +113,9 @@
 
 - **User Connection Priority**: API users now carry a `priority` field (type `i8`, nice-style: lower value = higher priority, default `0`, probe `127`).
   When all provider slots are occupied and a higher-priority user connects, the lowest-priority active connection on that provider is
-  evicted (oldest first when tied). Equal priority never evicts equal priority — the new connection is rejected normally (with grace-period
-  rules applied as before). User `max_connections` limits are unaffected.
+  evicted (oldest first when tied). Only connections with exactly one active listener are eligible for eviction; shared connections
+  with multiple listeners are not interrupted. Equal priority never evicts equal priority — the new connection is rejected normally
+  (with grace-period rules applied as before). User `max_connections` limits are unaffected.
 - **Configurable Probe Priority**: Stream-probe tasks (`probe_live`, `probe_vod`, `probe_series`) now run with a configurable priority
   instead of a fixed internal constant. Set `metadata_update.probe.user_priority` (default `127`, i.e. lowest priority) to control how
   aggressively active users can preempt probe connections.

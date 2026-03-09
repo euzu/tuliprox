@@ -445,7 +445,7 @@ mod tests {
                         status: Some(ProxyUserStatus::Expired),
                         ui_enabled: true,
                         comment: None,
-                        priority: 0,
+                        priority: -10, // non-zero priority to verify round-trip serialization
                         t_is_api_user: false,
                     }
                 ],
@@ -481,6 +481,10 @@ mod tests {
         let user_list = load_api_user(&cfg).await;
         assert!(user_list.is_ok());
         assert_eq!(user_list.as_ref().unwrap().len(), 1);
-        assert_eq!(user_list.as_ref().unwrap().first().unwrap().credentials.len(), 4);
+        let loaded = user_list.as_ref().unwrap().first().unwrap();
+        assert_eq!(loaded.credentials.len(), 4);
+        // Verify non-zero priority survives the store/load round-trip.
+        let test4 = loaded.credentials.iter().find(|c| c.username == "Test4").unwrap();
+        assert_eq!(test4.priority, -10);
     }
 }

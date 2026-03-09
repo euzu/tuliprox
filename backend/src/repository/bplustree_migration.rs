@@ -539,7 +539,10 @@ fn migrate_user_db_schema(db_path: &Path, merge_guard_path: &Path) -> io::Result
         return Ok(true);
     }
 
-    Ok(false)
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("User DB at '{}' exists but could not be read as V1, V2, or V3 format", db_path.display()),
+    ))
 }
 
 // ─── Combined startup migration ───────────────────────────────────────────────

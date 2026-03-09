@@ -6,8 +6,8 @@ use crate::{
         },
         TargetUser,
     },
-    config_field_child, config_field_custom, edit_field_bool, edit_field_date, edit_field_number,
-    edit_field_number_i8, edit_field_text, edit_field_text_option, generate_form_reducer,
+    config_field_child, config_field_custom, edit_field_bool, edit_field_date, edit_field_number, edit_field_number_i8,
+    edit_field_text, edit_field_text_option, generate_form_reducer,
     hooks::use_service_context,
     i18n::use_translation,
 };

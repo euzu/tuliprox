@@ -427,7 +427,7 @@ macro_rules! edit_field_number_i8 {
                                 Ok(val) => instance.dispatch($action(val)),
                                 Err(_) => return, // keep the existing value
                             },
-                            None => instance.dispatch($action(0)),
+                            None => {} // cleared input — keep the existing value
                         }
                     })}
                 />

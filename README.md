@@ -2679,21 +2679,24 @@ Reverse Proxy mode for user can be a subset:
 - `user_ui_enabled` is _optional_. If defined it can be `true` or `false`. Default is `true`. Disable/enable web_ui for user
 - `user_access_control` is _optional_. If defined it can be `true` or `false`. Default is `false`.
 
-#### User Priority
+### User Priority
 
 Each user credential accepts an optional `priority` field (`i8`, default `0`).
 The priority uses a **nice-style scale**: a **lower value means higher priority**. Negative values are allowed and represent even higher priority.
 Priority range: `-128` - `127`, where `-128` has highest priority.
 
-When all provider connection slots are occupied and a new user with **strictly higher priority** (lower value) connects, the lowest-priority active connection on that provider is evicted (oldest first when priorities are tied). A user with equal or lower priority than all existing connections is rejected normally — existing grace-period rules still apply.
+When all provider connection slots are occupied and a new user with **strictly higher priority** (lower value) connects, the lowest-priority  
+active connection on that provider is evicted (oldest first when priorities are tied). Only connections with exactly one active listener are  
+eligible for eviction — shared connections with multiple listeners are not interrupted. A user with equal or lower priority than all existing  
+connections is rejected normally — existing grace-period rules still apply.
 
-| Priority | Meaning |
-|:--------:|---------|
-| `-128` | highest possible priority |
-| `-10` | Very high — almost always preempts others |
-| `0` | Default — standard user |
-| `64` | Reduced — yields to default users |
-| `127` | Lowest — default priority for probe tasks |
+| Priority | Meaning                                    |
+|:--------:|--------------------------------------------|
+|  `-128`  | highest possible priority                  |
+| `-10`    | Very high — almost always preempts others  |
+|   `0`    | Default — standard user                    |
+|   `64`   | Reduced — yields to default users          |
+|  `127`   | Lowest — default priority for probe tasks  |
 
 `max_connections` per user is independent of priority and unaffected by eviction.
 

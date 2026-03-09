@@ -2809,7 +2809,7 @@ impl InputWorker {
                         Err(shared::error::info_err!("{}", TASK_ERR_PREEMPTED))
                     }
 
-                    res = Self::execute_task_inner_static(&app_state, &client, &input_to_use, task, item_title.as_deref(), Some(handle), collector, db_handles, failed_clusters) => {
+                    res = Self::execute_task_inner_static(&app_state, &client, &input_to_use, task, item_title.as_deref(), Some(handle), probe_priority, collector, db_handles, failed_clusters) => {
                         res
                     }
                 }
@@ -2821,6 +2821,7 @@ impl InputWorker {
                     task,
                     item_title.as_deref(),
                     Some(handle),
+                    probe_priority,
                     collector,
                     db_handles,
                     failed_clusters,
@@ -2835,6 +2836,7 @@ impl InputWorker {
                 task,
                 item_title.as_deref(),
                 None,
+                probe_priority,
                 collector,
                 db_handles,
                 failed_clusters,
@@ -2889,6 +2891,7 @@ impl InputWorker {
         task: &UpdateTask,
         item_title: Option<&str>,
         active_handle: Option<&ProviderHandle>,
+        probe_priority: i8,
         collector: &mut BatchResultCollector,
         db_handles: &mut HashMap<XtreamCluster, DbHandle>,
         failed_clusters: &mut HashSet<XtreamCluster>,
@@ -3021,13 +3024,6 @@ impl InputWorker {
                 }
                 let task_key = TaskKey::from_task(task);
                 let probe_identifier = if unique_id.trim().is_empty() { url.as_str() } else { unique_id.as_str() };
-                let probe_priority = app_state
-                    .app_config
-                    .config
-                    .load()
-                    .metadata_update
-                    .as_ref()
-                    .map_or(default_probe_user_priority(), |cfg| cfg.probe.user_priority);
 
                 let outcome = update_generic_stream_metadata(
                     &app_state.app_config,
