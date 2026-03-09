@@ -38,6 +38,7 @@ use std::{
 };
 use tokio::sync::{mpsc, RwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
+use shared::utils::default_probe_user_priority;
 
 const METADATA_RETRY_STATE_FILE: &str = "metadata_retry_state.db";
 const TASK_ERR_NO_CONNECTION: &str = "No connection available";
@@ -2748,9 +2749,17 @@ impl InputWorker {
 
         let needs_probe_connection = Self::task_needs_provider_connection(task, input_base.input_type);
 
+        let probe_priority = app_state
+            .app_config
+            .config
+            .load()
+            .metadata_update
+            .as_ref()
+            .map_or(default_probe_user_priority(), |cfg| cfg.probe.user_priority);
+
         // Reserve provider capacity only for actual probe work (ffprobe paths).
         let provider_handle = if needs_probe_connection {
-            let Some(handle) = app_state.active_provider.acquire_connection_for_probe(input_name).await else {
+            let Some(handle) = app_state.active_provider.acquire_connection_for_probe(input_name, probe_priority).await else {
                 debug_if_enabled!("No provider connection available for background task {}, skipping...", task);
                 return Err(shared::error::info_err!("{}", TASK_ERR_NO_CONNECTION));
             };
@@ -3012,6 +3021,13 @@ impl InputWorker {
                 }
                 let task_key = TaskKey::from_task(task);
                 let probe_identifier = if unique_id.trim().is_empty() { url.as_str() } else { unique_id.as_str() };
+                let probe_priority = app_state
+                    .app_config
+                    .config
+                    .load()
+                    .metadata_update
+                    .as_ref()
+                    .map_or(default_probe_user_priority(), |cfg| cfg.probe.user_priority);
 
                 let outcome = update_generic_stream_metadata(
                     &app_state.app_config,
@@ -3021,6 +3037,7 @@ impl InputWorker {
                     *item_type,
                     &app_state.active_provider,
                     active_handle,
+                    probe_priority,
                 )
                 .await?;
 

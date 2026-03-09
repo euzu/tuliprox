@@ -21,7 +21,7 @@ use crate::{
     library::LibraryProcessor,
     model::{AppConfig, Config, Healthcheck, HealthcheckConfig, ProcessTargets, SourcesConfig},
     processing::processor::exec_processing,
-    repository::migrate_bplustree_databases_with_marker,
+    repository::run_startup_migrations,
     utils::{config_file_reader, db_viewer, init_logger, request::create_client, resolve_env_var},
 };
 use arc_swap::{access::Access, ArcSwap};
@@ -162,7 +162,7 @@ async fn main() {
         std::process::exit(i32::from(!healthy));
     }
 
-    run_startup_bplustree_migration(&config_paths);
+    run_startup_migrations(&config_paths);
 
     // Handle Library scan before starting main application
     if args.scan_library || args.force_library_rescan {
@@ -212,42 +212,6 @@ async fn main() {
         start_in_server_mode(Arc::new(app_config), Arc::new(targets)).await;
     } else {
         start_in_cli_mode(Arc::new(app_config), Arc::new(targets)).await;
-    }
-}
-
-fn run_startup_bplustree_migration(config_paths: &ConfigPaths) {
-    let config_file_path = Path::new(config_paths.config_file_path.as_str());
-    if !config_file_path.exists() {
-        return;
-    }
-
-    let mut roots: Vec<PathBuf> = vec![PathBuf::from(&config_paths.config_path)];
-    let storage_dir = PathBuf::from(&config_paths.storage_path);
-    if !roots.iter().any(|root| root == &storage_dir) {
-        roots.push(storage_dir.clone());
-    }
-
-    match migrate_bplustree_databases_with_marker(&roots, &storage_dir) {
-        Ok(stats) => {
-            if stats.skipped_by_marker {
-                info!("B+Tree startup migration skipped (marker already present)");
-            } else if stats.migrated_files > 0 {
-                info!(
-                    "B+Tree startup migration completed: migrated {} file(s) ({} B+Tree files checked, {} .db files scanned)",
-                    stats.migrated_files,
-                    stats.bplustree_files,
-                    stats.scanned_files
-                );
-                //} else {
-                //    info!(
-                //       "B+Tree startup migration check completed: {} B+Tree files already current ({} .db files scanned)",
-                //        stats.bplustree_files, stats.scanned_files
-                //   );
-            }
-        }
-        Err(err) => {
-            exit!("B+Tree startup migration failed: {err}");
-        }
     }
 }
 

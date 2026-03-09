@@ -14,48 +14,8 @@ use std::io::Error;
 use std::path::{Path, PathBuf};
 use tokio::task;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct StoredProxyUserCredentialsDeprecated {
-    pub target: String,
-    pub username: String,
-    pub password: String,
-    pub token: Option<String>,
-    pub proxy: ProxyType,
-    pub server: Option<String>,
-    pub epg_timeshift: Option<String>,
-    pub created_at: Option<i64>,
-    pub exp_date: Option<i64>,
-    pub max_connections: Option<u32>,
-    pub status: Option<ProxyUserStatus>,
-    pub ui_enabled: bool,
-    pub comment: Option<String>,
-}
-
-impl StoredProxyUserCredentialsDeprecated {
-    fn to(stored: &StoredProxyUserCredentialsDeprecated) -> ProxyUserCredentials {
-        ProxyUserCredentials {
-            username: stored.username.clone(),
-            password: stored.password.clone(),
-            token: stored.token.clone(),
-            proxy: stored.proxy,
-            server: stored.server.clone(),
-            epg_timeshift: stored.epg_timeshift.clone(),
-            epg_request_timeshift: None,
-            created_at: stored.created_at,
-            exp_date: stored.exp_date,
-            max_connections: stored.max_connections.unwrap_or_default(),
-            status: stored.status,
-            ui_enabled: stored.ui_enabled,
-            comment: stored.comment.clone(),
-            t_is_api_user: false,
-        }
-    }
-}
-
-// This is a Helper class to store all user into one Database file.
-// For the Config files we keep the old structure where a user is assigned to a target.
-// But for storing inside one db file it is easier to store the target next to the user.
-// due to known issue with  bincode and skip_serialization_if we have to list all fields and can't use ProxyUserCredentials
+// V3 (current): added priority field. V1 and V2 are migrated to V3 at startup
+// by `bplustree_migration::run_all_startup_migrations`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct StoredProxyUserCredentials {
     pub target: String,
@@ -72,6 +32,7 @@ struct StoredProxyUserCredentials {
     pub status: Option<ProxyUserStatus>,
     pub ui_enabled: bool,
     pub comment: Option<String>,
+    pub priority: Option<i8>,
 }
 
 impl StoredProxyUserCredentials {
@@ -91,6 +52,7 @@ impl StoredProxyUserCredentials {
             status: proxy.status,
             ui_enabled: proxy.ui_enabled,
             comment: proxy.comment.clone(),
+            priority: if proxy.priority != 0 { Some(proxy.priority) } else { None },
         }
     }
 
@@ -109,6 +71,7 @@ impl StoredProxyUserCredentials {
             status: stored.status,
             ui_enabled: stored.ui_enabled,
             comment: stored.comment.clone(),
+            priority: stored.priority.unwrap_or(0),
             t_is_api_user: false,
         }
     }
@@ -177,56 +140,29 @@ pub async fn store_api_user(cfg: &AppConfig, target_users: &[TargetUser]) -> Res
     result
 }
 
-// TODO remove me if we get stable on user_db
-pub async fn load_api_user_deprecated(cfg: &AppConfig) -> Result<Vec<TargetUser>, Error> {
-    let path = get_api_user_db_path(cfg);
-    let lock = cfg.file_locks.read_lock(&path).await;
-    let user_tree = BPlusTree::<String, StoredProxyUserCredentialsDeprecated>::load(&path)?;
-    drop(lock);
+fn collect_target_users(user_tree: &BPlusTree<String, StoredProxyUserCredentials>) -> Vec<TargetUser> {
     let mut target_users: HashMap<String, TargetUser> = HashMap::new();
-    for (_uname, stored_user) in &user_tree {
-        let proxy_user: ProxyUserCredentials = StoredProxyUserCredentialsDeprecated::to(stored_user);
-        let target_name = stored_user.target.clone();
-        match target_users.entry(target_name) {
-            std::collections::hash_map::Entry::Occupied(mut entry) => {
-                let target = entry.get_mut();
-                target.credentials.push(proxy_user);
-            }
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert(TargetUser {
-                    target: stored_user.target.clone(),
-                    credentials: vec![proxy_user],
-                });
-            }
-        }
-    }
-    Ok(target_users.into_values().collect())
-}
-
-
-pub async fn load_api_user(cfg: &AppConfig) -> Result<Vec<TargetUser>, Error> {
-    let path = get_api_user_db_path(cfg);
-    let lock = cfg.file_locks.read_lock(&path).await;
-    let Ok(user_tree) = BPlusTree::<String, StoredProxyUserCredentials>::load(&path) else { return load_api_user_deprecated(cfg).await };
-    drop(lock);
-    let mut target_users: HashMap<String, TargetUser> = HashMap::new();
-    for (_uname, stored_user) in &user_tree {
+    for (_uname, stored_user) in user_tree {
         let proxy_user: ProxyUserCredentials = StoredProxyUserCredentials::to(stored_user);
         let target_name = stored_user.target.clone();
         match target_users.entry(target_name) {
             std::collections::hash_map::Entry::Occupied(mut entry) => {
-                let target = entry.get_mut();
-                target.credentials.push(proxy_user);
+                entry.get_mut().credentials.push(proxy_user);
             }
             std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert(TargetUser {
-                    target: stored_user.target.clone(),
-                    credentials: vec![proxy_user],
-                });
+                entry.insert(TargetUser { target: stored_user.target.clone(), credentials: vec![proxy_user] });
             }
         }
     }
-    Ok(target_users.into_values().collect())
+    target_users.into_values().collect()
+}
+
+pub async fn load_api_user(cfg: &AppConfig) -> Result<Vec<TargetUser>, Error> {
+    let path = get_api_user_db_path(cfg);
+    let lock = cfg.file_locks.read_lock(&path).await;
+    let result = BPlusTree::<String, StoredProxyUserCredentials>::load(&path);
+    drop(lock);
+    result.map(|tree| collect_target_users(&tree)).map_err(|err| Error::other(format!("Failed to load user db: {err}")))
 }
 
 pub fn get_user_storage_path(cfg: &Config, username: &str) -> Option<PathBuf> {
@@ -458,6 +394,7 @@ mod tests {
                         status: Some(ProxyUserStatus::Active),
                         ui_enabled: true,
                         comment: None,
+                        priority: 0,
                         t_is_api_user: false,
                     },
                     ProxyUserCredentials {
@@ -474,6 +411,7 @@ mod tests {
                         status: Some(ProxyUserStatus::Expired),
                         ui_enabled: true,
                         comment: None,
+                        priority: 0,
                         t_is_api_user: false,
                     },
                     ProxyUserCredentials {
@@ -490,6 +428,7 @@ mod tests {
                         status: Some(ProxyUserStatus::Expired),
                         ui_enabled: true,
                         comment: None,
+                        priority: 0,
                         t_is_api_user: false,
                     },
                     ProxyUserCredentials {
@@ -506,6 +445,7 @@ mod tests {
                         status: Some(ProxyUserStatus::Expired),
                         ui_enabled: true,
                         comment: None,
+                        priority: 0,
                         t_is_api_user: false,
                     }
                 ],

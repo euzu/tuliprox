@@ -1,7 +1,7 @@
 use crate::{
     error::{TuliproxError, TuliproxErrorKind},
     model::{ProxyType, ProxyUserStatus},
-    utils::{default_as_true, deserialize_timestamp, is_blank_optional_string, is_true},
+    utils::{default_as_true, deserialize_timestamp, is_blank_optional_string, is_true, default_user_priority, is_default_user_priority},
 };
 
 #[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -38,6 +38,8 @@ pub struct ProxyUserCredentialsDto {
     pub ui_enabled: bool,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub comment: Option<String>,
+    #[serde(default="default_user_priority", skip_serializing_if = "is_default_user_priority")]
+    pub priority: i8,
 }
 
 impl ProxyUserCredentialsDto {

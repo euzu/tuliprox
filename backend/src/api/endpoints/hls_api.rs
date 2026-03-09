@@ -107,7 +107,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
         Some(session) => {
             let handle = if let Some(handle) = app_state
                 .active_provider
-                .acquire_exact_connection_with_grace(&session.provider, &fingerprint.addr, false)
+                .acquire_exact_connection_with_grace(&session.provider, &fingerprint.addr, false, user.priority)
                 .await
             {
                 Some(handle)
@@ -117,7 +117,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
                     sanitize_sensitive_info(&session.provider),
                     sanitize_sensitive_info(&fingerprint.addr.to_string())
                 );
-                app_state.active_provider.acquire_connection_with_grace(&input.name, &fingerprint.addr, false).await
+                app_state.active_provider.acquire_connection_with_grace(&input.name, &fingerprint.addr, false, user.priority).await
             };
 
             match handle {

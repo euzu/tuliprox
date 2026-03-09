@@ -11,7 +11,7 @@ use crate::{
         },
         context::ConfigContext,
     },
-    config_field, config_field_bool, config_field_optional, edit_field_bool, edit_field_number,
+    config_field, config_field_bool, config_field_optional, edit_field_bool, edit_field_number, edit_field_number_i8,
     edit_field_number_option_u64, edit_field_number_u16, edit_field_number_u64, edit_field_number_u8,
     edit_field_number_usize, edit_field_text, edit_field_text_option, generate_form_reducer,
     i18n::use_translation,
@@ -39,6 +39,7 @@ const LABEL_PROBE_RETRY_BACKOFF_STEP_3: &str = "LABEL.METADATA_PROBE_RETRY_BACKO
 const LABEL_MAX_ATTEMPTS_RESOLVE: &str = "LABEL.METADATA_MAX_ATTEMPTS_RESOLVE";
 const LABEL_MAX_ATTEMPTS_PROBE: &str = "LABEL.METADATA_MAX_ATTEMPTS_PROBE";
 const LABEL_BACKOFF_JITTER_PERCENT: &str = "LABEL.METADATA_BACKOFF_JITTER_PERCENT";
+const LABEL_PROBE_USER_PRIORITY: &str = "LABEL.METADATA_PROBE_USER_PRIORITY";
 const LABEL_MAX_QUEUE_SIZE: &str = "LABEL.METADATA_MAX_QUEUE_SIZE";
 const LABEL_METADATA_PATH: &str = "LABEL.METADATA_PATH";
 const LABEL_FFPROBE_ENABLED: &str = "LABEL.FFPROBE_ENABLED";
@@ -105,6 +106,7 @@ generate_form_reducer!(
         RetryBackoffStep3 => retry_backoff_step_3: String,
         MaxAttempts => max_attempts: u8,
         BackoffJitterPercent => backoff_jitter_percent: u8,
+        UserPriority => user_priority: i8,
     }
 );
 
@@ -244,6 +246,7 @@ pub fn MetadataUpdateConfigView() -> Html {
                     <h1>{translate.t(LABEL_PROBE)}</h1>
                     { config_field!(probe, translate.t(LABEL_MAX_ATTEMPTS_PROBE), max_attempts) }
                     { config_field!(probe, translate.t(LABEL_BACKOFF_JITTER_PERCENT), backoff_jitter_percent) }
+                    { config_field!(probe, translate.t(LABEL_PROBE_USER_PRIORITY), user_priority) }
                     { config_field!(probe, translate.t(LABEL_PROBE_RETRY_BACKOFF_STEP_1), retry_backoff_step_1) }
                     { config_field!(probe, translate.t(LABEL_PROBE_RETRY_BACKOFF_STEP_2), retry_backoff_step_2) }
                     { config_field!(probe, translate.t(LABEL_PROBE_RETRY_BACKOFF_STEP_3), retry_backoff_step_3) }
@@ -315,6 +318,7 @@ pub fn MetadataUpdateConfigView() -> Html {
                 <Card class="tp__config-view__card">
                     <h1>{translate.t(LABEL_PROBE)}</h1>
                     { edit_field_number_u8!(probe_state, translate.t(LABEL_MAX_ATTEMPTS_PROBE), max_attempts, ProbeConfigFormAction::MaxAttempts) }
+                    { edit_field_number_i8!(probe_state, translate.t(LABEL_PROBE_USER_PRIORITY), user_priority, ProbeConfigFormAction::UserPriority) }
                     <div class="tp__form-field tp__form-field__number">
                         <NumberInput
                             label={Some(jitter_label)}

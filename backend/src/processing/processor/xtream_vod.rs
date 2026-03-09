@@ -30,6 +30,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use shared::utils::default_probe_user_priority;
 
 create_resolve_options_function_for_xtream_target!(vod);
 
@@ -814,11 +815,13 @@ pub async fn update_vod_metadata(
             let analyze_duration = metadata_update.ffprobe.analyze_duration_micros;
             let probe_size = metadata_update.ffprobe.probe_size_bytes;
 
+            let probe_priority = config.metadata_update.as_ref().map_or(default_probe_user_priority(), |cfg| cfg.probe.user_priority);
+
             // Acquire Connection logic
             let temp_handle = if active_handle.is_some() {
                 None // No new handle needed
             } else {
-                active_provider.acquire_connection_for_probe(&input.name).await
+                active_provider.acquire_connection_for_probe(&input.name, probe_priority).await
             };
 
                 if active_handle.is_some() || temp_handle.is_some() {

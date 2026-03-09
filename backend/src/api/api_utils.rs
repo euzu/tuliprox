@@ -346,6 +346,7 @@ async fn resolve_streaming_strategy(
     input: &ConfigInput,
     force_provider: Option<&Arc<str>>,
     allow_provider_grace: bool,
+    user_priority: i8,
 ) -> StreamingStrategy {
     // allocate a provider connection
     let mut forced_provider_allocated = false;
@@ -355,7 +356,7 @@ async fn resolve_streaming_strategy(
             // If that account is no longer available, fall back to any available account in the same lineup.
             if let Some(handle) = app_state
                 .active_provider
-                .acquire_exact_connection_with_grace(provider, &fingerprint.addr, allow_provider_grace)
+                .acquire_exact_connection_with_grace(provider, &fingerprint.addr, allow_provider_grace, user_priority)
                 .await
             {
                 forced_provider_allocated = true;
@@ -368,14 +369,14 @@ async fn resolve_streaming_strategy(
                 );
                 app_state
                     .active_provider
-                    .acquire_connection_with_grace(&input.name, &fingerprint.addr, allow_provider_grace)
+                    .acquire_connection_with_grace(&input.name, &fingerprint.addr, allow_provider_grace, user_priority)
                     .await
             }
         }
         None => {
             app_state
                 .active_provider
-                .acquire_connection_with_grace(&input.name, &fingerprint.addr, allow_provider_grace)
+                .acquire_connection_with_grace(&input.name, &fingerprint.addr, allow_provider_grace, user_priority)
                 .await
         }
     };
@@ -462,9 +463,10 @@ async fn create_stream_response_details(
     force_provider: Option<&Arc<str>>,
     allow_provider_grace: bool,
     virtual_id: VirtualId,
+    user_priority: i8,
 ) -> Result<StreamDetails, TuliproxError> {
     let mut streaming_strategy =
-        resolve_streaming_strategy(app_state, stream_url, fingerprint, input, force_provider, allow_provider_grace)
+        resolve_streaming_strategy(app_state, stream_url, fingerprint, input, force_provider, allow_provider_grace, user_priority)
             .await;
     let mut grace_period_options = app_state.get_grace_options();
     grace_period_options.period_millis = get_grace_period_millis(
@@ -783,6 +785,7 @@ pub async fn force_provider_stream_response(
         preferred_provider,
         allow_provider_grace,
         stream_channel.virtual_id,
+        user.priority,
     )
     .await
     {
@@ -934,6 +937,7 @@ pub async fn stream_response(
         None,
         true,
         stream_channel.virtual_id,
+        user.priority,
     )
     .await
     {
@@ -1737,6 +1741,7 @@ pub fn create_api_proxy_user(app_state: &Arc<AppState>) -> ProxyUserCredentials 
         status: None,
         ui_enabled: false,
         comment: None,
+        priority: 0,
         t_is_api_user: true,
     }
 }

@@ -1,6 +1,8 @@
-use super::bplustree::{MAGIC, STORAGE_VERSION};
+use super::bplustree::{BPlusTree, MAGIC, STORAGE_VERSION};
+use super::storage_const;
 use fs2::FileExt as _;
-use log::warn;
+use log::{info, warn};
+use shared::model::{ConfigPaths, ProxyType, ProxyUserStatus};
 use std::{
     collections::{HashSet, VecDeque},
     ffi::OsStr,
@@ -15,8 +17,9 @@ const METADATA_MAX_SIZE: u32 = 4000;
 const HEADER_FLAG_HAS_METADATA_FLAGS: u32 = 1 << 31;
 const HEADER_FLAG_HAS_TOMBSTONES: u32 = 1 << 30;
 const HEADER_METADATA_LEN_MASK: u32 = !(HEADER_FLAG_HAS_METADATA_FLAGS | HEADER_FLAG_HAS_TOMBSTONES);
-const MARKER_FILE_PREFIX: &str = ".db_mergeto";
-const LEGACY_MARKER_FILE_PREFIX_ALT: &str = ".db_mergedto";
+const MARKER_FILE_GUARD_PREFIX: &str = ".db_mergeto_v";
+const MARKER_FILE_GUARD_PREFIX_LEGACY_ALT: &str = ".db_mergedto";
+const MARKER_FILE_API_USER_GARD: &str = ".userdb_mergeto_v3";
 const MARKER_VERSION_KEY: &str = "migrated_to";
 const MARKER_ROOTS_FINGERPRINT_KEY: &str = "roots_fingerprint";
 
@@ -29,7 +32,7 @@ pub struct BPlusTreeMigrationStats {
 }
 
 #[derive(Debug)]
-pub struct BPlusTreeStartupMigrator {
+struct BPlusTreeStartupMigrator {
     roots: Vec<PathBuf>,
     migration_marker_path: Option<PathBuf>,
 }
@@ -77,48 +80,9 @@ impl BPlusTreeStartupMigrator {
         Ok(stats)
     }
 
-    fn resolve_scan_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
-        let mut resolved: Vec<PathBuf> = Vec::new();
-        let mut seen: HashSet<String> = HashSet::new();
-
-        for root in roots {
-            if !root.exists() || !root.is_dir() {
-                continue;
-            }
-            let resolved_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
-            let key = resolved_root.to_string_lossy().into_owned();
-            if seen.insert(key) {
-                resolved.push(resolved_root);
-            }
-        }
-
-        resolved
-    }
-
-    fn roots_fingerprint(roots: &[PathBuf]) -> String {
-        const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
-        const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-
-        let mut canonical_entries: Vec<String> = roots.iter().map(|path| path.to_string_lossy().into_owned()).collect();
-        canonical_entries.sort_unstable();
-        canonical_entries.dedup();
-
-        let mut hash = FNV_OFFSET_BASIS;
-        for entry in &canonical_entries {
-            for byte in entry.as_bytes() {
-                hash ^= u64::from(*byte);
-                hash = hash.wrapping_mul(FNV_PRIME);
-            }
-            hash ^= 0xff;
-            hash = hash.wrapping_mul(FNV_PRIME);
-        }
-
-        format!("{hash:016x}")
-    }
-
     fn cleanup_legacy_root_markers(&self, keep_marker_path: Option<&Path>) -> io::Result<()> {
         let marker_name = marker_file_name();
-        let marker_name_alt = marker_file_name_alt();
+        let marker_name_alt = format!("{MARKER_FILE_GUARD_PREFIX_LEGACY_ALT}{STORAGE_VERSION}");
         let mut visited_roots: HashSet<PathBuf> = HashSet::new();
 
         for root in &self.roots {
@@ -170,6 +134,45 @@ impl BPlusTreeStartupMigrator {
             (Ok(keep_parent_canon), Ok(candidate_parent_canon)) => keep_parent_canon == candidate_parent_canon,
             _ => false,
         }
+    }
+
+    fn resolve_scan_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
+        let mut resolved: Vec<PathBuf> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+
+        for root in roots {
+            if !root.exists() || !root.is_dir() {
+                continue;
+            }
+            let resolved_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+            let key = resolved_root.to_string_lossy().into_owned();
+            if seen.insert(key) {
+                resolved.push(resolved_root);
+            }
+        }
+
+        resolved
+    }
+
+    fn roots_fingerprint(roots: &[PathBuf]) -> String {
+        const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+        const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+        let mut canonical_entries: Vec<String> = roots.iter().map(|path| path.to_string_lossy().into_owned()).collect();
+        canonical_entries.sort_unstable();
+        canonical_entries.dedup();
+
+        let mut hash = FNV_OFFSET_BASIS;
+        for entry in &canonical_entries {
+            for byte in entry.as_bytes() {
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(FNV_PRIME);
+            }
+            hash ^= 0xff;
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+
+        format!("{hash:016x}")
     }
 
     fn collect_db_files_for_root(root: &Path) -> io::Result<Vec<PathBuf>> {
@@ -377,9 +380,236 @@ pub fn migrate_bplustree_databases_with_marker(
     BPlusTreeStartupMigrator::new_with_marker(roots.to_vec(), marker_path).run()
 }
 
-fn marker_file_name() -> String { format!("{MARKER_FILE_PREFIX}{STORAGE_VERSION}") }
+fn marker_file_name() -> String { format!("{MARKER_FILE_GUARD_PREFIX}{STORAGE_VERSION}") }
 
-fn marker_file_name_alt() -> String { format!("{LEGACY_MARKER_FILE_PREFIX_ALT}{STORAGE_VERSION}") }
+// ─── User DB schema migration ─────────────────────────────────────────────────
+//
+// The user database has gone through three serialisation schemas (MessagePack,
+// positional/sequence encoding via rmp_serde):
+//
+//   V1 (Deprecated) – original format, 13 fields, no epg_request_timeshift
+//   V2              – 14 fields, added epg_request_timeshift
+//   V3 (current)    – 15 fields, added priority
+//
+// On first startup after an upgrade the file is still in V1 or V2 format.
+// `migrate_user_db_schema` detects this, converts every record in-place, and
+// writes a merge-guard marker so that config-driven user merges cannot
+// overwrite the freshly migrated data.
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct StoredApiUserV1 {
+    pub target: String,
+    pub username: String,
+    pub password: String,
+    pub token: Option<String>,
+    pub proxy: ProxyType,
+    pub server: Option<String>,
+    pub epg_timeshift: Option<String>,
+    pub created_at: Option<i64>,
+    pub exp_date: Option<i64>,
+    pub max_connections: Option<u32>,
+    pub status: Option<ProxyUserStatus>,
+    pub ui_enabled: bool,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct StoredApiUserV2 {
+    pub target: String,
+    pub username: String,
+    pub password: String,
+    pub token: Option<String>,
+    pub proxy: ProxyType,
+    pub server: Option<String>,
+    pub epg_timeshift: Option<String>,
+    pub epg_request_timeshift: Option<String>,
+    pub created_at: Option<i64>,
+    pub exp_date: Option<i64>,
+    pub max_connections: Option<u32>,
+    pub status: Option<ProxyUserStatus>,
+    pub ui_enabled: bool,
+    pub comment: Option<String>,
+}
+
+// V3 mirror — same layout as user_repository::StoredProxyUserCredentials.
+// Defined here so the migration has no dependency on user_repository internals.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct StoredApiUserV3 {
+    pub target: String,
+    pub username: String,
+    pub password: String,
+    pub token: Option<String>,
+    pub proxy: ProxyType,
+    pub server: Option<String>,
+    pub epg_timeshift: Option<String>,
+    pub epg_request_timeshift: Option<String>,
+    pub created_at: Option<i64>,
+    pub exp_date: Option<i64>,
+    pub max_connections: Option<u32>,
+    pub status: Option<ProxyUserStatus>,
+    pub ui_enabled: bool,
+    pub comment: Option<String>,
+    pub priority: Option<i8>,
+}
+
+impl StoredApiUserV3 {
+    fn from_v2(v2: &StoredApiUserV2) -> Self {
+        Self {
+            target: v2.target.clone(),
+            username: v2.username.clone(),
+            password: v2.password.clone(),
+            token: v2.token.clone(),
+            proxy: v2.proxy,
+            server: v2.server.clone(),
+            epg_timeshift: v2.epg_timeshift.clone(),
+            epg_request_timeshift: v2.epg_request_timeshift.clone(),
+            created_at: v2.created_at,
+            exp_date: v2.exp_date,
+            max_connections: v2.max_connections,
+            status: v2.status,
+            ui_enabled: v2.ui_enabled,
+            comment: v2.comment.clone(),
+            priority: None,
+        }
+    }
+
+    fn from_v1(v1: &StoredApiUserV1) -> Self {
+        Self {
+            target: v1.target.clone(),
+            username: v1.username.clone(),
+            password: v1.password.clone(),
+            token: v1.token.clone(),
+            proxy: v1.proxy,
+            server: v1.server.clone(),
+            epg_timeshift: v1.epg_timeshift.clone(),
+            epg_request_timeshift: None,
+            created_at: v1.created_at,
+            exp_date: v1.exp_date,
+            max_connections: v1.max_connections,
+            status: v1.status,
+            ui_enabled: v1.ui_enabled,
+            comment: v1.comment.clone(),
+            priority: None,
+        }
+    }
+}
+
+fn create_user_db_merge_guard(merge_guard_path: &Path) -> io::Result<()> {
+    if !merge_guard_path.exists() {
+        std::fs::write(merge_guard_path, b"")?;
+    }
+    Ok(())
+}
+
+/// Migrates the user database file from V1 or V2 schema to V3 (current) in
+/// place and creates a merge-guard file so config-driven merges are skipped
+/// until the operator explicitly removes it.
+///
+/// Returns `true` when a migration was performed, `false` when the file was
+/// already in V3 format or did not exist.
+fn migrate_user_db_schema(db_path: &Path, merge_guard_path: &Path) -> io::Result<bool> {
+    if !db_path.exists() {
+        return Ok(false);
+    }
+
+    // Already V3? (15-field sequence — rmp_serde fails on shorter sequences)
+    if BPlusTree::<String, StoredApiUserV3>::load(db_path).is_ok() {
+        return Ok(false);
+    }
+
+    // Try V2 → V3
+    if let Ok(tree) = BPlusTree::<String, StoredApiUserV2>::load(db_path) {
+        let mut v3_tree: BPlusTree<String, StoredApiUserV3> = BPlusTree::new();
+        for (key, v2) in &tree {
+            v3_tree.insert(key.clone(), StoredApiUserV3::from_v2(v2));
+        }
+        v3_tree.store(db_path)?;
+        create_user_db_merge_guard(merge_guard_path)?;
+        return Ok(true);
+    }
+
+    // Try V1 → V3
+    if let Ok(tree) = BPlusTree::<String, StoredApiUserV1>::load(db_path) {
+        let mut v3_tree: BPlusTree<String, StoredApiUserV3> = BPlusTree::new();
+        for (key, v1) in &tree {
+            v3_tree.insert(key.clone(), StoredApiUserV3::from_v1(v1));
+        }
+        v3_tree.store(db_path)?;
+        create_user_db_merge_guard(merge_guard_path)?;
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
+// ─── Combined startup migration ───────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AllStartupMigrationStats {
+    pub bplustree: BPlusTreeMigrationStats,
+    pub user_db_migrated: bool,
+}
+
+/// Runs all startup migrations in sequence:
+/// 1. B+Tree storage-format migration (V1 → current binary format)
+/// 2. User DB schema migration (V1/V2 → V3 `MessagePack` layout)
+///
+/// `config_dir` is the directory that contains `api_user.db` and the merge-guard
+/// marker. `storage_dir` is used for the B+Tree migration marker.
+fn run_all_startup_migrations(
+    roots: &[PathBuf],
+    storage_dir: &Path,
+    config_dir: &Path,
+) -> io::Result<AllStartupMigrationStats> {
+    let marker_path = bplustree_migration_marker_path(storage_dir);
+    let bplustree = BPlusTreeStartupMigrator::new_with_marker(roots.to_vec(), marker_path).run()?;
+
+    let user_db_path = config_dir.join(storage_const::API_USER_DB_FILE);
+    let merge_guard_path = config_dir.join(MARKER_FILE_API_USER_GARD);
+    let user_db_migrated = migrate_user_db_schema(&user_db_path, &merge_guard_path)
+        .unwrap_or_else(|err| {
+            warn!("User DB schema migration failed: {err}");
+            false
+        });
+
+    Ok(AllStartupMigrationStats { bplustree, user_db_migrated })
+}
+
+
+pub fn run_startup_migrations(config_paths: &ConfigPaths) {
+    let config_file_path = Path::new(config_paths.config_file_path.as_str());
+    if !config_file_path.exists() {
+        return;
+    }
+
+    let config_dir = PathBuf::from(&config_paths.config_path);
+    let mut roots: Vec<PathBuf> = vec![config_dir.clone()];
+    let storage_dir = PathBuf::from(&config_paths.storage_path);
+    if !roots.iter().any(|root| root == &storage_dir) {
+        roots.push(storage_dir.clone());
+    }
+
+    match run_all_startup_migrations(&roots, &storage_dir, &config_dir) {
+        Ok(stats) => {
+            if stats.bplustree.skipped_by_marker {
+                info!("B+Tree startup migration skipped (marker already present)");
+            } else if stats.bplustree.migrated_files > 0 {
+                info!(
+                    "B+Tree startup migration completed: migrated {} file(s) ({} B+Tree files checked, {} .db files scanned)",
+                    stats.bplustree.migrated_files,
+                    stats.bplustree.bplustree_files,
+                    stats.bplustree.scanned_files
+                );
+            }
+            if stats.user_db_migrated {
+                info!("User DB schema migrated to V3");
+            }
+        }
+        Err(err) => {
+            crate::utils::exit!("Startup migration failed: {err}");
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -526,7 +756,7 @@ mod tests {
         let fingerprint = test_roots_fingerprint(&roots);
         BPlusTreeStartupMigrator::write_migration_marker(&global_marker, &fingerprint)?;
 
-        let legacy_per_root_marker = temp_other.path().join(format!("{MARKER_FILE_PREFIX}{STORAGE_VERSION}"));
+        let legacy_per_root_marker = temp_other.path().join(format!("{MARKER_FILE_GUARD_PREFIX}{STORAGE_VERSION}"));
         BPlusTreeStartupMigrator::write_migration_marker(&legacy_per_root_marker, "legacy")?;
         assert!(legacy_per_root_marker.exists());
 
@@ -565,3 +795,4 @@ mod tests {
         Ok(())
     }
 }
+

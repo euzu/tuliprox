@@ -469,6 +469,7 @@ metadata_update:
     retry_backoff_step_3: 1h
     max_attempts: 3
     backoff_jitter_percent: 20
+    user_priority: 127  # Connection priority for probe tasks (default 127 = lowest priority)
   tmdb:
     enabled: true
     # api_key: "..." # Optional, fallback is internal default placeholder
@@ -516,6 +517,9 @@ metadata_update:
 - `probe.retry_backoff_step_2` (default `30m`): Probe backoff delay for attempt 2.
 - `probe.retry_backoff_step_3` (default `1h`): Probe backoff delay for attempt 3 and higher.
 - `probe.backoff_jitter_percent` (default `20`): Random jitter percentage applied to resolve/probe retry backoff to avoid synchronized retries.
+- `probe.user_priority` (default `127`): Connection priority assigned to probe tasks. Uses the same nice-style scale as user priorities
+  (lower value = higher priority). At `127` (lowest priority), probe connections are always the first to be evicted when a regular user connects.
+  Reduce this value (e.g. `64`) to give probes more access to provider slots.
 - `tmdb.cooldown` (default `7d`): Cooldown duration after a TMDB lookup completed successfully but returned no match.
 - `tmdb.enabled` / `tmdb.api_key` / `tmdb.rate_limit_ms` / `tmdb.cache_duration_days` / `tmdb.language`: TMDB resolver settings.
 - `tmdb.match_threshold` (default `86`): TMDB match threshold for search results for TMDB ID resolution.
@@ -2675,6 +2679,24 @@ Reverse Proxy mode for user can be a subset:
 - `user_ui_enabled` is _optional_. If defined it can be `true` or `false`. Default is `true`. Disable/enable web_ui for user
 - `user_access_control` is _optional_. If defined it can be `true` or `false`. Default is `false`.
 
+#### User Priority
+
+Each user credential accepts an optional `priority` field (`i8`, default `0`).
+The priority uses a **nice-style scale**: a **lower value means higher priority**. Negative values are allowed and represent even higher priority.
+Priority range: `-128` - `127`, where `-128` has highest priority.
+
+When all provider connection slots are occupied and a new user with **strictly higher priority** (lower value) connects, the lowest-priority active connection on that provider is evicted (oldest first when priorities are tied). A user with equal or lower priority than all existing connections is rejected normally — existing grace-period rules still apply.
+
+| Priority | Meaning |
+|:--------:|---------|
+| `-128` | highest possible priority |
+| `-10` | Very high — almost always preempts others |
+| `0` | Default — standard user |
+| `64` | Reduced — yields to default users |
+| `127` | Lowest — default priority for probe tasks |
+
+`max_connections` per user is independent of priority and unaffected by eviction.
+
 If you have a lot of users and dont want to keep them in `api-proxy.yml`, you can set the option
 
 - `use_user_db` to true to store the user information inside a db-file.
@@ -2742,6 +2764,7 @@ user:
         exp_date: 1672705545
         max_connections: 1
         status: Active
+        priority: 0  # optional, default 0; lower = higher priority (nice-style, negative allowed)
 ```
 
 If you use a reverse proxy in front of Tuliprox, don’t forget to forward:

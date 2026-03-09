@@ -228,6 +228,10 @@ pub fn default_metadata_ffprobe_live_probe_size() -> String { "5MB".to_string() 
 pub fn is_default_metadata_ffprobe_live_probe_size(v: &String) -> bool {
     *v == default_metadata_ffprobe_live_probe_size()
 }
+pub fn default_probe_user_priority() -> i8 { 127 }
+pub fn is_default_probe_user_priority(v: &i8) -> bool { *v == default_probe_user_priority() }
+pub fn default_user_priority() -> i8 { 0 }
+pub fn is_default_user_priority(v: &i8) -> bool { *v == default_user_priority() }
 
 pub fn get_default_web_root() -> String { DEFAULT_WEB_DIR.to_string() }
 pub fn is_blank_or_default_web_root(value: &str) -> bool {

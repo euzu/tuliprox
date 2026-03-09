@@ -40,6 +40,7 @@ pub async fn update_generic_stream_metadata(
     item_type: PlaylistItemType,
     active_provider: &Arc<ActiveProviderManager>,
     active_handle: Option<&crate::api::model::ProviderHandle>,
+    probe_priority: i8,
 ) -> Result<GenericProbeOutcome, TuliproxError> {
     let storage_dir = &app_config.config.load().storage_dir;
 
@@ -89,7 +90,7 @@ pub async fn update_generic_stream_metadata(
     let acquired_handle = if !needs_provider_connection || active_handle.is_some() {
         None
     } else {
-        active_provider.acquire_connection_for_probe(&input.name).await
+        active_provider.acquire_connection_for_probe(&input.name, probe_priority).await
     };
 
     if needs_provider_connection && active_handle.is_none() && acquired_handle.is_none() {

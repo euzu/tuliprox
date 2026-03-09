@@ -411,6 +411,32 @@ macro_rules! edit_field_number_u16 {
 }
 
 #[macro_export]
+macro_rules! edit_field_number_i8 {
+    ($instance:expr, $label:expr, $field:ident, $action:path) => {{
+        let instance = $instance.clone();
+        html! {
+            <div class="tp__form-field tp__form-field__number">
+                <$crate::app::components::number_input::NumberInput
+                    label={$label}
+                    name={stringify!($field)}
+                    field_id={Some($crate::app::components::dto_field_id(&instance.form, stringify!($field)))}
+                    value={instance.form.$field as i64}
+                    on_change={Callback::from(move |value: Option<i64>| {
+                        match value {
+                            Some(value) => match i8::try_from(value) {
+                                Ok(val) => instance.dispatch($action(val)),
+                                Err(_) => return, // keep the existing value
+                            },
+                            None => instance.dispatch($action(0)),
+                        }
+                    })}
+                />
+            </div>
+        }
+    }};
+}
+
+#[macro_export]
 macro_rules! edit_field_number_i16 {
     ($instance:expr, $label:expr, $field:ident, $action:path) => {{
         let instance = $instance.clone();

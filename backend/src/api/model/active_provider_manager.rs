@@ -21,8 +21,6 @@ use std::{
 use tokio::sync::{RwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
 
-const DEFAULT_USER_PRIORITY: i8 = -1;
-const DEFAULT_PROBE_PRIORITY: i8 = 1;
 const PREEMPTED_PROBE_CANCEL_GRACE: Duration = Duration::from_secs(2);
 const PREEMPTED_GRACE_MAX_PENDING: usize = 64;
 static DUMMY_ADDR: LazyLock<SocketAddr> = LazyLock::new(|| "127.0.0.1:0".parse::<SocketAddr>().unwrap());
@@ -393,26 +391,28 @@ impl ActiveProviderManager {
         provider_name: &Arc<str>,
         addr: &SocketAddr,
         allow_grace: bool,
+        priority: i8,
     ) -> Option<ProviderHandle> {
         let allocation = self.providers.acquire_exact_connection_with_grace_override(provider_name, allow_grace).await;
         if matches!(allocation, ProviderAllocation::Exhausted) {
             return None;
         }
-        self.register_allocation(allocation, addr, DEFAULT_USER_PRIORITY, false).await
+        self.register_allocation(allocation, addr, priority, false).await
     }
 
     pub async fn force_exact_acquire_connection(
         &self,
         provider_name: &Arc<str>,
         addr: &SocketAddr,
+        priority: i8,
     ) -> Option<ProviderHandle> {
         // Compatibility wrapper: keep the exact-provider behavior but do not over-allocate exhausted accounts.
-        self.acquire_exact_connection_with_grace(provider_name, addr, false).await
+        self.acquire_exact_connection_with_grace(provider_name, addr, false, priority).await
     }
 
     // Returns the next available provider connection
-    pub async fn acquire_connection(&self, input_name: &Arc<str>, addr: &SocketAddr) -> Option<ProviderHandle> {
-        self.acquire_connection_inner(input_name, addr, false, None, DEFAULT_USER_PRIORITY, false).await
+    pub async fn acquire_connection(&self, input_name: &Arc<str>, addr: &SocketAddr, priority: i8) -> Option<ProviderHandle> {
+        self.acquire_connection_inner(input_name, addr, false, None, priority, false).await
     }
 
     /// Acquire a provider connection while explicitly controlling provider-side grace allocations.
@@ -421,14 +421,15 @@ impl ActiveProviderManager {
         input_name: &Arc<str>,
         addr: &SocketAddr,
         allow_grace: bool,
+        priority: i8,
     ) -> Option<ProviderHandle> {
-        self.acquire_connection_inner(input_name, addr, false, Some(allow_grace), DEFAULT_USER_PRIORITY, false).await
+        self.acquire_connection_inner(input_name, addr, false, Some(allow_grace), priority, false).await
     }
 
-    /// Acquire a provider connection while optionally disabling provider grace allocations.
-    pub async fn acquire_connection_for_probe(&self, input_name: &Arc<str>) -> Option<ProviderHandle> {
-        // Probe is strictly low-priority and must never consume grace capacity.
-        self.acquire_connection_inner(input_name, &DUMMY_ADDR, false, Some(false), DEFAULT_PROBE_PRIORITY, true).await
+    /// Acquire a provider connection for probe tasks with configurable priority.
+    /// Probes never consume grace capacity.
+    pub async fn acquire_connection_for_probe(&self, input_name: &Arc<str>, priority: i8) -> Option<ProviderHandle> {
+        self.acquire_connection_inner(input_name, &DUMMY_ADDR, false, Some(false), priority, true).await
     }
 
     // This method is used for redirects to cycle through the provider
@@ -681,6 +682,7 @@ mod tests {
         utils::Internable,
     };
     use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
+    use shared::utils::default_user_priority;
 
     fn build_test_app_config(aliases: Option<Vec<ConfigInputAlias>>, max_connections: u16) -> AppConfig {
         let input = Arc::new(ConfigInput {
@@ -757,12 +759,12 @@ mod tests {
         let client_2_addr: SocketAddr = "127.0.0.1:40002".parse().unwrap();
 
         let first_alloc =
-            manager.acquire_connection(&input_name, &client_1_addr).await.expect("client1 initial allocation");
+            manager.acquire_connection(&input_name, &client_1_addr, default_user_priority()).await.expect("client1 initial allocation");
         let pinned_provider = first_alloc.allocation.get_provider_name().expect("provider name expected");
         assert_eq!(pinned_provider.as_ref(), "provider_1");
 
         // provider_1 has max_connections=1 and is already in use by client1
-        let forced = manager.force_exact_acquire_connection(&pinned_provider, &client_2_addr).await;
+        let forced = manager.force_exact_acquire_connection(&pinned_provider, &client_2_addr, default_user_priority()).await;
         assert!(forced.is_none(), "forced exact acquire must not over-allocate busy provider");
 
         manager.release_connection(&client_1_addr).await;
@@ -781,7 +783,7 @@ mod tests {
 
         // Step 1: Client1 starts movie -> provider_1
         let first_alloc =
-            manager.acquire_connection(&input_name, &client_1_addr).await.expect("client1 initial allocation");
+            manager.acquire_connection(&input_name, &client_1_addr, default_user_priority()).await.expect("client1 initial allocation");
         assert_eq!(first_alloc.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
 
         // Step 2: Client1 stops -> release provider_1
@@ -789,7 +791,7 @@ mod tests {
 
         // Step 3: Client2 starts live -> provider_1
         let live_alloc =
-            manager.acquire_connection(&input_name, &client_2_addr).await.expect("client2 live allocation");
+            manager.acquire_connection(&input_name, &client_2_addr, default_user_priority()).await.expect("client2 live allocation");
         let busy_provider = live_alloc.allocation.get_provider_name().expect("provider name expected");
         assert_eq!(busy_provider.as_ref(), input_name.as_ref());
         assert!(manager.is_exhausted(&busy_provider).await);
@@ -797,7 +799,7 @@ mod tests {
         // Step 4: Client1 restarts same movie.
         // This emulates force-session fallback path by acquiring without provider grace.
         let fallback_alloc = manager
-            .acquire_connection_with_grace(&input_name, &client_1_addr, false)
+            .acquire_connection_with_grace(&input_name, &client_1_addr, false, 0)
             .await
             .expect("client1 fallback allocation without grace");
         let fallback_provider = fallback_alloc.allocation.get_provider_name().expect("fallback provider expected");
@@ -821,12 +823,12 @@ mod tests {
 
         // Initial playback for client1.
         let first_alloc =
-            manager.acquire_connection(&input_name, &client_1_addr).await.expect("client1 initial allocation");
+            manager.acquire_connection(&input_name, &client_1_addr, default_user_priority()).await.expect("client1 initial allocation");
         let pinned_provider = first_alloc.allocation.get_provider_name().expect("provider name expected");
         assert_eq!(pinned_provider.as_ref(), "provider_1");
 
         // Another client occupies the alternate account while client1 keeps seeking.
-        let second_alloc = manager.acquire_connection(&input_name, &client_2_addr).await.expect("client2 allocation");
+        let second_alloc = manager.acquire_connection(&input_name, &client_2_addr, default_user_priority()).await.expect("client2 allocation");
         let second_provider = second_alloc.allocation.get_provider_name().expect("provider name expected");
         assert_eq!(second_provider.as_ref(), "provider_2");
 
@@ -835,7 +837,7 @@ mod tests {
         for _ in 0..3 {
             manager.release_connection(&client_1_addr).await;
             let seek_alloc = manager
-                .force_exact_acquire_connection(&pinned_provider, &client_1_addr)
+                .force_exact_acquire_connection(&pinned_provider, &client_1_addr, default_user_priority())
                 .await
                 .expect("seek reacquire should stay on pinned provider");
             let seek_provider = seek_alloc.allocation.get_provider_name().expect("provider name expected");
@@ -857,12 +859,12 @@ mod tests {
         let user_addr: SocketAddr = "127.0.0.1:43001".parse().unwrap();
 
         let probe_handle =
-            manager.acquire_connection_for_probe(&input_name).await.expect("probe allocation should succeed");
+            manager.acquire_connection_for_probe(&input_name, default_probe_user_priority()).await.expect("probe allocation should succeed");
         let probe_token = probe_handle.cancel_token.clone().expect("probe handle must carry cancel token");
 
         // User request should preempt probe and immediately acquire released capacity.
         let user_alloc = manager
-            .acquire_connection_with_grace(&input_name, &user_addr, false)
+            .acquire_connection_with_grace(&input_name, &user_addr, false, default_user_priority())
             .await
             .expect("user allocation should preempt probe");
         assert_eq!(user_alloc.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
@@ -886,5 +888,93 @@ mod tests {
         );
 
         manager.release_connection(&user_addr).await;
+    }
+
+    #[tokio::test]
+    async fn test_higher_priority_user_preempts_lower_priority_user() {
+        // User with priority 5 (low) is connected; user with priority -1 (high) arrives.
+        // The low-priority user should be preempted.
+        let app_cfg = create_test_app_config_single_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+
+        let input_name = "provider_1".intern();
+        let low_prio_addr: SocketAddr = "127.0.0.1:44001".parse().unwrap();
+        let high_prio_addr: SocketAddr = "127.0.0.1:44002".parse().unwrap();
+
+        // Low-priority user connects (priority 5 = lower importance)
+        let low_alloc = manager
+            .acquire_connection(&input_name, &low_prio_addr, 5)
+            .await
+            .expect("low-priority user should get connection");
+        assert_eq!(low_alloc.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
+
+        // Provider is now exhausted
+        assert!(manager.is_exhausted(&input_name).await);
+
+        // High-priority user arrives (priority -1 = higher importance), should preempt low-priority user
+        let high_alloc = manager
+            .acquire_connection_with_grace(&input_name, &high_prio_addr, false, -1)
+            .await
+            .expect("high-priority user should preempt low-priority user and get connection");
+        assert_eq!(high_alloc.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
+
+        manager.release_connection(&high_prio_addr).await;
+    }
+
+    #[tokio::test]
+    async fn test_same_priority_user_does_not_preempt() {
+        // Two users with the same priority — new one should NOT preempt the existing one.
+        let app_cfg = create_test_app_config_single_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+
+        let input_name = "provider_1".intern();
+        let user_1_addr: SocketAddr = "127.0.0.1:45001".parse().unwrap();
+        let user_2_addr: SocketAddr = "127.0.0.1:45002".parse().unwrap();
+
+        // User 1 connects with priority 0
+        let alloc1 = manager
+            .acquire_connection(&input_name, &user_1_addr, default_user_priority())
+            .await
+            .expect("user1 should get connection");
+        assert_eq!(alloc1.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
+
+        // Provider is now exhausted
+        assert!(manager.is_exhausted(&input_name).await);
+
+        // User 2 arrives with the same priority 0 — should NOT preempt user 1
+        let alloc2 = manager.acquire_connection_with_grace(&input_name, &user_2_addr, false, default_user_priority()).await;
+        assert!(alloc2.is_none(), "same-priority user should not preempt existing user");
+
+        manager.release_connection(&user_1_addr).await;
+    }
+
+    #[tokio::test]
+    async fn test_lower_priority_user_does_not_preempt_higher_priority_user() {
+        // User with high priority is connected; user with low priority arrives — should NOT preempt.
+        let app_cfg = create_test_app_config_single_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+
+        let input_name = "provider_1".intern();
+        let high_prio_addr: SocketAddr = "127.0.0.1:46001".parse().unwrap();
+        let low_prio_addr: SocketAddr = "127.0.0.1:46002".parse().unwrap();
+
+        // High-priority user connects (priority -10)
+        let alloc1 = manager
+            .acquire_connection(&input_name, &high_prio_addr, -10)
+            .await
+            .expect("high-priority user should get connection");
+        assert_eq!(alloc1.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
+
+        // Provider is now exhausted
+        assert!(manager.is_exhausted(&input_name).await);
+
+        // Low-priority user arrives (priority 10) — should NOT preempt high-priority user
+        let alloc2 = manager.acquire_connection_with_grace(&input_name, &low_prio_addr, false, 10).await;
+        assert!(alloc2.is_none(), "low-priority user should not preempt high-priority user");
+
+        manager.release_connection(&high_prio_addr).await;
     }
 }
