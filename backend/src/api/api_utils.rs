@@ -65,7 +65,7 @@ pub(crate) fn resolve_request_url_for_logging<'a>(input: &ConfigInput, stream_ur
 
     let provider = input.get_resolve_provider(stream_url);
     if let Ok(url) = Url::parse(stream_url) {
-        return Cow::Owned(request::format_request_target_for_logging(&url, provider.as_ref()));
+        return Cow::Owned(request::preview_request_target_for_logging(&url, provider.as_ref()));
     }
 
     input
@@ -74,7 +74,7 @@ pub(crate) fn resolve_request_url_for_logging<'a>(input: &ConfigInput, stream_ur
         .and_then(|resolved| {
             Url::parse(resolved.as_ref())
                 .ok()
-                .map(|url| Cow::Owned(request::format_request_target_for_logging(&url, provider.as_ref())))
+                .map(|url| Cow::Owned(request::preview_request_target_for_logging(&url, provider.as_ref())))
         })
         .unwrap_or(Cow::Borrowed(stream_url))
 }

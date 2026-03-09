@@ -201,7 +201,11 @@ fn format_ip_host_header_with_port(ip: IpAddr, port: Option<u16>) -> String {
     }
 }
 
-fn resolve_attempt_target(url: &Url, provider: Option<&Arc<ConfigProvider>>) -> AttemptTarget {
+fn resolve_attempt_target_with_dns_mode(
+    url: &Url,
+    provider: Option<&Arc<ConfigProvider>>,
+    preview_dns_selection: bool,
+) -> AttemptTarget {
     let resolved_url = resolve_provider_url_for_attempt(url, provider);
     let Some(provider) = provider else {
         return AttemptTarget::new(resolved_url);
@@ -220,7 +224,12 @@ fn resolve_attempt_target(url: &Url, provider: Option<&Arc<ConfigProvider>>) -> 
         return target;
     }
 
-    let Some(connect_ip) = provider.select_ip_for_host(host) else {
+    let connect_ip = if preview_dns_selection {
+        provider.preview_ip_for_host(host)
+    } else {
+        provider.select_ip_for_host(host)
+    };
+    let Some(connect_ip) = connect_ip else {
         return target;
     };
     let keep_vhost = provider.get_dns_config().is_some_and(|dns| dns.keep_vhost);
@@ -249,8 +258,15 @@ fn resolve_attempt_target(url: &Url, provider: Option<&Arc<ConfigProvider>>) -> 
     target
 }
 
-pub fn format_request_target_for_logging(url: &Url, provider: Option<&Arc<ConfigProvider>>) -> String {
-    let target = resolve_attempt_target(url, provider);
+fn resolve_attempt_target(url: &Url, provider: Option<&Arc<ConfigProvider>>) -> AttemptTarget {
+    resolve_attempt_target_with_dns_mode(url, provider, false)
+}
+
+fn preview_attempt_target(url: &Url, provider: Option<&Arc<ConfigProvider>>) -> AttemptTarget {
+    resolve_attempt_target_with_dns_mode(url, provider, true)
+}
+
+fn format_request_target_for_logging(target: &AttemptTarget) -> String {
     if target.effective_url.scheme().eq_ignore_ascii_case("https") {
         if let Some(connect_ip) = target.connect_ip {
             format!("{} (connect_ip={connect_ip})", target.request_url)
@@ -260,6 +276,11 @@ pub fn format_request_target_for_logging(url: &Url, provider: Option<&Arc<Config
     } else {
         target.effective_url.to_string()
     }
+}
+
+pub fn preview_request_target_for_logging(url: &Url, provider: Option<&Arc<ConfigProvider>>) -> String {
+    let target = preview_attempt_target(url, provider);
+    format_request_target_for_logging(&target)
 }
 
 fn should_try_next_ip_on_connect_error(
@@ -1515,7 +1536,8 @@ pub fn should_trigger_failover(status: StatusCode) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_attempt_target, same_origin, send_with_retry_and_provider, should_try_next_ip_on_connect_error,
+        preview_request_target_for_logging, resolve_attempt_target, same_origin, send_with_retry_and_provider,
+        should_try_next_ip_on_connect_error,
         strip_sensitive_headers_for_cross_origin_redirect,
     };
     use crate::{
@@ -1754,6 +1776,20 @@ mod tests {
 
         assert!(should_try_next_ip_on_connect_error(Some(&provider), &first, &mut tried));
         assert!(!should_try_next_ip_on_connect_error(Some(&provider), &second, &mut tried));
+    }
+
+    #[test]
+    fn test_preview_request_target_for_logging_does_not_advance_dns_rotation() {
+        let provider = make_provider_with_dns(false, OnConnectErrorPolicy::TryNextIp, vec!["203.0.113.10", "203.0.113.11"]);
+        let url = Url::parse("http://example.com/live").expect("url parse should work");
+
+        let preview = preview_request_target_for_logging(&url, Some(&provider));
+        let first = resolve_attempt_target(&url, Some(&provider));
+        let second = resolve_attempt_target(&url, Some(&provider));
+
+        assert_eq!(preview, "http://203.0.113.10/live");
+        assert_eq!(first.connect_ip.map(|ip| ip.to_string()), Some("203.0.113.10".to_string()));
+        assert_eq!(second.connect_ip.map(|ip| ip.to_string()), Some("203.0.113.11".to_string()));
     }
 
     #[tokio::test]

@@ -12,7 +12,7 @@ use crate::{
     utils::{
         debug_if_enabled,
         request::{
-            classify_content_type, format_request_target_for_logging, get_request_headers, send_with_retry_and_provider,
+            classify_content_type, get_request_headers, preview_request_target_for_logging, send_with_retry_and_provider,
             MimeCategory,
         },
     },
@@ -193,7 +193,7 @@ impl ProviderStreamFactoryOptions {
             return std::borrow::Cow::Borrowed(self.url.as_str());
         }
 
-        std::borrow::Cow::Owned(format_request_target_for_logging(&self.url, self.provider.as_ref()))
+        std::borrow::Cow::Owned(preview_request_target_for_logging(&self.url, self.provider.as_ref()))
     }
 }
 
