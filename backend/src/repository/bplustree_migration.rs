@@ -598,9 +598,13 @@ pub fn run_startup_migrations(config_paths: &ConfigPaths) {
     }
 
     let config_dir = PathBuf::from(&config_paths.config_path);
+    let storage_dir = if config_paths.storage_path.trim().is_empty() {
+        config_dir.clone()
+    } else {
+        PathBuf::from(&config_paths.storage_path)
+    };
     let mut roots: Vec<PathBuf> = vec![config_dir.clone()];
-    let storage_dir = PathBuf::from(&config_paths.storage_path);
-    if !roots.iter().any(|root| root == &storage_dir) {
+    if storage_dir != config_dir {
         roots.push(storage_dir.clone());
     }
 
