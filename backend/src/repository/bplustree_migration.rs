@@ -138,20 +138,32 @@ impl BPlusTreeStartupMigrator {
 
     fn resolve_scan_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
         let mut resolved: Vec<PathBuf> = Vec::new();
-        let mut seen: HashSet<String> = HashSet::new();
 
+        // Normalize paths (canonicalize where possible)
         for root in roots {
             if !root.exists() || !root.is_dir() {
                 continue;
             }
-            let resolved_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
-            let key = resolved_root.to_string_lossy().into_owned();
-            if seen.insert(key) {
-                resolved.push(resolved_root);
-            }
+            // Try to resolve the absolute/real path, fall back to the original path on failure
+            let canon = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+            resolved.push(canon);
         }
 
-        resolved
+        // Sort paths so parent directories come before child directories
+        resolved.sort();
+        resolved.dedup();
+
+        // Keep only top-level directories, remove descendants
+        let mut final_roots: Vec<PathBuf> = Vec::new();
+        for path in resolved {
+            // If this path is already covered by a parent in `final_roots`, skip it
+            if final_roots.iter().any(|parent| path.starts_with(parent)) {
+                continue;
+            }
+            final_roots.push(path);
+        }
+
+        final_roots
     }
 
     fn roots_fingerprint(roots: &[PathBuf]) -> String {
