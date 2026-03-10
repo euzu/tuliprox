@@ -109,16 +109,19 @@ async fn send_burst_buffer(
     start_buffer: &VecDeque<Arc<Bytes>>,
     client_tx: &Sender<Bytes>,
     cancellation_token: &CancellationToken,
-) {
+) -> usize {
+    let mut sent = 0_usize;
     for buf in start_buffer {
         if cancellation_token.is_cancelled() {
-            return;
+            return sent;
         }
         if let Err(err) = client_tx.send(buf.as_ref().clone()).await {
             debug!("Failed sending burst-buffer chunk to client: {err}");
-            return; // stop on send error
+            return sent; // stop on send error
         }
+        sent = sent.saturating_add(1);
     }
+    sent
 }
 
 /// Represents the state of a shared provider URL.
@@ -191,17 +194,30 @@ impl SharedStreamState {
         let timeout_duration = Duration::from_secs(300); // 5 minutes
         let mut last_active = Instant::now();
         let mut last_lag_log = Instant::now().checked_sub(Duration::from_secs(10)).unwrap_or_else(Instant::now);
+        let subscriber_buf_size = self.buf_size;
 
         let address = *addr;
+        let subscriber_started_at = Instant::now();
         let handle = tokio::spawn(async move {
             // initial burst buffer
             let snapshot = {
                 let buffer = burst_buffer.read().await;
                 buffer.snapshot()
             };
-            send_burst_buffer(&snapshot, &client_tx_clone, &cancel_token).await;
+            let sent_burst_chunks = send_burst_buffer(&snapshot, &client_tx_clone, &cancel_token).await;
+            if sent_burst_chunks > 0 {
+                debug_if_enabled!(
+                    "Shared stream subscriber {} replayed {sent_burst_chunks} burst chunks after {} ms",
+                    sanitize_sensitive_info(&address.to_string()),
+                    subscriber_started_at.elapsed().as_millis()
+                );
+            }
 
             let mut loop_cnt = 0;
+            let mut first_live_chunk_logged = false;
+            let mut startup_chunks_sent = 0usize;
+            let mut startup_bytes_sent = 0usize;
+            let mut startup_stats_logged = false;
             loop {
                 tokio::select! {
                     biased;
@@ -230,9 +246,34 @@ impl SharedStreamState {
                                     continue;
                                 }
 
+                                let chunk_len = data.len();
                                 if let Err(err) = client_tx.send(data).await {
                                     debug!("Shared stream client send error: {address} {err}");
                                     break;
+                                }
+                                if !first_live_chunk_logged {
+                                    debug_if_enabled!(
+                                        "Shared stream subscriber {} received first live chunk after {} ms",
+                                        sanitize_sensitive_info(&address.to_string()),
+                                        subscriber_started_at.elapsed().as_millis()
+                                    );
+                                    first_live_chunk_logged = true;
+                                }
+                                if !startup_stats_logged {
+                                    startup_chunks_sent = startup_chunks_sent.saturating_add(1);
+                                    startup_bytes_sent = startup_bytes_sent.saturating_add(chunk_len);
+                                    if subscriber_started_at.elapsed() >= Duration::from_secs(5) {
+                                        debug_if_enabled!(
+                                            "Shared stream subscriber {} startup throughput: chunks={} bytes={} over {} ms (queue_used={}/{})",
+                                            sanitize_sensitive_info(&address.to_string()),
+                                            startup_chunks_sent,
+                                            startup_bytes_sent,
+                                            subscriber_started_at.elapsed().as_millis(),
+                                            subscriber_buf_size.saturating_sub(client_tx_clone.capacity()),
+                                            subscriber_buf_size
+                                        );
+                                        startup_stats_logged = true;
+                                    }
                                 }
                                 loop_cnt += 1;
                                 last_active = Instant::now();
@@ -280,12 +321,17 @@ impl SharedStreamState {
         let sender = self.broadcaster.clone();
         let stop_token = self.stop_token.clone();
         let burst_buffer = self.burst_buffer.clone();
+        let broadcast_started_at = Instant::now();
 
         tokio::spawn(async move {
             let mut counter = 0usize;
             let idle_timeout = Duration::from_secs(STREAM_IDLE_TIMEOUT);
             let idle = sleep(idle_timeout);
             tokio::pin!(idle);
+            let mut first_source_chunk_logged = false;
+            let mut startup_chunks_seen = 0usize;
+            let mut startup_bytes_seen = 0usize;
+            let mut startup_stats_logged = false;
 
             loop {
                 tokio::select! {
@@ -309,6 +355,28 @@ impl SharedStreamState {
                       idle.as_mut().reset(Instant::now() + idle_timeout);
                       match chunk {
                          Some(Ok(data)) => {
+                           if !first_source_chunk_logged {
+                               debug_if_enabled!(
+                                   "Shared stream source produced first chunk for {} after {} ms",
+                                   sanitize_sensitive_info(&streaming_url),
+                                   broadcast_started_at.elapsed().as_millis()
+                               );
+                               first_source_chunk_logged = true;
+                           }
+                           if !startup_stats_logged {
+                               startup_chunks_seen = startup_chunks_seen.saturating_add(1);
+                               startup_bytes_seen = startup_bytes_seen.saturating_add(data.len());
+                               if broadcast_started_at.elapsed() >= Duration::from_secs(5) {
+                                   debug_if_enabled!(
+                                       "Shared stream source startup throughput for {}: chunks={} bytes={} over {} ms",
+                                       sanitize_sensitive_info(&streaming_url),
+                                       startup_chunks_seen,
+                                       startup_bytes_seen,
+                                       broadcast_started_at.elapsed().as_millis()
+                                   );
+                                   startup_stats_logged = true;
+                               }
+                           }
                            let arc_data = Arc::new(data);
                            {
                              let mut buffer = burst_buffer.write().await;
@@ -559,6 +627,7 @@ impl SharedStreamManager {
         S: Stream<Item = Result<Bytes, E>> + Unpin + 'static + Send,
         E: std::fmt::Debug + Send,
     {
+        let registration_started_at = Instant::now();
         let buf_size = CHANNEL_SIZE.max(buffer_size);
         let config = app_state.app_config.config.load();
         let min_buffer_bytes = resolve_min_burst_buffer_bytes(&config);
@@ -566,6 +635,11 @@ impl SharedStreamManager {
         app_state.shared_stream_manager.register(addr, stream_url, Arc::clone(&shared_state)).await;
         app_state.active_provider.make_shared_connection(addr, stream_url).await;
         let subscribed_stream = Self::subscribe_shared_stream(app_state, stream_url, addr).await;
+        debug_if_enabled!(
+            "Shared stream startup register+subscribe completed for {} in {} ms",
+            sanitize_sensitive_info(stream_url),
+            registration_started_at.elapsed().as_millis()
+        );
         shared_state.broadcast(stream_url, bytes_stream, Arc::clone(&app_state.shared_stream_manager));
         debug_if_enabled!(
             "Created shared provider stream {} (channel_capacity={buf_size}, burst_buffer_min={min_buffer_bytes} bytes)",

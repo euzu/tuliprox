@@ -11,7 +11,7 @@ use std::{cmp::max, future::Future, pin::Pin, sync::Arc};
 use tokio::{
     select,
     sync::{
-        mpsc::{channel, Sender},
+        mpsc::{error::TrySendError, channel, Sender},
         Semaphore,
     },
     time::{sleep, Duration, Instant},
@@ -91,7 +91,18 @@ impl BufferedStream {
                                 };
                                 permit.forget();
                             }
-                            if tx.send(Ok(chunk)).await.is_err() {
+                            let send_res = match tx.try_send(Ok(chunk)) {
+                                Ok(()) => Ok(()),
+                                Err(TrySendError::Full(item)) => {
+                                    select! {
+                                        biased;
+                                        () = client_close_signal.cancelled() => Err(()),
+                                        res = tx.send(item) => res.map_err(|_| ()),
+                                    }
+                                }
+                                Err(TrySendError::Closed(_)) => Err(()),
+                            };
+                            if send_res.is_err() {
                                 if permits > 0 {
                                     semaphore.add_permits(permits);
                                 }
@@ -102,7 +113,18 @@ impl BufferedStream {
                         }
                         Some(Err(err)) => {
                             let err_msg = err.to_string();
-                            if tx.send(Err(err)).await.is_err() {
+                            let send_err_res = match tx.try_send(Err(err)) {
+                                Ok(()) => Ok(()),
+                                Err(TrySendError::Full(item)) => {
+                                    select! {
+                                        biased;
+                                        () = client_close_signal.cancelled() => Err(()),
+                                        res = tx.send(item) => res.map_err(|_| ()),
+                                    }
+                                }
+                                Err(TrySendError::Closed(_)) => Err(()),
+                            };
+                            if send_err_res.is_err() {
                                 debug!("Buffered stream dropped stream error due to closed receiver: {err_msg}");
                                 client_close_signal.cancel();
                             }

@@ -147,9 +147,6 @@ impl ProviderStreamFactoryOptions {
     fn is_buffer_enabled(&self) -> bool { self.flags.contains(ProviderStreamFactoryFlags::BufferEnabled) }
 
     #[inline]
-    fn is_shared_stream(&self) -> bool { self.flags.contains(ProviderStreamFactoryFlags::ShareStream) }
-
-    #[inline]
     pub(crate) fn get_buffer_size(&self) -> usize { self.buffer_size }
 
     #[inline]
@@ -582,18 +579,17 @@ pub async fn create_provider_stream(
     stream_options: ProviderStreamFactoryOptions,
 ) -> Option<ProviderStreamFactoryResponse> {
     let client_stream_factory = |stream, reconnect_flag, range_cnt| {
-        let stream =
-            if !stream_options.is_piped() && stream_options.is_buffer_enabled() && !stream_options.is_shared_stream() {
-                BufferedStream::new(
-                    stream,
-                    stream_options.get_buffer_size(),
-                    stream_options.get_reconnect_flag_clone(),
-                    stream_options.get_url_as_str(),
-                )
-                .boxed()
-            } else {
-                stream
-            };
+        let stream = if !stream_options.is_piped() && stream_options.is_buffer_enabled() {
+            BufferedStream::new(
+                stream,
+                stream_options.get_buffer_size(),
+                stream_options.get_reconnect_flag_clone(),
+                stream_options.get_url_as_str(),
+            )
+            .boxed()
+        } else {
+            stream
+        };
         ClientStream::new(stream, reconnect_flag, range_cnt, stream_options.get_url_as_str()).boxed()
     };
 

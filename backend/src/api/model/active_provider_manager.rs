@@ -514,16 +514,21 @@ impl ActiveProviderManager {
                                     tree.remove(&(v_prio, Reverse(victim_created_at), alloc_id));
                                 }
                             }
-                            Some((shared.allocation, shared.cancel_token))
+                            Some((key, shared.allocation, shared.cancel_token))
                         } else {
                             None
                         }
                     };
-                    let (allocation, cancel_token) = released_shared_allocation?;
+                    let (stream_url, allocation, cancel_token) = released_shared_allocation?;
                     if let Some(token) = cancel_token {
                         token.cancel();
                     }
                     allocation.release().await;
+                    // Shared broadcast has to be torn down explicitly, otherwise the provider
+                    // stream may continue after allocation counters were already released.
+                    if let Some(ssm) = self.shared_stream_manager.get() {
+                        ssm.teardown_preempted_stream(&stream_url).await;
+                    }
                 }
                 PriorityOwner::Single(addr) => {
                     debug_if_enabled!(

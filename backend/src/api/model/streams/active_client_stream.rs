@@ -77,6 +77,16 @@ impl ActiveClientStreamState {
         }
     }
 
+    fn clear_finished_grace_task(&mut self) {
+        if self
+            .grace_task_handle
+            .as_ref()
+            .is_some_and(tokio::task::JoinHandle::is_finished)
+        {
+            self.grace_task_handle = None;
+        }
+    }
+
     fn stop_provider_stream_preempted(&mut self) {
         self.provider_stopped = true;
         self.preempt_cancelled = None;
@@ -149,6 +159,7 @@ impl ActiveClientStreamState {
     }
 
     fn poll_next_base(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<Bytes, StreamError>>> {
+        self.clear_finished_grace_task();
         if let Some(waker) = &self.waker {
             waker.register(cx.waker());
         }
@@ -276,6 +287,7 @@ pub(crate) async fn create_active_client_stream(
     let user_agent = req_headers.get(USER_AGENT).map(|h| String::from_utf8_lossy(h.as_bytes())).unwrap_or_default();
 
     let virtual_id = stream_channel.virtual_id;
+    let is_shared_source_stream = stream_channel.shared && stream_details.request_url.is_some();
     app_state
         .connection_manager
         .update_connection(
@@ -290,6 +302,33 @@ pub(crate) async fn create_active_client_stream(
         .await;
     if let Some((_, _, _m_, Some(cvt))) = stream_details.stream_info.as_ref() {
         app_state.connection_manager.update_stream_detail(&fingerprint.addr, *cvt).await;
+    }
+
+    // Shared broadcaster source (first subscriber path): feed provider bytes directly.
+    // Grace/custom handling is not needed here because this stream is only the fan-out source.
+    if is_shared_source_stream {
+        let stream = match stream_details.stream.take() {
+            None => {
+                let provider_handle = stream_details.provider_handle.take();
+                app_state.connection_manager.release_provider_handle(provider_handle).await;
+                futures::stream::empty::<Result<Bytes, StreamError>>().boxed()
+            }
+            Some(stream) => {
+                let config = app_state.app_config.config.load();
+                match config.sleep_timer_mins {
+                    None => stream,
+                    Some(mins) => {
+                        let secs = u32::try_from((u64::from(mins) * 60).min(u64::from(u32::MAX))).unwrap_or(0);
+                        if secs > 0 {
+                            TimedClientStream::new(app_state, stream, secs, fingerprint.addr, virtual_id).boxed()
+                        } else {
+                            stream
+                        }
+                    }
+                }
+            }
+        };
+        return stream;
     }
 
     let provisioning_info = resolve_grace_period_provisioning(app_state, &stream_details);
