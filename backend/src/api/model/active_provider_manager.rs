@@ -9,7 +9,8 @@ use crate::{
 use log::error;
 use shared::utils::sanitize_sensitive_info;
 // trace_if_enabled removed
-use std::collections::{HashMap, HashSet};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::{
     net::SocketAddr,
     sync::{
@@ -27,6 +28,9 @@ static DUMMY_ADDR: LazyLock<SocketAddr> = LazyLock::new(|| "127.0.0.1:0".parse::
 
 pub type ClientConnectionId = SocketAddr;
 type AllocationId = u64;
+// Key for BTreeMap priority index: (priority, Reverse<created_at>, AllocationId)
+// .last() = highest priority value = lowest importance = best eviction victim
+type PriorityKey = (i8, Reverse<Instant>, AllocationId);
 
 #[derive(Debug, Clone)]
 pub struct ProviderHandle {
@@ -82,6 +86,9 @@ struct Connections {
     // Index to quickly find connections by provider name for preemption
     // ProviderName -> Vec<(ClientConnectionId, AllocationId)>
     by_provider: HashMap<Arc<str>, Vec<(ClientConnectionId, AllocationId)>>,
+    // Priority index per provider alias for O(log n) victim lookup
+    // ProviderName -> BTreeMap<PriorityKey, (ClientConnectionId, is_shared)>
+    priority_index: HashMap<Arc<str>, BTreeMap<PriorityKey, (ClientConnectionId, bool)>>,
 }
 
 pub struct ActiveProviderManager {
@@ -164,6 +171,32 @@ impl ActiveProviderManager {
         };
 
         if !matches!(allocation, ProviderAllocation::Exhausted) {
+            if matches!(&allocation, ProviderAllocation::GracePeriod(_)) && !force {
+                // Grace allocation received — try to evict a lower-priority victim
+                // across the entire input lineup (all aliases) to free capacity.
+                if self.evict_lower_priority_on_input(provider_or_input_name, priority).await {
+                    // A victim was evicted. If it was on the same alias as our grace
+                    // allocation, the provider is back at max (not over limit).
+                    // If it was on a different alias, release the grace allocation
+                    // and re-acquire on the input to land on the freed alias.
+                    let evicted_on_same = !self.providers.is_over_limit(
+                        &allocation.get_provider_name().unwrap_or_default(),
+                    ).await;
+                    if !evicted_on_same {
+                        // Victim was on a different alias — release grace, re-acquire
+                        allocation.release().await;
+                        let new_alloc = self.providers.acquire_connection_with_grace_override(
+                            provider_or_input_name, allow_grace,
+                        ).await;
+                        if !matches!(new_alloc, ProviderAllocation::Exhausted) {
+                            return self.register_allocation(new_alloc, addr, priority, is_probe).await;
+                        }
+                        // Fallback: could not re-acquire (race), fall through to exhausted path
+                        return None;
+                    }
+                }
+                // Eviction on same alias succeeded, or no victim found → keep grace allocation
+            }
             return self.register_allocation(allocation, addr, priority, is_probe).await;
         }
 
@@ -189,6 +222,7 @@ impl ActiveProviderManager {
         let provider_name = allocation.get_provider_name().unwrap_or_default();
         let allocation_id = self.next_allocation_id.fetch_add(1, Ordering::Relaxed);
         let cancel_token = CancellationToken::new();
+        let now = Instant::now();
 
         let mut connections = self.connections.write().await;
         let per_addr = connections.single.entry(*addr).or_default();
@@ -200,11 +234,13 @@ impl ActiveProviderManager {
                 priority,
                 is_probe,
                 cancel_token: cancel_token.clone(),
-                created_at: Instant::now(),
+                created_at: now,
             },
         );
 
         connections.by_provider.entry(provider_name.clone()).or_default().push((*addr, allocation_id));
+        connections.priority_index.entry(provider_name.clone()).or_default()
+            .insert((priority, Reverse(now), allocation_id), (*addr, false));
 
         debug_if_enabled!(
             "Added provider connection {provider_name:?} for {} (prio={})",
@@ -212,6 +248,153 @@ impl ActiveProviderManager {
             priority
         );
         Some(ProviderHandle::new(*addr, allocation_id, allocation, Some(cancel_token)))
+    }
+
+    #[allow(clippy::too_many_lines)]
+    /// Evict a single lower-priority connection across the entire input lineup
+    /// (all provider aliases). Used when a `GracePeriod` allocation was granted.
+    /// Returns true if a victim was successfully evicted.
+    async fn evict_lower_priority_on_input(
+        &self,
+        input_name: &Arc<str>,
+        new_priority: i8,
+    ) -> bool {
+        // Find best victim across all aliases under read lock
+        let victim: Option<(ClientConnectionId, AllocationId, i8, Instant, bool)> = {
+            let connections = self.connections.read().await;
+            let mut found: Option<(ClientConnectionId, AllocationId, i8, Instant, bool)> = None;
+            for (prov_name, tree) in &connections.priority_index {
+                if !self.providers.is_provider_for_input(prov_name, input_name) {
+                    continue;
+                }
+                for ((prio, Reverse(created_at), alloc_id), (addr, is_shared)) in tree.iter().rev() {
+                    if *prio <= new_priority {
+                        break; // No more victims on this alias
+                    }
+                    if *is_shared {
+                        let evictable = connections.shared.by_key.values()
+                            .any(|s| s.allocation_id == *alloc_id && s.connections.len() == 1);
+                        if !evictable { continue; }
+                    }
+                    let is_better = match found {
+                        None => true,
+                        Some((_, _, v_prio, v_created, _)) => {
+                            *prio > v_prio || (*prio == v_prio && *created_at < v_created)
+                        }
+                    };
+                    if is_better {
+                        found = Some((*addr, *alloc_id, *prio, *created_at, *is_shared));
+                    }
+                    break; // Only best candidate per alias
+                }
+            }
+            found
+        };
+
+        let Some((addr, alloc_id, v_prio, victim_created_at, is_shared)) = victim else {
+            return false;
+        };
+
+        debug_if_enabled!(
+            "Grace-evicting {} connection from {} (prio={}) on input {} for higher priority request (prio={})",
+            if is_shared { "shared" } else { "single" },
+            sanitize_sensitive_info(&addr.to_string()),
+            v_prio,
+            sanitize_sensitive_info(input_name),
+            new_priority
+        );
+
+        if is_shared {
+            let released = {
+                let mut connections = self.connections.write().await;
+                let Some(key) = connections.shared.key_by_addr.get(&addr).cloned() else {
+                    return false;
+                };
+
+                let still_single = connections.shared.by_key.get(&key).is_some_and(|shared| {
+                    shared.allocation_id == alloc_id
+                        && shared.connections.len() == 1
+                        && shared.priority == v_prio
+                        && shared.created_at == victim_created_at
+                });
+                if !still_single {
+                    return false;
+                }
+
+                if let Some(shared) = connections.shared.by_key.remove(&key) {
+                    connections.shared.shared_by_allocation_id.remove(&shared.allocation_id);
+                    for shared_addr in &shared.connections {
+                        connections.shared.key_by_addr.remove(shared_addr);
+                    }
+                    if let Some(name) = shared.allocation.get_provider_name() {
+                        if let Some(list) = connections.by_provider.get_mut(&name) {
+                            list.retain(|(_, i)| *i != shared.allocation_id);
+                        }
+                        if let Some(tree) = connections.priority_index.get_mut(&name) {
+                            tree.remove(&(v_prio, Reverse(victim_created_at), alloc_id));
+                        }
+                    }
+                    Some(shared.allocation)
+                } else {
+                    return false;
+                }
+            };
+            if let Some(allocation) = released {
+                allocation.release().await;
+            }
+        } else {
+            let removed_info = {
+                let mut connections = self.connections.write().await;
+                let mut removed_info = None;
+                let mut removed_provider_name = None;
+                let mut remove_addr_entry = false;
+                if let Some(per_addr) = connections.single.get_mut(&addr) {
+                    if let Some(info) = per_addr.get(&alloc_id) {
+                        if info.priority != v_prio || info.created_at != victim_created_at {
+                            return false;
+                        }
+                    }
+                    if let Some(info) = per_addr.remove(&alloc_id) {
+                        removed_provider_name = info.allocation.get_provider_name();
+                        remove_addr_entry = per_addr.is_empty();
+                        removed_info = Some(info);
+                    }
+                }
+                if remove_addr_entry {
+                    connections.single.remove(&addr);
+                }
+                if let Some(ref name) = removed_provider_name {
+                    if let Some(list) = connections.by_provider.get_mut(name) {
+                        if let Some(idx) = list.iter().position(|(a, i)| *a == addr && *i == alloc_id) {
+                            list.remove(idx);
+                        }
+                    }
+                    if let Some(tree) = connections.priority_index.get_mut(name) {
+                        tree.remove(&(v_prio, Reverse(victim_created_at), alloc_id));
+                    }
+                }
+                removed_info
+            };
+
+            let Some(info) = removed_info else { return false; };
+            let token = info.cancel_token;
+            if info.is_probe {
+                if let Ok(permit) = Arc::clone(&self.preempted_grace_semaphore).try_acquire_owned() {
+                    tokio::spawn(async move {
+                        let _permit = permit;
+                        tokio::time::sleep(PREEMPTED_PROBE_CANCEL_GRACE).await;
+                        token.cancel();
+                    });
+                } else {
+                    token.cancel();
+                }
+            } else {
+                token.cancel();
+            }
+            info.allocation.release().await;
+        }
+
+        true
     }
 
     #[allow(clippy::too_many_lines)]
@@ -227,48 +410,31 @@ impl ActiveProviderManager {
         {
             let connections = self.connections.read().await;
 
-            for (prov_name, active_conns) in &connections.by_provider {
-                if self.providers.is_provider_for_input(prov_name, input_name) {
-                    for (addr, alloc_id) in active_conns {
-                        // Check single connections
-                        if let Some(conns_map) = connections.single.get(addr) {
-                            if let Some(info) = conns_map.get(alloc_id) {
-                                if info.priority > new_priority {
-                                    let is_better = match victim {
-                                        None => true,
-                                        Some((_, _, v_prio, v_created, _)) => {
-                                            info.priority > v_prio
-                                                || (info.priority == v_prio && info.created_at < v_created)
-                                        }
-                                    };
-                                    if is_better {
-                                        victim = Some((*addr, *alloc_id, info.priority, info.created_at, false));
-                                    }
-                                }
-                            }
-                        }
-
-                        // Check shared connections (only if exactly 1 listener)
-                        if let Some(key) = connections.shared.key_by_addr.get(addr) {
-                            if let Some(shared) = connections.shared.by_key.get(key) {
-                                if shared.allocation_id == *alloc_id
-                                    && shared.connections.len() == 1
-                                    && shared.priority > new_priority
-                                {
-                                    let is_better = match victim {
-                                        None => true,
-                                        Some((_, _, v_prio, v_created, _)) => {
-                                            shared.priority > v_prio
-                                                || (shared.priority == v_prio && shared.created_at < v_created)
-                                        }
-                                    };
-                                    if is_better {
-                                        victim = Some((*addr, *alloc_id, shared.priority, shared.created_at, true));
-                                    }
-                                }
-                            }
-                        }
+            // Search across ALL provider aliases of this input using the priority index
+            for (prov_name, tree) in &connections.priority_index {
+                if !self.providers.is_provider_for_input(prov_name, input_name) {
+                    continue;
+                }
+                // Iterate from highest priority value (lowest importance) = best victim
+                for ((prio, Reverse(created_at), alloc_id), (addr, is_shared)) in tree.iter().rev() {
+                    if *prio <= new_priority {
+                        break; // No more victims on this alias
                     }
+                    if *is_shared {
+                        let evictable = connections.shared.by_key.values()
+                            .any(|s| s.allocation_id == *alloc_id && s.connections.len() == 1);
+                        if !evictable { continue; }
+                    }
+                    let is_better = match victim {
+                        None => true,
+                        Some((_, _, v_prio, v_created, _)) => {
+                            *prio > v_prio || (*prio == v_prio && *created_at < v_created)
+                        }
+                    };
+                    if is_better {
+                        victim = Some((*addr, *alloc_id, *prio, *created_at, *is_shared));
+                    }
+                    break; // Only need the best candidate per alias
                 }
             }
         }
@@ -306,6 +472,9 @@ impl ActiveProviderManager {
                         if let Some(name) = shared.allocation.get_provider_name() {
                             if let Some(list) = connections.by_provider.get_mut(&name) {
                                 list.retain(|(_, i)| *i != shared.allocation_id);
+                            }
+                            if let Some(tree) = connections.priority_index.get_mut(&name) {
+                                tree.remove(&(v_prio, Reverse(victim_created_at), alloc_id));
                             }
                         }
                         Some(shared.allocation)
@@ -346,6 +515,9 @@ impl ActiveProviderManager {
                             if let Some(idx) = list.iter().position(|(a, i)| *a == addr && *i == alloc_id) {
                                 list.remove(idx);
                             }
+                        }
+                        if let Some(tree) = connections.priority_index.get_mut(&name) {
+                            tree.remove(&(v_prio, Reverse(victim_created_at), alloc_id));
                         }
                     }
                     removed_info
@@ -454,13 +626,16 @@ impl ActiveProviderManager {
         let single_allocations = {
             let mut connections = self.connections.write().await;
             if let Some(allocations) = connections.single.remove(addr) {
-                // Remove from by_provider index while still holding the lock
+                // Remove from by_provider and priority_index while still holding the lock
                 for (id, info) in &allocations {
                     if let Some(name) = info.allocation.get_provider_name() {
                         if let Some(list) = connections.by_provider.get_mut(&name) {
                             if let Some(idx) = list.iter().position(|(a, i)| *a == *addr && *i == *id) {
                                 list.remove(idx);
                             }
+                        }
+                        if let Some(tree) = connections.priority_index.get_mut(&name) {
+                            tree.remove(&(info.priority, Reverse(info.created_at), *id));
                         }
                     }
                 }
@@ -510,6 +685,9 @@ impl ActiveProviderManager {
                     if let Some(list) = connections.by_provider.get_mut(&name) {
                         list.retain(|(_, i)| *i != shared.allocation_id);
                     }
+                    if let Some(tree) = connections.priority_index.get_mut(&name) {
+                        tree.remove(&(shared.priority, Reverse(shared.created_at), shared.allocation_id));
+                    }
                 }
                 Some(shared.allocation)
             } else {
@@ -532,12 +710,14 @@ impl ActiveProviderManager {
 
     pub async fn release_handle(&self, handle: &ProviderHandle) {
         let mut released = None;
+        let mut released_priority_key: Option<(Arc<str>, PriorityKey)> = None;
         {
             let mut connections = self.connections.write().await;
 
             // Try removing from Single
             if let Some(per_addr) = connections.single.get_mut(&handle.client_id) {
                 if let Some(info) = per_addr.remove(&handle.allocation_id) {
+                    let pkey = (info.priority, Reverse(info.created_at), handle.allocation_id);
                     released = Some(info.allocation);
                     if per_addr.is_empty() {
                         connections.single.remove(&handle.client_id);
@@ -552,6 +732,7 @@ impl ActiveProviderManager {
                                 list.remove(idx);
                             }
                         }
+                        released_priority_key = Some((name, pkey));
                     }
                 }
             }
@@ -560,6 +741,7 @@ impl ActiveProviderManager {
                 // Try removing from Shared
                 if let Some(key) = connections.shared.shared_by_allocation_id.remove(&handle.allocation_id) {
                     if let Some(shared) = connections.shared.by_key.remove(&key) {
+                        let pkey = (shared.priority, Reverse(shared.created_at), handle.allocation_id);
                         released = Some(shared.allocation);
                         for addr in shared.connections {
                             connections.shared.key_by_addr.remove(&addr);
@@ -568,8 +750,16 @@ impl ActiveProviderManager {
                             if let Some(list) = connections.by_provider.get_mut(&name) {
                                 list.retain(|(_, i)| *i != handle.allocation_id);
                             }
+                            released_priority_key = Some((name, pkey));
                         }
                     }
+                }
+            }
+
+            // Remove from priority_index
+            if let Some((name, pkey)) = &released_priority_key {
+                if let Some(tree) = connections.priority_index.get_mut(name) {
+                    tree.remove(pkey);
                 }
             }
         }
@@ -594,15 +784,25 @@ impl ActiveProviderManager {
                     let mut iter = m.drain();
                     if let Some((id, info)) = iter.next() {
                         // Collect others as extras to release
-                        for (_, extra_info) in iter {
-                            extras.push(extra_info.allocation);
-                        }
+                        let extra_entries: Vec<_> = iter.collect();
 
                         // Cleanup indices
                         if let Some(name) = info.allocation.get_provider_name() {
                             if let Some(list) = connections.by_provider.get_mut(&name) {
                                 list.retain(|(a, _)| *a != *addr);
                             }
+                            // Remove old single entry from priority_index
+                            if let Some(tree) = connections.priority_index.get_mut(&name) {
+                                tree.remove(&(info.priority, Reverse(info.created_at), id));
+                                // Remove extras from priority_index
+                                for (extra_id, extra_info) in &extra_entries {
+                                    tree.remove(&(extra_info.priority, Reverse(extra_info.created_at), *extra_id));
+                                }
+                            }
+                        }
+
+                        for (_, extra_info) in extra_entries {
+                            extras.push(extra_info.allocation);
                         }
 
                         connections.single.remove(addr); // Map is drained/empty now
@@ -640,6 +840,10 @@ impl ActiveProviderManager {
                 );
                 connections.shared.key_by_addr.insert(*addr, key.to_string());
                 connections.shared.shared_by_allocation_id.insert(handle.0.allocation_id, key.to_string());
+
+                // Insert new shared entry into priority_index
+                connections.priority_index.entry(provider_name.clone()).or_default()
+                    .insert((handle.1, Reverse(handle.2), handle.0.allocation_id), (*addr, true));
             }
             extras
         };
@@ -976,5 +1180,140 @@ mod tests {
         assert!(alloc2.is_none(), "low-priority user should not preempt high-priority user");
 
         manager.release_connection(&high_prio_addr).await;
+    }
+
+    #[tokio::test]
+    async fn test_grace_period_triggers_preemption_of_lower_priority() {
+        // Provider full, high-prio user arrives with grace allowed,
+        // low-prio victim should be evicted and provider should not be over limit.
+        let app_cfg = create_test_app_config_single_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+
+        let input_name = "provider_1".intern();
+        let low_prio_addr: SocketAddr = "127.0.0.1:47001".parse().unwrap();
+        let high_prio_addr: SocketAddr = "127.0.0.1:47002".parse().unwrap();
+
+        // Low-priority user connects (priority 20 = low importance)
+        let low_alloc = manager
+            .acquire_connection(&input_name, &low_prio_addr, 20)
+            .await
+            .expect("low-priority user should get connection");
+        assert_eq!(low_alloc.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
+        let low_token = low_alloc.cancel_token.clone().expect("must have cancel token");
+
+        // Provider is now exhausted
+        assert!(manager.is_exhausted(&input_name).await);
+
+        // High-priority user arrives WITH grace allowed (default streaming path)
+        // This should get a GracePeriod allocation and then evict the low-prio user
+        let high_alloc = manager
+            .acquire_connection(&input_name, &high_prio_addr, 0)
+            .await
+            .expect("high-priority user should get grace allocation and evict low-prio");
+        assert_eq!(high_alloc.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
+
+        // Low-priority user's cancel token should be cancelled
+        assert!(low_token.is_cancelled(), "low-prio user should be cancelled after eviction");
+
+        // Provider should not be over limit (eviction freed a slot)
+        assert!(!manager.is_over_limit(&input_name).await, "provider should not be over limit after eviction");
+
+        manager.release_connection(&high_prio_addr).await;
+    }
+
+    #[tokio::test]
+    async fn test_grace_period_no_victim_keeps_grace_behavior() {
+        // Provider full, same-prio user arrives with grace allowed,
+        // no victim available → normal grace behavior (allocation still returned).
+        let app_cfg = create_test_app_config_single_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+
+        let input_name = "provider_1".intern();
+        let user_1_addr: SocketAddr = "127.0.0.1:48001".parse().unwrap();
+        let user_2_addr: SocketAddr = "127.0.0.1:48002".parse().unwrap();
+
+        // User 1 connects with priority 0
+        let alloc1 = manager
+            .acquire_connection(&input_name, &user_1_addr, default_user_priority())
+            .await
+            .expect("user1 should get connection");
+        assert_eq!(alloc1.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
+        let token1 = alloc1.cancel_token.clone().expect("must have cancel token");
+
+        // Provider is now exhausted
+        assert!(manager.is_exhausted(&input_name).await);
+
+        // User 2 arrives with same priority and grace allowed
+        // Should get a grace allocation but NOT evict user 1
+        let alloc2 = manager
+            .acquire_connection(&input_name, &user_2_addr, default_user_priority())
+            .await;
+
+        // Grace allocation should be returned (provider allows grace)
+        if let Some(alloc2) = &alloc2 {
+            assert_eq!(alloc2.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
+        }
+        // User 1 should NOT be cancelled
+        assert!(!token1.is_cancelled(), "same-prio user should not be evicted");
+
+        manager.release_connection(&user_1_addr).await;
+        manager.release_connection(&user_2_addr).await;
+    }
+
+    #[tokio::test]
+    async fn test_btree_index_consistent_after_lifecycle() {
+        // Verify that the priority_index stays consistent through add, evict, release.
+        let app_cfg = create_test_app_config_single_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+
+        let input_name = "provider_1".intern();
+        let addr_a: SocketAddr = "127.0.0.1:49001".parse().unwrap();
+        let addr_b: SocketAddr = "127.0.0.1:49002".parse().unwrap();
+
+        // Add connection A (low priority)
+        let alloc_a = manager
+            .acquire_connection(&input_name, &addr_a, 10)
+            .await
+            .expect("alloc_a");
+
+        // Check index has 1 entry
+        {
+            let connections = manager.connections.read().await;
+            let tree = connections.priority_index.get(&input_name).expect("index for provider_1");
+            assert_eq!(tree.len(), 1, "index should have 1 entry after first allocation");
+        }
+
+        // High-priority user evicts low-priority via grace path
+        let alloc_b = manager
+            .acquire_connection(&input_name, &addr_b, -5)
+            .await
+            .expect("alloc_b should evict alloc_a");
+
+        // Check index: should have 1 entry (alloc_a evicted, alloc_b added)
+        {
+            let connections = manager.connections.read().await;
+            let tree = connections.priority_index.get(&input_name).expect("index for provider_1");
+            assert_eq!(tree.len(), 1, "index should have 1 entry after eviction + new allocation");
+            // The remaining entry should be alloc_b
+            let ((prio, _, _), _) = tree.iter().next().expect("one entry");
+            assert_eq!(*prio, -5, "remaining entry should be the high-prio connection");
+        }
+
+        // Release alloc_b
+        manager.release_handle(&alloc_b).await;
+
+        // Check index: should be empty
+        {
+            let connections = manager.connections.read().await;
+            let tree = connections.priority_index.get(&input_name);
+            let is_empty = tree.is_none_or(|t| t.is_empty());
+            assert!(is_empty, "index should be empty after releasing all connections");
+        }
+
+        // Verify alloc_a handle can be safely released (already evicted - no-op)
+        manager.release_handle(&alloc_a).await;
     }
 }
