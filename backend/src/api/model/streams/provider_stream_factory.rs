@@ -11,7 +11,10 @@ use crate::{
     tools::atomic_once_flag::AtomicOnceFlag,
     utils::{
         debug_if_enabled,
-        request::{classify_content_type, get_request_headers, send_with_retry_and_provider, MimeCategory},
+        request::{
+            classify_content_type, get_request_headers, preview_request_target_for_logging, send_with_retry_and_provider,
+            MimeCategory,
+        },
     },
 };
 use futures::{
@@ -25,7 +28,7 @@ use reqwest::{
 };
 use shared::{
     create_bitset,
-    utils::{filter_request_header, sanitize_sensitive_info},
+    utils::{filter_request_header, is_sanitize_sensitive_info_enabled, sanitize_sensitive_info},
 };
 use std::{
     collections::HashMap,
@@ -184,6 +187,14 @@ impl ProviderStreamFactoryOptions {
 
     #[inline]
     pub fn was_range_requested(&self) -> bool { self.flags.contains(ProviderStreamFactoryFlags::RangeRequested) }
+
+    fn get_log_url(&self) -> std::borrow::Cow<'_, str> {
+        if is_sanitize_sensitive_info_enabled() {
+            return std::borrow::Cow::Borrowed(self.url.as_str());
+        }
+
+        std::borrow::Cow::Owned(preview_request_target_for_logging(&self.url, self.provider.as_ref()))
+    }
 }
 
 fn get_request_range_start_bytes(req_headers: &HashMap<String, Vec<u8>>) -> Option<usize> {
@@ -494,8 +505,8 @@ async fn get_provider_stream(
     client: &reqwest::Client,
     stream_options: &ProviderStreamFactoryOptions,
 ) -> Result<Option<ProviderStreamFactoryResponse>, StatusCode> {
-    let url = stream_options.get_url();
-    debug_if_enabled!("stream provider {}", sanitize_sensitive_info(url.as_str()));
+    let log_url = stream_options.get_log_url();
+    debug_if_enabled!("stream provider {}", sanitize_sensitive_info(log_url.as_ref()));
     let start = Instant::now();
     let mut connect_err: u32 = 1;
 
@@ -508,7 +519,7 @@ async fn get_provider_stream(
                 if connect_err > ERR_MAX_RETRY_COUNT {
                     warn!(
                         "The stream could be unavailable. {}",
-                        sanitize_sensitive_info(stream_options.get_url().as_str())
+                        sanitize_sensitive_info(stream_options.get_log_url().as_ref())
                     );
                     break;
                 }
@@ -525,14 +536,14 @@ async fn get_provider_stream(
                 ) {
                     warn!(
                         "The stream could be unavailable. ({status}) {}",
-                        sanitize_sensitive_info(stream_options.get_url().as_str())
+                        sanitize_sensitive_info(stream_options.get_log_url().as_ref())
                     );
                     break;
                 }
                 if connect_err > ERR_MAX_RETRY_COUNT {
                     warn!(
                         "The stream could be unavailable. ({status}) {}",
-                        sanitize_sensitive_info(stream_options.get_url().as_str())
+                        sanitize_sensitive_info(stream_options.get_log_url().as_ref())
                     );
                     break;
                 }
@@ -544,15 +555,21 @@ async fn get_provider_stream(
         if start.elapsed().as_secs() > RETRY_SECONDS {
             warn!(
                 "The stream could be unavailable. Giving up after {RETRY_SECONDS} seconds. {}",
-                sanitize_sensitive_info(stream_options.get_url().as_str())
+                sanitize_sensitive_info(stream_options.get_log_url().as_ref())
             );
             break;
         }
         connect_err += 1;
         tokio::time::sleep(Duration::from_millis(50)).await;
-        debug_if_enabled!("Reconnecting stream {}", sanitize_sensitive_info(url.as_str()));
+        debug_if_enabled!(
+            "Reconnecting stream {}",
+            sanitize_sensitive_info(stream_options.get_log_url().as_ref())
+        );
     }
-    debug_if_enabled!("Stopped reconnecting stream {}", sanitize_sensitive_info(url.as_str()));
+    debug_if_enabled!(
+        "Stopped reconnecting stream {}",
+        sanitize_sensitive_info(stream_options.get_log_url().as_ref())
+    );
     stream_options.cancel_reconnect();
     app_state.connection_manager.release_provider_connection(&stream_options.addr).await;
     Err(StatusCode::SERVICE_UNAVAILABLE)
