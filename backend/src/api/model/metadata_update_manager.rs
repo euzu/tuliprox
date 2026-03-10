@@ -12,6 +12,7 @@ use crate::{
     },
     utils::{debug_if_enabled, FileReadGuard},
 };
+use arc_swap::ArcSwap;
 use dashmap::{mapref::entry::Entry, DashMap};
 use log::{debug, error, info, warn};
 use parking_lot::Mutex as ParkingMutex;
@@ -542,7 +543,7 @@ pub struct MetadataUpdateManager {
     ///   This guarantees that no background task runs while an update is active.
     update_pause_gate: Arc<RwLock<()>>,
     /// Global cancellation token for shutdown
-    cancel_token: CancellationToken,
+    cancel_token: ArcSwap<CancellationToken>,
     /// Monotonic worker generation id used to avoid removing a newly spawned worker context.
     next_worker_id: AtomicU64,
 }
@@ -561,17 +562,25 @@ impl MetadataUpdateManager {
             workers: DashMap::new(),
             app_state: tokio::sync::Mutex::new(None),
             update_pause_gate: Arc::new(RwLock::new(())),
-            cancel_token,
+            cancel_token: ArcSwap::from_pointee(cancel_token),
             next_worker_id: AtomicU64::new(1),
         }
     }
 
     /// Requests graceful shutdown for all metadata workers and delayed requeue tasks.
     /// This operation is idempotent.
-    pub fn shutdown(&self) { self.cancel_token.cancel(); }
+    pub fn shutdown(&self) { self.cancel_token.load().cancel(); }
 
     /// Returns true once shutdown has been requested.
-    pub fn is_shutdown(&self) -> bool { self.cancel_token.is_cancelled() }
+    pub fn is_shutdown(&self) -> bool { self.cancel_token.load().is_cancelled() }
+
+    /// Rotates the cancellation token for metadata workers.
+    /// Existing workers are cancelled and removed so new tasks start with fresh runtime state.
+    pub fn rotate_cancel_token(&self, cancel_token: CancellationToken) {
+        let old_token = self.cancel_token.swap(Arc::new(cancel_token));
+        old_token.cancel();
+        self.workers.clear();
+    }
 
     /// Acquire exclusive gate for a foreground playlist update.
     /// While this guard is held, background workers wait before starting heavy metadata/probe steps.
@@ -603,6 +612,12 @@ impl MetadataUpdateManager {
     /// * `task` - The task to process
     #[allow(clippy::too_many_lines)]
     pub async fn queue_task(&self, input_name: Arc<str>, task: UpdateTask) {
+        let cancel_token = self.cancel_token.load_full();
+        if cancel_token.is_cancelled() {
+            debug_if_enabled!("Ignoring metadata task enqueue for input {input_name} because manager is shutting down: {task}");
+            return;
+        }
+
         debug!("[Task] Queuing task for input {input_name}: {task}");
         // Read app state once and reuse for worker creation when needed.
         let app_state_weak = {
@@ -615,6 +630,13 @@ impl MetadataUpdateManager {
         let task_to_queue = task;
         let mut channel_closed_attempt: u32 = 0;
         loop {
+            if cancel_token.is_cancelled() {
+                debug_if_enabled!(
+                    "Aborting metadata enqueue loop for input {input_name} because cancellation was requested: {task_to_queue}"
+                );
+                return;
+            }
+
             // Atomically ensure there is exactly one worker context per input.
             let mut worker_to_spawn: Option<(u64, InputWorker)> = None;
             let ctx = match self.workers.entry(input_name.clone()) {
@@ -643,7 +665,7 @@ impl MetadataUpdateManager {
                             pending_task_count,
                             app_state_weak: app_state_weak.clone(),
                             update_pause_gate: Arc::clone(&self.update_pause_gate),
-                            cancel_token: self.cancel_token.clone(),
+                            cancel_token: (*cancel_token).clone(),
                             batch_buffer: BatchResultCollector::new(),
                             db_handles: HashMap::new(),
                             failed_clusters: HashSet::new(),
@@ -711,7 +733,7 @@ impl MetadataUpdateManager {
                     let backoff_ms = 25_u64.saturating_mul(factor).min(2_000);
                     let backoff = Duration::from_millis(backoff_ms);
                     tokio::select! {
-                        () = self.cancel_token.cancelled() => {
+                        () = cancel_token.cancelled() => {
                             warn!(
                                 "Aborting metadata task enqueue for input {input_name} because cancellation was requested: {task_to_queue}"
                             );
@@ -1741,8 +1763,15 @@ impl InputWorker {
         &mut self,
         runtime_settings: &MetadataUpdateRuntimeSettings,
     ) -> Option<(TaskKey, UpdateTask, u64)> {
+        if self.cancel_token.is_cancelled() {
+            return None;
+        }
+
         // Fast path: drain immediate signals until we find a real pending task.
         loop {
+            if self.cancel_token.is_cancelled() {
+                return None;
+            }
             match self.receiver.try_recv() {
                 Ok(key) => {
                     if let Some(snapshot) = self.load_task_snapshot(key) {
@@ -1775,6 +1804,9 @@ impl InputWorker {
                         Ok(None) => return None,
                         Err(_) => {
                             loop {
+                                if self.cancel_token.is_cancelled() {
+                                    return None;
+                                }
                                 match self.receiver.try_recv() {
                                     Ok(key) => {
                                         if let Some(snapshot) = self.load_task_snapshot(key) {

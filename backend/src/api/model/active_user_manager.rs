@@ -140,13 +140,58 @@ impl ActiveUserManager {
         }
     }
 
+    /// Releases an active stream for the given socket address without removing the
+    /// socket registration (`key_by_addr`). This is used when a stream ends while
+    /// the underlying HTTP connection may still remain open.
+    pub async fn release_stream(&self, addr: &SocketAddr) -> bool {
+        let (log_active_user, username) = {
+            let mut user_connections = self.connections.write().await;
+
+            let Some(username) = user_connections.key_by_addr.get(addr).cloned() else {
+                return false;
+            };
+
+            let mut removed_stream = false;
+            if let Some(connection_data) = user_connections.by_key.get_mut(&username) {
+                let prev_len = connection_data.streams.len();
+                connection_data.streams.retain(|c| c.addr != *addr);
+                removed_stream = connection_data.streams.len() != prev_len;
+
+                if removed_stream {
+                    if connection_data.connections > 0 {
+                        connection_data.connections -= 1;
+                    }
+                    if connection_data.connections < connection_data.max_connections {
+                        connection_data.granted_grace = false;
+                        connection_data.grace_ts = 0;
+                    }
+                }
+            }
+            (removed_stream, username)
+        };
+
+        if log_active_user {
+            if !username.is_empty() {
+                debug_if_enabled!(
+                    "Released stream for user {username} at {}",
+                    sanitize_sensitive_info(&addr.to_string())
+                );
+            }
+            self.log_active_user().await;
+        }
+
+        log_active_user
+    }
+
     pub async fn release_connection(&self, addr: &SocketAddr) {
         let (log_active_user, disconnected_user) = {
             let mut user_connections = self.connections.write().await;
 
             if let Some(username) = user_connections.key_by_addr.remove(addr) {
                 if let Some(connection_data) = user_connections.by_key.get_mut(&username) {
-                    if connection_data.connections > 0 {
+                    let prev_len = connection_data.streams.len();
+                    connection_data.streams.retain(|c| c.addr != *addr);
+                    if connection_data.streams.len() != prev_len && connection_data.connections > 0 {
                         connection_data.connections -= 1;
                     }
 
@@ -154,7 +199,6 @@ impl ActiveUserManager {
                         connection_data.granted_grace = false;
                         connection_data.grace_ts = 0;
                     }
-                    connection_data.streams.retain(|c| c.addr != *addr);
                 }
                 (true, Some(username))
             } else {

@@ -74,6 +74,12 @@ impl ConnectionManager {
         self.shared_stream_manager.release_connection(addr, false).await;
     }
 
+    pub async fn release_stream(&self, addr: &SocketAddr) {
+        if self.user_manager.release_stream(addr).await {
+            self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Disconnected(*addr)));
+        }
+    }
+
     pub async fn release_provider_handle(&self, provider_handle: Option<ProviderHandle>) {
         if let Some(handle) = provider_handle {
             self.provider_manager.release_handle(&handle).await;

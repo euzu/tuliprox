@@ -7,6 +7,7 @@ use futures::Stream;
 use log::trace;
 use shared::utils::sanitize_sensitive_info;
 use std::{
+    future::Future,
     pin::Pin,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -40,7 +41,9 @@ impl Stream for ClientStream {
     type Item = Result<Bytes, StreamError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Option<Self::Item>> {
-        if self.close_signal.is_cancelled() {
+        let close_signal = self.close_signal.clone();
+        let mut close_cancelled = std::pin::pin!(close_signal.cancelled());
+        if close_cancelled.as_mut().poll(cx).is_ready() {
             Poll::Ready(None)
         } else {
             match Pin::as_mut(&mut self.inner).poll_next(cx) {

@@ -55,9 +55,22 @@ struct ActiveClientStreamState {
     connection_manager: Arc<ConnectionManager>,
     fingerprint: Arc<Fingerprint>,
     provider_stopped: bool,
+    user_stream_released: bool,
 }
 
 impl ActiveClientStreamState {
+    fn release_user_stream(&mut self) {
+        if self.user_stream_released {
+            return;
+        }
+        self.user_stream_released = true;
+        let mgr = Arc::clone(&self.connection_manager);
+        let addr = self.fingerprint.addr;
+        tokio::spawn(async move {
+            mgr.release_stream(&addr).await;
+        });
+    }
+
     fn spawn_preempt_watch_task(
         provider_handle: Option<&ProviderHandle>,
         waker: &Arc<AtomicWaker>,
@@ -86,6 +99,7 @@ impl ActiveClientStreamState {
     fn stop_provider_stream_preempted(&mut self) {
         self.provider_stopped = true;
         self.stop_preempt_watch_task();
+        self.release_user_stream();
 
         if self.provider_handle.is_some() {
             let mgr = Arc::clone(&self.connection_manager);
@@ -111,6 +125,7 @@ impl ActiveClientStreamState {
     fn stop_provider_stream(&mut self, unavailable: bool) {
         self.provider_stopped = true;
         self.stop_preempt_watch_task();
+        self.release_user_stream();
 
         if self.provider_handle.is_some() {
             let mgr = Arc::clone(&self.connection_manager);
@@ -244,6 +259,16 @@ impl Stream for ActiveClientStream {
 impl Drop for ActiveClientStream {
     fn drop(&mut self) {
         self.state.stop_preempt_watch_task();
+        if !self.state.user_stream_released {
+            let mgr = Arc::clone(&self.state.connection_manager);
+            let addr = self.state.fingerprint.addr;
+            self.state.user_stream_released = true;
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    mgr.release_stream(&addr).await;
+                });
+            }
+        }
         let mgr = Arc::clone(&self.state.connection_manager);
         let hndl = self.state.provider_handle.take();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -295,6 +320,16 @@ impl Stream for ProvisionableActiveClientStream {
 impl Drop for ProvisionableActiveClientStream {
     fn drop(&mut self) {
         self.state.stop_preempt_watch_task();
+        if !self.state.user_stream_released {
+            let mgr = Arc::clone(&self.state.connection_manager);
+            let addr = self.state.fingerprint.addr;
+            self.state.user_stream_released = true;
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    mgr.release_stream(&addr).await;
+                });
+            }
+        }
         let mgr = Arc::clone(&self.state.connection_manager);
         let hndl = self.state.provider_handle.take();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -419,6 +454,7 @@ pub(crate) async fn create_active_client_stream(
         connection_manager: Arc::clone(&app_state.connection_manager),
         fingerprint: Arc::new(fingerprint.clone()),
         provider_stopped: false,
+        user_stream_released: false,
     };
 
     if has_provisioning {

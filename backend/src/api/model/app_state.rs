@@ -151,9 +151,13 @@ fn cancel_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
     let hdhomerun = cancel_service!(hdhomerun, UpdateChangesFlags::Hdhomerun, changes, cancel_tokens);
     let file_watch = cancel_service!(file_watch, UpdateChangesFlags::FileWatch, changes, cancel_tokens);
     let provider_dns = cancel_service!(provider_dns, UpdateChangesFlags::ProviderDns, changes, cancel_tokens);
-    // Metadata manager shutdown is handled explicitly at process/server shutdown.
-    // Keep the same token across config reloads so metadata workers survive hot reloads.
-    let metadata = cancel_tokens.metadata.clone();
+    let metadata = if changes.flags.contains(UpdateChangesFlags::Metadata) {
+        let token = CancellationToken::new();
+        app_state.metadata_manager.rotate_cancel_token(token.clone());
+        token
+    } else {
+        cancel_tokens.metadata.clone()
+    };
 
     let tokens = CancelTokens {
         scheduler,
@@ -456,12 +460,14 @@ impl AppState {
 
         let geoip_enabled = config.is_geoip_enabled();
         let geoip_enabled_old = old_config.is_geoip_enabled();
+        let changed_storage_dir = old_config.storage_dir != config.storage_dir;
 
         let mut changes = UpdateChanges { flags: UpdateChangesFlagsSet::new(), targets: None };
         changes.set_flag_if(changed_schedules || changed_library_enabled || geoip_enabled != geoip_enabled_old, UpdateChangesFlags::Scheduler);
         changes.set_flag_if(changed_hdhomerun, UpdateChangesFlags::Hdhomerun);
         changes.set_flag_if(changed_file_watch, UpdateChangesFlags::FileWatch);
         changes.set_flag_if(geoip_enabled != geoip_enabled_old, UpdateChangesFlags::Geoip);
+        changes.set_flag_if(changed_storage_dir, UpdateChangesFlags::Metadata);
         changes
     }
 

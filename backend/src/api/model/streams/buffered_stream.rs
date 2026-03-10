@@ -47,6 +47,10 @@ impl BufferedStream {
 
         while !client_close_signal.is_cancelled() {
             select! {
+                () = client_close_signal.cancelled() => {
+                    client_close_signal.cancel();
+                    break;
+                }
                 () = &mut idle => {
                     debug!("Buffered stream idle for too long, closing");
                     client_close_signal.cancel();

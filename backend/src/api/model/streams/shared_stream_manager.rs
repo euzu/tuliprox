@@ -444,6 +444,14 @@ impl SharedStreamManager {
                 (tx, is_empty, subs.len())
             };
 
+            let Some(client_stop_signal) = tx else {
+                trace_if_enabled!(
+                    "Ignoring duplicate shared stream release for {} (already removed)",
+                    sanitize_sensitive_info(&addr.to_string())
+                );
+                return;
+            };
+
             debug_if_enabled!(
                 "Shared stream subscriber removed {}; remaining subscribers={remaining}",
                 sanitize_sensitive_info(&addr.to_string())
@@ -460,9 +468,7 @@ impl SharedStreamManager {
                 }
             }
 
-            if let Some(client_stop_signal) = tx {
-                client_stop_signal.cancel();
-            }
+            client_stop_signal.cancel();
         }
     }
 
@@ -546,5 +552,112 @@ impl SharedStreamManager {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SharedStreamManager, SharedStreamState, CHANNEL_SIZE};
+    use crate::{
+        api::model::{ActiveProviderManager, EventManager},
+        model::{AppConfig, Config, ConfigInput, SourcesConfig},
+        utils::FileLockManager,
+    };
+    use arc_swap::{ArcSwap, ArcSwapOption};
+    use shared::{
+        model::{ConfigPaths, InputFetchMethod, InputType},
+        utils::Internable,
+    };
+    use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+    use tokio_util::sync::CancellationToken;
+
+    fn create_test_app_config() -> AppConfig {
+        let input = Arc::new(ConfigInput {
+            id: 1,
+            name: "provider_1".intern(),
+            input_type: InputType::Xtream,
+            headers: HashMap::default(),
+            url: "http://provider-1.example".to_string(),
+            username: Some("user1".to_string()),
+            password: Some("pass1".to_string()),
+            enabled: true,
+            priority: 0,
+            max_connections: 1,
+            method: InputFetchMethod::default(),
+            aliases: None,
+            ..ConfigInput::default()
+        });
+
+        let sources = SourcesConfig { inputs: vec![input], ..SourcesConfig::default() };
+
+        AppConfig {
+            config: Arc::new(ArcSwap::from_pointee(Config::default())),
+            sources: Arc::new(ArcSwap::from_pointee(sources)),
+            hdhomerun: Arc::new(ArcSwapOption::default()),
+            api_proxy: Arc::new(ArcSwapOption::default()),
+            file_locks: Arc::new(FileLockManager::default()),
+            paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
+                home_path: String::new(),
+                config_path: String::new(),
+                storage_path: String::new(),
+                config_file_path: String::new(),
+                sources_file_path: String::new(),
+                mapping_file_path: None,
+                mapping_files_used: None,
+                template_file_path: None,
+                template_files_used: None,
+                api_proxy_file_path: String::new(),
+                custom_stream_response_path: None,
+            })),
+            custom_stream_response: Arc::new(ArcSwapOption::default()),
+            access_token_secret: [0; 32],
+            encrypt_secret: [0; 16],
+            ffprobe_available: Arc::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_release_connection_is_idempotent_with_remaining_subscribers() {
+        let app_cfg = create_test_app_config();
+        let event_manager = Arc::new(EventManager::new());
+        let provider_manager = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
+        let shared_manager = Arc::new(SharedStreamManager::new(provider_manager));
+
+        let stream_url = "https://example.invalid/live/stream.ts";
+        let addr_1: SocketAddr = "127.0.0.1:41001".parse().unwrap_or_else(|_| unreachable!());
+        let addr_2: SocketAddr = "127.0.0.1:41002".parse().unwrap_or_else(|_| unreachable!());
+
+        let state = Arc::new(SharedStreamState::new(Vec::new(), CHANNEL_SIZE.max(8), None, 1024));
+
+        {
+            let mut reg = shared_manager.shared_streams.write().await;
+            reg.by_key.insert(stream_url.to_string(), Arc::clone(&state));
+            reg.key_by_addr.insert(addr_1, stream_url.to_string());
+            reg.key_by_addr.insert(addr_2, stream_url.to_string());
+        }
+
+        {
+            let mut subs = state.subscribers.write().await;
+            subs.insert(addr_1, CancellationToken::new());
+            subs.insert(addr_2, CancellationToken::new());
+        }
+
+        shared_manager.release_connection(&addr_1, false).await;
+        {
+            let subs = state.subscribers.read().await;
+            assert_eq!(subs.len(), 1, "first release should remove exactly one subscriber");
+            assert!(subs.contains_key(&addr_2), "remaining subscriber must stay registered");
+        }
+
+        // Duplicate release for the same address should be ignored.
+        shared_manager.release_connection(&addr_1, false).await;
+        {
+            let subs = state.subscribers.read().await;
+            assert_eq!(subs.len(), 1, "duplicate release must not modify subscribers");
+            assert!(subs.contains_key(&addr_2), "remaining subscriber must stay registered");
+        }
+
+        let reg = shared_manager.shared_streams.read().await;
+        assert!(reg.by_key.contains_key(stream_url), "shared stream must stay registered while one subscriber remains");
     }
 }
