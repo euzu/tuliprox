@@ -231,8 +231,9 @@ async fn create_shared_data(
     let client = create_http_client(app_config)?;
     let client_no_redirect = create_http_client_no_redirect(app_config)?;
 
-    let cancel_tokens = Arc::new(ArcSwap::from_pointee(CancelTokens::default()));
-    let metadata_manager = Arc::new(MetadataUpdateManager::new());
+    let tokens = CancelTokens::default();
+    let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
+    let cancel_tokens = Arc::new(ArcSwap::from_pointee(tokens));
 
     Ok(AppState {
         forced_targets: Arc::new(ArcSwap::new(Arc::clone(forced_targets))),
@@ -252,6 +253,15 @@ async fn create_shared_data(
         update_guard: UpdateGuard::new(),
         metadata_manager,
     })
+}
+
+fn cancel_all_service_tokens(app_state: &Arc<AppState>) {
+    let cancel_tokens = app_state.cancel_tokens.load();
+    cancel_tokens.scheduler.cancel();
+    cancel_tokens.hdhomerun.cancel();
+    cancel_tokens.file_watch.cancel();
+    cancel_tokens.provider_dns.cancel();
+    cancel_tokens.metadata.cancel();
 }
 
 fn exec_update_on_boot(client: &reqwest::Client, app_state: &Arc<AppState>, targets: &Arc<ProcessTargets>) -> bool {
@@ -409,8 +419,7 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
     // Keep using the original `app_state` below, which is valid because `Arc::clone` borrows.
     let shared_data = Arc::clone(&app_state);
 
-    let (cancel_token_scheduler, cancel_token_hdhomerun,
-        cancel_token_file_watch, cancel_token_provider_dns) = {
+    let (cancel_token_scheduler, cancel_token_hdhomerun, cancel_token_file_watch, cancel_token_provider_dns) = {
         let cancel_tokens = app_state.cancel_tokens.load();
         (
             cancel_tokens.scheduler.clone(),
@@ -494,7 +503,27 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
     let listener = tokio::net::TcpListener::bind(format!("{host}:{port}"))
         .await
         .map_err(|err| info_err!("Failed to bind to {host}:{port}, {err}"))?;
-    serve(listener, router, None, &shared_data.connection_manager).await;
+
+    let server_cancel_token = CancellationToken::new();
+    let server_cancel_token_signal = server_cancel_token.clone();
+    let app_state_signal = Arc::clone(&app_state);
+    tokio::spawn(async move {
+        match tokio::signal::ctrl_c().await {
+            Ok(()) => {
+                info!("Received shutdown signal (Ctrl+C), cancelling all background services");
+                cancel_all_service_tokens(&app_state_signal);
+                server_cancel_token_signal.cancel();
+            }
+            Err(err) => {
+                error!("Failed to listen for Ctrl+C: {err}");
+            }
+        }
+    });
+
+    serve(listener, router, Some(server_cancel_token), &shared_data.connection_manager).await;
+
+    // Final shutdown safeguard for all background services (idempotent).
+    cancel_all_service_tokens(&shared_data);
     Ok(())
 }
 

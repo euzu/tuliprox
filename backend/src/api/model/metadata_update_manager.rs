@@ -547,10 +547,6 @@ pub struct MetadataUpdateManager {
     next_worker_id: AtomicU64,
 }
 
-impl Default for MetadataUpdateManager {
-    fn default() -> Self { Self::new() }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SubmitTaskResult {
     QueuedOrMerged,
@@ -559,15 +555,23 @@ enum SubmitTaskResult {
 }
 
 impl MetadataUpdateManager {
-    pub fn new() -> Self {
+
+    pub fn new(cancel_token: CancellationToken) -> Self {
         Self {
             workers: DashMap::new(),
             app_state: tokio::sync::Mutex::new(None),
             update_pause_gate: Arc::new(RwLock::new(())),
-            cancel_token: CancellationToken::new(),
+            cancel_token,
             next_worker_id: AtomicU64::new(1),
         }
     }
+
+    /// Requests graceful shutdown for all metadata workers and delayed requeue tasks.
+    /// This operation is idempotent.
+    pub fn shutdown(&self) { self.cancel_token.cancel(); }
+
+    /// Returns true once shutdown has been requested.
+    pub fn is_shutdown(&self) -> bool { self.cancel_token.is_cancelled() }
 
     /// Acquire exclusive gate for a foreground playlist update.
     /// While this guard is held, background workers wait before starting heavy metadata/probe steps.
@@ -3089,7 +3093,8 @@ mod tests {
 
     #[tokio::test]
     async fn queue_task_creates_single_worker_per_input_under_concurrency() {
-        let manager = Arc::new(MetadataUpdateManager::new());
+        let cancel_token = CancellationToken::new();
+        let manager = Arc::new(MetadataUpdateManager::new(cancel_token));
         let input_name: Arc<str> = Arc::from("race_input");
 
         let mut joins = Vec::new();
@@ -3118,7 +3123,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(manager.active_worker_count(), 1);
 
-        cancel_token.cancel();
+        manager.shutdown();
     }
 
     #[tokio::test]

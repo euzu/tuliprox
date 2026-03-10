@@ -151,12 +151,16 @@ fn cancel_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
     let hdhomerun = cancel_service!(hdhomerun, UpdateChangesFlags::Hdhomerun, changes, cancel_tokens);
     let file_watch = cancel_service!(file_watch, UpdateChangesFlags::FileWatch, changes, cancel_tokens);
     let provider_dns = cancel_service!(provider_dns, UpdateChangesFlags::ProviderDns, changes, cancel_tokens);
+    // Metadata manager shutdown is handled explicitly at process/server shutdown.
+    // Keep the same token across config reloads so metadata workers survive hot reloads.
+    let metadata = cancel_tokens.metadata.clone();
 
     let tokens = CancelTokens {
         scheduler,
         hdhomerun,
         file_watch,
         provider_dns,
+        metadata,
     };
 
     app_state.cancel_tokens.store(Arc::new(tokens));
@@ -297,6 +301,7 @@ pub struct CancelTokens {
     pub(crate) hdhomerun: CancellationToken,
     pub(crate) file_watch: CancellationToken,
     pub(crate) provider_dns: CancellationToken,
+    pub(crate) metadata: CancellationToken,
 }
 impl Default for CancelTokens {
     fn default() -> Self {
@@ -305,6 +310,7 @@ impl Default for CancelTokens {
             hdhomerun: CancellationToken::new(),
             file_watch: CancellationToken::new(),
             provider_dns: CancellationToken::new(),
+            metadata: CancellationToken::new(),
         }
     }
 }
