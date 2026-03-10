@@ -224,6 +224,7 @@ async fn create_shared_data(
     let event_manager = Arc::new(EventManager::new());
     let active_provider = Arc::new(ActiveProviderManager::new(app_config, &event_manager));
     let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
+    active_provider.set_shared_stream_manager(Arc::clone(&shared_stream_manager));
     let active_users = Arc::new(ActiveUserManager::new(&config, &geoip, &event_manager));
     let connection_manager =
         Arc::new(ConnectionManager::new(&active_users, &active_provider, &shared_stream_manager, &event_manager));

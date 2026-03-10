@@ -1,21 +1,20 @@
 use crate::{
     api::model::{
         provider_lineup_manager::{ProviderAllocation, ProviderLineupManager},
-        EventManager, ProviderConfig,
+        EventManager, ProviderConfig, SharedStreamManager,
     },
     model::{AppConfig, ConfigInput, GracePeriodOptions},
     utils::debug_if_enabled,
 };
 use log::error;
 use shared::utils::sanitize_sensitive_info;
-// trace_if_enabled removed
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::{
     net::SocketAddr,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, LazyLock,
+        Arc, LazyLock, OnceLock,
     },
     time::{Duration, Instant},
 };
@@ -104,6 +103,7 @@ pub struct ActiveProviderManager {
     connections: RwLock<Connections>,
     next_allocation_id: AtomicU64,
     preempted_grace_semaphore: Arc<Semaphore>,
+    shared_stream_manager: OnceLock<Arc<SharedStreamManager>>,
 }
 
 impl ActiveProviderManager {
@@ -115,7 +115,12 @@ impl ActiveProviderManager {
             connections: RwLock::new(Connections::default()),
             next_allocation_id: AtomicU64::new(1),
             preempted_grace_semaphore: Arc::new(Semaphore::new(PREEMPTED_GRACE_MAX_PENDING)),
+            shared_stream_manager: OnceLock::new(),
         }
+    }
+
+    pub fn set_shared_stream_manager(&self, manager: Arc<SharedStreamManager>) {
+        let _ = self.shared_stream_manager.set(manager);
     }
 
     fn get_config_inputs(cfg: &AppConfig) -> Vec<Arc<ConfigInput>> {
@@ -345,16 +350,22 @@ impl ActiveProviderManager {
                                 tree.remove(&(v_prio, Reverse(victim_created_at), alloc_id));
                             }
                         }
-                        Some((shared.allocation, shared.cancel_token))
+                        Some((key, shared.allocation, shared.cancel_token))
                     } else {
                         return false;
                     }
                 };
-                if let Some((allocation, cancel_token)) = released {
+                if let Some((stream_url, allocation, cancel_token)) = released {
                     if let Some(token) = cancel_token {
                         token.cancel();
                     }
                     allocation.release().await;
+                    // Stop the shared stream broadcast task to match the released capacity.
+                    // Without this, the broadcast keeps running and consuming a provider slot
+                    // that was already freed by allocation.release().
+                    if let Some(ssm) = self.shared_stream_manager.get() {
+                        ssm.teardown_preempted_stream(&stream_url).await;
+                    }
                 }
             }
             PriorityOwner::Single(addr) => {

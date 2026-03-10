@@ -24,7 +24,7 @@ async fn cvs_api(
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
 
-    create_custom_video_stream_response(&app_state, &fingerprint.addr, custom_video_type).await.into_response()
+    create_custom_video_stream_response(&app_state, &fingerprint.addr, custom_video_type).into_response()
 }
 
 pub fn cvs_api_register() -> axum::Router<Arc<AppState>> {

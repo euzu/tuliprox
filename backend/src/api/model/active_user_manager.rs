@@ -184,7 +184,7 @@ impl ActiveUserManager {
     }
 
     pub async fn release_connection(&self, addr: &SocketAddr) -> bool {
-        let (log_active_user, disconnected_user) = {
+        let (addr_removed, disconnected_user) = {
             let mut user_connections = self.connections.write().await;
 
             if let Some(username) = user_connections.key_by_addr.remove(addr) {
@@ -215,11 +215,11 @@ impl ActiveUserManager {
             }
         }
 
-        if log_active_user {
+        if addr_removed {
             self.log_active_user().await;
         }
 
-        log_active_user
+        addr_removed
     }
 
     pub fn update_config(&self, config: &Config) {

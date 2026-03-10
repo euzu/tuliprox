@@ -301,7 +301,6 @@ async fn hls_api_stream(
             &fingerprint.addr,
             CustomVideoStreamType::UserAccountExpired,
         )
-        .await
         .into_response();
     }
 
@@ -325,7 +324,6 @@ async fn hls_api_stream(
                 &fingerprint.addr,
                 CustomVideoStreamType::UserConnectionsExhausted,
             )
-            .await
             .into_response();
         }
 
@@ -335,7 +333,6 @@ async fn hls_api_stream(
                 &fingerprint.addr,
                 CustomVideoStreamType::ProviderConnectionsExhausted,
             )
-            .await
             .into_response();
         }
 
@@ -374,7 +371,6 @@ async fn hls_api_stream(
                 &fingerprint.addr,
                 CustomVideoStreamType::UserConnectionsExhausted,
             )
-            .await
             .into_response();
         }
 

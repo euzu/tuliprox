@@ -2,8 +2,8 @@ use crate::{
     api::{
         api_utils::{try_unwrap_body, HeaderFilter},
         model::{
-            stream::ProviderStreamResponse, AppState, CustomVideoStream, ProvisioningStream, ThrottledStream,
-            TransportStreamBuffer,
+            stream::ProviderStreamResponse, AppState, CleanupEvent, CustomVideoStream, ProvisioningStream,
+            ThrottledStream, TransportStreamBuffer,
         },
     },
     model::AppConfig,
@@ -71,6 +71,16 @@ impl<'de> Deserialize<'de> for CustomVideoStreamType {
     }
 }
 
+fn prepare_video_headers(headers: &[(String, String)]) -> Vec<(String, String)> {
+    let mut h: Vec<(String, String)> = headers
+        .iter()
+        .filter(|(key, _)| !(key.eq("content-type") || key.eq("content-length") || key.contains("range")))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    h.push(("content-type".to_string(), "video/mp2t".to_string()));
+    h
+}
+
 fn create_video_stream(
     stream_type: CustomVideoStreamType,
     video_buffer: Option<&TransportStreamBuffer>,
@@ -79,15 +89,9 @@ fn create_video_stream(
 ) -> ProviderStreamResponse {
     if let Some(video) = video_buffer {
         trace!("{log_message}");
-        let mut response_headers: Vec<(String, String)> = headers
-            .iter()
-            .filter(|(key, _)| !(key.eq("content-type") || key.eq("content-length") || key.contains("range")))
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect();
-        response_headers.push(("content-type".to_string(), "video/mp2t".to_string()));
         (
             Some(Box::pin(ThrottledStream::new(CustomVideoStream::new(video.clone()), 8000))),
-            Some((response_headers, StatusCode::OK, None, Some(stream_type))),
+            Some((prepare_video_headers(headers), StatusCode::OK, None, Some(stream_type))),
         )
     } else {
         (None, None)
@@ -168,23 +172,17 @@ pub fn create_panel_api_provisioning_stream_with_stop(
     let video = custom_stream_response.as_ref().and_then(|c| c.panel_api_provisioning.as_ref());
     if let Some(video) = video {
         trace!("Streaming response panel api provisioning");
-        let mut response_headers: Vec<(String, String)> = headers
-            .iter()
-            .filter(|(key, _)| !(key.eq("content-type") || key.eq("content-length") || key.contains("range")))
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect();
-        response_headers.push(("content-type".to_string(), "video/mp2t".to_string()));
         let stream = ProvisioningStream::new(video.clone(), stop_signal);
         (
             Some(Box::pin(ThrottledStream::new(stream, 8000))),
-            Some((response_headers, StatusCode::OK, None, Some(CustomVideoStreamType::Provisioning))),
+            Some((prepare_video_headers(headers), StatusCode::OK, None, Some(CustomVideoStreamType::Provisioning))),
         )
     } else {
         (None, None)
     }
 }
 
-pub async fn create_custom_video_stream_response(
+pub fn create_custom_video_stream_response(
     app_state: &Arc<AppState>,
     addr: &SocketAddr,
     video_response: CustomVideoStreamType,
@@ -201,8 +199,10 @@ pub async fn create_custom_video_stream_response(
         CustomVideoStreamType::UserAccountExpired => create_user_account_expired_stream(config, &[]),
         CustomVideoStreamType::Provisioning => create_panel_api_provisioning_stream(config, &[]),
     } {
-        app_state.connection_manager.update_stream_detail(addr, video_response).await;
-        app_state.connection_manager.release_provider_connection(addr).await;
+        app_state.connection_manager.send_cleanup(CleanupEvent::UpdateDetailAndReleaseProviderConnection {
+            addr: *addr,
+            video_type: video_response,
+        });
         let mut builder = axum::response::Response::builder().status(status_code);
         for (key, value) in headers {
             builder = builder.header(key, value);

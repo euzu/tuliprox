@@ -29,10 +29,11 @@ impl Stream for ProvisioningStream {
             return Poll::Ready(None);
         }
 
-        self.buffer.register_waker(cx.waker());
-        match self.buffer.next_chunk() {
-            Some(chunk) => Poll::Ready(Some(Ok(chunk))),
-            None => Poll::Pending,
+        if let Some(chunk) = self.buffer.next_chunk() {
+            Poll::Ready(Some(Ok(chunk)))
+        } else {
+            self.buffer.register_waker(cx.waker());
+            Poll::Pending
         }
     }
 }

@@ -426,6 +426,41 @@ impl SharedStreamManager {
         }
     }
 
+    /// Tears down a shared stream that was preempted via priority eviction.
+    /// Stops the broadcast task and removes subscriber mappings, but does NOT
+    /// release the provider handle (the preemption path already handles that).
+    pub async fn teardown_preempted_stream(&self, stream_url: &str) {
+        let shared_state_opt = {
+            let mut shared_streams = self.shared_streams.write().await;
+
+            let remove_keys: Vec<SocketAddr> = shared_streams
+                .key_by_addr
+                .iter()
+                .filter_map(|(addr, url)| if url == stream_url { Some(*addr) } else { None })
+                .collect();
+            for k in remove_keys {
+                shared_streams.key_by_addr.remove(&k);
+            }
+
+            shared_streams.by_key.remove(stream_url)
+        };
+
+        if let Some(shared_state) = shared_state_opt {
+            debug_if_enabled!(
+                "Tearing down preempted shared stream {}",
+                sanitize_sensitive_info(stream_url)
+            );
+
+            for handle in shared_state.task_handles.write().await.drain(..) {
+                handle.abort();
+            }
+
+            // Cancel stop_token to terminate the broadcast task.
+            // Do NOT release provider_guard — the preemption caller already released the allocation.
+            shared_state.stop_token.cancel();
+        }
+    }
+
     pub async fn release_connection(&self, addr: &SocketAddr, send_stop_signal: bool) {
         let (stream_url, shared_state) = {
             let shared_streams = self.shared_streams.read().await;

@@ -889,7 +889,6 @@ pub async fn stream_response(
             &fingerprint.addr,
             CustomVideoStreamType::UserConnectionsExhausted,
         )
-        .await
         .into_response();
     }
 
@@ -993,14 +992,16 @@ pub async fn stream_response(
             debug_if_enabled!("panel_api provisioning response to client: status={} headers={:?}", status, headers);
         }
 
-        let provider_handle = if share_stream { stream_details.provider_handle.take() } else { None };
-
         let mut is_stream_shared = share_stream;
+        if stream_details.provider_grace_active {
+            is_stream_shared = false;
+        }
         if let Some((_header, _status_code, _url, Some(_custom_video))) = stream_details.stream_info.as_ref() {
             if stream_details.stream.is_some() {
                 is_stream_shared = false;
             }
         }
+        let provider_handle = if is_stream_shared { stream_details.provider_handle.take() } else { None };
 
         stream_channel.shared = is_stream_shared;
         let stream = create_active_client_stream(
@@ -1210,7 +1211,6 @@ pub async fn local_stream_response(
             &fingerprint.addr,
             CustomVideoStreamType::UserConnectionsExhausted,
         )
-        .await
         .into_response();
     }
 

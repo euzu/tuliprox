@@ -537,6 +537,8 @@ pub struct MetadataUpdateManager {
     workers: DashMap<Arc<str>, InputWorkerContext>,
     /// Synchronizes cancellation token rotation with worker context creation.
     worker_lifecycle_lock: ParkingMutex<()>,
+    /// Terminal shutdown flag; once set, token rotation must not reactivate workers.
+    is_shutdown_flag: AtomicBool,
     /// Global application state (weak reference to avoid cycles)
     app_state: tokio::sync::Mutex<Option<Weak<AppState>>>,
     /// Global gate:
@@ -563,6 +565,7 @@ impl MetadataUpdateManager {
         Self {
             workers: DashMap::new(),
             worker_lifecycle_lock: ParkingMutex::new(()),
+            is_shutdown_flag: AtomicBool::new(false),
             app_state: tokio::sync::Mutex::new(None),
             update_pause_gate: Arc::new(RwLock::new(())),
             cancel_token: ArcSwap::from_pointee(cancel_token),
@@ -572,16 +575,29 @@ impl MetadataUpdateManager {
 
     /// Requests graceful shutdown for all metadata workers and delayed requeue tasks.
     /// This operation is idempotent.
-    pub fn shutdown(&self) { self.cancel_token.load().cancel(); }
+    pub fn shutdown(&self) {
+        let token = {
+            let _guard = self.worker_lifecycle_lock.lock();
+            self.is_shutdown_flag.store(true, Ordering::Release);
+            self.cancel_token.load_full()
+        };
+        token.cancel();
+    }
 
     /// Returns true once shutdown has been requested.
-    pub fn is_shutdown(&self) -> bool { self.cancel_token.load().is_cancelled() }
+    pub fn is_shutdown(&self) -> bool { self.is_shutdown_flag.load(Ordering::Acquire) }
 
     /// Rotates the cancellation token for metadata workers.
     /// Existing workers are cancelled and removed so new tasks start with fresh runtime state.
     pub fn rotate_cancel_token(&self, cancel_token: CancellationToken) {
         let old_token = {
             let _guard = self.worker_lifecycle_lock.lock();
+            if self.is_shutdown_flag.load(Ordering::Acquire) {
+                self.workers.clear();
+                cancel_token.cancel();
+                return;
+            }
+
             let old_token = self.cancel_token.swap(Arc::new(cancel_token));
             self.workers.clear();
             old_token
@@ -705,6 +721,17 @@ impl MetadataUpdateManager {
                         }
                     }
                 });
+            }
+
+            let sender_still_current = {
+                let _guard = self.worker_lifecycle_lock.lock();
+                let token_matches = Arc::ptr_eq(&self.cancel_token.load_full(), &cancel_token);
+                let worker_matches =
+                    self.workers.get(&input_name).is_some_and(|current| current.worker_id == ctx.worker_id);
+                token_matches && worker_matches
+            };
+            if !sender_still_current {
+                continue;
             }
 
             match Self::submit_task(
@@ -1029,6 +1056,9 @@ impl InputWorker {
             };
 
             let Some((current_key, current_task, current_generation)) = task_data else { break };
+            if self.cancel_token.is_cancelled() {
+                break;
+            }
             if !self.metadata_retry_loaded {
                 self.ensure_metadata_retry_state_loaded(&input_name, app_state_weak.as_ref(), &runtime_settings).await;
             }
@@ -1558,7 +1588,13 @@ impl InputWorker {
             // Try to get the next task immediately to keep locks open.
             // Ignore phantom signals (channel key without pending map entry).
             if next_task.is_none() {
+                if self.cancel_token.is_cancelled() {
+                    break;
+                }
                 while let Ok(key) = self.receiver.try_recv() {
+                    if self.cancel_token.is_cancelled() {
+                        break;
+                    }
                     if let Some(snapshot) = self.load_task_snapshot(key) {
                         next_task = Some(snapshot);
                         break;
@@ -1781,6 +1817,9 @@ impl InputWorker {
             }
             match self.receiver.try_recv() {
                 Ok(key) => {
+                    if self.cancel_token.is_cancelled() {
+                        return None;
+                    }
                     if let Some(snapshot) = self.load_task_snapshot(key) {
                         return Some(snapshot);
                     }
@@ -1804,6 +1843,9 @@ impl InputWorker {
                 res = tokio::time::timeout(Duration::from_secs(runtime_settings.worker_idle_timeout_secs), self.receiver.recv()) => {
                     match res {
                         Ok(Some(key)) => {
+                            if self.cancel_token.is_cancelled() {
+                                return None;
+                            }
                             if let Some(snapshot) = self.load_task_snapshot(key) {
                                 return Some(snapshot);
                             }
@@ -1816,6 +1858,9 @@ impl InputWorker {
                                 }
                                 match self.receiver.try_recv() {
                                     Ok(key) => {
+                                        if self.cancel_token.is_cancelled() {
+                                            return None;
+                                        }
                                         if let Some(snapshot) = self.load_task_snapshot(key) {
                                             return Some(snapshot);
                                         }
