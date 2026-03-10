@@ -660,4 +660,49 @@ mod tests {
         let reg = shared_manager.shared_streams.read().await;
         assert!(reg.by_key.contains_key(stream_url), "shared stream must stay registered while one subscriber remains");
     }
+
+    #[tokio::test]
+    async fn test_duplicate_release_connection_is_idempotent_with_single_subscriber() {
+        let app_cfg = create_test_app_config();
+        let event_manager = Arc::new(EventManager::new());
+        let provider_manager = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
+        let shared_manager = Arc::new(SharedStreamManager::new(provider_manager));
+
+        let stream_url = "https://example.invalid/live/single.ts";
+        let addr_1: SocketAddr = "127.0.0.1:42001".parse().unwrap_or_else(|_| unreachable!());
+        let state = Arc::new(SharedStreamState::new(Vec::new(), CHANNEL_SIZE.max(8), None, 1024));
+
+        {
+            let mut reg = shared_manager.shared_streams.write().await;
+            reg.by_key.insert(stream_url.to_string(), Arc::clone(&state));
+            reg.key_by_addr.insert(addr_1, stream_url.to_string());
+        }
+
+        {
+            let mut subs = state.subscribers.write().await;
+            subs.insert(addr_1, CancellationToken::new());
+        }
+
+        shared_manager.release_connection(&addr_1, false).await;
+        {
+            let reg = shared_manager.shared_streams.read().await;
+            assert!(!reg.by_key.contains_key(stream_url), "stream should be unregistered after last subscriber leaves");
+            assert!(!reg.key_by_addr.contains_key(&addr_1), "address mapping should be removed");
+        }
+        {
+            let subs = state.subscribers.read().await;
+            assert!(subs.is_empty(), "subscriber list should be empty after release");
+        }
+
+        shared_manager.release_connection(&addr_1, false).await;
+        {
+            let reg = shared_manager.shared_streams.read().await;
+            assert!(!reg.by_key.contains_key(stream_url), "duplicate release must keep stream unregistered");
+            assert!(!reg.key_by_addr.contains_key(&addr_1), "duplicate release must keep address mapping absent");
+        }
+        {
+            let subs = state.subscribers.read().await;
+            assert!(subs.is_empty(), "duplicate release must keep subscribers empty");
+        }
+    }
 }

@@ -144,7 +144,7 @@ impl ActiveUserManager {
     /// socket registration (`key_by_addr`). This is used when a stream ends while
     /// the underlying HTTP connection may still remain open.
     pub async fn release_stream(&self, addr: &SocketAddr) -> bool {
-        let (log_active_user, username) = {
+        let (removed_stream, username) = {
             let mut user_connections = self.connections.write().await;
 
             let Some(username) = user_connections.key_by_addr.get(addr).cloned() else {
@@ -170,7 +170,7 @@ impl ActiveUserManager {
             (removed_stream, username)
         };
 
-        if log_active_user {
+        if removed_stream {
             if !username.is_empty() {
                 debug_if_enabled!(
                     "Released stream for user {username} at {}",
@@ -180,10 +180,10 @@ impl ActiveUserManager {
             self.log_active_user().await;
         }
 
-        log_active_user
+        removed_stream
     }
 
-    pub async fn release_connection(&self, addr: &SocketAddr) {
+    pub async fn release_connection(&self, addr: &SocketAddr) -> bool {
         let (log_active_user, disconnected_user) = {
             let mut user_connections = self.connections.write().await;
 
@@ -218,6 +218,8 @@ impl ActiveUserManager {
         if log_active_user {
             self.log_active_user().await;
         }
+
+        log_active_user
     }
 
     pub fn update_config(&self, config: &Config) {

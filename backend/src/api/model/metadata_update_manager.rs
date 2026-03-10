@@ -535,6 +535,8 @@ impl PendingTask {
 pub struct MetadataUpdateManager {
     /// Per-input worker senders. Worker is spawned when entry is created.
     workers: DashMap<Arc<str>, InputWorkerContext>,
+    /// Synchronizes cancellation token rotation with worker context creation.
+    worker_lifecycle_lock: ParkingMutex<()>,
     /// Global application state (weak reference to avoid cycles)
     app_state: tokio::sync::Mutex<Option<Weak<AppState>>>,
     /// Global gate:
@@ -560,6 +562,7 @@ impl MetadataUpdateManager {
     pub fn new(cancel_token: CancellationToken) -> Self {
         Self {
             workers: DashMap::new(),
+            worker_lifecycle_lock: ParkingMutex::new(()),
             app_state: tokio::sync::Mutex::new(None),
             update_pause_gate: Arc::new(RwLock::new(())),
             cancel_token: ArcSwap::from_pointee(cancel_token),
@@ -577,9 +580,13 @@ impl MetadataUpdateManager {
     /// Rotates the cancellation token for metadata workers.
     /// Existing workers are cancelled and removed so new tasks start with fresh runtime state.
     pub fn rotate_cancel_token(&self, cancel_token: CancellationToken) {
-        let old_token = self.cancel_token.swap(Arc::new(cancel_token));
+        let old_token = {
+            let _guard = self.worker_lifecycle_lock.lock();
+            let old_token = self.cancel_token.swap(Arc::new(cancel_token));
+            self.workers.clear();
+            old_token
+        };
         old_token.cancel();
-        self.workers.clear();
     }
 
     /// Acquire exclusive gate for a foreground playlist update.
@@ -612,12 +619,6 @@ impl MetadataUpdateManager {
     /// * `task` - The task to process
     #[allow(clippy::too_many_lines)]
     pub async fn queue_task(&self, input_name: Arc<str>, task: UpdateTask) {
-        let cancel_token = self.cancel_token.load_full();
-        if cancel_token.is_cancelled() {
-            debug_if_enabled!("Ignoring metadata task enqueue for input {input_name} because manager is shutting down: {task}");
-            return;
-        }
-
         debug!("[Task] Queuing task for input {input_name}: {task}");
         // Read app state once and reuse for worker creation when needed.
         let app_state_weak = {
@@ -630,59 +631,65 @@ impl MetadataUpdateManager {
         let task_to_queue = task;
         let mut channel_closed_attempt: u32 = 0;
         loop {
-            if cancel_token.is_cancelled() {
-                debug_if_enabled!(
-                    "Aborting metadata enqueue loop for input {input_name} because cancellation was requested: {task_to_queue}"
-                );
-                return;
-            }
-
             // Atomically ensure there is exactly one worker context per input.
             let mut worker_to_spawn: Option<(u64, InputWorker)> = None;
-            let ctx = match self.workers.entry(input_name.clone()) {
-                Entry::Occupied(entry) => entry.get().clone(),
-                Entry::Vacant(entry) => {
-                    let (tx, rx) = mpsc::channel::<TaskKey>(max_queue_size);
-                    let pending_tasks = Arc::new(DashMap::new());
-                    let pending_task_count = Arc::new(AtomicUsize::new(0));
-                    let worker_id = self.next_worker_id.fetch_add(1, Ordering::Relaxed);
-
-                    let ctx = InputWorkerContext {
-                        worker_id,
-                        sender: tx.clone(),
-                        pending_tasks: pending_tasks.clone(),
-                        pending_task_count: pending_task_count.clone(),
-                    };
-                    entry.insert(ctx.clone());
-
-                    worker_to_spawn = Some((
-                        worker_id,
-                        InputWorker {
-                            input_name: input_name.clone(),
-                            sender: tx,
-                            receiver: rx,
-                            pending_tasks,
-                            pending_task_count,
-                            app_state_weak: app_state_weak.clone(),
-                            update_pause_gate: Arc::clone(&self.update_pause_gate),
-                            cancel_token: (*cancel_token).clone(),
-                            batch_buffer: BatchResultCollector::new(),
-                            db_handles: HashMap::new(),
-                            failed_clusters: HashSet::new(),
-                            retry_states: HashMap::new(),
-                            resolve_exhausted: HashMap::new(),
-                            last_cycle_completed_at_ts: None,
-                            metadata_retry_state_path: None,
-                            metadata_retry_loaded: false,
-                            metadata_retry_load_retry_at_ts: None,
-                            last_retry_state_prune_at_ts: None,
-                            scheduled_requeues: Arc::new(DashMap::new()),
-                            recently_completed_no_change: HashMap::new(),
-                        },
-                    ));
-
-                    ctx
+            let (cancel_token, ctx) = {
+                let _guard = self.worker_lifecycle_lock.lock();
+                let cancel_token = self.cancel_token.load_full();
+                if cancel_token.is_cancelled() {
+                    debug_if_enabled!(
+                        "Aborting metadata enqueue loop for input {input_name} because cancellation was requested: {task_to_queue}"
+                    );
+                    return;
                 }
+
+                let ctx = match self.workers.entry(input_name.clone()) {
+                    Entry::Occupied(entry) => entry.get().clone(),
+                    Entry::Vacant(entry) => {
+                        let (tx, rx) = mpsc::channel::<TaskKey>(max_queue_size);
+                        let pending_tasks = Arc::new(DashMap::new());
+                        let pending_task_count = Arc::new(AtomicUsize::new(0));
+                        let worker_id = self.next_worker_id.fetch_add(1, Ordering::Relaxed);
+
+                        let ctx = InputWorkerContext {
+                            worker_id,
+                            sender: tx.clone(),
+                            pending_tasks: pending_tasks.clone(),
+                            pending_task_count: pending_task_count.clone(),
+                        };
+                        entry.insert(ctx.clone());
+
+                        worker_to_spawn = Some((
+                            worker_id,
+                            InputWorker {
+                                input_name: input_name.clone(),
+                                sender: tx,
+                                receiver: rx,
+                                pending_tasks,
+                                pending_task_count,
+                                app_state_weak: app_state_weak.clone(),
+                                update_pause_gate: Arc::clone(&self.update_pause_gate),
+                                cancel_token: (*cancel_token).clone(),
+                                batch_buffer: BatchResultCollector::new(),
+                                db_handles: HashMap::new(),
+                                failed_clusters: HashSet::new(),
+                                retry_states: HashMap::new(),
+                                resolve_exhausted: HashMap::new(),
+                                last_cycle_completed_at_ts: None,
+                                metadata_retry_state_path: None,
+                                metadata_retry_loaded: false,
+                                metadata_retry_load_retry_at_ts: None,
+                                last_retry_state_prune_at_ts: None,
+                                scheduled_requeues: Arc::new(DashMap::new()),
+                                recently_completed_no_change: HashMap::new(),
+                            },
+                        ));
+
+                        ctx
+                    }
+                };
+
+                (cancel_token, ctx)
             };
 
             if let Some((worker_id, worker)) = worker_to_spawn {

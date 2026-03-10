@@ -63,10 +63,12 @@ impl ConnectionManager {
     }
 
     pub async fn release_connection(&self, addr: &SocketAddr) {
-        self.user_manager.release_connection(addr).await;
+        let removed = self.user_manager.release_connection(addr).await;
         self.provider_manager.release_connection(addr).await;
         self.shared_stream_manager.release_connection(addr, true).await;
-        self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Disconnected(*addr)));
+        if removed {
+            self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Disconnected(*addr)));
+        }
     }
 
     pub async fn release_provider_connection(&self, addr: &SocketAddr) {

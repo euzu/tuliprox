@@ -8,24 +8,24 @@ use std::{
     pin::Pin,
     task::{Context, Poll},
 };
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 
 pub struct ProvisioningStream {
     buffer: TransportStreamBuffer,
-    stop_signal: CancellationToken,
+    stop_cancelled: Pin<Box<WaitForCancellationFutureOwned>>,
 }
 
 impl ProvisioningStream {
-    pub fn new(buffer: TransportStreamBuffer, stop_signal: CancellationToken) -> Self { Self { buffer, stop_signal } }
+    pub fn new(buffer: TransportStreamBuffer, stop_signal: CancellationToken) -> Self {
+        Self { buffer, stop_cancelled: Box::pin(stop_signal.cancelled_owned()) }
+    }
 }
 
 impl Stream for ProvisioningStream {
     type Item = Result<Bytes, StreamError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let stop_signal = self.stop_signal.clone();
-        let mut stop_cancelled = std::pin::pin!(stop_signal.cancelled());
-        if stop_cancelled.as_mut().poll(cx).is_ready() {
+        if self.stop_cancelled.as_mut().poll(cx).is_ready() {
             return Poll::Ready(None);
         }
 

@@ -1148,6 +1148,10 @@ async fn try_shared_stream_response_if_any(
     session_token: &str,
     req_headers: &HeaderMap,
 ) -> Option<impl IntoResponse> {
+    if connect_permission == UserConnectionPermission::GracePeriod {
+        return None;
+    }
+
     if let Some((stream, provider)) =
         SharedStreamManager::subscribe_shared_stream(app_state, stream_url, &fingerprint.addr).await
     {

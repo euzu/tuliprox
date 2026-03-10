@@ -104,6 +104,9 @@ impl ActiveClientStreamState {
         if self.provider_handle.is_some() {
             let mgr = Arc::clone(&self.connection_manager);
             let handle = self.provider_handle.take();
+            if let Some(flag) = &self.send_custom_stream_flag {
+                flag.store(INNER_STREAM, Ordering::Release);
+            }
 
             if let Some(waker) = &self.waker {
                 waker.wake();
@@ -287,13 +290,16 @@ impl Stream for ProvisionableActiveClientStream {
     type Item = Result<Bytes, StreamError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let res = self.state.poll_next_base(cx);
+        if !matches!(res, Poll::Ready(None)) {
+            return res;
+        }
+
         let flag = match &self.state.send_custom_stream_flag {
             Some(flag) => flag.load(Ordering::Acquire),
             None => INNER_STREAM,
         };
-
-        let res = self.state.poll_next_base(cx);
-        if !matches!(res, Poll::Ready(None)) || flag == INNER_STREAM {
+        if flag == INNER_STREAM {
             return res;
         }
 
