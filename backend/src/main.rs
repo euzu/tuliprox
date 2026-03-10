@@ -251,9 +251,6 @@ fn print_info(app_config: &AppConfig) {
     if let Some(metadata_update) = config.metadata_update.as_ref() {
         info!("Metadata path: {}", metadata_update.cache_path);
     }
-    if let Some(resource_path) = paths.custom_stream_response_path.as_ref() {
-        info!("Resource path: {resource_path}");
-    }
 }
 
 fn get_file_paths(args: &Args) -> ConfigPaths {

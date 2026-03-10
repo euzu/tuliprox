@@ -601,8 +601,11 @@ pub async fn read_initial_app_config(
         }
     }
 
-    paths.template_files_used = template_files_used;
-    app_config.paths.store(Arc::new(paths.clone()));
+    let current_paths = app_config.paths.load_full();
+    let mut merged_paths = current_paths.as_ref().clone();
+    merged_paths.mapping_files_used = paths.mapping_files_used.clone();
+    merged_paths.template_files_used = template_files_used;
+    app_config.paths.store(Arc::new(merged_paths));
 
     if server_mode {
         match read_api_proxy_config(&app_config, resolve_env).await {
