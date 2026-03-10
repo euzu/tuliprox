@@ -87,6 +87,18 @@ pub struct ProviderDnsCache {
 }
 
 impl ProviderDnsCache {
+    pub fn preview_ip_from(&self, host: &str, ips: &[IpAddr]) -> Option<IpAddr> {
+        if ips.is_empty() {
+            return None;
+        }
+        let len = ips.len();
+        let guard = self.by_host.read();
+        let idx = guard
+            .get(&host.to_ascii_lowercase())
+            .map_or(0, |entry| entry.rr_index.load(Ordering::Relaxed) % len);
+        Some(ips[idx])
+    }
+
     pub fn select_ip_from(&self, host: &str, ips: &[IpAddr]) -> Option<IpAddr> {
         if ips.is_empty() {
             return None;
@@ -107,6 +119,17 @@ impl ProviderDnsCache {
         }
         let len = entry.ips.len();
         let idx = entry.rr_index.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |i| Some((i + 1) % len)).unwrap_or_else(|i| i) % len;
+        Some(entry.ips[idx])
+    }
+
+    pub fn preview_cached_ip(&self, host: &str) -> Option<IpAddr> {
+        let guard = self.by_host.read();
+        let entry = guard.get(&host.to_ascii_lowercase())?;
+        if entry.ips.is_empty() {
+            return None;
+        }
+        let len = entry.ips.len();
+        let idx = entry.rr_index.load(Ordering::Relaxed) % len;
         Some(entry.ips[idx])
     }
 
@@ -223,6 +246,15 @@ impl ConfigProvider {
             return self.dns_cache.select_ip_from(&normalized, ips);
         }
         self.dns_cache.select_cached_ip(&normalized)
+    }
+
+    pub fn preview_ip_for_host(&self, host: &str) -> Option<IpAddr> {
+        let dns = self.dns.as_ref()?;
+        let normalized = host.trim().to_ascii_lowercase();
+        if let Some(ips) = dns.overrides.get(&normalized) {
+            return self.dns_cache.preview_ip_from(&normalized, ips);
+        }
+        self.dns_cache.preview_cached_ip(&normalized)
     }
 
     pub fn ip_count_for_host(&self, host: &str) -> usize {
