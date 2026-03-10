@@ -70,7 +70,7 @@ struct TargetChanges {
     target: Arc<ConfigTarget>,
 }
 
-create_bitset!(u8, UpdateChangesFlags, Scheduler, Hdhomerun, FileWatch, Geoip, ProviderDns);
+create_bitset!(u8, UpdateChangesFlags, Scheduler, Hdhomerun, FileWatch, Geoip, ProviderDns, Metadata);
 
 pub(in crate::api) struct UpdateChanges {
     flags: UpdateChangesFlagsSet,

@@ -2242,7 +2242,8 @@ where
 
     /// Internal store without locking, used for compaction or initial save.
     fn store_internal(&mut self, filepath: &Path) -> io::Result<u64> {
-        let tempfile = NamedTempFile::new()?;
+        let temp_dir = tempfile::env::temp_dir();
+        let tempfile = NamedTempFile::new_in(&temp_dir)?;
         let mut file = utils::file_writer(&tempfile);
         let mut buffer = vec![0u8; PAGE_SIZE_USIZE];
 

@@ -7,7 +7,6 @@ use crate::{
         },
     },
     model::AppConfig,
-    tools::atomic_once_flag::AtomicOnceFlag,
 };
 use axum::response::IntoResponse;
 use log::trace;
@@ -15,6 +14,7 @@ use reqwest::StatusCode;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use shared::model::PlaylistItemType;
 use std::{fmt, net::SocketAddr, str::FromStr, sync::Arc};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Copy, Clone)]
 pub enum CustomVideoStreamType {
@@ -162,7 +162,7 @@ pub fn create_panel_api_provisioning_stream(cfg: &AppConfig, headers: &[(String,
 pub fn create_panel_api_provisioning_stream_with_stop(
     cfg: &AppConfig,
     headers: &[(String, String)],
-    stop_signal: Arc<AtomicOnceFlag>,
+    stop_signal: CancellationToken,
 ) -> ProviderStreamResponse {
     let custom_stream_response = cfg.custom_stream_response.load();
     let video = custom_stream_response.as_ref().and_then(|c| c.panel_api_provisioning.as_ref());

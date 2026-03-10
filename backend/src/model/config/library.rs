@@ -203,7 +203,7 @@ mod tests {
             library: Some(LibraryConfigDto {
                 enabled: true,
                 scan_directories: vec![LibraryScanDirectoryDto {
-                    path: std::env::temp_dir().to_string_lossy().to_string(),
+                    path: tempfile::env::temp_dir().to_string_lossy().to_string(),
                     ..Default::default()
                 }],
                 ..Default::default()

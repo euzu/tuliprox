@@ -8,7 +8,6 @@ use crate::{
         },
     },
     model::{ConfigProvider, ReverseProxyDisabledHeaderConfig},
-    tools::atomic_once_flag::AtomicOnceFlag,
     utils::{
         debug_if_enabled,
         request::{classify_content_type, get_request_headers, send_with_retry_and_provider, MimeCategory},
@@ -36,6 +35,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use tokio_util::sync::CancellationToken;
 use url::Url;
 use shared::model::PlaylistItemType;
 use shared::utils::DEFAULT_USER_AGENT;
@@ -63,7 +63,7 @@ pub struct ProviderStreamFactoryOptions {
     headers: HeaderMap,
     default_user_agent: Option<axum::http::header::HeaderValue>,
     range_bytes: Arc<Option<AtomicUsize>>,
-    reconnect_flag: Arc<AtomicOnceFlag>,
+    reconnect_flag: CancellationToken,
     provider: Option<Arc<ConfigProvider>>,
 }
 
@@ -124,7 +124,7 @@ impl ProviderStreamFactoryOptions {
             addr,
             flags,
             buffer_size,
-            reconnect_flag: Arc::new(AtomicOnceFlag::new()),
+            reconnect_flag: CancellationToken::new(),
             url,
             headers,
             default_user_agent,
@@ -150,10 +150,10 @@ impl ProviderStreamFactoryOptions {
     pub(crate) fn get_buffer_size(&self) -> usize { self.buffer_size }
 
     #[inline]
-    pub fn get_reconnect_flag_clone(&self) -> Arc<AtomicOnceFlag> { Arc::clone(&self.reconnect_flag) }
+    pub fn get_reconnect_flag_clone(&self) -> CancellationToken { self.reconnect_flag.clone() }
 
     #[inline]
-    pub fn cancel_reconnect(&self) { self.reconnect_flag.notify(); }
+    pub fn cancel_reconnect(&self) { self.reconnect_flag.cancel(); }
 
     #[inline]
     pub fn get_url(&self) -> &Url { &self.url }
@@ -180,7 +180,7 @@ impl ProviderStreamFactoryOptions {
     pub fn get_range_bytes_clone(&self) -> Arc<Option<AtomicUsize>> { Arc::clone(&self.range_bytes) }
 
     #[inline]
-    pub fn should_continue(&self) -> bool { self.reconnect_flag.is_active() }
+    pub fn should_continue(&self) -> bool { !self.reconnect_flag.is_cancelled() }
 
     #[inline]
     pub fn was_range_requested(&self) -> bool { self.flags.contains(ProviderStreamFactoryFlags::RangeRequested) }
@@ -591,7 +591,7 @@ pub async fn create_provider_stream(
 
             let continue_signal = stream_options.get_reconnect_flag_clone();
             if is_media_stream_or_not_piped && stream_options.should_reconnect() {
-                let continue_client_signal = Arc::clone(&continue_signal);
+                let continue_client_signal = continue_signal.clone();
                 let continue_streaming_signal = continue_client_signal.clone();
                 let stream_options_provider = stream_options.clone();
                 let app_state_clone = Arc::clone(app_state);
@@ -602,7 +602,10 @@ pub async fn create_provider_stream(
                     let continue_streaming = continue_streaming_signal.clone();
                     let app_state_clone = Arc::clone(&app_state_clone);
                     async move {
-                        if continue_streaming.is_active() {
+                        if continue_streaming.is_cancelled() {
+                            app_state_clone.connection_manager.release_provider_connection(&stream_opts.addr).await;
+                            None
+                        } else {
                             match get_provider_stream(&app_state_clone, &client, &stream_opts).await {
                                 Ok(Some((stream, _info))) => Some((stream, ())),
                                 Ok(None) => {
@@ -610,7 +613,7 @@ pub async fn create_provider_stream(
                                         .connection_manager
                                         .release_provider_connection(&stream_opts.addr)
                                         .await;
-                                    continue_streaming.notify();
+                                    continue_streaming.cancel();
                                     if let (Some(boxed_provider_stream), _response_info) =
                                         create_channel_unavailable_stream(
                                             &app_state_clone.app_config,
@@ -627,7 +630,7 @@ pub async fn create_provider_stream(
                                         .connection_manager
                                         .release_provider_connection(&stream_opts.addr)
                                         .await;
-                                    continue_streaming.notify();
+                                    continue_streaming.cancel();
                                     if let (Some(boxed_provider_stream), _response_info) =
                                         create_channel_unavailable_stream(
                                             &app_state_clone.app_config,
@@ -640,9 +643,6 @@ pub async fn create_provider_stream(
                                     None
                                 }
                             }
-                        } else {
-                            app_state_clone.connection_manager.release_provider_connection(&stream_opts.addr).await;
-                            None
                         }
                     }
                 })
@@ -651,7 +651,7 @@ pub async fn create_provider_stream(
                 Some((
                     client_stream_factory(
                         init_stream.chain(unfold).boxed(),
-                        Arc::clone(&continue_client_signal),
+                        continue_client_signal.clone(),
                         stream_options.get_range_bytes_clone(),
                     )
                     .boxed(),
@@ -661,7 +661,7 @@ pub async fn create_provider_stream(
                 Some((
                     client_stream_factory(
                         init_stream.boxed(),
-                        Arc::clone(&continue_signal),
+                        continue_signal.clone(),
                         stream_options.get_range_bytes_clone(),
                     )
                     .boxed(),

@@ -8,7 +8,6 @@ use crate::{
     },
     auth::Fingerprint,
     model::{ConfigInput, ProxyUserCredentials},
-    tools::atomic_once_flag::AtomicOnceFlag,
     utils::debug_if_enabled,
 };
 use axum::http::{header::USER_AGENT, HeaderMap};
@@ -27,6 +26,7 @@ use std::{
     },
     task::{Context, Poll},
 };
+use tokio_util::sync::CancellationToken;
 
 const INNER_STREAM: u8 = 0_u8;
 const USER_EXHAUSTED_STREAM: u8 = 1_u8;
@@ -37,13 +37,14 @@ const GRACE_PENDING: u8 = 255_u8; // Grace period check hasn't completed yet
 
 struct GraceProvisioningInfo {
     input: Arc<ConfigInput>,
-    stop_signal: Arc<AtomicOnceFlag>,
+    stop_signal: CancellationToken,
 }
 
 struct ActiveClientStreamState {
     inner: BoxedProviderStream,
     send_custom_stream_flag: Option<Arc<AtomicU8>>,
     provider_handle: Option<ProviderHandle>,
+    preempt_watch_task: Option<tokio::task::JoinHandle<()>>,
     custom_video: (
         Option<TransportStreamBuffer>,
         Option<TransportStreamBuffer>,
@@ -57,8 +58,59 @@ struct ActiveClientStreamState {
 }
 
 impl ActiveClientStreamState {
+    fn spawn_preempt_watch_task(
+        provider_handle: Option<&ProviderHandle>,
+        waker: &Arc<AtomicWaker>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        let cancel_token = provider_handle.and_then(|handle| handle.cancel_token.as_ref()).cloned()?;
+        let wake = Arc::clone(waker);
+        Some(tokio::spawn(async move {
+            cancel_token.cancelled().await;
+            wake.wake();
+        }))
+    }
+
+    fn stop_preempt_watch_task(&mut self) {
+        if let Some(task) = self.preempt_watch_task.take() {
+            task.abort();
+        }
+    }
+
+    fn is_preempted(&self) -> bool {
+        self.provider_handle
+            .as_ref()
+            .and_then(|handle| handle.cancel_token.as_ref())
+            .is_some_and(CancellationToken::is_cancelled)
+    }
+
+    fn stop_provider_stream_preempted(&mut self) {
+        self.provider_stopped = true;
+        self.stop_preempt_watch_task();
+
+        if self.provider_handle.is_some() {
+            let mgr = Arc::clone(&self.connection_manager);
+            let handle = self.provider_handle.take();
+
+            if let Some(waker) = &self.waker {
+                waker.wake();
+            }
+
+            let addr = self.fingerprint.addr;
+            self.inner = futures::stream::empty::<Result<Bytes, StreamError>>().boxed();
+
+            tokio::spawn(async move {
+                debug_if_enabled!(
+                    "Provider stream preempted for {}; stopping client stream",
+                    sanitize_sensitive_info(&addr.to_string())
+                );
+                mgr.release_provider_handle(handle).await;
+            });
+        }
+    }
+
     fn stop_provider_stream(&mut self, unavailable: bool) {
         self.provider_stopped = true;
+        self.stop_preempt_watch_task();
 
         if self.provider_handle.is_some() {
             let mgr = Arc::clone(&self.connection_manager);
@@ -103,6 +155,12 @@ impl ActiveClientStreamState {
         if let Some(waker) = &self.waker {
             waker.register(cx.waker());
         }
+
+        if self.is_preempted() {
+            self.stop_provider_stream_preempted();
+            return Poll::Ready(None);
+        }
+
         let flag = match &self.send_custom_stream_flag {
             Some(flag) => flag.load(Ordering::Acquire),
             None => INNER_STREAM,
@@ -185,6 +243,7 @@ impl Stream for ActiveClientStream {
 
 impl Drop for ActiveClientStream {
     fn drop(&mut self) {
+        self.state.stop_preempt_watch_task();
         let mgr = Arc::clone(&self.state.connection_manager);
         let hndl = self.state.provider_handle.take();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -235,11 +294,14 @@ impl Stream for ProvisionableActiveClientStream {
 
 impl Drop for ProvisionableActiveClientStream {
     fn drop(&mut self) {
+        self.state.stop_preempt_watch_task();
         let mgr = Arc::clone(&self.state.connection_manager);
         let hndl = self.state.provider_handle.take();
-        tokio::spawn(async move {
-            mgr.release_provider_handle(hndl).await;
-        });
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                mgr.release_provider_handle(hndl).await;
+            });
+        }
     }
 }
 
@@ -284,10 +346,10 @@ pub(crate) async fn create_active_client_stream(
     let has_provisioning = provisioning_info.is_some();
     let hold_stream = stream_details.grace_period.hold_stream;
 
-    let (grace_stop_flag, waker) =
+    let waker = Arc::new(AtomicWaker::new());
+    let grace_stop_flag =
         if grant_user_grace_period || (stream_details.has_grace_period() && stream_details.provider_name.is_some()) {
-            let waker = Arc::new(AtomicWaker::new());
-            let flag = stream_grace_period(
+            stream_grace_period(
                 app_state,
                 &stream_details,
                 grant_user_grace_period,
@@ -297,23 +359,18 @@ pub(crate) async fn create_active_client_stream(
                 provisioning_info,
                 Some(Arc::clone(&waker)),
                 hold_stream,
-            );
-            let maybe_waker = flag.as_ref().map(|_| waker);
-            (flag, maybe_waker)
+            )
         } else {
-            (
-                stream_grace_period(
-                    app_state,
-                    &stream_details,
-                    grant_user_grace_period,
-                    user,
-                    fingerprint,
-                    virtual_id,
-                    provisioning_info,
-                    None,
-                    hold_stream,
-                ),
+            stream_grace_period(
+                app_state,
+                &stream_details,
+                grant_user_grace_period,
+                user,
+                fingerprint,
+                virtual_id,
+                provisioning_info,
                 None,
+                hold_stream,
             )
         };
 
@@ -352,10 +409,14 @@ pub(crate) async fn create_active_client_stream(
 
     let state = ActiveClientStreamState {
         inner: stream,
+        preempt_watch_task: ActiveClientStreamState::spawn_preempt_watch_task(
+            stream_details.provider_handle.as_ref(),
+            &waker,
+        ),
         provider_handle: stream_details.provider_handle,
         send_custom_stream_flag: grace_stop_flag,
         custom_video,
-        waker,
+        waker: Some(waker),
         connection_manager: Arc::clone(&app_state.connection_manager),
         fingerprint: Arc::new(fingerprint.clone()),
         provider_stopped: false,
@@ -381,7 +442,7 @@ fn resolve_grace_period_provisioning(
         return None;
     }
 
-    let stop_signal = Arc::new(AtomicOnceFlag::new());
+    let stop_signal = CancellationToken::new();
     Some(GraceProvisioningInfo { input, stop_signal })
 }
 
@@ -495,7 +556,7 @@ fn stream_grace_period(
 
             if updated {
                 if let Some(flag) = reconnect_flag {
-                    flag.notify();
+                    flag.cancel();
                 }
             }
 

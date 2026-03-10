@@ -232,7 +232,7 @@ async fn create_shared_data(
     let client_no_redirect = create_http_client_no_redirect(app_config)?;
 
     let cancel_tokens = Arc::new(ArcSwap::from_pointee(CancelTokens::default()));
-    let metadata_manager = Arc::new(MetadataUpdateManager::new(cancel_tokens.load().scheduler.clone()));
+    let metadata_manager = Arc::new(MetadataUpdateManager::new());
 
     Ok(AppState {
         forced_targets: Arc::new(ArcSwap::new(Arc::clone(forced_targets))),
@@ -409,7 +409,8 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
     // Keep using the original `app_state` below, which is valid because `Arc::clone` borrows.
     let shared_data = Arc::clone(&app_state);
 
-    let (cancel_token_scheduler, cancel_token_hdhomerun, cancel_token_file_watch, cancel_token_provider_dns) = {
+    let (cancel_token_scheduler, cancel_token_hdhomerun,
+        cancel_token_file_watch, cancel_token_provider_dns) = {
         let cancel_tokens = app_state.cancel_tokens.load();
         (
             cancel_tokens.scheduler.clone(),
@@ -432,11 +433,8 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
     }
 
     exec_scheduler(client.as_ref(), &app_state, &targets, &cancel_token_scheduler);
-
     exec_file_lock_prune(&app_state);
-
     exec_interner_prune(&app_state);
-
     exec_config_watch(&app_state, &cancel_token_file_watch);
     exec_provider_dns(&app_state, &cancel_token_provider_dns);
 

@@ -1,29 +1,28 @@
 use crate::{
     api::model::{StreamError, TransportStreamBuffer},
-    tools::atomic_once_flag::AtomicOnceFlag,
 };
 use bytes::Bytes;
 use futures::Stream;
 use std::{
     pin::Pin,
-    sync::Arc,
     task::{Context, Poll},
 };
+use tokio_util::sync::CancellationToken;
 
 pub struct ProvisioningStream {
     buffer: TransportStreamBuffer,
-    stop_signal: Arc<AtomicOnceFlag>,
+    stop_signal: CancellationToken,
 }
 
 impl ProvisioningStream {
-    pub fn new(buffer: TransportStreamBuffer, stop_signal: Arc<AtomicOnceFlag>) -> Self { Self { buffer, stop_signal } }
+    pub fn new(buffer: TransportStreamBuffer, stop_signal: CancellationToken) -> Self { Self { buffer, stop_signal } }
 }
 
 impl Stream for ProvisioningStream {
     type Item = Result<Bytes, StreamError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if !self.stop_signal.is_active() {
+        if self.stop_signal.is_cancelled() {
             return Poll::Ready(None);
         }
 

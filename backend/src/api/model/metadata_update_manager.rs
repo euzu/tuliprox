@@ -548,7 +548,7 @@ pub struct MetadataUpdateManager {
 }
 
 impl Default for MetadataUpdateManager {
-    fn default() -> Self { Self::new(CancellationToken::new()) }
+    fn default() -> Self { Self::new() }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -559,12 +559,12 @@ enum SubmitTaskResult {
 }
 
 impl MetadataUpdateManager {
-    pub fn new(cancel_token: CancellationToken) -> Self {
+    pub fn new() -> Self {
         Self {
             workers: DashMap::new(),
             app_state: tokio::sync::Mutex::new(None),
             update_pause_gate: Arc::new(RwLock::new(())),
-            cancel_token,
+            cancel_token: CancellationToken::new(),
             next_worker_id: AtomicU64::new(1),
         }
     }
@@ -3089,8 +3089,7 @@ mod tests {
 
     #[tokio::test]
     async fn queue_task_creates_single_worker_per_input_under_concurrency() {
-        let cancel_token = CancellationToken::new();
-        let manager = Arc::new(MetadataUpdateManager::new(cancel_token.clone()));
+        let manager = Arc::new(MetadataUpdateManager::new());
         let input_name: Arc<str> = Arc::from("race_input");
 
         let mut joins = Vec::new();
