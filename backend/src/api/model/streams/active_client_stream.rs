@@ -347,8 +347,7 @@ pub(crate) async fn create_active_client_stream(
     let hold_stream = stream_details.grace_period.hold_stream;
 
     let waker = Arc::new(AtomicWaker::new());
-    let grace_stop_flag =
-        if grant_user_grace_period || (stream_details.has_grace_period() && stream_details.provider_name.is_some()) {
+    let grace_stop_flag = if grant_user_grace_period || stream_details.provider_grace_active {
             stream_grace_period(
                 app_state,
                 &stream_details,
@@ -433,7 +432,7 @@ fn resolve_grace_period_provisioning(
     app_state: &Arc<AppState>,
     stream_details: &StreamDetails,
 ) -> Option<GraceProvisioningInfo> {
-    if stream_details.disable_provider_grace {
+    if stream_details.disable_provider_grace || !stream_details.provider_grace_active {
         return None;
     }
     let provider_name = stream_details.provider_name.as_deref();
@@ -462,7 +461,7 @@ fn stream_grace_period(
     let active_provider = Arc::clone(&app_state.active_provider);
     let connection_manager = Arc::clone(&app_state.connection_manager);
 
-    let provider_grace_check = if stream_details.has_grace_period()
+    let provider_grace_check = if stream_details.provider_grace_active
         && stream_details.provider_name.is_some()
         && !stream_details.disable_provider_grace
     {

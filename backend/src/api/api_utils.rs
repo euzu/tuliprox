@@ -488,6 +488,10 @@ async fn create_stream_response_details(
         &streaming_strategy.provider_stream_state,
         grace_period_options.period_millis,
     );
+    let provider_grace_active = matches!(
+        streaming_strategy.provider_stream_state,
+        ProviderStreamState::GracePeriod(_, _)
+    );
 
     let guard_provider_name =
         streaming_strategy.provider_handle.as_ref().and_then(|guard| guard.allocation.get_provider_name());
@@ -522,6 +526,7 @@ async fn create_stream_response_details(
                 provider_name: guard_provider_name.clone(),
                 request_url: None,
                 grace_period: grace_period_options,
+                provider_grace_active: false,
                 disable_provider_grace: false,
                 reconnect_flag: None,
                 provider_handle: streaming_strategy.provider_handle.clone(),
@@ -596,6 +601,7 @@ async fn create_stream_response_details(
                 provider_name: guard_provider_name.clone(),
                 request_url: Some(request_url.clone()),
                 grace_period: grace_period_options,
+                provider_grace_active,
                 disable_provider_grace: false,
                 reconnect_flag,
                 provider_handle,
@@ -890,7 +896,12 @@ pub async fn stream_response(
     let virtual_id = stream_channel.virtual_id;
     let item_type = stream_channel.item_type;
 
-    let share_stream = is_stream_share_enabled(item_type, target);
+    // Grace candidates are intentionally not shared:
+    // they are transient and may be terminated after the grace check.
+    // Keeping them out of the shared-stream lifecycle avoids cross-effects on
+    // concurrently running streams of the same user.
+    let share_stream =
+        is_stream_share_enabled(item_type, target) && connection_permission != UserConnectionPermission::GracePeriod;
     let _shared_lock = if share_stream {
         let write_lock = app_state.app_config.file_locks.write_lock_str(stream_url).await;
 
