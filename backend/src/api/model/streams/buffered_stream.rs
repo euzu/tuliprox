@@ -78,6 +78,13 @@ impl BufferedStream {
                     match chunk {
                         Some(Ok(chunk)) => {
                             let chunk_len = chunk.len();
+                            // Cap permits at MAX_BUFFER_BYTES per chunk.  A single chunk larger
+                            // than the cap consumes fewer permits than its actual byte count, so
+                            // the semaphore may temporarily allow more bytes in the channel than
+                            // MAX_BUFFER_BYTES.  This is an intentional trade-off: upstream
+                            // providers are expected to emit chunks well below this limit; the
+                            // inaccuracy is bounded to a single oversized chunk and is self-
+                            // correcting once that chunk is delivered.
                             let permits = chunk_len.min(MAX_BUFFER_BYTES);
                             if permits > 0 {
                                 let acquired = select! {

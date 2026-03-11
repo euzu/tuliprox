@@ -161,6 +161,7 @@ impl SharedStreamState {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn subscribe(
         &self,
         addr: &SocketAddr,
@@ -194,6 +195,7 @@ impl SharedStreamState {
         let timeout_duration = Duration::from_secs(300); // 5 minutes
         let mut last_active = Instant::now();
         let mut last_lag_log = Instant::now().checked_sub(Duration::from_secs(10)).unwrap_or_else(Instant::now);
+        let mut consecutive_lag_count: u32 = 0;
         let subscriber_buf_size = self.buf_size;
 
         let address = *addr;
@@ -241,6 +243,7 @@ impl SharedStreamState {
                     result = broadcast_rx.recv() => {
                         match result {
                             Ok(data) => {
+                                consecutive_lag_count = 0;
                                 // If the client press pause, skip
                                 if client_tx_clone.is_closed() {
                                     continue;
@@ -284,17 +287,28 @@ impl SharedStreamState {
                                 }
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                                consecutive_lag_count = consecutive_lag_count.saturating_add(1);
                                 if last_lag_log.elapsed() > Duration::from_secs(5) {
                                     let buffered_bytes = {
                                         let buffer = burst_buffer_for_log.read().await;
                                         buffer.current_bytes
                                     };
-                                    warn!("Shared stream client lagged behind {address}. Skipped {skipped} messages (buffered {buffered_bytes} bytes, yield counter {yield_counter})");
+                                    warn!(
+                                        "Shared stream client lagged behind {address}. Skipped {skipped} messages \
+                                         (buffered {buffered_bytes} bytes, yield counter {yield_counter}, \
+                                         consecutive lags={consecutive_lag_count})"
+                                    );
                                     last_lag_log = Instant::now();
                                 }
-                                // Sleep to prevent CPU spin when client is persistently lagging behind.
-                                // This provides backpressure for slow clients that can't keep up.
-                                sleep(Duration::from_millis(50)).await;
+                                // Exponential backoff for persistently lagging clients: 50 ms base,
+                                // doubling up to 1 600 ms, to provide increasing backpressure without
+                                // permanently blocking the subscriber task.
+                                let backoff_ms = 50_u64
+                                    .saturating_mul(
+                                        1_u64.checked_shl(consecutive_lag_count.min(5)).unwrap_or(u64::MAX),
+                                    )
+                                    .min(1_600);
+                                sleep(Duration::from_millis(backoff_ms)).await;
                             }
                             Err(_) => break,
                         }
@@ -311,6 +325,7 @@ impl SharedStreamState {
         (convert_stream(ReceiverStream::new(client_rx).boxed()), provider)
     }
 
+    #[allow(clippy::too_many_lines)]
     fn broadcast<S, E>(&self, stream_url: &str, bytes_stream: S, shared_streams: Arc<SharedStreamManager>)
     where
         S: Stream<Item = Result<Bytes, E>> + Unpin + 'static + Send,
@@ -497,6 +512,11 @@ impl SharedStreamManager {
     /// Tears down a shared stream that was preempted via priority eviction.
     /// Stops the broadcast task and removes subscriber mappings, but does NOT
     /// release the provider handle (the preemption path already handles that).
+    ///
+    /// # Precondition
+    /// The caller **must** have already released the provider allocation for this stream
+    /// before calling this method.  Failing to do so will leak the provider slot because
+    /// `provider_guard` inside the shared state is intentionally not released here.
     pub async fn teardown_preempted_stream(&self, stream_url: &str) {
         let shared_state_opt = {
             let mut shared_streams = self.shared_streams.write().await;

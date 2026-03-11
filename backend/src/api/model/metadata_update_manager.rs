@@ -45,6 +45,9 @@ const METADATA_RETRY_STATE_FILE: &str = "metadata_retry_state.db";
 const TASK_ERR_NO_CONNECTION: &str = "No connection available";
 const TASK_ERR_PREEMPTED: &str = "Task preempted";
 const TASK_ERR_UPDATE_IN_PROGRESS: &str = "Playlist update in progress";
+// Per-task execution timeout.  ffprobe defaults to 60 s; allow extra headroom for network
+// fetches, TMDB lookups, and B+Tree writes before declaring the task stuck.
+const PROBE_TASK_TIMEOUT_SECS: u64 = 30;
 const BLOCKING_DB_MIN_CONCURRENCY: usize = 4;
 const BLOCKING_DB_MAX_CONCURRENCY: usize = 32;
 const RETRY_STATE_PRUNE_INTERVAL_SECS: i64 = 300;
@@ -746,7 +749,11 @@ impl MetadataUpdateManager {
             {
                 SubmitTaskResult::QueuedOrMerged => return,
                 SubmitTaskResult::QueueFull => {
-                    warn!("Metadata queue full for input {input_name}, dropping task");
+                    error!(
+                        "Metadata queue full for input {input_name} (max_queue_size={max_queue_size}), \
+                         dropping task: {task_to_queue}; consider increasing max_queue_size or reducing \
+                         probe frequency"
+                    );
                     return;
                 }
                 SubmitTaskResult::ChannelClosed => {
@@ -2887,49 +2894,70 @@ impl InputWorker {
         };
 
         // Execute task; probe tasks get a reserved provider handle, resolve tasks don't.
-        let res = if let Some(handle) = provider_handle.as_ref() {
-            if let Some(token) = &handle.cancel_token {
-                tokio::select! {
-                    biased;
+        // Wrap every execution path in a per-task timeout so a stalled probe cannot block
+        // the worker indefinitely, starving all subsequent tasks for this input.
+        let task_timeout = Duration::from_secs(PROBE_TASK_TIMEOUT_SECS);
+        let timed_exec = tokio::time::timeout(
+            task_timeout,
+            async {
+                if let Some(handle) = provider_handle.as_ref() {
+                    if let Some(token) = &handle.cancel_token {
+                        tokio::select! {
+                            biased;
 
-                    () = token.cancelled() => {
-                        debug_if_enabled!("Metadata update task preempted by user request for input {}", input_name);
-                        Err(shared::error::info_err!("{}", TASK_ERR_PREEMPTED))
-                    }
+                            () = token.cancelled() => {
+                                debug_if_enabled!("Metadata update task preempted by user request for input {}", input_name);
+                                Err(shared::error::info_err!("{}", TASK_ERR_PREEMPTED))
+                            }
 
-                    res = Self::execute_task_inner_static(&app_state, &client, &input_to_use, task, item_title.as_deref(), Some(handle), probe_priority, collector, db_handles, failed_clusters) => {
-                        res
+                            res = Self::execute_task_inner_static(&app_state, &client, &input_to_use, task, item_title.as_deref(), Some(handle), probe_priority, collector, db_handles, failed_clusters) => {
+                                res
+                            }
+                        }
+                    } else {
+                        Self::execute_task_inner_static(
+                            &app_state,
+                            &client,
+                            &input_to_use,
+                            task,
+                            item_title.as_deref(),
+                            Some(handle),
+                            probe_priority,
+                            collector,
+                            db_handles,
+                            failed_clusters,
+                        )
+                        .await
                     }
+                } else {
+                    Self::execute_task_inner_static(
+                        &app_state,
+                        &client,
+                        &input_to_use,
+                        task,
+                        item_title.as_deref(),
+                        None,
+                        probe_priority,
+                        collector,
+                        db_handles,
+                        failed_clusters,
+                    )
+                    .await
                 }
-            } else {
-                Self::execute_task_inner_static(
-                    &app_state,
-                    &client,
-                    &input_to_use,
-                    task,
-                    item_title.as_deref(),
-                    Some(handle),
-                    probe_priority,
-                    collector,
-                    db_handles,
-                    failed_clusters,
-                )
-                .await
+            },
+        )
+        .await;
+        let res = match timed_exec {
+            Ok(result) => result,
+            Err(_elapsed) => {
+                error!(
+                    "Metadata task timed out after {PROBE_TASK_TIMEOUT_SECS}s for input {input_name}: {task}; \
+                     releasing provider handle and skipping task"
+                );
+                Err(shared::error::info_err!(
+                    "Task timed out after {PROBE_TASK_TIMEOUT_SECS}s for input {input_name}: {task}"
+                ))
             }
-        } else {
-            Self::execute_task_inner_static(
-                &app_state,
-                &client,
-                &input_to_use,
-                task,
-                item_title.as_deref(),
-                None,
-                probe_priority,
-                collector,
-                db_handles,
-                failed_clusters,
-            )
-            .await
         };
 
         if provider_handle.is_some() {

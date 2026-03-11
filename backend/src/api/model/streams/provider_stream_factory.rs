@@ -65,7 +65,7 @@ pub struct ProviderStreamFactoryOptions {
     url: Url,
     headers: HeaderMap,
     default_user_agent: Option<axum::http::header::HeaderValue>,
-    range_bytes: Arc<Option<AtomicUsize>>,
+    range_bytes: Option<Arc<AtomicUsize>>,
     reconnect_flag: CancellationToken,
     provider: Option<Arc<ConfigProvider>>,
 }
@@ -101,9 +101,9 @@ impl ProviderStreamFactoryOptions {
 
         let url = stream_url.clone();
         let range_bytes = if matches!(item_type, PlaylistItemType::Live | PlaylistItemType::LiveUnknown) {
-            Arc::new(requested_range.map(AtomicUsize::new))
+            requested_range.map(|v| Arc::new(AtomicUsize::new(v)))
         } else {
-            Arc::new(Some(AtomicUsize::new(requested_range.unwrap_or(0))))
+            Some(Arc::new(AtomicUsize::new(requested_range.unwrap_or(0))))
         };
         let mut flags = ProviderStreamFactoryFlagsSet::new();
         if stream_options.stream_retry {
@@ -169,15 +169,11 @@ impl ProviderStreamFactoryOptions {
 
     #[inline]
     pub fn get_total_bytes_send(&self) -> Option<usize> {
-        self.range_bytes.as_ref().as_ref().map(|atomic| atomic.load(Ordering::Acquire))
+        self.range_bytes.as_ref().map(|atomic| atomic.load(Ordering::Acquire))
     }
 
-    // pub fn get_range_bytes(&self) -> &Arc<Option<AtomicUsize>> {
-    //     &self.range_bytes
-    // }
-
     #[inline]
-    pub fn get_range_bytes_clone(&self) -> Arc<Option<AtomicUsize>> { Arc::clone(&self.range_bytes) }
+    pub fn get_range_bytes_clone(&self) -> Option<Arc<AtomicUsize>> { self.range_bytes.clone() }
 
     #[inline]
     pub fn should_continue(&self) -> bool { !self.reconnect_flag.is_cancelled() }
@@ -620,7 +616,25 @@ pub async fn create_provider_stream(
                             None
                         } else {
                             match get_provider_stream(&app_state_clone, &client, &stream_opts).await {
-                                Ok(Some((stream, _info))) => Some((stream, ())),
+                                Ok(Some((stream, info))) => {
+                                    // If we reconnected with a byte offset and the provider responded
+                                    // 200 OK instead of 206 Partial Content, the stream would restart
+                                    // from byte 0, producing a corrupt video.  Cancel the reconnect
+                                    // to avoid silently delivering corrupt data to the client.
+                                    if let Some((_, status, _, _)) = &info {
+                                        let current_pos = stream_opts.get_total_bytes_send().unwrap_or(0);
+                                        if current_pos > 0 && *status != StatusCode::PARTIAL_CONTENT {
+                                            warn!(
+                                                "Reconnect aborted: provider ignored Range request \
+                                                 (responded {status} instead of 206). URL: {}",
+                                                sanitize_sensitive_info(stream_opts.get_log_url().as_ref())
+                                            );
+                                            continue_streaming.cancel();
+                                            return None;
+                                        }
+                                    }
+                                    Some((stream, ()))
+                                }
                                 Ok(None) => {
                                     app_state_clone
                                         .connection_manager

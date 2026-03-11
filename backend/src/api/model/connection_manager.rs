@@ -91,13 +91,16 @@ impl ConnectionManager {
                         }
                     }
                     CleanupEvent::ReleaseStreamAndProviderHandle { addr, handle } => {
+                        // Release provider handle first to avoid a race window where the user
+                        // connection count drops (making capacity appear available) before the
+                        // provider slot is actually freed.
+                        if let Some(h) = handle {
+                            provider_manager.release_handle(&h).await;
+                        }
                         if user_manager.release_stream(&addr).await {
                             event_manager.send_event(EventMessage::ActiveUser(
                                 ActiveUserConnectionChange::Disconnected(addr),
                             ));
-                        }
-                        if let Some(h) = handle {
-                            provider_manager.release_handle(&h).await;
                         }
                     }
                     CleanupEvent::UpdateDetailAndReleaseProvider { addr, video_type, handle } => {

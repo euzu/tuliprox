@@ -6,7 +6,7 @@ use crate::{
     model::{AppConfig, ConfigInput, GracePeriodOptions},
     utils::debug_if_enabled,
 };
-use log::error;
+use log::{error, warn};
 use shared::utils::sanitize_sensitive_info;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -29,7 +29,11 @@ pub type ClientConnectionId = SocketAddr;
 type AllocationId = u64;
 type SharedConnectionId = AllocationId;
 // Key for BTreeMap priority index: (priority, Reverse<created_at>, AllocationId)
-// .last() = highest priority value = lowest importance = best eviction victim
+// Semantics: lower numeric priority value = higher importance (0 = highest, 127 = lowest).
+// `.last()` on the BTreeMap returns the entry with the highest priority value, which is
+// the lowest-importance connection and therefore the best eviction victim.
+// Ties are broken by `Reverse<Instant>`: among equal priority values, the oldest connection
+// (smallest `created_at`) sorts last and is evicted first.
 type PriorityKey = (i8, Reverse<Instant>, AllocationId);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -420,6 +424,10 @@ impl ActiveProviderManager {
                             token.cancel();
                         });
                     } else {
+                        warn!(
+                            "Preemption grace semaphore exhausted ({PREEMPTED_GRACE_MAX_PENDING} tasks pending); \
+                             falling back to immediate cancellation for preempted probe"
+                        );
                         token.cancel();
                     }
                 } else {
@@ -528,6 +536,12 @@ impl ActiveProviderManager {
                     // stream may continue after allocation counters were already released.
                     if let Some(ssm) = self.shared_stream_manager.get() {
                         ssm.teardown_preempted_stream(&stream_url).await;
+                    } else {
+                        error!(
+                            "SharedStreamManager not initialised during preemption teardown for {}; \
+                             shared stream may linger after allocation release",
+                            sanitize_sensitive_info(&stream_url)
+                        );
                     }
                 }
                 PriorityOwner::Single(addr) => {
@@ -590,6 +604,10 @@ impl ActiveProviderManager {
                                 token.cancel();
                             });
                         } else {
+                            warn!(
+                                "Preemption grace semaphore exhausted ({PREEMPTED_GRACE_MAX_PENDING} tasks pending); \
+                                 falling back to immediate cancellation for preempted probe"
+                            );
                             token.cancel();
                         }
                     } else {

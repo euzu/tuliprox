@@ -269,7 +269,11 @@ impl ActiveUserManager {
         if self.grace_period_millis.load(Ordering::Relaxed) > 0
             && current_connections == connection_data.max_connections
         {
-            // Allow a grace period once
+            // Intentional asymmetry: grace is granted when current == max (AT limit), while
+            // Exhausted is returned when current > max (OVER limit after the grace window).
+            // This allows exactly one extra connection during the grace window — the new
+            // connection is accepted now, and a background check evicts it if the count is
+            // still over max after the grace period elapses.
             connection_data.granted_grace = true;
             connection_data.grace_ts = now;
             debug!("Granted a grace period for user access: {username}");
