@@ -262,7 +262,9 @@ fn cancel_all_service_tokens(app_state: &Arc<AppState>) {
     cancel_tokens.hdhomerun.cancel();
     cancel_tokens.file_watch.cancel();
     cancel_tokens.provider_dns.cancel();
-    cancel_tokens.metadata.cancel();
+    // Use the manager's shutdown() rather than cancelling the token directly so
+    // the is_shutdown flag is set and workers do not attempt to restart after cancellation.
+    app_state.metadata_manager.shutdown();
 }
 
 fn exec_update_on_boot(client: &reqwest::Client, app_state: &Arc<AppState>, targets: &Arc<ProcessTargets>) -> bool {

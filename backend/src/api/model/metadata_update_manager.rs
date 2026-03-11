@@ -2894,40 +2894,25 @@ impl InputWorker {
         };
 
         // Execute task; probe tasks get a reserved provider handle, resolve tasks don't.
-        // Wrap every execution path in a per-task timeout so a stalled probe cannot block
-        // the worker indefinitely, starving all subsequent tasks for this input.
-        let task_timeout = Duration::from_secs(PROBE_TASK_TIMEOUT_SECS);
-        let timed_exec = tokio::time::timeout(
-            task_timeout,
-            async {
-                if let Some(handle) = provider_handle.as_ref() {
-                    if let Some(token) = &handle.cancel_token {
-                        tokio::select! {
-                            biased;
+        // The hard timeout is applied only to tasks that perform network probing — Probe*
+        // variants and Resolve tasks whose reason includes ResolveReason::Probe — because
+        // those are the only ones that can stall on an unresponsive provider.  Pure metadata
+        // resolve tasks (Info / TMDB / Date only) run without a timeout so they are not
+        // subject to the probe hard limit.
+        let exec_fut = async {
+            if let Some(handle) = provider_handle.as_ref() {
+                if let Some(token) = &handle.cancel_token {
+                    tokio::select! {
+                        biased;
 
-                            () = token.cancelled() => {
-                                debug_if_enabled!("Metadata update task preempted by user request for input {}", input_name);
-                                Err(shared::error::info_err!("{}", TASK_ERR_PREEMPTED))
-                            }
-
-                            res = Self::execute_task_inner_static(&app_state, &client, &input_to_use, task, item_title.as_deref(), Some(handle), probe_priority, collector, db_handles, failed_clusters) => {
-                                res
-                            }
+                        () = token.cancelled() => {
+                            debug_if_enabled!("Metadata update task preempted by user request for input {}", input_name);
+                            Err(shared::error::info_err!("{}", TASK_ERR_PREEMPTED))
                         }
-                    } else {
-                        Self::execute_task_inner_static(
-                            &app_state,
-                            &client,
-                            &input_to_use,
-                            task,
-                            item_title.as_deref(),
-                            Some(handle),
-                            probe_priority,
-                            collector,
-                            db_handles,
-                            failed_clusters,
-                        )
-                        .await
+
+                        res = Self::execute_task_inner_static(&app_state, &client, &input_to_use, task, item_title.as_deref(), Some(handle), probe_priority, collector, db_handles, failed_clusters) => {
+                            res
+                        }
                     }
                 } else {
                     Self::execute_task_inner_static(
@@ -2936,7 +2921,7 @@ impl InputWorker {
                         &input_to_use,
                         task,
                         item_title.as_deref(),
-                        None,
+                        Some(handle),
                         probe_priority,
                         collector,
                         db_handles,
@@ -2944,20 +2929,39 @@ impl InputWorker {
                     )
                     .await
                 }
-            },
-        )
-        .await;
-        let res = match timed_exec {
-            Ok(result) => result,
-            Err(_elapsed) => {
-                error!(
-                    "Metadata task timed out after {PROBE_TASK_TIMEOUT_SECS}s for input {input_name}: {task}; \
-                     releasing provider handle and skipping task"
-                );
-                Err(shared::error::info_err!(
-                    "Task timed out after {PROBE_TASK_TIMEOUT_SECS}s for input {input_name}: {task}"
-                ))
+            } else {
+                Self::execute_task_inner_static(
+                    &app_state,
+                    &client,
+                    &input_to_use,
+                    task,
+                    item_title.as_deref(),
+                    None,
+                    probe_priority,
+                    collector,
+                    db_handles,
+                    failed_clusters,
+                )
+                .await
             }
+        };
+        let needs_probe_timeout = Self::is_probe_task(task)
+            || (Self::is_resolve_task(task) && Self::task_reason(task).contains(ResolveReason::Probe));
+        let res = if needs_probe_timeout {
+            match tokio::time::timeout(Duration::from_secs(PROBE_TASK_TIMEOUT_SECS), exec_fut).await {
+                Ok(result) => result,
+                Err(_elapsed) => {
+                    error!(
+                        "Metadata probe task timed out after {PROBE_TASK_TIMEOUT_SECS}s for input {input_name}: {task}; \
+                         releasing provider handle and skipping task"
+                    );
+                    Err(shared::error::info_err!(
+                        "Task timed out after {PROBE_TASK_TIMEOUT_SECS}s for input {input_name}: {task}"
+                    ))
+                }
+            }
+        } else {
+            exec_fut.await
         };
 
         if provider_handle.is_some() {

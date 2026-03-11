@@ -75,7 +75,11 @@ impl<'de> Deserialize<'de> for CustomVideoStreamType {
 fn prepare_video_headers(headers: &[(String, String)]) -> Vec<(String, String)> {
     let mut h: Vec<(String, String)> = headers
         .iter()
-        .filter(|(key, _)| !(key.eq("content-type") || key.eq("content-length") || key.contains("range")))
+        .filter(|(key, _)| {
+            !(key.eq_ignore_ascii_case("content-type")
+                || key.eq_ignore_ascii_case("content-length")
+                || key.eq_ignore_ascii_case("range"))
+        })
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
     h.push(("content-type".to_string(), "video/mp2t".to_string()));

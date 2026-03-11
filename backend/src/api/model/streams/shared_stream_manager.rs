@@ -575,6 +575,13 @@ impl SharedStreamManager {
                 return;
             };
 
+            // Remove the addr → url mapping eagerly so key_by_addr does not leak when
+            // other subscribers are still active (unregister only runs when is_empty).
+            {
+                let mut shared_streams = self.shared_streams.write().await;
+                shared_streams.key_by_addr.remove(addr);
+            }
+
             debug_if_enabled!(
                 "Shared stream subscriber removed {}; remaining subscribers={remaining}",
                 sanitize_sensitive_info(&addr.to_string())
