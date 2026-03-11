@@ -2,8 +2,9 @@ use crate::{
     api::{
         api_utils::{try_unwrap_body, HeaderFilter},
         model::{
-            stream::ProviderStreamResponse, AppState, CleanupEvent, CustomVideoStream, ProvisioningStream,
-            ThrottledStream, TransportStreamBuffer,
+            stream::{BoxedProviderStream, ProviderStreamResponse},
+            AppState, CleanupEvent, CustomVideoStream, ProvisioningStream, ThrottledStream, TimedClientStream,
+            TransportStreamBuffer,
         },
     },
     model::AppConfig,
@@ -81,7 +82,21 @@ fn prepare_video_headers(headers: &[(String, String)]) -> Vec<(String, String)> 
     h
 }
 
+fn get_custom_stream_response_timeout_secs(cfg: &AppConfig) -> u32 {
+    cfg.config.load().custom_stream_response_timeout_secs
+}
+
+fn apply_custom_stream_timeout(cfg: &AppConfig, stream: BoxedProviderStream) -> BoxedProviderStream {
+    let timeout_secs = get_custom_stream_response_timeout_secs(cfg);
+    if timeout_secs == 0 {
+        stream
+    } else {
+        Box::pin(TimedClientStream::new_without_kick(stream, timeout_secs))
+    }
+}
+
 fn create_video_stream(
+    cfg: &AppConfig,
     stream_type: CustomVideoStreamType,
     video_buffer: Option<&TransportStreamBuffer>,
     headers: &[(String, String)],
@@ -89,8 +104,10 @@ fn create_video_stream(
 ) -> ProviderStreamResponse {
     if let Some(video) = video_buffer {
         trace!("{log_message}");
+        let stream =
+            apply_custom_stream_timeout(cfg, Box::pin(ThrottledStream::new(CustomVideoStream::new(video.clone()), 8000)));
         (
-            Some(Box::pin(ThrottledStream::new(CustomVideoStream::new(video.clone()), 8000))),
+            Some(stream),
             Some((prepare_video_headers(headers), StatusCode::OK, None, Some(stream_type))),
         )
     } else {
@@ -106,6 +123,7 @@ pub fn create_channel_unavailable_stream(
     let custom_stream_response = cfg.custom_stream_response.load();
     let video = custom_stream_response.as_ref().and_then(|c| c.channel_unavailable.as_ref());
     create_video_stream(
+        cfg,
         CustomVideoStreamType::ChannelUnavailable,
         video,
         headers,
@@ -120,6 +138,7 @@ pub fn create_user_connections_exhausted_stream(
     let custom_stream_response = cfg.custom_stream_response.load();
     let video = custom_stream_response.as_ref().and_then(|c| c.user_connections_exhausted.as_ref());
     create_video_stream(
+        cfg,
         CustomVideoStreamType::UserConnectionsExhausted,
         video,
         headers,
@@ -134,6 +153,7 @@ pub fn create_provider_connections_exhausted_stream(
     let custom_stream_response = cfg.custom_stream_response.load();
     let video = custom_stream_response.as_ref().and_then(|c| c.provider_connections_exhausted.as_ref());
     create_video_stream(
+        cfg,
         CustomVideoStreamType::ProviderConnectionsExhausted,
         video,
         headers,
@@ -145,6 +165,7 @@ pub fn create_user_account_expired_stream(cfg: &AppConfig, headers: &[(String, S
     let custom_stream_response = cfg.custom_stream_response.load();
     let video = custom_stream_response.as_ref().and_then(|c| c.user_account_expired.as_ref());
     create_video_stream(
+        cfg,
         CustomVideoStreamType::UserAccountExpired,
         video,
         headers,
@@ -156,6 +177,7 @@ pub fn create_panel_api_provisioning_stream(cfg: &AppConfig, headers: &[(String,
     let custom_stream_response = cfg.custom_stream_response.load();
     let video = custom_stream_response.as_ref().and_then(|c| c.panel_api_provisioning.as_ref());
     create_video_stream(
+        cfg,
         CustomVideoStreamType::Provisioning,
         video,
         headers,
@@ -173,8 +195,9 @@ pub fn create_panel_api_provisioning_stream_with_stop(
     if let Some(video) = video {
         trace!("Streaming response panel api provisioning");
         let stream = ProvisioningStream::new(video.clone(), stop_signal);
+        let stream = apply_custom_stream_timeout(cfg, Box::pin(ThrottledStream::new(stream, 8000)));
         (
-            Some(Box::pin(ThrottledStream::new(stream, 8000))),
+            Some(stream),
             Some((prepare_video_headers(headers), StatusCode::OK, None, Some(CustomVideoStreamType::Provisioning))),
         )
     } else {

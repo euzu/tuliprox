@@ -166,6 +166,9 @@ active URL of the specified provider.
   item now stores retry/cooldown state for `resolve`, `probe`, and `tmdb`.
 - **TMDB No-Match Cooldown**: Added explicit TMDB cooldown handling. When TMDB resolve completes successfully but returns no match, TMDB reasons are
   suppressed for that item during cooldown to prevent endless requeue loops.
+- **Custom Stream Response Timeout**: Added support to limit how long custom fallback stream responses are served.
+  Set `config.custom_stream_response_timeout_secs` to a value `> 0` to auto-stop these streams after N seconds.
+  If unset or `0`, custom responses are streamed without timeout.
 
 ## ⚙️ New Settings
 
@@ -173,6 +176,8 @@ active URL of the specified provider.
   - Added `priority` (`i8`, default `0`) to user credentials. Lower value = higher priority (nice-style).
     Configurable via Web UI user editor. Negative values are valid and represent higher-than-default priority.
 - **config.yml**:
+  - Added `custom_stream_response_timeout_secs` (`u32`, default `0`): maximum duration in seconds for custom stream response videos.
+    `0` disables the timeout and keeps existing behavior.
   - Added `metadata_update.probe.user_priority` (`i8`, default `127`): priority assigned to probe connections.
     Probe tasks run at the lowest priority by default; reduce this value to give probes more connection access.
   - Added `metadata_update` (optional) with grouped sections: `log`, `resolve`, `probe`, `ffprobe`, `tmdb`.

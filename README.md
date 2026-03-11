@@ -131,6 +131,8 @@ Top level entries in the config files are:
 - `user_access_control` _optional_
 - `connect_timeout_secs`: _optional_ and used for provider requests connection timeout, for only the connect phase.
 - `custom_stream_response_path` _optional_
+- `custom_stream_response_timeout_secs` _optional_, max duration in seconds for serving custom stream response videos.
+  If unset or `0`, custom stream responses are served without timeout.
 - `hdhomerun` _optional_
 - `proxy` _optional_
 - `ipcheck` _optional_
@@ -1078,6 +1080,16 @@ and add it to the `config.yml`.
 
 ```yaml
 custom_stream_response_path: /home/tuliprox/resources
+```
+
+Optional timeout for custom stream responses:
+
+- `custom_stream_response_timeout_secs`: if set to `> 0`, custom response videos are stopped after the given number of seconds.
+- If unset or set to `0`, custom response videos are served as-is (no timeout).
+
+```yaml
+custom_stream_response_path: /home/tuliprox/resources
+custom_stream_response_timeout_secs: 20
 ```
 
 ### 1.15 `user_config_dir`

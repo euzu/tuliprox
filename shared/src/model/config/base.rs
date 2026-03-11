@@ -12,7 +12,7 @@ use crate::{
         is_blank_or_default_backup_dir, is_blank_or_default_custom_stream_response_path,
         is_blank_or_default_mapping_path, is_blank_or_default_storage_dir, is_blank_or_default_template_path,
         is_blank_or_default_user_config_dir, is_default_connect_timeout_secs, is_false,
-        is_none_or_empty_metadata_update, is_none_or_empty_video, normalize_optional_config_file_path,
+        is_none_or_empty_metadata_update, is_none_or_empty_video, is_zero_u32, normalize_optional_config_file_path,
         normalize_optional_dir, DEFAULT_BACKUP_DIR, DEFAULT_CUSTOM_STREAM_RESPONSE_PATH, DEFAULT_STORAGE_DIR,
         DEFAULT_USER_CONFIG_DIR, MAPPING_FILE, TEMPLATE_FILE,
     },
@@ -42,6 +42,8 @@ pub struct ConfigDto {
         skip_serializing_if = "is_blank_or_default_custom_stream_response_path"
     )]
     pub custom_stream_response_path: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub custom_stream_response_timeout_secs: u32,
     #[serde(default, skip_serializing_if = "is_none_or_empty_video")]
     pub video: Option<VideoConfigDto>,
     #[serde(default, skip_serializing_if = "is_none_or_empty_metadata_update")]
@@ -92,6 +94,7 @@ impl Default for ConfigDto {
             mapping_path: None,
             template_path: None,
             custom_stream_response_path: None,
+            custom_stream_response_timeout_secs: 0,
             video: None,
             metadata_update: None,
             schedules: None,
@@ -134,6 +137,8 @@ pub struct MainConfigDto {
     pub template_path: Option<String>,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub custom_stream_response_path: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub custom_stream_response_timeout_secs: u32,
     #[serde(default, skip_serializing_if = "is_false")]
     pub user_access_control: bool,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -162,6 +167,7 @@ impl Default for MainConfigDto {
             mapping_path: default_main_mapping_path(),
             template_path: default_main_template_path(),
             custom_stream_response_path: None,
+            custom_stream_response_timeout_secs: 0,
             user_access_control: false,
             connect_timeout_secs: default_connect_timeout_secs(),
             sleep_timer_mins: None,
@@ -184,6 +190,7 @@ impl From<&ConfigDto> for MainConfigDto {
             mapping_path: config.mapping_path.clone(),
             template_path: config.template_path.clone(),
             custom_stream_response_path: config.custom_stream_response_path.clone(),
+            custom_stream_response_timeout_secs: config.custom_stream_response_timeout_secs,
             user_access_control: config.user_access_control,
             connect_timeout_secs: config.connect_timeout_secs,
             sleep_timer_mins: config.sleep_timer_mins,
@@ -357,6 +364,7 @@ impl ConfigDto {
         self.template_path = normalize_optional_config_file_path(&main_config.template_path, TEMPLATE_FILE);
         self.custom_stream_response_path =
             normalize_optional_dir(&main_config.custom_stream_response_path, DEFAULT_CUSTOM_STREAM_RESPONSE_PATH);
+        self.custom_stream_response_timeout_secs = main_config.custom_stream_response_timeout_secs;
         self.user_access_control = main_config.user_access_control;
         self.connect_timeout_secs = main_config.connect_timeout_secs;
         self.sleep_timer_mins = main_config.sleep_timer_mins;
