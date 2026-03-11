@@ -7,13 +7,13 @@ rust-version = "1.89.0"
 [dependencies]
 shared = { version = "3.2.130", path = "../shared" }
 chrono = "0.4.44"
-yew = "0.23.0"
-yew-router = "0.20.0"
+yew = "0.22.1"
+yew-router = "0.19.0"
 yew-hooks = "0.5.0"
 i18nrs = "0.1.9"
 serde_json = {version = "1.0.149" }
 serde = {version = "1.0.228", features = ["derive", "rc"] }
-wasm-bindgen = {version = "0.2.112", features = ["serde-serialize"]}
+wasm-bindgen = {version = "0.2.114", features = ["serde-serialize"]}
 #anyhow = "1.0.102"
 thiserror = "2.0.18"
 reqwasm = {version = "0.5", features = ["json"]}
@@ -27,8 +27,8 @@ gloo-timers = { version = "0", features = ["futures"] }
 futures-signals = "0.3.34"
 futures = "0.3.32"
 prost = "0.14.3"
-wasm-bindgen-futures = "0.4.62"
-js-sys = "0.3.89"
+wasm-bindgen-futures = "0.4.64"
+js-sys = "0.3.91"
 bytes = "1.11.1"
 regex = "1.12.3"
 base64 = "0.22.1"
@@ -37,7 +37,7 @@ fastrand = "2.3.0"
 indexmap = "2.13.0"
 
 [dependencies.web-sys]
-version = "0.3.89"
+version = "0.3.91"
 features = ["Document", "Element", "Node", "Window", "HtmlCollection", "HtmlImageElement", "HtmlInputElement",
     "DomRect", "HtmlDialogElement", "CssStyleDeclaration",
     "Event", "MutationObserver", "MutationObserverInit",
@@ -45,5 +45,5 @@ features = ["Document", "Element", "Node", "Window", "HtmlCollection", "HtmlImag
     "HtmlCanvasElement"]
 
 [dev-dependencies]
-wasm-bindgen-test = "0.3.62"
+wasm-bindgen-test = "0.3.64"
 gloo-utils = "0.2.0"
