@@ -14,7 +14,6 @@ use crate::{
         csv_patch_batch_append, csv_patch_batch_remove_expired, csv_patch_batch_sort_by_exp_date,
         csv_patch_batch_update_credentials, csv_patch_batch_update_exp_date, get_csv_file_path,
     },
-    tools::atomic_once_flag::AtomicOnceFlag,
     utils::{debug_if_enabled, format_http_status, persist_source_config, read_sources_file_from_path},
 };
 use axum::http::{Method, StatusCode};
@@ -45,6 +44,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+use tokio_util::sync::CancellationToken;
 use url::Url;
 
 #[derive(Debug, Clone)]
@@ -3479,16 +3479,20 @@ async fn wait_for_panel_api_account_ready(
 pub(crate) async fn run_panel_api_provisioning_probe(
     app_state: Arc<AppState>,
     input: ConfigInput,
-    stop_signal: Arc<AtomicOnceFlag>,
+    stop_signal: CancellationToken,
     addr: SocketAddr,
     virtual_id: VirtualId,
 ) -> Result<(), TuliproxError> {
+    if stop_signal.is_cancelled() {
+        return Ok(());
+    }
+
     let Some(panel_cfg) = input.panel_api.as_ref() else {
         debug_if_enabled!(
             "panel_api provisioning probe skipped (missing config) for input {}",
             sanitize_sensitive_info(&input.name)
         );
-        stop_signal.notify();
+        stop_signal.cancel();
         let _ = app_state.connection_manager.kick_connection(&addr, virtual_id, 0).await;
         return Ok(());
     };
@@ -3497,7 +3501,7 @@ pub(crate) async fn run_panel_api_provisioning_probe(
             "panel_api provisioning probe skipped (panel_api.enabled false) for input {}",
             sanitize_sensitive_info(&input.name)
         );
-        stop_signal.notify();
+        stop_signal.cancel();
         let _ = app_state.connection_manager.kick_connection(&addr, virtual_id, 0).await;
         return Ok(());
     }
@@ -3506,7 +3510,7 @@ pub(crate) async fn run_panel_api_provisioning_probe(
             "panel_api provisioning probe skipped (panel_api.url empty) for input {}",
             sanitize_sensitive_info(&input.name)
         );
-        stop_signal.notify();
+        stop_signal.cancel();
         let _ = app_state.connection_manager.kick_connection(&addr, virtual_id, 0).await;
         return Ok(());
     }
@@ -3524,7 +3528,10 @@ pub(crate) async fn run_panel_api_provisioning_probe(
     );
 
     let deadline = Instant::now() + Duration::from_secs(max_wait_secs);
-    let outcome = try_provision_account_on_exhausted(&app_state, &input).await;
+    let outcome = tokio::select! {
+        () = stop_signal.cancelled() => return Ok(()),
+        outcome = try_provision_account_on_exhausted(&app_state, &input) => outcome,
+    };
     let credentials = outcome.as_ref().map(PanelApiProvisionOutcome::credentials);
 
     if let Some(outcome) = outcome.as_ref() {
@@ -3542,13 +3549,16 @@ pub(crate) async fn run_panel_api_provisioning_probe(
 
     let Some((username, password)) = credentials else {
         if max_wait_secs > 0 {
-            tokio::time::sleep(Duration::from_secs(max_wait_secs)).await;
+            tokio::select! {
+                () = stop_signal.cancelled() => return Ok(()),
+                () = tokio::time::sleep(Duration::from_secs(max_wait_secs)) => {}
+            }
         }
         debug_if_enabled!(
             "panel_api provisioning probe timeout reached for input {} (no credentials)",
             sanitize_sensitive_info(&input.name)
         );
-        stop_signal.notify();
+        stop_signal.cancel();
         debug_if_enabled!(
             "panel_api provisioning closing client connection for input {} addr={}",
             sanitize_sensitive_info(&input.name),
@@ -3562,13 +3572,16 @@ pub(crate) async fn run_panel_api_provisioning_probe(
 
     let Some(test_url) = build_panel_api_test_url(&resolved_url, username, password) else {
         if max_wait_secs > 0 {
-            tokio::time::sleep(Duration::from_secs(max_wait_secs)).await;
+            tokio::select! {
+                () = stop_signal.cancelled() => return Ok(()),
+                () = tokio::time::sleep(Duration::from_secs(max_wait_secs)) => {}
+            }
         }
         debug_if_enabled!(
             "panel_api provisioning probe failed to build test url for input {}",
             sanitize_sensitive_info(&input.name)
         );
-        stop_signal.notify();
+        stop_signal.cancel();
         let _ = app_state.connection_manager.kick_connection(&addr, virtual_id, 0).await;
         return Ok(());
     };
@@ -3579,7 +3592,11 @@ pub(crate) async fn run_panel_api_provisioning_probe(
     while Instant::now() < deadline {
         attempt += 1;
         debug_if_enabled!("panel_api provisioning probe attempt {}", attempt);
-        match probe_panel_api_test_url(&app_state, &test_url, probe_method).await {
+        let probe_result = tokio::select! {
+            () = stop_signal.cancelled() => return Ok(()),
+            probe_result = probe_panel_api_test_url(&app_state, &test_url, probe_method) => probe_result,
+        };
+        match probe_result {
             Ok(status) => {
                 debug_if_enabled!(
                     "panel_api provisioning probe status: '{}' url: {}",
@@ -3612,7 +3629,10 @@ pub(crate) async fn run_panel_api_provisioning_probe(
         }
         let remaining = deadline.checked_duration_since(now).unwrap_or_default();
         let sleep_for = if remaining < probe_delay { remaining } else { probe_delay };
-        tokio::time::sleep(sleep_for).await;
+        tokio::select! {
+            () = stop_signal.cancelled() => return Ok(()),
+            () = tokio::time::sleep(sleep_for) => {}
+        }
     }
 
     if ready {
@@ -3628,7 +3648,10 @@ pub(crate) async fn run_panel_api_provisioning_probe(
             attempt
         );
     }
-    stop_signal.notify();
+    if stop_signal.is_cancelled() {
+        return Ok(());
+    }
+    stop_signal.cancel();
     debug_if_enabled!(
         "panel_api provisioning closing client connection for input {} addr={}",
         sanitize_sensitive_info(&input.name),
@@ -3646,10 +3669,13 @@ pub fn create_panel_api_provisioning_stream_details(
     addr: SocketAddr,
     virtual_id: VirtualId,
 ) -> StreamDetails {
-    let stop_signal = Arc::new(AtomicOnceFlag::new());
+    let stop_signal = CancellationToken::new();
     let headers = [("connection".to_string(), "close".to_string())];
-    let (stream, stream_info) =
-        create_panel_api_provisioning_stream_with_stop(&app_state.app_config, &headers, Arc::clone(&stop_signal));
+    let (stream, stream_info) = create_panel_api_provisioning_stream_with_stop(
+        &app_state.app_config,
+        &headers,
+        stop_signal.clone(),
+    );
 
     if stream.is_none() {
         debug_if_enabled!(
@@ -3663,6 +3689,7 @@ pub fn create_panel_api_provisioning_stream_details(
             provider_name,
             request_url: None,
             grace_period: *grace_period_options,
+            provider_grace_active: false,
             disable_provider_grace: true,
             reconnect_flag: None,
             provider_handle: None,
@@ -3671,7 +3698,7 @@ pub fn create_panel_api_provisioning_stream_details(
 
     let app_state_clone = Arc::clone(app_state);
     let input_clone = input.clone();
-    let stop_clone = Arc::clone(&stop_signal);
+    let stop_clone = stop_signal.clone();
     tokio::spawn(async move {
         if let Err(err) =
             run_panel_api_provisioning_probe(app_state_clone, input_clone, stop_clone, addr, virtual_id).await
@@ -3686,6 +3713,7 @@ pub fn create_panel_api_provisioning_stream_details(
         provider_name,
         request_url: None,
         grace_period: *grace_period_options,
+        provider_grace_active: false,
         disable_provider_grace: true,
         reconnect_flag: None,
         provider_handle: None,

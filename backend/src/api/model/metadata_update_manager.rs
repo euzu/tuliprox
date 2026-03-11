@@ -12,6 +12,7 @@ use crate::{
     },
     utils::{debug_if_enabled, FileReadGuard},
 };
+use arc_swap::ArcSwap;
 use dashmap::{mapref::entry::Entry, DashMap};
 use log::{debug, error, info, warn};
 use parking_lot::Mutex as ParkingMutex;
@@ -44,6 +45,9 @@ const METADATA_RETRY_STATE_FILE: &str = "metadata_retry_state.db";
 const TASK_ERR_NO_CONNECTION: &str = "No connection available";
 const TASK_ERR_PREEMPTED: &str = "Task preempted";
 const TASK_ERR_UPDATE_IN_PROGRESS: &str = "Playlist update in progress";
+// Per-task execution timeout.  ffprobe defaults to 60 s; allow extra headroom for network
+// fetches, TMDB lookups, and B+Tree writes before declaring the task stuck.
+const PROBE_TASK_TIMEOUT_SECS: u64 = 30;
 const BLOCKING_DB_MIN_CONCURRENCY: usize = 4;
 const BLOCKING_DB_MAX_CONCURRENCY: usize = 32;
 const RETRY_STATE_PRUNE_INTERVAL_SECS: i64 = 300;
@@ -534,6 +538,10 @@ impl PendingTask {
 pub struct MetadataUpdateManager {
     /// Per-input worker senders. Worker is spawned when entry is created.
     workers: DashMap<Arc<str>, InputWorkerContext>,
+    /// Synchronizes cancellation token rotation with worker context creation.
+    worker_lifecycle_lock: ParkingMutex<()>,
+    /// Terminal shutdown flag; once set, token rotation must not reactivate workers.
+    is_shutdown_flag: AtomicBool,
     /// Global application state (weak reference to avoid cycles)
     app_state: tokio::sync::Mutex<Option<Weak<AppState>>>,
     /// Global gate:
@@ -542,13 +550,9 @@ pub struct MetadataUpdateManager {
     ///   This guarantees that no background task runs while an update is active.
     update_pause_gate: Arc<RwLock<()>>,
     /// Global cancellation token for shutdown
-    cancel_token: CancellationToken,
+    cancel_token: ArcSwap<CancellationToken>,
     /// Monotonic worker generation id used to avoid removing a newly spawned worker context.
     next_worker_id: AtomicU64,
-}
-
-impl Default for MetadataUpdateManager {
-    fn default() -> Self { Self::new(CancellationToken::new()) }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -559,14 +563,46 @@ enum SubmitTaskResult {
 }
 
 impl MetadataUpdateManager {
+
     pub fn new(cancel_token: CancellationToken) -> Self {
         Self {
             workers: DashMap::new(),
+            worker_lifecycle_lock: ParkingMutex::new(()),
+            is_shutdown_flag: AtomicBool::new(false),
             app_state: tokio::sync::Mutex::new(None),
             update_pause_gate: Arc::new(RwLock::new(())),
-            cancel_token,
+            cancel_token: ArcSwap::from_pointee(cancel_token),
             next_worker_id: AtomicU64::new(1),
         }
+    }
+
+    /// Requests graceful shutdown for all metadata workers and delayed requeue tasks.
+    /// This operation is idempotent.
+    pub fn shutdown(&self) {
+        let _guard = self.worker_lifecycle_lock.lock();
+        self.is_shutdown_flag.store(true, Ordering::Release);
+        self.cancel_token.load_full().cancel();
+    }
+
+    /// Returns true once shutdown has been requested.
+    pub fn is_shutdown(&self) -> bool { self.is_shutdown_flag.load(Ordering::Acquire) }
+
+    /// Rotates the cancellation token for metadata workers.
+    /// Existing workers are cancelled and removed so new tasks start with fresh runtime state.
+    pub fn rotate_cancel_token(&self, cancel_token: CancellationToken) {
+        let old_token = {
+            let _guard = self.worker_lifecycle_lock.lock();
+            if self.is_shutdown_flag.load(Ordering::Acquire) {
+                self.workers.clear();
+                cancel_token.cancel();
+                return;
+            }
+
+            let old_token = self.cancel_token.swap(Arc::new(cancel_token));
+            self.workers.clear();
+            old_token
+        };
+        old_token.cancel();
     }
 
     /// Acquire exclusive gate for a foreground playlist update.
@@ -613,50 +649,63 @@ impl MetadataUpdateManager {
         loop {
             // Atomically ensure there is exactly one worker context per input.
             let mut worker_to_spawn: Option<(u64, InputWorker)> = None;
-            let ctx = match self.workers.entry(input_name.clone()) {
-                Entry::Occupied(entry) => entry.get().clone(),
-                Entry::Vacant(entry) => {
-                    let (tx, rx) = mpsc::channel::<TaskKey>(max_queue_size);
-                    let pending_tasks = Arc::new(DashMap::new());
-                    let pending_task_count = Arc::new(AtomicUsize::new(0));
-                    let worker_id = self.next_worker_id.fetch_add(1, Ordering::Relaxed);
-
-                    let ctx = InputWorkerContext {
-                        worker_id,
-                        sender: tx.clone(),
-                        pending_tasks: pending_tasks.clone(),
-                        pending_task_count: pending_task_count.clone(),
-                    };
-                    entry.insert(ctx.clone());
-
-                    worker_to_spawn = Some((
-                        worker_id,
-                        InputWorker {
-                            input_name: input_name.clone(),
-                            sender: tx,
-                            receiver: rx,
-                            pending_tasks,
-                            pending_task_count,
-                            app_state_weak: app_state_weak.clone(),
-                            update_pause_gate: Arc::clone(&self.update_pause_gate),
-                            cancel_token: self.cancel_token.clone(),
-                            batch_buffer: BatchResultCollector::new(),
-                            db_handles: HashMap::new(),
-                            failed_clusters: HashSet::new(),
-                            retry_states: HashMap::new(),
-                            resolve_exhausted: HashMap::new(),
-                            last_cycle_completed_at_ts: None,
-                            metadata_retry_state_path: None,
-                            metadata_retry_loaded: false,
-                            metadata_retry_load_retry_at_ts: None,
-                            last_retry_state_prune_at_ts: None,
-                            scheduled_requeues: Arc::new(DashMap::new()),
-                            recently_completed_no_change: HashMap::new(),
-                        },
-                    ));
-
-                    ctx
+            let (cancel_token, ctx) = {
+                let _guard = self.worker_lifecycle_lock.lock();
+                let cancel_token = self.cancel_token.load_full();
+                if cancel_token.is_cancelled() {
+                    debug_if_enabled!(
+                        "Aborting metadata enqueue loop for input {input_name} because cancellation was requested: {task_to_queue}"
+                    );
+                    return;
                 }
+
+                let ctx = match self.workers.entry(input_name.clone()) {
+                    Entry::Occupied(entry) => entry.get().clone(),
+                    Entry::Vacant(entry) => {
+                        let (tx, rx) = mpsc::channel::<TaskKey>(max_queue_size);
+                        let pending_tasks = Arc::new(DashMap::new());
+                        let pending_task_count = Arc::new(AtomicUsize::new(0));
+                        let worker_id = self.next_worker_id.fetch_add(1, Ordering::Relaxed);
+
+                        let ctx = InputWorkerContext {
+                            worker_id,
+                            sender: tx.clone(),
+                            pending_tasks: pending_tasks.clone(),
+                            pending_task_count: pending_task_count.clone(),
+                        };
+                        entry.insert(ctx.clone());
+
+                        worker_to_spawn = Some((
+                            worker_id,
+                            InputWorker {
+                                input_name: input_name.clone(),
+                                sender: tx,
+                                receiver: rx,
+                                pending_tasks,
+                                pending_task_count,
+                                app_state_weak: app_state_weak.clone(),
+                                update_pause_gate: Arc::clone(&self.update_pause_gate),
+                                cancel_token: (*cancel_token).clone(),
+                                batch_buffer: BatchResultCollector::new(),
+                                db_handles: HashMap::new(),
+                                failed_clusters: HashSet::new(),
+                                retry_states: HashMap::new(),
+                                resolve_exhausted: HashMap::new(),
+                                last_cycle_completed_at_ts: None,
+                                metadata_retry_state_path: None,
+                                metadata_retry_loaded: false,
+                                metadata_retry_load_retry_at_ts: None,
+                                last_retry_state_prune_at_ts: None,
+                                scheduled_requeues: Arc::new(DashMap::new()),
+                                recently_completed_no_change: HashMap::new(),
+                            },
+                        ));
+
+                        ctx
+                    }
+                };
+
+                (cancel_token, ctx)
             };
 
             if let Some((worker_id, worker)) = worker_to_spawn {
@@ -674,6 +723,17 @@ impl MetadataUpdateManager {
                 });
             }
 
+            let sender_still_current = {
+                let _guard = self.worker_lifecycle_lock.lock();
+                let token_matches = Arc::ptr_eq(&self.cancel_token.load_full(), &cancel_token);
+                let worker_matches =
+                    self.workers.get(&input_name).is_some_and(|current| current.worker_id == ctx.worker_id);
+                token_matches && worker_matches
+            };
+            if !sender_still_current {
+                continue;
+            }
+
             match Self::submit_task(
                 ctx.sender.clone(),
                 ctx.pending_tasks.clone(),
@@ -686,7 +746,11 @@ impl MetadataUpdateManager {
             {
                 SubmitTaskResult::QueuedOrMerged => return,
                 SubmitTaskResult::QueueFull => {
-                    warn!("Metadata queue full for input {input_name}, dropping task");
+                    error!(
+                        "Metadata queue full for input {input_name} (max_queue_size={max_queue_size}), \
+                         dropping task: {task_to_queue}; consider increasing max_queue_size or reducing \
+                         probe frequency"
+                    );
                     return;
                 }
                 SubmitTaskResult::ChannelClosed => {
@@ -707,7 +771,7 @@ impl MetadataUpdateManager {
                     let backoff_ms = 25_u64.saturating_mul(factor).min(2_000);
                     let backoff = Duration::from_millis(backoff_ms);
                     tokio::select! {
-                        () = self.cancel_token.cancelled() => {
+                        () = cancel_token.cancelled() => {
                             warn!(
                                 "Aborting metadata task enqueue for input {input_name} because cancellation was requested: {task_to_queue}"
                             );
@@ -996,6 +1060,9 @@ impl InputWorker {
             };
 
             let Some((current_key, current_task, current_generation)) = task_data else { break };
+            if self.cancel_token.is_cancelled() {
+                break;
+            }
             if !self.metadata_retry_loaded {
                 self.ensure_metadata_retry_state_loaded(&input_name, app_state_weak.as_ref(), &runtime_settings).await;
             }
@@ -1525,7 +1592,13 @@ impl InputWorker {
             // Try to get the next task immediately to keep locks open.
             // Ignore phantom signals (channel key without pending map entry).
             if next_task.is_none() {
+                if self.cancel_token.is_cancelled() {
+                    break;
+                }
                 while let Ok(key) = self.receiver.try_recv() {
+                    if self.cancel_token.is_cancelled() {
+                        break;
+                    }
                     if let Some(snapshot) = self.load_task_snapshot(key) {
                         next_task = Some(snapshot);
                         break;
@@ -1737,10 +1810,20 @@ impl InputWorker {
         &mut self,
         runtime_settings: &MetadataUpdateRuntimeSettings,
     ) -> Option<(TaskKey, UpdateTask, u64)> {
+        if self.cancel_token.is_cancelled() {
+            return None;
+        }
+
         // Fast path: drain immediate signals until we find a real pending task.
         loop {
+            if self.cancel_token.is_cancelled() {
+                return None;
+            }
             match self.receiver.try_recv() {
                 Ok(key) => {
+                    if self.cancel_token.is_cancelled() {
+                        return None;
+                    }
                     if let Some(snapshot) = self.load_task_snapshot(key) {
                         return Some(snapshot);
                     }
@@ -1764,6 +1847,9 @@ impl InputWorker {
                 res = tokio::time::timeout(Duration::from_secs(runtime_settings.worker_idle_timeout_secs), self.receiver.recv()) => {
                     match res {
                         Ok(Some(key)) => {
+                            if self.cancel_token.is_cancelled() {
+                                return None;
+                            }
                             if let Some(snapshot) = self.load_task_snapshot(key) {
                                 return Some(snapshot);
                             }
@@ -1771,8 +1857,14 @@ impl InputWorker {
                         Ok(None) => return None,
                         Err(_) => {
                             loop {
+                                if self.cancel_token.is_cancelled() {
+                                    return None;
+                                }
                                 match self.receiver.try_recv() {
                                     Ok(key) => {
+                                        if self.cancel_token.is_cancelled() {
+                                            return None;
+                                        }
                                         if let Some(snapshot) = self.load_task_snapshot(key) {
                                             return Some(snapshot);
                                         }
@@ -2799,19 +2891,40 @@ impl InputWorker {
         };
 
         // Execute task; probe tasks get a reserved provider handle, resolve tasks don't.
-        let res = if let Some(handle) = provider_handle.as_ref() {
-            if let Some(token) = &handle.cancel_token {
-                tokio::select! {
-                    biased;
+        // The hard timeout is applied only to tasks that perform network probing — Probe*
+        // variants and Resolve tasks whose reason includes ResolveReason::Probe — because
+        // those are the only ones that can stall on an unresponsive provider.  Pure metadata
+        // resolve tasks (Info / TMDB / Date only) run without a timeout so they are not
+        // subject to the probe hard limit.
+        let exec_fut = async {
+            if let Some(handle) = provider_handle.as_ref() {
+                if let Some(token) = &handle.cancel_token {
+                    tokio::select! {
+                        biased;
 
-                    () = token.cancelled() => {
-                        debug_if_enabled!("Metadata update task preempted by user request for input {}", input_name);
-                        Err(shared::error::info_err!("{}", TASK_ERR_PREEMPTED))
-                    }
+                        () = token.cancelled() => {
+                            debug_if_enabled!("Metadata update task preempted by user request for input {}", input_name);
+                            Err(shared::error::info_err!("{}", TASK_ERR_PREEMPTED))
+                        }
 
-                    res = Self::execute_task_inner_static(&app_state, &client, &input_to_use, task, item_title.as_deref(), Some(handle), probe_priority, collector, db_handles, failed_clusters) => {
-                        res
+                        res = Self::execute_task_inner_static(&app_state, &client, &input_to_use, task, item_title.as_deref(), Some(handle), probe_priority, collector, db_handles, failed_clusters) => {
+                            res
+                        }
                     }
+                } else {
+                    Self::execute_task_inner_static(
+                        &app_state,
+                        &client,
+                        &input_to_use,
+                        task,
+                        item_title.as_deref(),
+                        Some(handle),
+                        probe_priority,
+                        collector,
+                        db_handles,
+                        failed_clusters,
+                    )
+                    .await
                 }
             } else {
                 Self::execute_task_inner_static(
@@ -2820,7 +2933,7 @@ impl InputWorker {
                     &input_to_use,
                     task,
                     item_title.as_deref(),
-                    Some(handle),
+                    None,
                     probe_priority,
                     collector,
                     db_handles,
@@ -2828,20 +2941,24 @@ impl InputWorker {
                 )
                 .await
             }
+        };
+        let needs_probe_timeout = Self::is_probe_task(task)
+            || (Self::is_resolve_task(task) && Self::task_reason(task).contains(ResolveReason::Probe));
+        let res = if needs_probe_timeout {
+            match tokio::time::timeout(Duration::from_secs(PROBE_TASK_TIMEOUT_SECS), exec_fut).await {
+                Ok(result) => result,
+                Err(_elapsed) => {
+                    error!(
+                        "Metadata probe task timed out after {PROBE_TASK_TIMEOUT_SECS}s for input {input_name}: {task}; \
+                         releasing provider handle and skipping task"
+                    );
+                    Err(shared::error::info_err!(
+                        "Task timed out after {PROBE_TASK_TIMEOUT_SECS}s for input {input_name}: {task}"
+                    ))
+                }
+            }
         } else {
-            Self::execute_task_inner_static(
-                &app_state,
-                &client,
-                &input_to_use,
-                task,
-                item_title.as_deref(),
-                None,
-                probe_priority,
-                collector,
-                db_handles,
-                failed_clusters,
-            )
-            .await
+            exec_fut.await
         };
 
         if provider_handle.is_some() {
@@ -3090,7 +3207,7 @@ mod tests {
     #[tokio::test]
     async fn queue_task_creates_single_worker_per_input_under_concurrency() {
         let cancel_token = CancellationToken::new();
-        let manager = Arc::new(MetadataUpdateManager::new(cancel_token.clone()));
+        let manager = Arc::new(MetadataUpdateManager::new(cancel_token));
         let input_name: Arc<str> = Arc::from("race_input");
 
         let mut joins = Vec::new();
@@ -3119,7 +3236,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(manager.active_worker_count(), 1);
 
-        cancel_token.cancel();
+        manager.shutdown();
     }
 
     #[tokio::test]

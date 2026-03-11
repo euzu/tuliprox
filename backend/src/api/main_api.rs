@@ -49,6 +49,7 @@ use std::{
     path::PathBuf,
     sync::{atomic::AtomicI8, Arc},
 };
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tower_governor::key_extractor::SmartIpKeyExtractor;
 use tower_http::services::ServeDir;
@@ -199,7 +200,7 @@ async fn healthcheck() -> impl axum::response::IntoResponse { axum::Json(create_
 async fn create_shared_data(
     app_config: &Arc<AppConfig>,
     forced_targets: &Arc<ProcessTargets>,
-) -> Result<AppState, TuliproxError> {
+) -> Result<(AppState, mpsc::Receiver<Arc<ProcessTargets>>), TuliproxError> {
     let config = app_config.config.load();
 
     let use_geoip = config.is_geoip_enabled();
@@ -224,6 +225,7 @@ async fn create_shared_data(
     let event_manager = Arc::new(EventManager::new());
     let active_provider = Arc::new(ActiveProviderManager::new(app_config, &event_manager));
     let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
+    active_provider.set_shared_stream_manager(Arc::clone(&shared_stream_manager));
     let active_users = Arc::new(ActiveUserManager::new(&config, &geoip, &event_manager));
     let connection_manager =
         Arc::new(ConnectionManager::new(&active_users, &active_provider, &shared_stream_manager, &event_manager));
@@ -231,27 +233,69 @@ async fn create_shared_data(
     let client = create_http_client(app_config)?;
     let client_no_redirect = create_http_client_no_redirect(app_config)?;
 
-    let cancel_tokens = Arc::new(ArcSwap::from_pointee(CancelTokens::default()));
-    let metadata_manager = Arc::new(MetadataUpdateManager::new(cancel_tokens.load().scheduler.clone()));
+    let tokens = CancelTokens::default();
+    let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
+    let cancel_tokens = Arc::new(ArcSwap::from_pointee(tokens));
 
-    Ok(AppState {
-        forced_targets: Arc::new(ArcSwap::new(Arc::clone(forced_targets))),
-        app_config: Arc::clone(app_config),
-        http_client: Arc::new(ArcSwap::from_pointee(client)),
-        http_client_no_redirect: Arc::new(ArcSwap::from_pointee(client_no_redirect)),
-        downloads: Arc::new(DownloadQueue::new()),
-        cache: Arc::new(ArcSwapOption::from(cache)),
-        shared_stream_manager,
-        active_users,
-        active_provider,
-        connection_manager,
-        event_manager,
-        cancel_tokens,
-        playlists: Arc::new(PlaylistStorageState::new()),
-        geoip,
-        update_guard: UpdateGuard::new(),
-        metadata_manager,
-    })
+    let (manual_update_sender, manual_update_rx) = mpsc::channel::<Arc<ProcessTargets>>(1);
+
+    Ok((
+        AppState {
+            forced_targets: Arc::new(ArcSwap::new(Arc::clone(forced_targets))),
+            app_config: Arc::clone(app_config),
+            http_client: Arc::new(ArcSwap::from_pointee(client)),
+            http_client_no_redirect: Arc::new(ArcSwap::from_pointee(client_no_redirect)),
+            downloads: Arc::new(DownloadQueue::new()),
+            cache: Arc::new(ArcSwapOption::from(cache)),
+            shared_stream_manager,
+            active_users,
+            active_provider,
+            connection_manager,
+            event_manager,
+            cancel_tokens,
+            playlists: Arc::new(PlaylistStorageState::new()),
+            geoip,
+            update_guard: UpdateGuard::new(),
+            metadata_manager,
+            manual_update_sender,
+        },
+        manual_update_rx,
+    ))
+}
+
+async fn run_manual_update_worker(
+    client: reqwest::Client,
+    app_state: Arc<AppState>,
+    mut rx: mpsc::Receiver<Arc<ProcessTargets>>,
+) {
+    while let Some(targets) = rx.recv().await {
+        exec_processing(
+            &client,
+            Arc::clone(&app_state.app_config),
+            targets,
+            Some(Arc::clone(&app_state.event_manager)),
+            Some(Arc::clone(&app_state)),
+            Some(Arc::clone(&app_state.playlists)),
+            Some(app_state.update_guard.clone()),
+            app_state.get_disabled_headers(),
+            Some(Arc::clone(&app_state.active_provider)),
+            Some(Arc::clone(&app_state.metadata_manager)),
+            None,
+            None,
+        )
+        .await;
+    }
+}
+
+fn cancel_all_service_tokens(app_state: &Arc<AppState>) {
+    let cancel_tokens = app_state.cancel_tokens.load();
+    cancel_tokens.scheduler.cancel();
+    cancel_tokens.hdhomerun.cancel();
+    cancel_tokens.file_watch.cancel();
+    cancel_tokens.provider_dns.cancel();
+    // Use the manager's shutdown() rather than cancelling the token directly so
+    // the is_shutdown flag is set and workers do not attempt to restart after cancellation.
+    app_state.metadata_manager.shutdown();
 }
 
 fn exec_update_on_boot(client: &reqwest::Client, app_state: &Arc<AppState>, targets: &Arc<ProcessTargets>) -> bool {
@@ -393,12 +437,20 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
     if web_ui_enabled {
         infos.push(format!("Web root: {}", web_dir_path.display()));
     }
-    let app_shared_data = create_shared_data(&app_config, &targets).await?;
+    let (app_shared_data, manual_update_rx) = create_shared_data(&app_config, &targets).await?;
     let app_state = Arc::new(app_shared_data);
 
     // Initialize metadata manager with weak ref to app_state
     // IMPORTANT: clone app_state here to keep it alive for the weak ref, but avoid moving it
     app_state.metadata_manager.set_app_state(Arc::downgrade(&app_state)).await;
+
+    // Worker that processes manual playlist update requests one at a time.
+    // The bounded channel ensures at most one pending request is queued.
+    {
+        let worker_client = app_state.http_client.load().as_ref().clone();
+        let worker_state = Arc::clone(&app_state);
+        tokio::spawn(run_manual_update_worker(worker_client, worker_state, manual_update_rx));
+    }
 
     // Start event listener for input metadata updates
     // Clone app_state first to ensure it lives in the closure
@@ -432,11 +484,8 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
     }
 
     exec_scheduler(client.as_ref(), &app_state, &targets, &cancel_token_scheduler);
-
     exec_file_lock_prune(&app_state);
-
     exec_interner_prune(&app_state);
-
     exec_config_watch(&app_state, &cancel_token_file_watch);
     exec_provider_dns(&app_state, &cancel_token_provider_dns);
 
@@ -496,7 +545,27 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
     let listener = tokio::net::TcpListener::bind(format!("{host}:{port}"))
         .await
         .map_err(|err| info_err!("Failed to bind to {host}:{port}, {err}"))?;
-    serve(listener, router, None, &shared_data.connection_manager).await;
+
+    let server_cancel_token = CancellationToken::new();
+    let server_cancel_token_signal = server_cancel_token.clone();
+    let app_state_signal = Arc::clone(&app_state);
+    tokio::spawn(async move {
+        match tokio::signal::ctrl_c().await {
+            Ok(()) => {
+                info!("Received shutdown signal (Ctrl+C), cancelling all background services");
+                cancel_all_service_tokens(&app_state_signal);
+                server_cancel_token_signal.cancel();
+            }
+            Err(err) => {
+                error!("Failed to listen for Ctrl+C: {err}");
+            }
+        }
+    });
+
+    serve(listener, router, Some(server_cancel_token), &shared_data.connection_manager).await;
+
+    // Final shutdown safeguard for all background services (idempotent).
+    cancel_all_service_tokens(&shared_data);
     Ok(())
 }
 

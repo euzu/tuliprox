@@ -140,13 +140,58 @@ impl ActiveUserManager {
         }
     }
 
-    pub async fn release_connection(&self, addr: &SocketAddr) {
-        let (log_active_user, disconnected_user) = {
+    /// Releases an active stream for the given socket address without removing the
+    /// socket registration (`key_by_addr`). This is used when a stream ends while
+    /// the underlying HTTP connection may still remain open.
+    pub async fn release_stream(&self, addr: &SocketAddr) -> bool {
+        let (removed_stream, username) = {
+            let mut user_connections = self.connections.write().await;
+
+            let Some(username) = user_connections.key_by_addr.get(addr).cloned() else {
+                return false;
+            };
+
+            let mut removed_stream = false;
+            if let Some(connection_data) = user_connections.by_key.get_mut(&username) {
+                let prev_len = connection_data.streams.len();
+                connection_data.streams.retain(|c| c.addr != *addr);
+                removed_stream = connection_data.streams.len() != prev_len;
+
+                if removed_stream {
+                    if connection_data.connections > 0 {
+                        connection_data.connections -= 1;
+                    }
+                    if connection_data.connections < connection_data.max_connections {
+                        connection_data.granted_grace = false;
+                        connection_data.grace_ts = 0;
+                    }
+                }
+            }
+            (removed_stream, username)
+        };
+
+        if removed_stream {
+            if !username.is_empty() {
+                debug_if_enabled!(
+                    "Released stream for user {username} at {}",
+                    sanitize_sensitive_info(&addr.to_string())
+                );
+            }
+            self.log_active_user().await;
+        }
+
+        removed_stream
+    }
+
+    pub async fn release_connection(&self, addr: &SocketAddr) -> bool {
+        let (addr_removed, disconnected_user) = {
             let mut user_connections = self.connections.write().await;
 
             if let Some(username) = user_connections.key_by_addr.remove(addr) {
                 if let Some(connection_data) = user_connections.by_key.get_mut(&username) {
-                    if connection_data.connections > 0 {
+                    let prev_len = connection_data.streams.len();
+                    connection_data.streams.retain(|c| c.addr != *addr);
+                    if connection_data.streams.len() != prev_len && connection_data.connections > 0 {
                         connection_data.connections -= 1;
                     }
 
@@ -154,7 +199,6 @@ impl ActiveUserManager {
                         connection_data.granted_grace = false;
                         connection_data.grace_ts = 0;
                     }
-                    connection_data.streams.retain(|c| c.addr != *addr);
                 }
                 (true, Some(username))
             } else {
@@ -171,9 +215,11 @@ impl ActiveUserManager {
             }
         }
 
-        if log_active_user {
+        if addr_removed {
             self.log_active_user().await;
         }
+
+        addr_removed
     }
 
     pub fn update_config(&self, config: &Config) {
@@ -223,7 +269,11 @@ impl ActiveUserManager {
         if self.grace_period_millis.load(Ordering::Relaxed) > 0
             && current_connections == connection_data.max_connections
         {
-            // Allow a grace period once
+            // Intentional asymmetry: grace is granted when current == max (AT limit), while
+            // Exhausted is returned when current > max (OVER limit after the grace window).
+            // This allows exactly one extra connection during the grace window — the new
+            // connection is accepted now, and a background check evicts it if the count is
+            // still over max after the grace period elapses.
             connection_data.granted_grace = true;
             connection_data.grace_ts = now;
             debug!("Granted a grace period for user access: {username}");

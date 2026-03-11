@@ -408,7 +408,8 @@ impl AppConfig {
             }
 
             let path = PathBuf::from(custom_stream_response_path);
-            let path = utils::make_path_absolute(&path, &config.storage_dir);
+            let home_path = self.paths.load().home_path.clone();
+            let path = utils::make_path_absolute(&path, home_path.as_str());
 
             let paths = self.paths.load_full();
             let mut new_paths = paths.as_ref().clone();

@@ -524,12 +524,18 @@ fn migrate_user_db_schema(db_path: &Path, merge_guard_path: &Path) -> io::Result
         return Ok(false);
     }
 
-    // Already V3? (15-field sequence — rmp_serde fails on shorter sequences)
-    if BPlusTree::<String, StoredApiUserV3>::load(db_path).is_ok() {
-        return Ok(false);
+    // Try legacy schemas first to preserve explicit upgrade behavior:
+    // V1 -> V3, then V2 -> V3.
+    if let Ok(tree) = BPlusTree::<String, StoredApiUserV1>::load(db_path) {
+        let mut v3_tree: BPlusTree<String, StoredApiUserV3> = BPlusTree::new();
+        for (key, v1) in &tree {
+            v3_tree.insert(key.clone(), StoredApiUserV3::from_v1(v1));
+        }
+        v3_tree.store(db_path)?;
+        create_user_db_merge_guard(merge_guard_path)?;
+        return Ok(true);
     }
 
-    // Try V2 → V3
     if let Ok(tree) = BPlusTree::<String, StoredApiUserV2>::load(db_path) {
         let mut v3_tree: BPlusTree<String, StoredApiUserV3> = BPlusTree::new();
         for (key, v2) in &tree {
@@ -540,15 +546,10 @@ fn migrate_user_db_schema(db_path: &Path, merge_guard_path: &Path) -> io::Result
         return Ok(true);
     }
 
-    // Try V1 → V3
-    if let Ok(tree) = BPlusTree::<String, StoredApiUserV1>::load(db_path) {
-        let mut v3_tree: BPlusTree<String, StoredApiUserV3> = BPlusTree::new();
-        for (key, v1) in &tree {
-            v3_tree.insert(key.clone(), StoredApiUserV3::from_v1(v1));
-        }
-        v3_tree.store(db_path)?;
-        create_user_db_merge_guard(merge_guard_path)?;
-        return Ok(true);
+    // If legacy decoding failed, accept that DB may already be V3.
+    // Do not rewrite or persist anything in that case.
+    if BPlusTree::<String, StoredApiUserV3>::load(db_path).is_ok() {
+        return Ok(false);
     }
 
     Err(io::Error::new(
@@ -806,6 +807,87 @@ mod tests {
         let stats = migrate_bplustree_databases_with_marker(&current_roots, temp_a.path())?;
         assert!(!stats.skipped_by_marker);
         assert_eq!(stats.migrated_files, 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn user_db_schema_migration_v2_to_v3_creates_merge_guard() -> io::Result<()> {
+        let temp = tempdir()?;
+        let db_path = temp.path().join(storage_const::API_USER_DB_FILE);
+        let merge_guard_path = user_db_merge_guard_path(temp.path());
+
+        let mut v2_tree: BPlusTree<String, StoredApiUserV2> = BPlusTree::new();
+        v2_tree.insert(
+            "alice".to_string(),
+            StoredApiUserV2 {
+                target: "channels".to_string(),
+                username: "alice".to_string(),
+                password: "secret".to_string(),
+                token: Some("token".to_string()),
+                proxy: ProxyType::Reverse(None),
+                server: Some("srv".to_string()),
+                epg_timeshift: Some("1".to_string()),
+                epg_request_timeshift: Some("2".to_string()),
+                created_at: Some(1),
+                exp_date: Some(2),
+                max_connections: Some(3),
+                status: Some(ProxyUserStatus::Active),
+                ui_enabled: true,
+                comment: Some("note".to_string()),
+            },
+        );
+        let _ = v2_tree.store(&db_path)?;
+        assert!(!merge_guard_path.exists());
+
+        let migrated = migrate_user_db_schema(&db_path, &merge_guard_path)?;
+        assert!(migrated);
+        assert!(merge_guard_path.exists());
+
+        let v3_tree = BPlusTree::<String, StoredApiUserV3>::load(&db_path)?;
+        let user = v3_tree
+            .query(&"alice".to_string())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "alice missing after migration"))?;
+        assert_eq!(user.username, "alice");
+        assert_eq!(user.epg_request_timeshift.as_deref(), Some("2"));
+        assert_eq!(user.priority, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn user_db_schema_v3_is_detected_without_writing_merge_guard() -> io::Result<()> {
+        let temp = tempdir()?;
+        let db_path = temp.path().join(storage_const::API_USER_DB_FILE);
+        let merge_guard_path = user_db_merge_guard_path(temp.path());
+
+        let mut v3_tree: BPlusTree<String, StoredApiUserV3> = BPlusTree::new();
+        v3_tree.insert(
+            "bob".to_string(),
+            StoredApiUserV3 {
+                target: "channels".to_string(),
+                username: "bob".to_string(),
+                password: "secret".to_string(),
+                token: None,
+                proxy: ProxyType::Reverse(None),
+                server: None,
+                epg_timeshift: None,
+                epg_request_timeshift: None,
+                created_at: None,
+                exp_date: None,
+                max_connections: Some(1),
+                status: Some(ProxyUserStatus::Active),
+                ui_enabled: true,
+                comment: None,
+                priority: Some(5),
+            },
+        );
+        let _ = v3_tree.store(&db_path)?;
+        assert!(!merge_guard_path.exists());
+
+        let migrated = migrate_user_db_schema(&db_path, &merge_guard_path)?;
+        assert!(!migrated);
+        assert!(!merge_guard_path.exists());
 
         Ok(())
     }

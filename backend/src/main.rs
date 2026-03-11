@@ -227,6 +227,10 @@ fn print_info(app_config: &AppConfig) {
     info!("Api Proxy File: {:?}", &paths.api_proxy_file_path);
     info!("Mapping path: {:?}", &paths.mapping_file_path.as_ref().map_or_else(|| "not used", |v| v.as_str()));
     info!("Template path: {:?}", &paths.template_file_path.as_ref().map_or_else(|| "not used", |v| v.as_str()));
+    info!(
+        "Resources path: {:?}",
+        &paths.custom_stream_response_path.as_ref().map_or_else(|| "not used", |v| v.as_str())
+    );
 
     if let Some(mapping_paths) = paths.mapping_files_used.as_ref() {
         for mapping_path in mapping_paths {
@@ -246,9 +250,6 @@ fn print_info(app_config: &AppConfig) {
     }
     if let Some(metadata_update) = config.metadata_update.as_ref() {
         info!("Metadata path: {}", metadata_update.cache_path);
-    }
-    if let Some(resource_path) = paths.custom_stream_response_path.as_ref() {
-        info!("Resource path: {resource_path}");
     }
 }
 

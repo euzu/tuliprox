@@ -92,7 +92,6 @@ async fn m3u_api_stream(
             &fingerprint.addr,
             CustomVideoStreamType::UserAccountExpired,
         )
-        .await
         .into_response();
     }
 
@@ -153,7 +152,6 @@ async fn m3u_api_stream(
                 &fingerprint.addr,
                 CustomVideoStreamType::UserConnectionsExhausted,
             )
-            .await
             .into_response();
         }
 
@@ -163,7 +161,6 @@ async fn m3u_api_stream(
                 &fingerprint.addr,
                 CustomVideoStreamType::ProviderConnectionsExhausted,
             )
-            .await
             .into_response();
         }
         if session.virtual_id == virtual_id && is_seek_request(cluster, req_headers).await {
@@ -192,7 +189,6 @@ async fn m3u_api_stream(
             &fingerprint.addr,
             CustomVideoStreamType::UserConnectionsExhausted,
         )
-        .await
         .into_response();
     }
 

@@ -6,12 +6,28 @@ use crate::{
     auth::Fingerprint,
     utils::debug_if_enabled,
 };
-use log::warn;
+use log::{debug, warn};
 use shared::{
     model::{ActiveUserConnectionChange, StreamChannel, VirtualId},
     utils::sanitize_sensitive_info,
 };
 use std::{borrow::Cow, net::SocketAddr, sync::Arc};
+use tokio::sync::mpsc;
+
+pub(crate) enum CleanupEvent {
+    ReleaseStream { addr: SocketAddr },
+    ReleaseProviderHandle { handle: Option<ProviderHandle> },
+    ReleaseStreamAndProviderHandle { addr: SocketAddr, handle: Option<ProviderHandle> },
+    UpdateDetailAndReleaseProvider {
+        addr: SocketAddr,
+        video_type: CustomVideoStreamType,
+        handle: Option<ProviderHandle>,
+    },
+    UpdateDetailAndReleaseProviderConnection {
+        addr: SocketAddr,
+        video_type: CustomVideoStreamType,
+    },
+}
 
 pub struct ConnectionManager {
     pub user_manager: Arc<ActiveUserManager>,
@@ -19,6 +35,7 @@ pub struct ConnectionManager {
     pub shared_stream_manager: Arc<SharedStreamManager>,
     event_manager: Arc<EventManager>,
     close_socket_signal_tx: tokio::sync::broadcast::Sender<SocketAddr>,
+    cleanup_tx: mpsc::UnboundedSender<CleanupEvent>,
 }
 
 impl ConnectionManager {
@@ -29,13 +46,91 @@ impl ConnectionManager {
         event_manager: &Arc<EventManager>,
     ) -> Self {
         let (close_socket_signal_tx, _) = tokio::sync::broadcast::channel(256);
+        let (cleanup_tx, cleanup_rx) = mpsc::unbounded_channel();
 
-        Self {
+        let mgr = Self {
             user_manager: Arc::clone(user_manager),
             provider_manager: Arc::clone(provider_manager),
             shared_stream_manager: Arc::clone(shared_stream_manager),
             event_manager: Arc::clone(event_manager),
             close_socket_signal_tx,
+            cleanup_tx,
+        };
+
+        Self::spawn_cleanup_worker(
+            cleanup_rx,
+            Arc::clone(user_manager),
+            Arc::clone(provider_manager),
+            Arc::clone(shared_stream_manager),
+            Arc::clone(event_manager),
+        );
+
+        mgr
+    }
+
+    fn spawn_cleanup_worker(
+        mut rx: mpsc::UnboundedReceiver<CleanupEvent>,
+        user_manager: Arc<ActiveUserManager>,
+        provider_manager: Arc<ActiveProviderManager>,
+        shared_stream_manager: Arc<SharedStreamManager>,
+        event_manager: Arc<EventManager>,
+    ) {
+        tokio::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                match event {
+                    CleanupEvent::ReleaseStream { addr } => {
+                        if user_manager.release_stream(&addr).await {
+                            event_manager.send_event(EventMessage::ActiveUser(
+                                ActiveUserConnectionChange::Disconnected(addr),
+                            ));
+                        }
+                    }
+                    CleanupEvent::ReleaseProviderHandle { handle } => {
+                        if let Some(h) = handle {
+                            provider_manager.release_handle(&h).await;
+                        }
+                    }
+                    CleanupEvent::ReleaseStreamAndProviderHandle { addr, handle } => {
+                        // Release provider handle first to avoid a race window where the user
+                        // connection count drops (making capacity appear available) before the
+                        // provider slot is actually freed.
+                        if let Some(h) = handle {
+                            provider_manager.release_handle(&h).await;
+                        }
+                        if user_manager.release_stream(&addr).await {
+                            event_manager.send_event(EventMessage::ActiveUser(
+                                ActiveUserConnectionChange::Disconnected(addr),
+                            ));
+                        }
+                    }
+                    CleanupEvent::UpdateDetailAndReleaseProvider { addr, video_type, handle } => {
+                        if let Some(stream_info) = user_manager.update_stream_detail(&addr, video_type).await {
+                            event_manager.send_event(EventMessage::ActiveUser(
+                                ActiveUserConnectionChange::Updated(stream_info),
+                            ));
+                        }
+                        if let Some(h) = handle {
+                            provider_manager.release_handle(&h).await;
+                        }
+                    }
+                    CleanupEvent::UpdateDetailAndReleaseProviderConnection { addr, video_type } => {
+                        if let Some(stream_info) = user_manager.update_stream_detail(&addr, video_type).await {
+                            event_manager.send_event(EventMessage::ActiveUser(
+                                ActiveUserConnectionChange::Updated(stream_info),
+                            ));
+                        }
+                        provider_manager.release_connection(&addr).await;
+                        shared_stream_manager.release_connection(&addr, false).await;
+                    }
+                }
+            }
+            debug!("Cleanup worker exiting");
+        });
+    }
+
+    pub(crate) fn send_cleanup(&self, event: CleanupEvent) {
+        if let Err(e) = self.cleanup_tx.send(event) {
+            debug!("Cleanup channel closed, dropping event: {e}");
         }
     }
 
@@ -63,15 +158,23 @@ impl ConnectionManager {
     }
 
     pub async fn release_connection(&self, addr: &SocketAddr) {
-        self.user_manager.release_connection(addr).await;
+        let removed = self.user_manager.release_connection(addr).await;
         self.provider_manager.release_connection(addr).await;
         self.shared_stream_manager.release_connection(addr, true).await;
-        self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Disconnected(*addr)));
+        if removed {
+            self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Disconnected(*addr)));
+        }
     }
 
     pub async fn release_provider_connection(&self, addr: &SocketAddr) {
         self.provider_manager.release_connection(addr).await;
         self.shared_stream_manager.release_connection(addr, false).await;
+    }
+
+    pub async fn release_stream(&self, addr: &SocketAddr) {
+        if self.user_manager.release_stream(addr).await {
+            self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Disconnected(*addr)));
+        }
     }
 
     pub async fn release_provider_handle(&self, provider_handle: Option<ProviderHandle>) {

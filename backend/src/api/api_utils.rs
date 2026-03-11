@@ -488,6 +488,10 @@ async fn create_stream_response_details(
         &streaming_strategy.provider_stream_state,
         grace_period_options.period_millis,
     );
+    let provider_grace_active = matches!(
+        streaming_strategy.provider_stream_state,
+        ProviderStreamState::GracePeriod(_, _)
+    );
 
     let guard_provider_name =
         streaming_strategy.provider_handle.as_ref().and_then(|guard| guard.allocation.get_provider_name());
@@ -522,6 +526,7 @@ async fn create_stream_response_details(
                 provider_name: guard_provider_name.clone(),
                 request_url: None,
                 grace_period: grace_period_options,
+                provider_grace_active: false,
                 disable_provider_grace: false,
                 reconnect_flag: None,
                 provider_handle: streaming_strategy.provider_handle.clone(),
@@ -534,39 +539,57 @@ async fn create_stream_response_details(
                 sanitize_sensitive_info(guard_provider_name.as_deref().unwrap_or("?")),
                 sanitize_sensitive_info(resolve_request_url_for_logging(input, request_url.as_ref()).as_ref())
             );
-            let parsed_url = Url::parse(&request_url);
-            let ((stream, stream_info), reconnect_flag) = if let Ok(url) = parsed_url {
-                let default_user_agent = app_state.app_config.config.load().default_user_agent.clone();
-                let disabled_headers = app_state.get_disabled_headers();
-                let mut provider_stream_factory_options = ProviderStreamFactoryOptions::new(
-                    fingerprint.addr,
-                    item_type,
-                    share_stream,
-                    stream_options,
-                    &url,
-                    req_headers,
-                    streaming_strategy.input_headers.as_ref(),
-                    disabled_headers.as_ref(),
-                    default_user_agent.as_deref(),
-                );
-
-                let provider_config = input.get_resolve_provider(url.as_ref());
-                provider_stream_factory_options.set_provider(provider_config);
-
-                let reconnect_flag = provider_stream_factory_options.get_reconnect_flag_clone();
-                let provider_stream = match create_provider_stream(
-                    app_state,
-                    &app_state.http_client.load(),
-                    provider_stream_factory_options,
-                )
-                .await
-                {
-                    None => (None, None),
-                    Some((stream, info)) => (Some(stream), info),
-                };
-                (provider_stream, Some(reconnect_flag))
+            let defer_provider_stream_until_grace_check = if provider_grace_active && grace_period_options.hold_stream {
+                if let Some(provider_name) = guard_provider_name.as_ref() {
+                    app_state.active_provider.is_over_limit(provider_name).await
+                } else {
+                    false
+                }
             } else {
-                ((None, None), None)
+                false
+            };
+            let (stream, stream_info, reconnect_flag) = if defer_provider_stream_until_grace_check {
+                debug_if_enabled!(
+                    "Deferring provider stream open until grace check completes for {}",
+                    sanitize_sensitive_info(resolve_request_url_for_logging(input, request_url.as_ref()).as_ref())
+                );
+                (None, None, None)
+            } else {
+                let parsed_url = Url::parse(&request_url);
+                let ((stream, stream_info), reconnect_flag) = if let Ok(url) = parsed_url {
+                    let default_user_agent = app_state.app_config.config.load().default_user_agent.clone();
+                    let disabled_headers = app_state.get_disabled_headers();
+                    let mut provider_stream_factory_options = ProviderStreamFactoryOptions::new(
+                        fingerprint.addr,
+                        item_type,
+                        share_stream,
+                        stream_options,
+                        &url,
+                        req_headers,
+                        streaming_strategy.input_headers.as_ref(),
+                        disabled_headers.as_ref(),
+                        default_user_agent.as_deref(),
+                    );
+
+                    let provider_config = input.get_resolve_provider(url.as_ref());
+                    provider_stream_factory_options.set_provider(provider_config);
+
+                    let reconnect_flag = provider_stream_factory_options.get_reconnect_flag_clone();
+                    let provider_stream = match create_provider_stream(
+                        app_state,
+                        &app_state.http_client.load(),
+                        provider_stream_factory_options,
+                    )
+                    .await
+                    {
+                        None => (None, None),
+                        Some((stream, info)) => (Some(stream), info),
+                    };
+                    (provider_stream, Some(reconnect_flag))
+                } else {
+                    ((None, None), None)
+                };
+                (stream, stream_info, reconnect_flag)
             };
 
             if log_enabled!(log::Level::Debug) {
@@ -580,8 +603,9 @@ async fn create_stream_response_details(
                 }
             }
 
-            // if we have no stream, we should release the provider
-            let provider_handle = if stream.is_none() {
+            // if we have no stream, we should release the provider unless we intentionally defer
+            // opening it for provider-grace hold_stream behavior.
+            let provider_handle = if stream.is_none() && !defer_provider_stream_until_grace_check {
                 let provider_handle = streaming_strategy.provider_handle.take();
                 app_state.connection_manager.release_provider_handle(provider_handle).await;
                 error!("Can't open stream {}", sanitize_sensitive_info(&request_url));
@@ -596,6 +620,7 @@ async fn create_stream_response_details(
                 provider_name: guard_provider_name.clone(),
                 request_url: Some(request_url.clone()),
                 grace_period: grace_period_options,
+                provider_grace_active,
                 disable_provider_grace: false,
                 reconnect_flag,
                 provider_handle,
@@ -810,7 +835,10 @@ pub async fn force_provider_stream_response(
         }
     };
 
-    if stream_details.has_stream() {
+    let deferred_grace_hold_stream =
+        !stream_details.has_stream() && stream_details.provider_grace_active && stream_details.grace_period.hold_stream;
+
+    if stream_details.has_stream() || deferred_grace_hold_stream {
         let provider_response =
             stream_details.stream_info.as_ref().map(|(h, sc, url, cvt)| (h.clone(), *sc, url.clone(), *cvt));
         app_state.active_users.update_session_addr(&user.username, &user_session.token, &fingerprint.addr).await;
@@ -883,14 +911,18 @@ pub async fn stream_response(
             &fingerprint.addr,
             CustomVideoStreamType::UserConnectionsExhausted,
         )
-        .await
         .into_response();
     }
 
     let virtual_id = stream_channel.virtual_id;
     let item_type = stream_channel.item_type;
 
-    let share_stream = is_stream_share_enabled(item_type, target);
+    // Grace candidates are intentionally not shared:
+    // they are transient and may be terminated after the grace check.
+    // Keeping them out of the shared-stream lifecycle avoids cross-effects on
+    // concurrently running streams of the same user.
+    let share_stream =
+        is_stream_share_enabled(item_type, target) && connection_permission != UserConnectionPermission::GracePeriod;
     let _shared_lock = if share_stream {
         let write_lock = app_state.app_config.file_locks.write_lock_str(stream_url).await;
 
@@ -960,7 +992,10 @@ pub async fn stream_response(
         }
     };
 
-    if stream_details.has_stream() {
+    let deferred_grace_hold_stream =
+        !stream_details.has_stream() && stream_details.provider_grace_active && stream_details.grace_period.hold_stream;
+
+    if stream_details.has_stream() || deferred_grace_hold_stream {
         // let content_length = get_stream_content_length(provider_response.as_ref());
         let provider_response = stream_details
             .stream_info
@@ -982,14 +1017,16 @@ pub async fn stream_response(
             debug_if_enabled!("panel_api provisioning response to client: status={} headers={:?}", status, headers);
         }
 
-        let provider_handle = if share_stream { stream_details.provider_handle.take() } else { None };
-
         let mut is_stream_shared = share_stream;
+        if stream_details.provider_grace_active {
+            is_stream_shared = false;
+        }
         if let Some((_header, _status_code, _url, Some(_custom_video))) = stream_details.stream_info.as_ref() {
             if stream_details.stream.is_some() {
                 is_stream_shared = false;
             }
         }
+        let provider_handle = if is_stream_shared { stream_details.provider_handle.take() } else { None };
 
         stream_channel.shared = is_stream_shared;
         let stream = create_active_client_stream(
@@ -1137,6 +1174,10 @@ async fn try_shared_stream_response_if_any(
     session_token: &str,
     req_headers: &HeaderMap,
 ) -> Option<impl IntoResponse> {
+    if connect_permission == UserConnectionPermission::GracePeriod {
+        return None;
+    }
+
     if let Some((stream, provider)) =
         SharedStreamManager::subscribe_shared_stream(app_state, stream_url, &fingerprint.addr).await
     {
@@ -1195,7 +1236,6 @@ pub async fn local_stream_response(
             &fingerprint.addr,
             CustomVideoStreamType::UserConnectionsExhausted,
         )
-        .await
         .into_response();
     }
 

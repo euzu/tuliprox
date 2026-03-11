@@ -11,7 +11,6 @@ use crate::{
     },
     auth::create_access_token,
     model::{parse_xmltv_for_web_ui_from_url, ConfigInput, ConfigInputFlags, ConfigInputFlagsSet, ConfigInputOptions},
-    processing::processor::exec_processing,
     repository::xtream_get_item_for_stream_id,
 };
 use axum::{response::IntoResponse, Router};
@@ -79,35 +78,21 @@ async fn playlist_update(
     let process_targets = app_state.app_config.sources.load().validate_targets(user_targets.as_ref());
     match process_targets {
         Ok(valid_targets) => {
-            let http_client = app_state.http_client.load().as_ref().clone();
-            let app_config = Arc::clone(&app_state.app_config);
-            let event_manager = Arc::clone(&app_state.event_manager);
-            let playlist_state = Arc::clone(&app_state.playlists);
             let valid_targets = Arc::new(valid_targets);
-            let provider_manager = Arc::clone(&app_state.active_provider);
-            let disabled_headers = app_state.get_disabled_headers();
-            let metadata_manager = Arc::clone(&app_state.metadata_manager);
-            let update_guard = app_state.update_guard.clone();
-            tokio::spawn({
-                async move {
-                    exec_processing(
-                        &http_client,
-                        app_config,
-                        valid_targets,
-                        Some(event_manager),
-                        Some(app_state.clone()),
-                        Some(playlist_state),
-                        Some(update_guard),
-                        disabled_headers,
-                        Some(provider_manager),
-                        Some(metadata_manager),
-                        None,
-                        None,
-                    )
-                    .await;
+            // Deduplicate rapid clicks: the channel has capacity 1, so at most one
+            // update is queued at any time.  Additional requests while the channel
+            // is full are silently dropped — the pending run already covers them.
+            match app_state.manual_update_sender.try_send(valid_targets) {
+                Ok(()) => axum::http::StatusCode::ACCEPTED.into_response(),
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    debug!("Manual playlist update deduplicated: an update is already pending or running");
+                    axum::http::StatusCode::ACCEPTED.into_response()
                 }
-            });
-            axum::http::StatusCode::ACCEPTED.into_response()
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    debug!("Manual playlist update rejected: worker channel closed (server shutting down)");
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response()
+                }
+            }
         }
         Err(err) => {
             error!("Failed playlist update {}", sanitize_sensitive_info(err.to_string().as_str()));

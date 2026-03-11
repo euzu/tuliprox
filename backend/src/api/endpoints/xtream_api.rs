@@ -237,7 +237,6 @@ async fn xtream_player_api_stream(
             &fingerprint.addr,
             CustomVideoStreamType::UserAccountExpired,
         )
-        .await
         .into_response();
     }
 
@@ -249,7 +248,6 @@ async fn xtream_player_api_stream(
             &fingerprint.addr,
             CustomVideoStreamType::ChannelUnavailable,
         )
-        .await
         .into_response();
     }
 
@@ -310,7 +308,6 @@ async fn xtream_player_api_stream(
                 &fingerprint.addr,
                 CustomVideoStreamType::UserConnectionsExhausted,
             )
-            .await
             .into_response();
         }
 
@@ -320,7 +317,6 @@ async fn xtream_player_api_stream(
                 &fingerprint.addr,
                 CustomVideoStreamType::ProviderConnectionsExhausted,
             )
-            .await
             .into_response();
         }
 
@@ -353,7 +349,6 @@ async fn xtream_player_api_stream(
             &fingerprint.addr,
             CustomVideoStreamType::UserConnectionsExhausted,
         )
-        .await
         .into_response();
     }
 

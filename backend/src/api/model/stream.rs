@@ -1,12 +1,12 @@
 use crate::{
     api::model::{CustomVideoStreamType, ProviderHandle, StreamError},
     model::GracePeriodOptions,
-    tools::atomic_once_flag::AtomicOnceFlag,
 };
 use axum::http::StatusCode;
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use std::{collections::HashMap, sync::Arc};
+use tokio_util::sync::CancellationToken;
 use url::Url;
 
 pub type BoxedProviderStream = BoxStream<'static, Result<Bytes, StreamError>>;
@@ -32,8 +32,9 @@ pub struct StreamDetails {
     pub provider_name: Option<Arc<str>>,
     pub request_url: Option<Arc<str>>,
     pub grace_period: GracePeriodOptions,
+    pub provider_grace_active: bool,
     pub disable_provider_grace: bool,
-    pub reconnect_flag: Option<Arc<AtomicOnceFlag>>,
+    pub reconnect_flag: Option<CancellationToken>,
     pub provider_handle: Option<ProviderHandle>,
 }
 
@@ -45,6 +46,7 @@ impl StreamDetails {
             provider_name: None,
             request_url: None,
             grace_period: grace_period_options,
+            provider_grace_active: false,
             disable_provider_grace: false,
             reconnect_flag: None,
             provider_handle: None,

@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 pub const fn is_zero_u16(v: &u16) -> bool { *v == 0 }
 pub const fn is_zero_i16(v: &i16) -> bool { *v == 0 }
+pub const fn is_zero_u32(v: &u32) -> bool { *v == 0 }
 pub const fn is_true(v: &bool) -> bool { *v }
 pub const fn is_false(v: &bool) -> bool { !*v }
 pub const fn default_as_true() -> bool { true }

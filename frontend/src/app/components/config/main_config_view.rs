@@ -27,6 +27,7 @@ const LABEL_USER_CONFIG_DIR: &str = "LABEL.USER_CONFIG_DIR";
 const LABEL_SLEEP_TIMER_MINS: &str = "LABEL.SLEEP_TIMER_MINS";
 const LABEL_CONNECT_TIMEOUT_SECS: &str = "LABEL.CONNECT_TIMEOUT_SECS";
 const LABEL_CUSTOM_STREAM_RESPONSE_PATH: &str = "LABEL.CUSTOM_STREAM_RESPONSE_PATH";
+const LABEL_CUSTOM_STREAM_RESPONSE_TIMEOUT_SECS: &str = "LABEL.CUSTOM_STREAM_RESPONSE_TIMEOUT_SECS";
 const LABEL_ACCEPT_INSECURE_SSL_CERTIFICATES: &str = "LABEL.ACCEPT_INSECURE_SSL_CERTIFICATES";
 
 generate_form_reducer!(
@@ -48,6 +49,7 @@ generate_form_reducer!(
         SleepTimerMins => sleep_timer_mins: Option<u32>,
         ConnectTimeoutSecs => connect_timeout_secs: u32,
         CustomStreamResponsePath => custom_stream_response_path: Option<String>,
+        CustomStreamResponseTimeoutSecs => custom_stream_response_timeout_secs: u32,
     }
 );
 
@@ -108,6 +110,7 @@ pub fn MainConfigView() -> Html {
                 { config_field_optional!(form_state.form, translate.t(LABEL_SLEEP_TIMER_MINS), sleep_timer_mins) }
                 { config_field!(form_state.form, translate.t(LABEL_CONNECT_TIMEOUT_SECS), connect_timeout_secs) }
                 { config_field_optional!(form_state.form, translate.t(LABEL_CUSTOM_STREAM_RESPONSE_PATH), custom_stream_response_path) }
+                { config_field!(form_state.form, translate.t(LABEL_CUSTOM_STREAM_RESPONSE_TIMEOUT_SECS), custom_stream_response_timeout_secs) }
             </>
         }
     };
@@ -130,6 +133,7 @@ pub fn MainConfigView() -> Html {
                 { edit_field_number_option_u32!(form_state, translate.t(LABEL_SLEEP_TIMER_MINS), sleep_timer_mins, MainConfigFormAction::SleepTimerMins) }
                 { edit_field_number!(form_state, translate.t(LABEL_CONNECT_TIMEOUT_SECS), connect_timeout_secs, MainConfigFormAction::ConnectTimeoutSecs) }
                 { edit_field_text_option!(form_state, translate.t(LABEL_CUSTOM_STREAM_RESPONSE_PATH), custom_stream_response_path, MainConfigFormAction::CustomStreamResponsePath) }
+                { edit_field_number!(form_state, translate.t(LABEL_CUSTOM_STREAM_RESPONSE_TIMEOUT_SECS), custom_stream_response_timeout_secs, MainConfigFormAction::CustomStreamResponseTimeoutSecs) }
             </>
         }
     };
