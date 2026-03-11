@@ -1234,16 +1234,13 @@ async fn xtream_player_api(api_req: UserApiRequest, app_state: &Arc<AppState>) -
                     }
                     Err(err) => {
                         error!("Failed response for xtream target: {} action: {} error: {}", &target.name, action, err);
-                        // Some players fail on NoContent, so we return an empty array
                         axum::response::Json(get_user_info(&user, app_state).await).into_response()
-                        //api_utils::empty_json_list_response().into_response()
                     }
                 }
             }
             None => {
-                axum::response::Json(get_user_info(&user, app_state).await).into_response()
                 // Some players fail on NoContent, so we return an empty array
-                //api_utils::empty_json_list_response().into_response()
+                api_utils::empty_json_list_response().into_response()
             }
         }
     } else {

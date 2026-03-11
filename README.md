@@ -2329,7 +2329,6 @@ Has the following top level entries:
 
 - `id` _mandatory_
 - `match_as_ascii` _optional_ default is `false`
-- `create_alias` _optional_ default is `false`
 - `mapper` _mandatory_
 - `counter` _optional_
 
