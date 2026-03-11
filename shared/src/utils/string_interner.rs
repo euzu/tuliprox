@@ -116,6 +116,10 @@ fn intern_string(s: String) -> Arc<str> {
     Arc::from(s)
 }
 
+/// Returns the current number of strings held in the interning pool.
+/// Uses a read lock and is safe to call on hot paths for threshold checks.
+pub fn interner_len() -> usize { INTERNER.read().map(|g| g.len()).unwrap_or(0) }
+
 /// Garbage collection: removes strings that are only referenced by the cache.
 pub fn interner_gc() -> usize {
     if let Ok(mut guard) = INTERNER.write() {

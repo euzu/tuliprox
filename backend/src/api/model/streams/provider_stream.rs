@@ -78,7 +78,9 @@ fn prepare_video_headers(headers: &[(String, String)]) -> Vec<(String, String)> 
         .filter(|(key, _)| {
             !(key.eq_ignore_ascii_case("content-type")
                 || key.eq_ignore_ascii_case("content-length")
-                || key.eq_ignore_ascii_case("range"))
+                || key.eq_ignore_ascii_case("range")
+                || key.eq_ignore_ascii_case("content-range")
+                || key.eq_ignore_ascii_case("accept-ranges"))
         })
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();

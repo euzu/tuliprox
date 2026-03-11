@@ -33,7 +33,8 @@ use std::{
     sync::{atomic::AtomicI8, Arc},
     time::Duration,
 };
-use tokio::{sync::Mutex, task};
+use tokio::sync::{mpsc, Mutex};
+use tokio::task;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
@@ -347,6 +348,11 @@ pub struct AppState {
     pub geoip: Arc<ArcSwapOption<GeoIp>>,
     pub update_guard: UpdateGuard,
     pub metadata_manager: Arc<MetadataUpdateManager>,
+    /// Bounded channel (capacity 1) for manual playlist update requests.
+    /// `try_send` deduplicates rapid clicks: if an update is already pending
+    /// or the channel is full, the request is silently dropped so at most one
+    /// update is queued at any time regardless of how many times the button is clicked.
+    pub manual_update_sender: mpsc::Sender<Arc<ProcessTargets>>,
 }
 
 impl AppState {

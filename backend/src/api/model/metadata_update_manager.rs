@@ -579,12 +579,9 @@ impl MetadataUpdateManager {
     /// Requests graceful shutdown for all metadata workers and delayed requeue tasks.
     /// This operation is idempotent.
     pub fn shutdown(&self) {
-        let token = {
-            let _guard = self.worker_lifecycle_lock.lock();
-            self.is_shutdown_flag.store(true, Ordering::Release);
-            self.cancel_token.load_full()
-        };
-        token.cancel();
+        let _guard = self.worker_lifecycle_lock.lock();
+        self.is_shutdown_flag.store(true, Ordering::Release);
+        self.cancel_token.load_full().cancel();
     }
 
     /// Returns true once shutdown has been requested.

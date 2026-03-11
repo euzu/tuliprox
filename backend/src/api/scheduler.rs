@@ -10,12 +10,13 @@ use crate::{
 };
 use chrono::{DateTime, FixedOffset, Local};
 use cron::Schedule;
-use shared::{model::ScheduleTaskType, utils::interner_gc};
+use shared::{model::ScheduleTaskType, utils::{interner_gc, interner_len}};
 use std::{
     str::FromStr,
     sync::Arc,
     time::{Duration, Instant, SystemTime},
 };
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 pub fn datetime_to_instant(datetime: DateTime<FixedOffset>) -> Instant {
@@ -67,11 +68,115 @@ pub fn exec_scheduler(
         let app_state_clone = Arc::clone(app_state);
         let http_client = client.clone();
         let cancel_token = cancel.clone();
-        tokio::spawn(async move {
-            start_scheduler(http_client, expression.as_str(), task_type, app_state_clone, exec_targets, cancel_token)
-                .await;
-        });
+
+        match task_type {
+            ScheduleTaskType::PlaylistUpdate => {
+                // Bounded channel with capacity 1: if an update is already pending or
+                // running and the scheduler fires again, the extra signal is dropped
+                // (deduplicated).  This prevents redundant runs from piling up when
+                // updates are slow or blocked waiting for the playlist lock.
+                let (tx, rx) = mpsc::channel::<()>(1);
+
+                // Cron trigger: fires at scheduled times and notifies the worker.
+                let trigger_cancel = cancel_token.clone();
+                tokio::spawn(async move {
+                    start_playlist_trigger(expression.as_str(), trigger_cancel, tx).await;
+                });
+
+                // Worker: processes triggers one at a time, blocking on the playlist
+                // lock when another update is active.  Cancels cleanly on shutdown.
+                let worker_client = http_client;
+                let worker_state = app_state_clone;
+                let worker_targets = exec_targets;
+                tokio::spawn(async move {
+                    run_playlist_update_worker(worker_client, worker_state, worker_targets, rx, cancel_token).await;
+                });
+            }
+            ScheduleTaskType::LibraryScan | ScheduleTaskType::GeoIpUpdate => {
+                tokio::spawn(async move {
+                    start_scheduler(
+                        http_client,
+                        expression.as_str(),
+                        task_type,
+                        app_state_clone,
+                        exec_targets,
+                        cancel_token,
+                    )
+                    .await;
+                });
+            }
+        }
     }
+}
+
+/// Cron trigger for playlist updates.  Fires at each scheduled time and sends a
+/// unit signal to the worker via a bounded channel.  If the channel is already
+/// full (one update is pending), `try_send` silently drops the signal —
+/// deduplication at zero cost.
+async fn start_playlist_trigger(expression: &str, cancel: CancellationToken, tx: mpsc::Sender<()>) {
+    match Schedule::from_str(expression) {
+        Ok(schedule) => {
+            let offset = *Local::now().offset();
+            loop {
+                let mut upcoming = schedule.upcoming(offset).take(1);
+                if let Some(datetime) = upcoming.next() {
+                    tokio::select! {
+                        biased;
+                        () = cancel.cancelled() => break,
+                        () = tokio::time::sleep_until(tokio::time::Instant::from(datetime_to_instant(datetime))) => {
+                            // If the channel is full, there is already one pending run queued.
+                            // This fire is covered by that pending run; drop it.
+                            let _ = tx.try_send(());
+                        }
+                    }
+                }
+            }
+        }
+        Err(err) => exit!("Failed to start scheduler: {err}"),
+    }
+}
+
+/// Worker for playlist updates.  Waits for trigger signals from the cron trigger
+/// and runs updates one at a time.  Blocks on `acquire_playlist_lock` while
+/// another update source (manual trigger, metadata update, another schedule) holds
+/// the lock — the worker resumes automatically once the lock is released.
+async fn run_playlist_update_worker(
+    client: reqwest::Client,
+    app_state: Arc<AppState>,
+    targets: Arc<ProcessTargets>,
+    mut rx: mpsc::Receiver<()>,
+    cancel: CancellationToken,
+) {
+    loop {
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => break,
+            msg = rx.recv() => {
+                if msg.is_none() {
+                    break; // Sender dropped (scheduler task exited)
+                }
+                run_playlist_update_inner(&client, &app_state, &targets).await;
+            }
+        }
+    }
+}
+
+async fn run_playlist_update_inner(client: &reqwest::Client, app_state: &Arc<AppState>, targets: &Arc<ProcessTargets>) {
+    exec_processing(
+        client,
+        Arc::clone(&app_state.app_config),
+        Arc::clone(targets),
+        Some(Arc::clone(&app_state.event_manager)),
+        Some(Arc::clone(app_state)),
+        Some(app_state.playlists.clone()),
+        Some(app_state.update_guard.clone()),
+        app_state.get_disabled_headers(),
+        Some(Arc::clone(&app_state.active_provider)),
+        Some(Arc::clone(&app_state.metadata_manager)),
+        None,
+        None,
+    )
+    .await;
 }
 
 async fn start_scheduler(
@@ -79,7 +184,7 @@ async fn start_scheduler(
     expression: &str,
     task_type: ScheduleTaskType,
     app_state: Arc<AppState>,
-    targets: Arc<ProcessTargets>,
+    _targets: Arc<ProcessTargets>,
     cancel: CancellationToken,
 ) {
     match Schedule::from_str(expression) {
@@ -91,9 +196,7 @@ async fn start_scheduler(
                     tokio::select! {
                         () = tokio::time::sleep_until(tokio::time::Instant::from(datetime_to_instant(datetime))) => {
                             match task_type {
-                                ScheduleTaskType::PlaylistUpdate => {
-                                    run_playlist_update(&client, &app_state, &targets);
-                                }
+                                ScheduleTaskType::PlaylistUpdate => unreachable!("handled by channel-based path"),
                                 ScheduleTaskType::LibraryScan => {
                                     run_library_scan(&client, &app_state);
                                 }
@@ -111,35 +214,6 @@ async fn start_scheduler(
         }
         Err(err) => exit!("Failed to start scheduler: {err}"),
     }
-}
-
-fn run_playlist_update(client: &reqwest::Client, app_state: &Arc<AppState>, targets: &Arc<ProcessTargets>) {
-    let client = client.clone();
-    let app_state = Arc::clone(app_state);
-    let targets = Arc::clone(targets);
-    tokio::spawn(async move {
-        let app_config = Arc::clone(&app_state.app_config);
-        let event_manager = Arc::clone(&app_state.event_manager);
-        let playlist_state = app_state.playlists.clone();
-        let provider_manager = Arc::clone(&app_state.active_provider);
-        let disabled_headers = app_state.get_disabled_headers();
-        let metadata_manager = Arc::clone(&app_state.metadata_manager);
-        exec_processing(
-            &client,
-            app_config,
-            targets,
-            Some(event_manager),
-            Some(app_state.clone()),
-            Some(playlist_state),
-            Some(app_state.update_guard.clone()),
-            disabled_headers,
-            Some(provider_manager),
-            Some(metadata_manager),
-            None,
-            None,
-        )
-        .await;
-    });
 }
 
 fn run_library_scan(client: &reqwest::Client, app_state: &Arc<AppState>) {
@@ -191,7 +265,7 @@ pub fn get_process_targets(
             let inputs: Vec<u16> =
                 user_targets.inputs.iter().filter(|&id| process_targets.inputs.contains(id)).copied().collect();
             let targets: Vec<u16> =
-                user_targets.targets.iter().filter(|&id| process_targets.inputs.contains(id)).copied().collect();
+                user_targets.targets.iter().filter(|&id| process_targets.targets.contains(id)).copied().collect();
             let target_names: Vec<String> = user_targets
                 .target_names
                 .iter()
@@ -206,12 +280,23 @@ pub fn get_process_targets(
 
 // TODO Consider making the GC interval configurable.
 // The 180-second interval is hardcoded. For deployments with different memory/performance characteristics, a configurable interval might be useful.
+
+/// Minimum number of interned strings required before GC runs.
+/// Below this threshold the write-lock overhead outweighs the benefit.
+const INTERNER_GC_MIN_POOL_SIZE: usize = 100;
+
 pub fn exec_interner_prune(app_state: &Arc<AppState>) {
     let app_state = Arc::clone(app_state);
     tokio::spawn({
         async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(180)).await;
+                // Skip GC entirely when the pool is too small — acquiring a write
+                // lock on the global interner briefly blocks all concurrent interns,
+                // so the cost only pays off when there are enough strings to clean.
+                if interner_len() < INTERNER_GC_MIN_POOL_SIZE {
+                    continue;
+                }
                 if let Some(permit) = app_state.update_guard.try_playlist() {
                     // Gate check: ensure updates aren't in progress; permit dropped to allow concurrent updates during GC
                     drop(permit);
