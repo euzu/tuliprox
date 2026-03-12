@@ -8,6 +8,9 @@ pub enum StreamError {
     ReceiverError(BroadcastStreamRecvError),
     LockError(String),
     Stream(String),
+    MalformedPacket(String),
+    InvalidTimestamp(String),
+    SyncLoss(String),
 }
 
 impl StreamError {
@@ -26,7 +29,11 @@ impl std::fmt::Display for StreamError {
             StreamError::StdIo(e) => write!(f, "IO error: {e}"),
             // StreamError::ReceiverClosed =>  write!(f, "Receiver closed"),
             StreamError::ReceiverError(e) => write!(f, "Receiver error {e}"),
-            StreamError::Stream(e) | StreamError::LockError(e) => write!(f, "{e}"),
+            StreamError::Stream(e)
+            | StreamError::LockError(e)
+            | StreamError::MalformedPacket(e)
+            | StreamError::InvalidTimestamp(e)
+            | StreamError::SyncLoss(e) => write!(f, "{e}"),
         }
     }
 }

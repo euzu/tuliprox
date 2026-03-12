@@ -4583,6 +4583,7 @@ dependencies = [
  "log",
  "lol_html",
  "lz4_flex",
+ "memchr",
  "memmap2",
  "mime",
  "mime_guess",
