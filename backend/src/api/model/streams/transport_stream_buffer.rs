@@ -468,7 +468,8 @@ impl TransportStreamBuffer {
         if new_pkt_has_pcr {
             if let Some(base_pcr) = first_pcr {
                 pkt[5] = 0x80 | 0x10; // Discontinuity (0x80) + PCR Flag (0x10)
-                let new_pcr = (base_pcr + timestamp_offset * 300) % MAX_PCR;
+                let offset_27mhz = timestamp_offset.wrapping_mul(300) % MAX_PCR;
+                let new_pcr = base_pcr.wrapping_add(offset_27mhz) % MAX_PCR;
                 let pcr_bytes = encode_pcr(new_pcr);
                 pkt[6..12].copy_from_slice(&pcr_bytes);
             } else {
@@ -496,7 +497,8 @@ impl TransportStreamBuffer {
                 let pcr_pos = pkt_start + 6;
                 let orig_pcr = decode_pcr(&bytes[pcr_pos..pcr_pos + 6]);
                 // PCR runs at 27 MHz; convert 90 kHz offset by multiplying by 300.
-                let new_pcr = (orig_pcr + timestamp_offset * 300) % MAX_PCR;
+                let offset_27mhz = timestamp_offset.wrapping_mul(300) % MAX_PCR;
+                let new_pcr = orig_pcr.wrapping_add(offset_27mhz) % MAX_PCR;
                 bytes[pcr_pos..pcr_pos + 6].copy_from_slice(&encode_pcr(new_pcr));
             }
         }
@@ -541,7 +543,8 @@ impl TransportStreamBuffer {
                 // increasing across loops. Resetting to 0 causes decoders (MPV, ffmpeg) to see
                 // a backward timestamp jump and treat the loop as end-of-stream or corrupt data.
                 self.current_pos = 0;
-                self.timestamp_offset += self.stream_duration_90khz;
+                self.timestamp_offset =
+                    self.timestamp_offset.wrapping_add(self.stream_duration_90khz) % MAX_PTS_DTS;
                 self.current_dts = 0;
 
                 // Reset only the discontinuity-sent flag so injection packets are emitted at the
@@ -555,13 +558,16 @@ impl TransportStreamBuffer {
             let current_pos = self.current_pos;
             let (packet_start, pts_dts_maybe) = self.packet_indices[current_pos];
             let packet = &self.buffer[packet_start..packet_start + TS_PACKET_SIZE];
+            let afc = (packet[3] >> 4) & 0b11;
+            let packet_has_payload = afc == 0b01 || afc == 0b11;
 
             // O(1) PID lookup — PID is at most 13 bits (0–8191).
             let pid = (u16::from(packet[1] & 0x1F) << 8) | u16::from(packet[2]);
             let entry = &mut self.cc_entries[pid as usize];
             let is_new_pid = entry.is_none();
             if is_new_pid {
-                *entry = Some((0, false));
+                // Initialize from source packet CC; we only advance for payload packets.
+                *entry = Some((packet[3] & 0x0F, false));
             }
             let (counter, discontinuity_sent) = entry.as_mut().unwrap();
 
@@ -575,28 +581,26 @@ impl TransportStreamBuffer {
 
             let payload_packet_cc;
             if inject_discontinuity {
-                // Extra (discontinuity) packet takes counter N; payload packet takes N+1.
-                let extra_packet_cc = *counter;
-                *counter = (*counter + 1) % 16;
-                payload_packet_cc = *counter;
-                *counter = (*counter + 1) % 16;
+                // Discontinuity packet is adaptation-only and does not consume a CC step.
+                // Keep CC progression tied strictly to payload packets.
+                let extra_packet_cc = if packet_has_payload { *counter } else { packet[3] & 0x0F };
+                payload_packet_cc = if packet_has_payload { *counter } else { packet[3] & 0x0F };
                 *discontinuity_sent = true;
 
                 // Write discontinuity packet directly into the output buffer — no allocation.
                 Self::generate_discontinuity_packet(packet, extra_packet_cc, self.first_pcr, self.timestamp_offset, &mut bytes);
             } else {
-                payload_packet_cc = *counter;
+                payload_packet_cc = if packet_has_payload { *counter } else { packet[3] & 0x0F };
+            }
+
+            // TS continuity counter increments only when payload is present (AFC=01/11).
+            if packet_has_payload {
                 *counter = (*counter + 1) % 16;
             }
 
             // Append the original packet into `bytes`, then mutate the appended slice in-place.
             let pkt_start = bytes.len();
             bytes.extend_from_slice(packet);
-
-            // For a newly-seen PID, clear its CC bits so they are set cleanly below.
-            if is_new_pid {
-                bytes[pkt_start + 3] &= 0xF0;
-            }
 
             // Apply the computed CC to the payload packet.
             bytes[pkt_start + 3] = (bytes[pkt_start + 3] & 0xF0) | (payload_packet_cc & 0x0F);
@@ -609,5 +613,79 @@ impl TransportStreamBuffer {
         }
 
         Some(bytes.freeze())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build_pts_dts_payload_packet(pid: u16, cc: u8, pts: u64, dts: u64) -> [u8; TS_PACKET_SIZE] {
+        let mut packet = [0xFF_u8; TS_PACKET_SIZE];
+        packet[0] = SYNC_BYTE;
+        packet[1] = 0x40 | ((pid >> 8) as u8 & 0x1F); // PUSI + PID high bits
+        packet[2] = (pid & 0xFF) as u8;
+        packet[3] = 0x10 | (cc & 0x0F); // payload only
+
+        let payload = &mut packet[4..];
+        payload[0] = 0x00;
+        payload[1] = 0x00;
+        payload[2] = 0x01;
+        payload[3] = 0xE0;
+        payload[4] = 0x00;
+        payload[5] = 0x00;
+        payload[6] = 0x80;
+        payload[7] = 0xC0; // PTS + DTS present
+        payload[8] = 0x0A;
+
+        let mut pts_bytes = encode_timestamp(pts);
+        pts_bytes[0] = (pts_bytes[0] & 0x0F) | 0x30;
+        payload[9..14].copy_from_slice(&pts_bytes);
+
+        let mut dts_bytes = encode_timestamp(dts);
+        dts_bytes[0] = (dts_bytes[0] & 0x0F) | 0x10;
+        payload[14..19].copy_from_slice(&dts_bytes);
+
+        packet
+    }
+
+    fn build_adaptation_only_packet(pid: u16, cc: u8) -> [u8; TS_PACKET_SIZE] {
+        let mut packet = [0xFF_u8; TS_PACKET_SIZE];
+        packet[0] = SYNC_BYTE;
+        packet[1] = (pid >> 8) as u8 & 0x1F;
+        packet[2] = (pid & 0xFF) as u8;
+        packet[3] = 0x20 | (cc & 0x0F); // adaptation only
+        packet[4] = 183;
+        packet[5] = 0;
+        packet
+    }
+
+    #[test]
+    fn discontinuity_packet_does_not_advance_payload_cc() {
+        let packet = build_pts_dts_payload_packet(0x0100, 7, 90_000, 87_000);
+        let mut buf = TransportStreamBuffer::new(packet.to_vec());
+        let chunk = buf.next_chunk().expect("expected chunk");
+        assert!(chunk.len() >= TS_PACKET_SIZE * 2);
+
+        // First emitted packet is injected discontinuity (adaptation-only),
+        // second is the actual payload packet for the same PID.
+        let disc_cc = chunk[3] & 0x0F;
+        let disc_afc = (chunk[3] >> 4) & 0b11;
+        let payload_cc = chunk[TS_PACKET_SIZE + 3] & 0x0F;
+        assert_eq!(disc_afc, 0b10);
+        assert_eq!(disc_cc, payload_cc);
+    }
+
+    #[test]
+    fn adaptation_only_packets_keep_same_continuity_counter() {
+        let packet = build_adaptation_only_packet(0x0011, 5);
+        let mut buf = TransportStreamBuffer::new(packet.to_vec());
+        let chunk = buf.next_chunk().expect("expected chunk");
+        assert_eq!(chunk.len(), CHUNK_SIZE);
+
+        for i in 0..PACKET_COUNT {
+            let cc = chunk[i * TS_PACKET_SIZE + 3] & 0x0F;
+            assert_eq!(cc, 5);
+        }
     }
 }
