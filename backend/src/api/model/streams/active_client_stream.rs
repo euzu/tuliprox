@@ -757,8 +757,93 @@ fn stream_grace_period(
 
 #[cfg(test)]
 mod tests {
-    use super::{ActiveClientStreamState, StreamMode};
-    use crate::api::model::CustomVideoStreamType;
+    use super::{ActiveClientStream, ActiveClientStreamState, CustomVideoBuffers, StreamMode};
+    use crate::{
+        api::model::{
+            ActiveProviderManager, ActiveUserManager, ConnectionManager, CustomVideoStreamType, EventManager,
+            SharedStreamManager, StreamError,
+        },
+        auth::Fingerprint,
+        model::{AppConfig, Config, ConfigInput, SourcesConfig},
+        utils::{FileLockManager, GeoIp},
+    };
+    use arc_swap::{ArcSwap, ArcSwapOption};
+    use bytes::Bytes;
+    use futures::{pin_mut, StreamExt};
+    use shared::{
+        model::{ConfigPaths, InputFetchMethod, InputType},
+        utils::Internable,
+    };
+    use std::{
+        collections::HashMap,
+        sync::{
+            atomic::AtomicU8,
+            Arc,
+        },
+    };
+
+    fn create_test_app_config() -> AppConfig {
+        let input = Arc::new(ConfigInput {
+            id: 1,
+            name: "provider_1".intern(),
+            input_type: InputType::Xtream,
+            headers: HashMap::default(),
+            url: "http://provider-1.example".to_string(),
+            username: Some("user1".to_string()),
+            password: Some("pass1".to_string()),
+            enabled: true,
+            priority: 0,
+            max_connections: 1,
+            method: InputFetchMethod::default(),
+            aliases: None,
+            ..ConfigInput::default()
+        });
+        let sources = SourcesConfig { inputs: vec![input], ..SourcesConfig::default() };
+
+        AppConfig {
+            config: Arc::new(ArcSwap::from_pointee(Config::default())),
+            sources: Arc::new(ArcSwap::from_pointee(sources)),
+            hdhomerun: Arc::new(ArcSwapOption::default()),
+            api_proxy: Arc::new(ArcSwapOption::default()),
+            file_locks: Arc::new(FileLockManager::default()),
+            paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
+                home_path: String::new(),
+                config_path: String::new(),
+                storage_path: String::new(),
+                config_file_path: String::new(),
+                sources_file_path: String::new(),
+                mapping_file_path: None,
+                mapping_files_used: None,
+                template_file_path: None,
+                template_files_used: None,
+                api_proxy_file_path: String::new(),
+                custom_stream_response_path: None,
+            })),
+            custom_stream_response: Arc::new(ArcSwapOption::default()),
+            access_token_secret: [0; 32],
+            encrypt_secret: [0; 16],
+            ffprobe_available: Arc::default(),
+        }
+    }
+
+    fn create_test_connection_manager() -> Arc<ConnectionManager> {
+        let app_cfg = create_test_app_config();
+        let event_manager = Arc::new(EventManager::new());
+        let provider_manager = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
+        let shared_manager = Arc::new(SharedStreamManager::new(Arc::clone(&provider_manager)));
+        provider_manager.set_shared_stream_manager(Arc::clone(&shared_manager));
+
+        let geo_ip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let config = app_cfg.config.load();
+        let user_manager = Arc::new(ActiveUserManager::new(&config, &geo_ip, &event_manager));
+
+        Arc::new(ConnectionManager::new(
+            &user_manager,
+            &provider_manager,
+            &shared_manager,
+            &event_manager,
+        ))
+    }
 
     #[test]
     fn test_custom_video_type_mapping_for_grace_modes() {
@@ -782,5 +867,46 @@ mod tests {
             ActiveClientStreamState::custom_video_type_for_mode(StreamMode::ChannelUnavailable),
             CustomVideoStreamType::ChannelUnavailable
         ));
+    }
+
+    #[tokio::test]
+    async fn test_provisioning_without_custom_video_terminates_immediately_with_timeout_configured() {
+        let connection_manager = create_test_connection_manager();
+        let addr = "127.0.0.1:55001".parse().unwrap_or_else(|_| unreachable!());
+
+        let state = ActiveClientStreamState {
+            inner: futures::stream::empty::<Result<Bytes, StreamError>>().boxed(),
+            send_custom_stream_flag: Some(Arc::new(AtomicU8::new(StreamMode::Provisioning as u8))),
+            provider_handle: None,
+            preempt_cancelled: None,
+            grace_task_handle: None,
+            provisionable: true,
+            custom_video: CustomVideoBuffers {
+                user_exhausted: None,
+                provider_exhausted: None,
+                unavailable: None,
+                provisioning: None,
+                low_priority_preempted: None,
+            },
+            waker: None,
+            connection_manager,
+            fingerprint: Arc::new(Fingerprint::new(
+                "fp-key".to_string(),
+                "127.0.0.1".to_string(),
+                addr,
+            )),
+            provider_stopped: true,
+            user_stream_released: true,
+            provider_handle_released: true,
+            custom_video_timeout_secs: 5,
+            custom_video_timeout_mode: None,
+            custom_video_timeout_sleep: None,
+        };
+
+        let stream = ActiveClientStream { state };
+        pin_mut!(stream);
+
+        let result = stream.next().await;
+        assert!(result.is_none());
     }
 }
