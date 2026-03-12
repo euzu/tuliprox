@@ -250,7 +250,7 @@ fn resolve_attempt_target_with_dns_mode(
 
     if scheme.eq_ignore_ascii_case("http") {
         let mut effective = resolved_url.clone();
-        if effective.set_host(Some(connect_ip.to_string().as_str())).is_ok() {
+        if effective.set_ip_host(connect_ip).is_ok() {
             target.effective_url = effective;
         }
     }
@@ -1751,6 +1751,19 @@ mod tests {
         let target = resolve_attempt_target(&url, Some(&provider));
         assert_eq!(target.effective_url.host_str(), Some("203.0.113.10"));
         assert_eq!(target.host_header.as_deref(), Some("example.com:8080"));
+    }
+
+    #[test]
+    fn test_http_attempt_uses_bracketed_ipv6_target_for_logging_and_request_url() {
+        let provider = make_provider_with_dns(false, OnConnectErrorPolicy::TryNextIp, vec!["2a06:98c1:3121::3"]);
+        let url = Url::parse("http://example.com/live/stream.ts").expect("url parse should work");
+
+        let preview = preview_request_target_for_logging(&url, Some(&provider));
+        let target = resolve_attempt_target(&url, Some(&provider));
+
+        assert_eq!(preview, "http://[2a06:98c1:3121::3]/live/stream.ts");
+        assert_eq!(target.effective_url.as_str(), "http://[2a06:98c1:3121::3]/live/stream.ts");
+        assert_eq!(target.host_header.as_deref(), Some("[2a06:98c1:3121::3]"));
     }
 
     #[test]
