@@ -218,52 +218,44 @@ fn find_ts_alignment(buf: &[u8]) -> Option<usize> {
 /// Calculates exact stream duration in 90kHz ticks.
 /// Duration = (`last_pts` - `first_pts`) + `estimated_frame_duration`.
 pub fn calculate_duration_ticks(buffer: &[u8], packet_indices: &PacketIndices) -> u64 {
-    let mut first_pts: Option<u64> = None;
-    let mut last_pts: Option<u64> = None;
-    let mut count = 0;
-
-    // We already calculated average diff/duration in `extract_pts_dts_indices_with_continuity`
-    // but we didn't expose it. We can re-estimate it here or assume a default.
-    // However, packet_indices stores `diff` in the tuple! `(pts, dts, diff)`.
-    // But only for the first packet of a frame?
-    // Let's just find first and last.
-
-    // Also, we can estimate frame duration by taking the minimal non-zero diff between frames?
-    // Or just (last - first) / (count - 1).
-
-    // Note: packet_indices contains ALL packets. Many have None.
-    // Those with Some have PTS/DTS.
+    let mut min_ts: Option<u64> = None;
+    let mut max_ts: Option<u64> = None;
+    let mut ts_count = 0_u64;
 
     for &(packet_start, ref pts_dts_opt) in packet_indices {
-        if let Some((pts_offset, _dts_offset, _diff)) = pts_dts_opt {
-            let pts_bytes = &buffer[packet_start + pts_offset..packet_start + pts_offset + 5];
-            let pts = decode_timestamp(pts_bytes);
-
-            if first_pts.is_none() {
-                first_pts = Some(pts);
+        if let Some((pts_offset, dts_offset_opt, _diff)) = pts_dts_opt {
+            let pts_start = packet_start + pts_offset;
+            if pts_start + 5 <= buffer.len() {
+                let pts = decode_timestamp(&buffer[pts_start..pts_start + 5]);
+                min_ts = Some(min_ts.map_or(pts, |min_v| min_v.min(pts)));
+                max_ts = Some(max_ts.map_or(pts, |max_v| max_v.max(pts)));
+                ts_count += 1;
             }
-            last_pts = Some(pts);
-            count += 1;
+
+            if let Some(dts_offset) = dts_offset_opt {
+                let dts_start = packet_start + dts_offset;
+                if dts_start + 5 <= buffer.len() {
+                    let dts = decode_timestamp(&buffer[dts_start..dts_start + 5]);
+                    min_ts = Some(min_ts.map_or(dts, |min_v| min_v.min(dts)));
+                    max_ts = Some(max_ts.map_or(dts, |max_v| max_v.max(dts)));
+                    ts_count += 1;
+                }
+            }
         }
     }
 
-    match (first_pts, last_pts) {
-        (Some(start), Some(end)) if end >= start && count > 1 => {
+    match (min_ts, max_ts) {
+        (Some(start), Some(end)) if end > start && ts_count > 1 => {
             let visible_duration = end - start;
-            let avg_frame_duration = visible_duration / (count - 1);
-            // Limit avg frame duration to something reasonable (e.g. < 1 sec = 90000) to avoid outliers
-            let frame_duration = if avg_frame_duration > 0 && avg_frame_duration < 90000 {
-                avg_frame_duration
+            let avg_step = visible_duration / (ts_count - 1);
+            let frame_duration = if (1..90_000).contains(&avg_step) {
+                avg_step
             } else {
-                3000 // Default to ~30fps (3000 ticks) if calculation fails
+                3_000 // ~30fps fallback in 90kHz ticks
             };
-
             visible_duration + frame_duration
         }
-        (Some(start), Some(end)) if end >= start => {
-            // Single frame?
-            end - start + 3000
-        }
+        (Some(start), Some(end)) if end >= start => end - start + 3_000,
         _ => 0,
     }
 }
@@ -687,5 +679,26 @@ mod tests {
             let cc = chunk[i * TS_PACKET_SIZE + 3] & 0x0F;
             assert_eq!(cc, 5);
         }
+    }
+
+    #[test]
+    fn duration_uses_min_max_pts_not_packet_order() {
+        let p0 = build_pts_dts_payload_packet(0x0100, 0, 0, 0);
+        let p1 = build_pts_dts_payload_packet(0x0100, 1, 20_000, 20_000);
+        let p2 = build_pts_dts_payload_packet(0x0100, 2, 10_000, 10_000);
+
+        let mut raw = Vec::with_capacity(TS_PACKET_SIZE * 3);
+        raw.extend_from_slice(&p0);
+        raw.extend_from_slice(&p1);
+        raw.extend_from_slice(&p2);
+
+        let packet_indices = vec![
+            (0, Some((13, Some(18), 0))),
+            (TS_PACKET_SIZE, Some((13, Some(18), 0))),
+            (TS_PACKET_SIZE * 2, Some((13, Some(18), 0))),
+        ];
+
+        let duration = calculate_duration_ticks(&raw, &packet_indices);
+        assert!(duration > 20_000, "duration should be based on full min/max span");
     }
 }
