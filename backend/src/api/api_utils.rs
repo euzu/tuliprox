@@ -1061,6 +1061,7 @@ pub async fn stream_response(
                 shared_headers,
                 stream_options.buffer_size,
                 provider_handle,
+                user.priority,
             )
             .await
             {
@@ -1184,7 +1185,7 @@ async fn try_shared_stream_response_if_any(
     }
 
     if let Some((stream, provider)) =
-        SharedStreamManager::subscribe_shared_stream(app_state, stream_url, &fingerprint.addr).await
+        SharedStreamManager::subscribe_shared_stream(app_state, stream_url, &fingerprint.addr, user.priority).await
     {
         debug_if_enabled!("Using shared stream {}", sanitize_sensitive_info(stream_url));
         if let Some(headers) = app_state.shared_stream_manager.get_shared_state_headers(stream_url).await {

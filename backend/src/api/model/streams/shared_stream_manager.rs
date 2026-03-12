@@ -641,6 +641,7 @@ impl SharedStreamManager {
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn register_shared_stream<S, E>(
         app_state: &AppState,
         stream_url: &str,
@@ -649,6 +650,7 @@ impl SharedStreamManager {
         headers: Vec<(String, String)>,
         buffer_size: usize,
         provider_handle: Option<ProviderHandle>,
+        user_priority: i8,
     ) -> Option<(BoxedProviderStream, Option<Arc<str>>)>
     where
         S: Stream<Item = Result<Bytes, E>> + Unpin + 'static + Send,
@@ -661,7 +663,7 @@ impl SharedStreamManager {
         let shared_state = Arc::new(SharedStreamState::new(headers, buf_size, provider_handle, min_buffer_bytes));
         app_state.shared_stream_manager.register(addr, stream_url, Arc::clone(&shared_state)).await;
         app_state.active_provider.make_shared_connection(addr, stream_url).await;
-        let subscribed_stream = Self::subscribe_shared_stream(app_state, stream_url, addr).await;
+        let subscribed_stream = Self::subscribe_shared_stream(app_state, stream_url, addr, user_priority).await;
         debug_if_enabled!(
             "Shared stream startup register+subscribe completed for {} in {} ms",
             sanitize_sensitive_info(stream_url),
@@ -680,10 +682,11 @@ impl SharedStreamManager {
         app_state: &AppState,
         stream_url: &str,
         addr: &SocketAddr,
+        user_priority: i8,
     ) -> Option<(BoxedProviderStream, Option<Arc<str>>)> {
         let manager = Arc::clone(&app_state.shared_stream_manager);
         if let Some(result) = app_state.shared_stream_manager.subscribe_stream(stream_url, addr, manager).await {
-            app_state.active_provider.add_shared_connection(addr, stream_url).await;
+            app_state.active_provider.add_shared_connection(addr, stream_url, user_priority).await;
             Some(result)
         } else {
             None
