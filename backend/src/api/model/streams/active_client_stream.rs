@@ -97,6 +97,9 @@ struct ActiveClientStreamState {
     /// Mirrors `user_stream_released` for the provider handle to guard against double-release
     /// when preemption and Drop race.
     provider_handle_released: bool,
+    custom_video_timeout_secs: u32,
+    custom_video_timeout_mode: Option<StreamMode>,
+    custom_video_timeout_sleep: Option<Pin<Box<tokio::time::Sleep>>>,
 }
 
 impl ActiveClientStreamState {
@@ -231,6 +234,30 @@ impl ActiveClientStreamState {
         }
     }
 
+    fn reset_custom_video_timeout(&mut self) {
+        self.custom_video_timeout_mode = None;
+        self.custom_video_timeout_sleep = None;
+    }
+
+    fn custom_video_timed_out(&mut self, cx: &mut Context<'_>, mode: StreamMode) -> bool {
+        if self.custom_video_timeout_secs == 0 {
+            return false;
+        }
+
+        if self.custom_video_timeout_mode != Some(mode) || self.custom_video_timeout_sleep.is_none() {
+            self.custom_video_timeout_mode = Some(mode);
+            self.custom_video_timeout_sleep = Some(Box::pin(tokio::time::sleep(tokio::time::Duration::from_secs(
+                u64::from(self.custom_video_timeout_secs),
+            ))));
+        }
+
+        if let Some(timeout_sleep) = self.custom_video_timeout_sleep.as_mut() {
+            return timeout_sleep.as_mut().poll(cx).is_ready();
+        }
+
+        false
+    }
+
 }
 
 pub(in crate::api) struct ActiveClientStream {
@@ -265,10 +292,14 @@ impl Stream for ActiveClientStream {
         // 4. Dispatch based on current streaming phase
         match mode {
             // Grace period: hold_stream=true, waiting for grace task to resolve
-            StreamMode::GracePending => Poll::Pending,
+            StreamMode::GracePending => {
+                self.state.reset_custom_video_timeout();
+                Poll::Pending
+            }
 
             // Live streaming: forward bytes from upstream provider
             StreamMode::Inner => {
+                self.state.reset_custom_video_timeout();
                 match Pin::new(&mut self.state.inner).poll_next(cx) {
                     Poll::Ready(Some(Ok(bytes))) => Poll::Ready(Some(Ok(bytes))),
                     Poll::Ready(Some(Err(e))) => {
@@ -296,6 +327,14 @@ impl Stream for ActiveClientStream {
 
             // Custom video modes: serve the appropriate buffer
             video_mode => {
+                if self.state.custom_video_timed_out(cx, video_mode) {
+                    info!(
+                        "Custom video {video_mode:?} timed out for {}, terminating stream",
+                        sanitize_sensitive_info(&self.state.fingerprint.addr.to_string())
+                    );
+                    return Poll::Ready(None);
+                }
+
                 // Stop provider stream exactly once when entering a video mode
                 if !self.state.provider_stopped {
                     info!(
@@ -471,6 +510,7 @@ pub(crate) async fn create_active_client_stream(
 
     let cfg = &app_state.app_config;
     let custom_response = cfg.custom_stream_response.load();
+    let custom_video_timeout_secs = cfg.config.load().custom_stream_response_timeout_secs;
     let custom_video = custom_response.as_ref().map_or(
         CustomVideoBuffers {
             user_exhausted: None,
@@ -529,6 +569,9 @@ pub(crate) async fn create_active_client_stream(
         provider_stopped: false,
         user_stream_released: false,
         provider_handle_released: false,
+        custom_video_timeout_secs,
+        custom_video_timeout_mode: None,
+        custom_video_timeout_sleep: None,
     };
 
     ActiveClientStream { state }.boxed()
