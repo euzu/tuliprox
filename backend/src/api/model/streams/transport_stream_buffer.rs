@@ -492,8 +492,11 @@ impl TransportStreamBuffer {
                 // Loop back
                 self.current_pos = 0;
 
-                // Reset timestamps to start
-                self.timestamp_offset = 0;
+                // Advance timestamp offset by one video duration so PTS/DTS/PCR remain
+                // monotonically increasing across loops. Resetting to 0 causes decoders
+                // (MPV, ffmpeg) to see a backward timestamp jump and treat the loop as
+                // end-of-stream or corrupted data.
+                self.timestamp_offset += self.stream_duration_90khz;
                 self.current_dts = 0;
 
                 // Reset discontinuity flags to trigger injection of discontinuity packets for each PID

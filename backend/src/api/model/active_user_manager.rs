@@ -153,11 +153,9 @@ impl ActiveUserManager {
 
             let mut removed_stream = false;
             if let Some(connection_data) = user_connections.by_key.get_mut(&username) {
-                let prev_len = connection_data.streams.len();
-                connection_data.streams.retain(|c| c.addr != *addr);
-                removed_stream = connection_data.streams.len() != prev_len;
-
-                if removed_stream {
+                if let Some(stream_idx) = connection_data.streams.iter().position(|c| c.addr == *addr) {
+                    connection_data.streams.swap_remove(stream_idx);
+                    removed_stream = true;
                     if connection_data.connections > 0 {
                         connection_data.connections -= 1;
                     }
@@ -191,8 +189,10 @@ impl ActiveUserManager {
                 if let Some(connection_data) = user_connections.by_key.get_mut(&username) {
                     let prev_len = connection_data.streams.len();
                     connection_data.streams.retain(|c| c.addr != *addr);
-                    if connection_data.streams.len() != prev_len && connection_data.connections > 0 {
-                        connection_data.connections -= 1;
+                    let removed_count = prev_len.saturating_sub(connection_data.streams.len());
+                    if removed_count > 0 && connection_data.connections > 0 {
+                        connection_data.connections =
+                            connection_data.connections.saturating_sub(u32::try_from(removed_count).unwrap_or(0));
                     }
 
                     if connection_data.connections < connection_data.max_connections {
@@ -365,8 +365,17 @@ impl ActiveUserManager {
 
             let user_agent_string = user_agent.to_string();
 
-            let existing_stream_info =
-                connection_data.streams.iter_mut().find(|s| s.addr == fingerprint.addr).map(|stream_info| {
+            let existing_stream_info = connection_data
+                .streams
+                .iter_mut()
+                .find(|stream_info| {
+                    stream_info.addr == fingerprint.addr
+                        && match session_token {
+                            Some(token) => stream_info.session_token.as_deref() == Some(token),
+                            None => stream_info.session_token.is_none(),
+                        }
+                })
+                .map(|stream_info| {
                     stream_info.channel = stream_channel.clone();
                     stream_info.provider = provider.to_string();
                     stream_info.user_agent.clone_from(&user_agent_string);
@@ -635,6 +644,84 @@ impl ActiveUserManager {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{api::model::EventManager, auth::Fingerprint, model::Config};
+    use arc_swap::ArcSwapOption;
+    use shared::{
+        model::{PlaylistItemType, StreamChannel, XtreamCluster},
+        utils::Internable,
+    };
+    use std::{borrow::Cow, sync::Arc};
+
+    fn test_channel(virtual_id: u32) -> StreamChannel {
+        StreamChannel {
+            target_id: 1,
+            virtual_id,
+            provider_id: 1,
+            item_type: PlaylistItemType::Live,
+            cluster: XtreamCluster::Live,
+            group: "group".intern(),
+            title: "title".intern(),
+            url: "http://localhost/stream.ts".intern(),
+            shared: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_multi_session_same_addr_counts_and_releases_individually() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let addr: SocketAddr = "127.0.0.1:55001".parse().unwrap();
+        let fingerprint = Fingerprint::new("fp-key".to_string(), "127.0.0.1".to_string(), addr);
+        let username = "user1";
+
+        manager.add_connection(&addr).await;
+
+        let first = manager
+            .update_connection(
+                username,
+                1,
+                &fingerprint,
+                "provider-a",
+                test_channel(1001),
+                Cow::Borrowed("ua"),
+                Some("tok-1"),
+            )
+            .await;
+        assert!(first.is_some());
+        assert_eq!(manager.user_connections(username).await, 1);
+        assert_eq!(
+            manager.connection_permission(username, 1).await,
+            UserConnectionPermission::GracePeriod
+        );
+
+        let second = manager
+            .update_connection(
+                username,
+                1,
+                &fingerprint,
+                "provider-b",
+                test_channel(1002),
+                Cow::Borrowed("ua"),
+                Some("tok-2"),
+            )
+            .await;
+        assert!(second.is_some());
+        assert_eq!(manager.user_connections(username).await, 2);
+
+        assert!(manager.release_stream(&addr).await);
+        assert_eq!(manager.user_connections(username).await, 1);
+
+        assert!(manager.release_stream(&addr).await);
+        assert_eq!(manager.user_connections(username).await, 0);
     }
 }
 

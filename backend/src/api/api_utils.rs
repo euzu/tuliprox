@@ -992,8 +992,13 @@ pub async fn stream_response(
         }
     };
 
-    let deferred_grace_hold_stream =
-        !stream_details.has_stream() && stream_details.provider_grace_active && stream_details.grace_period.hold_stream;
+    // When no provider stream is available, still create an ActiveClientStream if a grace period
+    // needs to resolve (provider-grace with hold_stream, or user-grace). The grace task will
+    // determine the correct mode (UserExhausted / ProviderExhausted / Inner) and serve the
+    // appropriate custom video or terminate cleanly.
+    let deferred_grace_hold_stream = !stream_details.has_stream()
+        && (stream_details.provider_grace_active
+            || connection_permission == UserConnectionPermission::GracePeriod);
 
     if stream_details.has_stream() || deferred_grace_hold_stream {
         // let content_length = get_stream_content_length(provider_response.as_ref());

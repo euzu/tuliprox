@@ -96,6 +96,17 @@ struct ActiveClientStreamState {
 }
 
 impl ActiveClientStreamState {
+    fn custom_video_type_for_mode(mode: StreamMode) -> CustomVideoStreamType {
+        match mode {
+            StreamMode::UserExhausted => CustomVideoStreamType::UserConnectionsExhausted,
+            StreamMode::ProviderExhausted => CustomVideoStreamType::ProviderConnectionsExhausted,
+            StreamMode::Provisioning => CustomVideoStreamType::Provisioning,
+            StreamMode::ChannelUnavailable | StreamMode::Inner | StreamMode::GracePending => {
+                CustomVideoStreamType::ChannelUnavailable
+            }
+        }
+    }
+
     fn release_user_stream(&mut self) {
         if self.user_stream_released {
             return;
@@ -161,7 +172,7 @@ impl ActiveClientStreamState {
         }
     }
 
-    fn stop_provider_stream(&mut self, unavailable: bool) {
+    fn stop_provider_stream(&mut self, mode: StreamMode) {
         self.provider_stopped = true;
         self.preempt_cancelled = None;
         self.stop_grace_task();
@@ -171,7 +182,7 @@ impl ActiveClientStreamState {
             let handle = self.provider_handle.take();
             self.provider_handle_released = true;
 
-            if unavailable {
+            if mode == StreamMode::ChannelUnavailable {
                 if let Some(flag) = &self.send_custom_stream_flag {
                     let _ = flag.compare_exchange(
                         StreamMode::Inner as u8,
@@ -189,11 +200,7 @@ impl ActiveClientStreamState {
             let addr = self.fingerprint.addr;
             self.inner = futures::stream::empty::<Result<Bytes, StreamError>>().boxed();
 
-            let video_type = if unavailable {
-                CustomVideoStreamType::ChannelUnavailable
-            } else {
-                CustomVideoStreamType::UserConnectionsExhausted
-            };
+            let video_type = Self::custom_video_type_for_mode(mode);
             debug_if_enabled!(
                 "Provider stream stopped due to grace period or unavailable provider channel for {}",
                 sanitize_sensitive_info(&addr.to_string())
@@ -206,51 +213,6 @@ impl ActiveClientStreamState {
         }
     }
 
-    fn poll_next_base(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<Bytes, StreamError>>> {
-        self.clear_finished_grace_task();
-        if let Some(waker) = &self.waker {
-            waker.register(cx.waker());
-        }
-
-        if let Some(fut) = self.preempt_cancelled.as_mut() {
-            if fut.as_mut().poll(cx).is_ready() {
-                self.stop_provider_stream_preempted();
-                return Poll::Ready(None);
-            }
-        }
-
-        let mode = match &self.send_custom_stream_flag {
-            Some(flag) => StreamMode::from_u8(flag.load(Ordering::Acquire)),
-            None => StreamMode::Inner,
-        };
-
-        // When hold_stream_active is true and mode is GracePending, we wait for the grace period
-        // check to complete before starting to stream. The grace period task will update the flag.
-        if mode == StreamMode::GracePending {
-            // Still waiting for grace period check to complete
-            // The grace period task will wake us when done
-            return Poll::Pending;
-        }
-
-        if mode == StreamMode::Inner {
-            match Pin::new(&mut self.inner).poll_next(cx) {
-                Poll::Ready(Some(Err(e))) => {
-                    error!("Inner stream error: {e:?}");
-                    self.stop_provider_stream(true);
-                    return Poll::Ready(Some(Err(e)));
-                }
-                Poll::Ready(None) => {
-                    self.stop_provider_stream(true);
-                    return Poll::Ready(None);
-                }
-                healthy => return healthy,
-            }
-        }
-        if !self.provider_stopped {
-            self.stop_provider_stream(false);
-        }
-        Poll::Ready(None) // Fallback for subclasses to handle other flags
-    }
 }
 
 pub(in crate::api) struct ActiveClientStream {
@@ -261,41 +223,109 @@ impl Stream for ActiveClientStream {
     type Item = Result<Bytes, StreamError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let res = self.state.poll_next_base(cx);
-        if !matches!(res, Poll::Ready(None)) {
-            return res;
+        // 1. Preemption check (user priority feature)
+        if let Some(fut) = self.state.preempt_cancelled.as_mut() {
+            if fut.as_mut().poll(cx).is_ready() {
+                self.state.stop_provider_stream_preempted();
+                return Poll::Ready(None);
+            }
         }
 
+        // 2. Grace task lifecycle management + waker registration
+        self.state.clear_finished_grace_task();
+        if let Some(waker) = &self.state.waker {
+            waker.register(cx.waker());
+        }
+
+        // 3. Read atomic mode flag (set by grace task or stop_provider_stream)
         let mode = match &self.state.send_custom_stream_flag {
             Some(flag) => StreamMode::from_u8(flag.load(Ordering::Acquire)),
             None => StreamMode::Inner,
         };
 
-        // Only stay pending if provisionable AND the grace task is still running.
-        // Once the grace task completes (handle is None), the decision is final —
-        // if the stream ended, we must close to avoid hanging the client forever.
-        let grace_active = self.state.provisionable && self.state.grace_task_handle.is_some();
+        // 4. Dispatch based on current streaming phase
+        match mode {
+            // Grace period: hold_stream=true, waiting for grace task to resolve
+            StreamMode::GracePending => Poll::Pending,
 
-        if mode == StreamMode::Inner {
-            return if grace_active { Poll::Pending } else { Poll::Ready(None) };
-        }
-
-        let buffer_opt = match mode {
-            StreamMode::UserExhausted     => self.state.custom_video.user_exhausted.as_mut(),
-            StreamMode::ProviderExhausted => self.state.custom_video.provider_exhausted.as_mut(),
-            StreamMode::ChannelUnavailable => self.state.custom_video.unavailable.as_mut(),
-            StreamMode::Provisioning      => self.state.custom_video.provisioning.as_mut(),
-            _ => None,
-        };
-
-        if let Some(buffer) = buffer_opt {
-            buffer.register_waker(cx.waker());
-            match buffer.next_chunk() {
-                Some(chunk) => Poll::Ready(Some(Ok(chunk))),
-                None => if grace_active { Poll::Pending } else { Poll::Ready(None) },
+            // Live streaming: forward bytes from upstream provider
+            StreamMode::Inner => {
+                match Pin::new(&mut self.state.inner).poll_next(cx) {
+                    Poll::Ready(Some(Ok(bytes))) => Poll::Ready(Some(Ok(bytes))),
+                    Poll::Ready(Some(Err(e))) => {
+                        error!("Inner stream error: {e:?}");
+                        if self.state.grace_task_handle.is_none() {
+                            self.state.stop_provider_stream(StreamMode::ChannelUnavailable);
+                            Poll::Ready(None)
+                        } else {
+                            // Grace task is still resolving; keep stream alive until it decides
+                            Poll::Pending
+                        }
+                    }
+                    Poll::Ready(None) => {
+                        if self.state.grace_task_handle.is_none() {
+                            self.state.stop_provider_stream(StreamMode::ChannelUnavailable);
+                            Poll::Ready(None)
+                        } else {
+                            // Grace task is still resolving; keep stream alive until it decides
+                            Poll::Pending
+                        }
+                    }
+                    Poll::Pending => Poll::Pending,
+                }
             }
-        } else {
-            Pin::new(&mut self.state.inner).poll_next(cx)
+
+            // Custom video modes: serve the appropriate buffer
+            video_mode => {
+                // Stop provider stream exactly once when entering a video mode
+                if !self.state.provider_stopped {
+                    info!(
+                        "Switching to {video_mode:?} custom video stream for {}",
+                        sanitize_sensitive_info(&self.state.fingerprint.addr.to_string())
+                    );
+                    self.state.stop_provider_stream(video_mode);
+                }
+
+                let is_provisioning = video_mode == StreamMode::Provisioning && self.state.provisionable;
+
+                let buffer_opt = match video_mode {
+                    StreamMode::UserExhausted     => self.state.custom_video.user_exhausted.as_mut(),
+                    StreamMode::ProviderExhausted => self.state.custom_video.provider_exhausted.as_mut(),
+                    StreamMode::ChannelUnavailable => self.state.custom_video.unavailable.as_mut(),
+                    StreamMode::Provisioning      => self.state.custom_video.provisioning.as_mut(),
+                    _ => None,
+                };
+
+                if let Some(buffer) = buffer_opt {
+                    buffer.register_waker(cx.waker());
+                    match buffer.next_chunk() {
+                        Some(chunk) => Poll::Ready(Some(Ok(chunk))),
+                        None => {
+                            // Provisioning loops until preemption fires; all others terminate.
+                            if is_provisioning {
+                                Poll::Pending
+                            } else {
+                                info!(
+                                    "Custom video {video_mode:?} buffer exhausted for {}, terminating stream",
+                                    sanitize_sensitive_info(&self.state.fingerprint.addr.to_string())
+                                );
+                                Poll::Ready(None)
+                            }
+                        }
+                    }
+                } else {
+                    // No custom video configured for this mode
+                    if is_provisioning {
+                        Poll::Pending // Keep alive; provisioning probe will preempt us when done
+                    } else {
+                        info!(
+                            "No custom video configured for {video_mode:?} mode for {}, terminating stream",
+                            sanitize_sensitive_info(&self.state.fingerprint.addr.to_string())
+                        );
+                        Poll::Ready(None)
+                    }
+                }
+            }
         }
     }
 }
@@ -464,8 +494,8 @@ pub(crate) async fn create_active_client_stream(
         grace_task_handle,
         provider_handle: stream_details.provider_handle,
         send_custom_stream_flag: grace_stop_flag,
-        custom_video,
         provisionable: has_provisioning,
+        custom_video,
         waker: Some(waker),
         connection_manager: Arc::clone(&app_state.connection_manager),
         fingerprint: Arc::new(fingerprint.clone()),
@@ -644,4 +674,30 @@ fn stream_grace_period(
         return (Some(stream_strategy_flag), Some(grace_task_handle));
     }
     (None, None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ActiveClientStreamState, StreamMode};
+    use crate::api::model::CustomVideoStreamType;
+
+    #[test]
+    fn test_custom_video_type_mapping_for_grace_modes() {
+        assert!(matches!(
+            ActiveClientStreamState::custom_video_type_for_mode(StreamMode::UserExhausted),
+            CustomVideoStreamType::UserConnectionsExhausted
+        ));
+        assert!(matches!(
+            ActiveClientStreamState::custom_video_type_for_mode(StreamMode::ProviderExhausted),
+            CustomVideoStreamType::ProviderConnectionsExhausted
+        ));
+        assert!(matches!(
+            ActiveClientStreamState::custom_video_type_for_mode(StreamMode::Provisioning),
+            CustomVideoStreamType::Provisioning
+        ));
+        assert!(matches!(
+            ActiveClientStreamState::custom_video_type_for_mode(StreamMode::ChannelUnavailable),
+            CustomVideoStreamType::ChannelUnavailable
+        ));
+    }
 }
