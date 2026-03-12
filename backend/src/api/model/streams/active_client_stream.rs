@@ -239,16 +239,34 @@ impl ActiveClientStreamState {
         self.custom_video_timeout_sleep = None;
     }
 
+    fn enter_custom_mode(&mut self, mode: StreamMode) {
+        if self.custom_video_timeout_mode != Some(mode) {
+            self.custom_video_timeout_mode = Some(mode);
+            self.custom_video_timeout_sleep = if self.custom_video_timeout_secs > 0 {
+                Some(Box::pin(tokio::time::sleep(tokio::time::Duration::from_secs(
+                    u64::from(self.custom_video_timeout_secs),
+                ))))
+            } else {
+                None
+            };
+        }
+
+        if !self.provider_stopped {
+            info!(
+                "Switching to {mode:?} custom video stream for {}",
+                sanitize_sensitive_info(&self.fingerprint.addr.to_string())
+            );
+            self.stop_provider_stream(mode);
+        }
+    }
+
     fn custom_video_timed_out(&mut self, cx: &mut Context<'_>, mode: StreamMode) -> bool {
         if self.custom_video_timeout_secs == 0 {
             return false;
         }
 
-        if self.custom_video_timeout_mode != Some(mode) || self.custom_video_timeout_sleep.is_none() {
-            self.custom_video_timeout_mode = Some(mode);
-            self.custom_video_timeout_sleep = Some(Box::pin(tokio::time::sleep(tokio::time::Duration::from_secs(
-                u64::from(self.custom_video_timeout_secs),
-            ))));
+        if self.custom_video_timeout_mode != Some(mode) {
+            return false;
         }
 
         if let Some(timeout_sleep) = self.custom_video_timeout_sleep.as_mut() {
@@ -327,21 +345,16 @@ impl Stream for ActiveClientStream {
 
             // Custom video modes: serve the appropriate buffer
             video_mode => {
+                if self.state.custom_video_timeout_mode != Some(video_mode) {
+                    self.state.enter_custom_mode(video_mode);
+                }
+
                 if self.state.custom_video_timed_out(cx, video_mode) {
                     info!(
                         "Custom video {video_mode:?} timed out for {}, terminating stream",
                         sanitize_sensitive_info(&self.state.fingerprint.addr.to_string())
                     );
                     return Poll::Ready(None);
-                }
-
-                // Stop provider stream exactly once when entering a video mode
-                if !self.state.provider_stopped {
-                    info!(
-                        "Switching to {video_mode:?} custom video stream for {}",
-                        sanitize_sensitive_info(&self.state.fingerprint.addr.to_string())
-                    );
-                    self.state.stop_provider_stream(video_mode);
                 }
 
                 let is_provisioning = video_mode == StreamMode::Provisioning && self.state.provisionable;
