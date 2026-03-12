@@ -845,42 +845,17 @@ mod tests {
         ))
     }
 
-    #[test]
-    fn test_custom_video_type_mapping_for_grace_modes() {
-        assert!(matches!(
-            ActiveClientStreamState::custom_video_type_for_mode(StreamMode::UserExhausted),
-            CustomVideoStreamType::UserConnectionsExhausted
-        ));
-        assert!(matches!(
-            ActiveClientStreamState::custom_video_type_for_mode(StreamMode::ProviderExhausted),
-            CustomVideoStreamType::ProviderConnectionsExhausted
-        ));
-        assert!(matches!(
-            ActiveClientStreamState::custom_video_type_for_mode(StreamMode::Provisioning),
-            CustomVideoStreamType::Provisioning
-        ));
-        assert!(matches!(
-            ActiveClientStreamState::custom_video_type_for_mode(StreamMode::LowPriorityPreempted),
-            CustomVideoStreamType::LowPriorityPreempted
-        ));
-        assert!(matches!(
-            ActiveClientStreamState::custom_video_type_for_mode(StreamMode::ChannelUnavailable),
-            CustomVideoStreamType::ChannelUnavailable
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_provisioning_without_custom_video_terminates_immediately_with_timeout_configured() {
+    async fn assert_missing_custom_video_terminates(mode: StreamMode, provisionable: bool) {
         let connection_manager = create_test_connection_manager();
         let addr = "127.0.0.1:55001".parse().unwrap_or_else(|_| unreachable!());
 
         let state = ActiveClientStreamState {
             inner: futures::stream::empty::<Result<Bytes, StreamError>>().boxed(),
-            send_custom_stream_flag: Some(Arc::new(AtomicU8::new(StreamMode::Provisioning as u8))),
+            send_custom_stream_flag: Some(Arc::new(AtomicU8::new(mode as u8))),
             provider_handle: None,
             preempt_cancelled: None,
             grace_task_handle: None,
-            provisionable: true,
+            provisionable,
             custom_video: CustomVideoBuffers {
                 user_exhausted: None,
                 provider_exhausted: None,
@@ -908,5 +883,54 @@ mod tests {
 
         let result = stream.next().await;
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_custom_video_type_mapping_for_grace_modes() {
+        assert!(matches!(
+            ActiveClientStreamState::custom_video_type_for_mode(StreamMode::UserExhausted),
+            CustomVideoStreamType::UserConnectionsExhausted
+        ));
+        assert!(matches!(
+            ActiveClientStreamState::custom_video_type_for_mode(StreamMode::ProviderExhausted),
+            CustomVideoStreamType::ProviderConnectionsExhausted
+        ));
+        assert!(matches!(
+            ActiveClientStreamState::custom_video_type_for_mode(StreamMode::Provisioning),
+            CustomVideoStreamType::Provisioning
+        ));
+        assert!(matches!(
+            ActiveClientStreamState::custom_video_type_for_mode(StreamMode::LowPriorityPreempted),
+            CustomVideoStreamType::LowPriorityPreempted
+        ));
+        assert!(matches!(
+            ActiveClientStreamState::custom_video_type_for_mode(StreamMode::ChannelUnavailable),
+            CustomVideoStreamType::ChannelUnavailable
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_provisioning_without_custom_video_terminates_immediately_with_timeout_configured() {
+        assert_missing_custom_video_terminates(StreamMode::Provisioning, true).await;
+    }
+
+    #[tokio::test]
+    async fn test_user_exhausted_without_custom_video_terminates_immediately() {
+        assert_missing_custom_video_terminates(StreamMode::UserExhausted, false).await;
+    }
+
+    #[tokio::test]
+    async fn test_provider_exhausted_without_custom_video_terminates_immediately() {
+        assert_missing_custom_video_terminates(StreamMode::ProviderExhausted, false).await;
+    }
+
+    #[tokio::test]
+    async fn test_channel_unavailable_without_custom_video_terminates_immediately() {
+        assert_missing_custom_video_terminates(StreamMode::ChannelUnavailable, false).await;
+    }
+
+    #[tokio::test]
+    async fn test_low_priority_preempted_without_custom_video_terminates_immediately() {
+        assert_missing_custom_video_terminates(StreamMode::LowPriorityPreempted, false).await;
     }
 }
