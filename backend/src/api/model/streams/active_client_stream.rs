@@ -386,16 +386,12 @@ impl Stream for ActiveClientStream {
                         }
                     }
                 } else {
-                    // No custom video configured for this mode
-                    if is_provisioning {
-                        Poll::Pending // Keep alive; provisioning probe will preempt us when done
-                    } else {
-                        info!(
-                            "No custom video configured for {video_mode:?} mode for {}, terminating stream",
-                            sanitize_sensitive_info(&self.state.fingerprint.addr.to_string())
-                        );
-                        Poll::Ready(None)
-                    }
+                    // No custom video configured for this mode -> terminate immediately.
+                    info!(
+                        "No custom video configured for {video_mode:?} mode for {}, terminating stream",
+                        sanitize_sensitive_info(&self.state.fingerprint.addr.to_string())
+                    );
+                    Poll::Ready(None)
                 }
             }
         }
