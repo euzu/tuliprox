@@ -24,6 +24,30 @@ const PES_PTS_OFFSET: usize = 9;
 /// Byte offset of DTS within a PES payload when both PTS and DTS are present.
 const PES_DTS_OFFSET: usize = 14;
 
+#[inline]
+fn is_pes_header_with_optional_timestamps(payload: &[u8]) -> bool {
+    if payload.len() < PES_PTS_OFFSET + 5 || !payload.starts_with(&[0x00, 0x00, 0x01]) {
+        return false;
+    }
+    let stream_id = payload[3];
+    // PES stream_ids that do not carry optional PTS/DTS fields.
+    if matches!(
+        stream_id,
+        0xBC | // program_stream_map
+        0xBE | // padding_stream
+        0xBF | // private_stream_2
+        0xF0 | // ECM
+        0xF1 | // EMM
+        0xFF | // program_stream_directory
+        0xF2 | // DSM-CC
+        0xF8   // ITU-T Rec. H.222.1 type E
+    ) {
+        return false;
+    }
+    // MPEG-2 PES optional header marker bits: must be `10xxxxxx`.
+    (payload[6] & 0xC0) == 0x80
+}
+
 /// Decodes a 5-byte DTS/PTS field from PES header into u64 timestamp.
 fn decode_timestamp(ts_bytes: &[u8]) -> u64 {
     (((u64::from(ts_bytes[0]) >> 1) & 0x07) << 30)
@@ -130,7 +154,7 @@ pub fn extract_pts_dts_indices_with_continuity(ts_data: &[u8]) -> TsInfoExtracti
 
         // Need at least PES_PTS_OFFSET+5 bytes to safely read the PTS field.
         // This also guarantees payload_offset + PES_PTS_OFFSET + 5 <= TS_PACKET_SIZE.
-        if payload.len() >= PES_PTS_OFFSET + 5 && payload.starts_with(&[0x00, 0x00, 0x01]) {
+        if is_pes_header_with_optional_timestamps(payload) {
             let flags = payload[7];
             let pts_dts_flags = (flags >> 6) & 0b11;
 
@@ -558,8 +582,8 @@ impl TransportStreamBuffer {
             let entry = &mut self.cc_entries[pid as usize];
             let is_new_pid = entry.is_none();
             if is_new_pid {
-                // Initialize from source packet CC; we only advance for payload packets.
-                *entry = Some((packet[3] & 0x0F, false));
+                // Normalize payload continuity per PID to a clean local sequence.
+                *entry = Some((0, false));
             }
             let (counter, discontinuity_sent) = entry.as_mut().unwrap();
 
