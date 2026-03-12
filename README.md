@@ -1060,8 +1060,9 @@ Following attributes are available:
 - `user_connections_exhausted`: _optional_
 - `provider_connections_exhausted`: _optional_
 - `panel_api_provisioning`: _optional_
+- `low_priority_preempted`: _optional_
 
-Video files with name `channel_unavailable.ts`, `user_connections_exhausted.ts`, `provider_connections_exhausted.ts`, `panel_api_provisioning.ts`
+Video files with name `channel_unavailable.ts`, `user_connections_exhausted.ts`, `provider_connections_exhausted.ts`, `panel_api_provisioning.ts`, `low_priority_preempted.ts`
 are already available in the docker image.
 
 You can convert an image with `ffmpeg`.
@@ -1077,6 +1078,7 @@ and add it to the `config.yml`.
 - `user_connections_exhausted.ts`
 - `channel_unavailable.ts`
 - `panel_api_provisioning.ts`
+- `low_priority_preempted.ts`
 
 ```yaml
 custom_stream_response_path: /home/tuliprox/resources

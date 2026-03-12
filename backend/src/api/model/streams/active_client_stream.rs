@@ -45,6 +45,8 @@ enum StreamMode {
     ChannelUnavailable = 3,
     /// Show the provisioning/placeholder custom video while probing for capacity.
     Provisioning     = 4,
+    /// Show the "low-priority preempted" custom video.
+    LowPriorityPreempted = 5,
     /// Transient: grace-period check is still in progress; `poll_next` must park.
     GracePending     = 255,
 }
@@ -57,6 +59,7 @@ impl StreamMode {
             2 => Self::ProviderExhausted,
             3 => Self::ChannelUnavailable,
             4 => Self::Provisioning,
+            5 => Self::LowPriorityPreempted,
             _ => Self::GracePending,
         }
     }
@@ -69,6 +72,7 @@ struct CustomVideoBuffers {
     provider_exhausted: Option<TransportStreamBuffer>,
     unavailable:       Option<TransportStreamBuffer>,
     provisioning:      Option<TransportStreamBuffer>,
+    low_priority_preempted: Option<TransportStreamBuffer>,
 }
 
 struct GraceProvisioningInfo {
@@ -101,6 +105,7 @@ impl ActiveClientStreamState {
             StreamMode::UserExhausted => CustomVideoStreamType::UserConnectionsExhausted,
             StreamMode::ProviderExhausted => CustomVideoStreamType::ProviderConnectionsExhausted,
             StreamMode::Provisioning => CustomVideoStreamType::Provisioning,
+            StreamMode::LowPriorityPreempted => CustomVideoStreamType::LowPriorityPreempted,
             StreamMode::ChannelUnavailable | StreamMode::Inner | StreamMode::GracePending => {
                 CustomVideoStreamType::ChannelUnavailable
             }
@@ -144,16 +149,24 @@ impl ActiveClientStreamState {
         }
     }
 
-    fn stop_provider_stream_preempted(&mut self) {
+    fn stop_provider_stream_preempted(&mut self) -> bool {
         self.provider_stopped = true;
         self.preempt_cancelled = None;
         self.stop_grace_task();
         self.release_user_stream();
 
+        let mut serve_preempted_custom = false;
         if self.provider_handle.is_some() {
             let handle = self.provider_handle.take();
             self.provider_handle_released = true;
-            if let Some(flag) = &self.send_custom_stream_flag {
+            if self.custom_video.low_priority_preempted.is_some() {
+                serve_preempted_custom = true;
+                if let Some(flag) = &self.send_custom_stream_flag {
+                    flag.store(StreamMode::LowPriorityPreempted as u8, Ordering::Release);
+                } else {
+                    self.send_custom_stream_flag = Some(Arc::new(AtomicU8::new(StreamMode::LowPriorityPreempted as u8)));
+                }
+            } else if let Some(flag) = &self.send_custom_stream_flag {
                 flag.store(StreamMode::Inner as u8, Ordering::Release);
             }
 
@@ -168,8 +181,13 @@ impl ActiveClientStreamState {
                 "Provider stream preempted for {}; stopping client stream",
                 sanitize_sensitive_info(&addr.to_string())
             );
-            self.connection_manager.send_cleanup(CleanupEvent::ReleaseProviderHandle { handle });
+            self.connection_manager.send_cleanup(CleanupEvent::UpdateDetailAndReleaseProvider {
+                addr,
+                video_type: CustomVideoStreamType::LowPriorityPreempted,
+                handle,
+            });
         }
+        serve_preempted_custom
     }
 
     fn stop_provider_stream(&mut self, mode: StreamMode) {
@@ -226,8 +244,9 @@ impl Stream for ActiveClientStream {
         // 1. Preemption check (user priority feature)
         if let Some(fut) = self.state.preempt_cancelled.as_mut() {
             if fut.as_mut().poll(cx).is_ready() {
-                self.state.stop_provider_stream_preempted();
-                return Poll::Ready(None);
+                if !self.state.stop_provider_stream_preempted() {
+                    return Poll::Ready(None);
+                }
             }
         }
 
@@ -293,6 +312,7 @@ impl Stream for ActiveClientStream {
                     StreamMode::ProviderExhausted => self.state.custom_video.provider_exhausted.as_mut(),
                     StreamMode::ChannelUnavailable => self.state.custom_video.unavailable.as_mut(),
                     StreamMode::Provisioning      => self.state.custom_video.provisioning.as_mut(),
+                    StreamMode::LowPriorityPreempted => self.state.custom_video.low_priority_preempted.as_mut(),
                     _ => None,
                 };
 
@@ -452,12 +472,19 @@ pub(crate) async fn create_active_client_stream(
     let cfg = &app_state.app_config;
     let custom_response = cfg.custom_stream_response.load();
     let custom_video = custom_response.as_ref().map_or(
-        CustomVideoBuffers { user_exhausted: None, provider_exhausted: None, unavailable: None, provisioning: None },
+        CustomVideoBuffers {
+            user_exhausted: None,
+            provider_exhausted: None,
+            unavailable: None,
+            provisioning: None,
+            low_priority_preempted: None,
+        },
         |c| CustomVideoBuffers {
             user_exhausted:    c.user_connections_exhausted.clone(),
             provider_exhausted: c.provider_connections_exhausted.clone(),
             unavailable:       c.channel_unavailable.clone(),
             provisioning:      c.panel_api_provisioning.clone(),
+            low_priority_preempted: c.low_priority_preempted.clone(),
         },
     );
 
@@ -694,6 +721,10 @@ mod tests {
         assert!(matches!(
             ActiveClientStreamState::custom_video_type_for_mode(StreamMode::Provisioning),
             CustomVideoStreamType::Provisioning
+        ));
+        assert!(matches!(
+            ActiveClientStreamState::custom_video_type_for_mode(StreamMode::LowPriorityPreempted),
+            CustomVideoStreamType::LowPriorityPreempted
         ));
         assert!(matches!(
             ActiveClientStreamState::custom_video_type_for_mode(StreamMode::ChannelUnavailable),
