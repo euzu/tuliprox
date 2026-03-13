@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -euo pipefail
 
 # Function to print usage instructions
 print_usage() {
@@ -31,14 +32,17 @@ for resource in "${resources[@]}"; do
     fi
   fi
 
-  if which ffmpeg > /dev/null 2>&1; then
-        ffmpeg -y -nostdin -loop 1 -i "./resources/${resource}.jpg" -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=44100 \
+  if command -v ffmpeg > /dev/null 2>&1; then
+        if ! ffmpeg -y -nostdin -loop 1 -i "./resources/${resource}.jpg" -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=44100 \
            -c:v libx264 -r 30 -g 30 -keyint_min 30 -sc_threshold 0 -pix_fmt yuv420p -preset veryfast -crf 23 \
            -c:a aac -b:a 128k -ac 2 \
            -t 10 -muxrate 2000k \
-           -f mpegts "./resources/${resource}.ts"
+           -f mpegts "./resources/${resource}.ts"; then
+          echo "ffmpeg failed while creating ${resource}.ts" >&2
+          exit 1
+        fi
   else
-    echo "ffmpeg not found"
-    exit
+    echo "ffmpeg not found" >&2
+    exit 1
   fi
 done

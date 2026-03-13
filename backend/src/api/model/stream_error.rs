@@ -26,7 +26,8 @@ impl std::fmt::Display for StreamError {
             StreamError::StdIo(e) => write!(f, "IO error: {e}"),
             // StreamError::ReceiverClosed =>  write!(f, "Receiver closed"),
             StreamError::ReceiverError(e) => write!(f, "Receiver error {e}"),
-            StreamError::Stream(e) | StreamError::LockError(e) => write!(f, "{e}"),
+            StreamError::Stream(e) => write!(f, "StreamError::Stream: {e}"),
+            StreamError::LockError(e) => write!(f, "StreamError::LockError: {e}"),
         }
     }
 }

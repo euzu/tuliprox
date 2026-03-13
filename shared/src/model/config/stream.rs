@@ -1,9 +1,9 @@
 use crate::{
     error::{info_err_res, TuliproxError, TuliproxErrorKind},
     utils::{
-        default_grace_period_millis, default_grace_period_timeout_secs, default_shared_burst_buffer_mb,
-        is_blank_optional_string, is_default_grace_period_millis, is_default_grace_period_timeout_secs,
-        is_default_shared_burst_buffer_mb, parse_to_kbps,
+        default_as_true, default_grace_period_millis, default_grace_period_timeout_secs,
+        default_shared_burst_buffer_mb, is_blank_optional_string, is_default_grace_period_millis,
+        is_default_grace_period_timeout_secs, is_default_shared_burst_buffer_mb, is_true, parse_to_kbps,
     },
 };
 
@@ -31,7 +31,7 @@ impl StreamBufferConfigDto {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct StreamConfigDto {
-    #[serde(default)]
+    #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
     pub retry: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub buffer: Option<StreamBufferConfigDto>,
@@ -44,8 +44,8 @@ pub struct StreamConfigDto {
         skip_serializing_if = "is_default_grace_period_timeout_secs"
     )]
     pub grace_period_timeout_secs: u64,
-    /// If true, wait for grace period check before streaming. If false (default), start streaming instantly.
-    #[serde(default)]
+    /// If true, wait for grace period check before streaming before sending any payload.
+    #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
     pub grace_period_hold_stream: bool,
     #[serde(default, skip)]
     pub throttle_kbps: u64,
@@ -56,14 +56,14 @@ pub struct StreamConfigDto {
 impl Default for StreamConfigDto {
     fn default() -> Self {
         StreamConfigDto {
-            retry: false,
+            retry: true,
             buffer: None,
             throttle: None,
             grace_period_millis: default_grace_period_millis(),
             grace_period_timeout_secs: default_grace_period_timeout_secs(),
             throttle_kbps: 0,
             shared_burst_buffer_mb: default_shared_burst_buffer_mb(),
-            grace_period_hold_stream: false,
+            grace_period_hold_stream: true,
         }
     }
 }

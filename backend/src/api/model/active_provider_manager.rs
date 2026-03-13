@@ -23,7 +23,7 @@ use tokio_util::sync::CancellationToken;
 
 const PREEMPTED_PROBE_CANCEL_GRACE: Duration = Duration::from_secs(2);
 const PREEMPTED_GRACE_MAX_PENDING: usize = 64;
-static DUMMY_ADDR: LazyLock<SocketAddr> = LazyLock::new(|| "127.0.0.1:0".parse::<SocketAddr>().unwrap());
+static DUMMY_ADDR: LazyLock<SocketAddr> = LazyLock::new(|| SocketAddr::from(([127, 0, 0, 1], 0)));
 
 pub type ClientConnectionId = SocketAddr;
 type AllocationId = u64;
@@ -84,9 +84,9 @@ struct ActiveConnectionInfo {
 
 #[derive(Debug, Clone, Default)]
 struct SharedConnections {
-    by_key: HashMap<String, SharedAllocation>,
-    key_by_addr: HashMap<ClientConnectionId, String>,
-    shared_by_allocation_id: HashMap<AllocationId, String>,
+    by_key: HashMap<Arc<str>, SharedAllocation>,
+    key_by_addr: HashMap<ClientConnectionId, Arc<str>>,
+    shared_by_allocation_id: HashMap<AllocationId, Arc<str>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -833,6 +833,7 @@ impl ActiveProviderManager {
         let extras = {
             let mut connections = self.connections.write().await;
             let mut extras = Vec::new();
+            let shared_key: Arc<str> = Arc::from(key);
 
             // Find the allocation to promote (must be single)
             // Logic change: we must find the specific allocation if multiple exist, but usually per client only 1 active?
@@ -896,7 +897,7 @@ impl ActiveProviderManager {
                 );
 
                 connections.shared.by_key.insert(
-                    key.to_string(),
+                    Arc::clone(&shared_key),
                     SharedAllocation {
                         allocation_id: handle.0.allocation_id,
                         allocation: handle.0.allocation.clone(),
@@ -906,8 +907,11 @@ impl ActiveProviderManager {
                         cancel_token: handle.0.cancel_token.clone(),
                     },
                 );
-                connections.shared.key_by_addr.insert(*addr, key.to_string());
-                connections.shared.shared_by_allocation_id.insert(handle.0.allocation_id, key.to_string());
+                connections.shared.key_by_addr.insert(*addr, Arc::clone(&shared_key));
+                connections
+                    .shared
+                    .shared_by_allocation_id
+                    .insert(handle.0.allocation_id, shared_key);
 
                 // Insert new shared entry into priority_index
                 connections.priority_index.entry(provider_name.clone()).or_default()
@@ -924,7 +928,7 @@ impl ActiveProviderManager {
         }
     }
 
-    pub async fn add_shared_connection(&self, addr: &SocketAddr, key: &str) {
+    pub async fn add_shared_connection(&self, addr: &SocketAddr, key: &str) -> Result<(), String> {
         let mut connections = self.connections.write().await;
         if let Some(shared_allocation) = connections.shared.by_key.get_mut(key) {
             let provider_name = shared_allocation.allocation.get_provider_name().unwrap_or_default();
@@ -934,9 +938,15 @@ impl ActiveProviderManager {
                 sanitize_sensitive_info(key)
             );
             shared_allocation.connections.insert(*addr);
-            connections.shared.key_by_addr.insert(*addr, key.to_string());
+            connections.shared.key_by_addr.insert(*addr, Arc::from(key));
+            Ok(())
         } else {
-            error!("Failed to add shared connection for {addr}: url {} not found", sanitize_sensitive_info(key));
+            let err = format!(
+                "Failed to add shared connection for {addr}: url {} not found",
+                sanitize_sensitive_info(key)
+            );
+            error!("{err}");
+            Err(err)
         }
     }
 
