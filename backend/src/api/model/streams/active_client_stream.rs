@@ -26,6 +26,7 @@ use std::{
     },
     task::{Context, Poll},
 };
+use tokio::sync::Notify;
 use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 
 /// Discriminates which byte-stream the client is consuming at any moment.
@@ -498,6 +499,7 @@ pub(crate) async fn create_active_client_stream(
     let provisioning_info = resolve_grace_period_provisioning(app_state, &stream_details);
     let has_provisioning = provisioning_info.is_some();
     let hold_stream = stream_details.grace_period.hold_stream;
+    let capacity_notify = app_state.connection_manager.capacity_notified();
 
     let waker = Arc::new(AtomicWaker::new());
     let (grace_stop_flag, grace_task_handle) = if grant_user_grace_period || stream_details.provider_grace_active {
@@ -511,6 +513,7 @@ pub(crate) async fn create_active_client_stream(
             provisioning_info,
             Some(Arc::clone(&waker)),
             hold_stream,
+            capacity_notify,
         )
     } else {
         stream_grace_period(
@@ -523,6 +526,7 @@ pub(crate) async fn create_active_client_stream(
             provisioning_info,
             None,
             hold_stream,
+            capacity_notify,
         )
     };
 
@@ -623,6 +627,7 @@ fn stream_grace_period(
     provisioning_info: Option<GraceProvisioningInfo>,
     waker: Option<Arc<AtomicWaker>>,
     hold_stream: bool,
+    capacity_notify: Arc<Notify>,
 ) -> (Option<Arc<AtomicU8>>, Option<tokio::task::JoinHandle<()>>) {
     let active_users = Arc::clone(&app_state.active_users);
     let active_provider = Arc::clone(&app_state.active_provider);
@@ -671,7 +676,30 @@ fn stream_grace_period(
         let waker_for_fallback = waker.clone();
         let grace_task_handle = tokio::spawn(async move {
             let timed_out = tokio::time::timeout(grace_task_timeout, async move {
-                tokio::time::sleep(tokio::time::Duration::from_millis(grace_period_millis)).await;
+                let deadline =
+                    tokio::time::Instant::now() + tokio::time::Duration::from_millis(grace_period_millis);
+                loop {
+                    tokio::select! {
+                        () = tokio::time::sleep_until(deadline) => break,
+                        () = capacity_notify.notified() => {
+                            let user_ok = match &user_grace_check {
+                                Some((username, max_connections)) => {
+                                    user_manager.user_connections(username).await <= *max_connections
+                                }
+                                None => true,
+                            };
+                            let provider_ok = match &provider_grace_check {
+                                Some(provider_name) => {
+                                    !provider_manager.is_over_limit(provider_name).await
+                                }
+                                None => true,
+                            };
+                            if user_ok && provider_ok {
+                                break;
+                            }
+                        }
+                    }
+                }
 
                 let mut updated = false;
                 if let Some((username, max_connections)) = user_grace_check {

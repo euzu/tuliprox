@@ -290,7 +290,7 @@ fn get_stream_options(app_state: &Arc<AppState>) -> StreamOptions {
         .reverse_proxy
         .as_ref()
         .and_then(|reverse_proxy| reverse_proxy.stream.as_ref())
-        .map_or((false, false, 0), |stream| {
+        .map_or((true, false, 0), |stream| {
             let (buffer_enabled, buffer_size) =
                 stream.buffer.as_ref().map_or((false, 0), |buffer| (buffer.enabled, buffer.size));
             (stream.retry, buffer_enabled, buffer_size)

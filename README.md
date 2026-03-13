@@ -711,12 +711,12 @@ This configuration is only used for reverse proxy mode. The Reverse Proxy mode c
 
 Attributes:
 
-- `retry`
+- `retry`, default `true`, retries the stream if it fails.
 - `buffer`
 - `throttle` Allowed units are `KB/s`,`MB/s`,`KiB/s`,`MiB/s`,`kbps`,`mbps`,`Mibps`. Default unit is `kbps`
 - `grace_period_millis`  default set to 300 milliseconds.
 - `grace_period_timeout_secs` default set to 2 seconds.
-- `grace_period_hold_stream` if set to `true`, the stream will only start after the grace period check has completed. Default is `false`.
+- `grace_period_hold_stream` if set to `true`, the stream will only start after the grace period check has completed. Default is `true`.
 - `shared_burst_buffer_mb` optional (default `12`). Minimum burst buffer size (in MB) used for shared streams.
 
 ##### 1.7.1.1 `retry`
