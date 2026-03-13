@@ -45,6 +45,9 @@ incremental = false
 
 [profile.dev]
 opt-level = 1
+lto = false
+incremental = true
+codegen-units = 256
 
 [profile.release.package.frontend]
 opt-level = 'z'     # Size optimization for frontend

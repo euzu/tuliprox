@@ -82,7 +82,7 @@ struct GraceProvisioningInfo {
 
 #[allow(clippy::struct_excessive_bools)]
 struct ActiveClientStreamState {
-    inner: BoxedProviderStream,
+    inner: Option<BoxedProviderStream>,
     send_custom_stream_flag: Option<Arc<AtomicU8>>,
     provider_handle: Option<ProviderHandle>,
     preempt_cancelled: Option<Pin<Box<WaitForCancellationFutureOwned>>>,
@@ -167,6 +167,7 @@ impl ActiveClientStreamState {
                 if let Some(flag) = &self.send_custom_stream_flag {
                     flag.store(StreamMode::LowPriorityPreempted as u8, Ordering::Release);
                 } else {
+                    // Fallback: create_active_client_stream usually initializes this via stream_grace_period.
                     self.send_custom_stream_flag = Some(Arc::new(AtomicU8::new(StreamMode::LowPriorityPreempted as u8)));
                 }
             } else if let Some(flag) = &self.send_custom_stream_flag {
@@ -178,7 +179,9 @@ impl ActiveClientStreamState {
             }
 
             let addr = self.fingerprint.addr;
-            self.inner = futures::stream::empty::<Result<Bytes, StreamError>>().boxed();
+            // Drop the provider stream immediately instead of replacing with an
+            // allocated empty stream — avoids a heap allocation on every preemption.
+            self.inner = None;
 
             debug_if_enabled!(
                 "Provider stream preempted for {}; stopping client stream",
@@ -219,7 +222,9 @@ impl ActiveClientStreamState {
             }
 
             let addr = self.fingerprint.addr;
-            self.inner = futures::stream::empty::<Result<Bytes, StreamError>>().boxed();
+            // Drop the provider stream immediately instead of replacing with an
+            // allocated empty stream — avoids a heap allocation on every mode switch.
+            self.inner = None;
 
             let video_type = Self::custom_video_type_for_mode(mode);
             debug_if_enabled!(
@@ -288,10 +293,8 @@ impl Stream for ActiveClientStream {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         // 1. Preemption check (user priority feature)
         if let Some(fut) = self.state.preempt_cancelled.as_mut() {
-            if fut.as_mut().poll(cx).is_ready() {
-                if !self.state.stop_provider_stream_preempted() {
+            if fut.as_mut().poll(cx).is_ready() && !self.state.stop_provider_stream_preempted() {
                     return Poll::Ready(None);
-                }
             }
         }
 
@@ -318,7 +321,13 @@ impl Stream for ActiveClientStream {
             // Live streaming: forward bytes from upstream provider
             StreamMode::Inner => {
                 self.state.reset_custom_video_timeout();
-                match Pin::new(&mut self.state.inner).poll_next(cx) {
+                // Poll the inner stream if present; a `None` inner (provider already
+                // stopped/dropped) is treated the same as a finished stream.
+                let inner_poll = match self.state.inner.as_mut() {
+                    Some(inner) => Pin::new(inner).poll_next(cx),
+                    None => Poll::Ready(None),
+                };
+                match inner_poll {
                     Poll::Ready(Some(Ok(bytes))) => Poll::Ready(Some(Ok(bytes))),
                     Poll::Ready(Some(Err(e))) => {
                         error!("Inner stream error: {e:?}");
@@ -537,15 +546,15 @@ pub(crate) async fn create_active_client_stream(
         },
     );
 
-    let stream = match stream_details.stream.take() {
+    let stream: Option<BoxedProviderStream> = match stream_details.stream.take() {
         None => {
             let provider_handle = stream_details.provider_handle.take();
             app_state.connection_manager.release_provider_handle(provider_handle).await;
-            futures::stream::empty::<Result<Bytes, StreamError>>().boxed()
+            None
         }
         Some(stream) => {
             let config = app_state.app_config.config.load();
-            match config.sleep_timer_mins {
+            Some(match config.sleep_timer_mins {
                 None => stream,
                 Some(mins) => {
                     let secs = u32::try_from((u64::from(mins) * 60).min(u64::from(u32::MAX))).unwrap_or(0);
@@ -555,7 +564,7 @@ pub(crate) async fn create_active_client_stream(
                         stream
                     }
                 }
-            }
+            })
         }
     };
 
@@ -636,7 +645,7 @@ fn stream_grace_period(
         None
     };
 
-    debug!("hold stream {hold_stream}");
+    debug!("grace hold stream {hold_stream}");
 
     if provider_grace_check.is_some() || user_grace_check.is_some() {
         let stream_strategy_flag = Arc::new(AtomicU8::new(
@@ -761,14 +770,13 @@ mod tests {
     use crate::{
         api::model::{
             ActiveProviderManager, ActiveUserManager, ConnectionManager, CustomVideoStreamType, EventManager,
-            SharedStreamManager, StreamError,
+            SharedStreamManager,
         },
         auth::Fingerprint,
         model::{AppConfig, Config, ConfigInput, SourcesConfig},
         utils::{FileLockManager, GeoIp},
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
-    use bytes::Bytes;
     use futures::{pin_mut, StreamExt};
     use shared::{
         model::{ConfigPaths, InputFetchMethod, InputType},
@@ -850,7 +858,7 @@ mod tests {
         let addr = "127.0.0.1:55001".parse().unwrap_or_else(|_| unreachable!());
 
         let state = ActiveClientStreamState {
-            inner: futures::stream::empty::<Result<Bytes, StreamError>>().boxed(),
+            inner: None,
             send_custom_stream_flag: Some(Arc::new(AtomicU8::new(mode as u8))),
             provider_handle: None,
             preempt_cancelled: None,

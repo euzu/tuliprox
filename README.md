@@ -1057,12 +1057,13 @@ If you want to send a picture instead of black screen when a channel is not avai
 Following attributes are available:
 
 - `channel_unavailable`: _optional_
+- `user_account_expired`: _optional_
 - `user_connections_exhausted`: _optional_
 - `provider_connections_exhausted`: _optional_
 - `panel_api_provisioning`: _optional_
 - `low_priority_preempted`: _optional_
 
-Video files with name `channel_unavailable.ts`, `user_connections_exhausted.ts`, `provider_connections_exhausted.ts`, `panel_api_provisioning.ts`, `low_priority_preempted.ts`
+Video files with name `channel_unavailable.ts`, `user_account_expired.ts`, `user_connections_exhausted.ts`, `provider_connections_exhausted.ts`, `panel_api_provisioning.ts`, `low_priority_preempted.ts`
 are already available in the docker image.
 
 You can convert an image with `ffmpeg`.

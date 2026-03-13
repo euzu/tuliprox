@@ -29,11 +29,11 @@ impl std::fmt::Display for StreamError {
             StreamError::StdIo(e) => write!(f, "IO error: {e}"),
             // StreamError::ReceiverClosed =>  write!(f, "Receiver closed"),
             StreamError::ReceiverError(e) => write!(f, "Receiver error {e}"),
-            StreamError::Stream(e)
-            | StreamError::LockError(e)
-            | StreamError::MalformedPacket(e)
-            | StreamError::InvalidTimestamp(e)
-            | StreamError::SyncLoss(e) => write!(f, "{e}"),
+            StreamError::Stream(e) => write!(f, "Stream error: {e}"),
+            StreamError::LockError(e) => write!(f, "LockError: {e}"),
+            StreamError::MalformedPacket(e) => write!(f, "MalformedPacket: {e}"),
+            StreamError::InvalidTimestamp(e) => write!(f, "InvalidTimestamp: {e}"),
+            StreamError::SyncLoss(e) => write!(f, "SyncLoss: {e}"),
         }
     }
 }

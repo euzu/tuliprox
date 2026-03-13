@@ -23,7 +23,7 @@ use tokio_util::sync::CancellationToken;
 
 const PREEMPTED_PROBE_CANCEL_GRACE: Duration = Duration::from_secs(2);
 const PREEMPTED_GRACE_MAX_PENDING: usize = 64;
-static DUMMY_ADDR: LazyLock<SocketAddr> = LazyLock::new(|| "127.0.0.1:0".parse::<SocketAddr>().unwrap());
+static DUMMY_ADDR: LazyLock<SocketAddr> = LazyLock::new(|| SocketAddr::from(([127, 0, 0, 1], 0)));
 
 pub type ClientConnectionId = SocketAddr;
 type AllocationId = u64;
@@ -957,7 +957,7 @@ impl ActiveProviderManager {
         }
     }
 
-    pub async fn add_shared_connection(&self, addr: &SocketAddr, key: &str, priority: i8) {
+    pub async fn add_shared_connection(&self, addr: &SocketAddr, key: &str, priority: i8) -> Result<(), String> {
         let mut connections = self.connections.write().await;
 
         // Extract metadata before taking a second mutable borrow on `connections`.
@@ -965,34 +965,49 @@ impl ActiveProviderManager {
             (s.allocation_id, s.allocation.get_provider_name().unwrap_or_default(), s.priority, s.created_at)
         });
 
-        if let Some((alloc_id, provider_name, old_priority, created_at)) = metadata {
-            debug_if_enabled!(
-                "Shared connection: added addr {addr} provider={} key={}",
-                sanitize_sensitive_info(&provider_name),
+        let Some((alloc_id, provider_name, old_priority, created_at)) = metadata else {
+            let err = format!(
+                "Failed to add shared connection for {addr}: url {} not found",
                 sanitize_sensitive_info(key)
             );
+            error!("{err}");
+            return Err(err);
+        };
 
-            connections.shared.key_by_addr.insert(*addr, key.to_string());
+        debug_if_enabled!(
+            "Shared connection: added addr {addr} provider={} key={}",
+            sanitize_sensitive_info(&provider_name),
+            sanitize_sensitive_info(key)
+        );
 
-            if let Some(shared_allocation) = connections.shared.by_key.get_mut(key) {
-                shared_allocation.connections.insert(*addr, priority);
+        connections.shared.key_by_addr.insert(*addr, key.to_string());
 
-                // If the joining subscriber has higher importance (lower numeric priority),
-                // update the shared allocation's priority and refresh the priority index.
-                if priority < old_priority {
-                    shared_allocation.priority = priority;
-                    if let Some(tree) = connections.priority_index.get_mut(&provider_name) {
-                        tree.remove(&(old_priority, Reverse(created_at), alloc_id));
-                        tree.insert(
-                            (priority, Reverse(created_at), alloc_id),
-                            PriorityOwner::Shared(alloc_id),
-                        );
-                    }
-                }
+        let Some(shared_allocation) = connections.shared.by_key.get_mut(key) else {
+            let err = format!(
+                "Failed to add shared connection for {addr}: url {} disappeared during update",
+                sanitize_sensitive_info(key)
+            );
+            error!("{err}");
+            connections.shared.key_by_addr.remove(addr);
+            return Err(err);
+        };
+
+        shared_allocation.connections.insert(*addr, priority);
+
+        // If the joining subscriber has higher importance (lower numeric priority),
+        // update the shared allocation's priority and refresh the priority index.
+        if priority < old_priority {
+            shared_allocation.priority = priority;
+            if let Some(tree) = connections.priority_index.get_mut(&provider_name) {
+                tree.remove(&(old_priority, Reverse(created_at), alloc_id));
+                tree.insert(
+                    (priority, Reverse(created_at), alloc_id),
+                    PriorityOwner::Shared(alloc_id),
+                );
             }
-        } else {
-            error!("Failed to add shared connection for {addr}: url {} not found", sanitize_sensitive_info(key));
         }
+
+        Ok(())
     }
 
     pub async fn get_provider_connections_count(&self) -> usize { self.providers.active_connection_count().await }
@@ -1408,7 +1423,11 @@ mod tests {
         manager.make_shared_connection(&addr_a, stream_key).await;
 
         // B joins the same shared stream with lower importance (priority 1).
-        manager.add_shared_connection(&addr_b, stream_key, 1).await;
+        let join_result = manager.add_shared_connection(&addr_b, stream_key, 1).await;
+        assert!(
+            join_result.is_ok(),
+            "B should join existing shared stream, got: {join_result:?}"
+        );
 
         // A leaves shared stream. Shared allocation should now inherit B's lower priority.
         manager.release_connection(&addr_a).await;

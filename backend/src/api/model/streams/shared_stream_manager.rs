@@ -686,8 +686,19 @@ impl SharedStreamManager {
     ) -> Option<(BoxedProviderStream, Option<Arc<str>>)> {
         let manager = Arc::clone(&app_state.shared_stream_manager);
         if let Some(result) = app_state.shared_stream_manager.subscribe_stream(stream_url, addr, manager).await {
-            app_state.active_provider.add_shared_connection(addr, stream_url, user_priority).await;
-            Some(result)
+            match app_state.active_provider.add_shared_connection(addr, stream_url, user_priority).await {
+                Ok(()) => Some(result),
+                Err(err) => {
+                    warn!(
+                        "Rolling back shared stream subscriber {} for {}: {}",
+                        sanitize_sensitive_info(&addr.to_string()),
+                        sanitize_sensitive_info(stream_url),
+                        sanitize_sensitive_info(&err)
+                    );
+                    app_state.shared_stream_manager.release_connection(addr, true).await;
+                    None
+                }
+            }
         } else {
             None
         }

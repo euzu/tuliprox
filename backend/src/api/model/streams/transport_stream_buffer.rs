@@ -1,7 +1,7 @@
 use bytes::{Bytes, BytesMut};
 use futures::task::AtomicWaker;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     sync::Arc,
     task::Waker,
 };
@@ -49,6 +49,7 @@ fn is_pes_header_with_optional_timestamps(payload: &[u8]) -> bool {
 }
 
 /// Decodes a 5-byte DTS/PTS field from PES header into u64 timestamp.
+#[inline]
 fn decode_timestamp(ts_bytes: &[u8]) -> u64 {
     (((u64::from(ts_bytes[0]) >> 1) & 0x07) << 30)
         | (u64::from(ts_bytes[1]) << 22)
@@ -58,6 +59,7 @@ fn decode_timestamp(ts_bytes: &[u8]) -> u64 {
 }
 
 /// Encodes a u64 timestamp into 5-byte PES DTS/PTS field
+#[inline]
 fn encode_timestamp(ts: u64) -> [u8; 5] {
     [
         0x20 | ((((ts >> 30) & 0x07) as u8) << 1) | 1,
@@ -69,6 +71,7 @@ fn encode_timestamp(ts: u64) -> [u8; 5] {
 }
 
 /// Decode PCR from 6 bytes (adaptation field) into 42-bit PCR base + 9-bit extension as u64
+#[inline]
 fn decode_pcr(pcr_bytes: &[u8]) -> u64 {
     let pcr_base = (u64::from(pcr_bytes[0]) << 25)
         | ((u64::from(pcr_bytes[1])) << 17)
@@ -80,6 +83,7 @@ fn decode_pcr(pcr_bytes: &[u8]) -> u64 {
 }
 
 /// Encode PCR timestamp (u64) back into 6 bytes
+#[inline]
 #[allow(clippy::cast_possible_truncation)]
 fn encode_pcr(pcr: u64) -> [u8; 6] {
     let pcr_base = pcr / 300;
@@ -299,7 +303,6 @@ pub struct TransportStreamBuffer {
     cc_entries: Box<[Option<(u8, bool)>; 8192]>,
     waker: Arc<AtomicWaker>,
     first_pcr: Option<u64>,
-    pids_with_timestamps: Arc<HashSet<u16>>,
 }
 
 impl std::fmt::Debug for TransportStreamBuffer {
@@ -330,7 +333,6 @@ impl Clone for TransportStreamBuffer {
             cc_entries: Box::new([None; 8192]),
             waker: Arc::clone(&self.waker),
             first_pcr: self.first_pcr,
-            pids_with_timestamps: Arc::clone(&self.pids_with_timestamps),
         }
     }
 }
@@ -351,7 +353,6 @@ impl TransportStreamBuffer {
 
         // Scan for the first PCR in the buffer to use as a reference for discontinuity packets
         let mut first_pcr = None;
-        let mut pids_with_timestamps = HashSet::new();
         let mut i = 0;
         while i + TS_PACKET_SIZE <= raw.len() {
             if raw[i] != SYNC_BYTE {
@@ -359,31 +360,16 @@ impl TransportStreamBuffer {
                 continue;
             }
             let packet = &raw[i..i + TS_PACKET_SIZE];
-            let pid = (u16::from(packet[1] & 0x1F) << 8) | u16::from(packet[2]);
             let afc = (packet[3] >> 4) & 0b11;
             if afc == 2 || afc == 3 {
                 let adaptation_len = packet[4] as usize;
                 // Need at least 7 adaptation bytes (1 flag + 6 PCR) to safely read the PCR field.
                 if adaptation_len >= 7 && (packet[5] & ADAPTATION_FIELD_FLAG_PCR) != 0 {
                     first_pcr = Some(decode_pcr(&packet[6..12]));
-                    pids_with_timestamps.insert(pid);
                     break;
                 }
             }
             i += TS_PACKET_SIZE;
-        }
-
-        // Identify which PIDs actually have timestamps (PES).
-        // we only want to inject Discontinuity packets on these PIDs to avoid corrupting PSI (PAT/PMT) which don't have timestamps.
-        // pids_with_timestamps already seeded with PCR PID(s) above
-        for (idx, info) in &packet_indices {
-            if info.is_some() {
-                // This packet has PTS/DTS. Find its PID.
-                if *idx + 3 < raw.len() {
-                    let pid = (u16::from(raw[*idx + 1] & 0x1F) << 8) | u16::from(raw[*idx + 2]);
-                    pids_with_timestamps.insert(pid);
-                }
-            }
         }
 
         Self {
@@ -397,7 +383,6 @@ impl TransportStreamBuffer {
             cc_entries: Box::new([None; 8192]),
             waker: Arc::new(AtomicWaker::new()),
             first_pcr,
-            pids_with_timestamps: Arc::new(pids_with_timestamps),
         }
     }
 
@@ -505,6 +490,11 @@ impl TransportStreamBuffer {
         pts_dts_maybe: Option<(usize, Option<usize>, u16)>,
         timestamp_offset: u64,
     ) {
+        // No offset → timestamps are already correct, skip all decode/encode work.
+        if timestamp_offset == 0 {
+            return;
+        }
+
         // PCR rewrite (adaptation field must carry ≥7 bytes: 1 flag + 6 PCR).
         let afc = (bytes[pkt_start + 3] >> 4) & 0b11;
         if afc == 2 || afc == 3 {
@@ -587,13 +577,10 @@ impl TransportStreamBuffer {
             }
             let (counter, discontinuity_sent) = entry.as_mut().unwrap();
 
-            let needs_discontinuity = self.pids_with_timestamps.contains(&pid);
-            let inject_discontinuity = !*discontinuity_sent && needs_discontinuity;
-
-            if !*discontinuity_sent && !needs_discontinuity {
-                // PSI/other PIDs don't need a discontinuity packet; mark done immediately.
-                *discontinuity_sent = true;
-            }
+            // Inject a discontinuity packet for every PID on first appearance and at loop
+            // boundaries. This covers both PES PIDs (audio/video) and PSI PIDs (PAT/PMT)
+            // so that decoders accept the CC reset during mid-stream switches.
+            let inject_discontinuity = !*discontinuity_sent;
 
             let payload_packet_cc;
             if inject_discontinuity {
@@ -697,11 +684,14 @@ mod tests {
         let packet = build_adaptation_only_packet(0x0011, 5);
         let mut buf = TransportStreamBuffer::new(packet.to_vec());
         let chunk = buf.next_chunk().expect("expected chunk");
-        assert_eq!(chunk.len(), CHUNK_SIZE);
+        // Each of the 7 loop iterations emits a discontinuity packet + the actual packet
+        // because the single-packet buffer loops on every iteration.
+        let total_packets = PACKET_COUNT * 2;
+        assert_eq!(chunk.len(), TS_PACKET_SIZE * total_packets);
 
-        for i in 0..PACKET_COUNT {
+        for i in 0..total_packets {
             let cc = chunk[i * TS_PACKET_SIZE + 3] & 0x0F;
-            assert_eq!(cc, 5);
+            assert_eq!(cc, 5, "packet {i} CC mismatch");
         }
     }
 
