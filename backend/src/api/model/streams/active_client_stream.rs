@@ -205,7 +205,6 @@ impl ActiveClientStreamState {
         self.provider_stopped = true;
         self.preempt_cancelled = None;
         self.stop_grace_task();
-        self.release_user_stream();
 
         if self.provider_handle.is_some() {
             let handle = self.provider_handle.take();
