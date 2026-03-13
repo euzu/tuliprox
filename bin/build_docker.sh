@@ -32,7 +32,7 @@ echo "🚀 Building for branch: $BRANCH (tag: $TAG_SUFFIX)"
 # Directories
 WORKING_DIR=$(pwd)
 DOCKER_DIR="${WORKING_DIR}/docker"
-BACKEND_DIR="${WORKING_DIR}/backend"
+#BACKEND_DIR="${WORKING_DIR}/backend"
 FRONTEND_DIR="${WORKING_DIR}/frontend"
 FRONTEND_BUILD_DIR="${FRONTEND_DIR}/dist"
 ARTIFACT_DIR="${WORKING_DIR}/artifacts"
@@ -42,7 +42,7 @@ declare -A ARCHITECTURES=([LINUX]=x86_64-unknown-linux-musl [AARCH64]=aarch64-un
 declare -A MULTI_PLATFORM_IMAGES=([tuliprox]="scratch-final" [tuliprox-alpine]="alpine-final")
 
 # Version detection
-VERSION=$(grep -Po '^version\s*=\s*"\K[0-9\.]+' "${BACKEND_DIR}/Cargo.toml")
+VERSION=$(grep -Po '^version\s*=\s*"\K[0-9\.]+' "${WORKING_DIR}/Cargo.toml")
 echo "📦 Version: ${VERSION}"
 
 # Prepare artifact directory (clean per run to avoid stale files)
