@@ -15,7 +15,6 @@ use std::{borrow::Cow, net::SocketAddr, sync::Arc};
 use tokio::sync::{mpsc, Notify};
 
 const CLEANUP_QUEUE_CAPACITY: usize = 4096;
-
 fn notify_capacity(capacity_notify: &Notify) { capacity_notify.notify_waiters(); }
 
 pub(crate) enum CleanupEvent {
@@ -193,26 +192,26 @@ impl ConnectionManager {
         if removed {
             self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Disconnected(*addr)));
         }
-        self.capacity_notify.notify_waiters();
+        notify_capacity(self.capacity_notify.as_ref());
     }
 
     pub async fn release_provider_connection(&self, addr: &SocketAddr) {
         self.provider_manager.release_connection(addr).await;
         self.shared_stream_manager.release_connection(addr, false).await;
-        self.capacity_notify.notify_waiters();
+        notify_capacity(self.capacity_notify.as_ref());
     }
 
     pub async fn release_stream(&self, addr: &SocketAddr) {
         if self.user_manager.release_stream(addr).await {
             self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Disconnected(*addr)));
-            self.capacity_notify.notify_waiters();
+            notify_capacity(self.capacity_notify.as_ref());
         }
     }
 
     pub async fn release_provider_handle(&self, provider_handle: Option<ProviderHandle>) {
         if let Some(handle) = provider_handle {
             self.provider_manager.release_handle(&handle).await;
-            self.capacity_notify.notify_waiters();
+            notify_capacity(self.capacity_notify.as_ref());
         }
     }
 

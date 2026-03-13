@@ -44,7 +44,7 @@ pub struct StreamConfigDto {
         skip_serializing_if = "is_default_grace_period_timeout_secs"
     )]
     pub grace_period_timeout_secs: u64,
-    /// If true, wait for grace period check before streaming before sending any payload.
+    /// If true (default), wait for grace period check before streaming.
     #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
     pub grace_period_hold_stream: bool,
     #[serde(default, skip)]
@@ -70,15 +70,14 @@ impl Default for StreamConfigDto {
 
 impl StreamConfigDto {
     pub fn is_empty(&self) -> bool {
-        let empty = Self::default();
-        self.retry == empty.retry
+        self.retry
             && (self.buffer.is_none() || self.buffer.as_ref().is_some_and(|b| b.is_empty()))
             && (self.throttle.is_none() || self.throttle.as_ref().is_some_and(|t| t.is_empty()))
-            && self.grace_period_millis == empty.grace_period_millis
-            && self.grace_period_timeout_secs == empty.grace_period_timeout_secs
-            && self.throttle_kbps == empty.throttle_kbps
+            && self.grace_period_millis == default_grace_period_millis()
+            && self.grace_period_timeout_secs == default_grace_period_timeout_secs()
+            && self.throttle_kbps == 0
             && self.shared_burst_buffer_mb == default_shared_burst_buffer_mb()
-            && self.grace_period_hold_stream == empty.grace_period_hold_stream
+            && self.grace_period_hold_stream
     }
 
     pub(crate) fn prepare(&mut self) -> Result<(), TuliproxError> {

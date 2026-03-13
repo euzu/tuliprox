@@ -175,9 +175,7 @@ pub fn create_low_priority_preempted_stream(
     headers: &[(String, String)],
 ) -> ProviderStreamResponse {
     let custom_stream_response = cfg.custom_stream_response.load();
-    let video = custom_stream_response
-        .as_ref()
-        .and_then(|c| c.low_priority_preempted.as_ref());
+    let video = custom_stream_response.as_ref().and_then(|c| c.low_priority_preempted.as_ref());
     create_video_stream(
         cfg,
         CustomVideoStreamType::LowPriorityPreempted,
@@ -267,5 +265,18 @@ pub fn get_header_filter_for_item_type(item_type: PlaylistItemType) -> HeaderFil
             Some(Box::new(|key| key != "accept-ranges" && key != "range" && key != "content-range"))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CustomVideoStreamType;
+    use std::str::FromStr;
+
+    #[test]
+    fn test_low_priority_preempted_custom_video_type_roundtrip() {
+        let parsed = CustomVideoStreamType::from_str("low_priority_preempted")
+            .expect("low_priority_preempted should parse as custom video type");
+        assert_eq!(parsed.to_string(), "low_priority_preempted");
     }
 }

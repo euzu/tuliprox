@@ -2,10 +2,55 @@
 members = ["backend", "frontend", "shared"]
 resolver = "2"
 
+[workspace.package]
+version = "3.2.132"
+edition = "2021"
+rust-version = "1.89.0"
+
+[workspace.dependencies]
+serde         = { version = "1.0.228", features = ["derive", "rc"] }
+serde_json    = { version = "1.0.149" }
+regex         = "1.12.3"
+log           = "0.4.29"
+chrono        = "0.4.44"
+bytes         = "1.11.1"
+base64        = "0.22.1"
+blake3        = "1.8.3"
+fastrand      = "2.3.0"
+lz4_flex      = "0.12.0"
+indexmap      = "2.13.0"
+dashmap       = "6.1.0"
+arc-swap      = "1.8.2"
+paste         = "1.0.15"
+pest          = "2.8.6"
+pest_derive   = "2.8.6"
+zeroize       = "1.8.2"
+deunicode     = "1.6.2"
+path-clean    = "1.0.1"
+url           = "2.5.8"
+cron          = "0.15.0"
+enum-iterator = "2.3.0"
+futures       = "0.3.32"
+serde-saphyr  = "0.0.21"
+tokio         = { version = "1.50.0" }
+
 [profile.release]
 debug = false
-opt-level = 'z'     # Optimize for size.
-lto = "fat"          # Enable Link Time Optimization
+opt-level = 3       # Maximal performance
+lto = "fat"         # Enable Link Time Optimization
 codegen-units = 1   # Reduce number of codegen units to increase optimizations.
 panic = 'abort'     # Abort on panic
 strip = true
+incremental = false
+
+[profile.dev]
+opt-level = 1
+lto = false
+incremental = true
+codegen-units = 256
+
+[profile.release.package.frontend]
+opt-level = 'z'     # Size optimization for frontend
+
+[profile.release.package.shared]
+opt-level = 3       # optimize shared for speed

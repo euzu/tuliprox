@@ -711,18 +711,17 @@ This configuration is only used for reverse proxy mode. The Reverse Proxy mode c
 
 Attributes:
 
-- `retry` default set to `true`.
+- `retry`, default `true`, retries the stream if it fails.
 - `buffer`
 - `throttle` Allowed units are `KB/s`,`MB/s`,`KiB/s`,`MiB/s`,`kbps`,`mbps`,`Mibps`. Default unit is `kbps`
-- `grace_period_millis`  default set to 300 milliseconds.
-- `grace_period_timeout_secs` default set to 2 seconds.
+- `grace_period_millis`  default set to 2000 milliseconds.
+- `grace_period_timeout_secs` default set to 4 seconds.
 - `grace_period_hold_stream` if set to `true`, the stream will only start after the grace period check has completed. Default is `true`.
 - `shared_burst_buffer_mb` optional (default `12`). Minimum burst buffer size (in MB) used for shared streams.
 
 ##### 1.7.1.1 `retry`
 
-If set to `true` on connection loss to provider, the stream will be reconnected.
-Default is `true`.
+If set to `true` on connection loss to provider, the stream will be reconnected. Default is `true`.
 
 ##### 1.7.1.2 `buffer`
 
@@ -771,8 +770,7 @@ If the connection is not throttled, the player will play its buffered content lo
 
 ##### 1.7.1.4 `grace_period_timeout_secs`
 
-How long the grace grant will last, until another grace grant can made.
-The default is 4 seconds.
+How long the grace grant will last, until another grace grant can made. Default is `4` seconds.
 
 ##### 1.7.1.5 `grace_period_hold_stream`
 
@@ -2335,7 +2333,6 @@ Has the following top level entries:
 
 - `id` _mandatory_
 - `match_as_ascii` _optional_ default is `false`
-- `create_alias` _optional_ default is `false`
 - `mapper` _mandatory_
 - `counter` _optional_
 
