@@ -134,7 +134,7 @@ jobs:
       - name: Read project version
         id: version
         run: |
-          VERSION=$(grep -Po '^version\s*=\s*"\K[0-9\.]+' backend/Cargo.toml)
+          VERSION=$(grep -Po '^version\s*=\s*"\K[0-9\.]+' ./Cargo.toml)
           echo "value=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Verify static binary artifacts
