@@ -2,7 +2,6 @@
 set -eo pipefail
 
 WORKING_DIR=$(pwd)
-BACKEND_DIR="${WORKING_DIR}/backend"
 
 if ! command -v cargo-set-version &> /dev/null
 then
@@ -12,9 +11,9 @@ fi
 
 
 # Read current version from Cargo.toml
-OLD_VERSION="$(grep '^version' "${BACKEND_DIR}/Cargo.toml" | head -n1 | cut -d'"' -f2 || true)"
+OLD_VERSION="$(grep '^version' "${WORKING_DIR}/Cargo.toml" | head -n1 | cut -d'"' -f2 || true)"
 if [ -z "${OLD_VERSION}" ]; then
-    echo "🧨 Failed to read version from '${BACKEND_DIR}/Cargo.toml' (expected a line like: version = \"x.y.z\")."
+    echo "🧨 Failed to read version from '${WORKING_DIR}/Cargo.toml' (expected a line like: version = \"x.y.z\")."
     exit 1
 fi
 
