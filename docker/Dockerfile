@@ -99,13 +99,19 @@ WORKDIR /src
 COPY resources ./resources
 
 # Combine ffmpeg commands into a single layer to reduce image size
-RUN for img in channel_unavailable user_connections_exhausted provider_connections_exhausted user_account_expired panel_api_provisioning; do \
-      ffmpeg -y -nostdin -loop 1 -i ./resources/${img}.jpg \
-        -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=44100 \
-        -c:v libx264 -r 30 -g 30 -keyint_min 30 -sc_threshold 0 -pix_fmt yuv420p -preset veryfast -crf 23 \
-        -c:a aac -b:a 128k -ac 2 \
-        -t 10 -muxrate 2000k \
-        -f mpegts ./resources/${img}.ts || exit 1; \
+# Convert every .jpg file in resources into a matching .ts file.
+RUN set -eu; \
+    find ./resources -maxdepth 1 -type f -name '*.jpg' | sort | while IFS= read -r image; do \
+      output="${image%.jpg}.ts"; \
+      ffmpeg -y -nostdin -loop 1 -framerate 30 -i "${image}" \
+            -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000 \
+            -t 10 -shortest \
+            -c:v libx264 -pix_fmt yuv420p -preset veryfast -crf 23 \
+            -x264-params "keyint=30:min-keyint=30:scenecut=0:bframes=0:open_gop=0" \
+            -c:a aac -b:a 128k -ac 2 -ar 48000 \
+            -mpegts_flags +resend_headers \
+            -muxdelay 0 -muxpreload 0 \
+            -f mpegts "${output}" || exit 1; \
     done
 
 # -----------------------------------------------------------------

@@ -22,31 +22,37 @@ while getopts "fh" opt; do
   esac
 done
 
-declare -a resources=("channel_unavailable" "user_connections_exhausted" "provider_connections_exhausted" "low_priority_preempted" "user_account_expired" "panel_api_provisioning")
+if ! command -v ffmpeg > /dev/null 2>&1; then
+  echo "ffmpeg not found" >&2
+  exit 1
+fi
 
-for resource in "${resources[@]}"; do
-  if [ "$flag_force" = false ]; then
-    if [ -e "./resources/${resource}.ts" ]; then
-      echo "Resource ${resource} exists, skipping creation"
-      continue
-    fi
+mapfile -d '' -t resources < <(find ./resources -maxdepth 1 -type f -name '*.jpg' -print0 | sort -z)
+
+if [ "${#resources[@]}" -eq 0 ]; then
+  echo "No .jpg resources found in ./resources"
+  exit 0
+fi
+
+for image in "${resources[@]}"; do
+  output="${image%.jpg}.ts"
+  resource_name="$(basename "${image%.jpg}")"
+
+  if [ "$flag_force" = false ] && [ -e "${output}" ]; then
+    echo "Resource ${resource_name} exists, skipping creation"
+    continue
   fi
 
-  if command -v ffmpeg > /dev/null 2>&1; then
-    if ! ffmpeg -y -nostdin -loop 1 -framerate 30 -i "./resources/${resource}.jpg" \
-      -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000 \
-      -t 10 -shortest \
-      -c:v libx264 -pix_fmt yuv420p -preset veryfast -crf 23 \
-      -x264-params "keyint=30:min-keyint=30:scenecut=0:bframes=0:open_gop=0" \
-      -c:a aac -b:a 128k -ac 2 -ar 48000 \
-      -mpegts_flags +resend_headers \
-      -muxdelay 0 -muxpreload 0 \
-      -f mpegts "./resources/${resource}.ts"; then
-      echo "ffmpeg failed for resource ${resource}" >&2
-      exit 1
-    fi
-  else
-    echo "ffmpeg not found" >&2
+  if ! ffmpeg -y -nostdin -loop 1 -framerate 30 -i "${image}" \
+    -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000 \
+    -t 10 -shortest \
+    -c:v libx264 -pix_fmt yuv420p -preset veryfast -crf 23 \
+    -x264-params "keyint=30:min-keyint=30:scenecut=0:bframes=0:open_gop=0" \
+    -c:a aac -b:a 128k -ac 2 -ar 48000 \
+    -mpegts_flags +resend_headers \
+    -muxdelay 0 -muxpreload 0 \
+    -f mpegts "${output}"; then
+    echo "ffmpeg failed for resource ${resource_name}" >&2
     exit 1
   fi
 done

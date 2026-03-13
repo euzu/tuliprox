@@ -1069,7 +1069,14 @@ are already available in the docker image.
 
 You can convert an image with `ffmpeg`.
 
-`ffmpeg -loop 1 -i blank_screen.jpg -t 10 -r 1 -an -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p blank_screen.ts`
+```shell
+
+ffmpeg -y -nostdin -loop 1 -framerate 30 -i blank_screen.jpg -f lavfi \ 
+  -i anullsrc=channel_layout=stereo:sample_rate=48000 -t 10 -shortest -c:v libx264 \
+  -pix_fmt yuv420p -preset veryfast -crf 23 -x264-params "keyint=30:min-keyint=30:scenecut=0:bframes=0:open_gop=0" \
+  -c:a aac -b:a 128k -ac 2 -ar 48000 -mpegts_flags +resend_headers -muxdelay 0 -muxpreload 0 -f mpegts blank_screen.ts
+
+```
 
 and add it to the `config.yml`.
 

@@ -103,26 +103,20 @@ WORKDIR /src
 COPY resources ./resources
 
 # Combine ffmpeg commands into a single layer to reduce image size
-RUN ffmpeg -loop 1 -i ./resources/channel_unavailable.jpg -t 10 -r 1 -an \
-    -vf "scale=1920:1080" \
-    -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p \
-    ./resources/channel_unavailable.ts && \
-  ffmpeg -loop 1 -i ./resources/user_connections_exhausted.jpg -t 10 -r 1 -an \
-    -vf "scale=1920:1080" \
-    -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p \
-    ./resources/user_connections_exhausted.ts && \
-  ffmpeg -loop 1 -i ./resources/provider_connections_exhausted.jpg -t 10 -r 1 -an \
-    -vf "scale=1920:1080" \
-   -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p \
-   ./resources/provider_connections_exhausted.ts && \
-   ffmpeg -loop 1 -i ./resources/user_account_expired.jpg -t 10 -r 1 -an \
-     -vf "scale=1920:1080" \
-     -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p \
-     ./resources/user_account_expired.ts && \
-   ffmpeg -loop 1 -i ./resources/panel_api_provisioning.ppm -t 10 -r 1 -an \
-     -vf "scale=1920:1080" \
-     -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p \
-     ./resources/panel_api_provisioning.ts
+# Convert every .jpg file in resources into a matching .ts file.
+RUN set -eu; \
+    find ./resources -maxdepth 1 -type f -name '*.jpg' | sort | while IFS= read -r image; do \
+      output="${image%.jpg}.ts"; \
+      ffmpeg -y -nostdin -loop 1 -framerate 30 -i "${image}" \
+            -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000 \
+            -t 10 -shortest \
+            -c:v libx264 -pix_fmt yuv420p -preset veryfast -crf 23 \
+            -x264-params "keyint=30:min-keyint=30:scenecut=0:bframes=0:open_gop=0" \
+            -c:a aac -b:a 128k -ac 2 -ar 48000 \
+            -mpegts_flags +resend_headers \
+            -muxdelay 0 -muxpreload 0 \
+            -f mpegts "${output}" || exit 1; \
+    done
 
 # -----------------------------------------------------------------
 # Stage 4: Prepare timezone data
