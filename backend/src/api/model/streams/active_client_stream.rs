@@ -157,7 +157,6 @@ impl ActiveClientStreamState {
         self.provider_stopped = true;
         self.preempt_cancelled = None;
         self.stop_grace_task();
-        self.release_user_stream();
 
         let mut serve_preempted_custom = false;
         if self.provider_handle.is_some() {
@@ -195,6 +194,7 @@ impl ActiveClientStreamState {
                     handle,
                 });
             } else {
+                self.release_user_stream();
                 self.connection_manager.send_cleanup(CleanupEvent::ReleaseProviderHandle { handle });
             }
         }

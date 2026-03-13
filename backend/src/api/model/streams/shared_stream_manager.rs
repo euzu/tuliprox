@@ -338,7 +338,8 @@ impl SharedStreamState {
                                                     break;
                                                 }
                                             } else {
-                                                tokio::task::yield_now().await;
+                                                // End of fallback stream; close subscriber task.
+                                                break;
                                             }
                                         }
                                     }

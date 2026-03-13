@@ -886,6 +886,7 @@ impl ActiveProviderManager {
                         }
 
                         for (_, extra_info) in extra_entries {
+                            extra_info.cancel_token.cancel();
                             extras.push(extra_info.allocation);
                         }
 

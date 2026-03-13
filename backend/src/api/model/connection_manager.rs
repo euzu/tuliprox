@@ -104,15 +104,21 @@ impl ConnectionManager {
                         // Release provider handle first to avoid a race window where the user
                         // connection count drops (making capacity appear available) before the
                         // provider slot is actually freed.
-                        if let Some(h) = handle {
+                        let provider_released = if let Some(h) = handle {
                             provider_manager.release_handle(&h).await;
-                        }
-                        if user_manager.release_stream(&addr).await {
+                            true
+                        } else {
+                            false
+                        };
+                        let stream_released = user_manager.release_stream(&addr).await;
+                        if stream_released {
                             event_manager.send_event(EventMessage::ActiveUser(
                                 ActiveUserConnectionChange::Disconnected(addr),
                             ));
                         }
-                        notify_capacity(capacity_notify.as_ref());
+                        if provider_released || stream_released {
+                            notify_capacity(capacity_notify.as_ref());
+                        }
                     }
                     CleanupEvent::UpdateDetailAndReleaseProvider { addr, video_type, handle } => {
                         if let Some(stream_info) = user_manager.update_stream_detail(&addr, video_type).await {
@@ -144,17 +150,8 @@ impl ConnectionManager {
     pub(crate) fn send_cleanup(&self, event: CleanupEvent) {
         match self.cleanup_tx.try_send(event) {
             Ok(()) => {}
-            Err(tokio::sync::mpsc::error::TrySendError::Full(event)) => {
-                if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                    let tx = self.cleanup_tx.clone();
-                    handle.spawn(async move {
-                        if let Err(e) = tx.send(event).await {
-                            debug!("Cleanup channel closed while flushing overflow event: {e}");
-                        }
-                    });
-                } else {
-                    debug!("No Tokio runtime available to flush full cleanup queue");
-                }
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_event)) => {
+                warn!("Cleanup queue full, dropping event");
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_event)) => {
                 debug!("Cleanup channel closed, dropping cleanup event");
