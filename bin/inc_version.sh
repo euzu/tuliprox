@@ -28,7 +28,9 @@ CLEAN_VERSION="${OLD_VERSION%%-*}"
 CLEAN_VERSION="${CLEAN_VERSION%%+*}"
 IFS='.' read -r major minor patch <<< "$CLEAN_VERSION"
 
-case "$1" in
+bump_arg="${1:-}"
+
+case "${bump_arg}" in
   k)
     ;;
   m) # Major bump
