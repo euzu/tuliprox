@@ -9,7 +9,7 @@ use crate::{
 use log::{error, warn};
 use shared::utils::sanitize_sensitive_info;
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::{
     net::SocketAddr,
     sync::{
@@ -23,7 +23,7 @@ use tokio_util::sync::CancellationToken;
 
 const PREEMPTED_PROBE_CANCEL_GRACE: Duration = Duration::from_secs(2);
 const PREEMPTED_GRACE_MAX_PENDING: usize = 64;
-static DUMMY_ADDR: LazyLock<SocketAddr> = LazyLock::new(|| "127.0.0.1:0".parse::<SocketAddr>().unwrap());
+static DUMMY_ADDR: LazyLock<SocketAddr> = LazyLock::new(|| SocketAddr::from(([127, 0, 0, 1], 0)));
 
 pub type ClientConnectionId = SocketAddr;
 type AllocationId = u64;
@@ -66,7 +66,7 @@ impl ProviderHandle {
 struct SharedAllocation {
     allocation_id: AllocationId,
     allocation: ProviderAllocation,
-    connections: HashSet<ClientConnectionId>,
+    connections: HashMap<ClientConnectionId, i8>,
     priority: i8,
     created_at: Instant,
     cancel_token: Option<CancellationToken>,
@@ -343,7 +343,7 @@ impl ActiveProviderManager {
 
                     if let Some(shared) = connections.shared.by_key.remove(&key) {
                         connections.shared.shared_by_allocation_id.remove(&shared.allocation_id);
-                        for shared_addr in &shared.connections {
+                        for shared_addr in shared.connections.keys() {
                             connections.shared.key_by_addr.remove(shared_addr);
                         }
                         if let Some(name) = shared.allocation.get_provider_name() {
@@ -510,7 +510,7 @@ impl ActiveProviderManager {
                             None
                         } else if let Some(shared) = connections.shared.by_key.remove(&key) {
                             connections.shared.shared_by_allocation_id.remove(&shared.allocation_id);
-                            for shared_addr in &shared.connections {
+                            for shared_addr in shared.connections.keys() {
                                 connections.shared.key_by_addr.remove(shared_addr);
                             }
 
@@ -761,7 +761,23 @@ impl ActiveProviderManager {
                 }
                 Some(shared.allocation)
             } else {
-                // Update the entry back with the remaining connections
+                // Recompute shared priority from remaining subscribers so preemption decisions
+                // reflect who is actually still watching the shared stream.
+                let old_priority = shared.priority;
+                if let Some(new_priority) = shared.connections.values().copied().min() {
+                    if new_priority != old_priority {
+                        shared.priority = new_priority;
+                        if let Some(name) = shared.allocation.get_provider_name() {
+                            if let Some(tree) = connections.priority_index.get_mut(&name) {
+                                tree.remove(&(old_priority, Reverse(shared.created_at), shared.allocation_id));
+                                tree.insert(
+                                    (new_priority, Reverse(shared.created_at), shared.allocation_id),
+                                    PriorityOwner::Shared(shared.allocation_id),
+                                );
+                            }
+                        }
+                    }
+                }
                 connections.shared.by_key.insert(key, shared);
                 None
             }
@@ -813,8 +829,8 @@ impl ActiveProviderManager {
                     if let Some(shared) = connections.shared.by_key.remove(&key) {
                         let pkey = (shared.priority, Reverse(shared.created_at), handle.allocation_id);
                         released = Some(shared.allocation);
-                        for addr in shared.connections {
-                            connections.shared.key_by_addr.remove(&addr);
+                        for addr in shared.connections.keys() {
+                            connections.shared.key_by_addr.remove(addr);
                         }
                         if let Some(name) = released.as_ref().and_then(ProviderAllocation::get_provider_name) {
                             if let Some(list) = connections.by_provider.get_mut(&name) {
@@ -917,7 +933,7 @@ impl ActiveProviderManager {
                     SharedAllocation {
                         allocation_id: handle.0.allocation_id,
                         allocation: handle.0.allocation.clone(),
-                        connections: HashSet::from([*addr]),
+                        connections: HashMap::from([(*addr, handle.1)]),
                         priority: handle.1,
                         created_at: handle.2,
                         cancel_token: handle.0.cancel_token.clone(),
@@ -941,20 +957,55 @@ impl ActiveProviderManager {
         }
     }
 
-    pub async fn add_shared_connection(&self, addr: &SocketAddr, key: &str) {
+    pub async fn add_shared_connection(&self, addr: &SocketAddr, key: &str, priority: i8) -> Result<(), String> {
         let mut connections = self.connections.write().await;
-        if let Some(shared_allocation) = connections.shared.by_key.get_mut(key) {
-            let provider_name = shared_allocation.allocation.get_provider_name().unwrap_or_default();
-            debug_if_enabled!(
-                "Shared connection: added addr {addr} provider={} key={}",
-                sanitize_sensitive_info(&provider_name),
+
+        // Extract metadata before taking a second mutable borrow on `connections`.
+        let metadata = connections.shared.by_key.get(key).map(|s| {
+            (s.allocation_id, s.allocation.get_provider_name().unwrap_or_default(), s.priority, s.created_at)
+        });
+
+        let Some((alloc_id, provider_name, old_priority, created_at)) = metadata else {
+            let err = format!(
+                "Failed to add shared connection for {addr}: url {} not found",
                 sanitize_sensitive_info(key)
             );
-            shared_allocation.connections.insert(*addr);
-            connections.shared.key_by_addr.insert(*addr, key.to_string());
-        } else {
-            error!("Failed to add shared connection for {addr}: url {} not found", sanitize_sensitive_info(key));
+            error!("{err}");
+            return Err(err);
+        };
+
+        debug_if_enabled!(
+            "Shared connection: added addr {addr} provider={} key={}",
+            sanitize_sensitive_info(&provider_name),
+            sanitize_sensitive_info(key)
+        );
+
+        let Some(shared_allocation) = connections.shared.by_key.get_mut(key) else {
+            let err = format!(
+                "Failed to add shared connection for {addr}: url {} disappeared during update",
+                sanitize_sensitive_info(key)
+            );
+            error!("{err}");
+            return Err(err);
+        };
+
+        shared_allocation.connections.insert(*addr, priority);
+
+        // If the joining subscriber has higher importance (lower numeric priority),
+        // update the shared allocation's priority and refresh the priority index.
+        if priority < old_priority {
+            shared_allocation.priority = priority;
+            if let Some(tree) = connections.priority_index.get_mut(&provider_name) {
+                tree.remove(&(old_priority, Reverse(created_at), alloc_id));
+                tree.insert(
+                    (priority, Reverse(created_at), alloc_id),
+                    PriorityOwner::Shared(alloc_id),
+                );
+            }
         }
+
+        connections.shared.key_by_addr.insert(*addr, key.to_string());
+        Ok(())
     }
 
     pub async fn get_provider_connections_count(&self) -> usize { self.providers.active_connection_count().await }
@@ -1348,6 +1399,53 @@ mod tests {
 
         manager.release_connection(&user_1_addr).await;
         manager.release_connection(&user_2_addr).await;
+    }
+
+    #[tokio::test]
+    async fn test_shared_priority_downgrades_after_high_priority_user_leaves() {
+        let app_cfg = create_test_app_config_single_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+
+        let input_name = "provider_1".intern();
+        let stream_key = "http://example.com/shared/live";
+        let addr_a: SocketAddr = "127.0.0.1:48501".parse().unwrap();
+        let addr_b: SocketAddr = "127.0.0.1:48502".parse().unwrap();
+
+        // A starts shared stream with high importance (priority 0).
+        let alloc_a = manager
+            .acquire_connection(&input_name, &addr_a, 0)
+            .await
+            .expect("A should get initial connection");
+        let shared_token = alloc_a.cancel_token.clone().expect("shared allocation should have cancel token");
+        manager.make_shared_connection(&addr_a, stream_key).await;
+
+        // B joins the same shared stream with lower importance (priority 1).
+        let join_result = manager.add_shared_connection(&addr_b, stream_key, 1).await;
+        assert!(
+            join_result.is_ok(),
+            "B should join existing shared stream, got: {join_result:?}"
+        );
+
+        // A leaves shared stream. Shared allocation should now inherit B's lower priority.
+        manager.release_connection(&addr_a).await;
+        {
+            let connections = manager.connections.read().await;
+            let shared = connections.shared.by_key.get(stream_key).expect("shared entry should remain for B");
+            assert_eq!(shared.priority, 1, "shared priority must downgrade to remaining subscriber priority");
+        }
+
+        // A starts another stream with higher importance and should preempt B's shared stream.
+        let alloc_a2 = manager
+            .acquire_connection(&input_name, &addr_a, 0)
+            .await
+            .expect("A should preempt lower-priority shared stream");
+        assert_eq!(alloc_a2.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
+        assert!(shared_token.is_cancelled(), "shared stream should be cancelled when preempted");
+        assert!(!manager.is_over_limit(&input_name).await, "provider should not remain over limit after preemption");
+
+        manager.release_connection(&addr_a).await;
+        manager.release_connection(&addr_b).await;
     }
 
     #[tokio::test]

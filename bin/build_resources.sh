@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -euo pipefail
 
 # Function to print usage instructions
 print_usage() {
@@ -21,7 +22,7 @@ while getopts "fh" opt; do
   esac
 done
 
-declare -a resources=("channel_unavailable" "user_connections_exhausted" "provider_connections_exhausted" "user_account_expired" "panel_api_provisioning")
+declare -a resources=("channel_unavailable" "user_connections_exhausted" "provider_connections_exhausted" "user_account_expired" "panel_api_provisioning" "low_priority_preempted")
 
 for resource in "${resources[@]}"; do
   if [ "$flag_force" = false ]; then
@@ -31,14 +32,21 @@ for resource in "${resources[@]}"; do
     fi
   fi
 
-  if which ffmpeg > /dev/null 2>&1; then
-        ffmpeg -y -nostdin -loop 1 -i "./resources/${resource}.jpg" -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=44100 \
-           -c:v libx264 -r 30 -g 30 -keyint_min 30 -sc_threshold 0 -pix_fmt yuv420p -preset veryfast -crf 23 \
-           -c:a aac -b:a 128k -ac 2 \
-           -t 10 -muxrate 2000k \
-           -f mpegts "./resources/${resource}.ts"
+  if command -v ffmpeg > /dev/null 2>&1; then
+    if ! ffmpeg -y -nostdin -loop 1 -framerate 30 -i "./resources/${resource}.jpg" \
+      -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000 \
+      -t 10 -shortest \
+      -c:v libx264 -pix_fmt yuv420p -preset veryfast -crf 23 \
+      -x264-params "keyint=30:min-keyint=30:scenecut=0:bframes=0:open_gop=0" \
+      -c:a aac -b:a 128k -ac 2 -ar 48000 \
+      -mpegts_flags +resend_headers \
+      -muxdelay 0 -muxpreload 0 \
+      -f mpegts "./resources/${resource}.ts"; then
+      echo "ffmpeg failed for resource ${resource}" >&2
+      exit 1
+    fi
   else
     echo "ffmpeg not found"
-    exit
+    exit 1
   fi
 done

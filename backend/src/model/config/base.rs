@@ -55,7 +55,7 @@ impl Default for GracePeriodOptions {
         Self {
             period_millis: default_grace_period_millis(),
             timeout_secs: default_grace_period_timeout_secs(),
-            hold_stream: false,
+            hold_stream: true,
         }
     }
 }

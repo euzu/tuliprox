@@ -1166,7 +1166,7 @@
     "CLIPBOARD_NOT_SUPPORTED": "Clipboard not supported.\nYour browser or current context does not allow clipboard access.\nPlease use HTTPS or localhost.",
     "CONFIG_CHANGED": "Configuration on server changed.",
     "CONFIRM_DELETE": "You really want to delete it?",
-    "CONFIRM_SOURCES_SAVE": "Do you really want to save?.\n\nProceed?",
+    "CONFIRM_SOURCES_SAVE": "Do you really want to save?",
     "DOWNLOAD": {
       "FAIL": "Failed to download!",
       "GEOIP": {

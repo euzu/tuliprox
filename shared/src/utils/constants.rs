@@ -39,6 +39,13 @@ pub const HLS_EXT_FRAGMENT: &str = ".m3u8#";
 pub const DASH_EXT_QUERY: &str = ".mpd?";
 pub const DASH_EXT_FRAGMENT: &str = ".mpd#";
 
+pub const CHANNEL_UNAVAILABLE: &str = "channel_unavailable.ts";
+pub const USER_CONNECTIONS_EXHAUSTED: &str = "user_connections_exhausted.ts";
+pub const PROVIDER_CONNECTIONS_EXHAUSTED: &str = "provider_connections_exhausted.ts";
+pub const LOW_PRIORITY_PREEMPTED: &str = "low_priority_preempted.ts";
+pub const USER_ACCOUNT_EXPIRED: &str = "user_account_expired.ts";
+pub const PANEL_API_PROVISIONING: &str = "panel_api_provisioning.ts";
+
 pub const DEFAULT_EPISODE_PATTERN: &str = r".*(?P<episode>[Ss]\d{1,2}(.*?)[Ee]\d{1,2}).*";
 
 pub const FILENAME_TRIM_PATTERNS: &[char] = &['.', '-', '_'];

@@ -273,13 +273,12 @@ pub struct StreamOptions {
 /// - `buffer_size`: the size of the stream buffer.
 ///
 /// If the reverse proxy or stream settings are not defined, default values are used:
-/// - retry: `false`
+/// - retry: `true`
 /// - buffering: `false`
 /// - buffer size: `0`
 ///
-/// Additionally, it computes `pipe_provider_stream`, which is `true` only if
-/// both retry and buffering are disabled—indicating that the stream can be piped directly
-/// from the provider without additional handling.
+/// Additionally, it computes `pipe_provider_stream` as `!stream_retry && !buffer_enabled`.
+/// This means direct provider piping is enabled only when retry is disabled and buffering is disabled.
 ///
 /// Returns a `StreamOptions` instance with the resolved configuration.
 fn get_stream_options(app_state: &Arc<AppState>) -> StreamOptions {
@@ -290,7 +289,7 @@ fn get_stream_options(app_state: &Arc<AppState>) -> StreamOptions {
         .reverse_proxy
         .as_ref()
         .and_then(|reverse_proxy| reverse_proxy.stream.as_ref())
-        .map_or((false, false, 0), |stream| {
+        .map_or((true, false, 0), |stream| {
             let (buffer_enabled, buffer_size) =
                 stream.buffer.as_ref().map_or((false, 0), |buffer| (buffer.enabled, buffer.size));
             (stream.retry, buffer_enabled, buffer_size)
@@ -992,8 +991,13 @@ pub async fn stream_response(
         }
     };
 
-    let deferred_grace_hold_stream =
-        !stream_details.has_stream() && stream_details.provider_grace_active && stream_details.grace_period.hold_stream;
+    // When no provider stream is available, still create an ActiveClientStream if a grace period
+    // needs to resolve (provider-grace with hold_stream, or user-grace). The grace task will
+    // determine the correct mode (UserExhausted / ProviderExhausted / Inner) and serve the
+    // appropriate custom video or terminate cleanly.
+    let deferred_grace_hold_stream = !stream_details.has_stream()
+        && (stream_details.provider_grace_active
+            || connection_permission == UserConnectionPermission::GracePeriod);
 
     if stream_details.has_stream() || deferred_grace_hold_stream {
         // let content_length = get_stream_content_length(provider_response.as_ref());
@@ -1056,6 +1060,7 @@ pub async fn stream_response(
                 shared_headers,
                 stream_options.buffer_size,
                 provider_handle,
+                user.priority,
             )
             .await
             {
@@ -1179,7 +1184,7 @@ async fn try_shared_stream_response_if_any(
     }
 
     if let Some((stream, provider)) =
-        SharedStreamManager::subscribe_shared_stream(app_state, stream_url, &fingerprint.addr).await
+        SharedStreamManager::subscribe_shared_stream(app_state, stream_url, &fingerprint.addr, user.priority).await
     {
         debug_if_enabled!("Using shared stream {}", sanitize_sensitive_info(stream_url));
         if let Some(headers) = app_state.shared_stream_manager.get_shared_state_headers(stream_url).await {
