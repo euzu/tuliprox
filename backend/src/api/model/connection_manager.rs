@@ -14,6 +14,7 @@ use shared::{
 use std::{borrow::Cow, net::SocketAddr, sync::Arc};
 use tokio::sync::{mpsc, Notify};
 
+const CLEANUP_QUEUE_CAPACITY: usize = 4096;
 fn notify_capacity(capacity_notify: &Notify) { capacity_notify.notify_waiters(); }
 
 pub(crate) enum CleanupEvent {
@@ -37,7 +38,7 @@ pub struct ConnectionManager {
     pub shared_stream_manager: Arc<SharedStreamManager>,
     event_manager: Arc<EventManager>,
     close_socket_signal_tx: tokio::sync::broadcast::Sender<SocketAddr>,
-    cleanup_tx: mpsc::UnboundedSender<CleanupEvent>,
+    cleanup_tx: mpsc::Sender<CleanupEvent>,
     capacity_notify: Arc<Notify>,
 }
 
@@ -49,7 +50,7 @@ impl ConnectionManager {
         event_manager: &Arc<EventManager>,
     ) -> Self {
         let (close_socket_signal_tx, _) = tokio::sync::broadcast::channel(256);
-        let (cleanup_tx, cleanup_rx) = mpsc::unbounded_channel();
+        let (cleanup_tx, cleanup_rx) = mpsc::channel(CLEANUP_QUEUE_CAPACITY);
         let capacity_notify = Arc::new(Notify::new());
 
         let mgr = Self {
@@ -75,7 +76,7 @@ impl ConnectionManager {
     }
 
     fn spawn_cleanup_worker(
-        mut rx: mpsc::UnboundedReceiver<CleanupEvent>,
+        mut rx: mpsc::Receiver<CleanupEvent>,
         user_manager: Arc<ActiveUserManager>,
         provider_manager: Arc<ActiveProviderManager>,
         shared_stream_manager: Arc<SharedStreamManager>,
@@ -103,15 +104,21 @@ impl ConnectionManager {
                         // Release provider handle first to avoid a race window where the user
                         // connection count drops (making capacity appear available) before the
                         // provider slot is actually freed.
-                        if let Some(h) = handle {
+                        let provider_released = if let Some(h) = handle {
                             provider_manager.release_handle(&h).await;
-                        }
-                        if user_manager.release_stream(&addr).await {
+                            true
+                        } else {
+                            false
+                        };
+                        let stream_released = user_manager.release_stream(&addr).await;
+                        if stream_released {
                             event_manager.send_event(EventMessage::ActiveUser(
                                 ActiveUserConnectionChange::Disconnected(addr),
                             ));
                         }
-                        notify_capacity(capacity_notify.as_ref());
+                        if provider_released || stream_released {
+                            notify_capacity(capacity_notify.as_ref());
+                        }
                     }
                     CleanupEvent::UpdateDetailAndReleaseProvider { addr, video_type, handle } => {
                         if let Some(stream_info) = user_manager.update_stream_detail(&addr, video_type).await {
@@ -141,8 +148,14 @@ impl ConnectionManager {
     }
 
     pub(crate) fn send_cleanup(&self, event: CleanupEvent) {
-        if let Err(e) = self.cleanup_tx.send(event) {
-            debug!("Cleanup channel closed, dropping event: {e}");
+        match self.cleanup_tx.try_send(event) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_event)) => {
+                warn!("Cleanup queue full, dropping event");
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_event)) => {
+                debug!("Cleanup channel closed, dropping cleanup event");
+            }
         }
     }
 
@@ -176,26 +189,26 @@ impl ConnectionManager {
         if removed {
             self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Disconnected(*addr)));
         }
-        self.capacity_notify.notify_waiters();
+        notify_capacity(self.capacity_notify.as_ref());
     }
 
     pub async fn release_provider_connection(&self, addr: &SocketAddr) {
         self.provider_manager.release_connection(addr).await;
         self.shared_stream_manager.release_connection(addr, false).await;
-        self.capacity_notify.notify_waiters();
+        notify_capacity(self.capacity_notify.as_ref());
     }
 
     pub async fn release_stream(&self, addr: &SocketAddr) {
         if self.user_manager.release_stream(addr).await {
             self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Disconnected(*addr)));
-            self.capacity_notify.notify_waiters();
+            notify_capacity(self.capacity_notify.as_ref());
         }
     }
 
     pub async fn release_provider_handle(&self, provider_handle: Option<ProviderHandle>) {
         if let Some(handle) = provider_handle {
             self.provider_manager.release_handle(&handle).await;
-            self.capacity_notify.notify_waiters();
+            notify_capacity(self.capacity_notify.as_ref());
         }
     }
 

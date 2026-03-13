@@ -9,7 +9,7 @@ use crate::{
 use log::{error, warn};
 use shared::utils::sanitize_sensitive_info;
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::{
     net::SocketAddr,
     sync::{
@@ -75,18 +75,18 @@ struct SharedAllocation {
 #[derive(Debug, Clone)]
 struct ActiveConnectionInfo {
     allocation: ProviderAllocation,
-    priority: i8,
-    is_probe: bool,
     // Used to signal preemption to the consumer of this connection
     cancel_token: CancellationToken,
     created_at: Instant,
+    priority: i8,
+    is_probe: bool,
 }
 
 #[derive(Debug, Clone, Default)]
 struct SharedConnections {
-    by_key: HashMap<String, SharedAllocation>,
-    key_by_addr: HashMap<ClientConnectionId, String>,
-    shared_by_allocation_id: HashMap<AllocationId, String>,
+    by_key: HashMap<Arc<str>, SharedAllocation>,
+    key_by_addr: HashMap<ClientConnectionId, Arc<str>>,
+    shared_by_allocation_id: HashMap<AllocationId, Arc<str>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -95,8 +95,8 @@ struct Connections {
     single: HashMap<ClientConnectionId, HashMap<AllocationId, ActiveConnectionInfo>>,
     shared: SharedConnections,
     // Index to quickly find connections by provider name for preemption
-    // ProviderName -> Vec<(ClientConnectionId, AllocationId)>
-    by_provider: HashMap<Arc<str>, Vec<(ClientConnectionId, AllocationId)>>,
+    // ProviderName -> Set<(ClientConnectionId, AllocationId)>
+    by_provider: HashMap<Arc<str>, HashSet<(ClientConnectionId, AllocationId)>>,
     // Priority index per provider alias for O(log n) victim lookup
     // ProviderName -> BTreeMap<PriorityKey, PriorityOwner>
     priority_index: HashMap<Arc<str>, BTreeMap<PriorityKey, PriorityOwner>>,
@@ -248,14 +248,14 @@ impl ActiveProviderManager {
             allocation_id,
             ActiveConnectionInfo {
                 allocation: allocation.clone(),
-                priority,
-                is_probe,
                 cancel_token: cancel_token.clone(),
                 created_at: now,
+                priority,
+                is_probe,
             },
         );
 
-        connections.by_provider.entry(provider_name.clone()).or_default().push((*addr, allocation_id));
+        connections.by_provider.entry(provider_name.clone()).or_default().insert((*addr, allocation_id));
         connections.priority_index.entry(provider_name.clone()).or_default()
             .insert((priority, Reverse(now), allocation_id), PriorityOwner::Single(*addr));
 
@@ -403,9 +403,7 @@ impl ActiveProviderManager {
                     }
                     if let Some(ref name) = removed_provider_name {
                         if let Some(list) = connections.by_provider.get_mut(name) {
-                            if let Some(idx) = list.iter().position(|(a, i)| *a == addr && *i == alloc_id) {
-                                list.remove(idx);
-                            }
+                            list.remove(&(addr, alloc_id));
                         }
                         if let Some(tree) = connections.priority_index.get_mut(name) {
                             tree.remove(&(v_prio, Reverse(victim_created_at), alloc_id));
@@ -577,9 +575,7 @@ impl ActiveProviderManager {
                         }
                         if let Some(name) = removed_provider_name {
                             if let Some(list) = connections.by_provider.get_mut(&name) {
-                                if let Some(idx) = list.iter().position(|(a, i)| *a == addr && *i == alloc_id) {
-                                    list.remove(idx);
-                                }
+                                list.remove(&(addr, alloc_id));
                             }
                             if let Some(tree) = connections.priority_index.get_mut(&name) {
                                 tree.remove(&(v_prio, Reverse(victim_created_at), alloc_id));
@@ -700,9 +696,7 @@ impl ActiveProviderManager {
                 for (id, info) in &allocations {
                     if let Some(name) = info.allocation.get_provider_name() {
                         if let Some(list) = connections.by_provider.get_mut(&name) {
-                            if let Some(idx) = list.iter().position(|(a, i)| *a == *addr && *i == *id) {
-                                list.remove(idx);
-                            }
+                            list.remove(&(*addr, *id));
                         }
                         if let Some(tree) = connections.priority_index.get_mut(&name) {
                             tree.remove(&(info.priority, Reverse(info.created_at), *id));
@@ -812,11 +806,7 @@ impl ActiveProviderManager {
                     // Remove from by_provider index
                     if let Some(name) = released.as_ref().and_then(ProviderAllocation::get_provider_name) {
                         if let Some(list) = connections.by_provider.get_mut(&name) {
-                            if let Some(idx) =
-                                list.iter().position(|(a, i)| *a == handle.client_id && *i == handle.allocation_id)
-                            {
-                                list.remove(idx);
-                            }
+                            list.remove(&(handle.client_id, handle.allocation_id));
                         }
                         released_priority_key = Some((name, pkey));
                     }
@@ -859,6 +849,7 @@ impl ActiveProviderManager {
         let extras = {
             let mut connections = self.connections.write().await;
             let mut extras = Vec::new();
+            let shared_key: Arc<str> = Arc::from(key);
 
             // Find the allocation to promote (must be single)
             // Logic change: we must find the specific allocation if multiple exist, but usually per client only 1 active?
@@ -875,9 +866,7 @@ impl ActiveProviderManager {
                         // Cleanup indices
                         if let Some(name) = info.allocation.get_provider_name() {
                             if let Some(list) = connections.by_provider.get_mut(&name) {
-                                if let Some(idx) = list.iter().position(|(a, alloc_id)| *a == *addr && *alloc_id == id) {
-                                    list.remove(idx);
-                                }
+                                list.remove(&(*addr, id));
                             }
                             // Remove old single entry from priority_index
                             if let Some(tree) = connections.priority_index.get_mut(&name) {
@@ -888,12 +877,7 @@ impl ActiveProviderManager {
                         for (extra_id, extra_info) in &extra_entries {
                             if let Some(extra_provider_name) = extra_info.allocation.get_provider_name() {
                                 if let Some(list) = connections.by_provider.get_mut(&extra_provider_name) {
-                                    if let Some(idx) = list
-                                        .iter()
-                                        .position(|(extra_addr, alloc_id)| *extra_addr == *addr && *alloc_id == *extra_id)
-                                    {
-                                        list.remove(idx);
-                                    }
+                                    list.remove(&(*addr, *extra_id));
                                 }
                                 if let Some(tree) = connections.priority_index.get_mut(&extra_provider_name) {
                                     tree.remove(&(extra_info.priority, Reverse(extra_info.created_at), *extra_id));
@@ -902,6 +886,7 @@ impl ActiveProviderManager {
                         }
 
                         for (_, extra_info) in extra_entries {
+                            extra_info.cancel_token.cancel();
                             extras.push(extra_info.allocation);
                         }
 
@@ -929,7 +914,7 @@ impl ActiveProviderManager {
                 );
 
                 connections.shared.by_key.insert(
-                    key.to_string(),
+                    Arc::clone(&shared_key),
                     SharedAllocation {
                         allocation_id: handle.0.allocation_id,
                         allocation: handle.0.allocation.clone(),
@@ -939,8 +924,11 @@ impl ActiveProviderManager {
                         cancel_token: handle.0.cancel_token.clone(),
                     },
                 );
-                connections.shared.key_by_addr.insert(*addr, key.to_string());
-                connections.shared.shared_by_allocation_id.insert(handle.0.allocation_id, key.to_string());
+                connections.shared.key_by_addr.insert(*addr, Arc::clone(&shared_key));
+                connections
+                    .shared
+                    .shared_by_allocation_id
+                    .insert(handle.0.allocation_id, shared_key);
 
                 // Insert new shared entry into priority_index
                 connections.priority_index.entry(provider_name.clone()).or_default()
@@ -1004,7 +992,7 @@ impl ActiveProviderManager {
             }
         }
 
-        connections.shared.key_by_addr.insert(*addr, key.to_string());
+        connections.shared.key_by_addr.insert(*addr, Arc::from(key));
         Ok(())
     }
 

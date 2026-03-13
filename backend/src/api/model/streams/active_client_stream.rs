@@ -157,7 +157,6 @@ impl ActiveClientStreamState {
         self.provider_stopped = true;
         self.preempt_cancelled = None;
         self.stop_grace_task();
-        self.release_user_stream();
 
         let mut serve_preempted_custom = false;
         if self.provider_handle.is_some() {
@@ -188,11 +187,16 @@ impl ActiveClientStreamState {
                 "Provider stream preempted for {}; stopping client stream",
                 sanitize_sensitive_info(&addr.to_string())
             );
-            self.connection_manager.send_cleanup(CleanupEvent::UpdateDetailAndReleaseProvider {
-                addr,
-                video_type: CustomVideoStreamType::LowPriorityPreempted,
-                handle,
-            });
+            if serve_preempted_custom {
+                self.connection_manager.send_cleanup(CleanupEvent::UpdateDetailAndReleaseProvider {
+                    addr,
+                    video_type: CustomVideoStreamType::LowPriorityPreempted,
+                    handle,
+                });
+            } else {
+                self.release_user_stream();
+                self.connection_manager.send_cleanup(CleanupEvent::ReleaseProviderHandle { handle });
+            }
         }
         serve_preempted_custom
     }
@@ -577,12 +581,20 @@ pub(crate) async fn create_active_client_stream(
         .and_then(|h| h.cancel_token.as_ref())
         .map(|token| Box::pin(token.clone().cancelled_owned()));
 
+    let mut send_custom_stream_flag = grace_stop_flag;
+    if send_custom_stream_flag.is_none()
+        && preempt_cancelled.is_some()
+        && custom_video.low_priority_preempted.is_some()
+    {
+        send_custom_stream_flag = Some(Arc::new(AtomicU8::new(StreamMode::Inner as u8)));
+    }
+
     let state = ActiveClientStreamState {
         inner: stream,
         preempt_cancelled,
         grace_task_handle,
         provider_handle: stream_details.provider_handle,
-        send_custom_stream_flag: grace_stop_flag,
+        send_custom_stream_flag,
         provisionable: has_provisioning,
         custom_video,
         waker: Some(waker),

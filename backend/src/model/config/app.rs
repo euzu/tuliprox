@@ -12,6 +12,10 @@ use rand::Rng;
 use shared::error::{TuliproxError, TuliproxErrorKind};
 use shared::info_err_res;
 use shared::model::ConfigPaths;
+use shared::utils::{
+    CHANNEL_UNAVAILABLE, LOW_PRIORITY_PREEMPTED, PANEL_API_PROVISIONING, PROVIDER_CONNECTIONS_EXHAUSTED,
+    USER_ACCOUNT_EXPIRED, USER_CONNECTIONS_EXHAUSTED,
+};
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fs::File;
@@ -19,7 +23,6 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::OnceCell;
-use shared::utils::{CHANNEL_UNAVAILABLE, LOW_PRIORITY_PREEMPTED, PANEL_API_PROVISIONING, PROVIDER_CONNECTIONS_EXHAUSTED, USER_ACCOUNT_EXPIRED, USER_CONNECTIONS_EXHAUSTED};
 
 fn generate_secret() -> [u8; 32] {
     let mut rng = rand::rng();

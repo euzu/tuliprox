@@ -1611,32 +1611,6 @@ mod tests {
         Arc::new(ConfigProvider::from(&dto))
     }
 
-    async fn start_plain_http_server() -> (SocketAddr, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("tcp bind should work");
-        let addr = listener.local_addr().expect("local addr should exist");
-        let accepted = Arc::new(AtomicUsize::new(0));
-        let accepted_clone = Arc::clone(&accepted);
-
-        let handle = tokio::spawn(async move {
-            loop {
-                let Ok((mut socket, _)) = listener.accept().await else {
-                    continue;
-                };
-                accepted_clone.fetch_add(1, Ordering::SeqCst);
-                tokio::spawn(async move {
-                    let mut buf = vec![0_u8; 2048];
-                    let _ = socket.read(&mut buf).await;
-                    let _ = socket
-                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
-                        .await;
-                    let _ = socket.shutdown().await;
-                });
-            }
-        });
-
-        (addr, accepted, handle)
-    }
-
     #[test]
     fn test_url_mask() {
         // Replace with "***"
@@ -1816,9 +1790,43 @@ mod tests {
         assert_eq!(https_second.connect_ip.map(|ip| ip.to_string()), Some("203.0.113.11".to_string()));
     }
 
+    async fn start_plain_http_server() -> std::io::Result<(SocketAddr, Arc<AtomicUsize>, tokio::task::JoinHandle<()>)> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let accepted_clone = Arc::clone(&accepted);
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    continue;
+                };
+                accepted_clone.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut buf = vec![0_u8; 2048];
+                    let _ = socket.read(&mut buf).await;
+                    let _ = socket
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                        .await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+
+        Ok((addr, accepted, handle))
+    }
+
     #[tokio::test]
     async fn test_on_connect_error_try_next_ip_before_provider_rotation() {
-        let (addr, accepted, server_handle) = start_plain_http_server().await;
+
+        let (addr, accepted, server_handle) = match start_plain_http_server().await {
+            Ok(server) => server,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("skipping test_on_connect_error_try_next_ip_before_provider_rotation: {err}");
+                return;
+            }
+            Err(err) => panic!("failed to start test http server: {err}"),
+        };
 
         let mut cfg = Config {
             connect_timeout_secs: 1,
