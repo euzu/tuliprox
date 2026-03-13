@@ -288,6 +288,46 @@ pub fn calculate_duration_ticks(buffer: &[u8], packet_indices: &PacketIndices) -
     }
 }
 
+fn calculate_pcr_duration_ticks(buffer: &[u8]) -> Option<u64> {
+    let mut first_pcr = None;
+    let mut last_pcr = None;
+    let mut i = 0;
+    while i + TS_PACKET_SIZE <= buffer.len() {
+        if buffer[i] != SYNC_BYTE {
+            i += 1;
+            continue;
+        }
+        let packet = &buffer[i..i + TS_PACKET_SIZE];
+        let afc = (packet[3] >> 4) & 0b11;
+        if afc == 2 || afc == 3 {
+            let adaptation_len = packet[4] as usize;
+            if adaptation_len >= 7 && (packet[5] & ADAPTATION_FIELD_FLAG_PCR) != 0 {
+                let pcr = decode_pcr(&packet[6..12]);
+                if first_pcr.is_none() {
+                    first_pcr = Some(pcr);
+                }
+                last_pcr = Some(pcr);
+            }
+        }
+        i += TS_PACKET_SIZE;
+    }
+
+    let (Some(first), Some(last)) = (first_pcr, last_pcr) else {
+        return None;
+    };
+    if first == last {
+        return None;
+    }
+
+    let diff_27mhz = if last >= first {
+        last - first
+    } else {
+        MAX_PCR - first + last
+    };
+    let ticks_90khz = diff_27mhz / 300;
+    (ticks_90khz > 0).then_some(ticks_90khz)
+}
+
 type PacketIndices = Vec<(usize, Option<(usize, Option<usize>, u16)>)>;
 
 pub struct TransportStreamBuffer {
@@ -303,6 +343,7 @@ pub struct TransportStreamBuffer {
     cc_entries: Box<[Option<(u8, bool)>; 8192]>,
     waker: Arc<AtomicWaker>,
     first_pcr: Option<u64>,
+    force_discontinuity_on_wrap: bool,
 }
 
 impl std::fmt::Debug for TransportStreamBuffer {
@@ -314,6 +355,7 @@ impl std::fmt::Debug for TransportStreamBuffer {
             .field("timestamp_offset", &self.timestamp_offset)
             .field("stream_duration_90khz", &self.stream_duration_90khz)
             .field("first_pcr", &self.first_pcr)
+            .field("force_discontinuity_on_wrap", &self.force_discontinuity_on_wrap)
             .finish_non_exhaustive()
     }
 }
@@ -333,6 +375,9 @@ impl Clone for TransportStreamBuffer {
             cc_entries: Box::new([None; 8192]),
             waker: Arc::clone(&self.waker),
             first_pcr: self.first_pcr,
+            // Start each clone with one initial discontinuity marker to keep
+            // continuity behavior consistent for fresh consumers.
+            force_discontinuity_on_wrap: true,
         }
     }
 }
@@ -349,7 +394,10 @@ impl TransportStreamBuffer {
         let (packet_indices, _) = extract_pts_dts_indices_with_continuity(&raw);
         let length = packet_indices.len();
 
-        let stream_duration_90khz = calculate_duration_ticks(&raw, &packet_indices);
+        let mut stream_duration_90khz = calculate_duration_ticks(&raw, &packet_indices);
+        if stream_duration_90khz == 0 {
+            stream_duration_90khz = calculate_pcr_duration_ticks(&raw).unwrap_or(0);
+        }
 
         // Scan for the first PCR in the buffer to use as a reference for discontinuity packets
         let mut first_pcr = None;
@@ -383,6 +431,9 @@ impl TransportStreamBuffer {
             cc_entries: Box::new([None; 8192]),
             waker: Arc::new(AtomicWaker::new()),
             first_pcr,
+            // Emit a discontinuity packet on startup. Subsequent injections are
+            // governed by wrap handling and duration/discontinuity logic.
+            force_discontinuity_on_wrap: true,
         }
     }
 
@@ -549,9 +600,19 @@ impl TransportStreamBuffer {
                 // increasing across loops. Resetting to 0 causes decoders (MPV, ffmpeg) to see
                 // a backward timestamp jump and treat the loop as end-of-stream or corrupt data.
                 self.current_pos = 0;
-                self.timestamp_offset =
-                    self.timestamp_offset.wrapping_add(self.stream_duration_90khz) % MAX_PTS_DTS;
-                self.current_dts = 0;
+                // Advance timestamps by one full source duration per loop so output time is
+                // monotonic for clients. Resetting to zero causes backward jumps that some
+                // players interpret as stream end/corruption after the first cycle.
+                if self.stream_duration_90khz > 0 {
+                    self.timestamp_offset =
+                        self.timestamp_offset.wrapping_add(self.stream_duration_90khz) % MAX_PTS_DTS;
+                    self.current_dts = self.current_dts.wrapping_add(self.stream_duration_90khz) % MAX_PTS_DTS;
+                } else {
+                    // PCR-only (or malformed) assets may not expose PTS/DTS-derived duration.
+                    // Force one discontinuity marker after wrap so decoders do not see identical
+                    // timestamp cycles as a continuous timeline.
+                    self.force_discontinuity_on_wrap = true;
+                }
 
                 // Reset only the discontinuity-sent flag so injection packets are emitted at the
                 // start of the next loop. Continuity counter values keep running so CC remains
@@ -577,24 +638,23 @@ impl TransportStreamBuffer {
             }
             let (counter, discontinuity_sent) = entry.as_mut().unwrap();
 
-            // Inject a discontinuity packet for every PID on first appearance and at loop
-            // boundaries. This covers both PES PIDs (audio/video) and PSI PIDs (PAT/PMT)
-            // so that decoders accept the CC reset during mid-stream switches.
-            let inject_discontinuity = !*discontinuity_sent;
-
-            let payload_packet_cc;
+            // Disable synthetic discontinuity packet insertion for looped custom streams.
+            // In practice this can produce demuxer corruption on some clients (PES mismatch).
+            // Monotonic timestamps + stable continuity counters are sufficient here.
+            let inject_discontinuity = self.force_discontinuity_on_wrap && !*discontinuity_sent;
             if inject_discontinuity {
-                // Discontinuity packet is adaptation-only and does not consume a CC step.
-                // Keep CC progression tied strictly to payload packets.
                 let extra_packet_cc = if packet_has_payload { *counter } else { packet[3] & 0x0F };
-                payload_packet_cc = if packet_has_payload { *counter } else { packet[3] & 0x0F };
-                *discontinuity_sent = true;
-
-                // Write discontinuity packet directly into the output buffer — no allocation.
-                Self::generate_discontinuity_packet(packet, extra_packet_cc, self.first_pcr, self.timestamp_offset, &mut bytes);
-            } else {
-                payload_packet_cc = if packet_has_payload { *counter } else { packet[3] & 0x0F };
+                Self::generate_discontinuity_packet(
+                    packet,
+                    extra_packet_cc,
+                    self.first_pcr,
+                    self.timestamp_offset,
+                    &mut bytes,
+                );
+                self.force_discontinuity_on_wrap = false;
             }
+            *discontinuity_sent = true;
+            let payload_packet_cc = if packet_has_payload { *counter } else { packet[3] & 0x0F };
 
             // TS continuity counter increments only when payload is present (AFC=01/11).
             if packet_has_payload {
