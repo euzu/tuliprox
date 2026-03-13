@@ -161,31 +161,31 @@ pub fn MessagingConfigView() -> Html {
             .map_or_else(MessagingConfigDto::default, |m| m.clone());
 
         let telegram_cfg = msg_config.telegram.as_ref().map_or_else(TelegramMessagingConfigDto::default, |t| t.clone());
-        use_effect_with((telegram_cfg, config_view_ctx.edit_mode.clone()), move |(telegram_cfg, _mode)| {
+        use_effect_with((telegram_cfg, *config_view_ctx.edit_mode), move |(telegram_cfg, _mode)| {
             t_state.dispatch(TelegramMessagingConfigFormAction::SetAll(telegram_cfg.clone()));
             || ()
         });
 
         let rest_cfg = msg_config.rest.as_ref().map_or_else(RestMessagingConfigDto::default, |t| t.clone());
-        use_effect_with((rest_cfg, config_view_ctx.edit_mode.clone()), move |(rest_cfg, _mode)| {
+        use_effect_with((rest_cfg, *config_view_ctx.edit_mode), move |(rest_cfg, _mode)| {
             r_state.dispatch(RestMessagingConfigFormAction::SetAll(rest_cfg.clone()));
             || ()
         });
 
         let pushover_cfg = msg_config.pushover.as_ref().map_or_else(PushoverMessagingConfigDto::default, |t| t.clone());
-        use_effect_with((pushover_cfg, config_view_ctx.edit_mode.clone()), move |(pushover_cfg, _mode)| {
+        use_effect_with((pushover_cfg, *config_view_ctx.edit_mode), move |(pushover_cfg, _mode)| {
             p_state.dispatch(PushoverMessagingConfigFormAction::SetAll(pushover_cfg.clone()));
             || ()
         });
 
         let discord_state = discord_state.clone();
         let discord_cfg = msg_config.discord.as_ref().map_or_else(DiscordMessagingConfigDto::default, |t| t.clone());
-        use_effect_with((discord_cfg, config_view_ctx.edit_mode.clone()), move |(discord_cfg, _mode)| {
+        use_effect_with((discord_cfg, *config_view_ctx.edit_mode), move |(discord_cfg, _mode)| {
             discord_state.dispatch(DiscordMessagingConfigFormAction::SetAll(discord_cfg.clone()));
             || ()
         });
 
-        use_effect_with((msg_config, config_view_ctx.edit_mode.clone()), move |(msg_config, _mode)| {
+        use_effect_with((msg_config, *config_view_ctx.edit_mode), move |(msg_config, _mode)| {
             msg_state.dispatch(MessagingConfigFormAction::SetAll(msg_config.clone()));
             || ()
         });

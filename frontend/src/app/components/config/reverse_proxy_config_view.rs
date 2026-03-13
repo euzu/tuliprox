@@ -275,7 +275,7 @@ pub fn ReverseProxyConfigView() -> Html {
         let failover_patterns_state = failover_patterns_state.clone();
 
         let reverse_proxy_cfg = config_ctx.config.as_ref().and_then(|c| c.config.reverse_proxy.clone());
-        use_effect_with((reverse_proxy_cfg, config_view_ctx.edit_mode.clone()), move |(cfg, _mode)| {
+        use_effect_with((reverse_proxy_cfg, *config_view_ctx.edit_mode), move |(cfg, _mode)| {
             if let Some(rp) = cfg {
                 if reverse_proxy_state.form != *rp {
                     reverse_proxy_state.dispatch(ReverseProxyConfigFormAction::SetAll((*rp).clone()));

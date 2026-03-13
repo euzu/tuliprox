@@ -91,11 +91,11 @@ pub fn ConfigView() -> Html {
     };
 
     let tabs = {
-        let form_state = form_state.clone();
+        let form_state_value = (*form_state).clone();
         let translate = translate.clone();
         let edit_value = *edit_mode;
 
-        use_memo((form_state, edit_value, translate.clone()), move |(forms, editing, translate)| {
+        use_memo((form_state_value, edit_value, translate.clone()), move |(forms, editing, translate)| {
             let forms: &ConfigFormState = forms;
             let modified_pages = forms
                 .slots

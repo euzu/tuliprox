@@ -196,7 +196,7 @@ pub fn MetadataUpdateConfigView() -> Html {
 
         let metadata_update_cfg =
             config_ctx.config.as_ref().and_then(|c| c.config.metadata_update.clone()).unwrap_or_default();
-        use_effect_with((metadata_update_cfg, config_view_ctx.edit_mode.clone()), move |(cfg, _mode)| {
+        use_effect_with((metadata_update_cfg, *config_view_ctx.edit_mode), move |(cfg, _mode)| {
             form_state.dispatch(MetadataUpdateConfigFormAction::SetAll(cfg.clone()));
             log_state.dispatch(MetadataLogConfigFormAction::SetAll(cfg.log.clone()));
             resolve_state.dispatch(ResolveConfigFormAction::SetAll(cfg.resolve.clone()));

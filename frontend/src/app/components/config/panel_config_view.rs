@@ -618,7 +618,7 @@ pub fn PanelConfigView() -> Html {
     {
         let form_state = form_state.clone();
         let sources_cfg = config_ctx.config.as_ref().map(|c| c.sources.clone());
-        use_effect_with((sources_cfg, config_view_ctx.edit_mode.clone()), move |(sources_cfg, _mode)| {
+        use_effect_with((sources_cfg, *config_view_ctx.edit_mode), move |(sources_cfg, _mode)| {
             if let Some(src) = sources_cfg {
                 form_state.dispatch(PanelConfigFormAction::SetAll((*src).clone()));
             } else {

@@ -55,7 +55,7 @@ pub fn LogConfigView() -> Html {
         let form_state = form_state.clone();
         let log_config = config_ctx.config.as_ref().and_then(|c| c.config.log.clone()); // clone()  Option<LogConfigDto>
 
-        use_effect_with((log_config, config_view_ctx.edit_mode.clone()), move |(log_cfg, _mode)| {
+        use_effect_with((log_config, *config_view_ctx.edit_mode), move |(log_cfg, _mode)| {
             if let Some(log) = log_cfg {
                 form_state.dispatch(LogConfigFormAction::SetAll((*log).clone()));
             } else {

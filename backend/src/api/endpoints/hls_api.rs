@@ -276,6 +276,7 @@ async fn resolve_stream_channel(
             title: unknown,
             url: hls_url.clone(),
             shared: false,
+            technical: None,
         },
     };
 

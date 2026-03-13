@@ -1,7 +1,8 @@
 use crate::{
     app::{
         components::{
-            menu_item::MenuItem, popup_menu::PopupMenu, AppIcon, RevealContent, Table, TableDefinition, ToggleSwitch,
+            menu_item::MenuItem, popup_menu::PopupMenu, AppIcon, Chip, RevealContent, Table, TableDefinition,
+            ToggleSwitch,
         },
         ConfigContext,
     },
@@ -15,7 +16,9 @@ use gloo_utils::window;
 use shared::{
     concat_string,
     error::{info_err_res, TuliproxError},
-    model::{PlaylistItemType, ProtocolMessage, SortOrder, StreamChannel, StreamInfo, UserCommand},
+    model::{
+        PlaylistItemType, ProtocolMessage, SortOrder, StreamChannel, StreamInfo, StreamTechnicalInfo, UserCommand,
+    },
     utils::{current_time_secs, default_kick_secs, strip_port},
 };
 use std::{fmt::Display, rc::Rc, str::FromStr};
@@ -36,13 +39,14 @@ const COPY_LINK_TULIPROX_VIRTUAL_ID: &str = "copy_link_tuliprox_virtual_id";
 const COPY_LINK_TULIPROX_WEBPLAYER_URL: &str = "copy_link_tuliprox_webplayer_url";
 const COPY_LINK_PROVIDER_URL: &str = "copy_link_provider_url";
 
-const HEADERS: [&str; 12] = [
+const HEADERS: [&str; 13] = [
     "EMPTY",
     "USERNAME",
     "STREAM_ID",
     "CLUSTER",
     "CHANNEL",
     "GROUP",
+    "TECH",
     "CLIENT_IP",
     "COUNTRY",
     "PROVIDER",
@@ -56,6 +60,34 @@ fn format_duration(seconds: u64) -> String {
     let minutes = (seconds % 3600) / 60;
     let seconds = seconds % 60;
     format!("{hours:02}:{minutes:02}:{seconds:02}")
+}
+
+fn build_technical_chips(technical: Option<&StreamTechnicalInfo>) -> Vec<(String, &'static str)> {
+    let mut chips = Vec::new();
+    let Some(tech) = technical else {
+        return chips;
+    };
+
+    if !tech.container.is_empty() {
+        chips.push((tech.container.to_ascii_uppercase(), "tp__streams-table__tech-chip--container"));
+    }
+    if !tech.video_codec.is_empty() {
+        chips.push((tech.video_codec.clone(), "tp__streams-table__tech-chip--video-codec"));
+    }
+    if !tech.resolution.is_empty() {
+        chips.push((tech.resolution.clone(), "tp__streams-table__tech-chip--resolution"));
+    }
+    if !tech.fps.is_empty() {
+        chips.push((format!("{} fps", tech.fps), "tp__streams-table__tech-chip--fps"));
+    }
+    if !tech.audio_codec.is_empty() {
+        chips.push((tech.audio_codec.clone(), "tp__streams-table__tech-chip--audio-codec"));
+    }
+    if !tech.audio_channels.is_empty() {
+        chips.push((tech.audio_channels.clone(), "tp__streams-table__tech-chip--audio-channels"));
+    }
+
+    chips
 }
 
 fn update_timestamps() {
@@ -182,6 +214,23 @@ pub fn StreamsTable(props: &StreamsTableProps) -> Html {
                 "CLUSTER" => html! { render_cluster(&dto.channel) },
                 "CHANNEL" => html! {&dto.channel.title},
                 "GROUP" => html! {&*dto.channel.group},
+                "TECH" => {
+                    let chips = build_technical_chips(dto.channel.technical.as_ref());
+                    if chips.is_empty() {
+                        html! {}
+                    } else {
+                        html! {
+                            <div class="tp__streams-table__tech-chips">
+                                { for chips.into_iter().map(|(label, chip_class)| html! {
+                                    <Chip
+                                        label={label}
+                                        class={Some(format!("tp__streams-table__tech-chip {chip_class}"))}
+                                    />
+                                })}
+                            </div>
+                        }
+                    }
+                }
                 "CLIENT_IP" => html! { strip_port(&dto.client_ip)},
                 "COUNTRY" => {
                     html! { dto.country.as_ref().map_or_else(String::new, |c| t_safe(&translate, &format!("COUNTRY.{c}")).unwrap_or_else(||c.to_string())) }

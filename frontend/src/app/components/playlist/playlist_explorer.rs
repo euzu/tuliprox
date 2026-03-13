@@ -189,9 +189,9 @@ pub fn PlaylistExplorer() -> Html {
         let set_selected_channel = selected_channel.clone();
         let set_popup_is_open = popup_is_open.clone();
         let set_anchor_ref = popup_anchor_ref.clone();
-        use_effect_with(context.playlist.clone(), move |new_playlist| {
+        use_effect_with((*context.playlist).clone(), move |new_playlist| {
             set_current_item.set(ExplorerLevel::Categories);
-            set_playlist.set((**new_playlist).clone());
+            set_playlist.set(new_playlist.clone());
             // Reset popup state and selection when the underlying data changes
             set_selected_channel.set(None);
             set_popup_is_open.set(false);

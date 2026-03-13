@@ -121,21 +121,20 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
         })
     };
 
-    let processing_orders =
-        use_memo(target_form_state.clone(), |target_state: &UseReducerHandle<ConfigTargetFormState>| {
-            let default_po = target_state.form.processing_order;
-            [
-                ProcessingOrder::Frm,
-                ProcessingOrder::Fmr,
-                ProcessingOrder::Rfm,
-                ProcessingOrder::Rmf,
-                ProcessingOrder::Mfr,
-                ProcessingOrder::Mrf,
-            ]
-            .iter()
-            .map(|t| DropDownOption { id: t.to_string(), label: html! { t.to_string() }, selected: *t == default_po })
-            .collect::<Vec<DropDownOption>>()
-        });
+    let processing_orders = use_memo((*target_form_state).clone(), |target_state: &ConfigTargetFormState| {
+        let default_po = target_state.form.processing_order;
+        [
+            ProcessingOrder::Frm,
+            ProcessingOrder::Fmr,
+            ProcessingOrder::Rfm,
+            ProcessingOrder::Rmf,
+            ProcessingOrder::Mfr,
+            ProcessingOrder::Mrf,
+        ]
+        .iter()
+        .map(|t| DropDownOption { id: t.to_string(), label: html! { t.to_string() }, selected: *t == default_po })
+        .collect::<Vec<DropDownOption>>()
+    });
 
     {
         let target_form_state = target_form_state.clone();

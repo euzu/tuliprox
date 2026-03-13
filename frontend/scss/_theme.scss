@@ -131,6 +131,24 @@
   --table-header-background-color: #1E293B;
   --table-card-background-color: rgba(15, 23, 42, 0.56);
   --table-alternate-background-color: rgba(30, 41, 59, 0.42);
+  --stream-tech-chip-container-color: #0f3d2e;
+  --stream-tech-chip-container-background-color: #c4f1dd;
+  --stream-tech-chip-container-border-color: #65c79a;
+  --stream-tech-chip-video-codec-color: #123a66;
+  --stream-tech-chip-video-codec-background-color: #c9e4ff;
+  --stream-tech-chip-video-codec-border-color: #6ca9e9;
+  --stream-tech-chip-resolution-color: #4b2c0c;
+  --stream-tech-chip-resolution-background-color: #fde2b4;
+  --stream-tech-chip-resolution-border-color: #efb861;
+  --stream-tech-chip-fps-color: #5a1f4e;
+  --stream-tech-chip-fps-background-color: #f6d2ee;
+  --stream-tech-chip-fps-border-color: #d98cc8;
+  --stream-tech-chip-audio-codec-color: #15395a;
+  --stream-tech-chip-audio-codec-background-color: #c9eff9;
+  --stream-tech-chip-audio-codec-border-color: #71bdd0;
+  --stream-tech-chip-audio-channels-color: #2f3f10;
+  --stream-tech-chip-audio-channels-background-color: #deefc2;
+  --stream-tech-chip-audio-channels-border-color: #9ac56a;
 
   --discord-color: #5865f2;
   --documentation-color: #2bbf5a;
@@ -496,6 +514,24 @@ body[data-theme="bright"] {
   --table-card-background-color: #f7fbff;
   --table-alternate-background-color: #f0f6fc;
   --table-border-color: #cfdae6;
+  --stream-tech-chip-container-color: #0f3d2e;
+  --stream-tech-chip-container-background-color: #c4f1dd;
+  --stream-tech-chip-container-border-color: #65c79a;
+  --stream-tech-chip-video-codec-color: #123a66;
+  --stream-tech-chip-video-codec-background-color: #c9e4ff;
+  --stream-tech-chip-video-codec-border-color: #6ca9e9;
+  --stream-tech-chip-resolution-color: #4b2c0c;
+  --stream-tech-chip-resolution-background-color: #fde2b4;
+  --stream-tech-chip-resolution-border-color: #efb861;
+  --stream-tech-chip-fps-color: #5a1f4e;
+  --stream-tech-chip-fps-background-color: #f6d2ee;
+  --stream-tech-chip-fps-border-color: #d98cc8;
+  --stream-tech-chip-audio-codec-color: #15395a;
+  --stream-tech-chip-audio-codec-background-color: #c9eff9;
+  --stream-tech-chip-audio-codec-border-color: #71bdd0;
+  --stream-tech-chip-audio-channels-color: #2f3f10;
+  --stream-tech-chip-audio-channels-background-color: #deefc2;
+  --stream-tech-chip-audio-channels-border-color: #9ac56a;
 
   /* Tags & Statuses */
   --tag-background-color: #f1f5f9;

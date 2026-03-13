@@ -73,7 +73,7 @@ pub fn MainConfigView() -> Html {
     {
         let form_state = form_state.clone();
         let config = config_ctx.config.as_ref().map(|c| c.config.clone());
-        use_effect_with((config, config_view_ctx.edit_mode.clone()), move |(cfg, _mode)| {
+        use_effect_with((config, *config_view_ctx.edit_mode), move |(cfg, _mode)| {
             if let Some(main) = cfg {
                 let mut prepared_main: ConfigDto = main.clone();
                 match prepared_main.prepare(false) {

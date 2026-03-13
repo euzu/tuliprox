@@ -7,15 +7,15 @@ use yew::{classes, component, html, use_context, use_effect_with, use_state, Htm
 pub fn SourceEditorForm() -> Html {
     let source_editor_ctx = use_context::<SourceEditorContext>().expect("SourceEditorContext not found");
     let visible = use_state(|| false);
+    let is_active = matches!(*source_editor_ctx.edit_mode, EditMode::Active(_));
 
     {
         let visible_set = visible.clone();
-        use_effect_with(source_editor_ctx.edit_mode.clone(), move |edit_mode| match **edit_mode {
-            EditMode::Inactive => {
-                visible_set.set(false);
-            }
-            EditMode::Active(_) => {
+        use_effect_with(is_active, move |is_active| {
+            if *is_active {
                 visible_set.set(true);
+            } else {
+                visible_set.set(false);
             }
         });
     }

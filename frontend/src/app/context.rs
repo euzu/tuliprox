@@ -13,14 +13,23 @@ pub struct PlaylistContext {
     pub sources: Rc<Option<Rc<Vec<SingleSource>>>>,
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 pub struct PlaylistExplorerContext {
     pub active_page: UseStateHandle<PlaylistExplorerPage>,
     pub playlist: UseStateHandle<Option<Rc<UiPlaylistCategories>>>,
     pub playlist_request: UseStateHandle<Option<PlaylistRequest>>,
 }
 
-#[derive(Clone, PartialEq)]
+// Yew 0.22 changed UseStateHandle::PartialEq to compare by handle identity instead of value.
+// ContextProvider only propagates when old != new context. With identity-based comparison,
+// contexts containing UseStateHandle fields would never propagate value changes.
+// Returning false ensures propagation whenever the parent re-renders (which only happens on
+// actual state changes), so the overhead is negligible.
+impl PartialEq for PlaylistExplorerContext {
+    fn eq(&self, _other: &Self) -> bool { false }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct TargetUser {
     pub target: String,
     pub credentials: Rc<ProxyUserCredentialsDto>,
@@ -58,7 +67,7 @@ pub fn target_users_to_api_proxy_users(users: &TargetUserList) -> Vec<TargetUser
     grouped
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 pub struct UserlistContext {
     pub selected_user: UseStateHandle<Option<Rc<TargetUser>>>,
     pub filtered_users: UseStateHandle<TargetUserList>,
@@ -66,6 +75,10 @@ pub struct UserlistContext {
     pub active_page: UseStateHandle<UserlistPage>,
     pub local_mode: bool,
     pub on_users_change: Option<Callback<Vec<TargetUserDto>>>,
+}
+
+impl PartialEq for UserlistContext {
+    fn eq(&self, _other: &Self) -> bool { false }
 }
 
 impl UserlistContext {

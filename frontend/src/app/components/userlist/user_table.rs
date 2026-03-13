@@ -257,9 +257,11 @@ pub fn UserTable(props: &UserTableProps) -> Html {
         let on_sort = on_sort.clone();
         let is_sortable = is_sortable.clone();
         let num_cols = HEADERS.len();
-        let user_list_clone = user_list.clone();
-        use_memo(user_list_clone.clone(), move |targets| {
-            let items = if (*targets).as_ref().is_none_or(|l| l.is_empty()) { None } else { (**targets).clone() };
+        // Dereference the UseStateHandle to pass the actual value as dependency.
+        // Yew 0.22 compares UseStateHandle by identity, not value, so use_memo
+        // would never detect value changes if we passed the handle directly.
+        use_memo((*user_list).clone(), move |targets| {
+            let items = if targets.as_ref().is_none_or(|l| l.is_empty()) { None } else { targets.clone() };
             TableDefinition::<TargetUser> {
                 items,
                 num_cols,

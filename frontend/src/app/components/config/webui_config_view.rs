@@ -105,7 +105,7 @@ pub fn WebUiConfigView() -> Html {
         let csp_state = csp_state.clone();
 
         let webui_cfg = config_ctx.config.as_ref().and_then(|c| c.config.web_ui.clone());
-        use_effect_with((webui_cfg, config_view_ctx.edit_mode.clone()), move |(cfg, _mode)| {
+        use_effect_with((webui_cfg, *config_view_ctx.edit_mode), move |(cfg, _mode)| {
             if let Some(webui) = cfg {
                 webui_state.dispatch(WebUiConfigFormAction::SetAll((*webui).clone()));
                 if let Some(auth) = &webui.auth {

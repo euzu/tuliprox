@@ -1,3 +1,4 @@
+@use 'sass:list';
 @use '../../../size' as size;
 
 .tp__streams {
@@ -31,6 +32,50 @@
   flex-flow: column;
   overflow: auto;
 
+  &__tech-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--gap-mini);
+  }
+
+  &__tech-chip {
+    &--container {
+      color: var(--stream-tech-chip-container-color);
+      background-color: var(--stream-tech-chip-container-background-color);
+      border-color: var(--stream-tech-chip-container-border-color);
+    }
+
+    &--video-codec {
+      color: var(--stream-tech-chip-video-codec-color);
+      background-color: var(--stream-tech-chip-video-codec-background-color);
+      border-color: var(--stream-tech-chip-video-codec-border-color);
+    }
+
+    &--resolution {
+      color: var(--stream-tech-chip-resolution-color);
+      background-color: var(--stream-tech-chip-resolution-background-color);
+      border-color: var(--stream-tech-chip-resolution-border-color);
+    }
+
+    &--fps {
+      color: var(--stream-tech-chip-fps-color);
+      background-color: var(--stream-tech-chip-fps-background-color);
+      border-color: var(--stream-tech-chip-fps-border-color);
+    }
+
+    &--audio-codec {
+      color: var(--stream-tech-chip-audio-codec-color);
+      background-color: var(--stream-tech-chip-audio-codec-background-color);
+      border-color: var(--stream-tech-chip-audio-codec-border-color);
+    }
+
+    &--audio-channels {
+      color: var(--stream-tech-chip-audio-channels-color);
+      background-color: var(--stream-tech-chip-audio-channels-background-color);
+      border-color: var(--stream-tech-chip-audio-channels-border-color);
+    }
+  }
+
   .tp__table__th {
     $column-widths:
             40px,           /*index*/
@@ -38,17 +83,18 @@
             120px,          /*stream_id*/
             80px,           /*type*/
             200px,          /*channel*/
-            120px,
-            90px,
-            80px,
-            90px,
-            80px,
-            100px,
-            100px;
+            120px,          /*group*/
+            260px,          /*tech*/
+            90px,           /*client ip*/
+            80px,           /*country*/
+            90px,           /*provider*/
+            80px,           /*shared*/
+            120px,          /*player*/
+            100px;          /* duration */
 
-    @for $i from 1 through length($column-widths) {
+    @for $i from 1 through list.length($column-widths) {
       &--#{$i} {
-        @include size.fixed-width(nth($column-widths, $i));
+        @include size.fixed-width(list.nth($column-widths, $i));
       }
     }
   }

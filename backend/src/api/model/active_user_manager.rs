@@ -8,7 +8,7 @@ use arc_swap::ArcSwapOption;
 use jsonwebtoken::get_current_timestamp;
 use log::{debug, info};
 use shared::{
-    model::{ActiveUserConnectionChange, StreamChannel, StreamInfo, UserConnectionPermission, VirtualId},
+    model::{ActiveUserConnectionChange, StreamChannel, StreamInfo, StreamTechnicalInfo, UserConnectionPermission, VirtualId},
     utils::{
         current_time_secs, default_grace_period_millis, default_grace_period_timeout_secs, sanitize_sensitive_info,
         strip_port, Internable,
@@ -105,6 +105,17 @@ pub struct ActiveUserManager {
 }
 
 impl ActiveUserManager {
+    fn custom_stream_technical_info() -> StreamTechnicalInfo {
+        StreamTechnicalInfo {
+            container: String::from("mpegts"),
+            resolution: String::new(),
+            fps: String::from("30"),
+            video_codec: String::from("H.264"),
+            audio_codec: String::from("AAC"),
+            audio_channels: String::from("2.0"),
+        }
+    }
+
     pub fn new(config: &Config, geoip: &Arc<ArcSwapOption<GeoIp>>, event_manager: &Arc<EventManager>) -> Self {
         let log_active_user: bool = config.log.as_ref().is_some_and(|l| l.log_active_user);
         let (grace_period_millis, grace_period_timeout_secs) = get_grace_options(config);
@@ -321,6 +332,7 @@ impl ActiveUserManager {
                     stream.provider = String::from("tuliprox");
                     stream.channel.title = video_type.to_string().into();
                     stream.channel.group = "".intern();
+                    stream.channel.technical = Some(Self::custom_stream_technical_info());
                     return Some(stream.clone());
                 }
             }
@@ -669,6 +681,7 @@ mod tests {
             title: "title".intern(),
             url: "http://localhost/stream.ts".intern(),
             shared: false,
+            technical: None,
         }
     }
 

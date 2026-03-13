@@ -113,7 +113,7 @@ pub fn LibraryConfigView() -> Html {
         let metadata_read_state = metadata_read_state.clone();
 
         let library_cfg = config_ctx.config.as_ref().and_then(|c| c.config.library.clone());
-        use_effect_with((library_cfg, config_view_ctx.edit_mode.clone()), move |(library_cfg, _mode)| {
+        use_effect_with((library_cfg, *config_view_ctx.edit_mode), move |(library_cfg, _mode)| {
             if let Some(library) = library_cfg {
                 form_state.dispatch(LibraryConfigFormAction::SetAll(library.clone()));
                 playlist_state.dispatch(LibraryPlaylistConfigFormAction::SetAll(library.playlist.clone()));
