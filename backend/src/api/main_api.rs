@@ -37,6 +37,7 @@ use axum::{
     middleware::Next,
     Router,
 };
+use dashmap::DashSet;
 use log::{debug, error, info, warn};
 use shared::{
     error::TuliproxError,
@@ -58,16 +59,14 @@ const METADATA_TRIGGER_WAIT_CYCLE_LIMIT: u32 = 900;
 
 fn collect_rescheduled_targets(
     targets_set: &HashSet<String>,
-    running_trigger_targets: &Arc<std::sync::Mutex<HashSet<String>>>,
-    pending_trigger_targets: &Arc<std::sync::Mutex<HashSet<String>>>,
+    running_trigger_targets: &Arc<DashSet<String>>,
+    pending_trigger_targets: &Arc<DashSet<String>>,
 ) -> Vec<String> {
-    let mut running = running_trigger_targets.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let mut pending = pending_trigger_targets.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut targets_to_respawn = Vec::new();
     for target in targets_set {
-        running.remove(target);
-        if pending.remove(target) {
-            running.insert(target.clone());
+        running_trigger_targets.remove(target);
+        if pending_trigger_targets.remove(target).is_some() {
+            running_trigger_targets.insert(target.clone());
             targets_to_respawn.push(target.clone());
         }
     }
@@ -77,8 +76,8 @@ fn collect_rescheduled_targets(
 fn spawn_metadata_trigger_update(
     app_state: &Arc<AppState>,
     targets_to_spawn: &[String],
-    running_trigger_targets: &Arc<std::sync::Mutex<HashSet<String>>>,
-    pending_trigger_targets: &Arc<std::sync::Mutex<HashSet<String>>>,
+    running_trigger_targets: &Arc<DashSet<String>>,
+    pending_trigger_targets: &Arc<DashSet<String>>,
 ) {
     if targets_to_spawn.is_empty() {
         return;
@@ -628,13 +627,13 @@ fn exec_input_update_listener(app_state: &Arc<AppState>, targets: &Arc<ProcessTa
     tokio::spawn(async move {
         let mut rx = app_state.event_manager.get_event_channel();
         // Map<TargetName, Set<InputName>>: Tracks which inputs are currently updating for a given target
-        let mut active_target_inputs: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut active_target_inputs: HashMap<String, HashSet<Arc<str>>> = HashMap::new();
         // Set<TargetName>: Tracks which targets are pending an update once their inputs are done
         let mut pending_targets: HashSet<String> = HashSet::new();
         // Set<TargetName>: Tracks which targets have an active spawned playlist-update task (dedup guard)
-        let running_trigger_targets: Arc<std::sync::Mutex<HashSet<String>>> = Arc::new(std::sync::Mutex::new(HashSet::new()));
+        let running_trigger_targets: Arc<DashSet<String>> = Arc::new(DashSet::new());
         // Set<TargetName>: Tracks follow-up triggers that arrive while a target is already running.
-        let pending_trigger_targets: Arc<std::sync::Mutex<HashSet<String>>> = Arc::new(std::sync::Mutex::new(HashSet::new()));
+        let pending_trigger_targets: Arc<DashSet<String>> = Arc::new(DashSet::new());
 
         loop {
             match rx.recv().await {
@@ -651,7 +650,7 @@ fn exec_input_update_listener(app_state: &Arc<AppState>, targets: &Arc<ProcessTa
                                 active_target_inputs
                                     .entry(target.name.clone())
                                     .or_default()
-                                    .insert(input_name.to_string());
+                                    .insert(input_name.clone());
                                 // Mark target as potentially needing an update
                                 pending_targets.insert(target.name.clone());
                             }
@@ -659,37 +658,29 @@ fn exec_input_update_listener(app_state: &Arc<AppState>, targets: &Arc<ProcessTa
                     }
                 }
                 Ok(EventMessage::InputMetadataUpdatesCompleted(input_name)) => {
-                    // 1. Remove this input from all active sets
-                    let target_names: Vec<String> = active_target_inputs.keys().cloned().collect();
                     let mut targets_to_trigger = Vec::new();
-
-                    for target_name in target_names {
-                        if let std::collections::hash_map::Entry::Occupied(mut entry) =
-                            active_target_inputs.entry(target_name.clone())
-                        {
-                            let inputs = entry.get_mut();
-                            inputs.remove(input_name.as_ref());
-                            if inputs.is_empty() {
-                                entry.remove();
-                                // If this target was pending, it's now ready to trigger
-                                if pending_targets.remove(&target_name) {
-                                    targets_to_trigger.push(target_name);
-                                }
+                    // Remove this input from all active sets in-place and collect targets
+                    // that became ready without cloning all keys first.
+                    active_target_inputs.retain(|target_name, inputs| {
+                        inputs.remove(&input_name);
+                        if inputs.is_empty() {
+                            if pending_targets.remove(target_name) {
+                                targets_to_trigger.push(target_name.clone());
                             }
+                            false
+                        } else {
+                            true
                         }
-                    }
+                    });
 
                     // Deduplicate: only spawn for targets that don't already have a running trigger task
                     let targets_to_spawn: Vec<String> = {
-                        let mut running = running_trigger_targets.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                        let mut pending =
-                            pending_trigger_targets.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                         let mut to_spawn = Vec::new();
                         for target in targets_to_trigger {
-                            if running.insert(target.clone()) {
+                            if running_trigger_targets.insert(target.clone()) {
                                 to_spawn.push(target);
                             } else {
-                                pending.insert(target);
+                                pending_trigger_targets.insert(target);
                             }
                         }
                         to_spawn
