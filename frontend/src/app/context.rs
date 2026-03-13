@@ -26,9 +26,7 @@ pub struct PlaylistExplorerContext {
 // Returning false ensures propagation whenever the parent re-renders (which only happens on
 // actual state changes), so the overhead is negligible.
 impl PartialEq for PlaylistExplorerContext {
-    fn eq(&self, _other: &Self) -> bool {
-        false
-    }
+    fn eq(&self, _other: &Self) -> bool { false }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -80,9 +78,7 @@ pub struct UserlistContext {
 }
 
 impl PartialEq for UserlistContext {
-    fn eq(&self, _other: &Self) -> bool {
-        false
-    }
+    fn eq(&self, _other: &Self) -> bool { false }
 }
 
 impl UserlistContext {

@@ -1,3 +1,4 @@
+@use 'sass:list';
 @use '../../../size' as size;
 
 .tp__streams {
@@ -39,39 +40,39 @@
 
   &__tech-chip {
     &--container {
-      color: #0f3d2e;
-      background-color: #c4f1dd;
-      border-color: #65c79a;
+      color: var(--stream-tech-chip-container-color);
+      background-color: var(--stream-tech-chip-container-background-color);
+      border-color: var(--stream-tech-chip-container-border-color);
     }
 
     &--video-codec {
-      color: #123a66;
-      background-color: #c9e4ff;
-      border-color: #6ca9e9;
+      color: var(--stream-tech-chip-video-codec-color);
+      background-color: var(--stream-tech-chip-video-codec-background-color);
+      border-color: var(--stream-tech-chip-video-codec-border-color);
     }
 
     &--resolution {
-      color: #4b2c0c;
-      background-color: #fde2b4;
-      border-color: #efb861;
+      color: var(--stream-tech-chip-resolution-color);
+      background-color: var(--stream-tech-chip-resolution-background-color);
+      border-color: var(--stream-tech-chip-resolution-border-color);
     }
 
     &--fps {
-      color: #5a1f4e;
-      background-color: #f6d2ee;
-      border-color: #d98cc8;
+      color: var(--stream-tech-chip-fps-color);
+      background-color: var(--stream-tech-chip-fps-background-color);
+      border-color: var(--stream-tech-chip-fps-border-color);
     }
 
     &--audio-codec {
-      color: #15395a;
-      background-color: #c9eff9;
-      border-color: #71bdd0;
+      color: var(--stream-tech-chip-audio-codec-color);
+      background-color: var(--stream-tech-chip-audio-codec-background-color);
+      border-color: var(--stream-tech-chip-audio-codec-border-color);
     }
 
     &--audio-channels {
-      color: #2f3f10;
-      background-color: #deefc2;
-      border-color: #9ac56a;
+      color: var(--stream-tech-chip-audio-channels-color);
+      background-color: var(--stream-tech-chip-audio-channels-background-color);
+      border-color: var(--stream-tech-chip-audio-channels-border-color);
     }
   }
 
@@ -89,11 +90,11 @@
             90px,           /*provider*/
             80px,           /*shared*/
             120px,          /*player*/
-            100px;          /*duration*/
+            100px;          /* duration */
 
-    @for $i from 1 through length($column-widths) {
+    @for $i from 1 through list.length($column-widths) {
       &--#{$i} {
-        @include size.fixed-width(nth($column-widths, $i));
+        @include size.fixed-width(list.nth($column-widths, $i));
       }
     }
   }

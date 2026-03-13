@@ -105,11 +105,9 @@ fn stream_technical_from_properties(properties: Option<&StreamProperties>, url: 
             video.details.as_ref().and_then(|d| d.audio.as_deref()),
             Some(video.container_extension.as_ref()),
         ),
-        Some(StreamProperties::Episode(episode)) => (
-            episode.video.as_deref(),
-            episode.audio.as_deref(),
-            Some(episode.container_extension.as_ref()),
-        ),
+        Some(StreamProperties::Episode(episode)) => {
+            (episode.video.as_deref(), episode.audio.as_deref(), Some(episode.container_extension.as_ref()))
+        }
         _ => (None, None, None),
     };
 
@@ -133,7 +131,11 @@ fn stream_technical_from_properties(properties: Option<&StreamProperties>, url: 
         .or_else(|| extract_extension_from_url(url).and_then(|ext| normalize_container(&ext)))
         .unwrap_or_default();
 
-    if info.is_empty() { None } else { Some(info) }
+    if info.is_empty() {
+        None
+    } else {
+        Some(info)
+    }
 }
 
 fn parse_probe_json(raw: &str) -> Option<Value> {
@@ -150,9 +152,7 @@ fn get_str<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a str> {
 
 fn get_u64(value: &Value, keys: &[&str]) -> Option<u64> {
     keys.iter().find_map(|key| {
-        value
-            .get(*key)
-            .and_then(|entry| entry.as_u64().or_else(|| entry.as_str().and_then(|s| s.parse::<u64>().ok())))
+        value.get(*key).and_then(|entry| entry.as_u64().or_else(|| entry.as_str().and_then(|s| s.parse::<u64>().ok())))
     })
 }
 
@@ -236,13 +236,9 @@ fn parse_fps(video: &Value) -> Option<String> {
     }
 }
 
-fn parse_video_codec(video: &Value) -> Option<String> {
-    get_str(video, &["codec_name"]).map(normalize_video_codec)
-}
+fn parse_video_codec(video: &Value) -> Option<String> { get_str(video, &["codec_name"]).map(normalize_video_codec) }
 
-fn parse_audio_codec(audio: &Value) -> Option<String> {
-    get_str(audio, &["codec_name"]).map(normalize_audio_codec)
-}
+fn parse_audio_codec(audio: &Value) -> Option<String> { get_str(audio, &["codec_name"]).map(normalize_audio_codec) }
 
 fn parse_audio_channels(audio: &Value) -> Option<String> {
     let channels = get_u64(audio, &["channels"])?;

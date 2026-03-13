@@ -9,7 +9,5 @@ pub struct ConfigViewContext {
 }
 
 impl PartialEq for ConfigViewContext {
-    fn eq(&self, _other: &Self) -> bool {
-        false
-    }
+    fn eq(&self, _other: &Self) -> bool { false }
 }

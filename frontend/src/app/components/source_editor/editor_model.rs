@@ -160,7 +160,5 @@ pub struct SourceEditorContext {
 }
 
 impl PartialEq for SourceEditorContext {
-    fn eq(&self, _other: &Self) -> bool {
-        false
-    }
+    fn eq(&self, _other: &Self) -> bool { false }
 }

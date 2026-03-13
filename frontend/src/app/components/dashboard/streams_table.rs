@@ -16,7 +16,9 @@ use gloo_utils::window;
 use shared::{
     concat_string,
     error::{info_err_res, TuliproxError},
-    model::{PlaylistItemType, ProtocolMessage, SortOrder, StreamChannel, StreamInfo, StreamTechnicalInfo, UserCommand},
+    model::{
+        PlaylistItemType, ProtocolMessage, SortOrder, StreamChannel, StreamInfo, StreamTechnicalInfo, UserCommand,
+    },
     utils::{current_time_secs, default_kick_secs, strip_port},
 };
 use std::{fmt::Display, rc::Rc, str::FromStr};

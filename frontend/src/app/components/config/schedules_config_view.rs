@@ -56,16 +56,17 @@ pub fn SchedulesConfigView() -> Html {
             .collect::<Vec<String>>()
     });
 
-    let target_options = use_memo(((*selected_targets).clone(), all_targets.clone()), move |(selected, all_targets)| {
-        all_targets
-            .iter()
-            .map(|t| DropDownOption {
-                id: t.clone(),
-                label: html! { t.clone() },
-                selected: (*selected).as_ref().is_some_and(|s| s.contains(t)),
-            })
-            .collect::<Vec<DropDownOption>>()
-    });
+    let target_options =
+        use_memo(((*selected_targets).clone(), all_targets.clone()), move |(selected, all_targets)| {
+            all_targets
+                .iter()
+                .map(|t| DropDownOption {
+                    id: t.clone(),
+                    label: html! { t.clone() },
+                    selected: (*selected).as_ref().is_some_and(|s| s.contains(t)),
+                })
+                .collect::<Vec<DropDownOption>>()
+        });
 
     let form_state: UseReducerHandle<SchedulesConfigFormState> =
         use_reducer(|| SchedulesConfigFormState { form: SchedulesConfigDto::default(), modified: false });

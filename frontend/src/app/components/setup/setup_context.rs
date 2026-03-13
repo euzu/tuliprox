@@ -210,9 +210,7 @@ pub struct SetupContext {
 }
 
 impl PartialEq for SetupContext {
-    fn eq(&self, _other: &Self) -> bool {
-        false
-    }
+    fn eq(&self, _other: &Self) -> bool { false }
 }
 
 #[cfg(test)]
