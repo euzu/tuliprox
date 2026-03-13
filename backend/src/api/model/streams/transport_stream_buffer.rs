@@ -492,9 +492,14 @@ impl TransportStreamBuffer {
                 // Loop back
                 self.current_pos = 0;
 
-                // Reset timestamps to start
-                self.timestamp_offset = 0;
-                self.current_dts = 0;
+                // Advance timestamps by one full source duration per loop so output time is
+                // monotonic for clients. Resetting to zero causes backward jumps that some
+                // players interpret as stream end/corruption after the first cycle.
+                if self.stream_duration_90khz > 0 {
+                    self.timestamp_offset =
+                        self.timestamp_offset.wrapping_add(self.stream_duration_90khz) % MAX_PTS_DTS;
+                    self.current_dts = self.current_dts.wrapping_add(self.stream_duration_90khz) % MAX_PTS_DTS;
+                }
 
                 // Reset discontinuity flags to trigger injection of discontinuity packets for each PID
                 for (_, _, sent) in &mut self.continuity_counters {
