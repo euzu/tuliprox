@@ -22,6 +22,7 @@ pub enum CustomVideoStreamType {
     ChannelUnavailable,
     UserConnectionsExhausted,
     ProviderConnectionsExhausted,
+    LowPriorityPreempted,
     UserAccountExpired,
     Provisioning,
 }
@@ -32,6 +33,7 @@ impl fmt::Display for CustomVideoStreamType {
             CustomVideoStreamType::ChannelUnavailable => "channel_unavailable",
             CustomVideoStreamType::UserConnectionsExhausted => "user_connections_exhausted",
             CustomVideoStreamType::ProviderConnectionsExhausted => "provider_connections_exhausted",
+            CustomVideoStreamType::LowPriorityPreempted => "low_priority_preempted",
             CustomVideoStreamType::UserAccountExpired => "user_account_expired",
             CustomVideoStreamType::Provisioning => "provisioning",
         };
@@ -47,6 +49,7 @@ impl FromStr for CustomVideoStreamType {
             "channel_unavailable" => Ok(Self::ChannelUnavailable),
             "user_connections_exhausted" => Ok(Self::UserConnectionsExhausted),
             "provider_connections_exhausted" => Ok(Self::ProviderConnectionsExhausted),
+            "low_priority_preempted" => Ok(Self::LowPriorityPreempted),
             "user_account_expired" => Ok(Self::UserAccountExpired),
             "provisioning" => Ok(Self::Provisioning),
             _ => Err(format!("Unknown stream type: {s}")),
@@ -167,6 +170,23 @@ pub fn create_provider_connections_exhausted_stream(
     )
 }
 
+pub fn create_low_priority_preempted_stream(
+    cfg: &AppConfig,
+    headers: &[(String, String)],
+) -> ProviderStreamResponse {
+    let custom_stream_response = cfg.custom_stream_response.load();
+    let video = custom_stream_response
+        .as_ref()
+        .and_then(|c| c.low_priority_preempted.as_ref());
+    create_video_stream(
+        cfg,
+        CustomVideoStreamType::LowPriorityPreempted,
+        video,
+        headers,
+        "Streaming response low-priority preempted",
+    )
+}
+
 pub fn create_user_account_expired_stream(cfg: &AppConfig, headers: &[(String, String)]) -> ProviderStreamResponse {
     let custom_stream_response = cfg.custom_stream_response.load();
     let video = custom_stream_response.as_ref().and_then(|c| c.user_account_expired.as_ref());
@@ -225,6 +245,7 @@ pub fn create_custom_video_stream_response(
         CustomVideoStreamType::ProviderConnectionsExhausted => {
             create_provider_connections_exhausted_stream(config, &[])
         }
+        CustomVideoStreamType::LowPriorityPreempted => create_low_priority_preempted_stream(config, &[]),
         CustomVideoStreamType::UserAccountExpired => create_user_account_expired_stream(config, &[]),
         CustomVideoStreamType::Provisioning => create_panel_api_provisioning_stream(config, &[]),
     } {

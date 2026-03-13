@@ -23,6 +23,7 @@ use tokio::sync::OnceCell;
 const CHANNEL_UNAVAILABLE: &str = "channel_unavailable.ts";
 const USER_CONNECTIONS_EXHAUSTED: &str = "user_connections_exhausted.ts";
 const PROVIDER_CONNECTIONS_EXHAUSTED: &str = "provider_connections_exhausted.ts";
+const LOW_PRIORITY_PREEMPTED: &str = "low_priority_preempted.ts";
 const USER_ACCOUNT_EXPIRED: &str = "user_account_expired.ts";
 const PANEL_API_PROVISIONING: &str = "panel_api_provisioning.ts";
 
@@ -419,12 +420,14 @@ impl AppConfig {
             let channel_unavailable = load_and_set_file(&path.join(CHANNEL_UNAVAILABLE));
             let user_connections_exhausted = load_and_set_file(&path.join(USER_CONNECTIONS_EXHAUSTED));
             let provider_connections_exhausted = load_and_set_file(&path.join(PROVIDER_CONNECTIONS_EXHAUSTED));
+            let low_priority_preempted = load_and_set_file(&path.join(LOW_PRIORITY_PREEMPTED));
             let user_account_expired = load_and_set_file(&path.join(USER_ACCOUNT_EXPIRED));
             let panel_api_provisioning = load_and_set_file(&path.join(PANEL_API_PROVISIONING));
             self.custom_stream_response.store(Some(Arc::new(CustomStreamResponse {
                 channel_unavailable,
                 user_connections_exhausted,
                 provider_connections_exhausted,
+                low_priority_preempted,
                 user_account_expired,
                 panel_api_provisioning,
             })));
