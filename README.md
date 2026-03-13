@@ -711,17 +711,17 @@ This configuration is only used for reverse proxy mode. The Reverse Proxy mode c
 
 Attributes:
 
-- `retry`
+- `retry`, default `true`, retries the stream if it fails.
 - `buffer`
 - `throttle` Allowed units are `KB/s`,`MB/s`,`KiB/s`,`MiB/s`,`kbps`,`mbps`,`Mibps`. Default unit is `kbps`
 - `grace_period_millis`  default set to 300 milliseconds.
 - `grace_period_timeout_secs` default set to 2 seconds.
-- `grace_period_hold_stream` if set to `true`, the stream will only start after the grace period check has completed. Default is `false`.
+- `grace_period_hold_stream` if set to `true`, the stream will only start after the grace period check has completed. Default is `true`.
 - `shared_burst_buffer_mb` optional (default `12`). Minimum burst buffer size (in MB) used for shared streams.
 
 ##### 1.7.1.1 `retry`
 
-If set to `true` on connection loss to provider, the stream will be reconnected.
+If set to `true` on connection loss to provider, the stream will be reconnected. Default is `true`.
 
 ##### 1.7.1.2 `buffer`
 
@@ -765,19 +765,19 @@ Default unit is `kbps`.
 If you have a provider or a user where the max_connection attribute is greater than 0,
 a grace period can be given during the switchover.
 If this period is set too short, it may result in access being denied in some cases.
-The default is 0 milliseconds.
+The default is 300 milliseconds.
 If the connection is not throttled, the player will play its buffered content longer than expected.
 
 ##### 1.7.1.4 `grace_period_timeout_secs`
 
-How long the grace grant will last, until another grace grant can made.
+How long the grace grant will last, until another grace grant can made. Default is `2` seconds.
 
 ##### 1.7.1.5 `grace_period_hold_stream`
 
 If set to `true`, tuliprox will wait until the grace period check (defined by `grace_period_millis`) is finished before sending any data to the
 client.
 This is useful for players that might time out or error if they receive data and then a "connections exhausted" stream switch occurs. Default is
-`false`.
+`true`.
 
 #### 1.7.2 `cache`
 
@@ -1057,11 +1057,14 @@ If you want to send a picture instead of black screen when a channel is not avai
 Following attributes are available:
 
 - `channel_unavailable`: _optional_
+- `user_account_expired`: _optional_
 - `user_connections_exhausted`: _optional_
 - `provider_connections_exhausted`: _optional_
 - `panel_api_provisioning`: _optional_
+- `low_priority_preempted`: _optional_
 
-Video files with name `channel_unavailable.ts`, `user_connections_exhausted.ts`, `provider_connections_exhausted.ts`, `panel_api_provisioning.ts`
+Video files with name `channel_unavailable.ts`, `user_account_expired.ts`, `user_connections_exhausted.ts`,  
+`provider_connections_exhausted.ts`, `panel_api_provisioning.ts`, `low_priority_preempted.ts`  
 are already available in the docker image.
 
 You can convert an image with `ffmpeg`.
@@ -1077,6 +1080,7 @@ and add it to the `config.yml`.
 - `user_connections_exhausted.ts`
 - `channel_unavailable.ts`
 - `panel_api_provisioning.ts`
+- `low_priority_preempted.ts`
 
 ```yaml
 custom_stream_response_path: /home/tuliprox/resources
@@ -2329,7 +2333,6 @@ Has the following top level entries:
 
 - `id` _mandatory_
 - `match_as_ascii` _optional_ default is `false`
-- `create_alias` _optional_ default is `false`
 - `mapper` _mandatory_
 - `counter` _optional_
 

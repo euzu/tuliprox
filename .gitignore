@@ -43,3 +43,4 @@ artifacts
 
 .claude
 .envrc
+backend/Cargo.lock

@@ -7,6 +7,7 @@ use crate::{
     },
     utils::{arc_str_vec_serde, default_as_default, Internable},
 };
+use log::warn;
 use std::{collections::HashSet, sync::Arc};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -84,9 +85,27 @@ impl SourcesConfigDto {
         let mut source_index: u16 = 0;
         let mut input_index: u16 = 0;
         let mut target_index: u16 = 1;
+        let mut input_credentials = HashSet::new();
         // Prepare global inputs
         for input in &mut self.inputs {
             input_index = input.prepare(input_index, include_computed, provider_names)?;
+            if let (Some(username), Some(password)) = (input.username.as_ref(), input.password.as_ref()) {
+                let key = (username, password);
+                if !input_credentials.insert(key) {
+                    warn!("Duplicate credentials found for input: '{}'", input.name);
+                }
+            }
+
+            if let Some(aliases) = &input.aliases {
+                for alias in aliases {
+                    if let (Some(username), Some(password)) = (alias.username.as_ref(), alias.password.as_ref()) {
+                        let key = (username, password);
+                        if !input_credentials.insert(key) {
+                            warn!("Duplicate credentials found for input alias: '{}'", alias.name);
+                        }
+                    }
+                }
+            }
         }
 
         for source in &mut self.sources {

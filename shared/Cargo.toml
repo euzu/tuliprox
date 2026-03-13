@@ -1,38 +1,38 @@
 [package]
 name = "shared"
-version = "3.2.132"
-edition = "2021"
-rust-version = "1.89.0"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 bitflags = "2.11.0"
-serde = { version = "1.0.228", features = ["derive", "rc"] }
-regex = "1.12.3"
-enum-iterator = "2.3.0"
-log = "0.4.29"
-path-clean = "1.0.1"
-url = "2.5.8"
-indexmap = { version = "2.13.0", features = ["serde"] }
-pest = "2.8.6"
-pest_derive = "2.8.6"
-serde_json =  "1.0.149"
-base64 = "0.22.1"
-blake3 = "1.8.3"
-fastrand = { version = "2.3.0", features = ["js"] }
-zeroize = "1.8.2"
-chrono = "0.4.44"
-bytes = "1"
+serde.workspace = true
+regex.workspace = true
+enum-iterator.workspace = true
+log.workspace = true
+path-clean.workspace = true
+url.workspace = true
+indexmap = { workspace = true, features = ["serde"] }
+pest.workspace = true
+pest_derive.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+blake3.workspace = true
+fastrand = { workspace = true, features = ["js"] }
+zeroize.workspace = true
+chrono.workspace = true
+bytes.workspace = true
 ciborium = "0.2.2"
 hex = "0.4.3"
-lz4_flex = "0.12.0"
-deunicode = "1.6.2"
-serde-saphyr = "0.0.20"
-dashmap = "6.1.0"
+lz4_flex.workspace = true
+deunicode.workspace = true
+serde-saphyr.workspace = true
+dashmap.workspace = true
 serde_tuple = "1.1.3"
-paste = "1.0.15"
+paste.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-js-sys = "0.3.89"
+js-sys = "0.3.91"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-getrandom = "0.4.1"
+getrandom = "0.4.2"
