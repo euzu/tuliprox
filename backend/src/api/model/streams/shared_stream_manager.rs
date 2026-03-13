@@ -132,6 +132,8 @@ pub struct SharedStreamState {
     headers: Vec<(String, String)>,
     buf_size: usize,
     provider_guard: Option<ProviderHandle>,
+    low_priority_preempted: Option<crate::api::model::TransportStreamBuffer>,
+    preempted_token: CancellationToken,
     subscribers: RwLock<HashMap<SubscriberId, CancellationToken>>,
     broadcaster: tokio::sync::broadcast::Sender<Bytes>,
     stop_token: CancellationToken,
@@ -145,6 +147,7 @@ impl SharedStreamState {
         buf_size: usize,
         provider_guard: Option<ProviderHandle>,
         min_burst_buffer_size: usize,
+        low_priority_preempted: Option<crate::api::model::TransportStreamBuffer>,
     ) -> Self {
         let (broadcaster, _) = tokio::sync::broadcast::channel(buf_size);
         // TODO channel size versus byte size,  channels are chunk sized, burst_buffer byte sized
@@ -153,6 +156,8 @@ impl SharedStreamState {
             headers,
             buf_size,
             provider_guard,
+            low_priority_preempted,
+            preempted_token: CancellationToken::new(),
             subscribers: RwLock::new(HashMap::new()),
             broadcaster,
             stop_token: CancellationToken::new(),
@@ -197,6 +202,8 @@ impl SharedStreamState {
         let mut last_lag_log = Instant::now().checked_sub(Duration::from_secs(10)).unwrap_or_else(Instant::now);
         let mut consecutive_lag_count: u32 = 0;
         let subscriber_buf_size = self.buf_size;
+        let preempted_token = self.preempted_token.clone();
+        let low_priority_preempted = self.low_priority_preempted.clone();
 
         let address = *addr;
         let subscriber_started_at = Instant::now();
@@ -310,7 +317,34 @@ impl SharedStreamState {
                                     .min(1_600);
                                 sleep(Duration::from_millis(backoff_ms)).await;
                             }
-                            Err(_) => break,
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                if preempted_token.is_cancelled() {
+                                    if let Some(mut fallback) = low_priority_preempted {
+                                        debug_if_enabled!(
+                                            "Shared stream subscriber {} switching to low_priority_preempted fallback",
+                                            sanitize_sensitive_info(&address.to_string())
+                                        );
+                                        loop {
+                                            if cancel_token.is_cancelled() || client_tx_clone.is_closed() {
+                                                break;
+                                            }
+
+                                            if let Some(chunk) = fallback.next_chunk() {
+                                                if let Err(err) = client_tx.send(chunk).await {
+                                                    debug!(
+                                                        "Shared stream fallback send error for {}: {err}",
+                                                        sanitize_sensitive_info(&address.to_string())
+                                                    );
+                                                    break;
+                                                }
+                                            } else {
+                                                tokio::task::yield_now().await;
+                                            }
+                                        }
+                                    }
+                                }
+                                break;
+                            }
                         }
                     }
                 }
@@ -538,9 +572,7 @@ impl SharedStreamManager {
                 sanitize_sensitive_info(stream_url)
             );
 
-            for handle in shared_state.task_handles.write().await.drain(..) {
-                handle.abort();
-            }
+            shared_state.preempted_token.cancel();
 
             // Cancel stop_token to terminate the broadcast task.
             // Do NOT release provider_guard — the preemption caller already released the allocation.
@@ -662,7 +694,19 @@ impl SharedStreamManager {
         let buf_size = CHANNEL_SIZE.max(buffer_size);
         let config = app_state.app_config.config.load();
         let min_buffer_bytes = resolve_min_burst_buffer_bytes(&config);
-        let shared_state = Arc::new(SharedStreamState::new(headers, buf_size, provider_handle, min_buffer_bytes));
+        let low_priority_preempted = app_state
+            .app_config
+            .custom_stream_response
+            .load()
+            .as_ref()
+            .and_then(|c| c.low_priority_preempted.clone());
+        let shared_state = Arc::new(SharedStreamState::new(
+            headers,
+            buf_size,
+            provider_handle,
+            min_buffer_bytes,
+            low_priority_preempted,
+        ));
         app_state.shared_stream_manager.register(addr, stream_url, Arc::clone(&shared_state)).await;
         app_state.active_provider.make_shared_connection(addr, stream_url).await;
         let subscribed_stream = Self::subscribe_shared_stream(app_state, stream_url, addr).await;
@@ -719,11 +763,13 @@ mod tests {
         utils::FileLockManager,
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
+    use futures::StreamExt;
     use shared::{
         model::{ConfigPaths, InputFetchMethod, InputType},
         utils::Internable,
     };
     use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+    use tokio::time::{timeout, Duration};
     use tokio_util::sync::CancellationToken;
 
     fn create_test_app_config() -> AppConfig {
@@ -782,7 +828,13 @@ mod tests {
         let addr_1: SocketAddr = "127.0.0.1:41001".parse().unwrap_or_else(|_| unreachable!());
         let addr_2: SocketAddr = "127.0.0.1:41002".parse().unwrap_or_else(|_| unreachable!());
 
-        let state = Arc::new(SharedStreamState::new(Vec::new(), CHANNEL_SIZE.max(8), None, 1024));
+        let state = Arc::new(SharedStreamState::new(
+            Vec::new(),
+            CHANNEL_SIZE.max(8),
+            None,
+            1024,
+            None,
+        ));
 
         {
             let mut reg = shared_manager.shared_streams.write().await;
@@ -825,7 +877,13 @@ mod tests {
 
         let stream_url = "https://example.invalid/live/single.ts";
         let addr_1: SocketAddr = "127.0.0.1:42001".parse().unwrap_or_else(|_| unreachable!());
-        let state = Arc::new(SharedStreamState::new(Vec::new(), CHANNEL_SIZE.max(8), None, 1024));
+        let state = Arc::new(SharedStreamState::new(
+            Vec::new(),
+            CHANNEL_SIZE.max(8),
+            None,
+            1024,
+            None,
+        ));
 
         {
             let mut reg = shared_manager.shared_streams.write().await;
@@ -859,5 +917,47 @@ mod tests {
             let subs = state.subscribers.read().await;
             assert!(subs.is_empty(), "duplicate release must keep subscribers empty");
         }
+    }
+
+    #[tokio::test]
+    async fn test_preempted_shared_subscriber_switches_to_low_priority_fallback() {
+        let app_cfg = create_test_app_config();
+        let event_manager = Arc::new(EventManager::new());
+        let provider_manager = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
+        let shared_manager = Arc::new(SharedStreamManager::new(provider_manager));
+
+        let addr: SocketAddr = "127.0.0.1:43001".parse().unwrap_or_else(|_| unreachable!());
+
+        // Minimal valid TS packet (sync byte + padding) to feed TransportStreamBuffer.
+        let mut ts_packet = vec![0_u8; 188];
+        ts_packet[0] = 0x47;
+
+        let low_priority_fallback = crate::api::model::TransportStreamBuffer::new(ts_packet);
+        let state = Arc::new(SharedStreamState::new(
+            Vec::new(),
+            CHANNEL_SIZE.max(8),
+            None,
+            1024,
+            Some(low_priority_fallback),
+        ));
+
+        let (mut stream, _provider) = state.subscribe(&addr, Arc::clone(&shared_manager)).await;
+
+        // Simulate preemption teardown semantics:
+        // 1) mark as preempted, 2) drop state so broadcaster sender closes.
+        state.preempted_token.cancel();
+        drop(state);
+
+        let first = timeout(Duration::from_secs(2), stream.next()).await;
+        let maybe_chunk = match first {
+            Ok(v) => v,
+            Err(_) => panic!("timed out waiting for fallback chunk"),
+        };
+        let chunk = match maybe_chunk {
+            Some(Ok(bytes)) => bytes,
+            Some(Err(err)) => panic!("fallback stream returned error: {err}"),
+            None => panic!("fallback stream ended unexpectedly"),
+        };
+        assert!(!chunk.is_empty(), "fallback chunk must contain MPEG-TS bytes");
     }
 }

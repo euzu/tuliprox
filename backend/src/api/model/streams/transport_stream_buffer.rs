@@ -536,7 +536,10 @@ impl TransportStreamBuffer {
 
             let payload_packet_cc;
             let needs_discontinuity = self.pids_with_timestamps.contains(&pid);
-            let inject_discontinuity = !*discontinuity_sent && needs_discontinuity;
+            // Disable synthetic discontinuity packet insertion for looped custom streams.
+            // In practice this can produce demuxer corruption on some clients (PES mismatch).
+            // Monotonic timestamps + normal continuity counters are sufficient here.
+            let inject_discontinuity = false;
 
             if !*discontinuity_sent && !needs_discontinuity {
                 // For PIDs that don't need discontinuity (PSI), just mark as sent so we don't check again this loop
@@ -544,11 +547,10 @@ impl TransportStreamBuffer {
             }
 
             if inject_discontinuity {
-                // Extra packet gets current counter (N)
+                // Discontinuity packet is adaptation-only (no payload). For AFC=2 the continuity
+                // counter must not advance the payload sequence. Keep current CC for both packets
+                // and advance only after emitting the payload packet.
                 let extra_packet_cc = *counter;
-                *counter = (*counter + 1) % 16;
-
-                // Payload packet gets next counter (N+1)
                 payload_packet_cc = *counter;
                 *counter = (*counter + 1) % 16;
 
