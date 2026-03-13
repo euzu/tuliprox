@@ -56,7 +56,7 @@ pub fn HdHomerunConfigView() -> Html {
         let form_state = form_state.clone();
         let hdhr_config = config_ctx.config.as_ref().and_then(|c| c.config.hdhomerun.clone());
 
-        use_effect_with((hdhr_config, config_view_ctx.edit_mode.clone()), move |(hdhr_cfg, _mode)| {
+        use_effect_with((hdhr_config, *config_view_ctx.edit_mode), move |(hdhr_cfg, _mode)| {
             if let Some(hdhr) = hdhr_cfg {
                 form_state.dispatch(HdHomeRunConfigFormAction::SetAll((*hdhr).clone()));
             } else {

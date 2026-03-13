@@ -47,7 +47,7 @@ pub fn ProxyConfigView() -> Html {
     {
         let form_state = form_state.clone();
         let proxy_config = config_ctx.config.as_ref().and_then(|c| c.config.proxy.clone());
-        use_effect_with((proxy_config, config_view_ctx.edit_mode.clone()), move |(proxy_cfg, _mode)| {
+        use_effect_with((proxy_config, *config_view_ctx.edit_mode), move |(proxy_cfg, _mode)| {
             if let Some(proxy) = proxy_cfg {
                 form_state.dispatch(ProxyConfigFormAction::SetAll((*proxy).clone()));
             } else {

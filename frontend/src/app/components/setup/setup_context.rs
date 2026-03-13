@@ -194,7 +194,7 @@ impl SetupConfigFormState {
     pub fn collect_modified_forms(&self) -> Vec<ConfigForm> { self.slots.collect_modified_forms() }
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 pub struct SetupContext {
     pub active_step: UseStateHandle<SetupStep>,
     pub max_unlocked_step: UseStateHandle<SetupStep>,
@@ -207,6 +207,12 @@ pub struct SetupContext {
     pub is_submitting: UseStateHandle<bool>,
     pub is_completed: UseStateHandle<bool>,
     pub submit_error: UseStateHandle<Option<String>>,
+}
+
+impl PartialEq for SetupContext {
+    fn eq(&self, _other: &Self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]

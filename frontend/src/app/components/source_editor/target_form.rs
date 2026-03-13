@@ -122,7 +122,7 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
     };
 
     let processing_orders =
-        use_memo(target_form_state.clone(), |target_state: &UseReducerHandle<ConfigTargetFormState>| {
+        use_memo((*target_form_state).clone(), |target_state: &ConfigTargetFormState| {
             let default_po = target_state.form.processing_order;
             [
                 ProcessingOrder::Frm,

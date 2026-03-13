@@ -56,7 +56,7 @@ pub fn SchedulesConfigView() -> Html {
             .collect::<Vec<String>>()
     });
 
-    let target_options = use_memo((selected_targets.clone(), all_targets.clone()), move |(selected, all_targets)| {
+    let target_options = use_memo(((*selected_targets).clone(), all_targets.clone()), move |(selected, all_targets)| {
         all_targets
             .iter()
             .map(|t| DropDownOption {
@@ -81,7 +81,7 @@ pub fn SchedulesConfigView() -> Html {
     {
         let form_state = form_state.clone();
         let config = config_ctx.config.as_ref().map(|c| c.config.clone());
-        use_effect_with((config, config_view_ctx.edit_mode.clone()), move |(cfg, _mode)| {
+        use_effect_with((config, *config_view_ctx.edit_mode), move |(cfg, _mode)| {
             if let Some(conf) = cfg {
                 let schedules_config = SchedulesConfigDto::from(conf);
                 form_state.dispatch(SchedulesConfigFormAction::SetAll(schedules_config.clone()));

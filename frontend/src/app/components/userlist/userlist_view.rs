@@ -77,10 +77,10 @@ pub fn UserlistView(props: &UserlistViewProps) -> Html {
 
     {
         let breadcrumbs = breadcrumbs.clone();
-        let view_visible_dep = active_page.clone();
         let view_visible = active_page.clone();
-        let selected_user_dep = selected_user.clone();
+        let view_visible_dep = *active_page;
         let selected_user = selected_user.clone();
+        let selected_user_dep = (*selected_user).clone();
         let translate = translate.clone();
         use_effect_with((view_visible_dep, selected_user_dep), move |_| match *view_visible {
             UserlistPage::List => breadcrumbs.set(Rc::new(vec![translate.t("LABEL.USERS"), translate.t("LABEL.LIST")])),

@@ -120,7 +120,7 @@ pub fn Home() -> Html {
         });
     }
 
-    let sources = use_memo(config.clone(), |config_ctx| {
+    let sources = use_memo((*config).clone(), |config_ctx| {
         if let Some(cfg) = config_ctx.as_ref() {
             let mut sources = vec![];
             // Create a map for a faster lookup of global inputs by name

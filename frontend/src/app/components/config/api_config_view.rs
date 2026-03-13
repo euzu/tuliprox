@@ -213,9 +213,9 @@ pub fn ApiConfigView() -> Html {
     let edit_mode_ref = use_mut_ref(|| false);
     {
         let mode_ref = edit_mode_ref.clone();
-        let deps = config_view_ctx.edit_mode.clone();
+        let deps = *config_view_ctx.edit_mode;
         use_effect_with(deps, move |mode| {
-            *mode_ref.borrow_mut() = **mode;
+            *mode_ref.borrow_mut() = *mode;
         });
     }
 

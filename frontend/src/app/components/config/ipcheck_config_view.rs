@@ -50,7 +50,7 @@ pub fn IpCheckConfigView() -> Html {
         let form_state = form_state.clone();
         let ipcheck_config = config_ctx.config.as_ref().and_then(|c| c.config.ipcheck.clone());
 
-        use_effect_with((ipcheck_config, config_view_ctx.edit_mode.clone()), move |(ipcheck_cfg, _mode)| {
+        use_effect_with((ipcheck_config, *config_view_ctx.edit_mode), move |(ipcheck_cfg, _mode)| {
             if let Some(ipcheck) = ipcheck_cfg {
                 form_state.dispatch(IpCheckConfigFormAction::SetAll((*ipcheck).clone()));
             } else {

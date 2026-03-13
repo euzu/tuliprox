@@ -10,7 +10,7 @@ pub fn SourceEditorForm() -> Html {
 
     {
         let visible_set = visible.clone();
-        use_effect_with(source_editor_ctx.edit_mode.clone(), move |edit_mode| match **edit_mode {
+        use_effect_with((*source_editor_ctx.edit_mode).clone(), move |edit_mode| match edit_mode {
             EditMode::Inactive => {
                 visible_set.set(false);
             }

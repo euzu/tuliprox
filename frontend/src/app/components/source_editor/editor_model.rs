@@ -153,8 +153,14 @@ pub enum EditMode {
     Active(Block),
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 pub struct SourceEditorContext {
     pub on_form_change: Callback<(BlockId, BlockInstance)>,
     pub edit_mode: UseStateHandle<EditMode>,
+}
+
+impl PartialEq for SourceEditorContext {
+    fn eq(&self, _other: &Self) -> bool {
+        false
+    }
 }

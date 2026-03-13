@@ -31,6 +31,50 @@
   flex-flow: column;
   overflow: auto;
 
+  &__tech-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--gap-mini);
+  }
+
+  &__tech-chip {
+    &--container {
+      color: #0f3d2e;
+      background-color: #c4f1dd;
+      border-color: #65c79a;
+    }
+
+    &--video-codec {
+      color: #123a66;
+      background-color: #c9e4ff;
+      border-color: #6ca9e9;
+    }
+
+    &--resolution {
+      color: #4b2c0c;
+      background-color: #fde2b4;
+      border-color: #efb861;
+    }
+
+    &--fps {
+      color: #5a1f4e;
+      background-color: #f6d2ee;
+      border-color: #d98cc8;
+    }
+
+    &--audio-codec {
+      color: #15395a;
+      background-color: #c9eff9;
+      border-color: #71bdd0;
+    }
+
+    &--audio-channels {
+      color: #2f3f10;
+      background-color: #deefc2;
+      border-color: #9ac56a;
+    }
+  }
+
   .tp__table__th {
     $column-widths:
             40px,           /*index*/
@@ -38,13 +82,14 @@
             120px,          /*stream_id*/
             80px,           /*type*/
             200px,          /*channel*/
-            120px,
-            90px,
-            80px,
-            90px,
-            80px,
-            100px,
-            100px;
+            120px,          /*group*/
+            260px,          /*tech*/
+            90px,           /*client ip*/
+            80px,           /*country*/
+            90px,           /*provider*/
+            80px,           /*shared*/
+            120px,          /*player*/
+            100px;          /*duration*/
 
     @for $i from 1 through length($column-widths) {
       &--#{$i} {
