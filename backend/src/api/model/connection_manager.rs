@@ -14,6 +14,8 @@ use shared::{
 use std::{borrow::Cow, net::SocketAddr, sync::Arc};
 use tokio::sync::{mpsc, Notify};
 
+fn notify_capacity(capacity_notify: &Notify) { capacity_notify.notify_waiters(); }
+
 pub(crate) enum CleanupEvent {
     ReleaseStream { addr: SocketAddr },
     ReleaseProviderHandle { handle: Option<ProviderHandle> },
@@ -88,13 +90,13 @@ impl ConnectionManager {
                             event_manager.send_event(EventMessage::ActiveUser(
                                 ActiveUserConnectionChange::Disconnected(addr),
                             ));
-                            capacity_notify.notify_waiters();
+                            notify_capacity(capacity_notify.as_ref());
                         }
                     }
                     CleanupEvent::ReleaseProviderHandle { handle } => {
                         if let Some(h) = handle {
                             provider_manager.release_handle(&h).await;
-                            capacity_notify.notify_waiters();
+                            notify_capacity(capacity_notify.as_ref());
                         }
                     }
                     CleanupEvent::ReleaseStreamAndProviderHandle { addr, handle } => {
@@ -109,7 +111,7 @@ impl ConnectionManager {
                                 ActiveUserConnectionChange::Disconnected(addr),
                             ));
                         }
-                        capacity_notify.notify_waiters();
+                        notify_capacity(capacity_notify.as_ref());
                     }
                     CleanupEvent::UpdateDetailAndReleaseProvider { addr, video_type, handle } => {
                         if let Some(stream_info) = user_manager.update_stream_detail(&addr, video_type).await {
@@ -119,7 +121,7 @@ impl ConnectionManager {
                         }
                         if let Some(h) = handle {
                             provider_manager.release_handle(&h).await;
-                            capacity_notify.notify_waiters();
+                            notify_capacity(capacity_notify.as_ref());
                         }
                     }
                     CleanupEvent::UpdateDetailAndReleaseProviderConnection { addr, video_type } => {
@@ -130,7 +132,7 @@ impl ConnectionManager {
                         }
                         provider_manager.release_connection(&addr).await;
                         shared_stream_manager.release_connection(&addr, false).await;
-                        capacity_notify.notify_waiters();
+                        notify_capacity(capacity_notify.as_ref());
                     }
                 }
             }

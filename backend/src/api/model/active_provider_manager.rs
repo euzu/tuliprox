@@ -980,15 +980,12 @@ impl ActiveProviderManager {
             sanitize_sensitive_info(key)
         );
 
-        connections.shared.key_by_addr.insert(*addr, key.to_string());
-
         let Some(shared_allocation) = connections.shared.by_key.get_mut(key) else {
             let err = format!(
                 "Failed to add shared connection for {addr}: url {} disappeared during update",
                 sanitize_sensitive_info(key)
             );
             error!("{err}");
-            connections.shared.key_by_addr.remove(addr);
             return Err(err);
         };
 
@@ -1007,6 +1004,7 @@ impl ActiveProviderManager {
             }
         }
 
+        connections.shared.key_by_addr.insert(*addr, key.to_string());
         Ok(())
     }
 

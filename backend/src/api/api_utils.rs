@@ -273,13 +273,12 @@ pub struct StreamOptions {
 /// - `buffer_size`: the size of the stream buffer.
 ///
 /// If the reverse proxy or stream settings are not defined, default values are used:
-/// - retry: `false`
+/// - retry: `true`
 /// - buffering: `false`
 /// - buffer size: `0`
 ///
-/// Additionally, it computes `pipe_provider_stream`, which is `true` only if
-/// both retry and buffering are disabled—indicating that the stream can be piped directly
-/// from the provider without additional handling.
+/// Additionally, it computes `pipe_provider_stream` as `!stream_retry && !buffer_enabled`.
+/// This means direct provider piping is enabled only when retry is disabled and buffering is disabled.
 ///
 /// Returns a `StreamOptions` instance with the resolved configuration.
 fn get_stream_options(app_state: &Arc<AppState>) -> StreamOptions {
