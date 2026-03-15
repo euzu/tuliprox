@@ -6,7 +6,7 @@ use crate::{
     model::{AppConfig, ConfigInput, GracePeriodOptions},
     utils::debug_if_enabled,
 };
-use log::{error, warn};
+use log::error;
 use shared::utils::sanitize_sensitive_info;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -16,13 +16,11 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc, LazyLock, OnceLock,
     },
-    time::{Duration, Instant},
+    time::Instant,
 };
-use tokio::sync::{RwLock, Semaphore};
+use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
-const PREEMPTED_PROBE_CANCEL_GRACE: Duration = Duration::from_secs(2);
-const PREEMPTED_GRACE_MAX_PENDING: usize = 64;
 static DUMMY_ADDR: LazyLock<SocketAddr> = LazyLock::new(|| SocketAddr::from(([127, 0, 0, 1], 0)));
 
 pub type ClientConnectionId = SocketAddr;
@@ -79,7 +77,6 @@ struct ActiveConnectionInfo {
     cancel_token: CancellationToken,
     created_at: Instant,
     priority: i8,
-    is_probe: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -106,7 +103,6 @@ pub struct ActiveProviderManager {
     providers: ProviderLineupManager,
     connections: RwLock<Connections>,
     next_allocation_id: AtomicU64,
-    preempted_grace_semaphore: Arc<Semaphore>,
     shared_stream_manager: OnceLock<Arc<SharedStreamManager>>,
 }
 
@@ -118,7 +114,6 @@ impl ActiveProviderManager {
             providers: ProviderLineupManager::new(inputs, grace_period_options, event_manager),
             connections: RwLock::new(Connections::default()),
             next_allocation_id: AtomicU64::new(1),
-            preempted_grace_semaphore: Arc::new(Semaphore::new(PREEMPTED_GRACE_MAX_PENDING)),
             shared_stream_manager: OnceLock::new(),
         }
     }
@@ -172,7 +167,6 @@ impl ActiveProviderManager {
         force: bool,
         allow_grace_override: Option<bool>,
         priority: i8,
-        is_probe: bool,
     ) -> Option<ProviderHandle> {
         // 1. Try to acquire directly
         let (allow_grace, allocation) = if force {
@@ -207,14 +201,14 @@ impl ActiveProviderManager {
                         ).await;
                         if !matches!(new_alloc, ProviderAllocation::Exhausted) {
                             allocation.release().await;
-                            return self.register_allocation(new_alloc, addr, priority, is_probe).await;
+                            return self.register_allocation(new_alloc, addr, priority).await;
                         }
-                        return self.register_allocation(allocation, addr, priority, is_probe).await;
+                        return self.register_allocation(allocation, addr, priority).await;
                     }
                 }
                 // Eviction on same alias succeeded, or no victim found → keep grace allocation
             }
-            return self.register_allocation(allocation, addr, priority, is_probe).await;
+            return self.register_allocation(allocation, addr, priority).await;
         }
 
         // 2. If exhausted, try preemption (kick lower priority connection)
@@ -222,7 +216,7 @@ impl ActiveProviderManager {
             if let Some(preempted_alloc) =
                 self.try_preempt_connection(provider_or_input_name, priority, allow_grace).await
             {
-                return self.register_allocation(preempted_alloc, addr, priority, is_probe).await;
+                return self.register_allocation(preempted_alloc, addr, priority).await;
             }
         }
 
@@ -234,7 +228,6 @@ impl ActiveProviderManager {
         allocation: ProviderAllocation,
         addr: &SocketAddr,
         priority: i8,
-        is_probe: bool,
     ) -> Option<ProviderHandle> {
         let provider_name = allocation.get_provider_name().unwrap_or_default();
         let allocation_id = self.next_allocation_id.fetch_add(1, Ordering::Relaxed);
@@ -251,7 +244,6 @@ impl ActiveProviderManager {
                 cancel_token: cancel_token.clone(),
                 created_at: now,
                 priority,
-                is_probe,
             },
         );
 
@@ -413,24 +405,8 @@ impl ActiveProviderManager {
                 };
 
                 let Some(info) = removed_info else { return false; };
-                let token = info.cancel_token;
-                if info.is_probe {
-                    if let Ok(permit) = Arc::clone(&self.preempted_grace_semaphore).try_acquire_owned() {
-                        tokio::spawn(async move {
-                            let _permit = permit;
-                            tokio::time::sleep(PREEMPTED_PROBE_CANCEL_GRACE).await;
-                            token.cancel();
-                        });
-                    } else {
-                        warn!(
-                            "Preemption grace semaphore exhausted ({PREEMPTED_GRACE_MAX_PENDING} tasks pending); \
-                             falling back to immediate cancellation for preempted probe"
-                        );
-                        token.cancel();
-                    }
-                } else {
-                    token.cancel();
-                }
+                // Preempted probes must stop immediately; they must not keep a custom stream alive.
+                info.cancel_token.cancel();
                 info.allocation.release().await;
             }
         }
@@ -589,27 +565,8 @@ impl ActiveProviderManager {
                         return None;
                     };
 
-                    let token = info.cancel_token;
-                    if info.is_probe {
-                        // Probe preemption gets a short grace window, but cap detached sleep/cancel
-                        // tasks so bursts cannot spawn unbounded background work.
-                        if let Ok(permit) = Arc::clone(&self.preempted_grace_semaphore).try_acquire_owned() {
-                            tokio::spawn(async move {
-                                let _permit = permit;
-                                tokio::time::sleep(PREEMPTED_PROBE_CANCEL_GRACE).await;
-                                token.cancel();
-                            });
-                        } else {
-                            warn!(
-                                "Preemption grace semaphore exhausted ({PREEMPTED_GRACE_MAX_PENDING} tasks pending); \
-                                 falling back to immediate cancellation for preempted probe"
-                            );
-                            token.cancel();
-                        }
-                    } else {
-                        token.cancel();
-                    }
-
+                    // Preempted probes must stop immediately; they must not keep a custom stream alive.
+                    info.cancel_token.cancel();
                     info.allocation.release().await;
                 }
             }
@@ -635,7 +592,7 @@ impl ActiveProviderManager {
         if matches!(allocation, ProviderAllocation::Exhausted) {
             return None;
         }
-        self.register_allocation(allocation, addr, priority, false).await
+        self.register_allocation(allocation, addr, priority).await
     }
 
     pub async fn force_exact_acquire_connection(
@@ -650,7 +607,7 @@ impl ActiveProviderManager {
 
     // Returns the next available provider connection
     pub async fn acquire_connection(&self, input_name: &Arc<str>, addr: &SocketAddr, priority: i8) -> Option<ProviderHandle> {
-        self.acquire_connection_inner(input_name, addr, false, None, priority, false).await
+        self.acquire_connection_inner(input_name, addr, false, None, priority).await
     }
 
     /// Acquire a provider connection while explicitly controlling provider-side grace allocations.
@@ -661,13 +618,13 @@ impl ActiveProviderManager {
         allow_grace: bool,
         priority: i8,
     ) -> Option<ProviderHandle> {
-        self.acquire_connection_inner(input_name, addr, false, Some(allow_grace), priority, false).await
+        self.acquire_connection_inner(input_name, addr, false, Some(allow_grace), priority).await
     }
 
     /// Acquire a provider connection for probe tasks with configurable priority.
     /// Probes never consume grace capacity.
     pub async fn acquire_connection_for_probe(&self, input_name: &Arc<str>, priority: i8) -> Option<ProviderHandle> {
-        self.acquire_connection_inner(input_name, &DUMMY_ADDR, false, Some(false), priority, true).await
+        self.acquire_connection_inner(input_name, &DUMMY_ADDR, false, Some(false), priority).await
     }
 
     // This method is used for redirects to cycle through the provider
@@ -1012,7 +969,7 @@ mod tests {
         model::{ConfigPaths, InputFetchMethod, InputType},
         utils::Internable,
     };
-    use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
+    use std::{collections::HashMap, net::SocketAddr, sync::Arc};
     use shared::utils::{default_probe_user_priority, default_user_priority};
 
     fn build_test_app_config(aliases: Option<Vec<ConfigInputAlias>>, max_connections: u16) -> AppConfig {
@@ -1180,8 +1137,8 @@ mod tests {
         manager.release_connection(&client_2_addr).await;
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn test_probe_preemption_releases_capacity_immediately_and_cancels_after_grace() {
+    #[tokio::test]
+    async fn test_probe_preemption_releases_capacity_and_cancels_immediately() {
         let app_cfg = create_test_app_config_single_provider_pool();
         let event_manager = Arc::new(EventManager::new());
         let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
@@ -1200,23 +1157,9 @@ mod tests {
             .expect("user allocation should preempt probe");
         assert_eq!(user_alloc.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
 
-        // Let the detached cancellation task start and arm its sleep timer on the paused clock.
+        // Cancellation happens inline during preemption; yield once to observe any deferred work.
         tokio::task::yield_now().await;
-
-        // Probe cancellation is intentionally delayed by a small grace window.
-        tokio::time::advance(Duration::from_millis(100)).await;
-        assert!(!probe_token.is_cancelled(), "probe token should not be cancelled immediately");
-
-        let cancel_wait_timeout = super::PREEMPTED_PROBE_CANCEL_GRACE + Duration::from_millis(500);
-        let wait_token = probe_token.clone();
-        let cancel_wait =
-            tokio::spawn(async move { tokio::time::timeout(cancel_wait_timeout, wait_token.cancelled()).await });
-        tokio::task::yield_now().await;
-        tokio::time::advance(cancel_wait_timeout).await;
-        assert!(
-            cancel_wait.await.expect("cancel wait task should join").is_ok(),
-            "probe token should be cancelled before timeout after grace"
-        );
+        assert!(probe_token.is_cancelled(), "probe token should be cancelled immediately after preemption");
 
         manager.release_connection(&user_addr).await;
     }

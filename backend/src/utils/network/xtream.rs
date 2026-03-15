@@ -122,7 +122,7 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
                                     return value;
                                 }
                             }
-                            Err(err) => error!("Failed to persist video info: {err}")
+                            Err(err) => error!("Failed to persist video info for provider id {}: {err}", pli.provider_id)
                         }
                     }
                 }

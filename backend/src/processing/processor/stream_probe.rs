@@ -1,7 +1,7 @@
 use crate::api::model::ActiveProviderManager;
 use crate::model::ConfigInput;
 use crate::model::{AppConfig};
-use crate::processing::processor::select_cancel_token;
+use crate::processing::processor::{select_cancel_token, ProbeHandleGuard};
 use crate::repository::{get_input_m3u_playlist_file_path, get_input_storage_path, get_input_local_library_playlist_file_path, xtream_get_file_path, BPlusTreeUpdate};
 use crate::utils::{debug_if_enabled, ffmpeg};
 use crate::utils::ffmpeg::{ProbeFailureKind, ProbeUrlOutcome};
@@ -90,7 +90,10 @@ pub async fn update_generic_stream_metadata(
     let acquired_handle = if !needs_provider_connection || active_handle.is_some() {
         None
     } else {
-        active_provider.acquire_connection_for_probe(&input.name, probe_priority).await
+        active_provider
+            .acquire_connection_for_probe(&input.name, probe_priority)
+            .await
+            .map(|handle| ProbeHandleGuard::new(active_provider, handle))
     };
 
     if needs_provider_connection && active_handle.is_none() && acquired_handle.is_none() {
@@ -117,7 +120,10 @@ pub async fn update_generic_stream_metadata(
 
     debug_if_enabled!("Probing Generic Stream '{unique_id}'");
 
-    let cancel_token = select_cancel_token(acquired_handle.as_ref(), active_handle);
+    let cancel_token = select_cancel_token(
+        acquired_handle.as_ref().and_then(ProbeHandleGuard::handle),
+        active_handle,
+    );
     let probe_data = ffmpeg::probe_url_with_cancel(
         &probe_url,
         user_agent.as_deref(),
@@ -130,7 +136,7 @@ pub async fn update_generic_stream_metadata(
     .await;
 
     if let Some(handle) = acquired_handle {
-        active_provider.release_handle(&handle).await;
+        handle.release().await;
     }
 
     let (raw_video, raw_audio) = match probe_data {

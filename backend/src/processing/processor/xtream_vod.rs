@@ -9,6 +9,7 @@ use crate::processing::input_cache::resolve_input_storage_path;
 use crate::processing::processor::playlist::PlaylistProcessingContext;
 use crate::processing::processor::{
     create_resolve_options_function_for_xtream_target, process_foreground_retry_once, select_cancel_token,
+    ProbeHandleGuard,
     ResolveOptions, ResolveOptionsFlags, FOREGROUND_BATCH_SIZE as BATCH_SIZE, FOREGROUND_MIN_RETRY_DELAY_SECS,
     FOREGROUND_RETRY_BATCH_MAX_SIZE as RETRY_BATCH_MAX_SIZE,
 };
@@ -133,7 +134,7 @@ async fn playlist_resolve_vod_info(
     let resolve_tmdb_enabled = fpl.input.has_flag(ConfigInputFlags::ResolveTmdb);
 
     if resolve_options.has_flag(ResolveOptionsFlags::Background) && ctx.metadata_manager.is_some() {
-        queue_background_vod_info(ctx, fpl, filter, &resolve_options, do_probe, resolve_tmdb_enabled);
+        queue_background_vod_info(ctx, fpl, filter, &resolve_options, do_probe, resolve_tmdb_enabled).await;
     } else {
         process_immediate_vod_info(ctx, fpl, filter, resolve_options, do_probe, resolve_tmdb_enabled).await;
     }
@@ -415,7 +416,7 @@ fn check_resolve_tmdb(
     }
 }
 
-fn queue_background_vod_info(
+async fn queue_background_vod_info(
     ctx: &PlaylistProcessingContext,
     fpl: &mut FetchedPlaylist<'_>,
     filter: impl Fn(&PlaylistItem) -> bool,
@@ -444,7 +445,7 @@ fn queue_background_vod_info(
         if !reasons.is_empty() {
             let task =
                 UpdateTask::ResolveVod { id: provider_id.clone(), reason: reasons, delay: resolve_options.resolve_delay };
-            if mgr.is_redundant_with_pending_task(input.name.as_ref(), &task) {
+            if mgr.should_skip_enqueue(input.name.clone(), &task).await {
                 continue;
             }
 
@@ -500,6 +501,7 @@ async fn update_vod_info_immediate(
         reasons.contains(ResolveReason::Probe),
         db_query,
         None,
+        None,
     )
     .await
 }
@@ -527,6 +529,7 @@ pub async fn update_vod_metadata(
     do_probe: bool,
     db_query: Option<Arc<Mutex<BPlusTreeQuery<u32, XtreamPlaylistItem>>>>,
     tmdb_resolved_out: Option<&AtomicBool>,
+    probe_pending_out: Option<&AtomicBool>,
 ) -> Result<Option<VideoStreamProperties>, TuliproxError> {
     let storage_dir = &app_config.config.load().storage_dir;
     let storage_path = resolve_input_storage_path(storage_dir, &input.name).await;
@@ -599,6 +602,7 @@ pub async fn update_vod_metadata(
     let mut fetched_new = false;
     let mut properties_updated = false;
     let mut probe_failure: Option<ProbeFailureKind> = None;
+    let mut probe_pending = false;
 
     // Determine the title to use for logging and fallback.
     // Cloning here to satisfy borrow checker when 'props' is mutated later.
@@ -819,58 +823,72 @@ pub async fn update_vod_metadata(
 
             // Acquire Connection logic
             let temp_handle = if active_handle.is_some() {
-                None // No new handle needed
+                None
             } else {
-                active_provider.acquire_connection_for_probe(&input.name, probe_priority).await
+                active_provider
+                    .acquire_connection_for_probe(&input.name, probe_priority)
+                    .await
+                    .map(|handle| ProbeHandleGuard::new(active_provider, handle))
             };
 
-                if active_handle.is_some() || temp_handle.is_some() {
-                    debug_if_enabled!("Probing VOD '{}' (ID: {})", display_title, display_id);
-                    let cancel_token = select_cancel_token(temp_handle.as_ref(), active_handle);
-                    match crate::utils::ffmpeg::probe_url_with_cancel(
-                        &stream_url,
-                        user_agent.as_deref(),
-                        analyze_duration,
-                        probe_size,
-                        ffprobe_timeout,
-                        config.proxy.as_ref(),
-                        cancel_token,
-                    )
-                    .await
-                    {
-                        ProbeUrlOutcome::Success(_quality, raw_video, raw_audio) => {
-                            if let Some(details) = properties.details.as_mut() {
-                                if let Some(v) = raw_video {
-                                    details.video = Some(v.to_string().into());
-                                    properties_updated = true;
-                                }
-                                if let Some(a) = raw_audio {
-                                    details.audio = Some(a.to_string().into());
-                                    properties_updated = true;
-                                }
+            if active_handle.is_some() || temp_handle.is_some() {
+                debug_if_enabled!("Probing VOD '{}' (ID: {})", display_title, display_id);
+                let cancel_token = select_cancel_token(
+                    temp_handle.as_ref().and_then(ProbeHandleGuard::handle),
+                    active_handle,
+                );
+                match crate::utils::ffmpeg::probe_url_with_cancel(
+                    &stream_url,
+                    user_agent.as_deref(),
+                    analyze_duration,
+                    probe_size,
+                    ffprobe_timeout,
+                    config.proxy.as_ref(),
+                    cancel_token,
+                )
+                .await
+                {
+                    ProbeUrlOutcome::Success(_quality, raw_video, raw_audio) => {
+                        if let Some(details) = properties.details.as_mut() {
+                            if let Some(v) = raw_video {
+                                details.video = Some(v.to_string().into());
+                                properties_updated = true;
                             }
-                        }
-                        ProbeUrlOutcome::Failed(ProbeFailureKind::NotFound) => {
-                            probe_failure = Some(ProbeFailureKind::NotFound);
-                        }
-                        ProbeUrlOutcome::Failed(ProbeFailureKind::Other) => {
-                            if probe_failure.is_none() {
-                                probe_failure = Some(ProbeFailureKind::Other);
-                            }
-                        }
-                        ProbeUrlOutcome::Failed(ProbeFailureKind::Cancelled) => {
-                            if probe_failure.is_none() {
-                                probe_failure = Some(ProbeFailureKind::Cancelled);
+                            if let Some(a) = raw_audio {
+                                details.audio = Some(a.to_string().into());
+                                properties_updated = true;
                             }
                         }
                     }
-                if let Some(h) = temp_handle {
-                    active_provider.release_handle(&h).await;
+                    ProbeUrlOutcome::Failed(ProbeFailureKind::NotFound) => {
+                        probe_failure = Some(ProbeFailureKind::NotFound);
+                    }
+                    ProbeUrlOutcome::Failed(ProbeFailureKind::Other) => {
+                        probe_pending = true;
+                        if probe_failure.is_none() {
+                            probe_failure = Some(ProbeFailureKind::Other);
+                        }
+                    }
+                    ProbeUrlOutcome::Failed(ProbeFailureKind::Cancelled) => {
+                        probe_pending = true;
+                        if probe_failure.is_none() {
+                            probe_failure = Some(ProbeFailureKind::Cancelled);
+                        }
+                    }
                 }
             } else {
+                probe_pending = true;
                 warn!("Skipping probe for VOD {display_id} due to connection limits");
             }
+
+            if let Some(guard) = temp_handle {
+                guard.release().await;
+            }
         }
+    }
+
+    if let Some(out) = probe_pending_out {
+        out.store(probe_pending, Ordering::Relaxed);
     }
 
     let probe_only_unresolved = do_probe && !fetch_info && !resolve_tmdb && !properties_updated && !fetched_new;

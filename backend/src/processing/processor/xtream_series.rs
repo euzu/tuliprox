@@ -9,6 +9,7 @@ use crate::processing::parser::xtream::parse_xtream_series_info;
 use crate::processing::processor::playlist::{PlaylistProcessingContext, ProcessingPipe};
 use crate::processing::processor::{
     create_resolve_options_function_for_xtream_target, process_foreground_retry_once, select_cancel_token,
+    ProbeHandleGuard,
     ResolveOptions, ResolveOptionsFlags, FOREGROUND_BATCH_SIZE as BATCH_SIZE, FOREGROUND_MIN_RETRY_DELAY_SECS,
     FOREGROUND_RETRY_BATCH_MAX_SIZE as RETRY_BATCH_MAX_SIZE,
 };
@@ -111,7 +112,7 @@ async fn playlist_resolve_series_info(
     let resolve_tmdb_enabled = fpl.input.has_flag(ConfigInputFlags::ResolveTmdb);
 
     let groups_to_add = if resolve_options.has_flag(ResolveOptionsFlags::Background) && ctx.metadata_manager.is_some() {
-        queue_background_series_info(ctx, fpl, filter, &resolve_options, skip_resolve, resolve_tmdb_enabled)
+        queue_background_series_info(ctx, fpl, filter, &resolve_options, skip_resolve, resolve_tmdb_enabled).await
     } else {
         process_immediate_series_info(ctx, fpl, filter, &resolve_options, skip_resolve, resolve_tmdb_enabled).await
     };
@@ -177,7 +178,7 @@ fn sync_resolved_series_properties(provider_fpl: &mut FetchedPlaylist<'_>, proce
     }
 }
 
-fn queue_background_series_info(
+async fn queue_background_series_info(
     ctx: &PlaylistProcessingContext,
     fpl: &mut FetchedPlaylist<'_>,
     filter: impl Fn(&PlaylistItem) -> bool,
@@ -213,7 +214,7 @@ fn queue_background_series_info(
                     reason: reasons,
                     delay: resolve_options.resolve_delay,
                 };
-                if !mgr.is_redundant_with_pending_task(input_name_arc.as_ref(), &task) {
+                if !mgr.should_skip_enqueue(input_name_arc.clone(), &task).await {
                     if log_enabled!(Level::Debug) {
                         let has_details = pli.has_details();
                         let (has_tmdb, has_date) = match pli.header.additional_properties.as_ref() {
@@ -542,6 +543,7 @@ async fn update_series_info_immediate(
         probe_settings,
         db_query,
         None,
+        None,
     )
     .await
 }
@@ -639,6 +641,7 @@ pub async fn update_series_metadata(
     probe_settings: SeriesProbeSettings,
     db_query: Option<Arc<Mutex<BPlusTreeQuery<u32, XtreamPlaylistItem>>>>,
     tmdb_and_date_present_out: Option<&AtomicBool>,
+    probe_pending_out: Option<&AtomicBool>,
 ) -> Result<Option<SeriesStreamProperties>, TuliproxError> {
     let storage_dir = &app_config.config.load().storage_dir;
     let storage_path = get_input_storage_path(&input.name, storage_dir)
@@ -716,6 +719,7 @@ pub async fn update_series_metadata(
     let mut fetched_new = false;
     let mut properties_updated = false;
     let mut probe_failure: Option<ProbeFailureKind> = None;
+    let mut probe_pending = false;
 
     let display_id = series_id_opt.map_or_else(|| "StringID".to_string(), |v| v.to_string());
 
@@ -870,7 +874,10 @@ pub async fn update_series_metadata(
                         let temp_handle = if active_handle.is_some() {
                             None
                         } else {
-                            active_provider.acquire_connection_for_probe(&input.name, probe_priority).await
+                            active_provider
+                                .acquire_connection_for_probe(&input.name, probe_priority)
+                                .await
+                                .map(|handle| ProbeHandleGuard::new(active_provider, handle))
                         };
 
                         if active_handle.is_some() || temp_handle.is_some() {
@@ -890,7 +897,10 @@ pub async fn update_series_metadata(
                                 ep.title, ep.season, ep.episode_num, missing_reason
                             );
 
-                            let cancel_token = select_cancel_token(temp_handle.as_ref(), active_handle);
+                            let cancel_token = select_cancel_token(
+                                temp_handle.as_ref().and_then(ProbeHandleGuard::handle),
+                                active_handle,
+                            );
                             match crate::utils::ffmpeg::probe_url_with_cancel(
                                 &episode_url,
                                 user_agent.as_deref(),
@@ -917,22 +927,25 @@ pub async fn update_series_metadata(
                                     probe_failure = Some(ProbeFailureKind::NotFound);
                                 }
                                 ProbeUrlOutcome::Failed(ProbeFailureKind::Other) => {
+                                    probe_pending = true;
                                     if probe_failure.is_none() {
                                         probe_failure = Some(ProbeFailureKind::Other);
                                     }
                                 }
                                 ProbeUrlOutcome::Failed(ProbeFailureKind::Cancelled) => {
+                                    probe_pending = true;
                                     if probe_failure.is_none() {
                                         probe_failure = Some(ProbeFailureKind::Cancelled);
                                     }
                                 }
                             }
-
-                            if let Some(h) = temp_handle {
-                                active_provider.release_handle(&h).await;
-                            }
                         } else {
+                            probe_pending = true;
                             warn!("Skipping probe for series episode {} due to connection limits", ep.title);
+                        }
+
+                        if let Some(guard) = temp_handle {
+                            guard.release().await;
                         }
                     }
                 }
@@ -947,6 +960,10 @@ pub async fn update_series_metadata(
         } else {
             debug!("Series probe skipped for ID {display_id} (no series details available)");
         }
+    }
+
+    if let Some(out) = probe_pending_out {
+        out.store(probe_pending, Ordering::Relaxed);
     }
 
     let probe_only_unresolved = do_probe && !fetch_info && !resolve_tmdb && !properties_updated && !fetched_new;
