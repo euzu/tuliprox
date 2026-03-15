@@ -614,12 +614,12 @@ macro_rules! edit_field_date {
 
 #[macro_export]
 macro_rules! edit_field_exp_date {
-    ($instance:expr, $label:expr, $field:ident, $action:path, $refresh:expr) => {{
+    ($instance:expr, $label:expr, $field:ident, $action:path, $tool_action:expr) => {{
         let instance = $instance.clone();
 
         html! {
             <div class="tp__form-field tp__form-field__date">
-                <$crate::app::components::date_input::DateInput
+                <$crate::app::components::DateInputAction
                     label={$label}
                     name={stringify!($field)}
                     field_id={Some($crate::app::components::dto_field_id(&instance.form, stringify!($field)))}
@@ -627,12 +627,12 @@ macro_rules! edit_field_exp_date {
                     on_change={Callback::from(move |value: Option<i64>| {
                         instance.dispatch($action(value));
                     })}
+                    tool_action={$tool_action}
                 />
             </div>
         }
     }};
 }
-
 
 #[macro_export]
 macro_rules! edit_field_list {

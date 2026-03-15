@@ -1,7 +1,7 @@
 use crate::api::model::AppState;
 use crate::messaging::send_message;
 use crate::model::{is_input_expired, xtream_mapping_option_from_target_options, AppConfig,
-                   ConfigInput, ConfigInputFlags, ConfigTarget, MessageContent, XtreamLoginInfo, XtreamTargetOutput};
+                   ConfigInput, ConfigInputFlags, ConfigTarget, MessageContent, XtreamTargetOutput};
 use crate::model::{InputSource, ProxyUserCredentials};
 use shared::model::ClusterSource;
 use crate::processing::parser::xtream;
@@ -16,7 +16,7 @@ use log::{error, info, warn};
 use shared::error::TuliproxError;
 use shared::model::{PlaylistEntry, PlaylistGroup, ProxyUserStatus, SeriesStreamProperties,
                     StreamProperties, VideoStreamProperties, InputType, XtreamCluster, XtreamPlaylistItem,
-                    XtreamSeriesInfo, XtreamVideoInfo, XtreamVideoInfoDoc};
+                    XtreamSeriesInfo, XtreamLoginInfo, XtreamVideoInfo, XtreamVideoInfoDoc};
 use shared::utils::{extract_extension_from_url, get_i64_from_serde_value, get_string_from_serde_value, sanitize_sensitive_info, Internable, PROVIDER_SCHEME_PREFIX};
 use std::collections::HashMap;
 use std::io::Error;
@@ -276,7 +276,7 @@ const ACTIONS: [(XtreamCluster, &str, &str); 3] = [
     (XtreamCluster::Video, crate::model::XC_ACTION_GET_VOD_CATEGORIES, crate::model::XC_ACTION_GET_VOD_STREAMS),
     (XtreamCluster::Series, crate::model::XC_ACTION_GET_SERIES_CATEGORIES, crate::model::XC_ACTION_GET_SERIES)];
 
-async fn xtream_login(app_config: &Arc<AppConfig>, client: &reqwest::Client, input: &InputSource, username: &str) -> Result<Option<XtreamLoginInfo>, TuliproxError> {
+pub async fn xtream_login(app_config: &Arc<AppConfig>, client: &reqwest::Client, input: &InputSource, username: &str) -> Result<Option<XtreamLoginInfo>, TuliproxError> {
     let content = if let Ok(content) = request::get_input_json_content(app_config, client, input, None, false).await {
         content
     } else {

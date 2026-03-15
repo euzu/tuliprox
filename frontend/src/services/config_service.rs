@@ -12,7 +12,7 @@ use shared::{
     foundation::{get_filter, prepare_templates, MapperScript},
     model::{
         ApiProxyConfigDto, AppConfigDto, ConfigDto, ConfigInputDto, IpCheckDto, LibraryScanRequest, SourcesConfigDto,
-        TargetOutputDto,
+        TargetOutputDto, XtreamLoginInfo, XtreamLoginRequest,
     },
     utils::{
         concat_path, concat_path_leading_slash, HEADER_CONFIG_API_PROXY_REVISION, HEADER_CONFIG_MAIN_REVISION,
@@ -68,6 +68,7 @@ pub struct ConfigService {
     sources_path: String,
     ip_check_path: String,
     batch_input_content_path: String,
+    xtream_login_info_path: String,
     geoip_path: String,
     library_path: String,
     setup_complete_path: String,
@@ -91,6 +92,7 @@ impl ConfigService {
             sources_path: concat_path(&config_path, "sources"),
             ip_check_path: concat_path_leading_slash(&base_href, "api/v1/ipinfo"),
             batch_input_content_path: concat_path_leading_slash(&base_href, "api/v1/config/batchContent"),
+            xtream_login_info_path: concat_path_leading_slash(&base_href, "api/v1/config/xtream/login-info"),
             geoip_path: concat_path_leading_slash(&base_href, "api/v1/geoip/update"),
             library_path: concat_path_leading_slash(&base_href, "api/v1/library"),
             setup_complete_path: concat_path_leading_slash(&base_href, "api/v1/setup/complete"),
@@ -282,6 +284,10 @@ impl ConfigService {
             error!("{err}");
             None
         })
+    }
+
+    pub async fn get_xtream_login_info(&self, request: &XtreamLoginRequest) -> Result<Option<XtreamLoginInfo>, Error> {
+        request_post::<&XtreamLoginRequest, XtreamLoginInfo>(&self.xtream_login_info_path, request, None, None).await
     }
 
     pub async fn save_config(&self, dto: ConfigDto) -> Result<(), Error> {

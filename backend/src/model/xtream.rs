@@ -4,18 +4,12 @@ use crate::model::{ConfigTarget, XtreamTargetOutput};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use shared::model::{
-    PlaylistItem, PlaylistItemType, PlaylistItemTypeSet, ProxyUserStatus, XtreamMappingFlags,
-    XtreamMappingFlagsSet, XtreamMappingOptions,
+    PlaylistItem, PlaylistItemType, PlaylistItemTypeSet, XtreamMappingFlags, XtreamMappingFlagsSet,
+    XtreamMappingOptions,
 };
 use shared::utils::{arc_str_serde, concat_path_leading_slash, deserialize_number_from_string_or_zero};
 use enum_iterator::all;
 use crate::model::XtreamTargetFlags;
-
-#[derive(Debug, Default)]
-pub struct XtreamLoginInfo {
-    pub status: Option<ProxyUserStatus>,
-    pub exp_date: Option<i64>,
-}
 
 #[derive(Deserialize, Default)]
 pub struct XtreamCategory {

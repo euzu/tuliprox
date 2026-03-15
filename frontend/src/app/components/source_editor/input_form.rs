@@ -3,12 +3,14 @@ use crate::{
         components::{
             config::HasFormData, key_value_editor::KeyValueEditor, select::Select, AliasItemForm, BlockId,
             BlockInstance, Card, DropDownOption, DropDownSelection, EditMode, EpgSourceItemForm, IconButton, Panel,
-            ProviderItemForm, RadioButtonGroup, SourceEditorContext, TextButton, TitledCard,
+            ProviderItemForm, RadioButtonGroup, SourceEditorContext, TextButton, TitledCard, ToolAction,
         },
         ConfigContext,
     },
-    config_field_child, edit_field_bool, edit_field_exp_date, edit_field_date, edit_field_number_i16, edit_field_number_u16,
-    edit_field_number_u32, edit_field_text, edit_field_text_option, generate_form_reducer, html_if,
+    config_field_child, edit_field_bool, edit_field_exp_date, edit_field_number_i16, edit_field_number_u16,
+    edit_field_number_u32, edit_field_text, edit_field_text_option, generate_form_reducer,
+    hooks::use_service_context,
+    html_if,
     i18n::use_translation,
 };
 use shared::{
@@ -17,7 +19,7 @@ use shared::{
     info_err_res,
     model::{
         ClusterSource, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigProviderDto, EpgConfigDto,
-        EpgSourceDto, InputFetchMethod, InputType, StagedInputDto,
+        EpgSourceDto, InputFetchMethod, InputType, StagedInputDto, XtreamLoginRequest,
     },
 };
 use std::{
@@ -28,8 +30,8 @@ use std::{
 };
 use web_sys::MouseEvent;
 use yew::{
-    component, html, use_context, use_effect_with, use_memo, use_reducer, use_state, Callback, Html, Properties,
-    UseReducerHandle,
+    component, html, platform::spawn_local, use_context, use_effect_with, use_memo, use_reducer, use_state, Callback,
+    Html, Properties, UseReducerHandle,
 };
 
 const LABEL_NAME: &str = "LABEL.NAME";
@@ -224,6 +226,7 @@ pub struct ConfigInputViewProps {
 #[component]
 pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     let translate = use_translation();
+    let services = use_service_context();
     let source_editor_ctx = use_context::<SourceEditorContext>();
     let config_ctx = use_context::<ConfigContext>();
     let fetch_methods = use_memo((), |_| {
@@ -265,6 +268,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     let show_provider_form_state = use_state(|| false);
     let edit_alias = use_state(|| None::<ConfigInputAliasDto>);
     let edit_provider = use_state(|| None::<ConfigProviderDto>);
+    let exp_date_loading = use_state(|| false);
 
     let staged_input_types = use_memo(staged_input_state.form.input_type, |input_type| {
         let default_it = input_type;
@@ -751,6 +755,50 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     let render_input = || {
         let input_method_selection = Rc::new(vec![input_form_state.form.method.to_string()]);
         let input_form_state_disp = input_form_state.clone();
+        let exp_date_tool_action = if input_form_state.form.input_type.is_xtream() {
+            let services = services.clone();
+            let input_form_state = input_form_state.clone();
+            let exp_date_loading = exp_date_loading.clone();
+
+            Some(ToolAction {
+                name: Some("RefreshExpDate".to_string()),
+                icon: "Refresh".to_string(),
+                hint: Some(translate.t(LABEL_RESOLVE)),
+                class: (*exp_date_loading).then(|| "loading".to_string()),
+                onclick: Callback::from(move |_event: MouseEvent| {
+                    if *exp_date_loading {
+                        return;
+                    }
+
+                    exp_date_loading.set(true);
+                    let services = services.clone();
+                    let input_form_state = input_form_state.clone();
+                    let exp_date_loading = exp_date_loading.clone();
+                    let request = XtreamLoginRequest {
+                        url: input_form_state.form.url.clone(),
+                        username: input_form_state.form.username.clone().unwrap_or_default(),
+                        password: input_form_state.form.password.clone().unwrap_or_default(),
+                    };
+
+                    spawn_local(async move {
+                        match services.config.get_xtream_login_info(&request).await {
+                            Ok(Some(login_info)) => {
+                                if let Some(exp_date) = login_info.exp_date {
+                                    input_form_state.dispatch(ConfigInputFormAction::ExpDate(Some(exp_date)));
+                                } else {
+                                    services.toastr.warning("No expiration date returned by provider");
+                                }
+                            }
+                            Ok(None) => services.toastr.warning("No login information returned by provider"),
+                            Err(err) => services.toastr.error(err.to_string()),
+                        }
+                        exp_date_loading.set(false);
+                    });
+                }),
+            })
+        } else {
+            None
+        };
 
         html! {
              <Card class="tp__config-view__card">
@@ -766,7 +814,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                  { edit_field_text_option!(input_form_state, translate.t(LABEL_PASSWORD), password, ConfigInputFormAction::Password, true) }
                  { edit_field_number_u16!(input_form_state, translate.t(LABEL_MAX_CONNECTIONS), max_connections, ConfigInputFormAction::MaxConnections) }
                  { edit_field_number_i16!(input_form_state, translate.t(LABEL_PRIORITY), priority, ConfigInputFormAction::Priority) }
-                 { edit_field_exp_date!(input_form_state, translate.t(LABEL_EXP_DATE), exp_date, ConfigInputFormAction::ExpDate, input_form_state.input_type.is_xtream()) }
+                 { edit_field_exp_date!(input_form_state, translate.t(LABEL_EXP_DATE), exp_date, ConfigInputFormAction::ExpDate, exp_date_tool_action) }
                  { edit_field_text_option!(input_form_state, translate.t(LABEL_CACHE_DURATION), cache_duration, ConfigInputFormAction::CacheDuration) }
                  { config_field_child!(translate.t(LABEL_FETCH_METHOD), "INPUT_FORM.FETCH_METHOD", {
                    html! {
