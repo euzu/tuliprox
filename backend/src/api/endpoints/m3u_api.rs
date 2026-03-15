@@ -2,7 +2,7 @@ use crate::{
     api::{
         api_utils::{
             create_catchup_session_key, create_session_fingerprint, force_provider_stream_response,
-            get_catchup_session_ttl_secs, get_user_target, get_user_target_by_credentials, is_seek_request,
+            get_session_reservation_ttl_secs, get_user_target, get_user_target_by_credentials, is_seek_request,
             local_stream_response, redirect, redirect_response, resource_response, separate_number_and_remainder,
             stream_response, try_option_bad_request,
             try_result_bad_request, try_result_not_found, try_unwrap_body, RedirectParams,
@@ -179,11 +179,7 @@ async fn m3u_api_stream(
                     req_headers,
                     input: &input,
                     user: &user,
-                    session_reservation_ttl_secs: if pli.item_type == PlaylistItemType::Catchup {
-                        get_catchup_session_ttl_secs(app_state)
-                    } else {
-                        0
-                    },
+                    session_reservation_ttl_secs: get_session_reservation_ttl_secs(app_state, pli.item_type),
                 },
             )
             .await

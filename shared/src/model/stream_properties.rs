@@ -4,12 +4,41 @@ use crate::{
         arc_str_default_on_null, arc_str_none_default_on_null, arc_str_option_serde, deserialize_as_option_arc_str,
         deserialize_as_string_array, deserialize_json_as_opt_string, deserialize_number_from_string,
         deserialize_number_from_string_or_zero, serialize_json_as_opt_string, serialize_option_string_as_null_if_empty,
-        Internable,
+        Internable, CONSTANTS,
     },
 };
 use log::warn;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+fn format_episode_code(season: u32, episode: u32) -> Option<String> {
+    match (season, episode) {
+        (0, 0) => None,
+        (season, 0) => Some(format!("S{season:02}")),
+        (0, episode) => Some(format!("E{episode:02}")),
+        (season, episode) => Some(format!("S{season:02}E{episode:02}")),
+    }
+}
+
+fn title_contains_episode_code(title: &str) -> bool { CONSTANTS.re_episode_code.is_match(title) }
+
+pub fn normalize_episode_title(raw_title: &Arc<str>, series_name: &Arc<str>, season: u32, episode: u32) -> Arc<str> {
+    let title = raw_title.trim();
+    let series_name = series_name.trim();
+    let Some(code) = format_episode_code(season, episode) else {
+        return if title.is_empty() { series_name.intern() } else { title.intern() };
+    };
+
+    if title.is_empty() || (!series_name.is_empty() && title.eq_ignore_ascii_case(series_name)) {
+        return code.into();
+    }
+
+    if title_contains_episode_code(title) {
+        return title.intern();
+    }
+
+    format!("{code} - {title}").into()
+}
 
 #[derive(Default, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct LiveStreamProperties {
@@ -760,7 +789,7 @@ impl SeriesStreamProperties {
                             id: e.id,
                             episode_num: e.episode_num,
                             season: e.season,
-                            title: e.title.clone(),
+                            title: normalize_episode_title(&e.title, &info.info.name, e.season, e.episode_num),
                             container_extension: e.container_extension.clone(),
                             custom_sid: e.custom_sid.clone(),
                             added: e.added.clone(),
@@ -850,7 +879,7 @@ impl SeriesStreamProperties {
                             }),
                             episode_num: e.episode_num,
                             season: e.season,
-                            title: e.title.clone(),
+                            title: normalize_episode_title(&e.title, &info.info.name, e.season, e.episode_num),
                             container_extension: e.container_extension.clone(),
                             custom_sid: e.custom_sid.clone(),
                             added: e.added.clone(),
@@ -993,5 +1022,23 @@ mod tests {
         assert_eq!(props.trailer.as_deref(), Some("legacy-trailer"));
         assert_eq!(props.tmdb, Some(7788));
         assert_eq!(props.is_adult, 1);
+    }
+
+    #[test]
+    fn normalize_episode_title_injects_missing_episode_code() {
+        let normalized = normalize_episode_title(&"Pilot".into(), &"Example Show".into(), 1, 2);
+        assert_eq!(normalized.as_ref(), "S01E02 - Pilot");
+    }
+
+    #[test]
+    fn normalize_episode_title_replaces_series_name_only_with_episode_code() {
+        let normalized = normalize_episode_title(&"Example Show".into(), &"Example Show".into(), 1, 2);
+        assert_eq!(normalized.as_ref(), "S01E02");
+    }
+
+    #[test]
+    fn normalize_episode_title_keeps_existing_episode_code() {
+        let normalized = normalize_episode_title(&"S01E02".into(), &"Example Show".into(), 1, 2);
+        assert_eq!(normalized.as_ref(), "S01E02");
     }
 }

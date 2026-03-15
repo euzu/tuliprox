@@ -5,9 +5,9 @@ use crate::{
         api_utils,
         api_utils::{
             create_api_proxy_user, create_catchup_session_key, create_session_fingerprint, empty_json_response_as_array,
-            empty_json_response_as_object, force_provider_stream_response, get_catchup_session_ttl_secs, get_user_target,
-            get_user_target_by_credentials, internal_server_error, is_seek_request, local_stream_response, redirect,
-            redirect_response, resource_response, separate_number_and_remainder, stream_response,
+            empty_json_response_as_object, force_provider_stream_response, get_session_reservation_ttl_secs,
+            get_user_target, get_user_target_by_credentials, internal_server_error, is_seek_request,
+            local_stream_response, redirect, redirect_response, resource_response, separate_number_and_remainder, stream_response,
             try_option_bad_request, try_result_bad_request, try_result_not_found, try_unwrap_body, RedirectParams,
         },
         endpoints::{
@@ -337,11 +337,7 @@ async fn xtream_player_api_stream(
                     req_headers,
                     input: &input,
                     user: &user,
-                    session_reservation_ttl_secs: if item_type == PlaylistItemType::Catchup {
-                        get_catchup_session_ttl_secs(app_state)
-                    } else {
-                        0
-                    },
+                    session_reservation_ttl_secs: get_session_reservation_ttl_secs(app_state, item_type),
                 },
             )
             .await
