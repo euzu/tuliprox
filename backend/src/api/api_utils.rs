@@ -880,11 +880,13 @@ pub async fn force_provider_stream_response(
     if stream_details.has_stream() || deferred_grace_hold_stream {
         let provider_response =
             stream_details.stream_info.as_ref().map(|(h, sc, url, cvt)| (h.clone(), *sc, url.clone(), *cvt));
-        if let Some(provider_name) = stream_details.provider_name.as_ref() {
-            app_state
-                .active_provider
-                .refresh_provider_reservation(provider_name, &user_session.token, ctx.session_reservation_ttl_secs)
-                .await;
+        if ctx.session_reservation_ttl_secs > 0 {
+            if let Some(provider_name) = stream_details.provider_name.as_ref() {
+                app_state
+                    .active_provider
+                    .refresh_provider_reservation(provider_name, &user_session.token, ctx.session_reservation_ttl_secs)
+                    .await;
+            }
         }
         app_state
             .active_users
@@ -1217,7 +1219,7 @@ fn get_stream_throttle(app_state: &Arc<AppState>) -> u64 {
         .unwrap_or_default()
 }
 
-pub(crate) fn get_hls_session_ttl_secs(app_state: &Arc<AppState>) -> u64 {
+fn get_stream_config_u64(app_state: &Arc<AppState>, selector: impl FnOnce(&crate::model::StreamConfig) -> u64) -> u64 {
     app_state
         .app_config
         .config
@@ -1225,21 +1227,18 @@ pub(crate) fn get_hls_session_ttl_secs(app_state: &Arc<AppState>) -> u64 {
         .reverse_proxy
         .as_ref()
         .and_then(|reverse_proxy| reverse_proxy.stream.as_ref())
-        .map_or(0, |stream| stream.hls_session_ttl_secs)
+        .map_or(0, selector)
+}
+
+pub(crate) fn get_hls_session_ttl_secs(app_state: &Arc<AppState>) -> u64 {
+    get_stream_config_u64(app_state, |stream| stream.hls_session_ttl_secs)
 }
 
 pub(crate) fn get_catchup_session_ttl_secs(app_state: &Arc<AppState>) -> u64 {
-    app_state
-        .app_config
-        .config
-        .load()
-        .reverse_proxy
-        .as_ref()
-        .and_then(|reverse_proxy| reverse_proxy.stream.as_ref())
-        .map_or(0, |stream| stream.catchup_session_ttl_secs)
+    get_stream_config_u64(app_state, |stream| stream.catchup_session_ttl_secs)
 }
 
-fn get_session_reservation_ttl_secs(app_state: &Arc<AppState>, item_type: PlaylistItemType) -> u64 {
+pub(crate) fn get_session_reservation_ttl_secs(app_state: &Arc<AppState>, item_type: PlaylistItemType) -> u64 {
     match item_type {
         PlaylistItemType::LiveHls => get_hls_session_ttl_secs(app_state),
         PlaylistItemType::Catchup => get_catchup_session_ttl_secs(app_state),
@@ -1737,8 +1736,8 @@ pub fn create_session_fingerprint(fingerprint: &Fingerprint, username: &str, vir
     concat_string!(&fingerprint.key, "|", username, "|", &virtual_id.to_string())
 }
 
-pub fn create_catchup_session_key(username: &str, virtual_id: u32) -> String {
-    concat_string!("catchup|", username, "|", &virtual_id.to_string(), "|session")
+pub fn create_catchup_session_key(fingerprint: &Fingerprint, username: &str, virtual_id: u32) -> String {
+    concat_string!("catchup|", &fingerprint.key, "|", username, "|", &virtual_id.to_string(), "|session")
 }
 
 pub fn stream_json_array<P>(iter: Box<dyn Iterator<Item = P> + Send>) -> axum::response::Response

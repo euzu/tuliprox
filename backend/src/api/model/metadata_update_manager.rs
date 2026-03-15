@@ -32,7 +32,7 @@ use std::{
     io,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering},
         Arc, OnceLock, Weak,
     },
     time::{Duration, Instant},
@@ -568,6 +568,10 @@ pub struct MetadataUpdateManager {
     resolve_enqueue_suppressions: Arc<DashMap<ScopedTaskKey, i64>>,
     /// Tracks inputs for which producer-side retry suppression state was already loaded from disk.
     enqueue_state_loaded_inputs: Arc<DashMap<Arc<str>, ()>>,
+    /// Backoff for failed producer-side retry-state loads to avoid repeated blocking disk reads.
+    enqueue_state_load_retry_at_ts: Arc<DashMap<Arc<str>, i64>>,
+    /// Periodic prune marker for stale producer-side resolve suppression entries.
+    last_resolve_enqueue_suppression_prune_at_ts: AtomicI64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -590,6 +594,8 @@ impl MetadataUpdateManager {
             next_worker_id: AtomicU64::new(1),
             resolve_enqueue_suppressions: Arc::new(DashMap::new()),
             enqueue_state_loaded_inputs: Arc::new(DashMap::new()),
+            enqueue_state_load_retry_at_ts: Arc::new(DashMap::new()),
+            last_resolve_enqueue_suppression_prune_at_ts: AtomicI64::new(0),
         }
     }
 
@@ -601,6 +607,7 @@ impl MetadataUpdateManager {
         self.cancel_token.load_full().cancel();
         self.resolve_enqueue_suppressions.clear();
         self.enqueue_state_loaded_inputs.clear();
+        self.enqueue_state_load_retry_at_ts.clear();
     }
 
     /// Returns true once shutdown has been requested.
@@ -621,6 +628,7 @@ impl MetadataUpdateManager {
             self.workers.clear();
             self.resolve_enqueue_suppressions.clear();
             self.enqueue_state_loaded_inputs.clear();
+            self.enqueue_state_load_retry_at_ts.clear();
             old_token
         };
         old_token.cancel();
@@ -641,7 +649,26 @@ impl MetadataUpdateManager {
         ScopedTaskKey::new(Arc::from(input_name), TaskKey::from_task(task))
     }
 
+    fn has_pending_task(&self, input_name: &str, task: &UpdateTask) -> bool {
+        self.workers
+            .get(input_name)
+            .is_some_and(|ctx| !ctx.sender.is_closed() && ctx.pending_tasks.contains_key(&TaskKey::from_task(task)))
+    }
+
+    fn prune_resolve_enqueue_suppressions(&self, now_ts: i64) {
+        let last_pruned_at = self.last_resolve_enqueue_suppression_prune_at_ts.load(Ordering::Relaxed);
+        if last_pruned_at != 0 && now_ts.saturating_sub(last_pruned_at) < RETRY_STATE_PRUNE_INTERVAL_SECS {
+            return;
+        }
+        self.last_resolve_enqueue_suppression_prune_at_ts.store(now_ts, Ordering::Relaxed);
+        self.resolve_enqueue_suppressions
+            .retain(|_, suppressed_until_ts| *suppressed_until_ts > now_ts);
+    }
+
     fn should_skip_enqueue_cached(&self, input_name: &str, task: &UpdateTask) -> bool {
+        let now_ts = chrono::Utc::now().timestamp();
+        self.prune_resolve_enqueue_suppressions(now_ts);
+
         if self.is_redundant_with_pending_task(input_name, task) {
             return true;
         }
@@ -651,11 +678,13 @@ impl MetadataUpdateManager {
         }
 
         let scoped_key = Self::scoped_task_key(input_name, task);
-        let now_ts = chrono::Utc::now().timestamp();
         if let Some(entry) = self.resolve_enqueue_suppressions.get(&scoped_key) {
             let suppressed_until_ts = *entry;
             drop(entry);
             if now_ts < suppressed_until_ts {
+                if self.has_pending_task(input_name, task) {
+                    return false;
+                }
                 debug!(
                     "[Task] Skipping enqueue (resolve suppression) for input {}: {} (until_ts={}, remaining={}s)",
                     input_name,
@@ -675,17 +704,28 @@ impl MetadataUpdateManager {
         if self.enqueue_state_loaded_inputs.contains_key(input_name) {
             return;
         }
+        let now_ts = chrono::Utc::now().timestamp();
+        if self
+            .enqueue_state_load_retry_at_ts
+            .get(input_name)
+            .is_some_and(|retry_at_ts| now_ts < *retry_at_ts)
+        {
+            return;
+        }
 
         let app_state_weak = {
             let guard = self.app_state.lock().await;
             guard.clone()
         };
+        let runtime_settings = MetadataUpdateRuntimeSettings::from_app_state(app_state_weak.as_ref());
         let Some(app_state) = app_state_weak.and_then(|weak| Weak::upgrade(&weak)) else {
             return;
         };
+        let retry_at_ts = now_ts.saturating_add(runtime_settings.metadata_retry_load_retry_delay_secs);
 
         let storage_dir = app_state.app_config.config.load().storage_dir.clone();
         let Ok(storage_path) = get_input_storage_path(input_name, &storage_dir).await else {
+            self.enqueue_state_load_retry_at_ts.insert(input_name.clone(), retry_at_ts);
             return;
         };
         let retry_path = storage_path.join(METADATA_RETRY_STATE_FILE);
@@ -695,10 +735,10 @@ impl MetadataUpdateManager {
             .ok()
             .and_then(Result::ok);
         let Some(states) = loaded else {
+            self.enqueue_state_load_retry_at_ts.insert(input_name.clone(), retry_at_ts);
             return;
         };
 
-        let now_ts = chrono::Utc::now().timestamp();
         for (task_key, state) in states {
             if let Some(resolve_state) = state.resolve.as_ref() {
                 let suppressed_until_ts = resolve_state
@@ -711,6 +751,7 @@ impl MetadataUpdateManager {
             }
         }
 
+        self.enqueue_state_load_retry_at_ts.remove(input_name);
         self.enqueue_state_loaded_inputs.insert(input_name.clone(), ());
     }
 

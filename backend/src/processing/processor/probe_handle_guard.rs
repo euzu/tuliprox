@@ -30,9 +30,11 @@ impl Drop for ProbeHandleGuard {
             return;
         };
         let manager = Arc::clone(&self.manager);
-        tokio::spawn(async move {
-            manager.release_handle(&handle).await;
-        });
+        if let Ok(runtime_handle) = tokio::runtime::Handle::try_current() {
+            runtime_handle.spawn(async move {
+                manager.release_handle(&handle).await;
+            });
+        }
     }
 }
 

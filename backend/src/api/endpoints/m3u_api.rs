@@ -144,7 +144,7 @@ async fn m3u_api_stream(
         "ID chain for m3u endpoint: request_stream_id={} -> action_stream_id={action_stream_id} -> req_virtual_id={req_virtual_id} -> virtual_id={virtual_id}",
         stream_req.stream_id);
     let session_key = if pli.item_type == PlaylistItemType::Catchup {
-        create_catchup_session_key(&user.username, virtual_id)
+        create_catchup_session_key(fingerprint, &user.username, virtual_id)
     } else {
         create_session_fingerprint(fingerprint, &user.username, virtual_id)
     };

@@ -128,7 +128,7 @@ impl ActiveUserManager {
             fps: String::from("30"),
             video_codec: String::from("H.264"),
             audio_codec: String::from("AAC"),
-            audio_channels: String::from("2.0"),
+            audio_channels: String::from("Stereo"),
         }
     }
 
@@ -382,14 +382,18 @@ impl ActiveUserManager {
         let stream_info = {
             let mut user_connections = self.connections.write().await;
 
-            // needs to be registered through socket connection to avoid race time conditions through short disconnect
-            if !user_connections.key_by_addr.contains_key(&fingerprint.addr) {
-                return None;
-            }
-
+            let now = current_time_secs();
             if let Some(registration) = user_connections.key_by_addr.get_mut(&fingerprint.addr) {
                 registration.username = username.to_string();
-                registration.ts = current_time_secs();
+                registration.ts = now;
+            } else {
+                user_connections.key_by_addr.insert(
+                    fingerprint.addr,
+                    SocketRegistration {
+                        username: username.to_string(),
+                        ts: now,
+                    },
+                );
             }
 
             let connection_data = user_connections
@@ -647,7 +651,12 @@ impl ActiveUserManager {
             let mut connections = self.connections.write().await;
             let now = current_time_secs();
             connections.kicked.retain(|_, (expires_at, _)| *expires_at > now);
-            if let Some(username) = connections.key_by_addr.get(addr).map(|registration| registration.username.clone()) {
+            if let Some(username) = connections
+                .key_by_addr
+                .get(addr)
+                .map(|registration| registration.username.clone())
+                .filter(|username| !username.is_empty())
+            {
                 let expires_at = now + block_for_secs;
                 connections.kicked.insert(username, (expires_at, virtual_id));
             }
