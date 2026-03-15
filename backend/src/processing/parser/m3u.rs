@@ -38,6 +38,8 @@ fn get_title_group(text: &Arc<str>) -> Arc<str> {
 #[inline]
 fn token_value(stack: &mut String, it: &mut std::str::Chars) -> usize {
     let offset = stack.len();
+    // `any()` intentionally consumes chars from the iterator, advancing it past the opening '"'.
+    // Returns true when a quote is found, so read_value can extract the content until the closing '"'.
     if it.any(|ch| ch == '"') {
         read_value(stack, it);
     }
@@ -342,15 +344,14 @@ mod test {
     fn test_process_header_1() {
         let input = "hello".intern();
         let video_suffixes = Vec::new();
-        let url = "http://hello.de/hello.ts";
+        let url = "http://hello.de/live/user/pass/70001.ts";
         let line = r#"#EXTINF:-1 channel-id="abc-seven" tvg-id="abc-seven" tvg-logo="https://abc.nz/.images/seven.png" tvg-chno="7" group-title="Sydney" , Seven"#;
 
         let pli = process_header(&input, &video_suffixes, line, url.to_string());
         assert_eq!(pli.title, "Seven".intern());
-        // tvg-id is preserved as epg_channel_id, id falls back to url-derived hash
+        // tvg-id is preserved as epg_channel_id, id falls back to numeric url segment
         assert_eq!(pli.epg_channel_id, Some("abc-seven".intern()));
-        assert!(!pli.id.is_empty());
-        assert_ne!(&*pli.id, "abc-seven"); // id should NOT be tvg-id (avoids duplicates)
+        assert_eq!(pli.id, "70001".intern());
         assert_eq!(pli.logo, "https://abc.nz/.images/seven.png".intern());
         assert_eq!(pli.chno, 7);
         assert_eq!(&*pli.group, "Sydney");
@@ -360,14 +361,13 @@ mod test {
     fn test_process_header_2() {
         let input = "hello".intern();
         let video_suffixes = Vec::new();
-        let url = "http://hello.de/hello.ts";
+        let url = "http://hello.de/live/user/pass/70002.ts";
         let line = r#"#EXTINF:-1 channel-id="abc-seven" tvg-id="abc-seven" tvg-logo="https://abc.nz/.images/seven.png" tvg-chno="7" group-title="Sydney", Seven"#;
 
         let pli = process_header(&input, &video_suffixes, line, url.to_string());
         assert_eq!(pli.title, "Seven".intern());
         assert_eq!(pli.epg_channel_id, Some("abc-seven".intern()));
-        assert!(!pli.id.is_empty());
-        assert_ne!(&*pli.id, "abc-seven");
+        assert_eq!(pli.id, "70002".intern());
         assert_eq!(pli.logo, "https://abc.nz/.images/seven.png".intern());
         assert_eq!(pli.chno, 7);
         assert_eq!(&*pli.group, "Sydney");

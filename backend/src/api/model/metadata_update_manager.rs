@@ -1582,6 +1582,8 @@ impl InputWorker {
                         if task_outcome.tmdb_pending {
                             if let Some(source_last_modified) = task_source_last_modified {
                                 self.set_tmdb_source_marker(&current_key, source_last_modified);
+                            } else {
+                                self.clear_tmdb_source_marker(&current_key);
                             }
                         }
                         if should_remove_retry_entry || state_after_success.is_some() {
