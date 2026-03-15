@@ -965,12 +965,7 @@ pub async fn stream_response(
     let virtual_id = stream_channel.virtual_id;
     let item_type = stream_channel.item_type;
 
-    // Grace candidates are intentionally not shared:
-    // they are transient and may be terminated after the grace check.
-    // Keeping them out of the shared-stream lifecycle avoids cross-effects on
-    // concurrently running streams of the same user.
-    let share_stream =
-        is_stream_share_enabled(item_type, target) && connection_permission != UserConnectionPermission::GracePeriod;
+    let share_stream = is_stream_share_enabled(item_type, target);
     let _shared_lock = if share_stream {
         let write_lock = app_state.app_config.file_locks.write_lock_str(stream_url).await;
 
@@ -1072,9 +1067,6 @@ pub async fn stream_response(
         }
 
         let mut is_stream_shared = share_stream;
-        if stream_details.provider_grace_active {
-            is_stream_shared = false;
-        }
         if let Some((_header, _status_code, _url, Some(_custom_video))) = stream_details.stream_info.as_ref() {
             if stream_details.stream.is_some() {
                 is_stream_shared = false;

@@ -387,20 +387,9 @@ impl ActiveProviderManager {
                 if !self.providers.is_provider_for_input(prov_name, input_name) {
                     continue;
                 }
-                for ((prio, Reverse(created_at), alloc_id), owner) in tree.iter().rev() {
+                if let Some(((prio, Reverse(created_at), alloc_id), owner)) = tree.iter().next_back() {
                     if *prio <= new_priority {
-                        break; // No more victims on this alias
-                    }
-                    if let PriorityOwner::Shared(shared_id) = owner {
-                        let evictable = connections
-                            .shared
-                            .shared_by_allocation_id
-                            .get(shared_id)
-                            .and_then(|key| connections.shared.by_key.get(key))
-                            .is_some_and(|s| s.connections.len() == 1);
-                        if !evictable {
-                            continue;
-                        }
+                        continue;
                     }
                     let is_better = match found {
                         None => true,
@@ -411,7 +400,6 @@ impl ActiveProviderManager {
                     if is_better {
                         found = Some((*owner, *alloc_id, *prio, *created_at));
                     }
-                    break; // Only best candidate per alias
                 }
             }
             found
@@ -434,13 +422,12 @@ impl ActiveProviderManager {
                         return false;
                     };
 
-                    let still_single = connections.shared.by_key.get(&key).is_some_and(|shared| {
+                    let still_match = connections.shared.by_key.get(&key).is_some_and(|shared| {
                         shared.allocation_id == alloc_id
-                            && shared.connections.len() == 1
                             && shared.priority == v_prio
                             && shared.created_at == victim_created_at
                     });
-                    if !still_single {
+                    if !still_match {
                         return false;
                     }
 
@@ -543,21 +530,10 @@ impl ActiveProviderManager {
                 if !self.providers.is_provider_for_input(prov_name, input_name) {
                     continue;
                 }
-                // Iterate from highest priority value (lowest importance) = best victim
-                for ((prio, Reverse(created_at), alloc_id), owner) in tree.iter().rev() {
+                // Highest priority value (lowest importance) is the best victim candidate.
+                if let Some(((prio, Reverse(created_at), alloc_id), owner)) = tree.iter().next_back() {
                     if *prio <= new_priority {
-                        break; // No more victims on this alias
-                    }
-                    if let PriorityOwner::Shared(shared_id) = owner {
-                        let evictable = connections
-                            .shared
-                            .shared_by_allocation_id
-                            .get(shared_id)
-                            .and_then(|key| connections.shared.by_key.get(key))
-                            .is_some_and(|s| s.connections.len() == 1);
-                        if !evictable {
-                            continue;
-                        }
+                        continue;
                     }
                     let is_better = match victim {
                         None => true,
@@ -568,7 +544,6 @@ impl ActiveProviderManager {
                     if is_better {
                         victim = Some((*owner, *alloc_id, *prio, *created_at));
                     }
-                    break; // Only need the best candidate per alias
                 }
             }
         }
@@ -583,15 +558,13 @@ impl ActiveProviderManager {
                         let mut connections = self.connections.write().await;
                         let key = connections.shared.shared_by_allocation_id.get(&shared_id).cloned()?;
 
-                        // Revalidate the selected shared victim under WRITE lock to avoid evicting
-                        // a connection that gained additional listeners concurrently.
-                        let still_single = connections.shared.by_key.get(&key).is_some_and(|shared| {
+                        // Revalidate the selected shared victim under WRITE lock.
+                        let still_match = connections.shared.by_key.get(&key).is_some_and(|shared| {
                             shared.allocation_id == alloc_id
-                                && shared.connections.len() == 1
                                 && shared.priority == v_prio
                                 && shared.created_at == victim_created_at
                         });
-                        if !still_single {
+                        if !still_match {
                             None
                         } else if let Some(shared) = connections.shared.by_key.remove(&key) {
                             connections.shared.shared_by_allocation_id.remove(&shared.allocation_id);
@@ -1571,6 +1544,50 @@ mod tests {
         assert!(shared_token.is_cancelled(), "shared stream should be cancelled when preempted");
         assert!(!manager.is_over_limit(&input_name).await, "provider should not remain over limit after preemption");
 
+        manager.release_connection(&addr_a).await;
+        manager.release_connection(&addr_b).await;
+    }
+
+    #[tokio::test]
+    async fn test_higher_priority_user_preempts_shared_stream_with_multiple_subscribers() {
+        let app_cfg = create_test_app_config_single_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+
+        let input_name = "provider_1".intern();
+        let stream_key = "http://example.com/shared/live/multi";
+        let addr_a: SocketAddr = "127.0.0.1:48601".parse().unwrap();
+        let addr_b: SocketAddr = "127.0.0.1:48602".parse().unwrap();
+        let addr_high: SocketAddr = "127.0.0.1:48603".parse().unwrap();
+
+        let shared_alloc = manager
+            .acquire_connection(&input_name, &addr_a, 5)
+            .await
+            .expect("low-priority shared stream should get initial connection");
+        let shared_token = shared_alloc.cancel_token.clone().expect("shared allocation should have cancel token");
+        manager.make_shared_connection(&addr_a, stream_key).await;
+
+        manager
+            .add_shared_connection(&addr_b, stream_key, 6)
+            .await
+            .expect("second subscriber should join shared stream");
+
+        let high_alloc = manager
+            .acquire_connection(&input_name, &addr_high, 0)
+            .await
+            .expect("higher-priority user should preempt lower-priority shared stream");
+        assert_eq!(high_alloc.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
+        assert!(shared_token.is_cancelled(), "shared stream should be cancelled when preempted");
+
+        {
+            let connections = manager.connections.read().await;
+            assert!(
+                !connections.shared.by_key.contains_key(stream_key),
+                "preempted shared stream must be removed even with multiple subscribers"
+            );
+        }
+
+        manager.release_connection(&addr_high).await;
         manager.release_connection(&addr_a).await;
         manager.release_connection(&addr_b).await;
     }
