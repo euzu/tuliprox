@@ -1082,14 +1082,21 @@ impl MetadataUpdateManager {
         // Merge logic
         match (existing, task) {
             (
-                UpdateTask::ResolveVod { reason: r1, delay: d1, .. },
-                UpdateTask::ResolveVod { reason: r2, delay: d2, .. },
+                UpdateTask::ResolveVod { reason: r1, delay: d1, source_last_modified: lm1, .. },
+                UpdateTask::ResolveVod { reason: r2, delay: d2, source_last_modified: lm2, .. },
             ) => {
                 let previous_reason = *r1;
                 let previous_delay = *d1;
+                let previous_last_modified = *lm1;
                 *r1 |= r2;
                 *d1 = min(*d1, d2);
-                changed = *r1 != previous_reason || *d1 != previous_delay;
+                *lm1 = match (*lm1, lm2) {
+                    (Some(left), Some(right)) => Some(left.max(right)),
+                    (None, some @ Some(_)) => some,
+                    (some @ Some(_), None) => some,
+                    (None, None) => None,
+                };
+                changed = *r1 != previous_reason || *d1 != previous_delay || *lm1 != previous_last_modified;
             }
             (
                 UpdateTask::ResolveSeries { reason: r1, delay: d1, source_last_modified: lm1, .. },
@@ -2477,21 +2484,28 @@ impl InputWorker {
     #[inline]
     fn task_source_last_modified(task: &UpdateTask) -> Option<u64> {
         match task {
-            UpdateTask::ResolveSeries { source_last_modified, .. } => *source_last_modified,
+            UpdateTask::ResolveVod { source_last_modified, .. } | UpdateTask::ResolveSeries { source_last_modified, .. } => {
+                *source_last_modified
+            }
             _ => None,
         }
     }
 
     fn strip_tmdb_reasons(task: &UpdateTask) -> Option<UpdateTask> {
         match task {
-            UpdateTask::ResolveVod { id, reason, delay } => {
+            UpdateTask::ResolveVod { id, reason, delay, source_last_modified } => {
                 let mut next_reason = *reason;
                 next_reason.unset(ResolveReason::Tmdb);
                 next_reason.unset(ResolveReason::Date);
                 if next_reason.is_empty() {
                     None
                 } else {
-                    Some(UpdateTask::ResolveVod { id: id.clone(), reason: next_reason, delay: *delay })
+                    Some(UpdateTask::ResolveVod {
+                        id: id.clone(),
+                        reason: next_reason,
+                        delay: *delay,
+                        source_last_modified: *source_last_modified,
+                    })
                 }
             }
             UpdateTask::ResolveSeries { id, reason, delay, source_last_modified } => {
@@ -3576,6 +3590,7 @@ mod tests {
                             id: ProviderIdType::Id(id),
                             reason: ResolveReasonSet::default(),
                             delay: 0,
+                            source_last_modified: None,
                         },
                     )
                     .await;
@@ -3601,6 +3616,7 @@ mod tests {
             id: ProviderIdType::Id(42),
             reason: ResolveReasonSet::from_variants(&[ResolveReason::Info]),
             delay: 1,
+            source_last_modified: None,
         };
         let scoped_key = ScopedTaskKey::new(Arc::from(input_name), TaskKey::from_task(&task));
         manager
@@ -3660,6 +3676,49 @@ mod tests {
         }
     }
 
+    #[test]
+    fn strip_tmdb_reasons_for_enqueue_skips_unchanged_vod_tmdb_only_task() {
+        let manager = MetadataUpdateManager::new(CancellationToken::new());
+        let input_name = "input_vod_tmdb_marker";
+        let task = UpdateTask::ResolveVod {
+            id: ProviderIdType::Id(42),
+            reason: ResolveReasonSet::from_variants(&[ResolveReason::Tmdb, ResolveReason::Date]),
+            delay: 1,
+            source_last_modified: Some(777),
+        };
+        let scoped_key = ScopedTaskKey::new(Arc::from(input_name), TaskKey::from_task(&task));
+        manager.tmdb_source_markers.insert(scoped_key, 777);
+
+        assert!(manager.strip_tmdb_reasons_for_enqueue(input_name, task).is_none());
+    }
+
+    #[test]
+    fn strip_tmdb_reasons_for_enqueue_keeps_non_tmdb_reasons_for_unchanged_vod_source() {
+        let manager = MetadataUpdateManager::new(CancellationToken::new());
+        let input_name = "input_vod_tmdb_probe";
+        let task = UpdateTask::ResolveVod {
+            id: ProviderIdType::Id(42),
+            reason: ResolveReasonSet::from_variants(&[ResolveReason::Tmdb, ResolveReason::Probe]),
+            delay: 1,
+            source_last_modified: Some(777),
+        };
+        let scoped_key = ScopedTaskKey::new(Arc::from(input_name), TaskKey::from_task(&task));
+        manager.tmdb_source_markers.insert(scoped_key, 777);
+
+        let prepared = manager
+            .strip_tmdb_reasons_for_enqueue(input_name, task)
+            .expect("probe reason should remain");
+        match prepared {
+            UpdateTask::ResolveVod { reason, source_last_modified, .. } => {
+                assert_eq!(source_last_modified, Some(777));
+                assert!(!reason.contains(ResolveReason::Tmdb));
+                assert!(!reason.contains(ResolveReason::Date));
+                assert!(reason.contains(ResolveReason::Probe));
+            }
+            other => panic!("unexpected task type after enqueue strip: {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn submit_task_merges_existing_task_and_increments_generation() {
         let (tx, mut rx) = mpsc::channel::<TaskKey>(8);
@@ -3670,6 +3729,7 @@ mod tests {
             id: ProviderIdType::Id(42),
             reason: ResolveReasonSet::from_variants(&[ResolveReason::Info]),
             delay: 10,
+            source_last_modified: None,
         };
         let queue_size = MetadataUpdateRuntimeSettings::default().max_queue_size;
         MetadataUpdateManager::submit_task(
@@ -3686,6 +3746,7 @@ mod tests {
             id: ProviderIdType::Id(42),
             reason: ResolveReasonSet::from_variants(&[ResolveReason::Probe]),
             delay: 2,
+            source_last_modified: None,
         };
         MetadataUpdateManager::submit_task(
             tx,
@@ -3729,6 +3790,7 @@ mod tests {
             id: ProviderIdType::Id(42),
             reason: ResolveReasonSet::from_variants(&[ResolveReason::Tmdb]),
             delay: 10,
+            source_last_modified: None,
         };
         MetadataUpdateManager::submit_task(
             tx.clone(),
@@ -3744,6 +3806,7 @@ mod tests {
             id: ProviderIdType::Id(42),
             reason: ResolveReasonSet::from_variants(&[ResolveReason::Tmdb]),
             delay: 10,
+            source_last_modified: None,
         };
         MetadataUpdateManager::submit_task(
             tx,
@@ -3845,6 +3908,7 @@ mod tests {
             id: ProviderIdType::Id(42),
             reason: ResolveReasonSet::from_variants(&[ResolveReason::Info]),
             delay: 10,
+            source_last_modified: None,
         };
         pending_tasks.insert(key.clone(), PendingTask::new(existing_task));
 
@@ -3852,6 +3916,7 @@ mod tests {
             id: ProviderIdType::Id(42),
             reason: ResolveReasonSet::from_variants(&[ResolveReason::Probe]),
             delay: 2,
+            source_last_modified: None,
         };
 
         let result = MetadataUpdateManager::submit_task(
@@ -3882,6 +3947,7 @@ mod tests {
                 id: ProviderIdType::Id(7),
                 reason: ResolveReasonSet::from_variants(&[ResolveReason::Info]),
                 delay: 0,
+                source_last_modified: None,
             }),
         );
         if let Some(entry) = pending_tasks.get(&key) {
@@ -3906,6 +3972,7 @@ mod tests {
             id: ProviderIdType::Id(9),
             reason: ResolveReasonSet::from_variants(&[ResolveReason::Info]),
             delay: 0,
+            source_last_modified: None,
         };
 
         pending_tasks.insert(key.clone(), PendingTask::new(task.clone()));
@@ -3938,6 +4005,7 @@ mod tests {
             id: ProviderIdType::Id(10),
             reason: ResolveReasonSet::from_variants(&[ResolveReason::Info]),
             delay: 0,
+            source_last_modified: None,
         };
         let mut worker = create_test_worker("input_c", tx, rx, pending_tasks, pending_task_count);
         let runtime_settings = MetadataUpdateRuntimeSettings::default();
@@ -3970,6 +4038,7 @@ mod tests {
             id: ProviderIdType::Id(11),
             reason: ResolveReasonSet::from_variants(&[ResolveReason::Info]),
             delay: 0,
+            source_last_modified: None,
         };
 
         pending_tasks.insert(key.clone(), PendingTask::new(task.clone()));
@@ -4042,6 +4111,7 @@ mod tests {
             id: ProviderIdType::Id(100),
             reason: ResolveReasonSet::from_variants(&[ResolveReason::Tmdb, ResolveReason::Date]),
             delay: 5,
+            source_last_modified: None,
         };
 
         assert!(InputWorker::strip_tmdb_reasons(&task).is_none());
@@ -4160,6 +4230,7 @@ mod tests {
             id: ProviderIdType::Id(7),
             reason: ResolveReasonSet::from_variants(&[ResolveReason::Probe]),
             delay: 0,
+            source_last_modified: None,
         };
         assert_eq!(InputWorker::retry_domain_for_task(&task), RetryDomain::Probe);
     }
@@ -4207,6 +4278,7 @@ mod tests {
             id: ProviderIdType::Id(77),
             reason: ResolveReasonSet::from_variants(&[ResolveReason::Probe]),
             delay: 0,
+            source_last_modified: None,
         };
         pending_tasks.insert(key.clone(), PendingTask::new(task));
 

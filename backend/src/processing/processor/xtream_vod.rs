@@ -443,11 +443,19 @@ async fn queue_background_vod_info(
         let reasons = check_resolve_reasons(resolve_options, do_probe, resolve_tmdb_enabled, pli);
 
         if !reasons.is_empty() {
-            let task =
-                UpdateTask::ResolveVod { id: provider_id.clone(), reason: reasons, delay: resolve_options.resolve_delay };
-            if mgr.should_skip_enqueue(input.name.clone(), &task).await {
+            let task = UpdateTask::ResolveVod {
+                id: provider_id.clone(),
+                reason: reasons,
+                delay: resolve_options.resolve_delay,
+                source_last_modified: pli
+                    .header
+                    .additional_properties
+                    .as_ref()
+                    .and_then(StreamProperties::get_last_modified),
+            };
+            let Some(task) = mgr.prepare_task_for_enqueue(input.name.clone(), task).await else {
                 continue;
-            }
+            };
 
             if log_enabled!(Level::Debug) {
                 let has_details = pli.has_details();
@@ -464,9 +472,13 @@ async fn queue_background_vod_info(
                         }
                         _ => (false, false, false, false),
                     };
+                let enqueued_reasons = match &task {
+                    UpdateTask::ResolveVod { reason, .. } => *reason,
+                    _ => reasons,
+                };
                 debug!(
                     "[Task] Creating ResolveVod task for input {}: id={}, reasons={}, has_details={}, has_tmdb={}, has_date={}, has_video_info={}, has_audio_info={}, title=\"{}\"",
-                    input.name, provider_id, reasons, has_details, has_tmdb, has_date, has_video, has_audio, pli.header.title
+                    input.name, provider_id, enqueued_reasons, has_details, has_tmdb, has_date, has_video, has_audio, pli.header.title
                 );
             }
             mgr.queue_task_background(input.name.clone(), task);
