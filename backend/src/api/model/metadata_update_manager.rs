@@ -184,11 +184,13 @@ pub enum UpdateTask {
         id: ProviderIdType,
         reason: ResolveReasonSet,
         delay: u16,
+        source_last_modified: Option<u64>,
     },
     ResolveSeries {
         id: ProviderIdType,
         reason: ResolveReasonSet,
         delay: u16,
+        source_last_modified: Option<u64>,
     },
     ProbeLive {
         id: ProviderIdType,
@@ -221,10 +223,10 @@ impl UpdateTask {
 impl std::fmt::Display for UpdateTask {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            UpdateTask::ResolveVod { id, reason, delay } => {
+            UpdateTask::ResolveVod { id, reason, delay, .. } => {
                 write!(f, "Resolve VOD {id} (Reason: {reason}, Delay: {delay}sec)")
             }
-            UpdateTask::ResolveSeries { id, reason, delay } => {
+            UpdateTask::ResolveSeries { id, reason, delay, .. } => {
                 write!(f, "Resolve Series {id} (Reason: {reason}, Delay: {delay}sec)")
             }
             UpdateTask::ProbeLive { id, reason, delay, interval } => {
@@ -290,10 +292,19 @@ struct RetryState {
     next_allowed_at_ts: i64,
     cooldown_until_ts: Option<i64>,
     last_error: Option<String>,
+    source_last_modified: Option<u64>,
 }
 
 impl RetryState {
-    fn new() -> Self { Self { attempts: 0, next_allowed_at_ts: 0, cooldown_until_ts: None, last_error: None } }
+    fn new() -> Self {
+        Self {
+            attempts: 0,
+            next_allowed_at_ts: 0,
+            cooldown_until_ts: None,
+            last_error: None,
+            source_last_modified: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -402,6 +413,7 @@ struct RetryStateDbValue {
     next_allowed_at_ts: i64,
     cooldown_until_ts: Option<i64>,
     last_error: Option<String>,
+    source_last_modified: Option<u64>,
 }
 
 impl RetryStateDbValue {
@@ -411,6 +423,7 @@ impl RetryStateDbValue {
             next_allowed_at_ts: state.next_allowed_at_ts,
             cooldown_until_ts: state.cooldown_until_ts,
             last_error: state.last_error.clone(),
+            source_last_modified: state.source_last_modified,
         }
     }
 
@@ -423,6 +436,7 @@ impl RetryStateDbValue {
             next_allowed_at_ts: self.next_allowed_at_ts,
             cooldown_until_ts: self.cooldown_until_ts,
             last_error: self.last_error,
+            source_last_modified: self.source_last_modified,
         })
     }
 }
@@ -566,6 +580,8 @@ pub struct MetadataUpdateManager {
     /// Producer-visible view of active resolve cooldowns so repeated playlist refreshes
     /// can skip creating tasks that are still suppressed anyway.
     resolve_enqueue_suppressions: Arc<DashMap<ScopedTaskKey, i64>>,
+    /// Producer-visible TMDB/date suppression keyed by the last seen series `last_modified`.
+    tmdb_source_markers: Arc<DashMap<ScopedTaskKey, u64>>,
     /// Tracks inputs for which producer-side retry suppression state was already loaded from disk.
     enqueue_state_loaded_inputs: Arc<DashMap<Arc<str>, ()>>,
     /// Backoff for failed producer-side retry-state loads to avoid repeated blocking disk reads.
@@ -593,6 +609,7 @@ impl MetadataUpdateManager {
             cancel_token: ArcSwap::from_pointee(cancel_token),
             next_worker_id: AtomicU64::new(1),
             resolve_enqueue_suppressions: Arc::new(DashMap::new()),
+            tmdb_source_markers: Arc::new(DashMap::new()),
             enqueue_state_loaded_inputs: Arc::new(DashMap::new()),
             enqueue_state_load_retry_at_ts: Arc::new(DashMap::new()),
             last_resolve_enqueue_suppression_prune_at_ts: AtomicI64::new(0),
@@ -606,6 +623,7 @@ impl MetadataUpdateManager {
         self.is_shutdown_flag.store(true, Ordering::Release);
         self.cancel_token.load_full().cancel();
         self.resolve_enqueue_suppressions.clear();
+        self.tmdb_source_markers.clear();
         self.enqueue_state_loaded_inputs.clear();
         self.enqueue_state_load_retry_at_ts.clear();
     }
@@ -627,6 +645,7 @@ impl MetadataUpdateManager {
             let old_token = self.cancel_token.swap(Arc::new(cancel_token));
             self.workers.clear();
             self.resolve_enqueue_suppressions.clear();
+            self.tmdb_source_markers.clear();
             self.enqueue_state_loaded_inputs.clear();
             self.enqueue_state_load_retry_at_ts.clear();
             old_token
@@ -745,9 +764,14 @@ impl MetadataUpdateManager {
                     .cooldown_until_ts
                     .unwrap_or(resolve_state.next_allowed_at_ts);
                 if suppressed_until_ts > now_ts {
-                    let scoped_key = ScopedTaskKey::new(input_name_cloned.clone(), task_key);
+                    let scoped_key = ScopedTaskKey::new(input_name_cloned.clone(), task_key.clone());
                     self.resolve_enqueue_suppressions.insert(scoped_key, suppressed_until_ts);
                 }
+            }
+            if let Some(source_last_modified) = state.tmdb.as_ref().and_then(|tmdb_state| tmdb_state.source_last_modified)
+            {
+                let scoped_key = ScopedTaskKey::new(input_name_cloned.clone(), task_key.clone());
+                self.tmdb_source_markers.insert(scoped_key, source_last_modified);
             }
         }
 
@@ -758,6 +782,31 @@ impl MetadataUpdateManager {
     pub async fn should_skip_enqueue(&self, input_name: Arc<str>, task: &UpdateTask) -> bool {
         self.ensure_enqueue_state_loaded_for_input(&input_name).await;
         self.should_skip_enqueue_cached(input_name.as_ref(), task)
+    }
+
+    fn strip_tmdb_reasons_for_enqueue(&self, input_name: &str, task: UpdateTask) -> Option<UpdateTask> {
+        let scoped_key = Self::scoped_task_key(input_name, &task);
+        let current_last_modified = InputWorker::task_source_last_modified(&task);
+        let previous_last_modified = self.tmdb_source_markers.get(&scoped_key).map(|entry| *entry);
+        if current_last_modified.is_some()
+            && previous_last_modified.is_some()
+            && current_last_modified == previous_last_modified
+            && InputWorker::task_has_tmdb_reason(&task)
+        {
+            InputWorker::strip_tmdb_reasons(&task)
+        } else {
+            Some(task)
+        }
+    }
+
+    pub async fn prepare_task_for_enqueue(&self, input_name: Arc<str>, task: UpdateTask) -> Option<UpdateTask> {
+        self.ensure_enqueue_state_loaded_for_input(&input_name).await;
+        let prepared_task = self.strip_tmdb_reasons_for_enqueue(input_name.as_ref(), task)?;
+        if self.should_skip_enqueue_cached(input_name.as_ref(), &prepared_task) {
+            None
+        } else {
+            Some(prepared_task)
+        }
     }
 
     /// Spawn a background task to queue the update.
@@ -843,6 +892,8 @@ impl MetadataUpdateManager {
                                 scheduled_requeues: Arc::new(DashMap::new()),
                                 recently_completed_no_change: HashMap::new(),
                                 resolve_enqueue_suppressions: Arc::clone(&self.resolve_enqueue_suppressions),
+                                tmdb_source_markers: Arc::clone(&self.tmdb_source_markers),
+                                dirty_retry_state_keys: HashSet::new(),
                             },
                         ));
 
@@ -1033,16 +1084,29 @@ impl MetadataUpdateManager {
             (
                 UpdateTask::ResolveVod { reason: r1, delay: d1, .. },
                 UpdateTask::ResolveVod { reason: r2, delay: d2, .. },
-            )
-            | (
-                UpdateTask::ResolveSeries { reason: r1, delay: d1, .. },
-                UpdateTask::ResolveSeries { reason: r2, delay: d2, .. },
             ) => {
                 let previous_reason = *r1;
                 let previous_delay = *d1;
                 *r1 |= r2;
                 *d1 = min(*d1, d2);
                 changed = *r1 != previous_reason || *d1 != previous_delay;
+            }
+            (
+                UpdateTask::ResolveSeries { reason: r1, delay: d1, source_last_modified: lm1, .. },
+                UpdateTask::ResolveSeries { reason: r2, delay: d2, source_last_modified: lm2, .. },
+            ) => {
+                let previous_reason = *r1;
+                let previous_delay = *d1;
+                let previous_last_modified = *lm1;
+                *r1 |= r2;
+                *d1 = min(*d1, d2);
+                *lm1 = match (*lm1, lm2) {
+                    (Some(left), Some(right)) => Some(left.max(right)),
+                    (None, some @ Some(_)) => some,
+                    (some @ Some(_), None) => some,
+                    (None, None) => None,
+                };
+                changed = *r1 != previous_reason || *d1 != previous_delay || *lm1 != previous_last_modified;
             }
             (
                 UpdateTask::ProbeStream { reason: r1, delay: d1, url: url1, item_type: item_type1, .. },
@@ -1146,6 +1210,8 @@ struct InputWorker {
     // Stores the reason set so that tasks with new/different reasons are not wrongly skipped.
     recently_completed_no_change: HashMap<TaskKey, (Instant, ResolveReasonSet)>,
     resolve_enqueue_suppressions: Arc<DashMap<ScopedTaskKey, i64>>,
+    tmdb_source_markers: Arc<DashMap<ScopedTaskKey, u64>>,
+    dirty_retry_state_keys: HashSet<TaskKey>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1275,7 +1341,29 @@ impl InputWorker {
                 let mut clear_tmdb_state = false;
                 if let Some(state_bundle) = self.retry_states.get(&current_key) {
                     if let Some(tmdb_state) = state_bundle.get(RetryDomain::Tmdb) {
-                        if let Some(cooldown_until_ts) = tmdb_state.cooldown_until_ts {
+                        let source_unchanged = tmdb_state.source_last_modified.is_some()
+                            && tmdb_state.source_last_modified == Self::task_source_last_modified(&task_for_execution);
+                        if source_unchanged && Self::task_has_tmdb_reason(&task_for_execution) {
+                            if let Some(stripped_task) = Self::strip_tmdb_reasons(&task_for_execution) {
+                                debug!(
+                                    "[Task] TMDB/date unchanged for input {}: {}, continuing with non-TMDB reasons (last_modified={:?})",
+                                    input_name,
+                                    task_for_execution,
+                                    tmdb_state.source_last_modified
+                                );
+                                task_for_execution = stripped_task;
+                            } else {
+                                debug!(
+                                    "[Metadata-Task] Skipping task (TMDB/date unresolved and source unchanged) for input {}: {} (last_modified={:?})",
+                                    input_name,
+                                    task_for_execution,
+                                    tmdb_state.source_last_modified
+                                );
+                                self.scheduled_requeues.remove(&current_key);
+                                remove_current_task = true;
+                                skip_execution = true;
+                            }
+                        } else if let Some(cooldown_until_ts) = tmdb_state.cooldown_until_ts {
                             if now_ts < cooldown_until_ts {
                                 if let Some(stripped_task) = Self::strip_tmdb_reasons(&task_for_execution) {
                                     debug!(
@@ -1375,6 +1463,9 @@ impl InputWorker {
                     if clear_active_retry_state && active_retry_domain == RetryDomain::Resolve {
                         self.clear_resolve_enqueue_suppression(&current_key);
                     }
+                    if clear_tmdb_state {
+                        self.clear_tmdb_source_marker(&current_key);
+                    }
                     metadata_persist_state = Some(state_after_clear);
                 }
             }
@@ -1421,7 +1512,9 @@ impl InputWorker {
 
                         let active_retry_domain = Self::retry_domain_for_task(&task_for_execution);
                         let task_has_tmdb_reason = Self::task_has_tmdb_reason(&task_for_execution);
+                        let task_source_last_modified = Self::task_source_last_modified(&task_for_execution);
                         let mut should_remove_retry_entry = false;
+                        let mut clear_tmdb_marker = false;
                         let mut state_after_success: Option<TaskRetryState> = None;
 
                         if let Some(state_bundle) = self.retry_states.get_mut(&current_key) {
@@ -1435,6 +1528,7 @@ impl InputWorker {
                                     tmdb_state.cooldown_until_ts = Some(cooldown_until_ts);
                                     tmdb_state.last_error =
                                         Some("TMDB lookup completed without matching result".to_string());
+                                    tmdb_state.source_last_modified = task_source_last_modified;
                                     debug!(
                                         "[Metadata-Task] TMDB resolve produced no match (existing retry state), entering cooldown for input {}: {} (cooldown_until={}, cooldown_duration={}s)",
                                         input_name,
@@ -1444,6 +1538,7 @@ impl InputWorker {
                                     );
                                 } else {
                                     state_bundle.clear_domain(RetryDomain::Tmdb);
+                                    clear_tmdb_marker = true;
                                 }
                             }
 
@@ -1463,6 +1558,7 @@ impl InputWorker {
                                     next_allowed_at_ts: cooldown_until_ts,
                                     cooldown_until_ts: Some(cooldown_until_ts),
                                     last_error: Some("TMDB lookup completed without matching result".to_string()),
+                                    source_last_modified: task_source_last_modified,
                                 }),
                                 updated_at_ts: now_ts.max(1),
                             };
@@ -1475,10 +1571,20 @@ impl InputWorker {
                                 cooldown_until_ts,
                                 runtime_settings.tmdb_cooldown_secs
                             );
+                        } else if task_has_tmdb_reason {
+                            self.clear_tmdb_source_marker(&current_key);
                         }
 
                         if should_remove_retry_entry {
                             self.retry_states.remove(&current_key);
+                        }
+                        if clear_tmdb_marker {
+                            self.clear_tmdb_source_marker(&current_key);
+                        }
+                        if task_outcome.tmdb_pending {
+                            if let Some(source_last_modified) = task_source_last_modified {
+                                self.set_tmdb_source_marker(&current_key, source_last_modified);
+                            }
                         }
                         if should_remove_retry_entry || state_after_success.is_some() {
                             metadata_persist_state = Some(state_after_success);
@@ -1713,6 +1819,7 @@ impl InputWorker {
             }
 
             if let Some(state) = metadata_persist_state {
+                self.dirty_retry_state_keys.insert(current_key.clone());
                 self.persist_metadata_retry_state(&current_key, state.as_ref()).await;
             }
 
@@ -1883,19 +1990,26 @@ impl InputWorker {
         self.metadata_retry_load_retry_at_ts = None;
     }
 
-    async fn persist_metadata_retry_state(&self, key: &TaskKey, state: Option<&TaskRetryState>) {
+    async fn persist_metadata_retry_state(&mut self, key: &TaskKey, state: Option<&TaskRetryState>) {
         let Some(path) = self.metadata_retry_state_path.clone() else {
             return;
         };
+        if !self.dirty_retry_state_keys.contains(key) {
+            return;
+        }
 
-        let key = key.clone();
+        let key_for_persist = key.clone();
+        let key_for_dirty = key.clone();
         let state = state.cloned();
         let input_name = self.input_name.clone();
         let persist_result =
-            spawn_blocking_limited(move || persist_metadata_retry_state_to_disk(&path, &key, state.as_ref())).await;
+            spawn_blocking_limited(move || persist_metadata_retry_state_to_disk(&path, &key_for_persist, state.as_ref()))
+                .await;
 
         match persist_result {
-            Ok(Ok(())) => {}
+            Ok(Ok(())) => {
+                self.dirty_retry_state_keys.remove(&key_for_dirty);
+            }
             Ok(Err(err)) => warn!("Failed to persist metadata retry state for input {input_name}: {err}"),
             Err(err) => warn!("Failed to persist metadata retry state for input {input_name}: {err}"),
         }
@@ -2145,6 +2259,8 @@ impl InputWorker {
         for key in stale_retry_keys {
             if self.retry_states.remove(&key).is_some() {
                 self.clear_resolve_enqueue_suppression(&key);
+                self.clear_tmdb_source_marker(&key);
+                self.dirty_retry_state_keys.insert(key.clone());
                 debug_if_enabled!("Pruned stale metadata retry state for input {}: {:?}", self.input_name, key);
                 self.persist_metadata_retry_state(&key, None).await;
             }
@@ -2317,6 +2433,16 @@ impl InputWorker {
         self.resolve_enqueue_suppressions.remove(&scoped_key);
     }
 
+    fn set_tmdb_source_marker(&self, current_key: &TaskKey, source_last_modified: u64) {
+        let scoped_key = ScopedTaskKey::new(self.input_name.clone(), current_key.clone());
+        self.tmdb_source_markers.insert(scoped_key, source_last_modified);
+    }
+
+    fn clear_tmdb_source_marker(&self, current_key: &TaskKey) {
+        let scoped_key = ScopedTaskKey::new(self.input_name.clone(), current_key.clone());
+        self.tmdb_source_markers.remove(&scoped_key);
+    }
+
     fn sync_resolve_enqueue_suppression_from_retry_state(&self, current_key: &TaskKey, state: &TaskRetryState, now_ts: i64) {
         let Some(resolve_state) = state.resolve.as_ref() else {
             self.clear_resolve_enqueue_suppression(current_key);
@@ -2348,6 +2474,14 @@ impl InputWorker {
         }
     }
 
+    #[inline]
+    fn task_source_last_modified(task: &UpdateTask) -> Option<u64> {
+        match task {
+            UpdateTask::ResolveSeries { source_last_modified, .. } => *source_last_modified,
+            _ => None,
+        }
+    }
+
     fn strip_tmdb_reasons(task: &UpdateTask) -> Option<UpdateTask> {
         match task {
             UpdateTask::ResolveVod { id, reason, delay } => {
@@ -2360,14 +2494,19 @@ impl InputWorker {
                     Some(UpdateTask::ResolveVod { id: id.clone(), reason: next_reason, delay: *delay })
                 }
             }
-            UpdateTask::ResolveSeries { id, reason, delay } => {
+            UpdateTask::ResolveSeries { id, reason, delay, source_last_modified } => {
                 let mut next_reason = *reason;
                 next_reason.unset(ResolveReason::Tmdb);
                 next_reason.unset(ResolveReason::Date);
                 if next_reason.is_empty() {
                     None
                 } else {
-                    Some(UpdateTask::ResolveSeries { id: id.clone(), reason: next_reason, delay: *delay })
+                    Some(UpdateTask::ResolveSeries {
+                        id: id.clone(),
+                        reason: next_reason,
+                        delay: *delay,
+                        source_last_modified: *source_last_modified,
+                    })
                 }
             }
             _ => Some(task.clone()),
@@ -3414,6 +3553,8 @@ mod tests {
             scheduled_requeues: Arc::new(DashMap::new()),
             recently_completed_no_change: HashMap::new(),
             resolve_enqueue_suppressions: Arc::new(DashMap::new()),
+            tmdb_source_markers: Arc::new(DashMap::new()),
+            dirty_retry_state_keys: HashSet::new(),
         }
     }
 
@@ -3474,6 +3615,49 @@ mod tests {
 
         assert!(!manager.should_skip_enqueue_cached(input_name, &task));
         assert!(!manager.resolve_enqueue_suppressions.contains_key(&scoped_key));
+    }
+
+    #[test]
+    fn strip_tmdb_reasons_for_enqueue_skips_unchanged_series_tmdb_only_task() {
+        let manager = MetadataUpdateManager::new(CancellationToken::new());
+        let input_name = "input_tmdb_marker";
+        let task = UpdateTask::ResolveSeries {
+            id: ProviderIdType::Id(42),
+            reason: ResolveReasonSet::from_variants(&[ResolveReason::Tmdb, ResolveReason::Date]),
+            delay: 1,
+            source_last_modified: Some(777),
+        };
+        let scoped_key = ScopedTaskKey::new(Arc::from(input_name), TaskKey::from_task(&task));
+        manager.tmdb_source_markers.insert(scoped_key, 777);
+
+        assert!(manager.strip_tmdb_reasons_for_enqueue(input_name, task).is_none());
+    }
+
+    #[test]
+    fn strip_tmdb_reasons_for_enqueue_keeps_non_tmdb_reasons_for_unchanged_series_source() {
+        let manager = MetadataUpdateManager::new(CancellationToken::new());
+        let input_name = "input_tmdb_probe";
+        let task = UpdateTask::ResolveSeries {
+            id: ProviderIdType::Id(42),
+            reason: ResolveReasonSet::from_variants(&[ResolveReason::Tmdb, ResolveReason::Probe]),
+            delay: 1,
+            source_last_modified: Some(777),
+        };
+        let scoped_key = ScopedTaskKey::new(Arc::from(input_name), TaskKey::from_task(&task));
+        manager.tmdb_source_markers.insert(scoped_key, 777);
+
+        let prepared = manager
+            .strip_tmdb_reasons_for_enqueue(input_name, task)
+            .expect("probe reason should remain");
+        match prepared {
+            UpdateTask::ResolveSeries { reason, source_last_modified, .. } => {
+                assert_eq!(source_last_modified, Some(777));
+                assert!(!reason.contains(ResolveReason::Tmdb));
+                assert!(!reason.contains(ResolveReason::Date));
+                assert!(reason.contains(ResolveReason::Probe));
+            }
+            other => panic!("unexpected task type after enqueue strip: {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -3869,6 +4053,7 @@ mod tests {
             id: ProviderIdType::Id(5),
             reason: ResolveReasonSet::from_variants(&[ResolveReason::Tmdb, ResolveReason::Probe, ResolveReason::Info]),
             delay: 1,
+            source_last_modified: Some(123),
         };
 
         let stripped = InputWorker::strip_tmdb_reasons(&task).expect("task should keep non-tmdb reasons");
@@ -3894,18 +4079,21 @@ mod tests {
                 next_allowed_at_ts: 1_700_043_200,
                 cooldown_until_ts: Some(1_700_043_200),
                 last_error: Some("resolve exhausted".to_string()),
+                source_last_modified: None,
             }),
             probe: Some(RetryState {
                 attempts: 3,
                 next_allowed_at_ts: 1_700_000_000,
                 cooldown_until_ts: Some(1_700_086_400),
                 last_error: Some("probe timeout".to_string()),
+                source_last_modified: None,
             }),
             tmdb: Some(RetryState {
                 attempts: 0,
                 next_allowed_at_ts: 1_700_172_800,
                 cooldown_until_ts: Some(1_700_172_800),
                 last_error: Some("tmdb no match".to_string()),
+                source_last_modified: Some(999),
             }),
             updated_at_ts: 1_700_000_000,
         };
@@ -3925,6 +4113,7 @@ mod tests {
         let loaded_tmdb = loaded_state.tmdb.as_ref().expect("tmdb retry state should be present");
         assert_eq!(loaded_tmdb.cooldown_until_ts, Some(1_700_172_800));
         assert_eq!(loaded_tmdb.last_error.as_deref(), Some("tmdb no match"));
+        assert_eq!(loaded_tmdb.source_last_modified, Some(999));
 
         persist_metadata_retry_state_to_disk(&path, &key, None).expect("state clear should succeed");
         let cleared = load_metadata_retry_states_from_disk(&path).expect("state reload should succeed");
@@ -3981,6 +4170,7 @@ mod tests {
             id: ProviderIdType::Id(11),
             reason: ResolveReasonSet::from_variants(&[ResolveReason::Probe, ResolveReason::Info]),
             delay: 0,
+            source_last_modified: None,
         };
         assert_eq!(InputWorker::retry_domain_for_task(&task), RetryDomain::Resolve);
     }
@@ -4042,6 +4232,7 @@ mod tests {
             id: ProviderIdType::Id(33),
             reason: ResolveReasonSet::from_variants(&[ResolveReason::Info]),
             delay: 0,
+            source_last_modified: None,
         };
         assert!(InputWorker::should_trigger_playlist_update_for_task(&task, true));
         assert!(!InputWorker::should_trigger_playlist_update_for_task(&task, false));

@@ -213,8 +213,13 @@ async fn queue_background_series_info(
                     id: provider_id.clone(),
                     reason: reasons,
                     delay: resolve_options.resolve_delay,
+                    source_last_modified: pli
+                        .header
+                        .additional_properties
+                        .as_ref()
+                        .and_then(StreamProperties::get_last_modified),
                 };
-                if !mgr.should_skip_enqueue(input_name_arc.clone(), &task).await {
+                if let Some(task) = mgr.prepare_task_for_enqueue(input_name_arc.clone(), task).await {
                     if log_enabled!(Level::Debug) {
                         let has_details = pli.has_details();
                         let (has_tmdb, has_date) = match pli.header.additional_properties.as_ref() {
@@ -223,9 +228,13 @@ async fn queue_background_series_info(
                             }
                             _ => (false, false),
                         };
+                        let enqueued_reasons = match &task {
+                            UpdateTask::ResolveSeries { reason, .. } => *reason,
+                            _ => reasons,
+                        };
                         debug!(
                             "[Task] Creating ResolveSeries task for input {}: id={}, reasons={}, has_details={}, has_tmdb={}, has_date={}, title=\"{}\"",
-                            input_name_arc, provider_id, reasons, has_details, has_tmdb, has_date, pli.header.title
+                            input_name_arc, provider_id, enqueued_reasons, has_details, has_tmdb, has_date, pli.header.title
                         );
                     }
                     mgr.queue_task_background(input_name_arc.clone(), task);

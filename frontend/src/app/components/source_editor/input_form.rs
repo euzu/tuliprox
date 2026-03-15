@@ -7,7 +7,7 @@ use crate::{
         },
         ConfigContext,
     },
-    config_field_child, edit_field_bool, edit_field_date, edit_field_number_i16, edit_field_number_u16,
+    config_field_child, edit_field_bool, edit_field_exp_date, edit_field_date, edit_field_number_i16, edit_field_number_u16,
     edit_field_number_u32, edit_field_text, edit_field_text_option, generate_form_reducer, html_if,
     i18n::use_translation,
 };
@@ -766,7 +766,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                  { edit_field_text_option!(input_form_state, translate.t(LABEL_PASSWORD), password, ConfigInputFormAction::Password, true) }
                  { edit_field_number_u16!(input_form_state, translate.t(LABEL_MAX_CONNECTIONS), max_connections, ConfigInputFormAction::MaxConnections) }
                  { edit_field_number_i16!(input_form_state, translate.t(LABEL_PRIORITY), priority, ConfigInputFormAction::Priority) }
-                 { edit_field_date!(input_form_state, translate.t(LABEL_EXP_DATE), exp_date, ConfigInputFormAction::ExpDate) }
+                 { edit_field_exp_date!(input_form_state, translate.t(LABEL_EXP_DATE), exp_date, ConfigInputFormAction::ExpDate, input_form_state.input_type.is_xtream()) }
                  { edit_field_text_option!(input_form_state, translate.t(LABEL_CACHE_DURATION), cache_duration, ConfigInputFormAction::CacheDuration) }
                  { config_field_child!(translate.t(LABEL_FETCH_METHOD), "INPUT_FORM.FETCH_METHOD", {
                    html! {
