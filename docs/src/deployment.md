@@ -97,8 +97,8 @@ The repository ships helper scripts under `bin/`:
 
 `bin/build_fe.sh` is the shared entry point for docs plus frontend assets.
 
-Wasm optimization is always part of the frontend build.
-`bin/build_fe.sh` expects a compatible `wasm-opt` in `PATH`.
+Wasm optimization is handled by Trunk during the build (via `data-wasm-opt` in `index.html`).
+Trunk requires a compatible `wasm-opt` in `PATH`.
 
 Recommended local setup:
 

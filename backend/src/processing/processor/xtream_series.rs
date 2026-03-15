@@ -112,7 +112,7 @@ async fn playlist_resolve_series_info(
     let resolve_tmdb_enabled = fpl.input.has_flag(ConfigInputFlags::ResolveTmdb);
 
     let groups_to_add = if resolve_options.has_flag(ResolveOptionsFlags::Background) && ctx.metadata_manager.is_some() {
-        queue_background_series_info(ctx, fpl, filter, &resolve_options, skip_resolve, resolve_tmdb_enabled).await
+        queue_background_series_info(ctx, fpl, filter, &resolve_options, skip_resolve, resolve_tmdb_enabled)
     } else {
         process_immediate_series_info(ctx, fpl, filter, &resolve_options, skip_resolve, resolve_tmdb_enabled).await
     };
@@ -178,7 +178,7 @@ fn sync_resolved_series_properties(provider_fpl: &mut FetchedPlaylist<'_>, proce
     }
 }
 
-async fn queue_background_series_info(
+fn queue_background_series_info(
     ctx: &PlaylistProcessingContext,
     fpl: &mut FetchedPlaylist<'_>,
     filter: impl Fn(&PlaylistItem) -> bool,
@@ -213,23 +213,26 @@ async fn queue_background_series_info(
                     id: provider_id.clone(),
                     reason: reasons,
                     delay: resolve_options.resolve_delay,
+                    source_last_modified: pli
+                        .header
+                        .additional_properties
+                        .as_ref()
+                        .and_then(StreamProperties::get_last_modified),
                 };
-                if !mgr.should_skip_enqueue(input_name_arc.clone(), &task).await {
-                    if log_enabled!(Level::Debug) {
-                        let has_details = pli.has_details();
-                        let (has_tmdb, has_date) = match pli.header.additional_properties.as_ref() {
-                            Some(StreamProperties::Series(props)) => {
-                                (props.tmdb.is_some(), props.release_date.is_some())
-                            }
-                            _ => (false, false),
-                        };
-                        debug!(
-                            "[Task] Creating ResolveSeries task for input {}: id={}, reasons={}, has_details={}, has_tmdb={}, has_date={}, title=\"{}\"",
-                            input_name_arc, provider_id, reasons, has_details, has_tmdb, has_date, pli.header.title
-                        );
-                    }
-                    mgr.queue_task_background(input_name_arc.clone(), task);
+                if log_enabled!(Level::Debug) {
+                    let has_details = pli.has_details();
+                    let (has_tmdb, has_date) = match pli.header.additional_properties.as_ref() {
+                        Some(StreamProperties::Series(props)) => {
+                            (props.tmdb.is_some(), props.release_date.is_some())
+                        }
+                        _ => (false, false),
+                    };
+                    debug!(
+                        "[Task] Creating ResolveSeries task for input {}: id={}, reasons={}, has_details={}, has_tmdb={}, has_date={}, title=\"{}\"",
+                        input_name_arc, provider_id, reasons, has_details, has_tmdb, has_date, pli.header.title
+                    );
                 }
+                mgr.queue_task_background(input_name_arc.clone(), task);
             }
         }
 

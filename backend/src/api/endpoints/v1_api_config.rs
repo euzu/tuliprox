@@ -9,6 +9,7 @@ use crate::{
     utils::{
         persist_messaging_templates, prepare_sources_batch, prepare_users, read_api_proxy_file,
         request::download_text_content,
+        xtream::{get_xtream_stream_url_base, xtream_login},
     },
 };
 use axum::{
@@ -20,15 +21,15 @@ use log::error;
 use serde_json::json;
 use shared::{
     error::TuliproxError,
-    model::{ApiProxyConfigDto, ConfigDto, SourcesConfigDto},
+    model::{ApiProxyConfigDto, ConfigDto, SourcesConfigDto, XtreamLoginRequest},
     utils::{
         HEADER_CONFIG_API_PROXY_REVISION, HEADER_CONFIG_MAIN_REVISION, HEADER_CONFIG_SOURCES_REVISION, HEADER_IF_MATCH,
     },
 };
+use shared::model::InputFetchMethod;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-
-
 
 fn file_revision_from_bytes(bytes: &[u8]) -> String { blake3::hash(bytes).to_hex().to_string() }
 
@@ -422,10 +423,49 @@ async fn config_batch_content(
         .into_response()
 }
 
+async fn get_xtream_login_info(
+    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+    axum::extract::Json(request): axum::extract::Json<XtreamLoginRequest>,
+) -> impl IntoResponse + Send {
+    if request.url.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": "URL is required"}))).into_response();
+    }
+    if request.username.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": "Username is required"}))).into_response();
+    }
+    if request.password.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": "Password is required"}))).into_response();
+    }
+
+    let base_url = get_xtream_stream_url_base(&request.url, &request.username, &request.password);
+    let input_source = InputSource {
+        name: "xtream_login".into(),
+        url: base_url,
+        provider: None,
+        username: Some(request.username.clone()),
+        password: Some(request.password.clone()),
+        method: InputFetchMethod::GET,
+        headers: HashMap::new(),
+    };
+    let http_client = app_state.http_client.load();
+    match xtream_login(&app_state.app_config, &http_client, &input_source, &request.username).await {
+        Ok(login_info) => axum::Json(login_info.unwrap_or_default()).into_response(),
+        Err(err) => {
+            error!("Failed to get xtream login info: {err}");
+            (
+                StatusCode::BAD_GATEWAY,
+                axum::Json(json!({"error": "Failed to get Xtream login info"})),
+            )
+                .into_response()
+        }
+    }
+}
+
 pub fn v1_api_config_register(router: Router<Arc<AppState>>) -> axum::Router<Arc<AppState>> {
     router
         .route("/config", axum::routing::get(config))
         .route("/config/batchContent/{input_id}", axum::routing::get(config_batch_content))
+        .route("/config/xtream/login-info", axum::routing::post(get_xtream_login_info))
         .route("/config/main", axum::routing::post(save_config_main))
         .route("/config/sources", axum::routing::post(save_config_sources))
         .route("/config/apiproxy", axum::routing::get(get_config_api_proxy_config))

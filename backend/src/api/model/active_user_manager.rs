@@ -322,6 +322,47 @@ impl ActiveUserManager {
         UserConnectionPermission::Allowed
     }
 
+    pub async fn connection_permission_for_session(
+        &self,
+        username: &str,
+        max_connections: u32,
+        session_token: &str,
+    ) -> UserConnectionPermission {
+        if max_connections == 0 {
+            return UserConnectionPermission::Allowed;
+        }
+
+        {
+            let connections = self.connections.read().await;
+            let Some(connection_data) = connections.by_key.get(username) else {
+                return UserConnectionPermission::Allowed;
+            };
+
+            if connection_data
+                .streams
+                .iter()
+                .any(|stream| stream.session_token.as_deref() == Some(session_token))
+            {
+                return UserConnectionPermission::Allowed;
+            }
+        }
+
+        let mut connections = self.connections.write().await;
+        let Some(connection_data) = connections.by_key.get_mut(username) else {
+            return UserConnectionPermission::Allowed;
+        };
+
+        if connection_data
+            .streams
+            .iter()
+            .any(|stream| stream.session_token.as_deref() == Some(session_token))
+        {
+            return UserConnectionPermission::Allowed;
+        }
+
+        self.check_connection_permission(username, connection_data)
+    }
+
     pub async fn active_users_and_connections(&self) -> (usize, usize) {
         let user_connections = self.connections.read().await;
         user_connections
@@ -408,13 +449,13 @@ impl ActiveUserManager {
                 .streams
                 .iter_mut()
                 .find(|stream_info| {
-                    stream_info.addr == fingerprint.addr
-                        && match session_token {
-                            Some(token) => stream_info.session_token.as_deref() == Some(token),
-                            None => stream_info.session_token.is_none(),
-                        }
+                    match session_token {
+                        Some(token) => stream_info.session_token.as_deref() == Some(token),
+                        None => stream_info.addr == fingerprint.addr && stream_info.session_token.is_none(),
+                    }
                 })
                 .map(|stream_info| {
+                    stream_info.addr = fingerprint.addr;
                     stream_info.channel = stream_channel.clone();
                     stream_info.provider = provider.to_string();
                     stream_info.user_agent.clone_from(&user_agent_string);
@@ -776,6 +817,57 @@ mod tests {
 
         assert!(manager.release_stream(&addr).await);
         assert_eq!(manager.user_connections(username).await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_same_session_token_on_new_addr_reuses_logical_connection() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let first_addr: SocketAddr = "127.0.0.1:55021".parse().unwrap();
+        let second_addr: SocketAddr = "127.0.0.1:55022".parse().unwrap();
+        let first = Fingerprint::new("fp-key-1".to_string(), "127.0.0.1".to_string(), first_addr);
+        let second = Fingerprint::new("fp-key-2".to_string(), "127.0.0.1".to_string(), second_addr);
+
+        manager.add_connection(&first_addr).await;
+        manager
+            .update_connection(
+                "user1",
+                1,
+                &first,
+                "provider-a",
+                test_channel(2001),
+                Cow::Borrowed("ua"),
+                Some("tok-hls"),
+            )
+            .await;
+
+        assert_eq!(
+            manager.connection_permission_for_session("user1", 1, "tok-hls").await,
+            UserConnectionPermission::Allowed
+        );
+
+        manager.add_connection(&second_addr).await;
+        manager
+            .update_connection(
+                "user1",
+                1,
+                &second,
+                "provider-a",
+                test_channel(2001),
+                Cow::Borrowed("ua"),
+                Some("tok-hls"),
+            )
+            .await;
+
+        assert_eq!(manager.user_connections("user1").await, 1);
+
+        let streams = manager.active_streams().await;
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0].addr, second_addr);
+        assert_eq!(streams[0].session_token.as_deref(), Some("tok-hls"));
     }
 
     #[tokio::test]

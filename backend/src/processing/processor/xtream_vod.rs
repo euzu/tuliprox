@@ -134,7 +134,7 @@ async fn playlist_resolve_vod_info(
     let resolve_tmdb_enabled = fpl.input.has_flag(ConfigInputFlags::ResolveTmdb);
 
     if resolve_options.has_flag(ResolveOptionsFlags::Background) && ctx.metadata_manager.is_some() {
-        queue_background_vod_info(ctx, fpl, filter, &resolve_options, do_probe, resolve_tmdb_enabled).await;
+        queue_background_vod_info(ctx, fpl, filter, &resolve_options, do_probe, resolve_tmdb_enabled);
     } else {
         process_immediate_vod_info(ctx, fpl, filter, resolve_options, do_probe, resolve_tmdb_enabled).await;
     }
@@ -416,7 +416,7 @@ fn check_resolve_tmdb(
     }
 }
 
-async fn queue_background_vod_info(
+fn queue_background_vod_info(
     ctx: &PlaylistProcessingContext,
     fpl: &mut FetchedPlaylist<'_>,
     filter: impl Fn(&PlaylistItem) -> bool,
@@ -443,12 +443,16 @@ async fn queue_background_vod_info(
         let reasons = check_resolve_reasons(resolve_options, do_probe, resolve_tmdb_enabled, pli);
 
         if !reasons.is_empty() {
-            let task =
-                UpdateTask::ResolveVod { id: provider_id.clone(), reason: reasons, delay: resolve_options.resolve_delay };
-            if mgr.should_skip_enqueue(input.name.clone(), &task).await {
-                continue;
-            }
-
+            let task = UpdateTask::ResolveVod {
+                id: provider_id.clone(),
+                reason: reasons,
+                delay: resolve_options.resolve_delay,
+                source_last_modified: pli
+                    .header
+                    .additional_properties
+                    .as_ref()
+                    .and_then(StreamProperties::get_last_modified),
+            };
             if log_enabled!(Level::Debug) {
                 let has_details = pli.has_details();
                 let (has_tmdb, has_date, has_video, has_audio) =

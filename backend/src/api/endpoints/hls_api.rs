@@ -407,7 +407,14 @@ async fn hls_api_stream(
             return axum::http::StatusCode::BAD_REQUEST.into_response();
         }
 
-        let connection_permission = user.connection_permission(&app_state).await;
+        let connection_permission = if user.max_connections > 0 && app_state.app_config.config.load().user_access_control {
+            app_state
+                .active_users
+                .connection_permission_for_session(&user.username, user.max_connections, &session.token)
+                .await
+        } else {
+            UserConnectionPermission::Allowed
+        };
         if connection_permission == UserConnectionPermission::Exhausted {
             return create_custom_video_stream_response(
                 &app_state,

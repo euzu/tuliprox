@@ -1,10 +1,36 @@
-use crate::utils::{
-    arc_str_option_serde, arc_str_serde, deserialize_as_string_array, deserialize_json_as_opt_string,
-    deserialize_number_from_string, deserialize_number_from_string_or_zero, serialize_json_as_opt_string,
+use crate::{
+    model::ProxyUserStatus,
+    utils::{
+        arc_str_option_serde, arc_str_serde, deserialize_as_string_array, deserialize_json_as_opt_string,
+        deserialize_number_from_string, deserialize_number_from_string_or_zero, serialize_json_as_opt_string,
+    },
 };
 use serde::{ser::SerializeMap, Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, fmt, sync::Arc};
+
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
+pub struct XtreamLoginInfo {
+    pub status: Option<ProxyUserStatus>,
+    pub exp_date: Option<i64>,
+}
+
+#[derive(Serialize, Deserialize, Default, Clone, PartialEq)]
+pub struct XtreamLoginRequest {
+    pub url: String,
+    pub username: String,
+    pub password: String,
+}
+
+impl fmt::Debug for XtreamLoginRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("XtreamLoginRequest")
+            .field("url", &self.url)
+            .field("username", &"<redacted>")
+            .field("password", &"<redacted>")
+            .finish()
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct XtreamVideoInfoMovieData {
