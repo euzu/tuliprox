@@ -42,6 +42,10 @@ pub const fn default_shared_burst_buffer_mb() -> u64 { 12 }
 pub const fn is_default_shared_burst_buffer_mb(v: &u64) -> bool { *v == default_shared_burst_buffer_mb() }
 pub const fn default_grace_period_timeout_secs() -> u64 { 4 }
 pub const fn is_default_grace_period_timeout_secs(v: &u64) -> bool { *v == default_grace_period_timeout_secs() }
+pub const fn default_hls_session_ttl_secs() -> u64 { 15 }
+pub const fn is_default_hls_session_ttl_secs(v: &u64) -> bool { *v == default_hls_session_ttl_secs() }
+pub const fn default_catchup_session_ttl_secs() -> u64 { 45 }
+pub const fn is_default_catchup_session_ttl_secs(v: &u64) -> bool { *v == default_catchup_session_ttl_secs() }
 pub const fn default_panel_api_provision_timeout_secs() -> u64 { 65 }
 pub const fn default_panel_api_provision_probe_interval_secs() -> u64 { 15 }
 pub const fn default_panel_api_provision_cooldown_secs() -> u64 { 0 }

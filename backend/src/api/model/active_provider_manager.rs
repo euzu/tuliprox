@@ -6,7 +6,7 @@ use crate::{
     model::{AppConfig, ConfigInput, GracePeriodOptions},
     utils::debug_if_enabled,
 };
-use log::{error, warn};
+use log::error;
 use shared::utils::sanitize_sensitive_info;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -18,11 +18,10 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tokio::sync::{RwLock, Semaphore};
+use tokio::sync::RwLock;
+use tokio::time::Instant as TokioInstant;
 use tokio_util::sync::CancellationToken;
 
-const PREEMPTED_PROBE_CANCEL_GRACE: Duration = Duration::from_secs(2);
-const PREEMPTED_GRACE_MAX_PENDING: usize = 64;
 static DUMMY_ADDR: LazyLock<SocketAddr> = LazyLock::new(|| SocketAddr::from(([127, 0, 0, 1], 0)));
 
 pub type ClientConnectionId = SocketAddr;
@@ -79,7 +78,12 @@ struct ActiveConnectionInfo {
     cancel_token: CancellationToken,
     created_at: Instant,
     priority: i8,
-    is_probe: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ProviderReservation {
+    owner: Arc<str>,
+    expires_at: TokioInstant,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -105,20 +109,21 @@ struct Connections {
 pub struct ActiveProviderManager {
     providers: ProviderLineupManager,
     connections: RwLock<Connections>,
+    reservations: RwLock<HashMap<Arc<str>, ProviderReservation>>,
     next_allocation_id: AtomicU64,
-    preempted_grace_semaphore: Arc<Semaphore>,
     shared_stream_manager: OnceLock<Arc<SharedStreamManager>>,
 }
 
 impl ActiveProviderManager {
+
     pub fn new(cfg: &AppConfig, event_manager: &Arc<EventManager>) -> Self {
         let grace_period_options = Self::get_grace_options(cfg);
         let inputs = Self::get_config_inputs(cfg);
         Self {
             providers: ProviderLineupManager::new(inputs, grace_period_options, event_manager),
             connections: RwLock::new(Connections::default()),
+            reservations: RwLock::new(HashMap::new()),
             next_allocation_id: AtomicU64::new(1),
-            preempted_grace_semaphore: Arc::new(Semaphore::new(PREEMPTED_GRACE_MAX_PENDING)),
             shared_stream_manager: OnceLock::new(),
         }
     }
@@ -165,6 +170,149 @@ impl ActiveProviderManager {
         self.providers.reconcile_connections(counts).await;
     }
 
+    fn prune_expired_reservations(reservations: &mut HashMap<Arc<str>, ProviderReservation>) {
+        let now = TokioInstant::now();
+        reservations.retain(|_, reservation| reservation.expires_at > now);
+    }
+
+    // Reservation ownership is grouped by the `fingerprint|username` prefix and intentionally drops the
+    // trailing session/input suffix. That lets a client switch channels and immediately reuse the same
+    // reserved provider account without waiting for the old channel reservation to expire.
+    // Tradeoff: a new reservation for one channel clears any other reservation in the same family, so
+    // concurrent multi-channel playback for the same client family is not supported by this grouping.
+    // If concurrent streams must be supported, reservation matching must use the full owner identifier.
+    fn reservation_family(owner: &str) -> &str {
+        owner.rsplit_once('|').map_or(owner, |(family, _)| family)
+    }
+
+    // Compare reservations at the family level rather than exact owner equality so channel-switching can
+    // take over an existing reservation across different `virtual_id`s for the same client family.
+    // This shares the same tradeoff as `reservation_family`: same-family reservations replace each other.
+    fn is_same_reservation_family(reservation_owner: &str, session_owner: &str) -> bool {
+        Self::reservation_family(reservation_owner) == Self::reservation_family(session_owner)
+    }
+
+    async fn is_reserved_for_other(&self, provider_name: &Arc<str>, session_owner: Option<&str>) -> bool {
+        let mut reservations = self.reservations.write().await;
+        Self::prune_expired_reservations(&mut reservations);
+        reservations.get(provider_name).is_some_and(|reservation| {
+            session_owner.is_none_or(|owner| !Self::is_same_reservation_family(reservation.owner.as_ref(), owner))
+        })
+    }
+
+    async fn get_reserved_provider_for_owner(&self, input_name: &Arc<str>, session_owner: &str) -> Option<Arc<str>> {
+        let mut reservations = self.reservations.write().await;
+        Self::prune_expired_reservations(&mut reservations);
+        reservations.iter().find_map(|(provider_name, reservation)| {
+            if Self::is_same_reservation_family(reservation.owner.as_ref(), session_owner)
+                && self.providers.is_provider_for_input(provider_name, input_name)
+            {
+                Some(provider_name.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    async fn reserved_provider_names_for_other(
+        &self,
+        input_name: &Arc<str>,
+        session_owner: Option<&str>,
+    ) -> HashSet<Arc<str>> {
+        let mut reserved = HashSet::new();
+        for provider_name in self.providers.provider_names_for_input(input_name) {
+            if self.is_reserved_for_other(&provider_name, session_owner).await {
+                reserved.insert(provider_name);
+            }
+        }
+        reserved
+    }
+
+    pub async fn refresh_provider_reservation(&self, provider_name: &Arc<str>, session_owner: &str, ttl_secs: u64) {
+        let mut reservations = self.reservations.write().await;
+        Self::prune_expired_reservations(&mut reservations);
+        // Refresh operates on the reservation family, not the exact owner string. This is what allows a
+        // same-client channel switch to move the pinned provider account to the new stream immediately.
+        // The tradeoff is that other reservations from the same family are cleared here as well.
+        reservations.retain(|_, reservation| !Self::is_same_reservation_family(reservation.owner.as_ref(), session_owner));
+        if ttl_secs == 0 {
+            return;
+        }
+        reservations.insert(
+            provider_name.clone(),
+            ProviderReservation {
+                owner: Arc::from(session_owner),
+                expires_at: TokioInstant::now() + Duration::from_secs(ttl_secs),
+            },
+        );
+    }
+
+    async fn acquire_exact_connection_inner(
+        &self,
+        provider_name: &Arc<str>,
+        addr: &SocketAddr,
+        allow_grace: bool,
+        priority: i8,
+        session_owner: Option<&str>,
+    ) -> Option<ProviderHandle> {
+        if self.is_reserved_for_other(provider_name, session_owner).await {
+            return None;
+        }
+        let allocation = self.providers.acquire_exact_connection_with_grace_override(provider_name, allow_grace).await;
+        if matches!(allocation, ProviderAllocation::Exhausted) {
+            return None;
+        }
+        self.register_allocation(allocation, addr, priority).await
+    }
+
+    async fn finalize_lineup_allocation(
+        &self,
+        input_name: &Arc<str>,
+        addr: &SocketAddr,
+        allow_grace: bool,
+        priority: i8,
+        allocation: ProviderAllocation,
+        session_owner: Option<&str>,
+    ) -> Option<ProviderHandle> {
+        if matches!(&allocation, ProviderAllocation::GracePeriod(_))
+            && self.evict_lower_priority_on_input(input_name, priority, session_owner).await
+        {
+            let evicted_on_same = !self.providers.is_over_limit(&allocation.get_provider_name().unwrap_or_default()).await;
+            if !evicted_on_same {
+                let new_alloc = self.providers.acquire_connection_with_grace_override(input_name, allow_grace).await;
+                if !matches!(new_alloc, ProviderAllocation::Exhausted) {
+                    if let Some(provider_name) = new_alloc.get_provider_name() {
+                        if !self.is_reserved_for_other(&provider_name, session_owner).await {
+                            allocation.release().await;
+                            return self.register_allocation(new_alloc, addr, priority).await;
+                        }
+                    }
+                    new_alloc.release().await;
+                }
+            }
+        }
+
+        if matches!(&allocation, ProviderAllocation::GracePeriod(_))
+            && self.has_non_preemptable_connection_on_input(input_name, priority).await
+        {
+            allocation.release().await;
+            return None;
+        }
+
+        self.register_allocation(allocation, addr, priority).await
+    }
+
+    async fn has_non_preemptable_connection_on_input(&self, input_name: &Arc<str>, new_priority: i8) -> bool {
+        let connections = self.connections.read().await;
+        connections.priority_index.iter().any(|(prov_name, tree)| {
+            self.providers.is_provider_for_input(prov_name, input_name)
+                && tree
+                    .iter()
+                    .next()
+                    .is_some_and(|((prio, _, _), _)| *prio <= new_priority)
+        })
+    }
+
     async fn acquire_connection_inner(
         &self,
         provider_or_input_name: &Arc<str>,
@@ -172,58 +320,57 @@ impl ActiveProviderManager {
         force: bool,
         allow_grace_override: Option<bool>,
         priority: i8,
-        is_probe: bool,
+        session_owner: Option<&str>,
     ) -> Option<ProviderHandle> {
-        // 1. Try to acquire directly
-        let (allow_grace, allocation) = if force {
-            (true, self.providers.force_exact_acquire_connection(provider_or_input_name).await)
-        } else {
-            match allow_grace_override {
-                Some(allow_grace) => (
-                    allow_grace,
-                    self.providers.acquire_connection_with_grace_override(provider_or_input_name, allow_grace).await,
-                ),
-                None => (true, self.providers.acquire_connection(provider_or_input_name).await),
-            }
-        };
+        let allow_grace = if force { true } else { allow_grace_override.unwrap_or(true) };
 
-        if !matches!(allocation, ProviderAllocation::Exhausted) {
-            if matches!(&allocation, ProviderAllocation::GracePeriod(_)) && !force {
-                // Grace allocation received — try to evict a lower-priority victim
-                // across the entire input lineup (all aliases) to free capacity.
-                if self.evict_lower_priority_on_input(provider_or_input_name, priority).await {
-                    // A victim was evicted. If it was on the same alias as our grace
-                    // allocation, the provider is back at max (not over limit).
-                    // If it was on a different alias, release the grace allocation
-                    // and re-acquire on the input to land on the freed alias.
-                    let evicted_on_same = !self.providers.is_over_limit(
-                        &allocation.get_provider_name().unwrap_or_default(),
-                    ).await;
-                    if !evicted_on_same {
-                        // Victim was on a different alias — first try to re-acquire.
-                        // Keep the existing grace allocation as fallback if re-acquire fails.
-                        let new_alloc = self.providers.acquire_connection_with_grace_override(
-                            provider_or_input_name, allow_grace,
-                        ).await;
-                        if !matches!(new_alloc, ProviderAllocation::Exhausted) {
-                            allocation.release().await;
-                            return self.register_allocation(new_alloc, addr, priority, is_probe).await;
-                        }
-                        return self.register_allocation(allocation, addr, priority, is_probe).await;
-                    }
-                }
-                // Eviction on same alias succeeded, or no victim found → keep grace allocation
+        if force {
+            let allocation = self.providers.force_exact_acquire_connection(provider_or_input_name).await;
+            if matches!(allocation, ProviderAllocation::Exhausted) {
+                return None;
             }
-            return self.register_allocation(allocation, addr, priority, is_probe).await;
+            return self.register_allocation(allocation, addr, priority).await;
         }
 
-        // 2. If exhausted, try preemption (kick lower priority connection)
-        if !force {
-            if let Some(preempted_alloc) =
-                self.try_preempt_connection(provider_or_input_name, priority, allow_grace).await
-            {
-                return self.register_allocation(preempted_alloc, addr, priority, is_probe).await;
+        if let Some(owner) = session_owner {
+            if let Some(reserved_provider) = self.get_reserved_provider_for_owner(provider_or_input_name, owner).await {
+                return self.acquire_exact_connection_inner(&reserved_provider, addr, allow_grace, priority, Some(owner)).await;
             }
+        }
+
+        let candidate_count = self.providers.provider_names_for_input(provider_or_input_name).len();
+        let attempts = candidate_count.max(1);
+        let mut skipped_reserved = HashSet::new();
+        for _ in 0..attempts {
+            let allocation = self.providers.acquire_connection_with_grace_override(provider_or_input_name, allow_grace).await;
+            if matches!(allocation, ProviderAllocation::Exhausted) {
+                break;
+            }
+            if let Some(provider_name) = allocation.get_provider_name() {
+                if self.is_reserved_for_other(&provider_name, session_owner).await {
+                    debug_if_enabled!(
+                        "Skipping reserved provider {} for {}",
+                        sanitize_sensitive_info(&provider_name),
+                        sanitize_sensitive_info(&addr.to_string())
+                    );
+                    skipped_reserved.insert(provider_name);
+                    allocation.release().await;
+                    if skipped_reserved.len() >= attempts {
+                        break;
+                    }
+                    continue;
+                }
+            }
+            return self
+                .finalize_lineup_allocation(provider_or_input_name, addr, allow_grace, priority, allocation, session_owner)
+                .await;
+        }
+
+        if let Some(preempted_alloc) = self
+            .try_preempt_connection(provider_or_input_name, priority, allow_grace, session_owner)
+            .await
+        {
+            return self.register_allocation(preempted_alloc, addr, priority).await;
         }
 
         None
@@ -234,7 +381,6 @@ impl ActiveProviderManager {
         allocation: ProviderAllocation,
         addr: &SocketAddr,
         priority: i8,
-        is_probe: bool,
     ) -> Option<ProviderHandle> {
         let provider_name = allocation.get_provider_name().unwrap_or_default();
         let allocation_id = self.next_allocation_id.fetch_add(1, Ordering::Relaxed);
@@ -251,7 +397,6 @@ impl ActiveProviderManager {
                 cancel_token: cancel_token.clone(),
                 created_at: now,
                 priority,
-                is_probe,
             },
         );
 
@@ -275,7 +420,10 @@ impl ActiveProviderManager {
         &self,
         input_name: &Arc<str>,
         new_priority: i8,
+        session_owner: Option<&str>,
     ) -> bool {
+        let reserved_providers = self.reserved_provider_names_for_other(input_name, session_owner).await;
+
         // Find best victim across all aliases under read lock
         let victim: Option<(PriorityOwner, AllocationId, i8, Instant)> = {
             let connections = self.connections.read().await;
@@ -284,20 +432,12 @@ impl ActiveProviderManager {
                 if !self.providers.is_provider_for_input(prov_name, input_name) {
                     continue;
                 }
-                for ((prio, Reverse(created_at), alloc_id), owner) in tree.iter().rev() {
+                if reserved_providers.contains(prov_name) {
+                    continue;
+                }
+                if let Some(((prio, Reverse(created_at), alloc_id), owner)) = tree.iter().next_back() {
                     if *prio <= new_priority {
-                        break; // No more victims on this alias
-                    }
-                    if let PriorityOwner::Shared(shared_id) = owner {
-                        let evictable = connections
-                            .shared
-                            .shared_by_allocation_id
-                            .get(shared_id)
-                            .and_then(|key| connections.shared.by_key.get(key))
-                            .is_some_and(|s| s.connections.len() == 1);
-                        if !evictable {
-                            continue;
-                        }
+                        continue;
                     }
                     let is_better = match found {
                         None => true,
@@ -308,7 +448,6 @@ impl ActiveProviderManager {
                     if is_better {
                         found = Some((*owner, *alloc_id, *prio, *created_at));
                     }
-                    break; // Only best candidate per alias
                 }
             }
             found
@@ -331,13 +470,12 @@ impl ActiveProviderManager {
                         return false;
                     };
 
-                    let still_single = connections.shared.by_key.get(&key).is_some_and(|shared| {
+                    let still_match = connections.shared.by_key.get(&key).is_some_and(|shared| {
                         shared.allocation_id == alloc_id
-                            && shared.connections.len() == 1
                             && shared.priority == v_prio
                             && shared.created_at == victim_created_at
                     });
-                    if !still_single {
+                    if !still_match {
                         return false;
                     }
 
@@ -413,24 +551,8 @@ impl ActiveProviderManager {
                 };
 
                 let Some(info) = removed_info else { return false; };
-                let token = info.cancel_token;
-                if info.is_probe {
-                    if let Ok(permit) = Arc::clone(&self.preempted_grace_semaphore).try_acquire_owned() {
-                        tokio::spawn(async move {
-                            let _permit = permit;
-                            tokio::time::sleep(PREEMPTED_PROBE_CANCEL_GRACE).await;
-                            token.cancel();
-                        });
-                    } else {
-                        warn!(
-                            "Preemption grace semaphore exhausted ({PREEMPTED_GRACE_MAX_PENDING} tasks pending); \
-                             falling back to immediate cancellation for preempted probe"
-                        );
-                        token.cancel();
-                    }
-                } else {
-                    token.cancel();
-                }
+                // Preempted probes must stop immediately; they must not keep a custom stream alive.
+                info.cancel_token.cancel();
                 info.allocation.release().await;
             }
         }
@@ -444,7 +566,9 @@ impl ActiveProviderManager {
         input_name: &Arc<str>,
         new_priority: i8,
         allow_grace: bool,
+        session_owner: Option<&str>,
     ) -> Option<ProviderAllocation> {
+        let reserved_providers = self.reserved_provider_names_for_other(input_name, session_owner).await;
         // Victim: (owner, alloc_id, priority, created_at)
         let mut victim: Option<(PriorityOwner, AllocationId, i8, Instant)> = None;
 
@@ -456,21 +580,13 @@ impl ActiveProviderManager {
                 if !self.providers.is_provider_for_input(prov_name, input_name) {
                     continue;
                 }
-                // Iterate from highest priority value (lowest importance) = best victim
-                for ((prio, Reverse(created_at), alloc_id), owner) in tree.iter().rev() {
+                if reserved_providers.contains(prov_name) {
+                    continue;
+                }
+                // Highest priority value (lowest importance) is the best victim candidate.
+                if let Some(((prio, Reverse(created_at), alloc_id), owner)) = tree.iter().next_back() {
                     if *prio <= new_priority {
-                        break; // No more victims on this alias
-                    }
-                    if let PriorityOwner::Shared(shared_id) = owner {
-                        let evictable = connections
-                            .shared
-                            .shared_by_allocation_id
-                            .get(shared_id)
-                            .and_then(|key| connections.shared.by_key.get(key))
-                            .is_some_and(|s| s.connections.len() == 1);
-                        if !evictable {
-                            continue;
-                        }
+                        continue;
                     }
                     let is_better = match victim {
                         None => true,
@@ -481,7 +597,6 @@ impl ActiveProviderManager {
                     if is_better {
                         victim = Some((*owner, *alloc_id, *prio, *created_at));
                     }
-                    break; // Only need the best candidate per alias
                 }
             }
         }
@@ -496,15 +611,13 @@ impl ActiveProviderManager {
                         let mut connections = self.connections.write().await;
                         let key = connections.shared.shared_by_allocation_id.get(&shared_id).cloned()?;
 
-                        // Revalidate the selected shared victim under WRITE lock to avoid evicting
-                        // a connection that gained additional listeners concurrently.
-                        let still_single = connections.shared.by_key.get(&key).is_some_and(|shared| {
+                        // Revalidate the selected shared victim under WRITE lock.
+                        let still_match = connections.shared.by_key.get(&key).is_some_and(|shared| {
                             shared.allocation_id == alloc_id
-                                && shared.connections.len() == 1
                                 && shared.priority == v_prio
                                 && shared.created_at == victim_created_at
                         });
-                        if !still_single {
+                        if !still_match {
                             None
                         } else if let Some(shared) = connections.shared.by_key.remove(&key) {
                             connections.shared.shared_by_allocation_id.remove(&shared.allocation_id);
@@ -589,34 +702,25 @@ impl ActiveProviderManager {
                         return None;
                     };
 
-                    let token = info.cancel_token;
-                    if info.is_probe {
-                        // Probe preemption gets a short grace window, but cap detached sleep/cancel
-                        // tasks so bursts cannot spawn unbounded background work.
-                        if let Ok(permit) = Arc::clone(&self.preempted_grace_semaphore).try_acquire_owned() {
-                            tokio::spawn(async move {
-                                let _permit = permit;
-                                tokio::time::sleep(PREEMPTED_PROBE_CANCEL_GRACE).await;
-                                token.cancel();
-                            });
-                        } else {
-                            warn!(
-                                "Preemption grace semaphore exhausted ({PREEMPTED_GRACE_MAX_PENDING} tasks pending); \
-                                 falling back to immediate cancellation for preempted probe"
-                            );
-                            token.cancel();
-                        }
-                    } else {
-                        token.cancel();
-                    }
-
+                    // Preempted probes must stop immediately; they must not keep a custom stream alive.
+                    info.cancel_token.cancel();
                     info.allocation.release().await;
                 }
             }
 
             // Now try acquire again preserving the original grace policy.
-            let allocation = self.providers.acquire_connection_with_grace_override(input_name, allow_grace).await;
-            if !matches!(allocation, ProviderAllocation::Exhausted) {
+            let attempts = self.providers.provider_names_for_input(input_name).len().max(1);
+            for _ in 0..attempts {
+                let allocation = self.providers.acquire_connection_with_grace_override(input_name, allow_grace).await;
+                if matches!(allocation, ProviderAllocation::Exhausted) {
+                    break;
+                }
+                if let Some(provider_name) = allocation.get_provider_name() {
+                    if reserved_providers.contains(&provider_name) {
+                        allocation.release().await;
+                        continue;
+                    }
+                }
                 return Some(allocation);
             }
         }
@@ -631,11 +735,18 @@ impl ActiveProviderManager {
         allow_grace: bool,
         priority: i8,
     ) -> Option<ProviderHandle> {
-        let allocation = self.providers.acquire_exact_connection_with_grace_override(provider_name, allow_grace).await;
-        if matches!(allocation, ProviderAllocation::Exhausted) {
-            return None;
-        }
-        self.register_allocation(allocation, addr, priority, false).await
+        self.acquire_exact_connection_with_grace_for_session(provider_name, addr, allow_grace, priority, None).await
+    }
+
+    pub async fn acquire_exact_connection_with_grace_for_session(
+        &self,
+        provider_name: &Arc<str>,
+        addr: &SocketAddr,
+        allow_grace: bool,
+        priority: i8,
+        session_owner: Option<&str>,
+    ) -> Option<ProviderHandle> {
+        self.acquire_exact_connection_inner(provider_name, addr, allow_grace, priority, session_owner).await
     }
 
     pub async fn force_exact_acquire_connection(
@@ -650,7 +761,7 @@ impl ActiveProviderManager {
 
     // Returns the next available provider connection
     pub async fn acquire_connection(&self, input_name: &Arc<str>, addr: &SocketAddr, priority: i8) -> Option<ProviderHandle> {
-        self.acquire_connection_inner(input_name, addr, false, None, priority, false).await
+        self.acquire_connection_inner(input_name, addr, false, None, priority, None).await
     }
 
     /// Acquire a provider connection while explicitly controlling provider-side grace allocations.
@@ -661,13 +772,24 @@ impl ActiveProviderManager {
         allow_grace: bool,
         priority: i8,
     ) -> Option<ProviderHandle> {
-        self.acquire_connection_inner(input_name, addr, false, Some(allow_grace), priority, false).await
+        self.acquire_connection_with_grace_for_session(input_name, addr, allow_grace, priority, None).await
+    }
+
+    pub async fn acquire_connection_with_grace_for_session(
+        &self,
+        input_name: &Arc<str>,
+        addr: &SocketAddr,
+        allow_grace: bool,
+        priority: i8,
+        session_owner: Option<&str>,
+    ) -> Option<ProviderHandle> {
+        self.acquire_connection_inner(input_name, addr, false, Some(allow_grace), priority, session_owner).await
     }
 
     /// Acquire a provider connection for probe tasks with configurable priority.
     /// Probes never consume grace capacity.
     pub async fn acquire_connection_for_probe(&self, input_name: &Arc<str>, priority: i8) -> Option<ProviderHandle> {
-        self.acquire_connection_inner(input_name, &DUMMY_ADDR, false, Some(false), priority, true).await
+        self.acquire_connection_inner(input_name, &DUMMY_ADDR, false, Some(false), priority, None).await
     }
 
     // This method is used for redirects to cycle through the provider
@@ -997,6 +1119,7 @@ impl ActiveProviderManager {
     }
 
     pub async fn get_provider_connections_count(&self) -> usize { self.providers.active_connection_count().await }
+
 }
 
 #[cfg(test)]
@@ -1180,8 +1303,8 @@ mod tests {
         manager.release_connection(&client_2_addr).await;
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn test_probe_preemption_releases_capacity_immediately_and_cancels_after_grace() {
+    #[tokio::test]
+    async fn test_probe_preemption_releases_capacity_and_cancels_immediately() {
         let app_cfg = create_test_app_config_single_provider_pool();
         let event_manager = Arc::new(EventManager::new());
         let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
@@ -1200,25 +1323,78 @@ mod tests {
             .expect("user allocation should preempt probe");
         assert_eq!(user_alloc.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
 
-        // Let the detached cancellation task start and arm its sleep timer on the paused clock.
+        // Cancellation happens inline during preemption; yield once to observe any deferred work.
         tokio::task::yield_now().await;
-
-        // Probe cancellation is intentionally delayed by a small grace window.
-        tokio::time::advance(Duration::from_millis(100)).await;
-        assert!(!probe_token.is_cancelled(), "probe token should not be cancelled immediately");
-
-        let cancel_wait_timeout = super::PREEMPTED_PROBE_CANCEL_GRACE + Duration::from_millis(500);
-        let wait_token = probe_token.clone();
-        let cancel_wait =
-            tokio::spawn(async move { tokio::time::timeout(cancel_wait_timeout, wait_token.cancelled()).await });
-        tokio::task::yield_now().await;
-        tokio::time::advance(cancel_wait_timeout).await;
-        assert!(
-            cancel_wait.await.expect("cancel wait task should join").is_ok(),
-            "probe token should be cancelled before timeout after grace"
-        );
+        assert!(probe_token.is_cancelled(), "probe token should be cancelled immediately after preemption");
 
         manager.release_connection(&user_addr).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_session_provider_reservation_blocks_other_sessions_until_ttl_expires() {
+        let app_cfg = create_test_app_config_single_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+
+        let input_name = "provider_1".intern();
+        let owner_1 = "session-owner-1";
+        let owner_2 = "session-owner-2";
+        let addr_1: SocketAddr = "127.0.0.1:43101".parse().unwrap();
+        let addr_2: SocketAddr = "127.0.0.1:43102".parse().unwrap();
+
+        manager.refresh_provider_reservation(&input_name, owner_1, 15).await;
+
+        let first = manager
+            .acquire_connection_with_grace_for_session(&input_name, &addr_1, false, default_user_priority(), Some(owner_1))
+            .await
+            .expect("reserved owner should reacquire its provider");
+        assert_eq!(first.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
+        manager.release_connection(&addr_1).await;
+
+        let blocked = manager
+            .acquire_connection_with_grace_for_session(&input_name, &addr_2, false, default_user_priority(), Some(owner_2))
+            .await;
+        assert!(blocked.is_none(), "other sessions must not take a reserved provider before TTL expiry");
+
+        tokio::time::advance(Duration::from_secs(16)).await;
+
+        let second = manager
+            .acquire_connection_with_grace_for_session(&input_name, &addr_2, false, default_user_priority(), Some(owner_2))
+            .await
+            .expect("reservation should expire after TTL");
+        assert_eq!(second.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
+        manager.release_connection(&addr_2).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_same_client_family_can_reuse_reserved_provider_after_channel_switch() {
+        let app_cfg = create_test_app_config_single_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+
+        let input_name = "provider_1".intern();
+        let first_addr: SocketAddr = "127.0.0.1:43111".parse().unwrap();
+        let second_addr: SocketAddr = "127.0.0.1:43112".parse().unwrap();
+        let owner_channel_1 = "client|ua|user|100";
+        let owner_channel_2 = "client|ua|user|200";
+
+        manager.refresh_provider_reservation(&input_name, owner_channel_1, 15).await;
+
+        let reacquired = manager
+            .acquire_connection_with_grace_for_session(
+                &input_name,
+                &second_addr,
+                false,
+                default_user_priority(),
+                Some(owner_channel_2),
+            )
+            .await
+            .expect("same client family should be able to reuse the reserved provider after a channel switch");
+
+        assert_eq!(reacquired.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
+
+        manager.release_connection(&first_addr).await;
+        manager.release_connection(&second_addr).await;
     }
 
     #[tokio::test]
@@ -1350,9 +1526,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_grace_period_no_victim_keeps_grace_behavior() {
-        // Provider full, same-prio user arrives with grace allowed,
-        // no victim available → normal grace behavior (allocation still returned).
+    async fn test_equal_priority_user_does_not_preempt_and_gets_rejected() {
         let app_cfg = create_test_app_config_single_provider_pool();
         let event_manager = Arc::new(EventManager::new());
         let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
@@ -1372,16 +1546,13 @@ mod tests {
         // Provider is now exhausted
         assert!(manager.is_exhausted(&input_name).await);
 
-        // User 2 arrives with same priority and grace allowed
-        // Should get a grace allocation but NOT evict user 1
+        // User 2 arrives with same priority.
+        // Equal priority must not preempt and must not receive a grace allocation.
         let alloc2 = manager
             .acquire_connection(&input_name, &user_2_addr, default_user_priority())
             .await;
 
-        // Grace allocation should be returned (provider allows grace)
-        if let Some(alloc2) = &alloc2 {
-            assert_eq!(alloc2.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
-        }
+        assert!(alloc2.is_none(), "same-priority user must be rejected when provider capacity is exhausted");
         // User 1 should NOT be cancelled
         assert!(!token1.is_cancelled(), "same-prio user should not be evicted");
 
@@ -1432,6 +1603,50 @@ mod tests {
         assert!(shared_token.is_cancelled(), "shared stream should be cancelled when preempted");
         assert!(!manager.is_over_limit(&input_name).await, "provider should not remain over limit after preemption");
 
+        manager.release_connection(&addr_a).await;
+        manager.release_connection(&addr_b).await;
+    }
+
+    #[tokio::test]
+    async fn test_higher_priority_user_preempts_shared_stream_with_multiple_subscribers() {
+        let app_cfg = create_test_app_config_single_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+
+        let input_name = "provider_1".intern();
+        let stream_key = "http://example.com/shared/live/multi";
+        let addr_a: SocketAddr = "127.0.0.1:48601".parse().unwrap();
+        let addr_b: SocketAddr = "127.0.0.1:48602".parse().unwrap();
+        let addr_high: SocketAddr = "127.0.0.1:48603".parse().unwrap();
+
+        let shared_alloc = manager
+            .acquire_connection(&input_name, &addr_a, 5)
+            .await
+            .expect("low-priority shared stream should get initial connection");
+        let shared_token = shared_alloc.cancel_token.clone().expect("shared allocation should have cancel token");
+        manager.make_shared_connection(&addr_a, stream_key).await;
+
+        manager
+            .add_shared_connection(&addr_b, stream_key, 6)
+            .await
+            .expect("second subscriber should join shared stream");
+
+        let high_alloc = manager
+            .acquire_connection(&input_name, &addr_high, 0)
+            .await
+            .expect("higher-priority user should preempt lower-priority shared stream");
+        assert_eq!(high_alloc.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
+        assert!(shared_token.is_cancelled(), "shared stream should be cancelled when preempted");
+
+        {
+            let connections = manager.connections.read().await;
+            assert!(
+                !connections.shared.by_key.contains_key(stream_key),
+                "preempted shared stream must be removed even with multiple subscribers"
+            );
+        }
+
+        manager.release_connection(&addr_high).await;
         manager.release_connection(&addr_a).await;
         manager.release_connection(&addr_b).await;
     }

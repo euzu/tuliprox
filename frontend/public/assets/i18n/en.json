@@ -562,9 +562,11 @@
       "SIZE": "Size of the stream buffer in 8192-byte chunks. A value of 1024 means approximately 8MB."
     },
     "STREAM_CONFIG": {
+      "CATCHUP_SESSION_TTL_SECS": "How long to keep a catchup provider-account reservation alive after the last request so resume/seek can stay on the same provider account.",
       "GRACE_PERIOD_HOLD_STREAM": "If enabled, keeps the provider stream open briefly after the last client disconnects to allow quick reconnects.",
       "GRACE_PERIOD_MILLIS": "Duration in milliseconds to allow exceeding max_connections during rapid channel switches (default 2000).",
       "GRACE_PERIOD_TIMEOUT_SECS": "How many seconds to wait before terminating excess connections after grace period ends (default 5).",
+      "HLS_SESSION_TTL_SECS": "How long to keep an HLS provider-account reservation alive between playlist or segment requests so the same provider account can be reused.",
       "RETRY": "Number of times to retry connecting to the provider on initial stream failure.",
       "SHARED_BURST_BUFFER_MB": "Initial buffer size in MB to provide immediate data to new clients joining a shared stream.",
       "THROTTLE": "Enables bandwidth limiting for outgoing streams.",
@@ -734,6 +736,7 @@
     "CHANNELS": "Channels",
     "CHAT_IDS": "Chat Ids",
     "CLEANUP": "Cleanup",
+    "CATCHUP_SESSION_TTL_SECS": "Catchup Session TTL (secs)",
     "CLEAR": "Clear",
     "CLIENT_IP": "Client IP",
     "CLOSE": "Close",
@@ -835,6 +838,7 @@
     "GRACE_PERIOD_MILLIS": "Grace Period (millis)",
     "GRACE_PERIOD_TIMEOUT": "Grace period timeout sec",
     "GRACE_PERIOD_TIMEOUT_SECS": "Grace Period Timeout (secs)",
+    "HLS_SESSION_TTL_SECS": "HLS Session TTL (secs)",
     "GROUP": "Group",
     "GROUPS": "Groups",
     "GROUP_PATTERN": "Group Pattern",

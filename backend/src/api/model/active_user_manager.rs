@@ -28,6 +28,7 @@ use tokio::sync::RwLock;
 const USER_GC_TTL: u64 = 900; // 15 Min
 const USER_CON_TTL: u64 = 10_800; // 3 hours
 const USER_SESSION_LIMIT: usize = 50;
+const ANON_SOCKET_TTL: u64 = 300; // 5 Min
 
 fn get_grace_options(config: &Config) -> (u64, u64) {
     let (grace_period_millis, grace_period_timeout_secs) =
@@ -89,7 +90,22 @@ impl UserConnectionData {
 struct UserConnections {
     kicked: HashMap<String, (u64, VirtualId)>,
     by_key: HashMap<String, UserConnectionData>,
-    key_by_addr: HashMap<SocketAddr, String>,
+    key_by_addr: HashMap<SocketAddr, SocketRegistration>,
+}
+
+#[derive(Clone, Debug)]
+struct SocketRegistration {
+    username: String,
+    ts: u64,
+}
+
+impl SocketRegistration {
+    fn anonymous() -> Self {
+        Self {
+            username: String::new(),
+            ts: current_time_secs(),
+        }
+    }
 }
 
 pub struct ActiveUserManager {
@@ -112,7 +128,7 @@ impl ActiveUserManager {
             fps: String::from("30"),
             video_codec: String::from("H.264"),
             audio_codec: String::from("AAC"),
-            audio_channels: String::from("2.0"),
+            audio_channels: String::from("Stereo"),
         }
     }
 
@@ -158,7 +174,7 @@ impl ActiveUserManager {
         let (removed_stream, username) = {
             let mut user_connections = self.connections.write().await;
 
-            let Some(username) = user_connections.key_by_addr.get(addr).cloned() else {
+            let Some(username) = user_connections.key_by_addr.get(addr).map(|reg| reg.username.clone()) else {
                 return false;
             };
 
@@ -196,7 +212,8 @@ impl ActiveUserManager {
         let (addr_removed, disconnected_user) = {
             let mut user_connections = self.connections.write().await;
 
-            if let Some(username) = user_connections.key_by_addr.remove(addr) {
+            if let Some(registration) = user_connections.key_by_addr.remove(addr) {
+                let username = registration.username;
                 if let Some(connection_data) = user_connections.by_key.get_mut(&username) {
                     let prev_len = connection_data.streams.len();
                     connection_data.streams.retain(|c| c.addr != *addr);
@@ -322,7 +339,7 @@ impl ActiveUserManager {
         let mut user_connections = self.connections.write().await;
         let username = {
             match user_connections.key_by_addr.get(addr) {
-                Some(username) => username.clone(),
+                Some(registration) => registration.username.clone(),
                 None => return None,
             }
         };
@@ -342,10 +359,13 @@ impl ActiveUserManager {
 
     #[allow(clippy::too_many_arguments)]
     pub async fn add_connection(&self, addr: &SocketAddr) {
+        self.gc();
         let mut user_connections = self.connections.write().await;
-        if !user_connections.key_by_addr.contains_key(addr) {
-            user_connections.key_by_addr.insert(*addr, String::new());
-        }
+        user_connections
+            .key_by_addr
+            .entry(*addr)
+            .and_modify(|registration| registration.ts = current_time_secs())
+            .or_insert_with(SocketRegistration::anonymous);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -362,12 +382,19 @@ impl ActiveUserManager {
         let stream_info = {
             let mut user_connections = self.connections.write().await;
 
-            // needs to be registered through socket connection to avoid race time conditions through short disconnect
-            if !user_connections.key_by_addr.contains_key(&fingerprint.addr) {
-                return None;
+            let now = current_time_secs();
+            if let Some(registration) = user_connections.key_by_addr.get_mut(&fingerprint.addr) {
+                registration.username = username.to_string();
+                registration.ts = now;
+            } else {
+                user_connections.key_by_addr.insert(
+                    fingerprint.addr,
+                    SocketRegistration {
+                        username: username.to_string(),
+                        ts: now,
+                    },
+                );
             }
-
-            user_connections.key_by_addr.insert(fingerprint.addr, username.to_string());
 
             let connection_data = user_connections
                 .by_key
@@ -422,12 +449,12 @@ impl ActiveUserManager {
                     session_token,
                 );
 
-                let total_active = user_connections.key_by_addr.len();
+                let tracked_socket_count = user_connections.key_by_addr.len();
 
                 if let Some(connection_data) = user_connections.by_key.get_mut(username) {
                     connection_data.connections += 1;
                     connection_data.streams.push(stream_info.clone());
-                    Self::log_connection_added(username, &fingerprint.addr, connection_data, total_active);
+                    Self::log_connection_added(username, &fingerprint.addr, connection_data, tracked_socket_count);
                 }
 
                 stream_info
@@ -488,6 +515,7 @@ impl ActiveUserManager {
         for session in &mut connection_data.sessions {
             if session.token == session_token {
                 session.ts = current_time_secs();
+                session.addr = *addr;
                 if &*session.stream_url != stream_url {
                     session.stream_url = stream_url.intern();
                 }
@@ -579,7 +607,7 @@ impl ActiveUserManager {
         username: &str,
         addr: &SocketAddr,
         connection_data: &UserConnectionData,
-        total_active_sockets: usize,
+        tracked_socket_count: usize,
     ) {
         if log::log_enabled!(log::Level::Debug) {
             let active_for_user = connection_data.connections;
@@ -604,7 +632,7 @@ impl ActiveUserManager {
                 );
             } else {
                 debug_if_enabled!(
-                    "Added new connection for {username} at {} (active user connections={active_for_user}, total connections={total_active_sockets})",
+                    "Added new connection for {username} at {} (active user connections={active_for_user}, tracked sockets={tracked_socket_count})",
                     sanitize_sensitive_info(&addr.to_string())
                 );
             }
@@ -623,7 +651,12 @@ impl ActiveUserManager {
             let mut connections = self.connections.write().await;
             let now = current_time_secs();
             connections.kicked.retain(|_, (expires_at, _)| *expires_at > now);
-            if let Some(username) = connections.key_by_addr.get(addr).cloned() {
+            if let Some(username) = connections
+                .key_by_addr
+                .get(addr)
+                .map(|registration| registration.username.clone())
+                .filter(|username| !username.is_empty())
+            {
                 let expires_at = now + block_for_secs;
                 connections.kicked.insert(username, (expires_at, virtual_id));
             }
@@ -631,7 +664,12 @@ impl ActiveUserManager {
     }
 
     pub async fn get_username_for_addr(&self, addr: &SocketAddr) -> Option<String> {
-        self.connections.read().await.key_by_addr.get(addr).cloned()
+        self.connections
+            .read()
+            .await
+            .key_by_addr
+            .get(addr)
+            .map(|registration| registration.username.clone())
     }
 
     fn gc(&self) {
@@ -650,6 +688,9 @@ impl ActiveUserManager {
                     for connection_data in user_connections.by_key.values_mut() {
                         connection_data.sessions.retain(|s| now.saturating_sub(s.ts) < USER_CON_TTL);
                     }
+                    user_connections.key_by_addr.retain(|_, registration| {
+                        !(registration.username.is_empty() && now.saturating_sub(registration.ts) >= ANON_SOCKET_TTL)
+                    });
                 } else {
                     // Lock contention: release the GC claim so a subsequent caller can retry immediately.
                     let _ = gc_ts.compare_exchange(now, ts, Ordering::AcqRel, Ordering::Relaxed);
@@ -735,6 +776,34 @@ mod tests {
 
         assert!(manager.release_stream(&addr).await);
         assert_eq!(manager.user_connections(username).await, 0);
+    }
+
+    #[tokio::test]
+    async fn stale_anonymous_socket_registration_is_pruned_by_gc() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let stale_addr: SocketAddr = "127.0.0.1:55011".parse().unwrap();
+        let fresh_addr: SocketAddr = "127.0.0.1:55012".parse().unwrap();
+
+        manager.add_connection(&stale_addr).await;
+        {
+            let mut connections = manager.connections.write().await;
+            let registration = connections.key_by_addr.get_mut(&stale_addr).expect("socket registration should exist");
+            registration.ts = registration.ts.saturating_sub(ANON_SOCKET_TTL + 1);
+        }
+
+        if let Some(gc_ts) = &manager.gc_ts {
+            gc_ts.store(current_time_secs().saturating_sub(USER_GC_TTL + 1), Ordering::Release);
+        }
+
+        manager.add_connection(&fresh_addr).await;
+
+        let connections = manager.connections.read().await;
+        assert!(!connections.key_by_addr.contains_key(&stale_addr));
+        assert!(connections.key_by_addr.contains_key(&fresh_addr));
     }
 }
 

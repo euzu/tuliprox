@@ -3,7 +3,7 @@ use crate::model::{AppConfig, ConfigInput};
 use shared::concat_string;
 use shared::error::TuliproxError;
 use shared::model::UUIDType;
-use shared::model::{EpisodeStreamProperties, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, SeriesStreamDetailEpisodeProperties, SeriesStreamDetailProperties, SeriesStreamDetailSeasonProperties, SeriesStreamProperties, StreamProperties, VideoStreamDetailProperties, VideoStreamProperties, XtreamCluster};
+use shared::model::{EpisodeStreamProperties, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, SeriesStreamDetailEpisodeProperties, SeriesStreamDetailProperties, SeriesStreamDetailSeasonProperties, SeriesStreamProperties, StreamProperties, VideoStreamDetailProperties, VideoStreamProperties, XtreamCluster, normalize_episode_title};
 use shared::utils::{generate_playlist_uuid, Internable};
 use std::collections::HashMap;
 use std::path::Path;
@@ -263,6 +263,8 @@ pub fn metadata_cache_entry_to_xtream_series_info(
                 .unwrap_or_default();
             let episode_release_date = episode.aired.as_ref().map(ToString::to_string).unwrap_or_default();
             let tmdb_id = (episode.tmdb_id > 0).then_some(episode.tmdb_id);
+            let raw_episode_title: Arc<str> = episode.title.clone().into();
+            let series_title: Arc<str> = series.title.clone().into();
 
             let season_entry = season_data.entry(episode.season).or_insert_with(|| {
                 SeriesStreamDetailSeasonProperties {
@@ -283,7 +285,7 @@ pub fn metadata_cache_entry_to_xtream_series_info(
                 id: tmdb_id.unwrap_or_default(),
                 episode_num: episode.episode,
                 season: episode.season,
-                title: episode.title.clone().into(),
+                title: normalize_episode_title(&raw_episode_title, &series_title, episode.season, episode.episode),
                 container_extension: container_extension.into(),
                 custom_sid: None,
                 added: episode.file_modified.to_string().into(),

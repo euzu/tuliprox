@@ -9,42 +9,18 @@ mod trakt;
 mod library;
 mod stream_probe;
 mod filtered_playlist_source;
+mod probe_handle_guard;
+mod resolve_options;
 pub use self::playlist::*;
 pub use self::epg::*;
 pub use self::xtream::*;
 pub use self::xtream_vod::*;
 pub use self::xtream_series::*;
 pub use self::stream_probe::*;
+pub(crate) use self::probe_handle_guard::*;
+pub use self::resolve_options::*;
 use crate::api::model::ProviderHandle;
-use shared::create_bitset;
 use tokio_util::sync::CancellationToken;
-
-create_bitset!(u8, ResolveOptionsFlags, Resolve, TmdbMissing, Probe, Background);
-
-pub struct ResolveOptions {
-    flags: ResolveOptionsFlagsSet,
-    pub resolve_delay: u16,
-}
-
-impl ResolveOptions {
-    #[inline]
-    pub fn has_flag(&self, flag: ResolveOptionsFlags) -> bool {
-        self.flags.contains(flag)
-    }
-    #[inline]
-    pub fn unset_flag(&mut self, flag: ResolveOptionsFlags) {
-        self.flags.unset(flag);
-    }
-}
-
-impl Default for ResolveOptions {
-    fn default() -> Self {
-        Self {
-            flags: ResolveOptionsFlagsSet::from_variants(&[ResolveOptionsFlags::Background]),
-            resolve_delay: default_resolve_delay_secs(),
-        }
-    }
-}
 
 pub(crate) const FOREGROUND_BATCH_SIZE: usize = 200;
 pub(crate) const FOREGROUND_RETRY_BATCH_MAX_SIZE: usize = FOREGROUND_BATCH_SIZE * 4;
@@ -293,4 +269,3 @@ macro_rules! process_foreground_retry_once {
     };
 }
 pub(crate) use process_foreground_retry_once;
-use shared::utils::default_resolve_delay_secs;

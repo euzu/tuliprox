@@ -32,7 +32,7 @@ use std::{
     io,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering},
         Arc, OnceLock, Weak,
     },
     time::{Duration, Instant},
@@ -272,6 +272,16 @@ impl TaskKey {
             }
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ScopedTaskKey {
+    input_name: Arc<str>,
+    task_key: TaskKey,
+}
+
+impl ScopedTaskKey {
+    fn new(input_name: Arc<str>, task_key: TaskKey) -> Self { Self { input_name, task_key } }
 }
 
 #[derive(Debug, Clone)]
@@ -553,6 +563,15 @@ pub struct MetadataUpdateManager {
     cancel_token: ArcSwap<CancellationToken>,
     /// Monotonic worker generation id used to avoid removing a newly spawned worker context.
     next_worker_id: AtomicU64,
+    /// Producer-visible view of active resolve cooldowns so repeated playlist refreshes
+    /// can skip creating tasks that are still suppressed anyway.
+    resolve_enqueue_suppressions: Arc<DashMap<ScopedTaskKey, i64>>,
+    /// Tracks inputs for which producer-side retry suppression state was already loaded from disk.
+    enqueue_state_loaded_inputs: Arc<DashMap<Arc<str>, ()>>,
+    /// Backoff for failed producer-side retry-state loads to avoid repeated blocking disk reads.
+    enqueue_state_load_retry_at_ts: Arc<DashMap<Arc<str>, i64>>,
+    /// Periodic prune marker for stale producer-side resolve suppression entries.
+    last_resolve_enqueue_suppression_prune_at_ts: AtomicI64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -573,6 +592,10 @@ impl MetadataUpdateManager {
             update_pause_gate: Arc::new(RwLock::new(())),
             cancel_token: ArcSwap::from_pointee(cancel_token),
             next_worker_id: AtomicU64::new(1),
+            resolve_enqueue_suppressions: Arc::new(DashMap::new()),
+            enqueue_state_loaded_inputs: Arc::new(DashMap::new()),
+            enqueue_state_load_retry_at_ts: Arc::new(DashMap::new()),
+            last_resolve_enqueue_suppression_prune_at_ts: AtomicI64::new(0),
         }
     }
 
@@ -582,6 +605,9 @@ impl MetadataUpdateManager {
         let _guard = self.worker_lifecycle_lock.lock();
         self.is_shutdown_flag.store(true, Ordering::Release);
         self.cancel_token.load_full().cancel();
+        self.resolve_enqueue_suppressions.clear();
+        self.enqueue_state_loaded_inputs.clear();
+        self.enqueue_state_load_retry_at_ts.clear();
     }
 
     /// Returns true once shutdown has been requested.
@@ -600,6 +626,9 @@ impl MetadataUpdateManager {
 
             let old_token = self.cancel_token.swap(Arc::new(cancel_token));
             self.workers.clear();
+            self.resolve_enqueue_suppressions.clear();
+            self.enqueue_state_loaded_inputs.clear();
+            self.enqueue_state_load_retry_at_ts.clear();
             old_token
         };
         old_token.cancel();
@@ -614,6 +643,121 @@ impl MetadataUpdateManager {
     pub async fn set_app_state(&self, app_state: Weak<AppState>) {
         let mut guard = self.app_state.lock().await;
         *guard = Some(app_state);
+    }
+
+    fn scoped_task_key(input_name: &str, task: &UpdateTask) -> ScopedTaskKey {
+        ScopedTaskKey::new(Arc::from(input_name), TaskKey::from_task(task))
+    }
+
+    fn has_pending_task(&self, input_name: &str, task: &UpdateTask) -> bool {
+        self.workers
+            .get(input_name)
+            .is_some_and(|ctx| !ctx.sender.is_closed() && ctx.pending_tasks.contains_key(&TaskKey::from_task(task)))
+    }
+
+    fn prune_resolve_enqueue_suppressions(&self, now_ts: i64) {
+        let last_pruned_at = self.last_resolve_enqueue_suppression_prune_at_ts.load(Ordering::Relaxed);
+        if last_pruned_at != 0 && now_ts.saturating_sub(last_pruned_at) < RETRY_STATE_PRUNE_INTERVAL_SECS {
+            return;
+        }
+        self.last_resolve_enqueue_suppression_prune_at_ts.store(now_ts, Ordering::Relaxed);
+        self.resolve_enqueue_suppressions
+            .retain(|_, suppressed_until_ts| *suppressed_until_ts > now_ts);
+    }
+
+    fn should_skip_enqueue_cached(&self, input_name: &str, task: &UpdateTask) -> bool {
+        let now_ts = chrono::Utc::now().timestamp();
+        self.prune_resolve_enqueue_suppressions(now_ts);
+
+        if self.is_redundant_with_pending_task(input_name, task) {
+            return true;
+        }
+
+        if InputWorker::retry_domain_for_task(task) != RetryDomain::Resolve {
+            return false;
+        }
+
+        let scoped_key = Self::scoped_task_key(input_name, task);
+        if let Some(entry) = self.resolve_enqueue_suppressions.get(&scoped_key) {
+            let suppressed_until_ts = *entry;
+            drop(entry);
+            if now_ts < suppressed_until_ts {
+                if self.has_pending_task(input_name, task) {
+                    return false;
+                }
+                debug!(
+                    "[Task] Skipping enqueue (resolve suppression) for input {}: {} (until_ts={}, remaining={}s)",
+                    input_name,
+                    task,
+                    suppressed_until_ts,
+                    suppressed_until_ts.saturating_sub(now_ts)
+                );
+                return true;
+            }
+            self.resolve_enqueue_suppressions.remove(&scoped_key);
+        }
+
+        false
+    }
+
+    async fn ensure_enqueue_state_loaded_for_input(&self, input_name: &Arc<str>) {
+        if self.enqueue_state_loaded_inputs.contains_key(input_name) {
+            return;
+        }
+        let now_ts = chrono::Utc::now().timestamp();
+        if self
+            .enqueue_state_load_retry_at_ts
+            .get(input_name)
+            .is_some_and(|retry_at_ts| now_ts < *retry_at_ts)
+        {
+            return;
+        }
+
+        let app_state_weak = {
+            let guard = self.app_state.lock().await;
+            guard.clone()
+        };
+        let runtime_settings = MetadataUpdateRuntimeSettings::from_app_state(app_state_weak.as_ref());
+        let Some(app_state) = app_state_weak.and_then(|weak| Weak::upgrade(&weak)) else {
+            return;
+        };
+        let retry_at_ts = now_ts.saturating_add(runtime_settings.metadata_retry_load_retry_delay_secs);
+
+        let storage_dir = app_state.app_config.config.load().storage_dir.clone();
+        let Ok(storage_path) = get_input_storage_path(input_name, &storage_dir).await else {
+            self.enqueue_state_load_retry_at_ts.insert(input_name.clone(), retry_at_ts);
+            return;
+        };
+        let retry_path = storage_path.join(METADATA_RETRY_STATE_FILE);
+        let input_name_cloned = input_name.clone();
+        let loaded = spawn_blocking_limited(move || load_metadata_retry_states_from_disk(&retry_path))
+            .await
+            .ok()
+            .and_then(Result::ok);
+        let Some(states) = loaded else {
+            self.enqueue_state_load_retry_at_ts.insert(input_name.clone(), retry_at_ts);
+            return;
+        };
+
+        for (task_key, state) in states {
+            if let Some(resolve_state) = state.resolve.as_ref() {
+                let suppressed_until_ts = resolve_state
+                    .cooldown_until_ts
+                    .unwrap_or(resolve_state.next_allowed_at_ts);
+                if suppressed_until_ts > now_ts {
+                    let scoped_key = ScopedTaskKey::new(input_name_cloned.clone(), task_key);
+                    self.resolve_enqueue_suppressions.insert(scoped_key, suppressed_until_ts);
+                }
+            }
+        }
+
+        self.enqueue_state_load_retry_at_ts.remove(input_name);
+        self.enqueue_state_loaded_inputs.insert(input_name.clone(), ());
+    }
+
+    pub async fn should_skip_enqueue(&self, input_name: Arc<str>, task: &UpdateTask) -> bool {
+        self.ensure_enqueue_state_loaded_for_input(&input_name).await;
+        self.should_skip_enqueue_cached(input_name.as_ref(), task)
     }
 
     /// Spawn a background task to queue the update.
@@ -698,6 +842,7 @@ impl MetadataUpdateManager {
                                 last_retry_state_prune_at_ts: None,
                                 scheduled_requeues: Arc::new(DashMap::new()),
                                 recently_completed_no_change: HashMap::new(),
+                                resolve_enqueue_suppressions: Arc::clone(&self.resolve_enqueue_suppressions),
                             },
                         ));
 
@@ -1000,12 +1145,14 @@ struct InputWorker {
     // Prevents repeated resolution of already-resolved items across playlist refreshes.
     // Stores the reason set so that tasks with new/different reasons are not wrongly skipped.
     recently_completed_no_change: HashMap<TaskKey, (Instant, ResolveReasonSet)>,
+    resolve_enqueue_suppressions: Arc<DashMap<ScopedTaskKey, i64>>,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct ProcessTaskOutcome {
     task_changed: bool,
     tmdb_pending: bool,
+    probe_pending: bool,
 }
 
 impl InputWorker {
@@ -1164,22 +1311,26 @@ impl InputWorker {
                 if !skip_execution {
                     if let Some(state_bundle) = self.retry_states.get(&current_key) {
                         if let Some(active_state) = state_bundle.get(active_retry_domain) {
-                            if active_retry_domain == RetryDomain::Probe {
-                                if let Some(cooldown_until_ts) = active_state.cooldown_until_ts {
-                                    if now_ts < cooldown_until_ts {
-                                        debug!(
-                                            "[Metadata-Task] Skipping task (probe cooldown) for input {}: {} (cooldown_until={}, remaining={}s)",
-                                            input_name,
-                                            task_for_execution,
-                                            cooldown_until_ts,
-                                            cooldown_until_ts.saturating_sub(now_ts)
-                                        );
-                                        self.scheduled_requeues.remove(&current_key);
-                                        remove_current_task = true;
-                                        skip_execution = true;
+                            if let Some(cooldown_until_ts) = active_state.cooldown_until_ts {
+                                if now_ts < cooldown_until_ts {
+                                    let cooldown_label = if active_retry_domain == RetryDomain::Probe {
+                                        "probe"
                                     } else {
-                                        clear_active_retry_state = true;
-                                    }
+                                        "resolve"
+                                    };
+                                    debug!(
+                                        "[Metadata-Task] Skipping task ({} cooldown) for input {}: {} (cooldown_until={}, remaining={}s)",
+                                        cooldown_label,
+                                        input_name,
+                                        task_for_execution,
+                                        cooldown_until_ts,
+                                        cooldown_until_ts.saturating_sub(now_ts)
+                                    );
+                                    self.scheduled_requeues.remove(&current_key);
+                                    remove_current_task = true;
+                                    skip_execution = true;
+                                } else {
+                                    clear_active_retry_state = true;
                                 }
                             }
 
@@ -1221,6 +1372,9 @@ impl InputWorker {
                     if should_remove_retry_entry {
                         self.retry_states.remove(&current_key);
                     }
+                    if clear_active_retry_state && active_retry_domain == RetryDomain::Resolve {
+                        self.clear_resolve_enqueue_suppression(&current_key);
+                    }
                     metadata_persist_state = Some(state_after_clear);
                 }
             }
@@ -1258,10 +1412,11 @@ impl InputWorker {
                             Self::should_trigger_playlist_update_for_task(&task_for_execution, task_outcome.task_changed);
                         cycle_had_changes |= trigger_playlist_update;
                         debug!(
-                            "[Metadata-Task] Task succeeded for input {input_name}: {task_for_execution} (changed={}, trigger_playlist_update={}, tmdb_pending={})",
+                            "[Metadata-Task] Task succeeded for input {input_name}: {task_for_execution} (changed={}, trigger_playlist_update={}, tmdb_pending={}, probe_pending={})",
                             task_outcome.task_changed,
                             trigger_playlist_update,
-                            task_outcome.tmdb_pending
+                            task_outcome.tmdb_pending,
+                            task_outcome.probe_pending
                         );
 
                         let active_retry_domain = Self::retry_domain_for_task(&task_for_execution);
@@ -1330,12 +1485,16 @@ impl InputWorker {
                         }
 
                         self.resolve_exhausted.remove(&current_key);
+                        if active_retry_domain == RetryDomain::Resolve {
+                            self.clear_resolve_enqueue_suppression(&current_key);
+                        }
                         self.scheduled_requeues.remove(&current_key);
 
                         // Cache tasks that completed with no changes to skip redundant re-resolution.
                         if !task_outcome.task_changed
                             && Self::is_resolve_task(&task_for_execution)
                             && !task_outcome.tmdb_pending
+                            && !task_outcome.probe_pending
                         {
                             let reasons = Self::task_reason(&task_for_execution);
                             debug!(
@@ -1400,27 +1559,28 @@ impl InputWorker {
                                     runtime_settings.probe_cooldown_secs
                                 );
                             } else {
+                                let cooldown_until_ts =
+                                    now_ts.saturating_add(runtime_settings.resolve_exhaustion_reset_gap_secs);
+                                let state_bundle_after_update = {
+                                    let state_bundle = self.retry_states.entry(current_key.clone()).or_default();
+                                    let state = state_bundle.get_mut_or_insert(RetryDomain::Resolve);
+                                    state.attempts = runtime_settings.max_attempts_resolve;
+                                    state.next_allowed_at_ts = cooldown_until_ts;
+                                    state.cooldown_until_ts = Some(cooldown_until_ts);
+                                    state.last_error = Some(e.message.clone());
+                                    state_bundle.touch(now_ts);
+                                    state_bundle.clone()
+                                };
+                                self.set_resolve_enqueue_suppression(&current_key, cooldown_until_ts);
                                 self.resolve_exhausted.insert(current_key.clone(), now_ts);
-                                let mut should_remove_retry_entry = false;
-                                let mut state_after_clear: Option<TaskRetryState> = None;
-                                if let Some(state_bundle) = self.retry_states.get_mut(&current_key) {
-                                    state_bundle.clear_domain(retry_domain);
-                                    if state_bundle.is_empty() {
-                                        should_remove_retry_entry = true;
-                                    } else {
-                                        state_bundle.touch(now_ts);
-                                        state_after_clear = Some(state_bundle.clone());
-                                    }
-                                }
-                                if should_remove_retry_entry {
-                                    self.retry_states.remove(&current_key);
-                                }
-                                metadata_persist_state = Some(state_after_clear);
+                                metadata_persist_state = Some(Some(state_bundle_after_update));
                                 remove_current_task = true;
                                 debug!(
-                                    "[Metadata-Task] Resolve task marked exhausted after permanent not-found for input {}: {} (error={})",
+                                    "[Metadata-Task] Resolve task entering cooldown after permanent not-found for input {}: {} (cooldown_until={}, cooldown_duration={}s, error={})",
                                     input_name,
                                     task_for_execution,
+                                    cooldown_until_ts,
+                                    runtime_settings.resolve_exhaustion_reset_gap_secs,
                                     e.message
                                 );
                             }
@@ -1501,35 +1661,41 @@ impl InputWorker {
                                         e.message
                                     );
                                 } else {
+                                    let cooldown_until_ts =
+                                        now_ts.saturating_add(runtime_settings.resolve_exhaustion_reset_gap_secs);
+                                    let state_bundle_after_update = {
+                                        let state_bundle = self.retry_states.entry(current_key.clone()).or_default();
+                                        let state = state_bundle.get_mut_or_insert(RetryDomain::Resolve);
+                                        state.attempts = max_attempts;
+                                        state.next_allowed_at_ts = cooldown_until_ts;
+                                        state.cooldown_until_ts = Some(cooldown_until_ts);
+                                        state.last_error = Some(e.message.clone());
+                                        state_bundle.touch(now_ts);
+                                        state_bundle.clone()
+                                    };
+                                    self.set_resolve_enqueue_suppression(&current_key, cooldown_until_ts);
                                     self.resolve_exhausted.insert(current_key.clone(), now_ts);
-                                    let mut should_remove_retry_entry = false;
-                                    let mut state_after_clear: Option<TaskRetryState> = None;
-                                    if let Some(state_bundle) = self.retry_states.get_mut(&current_key) {
-                                        state_bundle.clear_domain(retry_domain);
-                                        if state_bundle.is_empty() {
-                                            should_remove_retry_entry = true;
-                                        } else {
-                                            state_bundle.touch(now_ts);
-                                            state_after_clear = Some(state_bundle.clone());
-                                        }
-                                    }
-                                    if should_remove_retry_entry {
-                                        self.retry_states.remove(&current_key);
-                                    }
-                                    metadata_persist_state = Some(state_after_clear);
+                                    metadata_persist_state = Some(Some(state_bundle_after_update));
                                     remove_current_task = true;
                                     debug!(
-                                        "[Metadata-Task] Resolve task exhausted (max attempts reached) for input {}: {} (attempts={}/{}, error={})",
+                                        "[Metadata-Task] Resolve task exhausted (max attempts reached) for input {}: {} (attempts={}/{}, cooldown_duration={}s, error={})",
                                         input_name,
                                         task_for_execution,
                                         attempts,
                                         max_attempts,
+                                        runtime_settings.resolve_exhaustion_reset_gap_secs,
                                         e.message
                                     );
                                 }
                             } else {
                                 schedule_requeue_at_ts = Some(state_after_update.next_allowed_at_ts);
                                 metadata_persist_state = Some(Some(state_bundle_after_update));
+                                if retry_domain == RetryDomain::Resolve {
+                                    self.set_resolve_enqueue_suppression(
+                                        &current_key,
+                                        state_after_update.next_allowed_at_ts,
+                                    );
+                                }
                                 debug!(
                                     "[Metadata-Task] Task failed, scheduling retry for input {}: {} (attempt={}/{}, next_allowed_at={}, backoff={}s, error={})",
                                     input_name,
@@ -1708,6 +1874,7 @@ impl InputWorker {
         // (for example by the next playlist update), because state alone does not contain the
         // full `UpdateTask` payload for all variants.
         for (key, state) in loaded {
+            self.sync_resolve_enqueue_suppression_from_retry_state(&key, &state, now_ts);
             self.retry_states.insert(key, state);
         }
         self.prune_retry_tracking_maps(now_ts, runtime_settings).await;
@@ -1977,6 +2144,7 @@ impl InputWorker {
 
         for key in stale_retry_keys {
             if self.retry_states.remove(&key).is_some() {
+                self.clear_resolve_enqueue_suppression(&key);
                 debug_if_enabled!("Pruned stale metadata retry state for input {}: {:?}", self.input_name, key);
                 self.persist_metadata_retry_state(&key, None).await;
             }
@@ -1995,6 +2163,7 @@ impl InputWorker {
             .collect();
         for key in stale_resolve_exhausted_keys {
             self.resolve_exhausted.remove(&key);
+            self.clear_resolve_enqueue_suppression(&key);
         }
 
         let no_change_ttl = Duration::from_secs(runtime_settings.no_change_cache_ttl_secs);
@@ -2136,6 +2305,32 @@ impl InputWorker {
 
         self.recently_completed_no_change.remove(current_key);
         false
+    }
+
+    fn set_resolve_enqueue_suppression(&self, current_key: &TaskKey, until_ts: i64) {
+        let scoped_key = ScopedTaskKey::new(self.input_name.clone(), current_key.clone());
+        self.resolve_enqueue_suppressions.insert(scoped_key, until_ts);
+    }
+
+    fn clear_resolve_enqueue_suppression(&self, current_key: &TaskKey) {
+        let scoped_key = ScopedTaskKey::new(self.input_name.clone(), current_key.clone());
+        self.resolve_enqueue_suppressions.remove(&scoped_key);
+    }
+
+    fn sync_resolve_enqueue_suppression_from_retry_state(&self, current_key: &TaskKey, state: &TaskRetryState, now_ts: i64) {
+        let Some(resolve_state) = state.resolve.as_ref() else {
+            self.clear_resolve_enqueue_suppression(current_key);
+            return;
+        };
+
+        let suppressed_until_ts = resolve_state
+            .cooldown_until_ts
+            .unwrap_or(resolve_state.next_allowed_at_ts);
+        if suppressed_until_ts > now_ts {
+            self.set_resolve_enqueue_suppression(current_key, suppressed_until_ts);
+        } else {
+            self.clear_resolve_enqueue_suppression(current_key);
+        }
     }
 
     #[inline]
@@ -2965,7 +3160,7 @@ impl InputWorker {
             app_state.connection_manager.release_provider_handle(provider_handle).await;
         }
         match res {
-            Ok(tmdb_and_date_present) => {
+            Ok((tmdb_and_date_present, probe_pending)) => {
                 let task_changed = match task {
                     UpdateTask::ResolveVod { .. } => collector.vod.len() > pre_vod_updates,
                     UpdateTask::ResolveSeries { .. } => collector.series.len() > pre_series_updates,
@@ -2982,7 +3177,7 @@ impl InputWorker {
                     }
                     UpdateTask::ProbeLive { .. } | UpdateTask::ProbeStream { .. } => false,
                 };
-                Ok(ProcessTaskOutcome { task_changed, tmdb_pending })
+                Ok(ProcessTaskOutcome { task_changed, tmdb_pending, probe_pending })
             }
             Err(e) => Err(e),
         }
@@ -3012,9 +3207,10 @@ impl InputWorker {
         collector: &mut BatchResultCollector,
         db_handles: &mut HashMap<XtreamCluster, DbHandle>,
         failed_clusters: &mut HashSet<XtreamCluster>,
-    ) -> Result<bool, TuliproxError> {
-        // The returned bool indicates whether both TMDB id and release date are already present in the DB
-        // (used by the caller to avoid false-positive "no match" cooldowns).
+    ) -> Result<(bool, bool), TuliproxError> {
+        // The returned tuple is `(tmdb_and_date_present, probe_pending)`.
+        // `tmdb_and_date_present` avoids false-positive TMDB "no match" cooldowns.
+        // `probe_pending` prevents skipped/aborted probes from being cached as no-op.
         match task {
             UpdateTask::ResolveVod { id, reason, .. } => {
                 let fetch_info = reason.contains(ResolveReason::Info);
@@ -3037,6 +3233,7 @@ impl InputWorker {
                 };
 
                 let tmdb_and_date_present = AtomicBool::new(false);
+                let probe_pending = AtomicBool::new(false);
                 match update_vod_metadata(
                     &app_state.app_config,
                     client,
@@ -3051,14 +3248,21 @@ impl InputWorker {
                     will_probe,
                     query_opt,
                     Some(&tmdb_and_date_present),
+                    Some(&probe_pending),
                 )
                 .await
                 {
                     Ok(Some(props)) => {
                         collector.add_vod(id.clone(), props);
-                        Ok(tmdb_and_date_present.load(Ordering::Relaxed))
+                        Ok((
+                            tmdb_and_date_present.load(Ordering::Relaxed),
+                            probe_pending.load(Ordering::Relaxed),
+                        ))
                     }
-                    Ok(None) => Ok(tmdb_and_date_present.load(Ordering::Relaxed)),
+                    Ok(None) => Ok((
+                        tmdb_and_date_present.load(Ordering::Relaxed),
+                        probe_pending.load(Ordering::Relaxed),
+                    )),
                     Err(e) => Err(e),
                 }
             }
@@ -3084,6 +3288,7 @@ impl InputWorker {
                 };
 
                 let tmdb_and_date_present = AtomicBool::new(false);
+                let probe_pending = AtomicBool::new(false);
                 match update_series_metadata(
                     &app_state.app_config,
                     client,
@@ -3099,14 +3304,21 @@ impl InputWorker {
                     series_probe_settings,
                     query_opt,
                     Some(&tmdb_and_date_present),
+                    Some(&probe_pending),
                 )
                 .await
                 {
                     Ok(Some(props)) => {
                         collector.add_series(id.clone(), props);
-                        Ok(tmdb_and_date_present.load(Ordering::Relaxed))
+                        Ok((
+                            tmdb_and_date_present.load(Ordering::Relaxed),
+                            probe_pending.load(Ordering::Relaxed),
+                        ))
                     }
-                    Ok(None) => Ok(tmdb_and_date_present.load(Ordering::Relaxed)),
+                    Ok(None) => Ok((
+                        tmdb_and_date_present.load(Ordering::Relaxed),
+                        probe_pending.load(Ordering::Relaxed),
+                    )),
                     Err(e) => Err(e),
                 }
             }
@@ -3127,9 +3339,9 @@ impl InputWorker {
                 {
                     Ok(Some(props)) => {
                         collector.add_live(id.clone(), props);
-                        Ok(false)
+                        Ok((false, false))
                     }
-                    Ok(None) => Ok(false),
+                    Ok(None) => Ok((false, false)),
                     Err(e) => Err(e),
                 }
             }
@@ -3155,7 +3367,7 @@ impl InputWorker {
                 .await?;
 
                 match outcome {
-                    GenericProbeOutcome::Updated | GenericProbeOutcome::Noop => Ok(false),
+                    GenericProbeOutcome::Updated | GenericProbeOutcome::Noop => Ok((false, false)),
                     GenericProbeOutcome::ProbeFailed => Err(shared::error::info_err!(
                         "Probe stream task failed for key {:?} ({})",
                         task_key,
@@ -3201,6 +3413,7 @@ mod tests {
             last_retry_state_prune_at_ts: None,
             scheduled_requeues: Arc::new(DashMap::new()),
             recently_completed_no_change: HashMap::new(),
+            resolve_enqueue_suppressions: Arc::new(DashMap::new()),
         }
     }
 
@@ -3237,6 +3450,30 @@ mod tests {
         assert_eq!(manager.active_worker_count(), 1);
 
         manager.shutdown();
+    }
+
+    #[test]
+    fn should_skip_enqueue_respects_resolve_suppression() {
+        let manager = MetadataUpdateManager::new(CancellationToken::new());
+        let input_name = "input_suppressed";
+        let task = UpdateTask::ResolveVod {
+            id: ProviderIdType::Id(42),
+            reason: ResolveReasonSet::from_variants(&[ResolveReason::Info]),
+            delay: 1,
+        };
+        let scoped_key = ScopedTaskKey::new(Arc::from(input_name), TaskKey::from_task(&task));
+        manager
+            .resolve_enqueue_suppressions
+            .insert(scoped_key.clone(), chrono::Utc::now().timestamp().saturating_add(60));
+
+        assert!(manager.should_skip_enqueue_cached(input_name, &task));
+
+        manager
+            .resolve_enqueue_suppressions
+            .insert(scoped_key.clone(), chrono::Utc::now().timestamp().saturating_sub(1));
+
+        assert!(!manager.should_skip_enqueue_cached(input_name, &task));
+        assert!(!manager.resolve_enqueue_suppressions.contains_key(&scoped_key));
     }
 
     #[tokio::test]
@@ -3652,7 +3889,12 @@ mod tests {
         let path = dir.path().join("metadata_retry_state.db");
         let key = TaskKey::Stream { scope: Arc::from("input_a"), id: Arc::from("stream_1") };
         let state = TaskRetryState {
-            resolve: None,
+            resolve: Some(RetryState {
+                attempts: 4,
+                next_allowed_at_ts: 1_700_043_200,
+                cooldown_until_ts: Some(1_700_043_200),
+                last_error: Some("resolve exhausted".to_string()),
+            }),
             probe: Some(RetryState {
                 attempts: 3,
                 next_allowed_at_ts: 1_700_000_000,
@@ -3672,6 +3914,10 @@ mod tests {
         let loaded = load_metadata_retry_states_from_disk(&path).expect("state load should succeed");
         let loaded_state = loaded.get(&key).expect("probe key should be present");
 
+        let loaded_resolve = loaded_state.resolve.as_ref().expect("resolve retry state should be present");
+        assert_eq!(loaded_resolve.attempts, 4);
+        assert_eq!(loaded_resolve.cooldown_until_ts, Some(1_700_043_200));
+        assert_eq!(loaded_resolve.last_error.as_deref(), Some("resolve exhausted"));
         let loaded_probe = loaded_state.probe.as_ref().expect("probe retry state should be present");
         assert_eq!(loaded_probe.attempts, 3);
         assert_eq!(loaded_probe.cooldown_until_ts, Some(1_700_086_400));

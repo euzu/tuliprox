@@ -265,6 +265,20 @@ pub struct StreamOptions {
     pub pipe_provider_stream: bool,
 }
 
+struct StreamingAcquireOptions<'a> {
+    force_provider: Option<&'a Arc<str>>,
+    allow_provider_grace: bool,
+    user_priority: i8,
+    session_owner: Option<&'a str>,
+}
+
+pub struct ForceStreamRequestContext<'a> {
+    pub req_headers: &'a HeaderMap,
+    pub input: &'a Arc<ConfigInput>,
+    pub user: &'a ProxyUserCredentials,
+    pub session_reservation_ttl_secs: u64,
+}
+
 /// Constructs a `StreamOptions` object based on the application's reverse proxy configuration.
 ///
 /// This function retrieves streaming-related settings from the `AppState`:
@@ -357,19 +371,23 @@ async fn resolve_streaming_strategy(
     stream_url: &str,
     fingerprint: &Fingerprint,
     input: &ConfigInput,
-    force_provider: Option<&Arc<str>>,
-    allow_provider_grace: bool,
-    user_priority: i8,
+    options: StreamingAcquireOptions<'_>,
 ) -> StreamingStrategy {
     // allocate a provider connection
     let mut forced_provider_allocated = false;
-    let provider_connection_handle = match force_provider {
+    let provider_connection_handle = match options.force_provider {
         Some(provider) => {
             // First try to stay on the exact pinned provider account without over-allocating.
             // If that account is no longer available, fall back to any available account in the same lineup.
             if let Some(handle) = app_state
                 .active_provider
-                .acquire_exact_connection_with_grace(provider, &fingerprint.addr, allow_provider_grace, user_priority)
+                .acquire_exact_connection_with_grace_for_session(
+                    provider,
+                    &fingerprint.addr,
+                    options.allow_provider_grace,
+                    options.user_priority,
+                    options.session_owner,
+                )
                 .await
             {
                 forced_provider_allocated = true;
@@ -382,14 +400,26 @@ async fn resolve_streaming_strategy(
                 );
                 app_state
                     .active_provider
-                    .acquire_connection_with_grace(&input.name, &fingerprint.addr, allow_provider_grace, user_priority)
+                    .acquire_connection_with_grace_for_session(
+                        &input.name,
+                        &fingerprint.addr,
+                        options.allow_provider_grace,
+                        options.user_priority,
+                        options.session_owner,
+                    )
                     .await
             }
         }
         None => {
             app_state
                 .active_provider
-                .acquire_connection_with_grace(&input.name, &fingerprint.addr, allow_provider_grace, user_priority)
+                .acquire_connection_with_grace_for_session(
+                    &input.name,
+                    &fingerprint.addr,
+                    options.allow_provider_grace,
+                    options.user_priority,
+                    options.session_owner,
+                )
                 .await
         }
     };
@@ -477,10 +507,21 @@ async fn create_stream_response_details(
     allow_provider_grace: bool,
     virtual_id: VirtualId,
     user_priority: i8,
+    session_owner: Option<&str>,
 ) -> Result<StreamDetails, TuliproxError> {
-    let mut streaming_strategy =
-        resolve_streaming_strategy(app_state, stream_url, fingerprint, input, force_provider, allow_provider_grace, user_priority)
-            .await;
+    let mut streaming_strategy = resolve_streaming_strategy(
+        app_state,
+        stream_url,
+        fingerprint,
+        input,
+        StreamingAcquireOptions {
+            force_provider,
+            allow_provider_grace,
+            user_priority,
+            session_owner,
+        },
+    )
+    .await;
     let mut grace_period_options = app_state.get_grace_options();
     grace_period_options.period_millis = get_grace_period_millis(
         connection_permission,
@@ -790,9 +831,7 @@ pub async fn force_provider_stream_response(
     app_state: &Arc<AppState>,
     user_session: &UserSession,
     mut stream_channel: StreamChannel,
-    req_headers: &HeaderMap,
-    input: &Arc<ConfigInput>,
-    user: &ProxyUserCredentials,
+    ctx: ForceStreamRequestContext<'_>,
 ) -> impl IntoResponse + Send {
     let stream_options = get_stream_options(app_state);
     let share_stream = false;
@@ -815,15 +854,16 @@ pub async fn force_provider_stream_response(
         &stream_options,
         &user_session.stream_url,
         fingerprint,
-        req_headers,
-        input,
+        ctx.req_headers,
+        ctx.input,
         item_type,
         share_stream,
         connection_permission,
         preferred_provider,
         allow_provider_grace,
         stream_channel.virtual_id,
-        user.priority,
+        ctx.user.priority,
+        Some(user_session.token.as_str()),
     )
     .await
     {
@@ -840,17 +880,28 @@ pub async fn force_provider_stream_response(
     if stream_details.has_stream() || deferred_grace_hold_stream {
         let provider_response =
             stream_details.stream_info.as_ref().map(|(h, sc, url, cvt)| (h.clone(), *sc, url.clone(), *cvt));
-        app_state.active_users.update_session_addr(&user.username, &user_session.token, &fingerprint.addr).await;
+        if ctx.session_reservation_ttl_secs > 0 {
+            if let Some(provider_name) = stream_details.provider_name.as_ref() {
+                app_state
+                    .active_provider
+                    .refresh_provider_reservation(provider_name, &user_session.token, ctx.session_reservation_ttl_secs)
+                    .await;
+            }
+        }
+        app_state
+            .active_users
+            .update_session_addr(&ctx.user.username, &user_session.token, &fingerprint.addr)
+            .await;
         stream_channel.shared = share_stream;
         let stream = create_active_client_stream(
             stream_details,
             app_state,
-            user,
+            ctx.user,
             connection_permission,
             fingerprint,
             stream_channel,
             Some(&user_session.token),
-            req_headers,
+            ctx.req_headers,
         )
         .await;
 
@@ -863,7 +914,7 @@ pub async fn force_provider_stream_response(
         let body_stream = prepare_body_stream(app_state, item_type, stream);
         debug_if_enabled!(
             "Streaming provider forced stream request from {}",
-            sanitize_sensitive_info(resolve_request_url_for_logging(input, user_session.stream_url.as_ref()).as_ref())
+            sanitize_sensitive_info(resolve_request_url_for_logging(ctx.input, user_session.stream_url.as_ref()).as_ref())
         );
         return try_unwrap_body!(response.body(body_stream));
     }
@@ -916,12 +967,7 @@ pub async fn stream_response(
     let virtual_id = stream_channel.virtual_id;
     let item_type = stream_channel.item_type;
 
-    // Grace candidates are intentionally not shared:
-    // they are transient and may be terminated after the grace check.
-    // Keeping them out of the shared-stream lifecycle avoids cross-effects on
-    // concurrently running streams of the same user.
-    let share_stream =
-        is_stream_share_enabled(item_type, target) && connection_permission != UserConnectionPermission::GracePeriod;
+    let share_stream = is_stream_share_enabled(item_type, target);
     let _shared_lock = if share_stream {
         let write_lock = app_state.app_config.file_locks.write_lock_str(stream_url).await;
 
@@ -981,6 +1027,7 @@ pub async fn stream_response(
         true,
         stream_channel.virtual_id,
         user.priority,
+        Some(session_token),
     )
     .await
     {
@@ -1022,9 +1069,6 @@ pub async fn stream_response(
         }
 
         let mut is_stream_shared = share_stream;
-        if stream_details.provider_grace_active {
-            is_stream_shared = false;
-        }
         if let Some((_header, _status_code, _url, Some(_custom_video))) = stream_details.stream_info.as_ref() {
             if stream_details.stream.is_some() {
                 is_stream_shared = false;
@@ -1143,6 +1187,13 @@ pub async fn stream_response(
                             connection_permission,
                         )
                         .await;
+                    let reservation_ttl_secs = get_session_reservation_ttl_secs(app_state, item_type);
+                    if reservation_ttl_secs > 0 {
+                        app_state
+                            .active_provider
+                            .refresh_provider_reservation(&provider, session_token, reservation_ttl_secs)
+                            .await;
+                    }
                 }
             }
 
@@ -1166,6 +1217,33 @@ fn get_stream_throttle(app_state: &Arc<AppState>) -> u64 {
         .and_then(|reverse_proxy| reverse_proxy.stream.as_ref())
         .map(|stream| stream.throttle_kbps)
         .unwrap_or_default()
+}
+
+fn get_stream_config_u64(app_state: &Arc<AppState>, selector: impl FnOnce(&crate::model::StreamConfig) -> u64) -> u64 {
+    app_state
+        .app_config
+        .config
+        .load()
+        .reverse_proxy
+        .as_ref()
+        .and_then(|reverse_proxy| reverse_proxy.stream.as_ref())
+        .map_or(0, selector)
+}
+
+pub(crate) fn get_hls_session_ttl_secs(app_state: &Arc<AppState>) -> u64 {
+    get_stream_config_u64(app_state, |stream| stream.hls_session_ttl_secs)
+}
+
+pub(crate) fn get_catchup_session_ttl_secs(app_state: &Arc<AppState>) -> u64 {
+    get_stream_config_u64(app_state, |stream| stream.catchup_session_ttl_secs)
+}
+
+pub(crate) fn get_session_reservation_ttl_secs(app_state: &Arc<AppState>, item_type: PlaylistItemType) -> u64 {
+    match item_type {
+        PlaylistItemType::LiveHls => get_hls_session_ttl_secs(app_state),
+        PlaylistItemType::Catchup => get_catchup_session_ttl_secs(app_state),
+        _ => 0,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1656,6 +1734,10 @@ where
 
 pub fn create_session_fingerprint(fingerprint: &Fingerprint, username: &str, virtual_id: u32) -> String {
     concat_string!(&fingerprint.key, "|", username, "|", &virtual_id.to_string())
+}
+
+pub fn create_catchup_session_key(fingerprint: &Fingerprint, username: &str, virtual_id: u32) -> String {
+    concat_string!("catchup|", &fingerprint.key, "|", username, "|", &virtual_id.to_string(), "|session")
 }
 
 pub fn stream_json_array<P>(iter: Box<dyn Iterator<Item = P> + Send>) -> axum::response::Response

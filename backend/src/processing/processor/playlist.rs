@@ -1180,7 +1180,7 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
                                     delay: probe_delay,
                                     interval: interval_secs,
                                 };
-                                if mgr.is_redundant_with_pending_task(input_name.as_ref(), &task) {
+                                if mgr.should_skip_enqueue(input_name.clone(), &task).await {
                                     continue;
                                 }
                                 if log_enabled!(Level::Debug) {
@@ -1249,7 +1249,7 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
             reason: ResolveReasonSet::from_variants(&[ResolveReason::MissingDetails]),
             delay: opts.probe_delay,
         };
-        if mgr.is_redundant_with_pending_task(input_name.as_ref(), &task) {
+        if mgr.should_skip_enqueue(input_name.clone(), &task).await {
             continue;
         }
         debug!(

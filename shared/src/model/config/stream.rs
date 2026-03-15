@@ -1,9 +1,11 @@
 use crate::{
     error::{info_err_res, TuliproxError, TuliproxErrorKind},
     utils::{
-        default_as_true, default_grace_period_millis, default_grace_period_timeout_secs,
-        default_shared_burst_buffer_mb, is_blank_optional_string, is_default_grace_period_millis,
-        is_default_grace_period_timeout_secs, is_default_shared_burst_buffer_mb, is_true, parse_to_kbps,
+        default_as_true, default_catchup_session_ttl_secs, default_grace_period_millis,
+        default_grace_period_timeout_secs, default_hls_session_ttl_secs, default_shared_burst_buffer_mb,
+        is_blank_optional_string, is_default_catchup_session_ttl_secs, is_default_grace_period_millis,
+        is_default_grace_period_timeout_secs, is_default_hls_session_ttl_secs, is_default_shared_burst_buffer_mb,
+        is_true, parse_to_kbps,
     },
 };
 
@@ -47,6 +49,10 @@ pub struct StreamConfigDto {
     /// If true (default), wait for grace period check before streaming.
     #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
     pub grace_period_hold_stream: bool,
+    #[serde(default = "default_hls_session_ttl_secs", skip_serializing_if = "is_default_hls_session_ttl_secs")]
+    pub hls_session_ttl_secs: u64,
+    #[serde(default = "default_catchup_session_ttl_secs", skip_serializing_if = "is_default_catchup_session_ttl_secs")]
+    pub catchup_session_ttl_secs: u64,
     #[serde(default, skip)]
     pub throttle_kbps: u64,
     #[serde(default = "default_shared_burst_buffer_mb", skip_serializing_if = "is_default_shared_burst_buffer_mb")]
@@ -64,6 +70,8 @@ impl Default for StreamConfigDto {
             throttle_kbps: 0,
             shared_burst_buffer_mb: default_shared_burst_buffer_mb(),
             grace_period_hold_stream: true,
+            hls_session_ttl_secs: default_hls_session_ttl_secs(),
+            catchup_session_ttl_secs: default_catchup_session_ttl_secs(),
         }
     }
 }
@@ -78,6 +86,8 @@ impl StreamConfigDto {
             && self.throttle_kbps == 0
             && self.shared_burst_buffer_mb == default_shared_burst_buffer_mb()
             && self.grace_period_hold_stream
+            && self.hls_session_ttl_secs == default_hls_session_ttl_secs()
+            && self.catchup_session_ttl_secs == default_catchup_session_ttl_secs()
     }
 
     pub(crate) fn prepare(&mut self) -> Result<(), TuliproxError> {
