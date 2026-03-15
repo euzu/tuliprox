@@ -150,7 +150,7 @@ fn process_header(input_name: &Arc<str>, video_suffixes: &[String], content: &st
                             } else if token == "group-title" {
                                 plih.group = value.intern();
                             } else if token == "tvg-id" {
-                                plih.epg_channel_id = Some(value.intern());
+                                plih.epg_channel_id = if value.is_empty() { None } else { Some(value.intern()) };
                             } else if token == "tvg-name" {
                                 plih.name = value.intern();
                             } else if token == "tvg-logo" {

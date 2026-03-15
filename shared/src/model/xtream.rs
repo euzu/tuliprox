@@ -7,7 +7,7 @@ use crate::{
 };
 use serde::{ser::SerializeMap, Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, fmt, sync::Arc};
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
 pub struct XtreamLoginInfo {
@@ -15,11 +15,21 @@ pub struct XtreamLoginInfo {
     pub exp_date: Option<i64>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Default, Clone, PartialEq)]
 pub struct XtreamLoginRequest {
     pub url: String,
     pub username: String,
     pub password: String,
+}
+
+impl fmt::Debug for XtreamLoginRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("XtreamLoginRequest")
+            .field("url", &self.url)
+            .field("username", &"<redacted>")
+            .field("password", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

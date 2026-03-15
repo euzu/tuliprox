@@ -66,6 +66,7 @@ pub fn AliasItemForm(props: &AliasItemFormProps) -> Html {
     });
     let exp_date_loading = use_state(|| false);
     let exp_date_request_in_flight = use_mut_ref(|| false);
+    let exp_date_request_token = use_mut_ref(|| 0_u64);
 
     let handle_submit = {
         let form_state = form_state.clone();
@@ -90,6 +91,7 @@ pub fn AliasItemForm(props: &AliasItemFormProps) -> Html {
         let form_state = form_state.clone();
         let exp_date_loading = exp_date_loading.clone();
         let exp_date_request_in_flight = exp_date_request_in_flight.clone();
+        let exp_date_request_token = exp_date_request_token.clone();
         let translate = translate.clone();
 
         Some(ToolAction {
@@ -102,36 +104,61 @@ pub fn AliasItemForm(props: &AliasItemFormProps) -> Html {
                     return;
                 }
 
-                let url = form_state.form.url.trim().to_string();
-                let username = form_state.form.username.clone().unwrap_or_default().trim().to_string();
-                let password = form_state.form.password.clone().unwrap_or_default().trim().to_string();
+                let url = form_state.form.url.clone();
+                let username = form_state.form.username.clone().unwrap_or_default();
+                let password = form_state.form.password.clone().unwrap_or_default();
 
-                if url.is_empty() || username.is_empty() || password.is_empty() {
+                if url.trim().is_empty() || username.trim().is_empty() || password.trim().is_empty() {
                     services.toastr.error(translate.t("MESSAGES.SOURCE_EDITOR.URL_USERNAME_AND_PASSWORD_MANDATORY"));
                     return;
                 }
 
                 *exp_date_request_in_flight.borrow_mut() = true;
+                let request_token = {
+                    let mut token = exp_date_request_token.borrow_mut();
+                    *token += 1;
+                    *token
+                };
                 exp_date_loading.set(true);
                 let services = services.clone();
                 let form_state = form_state.clone();
                 let exp_date_loading = exp_date_loading.clone();
                 let exp_date_request_in_flight = exp_date_request_in_flight.clone();
+                let exp_date_request_token = exp_date_request_token.clone();
                 let request = XtreamLoginRequest { url, username, password };
 
                 spawn_local(async move {
+                    let current_snapshot = || {
+                        (
+                            form_state.form.url.clone(),
+                            form_state.form.username.clone().unwrap_or_default(),
+                            form_state.form.password.clone().unwrap_or_default(),
+                        )
+                    };
                     match services.config.get_xtream_login_info(&request).await {
                         Ok(login_info) => {
-                            if let Some(exp_date) = login_info.exp_date {
-                                form_state.dispatch(AliasFormAction::ExpDate(Some(exp_date)));
-                            } else {
-                                services.toastr.warning("No expiration date returned by provider");
+                            if *exp_date_request_token.borrow() == request_token {
+                                let snapshot_matches = current_snapshot()
+                                    == (request.url.clone(), request.username.clone(), request.password.clone());
+                                if snapshot_matches {
+                                    if let Some(exp_date) = login_info.exp_date {
+                                        form_state.dispatch(AliasFormAction::ExpDate(Some(exp_date)));
+                                    } else {
+                                        services.toastr.warning("No expiration date returned by provider");
+                                    }
+                                }
                             }
                         }
-                        Err(err) => services.toastr.error(err.to_string()),
+                        Err(err) => {
+                            if *exp_date_request_token.borrow() == request_token {
+                                services.toastr.error(err.to_string());
+                            }
+                        }
                     }
-                    *exp_date_request_in_flight.borrow_mut() = false;
-                    exp_date_loading.set(false);
+                    if *exp_date_request_token.borrow() == request_token {
+                        *exp_date_request_in_flight.borrow_mut() = false;
+                        exp_date_loading.set(false);
+                    }
                 });
             }),
         })

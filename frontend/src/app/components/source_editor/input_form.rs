@@ -270,6 +270,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     let edit_provider = use_state(|| None::<ConfigProviderDto>);
     let exp_date_loading = use_state(|| false);
     let exp_date_request_in_flight = use_mut_ref(|| false);
+    let exp_date_request_token = use_mut_ref(|| 0_u64);
 
     let staged_input_types = use_memo(staged_input_state.form.input_type, |input_type| {
         let default_it = input_type;
@@ -761,6 +762,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             let input_form_state = input_form_state.clone();
             let exp_date_loading = exp_date_loading.clone();
             let exp_date_request_in_flight = exp_date_request_in_flight.clone();
+            let exp_date_request_token = exp_date_request_token.clone();
             let translate = translate.clone();
 
             Some(ToolAction {
@@ -773,11 +775,11 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                         return;
                     }
 
-                    let url = input_form_state.form.url.trim().to_string();
-                    let username = input_form_state.form.username.clone().unwrap_or_default().trim().to_string();
-                    let password = input_form_state.form.password.clone().unwrap_or_default().trim().to_string();
+                    let url = input_form_state.form.url.clone();
+                    let username = input_form_state.form.username.clone().unwrap_or_default();
+                    let password = input_form_state.form.password.clone().unwrap_or_default();
 
-                    if url.is_empty() || username.is_empty() || password.is_empty() {
+                    if url.trim().is_empty() || username.trim().is_empty() || password.trim().is_empty() {
                         services
                             .toastr
                             .error(translate.t("MESSAGES.SOURCE_EDITOR.URL_USERNAME_AND_PASSWORD_MANDATORY"));
@@ -785,26 +787,51 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                     }
 
                     *exp_date_request_in_flight.borrow_mut() = true;
+                    let request_token = {
+                        let mut token = exp_date_request_token.borrow_mut();
+                        *token += 1;
+                        *token
+                    };
                     exp_date_loading.set(true);
                     let services = services.clone();
                     let input_form_state = input_form_state.clone();
                     let exp_date_loading = exp_date_loading.clone();
                     let exp_date_request_in_flight = exp_date_request_in_flight.clone();
+                    let exp_date_request_token = exp_date_request_token.clone();
                     let request = XtreamLoginRequest { url, username, password };
 
                     spawn_local(async move {
+                        let current_snapshot = || {
+                            (
+                                input_form_state.form.url.clone(),
+                                input_form_state.form.username.clone().unwrap_or_default(),
+                                input_form_state.form.password.clone().unwrap_or_default(),
+                            )
+                        };
                         match services.config.get_xtream_login_info(&request).await {
                             Ok(login_info) => {
-                                if let Some(exp_date) = login_info.exp_date {
-                                    input_form_state.dispatch(ConfigInputFormAction::ExpDate(Some(exp_date)));
-                                } else {
-                                    services.toastr.warning("No expiration date returned by provider");
+                                if *exp_date_request_token.borrow() == request_token {
+                                    let snapshot_matches = current_snapshot()
+                                        == (request.url.clone(), request.username.clone(), request.password.clone());
+                                    if snapshot_matches {
+                                        if let Some(exp_date) = login_info.exp_date {
+                                            input_form_state.dispatch(ConfigInputFormAction::ExpDate(Some(exp_date)));
+                                        } else {
+                                            services.toastr.warning("No expiration date returned by provider");
+                                        }
+                                    }
                                 }
                             }
-                            Err(err) => services.toastr.error(err.to_string()),
+                            Err(err) => {
+                                if *exp_date_request_token.borrow() == request_token {
+                                    services.toastr.error(err.to_string());
+                                }
+                            }
                         }
-                        *exp_date_request_in_flight.borrow_mut() = false;
-                        exp_date_loading.set(false);
+                        if *exp_date_request_token.borrow() == request_token {
+                            *exp_date_request_in_flight.borrow_mut() = false;
+                            exp_date_loading.set(false);
+                        }
                     });
                 }),
             })
