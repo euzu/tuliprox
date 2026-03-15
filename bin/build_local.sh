@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -e
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+
 ###############################
 #
 # Standard
@@ -154,11 +156,7 @@ fi
 ########################################
 if [ "$BUILD_FRONTEND" = true ]; then
   echo "==> Building frontend (trunk)"
-  cd frontend || {
-    echo "❌ frontend directory not found"
-    exit 1
-  }
-  trunk build --release
+  "${SCRIPT_DIR}/build_fe.sh" release
 fi
 
 ########################################

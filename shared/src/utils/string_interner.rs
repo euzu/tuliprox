@@ -165,9 +165,14 @@ fn f64_to_str(v: f64) -> String {
 //   ArcStrVisitor        -> Arc<str>         (null/empty -> "")
 //   OptionArcStrVisitor  -> Option<Arc<str>> (null/empty -> None)
 //
-// Both visitors use `deserialize_string` inside `visit_some`, which tells
-// saphyr to return the **raw scalar text** without float-parsing.  This is
-// what makes `name: infinity` survive as the literal string `"infinity"`.
+// `ArcStrVisitor::visit_some` uses `deserialize_string`, which tells saphyr to
+// return the **raw scalar text** without float-parsing. That is what makes
+// `name: infinity` survive as the literal string `"infinity"`.
+//
+// `OptionArcStrVisitor::visit_some` intentionally diverges and uses
+// `deserialize_any` so JSON/YAML numeric inputs can flow into `visit_i64`,
+// `visit_u64` or `visit_f64`. The tradeoff is that this path no longer forces
+// raw-scalar preservation in the same way as `ArcStrVisitor`.
 
 /// Visitor that produces `Arc<str>`, mapping null / empty -> `""`.
 struct ArcStrVisitor;
@@ -209,7 +214,7 @@ impl<'de> Visitor<'de> for OptionArcStrVisitor {
     fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Self::Value, E> { Ok(Some(f64_to_str(v).intern())) }
     fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> { Ok(None) }
     fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> { Ok(None) }
-    fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> { d.deserialize_string(self) }
+    fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> { d.deserialize_any(self) }
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
         while seq.next_element::<IgnoredAny>()?.is_some() {}
         Ok(None)
@@ -301,9 +306,11 @@ pub mod arc_str_option_serde {
 }
 
 //
-// Reuses `ArcStrVisitor` via `deserialize_option`:
-//   - null / ~ / empty  -> visit_none / visit_unit -> ""
-//   - any other scalar  -> visit_some -> deserialize_string -> visit_str/visit_string -> interned text
+// Reuses `ArcStrVisitor` / `OptionArcStrVisitor` via `deserialize_option`:
+//   - null / ~ / empty  -> visit_none / visit_unit -> "" / None
+//   - `ArcStrVisitor::visit_some` -> deserialize_string -> raw scalar text
+//   - `OptionArcStrVisitor::visit_some` -> deserialize_any -> numbers/bools map
+//     into their typed `visit_*` methods before being interned as strings
 
 pub use arc_str_default_on_null as arc_str_none_default_on_null;
 
@@ -319,4 +326,27 @@ where
     D: Deserializer<'de>,
 {
     deserializer.deserialize_option(OptionArcStrVisitor)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, serde::Deserialize)]
+    struct OptArcStrHolder {
+        #[serde(default, with = "arc_str_option_serde")]
+        value: Option<Arc<str>>,
+    }
+
+    #[test]
+    fn arc_str_option_serde_accepts_json_integer() {
+        let parsed: OptArcStrHolder = serde_json::from_str(r#"{"value":8169}"#).unwrap();
+        assert_eq!(parsed.value.as_deref(), Some("8169"));
+    }
+
+    #[test]
+    fn arc_str_option_serde_accepts_json_string() {
+        let parsed: OptArcStrHolder = serde_json::from_str(r#"{"value":"8169"}"#).unwrap();
+        assert_eq!(parsed.value.as_deref(), Some("8169"));
+    }
 }

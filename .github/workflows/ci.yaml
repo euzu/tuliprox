@@ -43,6 +43,52 @@ jobs:
       - name: Lint with Clippy
         run: make lint
 
+  docs:
+    name: Documentation Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mdBook
+        uses: taiki-e/install-action@v2
+        with:
+          tool: mdbook
+
+      - name: Build documentation
+        run: make docs
+
+  frontend:
+    name: Frontend Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust Tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: trunk,wasm-bindgen-cli,mdbook
+
+      - name: Install Stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: "true"
+
+      - name: Install wasm tools 128
+        run: |
+          chmod +x ./bin/install_wasm_tools.sh
+          WASM_TOOLS_BIN="$(./bin/install_wasm_tools.sh 128)"
+          echo "${WASM_TOOLS_BIN}" >> "$GITHUB_PATH"
+
+      - name: Build frontend with wasm-opt
+        run: |
+          chmod +x ./bin/build_docs.sh ./bin/build_fe.sh
+          ./bin/build_fe.sh release
+
   # Job 3: Build and Test (takes longer)
   test:
     name: Build & Test

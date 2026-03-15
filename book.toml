@@ -1,0 +1,16 @@
+[book]
+authors = ["tuliprox contributors"]
+language = "en"
+src = "docs/src"
+title = "tuliprox Documentation"
+
+[build]
+build-dir = "frontend/build/docs"
+create-missing = false
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/euzu/tuliprox"
+edit-url-template = "https://github.com/euzu/tuliprox/edit/develop/{path}"
+no-section-label = true
