@@ -113,7 +113,6 @@ macro_rules! process_header_fields {
 }
 
 fn process_header(input_name: &Arc<str>, video_suffixes: &[String], content: &str, url: String) -> PlaylistItemHeader {
-    let url_id = extract_id_from_url(&url);
     let url_types = if video_suffixes.iter().any(|suffix| url.ends_with(suffix)) {
         // TODO find Series based on group or configured names
         Some((XtreamCluster::Video, PlaylistItemType::Video))
@@ -142,7 +141,7 @@ fn process_header(input_name: &Arc<str>, video_suffixes: &[String], content: &st
                         if let Some(t) = token {
                             let value = token_value(&mut stack, &mut it);
                             let token = t.to_lowercase();
-                            if token.as_str() == "xui-id" {
+                            if token.as_str() == "xui-id" || token.as_str() == "cuid" {
                                 if !value.is_empty() {
                                     provider_id = Some(value);
                                 }
@@ -151,7 +150,7 @@ fn process_header(input_name: &Arc<str>, video_suffixes: &[String], content: &st
                             } else if token == "group-title" {
                                 plih.group = value.intern();
                             } else if token == "tvg-id" {
-                                plih.id = value.intern();
+                                plih.epg_channel_id = Some(value.intern());
                             } else if token == "tvg-name" {
                                 plih.name = value.intern();
                             } else if token == "tvg-logo" {
@@ -172,17 +171,12 @@ fn process_header(input_name: &Arc<str>, video_suffixes: &[String], content: &st
             c = it.next();
         }
 
-        if plih.id.is_empty() {
-            plih.epg_channel_id = None;
-            if let Some(pid) = provider_id {
-                plih.id = pid.intern();
-            } else if !url_id.is_empty() {
-                plih.id = url_id.intern();
-            }
+        if let Some(pid) = provider_id {
+            plih.id = pid.intern();
         } else {
-            plih.epg_channel_id = Some(Arc::clone(&plih.id));
-            if let Some(pid) = provider_id {
-                plih.id = pid.intern();
+            let url_id = extract_id_from_url(&plih.url);
+            if !url_id.is_empty() {
+                plih.id = url_id.intern();
             }
         }
     }
@@ -291,7 +285,10 @@ mod test {
 
         let pli = process_header(&input, &video_suffixes, line, url.to_string());
         assert_eq!(pli.title, "Seven".intern());
-        assert_eq!(pli.id, "abc-seven".intern());
+        // tvg-id is preserved as epg_channel_id, id falls back to url-derived hash
+        assert_eq!(pli.epg_channel_id, Some("abc-seven".intern()));
+        assert!(!pli.id.is_empty());
+        assert_ne!(&*pli.id, "abc-seven"); // id should NOT be tvg-id (avoids duplicates)
         assert_eq!(pli.logo, "https://abc.nz/.images/seven.png".intern());
         assert_eq!(pli.chno, 7);
         assert_eq!(&*pli.group, "Sydney");
@@ -306,10 +303,53 @@ mod test {
 
         let pli = process_header(&input, &video_suffixes, line, url.to_string());
         assert_eq!(pli.title, "Seven".intern());
-        assert_eq!(pli.id, "abc-seven".intern());
+        assert_eq!(pli.epg_channel_id, Some("abc-seven".intern()));
+        assert!(!pli.id.is_empty());
+        assert_ne!(&*pli.id, "abc-seven");
         assert_eq!(pli.logo, "https://abc.nz/.images/seven.png".intern());
         assert_eq!(pli.chno, 7);
         assert_eq!(&*pli.group, "Sydney");
+    }
+
+    #[test]
+    fn test_process_header_cuid_format() {
+        let input = "test".intern();
+        let video_suffixes = Vec::new();
+        let url = "http://line.trx-ott.com/live/18be61b480/fc19249ec409/1905905.ts";
+        let line = r#"#EXTINF:0 CUID="12046" tvg-name="UK-NOWTV| SKY CRIME FHD" tvg-id="skycrime.uk" tvg-logo="https://logo.m3uassets.com/skycrime.png" group-title="🔪Murder Mystery",UK-NOWTV| SKY CRIME FHD"#;
+
+        let pli = process_header(&input, &video_suffixes, line, url.to_string());
+        assert_eq!(pli.name, "UK-NOWTV| SKY CRIME FHD".intern());
+        assert_eq!(pli.title, "UK-NOWTV| SKY CRIME FHD".intern());
+        assert_eq!(pli.id, "12046".intern()); // CUID is recognized as provider_id, overrides tvg-id
+        assert_eq!(pli.logo, "https://logo.m3uassets.com/skycrime.png".intern());
+        assert_eq!(&*pli.group, "🔪Murder Mystery");
+        assert_eq!(pli.epg_channel_id, Some("skycrime.uk".intern()));
+    }
+
+    #[test]
+    fn test_process_header_tvg_id_uses_url_id_fallback() {
+        let input = "test".intern();
+        let video_suffixes = Vec::new();
+        // Numeric last segment in URL -> extract_id_from_url returns "1905905"
+        let url = "http://line.trx-ott.com/live/user/pass/1905905.ts";
+        let line = r#"#EXTINF:-1 tvg-id="skycrime.uk" tvg-name="SKY CRIME" group-title="Crime",SKY CRIME"#;
+
+        let pli = process_header(&input, &video_suffixes, line, url.to_string());
+        assert_eq!(pli.id, "1905905".intern()); // url_id used as fallback
+        assert_eq!(pli.epg_channel_id, Some("skycrime.uk".intern())); // tvg-id preserved for EPG
+    }
+
+    #[test]
+    fn test_process_header_no_tvg_id_no_provider_id() {
+        let input = "test".intern();
+        let video_suffixes = Vec::new();
+        let url = "http://example.com/live/user/pass/12345.ts";
+        let line = r#"#EXTINF:-1 tvg-name="Test Channel" group-title="Group",Test Channel"#;
+
+        let pli = process_header(&input, &video_suffixes, line, url.to_string());
+        assert_eq!(pli.id, "12345".intern()); // url_id as sole fallback
+        assert_eq!(pli.epg_channel_id, None); // no tvg-id -> no epg_channel_id
     }
 
     #[test]
