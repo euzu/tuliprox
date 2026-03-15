@@ -231,8 +231,16 @@ impl ActiveClientStreamState {
             self.inner = None;
 
             let video_type = Self::custom_video_type_for_mode(mode);
+            let reason = match mode {
+                StreamMode::ChannelUnavailable => "unavailable provider channel",
+                StreamMode::UserExhausted => "user grace period exhaustion",
+                StreamMode::ProviderExhausted => "provider grace period exhaustion",
+                StreamMode::Provisioning => "provider grace period provisioning",
+                StreamMode::LowPriorityPreempted => "low-priority preemption",
+                StreamMode::Inner | StreamMode::GracePending => "stream mode transition",
+            };
             debug_if_enabled!(
-                "Provider stream stopped due to grace period or unavailable provider channel for {}",
+                "Provider stream stopped due to {reason} for {}",
                 sanitize_sensitive_info(&addr.to_string())
             );
             self.connection_manager.send_cleanup(CleanupEvent::UpdateDetailAndReleaseProvider {

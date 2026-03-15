@@ -150,6 +150,8 @@ impl PlaylistItemType {
         )
     }
 
+    pub fn is_live_adaptive(&self) -> bool { matches!(self, PlaylistItemType::LiveHls | PlaylistItemType::LiveDash) }
+
     pub fn as_u8(self) -> u8 { self as u8 }
 
     pub fn as_str(&self) -> &'static str {

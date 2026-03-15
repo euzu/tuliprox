@@ -106,7 +106,7 @@ impl ProviderStreamFactoryOptions {
             Some(Arc::new(AtomicUsize::new(requested_range.unwrap_or(0))))
         };
         let mut flags = ProviderStreamFactoryFlagsSet::new();
-        if stream_options.stream_retry {
+        if stream_options.stream_retry && !item_type.is_live_adaptive() {
             flags.set(ProviderStreamFactoryFlags::ReconnectEnabled);
         }
         if stream_options.pipe_provider_stream {
@@ -789,5 +789,41 @@ mod tests {
         );
         assert!(!options.was_range_requested()); // Stripped by filter
         assert_eq!(options.get_total_bytes_send(), None);
+    }
+
+    #[test]
+    fn test_provider_stream_factory_options_disables_reconnect_for_live_adaptive_streams() {
+        let addr = "127.0.0.1:8080".parse().unwrap();
+        let stream_url = Url::parse("http://example.com/segment.ts").unwrap();
+        let req_headers = HeaderMap::new();
+        let stream_options =
+            StreamOptions { stream_retry: true, buffer_enabled: true, buffer_size: 1024, pipe_provider_stream: false };
+
+        let hls_options = ProviderStreamFactoryOptions::new(
+            addr,
+            PlaylistItemType::LiveHls,
+            false,
+            &stream_options,
+            &stream_url,
+            &req_headers,
+            None,
+            None,
+            None,
+        );
+
+        let dash_options = ProviderStreamFactoryOptions::new(
+            addr,
+            PlaylistItemType::LiveDash,
+            false,
+            &stream_options,
+            &stream_url,
+            &req_headers,
+            None,
+            None,
+            None,
+        );
+
+        assert!(!hls_options.should_reconnect());
+        assert!(!dash_options.should_reconnect());
     }
 }
