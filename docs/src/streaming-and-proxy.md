@@ -6,7 +6,7 @@ Its runtime streaming behavior is a major part of the project.
 ## Reverse proxy vs redirect
 
 Tuliprox can either redirect to provider URLs or proxy traffic itself.
-Proxy mode gives tuliprox control over:
+Proxy mode gives Tuliprox control over:
 
 - user limits
 - provider limits
@@ -120,7 +120,7 @@ If preempted by a higher-priority user, they are cancelled immediately and relea
 
 ## Custom stream responses
 
-When tuliprox cannot serve the real stream, it can return custom fallback videos for cases such as:
+When Tuliprox cannot serve the real stream, it can return custom fallback videos for cases such as:
 
 - user connection exhausted
 - provider connection exhausted
@@ -156,7 +156,7 @@ Controls which request headers are stripped before upstream requests:
 
 - `referer_header`
 - `x_header`
-- `cloudfare_header`
+- `cloudflare_header`
 - `custom_header`
 
 ### `resource_retry`

@@ -828,7 +828,7 @@ mkdir -p "$RELEASE_DIR"
 # Clean previous builds
 cargo clean || true
 
-  "${SCRIPT_DIR}/build_fe.sh" release
+"${SCRIPT_DIR}/build_fe.sh" release
 # Check if the frontend build directory exists
 if [ ! -d "${FRONTEND_BUILD_DIR}" ]; then
     die "🧨 Error: Web directory '${FRONTEND_BUILD_DIR}' does not exist."

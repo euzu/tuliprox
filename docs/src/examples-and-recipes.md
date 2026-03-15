@@ -50,7 +50,7 @@ server:
   - name: default
     protocol: http
     host: 192.168.1.41
-    port: "8901"
+    port: 8901
     timezone: Europe/Berlin
     message: Welcome to tuliprox
 user:

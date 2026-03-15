@@ -67,6 +67,14 @@ rm -rf dist
 env -u NO_COLOR RUSTFLAGS="--remap-path-prefix $HOME=~" trunk "${TRUNK_ARGS[@]}"
 maybe_optimize_wasm
 
+if [ ! -d build/docs ]; then
+  die "Documentation output directory 'frontend/build/docs' does not exist."
+fi
+
+if ! find build/docs -mindepth 1 -print -quit >/dev/null 2>&1; then
+  die "Documentation output directory 'frontend/build/docs' is empty."
+fi
+
 mkdir -p dist/static
 rm -rf dist/static/docs
 cp -R build/docs dist/static/docs

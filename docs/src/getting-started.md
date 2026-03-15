@@ -87,10 +87,10 @@ services:
     image: ghcr.io/euzu/tuliprox-alpine:latest
     working_dir: /app
     volumes:
-      - /home/tuliprox2/tuliprox:/app/tuliprox
-      - /home/tuliprox2/config:/app/config
-      - /home/tuliprox2/data:/app/data
-      - /home/tuliprox2/cache:/app/cache
+      - /home/tuliprox/tuliprox:/app/tuliprox
+      - /home/tuliprox/config:/app/config
+      - /home/tuliprox/data:/app/data
+      - /home/tuliprox/cache:/app/cache
     environment:
       - TZ=Europe/Paris
     ports:

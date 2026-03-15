@@ -209,7 +209,7 @@ impl<'de> Visitor<'de> for OptionArcStrVisitor {
     fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Self::Value, E> { Ok(Some(f64_to_str(v).intern())) }
     fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> { Ok(None) }
     fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> { Ok(None) }
-    fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> { d.deserialize_string(self) }
+    fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> { d.deserialize_any(self) }
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
         while seq.next_element::<IgnoredAny>()?.is_some() {}
         Ok(None)
@@ -301,9 +301,9 @@ pub mod arc_str_option_serde {
 }
 
 //
-// Reuses `ArcStrVisitor` via `deserialize_option`:
-//   - null / ~ / empty  -> visit_none / visit_unit -> ""
-//   - any other scalar  -> visit_some -> deserialize_string -> visit_str/visit_string -> interned text
+// Reuses `ArcStrVisitor` / `OptionArcStrVisitor` via `deserialize_option`:
+//   - null / ~ / empty  -> visit_none / visit_unit -> "" / None
+//   - any other scalar  -> visit_some -> deserialize_any -> visit_* -> interned text
 
 pub use arc_str_default_on_null as arc_str_none_default_on_null;
 
@@ -319,4 +319,27 @@ where
     D: Deserializer<'de>,
 {
     deserializer.deserialize_option(OptionArcStrVisitor)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, serde::Deserialize)]
+    struct OptArcStrHolder {
+        #[serde(default, with = "arc_str_option_serde")]
+        value: Option<Arc<str>>,
+    }
+
+    #[test]
+    fn arc_str_option_serde_accepts_json_integer() {
+        let parsed: OptArcStrHolder = serde_json::from_str(r#"{"value":8169}"#).unwrap();
+        assert_eq!(parsed.value.as_deref(), Some("8169"));
+    }
+
+    #[test]
+    fn arc_str_option_serde_accepts_json_string() {
+        let parsed: OptArcStrHolder = serde_json::from_str(r#"{"value":"8169"}"#).unwrap();
+        assert_eq!(parsed.value.as_deref(), Some("8169"));
+    }
 }

@@ -3,7 +3,6 @@ dist
 /release
 /target
 /frontend/build
-/frontend/build/docs
 # Default ignored files
 /shelf/
 /workspace.xml
