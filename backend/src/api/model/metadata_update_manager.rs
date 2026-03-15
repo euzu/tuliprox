@@ -1101,8 +1101,7 @@ impl MetadataUpdateManager {
                 *d1 = min(*d1, d2);
                 *lm1 = match (*lm1, lm2) {
                     (Some(left), Some(right)) => Some(left.max(right)),
-                    (None, some @ Some(_)) | (some @ Some(_), None) => some,
-                    (None, None) => None,
+                    _ => None,
                 };
                 changed = *r1 != previous_reason || *d1 != previous_delay || *lm1 != previous_last_modified;
             }
@@ -1339,9 +1338,10 @@ impl InputWorker {
                 let mut clear_tmdb_state = false;
                 if let Some(state_bundle) = self.retry_states.get(&current_key) {
                     if let Some(tmdb_state) = state_bundle.get(RetryDomain::Tmdb) {
+                        let task_has_tmdb_reason = Self::task_has_tmdb_reason(&task_for_execution);
                         let source_unchanged = tmdb_state.source_last_modified.is_some()
                             && tmdb_state.source_last_modified == Self::task_source_last_modified(&task_for_execution);
-                        if source_unchanged && Self::task_has_tmdb_reason(&task_for_execution) {
+                        if source_unchanged && task_has_tmdb_reason {
                             if let Some(stripped_task) = Self::strip_tmdb_reasons(&task_for_execution) {
                                 debug!(
                                     "[Task] TMDB/date unchanged for input {}: {}, continuing with non-TMDB reasons (last_modified={:?})",
@@ -1361,31 +1361,33 @@ impl InputWorker {
                                 remove_current_task = true;
                                 skip_execution = true;
                             }
-                        } else if let Some(cooldown_until_ts) = tmdb_state.cooldown_until_ts {
-                            if now_ts < cooldown_until_ts {
-                                if let Some(stripped_task) = Self::strip_tmdb_reasons(&task_for_execution) {
-                                    debug!(
-                                        "[Task] TMDB cooldown active for input {}: {}, continuing with non-TMDB reasons (cooldown_until={}, remaining={}s)",
-                                        input_name,
-                                        task_for_execution,
-                                        cooldown_until_ts,
-                                        cooldown_until_ts.saturating_sub(now_ts)
-                                    );
-                                    task_for_execution = stripped_task;
+                        } else if task_has_tmdb_reason {
+                            if let Some(cooldown_until_ts) = tmdb_state.cooldown_until_ts {
+                                if now_ts < cooldown_until_ts {
+                                    if let Some(stripped_task) = Self::strip_tmdb_reasons(&task_for_execution) {
+                                        debug!(
+                                            "[Task] TMDB cooldown active for input {}: {}, continuing with non-TMDB reasons (cooldown_until={}, remaining={}s)",
+                                            input_name,
+                                            task_for_execution,
+                                            cooldown_until_ts,
+                                            cooldown_until_ts.saturating_sub(now_ts)
+                                        );
+                                        task_for_execution = stripped_task;
+                                    } else {
+                                        debug!(
+                                            "[Metadata-Task] Skipping task (TMDB-only in cooldown) for input {}: {} (cooldown_until={}, remaining={}s)",
+                                            input_name,
+                                            task_for_execution,
+                                            cooldown_until_ts,
+                                            cooldown_until_ts.saturating_sub(now_ts)
+                                        );
+                                        self.scheduled_requeues.remove(&current_key);
+                                        remove_current_task = true;
+                                        skip_execution = true;
+                                    }
                                 } else {
-                                    debug!(
-                                        "[Metadata-Task] Skipping task (TMDB-only in cooldown) for input {}: {} (cooldown_until={}, remaining={}s)",
-                                        input_name,
-                                        task_for_execution,
-                                        cooldown_until_ts,
-                                        cooldown_until_ts.saturating_sub(now_ts)
-                                    );
-                                    self.scheduled_requeues.remove(&current_key);
-                                    remove_current_task = true;
-                                    skip_execution = true;
+                                    clear_tmdb_state = true;
                                 }
-                            } else {
-                                clear_tmdb_state = true;
                             }
                         }
                     }
@@ -1926,6 +1928,7 @@ impl InputWorker {
                 Self::flush_batch_static(&input_name, app_state_weak.as_ref(), &mut self.batch_buffer).await;
             }
         }
+        self.flush_dirty_retry_states().await;
 
         debug!("Metadata worker stopped for input {input_name}");
     }
@@ -2012,6 +2015,18 @@ impl InputWorker {
             }
             Ok(Err(err)) => warn!("Failed to persist metadata retry state for input {input_name}: {err}"),
             Err(err) => warn!("Failed to persist metadata retry state for input {input_name}: {err}"),
+        }
+    }
+
+    async fn flush_dirty_retry_states(&mut self) {
+        if self.dirty_retry_state_keys.is_empty() {
+            return;
+        }
+
+        let dirty_keys: Vec<TaskKey> = self.dirty_retry_state_keys.iter().cloned().collect();
+        for key in dirty_keys {
+            let state = self.retry_states.get(&key).cloned();
+            self.persist_metadata_retry_state(&key, state.as_ref()).await;
         }
     }
 
@@ -4183,6 +4198,107 @@ mod tests {
             }
             other => panic!("unexpected task type after strip: {other:?}"),
         }
+    }
+
+    #[test]
+    fn merge_task_payload_resolve_vod_unknown_last_modified_wins() {
+        let mut existing = UpdateTask::ResolveVod {
+            id: ProviderIdType::Id(7),
+            reason: ResolveReasonSet::from_variants(&[ResolveReason::Info]),
+            delay: 5,
+            source_last_modified: Some(123),
+        };
+        let changed = MetadataUpdateManager::merge_task_payload(
+            &mut existing,
+            UpdateTask::ResolveVod {
+                id: ProviderIdType::Id(7),
+                reason: ResolveReasonSet::from_variants(&[ResolveReason::Probe]),
+                delay: 3,
+                source_last_modified: None,
+            },
+        );
+
+        assert!(changed);
+        match existing {
+            UpdateTask::ResolveVod { reason, delay, source_last_modified, .. } => {
+                assert!(reason.contains(ResolveReason::Info));
+                assert!(reason.contains(ResolveReason::Probe));
+                assert_eq!(delay, 3);
+                assert_eq!(source_last_modified, None);
+            }
+            other => panic!("unexpected merged task type: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_task_payload_resolve_series_unknown_last_modified_wins() {
+        let mut existing = UpdateTask::ResolveSeries {
+            id: ProviderIdType::Id(9),
+            reason: ResolveReasonSet::from_variants(&[ResolveReason::Info]),
+            delay: 2,
+            source_last_modified: None,
+        };
+        let changed = MetadataUpdateManager::merge_task_payload(
+            &mut existing,
+            UpdateTask::ResolveSeries {
+                id: ProviderIdType::Id(9),
+                reason: ResolveReasonSet::from_variants(&[ResolveReason::Tmdb]),
+                delay: 2,
+                source_last_modified: Some(456),
+            },
+        );
+
+        assert!(changed);
+        match existing {
+            UpdateTask::ResolveSeries { reason, delay, source_last_modified, .. } => {
+                assert!(reason.contains(ResolveReason::Info));
+                assert!(reason.contains(ResolveReason::Tmdb));
+                assert_eq!(delay, 2);
+                assert_eq!(source_last_modified, None);
+            }
+            other => panic!("unexpected merged task type: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn flush_dirty_retry_states_retries_persist_after_transient_failure() {
+        let dir = tempdir().expect("tempdir should be created");
+        let failing_path = dir.path().join("missing").join("metadata_retry_state.db");
+        let success_path = dir.path().join("metadata_retry_state.db");
+        let key = TaskKey::Vod(42);
+        let state = TaskRetryState {
+            resolve: Some(RetryState {
+                attempts: 2,
+                next_allowed_at_ts: 1_700_043_200,
+                cooldown_until_ts: None,
+                last_error: Some("temporary failure".to_string()),
+                source_last_modified: None,
+            }),
+            probe: None,
+            tmdb: None,
+            updated_at_ts: 1_700_000_000,
+        };
+        let (tx, rx) = mpsc::channel::<TaskKey>(8);
+        let pending_tasks = Arc::new(DashMap::new());
+        let pending_task_count = Arc::new(AtomicUsize::new(0));
+        let mut worker = create_test_worker("input_retry_flush", tx, rx, pending_tasks, pending_task_count);
+
+        worker.metadata_retry_state_path = Some(failing_path);
+        worker.retry_states.insert(key.clone(), state.clone());
+        worker.dirty_retry_state_keys.insert(key.clone());
+
+        worker.persist_metadata_retry_state(&key, Some(&state)).await;
+        assert!(worker.dirty_retry_state_keys.contains(&key));
+
+        worker.metadata_retry_state_path = Some(success_path.clone());
+        worker.flush_dirty_retry_states().await;
+
+        assert!(!worker.dirty_retry_state_keys.contains(&key));
+        let loaded = load_metadata_retry_states_from_disk(&success_path).expect("state load should succeed after retry");
+        let loaded_state = loaded.get(&key).expect("retry state should be persisted on flush");
+        let loaded_resolve = loaded_state.resolve.as_ref().expect("resolve retry state should be present");
+        assert_eq!(loaded_resolve.attempts, 2);
+        assert_eq!(loaded_resolve.last_error.as_deref(), Some("temporary failure"));
     }
 
     #[test]
