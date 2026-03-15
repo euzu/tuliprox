@@ -7,7 +7,7 @@
     "authUrl": "/auth/"
   },
   "discord": "https://discord.gg/gkzCmWw9Tf",
-  "documentation": "https://euzu.github.io/tuliprox-docs/",
+  "documentation": "static/docs/",
   "wsUrl" : "/ws",
   "protocolVersion": 1
 }

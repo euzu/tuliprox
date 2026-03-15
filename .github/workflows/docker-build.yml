@@ -43,12 +43,18 @@ jobs:
       - name: Install Rust Tools (Binaries)
         uses: taiki-e/install-action@v2
         with:
-          tool: cross,trunk,wasm-bindgen-cli,cargo-edit
+          tool: cross,trunk,wasm-bindgen-cli,cargo-edit,mdbook
 
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl,wasm32-unknown-unknown
+
+      - name: Install wasm tools 128
+        run: |
+          chmod +x ./bin/install_wasm_tools.sh
+          WASM_TOOLS_BIN="$(./bin/install_wasm_tools.sh 128)"
+          echo "${WASM_TOOLS_BIN}" >> "$GITHUB_PATH"
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2

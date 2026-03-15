@@ -63,14 +63,10 @@ write_checksum() {
 }
 
 # -----------------------------------------
-# 1. Frontend Build
+# 1. Documentation + Frontend Build
 # -----------------------------------------
-if [ -d "${FRONTEND_BUILD_DIR}" ]; then
-    echo "🎨 Frontend build found, skipping build..."
-else
-    echo "🎨 Building frontend..."
-    cd "${FRONTEND_DIR}" && trunk build --release
-fi
+echo "🎨 Building frontend..."
+"${WORKING_DIR}/bin/build_fe.sh" release
 
 cd "$WORKING_DIR"
 

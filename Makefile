@@ -12,6 +12,7 @@ CROSS := $(CARGO_BIN_DIR)/cross
 TRUNK := $(CARGO_BIN_DIR)/trunk
 WASM_BINDGEN := $(CARGO_BIN_DIR)/wasm-bindgen
 CARGO_SET_VERSION := $(CARGO_BIN_DIR)/cargo-set-version
+MDBOOK := $(CARGO_BIN_DIR)/mdbook
 
 # Explicitly force stable/nightly to avoid system-wide overrides
 CARGO_STABLE     := $(CARGO) +stable
@@ -33,7 +34,7 @@ help: ## Display this help
 ##@ Prerequisites:
 
 .PHONY: install-tools
-install-tools: rustup install-nightly-fmt cross trunk wasm-bindgen cargo-set-version markdownlint ## Install required development tools
+install-tools: rustup install-nightly-fmt cross trunk wasm-bindgen cargo-set-version mdbook markdownlint ## Install required development tools
 
 .PHONY: install-nightly-fmt
 install-nightly-fmt: ## Install nightly toolchain specifically for formatting
@@ -81,6 +82,14 @@ $(CARGO_SET_VERSION):
 	@$(CARGO) install cargo-edit
 	@echo "✅ $@ installed"
 
+.PHONY: mdbook
+mdbook: $(MDBOOK) ## Install mdBook (documentation generator)
+
+$(MDBOOK):
+	@echo "📦 Installing mdBook"
+	@$(CARGO) install mdbook
+	@echo "✅ mdBook installed"
+
 .PHONY: markdownlint
 markdownlint: ## Install markdownlint-cli2 (requires npm)
 	@echo "📦 Installing markdownlint-cli2"
@@ -127,3 +136,26 @@ markdown-lint: ## Lint markdown files
 	}
 	@markdownlint-cli2 "**/*.md"
 	@echo "✅ Markdown linting complete"
+
+.PHONY: docs
+docs: mdbook ## Build static documentation into frontend/build/docs
+	@echo "==> Building documentation"
+	@$(MDBOOK) build
+	@echo "✅ Documentation built at frontend/build/docs"
+
+.PHONY: docs-serve
+docs-serve: mdbook ## Serve documentation locally with mdBook
+	@echo "==> Serving documentation"
+	@$(MDBOOK) serve --open
+
+.PHONY: docs-clean
+docs-clean: ## Remove generated documentation output
+	@echo "==> Removing generated documentation"
+	@rm -rf frontend/build/docs
+	@echo "✅ Documentation output removed"
+
+.PHONY: web-dist
+web-dist: mdbook trunk ## Build static documentation and frontend assets
+	@echo "==> Building web assets"
+	@./bin/build_fe.sh release
+	@echo "✅ Web assets built"
