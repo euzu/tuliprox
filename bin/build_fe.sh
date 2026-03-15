@@ -33,9 +33,13 @@ maybe_optimize_wasm() {
   for wasm_file in "${wasm_files[@]}"; do
     tmp_file="$(mktemp "${TMPDIR:-/tmp}/tuliprox-wasm-opt.XXXXXX.wasm")"
     if wasm-opt -O --all-features --output="${tmp_file}" "${wasm_file}"; then
-      mv "${tmp_file}" "${wasm_file}"
-      echo "✅ Optimized $(basename "${wasm_file}") with ${wasm_opt_version}"
-      continue
+      if mv "${tmp_file}" "${wasm_file}"; then
+        echo "✅ Optimized $(basename "${wasm_file}") with ${wasm_opt_version}"
+        continue
+      fi
+
+      rm -f "${tmp_file}"
+      die "Failed to replace $(basename "${wasm_file}") with the optimized wasm artifact."
     fi
 
     rm -f "${tmp_file}"
@@ -71,7 +75,7 @@ if [ ! -d build/docs ]; then
   die "Documentation output directory 'frontend/build/docs' does not exist."
 fi
 
-if ! find build/docs -mindepth 1 -print -quit >/dev/null 2>&1; then
+if [ -z "$(find build/docs -mindepth 1 -maxdepth 1 -print -quit)" ]; then
   die "Documentation output directory 'frontend/build/docs' is empty."
 fi
 

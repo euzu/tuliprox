@@ -49,9 +49,12 @@ Options:
   --force-library-rescan
   --dbx
   --dbm
+  --dbms
   --dbe
   --dbv
 ```
+
+`--dbx`, `--dbm`, `--dbe`, `--dbv` and `--dbms` open the internal database viewers for Xtream, M3U, EPG, target-id mapping and metadata retry status files.
 
 ## Important files
 

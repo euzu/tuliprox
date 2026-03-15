@@ -165,9 +165,14 @@ fn f64_to_str(v: f64) -> String {
 //   ArcStrVisitor        -> Arc<str>         (null/empty -> "")
 //   OptionArcStrVisitor  -> Option<Arc<str>> (null/empty -> None)
 //
-// Both visitors use `deserialize_string` inside `visit_some`, which tells
-// saphyr to return the **raw scalar text** without float-parsing.  This is
-// what makes `name: infinity` survive as the literal string `"infinity"`.
+// `ArcStrVisitor::visit_some` uses `deserialize_string`, which tells saphyr to
+// return the **raw scalar text** without float-parsing. That is what makes
+// `name: infinity` survive as the literal string `"infinity"`.
+//
+// `OptionArcStrVisitor::visit_some` intentionally diverges and uses
+// `deserialize_any` so JSON/YAML numeric inputs can flow into `visit_i64`,
+// `visit_u64` or `visit_f64`. The tradeoff is that this path no longer forces
+// raw-scalar preservation in the same way as `ArcStrVisitor`.
 
 /// Visitor that produces `Arc<str>`, mapping null / empty -> `""`.
 struct ArcStrVisitor;
@@ -303,7 +308,9 @@ pub mod arc_str_option_serde {
 //
 // Reuses `ArcStrVisitor` / `OptionArcStrVisitor` via `deserialize_option`:
 //   - null / ~ / empty  -> visit_none / visit_unit -> "" / None
-//   - any other scalar  -> visit_some -> deserialize_any -> visit_* -> interned text
+//   - `ArcStrVisitor::visit_some` -> deserialize_string -> raw scalar text
+//   - `OptionArcStrVisitor::visit_some` -> deserialize_any -> numbers/bools map
+//     into their typed `visit_*` methods before being interned as strings
 
 pub use arc_str_default_on_null as arc_str_none_default_on_null;
 
