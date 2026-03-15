@@ -286,8 +286,10 @@ impl ConfigService {
         })
     }
 
-    pub async fn get_xtream_login_info(&self, request: &XtreamLoginRequest) -> Result<Option<XtreamLoginInfo>, Error> {
-        request_post::<&XtreamLoginRequest, XtreamLoginInfo>(&self.xtream_login_info_path, request, None, None).await
+    pub async fn get_xtream_login_info(&self, request: &XtreamLoginRequest) -> Result<XtreamLoginInfo, Error> {
+        request_post::<&XtreamLoginRequest, XtreamLoginInfo>(&self.xtream_login_info_path, request, None, None)
+            .await
+            .map(|response| response.unwrap_or_default())
     }
 
     pub async fn save_config(&self, dto: ConfigDto) -> Result<(), Error> {

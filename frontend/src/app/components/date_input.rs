@@ -1,6 +1,6 @@
 use crate::app::components::FieldLabel;
 use web_sys::HtmlInputElement;
-use yew::{component, html, use_effect_with, Callback, Html, NodeRef, Properties, TargetCast};
+use yew::{classes, component, html, use_effect_with, Callback, Html, NodeRef, Properties, TargetCast};
 
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct DateInputProps {
@@ -18,8 +18,28 @@ pub struct DateInputProps {
     pub on_change: Option<Callback<Option<i64>>>, // None or Some(timestamp)
 }
 
+#[derive(Properties, Clone, PartialEq, Debug)]
+pub(crate) struct DateInputBaseProps {
+    #[prop_or_default]
+    pub name: String,
+    #[prop_or_default]
+    pub field_id: Option<String>,
+    #[prop_or_default]
+    pub label: Option<String>,
+    #[prop_or_default]
+    pub input_ref: Option<NodeRef>,
+    #[prop_or_default]
+    pub value: Option<i64>,
+    #[prop_or_default]
+    pub on_change: Option<Callback<Option<i64>>>,
+    #[prop_or_default]
+    pub tools: Html,
+    #[prop_or_default]
+    pub extra_class: Option<&'static str>,
+}
+
 #[component]
-pub fn DateInput(props: &DateInputProps) -> Html {
+pub(crate) fn DateInputBase(props: &DateInputBaseProps) -> Html {
     let local_ref = props.input_ref.clone().unwrap_or_default();
 
     {
@@ -28,7 +48,6 @@ pub fn DateInput(props: &DateInputProps) -> Html {
         use_effect_with(value, move |val| {
             if let Some(input) = local_ref.cast::<HtmlInputElement>() {
                 if let Some(ts) = val {
-                    // Timestamp -> yyyy-mm-dd
                     if let Some(date) = chrono::DateTime::from_timestamp(*ts, 0) {
                         input.set_value(&date.format("%Y-%m-%d").to_string());
                     }
@@ -44,7 +63,7 @@ pub fn DateInput(props: &DateInputProps) -> Html {
         let onchange_cb = props.on_change.clone();
         Callback::from(move |event: yew::events::Event| {
             if let Some(input) = event.target_dyn_into::<HtmlInputElement>() {
-                let value = input.value(); // "2025-08-22"
+                let value = input.value();
                 let ts = if value.is_empty() {
                     None
                 } else {
@@ -61,7 +80,7 @@ pub fn DateInput(props: &DateInputProps) -> Html {
     };
 
     html! {
-        <div class="tp__input tp__input-date">
+        <div class={classes!("tp__input", "tp__input-date", props.extra_class)}>
             { if let Some(label) = &props.label {
                 html! {
                     <FieldLabel
@@ -83,7 +102,22 @@ pub fn DateInput(props: &DateInputProps) -> Html {
                     name={props.name.clone()}
                     onchange={handle_change}
                 />
+               {props.tools.clone()}
             </div>
         </div>
+    }
+}
+
+#[component]
+pub fn DateInput(props: &DateInputProps) -> Html {
+    html! {
+        <DateInputBase
+            name={props.name.clone()}
+            field_id={props.field_id.clone()}
+            label={props.label.clone()}
+            input_ref={props.input_ref.clone()}
+            value={props.value}
+            on_change={props.on_change.clone()}
+        />
     }
 }

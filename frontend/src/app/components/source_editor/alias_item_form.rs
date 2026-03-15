@@ -1,12 +1,16 @@
 use crate::{
-    app::components::{Card, TextButton},
-    edit_field_bool, edit_field_date, edit_field_number_i16, edit_field_number_u16, edit_field_text,
+    app::components::{Card, TextButton, ToolAction},
+    edit_field_bool, edit_field_exp_date, edit_field_number_i16, edit_field_number_u16, edit_field_text,
     edit_field_text_option, generate_form_reducer,
+    hooks::use_service_context,
     i18n::use_translation,
 };
-use shared::{model::ConfigInputAliasDto, utils::Internable};
+use shared::{
+    model::{ConfigInputAliasDto, InputType, XtreamLoginRequest},
+    utils::Internable,
+};
 use std::sync::Arc;
-use yew::prelude::*;
+use yew::{platform::spawn_local, prelude::*};
 
 const LABEL_ALIAS_NAME: &str = "LABEL.ALIAS_NAME";
 const LABEL_URL: &str = "LABEL.URL";
@@ -36,6 +40,7 @@ generate_form_reducer!(
 pub struct AliasItemFormProps {
     pub on_submit: Callback<ConfigInputAliasDto>,
     pub on_cancel: Callback<()>,
+    pub input_type: InputType,
     #[prop_or_default]
     pub initial: Option<ConfigInputAliasDto>,
 }
@@ -43,6 +48,7 @@ pub struct AliasItemFormProps {
 #[component]
 pub fn AliasItemForm(props: &AliasItemFormProps) -> Html {
     let translate = use_translation();
+    let services = use_service_context();
 
     let form_state: UseReducerHandle<AliasFormState> = use_reducer(|| AliasFormState {
         form: props.initial.clone().unwrap_or_else(|| ConfigInputAliasDto {
@@ -58,6 +64,8 @@ pub fn AliasItemForm(props: &AliasItemFormProps) -> Html {
         }),
         modified: false,
     });
+    let exp_date_loading = use_state(|| false);
+    let exp_date_request_in_flight = use_mut_ref(|| false);
 
     let handle_submit = {
         let form_state = form_state.clone();
@@ -77,6 +85,60 @@ pub fn AliasItemForm(props: &AliasItemFormProps) -> Html {
         })
     };
 
+    let exp_date_tool_action = if props.input_type.is_xtream() {
+        let services = services.clone();
+        let form_state = form_state.clone();
+        let exp_date_loading = exp_date_loading.clone();
+        let exp_date_request_in_flight = exp_date_request_in_flight.clone();
+        let translate = translate.clone();
+
+        Some(ToolAction {
+            name: Some("RefreshAliasExpDate".to_string()),
+            icon: "Refresh".to_string(),
+            hint: Some(translate.t("LABEL.RESOLVE")),
+            class: (*exp_date_loading).then(|| "loading".to_string()),
+            onclick: Callback::from(move |_event: MouseEvent| {
+                if *exp_date_request_in_flight.borrow() {
+                    return;
+                }
+
+                let url = form_state.form.url.trim().to_string();
+                let username = form_state.form.username.clone().unwrap_or_default().trim().to_string();
+                let password = form_state.form.password.clone().unwrap_or_default().trim().to_string();
+
+                if url.is_empty() || username.is_empty() || password.is_empty() {
+                    services.toastr.error(translate.t("MESSAGES.SOURCE_EDITOR.URL_USERNAME_AND_PASSWORD_MANDATORY"));
+                    return;
+                }
+
+                *exp_date_request_in_flight.borrow_mut() = true;
+                exp_date_loading.set(true);
+                let services = services.clone();
+                let form_state = form_state.clone();
+                let exp_date_loading = exp_date_loading.clone();
+                let exp_date_request_in_flight = exp_date_request_in_flight.clone();
+                let request = XtreamLoginRequest { url, username, password };
+
+                spawn_local(async move {
+                    match services.config.get_xtream_login_info(&request).await {
+                        Ok(login_info) => {
+                            if let Some(exp_date) = login_info.exp_date {
+                                form_state.dispatch(AliasFormAction::ExpDate(Some(exp_date)));
+                            } else {
+                                services.toastr.warning("No expiration date returned by provider");
+                            }
+                        }
+                        Err(err) => services.toastr.error(err.to_string()),
+                    }
+                    *exp_date_request_in_flight.borrow_mut() = false;
+                    exp_date_loading.set(false);
+                });
+            }),
+        })
+    } else {
+        None
+    };
+
     html! {
         <Card class="tp__config-view__card tp__item-form">
             { edit_field_bool!(form_state, translate.t(LABEL_ENABLED), enabled, AliasFormAction::Enabled) }
@@ -88,7 +150,7 @@ pub fn AliasItemForm(props: &AliasItemFormProps) -> Html {
               { edit_field_number_i16!(form_state, translate.t(LABEL_PRIORITY), priority, AliasFormAction::Priority) }
               { edit_field_number_u16!(form_state, translate.t(LABEL_MAX_CONNECTIONS), max_connections, AliasFormAction::MaxConnections) }
             </div>
-            { edit_field_date!(form_state, translate.t(LABEL_EXP_DATE), exp_date, AliasFormAction::ExpDate) }
+            { edit_field_exp_date!(form_state, translate.t(LABEL_EXP_DATE), exp_date, AliasFormAction::ExpDate, exp_date_tool_action) }
 
             <div class="tp__form-page__toolbar">
                 <TextButton

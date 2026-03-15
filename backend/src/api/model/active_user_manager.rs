@@ -332,6 +332,21 @@ impl ActiveUserManager {
             return UserConnectionPermission::Allowed;
         }
 
+        {
+            let connections = self.connections.read().await;
+            let Some(connection_data) = connections.by_key.get(username) else {
+                return UserConnectionPermission::Allowed;
+            };
+
+            if connection_data
+                .streams
+                .iter()
+                .any(|stream| stream.session_token.as_deref() == Some(session_token))
+            {
+                return UserConnectionPermission::Allowed;
+            }
+        }
+
         let mut connections = self.connections.write().await;
         let Some(connection_data) = connections.by_key.get_mut(username) else {
             return UserConnectionPermission::Allowed;

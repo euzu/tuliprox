@@ -428,7 +428,11 @@ impl RetryStateDbValue {
     }
 
     fn into_retry_state(self) -> Option<RetryState> {
-        if self.attempts == 0 && self.next_allowed_at_ts <= 0 && self.cooldown_until_ts.is_none() {
+        if self.attempts == 0
+            && self.next_allowed_at_ts <= 0
+            && self.cooldown_until_ts.is_none()
+            && self.source_last_modified.is_none()
+        {
             return None;
         }
         Some(RetryState {
@@ -788,11 +792,7 @@ impl MetadataUpdateManager {
         let scoped_key = Self::scoped_task_key(input_name, &task);
         let current_last_modified = InputWorker::task_source_last_modified(&task);
         let previous_last_modified = self.tmdb_source_markers.get(&scoped_key).map(|entry| *entry);
-        if current_last_modified.is_some()
-            && previous_last_modified.is_some()
-            && current_last_modified == previous_last_modified
-            && InputWorker::task_has_tmdb_reason(&task)
-        {
+        if current_last_modified == previous_last_modified && InputWorker::task_has_tmdb_reason(&task) {
             InputWorker::strip_tmdb_reasons(&task)
         } else {
             Some(task)

@@ -30,8 +30,8 @@ use std::{
 };
 use web_sys::MouseEvent;
 use yew::{
-    component, html, platform::spawn_local, use_context, use_effect_with, use_memo, use_reducer, use_state, Callback,
-    Html, Properties, UseReducerHandle,
+    component, html, platform::spawn_local, use_context, use_effect_with, use_memo, use_mut_ref, use_reducer,
+    use_state, Callback, Html, Properties, UseReducerHandle,
 };
 
 const LABEL_NAME: &str = "LABEL.NAME";
@@ -269,6 +269,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     let edit_alias = use_state(|| None::<ConfigInputAliasDto>);
     let edit_provider = use_state(|| None::<ConfigProviderDto>);
     let exp_date_loading = use_state(|| false);
+    let exp_date_request_in_flight = use_mut_ref(|| false);
 
     let staged_input_types = use_memo(staged_input_state.form.input_type, |input_type| {
         let default_it = input_type;
@@ -759,6 +760,8 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             let services = services.clone();
             let input_form_state = input_form_state.clone();
             let exp_date_loading = exp_date_loading.clone();
+            let exp_date_request_in_flight = exp_date_request_in_flight.clone();
+            let translate = translate.clone();
 
             Some(ToolAction {
                 name: Some("RefreshExpDate".to_string()),
@@ -766,32 +769,41 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 hint: Some(translate.t(LABEL_RESOLVE)),
                 class: (*exp_date_loading).then(|| "loading".to_string()),
                 onclick: Callback::from(move |_event: MouseEvent| {
-                    if *exp_date_loading {
+                    if *exp_date_request_in_flight.borrow() {
                         return;
                     }
 
+                    let url = input_form_state.form.url.trim().to_string();
+                    let username = input_form_state.form.username.clone().unwrap_or_default().trim().to_string();
+                    let password = input_form_state.form.password.clone().unwrap_or_default().trim().to_string();
+
+                    if url.is_empty() || username.is_empty() || password.is_empty() {
+                        services
+                            .toastr
+                            .error(translate.t("MESSAGES.SOURCE_EDITOR.URL_USERNAME_AND_PASSWORD_MANDATORY"));
+                        return;
+                    }
+
+                    *exp_date_request_in_flight.borrow_mut() = true;
                     exp_date_loading.set(true);
                     let services = services.clone();
                     let input_form_state = input_form_state.clone();
                     let exp_date_loading = exp_date_loading.clone();
-                    let request = XtreamLoginRequest {
-                        url: input_form_state.form.url.clone(),
-                        username: input_form_state.form.username.clone().unwrap_or_default(),
-                        password: input_form_state.form.password.clone().unwrap_or_default(),
-                    };
+                    let exp_date_request_in_flight = exp_date_request_in_flight.clone();
+                    let request = XtreamLoginRequest { url, username, password };
 
                     spawn_local(async move {
                         match services.config.get_xtream_login_info(&request).await {
-                            Ok(Some(login_info)) => {
+                            Ok(login_info) => {
                                 if let Some(exp_date) = login_info.exp_date {
                                     input_form_state.dispatch(ConfigInputFormAction::ExpDate(Some(exp_date)));
                                 } else {
                                     services.toastr.warning("No expiration date returned by provider");
                                 }
                             }
-                            Ok(None) => services.toastr.warning("No login information returned by provider"),
                             Err(err) => services.toastr.error(err.to_string()),
                         }
+                        *exp_date_request_in_flight.borrow_mut() = false;
                         exp_date_loading.set(false);
                     });
                 }),
@@ -846,6 +858,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
              <Card class="tp__config-view__card">
               if *show_alias_form {
                     <AliasItemForm
+                        input_type={input_form_state.form.input_type}
                         initial={(*edit_alias).clone()}
                         on_submit={handle_add_alias_item}
                         on_cancel={handle_close_add_alias_item}

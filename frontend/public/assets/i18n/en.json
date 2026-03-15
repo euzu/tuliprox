@@ -1250,6 +1250,9 @@
     "SOURCE_SELECTOR": {
       "MISSING_SELECTION": "No entry selected"
     },
+    "SOURCE_EDITOR": {
+      "URL_USERNAME_AND_PASSWORD_MANDATORY": "Url, Username and Password are mandatory!"
+    },
     "TARGET_NOT_EXISTS": "Target does not exist",
     "USER_DELETED": "User successfully deleted"
   },
