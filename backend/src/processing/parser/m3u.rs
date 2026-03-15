@@ -6,56 +6,74 @@ use std::borrow::BorrowMut;
 use std::sync::Arc;
 use tokio::io::AsyncBufReadExt;
 use indexmap::IndexMap;
-use shared::concat_string;
 use crate::repository::CategoryKey;
 
 // other implementations like calculating text_distance on all titles took too much time
 // we keep it now as simple as possible and less memory intensive.
 fn get_title_group(text: &Arc<str>) -> Arc<str> {
-    let alphabetic_only: String = text.chars().map(|c| if c.is_alphanumeric() { c } else { ' ' }).collect();
-    let parts = alphabetic_only.split_whitespace();
     let mut combination = String::new();
-    for p in parts {
-        combination = concat_string!(&combination, " " , p);
-        if combination.len() > 2 {
-            return combination.intern();
+    let mut in_word = false;
+    for c in text.chars() {
+        if c.is_alphanumeric() {
+            if !in_word && !combination.is_empty() {
+                combination.push(' ');
+            }
+            in_word = true;
+            combination.push(c);
+        } else {
+            if in_word && combination.len() > 2 {
+                return combination.intern();
+            }
+            in_word = false;
         }
+    }
+    if combination.len() > 2 {
+        return combination.intern();
     }
     text.clone()
 }
 
+/// Reads a quoted value into the stack and returns the start offset.
+/// The value is `&stack[offset..]`. Caller must call `stack.truncate(offset)` after use.
 #[inline]
-fn token_value(stack: &mut String, it: &mut std::str::Chars) -> String {
-    // Use .find() to skip until the first double quote (") character.
+fn token_value(stack: &mut String, it: &mut std::str::Chars) -> usize {
+    let offset = stack.len();
     if it.any(|ch| ch == '"') {
-        // If a quote is found, call get_value to extract the value.
-        return get_value(stack, it);
+        read_value(stack, it);
     }
-    // If no double quote is found, return an empty string.
-    String::new()
+    offset
 }
 
-fn get_value(stack: &mut String, it: &mut std::str::Chars) -> String {
+/// Reads a quoted or comma-delimited value into the stack and returns the start offset.
+fn read_value(stack: &mut String, it: &mut std::str::Chars) {
     for c in it.skip_while(|c| c.is_whitespace()) {
         if c == '"' {
             break;
         }
         stack.push(c);
     }
-
-    let result = (*stack).clone();
-    stack.clear();
-    result
 }
 
-fn token_till(stack: &mut String, it: &mut std::str::Chars, stop_char: char, start_with_alpha: bool) -> Option<String> {
+/// Reads a comma-delimited value (title) into the stack and returns the start offset.
+#[inline]
+fn title_value(stack: &mut String, it: &mut std::str::Chars) -> usize {
+    let offset = stack.len();
+    read_value(stack, it);
+    offset
+}
+
+/// Reads characters into the stack until `stop_char` is reached.
+/// Returns `Some(offset)` where `&stack[offset..]` is the token, or `None` if empty.
+/// Caller must call `stack.truncate(offset)` after use.
+fn token_till(stack: &mut String, it: &mut std::str::Chars, stop_char: char, start_with_alpha: bool) -> Option<usize> {
+    let offset = stack.len();
     let mut skip_non_alpha = start_with_alpha;
 
     for ch in it.by_ref() {
         if ch == stop_char {
             break;
         }
-        if stack.is_empty() && ch.is_whitespace() {
+        if stack.len() == offset && ch.is_whitespace() {
             continue;
         }
 
@@ -69,12 +87,10 @@ fn token_till(stack: &mut String, it: &mut std::str::Chars, stop_char: char, sta
         stack.push(ch);
     }
 
-    if stack.is_empty() {
+    if stack.len() == offset {
         None
     } else {
-        let result = (*stack).clone();
-        stack.clear();
-        Some(result)
+        Some(offset)
     }
 }
 
@@ -101,15 +117,54 @@ fn create_empty_playlistitem_header(input_name: &Arc<str>, url: String) -> Playl
     }
 }
 
-macro_rules! process_header_fields {
-    ($header:expr, $token:expr, $(($prop:ident, $field:expr)),*; $val:expr) => {
-        match $token {
-            $(
-               $field => $header.$prop = $val,
-             )*
-            _ => {}
-        }
-    };
+enum M3uToken {
+    ProviderId,
+    TvgChno,
+    GroupTitle,
+    TvgId,
+    TvgName,
+    TvgLogo,
+    TvgLogoSmall,
+    ParentCode,
+    AudioTrack,
+    TimeShift,
+    TvgRec,
+    PossibleId,
+    Unknown,
+}
+
+fn classify_token(t: &str) -> M3uToken {
+    if t.eq_ignore_ascii_case("xui-id") || t.eq_ignore_ascii_case("cuid") {
+        M3uToken::ProviderId
+    } else if t.eq_ignore_ascii_case("tvg-chno") {
+        M3uToken::TvgChno
+    } else if t.eq_ignore_ascii_case("group-title") {
+        M3uToken::GroupTitle
+    } else if t.eq_ignore_ascii_case("tvg-id") {
+        M3uToken::TvgId
+    } else if t.eq_ignore_ascii_case("tvg-name") {
+        M3uToken::TvgName
+    } else if t.eq_ignore_ascii_case("tvg-logo") {
+        M3uToken::TvgLogo
+    } else if t.eq_ignore_ascii_case("tvg-logo-small") {
+        M3uToken::TvgLogoSmall
+    } else if t.eq_ignore_ascii_case("parent-code") {
+        M3uToken::ParentCode
+    } else if t.eq_ignore_ascii_case("audio-track") {
+        M3uToken::AudioTrack
+    } else if t.eq_ignore_ascii_case("timeshift") {
+        M3uToken::TimeShift
+    } else if t.eq_ignore_ascii_case("tvg-rec") {
+        M3uToken::TvgRec
+    } else if t.eq_ignore_ascii_case("id") ||
+        (t.len() > 2
+        && !t.as_bytes()[..3].eq_ignore_ascii_case(b"tvg")
+        && t.as_bytes()[t.len() - 2..].eq_ignore_ascii_case(b"id"))
+    {
+        M3uToken::PossibleId
+    } else {
+        M3uToken::Unknown
+    }
 }
 
 fn process_header(input_name: &Arc<str>, video_suffixes: &[String], content: &str, url: String) -> PlaylistItemHeader {
@@ -123,48 +178,53 @@ fn process_header(input_name: &Arc<str>, video_suffixes: &[String], content: &st
     let mut plih = create_empty_playlistitem_header(input_name, url);
     let mut it = content.chars();
     let mut stack = String::with_capacity(64);
-    let line_token = token_till(&mut stack, &mut it, ':', false);
-    if line_token.as_deref() == Some("#EXTINF") {
+    let is_extinf = token_till(&mut stack, &mut it, ':', false)
+        .is_some_and(|off| stack[off..].eq_ignore_ascii_case("#EXTINF"));
+    stack.clear();
+    if is_extinf {
         let mut provider_id = None::<String>;
+        let mut fallback_id = None::<String>;
         let mut c = skip_digit(&mut it);
-        loop {
-            match c {
-                None => break,
-                Some(chr) => {
-                    if chr.is_whitespace() {
-                        // skip
-                    } else if chr == ',' {
-                        plih.title = get_value(&mut stack, &mut it).intern();
-                    } else {
-                        stack.push(chr);
-                        let token = token_till(&mut stack, &mut it, '=', true);
-                        if let Some(t) = token {
-                            let value = token_value(&mut stack, &mut it);
-                            let token = t.to_lowercase();
-                            if token.as_str() == "xui-id" || token.as_str() == "cuid" {
-                                if !value.is_empty() {
-                                    provider_id = Some(value);
-                                }
-                            } else if token == "tvg-chno" {
-                                plih.chno = value.parse::<u32>().unwrap_or(0);
-                            } else if token == "group-title" {
-                                plih.group = value.intern();
-                            } else if token == "tvg-id" {
-                                plih.epg_channel_id = if value.is_empty() { None } else { Some(value.intern()) };
-                            } else if token == "tvg-name" {
-                                plih.name = value.intern();
-                            } else if token == "tvg-logo" {
-                                plih.logo = value.intern();
-                            } else if token == "tvg-logo-small" {
-                                plih.logo_small = value.intern();
-                            } else {
-                                process_header_fields!(plih, token.as_str(),
-                                (parent_code, "parent-code"),
-                                (audio_track, "audio-track"),
-                                (time_shift, "timeshift"),
-                                (rec, "tvg-rec"); value.intern());
+        while let Some(chr) = c {
+            match chr {
+                _ if chr.is_whitespace() => {}
+                ',' => {
+                    let off = title_value(&mut stack, &mut it);
+                    plih.title = stack[off..].intern();
+                    stack.truncate(off);
+                }
+                _ => {
+                    let tok_start = stack.len();
+                    stack.push(chr);
+                    if token_till(&mut stack, &mut it, '=', true).is_some() {
+                        let token = classify_token(&stack[tok_start..]);
+                        stack.clear();
+                        let val_off = token_value(&mut stack, &mut it);
+                        match token {
+                            M3uToken::ProviderId if stack.len() > val_off => {
+                                provider_id = Some(stack[val_off..].to_owned());
                             }
+                            M3uToken::TvgChno => plih.chno = stack[val_off..].parse::<u32>().unwrap_or(0),
+                            M3uToken::GroupTitle => plih.group = stack[val_off..].intern(),
+                            M3uToken::TvgId => plih.epg_channel_id = if stack.len() == val_off { None } else { Some(stack[val_off..].intern()) },
+                            M3uToken::TvgName => plih.name = stack[val_off..].intern(),
+                            M3uToken::TvgLogo => plih.logo = stack[val_off..].intern(),
+                            M3uToken::TvgLogoSmall => plih.logo_small = stack[val_off..].intern(),
+                            M3uToken::ParentCode => plih.parent_code = stack[val_off..].intern(),
+                            M3uToken::AudioTrack => plih.audio_track = stack[val_off..].intern(),
+                            M3uToken::TimeShift => plih.time_shift = stack[val_off..].intern(),
+                            M3uToken::TvgRec => plih.rec = stack[val_off..].intern(),
+                            // Unknown panel-specific ID fields (e.g. "stream-id", "channel-uid")
+                            M3uToken::PossibleId
+                                if fallback_id.is_none()
+                                    && stack.len() > val_off
+                                    && stack[val_off..].bytes().all(|b| b.is_ascii_digit()) =>
+                            {
+                                fallback_id = Some(stack[val_off..].to_owned());
+                            }
+                            _ => {}
                         }
+                        stack.clear();
                     }
                 }
             }
@@ -173,6 +233,8 @@ fn process_header(input_name: &Arc<str>, video_suffixes: &[String], content: &st
 
         if let Some(pid) = provider_id {
             plih.id = pid.intern();
+        } else if let Some(fid) = fallback_id {
+            plih.id = fid.intern();
         } else {
             let url_id = extract_id_from_url(&plih.url);
             if !url_id.is_empty() {
@@ -353,6 +415,31 @@ mod test {
     }
 
     #[test]
+    fn test_process_header_expiring_query_params_id_fallback() {
+        let input = "test".intern();
+        let video_suffixes = Vec::new();
+        let line = r#"#EXTINF:-1 tvg-name="Test Channel" group-title="Group",Test Channel"#;
+
+        let pli = process_header(
+            &input,
+            &video_suffixes,
+            line,
+            "http://example.com/live/user/pass/1905905.ts?expires=1712345678&token=alpha".to_string(),
+        );
+        assert_eq!(pli.id, "1905905".intern());
+        assert_eq!(pli.epg_channel_id, None);
+
+        let pli_variant = process_header(
+            &input,
+            &video_suffixes,
+            line,
+            "http://example.com/live/user/pass/1905905.ts?expires=1719999999&token=beta".to_string(),
+        );
+        assert_eq!(pli_variant.id, "1905905".intern());
+        assert_eq!(pli_variant.epg_channel_id, None);
+    }
+
+    #[test]
     fn test_process_header_xui_id() {
         let input = "hello".intern();
         let video_suffixes = Vec::new();
@@ -364,5 +451,42 @@ mod test {
         assert_eq!(pli.id, "provider-123".intern()); // Should use xui-id
         assert_eq!(pli.epg_channel_id, Some("abc-seven".intern())); // Should preserve original tvg-id
         assert_eq!(&*pli.group, "Sydney");
+    }
+
+    #[test]
+    fn test_process_header_unknown_numeric_id_field() {
+        let input = "test".intern();
+        let video_suffixes = Vec::new();
+        let url = "http://example.com/live/user/pass/99999.ts";
+        // "stream-id" is an unknown field ending in "id" with a numeric value
+        let line = r#"#EXTINF:-1 stream-id="55555" tvg-name="Test Channel" group-title="Group",Test Channel"#;
+
+        let pli = process_header(&input, &video_suffixes, line, url.to_string());
+        assert_eq!(pli.id, "55555".intern()); // fallback numeric id field detected
+        assert_eq!(pli.epg_channel_id, None);
+    }
+
+    #[test]
+    fn test_process_header_unknown_id_non_numeric_ignored() {
+        let input = "test".intern();
+        let video_suffixes = Vec::new();
+        let url = "http://example.com/live/user/pass/99999.ts";
+        // "channel-id" has a non-numeric value, should be ignored as fallback
+        let line = r#"#EXTINF:-1 channel-id="abc-def" tvg-name="Test" group-title="G",Test"#;
+
+        let pli = process_header(&input, &video_suffixes, line, url.to_string());
+        assert_eq!(pli.id, "99999".intern()); // falls through to url_id
+    }
+
+    #[test]
+    fn test_process_header_explicit_cuid_overrides_fallback_id() {
+        let input = "test".intern();
+        let video_suffixes = Vec::new();
+        let url = "http://example.com/live/user/pass/99999.ts";
+        // Both CUID (explicit) and stream-id (fallback) present: CUID wins
+        let line = r#"#EXTINF:-1 stream-id="55555" CUID="77777" tvg-name="Test" group-title="G",Test"#;
+
+        let pli = process_header(&input, &video_suffixes, line, url.to_string());
+        assert_eq!(pli.id, "77777".intern()); // CUID takes priority
     }
 }

@@ -802,7 +802,7 @@ impl MetadataUpdateManager {
         }
     }
 
-    pub async fn prepare_task_for_enqueue(&self, input_name: Arc<str>, task: UpdateTask) -> Option<UpdateTask> {
+    async fn prepare_task_for_enqueue(&self, input_name: Arc<str>, task: UpdateTask) -> Option<UpdateTask> {
         self.ensure_enqueue_state_loaded_for_input(&input_name).await;
         let prepared_task = self.strip_tmdb_reasons_for_enqueue(input_name.as_ref(), task)?;
         if self.should_skip_enqueue_cached(input_name.as_ref(), &prepared_task) {
@@ -832,6 +832,10 @@ impl MetadataUpdateManager {
     #[allow(clippy::too_many_lines)]
     pub async fn queue_task(&self, input_name: Arc<str>, task: UpdateTask) {
         debug!("[Task] Queuing task for input {input_name}: {task}");
+        let Some(task_to_queue) = self.prepare_task_for_enqueue(input_name.clone(), task).await else {
+            return;
+        };
+
         // Read app state once and reuse for worker creation when needed.
         let app_state_weak = {
             let guard = self.app_state.lock().await;
@@ -840,7 +844,6 @@ impl MetadataUpdateManager {
         let runtime_settings = MetadataUpdateRuntimeSettings::from_app_state(app_state_weak.as_ref());
         let max_queue_size = runtime_settings.max_queue_size;
 
-        let task_to_queue = task;
         let mut channel_closed_attempt: u32 = 0;
         loop {
             // Atomically ensure there is exactly one worker context per input.
@@ -3665,6 +3668,33 @@ mod tests {
     }
 
     #[test]
+    fn strip_tmdb_reasons_for_enqueue_keeps_unknown_series_timestamp_and_tmdb_reason() {
+        let manager = MetadataUpdateManager::new(CancellationToken::new());
+        let input_name = "input_tmdb_unknown_series";
+        let task = UpdateTask::ResolveSeries {
+            id: ProviderIdType::Id(42),
+            reason: ResolveReasonSet::from_variants(&[ResolveReason::Tmdb, ResolveReason::Date]),
+            delay: 1,
+            source_last_modified: None,
+        };
+        let scoped_key = ScopedTaskKey::new(Arc::from(input_name), TaskKey::from_task(&task));
+
+        assert!(!manager.tmdb_source_markers.contains_key(&scoped_key));
+
+        let prepared = manager
+            .strip_tmdb_reasons_for_enqueue(input_name, task)
+            .expect("unknown timestamps should not be suppressed");
+        match prepared {
+            UpdateTask::ResolveSeries { reason, source_last_modified, .. } => {
+                assert_eq!(source_last_modified, None);
+                assert!(reason.contains(ResolveReason::Tmdb));
+                assert!(reason.contains(ResolveReason::Date));
+            }
+            other => panic!("unexpected task type after enqueue strip: {other:?}"),
+        }
+    }
+
+    #[test]
     fn strip_tmdb_reasons_for_enqueue_skips_unchanged_vod_tmdb_only_task() {
         let manager = MetadataUpdateManager::new(CancellationToken::new());
         let input_name = "input_vod_tmdb_marker";
@@ -3702,6 +3732,33 @@ mod tests {
                 assert!(!reason.contains(ResolveReason::Tmdb));
                 assert!(!reason.contains(ResolveReason::Date));
                 assert!(reason.contains(ResolveReason::Probe));
+            }
+            other => panic!("unexpected task type after enqueue strip: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn strip_tmdb_reasons_for_enqueue_keeps_unknown_vod_timestamp_and_tmdb_reason() {
+        let manager = MetadataUpdateManager::new(CancellationToken::new());
+        let input_name = "input_tmdb_unknown_vod";
+        let task = UpdateTask::ResolveVod {
+            id: ProviderIdType::Id(42),
+            reason: ResolveReasonSet::from_variants(&[ResolveReason::Tmdb, ResolveReason::Date]),
+            delay: 1,
+            source_last_modified: None,
+        };
+        let scoped_key = ScopedTaskKey::new(Arc::from(input_name), TaskKey::from_task(&task));
+
+        assert!(!manager.tmdb_source_markers.contains_key(&scoped_key));
+
+        let prepared = manager
+            .strip_tmdb_reasons_for_enqueue(input_name, task)
+            .expect("unknown timestamps should not be suppressed");
+        match prepared {
+            UpdateTask::ResolveVod { reason, source_last_modified, .. } => {
+                assert_eq!(source_last_modified, None);
+                assert!(reason.contains(ResolveReason::Tmdb));
+                assert!(reason.contains(ResolveReason::Date));
             }
             other => panic!("unexpected task type after enqueue strip: {other:?}"),
         }

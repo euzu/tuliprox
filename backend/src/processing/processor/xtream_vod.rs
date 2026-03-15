@@ -134,7 +134,7 @@ async fn playlist_resolve_vod_info(
     let resolve_tmdb_enabled = fpl.input.has_flag(ConfigInputFlags::ResolveTmdb);
 
     if resolve_options.has_flag(ResolveOptionsFlags::Background) && ctx.metadata_manager.is_some() {
-        queue_background_vod_info(ctx, fpl, filter, &resolve_options, do_probe, resolve_tmdb_enabled).await;
+        queue_background_vod_info(ctx, fpl, filter, &resolve_options, do_probe, resolve_tmdb_enabled);
     } else {
         process_immediate_vod_info(ctx, fpl, filter, resolve_options, do_probe, resolve_tmdb_enabled).await;
     }
@@ -416,7 +416,7 @@ fn check_resolve_tmdb(
     }
 }
 
-async fn queue_background_vod_info(
+fn queue_background_vod_info(
     ctx: &PlaylistProcessingContext,
     fpl: &mut FetchedPlaylist<'_>,
     filter: impl Fn(&PlaylistItem) -> bool,
@@ -453,10 +453,6 @@ async fn queue_background_vod_info(
                     .as_ref()
                     .and_then(StreamProperties::get_last_modified),
             };
-            let Some(task) = mgr.prepare_task_for_enqueue(input.name.clone(), task).await else {
-                continue;
-            };
-
             if log_enabled!(Level::Debug) {
                 let has_details = pli.has_details();
                 let (has_tmdb, has_date, has_video, has_audio) =
@@ -472,13 +468,9 @@ async fn queue_background_vod_info(
                         }
                         _ => (false, false, false, false),
                     };
-                let enqueued_reasons = match &task {
-                    UpdateTask::ResolveVod { reason, .. } => *reason,
-                    _ => reasons,
-                };
                 debug!(
                     "[Task] Creating ResolveVod task for input {}: id={}, reasons={}, has_details={}, has_tmdb={}, has_date={}, has_video_info={}, has_audio_info={}, title=\"{}\"",
-                    input.name, provider_id, enqueued_reasons, has_details, has_tmdb, has_date, has_video, has_audio, pli.header.title
+                    input.name, provider_id, reasons, has_details, has_tmdb, has_date, has_video, has_audio, pli.header.title
                 );
             }
             mgr.queue_task_background(input.name.clone(), task);
